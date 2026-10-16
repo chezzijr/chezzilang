@@ -402,7 +402,6 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        self.arity_range_err("read_bytes", args, 1, 2, span)?;
         if self.poll_timeout_check(span)? {
             return Ok(self.sock_err("timeout"));
         }
@@ -535,7 +534,6 @@ impl Vm {
         // The optional trailing int bounds readiness (D6c). On a timeout the netpoller re-injects this
         // fiber with `poll_timed_out` set; the rewound op re-runs and lands HERE — so check it at entry
         // (after the `run_until` loop-top cancel check, which a sibling fault wins) and return Err.
-        self.arity_range_err("read", args, 1, 2, span)?;
         if self.poll_timeout_check(span)? {
             // N3(a) — if this read took a partial codepoint off the wire before the deadline fired
             // (`poll_partial` was latched at the NeedMore point and survived the park), classify it as
@@ -756,7 +754,6 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         // The optional trailing int bounds writability.
-        self.arity_range_err(method, args, 1, 2, span)?;
         if self.poll_timeout_check(span)? {
             return Ok(self.sock_err("timeout"));
         }
@@ -904,7 +901,6 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         // `accept()` or `accept(timeout_ms)` — the optional trailing int bounds how long to wait for
         // an inbound connection (D6c). Mirrors `Socket::read`'s timeout handling.
-        self.arity_range_err("accept", args, 0, 1, span)?;
         if self.poll_timeout_check(span)? {
             return Ok(self.sock_err("timeout"));
         }

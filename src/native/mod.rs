@@ -654,29 +654,6 @@ pub fn expect_args(h: &dyn Host, name: &str, n: usize) -> Result<(), HostError> 
     }
 }
 
-/// Helper for native functions with an optional trailing arg: assert `min..=max` arguments. The
-/// runtime mirror of the checker's `FnSig::optional_tail` arity range (used by `std.request`'s
-/// optional `timeout_ms`). `min == max` reproduces [`expect_args`]' exact-arity message.
-pub fn expect_args_range(
-    h: &dyn Host,
-    name: &str,
-    min: usize,
-    max: usize,
-) -> Result<(), HostError> {
-    let got = h.arg_count();
-    if (min..=max).contains(&got) {
-        Ok(())
-    } else if min == max {
-        Err(HostError {
-            message: format!("{name}() expects {min} argument(s), got {got}"),
-        })
-    } else {
-        Err(HostError {
-            message: format!("{name}() expects {min}–{max} argument(s), got {got}"),
-        })
-    }
-}
-
 /// If this dotted import path names a native (virtual, no-file) std module, return its canonical
 /// `'static` name. `std.string` is intentionally absent: it is a real Chezzi file under the stdlib dir.
 pub fn native_name(path: &[String]) -> Option<&'static str> {
@@ -956,41 +933,6 @@ mod tests {
             f(&mut host),
             Err(HostError {
                 message: "add() expects 2 argument(s), got 1".into()
-            })
-        );
-    }
-
-    #[test]
-    fn expect_args_range_accepts_optional_tail() {
-        // min=1, max=2: arity 1 and 2 are both Ok; 0 and 3 are Err with a range message.
-        let h1 = MockHost {
-            ints: vec![1],
-            ..Default::default()
-        };
-        assert!(expect_args_range(&h1, "get", 1, 2).is_ok());
-        let h2 = MockHost {
-            ints: vec![1, 2],
-            ..Default::default()
-        };
-        assert!(expect_args_range(&h2, "get", 1, 2).is_ok());
-        let h0 = MockHost {
-            ints: vec![],
-            ..Default::default()
-        };
-        assert_eq!(
-            expect_args_range(&h0, "get", 1, 2),
-            Err(HostError {
-                message: "get() expects 1–2 argument(s), got 0".into()
-            })
-        );
-        let h3 = MockHost {
-            ints: vec![1, 2, 3],
-            ..Default::default()
-        };
-        assert_eq!(
-            expect_args_range(&h3, "get", 1, 2),
-            Err(HostError {
-                message: "get() expects 1–2 argument(s), got 3".into()
             })
         );
     }

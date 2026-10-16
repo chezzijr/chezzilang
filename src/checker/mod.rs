@@ -497,7 +497,7 @@ struct FnSig {
     /// Swift-style parameter labels parallel to `params` (the declaration's param names; `None` for
     /// `self` or an unnamed slot). Surface-only — used ONLY to build a labelled `Ty::Func` value type
     /// in `infer_ident` so `g := f; g(name=…)` resolves. Excluded from `fn_sig_eq` (labels are not
-    /// type identity). Empty for synthetic/native sigs built via `plain`/`optional_tail`.
+    /// type identity). Empty for synthetic/native sigs built via `plain`.
     labels: Vec<Option<String>>,
     ret: Ty,
     type_params: Vec<TyParam>,
@@ -514,7 +514,7 @@ struct FnSig {
     min_params: usize,
     /// A struct/enum method whose first parameter is NOT `self` (or which has no params) is a STATIC
     /// (associated) method — called `Type.method(args)`, not `value.method(args)`. `false` for every
-    /// instance method, free function, closure, and native sig (the default via `plain`/`optional_tail`);
+    /// instance method, free function, closure, and native sig (the default via `plain`);
     /// set only by [`Checker::fn_sig`] from the declaration's first param name.
     is_static: bool,
     /// Doc-comment from the declaration (set by [`Checker::fn_sig`] from `FnDecl::doc`; `None` for
@@ -542,7 +542,7 @@ struct FnSig {
     variadic: Option<usize>,
     /// The declaration's call-binding slots (receiver dropped), which `Checker::bind_call` binds
     /// named, omitted and variadic arguments against. `None` for a native, builtin or `extern` sig
-    /// (built by [`FnSig::plain`] / [`FnSig::optional_tail`]): it has no Chezzi parameter list, takes
+    /// (built by [`FnSig::plain`]): it has no Chezzi parameter list, takes
     /// no named arguments, and its `= 0` defaults are arity markers the runtime reads from the
     /// supplied argument count. Excluded from `fn_sig_eq`.
     slots: Option<Vec<crate::desugar::SlotSpec>>,
@@ -557,27 +557,6 @@ impl FnSig {
     /// A non-generic signature (the common case): every param is required (`min_params == params.len()`).
     fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
         let min_params = params.len();
-        FnSig {
-            summary: fn_writes::FnSummary::default(),
-            labels: Vec::new(),
-            params,
-            ret,
-            type_params: Vec::new(),
-            where_bounds: Vec::new(),
-            min_params,
-            is_static: false,
-            doc: None,
-            witness_params: Vec::new(),
-            variadic: None,
-            slots: None,
-            c_variadic: false,
-        }
-    }
-
-    /// D6c — a non-generic signature whose last `optional` params may be omitted (the net socket ops'
-    /// optional trailing `timeout_ms`). `check_args` accepts `params.len() - optional ..= params.len()`.
-    fn optional_tail(params: Vec<Ty>, ret: Ty, optional: usize) -> FnSig {
-        let min_params = params.len() - optional;
         FnSig {
             summary: fn_writes::FnSummary::default(),
             labels: Vec::new(),

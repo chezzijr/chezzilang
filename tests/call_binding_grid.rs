@@ -51,7 +51,6 @@ const DFLT_UNBOUND: &str = "unknown name 'a'";
 const CALLEE_FILLED_HOLE: &str =
     "is filled by the callee and can only be omitted from the END of a call";
 const FN_VALUE_KW: &str = "keyword arguments through a function value need a binding";
-const ONLY_SUPPORTED: &str = "named arguments are only supported on";
 
 /// A fixed-arity callee kind: `files(params_or_fields, args)` builds the program.
 struct Kind {
@@ -625,7 +624,7 @@ fn native_cells() -> Vec<Cell> {
         cell(
             "fn_field/kw",
             &format!("{fn_field}print(h.map(arg=4))\n"),
-            Expect::Rejects(ONLY_SUPPORTED),
+            Expect::Rejects(FN_VALUE_KW),
         ),
     ]
 }

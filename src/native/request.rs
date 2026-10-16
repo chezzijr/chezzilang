@@ -34,7 +34,7 @@
 //! and headers; see `send_hop`). Only the failed hop is re-sent (TICKET-212, TICKET-221).
 
 use super::request_head::{LenientHeadConnector, is_closed_idle};
-use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args, expect_args_range};
+use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 use std::io::Read;
 use std::time::{Duration, Instant};
 use ureq::http::{Request, Response};
@@ -502,7 +502,6 @@ fn read_timeout(h: &mut dyn Host, idx: usize) -> Result<Option<Duration>, HostEr
 }
 
 fn get(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args_range(h, "get", 1, 2)?;
     let url = h.arg_str(0)?;
     let timeout = read_timeout(h, 1)?;
     Ok(do_get(&url, timeout))
@@ -512,14 +511,12 @@ fn get(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// HTTP sibling of `io.read_bytes` / `Socket.read_bytes`. Body-only: a non-2xx status is an `Err` (so
 /// a 404/500 error page can't masquerade as a successful download), headers are dropped.
 fn get_bytes(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args_range(h, "get_bytes", 1, 2)?;
     let url = h.arg_str(0)?;
     let timeout = read_timeout(h, 1)?;
     Ok(do_get_bytes(&url, timeout))
 }
 
 fn post(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args_range(h, "post", 2, 3)?;
     let (url, body) = (h.arg_str(0)?, h.arg_str(1)?);
     let timeout = read_timeout(h, 2)?;
     Ok(do_post(&url, &body, timeout))
@@ -529,7 +526,6 @@ fn post(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 /// point. `headers` is a `map[str, str]` read in insertion order (deterministic across engines);
 /// the optional trailing `timeout_ms: int` overrides the agent default caps for this call.
 fn request(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args_range(h, "request", 4, 5)?;
     let (method, url, body) = (h.arg_str(0)?, h.arg_str(1)?, h.arg_str(2)?);
     let headers = h.arg_str_map(3)?;
     let timeout = read_timeout(h, 4)?;

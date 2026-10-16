@@ -141,29 +141,6 @@ impl Vm {
         }
     }
 
-    /// D6c — arity check for a method that accepts an inclusive `min..=max` argument range (the net
-    /// socket ops: `read`/`write` take 1–2, `accept` 0–1 — the optional trailing `timeout_ms`).
-    pub(super) fn arity_range_err(
-        &self,
-        name: &str,
-        args: &[Value],
-        min: usize,
-        max: usize,
-        span: Span,
-    ) -> Result<(), RuntimeError> {
-        if (min..=max).contains(&args.len()) {
-            Ok(())
-        } else {
-            Err(self.err(
-                format!(
-                    "{name}() expects {min}–{max} argument(s), got {}",
-                    args.len()
-                ),
-                span,
-            ))
-        }
-    }
-
     /// D6c — parse the optional trailing `timeout_ms` int arg of a net socket op. `Ok(None)` if no
     /// timeout arg was passed (park forever — the existing behavior). `Ok(Some(Timeout))` otherwise:
     /// `poll_once` is true iff `ms <= 0` (`0` polls once and never parks; a negative saturates to it),

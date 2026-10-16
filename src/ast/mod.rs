@@ -977,19 +977,25 @@ impl PartialEq for Import {
 ///
 /// Returns `params.len()` (i.e. "no short entry") when:
 ///   * no trailing parameter carries a default;
-///   * any parameter is VARIADIC — the surplus collapse is a call-site rewrite the callee cannot
-///     reconstruct from a raw argument count;
 ///   * `has_witness_params` — M24's hidden witness arguments are appended AFTER the declared ones,
 ///     so a short declared count would land a witness in a defaulted slot.
+///
+/// A VARIADIC parameter is never short-entered: every call site supplies the pack, so only the
+/// defaults after it are callee-filled (the result is at least the pack's index plus one).
 pub fn min_callable_params(params: &[Param], has_witness_params: bool) -> usize {
-    if has_witness_params || params.iter().any(|p| p.is_variadic) {
+    if has_witness_params {
         return params.len();
     }
     let mut first = params.len();
     while first > 0 && params[first - 1].default.is_some() {
         first -= 1;
     }
-    first
+    // Every call site supplies the variadic pack (the surplus collapse is a call-site rewrite), so
+    // only the defaults AFTER the pack are callee-filled: the pack slot itself is never omitted.
+    match params.iter().position(|p| p.is_variadic) {
+        Some(v) => first.max(v + 1),
+        None => first,
+    }
 }
 
 // ===== types =====
@@ -2246,6 +2252,25 @@ mod tests {
             StmtKind::Expr(e) => e,
             other => panic!("not an expression statement: {other:?}"),
         }
+    }
+
+    /// TICKET-264 — a defaulted keyword-only tail after a variadic is callee-filled; the pack and
+    /// a required keyword-only param are not.
+    #[test]
+    fn min_callable_params_counts_a_defaulted_keyword_only_tail() {
+        let min = |src: &str| match parse_module(src).stmts.remove(0).kind {
+            StmtKind::Fn(d) => min_callable_params(&d.params, false),
+            other => panic!("not a fn: {other:?}"),
+        };
+        assert_eq!(
+            min("fn vk(...xs: int, tail: int = 3) -> int:\n    return 0\n"),
+            1
+        );
+        assert_eq!(
+            min("fn dv(a: int, b: int = 10, ...rest: int) -> int:\n    return 0\n"),
+            3
+        );
+        assert_eq!(min("fn rk(...xs: int, t: int) -> int:\n    return 0\n"), 2);
     }
 
     /// TICKET-251 — a name or a named member heads a type application; a tuple index, a literal,

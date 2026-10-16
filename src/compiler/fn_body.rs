@@ -159,8 +159,8 @@ impl Compiler {
     /// the parameters carrying defaults form a SUFFIX (a short call can only ever drop a suffix, so
     /// a hole before a supplied argument is not expressible), the proto carries no hidden trailing
     /// WITNESS parameters (they live past the declared ones, so a short declared count would land a
-    /// witness in a defaulted slot), and no parameter is VARIADIC (its surplus collapse is a
-    /// call-site rewrite the callee cannot reconstruct). A function with no defaults is
+    /// witness in a defaulted slot). A VARIADIC pack is never short-entered (every call site supplies
+    /// it), so only the defaults after it are filled here. A function with no defaults is
     /// byte-identical to before.
     fn emit_default_param_prologue(
         &mut self,
@@ -171,7 +171,7 @@ impl Compiler {
         // agree by construction rather than by hand-sync.
         let first = crate::ast::min_callable_params(params, !self.witness_locals.is_empty());
         if first == params.len() {
-            return Ok(()); // no short entry for this shape (no trailing defaults, variadic, witnesses)
+            return Ok(()); // no short entry for this shape (no defaults after the pack, witnesses)
         }
         for (i, p) in params.iter().enumerate().skip(first) {
             let Some(d) = &p.default else { continue };

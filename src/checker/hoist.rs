@@ -883,37 +883,7 @@ impl Checker {
     /// native-decl dynamic convention: an UNANNOTATED param → `Ty::Unknown`; no `-> ret` → `Ty::Unknown`
     /// return (native/never, how `panic` is spelled).
     pub(super) fn register_native_decl(&mut self, decl: &NativeDecl) {
-        // TICKET-214: a generic `native fn abs[T: Num](x: T) -> T` names its own `T`; enter it (as
-        // `harvest_native_fn_sig` does) so the standalone check does not read `T` as an unknown type.
-        let saved_tps = self.enter_type_params(&decl.type_params);
-        let params: Vec<Ty> = decl
-            .params
-            .iter()
-            .map(|p| match &p.ty {
-                // A variadic `...args: T` collapses to the slot type `List[T]` (mirrors `fn_sig` /
-                // `harvest_native_fn_sig`), so `print`'s harvested sig reads as `fn(List[Any], str, str)`.
-                Some(t) if p.is_variadic => Ty::List(Box::new(self.resolve_type_at(
-                    t,
-                    decl.span,
-                    TypePos::CParam,
-                ))),
-                Some(t) => self.resolve_type_at(t, decl.span, TypePos::CParam),
-                None => Ty::Unknown,
-            })
-            .collect();
-        let ret = match &decl.ret {
-            Some(t) => self.resolve_type_at(t, decl.span, TypePos::CRet),
-            None => Ty::Unknown,
-        };
-        self.exit_type_params(saved_tps);
-        // A defaulted trailing param (`sep`/`end`) is optional; count how many so `min_params` is right.
-        let optional = decl.params.iter().filter(|p| p.default.is_some()).count();
-        let mut sig = if optional > 0 {
-            FnSig::optional_tail(params, ret, optional)
-        } else {
-            FnSig::plain(params, ret)
-        };
-        sig.variadic = decl.params.iter().position(|p| p.is_variadic);
+        let sig = self.harvest_native_fn_sig(decl, false);
         self.native_prelude_sigs.insert(decl.name.clone(), sig);
     }
 

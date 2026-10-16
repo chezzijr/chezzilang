@@ -324,7 +324,7 @@ impl Checker {
         recv: WitnessCallee,
     ) -> Ty {
         // `sig.min_params` is `ast::min_callable_params`, which returns `params.len()` whenever the
-        // sig carries witness params or is variadic, so a witness-taking callee keeps its full arity.
+        // sig carries witness params, so a witness-taking callee keeps its full arity.
         if !(sig.min_params..=sig.params.len()).contains(&args.len()) {
             self.check_arity(name, sig.params.len(), args, span);
         }

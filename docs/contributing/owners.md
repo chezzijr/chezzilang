@@ -18,7 +18,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Where a block expression may start (value site) | `parse_value` (`parser/expr.rs`), `open_value` (`parser/expr.rs`) | U8 |
 
 | Constant value of an expression | `eval` (`ast/consteval.rs`) | overflow lint, width check, const |
-| Fewest args a decl may be entered with | `min_callable_params` (`ast/mod.rs`) | DUPLICATE: `optional_tail` (`checker/mod.rs`) and its runtime copy in `native/mod.rs` |
+| Fewest args a decl may be entered with | `min_callable_params` (`ast/mod.rs`) | one owner; the native-sig builder is `harvest_native_fn_sig` (`checker/harvest.rs`) |
 | Is this name the blank `_` | `is_blank_name` (`ast/mod.rs`) | the parser encodes a blank at every binding site (`Pattern::Wildcard`, an `else _:` binder as no binder); `tests/owner_guards.rs` rejects a `== "_"` anywhere else |
 | Valid assignment target | `is_place` (`ast/mod.rs`) | the parser admits only places; the non-place arms of `check_assign` (`checker/assign.rs`), `compile_assign` (`compiler/assign.rs`) and `emit_assign_value_first` (`compiler/stmt.rs`) are `internal:` errors, never a second decision |
 | May `head[X]` be a type application | `is_named_head` (`ast/mod.rs`) | all three parser sites read it; the checker still probes the receiver twice per chained link (`checker/expr.rs`, U17's remaining half) |

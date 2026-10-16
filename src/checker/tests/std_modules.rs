@@ -509,7 +509,7 @@ fn regex_chz_match_matches_handbuilt_layouts() {
 // whose fields-only `native struct` (ProcResult / Response) + `native fn`s are declared in-module and
 // harvested via `harvest_native_module`, retiring BOTH their `native_module_sig` fn arms AND their
 // `export_struct` type arms. The one subtlety over regex: get/post/request carry an OPTIONAL trailing
-// `timeout_ms: int = 0`, which harvest lowers to `FnSig::optional_tail` from the trailing default. =====
+// `timeout_ms: int = 0`, which harvest lowers to `min_params` from the trailing default. =====
 
 /// Parse a native-module source string into an AST (the SIGNATURE source for a file-backed module).
 #[cfg(test)]
@@ -536,7 +536,7 @@ fn parse_request_chz() -> crate::ast::Module {
 
 /// HARVEST — a `native fn` whose trailing param carries a `= default` marker lowers to an
 /// optional-tail FnSig (min_params = len - trailing-defaults). Byte-identical to the deleted
-/// hand-built `FnSig::optional_tail(...)` install for std.request's get/post/request.
+/// hand-built install for std.request's get/post/request.
 #[test]
 fn harvest_optional_tail_from_trailing_default() {
     let ast = parse_native_src("native fn f(a: str, b: int = 0) -> bool!\n");
@@ -671,8 +671,8 @@ fn request_fn_sigs_exact() {
 }
 
 /// Phase 4f — request.get/post/request accept the OPTIONAL trailing `timeout_ms` BOTH ways (the
-/// harvested optional-tail sig, min_params = len-1). Byte-identical to the deleted hand-built
-/// `FnSig::optional_tail(...)` install.
+/// harvested optional-tail sig, min_params = len-1). Byte-identical to the deleted
+/// hand-built install.
 #[test]
 fn request_optional_timeout_arg_typechecks() {
     // With and without the trailing timeout_ms — both must check.

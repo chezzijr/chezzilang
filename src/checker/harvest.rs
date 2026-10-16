@@ -448,17 +448,8 @@ impl Checker {
         let own_tps = self.resolve_bounds(&decl.type_params, decl.span);
         self.exit_type_params(saved_tps);
         let variadic = decl.params.iter().skip(skip).position(|p| p.is_variadic);
-        let optional = decl
-            .params
-            .iter()
-            .skip(skip)
-            .filter(|p| p.default.is_some())
-            .count();
-        let mut sig = if optional > 0 {
-            FnSig::optional_tail(params, ret, optional)
-        } else {
-            FnSig::plain(params, ret)
-        };
+        let mut sig = FnSig::plain(params, ret);
+        sig.min_params = crate::ast::min_callable_params(&decl.params[skip..], false);
         // Carry the `where T: Bound` clause onto the harvested sig — for a native METHOD (e.g.
         // `List.sort`'s `where T: Comparable`) it is enforced at each call site by the container
         // method-dispatch arm (the `T` names the enclosing native struct's type param, in scope here).
