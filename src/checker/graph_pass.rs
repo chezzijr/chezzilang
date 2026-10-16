@@ -532,6 +532,7 @@ pub(super) fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
                     params: vec![t],
                     ret: Box::new(Ty::Unknown),
                     labels: FnLabels::default(),
+                    variadic: crate::ast::Variadic::No,
                 };
             }
         }
@@ -546,6 +547,7 @@ pub(super) fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
                 params: vec![],
                 ret: Box::new(Ty::Unknown),
                 labels: FnLabels::default(),
+                variadic: crate::ast::Variadic::No,
             };
         }
     }

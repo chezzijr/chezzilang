@@ -1055,7 +1055,13 @@ impl Checker {
         // The callback's own RETURN slot additionally accepts `nil` (void) — mirroring the top-level
         // `allow_void` split above, but scoped to the return only: a `nil` callback PARAM has no
         // `CType` lowering and would panic the backend's `ctype_of`, so it stays rejected.
-        if let Ty::Func { params, ret, .. } = ty
+        // A variadic fn type (`fn(...int)`, a C `...`) has no C callback shape, so it falls through too.
+        if let Ty::Func {
+            params,
+            ret,
+            variadic: crate::ast::Variadic::No,
+            ..
+        } = ty
             && !allow_void
         {
             let part_ok = |t: &Ty| {

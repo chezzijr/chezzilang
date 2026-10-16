@@ -593,11 +593,7 @@ impl Checker {
                         // Editor hover (decl-site): record the imported function's signature at the
                         // bound-name token (probe-gated no-op off the probe / outside the entry module).
                         if self.hover_probe.is_some() {
-                            let fty = Ty::Func {
-                                params: fsig.params.clone(),
-                                ret: Box::new(fsig.ret.clone()),
-                                labels: crate::checker::FnLabels::default(),
-                            };
+                            let fty = crate::checker::fn_value_ty(fsig);
                             self.hover_record_at(
                                 *name_span,
                                 &fty,

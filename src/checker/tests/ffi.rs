@@ -238,6 +238,20 @@ fn extern_callback_nested_callback_rejected() {
 }
 
 #[test]
+fn a_variadic_c_callback_type_is_not_marshallable() {
+    // TICKET-264: `fn(...int)` is a variadic fn type (`Pack`), and a C `...` is another flag. Neither
+    // has a C callback shape, so `resolve_ctype_d` answers `None` and the marshal gate rejects both.
+    rejects(
+        "extern \"libapply.so\":\n    fn apply(f: fn(...int) -> int) -> int\n",
+        "not C-marshallable",
+    );
+    rejects(
+        "extern \"libapply.so\":\n    fn apply(f: fn(int, ...) -> int) -> int\n",
+        "not C-marshallable",
+    );
+}
+
+#[test]
 fn extern_callback_as_return_rejected() {
     // A callback is PARAM-ONLY: a function-typed RETURN is rejected (no C marshalling for a returned
     // function pointer in v1).
@@ -1395,5 +1409,22 @@ fn extern_nil_param_rejected() {
     rejects(
         "extern \"libc.so.6\":\n    fn f(x: None) -> int\n",
         "'None' is not a value type",
+    );
+}
+
+#[test]
+fn a_c_variadic_extern_value_keeps_its_varargs() {
+    // TICKET-264: `f := snprintf` keeps the C `...`, so the surplus args check as C varargs. The base
+    // build said `'f' expects 3 argument(s), got 5`. A surplus that is no C vararg (a list) still fails.
+    entry_ok(
+        "import std.ffi\nimport int32 from std.ffi\nextern \"libc\":\n    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int32\nbuf := ffi.alloc(64)\nf := snprintf\nprint(f(buf, 64, \"%s-%ld\", \"x\", 42))\n",
+    );
+    entry_rejects(
+        "import std.ffi\nimport int32 from std.ffi\nextern \"libc\":\n    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int32\nbuf := ffi.alloc(64)\nf := snprintf\nprint(f(buf, 64, \"%d\", [1]))\n",
+        "C vararg",
+    );
+    entry_rejects(
+        "import std.ffi\nimport int32 from std.ffi\nextern \"libc\":\n    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int32\nbuf := ffi.alloc(64)\nf := snprintf\nprint(f(buf))\n",
+        "'f' expects at least 3 argument(s), got 1",
     );
 }

@@ -56,10 +56,25 @@ impl Parser {
     // ----- types -----
 
     /// One parameter slot of a `fn(...)` TYPE, with an OPTIONAL Swift-style label: `name: T` yields
-    /// `(Some("name"), T)`; a bare `T` yields `(None, T)`. A label is an `IDENT` IMMEDIATELY followed
-    /// by `:` — disambiguated by lookahead so a bare qualified/generic type head (`m.Type` = `IDENT
-    /// Dot`, `List[int]` = `IDENT LBracket`) is never mistaken for a label.
-    fn parse_fn_type_param(&mut self) -> PResult<(Option<String>, Type)> {
+    /// `(Some("name"), Some(T), No)`; a bare `T` yields `(None, Some(T), No)`. A label is an `IDENT`
+    /// IMMEDIATELY followed by `:` — disambiguated by lookahead so a bare qualified/generic type head
+    /// (`m.Type` = `IDENT Dot`, `List[int]` = `IDENT LBracket`) is never mistaken for a label.
+    /// A variadic slot is `...T` or `...name: T` (`Pack`); a bare `...` (a C vararg, no type) yields
+    /// `(None, None, C)`.
+    fn parse_fn_type_param(&mut self) -> PResult<(Option<String>, Option<Type>, Variadic)> {
+        if self.eat(&Token::DotDotDot) {
+            if self.check(&Token::Comma) || self.check(&Token::RParen) {
+                return Ok((None, None, Variadic::C));
+            }
+            let (label, ty) = self.parse_labeled_type()?;
+            return Ok((label, Some(ty), Variadic::Pack));
+        }
+        let (label, ty) = self.parse_labeled_type()?;
+        Ok((label, Some(ty), Variadic::No))
+    }
+
+    /// `name: T` or a bare `T`.
+    fn parse_labeled_type(&mut self) -> PResult<(Option<String>, Type)> {
         if matches!(self.peek(), Token::Ident(_)) && *self.peek_at(1) == Token::Colon {
             let label = self.expect_ident()?;
             self.expect(&Token::Colon)?;
@@ -98,14 +113,24 @@ impl Parser {
             self.expect(&Token::LParen)?;
             let mut params = Vec::new();
             let mut labels: Vec<Option<String>> = Vec::new();
+            let mut variadic = Variadic::No;
             if !self.check(&Token::RParen) {
-                let (l, t) = self.parse_fn_type_param()?;
-                labels.push(l);
-                params.push(t);
-                while self.eat(&Token::Comma) {
-                    let (l, t) = self.parse_fn_type_param()?;
-                    labels.push(l);
-                    params.push(t);
+                loop {
+                    if variadic != Variadic::No {
+                        return Err(self.err(
+                            "a variadic parameter must be the last parameter of a function type"
+                                .to_string(),
+                        ));
+                    }
+                    let (l, t, v) = self.parse_fn_type_param()?;
+                    variadic = v;
+                    if let Some(t) = t {
+                        labels.push(l);
+                        params.push(t);
+                    }
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
                 }
             }
             self.expect(&Token::RParen)?;
@@ -115,6 +140,7 @@ impl Parser {
                 params,
                 ret: Box::new(ret),
                 labels,
+                variadic,
             };
             ty = self.parse_type_postfix(ty)?;
             return Ok(ty);

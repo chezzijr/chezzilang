@@ -1511,6 +1511,7 @@ fn polymorphic_recursion_through_a_func_type_argument_is_refused_in_bounded_time
             params: vec![Ty::List(Box::new(Ty::Int))],
             ret: Box::new(Ty::Int),
             labels: FnLabels::default(),
+            variadic: crate::ast::Variadic::No,
         }),
         4,
         "ty_nodes must charge a Func's params and return type; a fail-open arm makes polymorphic \

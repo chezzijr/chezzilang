@@ -229,10 +229,12 @@ pub(super) fn map_ty(t: &Ty, f: &mut dyn FnMut(&Ty) -> Option<Ty>) -> Ty {
             params,
             ret,
             labels,
+            variadic,
         } => Ty::Func {
             params: all(params, f),
             ret: Box::new(map_ty(ret, f)),
             labels: labels.clone(),
+            variadic: *variadic,
         },
         Ty::BuiltinFn { params, ret } => Ty::BuiltinFn {
             params: all(params, f),
@@ -385,8 +387,9 @@ impl Checker {
                     .for_each(|(x, y)| self.solve_at(x, y, false));
             }
             _ => {
-                if let (Some((p1, r1)), Some((p2, r2))) = (a.fn_parts(), b.fn_parts())
+                if let (Some((p1, r1, v1)), Some((p2, r2, v2))) = (a.fn_parts(), b.fn_parts())
                     && p1.len() == p2.len()
+                    && v1 == v2
                 {
                     p1.iter()
                         .zip(p2)
@@ -841,6 +844,7 @@ mod tests {
             params: vec![p],
             ret: Box::new(r),
             labels: FnLabels::default(),
+            variadic: crate::ast::Variadic::No,
         }
     }
 

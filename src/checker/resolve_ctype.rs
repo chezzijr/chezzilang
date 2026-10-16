@@ -99,14 +99,16 @@ impl Checker {
                 params,
                 ret,
                 labels,
-            } => Ty::Func {
-                params: params
+                variadic,
+            } => super::resolve_type::fn_annotation_ty(
+                params
                     .iter()
                     .map(|p| self.resolve_ty_ro_d(p, depth + 1))
                     .collect(),
-                ret: Box::new(self.resolve_ty_ro_d(ret, depth + 1)),
-                labels: FnLabels::new(labels.clone()),
-            },
+                self.resolve_ty_ro_d(ret, depth + 1),
+                labels,
+                *variadic,
+            ),
             Type::Tuple(ts) => Ty::Tuple(
                 ts.iter()
                     .map(|t| self.resolve_ty_ro_d(t, depth + 1))
@@ -215,7 +217,17 @@ impl Checker {
             // non-scalar return (e.g. `str`) is already rejected by `assert_marshallable` before this
             // runs, so a `None` reaching here in a program that checks clean can only be `nil` (or a
             // transparent alias to it) — never a silently-dropped scalar.
-            Type::Func { params, ret, .. } => {
+            // A variadic callback type (`fn(...int)`, a C `...`) has no C callback shape: `None`.
+            Type::Func {
+                variadic: crate::ast::Variadic::Pack | crate::ast::Variadic::C,
+                ..
+            } => None,
+            Type::Func {
+                params,
+                ret,
+                variadic: crate::ast::Variadic::No,
+                ..
+            } => {
                 let mut cparams = Vec::with_capacity(params.len());
                 for p in params {
                     let cp = self.resolve_ctype_d(p, depth + 1)?;

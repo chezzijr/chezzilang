@@ -954,3 +954,44 @@ fn hello_example_inner_structure() {
         other => panic!("{other:?}"),
     }
 }
+
+/// TICKET-264 — `fn(int, ...int)`, `fn(...xs: int)` and a bare `fn(int, ...)` parse and set the
+/// flag on the fn type.
+#[test]
+fn fn_type_variadic_param_parses() {
+    let shape = |src: &str| match only(src) {
+        StmtKind::TypeAlias {
+            ty: Type::Func {
+                params, variadic, ..
+            },
+            ..
+        } => (params.len(), variadic),
+        other => panic!("not a fn-type alias: {other:?}"),
+    };
+    assert_eq!(
+        shape("type A = fn(int, ...int) -> int\n"),
+        (2, Variadic::Pack)
+    );
+    assert_eq!(
+        shape("type A = fn(...xs: int) -> int\n"),
+        (1, Variadic::Pack)
+    );
+    assert_eq!(shape("type A = fn(int, ...) -> int\n"), (1, Variadic::C));
+    assert_eq!(shape("type A = fn(int) -> int\n"), (1, Variadic::No));
+}
+
+/// TICKET-264 — a variadic parameter ends the list; a parameter after it is an error.
+#[test]
+fn fn_type_variadic_must_be_last() {
+    for src in [
+        "type A = fn(...int, int) -> int\n",
+        "type A = fn(..., int) -> int\n",
+    ] {
+        let e = parse_err(src);
+        assert!(
+            e.message
+                .contains("a variadic parameter must be the last parameter of a function type"),
+            "{src}: {e}"
+        );
+    }
+}

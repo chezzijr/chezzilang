@@ -625,11 +625,7 @@ impl Checker {
     /// builtin branch returns a canonical display sig ("fn(int) -> List[int]" for `range`).
     pub(super) fn callee_display_ty(&self, name: &str) -> Option<Ty> {
         if let Some(sig) = self.functions.get(name) {
-            return Some(Ty::Func {
-                params: sig.params.clone(),
-                ret: Box::new(sig.ret.clone()),
-                labels: crate::checker::FnLabels::default(),
-            });
+            return Some(crate::checker::fn_value_ty(sig));
         }
         // A RESERVED builtin container/handle (`List`/`Map`/`Set`/`Channel`/`Shared`/…) now ALSO has a
         // `self.structs` entry — for its harvested METHOD table — but it is NOT a nominal struct: its
@@ -649,17 +645,14 @@ impl Checker {
                 params,
                 ret: Box::new(Ty::Struct(name.to_string(), targs)),
                 labels: FnLabels::default(),
+                variadic: crate::ast::Variadic::No,
             });
         }
         // A free / constructor builtin (`print`/`range`/`List`/`Channel`/…): a DISPLAY-only signature
         // from `builtin_sig` (the inference arms aren't a single queryable sig). Reserved names can't
         // be user-shadowed, so this never collides with the fn/struct tables above.
         if let Some(sig) = self.builtin_sig(name) {
-            return Some(Ty::Func {
-                params: sig.params,
-                ret: Box::new(sig.ret),
-                labels: crate::checker::FnLabels::default(),
-            });
+            return Some(crate::checker::fn_value_ty(&sig));
         }
         None
     }

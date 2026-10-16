@@ -618,11 +618,7 @@ impl Checker {
         // (first-hit-wins in `hover_record_at`), so this is a harmless no-op there; for a free fn
         // there is no prior record, so this produces the previously-missing fn-name hover.
         if self.hover_probe.is_some() {
-            let fty = Ty::Func {
-                params: sig.params.clone(),
-                ret: Box::new(sig.ret.clone()),
-                labels: crate::checker::FnLabels::default(),
-            };
+            let fty = crate::checker::fn_value_ty(&sig);
             self.hover_record_at(decl.name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
         let param_ty = |i: usize, _: &Param| sig.params.get(i).cloned().unwrap_or(Ty::Unknown);

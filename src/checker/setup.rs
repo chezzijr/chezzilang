@@ -1042,10 +1042,12 @@ pub(super) fn open_binding_message(name: &str, t: &Ty, site: BindSite) -> String
                 params,
                 ret,
                 labels,
+                variadic,
             } => Ty::Func {
                 params: v(params),
                 ret: b(ret),
                 labels: labels.clone(),
+                variadic: *variadic,
             },
             other @ Ty::Int
             | other @ Ty::Float

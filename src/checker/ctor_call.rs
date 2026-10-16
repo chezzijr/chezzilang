@@ -52,11 +52,7 @@ impl Checker {
         // method-name token (`Foo.default()` → "fn() -> Foo"), mirroring the free-fn convention
         // (declared `FnSig` params/ret verbatim). Emits no error, changes no checking result.
         if self.hover_probe.is_some() {
-            let fty = Ty::Func {
-                params: sig.params.clone(),
-                ret: Box::new(sig.ret.clone()),
-                labels: crate::checker::FnLabels::default(),
-            };
+            let fty = crate::checker::fn_value_ty(&sig);
             self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
         // A method-level turbofish (`Box.empty[int]()`) on a static method that declares NO own
@@ -192,6 +188,7 @@ impl Checker {
                 params: v.payload.clone(),
                 ret: Box::new(Ty::enum_ty(v.enum_name.clone(), targs_disp)),
                 labels: crate::checker::FnLabels::default(),
+                variadic: crate::ast::Variadic::No,
             };
             self.hover_record_at(name_span, &fty, HoverKind::Func, None);
         }

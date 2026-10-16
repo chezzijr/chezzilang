@@ -226,10 +226,12 @@ fn subst_self_ty(t: &Type, self_ty: Option<&str>) -> Type {
             params,
             ret,
             labels,
+            variadic,
         } => Type::Func {
             params: params.iter().map(|a| subst_self_ty(a, self_ty)).collect(),
             ret: Box::new(subst_self_ty(ret, self_ty)),
             labels: labels.clone(),
+            variadic: *variadic,
         },
         Type::Tuple(ts) => Type::Tuple(ts.iter().map(|a| subst_self_ty(a, self_ty)).collect()),
     }

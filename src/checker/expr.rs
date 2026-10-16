@@ -753,8 +753,9 @@ impl Checker {
                 params,
                 ret,
                 labels,
+                variadic,
             } if !named.is_empty()
-                || (labels.variadic().is_some()
+                || (variadic == crate::ast::Variadic::Pack
                     && callee
                         .and_then(|c| c.kind.as_ident())
                         .is_some_and(|n| self.labels_certain(n).is_some())) =>
@@ -790,14 +791,20 @@ impl Checker {
                 // so it fills defaults and packs a variadic like a direct call. Any other value's
                 // slots are its labels, callee-filled from `min_params` on (a trailing run).
                 let minp = labels.min_or(params.len());
+                let all: Vec<Ty> = params.iter().chain(&labels.kw).cloned().collect();
                 let value_slots = match &labels.slots {
                     Some(slots) => slots.to_vec(),
-                    None => callable_slots(&labels.names, minp, params.len()),
+                    None => callable_slots(
+                        &labels.names,
+                        minp,
+                        all.len(),
+                        (variadic == crate::ast::Variadic::Pack).then(|| params.len() - 1),
+                    ),
                 };
                 let Some(bound) = self.bind_call(Some(&value_slots), head, args, 0, span) else {
                     return *ret;
                 };
-                self.check_args_range(head, &params, minp, &bound, span);
+                self.check_args_range(head, &all, minp, &bound, span);
                 *ret
             }
             // A first-class builtin fn value (`f := ord; f("a")`) checks its args against the builtin's
@@ -823,6 +830,7 @@ impl Checker {
                 params,
                 ret,
                 labels,
+                variadic,
             } => {
                 // STRICT — an int never widens into a `float` param through a function VALUE (D3, like
                 // every other sink) — write `f(1.0)`.
@@ -832,7 +840,27 @@ impl Checker {
                 // is `f(1)`. `min_or` collapses to exact arity for everything else (a bare `fn(T)`
                 // annotation, a closure, a builtin) — those carry no optional tail.
                 let minp = labels.min_or(params.len());
-                self.check_args_range(head, &params, minp, args, span);
+                match variadic {
+                    // A C `...` follows the params: the direct call's own check, no plan, so the VM
+                    // hands the raw args to the extern as it does for a direct call.
+                    crate::ast::Variadic::C => {
+                        self.check_c_variadic_args(head, &params, args, span);
+                    }
+                    // The last param is the `List[T]` pack slot. Bind the surplus into it like a
+                    // direct call; a keyword-only tail (`labels.kw`) is callee-filled when defaulted
+                    // and a `missing required keyword argument` error when it is not.
+                    crate::ast::Variadic::Pack => {
+                        let all: Vec<Ty> = params.iter().chain(&labels.kw).cloned().collect();
+                        let slots =
+                            callable_slots(&labels.names, minp, all.len(), Some(params.len() - 1));
+                        if let Some(bound) = self.bind_call(Some(&slots), head, args, 0, span) {
+                            self.check_args_range(head, &all, minp, &bound, span);
+                        }
+                    }
+                    crate::ast::Variadic::No => {
+                        self.check_args_range(head, &params, minp, args, span);
+                    }
+                }
                 *ret
             }
             Ty::BuiltinFn { params, ret } => {
@@ -1367,17 +1395,23 @@ impl Checker {
 /// TICKET-187 — the one slot builder for a callee with no declaration to bind against: a protocol
 /// requirement (it binds by the PROTOCOL's parameter names and declares no defaults, so `min` is
 /// its arity) and a fn value whose type carries no declaration slots (its labels and callee-filled
-/// tail from `min`). Slot `i` is named `names[i]` and callee-filled from `min` on.
+/// tail from `min`). Slot `i` is named `names[i]` and callee-filled from `min` on. The `variadic`
+/// slot, when there is one, packs the surplus positionals and carries no default (`min` always
+/// covers it, as `min_callable_params` counts the pack).
 pub(super) fn callable_slots(
     names: &[Option<String>],
     min: usize,
     len: usize,
+    variadic: Option<usize>,
 ) -> Vec<crate::desugar::SlotSpec> {
     (0..len)
-        .map(|i| crate::desugar::SlotSpec {
-            name: names.get(i).cloned().flatten(),
-            default: (i >= min).then_some(crate::desugar::Dflt::CalleeFilled),
-            is_variadic: false,
+        .map(|i| {
+            let is_variadic = variadic == Some(i);
+            crate::desugar::SlotSpec {
+                name: names.get(i).cloned().flatten(),
+                default: (i >= min && !is_variadic).then_some(crate::desugar::Dflt::CalleeFilled),
+                is_variadic,
+            }
         })
         .collect()
 }

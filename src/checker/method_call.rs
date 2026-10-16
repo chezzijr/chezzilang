@@ -297,6 +297,7 @@ impl Checker {
                         msig.labels.get(1..).unwrap_or(&[]),
                         expected.len(),
                         expected.len(),
+                        None,
                     );
                     let Some(bound) = self.bind_call(Some(&slots), method, args, 0, span) else {
                         return Ty::Unknown;
@@ -337,10 +338,14 @@ impl Checker {
             Ty::Struct(sname, targs) => {
                 // Substitute the struct's type arguments into the method signature, so calling
                 // `Stack[int].push(x)` checks `x` against `int`, not the parameter `T`.
+                let hover = self.hover_probe.is_some();
                 let resolved = self.struct_shape(sname).and_then(|info| {
                     info.methods.get(method).map(|sig| {
                         let map = struct_param_map(info, targs);
                         let inst = instantiate_method(sig, &map);
+                        // Editor hover only: the method's CALL type, receiver stripped.
+                        let hover_ty = (hover && !sig.is_static && !inst.params.is_empty())
+                            .then(|| crate::checker::fn_value_ty(&inst.receiverless()));
                         (
                             inst.params,
                             // the DECLARED (pre-substitution) param types — the widen license (a `T`
@@ -361,6 +366,7 @@ impl Checker {
                             // receiver param's name (TICKET-202).
                             (sig.where_bounds.clone(), sig.type_params.clone()),
                             map,
+                            hover_ty,
                         )
                     })
                 });
@@ -375,6 +381,7 @@ impl Checker {
                     mdoc,
                     (where_bounds, where_owner),
                     rmap,
+                    hover_ty,
                 )) = resolved
                 {
                     // A STATIC method (no `self`) is NOT callable on a value — it is reached only as
@@ -421,18 +428,8 @@ impl Checker {
                             // Editor hover (probe-gated no-op): record the method's CALL signature
                             // (receiver stripped → "fn(int) -> int") at the method-name token, so
                             // hovering `c.foo(2)`'s `foo` yields the signature. Pure side effect.
-                            if self.hover_probe.is_some() {
-                                let fty = Ty::Func {
-                                    params: expected.to_vec(),
-                                    ret: Box::new(ret.clone()),
-                                    labels: crate::checker::FnLabels::default(),
-                                };
-                                self.hover_record_at(
-                                    name_span,
-                                    &fty,
-                                    HoverKind::Func,
-                                    mdoc.clone(),
-                                );
+                            if let Some(fty) = &hover_ty {
+                                self.hover_record_at(name_span, fty, HoverKind::Func, mdoc.clone());
                             }
                             self.check_args_subst(
                                 method,
@@ -1273,6 +1270,7 @@ impl Checker {
                         msig.labels.get(1..).unwrap_or(&[]),
                         expected.len(),
                         expected.len(),
+                        None,
                     );
                     let Some(bound) = self.bind_call(Some(&slots), method, args, 0, span) else {
                         return Ty::Unknown;

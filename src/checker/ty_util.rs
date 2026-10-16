@@ -85,7 +85,11 @@ pub(super) fn first_duplicate_binder(
 /// M22 — structural equality of two protocol method signatures (params + return + arity), used to
 /// dedup identical embed-pulled methods (the legal diamond) vs. flag a conflicting-signature embed.
 pub(super) fn fn_sig_eq(a: &FnSig, b: &FnSig) -> bool {
-    a.params == b.params && a.ret == b.ret && a.min_params == b.min_params
+    a.params == b.params
+        && a.ret == b.ret
+        && a.min_params == b.min_params
+        && a.variadic == b.variadic
+        && a.c_variadic == b.c_variadic
 }
 
 pub(super) fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
@@ -691,13 +695,15 @@ pub(crate) fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
                 params: ap,
                 ret: ar,
                 labels,
+                variadic: av,
             },
             Func {
                 params: sp,
                 ret: sr,
+                variadic: sv,
                 ..
             },
-        ) if ap.len() == sp.len() => Func {
+        ) if ap.len() == sp.len() && av == sv => Func {
             params: ap
                 .iter()
                 .zip(sp)
@@ -705,6 +711,7 @@ pub(crate) fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
                 .collect(),
             ret: Box::new(merge_unknown(ar, sr)),
             labels: labels.clone(),
+            variadic: *av,
         },
         // Shape/name/arity mismatch: leave `a` unchanged (no fill — the caller's mismatch fires).
         _ => a.clone(),
@@ -726,11 +733,13 @@ pub(super) fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
             params,
             ret,
             labels,
+            variadic,
         } => Ty::Func {
             params: params.iter().map(|t| subst(t, map)).collect(),
             ret: Box::new(subst(ret, map)),
             // Preserve surface labels across generic substitution (they name params, not types).
             labels: labels.clone(),
+            variadic: *variadic,
         },
         // Native reserved generic handles must substitute their element param too (mirror `subst`'s
         // List/Map/… arms) so a generic wrapper struct field `ch: Channel[T]` becomes `Channel[int]`
@@ -952,6 +961,13 @@ impl Checker {
         if proto.params.len() != actual.params.len() {
             return false;
         }
+        // The variadic flag is part of the type (Go): a requirement `fn log(self, xs: List[int])` is
+        // not witnessed by `fn log(self, ...xs: int)`, and the reverse. A C `...` is the same flag.
+        if proto.variadic.is_some() != actual.variadic.is_some()
+            || proto.c_variadic != actual.c_variadic
+        {
+            return false;
+        }
         // A STATIC-slot protocol requirement (`Convert`'s `convert(x: S) -> Self`, first param NOT `self`)
         // is witnessed ONLY by a matching STATIC method — a value cannot invoke a static ctor, so an
         // instance/`self`-slot method with the same arity (`convert(self) -> Self`) must NOT falsely satisfy
@@ -1027,10 +1043,16 @@ pub(super) fn seed_from_hint(hint: Option<&Ty>, shape: &Ty, sub: &mut HashMap<St
 /// non-`Func`) is returned unchanged, so param/receiver unification is untouched.
 pub(super) fn mask_closure_ret(actual: &Ty) -> Ty {
     match actual {
-        Ty::Func { params, labels, .. } => Ty::Func {
+        Ty::Func {
+            params,
+            labels,
+            variadic,
+            ..
+        } => Ty::Func {
             params: params.clone(),
             ret: Box::new(Ty::Unknown),
             labels: labels.clone(),
+            variadic: *variadic,
         },
         other @ Ty::Int
         | other @ Ty::Float
@@ -1126,12 +1148,14 @@ pub(super) fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
             Ty::Func {
                 params: dp,
                 ret: dr,
+                variadic: dv,
                 ..
             },
             a,
         ) => {
-            if let Some((ap, ar)) = a.fn_parts()
+            if let Some((ap, ar, av)) = a.fn_parts()
                 && dp.len() == ap.len()
+                && *dv == av
             {
                 dp.iter().zip(ap).for_each(|(d, a)| unify(d, a, map));
                 unify(dr, ar, map);

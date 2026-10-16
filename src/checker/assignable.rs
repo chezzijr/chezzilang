@@ -208,14 +208,17 @@ impl Checker {
                     params: p1,
                     ret: r1,
                     labels: l1,
+                    variadic: v1,
                 },
                 Func {
                     params: p2,
                     ret: r2,
                     labels: l2,
+                    variadic: v2,
                 },
             ) => {
                 p1.len() == p2.len()
+                    && v1 == v2
                     && l2.min_or(p2.len()) <= l1.min_or(p1.len())
                     && p1.iter().zip(p2).all(|(a, b)| param_invariant(a, b))
                     && self.assignable(r1, r2)

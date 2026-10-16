@@ -440,6 +440,7 @@ impl Checker {
                                 params: vi.payload,
                                 ret: Box::new(Ty::enum_ty(vi.enum_name, targs_disp.clone())),
                                 labels: crate::checker::FnLabels::default(),
+                                variadic: crate::ast::Variadic::No,
                             };
                             self.hover_record_at(v.name_span, &fty, HoverKind::Func, None);
                         }

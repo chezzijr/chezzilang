@@ -2691,3 +2691,107 @@ fn an_index_call_names_no_binding() {
     );
     assert!(!msg.contains("'fs'"), "got: {msg}");
 }
+
+// TICKET-264: a variadic is part of the fn type; a `...T` fn type takes a variadic fn.
+#[test]
+fn a_variadic_fn_type_accepts_a_variadic_fn() {
+    entry_ok(
+        "fn g(a: int, ...r: int) -> int:\n    return a\nfn ap(k: fn(int, ...int) -> int) -> int:\n    return 0\nfn main():\n    print(ap(g))\n",
+    );
+}
+
+// TICKET-264: a `List[T]` last param is a different type from a `...T` one (Go's `[]int` vs `...int`).
+#[test]
+fn a_list_slot_type_rejects_a_variadic_fn() {
+    entry_rejects(
+        "fn g(a: int, ...r: int) -> int:\n    return a\nfn ap(k: fn(int, List[int]) -> int) -> int:\n    return 0\nfn main():\n    print(ap(g))\n",
+        "fn(int, ...int) -> int",
+    );
+}
+
+// TICKET-264: an alias keeps the flag; a list-slot fn does not flow into the aliased variadic type.
+#[test]
+fn an_alias_keeps_the_variadic_flag() {
+    entry_ok(
+        "type Cb = fn(int, ...int) -> int\nfn g(a: int, ...r: int) -> int:\n    return a\nfn ap(k: Cb) -> int:\n    return 0\nfn main():\n    print(ap(g))\n",
+    );
+    entry_rejects(
+        "type Cb = fn(int, ...int) -> int\nfn h(a: int, r: List[int]) -> int:\n    return a\nfn ap(k: Cb) -> int:\n    return 0\nfn main():\n    print(ap(h))\n",
+        "fn(int, ...int) -> int",
+    );
+}
+
+// TICKET-264: a fn with a required keyword-only param needs more than a narrower fn type supplies.
+#[test]
+fn a_required_keyword_only_fn_does_not_flow_into_a_narrower_fn_type() {
+    entry_rejects(
+        "fn rk(...xs: int, t: int) -> int:\n    return t\nfn ap(k: fn(...int) -> int) -> int:\n    return 0\nfn main():\n    print(ap(rk))\n",
+        "fn(...int) -> int",
+    );
+}
+
+// TICKET-264: Go rejects a variadic method for a `[]T` requirement; so do we.
+#[test]
+fn a_variadic_method_does_not_satisfy_a_list_requirement() {
+    entry_rejects(
+        "protocol Log:\n    fn log(self, xs: List[int]) -> int\nstruct S:\n    n: int\n    fn log(self, ...xs: int) -> int:\n        return xs.len()\nfn use_it(l: Log) -> int:\n    return l.log([1, 2, 3])\nfn main():\n    print(use_it(S(1)))\n",
+        "Log",
+    );
+}
+
+fn run_out(src: &str) -> String {
+    crate::compiler::run_for_tests::run_capture(src).expect("the program runs")
+}
+
+// TICKET-264: a variadic fn value packs its surplus through a list slot, as a direct call does.
+#[test]
+fn a_variadic_fn_value_packs_through_a_list_slot() {
+    assert_eq!(
+        run_out(
+            "fn g(...xs: int) -> int:\n    return xs.len()\nfs := [g]\nprint(fs[0](1, 2, 3))\n"
+        ),
+        "3\n"
+    );
+}
+
+// TICKET-264: the same through a fn-typed parameter, whose annotation `fn(...int) -> int` is variadic.
+#[test]
+fn a_variadic_fn_value_packs_through_a_parameter() {
+    assert_eq!(
+        run_out(
+            "fn g(...xs: int) -> int:\n    return xs.len()\nfn ap(f: fn(...int) -> int) -> int:\n    return f(1, 2, 3)\nprint(ap(g))\n"
+        ),
+        "3\n"
+    );
+}
+
+// TICKET-264: the same through a fn-typed struct field.
+#[test]
+fn a_variadic_fn_field_packs() {
+    assert_eq!(
+        run_out(
+            "fn g(...xs: int) -> int:\n    return xs.len()\nstruct W:\n    f: fn(...int) -> int\nw := W(g)\nprint(w.f(1, 2, 3))\n"
+        ),
+        "3\n"
+    );
+}
+
+// TICKET-264: a list-slot call omits a defaulted keyword-only tail; the callee fills it, as in `vk(1, 2)`.
+#[test]
+fn a_list_slot_value_omits_a_defaulted_keyword_only_tail() {
+    assert_eq!(
+        run_out(
+            "fn vk(...r: int, t: int = 3) -> str:\n    return \"{r.len()}+{t}\"\nfs := [vk]\nprint(fs[0](1, 2))\nprint(vk(1, 2))\n"
+        ),
+        "2+3\n2+3\n"
+    );
+}
+
+// TICKET-264: a required keyword-only param cannot be named through a list slot, so the call is an error.
+#[test]
+fn a_required_keyword_only_param_refuses_a_list_slot_call() {
+    entry_rejects(
+        "fn rk(...r: int, t: int) -> int:\n    return t\nfn main():\n    fs := [rk]\n    print(fs[0](1, 2))\n",
+        "missing required keyword argument 't'",
+    );
+}

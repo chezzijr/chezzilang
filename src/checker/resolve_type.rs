@@ -322,18 +322,21 @@ impl Checker {
                 params,
                 ret,
                 labels,
+                variadic,
             } => {
                 let (pp, rp) = pos.func_parts();
-                Ty::Func {
-                    params: params
-                        .iter()
-                        .map(|p| self.resolve_type_at(p, span, pp))
-                        .collect(),
-                    ret: Box::new(self.resolve_type_at(ret, span, rp)),
-                    // Carry the annotation's optional labels onto the type (surface-only), so a value call
-                    // through e.g. a HOF param `f: fn(name: str) -> nil` can resolve `f(name="X")`.
-                    labels: FnLabels::new(labels.clone()),
-                }
+                let params = params
+                    .iter()
+                    .map(|p| self.resolve_type_at(p, span, pp))
+                    .collect();
+                // The annotation's optional labels ride onto the type (surface-only), so a value call
+                // through e.g. a HOF param `f: fn(name: str) -> nil` can resolve `f(name="X")`.
+                fn_annotation_ty(
+                    params,
+                    self.resolve_type_at(ret, span, rp),
+                    labels,
+                    *variadic,
+                )
             }
             Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_type(t, span)).collect()),
             Type::Generic(n, args, head_span) => {
@@ -670,4 +673,26 @@ impl Checker {
     }
 
     // ===== pass 2: check statements =====
+}
+
+/// The one builder of a function type from an ANNOTATION (`fn(int, ...int) -> int`), for both type
+/// resolvers (`resolve_type_at` and the read-only `resolve_ty_ro_d`). A `Pack` annotation spells its
+/// last param as the element type `T`; the type holds the slot type `List[T]`, as `fn_value_ty` does.
+pub(super) fn fn_annotation_ty(
+    mut params: Vec<Ty>,
+    ret: Ty,
+    labels: &[Option<String>],
+    variadic: crate::ast::Variadic,
+) -> Ty {
+    if variadic == crate::ast::Variadic::Pack
+        && let Some(last) = params.pop()
+    {
+        params.push(Ty::List(Box::new(last)));
+    }
+    Ty::Func {
+        params,
+        ret: Box::new(ret),
+        labels: FnLabels::new(labels.to_vec()),
+        variadic,
+    }
 }

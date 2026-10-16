@@ -224,6 +224,9 @@ pub struct FnLabels {
     /// Equality-neutral like `min`: a function type is not changed by how a call through it may be
     /// spelled.
     pub(crate) slots: Option<std::sync::Arc<Vec<crate::desugar::SlotSpec>>>,
+    /// The types of the declaration's KEYWORD-ONLY parameters (the ones after a variadic pack), which
+    /// `Ty::Func::params` does not carry: `params` ends at the pack slot. Equality-neutral like `min`.
+    pub kw: Vec<Ty>,
 }
 
 impl PartialEq for FnLabels {
@@ -256,6 +259,7 @@ impl FnLabels {
             names,
             min: None,
             slots: None,
+            kw: Vec::new(),
         }
     }
 
@@ -271,14 +275,12 @@ impl FnLabels {
         self
     }
 
-    /// The declaration's variadic parameter index, derived from its slots.
-    pub fn variadic(&self) -> Option<usize> {
-        self.slots.as_ref()?.iter().position(|s| s.is_variadic)
-    }
-
-    /// The fewest arguments a call may supply, given the value's declared parameter count.
+    /// The fewest arguments a call may supply, given the value's declared positional parameter
+    /// count. The count runs over the whole parameter list, keyword-only parameters included, so a
+    /// required keyword-only parameter raises it above `params`.
     pub fn min_or(&self, params: usize) -> usize {
-        self.min.unwrap_or(params).min(params)
+        let all = params + self.kw.len();
+        self.min.unwrap_or(all).min(all)
     }
 }
 
@@ -319,6 +321,9 @@ pub enum Ty {
         /// call can resolve `g(name="Bob")` to a positional slot. IGNORED by `compatible`/`unify`/
         /// `sendable`. Display marks an omittable parameter (`int = …`) using `min_or`.
         labels: FnLabels,
+        /// Whether the last param is a variadic pack (`Pack`: its slot is `List[T]`) or a C `...`
+        /// follows it (`C`). PART of the type: `compatible`/`unify` compare it.
+        variadic: crate::ast::Variadic,
     },
     /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`) used in value
     /// position (`f := ord`, a HOF arg, a bare `defer print(...)`). DISTINCT from [`Ty::Func`] (a user
@@ -709,9 +714,15 @@ impl Ty {
     /// The parameter and return types of any function value: a user [`Ty::Func`] or a builtin
     /// [`Ty::BuiltinFn`] (`ord`, `chr`). They differ only in sendability, never in shape, so a
     /// structural question (generic inference, arity) asks this instead of matching one variant.
-    pub fn fn_parts(&self) -> Option<(&[Ty], &Ty)> {
+    pub fn fn_parts(&self) -> Option<(&[Ty], &Ty, crate::ast::Variadic)> {
         match self {
-            Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => Some((params, ret)),
+            Ty::Func {
+                params,
+                ret,
+                variadic,
+                ..
+            } => Some((params, ret, *variadic)),
+            Ty::BuiltinFn { params, ret } => Some((params, ret, crate::ast::Variadic::No)),
             Ty::Int
             | Ty::Float
             | Ty::Bool
@@ -758,15 +769,18 @@ pub fn fn_arity_note(expected: &Ty, actual: &Ty) -> String {
         Ty::Func {
             params: p1,
             labels: l1,
+            variadic: v1,
             ..
         },
         Ty::Func {
             params: p2,
             labels: l2,
+            variadic: v2,
             ..
         },
     ) = (expected, actual)
         && p1.len() == p2.len()
+        && v1 == v2
     {
         let (e, a) = (l1.min_or(p1.len()), l2.min_or(p2.len()));
         if a > e {
@@ -850,14 +864,17 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
                 params: p1,
                 ret: r1,
                 labels: l1,
+                variadic: v1,
             },
             Func {
                 params: p2,
                 ret: r2,
                 labels: l2,
+                variadic: v2,
             },
         ) => {
             p1.len() == p2.len()
+                && v1 == v2
                 && l2.min_or(p2.len()) <= l1.min_or(p1.len())
                 && p1.iter().zip(p2).all(|(a, b)| param_invariant(a, b))
                 && compatible(r1, r2)
@@ -1176,6 +1193,7 @@ impl Ty {
                 params,
                 ret,
                 labels,
+                variadic,
             } => {
                 write!(f, "fn(")?;
                 let min = labels.min_or(params.len());
@@ -1183,10 +1201,21 @@ impl Ty {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", Named(p, names))?;
+                    // A `Pack` last slot is a `List[T]` that prints as the spelling `...T`.
+                    if *variadic == crate::ast::Variadic::Pack
+                        && i + 1 == params.len()
+                        && let Ty::List(elem) = p
+                    {
+                        write!(f, "...{}", Named(elem, names))?;
+                    } else {
+                        write!(f, "{}", Named(p, names))?;
+                    }
                     if i >= min {
                         write!(f, " = …")?;
                     }
+                }
+                if *variadic == crate::ast::Variadic::C {
+                    write!(f, "{}...", if params.is_empty() { "" } else { ", " })?;
                 }
                 write!(f, ") -> {}", Named(ret, names))
             }
@@ -1269,7 +1298,8 @@ mod tests {
             Ty::Func {
                 params: vec![Ty::Int, Ty::Str],
                 ret: Box::new(Ty::Bool),
-                labels: FnLabels::none(2)
+                labels: FnLabels::none(2),
+                variadic: crate::ast::Variadic::No,
             }
             .to_string(),
             "fn(int, str) -> bool"

@@ -1000,6 +1000,18 @@ pub fn min_callable_params(params: &[Param], has_witness_params: bool) -> usize 
 
 // ===== types =====
 
+/// Whether a function TYPE ends in a variadic parameter, and which kind. The one owner of the
+/// fact: the parser sets it, `Ty::Func` carries it, and every comparison reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Variadic {
+    /// No variadic parameter.
+    No,
+    /// A Chezzi `...T`: the LAST param is the pack, its element type `T` (the callee's slot is `List[T]`).
+    Pack,
+    /// A C `...` after the last param (an `extern` fn's varargs); it has no Chezzi type.
+    C,
+}
+
 /// A type annotation: `int`, `str`, `Point`, or a generic `list[int]`, `map[K, V]`, `Result[int]`.
 ///
 /// `PartialEq` is hand-written (NOT derived) so the `Named` span is EQUALITY-NEUTRAL: two
@@ -1043,6 +1055,9 @@ pub enum Type {
         /// are the SAME annotation. Carried through `resolve_type` onto `Ty::Func` so a value call
         /// through this type can resolve keyword arguments.
         labels: Vec<Option<String>>,
+        /// Whether the type's last parameter is variadic. PART of the type (Go: `func(...int)` and
+        /// `func([]int)` differ), so the hand `PartialEq` compares it.
+        variadic: Variadic,
     },
     /// `(T1, T2, …)` — a tuple type (always ≥2 elements; a 1-element `(T)` unwraps to `T`).
     Tuple(Vec<Type>),
@@ -1086,14 +1101,16 @@ impl PartialEq for Type {
                 Type::Func {
                     params: p1,
                     ret: r1,
+                    variadic: v1,
                     ..
                 },
                 Type::Func {
                     params: p2,
                     ret: r2,
+                    variadic: v2,
                     ..
                 },
-            ) => p1 == p2 && r1 == r2,
+            ) => p1 == p2 && r1 == r2 && v1 == v2,
             (Type::Tuple(t1), Type::Tuple(t2)) => t1 == t2,
             (Type::Nil(_), Type::Nil(_)) => true,
             _ => false,

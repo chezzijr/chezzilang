@@ -1295,3 +1295,11 @@ fn golden_assert_chz_matches_expected_and_interp() {
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }
+
+/// TICKET-264: a C-variadic extern read as a value keeps its varargs (`f := snprintf; f(buf, 64, "%s-%ld", "x", 42)`),
+/// as the direct call does. The base build refused the call with `'closure' expects 3 argument(s), got 5`.
+#[test]
+fn a_c_variadic_extern_value_takes_its_varargs() {
+    let src = "import std.ffi\nimport int32 from std.ffi\nextern \"libc\":\n    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int32\nbuf := ffi.alloc(64)\nf := snprintf\nprint(f(buf, 64, \"%s-%ld\", \"x\", 42))\nprint(ffi.load_str(buf))\nffi.free(buf)\n";
+    assert_eq!(run(src), "4\nx-42\n");
+}

@@ -293,11 +293,7 @@ impl Checker {
     /// method-arm probe block (which strips the receiver first).
     pub(super) fn record_method_hover(&mut self, name_span: Span, sig: &FnSig) {
         if self.hover_probe.is_some() {
-            let fty = Ty::Func {
-                params: sig.params.clone(),
-                ret: Box::new(sig.ret.clone()),
-                labels: crate::checker::FnLabels::default(),
-            };
+            let fty = crate::checker::fn_value_ty(sig);
             self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
     }
@@ -308,15 +304,10 @@ impl Checker {
     /// receiver) keeps all its params. Probe-gated no-op like [`record_method_hover`].
     pub(super) fn record_method_decl_hover(&mut self, name_span: Span, sig: &FnSig) {
         if self.hover_probe.is_some() {
-            let params: Vec<Ty> = if !sig.is_static && !sig.params.is_empty() {
-                sig.params[1..].to_vec()
+            let fty = if !sig.is_static && !sig.params.is_empty() {
+                crate::checker::fn_value_ty(&sig.receiverless())
             } else {
-                sig.params.clone()
-            };
-            let fty = Ty::Func {
-                params,
-                ret: Box::new(sig.ret.clone()),
-                labels: FnLabels::default(),
+                crate::checker::fn_value_ty(sig)
             };
             self.hover_record_at(name_span, &fty, HoverKind::Func, sig.doc.clone());
         }

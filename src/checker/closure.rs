@@ -350,16 +350,23 @@ impl Checker {
         // reports the mismatch (single diagnostic).
         let (exp_params, exp_ret): (Option<Vec<Ty>>, Option<Ty>) = match expected {
             Some(Ty::Func {
-                params: p, ret: r, ..
+                params: p,
+                ret: r,
+                variadic: crate::ast::Variadic::No,
+                ..
             }) if p.len() == params.len() => (Some(p.clone()), Some((**r).clone())),
             _ => (None, None),
         };
         // A `fn`-typed slot whose arity does NOT match: keep unannotated params silently `Unknown`
         // here and let the call site's `assignable` check report the single arity diagnostic — do
         // NOT route them through the free-closure scan (which would emit a spurious, misdirecting
-        // "cannot infer type of parameter").
-        let expected_arity_mismatch =
-            matches!(expected, Some(Ty::Func { params: p, .. }) if p.len() != params.len());
+        // "cannot infer type of parameter"). A variadic expected type (`Pack` or `C`) is the same
+        // case: a closure literal is never variadic, so the call site's `assignable` check rejects it.
+        let expected_arity_mismatch = matches!(
+            expected,
+            Some(Ty::Func { params: p, variadic, .. })
+                if p.len() != params.len() || *variadic != crate::ast::Variadic::No
+        );
         // A closure body opens a fresh loop context (same rule as `check_fn_body`): a loop around
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
@@ -554,6 +561,7 @@ impl Checker {
             params: param_tys,
             ret: Box::new(ret_ty),
             labels: FnLabels::new(labels),
+            variadic: crate::ast::Variadic::No,
         }
     }
 

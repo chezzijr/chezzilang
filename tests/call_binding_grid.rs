@@ -801,11 +801,12 @@ fn t187_cells() -> Vec<Cell> {
             prints("1\n3"),
         ),
     ];
-    // Must still fail: packing and keywords need a binding certain to hold ONE function.
+    // A variadic is part of the fn type (owner answer, TICKET-264): a list slot packs its surplus
+    // like a direct call. Keywords still need a binding certain to hold ONE function.
     cells.push(cell(
         "t187/fn_value/uncertain/variadic",
         &format!("{v}fs := [v]\nprint(fs[0](1, 2, 3))\n"),
-        Expect::Rejects("expects 2 argument(s), got 3"),
+        prints("3"),
     ));
     cells.push(lib_cell(
         "fn_value/qualified/reassigned_named",

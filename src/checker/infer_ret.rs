@@ -900,10 +900,12 @@ impl Checker {
                 params,
                 ret,
                 labels,
+                variadic,
             } => Ty::Func {
                 params: params.iter().map(|x| self.fill_ret(x, bad)).collect(),
                 ret: Box::new(self.fill_ret(ret, bad)),
                 labels: labels.clone(),
+                variadic: *variadic,
             },
             Ty::BuiltinFn { params, ret } => Ty::BuiltinFn {
                 params: params.iter().map(|x| self.fill_ret(x, bad)).collect(),

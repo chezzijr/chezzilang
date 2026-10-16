@@ -561,9 +561,12 @@
 # A `fn(...)` TYPE parameter may carry an OPTIONAL Swift-style LABEL (`IDENT ":"`) before its type
 # (`fn(name: str, greeting: str) -> None`), enabling keyword arguments through a function VALUE
 # (`g := greet; g(name="Bob")`). Labels are SURFACE-ONLY: `fn(str)->None` and `fn(name:str)->None` are
-# the same type (mutually assignable). A bare param (no label) is still valid.
-<fnParamList> ::= <fnParam> | <fnParam> "COMMA" <fnParamList>
+# the same type (mutually assignable). A bare param (no label) is still valid. A variadic param (`...T`,
+# `...name: T`, or a bare C `...`) is part of the type and only the last param may be one.
+<fnParamList> ::= <fnParams> | <fnParams> "COMMA" <fnVariadic> | <fnVariadic>
+<fnParams>    ::= <fnParam> | <fnParam> "COMMA" <fnParams>
 <fnParam>     ::= <type> | "IDENT" "COLON" <type>
+<fnVariadic>  ::= "DOTDOTDOT" <type> | "DOTDOTDOT" "IDENT" "COLON" <type> | "DOTDOTDOT"
 
 # One bracket after a postfix head (TICKET-222): `head[X…]` is ONE node carrying every reading that
 # parses — the type list by the real type grammar (`Map[str, int]`, `(int, str)`, `fn(int) -> int`,

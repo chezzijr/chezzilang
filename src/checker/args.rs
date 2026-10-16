@@ -330,7 +330,9 @@ impl Checker {
                 params: cparams, ..
             } = &arg.kind
                 && let Ty::Func {
-                    params: dparams, ..
+                    params: dparams,
+                    variadic: crate::ast::Variadic::No,
+                    ..
                 } = decl
             {
                 let before = mentioned.len();

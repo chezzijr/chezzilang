@@ -554,6 +554,25 @@ struct FnSig {
 }
 
 impl FnSig {
+    /// This signature as a value read off a receiver: parameter 0 (`self`) dropped with its label and
+    /// slot, the variadic index shifted, `min_params` lowered. The one builder of a bound-method
+    /// hover type: `fn_value_ty(&sig.receiverless())`.
+    fn receiverless(&self) -> FnSig {
+        let mut sig = self.clone();
+        sig.params.remove(0);
+        if !sig.labels.is_empty() {
+            sig.labels.remove(0);
+        }
+        if let Some(slots) = &mut sig.slots
+            && !slots.is_empty()
+        {
+            slots.remove(0);
+        }
+        sig.variadic = sig.variadic.and_then(|v| v.checked_sub(1));
+        sig.min_params = sig.min_params.saturating_sub(1);
+        sig
+    }
+
     /// A non-generic signature (the common case): every param is required (`min_params == params.len()`).
     fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
         let min_params = params.len();
@@ -747,12 +766,22 @@ impl ModuleSig {
 /// declaration's call slots, so `f := request.get; f(url)`, `f(url, 5)` and a keyword or variadic
 /// call through a certain `f` all work. Every fn value type is built here (TICKET-197).
 fn fn_value_ty(f: &FnSig) -> Ty {
+    // `params` ends at the variadic pack slot; the keyword-only rest rides in `labels.kw`.
+    let split = f.variadic.map_or(f.params.len(), |v| v + 1);
+    let mut labels = FnLabels::new(f.labels.clone())
+        .with_min(f.min_params)
+        .with_slots(f.slots.clone());
+    labels.kw = f.params[split..].to_vec();
+    let variadic = match (f.variadic, f.c_variadic) {
+        (Some(_), _) => crate::ast::Variadic::Pack,
+        (None, true) => crate::ast::Variadic::C,
+        (None, false) => crate::ast::Variadic::No,
+    };
     Ty::Func {
-        params: f.params.clone(),
+        params: f.params[..split].to_vec(),
         ret: Box::new(f.ret.clone()),
-        labels: FnLabels::new(f.labels.clone())
-            .with_min(f.min_params)
-            .with_slots(f.slots.clone()),
+        labels,
+        variadic,
     }
 }
 
