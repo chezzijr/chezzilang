@@ -96,8 +96,19 @@ Details of each step are in [`docs/history/progress/2026-10.md`](docs/history/pr
 - Does `Hashable` imply `Eq`?
 - The bound of the JSON timing test.
 - `Iterable` for `Deque`, `Heap` and `Counter`.
-- The U16 `remove` table.
-- `Hashable` for a payload-less enum and for `T?`.
+- `Hashable` for a payload-less enum.
+
+### Owner decisions not yet implemented
+
+- **`T?` derives nothing from `T`** (2026-10-16): no `Hashable`, no ordering, no methods of `T`. Today
+  `a < b` on two `int?` is accepted; it becomes an error. Rust derives `Hash` and `Ord` for
+  `Option<T>` and Python accepts `{None: 1}`; the owner chose one rule for all three. A user who wants
+  them declares an enum with its own methods.
+- **Collection methods** (U16, 2026-10-16): one convention table, with Rust's shapes: Set
+  `insert`/`remove` return `bool`, Map `insert`/`remove` return `V?`, List `remove(i)` returns `T` and
+  faults on a bad index; the concurrent collections follow the same rows. A protocol only where
+  generic code needs one (`Iterable`, `Contains`, `Sized`, `Extend`); a new protocol goes in a std
+  module, not the global namespace.
 - Top-level `return` (TICKET-178). `print(1)` / `return` / `print(2)` at module level prints `1` and
   exits 0. CPython rejects it with `SyntaxError: 'return' outside function`.
 
