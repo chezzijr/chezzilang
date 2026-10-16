@@ -3191,3 +3191,20 @@ fn sort_where_clause_bool_list_rejected() {
         "does not satisfy Comparable",
     );
 }
+
+// ----- TICKET-265 — protocols live in modules; `T?` derives nothing from `T` -----
+
+/// Owner decision 1: a bound `[T: Add]` needs `import Add from std.ops`. Today it checks with no import.
+#[test]
+fn add_bound_without_import_is_unknown_name() {
+    rejects(
+        "fn f[T: Add](a: T, b: T) -> T:\n    return a + b\nprint(f(1, 2))\n",
+        "unknown name 'Add'",
+    );
+}
+
+/// Owner decision 4: `T?` derives no ordering from `T`. Today `a < b` on `int?` checks.
+#[test]
+fn optional_int_has_no_ordering() {
+    rejects("a: int? = 1\nb: int? = 2\nprint(a < b)\n", "cannot compare");
+}
