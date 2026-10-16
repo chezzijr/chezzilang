@@ -135,8 +135,8 @@ check-OK-then-broken program, and a JIT would trust the static type.
 - **Do not default a slot to a protocol without checking satisfaction.** The inferred `T!E` E-slot
   defaults to `Error` only if `Unknown` or the payload satisfies `Error`.
 - **A guard over a hoisted declaration must not use source position.** A top-level `fn` is in its slot
-  before any statement runs. Judge the slot: its type is frozen at its first binding, hoisted or not.
-  `Ty::Func` equality ignores optional arity, so a stricter re-binding needs its own directional check.
+  before any statement runs. Judge the slot, never the statement order. (A module binds each name
+  once, so a second module-level binding is an error, not a re-binding to check.)
 - **A guard keyed on a module-wide bare-name table fires on a parameter or local that shadows the
   name.** Require scope-0 resolution (`scopes.iter().skip(1).any(...)` means shadowed).
 - **A checker→compiler side table keyed on a `Span` aliases wherever one coordinate is reachable under
