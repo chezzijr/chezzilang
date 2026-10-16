@@ -1121,12 +1121,15 @@ fn a_self_referencing_default_is_a_cycle_error() {
     );
 }
 
-/// A call through a fn-typed FIELD binds no declaration: it keeps the generic refusal.
+/// A call through a fn-typed FIELD binds no declaration: `apply_value_call` refuses a keyword call (TICKET-264).
 #[test]
 fn fn_field_named_call_keeps_the_generic_refusal() {
     let src =
         "struct S:\n    map: fn(int) -> int\ns := S(fn(x: int) -> int: x)\nprint(s.map(arg=1))\n";
-    entry_rejects(src, "only supported on");
+    entry_rejects(
+        src,
+        "keyword arguments through a function value need a binding",
+    );
     let errs = check_entry(src);
     assert!(
         !errs

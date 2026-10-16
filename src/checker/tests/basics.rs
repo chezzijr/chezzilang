@@ -636,7 +636,7 @@ fn inferred_nested_fn_does_not_pollute_outer() {
 fn nested_fn_shadows_global_arity_checked() {
     entry_rejects(
         "fn f():\n    print(\"g\")\nfn outer():\n    fn f(x: int):\n        print(x + 1)\n    f()\nfn main():\n    outer()\nmain()\n",
-        "'closure' expects",
+        "'f' expects 1 argument(s), got 0",
     );
 }
 

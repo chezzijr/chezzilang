@@ -2649,3 +2649,45 @@ fn fn_value_arity_error_names_the_binding() {
         "'h' expects 1 argument(s), got 2",
     );
 }
+
+// TICKET-264: every value-call arm names the callee as written.
+#[test]
+fn a_keyword_value_call_names_the_binding() {
+    entry_rejects(
+        "fn g(a: int) -> int:\n    return a\nfn main():\n    h := g\n    h(a=\"x\")\n",
+        "argument 1 of 'h': expected int, found str",
+    );
+}
+
+#[test]
+fn a_variadic_value_call_names_the_binding() {
+    entry_rejects(
+        "fn gv(a: int, ...r: int) -> int:\n    return a\nfn main():\n    h := gv\n    h(\"x\")\n",
+        "argument 1 of 'h'",
+    );
+}
+
+#[test]
+fn a_builtin_value_call_names_the_binding() {
+    entry_rejects(
+        "fn main():\n    f := ord\n    f(1)\n",
+        "argument 1 of 'f': expected str, found int",
+    );
+}
+
+#[test]
+fn an_index_call_names_no_binding() {
+    let errs = check_entry(
+        "fn g(a: int) -> int:\n    return a\nfn main():\n    fs := [g]\n    fs[0](1, 2)\n",
+    );
+    let msg = errs
+        .iter()
+        .map(|e| e.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        msg.contains("'closure' expects 1 argument(s), got 2"),
+        "got: {msg}"
+    );
+    assert!(!msg.contains("'fs'"), "got: {msg}");
+}

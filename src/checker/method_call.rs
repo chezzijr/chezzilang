@@ -176,25 +176,8 @@ impl Checker {
                     }
                     return fsig.ret;
                 }
-                // TICKET-196: a slot without `certain_fn` binds no labels, so a keyword call through
-                // it is denied, as through a same-module value callee.
-                if let Some(m) = member.as_ref().filter(|m| m.holds_fn())
-                    && let Some(c) = &self.call_ctx
-                    && !c.named.is_empty()
-                    && m.certain_fn.is_none()
-                {
-                    let named = c.named.clone();
-                    self.consume_named();
-                    self.infer_all(args);
-                    for (_, v) in &named {
-                        self.infer(v);
-                    }
-                    self.error(span, super::globals::KW_NOT_ONE_FN.to_string());
-                    return Ty::Unknown;
-                }
                 // W7-21 — a module GLOBAL that HOLDS a function value is callable through the module
-                // (`m.G()`), like CPython's `m.G()` and Go's `pkg.G()`. Mirrors the fn-typed-FIELD
-                // fallback in the struct arm. Editor hover, same as the `fsig` path above: the
+                // (`m.G()`), like CPython's `m.G()` and Go's `pkg.G()`. Editor hover, same as the `fsig` path above: the
                 // member's own `Ty::Func` IS what `record_method_hover` would build from an `FnSig`,
                 // so record it directly (no doc — a slot without `certain_fn` carries none).
                 if self.hover_probe.is_some()
@@ -208,9 +191,15 @@ impl Checker {
                     // which declaration it came from (a generic fn instantiated at float has an erased
                     // `T` param and coerces nothing). Same rule as the fn-value and fn-field call
                     // paths: no int→float widening through a function value.
-                    Some(Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret }) => {
-                        self.check_args(method, &params, args, span);
-                        return *ret;
+                    // TICKET-196: it has no declaration to bind labels from, so `apply_value_call` with
+                    // no callee refuses a keyword call through it.
+                    Some(t @ (Ty::Func { .. } | Ty::BuiltinFn { .. })) => {
+                        let named = self
+                            .call_ctx
+                            .as_ref()
+                            .map(|c| c.named.clone())
+                            .unwrap_or_default();
+                        return self.apply_value_call(None, Some(method), t, args, &named, span);
                     }
                     // The member's own initializer already errored (`X := k.nope`), so its type is
                     // `Unknown`. Stay SILENT — the checker's Unknown-suppression convention (the
@@ -468,13 +457,15 @@ impl Checker {
                 // call; the desugar pass leaves fn-field names un-normalized so no method default is
                 // injected here.)
                 let field_fn = self.data_member_ty(&obj_ty, method);
-                if let Some(Ty::Func { params, ret, .. }) = field_fn {
-                    // STRICT — a fn-typed FIELD holds a function VALUE, and a `Ty::Func` does not say
-                    // which declaration it came from (a generic fn instantiated at float has an erased
-                    // `T` param and coerces nothing). Same rule as the positional/named fn-value call
-                    // paths above: no int→float widening through a function value.
-                    self.check_args(method, &params, args, span);
-                    return *ret;
+                if let Some(t @ Ty::Func { .. }) = field_fn {
+                    // STRICT — a fn-typed FIELD holds a function VALUE: `apply_value_call` checks it
+                    // like every other value (no int→float widening through a function value).
+                    let named = self
+                        .call_ctx
+                        .as_ref()
+                        .map(|c| c.named.clone())
+                        .unwrap_or_default();
+                    return self.apply_value_call(None, Some(method), t, args, &named, span);
                 }
                 // TICKET-030 — every struct gets an intrinsic, MISS-ONLY `copy()`: it is checked here
                 // only after the declared-method lookup and the fn-typed-field fallback above both

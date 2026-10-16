@@ -237,7 +237,7 @@ impl Checker {
                 self.record_index_call(id, span);
             }
             let callee_ty = self.index_value(callee, &ix, true);
-            return self.apply_value_call(callee, callee_ty, args, named, span);
+            return self.apply_value_call(None, None, callee_ty, args, named, span);
         }
         // Explicit call-site type arguments `name[T, …](…)`. Resolved once here; only generic
         // by-name calls (fn / struct / variant constructors) can consume them.
@@ -365,7 +365,8 @@ impl Checker {
         }
         // Fall back: the callee is an arbitrary expression; it must evaluate to a function.
         let callee_ty = self.infer(callee);
-        self.apply_value_call(callee, callee_ty, args, named, span)
+        let name = callee.kind.as_ident().map(String::as_str);
+        self.apply_value_call(Some(callee), name, callee_ty, args, named, span)
     }
 
     /// A call whose callee is the member path `obj.name`, dispatched on `res`, the rule table's
@@ -444,7 +445,7 @@ impl Checker {
             // `T::get(&v)`) is the path value `T.get` applied.
             Some(Resolution::ParamMethodFn { .. }) => {
                 let callee_ty = self.infer(callee);
-                self.apply_value_call(callee, callee_ty, args, named, span)
+                self.apply_value_call(None, Some(name), callee_ty, args, named, span)
             }
             // A call through a type path: a variant constructor or a method of the type.
             Some(
@@ -731,14 +732,18 @@ impl Checker {
     /// A call of an arbitrary callee expression whose type is `callee_ty`: it must evaluate to a
     /// function. The value-call fallback of `infer_call_dispatch`, shared by the index-then-call
     /// reading of a call bracket and by a call through a type parameter's member (`T.get(v)`).
-    fn apply_value_call(
+    pub(super) fn apply_value_call(
         &mut self,
-        callee: &Expr,
+        callee: Option<&Expr>,
+        name: Option<&str>,
         callee_ty: Ty,
         args: &[Expr],
         named: &[(String, Expr)],
         span: Span,
     ) -> Ty {
+        // The callee as written names it in an arity error (`h(1, 2)`: `'h' expects ...`); a callee
+        // with no name (`fs[0](1, 2)`, `mk()(1, 2)`) is the generic `'closure'`.
+        let head = name.unwrap_or("closure");
         match callee_ty {
             // A user fn / closure VALUE carrying keyword arguments (`g := greet; g(name="Bob")`):
             // resolve each label to a positional slot against the value's surface labels (Swift-style
@@ -750,7 +755,9 @@ impl Checker {
                 labels,
             } if !named.is_empty()
                 || (labels.variadic().is_some()
-                    && matches!(&callee.kind, ExprKind::Ident(n) if self.labels_certain(n).is_some())) =>
+                    && callee
+                        .and_then(|c| c.kind.as_ident())
+                        .is_some_and(|n| self.labels_certain(n).is_some())) =>
             {
                 // TICKET-139 (W14-2) — labels are surface-only (equality-neutral, DEC-108), so a
                 // callee that is not certain to hold ONE known function may bind a permuted set of
@@ -758,7 +765,9 @@ impl Checker {
                 // `ren`. Only a `kw_certain` `Ident` binding keeps keyword calls; everything else
                 // is a compile error (positional calls are unaffected).
                 // TICKET-186: `labels_certain` is the one decider, shared with the by-name path.
-                let key = callee.kind.as_ident().and_then(|n| self.labels_certain(n));
+                let key = callee
+                    .and_then(|c| c.kind.as_ident())
+                    .and_then(|n| self.labels_certain(n));
                 self.consume_named();
                 let Some(key) = key else {
                     for a in args {
@@ -785,11 +794,10 @@ impl Checker {
                     Some(slots) => slots.to_vec(),
                     None => callable_slots(&labels.names, minp, params.len()),
                 };
-                let Some(bound) = self.bind_call(Some(&value_slots), "closure", args, 0, span)
-                else {
+                let Some(bound) = self.bind_call(Some(&value_slots), head, args, 0, span) else {
                     return *ret;
                 };
-                self.check_args_range("closure", &params, minp, &bound, span);
+                self.check_args_range(head, &params, minp, &bound, span);
                 *ret
             }
             // A first-class builtin fn value (`f := ord; f("a")`) checks its args against the builtin's
@@ -824,11 +832,11 @@ impl Checker {
                 // is `f(1)`. `min_or` collapses to exact arity for everything else (a bare `fn(T)`
                 // annotation, a closure, a builtin) — those carry no optional tail.
                 let minp = labels.min_or(params.len());
-                self.check_args_range("closure", &params, minp, args, span);
+                self.check_args_range(head, &params, minp, args, span);
                 *ret
             }
             Ty::BuiltinFn { params, ret } => {
-                self.check_args("closure", &params, args, span);
+                self.check_args(head, &params, args, span);
                 *ret
             }
             Ty::Unknown => {

@@ -2588,7 +2588,7 @@ fn nested_fn_default_reads_module_global() {
 fn lambda_call_keeps_exact_arity() {
     rejects(
         "h := fn(x: int) -> int: x\nprint(h())\n",
-        "'closure' expects 1 argument(s), got 0",
+        "'h' expects 1 argument(s), got 0",
     );
 }
 
