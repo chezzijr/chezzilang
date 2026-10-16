@@ -107,7 +107,7 @@ test fn a_channel_of_pairs_destructures():
         got.push("{a}{b}")
     assert got == ["1x", "2y"], "got {got}"
 
-# Go >= 1.22 per-iteration cells (docs/reference/syntax.md:511) hold for EVERY name. CPython late-binds here
+# Go >= 1.22 per-iteration cells (docs/reference/syntax/) hold for EVERY name. CPython late-binds here
 # and both closures see (2, 'y') -- a documented, deliberate divergence.
 test fn every_name_gets_a_fresh_cell_per_iteration():
     fs: List[fn() -> str] = []

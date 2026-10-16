@@ -121,7 +121,7 @@ fn is_inline_default(e: &Expr) -> bool {
 ///     expected T, found int`); `Self` is the opposite case and is why this carve-out is not just
 ///     about diagnostics — `other: Self = mkq()`, `other: Self = Q(5)` and `xs: List[Self] = mkl()`
 ///     are all LEGAL and all ran on `b1307258` (`6`, `6`, `2`), while a provider declared
-///     `-> Self` is `unknown type 'Self'` (`docs/reference/syntax.md`: `Self` names the receiver type and is
+///     `-> Self` is `unknown type 'Self'` (`docs/reference/syntax/`: `Self` names the receiver type and is
 ///     not spellable in a free fn's signature). Struct and enum hosts alike.
 ///   * an *expression* mentioning either (`x: int = mk[T]().n`) — the type is spellable but the body
 ///     is not: a provider would be checked with `T` unbound and add `unknown type 'T'` plus a
@@ -644,7 +644,7 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
 /// the same shape as CPython's `RecursionError`. Following ordinary
 /// call edges too would mean deciding recursion over the whole program's call graph, which is a
 /// confident-wrong-answer risk the project declines to take (`docs/contributing/gaps.md` W7-12); the runtime
-/// fault is the documented, accepted outcome (`docs/reference/syntax.md` §5).
+/// fault is the documented, accepted outcome (`docs/reference/syntax/` §5).
 pub(crate) fn check_provider_cycles_in(
     edges: &HashMap<String, (Vec<String>, Span)>,
 ) -> Result<(), ResolveError> {

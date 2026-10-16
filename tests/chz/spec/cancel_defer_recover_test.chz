@@ -1,6 +1,6 @@
 # tests/chz/spec/cancel_defer_recover_test.chz — W7-3: the `recover:` / cancel-teardown boundary.
 #
-# A `defer` is never itself cancelled (docs/reference/concurrency.md), so a `recover:` installed INSIDE a
+# A `defer` is never itself cancelled (docs/reference/concurrency/), so a `recover:` installed INSIDE a
 # defer body must catch faults raised beneath it even while the task is being torn down by a
 # nursery cancel — while a `recover:` OUTSIDE the defer still must NOT defeat the cancel, and the
 # pending cancel must resume travelling up once the defer body finishes.

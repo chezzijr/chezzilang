@@ -798,7 +798,7 @@ fn ticket_066_qualified_turbofish_unknown_variant_names_the_enum() {
 // test `named_arg_before_variadic_is_not_missing` (src/desugar/mod.rs) — the false rejection is
 // raised by desugar, before the checker ever sees the call.
 
-// TICKET-066 W10-20: docs/reference/syntax.md:1503 and docs/reference/spec.md:314 claim `fn(): nil` is a no-op closure.
+// TICKET-066 W10-20: docs/reference/syntax/ and docs/reference/spec/ claim `fn(): nil` is a no-op closure.
 // There is NO working spelling of an empty closure today: the documented one fails with "unknown
 // name 'nil'" (there is no value-level `nil`), and the natural alternative `fn(): pass` fails too
 // ("unexpected 'pass' in expression" -- a single-line closure body must be an expression). This
@@ -1196,7 +1196,7 @@ fn w12_7_protocol_key_neighbours_accept_and_reject() {
 
 /// W12-8 (TICKET-106): `[S: Iterable[(A, B)], A, B]` fails to recover `A`/`B` from a
 /// `List[(int, str)]` argument, even though the bare `[S: Iterable[T], T]` shape recovers `T`
-/// fine. `docs/reference/syntax.md` §7b promises `Iterable[T]` recovers `T` by unifying against the
+/// fine. `docs/reference/syntax/` §7b promises `Iterable[T]` recovers `T` by unifying against the
 /// iterand's element type; a tuple element must unify the same way, mirroring Rust's
 /// `I: IntoIterator<Item = (A, B)>` inference.
 #[test]

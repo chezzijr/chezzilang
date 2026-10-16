@@ -415,7 +415,7 @@ impl Checker {
             // ("fn(...) -> ..." — see `impl Display for Ty`) and compares by the same runtime
             // identity (`Obj::Builtin` name-equality, `vm/arith.rs`'s `(Obj::Builtin(a),
             // Obj::Builtin(b))` arm); it is a DISTINCT `Ty` variant only for sendability
-            // (`docs/reference/syntax.md`: all four universe builtins are sendable, a plain closure is not), so
+            // (`docs/reference/syntax/`: all four universe builtins are sendable, a plain closure is not), so
             // it shares `Ty::Func`'s kind rather than minting a second one (W7-54 follow-up).
             Ty::Func { .. } | Ty::BuiltinFn { .. } => Some(RecvKind::Func),
             // A protocol EXISTENTIAL — at runtime this is always its concrete witness object, so

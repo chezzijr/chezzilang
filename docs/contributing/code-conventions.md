@@ -3,10 +3,17 @@
 The full text of every convention, moved out of `CLAUDE.md` (which every agent turn reads). `CLAUDE.md` keeps one line per rule. Read the entry for the area you touch before you change it.
 
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
-- Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` →
-  `desugar` → `checker` → `compiler` → `vm` (the engine of record), plus `native` (builtins / std),
-  `resolver` (module paths). (The tree-walk `interp` engine has been removed.) Each phase is split
-  into one file per topic; `docs/contributing/owners.md` maps each area to its files and names the one owner of each fact.
+- The phases are `lexer` → `parser` → `ast` → `desugar` → `checker` → `compiler` → `vm` (the engine
+  of record), plus `native` (builtins / std), `resolver` (module paths), `base` (what both the front
+  end and the VM read: bytecode, hooks, crossing marks) and `run` (the CLI's run drivers). Each layer
+  is its own crate: `crates/chezzi-syntax` (lexer, ast, parser), `crates/chezzi-native`,
+  `crates/chezzi-base`, `crates/chezzi-front` (resolver, desugar, checker, compiler) and
+  `crates/chezzi-vm`; the root `chezzi` crate holds the CLI, `run` and the editor. The sources stay
+  under `src/<phase>/`, and each crate's `lib.rs` includes them by `#[path]`. An edit rebuilds only
+  its crate and the crates above it. The VM never calls the checker or the compiler; a driver hands it
+  a `Program`. A test that must run a program lives in `chezzi-vm` (it dev-depends on the front end)
+  or calls `compiler::run_for_tests` in the front end. Each phase is split into one file per topic;
+  `docs/contributing/owners.md` maps each area to its files and names the one owner of each fact.
 - Keep modules small and single-purpose. **One topic per file**: the file's first line names the
   topic, a production file has at most 2,500 lines and a test file at most 3,500
   (`tests/source_layout.rs`, no exemptions). A big `impl` is split by topic into sibling files, each
@@ -69,13 +76,11 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   When you delete a Rust behavioral test after porting, the `tests/chz` gates must stay green. Full
   rationale + ranked runner follow-ups: `docs/design/roadmap.md §3b`; the suite's own guide:
   `tests/chz/README.md`.
-- **ONE ENGINE.** The bytecode VM on its M:N scheduler is the sole engine — the tree-walk interpreter
-  and the cooperative `--serial` VM are both **removed** (`--serial` since 2026-08-16). There are no
-  per-engine test-helper pairs any more: `run_capture`/`run_program`/`run_file` (and the golden
-  helpers — `src/vm/golden_tests/`, `assert_golden_out`/`golden_entry*`, renamed from the historical
-  `parity_tests.rs`/`assert_parity*` on 2026-08-16) all run the one engine and compare against a
-  **literal golden**. A helper that runs the program twice and diffs the two runs against each other proves
-  nothing — give it a real expectation.
+- **ONE ENGINE.** The bytecode VM on its M:N scheduler is the only engine. `run_capture`/
+  `run_program`/`run_file` and the golden helpers (`src/vm/golden_tests/`,
+  `assert_golden_out`/`golden_entry*`) run that engine and compare against a **literal golden**. A
+  helper that runs the program twice and diffs the two runs against each other proves nothing; give it
+  a real expectation.
 - **A CHECKER WARNING'S GATE IS DERIVED FROM THE RUNTIME, ONE PROGRAM PER SHAPE — never from the
   plausible-looking checker flag.** The checker has a non-fatal `Severity::Warning` channel
   (`Checker::warn`, `warns`/`no_warn` test helpers) and a warning's whole value is that it is TRUE
@@ -91,16 +96,16 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   (W8-2's is the eight `FnComp::new` sites), and when unsure **decline** — an under-warn is a ceiling
   you can pin with a test, an over-warn teaches users to ignore the channel.
 - **CORRECTNESS IS JUDGED AGAINST THE ANCESTOR — there is no engine agreement to hide behind.**
-  With one engine there is no cross-engine oracle at all, so "both engines agree" is not merely a weak
-  defense, it is not available. Whenever behavior is in question, judge it against the ancestor that
+  There is one engine and no cross-engine oracle. Whenever behavior is in question, judge it against the ancestor that
   owns the feature and **run the reference program** rather than reasoning about it: **Go** for
   concurrency/interfaces, **Python** for scripting feel + `Executor`-family semantics, **Rust** for
   enums/errors/control flow. If Chezzi disagrees with the owning ancestor and the difference isn't a
   documented deliberate decision, that is a **bug**. State the ancestor's measured output; never
-  defend a behavior by citing another run of Chezzi. What replaced the cross-engine detector for
-  ACCIDENTAL divergence: the CPython differential (`src/difftest/`) and the two-worker-count schedule
-  differential (`tests/chezzi_threads_cli.rs`) — see `docs/contributing/bug-discovery.md` Tier 2. Corollary for any
+  defend a behavior by citing another run of Chezzi. The detectors for ACCIDENTAL divergence are the
+  CPython differential (`src/difftest/`), the two-worker-count schedule differential
+  (`tests/chezzi_threads_cli.rs`) and the seeded scheduler (`src/schedfuzz/`); see
+  `docs/contributing/bug-discovery.md`. Corollary for any
   heuristic verdict (deadlock detection, resource caps, inference fallbacks): when unsure it must
   **decline** (hang / stay silent / ask), never emit a confident wrong answer — a missing answer is
   recoverable, a wrong one teaches distrust of every answer. Worked example + measured Go/CPython
-  table: `docs/history/bug-hunts/gaps-archive.md` **W7-12**.
+  table: `docs/history/bug-hunts/w07.md` **W7-12**.

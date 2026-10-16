@@ -604,7 +604,7 @@ fn same_named_types_whose_module_names_collide_use_the_full_path() {
 
 #[test]
 fn extern_fn_reachable_as_module_member() {
-    // TICKET-061 W10-14: an extern fn is a module-global callable (docs/reference/syntax.md) and functions
+    // TICKET-061 W10-14: an extern fn is a module-global callable (docs/reference/syntax/) and functions
     // export by default, but `capture_sig` has no `StmtKind::Extern` arm, so it never lands in
     // `sig.members` — an importer sees "module 'c' has no member 'strlen'" even though `c.chz`
     // declares `extern fn strlen`.

@@ -532,7 +532,7 @@ impl Vm {
         //
         // W7-3 CARVE-OUT — the (a) `Cut::Cancelled` marker ONLY. `Cut::Cancelled` is a
         // task-wide LATCH that stays set while the cancelled task's `defer`s run, but "a
-        // `defer` is never itself cancelled" (docs/reference/concurrency.md) and `cancel_suppressed`
+        // `defer` is never itself cancelled" (docs/reference/concurrency/) and `cancel_suppressed`
         // already carries the same `deferring > 0` suppression. So a `recover:` owned by
         // THIS nested dispatch loop (`frame_len > base_level` — i.e. installed inside the
         // defer body, not outside it) catches while `deferring > 0`. A `recover:` OUTSIDE

@@ -1,7 +1,7 @@
 # Chezzi — Claude Code Guide
 
 Chezzi is a fast, statically-typed, Python-feel scripting language, hand-built in Rust.
-Full design + roadmap: **[`docs/reference/spec.md`](docs/reference/spec.md)**. Syntax cheat-sheet: **[`docs/reference/syntax.md`](docs/reference/syntax.md)**. Stdlib/builtin reference: **[`docs/reference/stdlib.md`](docs/reference/stdlib.md)**. Canonical grammar: **[`docs/reference/grammar.bnf`](docs/reference/grammar.bnf)** (executed + drift-checked by `cargo test conformance`). Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**. Bug-discovery strategy (fuzzing / CPython differential / sanitizers, pre-JIT): **[`docs/contributing/bug-discovery.md`](docs/contributing/bug-discovery.md)**. Hard-won engineering rules (distilled from working memory — read the section for the area you touch): **[`docs/contributing/lessons.md`](docs/contributing/lessons.md)**. **Where each fact lives (its one owner) and which file owns each topic: [`docs/contributing/owners.md`](docs/contributing/owners.md) — read it before you grep.** The docs are also emitted by the CLI: `chezzi docs <topic>` / `chezzi docs` (full LLM bundle).
+Docs index (every doc, by audience): **[`docs/README.md`](docs/README.md)**. Language reference, one folder of chapter files per topic: **[`docs/reference/`](docs/reference/)** (`spec/`, `syntax/`, `stdlib/`, `concurrency/`). Canonical grammar: **[`docs/reference/grammar.bnf`](docs/reference/grammar.bnf)** (executed + drift-checked by `cargo test conformance`). Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**. Bug-discovery strategy (fuzzing / CPython differential / sanitizers, pre-JIT): **[`docs/contributing/bug-discovery.md`](docs/contributing/bug-discovery.md)**. Hard-won engineering rules (distilled from working memory — read the section for the area you touch): **[`docs/contributing/lessons.md`](docs/contributing/lessons.md)**. **Where each fact lives (its one owner) and which file owns each topic: [`docs/contributing/owners.md`](docs/contributing/owners.md) — read it before you grep.** The docs are also emitted by the CLI: `chezzi docs <topic>` / `chezzi docs` (full LLM bundle).
 
 ## How we work
 
@@ -15,8 +15,8 @@ Claude implements directly. Ship working, tested code each session.
 - **Docs are part of the change, not a follow-up.** When a change adds/alters/removes observable
   behavior — syntax, stdlib/builtin surface, engine semantics, a flag, a limit lifted/added, or a perf
   delta — update the affected `.md` in the **same commit**: `PROGRESS.md` always, plus as relevant
-  `docs/reference/syntax.md`, `docs/reference/spec.md`, `docs/reference/grammar.bnf`, `docs/concurrency*.md`, `docs/design/roadmap.md`,
-  `docs/contributing/benchmarks.md`. Grep the docs for any now-stale claim about what you changed (`deferred`,
+  the chapter that owns the topic under `docs/reference/{syntax,spec,stdlib,concurrency}/`,
+  `docs/reference/grammar.bnf`, `docs/design/roadmap.md`, `docs/contributing/benchmarks.md`. Grep the docs for any now-stale claim about what you changed (`deferred`,
   `experimental`, `not yet`, `follow-up`, `mooted`) and fix or delete it. A green build with stale docs
   is not done.
 - Match the existing code's style and patterns; reuse before adding new abstractions.
@@ -77,6 +77,6 @@ read that rule's entry there.
 
 ## Status and roadmap
 
-In **[`docs/status-and-roadmap.md`](docs/status-and-roadmap.md)**: what is implemented, the pre-JIT bug-hunt,
-the JIT entry rule, the open-row ledger and the perf roadmap. Read it before core work.
-**[`PROGRESS.md`](PROGRESS.md)** is the single source of truth for what is next.
+In **[`PROGRESS.md`](PROGRESS.md)**: what is implemented, the pre-JIT bug-hunt, the JIT entry rule,
+the open-row ledger and what is next. Read it before core work. It is the single source of truth
+for status. Dated entries go to `docs/history/progress/<YYYY-MM>.md`, newest first.

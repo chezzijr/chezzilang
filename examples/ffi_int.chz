@@ -23,7 +23,7 @@
 # `ffi.cast_<w>` (here `cast_int8`) wraps explicitly, like a C cast.
 import int8, int32, uint32, cast_int8 from std.ffi
 
-# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax.md §12b).
+# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax/ §12b).
 
 extern "libc":
     # `atoi(const char*)->int`: parses a decimal string to a C int; declared int32 it sign-extends a

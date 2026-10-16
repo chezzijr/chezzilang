@@ -7,7 +7,7 @@
 # receiver's closure still reads its own (unwritten) value — D2's isolation still holds, now
 # enforced at the write instead of by a silent drop. CPython threading and Go see one shared
 # object; the divergence is the deliberate "module globals isolate per task, and a task may not
-# write one" rule (docs/reference/concurrency.md) — use `Shared`/`Channel` to share.
+# write one" rule (docs/reference/concurrency/) — use `Shared`/`Channel` to share.
 # TICKET-111 (docs/contributing/gaps.md W12-5) — a task-local alias of a global is the SAME object as the
 # task's copy of the global (adoption), not a second copy. That still holds; a write through
 # either the alias or the global now faults identically (both denote the one copied object).

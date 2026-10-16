@@ -788,7 +788,7 @@ fn golden_literals_chz_matches_expected_and_interp() {
 }
 
 /// Large-integral float golden: `examples/float_large_integral.chz`. Floats print with CPython
-/// `repr()`/`str()` parity (docs/reference/syntax.md contract): scientific notation once the decimal exponent
+/// `repr()`/`str()` parity (docs/reference/syntax/ contract): scientific notation once the decimal exponent
 /// is `>= 16` (`1.5e23` → `1.5e+23`), fixed with a `.0` below that. Exercises BOTH the engine
 /// `format_float` path (bare interpolation) and `fmtspec::repr_float` (bare format-spec, no type
 /// char) — now the same `repr_float` helper — and asserts byte-identical against `.expected`.

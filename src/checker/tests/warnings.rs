@@ -1440,7 +1440,7 @@ fn a_body_declared_inside_the_task_neither_reports_nor_swallows_the_parents_warn
 /// A `defer:` block nested INSIDE a `spawn:` body is on the far side of the airlock like any other
 /// task statement — its write really is lost, so it must taint. Measured on the release binary:
 /// `spawn: defer: xs.push(1)` leaves `xs.len() == 0` after the join, and `spawn: defer: n = 5` leaves
-/// `n == 0`. The code comment and `docs/reference/syntax.md` both claimed the opposite (that a `defer:` never
+/// `n == 0`. The code comment and `docs/reference/syntax/` both claimed the opposite (that a `defer:` never
 /// reaches the write path as a task write) — a claim written without running the program.
 #[test]
 fn a_defer_inside_the_task_is_on_the_far_side_of_the_airlock() {

@@ -18,7 +18,7 @@
 # * DURATION arithmetic operates on epoch INTS (seconds), not DateTime: add_seconds/add_days/
 #   diff_seconds/diff_days. Calendar-aware work goes through from_epoch/to_epoch (decompose/recompose).
 #
-# See docs/reference/stdlib.md §5 for the full contract.
+# See docs/reference/stdlib/ §5 for the full contract.
 
 import std.time as time
 import std.string as s

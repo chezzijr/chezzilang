@@ -1262,7 +1262,7 @@ test fn hof_spins():
 
 /// Defect A — a nursery OWNER (the module top level) is now a cancel participant in its own scope:
 /// a `recover:` installed INSIDE the faulting nursery's body does not catch the cancel, and the
-/// program aborts exactly once at rc=1 (`docs/reference/spec.md:149`, `docs/history/designs/concurrency-b3.md:235`).
+/// program aborts exactly once at rc=1 (`docs/reference/spec/`, `docs/history/designs/concurrency-b3.md:235`).
 #[test]
 fn module_top_level_fault_is_delivered_twice_and_truncates_after_recover() {
     let t = TmpDir::new();
@@ -1297,7 +1297,7 @@ print("THIS LINE NEVER PRINTS")
 }
 
 /// Defect B — the top-level `main` fiber's `while` loop back-edge is not a cancel checkpoint, so a
-/// sibling task's fault does not cancel a doomed CPU loop promptly. `docs/reference/concurrency.md:1042`
+/// sibling task's fault does not cancel a doomed CPU loop promptly. `docs/reference/concurrency/`
 /// claims "the loop back-edge is the checkpoint" on the top-level `main` thread too, and the
 /// identical loop inside a `parallel:` sibling IS cancelled promptly (measured ~33 ms in the
 /// ticket). Here the loop is sized so an UNCANCELLED run takes several seconds; a correct run

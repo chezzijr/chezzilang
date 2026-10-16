@@ -1190,7 +1190,7 @@ done.recv()
 /// join was uncancellable and the outer `shutdown_now` waited for work it had just asked to stop.
 ///
 /// **The inner job is deliberately uninterruptible.** `process.run` is documented as having no
-/// cancellation checkpoint until it returns (`docs/reference/stdlib.md` §std.process), so the ONLY party that
+/// cancellation checkpoint until it returns (`docs/reference/stdlib/` §std.process), so the ONLY party that
 /// can end this wait early is the joiner itself — which is exactly the rung under test. A job
 /// blocked on a `Channel` instead would be ended by the deadlock verdict that already existed, and a
 /// `time.sleep_ms` job would be ended by its own cancel checkpoint (`W7-16`); neither would fail
@@ -1198,7 +1198,7 @@ done.recv()
 ///
 /// Measured on the release binary, `chezzi run`: pre-fix **6 011 ms** (the full `sleep 6`), post-fix
 /// **213 ms** (with `sleep 6`; the fixture below uses `sleep 2` so it strands a process-global
-/// pool worker for as little time as still discriminates) — against `docs/reference/stdlib.md`'s own "ends the wait within ~5 ms" promise. The cancelled
+/// pool worker for as little time as still discriminates) — against `docs/reference/stdlib/`'s own "ends the wait within ~5 ms" promise. The cancelled
 /// joiner's own output is SWALLOWED, as every cancelled task's is, so `job past inner join` must NOT
 /// appear; that is the observable half of the assertion and the reason it is not a pure timing test.
 ///
@@ -1973,7 +1973,7 @@ main()
     assert!(
         out.contains("cleanup ran"),
         "a task cancelled DURING its sleep must still unwind through its `defer`s \
-         (docs/reference/concurrency.md: cleanup does not depend on scheduler timing): out={out:?} r={rdbg}"
+         (docs/reference/concurrency/: cleanup does not depend on scheduler timing): out={out:?} r={rdbg}"
     );
     assert!(
         elapsed < std::time::Duration::from_millis(1500),

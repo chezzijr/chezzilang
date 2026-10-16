@@ -250,7 +250,7 @@ fn pad_left_codepoints_not_bytes() {
 
 /// A huge `width` routes through the same capacity guard as `repeat`: a recoverable fault, not an
 /// OOM/abort. (Native only — the `std.string` free fn cannot probe the allocator; that is a documented
-/// divergence, docs/reference/stdlib.md.)
+/// divergence, docs/reference/stdlib/.)
 #[test]
 fn pad_left_huge_width_is_recoverable_fault() {
     for src in [

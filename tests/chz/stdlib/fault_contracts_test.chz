@@ -1,4 +1,4 @@
-# tests/chz/stdlib/fault_contracts_test.chz — pins the second-round rows of docs/reference/stdlib.md §1
+# tests/chz/stdlib/fault_contracts_test.chz — pins the second-round rows of docs/reference/stdlib/ §1
 # "Which failures fault, and why they are not `T!E`s".
 #
 # Each `test fn` below is the exact program that MEASURED the message quoted in the docs table (B2,

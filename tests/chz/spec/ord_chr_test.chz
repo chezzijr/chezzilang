@@ -1,6 +1,6 @@
 # tests/chz/spec/ord_chr_test.chz — `ord`/`chr`, the two universe builtins that bridge str ↔ codepoint.
 #
-# Every expected value/fault below is measured against CPython 3.14.7 (docs/reference/stdlib.md fault table).
+# Every expected value/fault below is measured against CPython 3.14.7 (docs/reference/stdlib/ fault table).
 # `ord("ab")` used to return 97 SILENTLY where CPython raises `TypeError` — a plausible wrong answer
 # with rc=0, the defect class this suite exists to catch.
 # Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
@@ -37,7 +37,7 @@ test fn chr_faults_outside_the_unicode_codepoint_span():
         match r:
             ?_:  assert false, "chr() must reject a codepoint outside the range 0..0x110000"
             !e: assert e.message().contains("not a valid Unicode codepoint")
-    # DIVERGENCE, recorded not fixed (docs/reference/stdlib.md): CPython returns a lone surrogate here,
+    # DIVERGENCE, recorded not fixed (docs/reference/stdlib/): CPython returns a lone surrogate here,
     # Chezzi faults — `str` is UTF-8 and cannot hold one. A loud fault, not a wrong value.
     rs := recover: chr(55296)
     match rs:

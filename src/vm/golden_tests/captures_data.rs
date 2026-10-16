@@ -538,7 +538,7 @@ main()";
 /// cell (`WireMemo::cells` is never popped). Collapsing the closure VALUE is unobservable: a closure is
 /// proto + captures, immutable, and every piece of mutable state it owns already lived in the cell. So
 /// `pair[0]()` then `pair[1]()` still reads `2`, matching the language's own sibling-closure sharing rule
-/// (docs/reference/syntax.md) and Go. See `airlock_struct_alias_preserves_identity` — data and closures now follow
+/// (docs/reference/syntax/) and Go. See `airlock_struct_alias_preserves_identity` — data and closures now follow
 /// the SAME identity rule.
 #[test]
 fn airlock_aliased_closure_shares_its_binding() {
@@ -1367,7 +1367,7 @@ fn for_over_pure_iterable_struct() {
 }
 
 // ---- Bug C: a `for`/`List()`/`Set()` over a NAMED builtin cursor consumes it in place ----
-// (must match `.next()` and struct iterators and docs/reference/syntax.md:709-713).
+// (must match `.next()` and struct iterators and docs/reference/syntax/-713).
 
 #[test]
 fn for_named_cursor_partial_consume_then_drain() {

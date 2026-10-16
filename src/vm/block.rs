@@ -1,7 +1,7 @@
 //! TICKET-181 (wave 16 Family 2, "Blocking contexts") — the ONE answer to "may this op block
 //! here, and how?". Every blocking op names its wait as a [`WaitSpec`]; the execution context is
 //! derived on every call by [`Vm::block_ctx`] (never cached — its inputs change at many sites);
-//! and [`mode`] is the table that joins them. `docs/reference/concurrency.md` "Blocking-context table" is the
+//! and [`mode`] is the table that joins them. `docs/reference/concurrency/` "Blocking-context table" is the
 //! prose copy of [`mode`], and `tests::every_cell_matches_the_table` pins every cell.
 //!
 //! The per-op MECHANISM (park on a channel bucket, park on the netpoller, the timer thread) stays
@@ -133,7 +133,7 @@ pub(super) enum BlockMode {
 
 /// THE blocking-context table. Every blocking op asks this, and nothing else, how to block.
 /// Changing a cell means changing this, `tests::every_cell_matches_the_table` and the
-/// `docs/reference/concurrency.md` "Blocking-context table" in one commit.
+/// `docs/reference/concurrency/` "Blocking-context table" in one commit.
 pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
     use BlockMode::{Demote, Help, InPlace, InlineSleep, Park, Refuse};
     use WaitSpec as W;

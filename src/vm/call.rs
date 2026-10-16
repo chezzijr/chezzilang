@@ -534,7 +534,7 @@ impl Vm {
             self.block_exit(reg);
         }
         // TICKET-188 — a native that held its host thread has no checkpoint until it returns
-        // (`docs/reference/stdlib.md` "Blocking calls cannot be interrupted"), so the halt is delivered AT the
+        // (`docs/reference/stdlib/` "Blocking calls cannot be interrupted"), so the halt is delivered AT the
         // return, as the offload resume delivers it: the value that completed with it is dropped.
         if in_place {
             self.resume_halts(span)?;

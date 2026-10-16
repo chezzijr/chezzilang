@@ -972,7 +972,7 @@ impl Gen {
     /// `Div` landed too: `BinOp::Div` is in the op list below, **with no non-zero-divisor
     /// discipline** — that inverts `gen_int`'s rule (int `/` FAULTS on zero, so `gen_int` must
     /// guarantee a non-zero divisor) because float `/` is total IEEE-754
-    /// (`docs/reference/spec.md:472`): a zero divisor is `inf`/`-inf`/`NaN`, never a fault, so it is a
+    /// (`docs/reference/spec/`): a zero divisor is `inf`/`-inf`/`NaN`, never a fault, so it is a
     /// legitimate value whose result this widening exists to exercise, not a case to dodge. The
     /// `_chz_fdiv` shim in `emit_python.rs` absorbs CPython's `ZeroDivisionError` divergence
     /// (deliberate — Chezzi follows Rust/Go here, not Python; confirmed by the project owner
@@ -1034,7 +1034,7 @@ impl Gen {
             return e;
         }
         // `Div`/`Mod`'s divisor is UNRESTRICTED — no non-zero guard, unlike `gen_int`'s Div/Mod
-        // arm. Both are total IEEE-754 (`docs/reference/spec.md:472`): `x/0.0` is `inf`/`-inf`/`NaN` and
+        // arm. Both are total IEEE-754 (`docs/reference/spec/`): `x/0.0` is `inf`/`-inf`/`NaN` and
         // `x%0.0` is `NaN`, never a fault, so a zero divisor is a legitimate value this widening
         // should reach, not one to avoid — do not add a guard here by analogy with the int arm
         // above.

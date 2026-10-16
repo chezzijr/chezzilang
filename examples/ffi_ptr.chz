@@ -4,7 +4,7 @@
 # and the `null`/`is_null` vocabulary all live in `std.ffi` — import what you use.
 import ptr, null, is_null from std.ffi
 
-# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax.md §12b).
+# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax/ §12b).
 
 extern "libc":
     fn fopen(path: str, mode: str) -> ptr

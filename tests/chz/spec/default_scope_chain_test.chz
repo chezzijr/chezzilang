@@ -245,7 +245,7 @@ test fn a_default_cycle_routed_through_an_ordinary_fn_faults_cleanly():
 # --- a `Self`-typed parameter keeps the INLINE clone ----------------------------------------------
 #
 # A provider is a free top-level `fn` declared `-> <the parameter's type>`, and `Self` is not
-# spellable in one (`docs/reference/syntax.md`: naming `Self` as a free-fn parameter is `unknown type 'Self'`).
+# spellable in one (`docs/reference/syntax/`: naming `Self` as a free-fn parameter is `unknown type 'Self'`).
 # So a default on a `Self`-typed parameter — or one whose type merely MENTIONS `Self`, like
 # `List[Self]` — must keep working. Without a carve-out these four shapes stopped compiling entirely
 # (`unknown type 'Self'` at the declaration), and no test in the tree paired `Self` with a default,

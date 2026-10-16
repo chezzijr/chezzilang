@@ -1,808 +1,217 @@
 # Chezzi — Bug Discovery Strategy
 
-> **Status:** strategy doc. Captures *how* we systematically find correctness bugs in the
-> implementation before committing to large work (e.g. the Cranelift JIT). The Tier-1 mechanical
-> levers are now built — **#1 panic-fuzz (`src/panicfuzz/`)** and **#2 CPython differential
-> (`src/difftest/`)**; the rest below is the ranked plan. Live status in
-> [`PROGRESS.md`](../../PROGRESS.md); design rationale for the language in [`spec.md`](../reference/spec.md).
+This page says how we find correctness bugs in the implementation before large work such as the
+Cranelift JIT. The harnesses themselves (panic-fuzz, CPython differential, DSA judge, seeded scheduler)
+are in [`bug-discovery-harnesses.md`](bug-discovery-harnesses.md). Live status is in
+[`PROGRESS.md`](../../PROGRESS.md). Earlier incident write-ups are in
+[`history/bug-hunts/bug-discovery-records.md`](../history/bug-hunts/bug-discovery-records.md).
 
 ## Why this exists
 
-Manual edge-case probing (hand-writing `1.0/0.0`, `sum()` overflow, etc.) finds a handful of bugs but
-does not scale and is biased toward bugs you can already imagine. Mature language implementations
-**automate** bug discovery with adversarial input generators + independent oracles. This doc records
-the techniques, who uses them, and the ranked plan for Chezzi.
+Manual edge-case probing (`1.0/0.0`, `sum()` overflow) finds a few bugs. It does not scale, and it
+finds only the bugs you can already imagine. Mature language implementations automate bug discovery
+with adversarial input generators and independent oracles.
 
-## The blind spot in our current setup
+An oracle that runs the same code twice catches divergence, never shared wrongness. Every bug of the
+June 2026 hunt was of that kind:
 
-**Historical framing (2026-06/07), kept because the lesson outlived the mechanism.** Chezzi then had a
-**two-VM parity oracle**: every golden test asserted the cooperative `--serial` VM and the default M:N
-VM produced byte-identical output. That was a real differential for *concurrent* programs — but it had
-one structural blind spot:
+- `List.sum()` wrapped i64 overflow without an error.
+- `nan < 1.0` faulted with a misleading message.
+- Float division by zero faulted (not IEEE).
 
-> **Both engines were the same `Vm`; for sequential programs they ran identical bytecode.** So for
-> non-concurrent code, parity was a determinism check, not a differential — it caught
-> *divergence*, never *shared wrongness*.
+The remedy has two parts:
 
-**`--serial` was removed 2026-08-16** (`docs/design/roadmap.md` §2b), so that oracle no longer exists at all;
-what stands in its place for accidental *schedule*-dependent divergence is the two-worker-count gate
-(Tier 2 #4 below). The blind spot argument is unchanged by the removal — it is the reason the CPython
-differential and the DSA known-answer harness were built, and both are live.
+1. An external oracle (CPython, because Chezzi is Python-feel) catches semantic bugs.
+2. Fuzzing the Rust host catches crashes (panics on malformed input) that the curated corpus never
+   reaches.
 
-Every bug found in the June 2026 hunt was invisible to parity because **both** engines had it:
-- `List.sum()` silently wrapped i64 overflow on both engines → parity green → undetected.
-- `nan < 1.0` faulted with a misleading message on both engines → parity green → undetected.
-- Float div-by-zero faulted (non-IEEE) on both engines → parity green → undetected.
+## What we have
 
-The remedy is twofold and is the core of this strategy:
-1. an **external oracle** (compare against CPython — Chezzi is Python-feel) to catch *semantic* bugs both engines agree on, and
-2. **fuzzing the Rust host** to catch *crashes* (panics on malformed input) the curated test corpus never exercises.
+| oracle | where | what it catches |
+|---|---|---|
+| Golden suite | `assert_golden_out` / `golden_entry*` (`src/vm/golden_tests/`), golden `examples/*.chz` + `.expected` | a change from a literal expected output |
+| Two-worker-count differential | `tests/chezzi_threads_cli.rs` | a verdict on `tests/chz` that changes between the default worker count and `CHEZZI_THREADS=2` |
+| Grammar conformance | `docs/reference/grammar.bnf`, `src/conformance.rs`, `tests/corpus/`, `cargo test conformance` | parser drift from the grammar (syntax only) |
+| Panic-fuzz | `src/panicfuzz/`, `tests/panicfuzz.rs`, `src/bin/panicfuzz.rs` | a Rust panic or signal crash in `chezzi check` |
+| CPython differential | `src/difftest/`, `tests/difftest.rs`, `src/bin/difffuzz.rs` | stdout that differs from CPython on generated programs |
+| DSA known-answer judge | `judge/`, `tests/judge.rs` | wrong answers on hand-written CSES solutions |
+| Seeded scheduler | `src/schedfuzz/`, `src/vm/sched_seed.rs`, `src/bin/schedfuzz.rs` | hangs, panics, exit-code or output changes under explored schedules |
+| Adversarial review | `auto-task` (prosecute, defend, judge) + `post-merge-gate` | defects in a known change (not a discovery tool) |
 
-## What we already have
-
-- **Golden suite** — `assert_golden_out`/`golden_entry*` (`src/vm/golden_tests/`, renamed 2026-08-16 from `assert_parity_*`/`parity_tests.rs`) / golden `examples/*.chz` + `.expected`. Each runs the one engine and compares against a literal expectation. The two-VM parity oracle these grew out of was removed with `--serial` on 2026-08-16.
-- **Two-worker-count schedule differential** — `tests/chezzi_threads_cli.rs` runs the whole `tests/chz` suite through the built binary at the default worker count and again at `CHEZZI_THREADS=2`, each in its own process/pool, asserting the same verdicts. This is what replaced `serial == M:N` as the standing accidental-divergence detector; it is narrower (a curated corpus, two fixed schedules).
-- **Grammar conformance** — `docs/reference/grammar.bnf` is executed and differential-tested against the parser (`src/conformance.rs`, `tests/corpus/`, `cargo test conformance`). Syntax-level only — not semantics.
-- **CPython bench harness** — `benches/run.chz` runs paired programs in `benches/chz/` (Chezzi) and `benches/py/` (Python) and compares **timing**. The paired programs seeded the output-differential oracle below.
-- **CPython differential oracle** — ✅ **built** (lever #2). `src/difftest/` generates random semantically-equivalent programs, renders each as both Chezzi and Python, runs both, and diffs stdout. Wired as the `tests/difftest.rs` CI gate (fixed seed range, reproducible) and the `src/bin/difffuzz` long-runner. See "Differential oracle" below.
-- **Front-end panic-fuzzer** — ✅ **built** (lever #1). `src/panicfuzz/` feeds adversarial / malformed inputs to `chezzi check` (lexer + parser + checker) under a wall-clock timeout and flags any Rust panic or signal crash. A stable, dependency-free **subprocess** harness (a stand-in for `cargo-fuzz`, which is unavailable here: no nightly / rustup / cargo-fuzz). Wired as the `tests/panicfuzz.rs` CI gate (seeds `0..2000`) and the `src/bin/panicfuzz` long-runner. See "Panic-fuzz harness" below.
-- **DSA known-answer harness** — ✅ **built**. `judge/` runs hand-written competitive-programming solutions (`judge/problems/<slug>/solution.chz`) against known-correct CSES answers — a third oracle that catches *shared wrongness* invisible to both the VM's own implementation and CPython. The harness itself is written in Chezzi (`judge/run.chz`). See "DSA known-answer harness" below.
-- **Adversarial review pipeline** — `auto-task` (prosecute→defend→judge) + `post-merge-gate`. Good at vetting a *known* change; not a *discovery* tool.
+`benches/run.chz` also runs paired Chezzi and Python programs, but it compares timing only.
 
 ## How real implementations find bugs
 
-| Technique | Who uses it | What it catches | Fit for Chezzi |
+| technique | who uses it | what it catches | fit for Chezzi |
 |---|---|---|---|
-| **Coverage-guided fuzzing** (libFuzzer/AFL) | Rust `cargo fuzz`; SQLite `dbsqlfuzz`; JS `Fuzzilli` | parser/checker **panics** on malformed input (should be clean errors, not Rust crashes) | ✅ **built** as a subprocess panic-fuzzer (`src/panicfuzz/`) — `cargo-fuzz` is unavailable in this environment, and the subprocess boundary catches signal crashes too |
-| **Differential vs reference impl** | GCC/LLVM (CSmith vs `-O0`/`-O3`); JS engines cross-tested | **shared** semantic bugs — wrong output both engines agree on | ⭐ Python-feel + CPython harness already exists |
-| **Metamorphic / EMI** | GCC/LLVM (Equivalence-Modulo-Inputs, 400+ bugs) | optimizer bugs: behavior-preserving transforms that change output | peephole/const-fold on==off, `x`→`(x)`, dead-code inject |
-| **Property-based** (proptest / Hypothesis) | CPython, Rust | invariant violations: `parse∘print==id`, idempotence, roundtrips | compiler pipeline |
-| **Miri / sanitizers** (UBSan/ASan/TSan) | Rust (Miri); Go (race detector) | UB in `unsafe`; data races | ⭐ GC + FFI + OS-thread engine are fragile (see the FFI SIGSEGV history) |
-| **loom** (exhaustive interleavings) | Rust concurrency libs | concurrency races by exploring all schedules | channels / `Shared` / executor / netpoller |
-| **Coverage measurement** | SQLite (100% MC/DC) | untested branches, especially error paths | `cargo-llvm-cov` |
-| **Dogfooding real programs** | every language | ergonomic + integration + missing-feature + semantic bugs fuzzing can't reach | a real CLI app |
+| Coverage-guided fuzzing (libFuzzer, AFL) | Rust `cargo fuzz`; SQLite `dbsqlfuzz`; JS `Fuzzilli` | parser and checker panics on malformed input | built as a subprocess panic-fuzzer (`src/panicfuzz/`) |
+| Differential vs a reference implementation | GCC/LLVM (CSmith); JS engines | semantic bugs both runs agree on | built (`src/difftest/`) |
+| Metamorphic / EMI | GCC/LLVM (Equivalence Modulo Inputs, 400+ bugs) | optimizer bugs | peephole and const-fold on vs off; `x` -> `(x)`; dead-code insertion |
+| Property-based (proptest, Hypothesis) | CPython, Rust | invariant breaks: `parse∘print == id`, round trips | compiler pipeline |
+| Miri / sanitizers (UBSan, ASan, TSan) | Rust (Miri); Go (race detector) | UB in `unsafe`; data races | GC, FFI and the OS-thread engine |
+| loom (exhaustive interleavings) | Rust concurrency libraries | races, by exploring every schedule | channels, `Shared`, `Executor`, netpoller |
+| Coverage measurement | SQLite (100% MC/DC) | untested branches, mainly error paths | `cargo-llvm-cov` |
+| Dogfooding real programs | every language | ergonomic, integration and missing-feature bugs | a real CLI app |
 
-SQLite is the extreme reference point: ~600× more test code than source, every `malloc`/IO failure
-path exercised via fault injection. Rust's **crater** runs a candidate change against all of
-crates.io. The common thread is *automated oracles + adversarial input generation*, not hand-written
-cases.
+SQLite has about 600× more test code than source and injects a failure into every `malloc` and IO
+path. Rust's crater runs a change against all of crates.io. The common method is automated oracles plus
+adversarial input generation.
 
-## Ranked plan for Chezzi
+## Ranked plan
 
-**Tier 1 — would have auto-caught the June 2026 bugs; closes the blind spot:**
+**Tier 1: closes the shared-wrongness blind spot.**
 
-1. **Panic-fuzz the front-end (lexer → parser → checker).** ✅ **Built** — `src/panicfuzz/` (see
-   "Panic-fuzz harness" below). Feed adversarial / malformed inputs to `chezzi check`. Invariant:
-   *the pipeline never crashes — malformed input yields a clean diagnostic, never a Rust panic /
-   `unwrap` / index out-of-bounds / arithmetic overflow / stack overflow / signal kill.* Implemented
-   as a **stable, dependency-free subprocess harness** (a hand-rolled stand-in for `cargo-fuzz`),
-   not `cargo-fuzz` itself, because this environment has **no nightly / rustup / cargo-fuzz**.
-   Chezzi now has a library crate (`src/lib.rs`), so an in-process target is technically possible;
-   the subprocess design remains valuable because it catches **more** crash classes than in-process
-   `catch_unwind` (notably stack overflow, the most likely deep-parser crash). The single
-   highest-yield mechanical lever for a Rust-hosted language.
-2. **Differential vs CPython.** ✅ **Built** — `src/difftest/` (see "Differential oracle" below). The
-   external oracle that defeats the shared-bug blind spot: it would flag `sum()` overflow and `nan <`
-   immediately. The documented intentional divergences are handled *structurally* by a Python
-   **shim** (mirrors Chezzi's spec — `true`/`false` spelling, truncating
-   `/`,`%`) rather than by a big allow-list, so the allow-list stays near-empty and any hit is a
-   genuinely new category to triage.
-3. **Miri + ASan on the `unsafe` surface** (GC, FFI/libffi, raw pointers, any `transmute`).
-   `cargo +nightly miri test` for UB; ASan on the C-ABI paths. Targeted at the most memory-fragile code.
+1. **Panic-fuzz the front end** (lexer, parser, checker). Built. Invariant: malformed input yields a
+   clean diagnostic, never a Rust panic, `unwrap`, index out of bounds, arithmetic overflow, stack
+   overflow or signal kill.
+2. **Differential vs CPython.** Built. A Python shim implements Chezzi's specified divergences, so the
+   allow-list stays empty and each hit is a new category to triage.
+3. **Miri + ASan on the `unsafe` surface** (GC, FFI/libffi, raw pointers, `transmute`). Not built.
+   Use `cargo +nightly miri test` for UB and ASan on the C-ABI paths.
 
-**Tier 2 — structural, medium effort:**
+**Tier 2: structural, medium effort.**
 
 4. **`proptest` properties:** `parse∘print == id`; peephole on == off; const-fold result == unfolded
-   result. (`--serial` is **removed** — the "`--serial` == default" property this bullet used to name
-   can no longer be written. Its replacement is narrower, not a proptest: `tests/chezzi_threads_cli.rs`
-   runs the curated `tests/chz` suite, unchanged, at two worker counts — default and
-   `CHEZZI_THREADS=2` — as a standing `cargo test` gate. That is a differential over worker-count
-   *scheduling*, not over *randomly generated* programs, and it does not extend parity beyond the
-   curated corpus the way this bullet's original idea would have; a generative version of this
-   property remains unbuilt.)
-5. **Generative grammar fuzzer** from `grammar.bnf` → random *valid* programs → run against CPython.
-   Complements #1 (which targets the error paths) by targeting the *accept* paths.
-6. **TSan / loom on the concurrency engine** — channels, `Shared`, `Executor`, netpoller under race
-   detection / exhaustive interleaving.
-   TICKET-246 (2026-10-11) tried to run `tests/rwshared_parallel_readers_stress.rs` under
-   ThreadSanitizer and could not: this box has no nightly toolchain. `rustup toolchain list`
-   printed `command not found: rustup` and `cargo +nightly --version` printed
-   ``error: no such command: `+nightly` ``. The parallel-reader path therefore rests on the
-   compile-time `Heap: Sync` assertion (no `unsafe` on the reader path) and on that stress test at
-   `CHEZZI_THREADS` 1, 2 and default (16 readers, one writer, 0 torn copies). The command to run
-   once a nightly exists: `RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target
+   result. Not built. The only standing schedule differential is `tests/chezzi_threads_cli.rs`: the
+   curated `tests/chz` suite at the default worker count and at `CHEZZI_THREADS=2`. A generative
+   version over random programs is not built.
+5. **Generative grammar fuzzer** from `grammar.bnf`: random valid programs run against CPython. It
+   targets the accept paths; #1 targets the error paths.
+6. **TSan / loom on the concurrency engine** (channels, `Shared`, `Executor`, netpoller). Not built.
+   This box has no nightly toolchain (`rustup` and `cargo +nightly` are missing), so TICKET-246 could
+   not run TSan. The parallel-reader path rests on the compile-time `Heap: Sync` assertion and on
+   `tests/rwshared_parallel_readers_stress.rs` at `CHEZZI_THREADS` 1, 2 and default. With a nightly,
+   run: `RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target
    x86_64-unknown-linux-gnu --test rwshared_parallel_readers_stress`.
 
-**Tier 3:**
+**Tier 3.**
 
-7. **Coverage measurement** (`cargo-llvm-cov`) — find untested branches, especially error paths; write
-   tests for the gaps. (The auto-task found bugs in exactly the spots that lacked adversarial tests;
-   coverage makes those gaps visible.)
-8. **Dogfooding** — write real programs (a JSON CLI, a mini-interpreter, a log analyzer). Finds
-   semantic/ergonomic/integration bugs and missing-feature friction that fuzzing structurally cannot.
-9. **Manual feature-audit (agent-driven).** ✅ **Playbook below.** A structured adversarial sweep of the
-   feature domains the generators *cannot reach* — generics, `match`/enums, closures, protocols,
-   modules, namespace/import gating. The June 2026 *automated* hunt found numeric/parity bugs; the
-   June 27 *manual* audit found a **`match` exhaustiveness soundness hole** + namespace leaks the
-   differential generator can never surface (it emits no generics/enums/match). See the playbook.
+7. **Coverage measurement** (`cargo-llvm-cov`): find untested branches, mainly error paths, and write
+   tests for them. Auto-task found bugs in the spots that had no adversarial tests.
+8. **Dogfooding:** write real programs (a JSON CLI, a mini-interpreter, a log analyzer). They find
+   semantic, ergonomic and missing-feature bugs that fuzzing cannot reach.
+9. **Manual feature audit (agent-driven).** See the playbook below. The June 27 2026 audit found a
+   `match` exhaustiveness soundness hole and namespace leaks that the differential generator cannot
+   reach (it emits no generics, enums or `match`).
 
 ## Recommended starting point
 
-**#1 (panic-fuzz front-end) + #2 (CPython differential)** are both ✅ **built** — together they cover
-both *crashes* (fuzz) and *wrong answers* (differential), the two techniques that directly close the
-parity blind spot. Run them unattended; triage findings through the existing
-`auto-task` → `post-merge-gate` pipeline.
+Run #1 (panic-fuzz) and #2 (CPython differential) unattended. Together they cover crashes and wrong
+answers. Triage findings through `auto-task` -> `post-merge-gate`.
 
-Pre-JIT gate: the JIT is a large, late-stage endeavor that assumes the VM semantics are
-correct (it must produce byte-identical results to the VM). Standing up Tier 1 first — so the
-reference semantics are fuzzed and differentially validated — de-risks the JIT before a line of it is
-written.
+Pre-JIT gate: the JIT must produce byte-identical results to the VM, so it assumes the VM semantics
+are correct. Fuzz and differentially validate the reference semantics before you write the JIT.
 
-## Manual feature-audit playbook (agent-driven — finds what the generators can't reach)
+## Manual feature-audit playbook
 
-> **Run this when** the automated oracles (panic-fuzz, CPython-differential, DSA) have gone quiet but
-> the language is still pre-freeze (pre-JIT). "No bugs found by the fuzzers" ≠ "the language is
-> correct" — it means *that bug class* is exhausted. The fuzzers only exercise a narrow surface; this
-> playbook attacks the rest by hand. **It is the highest-yield way to find correctness bugs in the
-> typed feature surface**, and it is repeatable every session.
+Run this when the automated oracles go quiet and the language is still pre-freeze (pre-JIT). "No
+fuzzer findings" means that one bug class is exhausted. The fuzzers reach a narrow surface; this
+playbook attacks the rest by hand. Repeat it each session.
 
-### Why the generators miss these (the structural gap)
+### The structural gap
 
-`src/difftest/generate.rs` is **correct-by-construction over a deliberately small surface**: straight-line
-code + simple non-recursive functions over `int`/`List`/`Map`/`str`/`tuple`/slicing, with conservative
-bounds (it *avoids* overflow, deep nesting, aliasing). It emits **no** generics, structs, enums, `match`,
-closures/HOF, protocols, `T!E`/`T?`/`?`, recursion, or modules. So every bug in those features is
-invisible to it. (Historically, the two-VM **parity** oracle was blind here too: both engines were the
-same `Vm` running identical bytecode for this sequential code, so they shared bugs rather than
-diverging — parity caught *divergence*, never *shared wrongness*; that oracle is gone with `--serial`,
-see above.) A bug that lives in an un-generated feature is undiscoverable by the CPython differential
-alone. That is exactly where the real bugs have been.
+`src/difftest/generate.rs` is correct by construction over a small surface: straight-line code and
+simple non-recursive functions over `int`/`List`/`Map`/`str`/`tuple`/slicing, with conservative bounds
+(no overflow, no deep nesting, no aliasing). It emits no generics, structs, enums, `match`,
+closures/HOF, protocols, `T!E`/`T?`/`?`, recursion or modules. A bug in those features is invisible to
+the CPython differential, and most real bugs live there.
 
-### Bug taxonomy this audit targets
+### Bug taxonomy
 
-Every finding so far falls into one of these (use as a "what am I hunting" checklist):
+Use this list as the "what am I hunting" checklist:
 
-- **Feature doesn't work as documented** — the spec says X, the impl does Y (e.g. `match` accepts a
-  non-exhaustive set then faults at runtime — a *soundness* hole: `check` passes, the program traps).
-- **Namespace pollution / name leak** — a builtin name resolves without its `import` (e.g. `Socket`
-  usable with no `import std.net`), or a builtin type name can be *redeclared* (`struct int`) and is
-  then silently shadowed → self-contradictory diagnostics (`expected return type Socket, found Socket`).
-- **Import / path resolution** — a module resolves to the wrong file, fails for a file that exists, or
-  is cwd-sensitive; double-eval of a module's top level; bad error attribution across a transitive chain.
-- **Numeric / scalar edge cases** — overflow at a seam the fuzzer skips (`*`, `pow`, shifts, `abs(MIN)`),
-  float formatting (`-NaN`), div/mod sign rules, slice steps, unicode indexing, aliasing/copy semantics.
-- **Unintended feature from a bug** — an "abnormal feature" that only exists because of an
-  implementation accident (an accepted form the spec never sanctioned); it WILL be relied on, then break.
-- **Diagnostic-quality bugs** — wrong/misleading error text (`"earlier push"` when there was none),
-  even when the accept/reject decision is correct. Low severity, high user-confusion.
-- **Hidden / latent** — passes every existing test because the tests never exercise the angle. The
-  audit's whole point: surface these before a JIT freezes them into native code.
+- **Feature does not work as documented.** Example: `match` accepts a non-exhaustive arm set, then
+  faults at run time (a soundness hole: `check` passes, the program traps).
+- **Namespace pollution / name leak.** A builtin name resolves without its `import` (`Socket` with no
+  `import std.net`), or a redeclared builtin type gives self-contradictory diagnostics (`expected
+  return type Socket, found Socket`).
+- **Import / path resolution.** A module resolves to the wrong file, fails for a file that exists, or
+  depends on the cwd; a module's top level runs twice; a transitive chain blames the wrong file.
+- **Numeric / scalar edge cases.** Overflow at a seam the fuzzer skips (`*`, `pow`, shifts,
+  `abs(MIN)`), float formatting (`-NaN`), div/mod sign rules, slice steps, unicode indexing,
+  aliasing and copy semantics.
+- **Unintended feature from a bug.** An accepted form the spec never sanctioned. Users will rely on it,
+  then it breaks.
+- **Diagnostic-quality bugs.** Wrong or misleading error text (`"earlier push"` when there was none),
+  even when the accept/reject decision is correct.
+- **Hidden / latent.** Passes every test because no test reaches the angle. Surface these before a JIT
+  freezes them into native code.
 
-### The procedure (repeatable)
+### The procedure
 
-1. **Measure the blind spot first.** Re-read `src/difftest/generate.rs`'s `Features`/`gen_*` to confirm
-   what's *still* un-generated — that list IS your target domains. (Don't re-hunt a domain the generator
-   now covers.)
-2. **Build, then fan out.** `cargo build --release`. Dispatch one agent **per feature domain** in
-   parallel (`superpowers:dispatching-parallel-agents`) — domains are independent, no shared state.
-   The five domains below + import-resolution were the June 27 split; reuse or refine.
-3. **Per-agent protocol** (bake into every prompt):
-   - **Read the spec FIRST** (`docs/reference/syntax.md`, `docs/reference/spec.md`, `docs/reference/stdlib.md`) — distinguish a *bug*
-     from *intended design*. Chezzi's intended Python-divergences (i64 not bignum, truncating `/`,`%`,
-     static typing) are **not** bugs; silent wrapping / UB / a runtime fault on an accepted program is.
-   - **Write tiny focused `.chz` probes**, one angle each.
-   - **Run `run` AND `check`**, and — for anything concurrent — run it again under `CHEZZI_THREADS=1`
-     and `CHEZZI_THREADS=2`. A verdict that changes with the worker count is a bug. (Until 2026-08-18
-     those were the **same** configuration — `--threads=1` ran two CPU runners, so this method had one
-     arm fewer than it claimed; `docs/contributing/gaps.md` **W8-8**. It now genuinely has two: 1.00 cores at `=1`
-     vs 1.91 at `=2`, `docs/contributing/benchmarks.md` §"W8-7 / W8-8 idle-worker-policy fix".) Where the
-     semantics should match Python, diff against `python3`; where they should match Go, write and run
-     the Go program.
-   - **Evidence-gated, reproduced-only.** Each finding: minimal repro + exact command + EXPECTED (cite
-     spec) + ACTUAL (quoted) + does the worker count change it? + severity. No speculation; "clean" if
-     an angle yields nothing, with the angles covered listed.
-4. **Root-cause pass BEFORE any fix** (added 2026-09-28 after wave 16). Group the confirmed findings
-   by the fact they share, and for each group find every place that decides that fact, the grid it
-   spans, the broken cells, and how many past tickets patched the same class — the method is
-   `docs/contributing/lessons.md` §1 "How to find the root cause"; the worked example is `docs/history/bug-hunts/w16.md`
-   (12 P0/P1 → 5 families; an audit showed 34 of 51 earlier fixes were point patches whose families
-   all came back). Show the write-up to the owner before filing.
-5. **File one structural ticket per family** (delete the duplicated decision, add the single source,
-   land one whole-grid test), through the pipeline; its planning and plan-validation stages reject a
-   point patch in a systemic family. Only an isolated defect with no sibling copies (a one-site
-   arithmetic guard, a stdlib edge) is fixed directly. Order the tickets by file seam so two tickets
-   editing the same code never run concurrently.
+1. **Measure the blind spot first.** Read `src/difftest/generate.rs` (`Features`, `gen_*`). The
+   features it still does not generate are your target domains. Do not re-hunt a covered domain.
+2. **Build, then fan out.** Run `cargo build --release`. Dispatch one agent per feature domain in
+   parallel (`superpowers:dispatching-parallel-agents`). Use the domains below.
+3. **Per-agent protocol** (put it in every prompt):
+   - Read the spec first (`docs/reference/syntax/`, `docs/reference/spec/`,
+     `docs/reference/stdlib/`) to tell a bug from intended design. The intended divergences from
+     Python (i64 not bignum, truncating `/` and `%`, static typing) are not bugs. Silent wrapping, UB,
+     or a run-time fault on an accepted program is a bug.
+   - Write tiny `.chz` probes, one angle each.
+   - Run `run` and `check`. For concurrent code, run again under `CHEZZI_THREADS=1` and
+     `CHEZZI_THREADS=2`. A verdict that changes with the worker count is a bug. Where the semantics
+     should match Python, diff against `python3`. Where they should match Go, write and run the Go
+     program.
+   - Report only reproduced findings: minimal repro, exact command, EXPECTED (cite the spec), ACTUAL
+     (quoted), whether the worker count changes it, severity. Report "clean" with the angles covered
+     when an angle finds nothing.
+4. **Root-cause pass before any fix.** Group the confirmed findings by the fact they share. For each
+   group, find every place that decides that fact, the grid it spans, the broken cells, and how many
+   past tickets patched the same class. Method: [`lessons.md` §1](lessons.md). Worked example:
+   [`history/bug-hunts/w16.md`](../history/bug-hunts/w16.md) (12 P0/P1 findings -> 5 families; 34 of 51
+   earlier fixes were point patches). Show the write-up to the owner before you file.
+5. **File one structural ticket per family**: delete the duplicated decision, add the single source,
+   land one whole-grid test. The pipeline's planning stages reject a point patch in a systemic family.
+   Fix directly only an isolated defect with no sibling copies (a one-site arithmetic guard, a stdlib
+   edge). Order the tickets by file seam, so that two tickets that edit the same code never run at the
+   same time.
 
-### Domain checklist (the reusable target list)
+### Domain checklist
 
-| Domain | High-value angles (start here) |
+| domain | high-value angles |
 |---|---|
-| **Generics** | turbofish at decl vs use site; nested (`Map[str,List[int]]`); return-only param inference (`empty[T]()`); generic methods/static methods; protocol bounds + calling a bound method on a type param; recursive generic enums; arity/mismatch → clean error not panic |
-| **`match`/enums** | exhaustiveness with **guards** (`A if c` must NOT close A) and **refutable payloads** (`?0`, `Pair(0,y)` must NOT close); nested single-variant *is* irrefutable; or-patterns binding consistency; redundant/duplicate arms; range patterns; match-as-expression divergent arms |
-| **Closures/defer/recover** | loop-variable capture (**fresh cell per iteration** — must NOT be late-binding); uniform by-reference capture (local/global all share the live binding — a closure write is visible outside); a plain capture into a `spawn` is an isolated per-task copy (F1 divergence); escaping closures; `defer` block shares by reference (sees latest) vs `defer f(x)` eager args; `recover` catching overflow/index/div0; re-panic in `recover` |
-| **Namespace/import gating** | redeclare a builtin type (`struct int`/`List`/`Socket`/`range`) → must be `reserved (builtin)`, never silently shadowed; bare std type without `import` → import hint; `import X from M` for a pure type runs at all (the `bind_import` skip); reserved-name shadowing by var/param/type-param/field |
-| **Import/path resolution** | cwd-sensitivity; nested `chezzi.toml` (entry-root vs import-root must agree); dotted paths; dir/file name collision; diamond re-import (top-level runs once?); a local module shadowing a `std.*` name; entrypoint `:fn` suffix forms; transitive-error attribution |
-| **Numeric/string/collection** | overflow at `*`/`pow`/shifts/`abs(MIN)`/fold; float `-NaN` via format-spec; div/mod sign + by-zero; slice neg-step/OOB/step-0; unicode index/len; **aliasing** (list-of-list shared ref, `b:=a`, captured-list mutation); NaN/inf in sort/keys/compare |
-
-### Procedure gotchas (these cost real time — internalize them)
-
-- **Verify the CLI via `cargo run --release --bin chezzi -- …`, never a hardcoded `target/` path.**
-  auto-task worktrees redirect `target-dir` to `~/.cache/chezzi-target` (a git-excluded `.cargo/config.toml`);
-  main builds to `./target`. A hardcoded cache path serves a *stale worktree binary* → a fake "bug".
-  `cargo build` can even report "Finished" while the on-disk artifact is missing/stale. Trust
-  `cargo run`/`cargo test`, not a path + mtime. (4 bins exist → `cargo run` needs `--bin chezzi`.)
-- **An `ok()`/`check_src` unit test passing ≠ the CLI is correct.** `check_src` (test helper) runs
-  *no desugar, single-module*; the real CLI runs `build_graph` (desugars) → `check_graph` (module-scoped
-  keys). Use the `check_entry`/`entry_ok` helpers (which go through `build_graph` + `check_graph`) to
-  regression-guard a finding on the **real** path, and confirm via the CLI binary itself.
-- **Adversarially verify every fix — an over-broad fix over-rejects.** Twice this session a fix that
-  closed the reported hole *also* rejected a legitimate neighbor (a nested single-variant match; a
-  bound-param push). Always add a failing-then-green test for the *boundary* case the fix must NOT break.
-- **Golden-green is necessary, not sufficient.** Passing the golden suite only proves the VM matches
-  its own recorded expectation; it says nothing about shared wrongness against the reference language.
-  The external check (spec + CPython) is what catches those.
-
-## Panic-fuzz harness (`src/panicfuzz/`)
-
-Lever #1, built. A seeded, dependency-free generator emits adversarial / malformed inputs and feeds
-each to the already-built `chezzi check <tmpfile>` (the full front-end: `resolver::build_graph` →
-`checker::check_graph` = lexer + parser + checker). The single invariant it enforces: **malformed
-input must yield a clean diagnostic, never a Rust panic or a signal crash.** It structurally mirrors
-`src/difftest/` (its own copy of the `xoshiro256**` RNG; the same reader-thread + `try_wait` +
-kill-on-timeout subprocess machinery) and is wired via a `#[path]` include into both the
-`tests/panicfuzz.rs` CI gate (fixed seeds `0..2000`) and the `src/bin/panicfuzz` long-runner.
-
-**Why a hand-rolled subprocess harness instead of `cargo-fuzz`.** Three constraints decided the
-architecture:
-- **No nightly / rustup / cargo-fuzz** in this environment — `cargo-fuzz` is unavailable.
-- **Chezzi now has a library crate** (`src/lib.rs`), so an in-process fuzz target is technically
-  possible. The existing harness predates that split and deliberately retains a process boundary
-  for the stronger crash classification below.
-- **Shelling out catches more crash classes** than in-process `catch_unwind`: a subprocess detects a
-  **signal kill** (SIGSEGV / SIGABRT / **stack overflow** — the most likely deep-parser crash, which
-  `catch_unwind` cannot intercept) as an exit code of `None`, *and* a Rust panic via the `panicked
-  at` marker on stderr.
-
-**Classification** (`run.rs`): `Clean` = exit 0, or non-zero with a clean diagnostic and no panic
-marker (non-finding); `HostPanic` = stderr contains `panicked at` (a BUG); `Crash` = exit code is
-`None`, killed by a signal (a BUG); `Timeout` = killed at the wall-clock budget (**not** a finding —
-a slow input, not a crash); `HarnessError(String)` = the oracle itself could not run this input at
-all — the child failed to spawn or the candidate could not be staged to a temp file (**not** a
-finding — it isn't a Chezzi bug — but FATAL: both callers (`tests/panicfuzz.rs`'s `fuzz_range_cfg`,
-`src/bin/panicfuzz.rs`) abort on it instead of scoring it, exit code **2** for the bin, distinct from
-**1** for real findings, mirroring `difftest`'s `W7-34` contract — `docs/contributing/gaps.md` **W7-35**). Only
-`HostPanic`/`Crash` are findings (`is_finding()`).
-
-**Three combined generators** (`generate.rs`), all bounded to ≤ 2 KB and deterministic in `(seed,
-corpus)`: (1) random UTF-8-ish byte strings; (2) a token-alphabet sampler over Chezzi keyword /
-punctuation / operator spellings + random identifiers / numbers / newlines + indentation (reaches
-deep parser states); (3) structure-aware **raw-byte** mutation of the `examples/*.chz` corpus (byte
-flips, truncation, duplicated / removed lines, inserted braces / colons / indentation). A finding
-reports the **seed + the raw triggering input** (the input *is* the artifact — no shrink pass in v1),
-reproducible with `panicfuzz --seed N`.
-
-**Correctness oracles don't apply to this lever** — it exercises only the front-end's crash-safety; it
-never runs the VM, so neither the golden suite nor the CPython differential is relevant here.
-
-How to run:
-
-```sh
-cargo test --test panicfuzz                # CI gate: classify/clean/determinism unit guards + fuzz seeds 0..2000
-cargo build --release --bin chezzi --bin panicfuzz
-./target/release/panicfuzz --seeds 0..200000   # unattended sweep (~30-50 min of subprocess spawns)
-./target/release/panicfuzz --seed 12345        # reproduce one seed (prints the triggering input)
-```
-
-**Overflow blind spot in release.** The `tests/panicfuzz.rs` gate runs the **debug** `chezzi`
-(overflow-checks ON), so arithmetic-overflow panics ARE caught there. A **release** sibling `chezzi`
-has overflow-checks OFF, so arithmetic-overflow wraps *silently* and is invisible in a release sweep
-(the bin prints this NOTE). For a full overflow sweep, rebuild with `RUSTFLAGS="-C
-overflow-checks=on"`. Signal / segfault / explicit-panic crashes are caught regardless of profile.
-
-**Grammar-structure blind spot (deeply-nested constructs).** The three generators are byte/token-level:
-they produce random bytes, sample the token alphabet, and mutate the corpus — none *recursively deepen a
-specific grammar production*. So a crash that needs, say, ~10 000 levels of one nested construct is
-statistically unreachable (the token sampler would have to emit thousands of the *same* opening token
-consecutively by chance). The **2026-07-12 manual hunt found exactly such a bug the fuzzer missed**: a
-deeply-nested `match` **pattern** (`?(?(…?0…))` / nested tuples) overflowed the host stack
-(SIGABRT, exit 134) because `parse_pattern_impl` was the one recursive-descent entry point with no
-`MAX_DEPTH` guard (fixed — `dcde045`). Lesson: crash-safety over *depth* per grammar production is a
-distinct axis from the byte/token fuzzing here — either add a grammar-aware generator that recursively
-nests each production to `MAX_DEPTH+N`, or (cheaper) assert every recursive-descent parse fn shares the
-one depth guard. Until then, "zero fuzzer crashes" does not certify the deep-nesting axis.
-
-**Now partly asserted (W7-50, 2026-08-13).** `parser::tests::max_depth_boundary_accepts_then_rejects`
-is the per-production depth assertion this section asks for: it **bisects** the accepted nesting count
-for each of the seven guarded productions (parens, lists, calls, blocks, unary, generic types, match
-patterns), asserts `k` parses / `k+1` rejects with `"too deeply"` (never a host abort), and asserts
-`k >= 200` — CPython 3.14's own limit — for the four directly comparable forms. The boundary is
-measured, never hard-coded, so a widening AST node shows up as a *number in a failure message* instead
-of as a silent shrink. Its end-to-end sibling
-`check_errors_json::worst_accepted_nesting_never_signal_crashes` drives `ast`/`check`/`run` over the
-worst program the parser accepts. What is still missing is a *generator* that reaches these shapes from
-the fuzzer, so the corpus axis remains uncertified.
-
-**Post-parse walker depth axis (iterative chains) — found 2026-07-12, fixed `fix/frontend-deep-stack`.**
-The `dcde045` guard closed deep *recursively-parsed* constructs (patterns, parens, types). But the
-`MAX_DEPTH` guards only bound the parser's *recursion* — and left-associative binary chains (`1+1+…`)
-and postfix chains (`x.f.f…`, `a[0][0]…`, `f().g()…`) parse in the **iterative** `while`/`loop` bodies
-of `parse_bp` / `parse_postfix`, which never bump `self.depth`. So the parser *accepted* a valid but
-thousands-deep left-leaning AST that the **post-parse recursive walkers** — `desugar::walk_expr`, the
-checker's inference walk, the compiler's lowering — then overflowed on (SIGABRT, exit 134, on the CLI
-main thread *and* the ~2 MiB LSP worker; uncatchable by `recover:` — it is a *compile-time* host abort
-on a well-typed program, strictly worse than the malformed-input pattern case). Two-part fix: (1) a
-`MAX_CHAIN_DEPTH` per-loop cap in both iterative loops bounds a single chain's length (so accepted AST
-depth is bounded by `MAX_DEPTH` × `MAX_CHAIN_DEPTH` — **superseded by W7-50**, see below); (2) the whole front-end (resolve → desugar →
-check, and `run`'s build+compile) runs on a dedicated large stack — `chezzi::on_frontend_stack` /
-`FRONTEND_STACK_BYTES`, mirroring the VM's `VM_STACK_BYTES` thread — so that bounded depth is walked
-with headroom regardless of the caller's stack size. A parser cap **alone** cannot fix it: any cap high
-enough for real code (100+-term chains) still overflows the 2 MiB LSP walker stack, so the large stack
-is load-bearing (this is the `recursion-guard-smallest-stack` rule — a bare depth cap must be sized for
-the *smallest* stack the guarded recursion runs on). Lesson: crash-safety has a **post-parse walker**
-depth axis distinct from parse-time recursion; a recursive AST walker must run on a stack sized for the
-worst parser-accepted depth (or share the depth guard), not just the parser.
-
-**Superseding correction (W7-50, 2026-08-13).** The `MAX_DEPTH` × `MAX_CHAIN_DEPTH` product was a
-*bound*, not a *measurement*, and it stopped holding the moment `MAX_DEPTH` was raised from 64 to 512
-to reach CPython parity (512 × 500 = 256 k nodes, against a measured ~33 k-node cliff). The per-loop
-proxy is gone; `parser::MAX_AST_DEPTH` (16 000) now bounds the resource directly — the *synthesized*
-fold depth of the tree being built (`Parser::fold_depth`), so it composes across nesting levels the way
-the tree does. An **ambient** counter decremented on loop exit was tried and rejected with evidence: a
-fold loop runs AFTER the descent it sits above, so in `f(g(DEEP) + 1 + 1 + …)` the folds and the descent
-never coexist in an ambient counter — measured, that shape parses at 45 000 nodes deep and SIGABRTs
-`chezzi run`. Same lesson as W7-55's `Eq`-walk node budget: bound the resource that is spent, and prove
-the bound against the shape that composes, not the shape you had in mind.
-
-**And the axis NARROWED, deliberately — say so, because the first writeup said the opposite.** W7-50
-originally shipped claiming 16 000 was above everything that parsed before, so nothing regressed. It
-was not: a paren level can spend BOTH fold loops (`parse_postfix`'s and `parse_bp`'s) at ~998 nodes per
-level, and `x := ` + *k* × `( … .f×499 +1×499 )` bisects to *k* = **30** (~29 940 nodes) on `b1307258`
-versus *k* = **16** (~15 968) today. Against the ~33 100-node cliff that is **1.11× → 2.07×** headroom:
-the old ceiling was accepting programs within ~10% of an uncatchable abort. Two lessons for this
-document's own method. (1) **A limit's "no regression" claim is a measurement, not a corollary** — it
-must be bisected on the PRE-change binary against the *worst* shape, and the worst shape is the one
-that spends every loop a level can spend, not the first one that came to mind. (2) When a hunt's fix
-narrows what is accepted, that is often the *win*; hiding it behind a false no-regression claim makes a
-good change unauditable (same family as `rule fires ≠ rule is right`).
-
-**Third correction (same gap, follow-up): a per-*instance* limit is not a limit on the axis.**
-`MAX_AST_DEPTH` was enforced by the `Parser` object that builds a tree — and an interpolated `{…}`
-fragment is re-lexed and built by a **second** `Parser` whose counters start at zero. So the axis had
-no bound at all: *L* nested levels of `"{ <15 985 deep> }".len()` bought *L* × 16 000, measured at
-peak walk depth 15 000 / 30 000 / 45 000 for L = 1/2/3, and debug `chezzi run` SIGABRTed at L = 3 on a
-program `chezzi check` accepted. The generalizable lesson for this document: **when a bound lives on
-an object, ask what happens when the pipeline makes a second one.** Grep for every constructor of the
-bound-carrying type (`Parser::new` here) — a re-parse, a re-lex, a spliced fragment or a macro
-expansion is a fresh instance, and a resource bound that resets per instance is a bound on nothing.
-The repair that composes is to enforce on the **finished artifact** at a seam every consumer routes
-through — here `desugar::Walker::walk_expr`, whose recursion depth is the composed tree's depth —
-rather than to thread a remaining budget through each re-entry, which is only as good as the callers
-that remember to pass it.
-
-**And the second half of that lesson, which the review had to supply: "finished" is a claim to check,
-not a word to use.** The chosen seam is finished for everything the walk *reaches*, and `desugar`
-then spliced default arguments in the **tail** of the walk, after that node's children
-had already been visited — so a splice performed on the second (last) pass was never walked, and a
-well-formed interpolated literal inside it still reached the checker and compiler un-converted, at
-~2× the bound. When you enforce on an artifact, enumerate every writer that can still mutate it after
-your check, not just every reader that consumes it. A tail-position mutation in the same walk is the
-easiest one to miss, because it does not look like a second pipeline stage.
-
-**Closed by W7-51, and the way it was closed is the third half of the lesson: delete the writer.**
-That residual needed two things — a second pass, and a spliced default *expression*. W7-51 removed
-both (one pass; a non-literal default is compiled once in its defining module and the call site gets
-a two-node call to it), so the class is gone by construction rather than by a third guard. **Verify a
-"gone by construction" claim with a probe on the mechanism, plus a negative control**: a probe on
-`checker::check_interpolation`'s success arm fires exactly when a well-formed `Str` reaches the
-checker un-converted, and on the fixture the residual was recorded with it read **1 hit on
-`925dd0f7`, 0 on `ed4830b3`** — with **2 hits** on the same `ed4830b3` build once the desugar
-`Str → Interp` conversion was disabled, which is what makes the zero evidence instead of an absence.
-A zero from an unfalsified probe proves nothing about the code and everything about the probe.
-
-Status: the `0..2000` gate is green, and unattended sweeps of `0..100000` (release, overflow-checks
-OFF) and `0..20000` (debug, overflow-checks ON) found **zero** panics or signal crashes — the
-front-end is crash-safe over the *byte/token* inputs explored so far (see the deep-nesting blind spot
-above: the deep-pattern SIGABRT was found by manual audit, not the fuzzer, and is now guarded).
-
-## Differential oracle (`src/difftest/`)
-
-Lever #2, built. A seeded generator emits a *cross-language safe subset* (literals, bounded-int
-arithmetic, bool/str ops, `if`/`for`/`while`, non-recursive functions, list/map/index/len, plus the
-widened families below). One abstract IR (`ast.rs`) is rendered by two backends — `emit_chezzi`
-(native ops/`print`) and `emit_python` — and the two are run and their stdout diffed (`run.rs`).
-
-The diff is on **raw bytes**, not on decoded text (`Capture.stdout` is `Vec<u8>`): `from_utf8_lossy`
-is not injective, so a decoded compare would call `ff fe` vs `fe ff` a `Match`, and both sides can
-emit non-UTF-8 (`io.stdout().write_bytes`, CPython `sys.stdout.buffer.write`). `Capture::stdout_text()`
-decodes for the report and for `is_host_panic`'s `panicked at` scan only — never for a verdict
-(`gaps.md` W7-30). (`allowlist::MATCHERS` is empty at HEAD — its one formatting heuristic was
-deleted by `gaps.md` **W7-31**; `check()` remains as the extension point.)
-
-**A host crash is always `HostPanic`, checked before any other verdict logic.** `classify` looks
-for a Rust `panicked at` marker on Chezzi's stderr and, separately, `chz.code.is_none()` (killed
-by a signal — SIGSEGV/SIGABRT/a Rust stack overflow, which has no `panicked at` marker at all) —
-both **unconditionally on every arm**, including the both-exit-0 stdout-compare arm (a panicking
-*worker thread* doesn't change the process's own exit code). Neither can be allow-listed and
-neither can be buried under a `BothError` non-finding. Same rule the twin panic-fuzz oracle uses
-(`panicfuzz::classify`, above) — see `gaps.md` **W7-33**.
-
-**A harness that never ran is a fatal error, not "0 findings."** `run_one` distinguishes a real
-timeout (`RunErr::TimedOut`) from a child the harness could not even observe — spawn failed, a
-stdio pipe wasn't there, `try_wait` errored (`RunErr::CouldNotRun(String)`, carrying the program
-name and the real `io::Error` text). `run_sources` routes `CouldNotRun`, and a temp-file staging
-failure, to `Outcome::HarnessError(String)` — `is_finding()` is `false` (it isn't a Chezzi bug)
-but both callers treat it as **fatal**: `tests/difftest.rs::fuzz_range` `panic!`s on the first
-one, and `difffuzz` prints it to stderr and exits **2**. Exit-code contract: `0` = clean (no
-findings), `1` = findings (real divergences), `2` = the harness itself is broken and the run did
-not finish (bad args — including an **empty** `--seeds A..A`, which would otherwise be a clean pass
-over zero comparisons — or a `HarnessError`, e.g. `chezzi` not on `PATH`). **Findings win over the
-abort**: if the harness breaks *after* a real divergence was already confirmed, the exit code is
-`1`, not `2`, so a real finding is never masked by a later environment failure. The abort now
-`break`s out of the seed loop instead of exiting inside it, so the `done:` line and the histogram
-print on that path too and say how many seeds actually ran (`done: 1 of 50 seeds 0..50, 0
-finding(s) [HarnessError 1]`). See `gaps.md` **W7-34** for the measured before/after (`chezzi`
-missing → `done: N seeds, 0 finding(s)`, exit 0, before the fix) and **W7-38** for the empty-range,
-abort-path and exit-code half.
-
-**Every sweep prints an outcome histogram, because "0 findings" alone cannot be read.** Both
-`difffuzz` and `panicfuzz` tally `kind_label(&outcome)` per seed and print it in the `done:` line:
-`done: 200 seeds 0..200, 0 finding(s) [Match 200]` on a healthy sweep versus
-`done: 20 seeds 0..20, 0 finding(s) [Timeout 20]` when every child was killed at the deadline and
-**nothing was ever compared**. `HarnessError` closes "the child never started"; it does not close
-"the children started and nothing was compared", and before the histogram those two runs printed
-byte-identical lines. There is deliberately **no** abort threshold or "too many timeouts"
-heuristic: a verdict that cannot be certain must decline rather than emit a confident wrong one
-(`gaps.md` **W7-12**), and a wrong "your oracle is broken" abort would teach distrust of every
-future one. The fix is legibility — read the histogram (`gaps.md` **W7-34**).
-
-**…and the CI gates refuse to PASS over zero comparisons.** Legibility is enough for a human
-running the binary, and not enough for `cargo test`: libtest CAPTURES stderr on a passing test, so
-the histogram above is invisible exactly when the sweep was vacuous. Both gates
-(`tests/difftest.rs::fuzz_range_cfg`, `tests/panicfuzz.rs::fuzz_range_cfg`) therefore assert a hard
-floor — the number of seeds that represent a REAL comparison (`Match`/`AllowListed`/`Divergence`/
-`HostPanic`/`BothError`; `Clean`/`HostPanic`/`Crash` for panicfuzz) must be non-zero, `Timeout` and
-`HarnessError` being the two outcomes that mean nothing was compared. A zero floor is certain; a
-"too many timeouts" threshold would be a heuristic, and is deliberately absent (`gaps.md`
-**W7-38**).
-
-**A SIGKILL is not a Chezzi bug.** `ExitStatus::code()` is `None` for *every* signal, so both
-oracles capture the signal NUMBER too. Only signals a crash in the child itself raises — SIGILL,
-SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV, SIGSYS — are a finding (`HostPanic`/`Crash`). Every
-other signal, SIGKILL (the cgroup OOM-killer under a `MemoryMax` scope, `kill -9`) and SIGTERM (a
-CI reaper) included, is an outside kill that implicates nothing about the program: it becomes the
-fatal-but-not-a-finding `HarnessError` saying the seed proved nothing. An unrecognized signal
-declines the same way rather than asserting a crash (`gaps.md` **W7-12**, **W7-38**). Reports NAME
-the signal — `--- chezzi killed by SIGSEGV (signal 11) ---` — because "killed by a signal" is
-unactionable when SIGSEGV, SIGABRT and SIGFPE want three different first moves.
-
-**A Chezzi timeout is not thrown away — Python gets a chance to prove it's a real hang.**
-`generate.rs` bounds every loop by construction (`LOOP_CAP`, a bounded `for`, a mandatory `while`
-increment on a reserved counter), so a generated program that does not terminate in the timeout is
-a Chezzi bug — PROVIDED Python finishes the same program cleanly; a program outside the shared
-subset times out for reasons that say nothing about Chezzi. On a chezzi timeout, `run_sources` now
-runs Python anyway: if Python exits 0, Chezzi is re-run ONCE at 3x the configured timeout (a
-false-positive guard against a loaded machine — required, not optional, since this gate runs in CI
-beside a full `cargo test`) and only a second timeout is reported, as
-`Outcome::Divergence { kind: DivKind::ChezziHang, .. }` — `chz` there is a synthesized `Capture`
-(`code: None`, but never passed through `classify`, so `W7-33`'s signal-kill invariant is
-untouched). If Python fails, itself times out, or can't be run, the outcome stays the non-finding
-`Outcome::Timeout { which: "chezzi" }` (`gaps.md` **W7-36**).
-
-**The both-failed arm compares stdout, prefix-compatibly.** `classify`'s `BothError` arm used to
-discard stdout unexamined even when the two sides had printed genuinely different bytes before
-failing. It now diffs the shared PREFIX (`chz.stdout[..n] == py.stdout[..n]`) — a byte difference
-within that prefix is `Outcome::Divergence { kind: DivKind::BothErrorStdout, .. }`; one side simply
-printing more before its own unrelated fault stays `BothError`. Prefix, not plain `!=`: CPython
-failing at parse time writes nothing to stdout while Chezzi routinely fails at runtime after
-printing, and equality would false-positive on that routine, harmless shape (`gaps.md` **W7-36**).
-
-**Widened construct coverage** (granular `Features` flags, all on in `full()`):
-- **String methods** (`string_methods`): the eight ASCII-identical methods `upper`/`lower`/`replace`/
-  `split`/`join`/`starts_with`/`ends_with`/`contains`. The emitters map names per language
-  (`starts_with`→`startswith`, `ends_with`→`endswith`); `contains` has no Python `str` method so it
-  renders as `sub in recv`. One by-design diff is dodged by generator restriction (no shim): a `split` `sep` is always a
-  **non-empty** literal (empty `sep` per-char-splits in Chezzi but `ValueError`s in Python). A
-  `replace` `old` is also kept non-empty, by choice only: since TICKET-121 an empty `old`
-  interleaves in Chezzi exactly as in Python.
-- **Slicing + negative indexing** (`slicing`): `xs[a..b]` / `xs[Range(a, b, c)]` on lists/strings (Python's `xs[a:b:c]` on the CPython side) and negative
-  scalar index `xs[-k]`. Both engines clamp out-of-range bounds identically and step `0` errors on
-  both, so no shim — the generator just never emits step `0` and keeps negative scalar indices in
-  `[-len, -1]`. Slice results carry `len: None`, so they are never scalar-indexed (no OOB seam).
-- **Membership** (`membership`): `x in xs` (list element), `k in m` (map key), `sub in s` (substring) —
-  native `in` on both sides, always `bool`.
-- **Tuples** (`tuples`): literals `(a, b)`, positional fields (`(t).N` Chezzi / `(t)[N]` Python), and
-  destructuring (`a, b := t` / `a, b = t`). The **single** new shim arm is the tuple stringify in
-  `_chz_str` (`(1, 'two', true)` spelling); single-element `(1,)` and empty `()`
-  diverge from Chezzi's spelling, so the generator only emits arity ≥ 2.
-- **Floats** (`floats`, on in `full()` since `docs/contributing/gaps.md` §W7-37): float **arithmetic**, not just
-  float literals. `gen_float` is recursive like `gen_int` — `Add`/`Sub`/`Mul` over in-scope float
-  vars, `try_call`/`try_index` leaves, and literals — and floats are assignable (`=`/`+=`/`-=`).
-  Leaves are `n/8` scaled by `2^e`: exact (a power of two moves only the exponent field, so the
-  "both engines compute the identical double" argument holds), and the scale is what actually
-  reaches Python's scientific-notation crossover (`|x| >= 1e16` / `< 1e-4`) — `n/8` alone tops out
-  near `1e8`. That crossover is where shortest-`repr` formatting is most delicate and where `W7-32`
-  lived. The per-leaf `[-70, 60]` scale bounds a single LITERAL leaf, not the generator overall —
-  a float var or a `try_call` result can carry a prior multi-leaf product, so magnitudes compose
-  across statements and functions and `inf`/`NaN`/`-0.0` are structurally reachable; measured 0
-  `inf`/`NaN` (25 `-0.0`) across 5000 `Features::full()` programs, and both engines render all
-  four byte-identically when they do occur. **Comparison** (`< <= > >= == !=`) landed 2026-08-07:
-  `gen_bool`'s comparison arm now sometimes draws both operands from `gen_float` — premise
-  verified first, 4005 cases byte-identical against CPython. **`Div`** landed the same day:
-  `gen_float` emits it with no non-zero-divisor guard (float `/` is total IEEE-754,
-  `docs/reference/spec.md:472` — a zero divisor is `inf`/`-inf`/`NaN`, never a fault), and the Python shim's
-  `_chz_fdiv` absorbs Chezzi's deliberate divergence from CPython's `ZeroDivisionError`.
-  **Int↔float mixing** (`1 + 2.0`) landed 2026-08-07 too — the filed reason it was deferred
-  ("needs a coercion model in the IR") was wrong: `Bin`'s `ty` is already the result type, so a
-  mixed node renders correctly through both emitters with no IR change. `gen_float`'s composite
-  arm and `gen_bool`'s float-comparison arm each mix in an int operand (0.3 chance), side
-  randomized so both `int op float` and `float op int` are generated; `MAX_BOUND` now straddles
-  `2^53` (`W8-23`, TICKET-014) and the VM compares an int against a float exactly, so mixed
-  comparison stays correct without capping the bound. **`Mod`** landed 2026-08-08, the last unreached float
-  operator: `gen_float` emits it beside `Div`, same no-non-zero-divisor discipline, and rides the
-  same `op` variable the mixing arm already uses so mixed int↔float `%` comes for free. Chezzi's
-  float `%` is `fmod` — sign of the DIVIDEND, matching Rust/Go, diverging deliberately from
-  CPython's floored, raising `%` — and the Python shim's `_chz_fmod` absorbs both the sign rule and
-  the totality (a zero divisor or an `inf` dividend is `NaN`, where `math.fmod` raises on both).
-  §W7-37 is now fully closed.
-
-**Every scalar type is reachable through a call and an index.** `try_call`/`try_index` used to be
-asked only for `Ty::Int`, so ~2/3 of generated functions were emitted and never invoked and non-int
-element reads never happened — code both engines "agreed" on because neither ran it. `gen_bool`,
-`gen_str` and `gen_float` now each attempt both (§W7-37). `try_call`'s int-argument discipline is
-unchanged: an int arg stays a small literal, because the callee's body and `ret_bound` were
-generated assuming `|int param| <= PARAM_BOUND`.
-
-The i64-no-overflow guarantee is preserved across these: the only new path where an int value crosses a
-seam is a tuple-field read, which inherits the element's tracked `tuple_bounds` and is never emitted
-inside an in-loop accumulator RHS; method (`str`/`bool`/`List[str]`), `in` (`bool`), and slice
-(collection/`str`) results carry no int value, so they add no seam.
-
-**One shim arm became the identity (2026-08-06).** A string nested in a container used to render
-raw, so `_chz_repr` returned the string unchanged; it is now CPython `repr` (`docs/contributing/gaps.md` §W7-25),
-so that arm is literally `repr` and the oracle proves the nested-string rendering equal rather than
-absorbing a difference. Note the direction of the hazard: while the divergence existed, the shim
-ENCODED it, so the oracle could never have reported it — a detector written to mirror the
-implementation cannot see a bug in what it mirrors.
-
-**Why it isn't a tautology.** The Python backend prepends a fixed *shim* that implements Chezzi's
-**specification** (`_chz_str` for `true`/`false` + Chezzi float format;
-`_chz_div`/`_chz_mod` for truncate-toward-zero / sign-of-dividend). Chezzi source uses the real
-**implementation**. The shim absorbs only the by-design surface/semantic differences — never the
-actual arithmetic or control-flow *result* — so a stdout divergence means the implementation
-deviated from its own contract (a real bug). The `oracle_detects_real_divergence` test proves the
-harness catches a genuine divergence (raw Python `%` vs Chezzi `%` on negatives).
-
-**Correctness by construction.** Every generated program is well-typed and in-scope, every divisor
-is non-zero, every index is in range, and every integer value is provably within a safe window
-(`generate.rs` bound tracking) so it can never hit Chezzi's i64-overflow fault — that makes a Chezzi
-fault a real bug, not a generator artifact. (Deliberate overflow testing is the opt-in metamorphic
-mode, P5 — a Chezzi recoverable-panic vs Python bignum, handled as a distinct outcome, not stdout.)
-
-How to run:
-
-```sh
-cargo test --test difftest                 # CI gate: P0 probes + fixed seed range (reproducible)
-cargo test --test difftest -- --ignored    # heavier sweep (fuzz_full_heavy, seeds 0..3000)
-
-cargo build --release --bin chezzi --bin difffuzz
-./target/release/difffuzz --seeds 0..100000          # unattended fuzz (full features)
-./target/release/difffuzz --seed 12345               # reproduce one seed (prints both sources)
-./target/release/difffuzz --seeds 0..5000 --floats   # floats (on by default since W7-37; explicit here)
-```
-
-A finding prints the seed plus both rendered sources and both captures — paste-ready for a bug
-report, reproduce with `--seed N`, then route through `auto-task` → `post-merge-gate`. To accept a
-newly-discovered, deliberately-unfixed divergence, add a narrow matcher to `allowlist.rs` with a
-cited reason.
-
-## DSA known-answer harness (`judge/`)
-
-A third oracle, complementary to the two above. The differential generator (`src/difftest/`) is
-correct **by construction** — it deliberately keeps every int in a safe window so it never trips
-overflow, never recurses, and only emits a cross-language-safe subset. That safety is exactly its
-blind spot: real algorithms live at the edges it avoids. The DSA harness runs **hand-written
-competitive-programming solutions** (deep recursion, big-int boundaries, heavy `List`/`Map`/`Set`
-churn, grids, slicing) against **known-correct answers** — so it catches *shared wrongness* invisible
-to both the VM's own implementation and CPython, with an oracle that depends on neither.
-
-- **Source of truth:** the CSES Problem Set. Each `judge/problems/<slug>/solution.chz` is a
-  hand-written Chezzi solution reading stdin competitive-style (`std.io.read_line`). It is **vetted
-  once** against the published answer; after that, any divergence on re-run is a candidate Chezzi
-  regression.
-- **Test cases:** committed **public samples** (from the statement) under
-  `judge/problems/<slug>/samples/*.in`/`.out`, plus generated/official cases under
-  `judge/data/<slug>/` (gitignored). The main path generates them (see below); official CSES hidden
-  data is the authors' IP (gated/solve-first, no API) — drop it into `judge/data/` by hand if you have
-  it. `judge/fetch_problem.py <url>` scaffolds a new problem from its public statement + samples.
-- **The harness is itself written in Chezzi** (`judge/run.chz`) — dogfooding: the judge is one more
-  real program exercising the language, and it mirrors the `benches/run.chz` driver pattern. It shells
-  out per case via `sh -c "timeout N chezzi run solution.chz < case.in"` (`std.process` has no stdin
-  piping yet, so the case input is fed by shell redirection), so a solution that hangs (`TIME`),
-  hard-crashes, or panics the host (`PANIC`) is isolated and reported instead of taking down the run.
-  Output is compared whitespace-normalized (CSES checkers are whitespace-insensitive).
-
-**Self-contained generated oracle (no download).** The primary path needs no CSES data at all: each
-problem ships `gen.py` (random input within the problem's stated range/domain) and `reference.py` (an
-**independent** Python implementation — ideally a brute force that's obviously correct on small inputs,
-plus a fast path for large stress inputs). `judge/generate.py` feeds the same input to both and writes
-`judge/data/<slug>/` (gitignored); `run.chz` diffs the Chezzi solution against the Python oracle — a
-self-contained Chezzi-vs-Python differential. The oracle uses a *different algorithm* than the solution
-(e.g. union-find vs flood-fill, sequence-enumeration vs DP) so an agreeing pair can't be hiding a shared
-bug. Seeded with 12 problems (11 CSES + 1 Codeforces) spanning loop/bigint, Set, Map, DP+mod, grid
-flood-fill, string iteration, modular loops, sort+i64, and 2^n recursion; 318 committed + generated
-cases run clean.
-
-How to run:
-
-```sh
-cargo build --release
-python3 judge/generate.py [--count N]                      # synthesize in-domain cases (no download)
-./target/release/chezzi run judge/run.chz                  # all problems (samples + generated cases)
-./target/release/chezzi run judge/run.chz weird_algorithm  # one problem
-./target/release/chezzi run judge/run.chz --samples-only    # committed samples only (the cargo gate)
-python3 judge/fetch_problem.py <url> [slug]                # scaffold a new problem from its statement
-```
-
-`tests/judge.rs` gates the harness on every `cargo test` (type-check + the committed samples).
-
-A non-`PASS` verdict on a vetted solution is a candidate bug: minimize the failing `.in`, then land a
-failing-then-green unit test per the repo's TDD flow before fixing. Verdicts: `PASS` / `WRONG` (prints
-the first differing line) / `FAULT` (Chezzi runtime error + exit code) / `PANIC` (Rust host panic — a
-Chezzi bug for certain) / `TIME` (timeout). A problem with no cases is **skipped**, never failed, so
-the harness is inert until samples are committed or data is fetched.
-
-## Seeded scheduler oracle (`src/schedfuzz/`)
-
-A fourth oracle, replacing the race-finding job the removed `--serial` engine used to do
-(`docs/design/roadmap.md` §2b). The three oracles above never vary the SCHEDULE — the CPython/DSA
-differentials compare shared wrongness across one fixed run each, and the two-worker-count gate
-(`tests/chezzi_threads_cli.rs`) is two fixed schedules, not an explored space. Every scheduler/netpoller
-race found this project year (W8-7, W8-8, W11-4, W13-26/27/28, W15-1) was found by a person running a
-hand-built program against Go, not by a mechanical oracle — this is the mechanical replacement.
-
-**How it works.** `CHEZZI_SCHED_SEED=<u64>` (`src/vm/sched_seed.rs`) makes every scheduler free choice
-— which fiber a pop returns, the step-0/steal cadence, `handoff_wake`'s `runnext` coin flip, the reds
-refill — come from a seeded PRNG. At `CHEZZI_THREADS=1` this replays the SAME seed to the SAME
-schedule, byte-for-byte for channel waits and at a measured rate for the waits W15-10 lists (see the
-limit below); at `CHEZZI_THREADS>=2` it also
-injects random yields/spins/sleeps at every sync point, widening real OS-thread race windows the way
-loom/shuttle-style fuzzing does.
-
-**Run it:**
-
-```sh
-cargo build --release --bin schedfuzz --bin chezzi
-target/release/schedfuzz --seeds 1..33 --threads 1,2,0                   # default corpus sweep (0 = default worker count too — W15-1 only reproduces there)
-target/release/schedfuzz --program tests/sched_seed/interleave.chz       # one program
-```
-
-A finding prints `FINDING kind=<hang|panic|rc|output> seed=<S> threads=<T> program=<path> replay:
-CHEZZI_SCHED_SEED=<S> CHEZZI_THREADS=<T> chezzi <test|run> <path>` — paste the `replay:` clause
-verbatim to reproduce. Every run is judged against an UNSEEDED baseline of the SAME fixed binary
-(never a mutant's own run), so a target that already hangs unseeded is still comparable. The baseline
-samples `BASELINE_REPS = 5` unseeded reps at the SWEPT worker count: a target whose reps disagree on
-stdout only turns `check_output` off for it, while reps that disagree on rc, or that time out, or that
-panic, mark the whole target `UNSTABLE` and skip it rather than score it.
-
-**Replay a single failing seed directly**, without the harness:
-
-```sh
-CHEZZI_SCHED_SEED=12345 CHEZZI_THREADS=1 cargo run -- run <file>
-```
-
-**Replay limit (measured 2026-09-22/23, release binary; W15-2 fixed 2026-09-23, TICKET-168).** T=1
-replay has two limits. (1) Since TICKET-205 and TICKET-206 it is byte-for-byte for the six wait
-shapes of `tests/sched_seed_cli.rs::the_same_seed_replays_byte_for_byte_at_one_worker` (a fiber-owned
-nested fan-out, a flat fan-out, a body `recv` on a rendezvous and on a bounded channel, a body
-`wait:`, a `send` inside a native callback): 80/80 on each, idle, under 8 and under 40
-CPU hogs (seeds 1-8 x 10 runs, release; base was 22-80 of 80). A gated thread picks and draws only
-while it holds the runner permit, the waker queues the woken thread, and a gated worker queues its
-own next turn before it releases the permit (`docs/reference/concurrency.md`). It stays a MEASURED RATE for
-the waits `docs/contributing/gaps.md` **W15-10** lists: an in-place nursery join, a `Shared` guard wait, an
-`Executor` join and job start, and a `recv` and a `wait:` inside a native callback (80 of 80 idle, a
-rate under 40 hogs). Pinned to one core (`taskset -c 3`) two callback fixtures also
-replay at a rate; W15-10 carries the numbers. (2) Timers, sockets, blocking natives and eager-nursery programs are outside what the
-RNG stream covers at all — only the sync-point-gated fan-out fixtures are measured.
-
-**Owner decision 2026-10-05: the seed is a fuzzer first.** Byte-for-byte T=1 replay is not required for every wait kind. A wait that replays exactly today stays in `FIXTURES`, and seeded mode still adds no seeded-only gate, queue or park path. The waits W15-10 lists stay rate fixtures in `tests/sched_seed/open/`. A fix that makes one of them exact ships only if unseeded runs pay nothing for it: release, interleaved, n >= 5, `tests/shared_update_contention.rs`, `benches/sched/rendezvous_pingpong.chz` and `examples/primes_parallel.chz` at T=1/2/0 inside base's spread. TICKET-209 measured both candidate fixes outside that spread: a direct `Shared` guard hand-off cost 7.6x at T=1 (225 ms against 29 ms), and the exact nursery-join fix about 2x (67 ms against 34 ms).
-
-**Mutation-testing results, all release binary, `--seeds 1..257 --threads 1,2,0` (0 = default/28
-cores this box), full table + method: TICKET-167 `## Thread`.**
-
-| mutation | fix reverted | T=1 | T=2 | default | note |
-|---|---|---|---|---|---|
-| W15-1 (TICKET-166, `0ff6a8b9`) | `close()` wakes a parked netpoller op | not found (0/256) | not found (0/256) | **found, 152/256** | only the default worker count reproduces this race at all — unseeded is 62/64 at default vs. 0/64 at T=1/T=2 too; seeding does not widen the low-count window, it only replays what default-count OS jitter already opens |
-| TICKET-128 (`owner_scope_done`) | the T=1 hang the debug smoke test gates on | not found (0/256) | not found (0/256) | not found (0/256) | masked on RELEASE at every count tried (the debug build's smoke gate is red on this same mutation — optimization changes the race window) |
-| W14-39 (TICKET-135, `a5b87cb5`) | cancel-unwind orphaning a nested child | **found, 217/256** | **found, 78/256** | not found (0/256) | seeded rate is LOWER than unseeded at both T=1 (84.8% vs 100%) and T=2 (30.5% vs 46.9%) — seeding replays a jitter-found failure here too, it does not widen past it |
-
-**Standing limit, stated for both mutations that DID reproduce:** as landed, seeded perturbation does
-not widen either race's window past what unseeded OS-thread jitter already finds at the SAME worker
-count. Seeding buys a replay at T=1 only — never at T>=2. At T=1 the same seed reruns
-the same choice sequence, so a T=1 finding replays byte-for-byte for the channel-wait shapes and at a
-measured rate for the rest (see "Replay limit" above). At
-T>=2 the seed drives random yields/spins/sleeps at the sync points, but real OS-thread timing still
-decides the outcome, so the same seed is NOT guaranteed to reproduce a T>=2 finding — W14-39's T=2
-column (78/256) is a run-to-run RATE over the 256-seed sweep, not a per-seed guarantee. Either way it
-is not a wider net than raw multi-run unseeded fuzzing at low worker counts — valuable for a bisect or
-a CI repro, not for finding races unseeded fuzzing can't already reach. Widening the net further would
-mean perturbation at more or different sync points; not attempted here.
-
-**What it already found on `main`:** W15-3 (`docs/contributing/gaps.md`) — a `write` parked on a `Socket` that
-another task then `close()`s can return `?v` instead of TICKET-166's error, at `CHEZZI_THREADS=1`,
-12/16 seeds in the first sweep, 0/10 unseeded at the same worker count. The socket write path was not
-covered by TICKET-166's listener-accept fix.
-
-**Fixed: a harness false positive that used to cry wolf on a clean tree, twice over.** `corpus()`
-includes any `examples/*.chz` with a sibling `.expected` and a concurrency keyword. Three problems
-compounded: (1) `measure_baseline` sampled only ONE unseeded run at T=1 and ONE at T=2 — REGARDLESS
-of the worker count the job it judged actually used — so a job run at `CHEZZI_THREADS=0` (the
-default) was judged against a baseline that never ran at that count at all, and a flaky exit code
-could read as stable on luck alone; (2) even a correctly-measured unseeded baseline cannot bound
-byte-exactness for a program that SPAWNS a separate printing task, because `chezzi run`'s cross-task
-print order is nondeterministic BY CONTRACT (`docs/reference/concurrency.md` "Output ordering: streaming CLI
-vs buffered sink") — a first fix read this off a `spawn`/`Executor` keyword and silenced the output
-check on 42 of 46 examples (`contains("spawn")` also matched comments), which is worse than the false
-findings it hid; (3) the sweep's OWN concurrent job load creates enough CPU contention to make a
-wall-clock-ratio-gated Chezzi test flake, unrelated to scheduling at all.
-
-Landed fix (`src/schedfuzz/mod.rs`): `measure_baseline` now takes a `threads` argument and runs
-`BASELINE_REPS = 5` unseeded reps ALL AT THAT COUNT — the same one the job it judges will use — never
-a hardcoded T=1/T=2 pair; the `(target, threads)` cache key already existed, it just wasn't being fed
-the right baseline. `target_for` no longer reads any keyword — it always loads a sibling `.expected`,
-and whether the output check is actually trusted is decided purely by SAMPLING: a stable exit code
-with disagreeing stdout across the `BASELINE_REPS` turns off `check_output` without marking the whole
-target `UNSTABLE`, so hang/panic/rc checks stay live. This sampled check does not bound
-`parallel_cross_nursery_ok.chz`-class divergence (measured 0/40 unseeded `CHEZZI_THREADS=2`, yet a
-real race) — a `KNOWN_TARGETS` list (`src/schedfuzz/mod.rs`) now skips such targets BY FILE NAME on a
-default (no `--program`) sweep, citing the `docs/contributing/gaps.md` row that explains each: **W15-4** for six
-programs whose printing crosses a `spawn`/`Executor` boundary (the documented contract itself, not a
-bug), **W15-5** for two wall-clock-ratio-gated `tests/chz` files that flake under the sweep's own CPU
-contention (measured: `regex_test.chz` 1/10 unseeded under SUSTAINED sibling load, 0/30 with none),
-and one entry each for the still-open **W15-3** (net), **W15-6** (a generator-over-channel hang) and
-**W15-7** (a cancel-propagation hang) so a routine sweep does not keep re-reporting an already-filed
-bug as new. `--program <path>` bypasses the skip list — it always runs the target you name. A
-`KNOWN_TARGETS` entry currently skips the WHOLE target, so it also drops that target's hang, panic and
-rc checks, not just the output check its reason names; an output-only skip (leaving the other three
-live) is the upgrade path, not yet built.
-
-Measured 2026-09-23, `--seeds 1..17 --threads 1,2,0`, four full corpus sweeps across the two fixes:
-the first (worker-count-blind baseline, keyword-gated `.expected`) flagged `output` findings only on
-`try_recv.chz`/`parallel.chz`/`parallel_cross_nursery_ok.chz`/`channel.chz`/`channel_block.chz`,
-`rc`/`hang` findings on `regex_test.chz`/`generator_channel_test.chz`, and printed
-`nested_nursery_open_outer_body_test.chz` as `UNSTABLE` (a SKIP, not a finding — its old T=1/T=2-mixed
-baseline sample happened to disagree). After the worker-count fix, the SAME `nested_nursery_open_outer_body_test.chz`
-row is no longer a lucky `UNSTABLE` skip: judged at its own swept `T=2`, its baseline is stable and its
-wall-clock-ratio flake now scores as a real `rc` finding, joining `regex_test.chz` in **W15-5**. After
-both fixes and the `KNOWN_TARGETS` skip list, a clean-tree sweep reports 0 unexplained findings and
-exits 0:
-
-```
-done: 177 targets, 8496 runs, 0 finding(s), 0 unstable, 11 known
-```
-
-every remaining divergence is either the documented contract (**W15-4**), a
-load-sensitive test-infra flake (**W15-5**), or an already-filed bug (**W15-3**, **W15-6**, **W15-7**).
+| **Generics** | turbofish at declaration vs use site; nested (`Map[str,List[int]]`); return-only parameter inference (`empty[T]()`); generic methods and static methods; protocol bounds and a bound method called on a type parameter; recursive generic enums; arity mismatch -> clean error, not panic |
+| **`match`/enums** | exhaustiveness with guards (`A if c` must NOT close A) and refutable payloads (`?0`, `Pair(0,y)` must NOT close); a nested single-variant pattern IS irrefutable; or-pattern binding consistency; redundant arms; range patterns; divergent arms of a match expression |
+| **Closures/defer/recover** | loop-variable capture (a fresh cell per iteration, never late binding); by-reference capture (a closure write is visible outside); a plain capture into a `spawn` is a per-task copy; escaping closures; a `defer` block sees the latest value, `defer f(x)` evaluates args eagerly; `recover` catching overflow, index and div0; re-panic inside `recover` |
+| **Namespace/import gating** | redeclare a builtin type (`struct int`, `List`, `Socket`, `range`); a bare std type without `import` -> import hint; `import X from M` for a pure type; shadowing a builtin name by a variable, parameter, type parameter or field |
+| **Import/path resolution** | cwd sensitivity; nested `chezzi.toml` (entry root and import root must agree); dotted paths; a directory and a file with the same name; diamond re-import (the top level runs once); a local module that shadows a `std.*` name; entrypoint `:fn` suffix forms; transitive-error attribution |
+| **Numeric/string/collection** | overflow at `*`, `pow`, shifts, `abs(MIN)`, fold; float `-NaN` through a format spec; div/mod sign and by-zero; slice negative step, out of bounds, step 0; unicode index and len; aliasing (`b := a`, list of lists, a captured list mutated); NaN/inf in sort, keys and compare |
+
+### Procedure gotchas
+
+- **Check the CLI with `cargo run --release --bin chezzi -- …`, never a hard-coded `target/` path.**
+  Auto-task worktrees redirect `target-dir` to `~/.cache/chezzi-target`; main builds to `./target`. A
+  hard-coded path can serve a stale worktree binary and show a fake bug. `cargo build` can print
+  "Finished" while the artifact on disk is stale. The repo has four binaries, so `cargo run` needs
+  `--bin chezzi`.
+- **A passing `ok()`/`check_src` unit test does not prove the CLI correct.** `check_src` runs no
+  desugar and one module. The CLI runs `build_graph` (with desugar), then `check_graph` (module-scoped
+  keys). Guard a finding with `check_entry`/`entry_ok`, which go through both, and confirm it on the
+  CLI binary.
+- **Prove each fix against its neighbours: an over-broad fix over-rejects.** Two fixes once closed the
+  reported hole and also rejected a legal neighbour (a nested single-variant match; a push on a bound
+  parameter). Add a failing-then-green test for the boundary case the fix must NOT break.
+- **A green golden suite is necessary, not sufficient.** It proves the VM matches its own recorded
+  output. The spec and CPython are the external check for shared wrongness.
 
 ## Load hygiene for synthetic-load experiments
 
-Any synthetic-load generator (a loop that repeatedly spawns `chezzi` processes, a `yes`, anything
-meant to hold the box's CPU contended for a measurement) must run under a single named scope:
+Run each synthetic-load generator (a loop that spawns `chezzi` processes, a `yes`, any CPU hog for a
+measurement) under one named scope:
 
 ```sh
 systemd-run --user --scope --unit=<name> -- bash -c 'while true; do ...; done'
 ```
 
-and be torn down with:
+Tear it down with:
 
 ```sh
 systemctl --user stop <name>
 ```
 
-Never start one as a bare background `while` loop. `pkill -9 -f "<pattern>"` kills the PROCESSES the
-loop spawns, not the loop itself — the loop just respawns them, and every later measurement on the
-box (this ticket's own included) is then silently taken under load nobody intended. This is what
-produced **W15-8**: 28 orphaned `while true; do CHEZZI_THREADS=2 timeout 3 chezzi test
-tests/chz/stdlib/regex_test.chz; done` loops plus 4 `yes` processes, left over from an earlier load
-experiment whose `pkill` had only killed the spawned test processes, held `uptime` load at 33-34 for
-hours and made an unrelated test misread as a flaky regression. `systemd-run --scope` ties the whole
-tree to one cgroup that `systemctl stop` tears down in one shot, loops included.
+Do not start one as a bare background `while` loop. `pkill -9 -f "<pattern>"` kills the processes the
+loop spawns, not the loop, and the loop respawns them. Every later measurement then runs under load
+that nobody intended (gaps row **W15-8**; record in
+[`bug-discovery-records.md`](../history/bug-hunts/bug-discovery-records.md#load-hygiene-the-w15-8-incident)).
+`systemd-run --scope` puts the whole tree, loops included, in one cgroup that `systemctl stop` removes.

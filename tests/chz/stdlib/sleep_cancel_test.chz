@@ -1,7 +1,7 @@
 # tests/chz/stdlib/sleep_cancel_test.chz — W7-16: a wait whose DEADLINE WE OWN is a *continuous*
 # cancellation checkpoint, not merely an entry one.
 #
-# Contract (`docs/reference/concurrency.md` §cancellation points): `time.sleep_ms` and a `time.timer(ms)`
+# Contract (`docs/reference/concurrency/` §cancellation points): `time.sleep_ms` and a `time.timer(ms)`
 # channel's `recv` observe a cancel for the whole duration of the wait — in a `parallel:` nursery, in
 # an eager `Executor` job, and on the top-level `main` thread — and the cancelled task still unwinds
 # through its `defer`s. A genuinely syscall-blocking native (`fs.*`, `request*`, `process*`, `io.*`)

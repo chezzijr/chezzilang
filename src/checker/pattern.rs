@@ -946,7 +946,7 @@ impl Checker {
                             }
                         }
                         // A variant is `covered` ONLY when an arm for it is BOTH unguarded AND has an
-                        // all-irrefutable payload (docs/reference/syntax.md §8: a guarded arm is never
+                        // all-irrefutable payload (docs/reference/syntax/ §8: a guarded arm is never
                         // irrefutable). Duplicate-arm detection fires only against a PRIOR fully
                         // closing arm, so a guard-then-fallback on the same variant is legal.
                         let variant = crate::ast::unprivate(name);

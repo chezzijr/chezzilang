@@ -5,9 +5,9 @@
 //!
 //! The table in `docs/contributing/gaps.md` is the source of truth: one `| **W<wave>-n** |` row per OPEN row (a
 //! closed row is struck as `| ~~**W<wave>-n**~~ |` and stops matching, and a closed row now lives in
-//! `docs/history/bug-hunts/gaps-archive.md`). The filter was `| **W8-` until 2026-09-20, when the ledger split left it
+//! `docs/history/bug-hunts/closed-rows.md`). The filter was `| **W8-` until 2026-09-20, when the ledger split left it
 //! holding open rows from W8 through W14; a wave-scoped filter would have counted 2 of 11. The two prose counters —
-//! `docs/contributing/gaps.md`'s section header and `docs/status-and-roadmap.md`'s ledger paragraph (moved there from `CLAUDE.md`) — must equal it.
+//! `docs/contributing/gaps.md`'s section header and `PROGRESS.md`'s ledger paragraph — must equal it.
 
 use std::fs;
 
@@ -45,12 +45,9 @@ fn open_row_counters_agree_with_the_gaps_table() {
         "docs/contributing/gaps.md's section header disagrees with its own table ({rows} unstruck `| **W8-n** |` rows)"
     );
     assert_eq!(
-        claimed(
-            &read("docs/status-and-roadmap.md"),
-            "docs/status-and-roadmap.md"
-        ),
+        claimed(&read("PROGRESS.md"), "PROGRESS.md"),
         rows,
-        "docs/status-and-roadmap.md's ledger count disagrees with docs/contributing/gaps.md's table ({rows} unstruck rows) — \
+        "PROGRESS.md's ledger count disagrees with docs/contributing/gaps.md's table ({rows} unstruck rows) — \
          re-derive it with: grep -c '^| \\*\\*W' docs/contributing/gaps.md"
     );
 }
@@ -74,18 +71,18 @@ fn a_row_that_says_closed_is_struck() {
     );
 }
 
-/// `docs/reference/concurrency.md`'s deadlock-vs-Go's-`fatal error` bullet must say the Chezzi verdict is FATAL
+/// `docs/reference/concurrency/02-channel.md`'s deadlock-vs-Go's-`fatal error` bullet must say the Chezzi verdict is FATAL
 /// (TICKET-135, D1): a top-level `recover:` around a `parallel:` deadlock aborts at rc=1 like Go's
 /// `fatal error`. The bullet must name `recover` and state the verdict is fatal, next to the Go
 /// comparison.
 #[test]
 fn concurrency_doc_deadlock_bullet_states_the_verdict_is_fatal() {
-    let doc = read("docs/reference/concurrency.md");
+    let doc = read("docs/reference/concurrency/02-channel.md");
     let start = doc
         .find("**`recv` on an empty channel BLOCKS**")
         .unwrap_or_else(|| {
             panic!(
-                "docs/reference/concurrency.md: no `recv on an empty channel BLOCKS` bullet found"
+                "docs/reference/concurrency/02-channel.md: no `recv on an empty channel BLOCKS` bullet found"
             )
         });
     let rest = &doc[start..];
@@ -96,11 +93,11 @@ fn concurrency_doc_deadlock_bullet_states_the_verdict_is_fatal() {
     let bullet = &rest[..end];
     assert!(
         bullet.contains("recover"),
-        "docs/reference/concurrency.md's deadlock-vs-Go bullet must mention `recover`: {bullet}"
+        "docs/reference/concurrency/02-channel.md's deadlock-vs-Go bullet must mention `recover`: {bullet}"
     );
     assert!(
         bullet.contains("FATAL"),
-        "docs/reference/concurrency.md's deadlock-vs-Go bullet must state the Chezzi verdict is FATAL: {bullet}"
+        "docs/reference/concurrency/02-channel.md's deadlock-vs-Go bullet must state the Chezzi verdict is FATAL: {bullet}"
     );
 }
 

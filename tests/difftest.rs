@@ -111,7 +111,7 @@ fn p0_shim_div_mod_negatives() {
     }
 }
 
-/// Float `/` is total IEEE-754 in Chezzi (`docs/reference/spec.md:472`): a zero divisor is `inf`/`-inf`/`NaN`,
+/// Float `/` is total IEEE-754 in Chezzi (`docs/reference/spec/`): a zero divisor is `inf`/`-inf`/`NaN`,
 /// never a fault — a DELIBERATE divergence from CPython, which raises `ZeroDivisionError` on the
 /// same expression (Chezzi follows Rust/Go here, confirmed by the project owner 2026-08-07). The
 /// shim's `_chz_fdiv` absorbs this, exactly like `_chz_div`/`_chz_mod` absorb truncating int
@@ -219,7 +219,7 @@ fn p0_mixed_int_float_compare_above_2_53() {
     }
 }
 
-/// Float `%` is `fmod` in Chezzi — sign follows the DIVIDEND (`docs/reference/spec.md`) — and total (never
+/// Float `%` is `fmod` in Chezzi — sign follows the DIVIDEND (`docs/reference/spec/`) — and total (never
 /// faults), same two properties `p0_shim_float_div_signed_zero` pins for `/`. Two things a careless
 /// edit would break, both pinned here:
 ///

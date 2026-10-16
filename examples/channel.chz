@@ -6,7 +6,7 @@
 # `channel.expected`'s exact line order is the BUFFERED test sink (every lib helper), where a task's
 # output is flushed at the join in spawn order.
 # `chezzi run` STREAMS: cross-task print order is nondeterministic by contract
-# (docs/reference/concurrency.md, "the user-facing contract"), so diffing streamed CLI output against the
+# (docs/reference/concurrency/, "the user-facing contract"), so diffing streamed CLI output against the
 # golden is not a supported comparison — the M:N golden asserts the line SET (`assert_same_lines`).
 
 fn worker(id: int, prefix: str, out: Channel[str]):

@@ -76,7 +76,7 @@
 >   FLAKY, and the rate climbed with width: T=1 0/30 deadlock, T=2 7/30, T=4 22/30, T=8 30/30. Both
 >   shapes are now green at every worker count 1/2/4/8, 30/30 runs each (TICKET-099, `## Thread`).
 >
-> Cross-refs: [`concurrency.md §11`](../../reference/concurrency.md),
+> Cross-refs: [`concurrency.md §11`](../../reference/concurrency/01-model.md),
 > [`concurrency-tier-d.md`](concurrency-tier-d.md), `PROGRESS.md`.
 
 ## 1. The problem in one sentence

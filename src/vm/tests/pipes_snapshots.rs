@@ -46,7 +46,7 @@ fn iter_sum_delegates_and_empty_is_zero() {
     assert_eq!(pout, "6\n0\n", "M:N");
 }
 
-/// The verbatim docs/reference/syntax.md §11 pipe example must run and print 60.
+/// The verbatim docs/reference/syntax/ §11 pipe example must run and print 60.
 #[test]
 fn docs_syntax_pipe_example_runs_on_both_engines() {
     let src = "\

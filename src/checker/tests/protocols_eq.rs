@@ -2641,7 +2641,7 @@ xs.sort()
 // directions by measurement — a `compare` covering every field in declaration order agrees with
 // structural `==` exactly (the rule would fire, wrongly), while the repo's own motivating `Ver`
 // DOES define both and still disagrees (the rule would not fire). **Rust owns this** and permits a
-// manual `Ord` beside a derived `Eq` — a clippy lint, not an error. `docs/reference/syntax.md` already
+// manual `Ord` beside a derived `Eq` — a clippy lint, not an error. `docs/reference/syntax/` already
 // concedes the checker cannot verify the coherence the rule pretended to enforce.
 //
 // The two surviving halves of those tests — the BARE wordings, which are now the only wordings —

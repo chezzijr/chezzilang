@@ -1,5 +1,5 @@
 //! W13-8: `shutdown_now()` must cancel a job's nursery child parked on a blocking `recv`, since
-//! `recv` is a documented cancellation point (`docs/reference/concurrency.md`: `shutdown_now()` "ask[s]
+//! `recv` is a documented cancellation point (`docs/reference/concurrency/`: `shutdown_now()` "ask[s]
 //! running jobs to stop at their next cancellation point"). Instead the nursery's own deadlock
 //! detector fires first and faults the whole run with `deadlock: ...`, before `shutdown_now()`
 //! gets a chance to cancel the child. Go's `select`+`cancel()` equivalent completes.

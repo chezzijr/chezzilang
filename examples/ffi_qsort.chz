@@ -12,7 +12,7 @@
 # `const void*` slots line up with the stored elements on every LP64 unix.
 import std.ffi
 
-# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax.md §12b).
+# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax/ §12b).
 
 extern "libc":
     fn qsort(base: ffi.ptr, n: int, size: int, cmp: fn(ffi.ptr, ffi.ptr) -> int)

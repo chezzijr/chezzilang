@@ -724,7 +724,7 @@ fn main():
     print(m[\"k\"])
 main()";
     // x: 100*3=300 /2=150 %40=30 &12=12 |1=13 ^5=8 <<2=32 >>1=16, hand-computed under Chezzi's
-    // OWN int semantics (`/` truncates by design, docs/reference/syntax.md:1982) — NOT CPython-verified:
+    // OWN int semantics (`/` truncates by design, docs/reference/syntax/) — NOT CPython-verified:
     // measured, CPython's `/=` always promotes to float (`100*3/2` → `150.0`), so `x &= 12` two
     // steps later raises `TypeError: unsupported operand type(s) for &=: 'float' and 'int'`; the
     // sequence can't even run to completion under CPython's semantics, let alone match this golden.

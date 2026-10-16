@@ -146,7 +146,7 @@ test fn min_mod_zero_and_min_div_neg_one_still_fault():
         !e: assert e.message() == "integer overflow in Div"
 
 test fn ordinary_mod_sign_unaffected():
-    # pinned against measured Go 1.26 / this project's documented policy (docs/reference/spec.md's integer
+    # pinned against measured Go 1.26 / this project's documented policy (docs/reference/spec/'s integer
     # overflow policy note): `%` follows the DIVIDEND's sign (Rust/C/Go), NOT Python's floored `%`
     # (which follows the divisor — measured -7 % 3 == 2, 7 % -3 == -2 in Python on this box). This task
     # must never move the sign.

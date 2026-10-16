@@ -8,7 +8,7 @@
 > ([`concurrency-tier-d.md`](concurrency-tier-d.md)), which rebuilt `--parallel` as an M:N
 > work-stealing scheduler on top of B3's share-nothing OS-thread foundation. This file is retained as
 > the persistent source of truth for **B3** — the original phased plan plus condensed landing notes.
-> The high-level A/B roadmap lives in [`concurrency.md` §9](../../reference/concurrency.md#9-implementation-roadmap-c1c5);
+> The high-level A/B roadmap lives in [`concurrency.md` §9](concurrency-roadmap.md#9-implementation-roadmap-c1c5);
 > read `concurrency.md` §2 (tier table), §4 (staged executor), §5–§7 (Channel/Shared/sendability) for
 > companion context. Line references were anchors at authoring time — re-grep by symbol name if drifted.
 >
@@ -23,7 +23,7 @@
 
 Make `parallel:` / `spawn` / `Channel[T]` / `Shared[T]` / `Executor` run on **real OS threads** —
 true multicore — with the **surface completely unchanged**. This is Tier C from
-[`concurrency.md` §2](../../reference/concurrency.md#2-why-shared-nothing-and-why-not-the-go-memory-model):
+[`concurrency.md` §2](../../reference/concurrency/01-model.md#2-why-shared-nothing-and-why-not-the-go-memory-model):
 shared-nothing threads + channels, **no `Rc`→`Arc` on `Value`, no concurrent GC**.
 
 **The invariant that makes it cheap:** each worker thread owns its **own heap + its own mark-sweep
@@ -386,10 +386,10 @@ B4 (real `Shared`) and B5 (real `Executor` pool) are **folded into** B3 (B3.4–
 after it, because under shared-nothing threads they *are* the same machinery. The alternative bet —
 Tier-A-only (richer cooperative scheduler, no real parallelism) — is **not pursued**: B1/B2 already shipped
 the cooperative engine, and the remaining demand is genuine multicore. Items deliberately *not* in B3–B5
-live in the [`concurrency.md` "Deferred / backlog"](../../reference/concurrency.md#11-deferred--backlog-not-b3b5) section.
+live in the [`concurrency.md` "Deferred / backlog"](concurrency-roadmap.md#11-deferred--backlog-not-b3b5) section.
 
 **I/O-bound concurrency is explicitly NOT a B3 goal.** B3 delivers CPU-bound multicore; a blocking-I/O task
 pins its pool thread (risk G3). Smart I/O handling — an elastic blocking pool or a full **M:N scheduler +
 async-I/O pollset** — is the **Tier-D post-B3 frontier**
-([`concurrency.md` §10](../../reference/concurrency.md#10-future-evolution); shipped in
+([`concurrency.md` §10](concurrency-roadmap.md#10-future-evolution); shipped in
 [`concurrency-tier-d.md`](concurrency-tier-d.md)).

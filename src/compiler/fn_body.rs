@@ -179,7 +179,7 @@ impl Compiler {
             // Patched below once the body's length is known.
             let jump_at = fc.code.len();
             fc.emit(Op::JumpIfProvided(i as u32, usize::MAX), span);
-            // **The default is evaluated in MODULE scope, not the callee's.** `docs/reference/syntax.md`: "a
+            // **The default is evaluated in MODULE scope, not the callee's.** `docs/reference/syntax/`: "a
             // default is evaluated on its own, where parameters are not in scope" — and the provider
             // `fn` that serves every reachable call site is a free top-level function, so it resolves
             // its free names against the module's globals. This prologue must give the SAME answer, or

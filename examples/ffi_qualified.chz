@@ -5,7 +5,7 @@
 # Run with: chezzi run examples/ffi_qualified.chz
 import std.ffi
 
-# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax.md §12b).
+# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax/ §12b).
 
 extern "libc":
     fn abs(x: ffi.int32) -> ffi.int32

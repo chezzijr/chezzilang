@@ -1,8 +1,8 @@
 //! Chezzi — a fast, statically-typed, Python-feel scripting language.
 //!
-//! Design spec: docs/reference/spec.md
+//! Design spec: docs/reference/spec/
 //!
-//! Pipeline (built incrementally — see roadmap in docs/reference/spec.md):
+//! Pipeline (built incrementally — see roadmap in docs/reference/spec/):
 //!   source.chz → lexer → parser → checker → compiler → bytecode VM
 //!
 //! Status: pre-M1 scaffold. Subcommands below are stubs.
@@ -77,7 +77,7 @@ fn main() -> ExitCode {
     // `args_os`, not `args`: `std::env::args()` PANICS on a non-UTF-8 argument, so hostile bytes in
     // argv (or in the script path) aborted the CLI with rc=101 before the program ever started.
     // Decoding is LOSSY (invalid bytes → U+FFFD) — argv reaches Chezzi as `str`; documented in
-    // docs/reference/stdlib.md under std.os.
+    // docs/reference/stdlib/ under std.os.
     let args: Vec<String> = std::env::args_os()
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
@@ -815,7 +815,7 @@ fn scaffold_project(dir: &std::path::Path) -> Result<ScaffoldReport, String> {
         "# chezzi.toml — project manifest.\n\
          #\n\
          # This file is BOTH a project ROOT MARKER (module resolution walks up for it; see\n\
-         # docs/reference/spec.md \"Imports & module resolution\") AND a parsed manifest. The toolchain reads\n\
+         # docs/reference/spec/ \"Imports & module resolution\") AND a parsed manifest. The toolchain reads\n\
          # `[project]` keys: `entrypoint` is what a bare `chezzi run` executes — a dotted module\n\
          # path, optionally suffixed with `:function` to call that function directly after the\n\
          # module loads (swap which function runs by editing the part after the colon). Without a\n\
@@ -837,7 +837,7 @@ fn scaffold_project(dir: &std::path::Path) -> Result<ScaffoldReport, String> {
     let main_chz = "# src/main.chz — program entry.\n\
         #\n\
         # chezzi.toml's `entrypoint = \"src.main:main\"` calls `main` for you after this module\n\
-        # loads, so no trailing `main()` call is needed (see docs/reference/syntax.md \"9b. Program entry\").\n\
+        # loads, so no trailing `main()` call is needed (see docs/reference/syntax/ \"9b. Program entry\").\n\
         # Swap the function a bare `chezzi run` invokes by editing the part after the `:`. Run a\n\
         # *file* directly (`chezzi run src/main.chz`) and it is scripting-style: top-level only.\n\
         \n\
@@ -848,7 +848,7 @@ fn scaffold_project(dir: &std::path::Path) -> Result<ScaffoldReport, String> {
 
     let test_chz = "# src/main_test.chz — example test.\n\
         #\n\
-        # `chezzi test` discovers every `test fn` in *_test.chz files (see docs/reference/syntax.md \"9c\").\n\
+        # `chezzi test` discovers every `test fn` in *_test.chz files (see docs/reference/syntax/ \"9c\").\n\
         # Run it with:  chezzi test .\n\
         \n\
         test fn arithmetic():\n\
@@ -862,18 +862,116 @@ fn scaffold_project(dir: &std::path::Path) -> Result<ScaffoldReport, String> {
     Ok(ScaffoldReport { main, main_test })
 }
 
-/// Embedded language documentation, keyed by topic. `include_str!` paths are relative to this file
-/// (`src/main.rs`), so the docs live at `../docs/...`. Bundling them into the binary means
-/// `chezzi docs` works anywhere (no repo checkout), e.g. piping the full reference to an LLM.
+/// Embedded language documentation, keyed by topic. Each topic is the chapter files of its folder
+/// under `docs/reference/<topic>/`, in file-name order. `include_str!` paths are relative to this file
+/// (`src/main.rs`). Bundling them into the binary means `chezzi docs` works anywhere (no repo
+/// checkout), e.g. piping the full reference to an LLM. `tests/doc_fences_lex.rs` fails if a chapter
+/// file is not listed here.
 const DOC_TOPICS: &[(&str, &str)] = &[
-    ("spec", include_str!("../docs/reference/spec.md")),
-    ("syntax", include_str!("../docs/reference/syntax.md")),
-    ("stdlib", include_str!("../docs/reference/stdlib.md")),
+    (
+        "spec",
+        concat!(
+            include_str!("../docs/reference/spec/01-overview.md"),
+            "\n",
+            include_str!("../docs/reference/spec/02-feature-set.md"),
+            "\n",
+            include_str!("../docs/reference/spec/03-imports-and-modules.md"),
+            "\n",
+            include_str!("../docs/reference/spec/04-semantics.md"),
+            "\n",
+            include_str!("../docs/reference/spec/05-conversions.md"),
+            "\n",
+            include_str!("../docs/reference/spec/06-architecture.md"),
+        ),
+    ),
+    (
+        "syntax",
+        concat!(
+            include_str!("../docs/reference/syntax/01-lexical-and-literals.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/02-variables-and-types.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/03-operators.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/04-functions.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/05-function-values.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/06-control-flow.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/07-structs.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/08-generics.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/09-protocols.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/10-protocol-hooks.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/11-enums-and-match.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/12-errors.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/13-testing-and-entry.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/14-strings.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/15-pipe-and-concurrency.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/16-imports.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/17-ffi.md"),
+            "\n",
+            include_str!("../docs/reference/syntax/18-native-decls-and-example.md"),
+        ),
+    ),
+    (
+        "stdlib",
+        concat!(
+            include_str!("../docs/reference/stdlib/01-builtins.md"),
+            "\n",
+            include_str!("../docs/reference/stdlib/02-methods.md"),
+            "\n",
+            include_str!("../docs/reference/stdlib/03-runtime-types.md"),
+            "\n",
+            include_str!("../docs/reference/stdlib/04-native-core.md"),
+            "\n",
+            include_str!("../docs/reference/stdlib/05-native-system.md"),
+            "\n",
+            include_str!("../docs/reference/stdlib/06-native-network-ffi.md"),
+            "\n",
+            include_str!("../docs/reference/stdlib/07-pure-text-data.md"),
+            "\n",
+            include_str!("../docs/reference/stdlib/08-pure-concurrency-utils.md"),
+            "\n",
+            include_str!("../docs/reference/stdlib/09-pure-cli-json.md"),
+        ),
+    ),
+    (
+        "concurrency",
+        concat!(
+            include_str!("../docs/reference/concurrency/01-model.md"),
+            "\n",
+            include_str!("../docs/reference/concurrency/02-channel.md"),
+            "\n",
+            include_str!("../docs/reference/concurrency/03-shared.md"),
+            "\n",
+            include_str!("../docs/reference/concurrency/04-timer-wait.md"),
+            "\n",
+            include_str!("../docs/reference/concurrency/05-cancel.md"),
+            "\n",
+            include_str!("../docs/reference/concurrency/06-blocking.md"),
+            "\n",
+            include_str!("../docs/reference/concurrency/07-sendability.md"),
+            "\n",
+            include_str!("../docs/reference/concurrency/08-executor.md"),
+        ),
+    ),
 ];
 
 /// The topics, in order, that make up the `llms` bundle (`chezzi docs` with no topic): the essentials
-/// an LLM needs to write correct Chezzi — language overview, full syntax, and the library surface.
-const LLMS_BUNDLE: &[&str] = &["spec", "syntax", "stdlib"];
+/// an LLM needs to write correct Chezzi — language overview, full syntax, the library surface and the
+/// concurrency model.
+const LLMS_BUNDLE: &[&str] = &["spec", "syntax", "stdlib", "concurrency"];
 
 fn doc_topic(name: &str) -> Option<&'static str> {
     DOC_TOPICS
@@ -884,7 +982,7 @@ fn doc_topic(name: &str) -> Option<&'static str> {
 
 /// Build the text `chezzi docs <topic>` prints, or a ready-to-print error message. Pure (no I/O) so
 /// it is unit-testable. Topics:
-/// - `llms` / `all` → the full reference bundle (spec + syntax + stdlib + grammar).
+/// - `llms` / `all` → the full reference bundle (every topic in `LLMS_BUNDLE`).
 /// - `topics` / `list` → the available topic names.
 /// - `<topic>` → that one embedded document. Unknown topic / any flag → `Err`.
 fn render_docs(topic: &str) -> Result<String, String> {

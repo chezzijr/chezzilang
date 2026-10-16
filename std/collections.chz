@@ -12,7 +12,7 @@
 # insertion order; std.json's round-trip relies on it). So there is no ordered-map wrapper here — use
 # the builtin `map` directly. (No move-to-end/popitem LRU primitive is provided either; out of scope.)
 #
-# See docs/reference/stdlib.md §5 for the full contract.
+# See docs/reference/stdlib/ §5 for the full contract.
 
 # ============================================================================
 # Heap[T] — a binary heap over a backing `List[T]` with a comparator CLOSURE.

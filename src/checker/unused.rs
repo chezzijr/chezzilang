@@ -5,7 +5,7 @@
 //! pass, pass 2, speculative probes) and calls `lookup` for non-reading purposes; a lexical walk
 //! reads each identifier exactly once.
 //!
-//! The warn/silent table is measured against the runtime (`docs/reference/syntax.md` §"Unused locals warn"):
+//! The warn/silent table is measured against the runtime (`docs/reference/syntax/` §"Unused locals warn"):
 //! candidates are fn-local and block-local `:=`/`let` names and `for` loop variables. Never a
 //! candidate: module-scope bindings (an importer may read them), parameters (Go does not warn),
 //! `match`/`wait:`/comprehension bindings, nested `fn` names, and any `_`-prefixed name. A plain `=`
@@ -62,7 +62,7 @@ impl Scan {
     }
 
     /// Mark the innermost visible binding of `name` read. A same-scope `:=` is a FRESH binding
-    /// (`docs/reference/syntax.md`: a fn-local re-declare is Rust-style shadowing), so the latest one wins.
+    /// (`docs/reference/syntax/`: a fn-local re-declare is Rust-style shadowing), so the latest one wins.
     fn read(&mut self, name: &str) {
         for scope in self.scopes.iter().rev() {
             for &i in scope.iter().rev() {

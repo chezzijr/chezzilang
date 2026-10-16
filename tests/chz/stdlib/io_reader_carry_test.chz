@@ -8,7 +8,7 @@
 # than skipping), `read_bytes` (drains it, a carry-only short read), `lines()` (a pure-Chezzi
 # generator over `read_line`, so it inherits both), `close()` (discards it).
 #
-# WHICH ANCESTOR THIS PINS (measured 2026-08-17 — see the `Reader` section of `docs/reference/stdlib.md`):
+# WHICH ANCESTOR THIS PINS (measured 2026-08-17 — see the `Reader` section of `docs/reference/stdlib/`):
 # NEITHER ancestor's exact mechanics, because neither is available. CPython's `readline()` raises once
 # and then silently reports EOF forever (it loses the valid line before the bad one AND every line
 # after), so "Chezzi should advance like Python" is backwards — Python does not advance, it goes quiet.

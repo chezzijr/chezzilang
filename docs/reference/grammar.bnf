@@ -15,7 +15,7 @@
 # Notation: pure BNF. `<x>` nonterminal, "TOK" terminal (a token class), `::=`, `|`.
 # No `*`/`?` — repetition is written with right-recursion, optionals as explicit alternatives.
 # The expression rules form a precedence cascade (loosest first) mirroring `infix_op`'s binding
-# powers in the parser (see docs/reference/syntax.md §4); the hand parser realizes the same precedence via
+# powers in the parser (see docs/reference/syntax/ §4); the hand parser realizes the same precedence via
 # Pratt binding powers rather than literal cascade recursion.
 #
 # Terminals = exactly the `Token` enum variants, one class each. PIPE ("|>") drives the pipe
@@ -25,7 +25,7 @@
 # one terminal and need NO production here: FLOAT covers scientific notation (`1e3`, `1.5e-9`,
 # `6.022e23` — any exponent makes the literal a float); STR covers both `"…"` and `'…'` quoting
 # and all string escapes including `\u{HEX}` unicode. The exact lexical grammar lives in
-# `src/lexer/mod.rs` + `docs/reference/syntax.md §2/§10`.
+# `src/lexer/mod.rs` + `docs/reference/syntax/ §2/§10`.
 
 # ===== top level =====
 # A file is zero or more statements then EOF. The lexer always emits a trailing NEWLINE before
@@ -601,7 +601,7 @@
 # this production is left-recursive over that shared level, same as any other. What the BNF cannot
 # express: they CHAIN, Python-style. `a < b == c` means `a < b and b == c`, with `b` evaluated
 # exactly once and the chain short-circuiting at the first false link; `(a < b) == c` (parenthesized)
-# stays two ordinary comparisons instead. See `docs/reference/syntax.md` §4 for the semantic rule.
+# stays two ordinary comparisons instead. See `docs/reference/syntax/` §4 for the semantic rule.
 <cmpExpr>  ::= <rangeExpr> | <cmpExpr> <cmpOp> <rangeExpr>
 <cmpOp>    ::= "EQEQ" | "NOTEQ" | "IN" | "LT" | "LTEQ" | "GT" | "GTEQ"
 # Bitwise / shift cascade (gap #13), Python's relative order: `|` looser than `^` looser than `&`
@@ -676,7 +676,7 @@
 # The method-level form `Type.method[T](...)` is a MEMBER-level turbofish and is accepted: it pins the
 # member's OWN type args (`Box.make[str]("hi")`), per the declaration-site rule — a type argument is
 # written where its parameter is declared. It composes with the type-level form
-# (`Box[int].make[str](x)`). See `docs/reference/syntax.md` §7a.
+# (`Box[int].make[str](x)`). See `docs/reference/syntax/` §7a.
 <postfix> ::= <primary>
             | <postfix> "LPAREN" "RPAREN"
             | <postfix> "LPAREN" <argList> "RPAREN"

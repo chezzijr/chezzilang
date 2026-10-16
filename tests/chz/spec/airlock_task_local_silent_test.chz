@@ -180,7 +180,7 @@ test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
     assert r.recv() == "no-fault"
     assert t.s.get() == 5
 
-# Memo-order pin (docs/reference/concurrency.md ceiling 1), known under-fault: a tuple (xs, f), f capturing
+# Memo-order pin (docs/reference/concurrency/ ceiling 1), known under-fault: a tuple (xs, f), f capturing
 # xs, sent in ONE crossing over a Channel — xs is visited FIRST and stays unmarked, so f's own
 # capture aliases the unmarked xs and NEITHER f()'s push nor the direct write to the tuple's own
 # xs element faults. The mirror order (f, xs) faults both, pinned in

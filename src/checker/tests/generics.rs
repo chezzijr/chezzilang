@@ -448,7 +448,7 @@ fn d3_an_annotation_reaches_through_a_collection_literal() {
     // CEILING, second (TICKET-033): the int→float element widen does not reach through a carrier,
     // because the license is computed from the SINK TYPE before `slot_payload` unwraps it — a
     // `List[float]?` sink resolves to `Ty::Option(..)`, on which `float_elem_hint_ty` answers `None`
-    // by construction, never `Ty::List(Float)`. `docs/reference/spec.md` and `docs/reference/syntax.md` document this as
+    // by construction, never `Ty::List(Float)`. `docs/reference/spec/` and `docs/reference/syntax/` document this as
     // deliberate.
     rejects(
         "fn f() -> List[float]?:\n    return [1, 2]\n",
@@ -536,7 +536,7 @@ fn element_widen_still_declines_carrier_nested_and_erased_sinks() {
 
 /// TICKET-094 defect B — the element widen must reach a parameter default, a struct-field default,
 /// a `Map[_, float]` value default and a method default, matching the scalar default's widen and
-/// `docs/reference/syntax.md`'s stated sink list.
+/// `docs/reference/syntax/`'s stated sink list.
 #[test]
 fn d3_element_int_rejected_at_parameter_and_field_defaults() {
     rejects(

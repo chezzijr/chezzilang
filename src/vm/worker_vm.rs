@@ -970,7 +970,7 @@ impl Vm {
         // must be rolled back on that branch (`try_wire_speculative`).
         // TICKET-119: skip the attempt entirely when an EARLIER depth-tripped attempt already proved,
         // by an exact replay argument, that a walk from `h` at this depth or deeper trips no later —
-        // see `docs/reference/concurrency.md`'s depth-guard paragraph and `WireMemo::doomed`.
+        // see `docs/reference/concurrency/`'s depth-guard paragraph and `WireMemo::doomed`.
         if !memo.doomed(h, depth)
             && let Some(w) = self.try_wire_speculative(v, depth, memo, |w| !w.has_handle())
         {

@@ -11,8 +11,8 @@
 use std::fs;
 
 /// Doc paths bundled by `chezzi docs`, derived from `src/main.rs`'s `DOC_TOPICS` entries
-/// (`include_str!("../docs/<topic>.md")`), so the guard tracks the real bundle without a
-/// hand-maintained list.
+/// (`include_str!("../docs/reference/<topic>/<chapter>.md")`), so the guard tracks the real bundle
+/// without a hand-maintained list.
 fn doc_paths() -> Vec<String> {
     let src = fs::read_to_string("src/main.rs").unwrap_or_else(|e| panic!("read src/main.rs: {e}"));
     let needle = "include_str!(\"../docs/";
@@ -29,21 +29,34 @@ fn doc_paths() -> Vec<String> {
     paths
 }
 
+/// Every chapter file under `docs/reference/<topic>/` is bundled, so a new or renamed chapter that
+/// `DOC_TOPICS` misses fails here instead of vanishing from `chezzi docs`.
 #[test]
-fn doc_paths_covers_the_bundled_topics() {
+fn every_reference_chapter_is_bundled() {
     let paths = doc_paths();
-    assert!(!paths.is_empty(), "doc_paths() derived an empty list");
+    let mut chapters = Vec::new();
+    for topic in fs::read_dir("docs/reference").unwrap() {
+        let topic = topic.unwrap().path();
+        if !topic.is_dir() {
+            continue;
+        }
+        for chapter in fs::read_dir(&topic).unwrap() {
+            let chapter = chapter.unwrap().path();
+            if chapter.extension().is_some_and(|x| x == "md") {
+                chapters.push(chapter.display().to_string());
+            }
+        }
+    }
+    assert!(chapters.len() > 20, "found only {chapters:?}");
+    let missing: Vec<&String> = chapters.iter().filter(|c| !paths.contains(c)).collect();
     assert!(
-        paths.contains(&"docs/reference/spec.md".to_string()),
-        "{paths:?}"
+        missing.is_empty(),
+        "chapters not in src/main.rs DOC_TOPICS: {missing:?}"
     );
+    let stale: Vec<&String> = paths.iter().filter(|p| !chapters.contains(p)).collect();
     assert!(
-        paths.contains(&"docs/reference/syntax.md".to_string()),
-        "{paths:?}"
-    );
-    assert!(
-        paths.contains(&"docs/reference/stdlib.md".to_string()),
-        "{paths:?}"
+        stale.is_empty(),
+        "DOC_TOPICS names files outside docs/reference/<topic>/: {stale:?}"
     );
 }
 

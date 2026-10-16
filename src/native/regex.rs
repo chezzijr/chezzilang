@@ -630,19 +630,20 @@ mod tests {
         assert!(e.contains("regex parse error"), "{e}");
     }
 
-    /// W8-6's doc half: `docs/reference/stdlib.md` documented the OLD `Ok('\2/\1')` result. That sentence is now
-    /// false, and prose has no other gate — this one reads the shipped file (`src/main.rs:707` compiles
-    /// the same doc into `chezzi docs`), so a revert of the fix without a revert of the doc fails here.
+    /// W8-6's doc half: the stdlib reference documented the OLD `Ok('\2/\1')` result. That sentence was
+    /// false, and prose has no other gate — this one reads the shipped chapter (`src/main.rs` compiles
+    /// the same file into `chezzi docs`), so a revert of the fix without a revert of the doc fails here.
     #[test]
     fn stdlib_doc_no_longer_claims_the_old_ok_result() {
-        let doc = include_str!("../../docs/reference/stdlib.md");
+        let doc = include_str!("../../docs/reference/stdlib/05-native-system.md");
         assert!(
             !doc.contains(r"Ok('\\2/\\1')"),
-            "docs/reference/stdlib.md still claims replace_all(r\"(\\d+)-(\\d+)\", \"10-20\", r\"\\2/\\1\") returns Ok"
+            "the regex chapter still claims replace_all(r\"(\\d+)-(\\d+)\", \"10-20\", r\"\\2/\\1\") returns Ok"
         );
         assert!(
-            doc.contains("W8-6") && doc.contains("closed 2026-08-27"),
-            "docs/reference/stdlib.md must record W8-6 as closed on 2026-08-27"
+            doc.contains(r#"the same call with `r"\2/\1"` → an"#)
+                && doc.contains("naming the RE2 form (`'$2'`)"),
+            "the regex chapter must state that a Python-style `\\2` replacement is an error naming `$2`"
         );
     }
 }

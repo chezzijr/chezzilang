@@ -1,1 +1,3 @@
 PROGRESS.md merge=union
+docs/history/progress/*.md merge=union
+docs/history/benchmarks/*.md merge=union

@@ -883,7 +883,7 @@ fn golden_parallel_deadlock_still_faults() {
 /// The program's own print order IS deterministic, not a race: every print is causally chained
 /// through a channel handoff (`pong 0` → `a.send(100)` → `a.recv()` → `ping 100` → `b.send(1)` →
 /// `pong 1` → …), and the real CLI's stdout sink is one locked write per `print` — line-atomic, no
-/// per-thread buffering (`docs/reference/concurrency.md:1030`) — so the happens-before chain pins the
+/// per-thread buffering (`docs/reference/concurrency/`) — so the happens-before chain pins the
 /// interleaving exactly there (verified against the release binary: 20/20 runs identical,
 /// `pong 0\nping 100\n…`).
 ///

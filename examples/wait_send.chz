@@ -1,7 +1,7 @@
 # `wait:` SEND-arms — Go-`select` symmetry: an arm `ch.send(v):` fires once the channel can accept
 # the value (bounded-with-space / unbounded / closed → faults, Go's panic analog). Selection is
 # DETERMINISTIC source order (first ready arm wins, recv OR send) — Chezzi's one principled divergence
-# from Go's random fairness. See docs/reference/concurrency.md §6d.
+# from Go's random fairness. See docs/reference/concurrency/ §6d.
 
 fn main():
     # --- Phase A: mixed recv + send + else at top level (single fiber; `else` keeps it non-blocking) ---

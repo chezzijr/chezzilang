@@ -12,23 +12,23 @@ fn main():
     print(greet("chezzi"))
 ```
 
-## Status
+## Docs
 
-**Core language implemented through M24 (still evolving; M19 perf in progress); concurrency shipped through Tier-D.** Currently in
-**M19** (a perf track — optimization-focused).
-- [`PROGRESS.md`](PROGRESS.md) — live milestone tracker (single source of truth for "what's next")
-- [`docs/reference/spec.md`](docs/reference/spec.md) — full language design
-- [`docs/reference/syntax.md`](docs/reference/syntax.md) — syntax cheat-sheet (every construct, by example)
-- [`docs/reference/concurrency.md`](docs/reference/concurrency.md) — concurrency design (`spawn` / `parallel:` / channels)
-- [`docs/contributing/lessons.md`](docs/contributing/lessons.md) — hard-won engineering rules (what green gates cannot see, checker/airlock/test traps) — read before contributing
+- [`PROGRESS.md`](PROGRESS.md): current status and what is next
+- [`docs/README.md`](docs/README.md): index of every doc
+- [Syntax reference](docs/reference/syntax/01-lexical-and-literals.md): every construct, by example
+- [Standard library](docs/reference/stdlib/01-builtins.md)
+- [Concurrency](docs/reference/concurrency/01-model.md): `spawn`, `parallel:`, channels
+- [Lessons](docs/contributing/lessons.md): engineering rules; read them before you contribute
+
+`chezzi docs` prints the full reference.
 
 ## Design at a glance
 
 - **Host:** Rust — no GC, max perf, real memory learning.
 - **Execution:** a bytecode stack VM — the **sole** engine. `chezzi run` runs it on the real-thread
   multicore (M:N) scheduler; size the worker pool with `--threads=N` / `CHEZZI_THREADS` (`0` = all
-  cores). (The tree-walk interpreter and the cooperative single-thread `--serial` engine have both
-  been removed.)
+  cores).
 - **Types:** static with local inference — explicit function signatures, inferred locals (`x := 5`).
 - **Syntax:** indentation blocks (Python-feel).
 - **Errors:** `T!E`/`T?` + `?` — errors as values, no hidden control flow.
@@ -39,12 +39,3 @@ fn main():
 cargo build
 cargo run -- help
 ```
-
-## Roadmap
-
-Shipped: **M1–M18** (lexer → parser → checker → bytecode VM + GC → stdlib → generics + protocols →
-exhaustive `match` → closures/HOF → modules → iterators → `defer`/`recover:`) plus **concurrency
-Tiers A–D** (`spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N
-scheduler + netpoller + `std.net`). **M19** (perf track) is in progress.
-
-Live status + full milestone history: [`PROGRESS.md`](PROGRESS.md). Design: [`docs/reference/spec.md`](docs/reference/spec.md).

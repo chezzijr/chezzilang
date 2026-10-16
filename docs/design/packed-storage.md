@@ -1,10 +1,10 @@
 # Proposal: packed data and numeric kernels
 
-**Status:** design draft. This is an additive experiment; it does not change `struct` or `List[T]` semantics.
+**Status: proposal, not started.** An additive experiment: it does not change `struct` or `List[T]` semantics. The general escape-analysis alternative is [`value-structs.md`](value-structs.md).
 
 ## Goal
 
-Measure whether storing small struct fields inline improves memory use and sequential processing enough to justify a language feature. Today `List[P]` stores 8-byte handles to separately allocated 64-byte GC slots. The existing two-million-point benchmark uses about 149 MB, versus 67 MB for Go's inline slice of points (`docs/contributing/benchmarks.md`).
+Measure whether storing small struct fields inline improves memory use and sequential processing enough to justify a language feature. Today `List[P]` stores 8-byte handles to separately allocated 64-byte GC slots. The existing two-million-point benchmark uses about 149 MB, versus 67 MB for Go's inline slice of points ([`benchmarks.md`](../contributing/benchmarks.md)).
 
 A local three-run probe of the installed release binary (2026-09-28, process startup included) shows why layout alone is not a complete speed plan:
 
@@ -49,7 +49,7 @@ If packed storage helps only the append-and-count case while slowing common scan
 
 ## Where arena allocation fits
 
-A frame arena can reduce allocation and GC work for temporary structs whose references never escape a call. It does not remove the per-element slots in `many_struct`: those objects live in a list after their constructors return. Measure a temporary-struct workload separately; do not credit an arena with the packed-list benchmark's expected memory gain. The more general escape-analysis and inline-container design is in `docs/design/value-structs.md`.
+A frame arena can reduce allocation and GC work for temporary structs whose references never escape a call. It does not remove the per-element slots in `many_struct`: those objects live in a list after their constructors return. Measure a temporary-struct workload separately; do not credit an arena with the packed-list benchmark's expected memory gain. The more general escape-analysis and inline-container design is in [`value-structs.md`](value-structs.md).
 
 ## SIMD comes after dense numeric storage
 

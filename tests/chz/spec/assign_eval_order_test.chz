@@ -1,7 +1,7 @@
 # tests/chz/spec/assign_eval_order_test.chz — plain `=` on an index/field target must evaluate
 # the RHS before the target's object/index expressions, matching Python (and matching the two
 # sibling assignment forms — compound `+=` and multi-target `a, b = x, y` — already documented as
-# Python-ordered in docs/reference/syntax.md). Run: `cargo run -- test tests/chz/`.
+# Python-ordered in docs/reference/syntax/). Run: `cargo run -- test tests/chz/`.
 #
 # TICKET-074: today plain `xs[i] = v` evaluates the target's obj/index BEFORE the RHS (Go order),
 # so a subscript that reads and writes the same collection via side-effecting index expressions

@@ -6,7 +6,7 @@
 > engine is now the **default and only** engine, `--parallel` is an accepted no-op alias, and `--serial`
 > was **removed 2026-08-16** (`docs/design/roadmap.md` §2b). Nothing in the phase ladder itself changed.
 
-Companion to [`concurrency.md` §10](../../reference/concurrency.md) (the design) the way
+Companion to [`concurrency.md` §10](../../reference/concurrency/01-model.md) (the design) the way
 [`concurrency-b3.md`](concurrency-b3.md) is the companion to §9 for the B3 epic. §10 says *what*
 Tier-D is and *why*; this file is the *how* — the phase ladder **D0…D6**, each independently
 TDD-able, plus the **Go-vs-BEAM borrow ledger** so the split is not relitigated.
@@ -394,7 +394,7 @@ Critical + Important findings before the completion claim.
   (`ChanState`) so the park-gap re-check is TOCTOU-free. See PROGRESS.md.
 - **M-C implicit nurseries** — shipped (2026-06-12): bare `spawn` legal anywhere; every function body /
   module top level joins its tasks at `return`/end. See `docs/reference/concurrency.md §10`.
-- **Cross-nursery wakeups** ([§11](../../reference/concurrency.md)) — **M:N (`--parallel`) RESOLVED, cooperative
+- **Cross-nursery wakeups** ([§11](../../reference/concurrency/01-model.md)) — **M:N (`--parallel`) RESOLVED, cooperative
   pending.** The circular outer-sibling case (`examples/parallel_cross_nursery_circular.chz`) now
   completes under `--parallel`: one VM-global `MnSched` holds a `Vec<JoinScope>` flat scheduler (each
   nested nursery = a scope enlisted into the same global run queue; the inline owner returns on a

@@ -4,11 +4,11 @@ The full command reference, moved out of `CLAUDE.md` (which every agent turn rea
 
 ```sh
 cargo build --release    # compile (release; the VM is only fast optimized)
-# Tests: `src/main.rs` (the `chezzi` CLI) is a thin shim over the `chezzi` library crate (src/lib.rs,
-# the front-end + editor tooling), so the front-end compiles ONCE and its unit tests + goldens +
-# conformance run ONCE (in the lib test target). `cargo test` is the normal full command.
+# Tests: each layer is a crate (`crates/chezzi-{syntax,native,base,front,vm}`, sources under `src/`);
+# the root `chezzi` crate holds the CLI, `run` and the editor. `cargo test` is the normal full command.
 cargo test                       # FULL pre-commit suite: lib unit suite + goldens + conformance + integration
-# ^ includes `tests/chezzi_threads_cli.rs`: with `--serial` gone, the standing differential is
+cargo test -p chezzi-front       # one crate's tests (also -p chezzi-syntax / chezzi-native / chezzi-base / chezzi-vm)
+# ^ `cargo test` includes `tests/chezzi_threads_cli.rs`: the standing schedule differential is
 #   `tests/chz` (the Chezzi behavioural suite) run at TWO worker counts (default + `CHEZZI_THREADS=2`)
 #   via the built binary, each its own process/pool. NOT a gate over the Rust lib tests — that
 #   pool is ONE process-wide `OnceLock`, so forcing a count inside `cargo test --lib` either no-ops or
@@ -67,5 +67,4 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 > `chezzi run` runs the VM on its real-thread OS-thread (M:N) scheduler. That is the **only** engine;
 > `--parallel` is kept as an accepted no-op alias for it.
 > `--threads=N` (or env `CHEZZI_THREADS`) sizes the worker pool — `0`/omitted = all cores, and the flag
-> wins over the env. (Both the tree-walk interpreter and the cooperative single-thread `--serial`
-> engine have been **removed** — `--serial` and `--check-parity` are now `unknown flag` errors.)
+> wins over the env.

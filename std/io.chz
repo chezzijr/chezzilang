@@ -14,7 +14,7 @@ native fn read_line() -> str?
 # Drain ALL remaining stdin to EOF as one str (Python `sys.stdin.read()`); "" at a clean EOF. Shares
 # the ONE stdin source with `read_line` (a later read then sees EOF). Non-UTF-8 real stdin is a
 # runtime FAULT (`stdin: stream is not valid UTF-8`) — there is no stdin `read_bytes` hatch. A mid-read
-# I/O error is a separate, rarer fault on the same call; both are recoverable. See docs/reference/stdlib.md §1
+# I/O error is a separate, rarer fault on the same call; both are recoverable. See docs/reference/stdlib/ §1
 # "Which failures fault…" for the sibling `Reader` (R2b) discussion — `read_line`/`read_char`/`input`
 # return `str?` and can STILL fault on the same non-UTF-8 condition.
 native fn read_all() -> str

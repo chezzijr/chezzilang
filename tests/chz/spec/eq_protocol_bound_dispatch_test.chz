@@ -50,7 +50,7 @@ test fn through_an_eq_bound_the_protocol_wins():
     assert ne_via_bound(Key(1), Key(2)) == true
 
 test fn the_bound_and_the_operator_agree_on_a_non_hook_receiver():
-    # The property `docs/reference/syntax.md` states: through a bound, the method spelling and the operator
+    # The property `docs/reference/syntax/` states: through a bound, the method spelling and the operator
     # are one dispatch. Checked pairwise so a future divergence fails here first.
     ls := [1, 1, 2, 7]
     rs := [1, 2, 2, 3]

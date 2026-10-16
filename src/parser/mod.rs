@@ -3,7 +3,7 @@
 //! Two interlocking techniques:
 //!   - **recursive descent** for statements / declarations (one `parse_*` fn per form), and
 //!   - a **Pratt** (precedence-climbing) parser for expressions, following the binding powers
-//!     in `docs/reference/syntax.md` §4.
+//!     in `docs/reference/syntax/` §4.
 //!
 //! Layout tokens (`Newline`/`Indent`/`Dedent`) from the indentation-aware lexer drive block
 //! structure: a block opens after a `:` as either an indented `Newline Indent … Dedent` group or

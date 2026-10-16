@@ -4,7 +4,7 @@
 //! and VM consume the same [`ModuleGraph`] so they agree on what gets loaded and in what
 //! order.
 //!
-//! Resolution rules (see `docs/reference/spec.md` §"Imports & module resolution"):
+//! Resolution rules (see `docs/reference/spec/` §"Imports & module resolution"):
 //!   1. Take the entry `.chz`. Walk *up* for `chezzi.toml` → that dir is the project root.
 //!      None found → the entry's own dir is root. (Kills Python's run-relative import footgun.)
 //!   2. `std.*` is reserved → its SOURCE comes from [`std_source`]: `$CHEZZI_STD` (dev override,

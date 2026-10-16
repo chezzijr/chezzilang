@@ -29,7 +29,7 @@ match json.parse(src):
 
 # Malformed syntax comes back as an error, never a crash. `parse` is recursive-descent, so nesting depth
 # in the input becomes call-stack depth in the program; past MAX_NEST_DEPTH (2000) it returns a
-# clean !"exceeded max depth" instead of aborting — see docs/reference/stdlib.md §std.json.
+# clean !"exceeded max depth" instead of aborting — see docs/reference/stdlib/ §std.json.
 match json.parse("[1, 2,]"):
     ?j: print(json.stringify(j))
     !e: print("error: " + e.message())

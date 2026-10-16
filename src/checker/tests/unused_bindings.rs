@@ -6,7 +6,7 @@ use super::*;
 
 // ===== TICKET-089: a mutating call on a Shared/RwShared/Atomic read temporary =====
 
-/// `s.get().push(1)` as a bare statement mutates a copy and discards it (`docs/reference/concurrency.md` §6).
+/// `s.get().push(1)` as a bare statement mutates a copy and discards it (`docs/reference/concurrency/` §6).
 /// The warning must name the working spelling, `update`.
 #[test]
 fn mutating_call_on_a_shared_read_temporary_warns() {
@@ -134,7 +134,7 @@ fn unused_local_binding_warns() {
 
 /// The `:=` typo (`total := total + x` instead of `total = total + x`) makes the ticket's block-scoped
 /// `:=` shadow the outer `total` every iteration — the accumulator loses every update but still prints
-/// `0` at rc=0. `docs/reference/syntax.md`'s measured warn table names this the flagship shape.
+/// `0` at rc=0. `docs/reference/syntax/`'s measured warn table names this the flagship shape.
 #[test]
 fn unused_local_accumulator_typo_warns_once_at_the_inner_binding() {
     let (errs, warns) = warn_src(
@@ -155,7 +155,7 @@ fn unused_local_accumulator_typo_warns_once_at_the_inner_binding() {
     assert_eq!(warns[0].span.col, 9, "got: {:?}", warns[0]);
 }
 
-/// The measured fire half of `docs/reference/syntax.md`'s warn table — one program per shape.
+/// The measured fire half of `docs/reference/syntax/`'s warn table — one program per shape.
 #[test]
 fn unused_local_warn_table_fires() {
     warns(
@@ -186,7 +186,7 @@ fn unused_local_warn_table_fires() {
     );
 }
 
-/// The measured silent half of `docs/reference/syntax.md`'s warn table — every deliberate under-warn.
+/// The measured silent half of `docs/reference/syntax/`'s warn table — every deliberate under-warn.
 #[test]
 fn unused_local_warn_table_stays_silent() {
     no_warn("fn f():\n    _u := 42\n    _ := 1\nf()\n");

@@ -335,7 +335,7 @@ impl Checker {
     }
     /// TICKET-089 — `e` is a NULLARY read of a `Shared`/`RwShared`/`Atomic` box bound to a bare name
     /// (`s.get()`, `r.get()`, `a.load()`): the value it returns is a deep copy, so a write to it is
-    /// thrown away (`docs/reference/concurrency.md` §6). Returns `(box name, reader, payload type, write-through
+    /// thrown away (`docs/reference/concurrency/` §6). Returns `(box name, reader, payload type, write-through
     /// method)`. Bare-`Ident` receivers only, so the box type comes from `lookup` with no re-inference
     /// (which would double-report the receiver's diagnostics) — `boxes[0].get()` stays a ceiling.
     /// `RwShared.read(f)` takes a closure, so it is not this shape.

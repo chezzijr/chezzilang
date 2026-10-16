@@ -1334,7 +1334,7 @@ pub struct ExecutorCore {
     /// The cancel-flag chain of the job that CREATED this executor (`Vm::scope_ancestors()` captured at
     /// `Op::NewExecutor`), empty for an executor created by `main` or by a `parallel:`/`spawn` fiber.
     /// Every job dispatched from this core inherits it as its `cancel_outer`, so an outer
-    /// `shutdown_now()` reaches a nested executor's jobs (W7-39, `docs/reference/concurrency.md` §Executor).
+    /// `shutdown_now()` reaches a nested executor's jobs (W7-39, `docs/reference/concurrency/` §Executor).
     ///
     /// **Keyed on the CREATOR, never on the submitter.** An `Executor` value crosses the airlock by
     /// `Arc`, so `submit` can be reached from a job of an entirely unrelated executor; keying on the
@@ -2242,7 +2242,7 @@ mod tests {
     }
 
     /// W6-1 sibling — the drop-flush must walk a NESTED `buffered(buffered(file))` chain, not just a
-    /// one-level `Buffered{inner=File}`. `docs/reference/stdlib.md` promises a **file**-backed buffered writer's
+    /// one-level `Buffered{inner=File}`. `docs/reference/stdlib/` promises a **file**-backed buffered writer's
     /// tail is recovered on drop, and a transitively file-backed chain is file-backed. Rust-only:
     /// `assert` can't observe drop timing (the Chezzi suite covers the explicit `flush`/`close` path).
     #[test]

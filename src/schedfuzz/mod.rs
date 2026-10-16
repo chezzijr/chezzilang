@@ -34,7 +34,7 @@ pub struct Target {
 /// `chezzi run`, picking up a sibling `.expected` file if one exists. Whether that `.expected` is
 /// actually trusted for the output check is decided later, per-target, by `measure_baseline`'s
 /// sampled-disagreement check — never here by a keyword. A prior version skipped `.expected`
-/// whenever the source contained `spawn`/`Executor`, reading `docs/reference/concurrency.md`'s streaming-CLI
+/// whenever the source contained `spawn`/`Executor`, reading `docs/reference/concurrency/`'s streaming-CLI
 /// contract off a substring; the owner dropped it (review 2026-09-22) because it silenced the
 /// output check on 42 of 46 examples — including ones with exactly one printing context — and
 /// `contains("spawn")` also matched comments.
@@ -62,7 +62,7 @@ pub fn target_for(path: &Path) -> Target {
 /// the owner dropped from `target_for`, review 2026-09-22) — each entry is hand-picked and cites the
 /// row that explains it. Two classes so far:
 /// - a program that prints across a `spawn`/`Executor` task boundary: `chezzi run`'s cross-task
-///   print order is nondeterministic BY CONTRACT (`docs/reference/concurrency.md` "Output ordering: streaming
+///   print order is nondeterministic BY CONTRACT (`docs/reference/concurrency/` "Output ordering: streaming
 ///   CLI vs buffered sink"), so an `output` finding here is that CONTRACT surfacing, not a new race
 ///   — W15-4.
 /// - a Chezzi test file gated on a wall-clock ratio (an `optimized_build()`-style
@@ -80,32 +80,32 @@ pub const KNOWN_TARGETS: &[KnownTarget] = &[
     KnownTarget {
         file_name: "try_recv.chz",
         row: "W15-4",
-        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency.md)",
+        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency/)",
     },
     KnownTarget {
         file_name: "parallel.chz",
         row: "W15-4",
-        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency.md)",
+        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency/)",
     },
     KnownTarget {
         file_name: "parallel_cross_nursery_ok.chz",
         row: "W15-4",
-        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency.md)",
+        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency/)",
     },
     KnownTarget {
         file_name: "channel.chz",
         row: "W15-4",
-        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency.md)",
+        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency/)",
     },
     KnownTarget {
         file_name: "channel_block.chz",
         row: "W15-4",
-        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency.md)",
+        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency/)",
     },
     KnownTarget {
         file_name: "executor_autodrain.chz",
         row: "W15-4",
-        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency.md)",
+        reason: "cross-task print order is nondeterministic by contract (docs/reference/concurrency/)",
     },
     KnownTarget {
         file_name: "regex_test.chz",
@@ -273,7 +273,7 @@ pub enum BaselineOutcome {
 
 /// Unseeded reps at the swept worker count used to establish a target's baseline. One rep
 /// undercounts: an exit code that only occasionally flakes (a load-sensitive wall-clock margin,
-/// `docs/history/bug-hunts/gaps-archive.md` class) can agree on a single sample and read as stable. This governs the
+/// `docs/history/bug-hunts/` class) can agree on a single sample and read as stable. This governs the
 /// rc/panic/hang baseline only — output byte-exactness is decided from a sampled-disagreement check
 /// over the same reps (`check_output`), because that class of divergence can be arbitrarily rare
 /// unseeded (measured 0/40 for `parallel_cross_nursery_ok.chz`) yet still real.

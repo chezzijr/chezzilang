@@ -219,7 +219,7 @@ pub enum StmtKind {
     /// value first, bind it (per the arm's target pattern), and run that arm's body. Source-order
     /// poll (deterministic, not Go-random); a closed+empty arm is skipped; `else_block` (optional,
     /// last) is the non-blocking fallback. Recv-only — unbounded channels never block a `send`. See
-    /// `docs/reference/concurrency.md §6d`.
+    /// `docs/reference/concurrency/ §6d`.
     Wait {
         arms: Vec<WaitArm>,
         else_block: Option<Block>,

@@ -175,7 +175,6 @@ fn every_relative_link_resolves() {
 }
 
 #[test]
-#[ignore = "enabled once the large docs are split"]
 fn every_live_doc_stays_small() {
     let big: Vec<String> = live_docs()
         .iter()
@@ -192,7 +191,6 @@ fn every_live_doc_stays_small() {
 }
 
 #[test]
-#[ignore = "enabled once docs/README.md exists"]
 fn the_docs_index_links_every_live_doc() {
     let index = Path::new("docs/README.md");
     let linked: HashSet<PathBuf> = link_targets(&read(index))
