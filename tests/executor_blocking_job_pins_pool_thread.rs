@@ -66,7 +66,7 @@ fn run(src: &str, threads: Option<&str>, secs: u64) -> (Option<ExitStatus>, Stri
 
 #[test]
 fn executor_consumer_then_producer_completes_at_one_worker() {
-    let src = "import std.concurrency\nex := Executor()\nch := Channel[int]()\nex.submit(fn(): print(ch.recv()))\nex.submit(fn(): ch.send(7))\nex.shutdown()\nprint(\"ok\")\n";
+    let src = "import Executor from std.concurrency\nex := Executor()\nch := Channel[int]()\nex.submit(fn(): print(ch.recv()))\nex.submit(fn(): ch.send(7))\nex.shutdown()\nprint(\"ok\")\n";
     let (status, stdout, _) = run(src, Some("1"), 15);
     let status = status.unwrap_or_else(|| {
         panic!(
@@ -85,7 +85,7 @@ fn executor_consumer_then_producer_completes_at_one_worker() {
 
 #[test]
 fn thirteen_consumers_and_one_feeder_complete_at_the_default_worker_count() {
-    let src = "import std.concurrency\nch := Channel[int]()\nfn worker():\n    print(ch.recv())\nfn feeder():\n    for i in 0..13:\n        ch.send(i)\nex := Executor()\nfor _ in 0..13:\n    ex.submit(worker)\nex.submit(feeder)\nex.shutdown()\nprint(\"ok\")\n";
+    let src = "import Executor from std.concurrency\nch := Channel[int]()\nfn worker():\n    print(ch.recv())\nfn feeder():\n    for i in 0..13:\n        ch.send(i)\nex := Executor()\nfor _ in 0..13:\n    ex.submit(worker)\nex.submit(feeder)\nex.shutdown()\nprint(\"ok\")\n";
     let (status, stdout, _) = run(src, None, 30);
     let status = status.unwrap_or_else(|| {
         panic!(
@@ -103,7 +103,7 @@ fn thirteen_consumers_and_one_feeder_complete_at_the_default_worker_count() {
 
 #[test]
 fn nested_executors_complete_deeper_than_the_worker_count() {
-    let src = "import std.concurrency\nfn level(n: int):\n    if n == 0:\n        print(\"bottom\")\n        return\n    ex := Executor()\n    ex.submit(fn(): level(n - 1))\n    ex.shutdown()\nlevel(13)\nprint(\"ok\")\n";
+    let src = "import Executor from std.concurrency\nfn level(n: int):\n    if n == 0:\n        print(\"bottom\")\n        return\n    ex := Executor()\n    ex.submit(fn(): level(n - 1))\n    ex.shutdown()\nlevel(13)\nprint(\"ok\")\n";
     let (status, stdout, _) = run(src, Some("1"), 30);
     let status = status.unwrap_or_else(|| {
         panic!(
@@ -118,7 +118,7 @@ fn nested_executors_complete_deeper_than_the_worker_count() {
 
 #[test]
 fn a_blocked_guard_and_a_blocked_recv_do_not_starve_the_job_that_frees_them() {
-    let src = "import std.concurrency\nch := Channel[int]()\nsh := Shared(0)\nfn bump(v: int) -> int:\n    return v + ch.recv()\nex := Executor()\nex.submit(fn(): sh.update(bump))\nex.submit(fn(): sh.set(5))\nex.submit(fn(): ch.send(1))\nex.shutdown()\nprint(\"ok\")\n";
+    let src = "import Executor, Shared from std.concurrency\nch := Channel[int]()\nsh := Shared(0)\nfn bump(v: int) -> int:\n    return v + ch.recv()\nex := Executor()\nex.submit(fn(): sh.update(bump))\nex.submit(fn(): sh.set(5))\nex.submit(fn(): ch.send(1))\nex.shutdown()\nprint(\"ok\")\n";
     let (status, stdout, _) = run(src, Some("1"), 30);
     let status = status.unwrap_or_else(|| {
         panic!(
@@ -132,7 +132,7 @@ fn a_blocked_guard_and_a_blocked_recv_do_not_starve_the_job_that_frees_them() {
 
 #[test]
 fn six_sleeping_jobs_overlap_at_one_worker() {
-    let src = "import std.concurrency\nimport std.time\nex := Executor()\nfor _ in 0..6:\n    ex.submit(fn(): time.sleep_ms(500))\nex.shutdown()\nprint(\"ok\")\n";
+    let src = "import Executor from std.concurrency\nimport std.time\nex := Executor()\nfor _ in 0..6:\n    ex.submit(fn(): time.sleep_ms(500))\nex.shutdown()\nprint(\"ok\")\n";
     let (status, stdout, elapsed) = run(src, Some("1"), 30);
     let status = status.unwrap_or_else(|| {
         panic!(
@@ -155,7 +155,7 @@ fn six_sleeping_jobs_overlap_at_one_worker() {
 #[test]
 #[cfg(target_os = "linux")]
 fn a_yielded_pool_thread_retires_instead_of_growing_the_pool() {
-    let src = "import std.concurrency\nimport std.io\nimport std.time\n\nfn thread_count() -> int:\n    text := io.read_file(\"/proc/self/status\") ?? \"\"\n    for ln in text.split(\"\\n\"):\n        if ln.starts_with(\"Threads:\"):\n            parts := ln.split(\"\\t\")\n            return parts[1].trim().to_int() ?? -1\n    return -1\n\nwarmup := Executor()\nwarmup.submit(fn(): time.sleep_ms(1))\nwarmup.shutdown()\ntime.sleep_ms(300)\nprint(\"mid \" + str(thread_count()))\n\nch := Channel[int]()\nex := Executor()\nfor _ in 0..40:\n    ex.submit(fn(): ch.recv())\nfn feeder():\n    for i in 0..40:\n        ch.send(i)\nex.submit(feeder)\nex.shutdown()\ntime.sleep_ms(300)\nprint(\"end \" + str(thread_count()))\n";
+    let src = "import Executor from std.concurrency\nimport std.io\nimport std.time\n\nfn thread_count() -> int:\n    text := io.read_file(\"/proc/self/status\") ?? \"\"\n    for ln in text.split(\"\\n\"):\n        if ln.starts_with(\"Threads:\"):\n            parts := ln.split(\"\\t\")\n            return parts[1].trim().to_int() ?? -1\n    return -1\n\nwarmup := Executor()\nwarmup.submit(fn(): time.sleep_ms(1))\nwarmup.shutdown()\ntime.sleep_ms(300)\nprint(\"mid \" + str(thread_count()))\n\nch := Channel[int]()\nex := Executor()\nfor _ in 0..40:\n    ex.submit(fn(): ch.recv())\nfn feeder():\n    for i in 0..40:\n        ch.send(i)\nex.submit(feeder)\nex.shutdown()\ntime.sleep_ms(300)\nprint(\"end \" + str(thread_count()))\n";
     let (status, stdout, _) = run(src, None, 60);
     let status = status.unwrap_or_else(|| {
         panic!(

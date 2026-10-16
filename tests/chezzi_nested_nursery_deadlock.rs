@@ -310,7 +310,7 @@ main()
 
 /// TICKET-112 — an Executor job's nursery spawns a task that opens its own nested nursery, whose
 /// only child is genuinely deadlocked. Traces the same defect on the Executor path.
-const EXEC_NESTED: &str = r#"import std.concurrency
+const EXEC_NESTED: &str = r#"import Executor from std.concurrency
 
 fn job():
     never := Channel[int](0)

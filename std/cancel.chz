@@ -51,7 +51,7 @@ import std.time
 import std.concurrency
 
 struct Token:
-    flag: Shared[bool]     # cancel bit (sendable, owner-serialized)
+    flag: concurrency.Shared[bool]     # cancel bit (sendable, owner-serialized)
     deadline: float        # absolute monotonic() secs; 0.0 == no deadline; checked at POLL TIME
     dl: Channel[bool]      # done(): a timer channel (timeout) or a trip()-able latch channel (manual)
     parent: Token?         # the live derivation link (None for a root); cancelled()/reason() fall back to it
@@ -163,8 +163,8 @@ struct Token:
                 rem_ms = int(rem) + 1
             if rem_ms < 0:
                 rem_ms = 0
-            cdl = timer(rem_ms)
-        fl := Shared(false)
+            cdl = time.timer(rem_ms)
+        fl := concurrency.Shared(false)
         kch := Channel[Token]()
         child := Token(flag=fl, deadline=d, dl=cdl, parent=?self, kids=kch)
         # Register into the IMMEDIATE parent only (Go). O(1) — an unbounded channel send never blocks.
@@ -191,7 +191,7 @@ struct Token:
 
 # A manually-cancellable token with no deadline. `cancel()` is the only thing that trips it.
 fn manual() -> Token:
-    return Token(flag=Shared(false), deadline=0.0, dl=Channel[bool](), parent=None,
+    return Token(flag=concurrency.Shared(false), deadline=0.0, dl=Channel[bool](), parent=None,
                  kids=Channel[Token]())
 
 # A token that auto-cancels `ms` milliseconds after creation, and is also manually cancellable. A
@@ -200,7 +200,7 @@ fn timeout(ms: int) -> Token:
     m := ms
     if m < 0:
         m = 0
-    return Token(flag=Shared(false), deadline=time.monotonic() + float(m) / 1000.0, dl=timer(m),
+    return Token(flag=concurrency.Shared(false), deadline=time.monotonic() + float(m) / 1000.0, dl=time.timer(m),
                  parent=None, kids=Channel[Token]())
 
 # Derive a child token from `parent` (the free-function form of `parent.derive()`, for a pipe / when

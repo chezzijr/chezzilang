@@ -10,7 +10,7 @@ import std.fs
 import std.io
 import std.os
 import std.path
-import std.concurrency
+import Shared from std.concurrency
 
 # The undecodable filename under test: `A<0xff>B.txt`.
 BAD := b"A\xffB.txt"

@@ -7,7 +7,7 @@
 # `Shared`/`RwShared`/`Atomic`/`Channel` stay the only real sharing. A NESTED `parallel:` inside a
 # task sees the TASK's current view, not the parent module's.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
-import std.concurrency
+import AtomicInt, Executor, Shared from std.concurrency
 
 # --- W6-2 repro: a first nursery BEFORE `n` is initialized ------------------------------------
 tot := AtomicInt(0)

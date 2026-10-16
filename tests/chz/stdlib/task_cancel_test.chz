@@ -16,14 +16,14 @@ fn slow(hold: Channel[int]) -> int:
 
 test fn shutdown_now_does_not_strand_a_submitted_task():
     hold := Channel[int](1)
-    ex := Executor()
+    ex := concurrency.Executor()
     t := submit_task(ex, fn(): slow(hold))
     ex.shutdown_now()
     assert t.done(), "done() must be true after shutdown_now()"
 
 test fn a_cancelled_tasks_get_returns_the_cancel_error():
     hold := Channel[int](1)
-    ex := Executor()
+    ex := concurrency.Executor()
     t := submit_task(ex, fn(): slow(hold))
     ex.shutdown_now()
     assert t.done(), "done() must be true before get() is called"
@@ -38,7 +38,7 @@ test fn a_cancelled_tasks_get_returns_the_cancel_error():
 
 test fn every_task_is_done_after_shutdown_now_started_or_not():
     hold := Channel[int](1)
-    ex := Executor()
+    ex := concurrency.Executor()
     ts := [submit_task(ex, fn(): slow(hold)) for i in 0..30]
     ex.shutdown_now()
     n := 0
@@ -49,7 +49,7 @@ test fn every_task_is_done_after_shutdown_now_started_or_not():
 
 test fn shutdown_now_settles_a_submit_result_channel():
     hold := Channel[int](1)
-    ex := Executor()
+    ex := concurrency.Executor()
     ch := ex.submit_result(fn(): slow(hold))
     ex.shutdown_now()
     match ch.recv():
@@ -57,7 +57,7 @@ test fn shutdown_now_settles_a_submit_result_channel():
         !e: assert e.message() == "task cancelled: shutdown_now() stopped it before it finished"
 
 test fn a_task_that_finished_carries_no_cancel_message():
-    ex := Executor()
+    ex := concurrency.Executor()
     t := submit_task(ex, fn(): 5)
     ex.shutdown()
     ex.shutdown_now()
@@ -71,7 +71,7 @@ test fn a_task_that_finished_carries_no_cancel_message():
 test fn a_held_job_dropped_by_shutdown_now_settles_err():
     msg := "task cancelled: shutdown_now() stopped it before it finished"
     hold := Channel[int](1)
-    ex := Executor(1)
+    ex := concurrency.Executor(1)
     first := submit_task(ex, fn(): slow(hold))
     a := submit_task(ex, fn() -> int: 1)
     b := submit_task(ex, fn() -> int: 2)

@@ -1,6 +1,6 @@
 # TICKET-141 (W14-14): a CPU loop inside a native callback is preempted at every worker count.
 # Gated by chz_suite_passes (tests/chz_suite.rs).
-import std.concurrency
+import AtomicInt, Shared from std.concurrency
 
 fn wait_flag(f: AtomicInt, x: int) -> int:
     while f.load() == 0:

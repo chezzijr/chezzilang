@@ -77,7 +77,7 @@ fn str_arg_backing_cstring_must_outlive_a_ptr_returned_into_it() {
     // The corrupted content is heap-layout-dependent (varies run to run, confirmed non-`" world"`
     // over 10+ runs), so this asserts against the CORRECT value with a fixed custom message
     // rather than the (unstable) garbage `Cffi::call` currently produces.
-    let src = "import std.ffi\nimport int32 from std.ffi\nextern \"libc\":\n    fn strchr(s: str, c: int32) -> ptr\np := strchr(\"hello world\", 32)\nprint(ffi.load_str(p))\n";
+    let src = "import std.ffi\nimport int32 from std.ffi\nextern \"libc\":\n    fn strchr(s: str, c: int32) -> ffi.ptr\np := strchr(\"hello world\", 32)\nprint(ffi.load_str(p))\n";
     let entry = write_deref_chz(src);
     let (out, _e, res, _) = crate::vm::run_file(&entry);
     let _ = std::fs::remove_file(&entry);
@@ -256,7 +256,7 @@ fn ffi_deref_load_two_engine_parity() {
     let so = build_callback_so();
     let src = format!(
         "import std.ffi\n\
-extern \"{}\":\n    fn mkrec() -> ptr\n\n\
+extern \"{}\":\n    fn mkrec() -> ffi.ptr\n\n\
 p := mkrec()\n\
 print(ffi.load_int32_at(p, 0))\n\
 print(ffi.load_int64_at(p, 8))\n\
@@ -277,7 +277,7 @@ fn ffi_deref_store_then_load_two_engine_parity() {
     let so = build_callback_so();
     let src = format!(
         "import std.ffi\n\
-extern \"{}\":\n    fn mkrec() -> ptr\n\n\
+extern \"{}\":\n    fn mkrec() -> ffi.ptr\n\n\
 p := mkrec()\n\
 ffi.store_int32_at(p, 0, 99)\n\
 ffi.store_float_at(p, 16, 1.5)\n\
@@ -303,7 +303,7 @@ fn ffi_deref_three_engine_parity() {
     let so = build_callback_so();
     let src = format!(
         "import std.ffi\n\
-extern \"{}\":\n    fn mkrec() -> ptr\n\n\
+extern \"{}\":\n    fn mkrec() -> ffi.ptr\n\n\
 p := mkrec()\n\
 print(ffi.load_int32_at(p, 0))\n",
         so.to_str().unwrap()

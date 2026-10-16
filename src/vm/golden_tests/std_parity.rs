@@ -136,7 +136,7 @@ fn parity_spawned_tasks_share_stdin_exactly_once() {
 #[test]
 fn parity_executor_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
-    let src = "import std.io\nimport std.concurrency\nfn t():\n    match io.read_line():\n        ?v: io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    e := Executor()\n    e.submit(t)\n    e.submit(t)\n    e.shutdown()\n    t()\nmain()";
+    let src = "import std.io\nimport Executor from std.concurrency\nfn t():\n    match io.read_line():\n        ?v: io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    e := Executor()\n    e.submit(t)\n    e.submit(t)\n    e.shutdown()\n    t()\nmain()";
     let out = golden_entry_cfg_lines(src, || HostConfig {
         stdin: Stdin::lines(["a".to_string(), "b".to_string(), "c".to_string()]),
         ..Default::default()

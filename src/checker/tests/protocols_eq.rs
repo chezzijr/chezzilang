@@ -1815,7 +1815,7 @@ fn disjoint_types_equality_rejected() {
         "cannot compare Channel[int] and Channel[str] for equality",
     );
     entry_rejects(
-        "import std.concurrency\nfn cmp(a: Shared[int], b: Shared[str]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "import Shared from std.concurrency\nfn cmp(a: Shared[int], b: Shared[str]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
         "cannot compare Shared[int] and Shared[str] for equality",
     );
     // A PARAMETERIZED protocol erases only its ARGS — the method SET is still decided, so a concrete
@@ -1904,10 +1904,10 @@ fn comparable_types_equality_still_ok() {
     // `compatible`, which is neither `Param`-tolerant nor conformance-aware, so BOTH the erased-param
     // escape (8) and the existential-nesting case (7) stopped one constructor short.
     entry_ok(
-        "import std.concurrency\nfn chans[T](a: Channel[T], b: Channel[int]) -> bool:\n    return a == b\nfn atoms[T: StructuralEq](a: Atomic[T], b: Atomic[int]) -> bool:\n    return a == b\nfn rws[T](a: RwShared[T], b: RwShared[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "import Atomic, RwShared, StructuralEq from std.concurrency\nfn chans[T](a: Channel[T], b: Channel[int]) -> bool:\n    return a == b\nfn atoms[T: StructuralEq](a: Atomic[T], b: Atomic[int]) -> bool:\n    return a == b\nfn rws[T](a: RwShared[T], b: RwShared[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
     );
     entry_ok(
-        "import std.concurrency\nstruct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn shr(a: Shared[Error], b: Shared[MyErr]) -> bool:\n    return a == b\nfn nested(a: List[Shared[Error]], b: List[Shared[MyErr]]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "import Shared from std.concurrency\nstruct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn shr(a: Shared[Error], b: Shared[MyErr]) -> bool:\n    return a == b\nfn nested(a: List[Shared[Error]], b: List[Shared[MyErr]]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
     );
     // (11) a PARAMETERIZED protocol existential vs a conforming concrete, with a free `T` in the
     // protocol's args — the erasure escape did not reach into `Protocol`'s own `pargs` either, so the
@@ -1940,7 +1940,7 @@ fn atomic_payload_with_eq_rejected() {
     // BOUNDARY: the payloads that DON'T define `eq` stay legal — scalars (whose `Eq` is intrinsic and
     // IS structural equality) and a struct without an `eq` method.
     entry_ok(
-        "import std.concurrency\nstruct Q:\n    x: int\nfn main():\n    a := Atomic(1)\n    b := Atomic(\"s\")\n    c := Atomic(Q(1))\n    print(a.load() + c.load().x)\n    print(b.load())\nmain()\n",
+        "import Atomic from std.concurrency\nstruct Q:\n    x: int\nfn main():\n    a := Atomic(1)\n    b := Atomic(\"s\")\n    c := Atomic(Q(1))\n    print(a.load() + c.load().x)\n    print(b.load())\nmain()\n",
     );
 }
 
@@ -1977,7 +1977,7 @@ fn atomic_cas_on_fn_payload_rejected() {
     // (measured on the base binary: `Atomic(math.sqrt).cas(a.load(), math.sqrt)` is `false`), so it
     // is the same bug and is rejected too.
     entry_rejects(
-        "import std.concurrency\nimport std.math\nfn main():\n    a := Atomic(math.sqrt)\n    print(a.cas(a.load(), math.sqrt))\nmain()\n",
+        "import Atomic from std.concurrency\nimport std.math\nfn main():\n    a := Atomic(math.sqrt)\n    print(a.cas(a.load(), math.sqrt))\nmain()\n",
         needle,
     );
     // MUST STILL PASS: a fn payload with only `store`/`load`/`exchange`, and a builtin fn with `cas`.
@@ -1985,7 +1985,7 @@ fn atomic_cas_on_fn_payload_rejected() {
         "{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    a.store(one)\n    f := a.exchange(one)\n    print(f() + a.load()())\nmain()\n"
     ));
     entry_ok(
-        "import std.concurrency\nfn main():\n    a := Atomic(ord)\n    print(a.cas(a.load(), ord))\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(ord)\n    print(a.cas(a.load(), ord))\nmain()\n",
     );
     // A payload with no fn in it keeps `cas`.
     entry_ok(&format!(
@@ -2019,7 +2019,7 @@ fn atomic_payload_reaching_a_nested_eq_rejected() {
     // BOUNDARY: the same shapes over an `eq`-free element stay legal — the walk must reject on
     // REACHING an `eq`, not on being a container. A self-referential struct must also terminate.
     entry_ok(
-        "import std.concurrency\nstruct Q:\n    x: int\nstruct Node:\n    v: int\n    next: List[Node]\nfn main():\n    a := Atomic([1, 2])\n    b := Atomic({\"k\": [Q(1)]})\n    c := Atomic((1, \"x\"))\n    d := Atomic(Node(1, []))\n    print(a.load().len() + b.load().len() + d.load().v)\n    print(c.load())\nmain()\n",
+        "import Atomic from std.concurrency\nstruct Q:\n    x: int\nstruct Node:\n    v: int\n    next: List[Node]\nfn main():\n    a := Atomic([1, 2])\n    b := Atomic({\"k\": [Q(1)]})\n    c := Atomic((1, \"x\"))\n    d := Atomic(Node(1, []))\n    print(a.load().len() + b.load().len() + d.load().v)\n    print(c.load())\nmain()\n",
     );
 }
 

@@ -54,32 +54,32 @@ fn report(name: str, n: int, callers: int, calls: int, t0: float):
     us := (time.monotonic() - t0) * 1000000.0 / float(calls)
     print("{name}|{n}|{callers}|{us}")
 
-fn shared_updates(s: Shared[Table], calls: int):
+fn shared_updates(s: concurrency.Shared[Table], calls: int):
     for _ in 0..calls:
         s.update(hit)
 
-fn shared_gets(s: Shared[Table], calls: int, sink: AtomicInt):
+fn shared_gets(s: concurrency.Shared[Table], calls: int, sink: concurrency.AtomicInt):
     for _ in 0..calls:
         sink.add(s.get().hits)
 
-fn rw_writes(w: RwShared[Table], calls: int):
+fn rw_writes(w: concurrency.RwShared[Table], calls: int):
     for _ in 0..calls:
         w.write(hit)
 
-fn rw_reads(w: RwShared[Table], calls: int, sink: AtomicInt):
+fn rw_reads(w: concurrency.RwShared[Table], calls: int, sink: concurrency.AtomicInt):
     for _ in 0..calls:
         sink.add(w.read(hits_of))
 
-fn rw_gets(w: RwShared[Table], calls: int, sink: AtomicInt):
+fn rw_gets(w: concurrency.RwShared[Table], calls: int, sink: concurrency.AtomicInt):
     for _ in 0..calls:
         sink.add(w.get().hits)
 
 fn cell(n: int, callers: int):
     calls := calls_for(n)
     each := calls / callers
-    sink := AtomicInt(0)
-    s := Shared(table(n))
-    w := RwShared(table(n))
+    sink := concurrency.AtomicInt(0)
+    s := concurrency.Shared(table(n))
+    w := concurrency.RwShared(table(n))
     t0 := time.monotonic()
     parallel:
         for _ in 0..callers:
@@ -106,20 +106,20 @@ fn cell(n: int, callers: int):
             spawn rw_gets(w, each, sink)
     report("RwShared.get", n, callers, each * callers, t0)
 
-fn list_ats(xs: ConcurrentList[int], calls: int, sink: AtomicInt):
+fn list_ats(xs: ConcurrentList[int], calls: int, sink: concurrency.AtomicInt):
     for i in 0..calls:
         match xs.at(i % 1000):
             ?v: sink.add(v)
             None: pass
 
-fn map_gets(m: ConcurrentMap[int, int], calls: int, sink: AtomicInt):
+fn map_gets(m: ConcurrentMap[int, int], calls: int, sink: concurrency.AtomicInt):
     for i in 0..calls:
         match m.get(i % 1000):
             ?v: sink.add(v)
             None: pass
 
 fn collections():
-    sink := AtomicInt(0)
+    sink := concurrency.AtomicInt(0)
     xs := ConcurrentList[int].new()
     m := ConcurrentMap[int, int].new()
     for i in 0..100000:
@@ -146,31 +146,31 @@ fn creation():
     t0 := time.monotonic()
     total := 0
     for i in 0..100000:
-        total += Shared(i).get()
+        total += concurrency.Shared(i).get()
     report("Shared(i) + get", 1, 1, 100000, t0)
     t0 = time.monotonic()
     for i in 0..100000:
-        total += RwShared(i).get()
+        total += concurrency.RwShared(i).get()
     report("RwShared(i) + get", 1, 1, 100000, t0)
     t0 = time.monotonic()
     for i in 0..100000:
-        total += Atomic(i).load()
+        total += concurrency.Atomic(i).load()
     report("Atomic(i) + load", 1, 1, 100000, t0)
 
 G: List[int] = []
 
-fn outer_fn(b: Shared[int], x: int) -> int:
+fn outer_fn(b: concurrency.Shared[int], x: int) -> int:
     b.update(inc)
     return x + 1
 
-fn outer_agg(b: Shared[int], x: int) -> int:
+fn outer_agg(b: concurrency.Shared[int], x: int) -> int:
     b.update(fn(y: int) -> int: y + G.len())
     return x + 1
 
 fn closures():
     for _ in 0..100000:
         G.push(1)
-    s := Shared(0)
+    s := concurrency.Shared(0)
     t0 := time.monotonic()
     for _ in 0..100000:
         s.update(inc)
@@ -183,8 +183,8 @@ fn closures():
     for _ in 0..100000:
         s.update(abs_inc)
     report("update: math.abs", 1, 1, 100000, t0)
-    a := Shared(0)
-    b := Shared(0)
+    a := concurrency.Shared(0)
+    b := concurrency.Shared(0)
     t0 = time.monotonic()
     for i in 0..2000:
         G[0] = i

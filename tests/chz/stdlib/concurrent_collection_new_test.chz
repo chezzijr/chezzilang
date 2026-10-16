@@ -37,6 +37,6 @@ test fn two_new_calls_are_independent():
     assert b.len() == 0
 
 test fn the_field_constructor_still_works():
-    m: ConcurrentMap[str, int] = ConcurrentMap(RwShared({}))
+    m: ConcurrentMap[str, int] = ConcurrentMap(concurrency.RwShared({}))
     m.set("a", 1)
     assert m.len() == 1

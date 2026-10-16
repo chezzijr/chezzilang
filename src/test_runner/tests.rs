@@ -1423,7 +1423,7 @@ fn an_earlier_job_fault_outranks_a_later_timeout_in_a_test() {
     let d = TmpDir::new();
     let f = d.write(
             "exhalt_test.chz",
-            "import std.concurrency\nfn boom():\n    panic(\"ordinary\")\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(boom)\n    ex.submit(spin)\n    r := recover: ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            "import Executor from std.concurrency\nfn boom():\n    panic(\"ordinary\")\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(boom)\n    ex.submit(spin)\n    r := recover: ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
         );
     let report = run_tests_timed(&f, 0, 50);
     assert!(!report.passed, "report:\n{}", report.text);
@@ -1475,11 +1475,11 @@ fn timeout_reaches_a_job_blocked_on_a_channel_and_on_wait() {
     for (name, body) in [
         (
             "blockrecv_test.chz",
-            "import std.concurrency\nch: Channel[int] = Channel[int](1)\nfn w():\n    print(ch.recv())\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.submit(spin)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            "import Executor from std.concurrency\nch: Channel[int] = Channel[int](1)\nfn w():\n    print(ch.recv())\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.submit(spin)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
         ),
         (
             "blockwait_test.chz",
-            "import std.concurrency\na: Channel[int] = Channel[int](1)\nb: Channel[int] = Channel[int](1)\nfn w():\n    wait:\n        v := a.recv(): print(v)\n        v := b.recv(): print(v)\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.submit(spin)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            "import Executor from std.concurrency\na: Channel[int] = Channel[int](1)\nb: Channel[int] = Channel[int](1)\nfn w():\n    wait:\n        v := a.recv(): print(v)\n        v := b.recv(): print(v)\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(w)\n    ex.submit(spin)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
         ),
     ] {
         let d = TmpDir::new();
@@ -1545,11 +1545,11 @@ fn timeout_aborts_a_sleeping_test_everywhere() {
         ),
         (
             "execsleep_test.chz",
-            "import std.time\nimport std.concurrency\nfn nap():\n    time.sleep_ms(3000)\ntest fn t():\n    ex := Executor()\n    ex.submit(nap)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            "import std.time\nimport Executor from std.concurrency\nfn nap():\n    time.sleep_ms(3000)\ntest fn t():\n    ex := Executor()\n    ex.submit(nap)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
         ),
         (
             "exectimer_test.chz",
-            "import std.time\nimport std.concurrency\nfn nap():\n    tm := time.timer(3000)\n    _ := tm.recv()\ntest fn t():\n    ex := Executor()\n    ex.submit(nap)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            "import std.time\nimport Executor from std.concurrency\nfn nap():\n    tm := time.timer(3000)\n    _ := tm.recv()\ntest fn t():\n    ex := Executor()\n    ex.submit(nap)\n    ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
         ),
         // W7-17 — the single-`recv` park (`chan_recv_step`'s M:N timer branch).
         (

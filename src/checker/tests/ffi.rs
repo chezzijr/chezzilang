@@ -129,7 +129,7 @@ fn extern_ptr_param_and_return_ok() {
     // The opaque `ptr` handle is C-marshallable: an extern fn can return one and take one back.
     // `ptr` requires `import std.ffi` (one import covers both the extern block and the annotation).
     entry_ok(
-        "import std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
+        "import ptr from std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
     );
 }
 
@@ -167,7 +167,7 @@ fn ffi_ptr_license_does_not_leak_past_harvest() {
     let t = TmpDir::new();
     t.write(
         "helper.chz",
-        "import std.ffi\nfn get() -> ptr:\n    return ffi.null()\n",
+        "import std.ffi\nfn get() -> ffi.ptr:\n    return ffi.null()\n",
     );
     let entry = t.write(
         "main.chz",
@@ -189,7 +189,7 @@ fn ffi_ptr_license_does_not_leak_past_harvest() {
 fn ptr_whole_module_import_ok() {
     // A whole-module `import std.ffi` licenses bare `ptr` in BOTH extern signatures and annotations.
     entry_ok(
-        "import std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
+        "import ptr from std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
     );
 }
 
@@ -946,7 +946,7 @@ fn ffi_deref_load_sigs_typecheck() {
         "import std.ffi\nfn main():\n    p := ffi.null()\n    b: bool = ffi.load_bool(p)\n    print(b)\n",
     );
     entry_ok(
-        "import std.ffi\nfn main():\n    p := ffi.null()\n    q: ptr = ffi.load_ptr(p)\n    print(ffi.is_null(q))\n",
+        "import std.ffi\nfn main():\n    p := ffi.null()\n    q: ffi.ptr = ffi.load_ptr(p)\n    print(ffi.is_null(q))\n",
     );
     entry_ok(
         "import std.ffi\nfn main():\n    p := ffi.null()\n    s: str = ffi.load_str_at(p, 2)\n    print(s)\n",
@@ -969,7 +969,7 @@ fn ffi_alloc_layer_typechecks() {
     );
     // alloc returns a ptr (usable where a ptr is expected, e.g. is_null).
     entry_ok(
-        "import std.ffi\nfn main():\n    p: ptr = ffi.alloc(8)\n    print(ffi.is_null(p))\n    ffi.free(p)\n",
+        "import std.ffi\nfn main():\n    p: ffi.ptr = ffi.alloc(8)\n    print(ffi.is_null(p))\n    ffi.free(p)\n",
     );
     // free returns nil — using it as an int is a type error.
     entry_rejects(

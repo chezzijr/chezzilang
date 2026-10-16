@@ -305,7 +305,7 @@ fn parity_a_defer_that_can_never_complete_is_reported_not_hung() {
 /// real cleanup DOES (close a socket, send a final message, flush).
 #[test]
 fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
-    let src = "import std.concurrency\nimport std.time\n\
+    let src = "import Shared from std.concurrency\nimport std.time\n\
                fn cleanup(s: Shared[int]):\n    print(\"CLEANUP-ENTER\")\n    time.sleep_ms(20)\n    s.set(42)\n    print(\"CLEANUP-DONE\")\n\
                fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
@@ -334,7 +334,7 @@ fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
 /// now severs identically, so cleanup that DELEGATES is as uncancellable as cleanup that blocks inline.
 #[test]
 fn parity_a_nursery_inside_a_cancelled_tasks_defer_runs_to_completion() {
-    let src = "import std.concurrency\n\
+    let src = "import Shared from std.concurrency\n\
                fn setit(s: Shared[int]):\n    i := 0\n    while i < 1000:\n        i = i + 1\n    s.set(42)\n    print(\"CHILD-DONE\")\n\
                fn cleanup(s: Shared[int]):\n    print(\"CLEANUP-ENTER\")\n    parallel:\n        spawn setit(s)\n    print(\"CLEANUP-DONE\")\n\
                fn worker(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
@@ -862,7 +862,7 @@ fn serial_module_global_task_local_alias_isolates_parity() {
 /// engines. This is the regression guard for trap #1 (a hand-rolled copier would clone the Arc away → 0).
 #[test]
 fn atomic_incremented_in_task_visible_to_parent_parity() {
-    let src = "import std.concurrency\na := Atomic(0)\nfn main():\n    parallel:\n        spawn:\n            a.add(1)\n        spawn:\n            a.add(1)\n    print(a.load())\nmain()\n";
+    let src = "import Atomic from std.concurrency\na := Atomic(0)\nfn main():\n    parallel:\n        spawn:\n            a.add(1)\n        spawn:\n            a.add(1)\n    print(a.load())\nmain()\n";
     let out = golden_entry(src);
     assert_eq!(out, "2\n");
 }
@@ -871,14 +871,14 @@ fn atomic_incremented_in_task_visible_to_parent_parity() {
 /// AtomicInt — monomorphic lock-free int atomic. Basic load/store/exchange/cas roundtrip.
 #[test]
 fn atomic_int_roundtrip_parity() {
-    let src = "import std.concurrency\nfn main():\n    a := AtomicInt(5)\n    a.store(10)\n    print(a.load())\n    print(a.exchange(20))\n    print(a.cas(20, 99))\n    print(a.load())\nmain()\n";
+    let src = "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(5)\n    a.store(10)\n    print(a.load())\n    print(a.exchange(20))\n    print(a.cas(20, 99))\n    print(a.load())\nmain()\n";
     assert_eq!(golden_entry(src), "10\n10\ntrue\n99\n");
 }
 
 /// AtomicInt.add MUST keep the i64-overflow FAULT (checked CAS-loop, NOT raw fetch_add that wraps).
 #[test]
 fn atomic_int_add_overflow_parity() {
-    let src = "import std.concurrency\nfn main():\n    a := AtomicInt(9223372036854775807)\n    print(a.add(1))\nmain()\n";
+    let src = "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(9223372036854775807)\n    print(a.add(1))\nmain()\n";
     let msg = golden_entry_fault(src);
     assert!(msg.contains("integer overflow in Add"), "{msg}");
 }
@@ -886,7 +886,7 @@ fn atomic_int_add_overflow_parity() {
 /// AtomicInt.sub MUST keep the i64-overflow FAULT symmetrically (i64::MIN - 1).
 #[test]
 fn atomic_int_sub_overflow_parity() {
-    let src = "import std.concurrency\nfn main():\n    a := AtomicInt(-9223372036854775808)\n    print(a.sub(1))\nmain()\n";
+    let src = "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(-9223372036854775808)\n    print(a.sub(1))\nmain()\n";
     let msg = golden_entry_fault(src);
     assert!(msg.contains("integer overflow in Sub"), "{msg}");
 }
@@ -895,7 +895,7 @@ fn atomic_int_sub_overflow_parity() {
 /// correctness — a broken non-atomic RMW would lose updates under M:N).
 #[test]
 fn atomic_int_contention_parity() {
-    let src = "import std.concurrency\na := AtomicInt(0)\nfn main():\n    parallel:\n        for _ in 0..8:\n            spawn:\n                for _ in 0..10000:\n                    a.add(1)\n    print(a.load())\nmain()\n";
+    let src = "import AtomicInt from std.concurrency\na := AtomicInt(0)\nfn main():\n    parallel:\n        for _ in 0..8:\n            spawn:\n                for _ in 0..10000:\n                    a.add(1)\n    print(a.load())\nmain()\n";
     assert_eq!(golden_entry(src), "80000\n");
 }
 
@@ -916,28 +916,28 @@ fn atomic_int_wide_value_returns_parity() {
     // load a wide stored value
     assert_eq!(
         golden_entry(
-            "import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.load())\nmain()\n"
+            "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.load())\nmain()\n"
         ),
         "4611686018427387904\n",
     );
     // exchange returns the wide OLD value
     assert_eq!(
         golden_entry(
-            "import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.exchange(0))\n    print(a.load())\nmain()\n"
+            "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387904)\n    print(a.exchange(0))\n    print(a.load())\nmain()\n"
         ),
         "4611686018427387904\n0\n",
     );
     // add carries the counter across the inline boundary (no i64 overflow → must return boxed)
     assert_eq!(
         golden_entry(
-            "import std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387903)\n    print(a.add(1))\nmain()\n"
+            "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(4611686018427387903)\n    print(a.add(1))\nmain()\n"
         ),
         "4611686018427387904\n",
     );
     // sub carries below the negative inline boundary
     assert_eq!(
         golden_entry(
-            "import std.concurrency\nfn main():\n    a := AtomicInt(-4611686018427387904)\n    print(a.sub(1))\nmain()\n"
+            "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(-4611686018427387904)\n    print(a.sub(1))\nmain()\n"
         ),
         "-4611686018427387905\n",
     );
@@ -1303,7 +1303,7 @@ main()";
 /// and run type-erased identically.
 #[test]
 fn generic_fn_over_native_handles_run_parity() {
-    let src = "import std.concurrency\n\
+    let src = "import Atomic, Shared, StructuralEq from std.concurrency\n\
                fn peek[T](s: Shared[T]) -> T:\n\
                \x20   return s.get()\n\
                fn look[T: StructuralEq](a: Atomic[T]) -> T:\n\

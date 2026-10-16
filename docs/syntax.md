@@ -5215,7 +5215,7 @@ function; each call's extra args are C varargs, typed by the checker from their 
 import std.ffi
 
 extern "libc":
-    fn snprintf(buf: ptr, n: int, fmt: str, ...) -> int
+    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int
 
 buf := ffi.alloc(64)
 defer ffi.free(buf)

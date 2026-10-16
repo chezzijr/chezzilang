@@ -1,7 +1,7 @@
 # TICKET-254: a mutating call on a fresh temporary changes a value no name holds, in a task or
 # not. The checker warns ("changes a temporary copy"); it is never the D4 error "is this task's
 # copy". Each test runs the write in a task and asserts the root after the join.
-import std.concurrency
+import Executor, Shared from std.concurrency
 
 fn push_lit(g: List[List[int]]):
     g[0..2].push([9])

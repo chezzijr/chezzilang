@@ -10,7 +10,7 @@ fn main():
     while i < n:
         m[i] = i
         i = i + 1
-    box := ConcurrentMap(RwShared(m))
+    box := ConcurrentMap(concurrency.RwShared(m))
     hits := 0
     i = 0
     while i < n:

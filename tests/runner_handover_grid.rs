@@ -41,7 +41,7 @@ const KILL_AT: Duration = Duration::from_secs(3);
 
 const PRELUDE: &str = r#"import std.time
 import std.os
-import std.concurrency
+import Executor, Shared from std.concurrency
 ch := Channel[int](1)
 sa := Shared(0)
 sb := Shared(0)

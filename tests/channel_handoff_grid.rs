@@ -97,7 +97,7 @@ fn run_with(
     (status, out, err)
 }
 
-const HARNESS: &str = r#"import std.concurrency
+const HARNESS: &str = r#"import Executor, Shared from std.concurrency
 
 fn spin(n: int):
     i := 0
@@ -392,7 +392,7 @@ fn check_named(name: &str, src: &str, want: &str) -> Vec<String> {
 
 /// H1 — the ticket's worker-pool idiom. Go (0/200 bad) prints
 /// `received by workers: 100 left in channel: 0 None`-shaped output (Go spells the last `<nil>`).
-const H1: &str = r#"import std.concurrency
+const H1: &str = r#"import AtomicInt from std.concurrency
 fn worker(done: Channel[bool], work: Channel[int], n: AtomicInt):
     while true:
         wait:

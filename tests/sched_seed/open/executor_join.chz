@@ -1,4 +1,4 @@
-import std.concurrency
+import Executor from std.concurrency
 fn job(tag: str, ch: Channel[str]) -> int:
     for j in 0..3:
         ch.send("{tag}.{j}")

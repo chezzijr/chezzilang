@@ -2,7 +2,7 @@ import std.concurrency
 import submit_task from std.concurrency.task
 fn f() -> int:
     return 1
-ex := Executor()
+ex := concurrency.Executor()
 s := 0
 for _ in 0..2000:
     r := submit_task(ex, f).get()

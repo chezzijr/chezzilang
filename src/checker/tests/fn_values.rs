@@ -14,7 +14,7 @@ use super::*;
 #[test]
 fn closure_param_inferred_from_shared_update_conflict_rejected() {
     entry_rejects(
-        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x.upper())\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x.upper())\n",
         "has no method 'upper'",
     );
 }
@@ -22,7 +22,7 @@ fn closure_param_inferred_from_shared_update_conflict_rejected() {
 #[test]
 fn closure_param_inferred_from_shared_update_ok() {
     entry_ok(
-        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x + 1)\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x + 1)\n",
     );
 }
 
@@ -445,7 +445,7 @@ fn free_fn_hof_conflicting_returnonly_closures_rejected() {
 #[test]
 fn rwshared_read_len_ok() {
     entry_ok(
-        "import std.concurrency\nfn main():\n    r := RwShared({\"a\": 1})\n    print(r.read(fn(m): m.len()))\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared({\"a\": 1})\n    print(r.read(fn(m): m.len()))\n",
     );
 }
 
@@ -2096,7 +2096,7 @@ fn a_generic_fn_argument_pinned_by_anything_stays_ok() {
     ));
     // `std.concurrency`'s slots, including `for_each`'s deliberately-`?` return
     entry_ok(&format!(
-        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\n{head}fn gi[T](x: T) -> T:\n    return x\nfn gs[T](x: T):\n    print(x)\nfn main():\n    s := Shared(1)\n    s.update(gi)\n    r := RwShared(1)\n    r.write(gi)\n    q := ConcurrentList(RwShared([1,2,3]))\n    q.for_each(gs)\nmain()\n"
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\n{head}fn gi[T](x: T) -> T:\n    return x\nfn gs[T](x: T):\n    print(x)\nfn main():\n    s := concurrency.Shared(1)\n    s.update(gi)\n    r := concurrency.RwShared(1)\n    r.write(gi)\n    q := ConcurrentList(concurrency.RwShared([1,2,3]))\n    q.for_each(gs)\nmain()\n"
     ));
     // an EMPTY receiver leaves the slot's own parameter `Unknown` — the empty-collection sentinel,
     // not evidence the fn is un-instantiable. Both of these print `[]` today and must keep doing so.
@@ -2111,7 +2111,7 @@ fn a_generic_fn_argument_pinned_by_anything_stays_ok() {
         "{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print([].fold(0, add))\n    print([].fold(\"\", pick))\n"
     ));
     entry_ok(&format!(
-        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    s: ConcurrentList[int] = ConcurrentList(RwShared([]))\n    print(s.fold(0, add))\nmain()\n"
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    s: ConcurrentList[int] = ConcurrentList(concurrency.RwShared([]))\n    print(s.fold(0, add))\nmain()\n"
     ));
 }
 

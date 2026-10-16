@@ -14,7 +14,7 @@ import std.concurrency
 import std.cancel
 import submit_task from std.concurrency.task
 
-fn bump(c: AtomicInt, by: int):
+fn bump(c: concurrency.AtomicInt, by: int):
     c.add(by)
 
 fn blow_up_int() -> int:
@@ -28,15 +28,15 @@ fn err_of(r: int!) -> str:
         ?_: return "no fault"
         !e: return e.message()
 
-fn guarded_bump(tok: cancel.Token, c: AtomicInt):
+fn guarded_bump(tok: cancel.Token, c: concurrency.AtomicInt):
     if tok.cancelled():
         return
     c.add(1)
 
 # A HANDLE job's fault is its handle's `!e`: `shutdown()` raises nothing, and no sibling is cut.
 test fn every_job_runs_despite_a_handle_job_fault():
-    ex := Executor()
-    c := AtomicInt(0)
+    ex := concurrency.Executor()
+    c := concurrency.AtomicInt(0)
     t := submit_task(ex, blow_up_int)
     ex.submit(fn(): bump(c, 1))
     ex.submit(fn(): bump(c, 10))
@@ -46,7 +46,7 @@ test fn every_job_runs_despite_a_handle_job_fault():
     assert c.load() == 111, "every non-faulting job must run, got " + str(c.load())
 
 test fn each_handle_carries_its_own_fault():
-    ex := Executor()
+    ex := concurrency.Executor()
     a := submit_task(ex, blow_up_int)
     b := submit_task(ex, blow_up_late_int)
     ex.shutdown()
@@ -55,7 +55,7 @@ test fn each_handle_carries_its_own_fault():
     assert err_of(b.get()).contains("late boom"), err_of(b.get())
 
 test fn a_later_jobs_result_survives_an_earlier_handle_fault():
-    ex := Executor()
+    ex := concurrency.Executor()
     t := submit_task(ex, blow_up_int)
     ch := ex.submit_result(fn() -> int: 7)
     ex.shutdown()
@@ -63,8 +63,8 @@ test fn a_later_jobs_result_survives_an_earlier_handle_fault():
     assert (ch.recv() ?? 0) == 7, "the surviving result must be the job's real value"
 
 test fn a_second_shutdown_after_a_handle_fault_is_a_no_op():
-    ex := Executor()
-    c := AtomicInt(0)
+    ex := concurrency.Executor()
+    c := concurrency.AtomicInt(0)
     t := submit_task(ex, blow_up_int)
     ex.submit(fn(): bump(c, 1))
     ex.shutdown()
@@ -78,10 +78,10 @@ test fn a_pre_cancelled_token_stops_the_jobs():
     # there is nothing to race: `guarded_bump` observes an already-cancelled token deterministically,
     # unlike submitting `tok.cancel()` as job 0 and racing jobs 1/2 against it (M:N farms
     # `ready[1..]` to the pool before running `ready[0]` inline, so a hot pool thread can win that race).
-    ex := Executor()
+    ex := concurrency.Executor()
     tok := cancel.manual()
     tok.cancel()
-    c := AtomicInt(0)
+    c := concurrency.AtomicInt(0)
     ex.submit(fn(): guarded_bump(tok, c))
     ex.submit(fn(): guarded_bump(tok, c))
     ex.shutdown()
@@ -105,8 +105,8 @@ test fn a_pre_cancelled_token_stops_the_jobs():
 # The self-shutdown job is submitted LAST on purpose: it marks the executor `shut`, so a submit racing
 # behind it would be rejected with "submit on a shut-down Executor" (CPython raises there too).
 test fn a_job_may_gracefully_shut_down_its_own_executor():
-    ex := Executor()
-    c := AtomicInt(0)
+    ex := concurrency.Executor()
+    c := concurrency.AtomicInt(0)
     ex.submit(fn(): bump(c, 1))
     ex.submit(fn(): bump(c, 10))
     ex.submit(fn(): ex.shutdown())
@@ -118,7 +118,7 @@ test fn a_job_may_shutdown_now_its_own_executor():
     # The reentrant-cancel half of the same seam. No accumulator assertion: `shutdown_now` trips the
     # per-core cancel flag, so whether a sibling reaches its next checkpoint first is genuinely
     # nondeterministic. What must be deterministic is that nobody calls this run dead.
-    ex := Executor()
+    ex := concurrency.Executor()
     ex.submit(fn(): ex.shutdown_now())
     r := recover: ex.shutdown()
     match r:
@@ -126,9 +126,9 @@ test fn a_job_may_shutdown_now_its_own_executor():
         !e: assert false, "a job that shuts down its own executor must not fault: " + e.message()
 
 test fn an_uncancelled_token_is_a_no_op():
-    ex := Executor()
+    ex := concurrency.Executor()
     tok := cancel.manual()
-    c := AtomicInt(0)
+    c := concurrency.AtomicInt(0)
     ex.submit(fn(): guarded_bump(tok, c))
     ex.submit(fn(): guarded_bump(tok, c))
     ex.shutdown()

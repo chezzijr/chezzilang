@@ -670,7 +670,7 @@ box whose writes are serialised by a single owner (Elixir's `Agent` trick), so t
 unrepresentable.
 
 ```chezzi
-import std.concurrency
+import Shared from std.concurrency
 
 s := Shared(0)             # one owner holds the value
 parallel:
@@ -889,7 +889,7 @@ distinct from the generic reference cell). Same import gate and reserved name as
 `add`/`sub` are **always** available (int is always numeric — no residual numeric gate):
 
 ```chezzi
-import std.concurrency
+import AtomicInt from std.concurrency
 a := AtomicInt(0)
 fn main():
     parallel:
@@ -1072,7 +1072,7 @@ so the import is checker-only licensing with zero runtime cost; bare use without
 `unknown function 'timer' (import it from std.time: \`import std.time\`)` error.
 
 ```chezzi
-import std.time
+import timer from std.time
 t := timer(500)
 print(t.recv())            # true — blocks ~500ms, then delivers
 ```

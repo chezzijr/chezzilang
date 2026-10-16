@@ -11,7 +11,7 @@
 #
 # `RwShared.write` has the same row: it runs in place under the exclusive lock.
 
-import std.concurrency
+import RwShared, Shared from std.concurrency
 import std.time
 
 struct Table:

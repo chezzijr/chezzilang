@@ -1,4 +1,4 @@
-import std.concurrency
+import Atomic from std.concurrency
 
 fn main():
     a := Atomic[int](0)

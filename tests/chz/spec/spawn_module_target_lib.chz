@@ -2,7 +2,7 @@
 #
 # Not a `*_test.chz`, so `chezzi test` never picks it up on its own; it exists so the test next door
 # can spell a module-qualified `spawn` target whose effect is observable.
-import std.concurrency
+import Shared from std.concurrency
 
 # Add `by` to the shared box. The box is a `Shared` handle, so the write is visible to the spawner
 # after the nursery joins — which is what makes "the spawned call actually RAN" assertable.

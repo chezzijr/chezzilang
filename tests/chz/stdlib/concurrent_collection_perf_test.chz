@@ -18,8 +18,8 @@ test fn push_and_add_on_a_100k_container_do_not_copy_it():
         xs.push(i)
         st.add(i)
         i = i + 1
-    cl := ConcurrentList(RwShared(xs))
-    cs := ConcurrentSet(RwShared(st))
+    cl := ConcurrentList(concurrency.RwShared(xs))
+    cs := ConcurrentSet(concurrency.RwShared(st))
 
     t0 := time.now_ms()
     i = 0

@@ -57,7 +57,7 @@ fn std_internal_names_are_hidden_from_user_modules() {
         let help = format!("use {coll} from std.concurrency.collection");
         for name in *names {
             let src = format!(
-                "import std.concurrency\nfn main():\n    r := RwShared({init})\n    r.{name}()\nmain()\n"
+                "import RwShared from std.concurrency\nfn main():\n    r := RwShared({init})\n    r.{name}()\nmain()\n"
             );
             let errs = check_entry(&src);
             assert!(
@@ -175,17 +175,17 @@ fn std_internal_names_are_hidden_from_user_modules() {
     assert!(errs.is_empty(), "a user module's `_` names: {errs:?}");
     // A native `_` method is no field either, and witnesses no user protocol.
     entry_rejects(
-        "import std.concurrency\nr := RwShared([1])\nf := r._len\n",
+        "import RwShared from std.concurrency\nr := RwShared([1])\nf := r._len\n",
         "has no field '_len'",
     );
     entry_rejects(
-        "import std.concurrency\nprotocol P:\n    fn _len(self) -> int\nfn f[T: P](x: T) -> int:\n    return x._len()\nprint(f(RwShared([1])))\n",
+        "import RwShared from std.concurrency\nprotocol P:\n    fn _len(self) -> int\nfn f[T: P](x: T) -> int:\n    return x._len()\nprint(f(RwShared([1])))\n",
         "does not satisfy P",
     );
 
     // (c) the native `_` method, and the public surface beside every sealed name.
     let errs = check_entry(
-        "import std.concurrency\nex := Executor()\nch: Channel[int] = Channel(1)\nex._submit_settled(fn(): pass, ch)\n",
+        "import Executor from std.concurrency\nex := Executor()\nch: Channel[int] = Channel(1)\nex._submit_settled(fn(): pass, ch)\n",
     );
     assert!(
         errs.iter()
@@ -200,7 +200,7 @@ fn std_internal_names_are_hidden_from_user_modules() {
         "the help names the hidden method: {errs:?}"
     );
     entry_ok(
-        "import std.fs\nimport std.concurrency\nimport ConcurrentList from std.concurrency.collection\nprint(fs.exists(\"x\"))\nh := Executor().submit_result(fn(): 4)\nprint(h)\nConcurrentList[int].new().push(1)\n",
+        "import std.fs\nimport std.concurrency\nimport ConcurrentList from std.concurrency.collection\nprint(fs.exists(\"x\"))\nh := concurrency.Executor().submit_result(fn(): 4)\nprint(h)\nConcurrentList[int].new().push(1)\n",
     );
 }
 
@@ -208,7 +208,7 @@ fn std_internal_names_are_hidden_from_user_modules() {
 #[test]
 fn shared_has_a_read_method() {
     entry_ok(
-        "import std.concurrency\nfn main():\n    s := Shared([1, 2, 3])\n    n := s.read(fn(l: List[int]) -> int: l.len())\n    print(n)\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared([1, 2, 3])\n    n := s.read(fn(l: List[int]) -> int: l.len())\n    print(n)\nmain()\n",
     );
 }
 
@@ -269,7 +269,7 @@ fn every_crossing_closure_method_reports_a_captured_write() {
         user_rows.len() + 1
     );
     entry_ok(
-        "import std.concurrency\nfn main():\n    ex := Executor(1)\n    ch := ex.submit_result(fn() -> int: 1)\n    print(ch.recv())\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor(1)\n    ch := ex.submit_result(fn() -> int: 1)\n    print(ch.recv())\n    ex.shutdown()\nmain()\n",
     );
     for (owner, method, setup, call, param) in user_rows {
         let ret = if param.is_empty() { "None" } else { "int" };
@@ -326,11 +326,11 @@ fn every_crossing_closure_method_reports_a_captured_write() {
     }
     // A closure that mutates only its PARAMETER is the point of the box: `ok`.
     entry_ok(
-        "import std.concurrency\nfn bump(xs: List[int]) -> List[int]:\n    xs.push(1)\n    return xs\nfn main():\n    s := Shared([1])\n    s.update(fn(xs): bump(xs))\n    w := RwShared([1])\n    w.write(fn(xs): bump(xs))\n    print(s.read(fn(xs): xs.len()), w.get())\nmain()\n",
+        "import RwShared, Shared from std.concurrency\nfn bump(xs: List[int]) -> List[int]:\n    xs.push(1)\n    return xs\nfn main():\n    s := Shared([1])\n    s.update(fn(xs): bump(xs))\n    w := RwShared([1])\n    w.write(fn(xs): bump(xs))\n    print(s.read(fn(xs): xs.len()), w.get())\nmain()\n",
     );
     // No row: `RwShared.read` runs its closure in the reader's heap, so a captured write is legal.
     entry_ok(
-        "import std.concurrency\nfn main():\n    seen: List[int] = []\n    w := RwShared(1)\n    n := w.read(fn(x: int) -> int: x + seen.remove_at(0))\n    print(n, seen)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    seen: List[int] = []\n    w := RwShared(1)\n    n := w.read(fn(x: int) -> int: x + seen.remove_at(0))\n    print(n, seen)\nmain()\n",
     );
 }
 
@@ -513,13 +513,13 @@ fn an_atomic_payload_with_a_non_hook_eq_is_legal() {
             "    fn eq(self, other: P) -> int:\n        return 1\n",
         ] {
             entry_ok(&format!(
-                "import std.concurrency\n{owner}{eq}a := Atomic({mk})\nprint(a.load() == {mk})\n"
+                "import Atomic from std.concurrency\n{owner}{eq}a := Atomic({mk})\nprint(a.load() == {mk})\n"
             ));
         }
         // The hook itself is still refused.
         entry_rejects(
             &format!(
-                "import std.concurrency\n{owner}    fn eq(self, other: P) -> bool:\n        return true\na := Atomic({mk})\nprint(a.load() == {mk})\n"
+                "import Atomic from std.concurrency\n{owner}    fn eq(self, other: P) -> bool:\n        return true\na := Atomic({mk})\nprint(a.load() == {mk})\n"
             ),
             "payload defines its own 'eq'",
         );
@@ -644,32 +644,32 @@ fn an_atomic_payload_parameter_must_carry_structural_eq() {
     const UNKNOWN: &str = "unknown protocol 'StructuralEq' in bound on 'T' (import it from std.concurrency: `import std.concurrency`)";
     // The unbounded parameter is refused, in a signature and in a struct field.
     entry_rejects(
-        &format!("import std.concurrency\nfn mk[T]{MK}"),
+        &format!("import Atomic from std.concurrency\nfn mk[T]{MK}"),
         "Atomic[T] payload 'T' must carry the bound StructuralEq (import it from std.concurrency)",
     );
     entry_rejects(
-        "import std.concurrency\nstruct H[T]:\n    a: Atomic[T]\n",
+        "import Atomic from std.concurrency\nstruct H[T]:\n    a: Atomic[T]\n",
         "payload 'T' must carry the bound StructuralEq",
     );
     // A parameter nested in the payload is the same hole.
     entry_rejects(
-        "import std.concurrency\nfn f[T](a: Atomic[List[T]]) -> int:\n    return 1\n",
+        "import Atomic from std.concurrency\nfn f[T](a: Atomic[List[T]]) -> int:\n    return 1\n",
         "payload 'T' must carry the bound StructuralEq",
     );
     // Another bound does not stand in for it.
     entry_rejects(
-        &format!("import std.concurrency\nfn mk[T: Hashable]{MK}"),
+        &format!("import Atomic from std.concurrency\nfn mk[T: Hashable]{MK}"),
         "must carry the bound StructuralEq",
     );
     // The bound checks under both import forms and as a `where` clause.
     entry_ok(&format!(
-        "import std.concurrency\nfn mk[T: StructuralEq]{MK}print(mk(3).load())\n"
+        "import Atomic, StructuralEq from std.concurrency\nfn mk[T: StructuralEq]{MK}print(mk(3).load())\n"
     ));
     entry_ok(&format!(
         "import Atomic, StructuralEq from std.concurrency\nfn mk[T: StructuralEq]{MK}print(mk([1]).load())\n"
     ));
     entry_ok(
-        "import std.concurrency\nstruct H[T: StructuralEq]:\n    a: Atomic[T]\nh := H(Atomic(1))\n",
+        "import Atomic, StructuralEq from std.concurrency\nstruct H[T: StructuralEq]:\n    a: Atomic[T]\nh := H(Atomic(1))\n",
     );
     // `Atomic` alone does not license the bound's name; neither does no import at all.
     entry_rejects(
@@ -687,7 +687,9 @@ fn an_atomic_payload_parameter_must_carry_structural_eq() {
     // The bound is sealed: a type that reaches the `eq` hook does not satisfy it.
     for call in ["mk(P(1))", "mk([P(1)])", "mk((1, ?P(1)))"] {
         entry_rejects(
-            &format!("import std.concurrency\n{HOOKED}fn mk[T: StructuralEq]{MK}x := {call}\n"),
+            &format!(
+                "import Atomic, StructuralEq from std.concurrency\n{HOOKED}fn mk[T: StructuralEq]{MK}x := {call}\n"
+            ),
             "does not satisfy StructuralEq",
         );
     }
@@ -703,13 +705,13 @@ fn an_atomic_payload_parameter_must_carry_structural_eq() {
             ("enum P:\n    A(int)", "P.A(1)"),
         ] {
             entry_ok(&format!(
-                "import std.concurrency\n{decl}\n    {eq}\nfn mk[T: StructuralEq]{MK}a := Atomic({val})\nb := mk({val})\n"
+                "import Atomic, StructuralEq from std.concurrency\n{decl}\n    {eq}\nfn mk[T: StructuralEq]{MK}a := Atomic({val})\nb := mk({val})\n"
             ));
         }
     }
     // Must still fail: the direct spelling of a hooked payload.
     entry_rejects(
-        &format!("import std.concurrency\n{HOOKED}a := Atomic(P(1))\n"),
+        &format!("import Atomic from std.concurrency\n{HOOKED}a := Atomic(P(1))\n"),
         "payload defines its own 'eq'",
     );
 }

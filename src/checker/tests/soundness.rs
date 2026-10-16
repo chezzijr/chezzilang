@@ -1427,16 +1427,16 @@ fn three_branch_mixed_error_inference_ok() {
 #[test]
 fn generic_fn_over_native_handles_infers_param() {
     entry_ok(
-        "import std.concurrency\nfn peek[T](s: Shared[T]) -> T:\n    return s.get()\nx := peek(Shared(9))\nprint(x)\n",
+        "import Shared from std.concurrency\nfn peek[T](s: Shared[T]) -> T:\n    return s.get()\nx := peek(Shared(9))\nprint(x)\n",
     );
     entry_ok(
         "import std.concurrency\nfn first[T](c: Channel[T]) -> T:\n    return c.recv()\nch := Channel[int]()\nch.send(1)\nprint(first(ch))\n",
     );
     entry_ok(
-        "import std.concurrency\nfn look[T: StructuralEq](a: Atomic[T]) -> T:\n    return a.load()\nprint(look(Atomic(3)))\n",
+        "import Atomic, StructuralEq from std.concurrency\nfn look[T: StructuralEq](a: Atomic[T]) -> T:\n    return a.load()\nprint(look(Atomic(3)))\n",
     );
     entry_ok(
-        "import std.concurrency\nfn peekrw[T](s: RwShared[T]) -> T:\n    return s.get()\nprint(peekrw(RwShared(4)))\n",
+        "import RwShared from std.concurrency\nfn peekrw[T](s: RwShared[T]) -> T:\n    return s.get()\nprint(peekrw(RwShared(4)))\n",
     );
 }
 
@@ -1453,7 +1453,7 @@ fn generic_wrapper_struct_holding_channel_substitutes() {
 /// domain); the mismatch error itself is unchanged. `Set.add`'s hint still fires.
 #[test]
 fn atomic_add_mismatch_no_collection_hint() {
-    let errs = check_entry("import std.concurrency\na := Atomic(0)\na.add(1.5)\n");
+    let errs = check_entry("import Atomic from std.concurrency\na := Atomic(0)\na.add(1.5)\n");
     let msg = errs
         .iter()
         .map(|e| e.message.as_str())
@@ -1526,7 +1526,7 @@ fn rwshared_readview_fold_turbofish_ok() {
         "import std.concurrency\n\
          import ConcurrentList, ConcurrentMap from std.concurrency.collection\n\
          fn main():\n\
-         \x20   rw := ConcurrentList(RwShared([1, 2, 3]))\n\
+         \x20   rw := ConcurrentList(concurrency.RwShared([1, 2, 3]))\n\
          \x20   print(rw.fold[int](0, fn(a, x): a + x))\n\
          main()\n",
     );
@@ -1534,7 +1534,7 @@ fn rwshared_readview_fold_turbofish_ok() {
         "import std.concurrency\n\
          import ConcurrentList, ConcurrentMap from std.concurrency.collection\n\
          fn main():\n\
-         \x20   m := ConcurrentMap(RwShared({\"a\": 1}))\n\
+         \x20   m := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n\
          \x20   print(m.fold_entries[int](0, fn(a, k, v): a + v))\n\
          main()\n",
     );
@@ -1545,7 +1545,7 @@ fn rwshared_readview_fold_turbofish_ok() {
 #[test]
 fn rwshared_readview_nongeneric_method_turbofish_rejected() {
     rejects(
-        "import std.concurrency\n\
+        "import RwShared from std.concurrency\n\
          fn main():\n\
          \x20   rw := RwShared([1, 2, 3])\n\
          \x20   print(rw.len[int]())\n\
@@ -1561,7 +1561,7 @@ fn rwshared_readview_nongeneric_method_turbofish_rejected() {
 #[test]
 fn executor_bodied_generic_method_infers_from_closure() {
     entry_ok(
-        "import std.concurrency\n\
+        "import Executor from std.concurrency\n\
          fn main():\n\
          \x20   ex := Executor()\n\
          \x20   ch := ex.submit_result(fn() -> int: 5)\n\

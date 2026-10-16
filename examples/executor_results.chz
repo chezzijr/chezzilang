@@ -15,9 +15,9 @@ fn score(row: str) -> int:
 
 fn main():
     rows := ["alpha", "", "beta", "gamma"]
-    ex := Executor()
+    ex := concurrency.Executor()
 
-    handles: List[Task[int]] = []
+    handles: List[task.Task[int]] = []
     for r in rows:
         handles.push(task.submit_task(ex, fn() -> int: score(r)))
 

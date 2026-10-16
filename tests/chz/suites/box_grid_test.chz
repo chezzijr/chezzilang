@@ -4,7 +4,7 @@
 # with the container cycle marker. Before the fix `print(n)` hung for Shared and Atomic
 # (rc=124 under `timeout 10`) and overflowed the stack for RwShared (rc=134).
 
-import std.concurrency
+import Atomic, AtomicInt, RwShared, Shared from std.concurrency
 
 struct NS:
     id: int

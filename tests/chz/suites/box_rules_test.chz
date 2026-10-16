@@ -3,7 +3,7 @@
 # spawned task. Each rule here is RUN; `tests/box_private_heap_grid.rs` runs this file at
 # CHEZZI_THREADS 1, 2 and default, on the debug binary.
 
-import std.concurrency
+import AtomicInt, Executor, RwShared, Shared from std.concurrency
 import std.net
 import std.time
 
@@ -259,7 +259,7 @@ fn feed_one(addr: str, go: Channel[int]):
                 !e: panic(e.message())
         !e: panic(e.message())
 
-fn take_one(ln: Listener, go: Channel[int]) -> int:
+fn take_one(ln: net.Listener, go: Channel[int]) -> int:
     match ln.accept():
         ?peer:
             go.send(1)
@@ -273,12 +273,12 @@ fn take_one(ln: Listener, go: Channel[int]) -> int:
         !_: return -3
     return -4
 
-fn listen_local() -> Listener:
+fn listen_local() -> net.Listener:
     match net.listen("127.0.0.1:0"):
         ?ln: return ln
         !e: panic(e.message())
 
-fn addr_of(ln: Listener) -> str:
+fn addr_of(ln: net.Listener) -> str:
     match ln.addr():
         ?a: return a
         !e: panic(e.message())

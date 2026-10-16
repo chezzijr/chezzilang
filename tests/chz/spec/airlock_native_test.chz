@@ -4,7 +4,7 @@
 # (a `spawn:` block capturing it). Previously the wire path lumped Native with Module and rejected it.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.math
-import std.concurrency
+import Shared from std.concurrency
 
 # Channel.send/recv a native fn, then call it in the parent.
 test fn native_crosses_channel():

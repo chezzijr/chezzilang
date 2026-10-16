@@ -10,7 +10,7 @@
 use std::process::{Command, ExitStatus};
 
 /// `sh7.chz`: a `List.map` callback spins on a flag that a sleeping sibling sets.
-const SH7: &str = r#"import std.concurrency
+const SH7: &str = r#"import AtomicInt from std.concurrency
 import std.time
 flag := AtomicInt(0)
 fn waitflag(f: AtomicInt, x: int) -> int:
@@ -29,7 +29,7 @@ print("done")
 "#;
 
 /// `sh8.chz`: the same wait inside a `Shared.update` closure.
-const SH8: &str = r#"import std.concurrency
+const SH8: &str = r#"import AtomicInt, Shared from std.concurrency
 import std.time
 flag := AtomicInt(0)
 s := Shared(0)
@@ -46,7 +46,7 @@ print("done {s.get()}")
 "#;
 
 /// `sh4.chz`: a sibling faults, so the spinning `update` closure must be cancelled, not commit.
-const C4: &str = r#"import std.concurrency
+const C4: &str = r#"import AtomicInt, Shared from std.concurrency
 import std.time
 flag := AtomicInt(0)
 s := Shared(0)
@@ -64,7 +64,7 @@ print("{r} {s.get()}")
 "#;
 
 /// `sh6.chz`: a sleeping sibling must wake while a callback spins, and stop the spin early.
-const C6: &str = r#"import std.concurrency
+const C6: &str = r#"import AtomicInt from std.concurrency
 import std.time
 flag := AtomicInt(0)
 fn spin(f: AtomicInt, n: int) -> int:
@@ -86,7 +86,7 @@ parallel:
 "#;
 
 /// Shape `d`: a nursery opened and joined inside a preempted callback.
-const D: &str = r#"import std.concurrency
+const D: &str = r#"import AtomicInt from std.concurrency
 flag := AtomicInt(0)
 ch := Channel[int](0)
 fn wait_then_join(f: AtomicInt, c: Channel[int], x: int) -> int:

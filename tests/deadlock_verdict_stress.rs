@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-const PROG: &str = r#"import std.concurrency
+const PROG: &str = r#"import Shared from std.concurrency
 fn hold(x: int, ready: Channel[int], c: Channel[int]) -> int:
     ready.send(1)
     return x + c.recv()

@@ -11,7 +11,7 @@
 # (`index out of bounds: the len is 0 but the index is 4`).
 # Generated once from the planning probe by target/t246-scratch/nest_to_test.py.
 
-import std.concurrency
+import Executor, RwShared, Shared from std.concurrency
 import std.math
 K: int = 7
 G: List[int] = [1, 2, 3]

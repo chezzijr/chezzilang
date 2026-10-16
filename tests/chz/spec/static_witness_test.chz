@@ -14,7 +14,7 @@
 # (`// ===== M24` section), not here: they never reach a runtime.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
-import std.concurrency
+import Shared from std.concurrency
 # a module bind a PARAMETER can shadow — see the M24-2 section at the bottom of this file
 import std.math
 # the OTHER module a forward can point at — see the M24-1 section at the bottom of this file

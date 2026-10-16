@@ -1934,7 +1934,7 @@ main()
 /// so the count is that plus two per lookup: 8001. A scan would be 4 000 000.
 #[test]
 fn rwshared_map_get_key_is_not_linear() {
-    let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := ConcurrentMap(RwShared(m))\n    s := 0\n    i = 0\n    while i < n:\n        match box.get(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
+    let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := ConcurrentMap(concurrency.RwShared(m))\n    s := 0\n    i = 0\n    while i < n:\n        match box.get(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n");
     assert!(
@@ -1950,7 +1950,7 @@ fn rwshared_map_get_key_is_not_linear() {
 /// so 4000 writes rebuild 8000 nodes (plus the final `get`). A re-encode would be millions.
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
-    let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(RwShared(m))\n    i := 0\n    while i < n:\n        box.set(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
+    let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(concurrency.RwShared(m))\n    i := 0\n    while i < n:\n        box.set(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n2000\n");
     assert!(
@@ -1965,7 +1965,7 @@ fn rwshared_map_set_key_is_not_linear() {
 #[test]
 fn returned_job_keeps_its_result_across_shutdown_now() {
     let src = r#"
-import std.concurrency
+import Executor from std.concurrency
 lost := 0
 for _ in 0..20:
     ex := Executor()

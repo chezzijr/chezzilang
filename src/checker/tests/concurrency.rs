@@ -435,7 +435,7 @@ fn shared_update_on_captured_module_global_in_spawn_ok() {
     // The collision guard: `Shared.update` shares the mutator name `update` with `Map`, but the gate is
     // typed on the receiver so a captured module-global Shared stays accepted (that IS the cross-task box).
     entry_ok(
-        "import std.concurrency\ng := Shared(0)\nfn main():\n    parallel:\n        spawn:\n            g.update(fn(x): x + 1)\nmain()\n",
+        "import Shared from std.concurrency\ng := Shared(0)\nfn main():\n    parallel:\n        spawn:\n            g.update(fn(x): x + 1)\nmain()\n",
     );
 }
 
@@ -464,7 +464,7 @@ fn spawn_in_plain_fn_ok() {
 fn shared_construct_and_methods_ok() {
     // `Shared(v)` infers its element type from the value (no `[T]` type arg, unlike Channel).
     entry_ok(
-        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n",
     );
 }
 
@@ -472,14 +472,14 @@ fn shared_construct_and_methods_ok() {
 fn shared_get_returns_element_type() {
     // `get()` yields `T`, so it must compose where a `T` is expected (here, str concat).
     entry_ok(
-        "import std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    msg := s.get() + \"!\"\n    print(msg)\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    msg := s.get() + \"!\"\n    print(msg)\nmain()\n",
     );
 }
 
 #[test]
 fn shared_set_wrong_type_rejected() {
     entry_rejects(
-        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
         "expected int",
     );
 }
@@ -488,7 +488,7 @@ fn shared_set_wrong_type_rejected() {
 fn shared_update_fn_arity_rejected() {
     // `update` takes `fn(T) -> T`; a two-param closure must not type-check.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x, y): x + y)\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x, y): x + y)\nmain()\n",
         "argument 1 of 'update'",
     );
 }
@@ -498,7 +498,7 @@ fn shared_accepts_turbofish() {
     // `Shared[T](v)` — the turbofish is OPTIONAL (value-first), and when present pins the element
     // type. It must agree with the value's inferred type.
     entry_ok(
-        "import std.concurrency\nfn main():\n    s := Shared[int](0)\n    print(s.get())\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared[int](0)\n    print(s.get())\nmain()\n",
     );
 }
 
@@ -507,11 +507,11 @@ fn rwshared_list_view_methods_accept_on_list_element() {
     // The zero-copy read-view methods (`len`/`at`/`slice`/`for_each`/`fold`) are valid when the box
     // element is a list. `fold`'s R is inferred from the concrete `init` accumulator.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(RwShared([1, 2, 3]))\n    print(box.len())\n    print(box.at(0))\n    print(box[0..2])\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(concurrency.RwShared([1, 2, 3]))\n    print(box.len())\n    print(box.at(0))\n    print(box[0..2])\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
     );
     // R is not pinned to the element type — a str accumulator folds a list of ints to a str.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(RwShared([1, 2, 3]))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(concurrency.RwShared([1, 2, 3]))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
     );
 }
 
@@ -520,15 +520,15 @@ fn rwshared_list_view_methods_reject_on_non_list_element() {
     // Element-shape gate at the CHECKER (no check-OK-then-run-fault): the read-view methods are gated
     // to a list element, so a non-list `RwShared[int]` cleanly reports "no method".
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
         "type RwShared[int] has no method 'fold'",
     );
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.at(0))\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.at(0))\nmain()\n",
         "type RwShared[int] has no method 'at'",
     );
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.len())\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.len())\nmain()\n",
         "type RwShared[int] has no method 'len'",
     );
 }
@@ -540,31 +540,31 @@ fn rwshared_readview_gate_rejects_non_container_and_wrong_method() {
     // name on the wrong container head also misses.
     // int element — Set/Map methods miss.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.contains(3))\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared(0)\n    print(box.contains(3))\nmain()\n",
         "type RwShared[int] has no method 'contains'",
     );
     // str element — fold_entries (a Map method) misses.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared(\"hi\")\n    print(box.fold_entries(0, fn(a, k, v): a))\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared(\"hi\")\n    print(box.fold_entries(0, fn(a, k, v): a))\nmain()\n",
         "has no method 'fold_entries'",
     );
     // Tuple element is heterogeneous — EXCLUDED entirely: len/fold both miss.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared((1, \"a\"))\n    print(box.len())\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared((1, \"a\"))\n    print(box.len())\nmain()\n",
         "has no method 'len'",
     );
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared((1, \"a\"))\n    print(box.fold(0, fn(a, x): a))\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared((1, \"a\"))\n    print(box.fold(0, fn(a, x): a))\nmain()\n",
         "has no method 'fold'",
     );
     // A List element rejects Map/Set-specific method names (fold_entries/contains) — head branches first.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared([1, 2, 3])\n    print(box.fold_entries(0, fn(a, k, v): a))\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared([1, 2, 3])\n    print(box.fold_entries(0, fn(a, k, v): a))\nmain()\n",
         "has no method 'fold_entries'",
     );
     // A Map element rejects the List-only `fold`/`at` names (Map uses fold_entries).
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    print(box.fold(0, fn(a, x): a))\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    print(box.fold(0, fn(a, x): a))\nmain()\n",
         "has no method 'fold'",
     );
 }
@@ -574,23 +574,23 @@ fn rwshared_map_readview_methods() {
     // Map read-view: len/get_key/has/for_each_entry/fold_entries. K/V arm-recovered from the concrete
     // Map[K,V]; fold_entries's R pins from the concrete init.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1, \"b\": 2}))\n    print(box.len())\n    print(box.contains(\"a\"))\n    box.for_each_entry(fn(k, v): print(k + str(v)))\n    print(box.fold_entries(0, fn(a, k, v): a + v))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1, \"b\": 2}))\n    print(box.len())\n    print(box.contains(\"a\"))\n    box.for_each_entry(fn(k, v): print(k + str(v)))\n    print(box.fold_entries(0, fn(a, k, v): a + v))\nmain()\n",
     );
     // get_key returns Option[V] — matchable, V concrete (no unbound Param escapes).
     entry_ok(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    match box.get(\"a\"):\n        ?v: print(v + 1)\n        None: print(-1)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    match box.get(\"a\"):\n        ?v: print(v + 1)\n        None: print(-1)\nmain()\n",
     );
     // Nesting: V = List[int] recovered.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": [1, 2]}))\n    match box.get(\"a\"):\n        ?v: print(v.len())\n        None: print(-1)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": [1, 2]}))\n    match box.get(\"a\"):\n        ?v: print(v.len())\n        None: print(-1)\nmain()\n",
     );
     // fold_entries R is not pinned to V — a str accumulator over a Map[str,int] folds to str.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    s := box.fold_entries(\"\", fn(a, k, v): a + k)\n    print(s)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    s := box.fold_entries(\"\", fn(a, k, v): a + k)\n    print(s)\nmain()\n",
     );
     // Wrong key type on get_key/has is rejected (K = str; int arg mismatches).
     entry_rejects(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    print(box.get(3))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    print(box.get(3))\nmain()\n",
         "expected",
     );
 }
@@ -599,20 +599,20 @@ fn rwshared_map_readview_methods() {
 fn rwshared_map_write_entry_methods() {
     // TICKET-192: the single-entry writers of a `RwShared[Map[K, V]]`.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    box.set(\"a\", 2)\n    box.remove(\"a\")\n    print(box.get_or_insert(\"a\", 3) + 1)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    box.set(\"a\", 2)\n    box.remove(\"a\")\n    print(box.get_or_insert(\"a\", 3) + 1)\nmain()\n",
     );
     // Wrong key type, wrong value type.
     entry_rejects(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    box.set(1, 2)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    box.set(1, 2)\nmain()\n",
         "expected",
     );
     entry_rejects(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    box.set(\"a\", \"x\")\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    box.set(\"a\", \"x\")\nmain()\n",
         "expected",
     );
     // A List element has no map writers.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared([1])\n    box.set_key(0, 1)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    box := RwShared([1])\n    box.set_key(0, 1)\nmain()\n",
         "has no method 'set_key'",
     );
 }
@@ -621,16 +621,16 @@ fn rwshared_map_write_entry_methods() {
 fn rwshared_set_readview_methods() {
     // Set read-view: len/contains/for_each/fold. E arm-recovered from the concrete Set[E].
     entry_ok(
-        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(RwShared(Set([1, 2, 3])))\n    print(box.len())\n    print(box.contains(2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3])))\n    print(box.len())\n    print(box.contains(2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
     );
     // contains with the wrong element type is rejected (E = int; str arg mismatches).
     entry_rejects(
-        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(RwShared(Set([1, 2, 3])))\n    print(box.contains(\"x\"))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3])))\n    print(box.contains(\"x\"))\nmain()\n",
         "expected",
     );
     // Set fold R not pinned to E — str accumulator over Set[int] folds to str.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(RwShared(Set([1, 2, 3])))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3])))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
     );
 }
 
@@ -638,7 +638,7 @@ fn rwshared_set_readview_methods() {
 fn shared_is_sendable() {
     // A `Shared[T]` handle crosses the airlock — both spawned tasks reach the same box.
     entry_ok(
-        "import std.concurrency\nfn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n        spawn bump(s)\n        spawn bump(s)\n    print(s.get())\nmain()\n",
+        "import Shared from std.concurrency\nfn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n        spawn bump(s)\n        spawn bump(s)\n    print(s.get())\nmain()\n",
     );
 }
 
@@ -647,7 +647,7 @@ fn shared_handle_sendable_regardless_of_element() {
     // The asymmetry vs Channel: a `Shared` handle is sendable even when its element type isn't
     // (the value never crosses the airlock — only the handle does). Locks in the intent.
     entry_ok(
-        "import std.concurrency\nfn use_it(s: Shared[fn() -> int]):\n    f := s.get()\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    s := Shared(g)\n    parallel:\n        spawn use_it(s)\nmain()\n",
+        "import Shared from std.concurrency\nfn use_it(s: Shared[fn() -> int]):\n    f := s.get()\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    s := Shared(g)\n    parallel:\n        spawn use_it(s)\nmain()\n",
     );
 }
 
@@ -657,7 +657,7 @@ fn shared_handle_sendable_regardless_of_element() {
 fn rwshared_construct_and_methods_ok() {
     // `RwShared(v)` infers its element type from the value (value-first, like `Shared`).
     entry_ok(
-        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    r.set(5)\n    r.write(fn(x): x + 1)\n    print(r.read(fn(x): x))\n    print(r.get())\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared(0)\n    r.set(5)\n    r.write(fn(x): x + 1)\n    print(r.read(fn(x): x))\n    print(r.get())\nmain()\n",
     );
 }
 
@@ -665,7 +665,7 @@ fn rwshared_construct_and_methods_ok() {
 fn rwshared_read_returns_closure_result_type() {
     // `read(f: fn(T) -> R) -> R` — R is the closure's return type, distinct from T here (int -> str).
     entry_ok(
-        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    msg := r.read(fn(x): str(x)) + \"!\"\n    print(msg)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared(0)\n    msg := r.read(fn(x): str(x)) + \"!\"\n    print(msg)\nmain()\n",
     );
 }
 
@@ -675,7 +675,7 @@ fn rwshared_read_closure_body_error_reported_once() {
     // re-inferring the closure after `check_args` already inferred it; that recovery must not
     // double-emit the body's errors (regression: `nope` was reported twice).
     let errs = check_entry(
-        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    print(r.read(fn(x): nope + x))\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared(0)\n    print(r.read(fn(x): nope + x))\nmain()\n",
     );
     let n = errs.iter().filter(|e| e.message.contains("nope")).count();
     assert_eq!(
@@ -687,14 +687,14 @@ fn rwshared_read_closure_body_error_reported_once() {
 #[test]
 fn rwshared_get_returns_element_type() {
     entry_ok(
-        "import std.concurrency\nfn main():\n    r := RwShared(\"hi\")\n    msg := r.get() + \"!\"\n    print(msg)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared(\"hi\")\n    msg := r.get() + \"!\"\n    print(msg)\nmain()\n",
     );
 }
 
 #[test]
 fn rwshared_set_wrong_type_rejected() {
     entry_rejects(
-        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    r.set(\"x\")\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared(0)\n    r.set(\"x\")\nmain()\n",
         "expected int",
     );
 }
@@ -702,7 +702,7 @@ fn rwshared_set_wrong_type_rejected() {
 #[test]
 fn rwshared_write_fn_arity_rejected() {
     entry_rejects(
-        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    r.write(fn(x, y): x + y)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared(0)\n    r.write(fn(x, y): x + y)\nmain()\n",
         "argument 1 of 'write'",
     );
 }
@@ -710,7 +710,7 @@ fn rwshared_write_fn_arity_rejected() {
 #[test]
 fn rwshared_unknown_method_rejected() {
     entry_rejects(
-        "import std.concurrency\nfn main():\n    r := RwShared(0)\n    r.update(fn(x): x + 1)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared(0)\n    r.update(fn(x): x + 1)\nmain()\n",
         "has no method 'update'",
     );
 }
@@ -718,21 +718,21 @@ fn rwshared_unknown_method_rejected() {
 #[test]
 fn rwshared_accepts_turbofish() {
     entry_ok(
-        "import std.concurrency\nfn main():\n    r := RwShared[int](0)\n    print(r.get())\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared[int](0)\n    print(r.get())\nmain()\n",
     );
 }
 
 #[test]
 fn rwshared_is_sendable() {
     entry_ok(
-        "import std.concurrency\nfn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n        spawn bump(r)\n    print(r.get())\nmain()\n",
+        "import RwShared from std.concurrency\nfn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n        spawn bump(r)\n    print(r.get())\nmain()\n",
     );
 }
 
 #[test]
 fn rwshared_annotation_with_map_ok() {
     entry_ok(
-        "import std.concurrency\nfn put(r: RwShared[Map[str, int]], k: str):\n    r.write(fn(m): m)\nfn main():\n    r := RwShared({\"a\": 1})\n    put(r, \"b\")\n    print(r.get())\nmain()\n",
+        "import RwShared from std.concurrency\nfn put(r: RwShared[Map[str, int]], k: str):\n    r.write(fn(m): m)\nfn main():\n    r := RwShared({\"a\": 1})\n    put(r, \"b\")\n    print(r.get())\nmain()\n",
     );
 }
 
@@ -742,7 +742,7 @@ fn rwshared_annotation_with_map_ok() {
 fn atomic_construct_and_methods_ok() {
     // `Atomic(v)` infers its element type from the value (value-first, like `Shared`).
     entry_ok(
-        "import std.concurrency\nfn main():\n    a := Atomic(0)\n    a.store(5)\n    n := a.add(1)\n    m := a.sub(2)\n    old := a.exchange(9)\n    ok := a.cas(9, 10)\n    print(a.load())\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(0)\n    a.store(5)\n    n := a.add(1)\n    m := a.sub(2)\n    old := a.exchange(9)\n    ok := a.cas(9, 10)\n    print(a.load())\nmain()\n",
     );
 }
 
@@ -750,7 +750,7 @@ fn atomic_construct_and_methods_ok() {
 fn atomic_load_returns_element_type() {
     // `load()` yields `T`, so it composes where a `T` is expected (here, str concat).
     entry_ok(
-        "import std.concurrency\nfn main():\n    a := Atomic(\"hi\")\n    msg := a.load() + \"!\"\n    print(msg)\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(\"hi\")\n    msg := a.load() + \"!\"\n    print(msg)\nmain()\n",
     );
 }
 
@@ -758,14 +758,14 @@ fn atomic_load_returns_element_type() {
 fn atomic_cas_returns_bool() {
     // `cas(expected, new)` reports whether the swap happened.
     entry_ok(
-        "import std.concurrency\nfn main():\n    a := Atomic(0)\n    if a.cas(0, 1):\n        print(\"swapped\")\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(0)\n    if a.cas(0, 1):\n        print(\"swapped\")\nmain()\n",
     );
 }
 
 #[test]
 fn atomic_store_wrong_type_rejected() {
     entry_rejects(
-        "import std.concurrency\nfn main():\n    a := Atomic(0)\n    a.store(\"x\")\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(0)\n    a.store(\"x\")\nmain()\n",
         "expected int",
     );
 }
@@ -774,7 +774,7 @@ fn atomic_store_wrong_type_rejected() {
 fn atomic_add_non_numeric_rejected() {
     // `add`/`sub` are arithmetic — only `int`/`float` boxes have them.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    a := Atomic(\"x\")\n    a.add(1)\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(\"x\")\n    a.add(1)\nmain()\n",
         "no method 'add'",
     );
 }
@@ -783,7 +783,7 @@ fn atomic_add_non_numeric_rejected() {
 fn atomic_accepts_turbofish() {
     // `Atomic[T](v)` — turbofish optional (value-first); when present it pins the element type.
     entry_ok(
-        "import std.concurrency\nfn main():\n    a := Atomic[int](0)\n    print(a.load())\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic[int](0)\n    print(a.load())\nmain()\n",
     );
 }
 
@@ -791,15 +791,15 @@ fn atomic_accepts_turbofish() {
 fn concurrency_ctor_turbofish_checks_value() {
     // A turbofish element type that disagrees with the value's inferred type is rejected.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    s := Shared[str](0)\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared[str](0)\nmain()\n",
         "expected element type str, found int",
     );
     entry_rejects(
-        "import std.concurrency\nfn main():\n    r := RwShared[str](0)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared[str](0)\nmain()\n",
         "expected element type str, found int",
     );
     entry_rejects(
-        "import std.concurrency\nfn main():\n    a := Atomic[str](0)\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic[str](0)\nmain()\n",
         "expected element type str, found int",
     );
 }
@@ -807,15 +807,15 @@ fn concurrency_ctor_turbofish_checks_value() {
 #[test]
 fn concurrency_ctor_turbofish_arity() {
     entry_rejects(
-        "import std.concurrency\nfn main():\n    s := Shared[int, str](0)\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared[int, str](0)\nmain()\n",
         "Shared[T]() takes exactly one type argument",
     );
     entry_rejects(
-        "import std.concurrency\nfn main():\n    r := RwShared[int, str](0)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    r := RwShared[int, str](0)\nmain()\n",
         "RwShared[T]() takes exactly one type argument",
     );
     entry_rejects(
-        "import std.concurrency\nfn main():\n    a := Atomic[int, str](0)\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic[int, str](0)\nmain()\n",
         "Atomic[T]() takes exactly one type argument",
     );
 }
@@ -824,7 +824,7 @@ fn concurrency_ctor_turbofish_arity() {
 fn atomic_is_sendable() {
     // An `Atomic[T]` handle crosses the airlock — both spawned tasks reach the same box.
     entry_ok(
-        "import std.concurrency\nfn bump(a: Atomic[int]):\n    a.add(1)\nfn main():\n    a := Atomic(0)\n    parallel:\n        spawn bump(a)\n        spawn bump(a)\n    print(a.load())\nmain()\n",
+        "import Atomic from std.concurrency\nfn bump(a: Atomic[int]):\n    a.add(1)\nfn main():\n    a := Atomic(0)\n    parallel:\n        spawn bump(a)\n        spawn bump(a)\n    print(a.load())\nmain()\n",
     );
 }
 
@@ -835,14 +835,14 @@ fn timer_returns_channel_bool() {
     // `timer(ms)` yields a `Channel[bool]`; `recv()` on it composes where a `bool` is expected.
     // `timer` now requires `import std.time` (gated builtin) — see `timer_requires_import`.
     entry_ok(
-        "import std.time\nfn main():\n    t := timer(50)\n    if t.recv():\n        print(\"fired\")\nmain()\n",
+        "import timer from std.time\nfn main():\n    t := timer(50)\n    if t.recv():\n        print(\"fired\")\nmain()\n",
     );
 }
 
 #[test]
 fn timer_arg_must_be_int() {
     entry_rejects(
-        "import std.time\nfn main():\n    t := timer(\"x\")\n    print(t.recv())\nmain()\n",
+        "import timer from std.time\nfn main():\n    t := timer(\"x\")\n    print(t.recv())\nmain()\n",
         "expected int",
     );
 }
@@ -862,7 +862,9 @@ fn timer_requires_import() {
 #[test]
 fn timer_whole_module_import_ok() {
     // A whole-module `import std.time` licenses the bare `timer(ms)` builtin.
-    entry_ok("import std.time\nfn main():\n    t := timer(50)\n    print(t.recv())\nmain()\n");
+    entry_ok(
+        "import timer from std.time\nfn main():\n    t := timer(50)\n    print(t.recv())\nmain()\n",
+    );
 }
 
 #[test]
@@ -933,21 +935,21 @@ fn reserved_name_local_shadow_still_ok() {
 #[test]
 fn executor_construct_and_methods_ok() {
     entry_ok(
-        "import std.concurrency\nfn job():\n    print(1)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn job():\n    print(1)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    ex.shutdown()\nmain()\n",
     );
 }
 
 #[test]
 fn executor_shutdown_now_ok() {
     entry_ok(
-        "import std.concurrency\nfn main():\n    ex := Executor()\n    ex.shutdown_now()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.shutdown_now()\nmain()\n",
     );
 }
 
 #[test]
 fn executor_defer_shutdown_ok() {
     entry_ok(
-        "import std.concurrency\nfn job():\n    print(1)\nfn main():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): job())\nmain()\n",
+        "import Executor from std.concurrency\nfn job():\n    print(1)\nfn main():\n    ex := Executor()\n    defer ex.shutdown()\n    ex.submit(fn(): job())\nmain()\n",
     );
 }
 
@@ -962,7 +964,7 @@ fn executor_type_arg_rejected() {
 #[test]
 fn executor_unknown_method_rejected() {
     entry_rejects(
-        "import std.concurrency\nfn main():\n    ex := Executor()\n    ex.run()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.run()\nmain()\n",
         "has no method 'run'",
     );
 }
@@ -971,7 +973,7 @@ fn executor_unknown_method_rejected() {
 fn executor_is_sendable() {
     // The handle crosses the airlock like Channel/Shared — submitting from a spawned task is legal.
     entry_ok(
-        "import std.concurrency\nfn use_ex(ex: Executor):\n    ex.submit(fn(): print(1))\nfn main():\n    ex := Executor()\n    parallel:\n        spawn use_ex(ex)\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn use_ex(ex: Executor):\n    ex.submit(fn(): print(1))\nfn main():\n    ex := Executor()\n    parallel:\n        spawn use_ex(ex)\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -1050,15 +1052,15 @@ fn bare_concurrency_type_with_import_needs_type_arg() {
     // precedent), NOT "unknown type".
     for (src, name) in [
         (
-            "import std.concurrency\nfn f(s: Shared):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+            "import Shared from std.concurrency\nfn f(s: Shared):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
             "Shared",
         ),
         (
-            "import std.concurrency\nfn f(r: RwShared):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+            "import RwShared from std.concurrency\nfn f(r: RwShared):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
             "RwShared",
         ),
         (
-            "import std.concurrency\nfn f(a: Atomic):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+            "import Atomic from std.concurrency\nfn f(a: Atomic):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
             "Atomic",
         ),
     ] {
@@ -1093,10 +1095,10 @@ fn reserved_typeparam_fix_does_not_overreject() {
 fn concurrency_whole_module_import_ok() {
     // A whole-module `import std.concurrency` licenses all four (value + annotation positions).
     entry_ok(
-        "import std.concurrency\nfn main():\n    s := Shared(0)\n    r := RwShared(0)\n    a := Atomic(0)\n    ex := Executor()\n    print(s.get())\nmain()\n",
+        "import Atomic, Executor, RwShared, Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    r := RwShared(0)\n    a := Atomic(0)\n    ex := Executor()\n    print(s.get())\nmain()\n",
     );
     entry_ok(
-        "import std.concurrency\nfn f(s: Shared[int], r: RwShared[int], a: Atomic[int], ex: Executor):\n    print(s.get())\nfn main():\n    print(1)\nmain()\n",
+        "import Atomic, Executor, RwShared, Shared from std.concurrency\nfn f(s: Shared[int], r: RwShared[int], a: Atomic[int], ex: Executor):\n    print(s.get())\nfn main():\n    print(1)\nmain()\n",
     );
 }
 
@@ -1151,7 +1153,7 @@ fn atomic_int_bare_unlicensed_errors() {
     );
     // Licensed: `import std.concurrency` makes it resolve cleanly.
     let errs = check_entry(
-        "import std.concurrency\nfn main():\n    a := AtomicInt(0)\n    a.add(1)\n    print(a.load())\nmain()\n",
+        "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(0)\n    a.add(1)\n    print(a.load())\nmain()\n",
     );
     assert!(
         errs.is_empty(),
@@ -1159,7 +1161,7 @@ fn atomic_int_bare_unlicensed_errors() {
     );
     // A non-int arg is rejected.
     let errs = check_entry(
-        "import std.concurrency\nfn main():\n    a := AtomicInt(3.5)\n    print(a.load())\nmain()\n",
+        "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(3.5)\n    print(a.load())\nmain()\n",
     );
     assert!(!errs.is_empty(), "AtomicInt(3.5) must be a type error");
 }
@@ -1195,7 +1197,7 @@ fn bare_net_type_without_import_hints_import() {
 fn net_type_with_import_ok() {
     // A whole-module `import std.net` licenses both bare net handles in annotation position.
     entry_ok(
-        "import std.net\nfn f(s: Socket, l: Listener):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
+        "import Listener, Socket from std.net\nfn f(s: Socket, l: Listener):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
     );
     // A selective per-name import licenses each named handle.
     entry_ok(
@@ -1377,7 +1379,7 @@ fn submit_protocol_capture_ok() {
     // protocol existential is sendable (witness `Boxy` crosses by deep value copy to the pool thread).
     // (Was rejected under the old rule; the submit capture gate routes through `self.sendable()`.)
     entry_ok(
-        "import std.concurrency\nprotocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn main():\n    p: NS = Boxy(0)\n    ex := Executor()\n    ex.submit(fn(): print(p.tag()))\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nprotocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn main():\n    p: NS = Boxy(0)\n    ex := Executor()\n    ex.submit(fn(): print(p.tag()))\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -1387,7 +1389,7 @@ fn submit_capturefree_closure_ok() {
     // ACCEPTED — closures cross the airlock by value. A submitted closure that
     // captures a `ref` is still rejected (`submit_non_sendable_capture_rejected`).
     entry_ok(
-        "import std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -1395,7 +1397,7 @@ fn submit_capturefree_closure_ok() {
 fn submit_captured_channel_ok() {
     // A Channel handle is sendable — capturing it in a submitted task is fine.
     entry_ok(
-        "import std.concurrency\nfn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(1))\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(1))\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -1403,7 +1405,7 @@ fn submit_captured_channel_ok() {
 fn submit_captured_int_ok() {
     // A sendable capture (int) gets its own copy — reading it in the task is the whole point.
     entry_ok(
-        "import std.concurrency\nfn main():\n    n := 42\n    ex := Executor()\n    ex.submit(fn(): print(n))\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    n := 42\n    ex := Executor()\n    ex.submit(fn(): print(n))\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -1413,7 +1415,7 @@ fn submit_capturefree_closure_through_nested_closure_ok() {
     // is now ACCEPTED (both closures cross by value). Previously rejected under
     // the old "Func non-sendable" rule; a nested closure that captures a `ref` is Task 2b's backstop.
     entry_ok(
-        "import std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print((fn() -> int: g())()))\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print((fn() -> int: g())()))\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -1424,7 +1426,7 @@ fn top_level_closure_submitted_ok() {
     // non-sendable (the `is_local_capture` scope-0 exclusion). Locks the intentional gap so a future
     // tightening of the gate can't silently flip it without a test failing.
     entry_ok(
-        "import std.concurrency\ng := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\ng := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -1513,7 +1515,7 @@ fn spawn_reads_global_ok() {
 fn shared_update_in_spawn_ok() {
     // The prescribed cross-task mutation path: a global `Shared`, mutated via `update()` in a task.
     entry_ok(
-        "import std.concurrency\nc := Shared(0)\nfn bump():\n    c.update(fn(x): x + 1)\nfn main():\n    parallel:\n        spawn bump()\n    print(c.get())\nmain()\n",
+        "import Shared from std.concurrency\nc := Shared(0)\nfn bump():\n    c.update(fn(x): x + 1)\nfn main():\n    parallel:\n        spawn bump()\n    print(c.get())\nmain()\n",
     );
 }
 
@@ -1545,14 +1547,14 @@ fn user_struct_named_ref_is_legal() {
 fn socket_read_with_timeout_type_checks() {
     // `read(n)` and `read(n, timeout_ms)` both type-check (the trailing int is optional).
     entry_ok(
-        "import std.net\nfn use_sock(s: Socket) -> str!:\n    a := s.read(64)?\n    b := s.read(64, 100)?\n    return ?(a + b)\nfn main():\n    print(1)\nmain()\n",
+        "import Socket from std.net\nfn use_sock(s: Socket) -> str!:\n    a := s.read(64)?\n    b := s.read(64, 100)?\n    return ?(a + b)\nfn main():\n    print(1)\nmain()\n",
     );
 }
 
 #[test]
 fn socket_write_with_timeout_type_checks() {
     entry_ok(
-        "import std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.write(\"x\")?\n    b := s.write(\"x\", 100)?\n    return ?(a + b)\nfn main():\n    print(1)\nmain()\n",
+        "import Socket from std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.write(\"x\")?\n    b := s.write(\"x\", 100)?\n    return ?(a + b)\nfn main():\n    print(1)\nmain()\n",
     );
 }
 
@@ -1560,7 +1562,7 @@ fn socket_write_with_timeout_type_checks() {
 fn listener_accept_with_timeout_type_checks() {
     // `accept()` and `accept(timeout_ms)` both type-check.
     entry_ok(
-        "import std.net\nfn use_listener(l: Listener) -> int!:\n    l.accept()?\n    l.accept(100)?\n    return ?0\nfn main():\n    print(1)\nmain()\n",
+        "import Listener from std.net\nfn use_listener(l: Listener) -> int!:\n    l.accept()?\n    l.accept(100)?\n    return ?0\nfn main():\n    print(1)\nmain()\n",
     );
 }
 
@@ -1583,7 +1585,7 @@ fn check_entry_rejects_net(src: &str, needle: &str) {
 fn socket_read_with_non_int_timeout_rejected() {
     // A non-int `timeout_ms` is a type error.
     check_entry_rejects_net(
-        "import std.net\nfn use_sock(s: Socket):\n    s.read(64, \"x\")\nfn main():\n    print(1)\nmain()\n",
+        "import Socket from std.net\nfn use_sock(s: Socket):\n    s.read(64, \"x\")\nfn main():\n    print(1)\nmain()\n",
         "expected int",
     );
 }
@@ -1592,7 +1594,7 @@ fn socket_read_with_non_int_timeout_rejected() {
 fn socket_read_with_too_few_args_rejected() {
     // `read()` (zero args) is below the 1–2 arg range.
     check_entry_rejects_net(
-        "import std.net\nfn use_sock(s: Socket):\n    s.read()\nfn main():\n    print(1)\nmain()\n",
+        "import Socket from std.net\nfn use_sock(s: Socket):\n    s.read()\nfn main():\n    print(1)\nmain()\n",
         "argument",
     );
 }
@@ -1601,7 +1603,7 @@ fn socket_read_with_too_few_args_rejected() {
 fn socket_read_with_too_many_args_rejected() {
     // `read(n, t, extra)` exceeds the 1–2 arg range.
     check_entry_rejects_net(
-        "import std.net\nfn use_sock(s: Socket):\n    s.read(64, 100, 1)\nfn main():\n    print(1)\nmain()\n",
+        "import Socket from std.net\nfn use_sock(s: Socket):\n    s.read(64, 100, 1)\nfn main():\n    print(1)\nmain()\n",
         "argument",
     );
 }
@@ -1609,7 +1611,7 @@ fn socket_read_with_too_many_args_rejected() {
 #[test]
 fn listener_accept_with_too_many_args_rejected() {
     check_entry_rejects_net(
-        "import std.net\nfn use_listener(l: Listener):\n    l.accept(100, 1)\nfn main():\n    print(1)\nmain()\n",
+        "import Listener from std.net\nfn use_listener(l: Listener):\n    l.accept(100, 1)\nfn main():\n    print(1)\nmain()\n",
         "argument",
     );
 }

@@ -9,12 +9,12 @@ import std.concurrency
 import std.iter
 import submit_task from std.concurrency.task
 
-fn submit_on(ex: Executor) -> int:
+fn submit_on(ex: concurrency.Executor) -> int:
     t := submit_task(ex, fn(): 1)
     return t.get() ?? 0
 
 test fn a_native_std_fault_is_located_at_the_users_call():
-    ex := Executor()
+    ex := concurrency.Executor()
     ex.shutdown()
     r := recover: submit_task(ex, fn(): 1)
     match r:
@@ -28,9 +28,9 @@ test fn a_native_std_fault_is_located_at_the_users_call():
                 ?p: assert p.ends_with("std_fault_origin_test.chz"), "file: {p}"
 
 test fn a_native_std_fault_in_a_job_is_located_at_the_users_call():
-    ex := Executor()
+    ex := concurrency.Executor()
     ex.shutdown()
-    outer := Executor()
+    outer := concurrency.Executor()
     t := submit_task(outer, fn(): submit_on(ex))
     outer.shutdown()
     match t.get():

@@ -1,4 +1,4 @@
-import std.concurrency
+import Executor from std.concurrency
 import std.time
 
 fn leaf() -> int:

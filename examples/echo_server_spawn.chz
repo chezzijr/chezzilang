@@ -16,15 +16,15 @@
 # which completed the whole round-trip bumps.
 
 import std.net
-import std.concurrency
+import AtomicInt from std.concurrency
 
-fn handle(conn: Socket) -> int!:
+fn handle(conn: net.Socket) -> int!:
     msg := conn.read(64)?
     conn.write("echo:" + msg)?
     conn.close()
     return ?0
 
-fn acceptor(server: Listener, n: int) -> int!:
+fn acceptor(server: net.Listener, n: int) -> int!:
     parallel:
         for _ in 0..n:
             conn := server.accept()?

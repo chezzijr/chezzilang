@@ -499,10 +499,10 @@ fn t254_program(
             format!("{decls}{root}parallel:\n    spawn:\n        {stmt}\nprint({show})\n")
         }
         T254Ctx::ExecutorJob => format!(
-            "import std.concurrency\n{decls}{work}{root}ex := Executor()\nex.submit(fn(): work({args}))\nex.shutdown()\nprint({show})\n"
+            "import Executor from std.concurrency\n{decls}{work}{root}ex := Executor()\nex.submit(fn(): work({args}))\nex.shutdown()\nprint({show})\n"
         ),
         T254Ctx::BoxClosure => format!(
-            "import std.concurrency\n{decls}{work}fn wrap({params}, x: int) -> int:\n    work({args})\n    return x\n{root}s := Shared(0)\ns.update(fn(x: int) -> int: wrap({args}, x))\nprint({show})\n"
+            "import Shared from std.concurrency\n{decls}{work}fn wrap({params}, x: int) -> int:\n    work({args})\n    return x\n{root}s := Shared(0)\ns.update(fn(x: int) -> int: wrap({args}, x))\nprint({show})\n"
         ),
         T254Ctx::ImportedFn => {
             files.push(("lib.chz", work));

@@ -144,16 +144,16 @@ fn remover(s: ConcurrentSet[int], m: ConcurrentMap[int, int]):
         s.remove(i * 2)
         m.remove(i * 2)
 
-fn count_odd(acc: Shared[int], x: int):
+fn count_odd(acc: concurrency.Shared[int], x: int):
     if x % 2 == 1:
         acc.update(fn(n): n + 1)
 
 fn reader(s: ConcurrentSet[int], m: ConcurrentMap[int, int], out: Channel[List[int]]):
     a := s.fold(0, fn(acc: int, x: int) -> int: acc + odd(x))
     b := m.fold_entries(0, fn(acc: int, k: int, v: int) -> int: acc + odd(k))
-    c := Shared(0)
+    c := concurrency.Shared(0)
     s.for_each(fn(x: int): count_odd(c, x))
-    d := Shared(0)
+    d := concurrency.Shared(0)
     m.for_each_entry(fn(k: int, v: int): count_odd(d, k))
     e := 0
     for x in s.snapshot():

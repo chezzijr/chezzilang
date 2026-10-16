@@ -1,7 +1,7 @@
 # TICKET-028 — `Channel[T](0)` is Chezzi's rendezvous channel (Go's `make(chan T)`), while
 # `Channel[T]()` keeps its existing UNBOUNDED meaning. `cap()` reports -1 for unbounded, 0 for
 # rendezvous, the bound for bounded.
-import std.concurrency
+import AtomicInt, Executor, Shared from std.concurrency
 import std.time
 
 fn fault_msg[T](r: T!Error) -> str:

@@ -9,7 +9,7 @@ fn count_text(r: int!) -> str:
         ?n: return "Ok {n}"
         !e: return e.message()
 
-fn drain(peer: Socket) -> int:
+fn drain(peer: net.Socket) -> int:
     total := 0
     while true:
         match peer.read_bytes(65536):

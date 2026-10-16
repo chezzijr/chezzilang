@@ -1,7 +1,7 @@
 # benches/box/shared_read.chz — TICKET-246: `Shared.read(f)`, new with this ticket (no "before").
 # Same value and cells as benches/box/update_read.chz: `name|n|callers|us per call`.
 
-import std.concurrency
+import AtomicInt, Shared from std.concurrency
 import std.time
 
 struct Table:

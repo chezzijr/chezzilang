@@ -28,7 +28,7 @@ import std.string as s
 import std.datetime as dt
 import std.path
 import std.os
-import std.concurrency
+import Atomic, AtomicInt from std.concurrency
 
 test fn range_faults():
     r1 := recover: List(Range(0, 5, 0))
@@ -241,18 +241,18 @@ test fn channel_send_recv_closed_faults():
         !e: assert e.message() == "receive on a closed channel"
 
 test fn json_stringify_faults():
-    r1 := recover: json.stringify(Json.Num(math.nan))
+    r1 := recover: json.stringify(json.Json.Num(math.nan))
     match r1:
         ?_: assert false, "NaN must fault"
         !e: assert e.message() == "cannot serialize non-finite float to JSON"
-    r2 := recover: json.stringify(Json.Num(math.inf))
+    r2 := recover: json.stringify(json.Json.Num(math.inf))
     match r2:
         ?_: assert false, "inf must fault"
         !e: assert e.message() == "cannot serialize non-finite float to JSON"
-    j: Json = Json.Num(1.0)
+    j: json.Json = json.Json.Num(1.0)
     i := 0
     while i < 2500:
-        j = Json.Arr([j])
+        j = json.Json.Arr([j])
         i += 1
     r3 := recover: json.stringify(j)
     match r3:

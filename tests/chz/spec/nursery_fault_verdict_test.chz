@@ -2,7 +2,7 @@
 # verdict for a `parallel:` nursery OWNER blocked in a channel op, and `main` blocked on a channel
 # op inside a native re-entry (generator resume, `list.map`/`Shared.update` callback) must block in
 # place instead of faulting `deadlock` while a sibling is still alive to send/receive.
-import std.concurrency
+import Shared from std.concurrency
 
 test fn owner_parked_recv_reports_the_child_fault():
     ch := Channel[int]()

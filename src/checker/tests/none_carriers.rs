@@ -1861,7 +1861,7 @@ fn one_line_if_statement_branches_need_not_join() {
         "returned by 'po' is discarded",
     );
     entry_warns(
-        "import std.concurrency\nfn main():\n    c := true\n    s := Shared[List[int]]([])\n    if c: s.get().push(1) else: print(0)\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    c := true\n    s := Shared[List[int]]([])\n    if c: s.get().push(1) else: print(0)\nmain()\n",
         "update",
     );
 }
@@ -1976,7 +1976,7 @@ fn rwshared_container_methods_are_not_public() {
     ];
     for (init, call, _ty, help) in cases {
         let src = format!(
-            "import std.concurrency\nfn main():\n    r := RwShared({init})\n    r.{call}\nmain()\n"
+            "import RwShared from std.concurrency\nfn main():\n    r := RwShared({init})\n    r.{call}\nmain()\n"
         );
         let errs = check_entry(&src);
         assert!(

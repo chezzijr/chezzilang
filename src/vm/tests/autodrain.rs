@@ -67,7 +67,7 @@ fn a_fire_and_forget_fault_ends_the_run_past_recover() {
 #[test]
 fn the_first_fire_and_forget_fault_is_the_report() {
     let src = r#"
-import std.concurrency
+import Executor from std.concurrency
 
 fn boom_a():
     print("a-before-fault")

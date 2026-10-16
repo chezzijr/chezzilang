@@ -586,7 +586,7 @@ fn dead_stdout_under_an_executor(threads: Option<usize>, writes: usize, handle: 
             "import std.concurrency\nimport submit_task from std.concurrency.task\nimport std.fs\n\n\
              fn spew():\n    i := 0\n    while i < 500000:\n        print(\"x{{i}}\")\n        i = i + 1\n\n\
              fn markers():\n{body}\n\
-             ex := Executor()\n{tail}"
+             ex := concurrency.Executor()\n{tail}"
         ),
     );
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));

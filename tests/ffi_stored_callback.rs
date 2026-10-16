@@ -103,7 +103,7 @@ fn field(key: str) -> int:
 
 /// The gaps.md W6-8 repro verbatim: `signal(10, handler)` STORES the trampoline, then `raise(10)`
 /// makes C invoke it after the `signal` extern call has already returned.
-const REPRO: &str = r#"import std.ffi
+const REPRO: &str = r#"import ptr from std.ffi
 
 extern "libc.so.6":
     fn signal(sig: int, h: fn(int) -> int) -> ptr
@@ -163,7 +163,7 @@ fn abort_diagnoses_even_with_a_full_unread_stdout_pipe() {
     // does NOT read the child's stdout until the child is long past its last `print`. The writer
     // thread therefore blocks on a full pipe with the tail of the program still sitting in the
     // queue: exactly the state that wedged the drain.
-    const SRC: &str = r#"import std.ffi
+    const SRC: &str = r#"import ptr from std.ffi
 
 extern "libc.so.6":
     fn signal(sig: int, h: fn(int) -> int) -> ptr
@@ -236,10 +236,10 @@ fn cross_thread_stored_callback_aborts_without_entering_the_vm() {
     const SRC: &str = r#"import std.ffi
 
 extern "libc.so.6":
-    fn pthread_create(t: ptr, attr: ptr, f: fn(ptr) -> ptr, arg: ptr) -> int
+    fn pthread_create(t: ffi.ptr, attr: ffi.ptr, f: fn(ffi.ptr) -> ffi.ptr, arg: ffi.ptr) -> int
     fn usleep(us: int) -> int
 
-fn worker(a: ptr) -> ptr:
+fn worker(a: ffi.ptr) -> ffi.ptr:
     print("VM RE-ENTERED OFF-THREAD")
     return ffi.null()
 
@@ -363,10 +363,10 @@ fn exhausted_closure_pool_faults_cleanly_instead_of_crashing() {
 import std.ffi
 
 extern "libc.so.6":
-    fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)
-    fn setrlimit(res: int, lim: ptr) -> int
+    fn qsort(base: ffi.ptr, n: int, size: int, cmp: fn(ffi.ptr, ffi.ptr) -> int)
+    fn setrlimit(res: int, lim: ffi.ptr) -> int
 
-fn cmp(a: ptr, b: ptr) -> int:
+fn cmp(a: ffi.ptr, b: ffi.ptr) -> int:
     x := ffi.load_int64(a)
     y := ffi.load_int64(b)
     if x < y:

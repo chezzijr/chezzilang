@@ -485,7 +485,7 @@ fn reader_grid_handle_cells_survive_stress() {
 }
 
 /// The feeder is cut while it sleeps, before its send: nothing can feed `plain` any more.
-const CUT_PLAIN_FEEDER: &str = r#"import std.concurrency
+const CUT_PLAIN_FEEDER: &str = r#"import Executor from std.concurrency
 import std.time
 
 fn feeder(plain: Channel[int]):

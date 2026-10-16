@@ -8,7 +8,7 @@ import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collect
 # len / at (incl. negative index) / slice. `at` is the SAFE index: out of range is None, never a
 # fault (`[]` is the dangerous one). Same split as `ConcurrentMap.get` below and `std.json.at`.
 test fn read_view_indexing():
-    box := ConcurrentList(RwShared(List(1..1001)))   # [1, 2, ..., 1000]
+    box := ConcurrentList(concurrency.RwShared(List(1..1001)))   # [1, 2, ..., 1000]
     assert box.len() == 1000
     assert box.at(0) == ?1
     assert box.at(999) == ?1000
@@ -21,28 +21,28 @@ test fn read_view_indexing():
 
 # for_each: side-effect scan accumulating into an AtomicInt (its own box, no reentrancy).
 test fn read_view_for_each():
-    box := ConcurrentList(RwShared(List(1..1001)))
-    n := AtomicInt(0)
+    box := ConcurrentList(concurrency.RwShared(List(1..1001)))
+    n := concurrency.AtomicInt(0)
     box.for_each(fn(x): n.add(x))
     assert n.load() == 500500
 
 # fold: reduce; R is inferred from the init accumulator (int here).
 test fn read_view_fold_int():
-    box := ConcurrentList(RwShared(List(1..1001)))
+    box := ConcurrentList(concurrency.RwShared(List(1..1001)))
     s := box.fold(0, fn(a, x): a + x)
     assert s == 500500
 
 # fold with a str accumulator — proves R is NOT pinned to int (recovered from init).
 test fn read_view_fold_str():
-    box := ConcurrentList(RwShared(List(1..4)))   # [1, 2, 3]
+    box := ConcurrentList(concurrency.RwShared(List(1..4)))   # [1, 2, 3]
     s := box.fold("", fn(a, x): a + str(x))
     assert s == "123"
 
 # The real fan-out use case: reduce the shared list from inside a spawned task under parallel:.
 # Assert the scalar reduced value (order-insensitive) so M:N output ordering can't flake.
 test fn read_view_fold_under_parallel():
-    box := ConcurrentList(RwShared(List(1..1001)))
-    out := AtomicInt(0)
+    box := ConcurrentList(concurrency.RwShared(List(1..1001)))
+    out := concurrency.AtomicInt(0)
     parallel:
         spawn:
             out.store(box.fold(0, fn(a, x): a + x))
@@ -63,8 +63,8 @@ fn nested_first(b: ConcurrentList[int]) -> int:
         None: return 0
 
 test fn read_view_nested_read_under_writer():
-    box := ConcurrentList(RwShared(List(1..51)))
-    done := AtomicInt(0)
+    box := ConcurrentList(concurrency.RwShared(List(1..51)))
+    done := concurrency.AtomicInt(0)
     parallel:
         spawn:                                   # walker: nested read of the SAME box inside the walk
             for _round in 0..20:
@@ -81,9 +81,9 @@ test fn read_view_nested_read_under_writer():
 # impl held A's read guard across B.set (blocked on B.write) while W2 held B's read guard across A.set
 # -> mutual M:N deadlock; serial serialises the spawns so it never deadlocks (parity divergence).
 test fn read_view_cross_box_no_deadlock():
-    a := ConcurrentList(RwShared(List(1..31)))
-    b := ConcurrentList(RwShared(List(1..31)))
-    done := AtomicInt(0)
+    a := ConcurrentList(concurrency.RwShared(List(1..31)))
+    b := ConcurrentList(concurrency.RwShared(List(1..31)))
+    done := concurrency.AtomicInt(0)
     parallel:
         spawn:
             for _round in 0..30:
@@ -99,7 +99,7 @@ test fn read_view_cross_box_no_deadlock():
 
 # len / has (hit + miss) / get_key (a value + None).
 test fn map_read_view_len_has_get():
-    box := ConcurrentMap(RwShared({"a": 1, "b": 2, "c": 3}))
+    box := ConcurrentMap(concurrency.RwShared({"a": 1, "b": 2, "c": 3}))
     assert box.len() == 3
     assert box.contains("a")
     assert box.contains("c")
@@ -113,27 +113,27 @@ test fn map_read_view_len_has_get():
 
 # fold_entries: sum the values. R inferred from the int init.
 test fn map_read_view_fold_entries_sum():
-    box := ConcurrentMap(RwShared({"a": 1, "b": 2, "c": 3, "d": 4}))
+    box := ConcurrentMap(concurrency.RwShared({"a": 1, "b": 2, "c": 3, "d": 4}))
     s := box.fold_entries(0, fn(a, k, v): a + v)
     assert s == 10
 
 # fold_entries with a str accumulator over keys — proves R is not pinned to V.
 test fn map_read_view_fold_entries_str():
-    box := ConcurrentMap(RwShared({"x": 10}))
+    box := ConcurrentMap(concurrency.RwShared({"x": 10}))
     s := box.fold_entries("", fn(a, k, v): a + k)
     assert s == "x"
 
 # for_each_entry: accumulate values into an AtomicInt (its own box, no reentrancy).
 test fn map_read_view_for_each_entry():
-    box := ConcurrentMap(RwShared({"a": 5, "b": 7, "c": 11}))
-    n := AtomicInt(0)
+    box := ConcurrentMap(concurrency.RwShared({"a": 5, "b": 7, "c": 11}))
+    n := concurrency.AtomicInt(0)
     box.for_each_entry(fn(k, v): n.add(v))
     assert n.load() == 23
 
 # The fan-out use case: reduce the shared map from inside a spawned task under parallel:.
 test fn map_read_view_fold_entries_under_parallel():
-    box := ConcurrentMap(RwShared({"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}))
-    out := AtomicInt(0)
+    box := ConcurrentMap(concurrency.RwShared({"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}))
+    out := concurrency.AtomicInt(0)
     parallel:
         spawn:
             out.store(box.fold_entries(0, fn(a, k, v): a + v))
@@ -142,26 +142,26 @@ test fn map_read_view_fold_entries_under_parallel():
 # ---- Set[E] read-view: len / contains / for_each / fold ----
 
 test fn set_read_view_len_contains():
-    box := ConcurrentSet(RwShared(Set([1, 2, 3, 4])))
+    box := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3, 4])))
     assert box.len() == 4
     assert box.contains(3)
     assert not box.contains(99)
 
 test fn set_read_view_fold():
-    box := ConcurrentSet(RwShared(Set([1, 2, 3, 4, 5])))
+    box := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3, 4, 5])))
     s := box.fold(0, fn(a, x): a + x)
     assert s == 15
 
 test fn set_read_view_for_each():
-    box := ConcurrentSet(RwShared(Set([2, 4, 6])))
-    n := AtomicInt(0)
+    box := ConcurrentSet(concurrency.RwShared(Set([2, 4, 6])))
+    n := concurrency.AtomicInt(0)
     box.for_each(fn(x): n.add(x))
     assert n.load() == 12
 
 # contains from inside a spawned task under parallel:.
 test fn set_read_view_contains_under_parallel():
-    box := ConcurrentSet(RwShared(Set([10, 20, 30])))
-    hit := AtomicInt(0)
+    box := ConcurrentSet(concurrency.RwShared(Set([10, 20, 30])))
+    hit := concurrency.AtomicInt(0)
     parallel:
         spawn:
             if box.contains(20):
@@ -173,8 +173,8 @@ test fn set_read_view_contains_under_parallel():
 # so it never deadlocks -> parity divergence. Per-entry/per-probe re-lock makes them complete fast.
 
 test fn map_read_view_nested_read_under_writer():
-    box := ConcurrentMap(RwShared({"a": 1, "b": 2, "c": 3}))
-    done := AtomicInt(0)
+    box := ConcurrentMap(concurrency.RwShared({"a": 1, "b": 2, "c": 3}))
+    done := concurrency.AtomicInt(0)
     parallel:
         spawn:                                            # walker: nested read of the SAME box
             for _round in 0..20:
@@ -188,8 +188,8 @@ test fn map_read_view_nested_read_under_writer():
     assert done.load() == 1
 
 test fn map_read_view_get_key_nested_under_writer():
-    box := ConcurrentMap(RwShared({"a": 1, "b": 2, "c": 3}))
-    done := AtomicInt(0)
+    box := ConcurrentMap(concurrency.RwShared({"a": 1, "b": 2, "c": 3}))
+    done := concurrency.AtomicInt(0)
     parallel:
         spawn:                                            # walker does a nested get_key/has of same box
             for _round in 0..50:
@@ -203,8 +203,8 @@ test fn map_read_view_get_key_nested_under_writer():
     assert done.load() == 1
 
 test fn set_read_view_nested_read_under_writer():
-    box := ConcurrentSet(RwShared(Set([1, 2, 3, 4, 5])))
-    done := AtomicInt(0)
+    box := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3, 4, 5])))
+    done := concurrency.AtomicInt(0)
     parallel:
         spawn:
             for _round in 0..20:
@@ -252,7 +252,7 @@ fn cyclic_list() -> List[Cyc]:
     return xs
 
 test fn cyclic_element_at_returns_the_piece_with_its_cycle_intact():
-    box := ConcurrentList(RwShared(cyclic_list()))
+    box := ConcurrentList(concurrency.RwShared(cyclic_list()))
     match box.at(0):
         ?e:
             assert e.val == 1
@@ -271,11 +271,11 @@ test fn cyclic_element_at_returns_the_piece_with_its_cycle_intact():
         None: assert false, "at(1) must be Some"
 
 test fn cyclic_element_slice_for_each_fold():
-    box := ConcurrentList(RwShared(cyclic_list()))
+    box := ConcurrentList(concurrency.RwShared(cyclic_list()))
     sliced := box[0..1]
     assert sliced.len() == 1
     assert sliced[0].back[0].back[0].val == 1
-    n := AtomicInt(0)
+    n := concurrency.AtomicInt(0)
     box.for_each(fn(x): n.add(x.val + x.back.len()))   # 1+2 then 2+0
     assert n.load() == 5
     assert box.fold(0, fn(a, x): a + x.back.len()) == 2
@@ -284,7 +284,7 @@ test fn cyclic_map_value_views():
     b := CycMap(7, {})
     m := {"k": b}
     b.back = m                 # the value points back at the map that holds it
-    box := ConcurrentMap(RwShared(m))
+    box := ConcurrentMap(concurrency.RwShared(m))
     match box.get("k"):
         ?v:
             assert v.val == 7
@@ -292,7 +292,7 @@ test fn cyclic_map_value_views():
             v.val = 9
             assert v.back["k"].val == 9        # identity through the cycle
         None: assert false, "get_key must be Some"
-    t := AtomicInt(0)
+    t := concurrency.AtomicInt(0)
     box.for_each_entry(fn(k, v): t.add(v.val + v.back.len()))
     assert t.load() == 8
     assert box.fold_entries(0, fn(a, k, v): a + v.back["k"].back["k"].val) == 7
@@ -301,8 +301,8 @@ test fn cyclic_set_element_views():
     e := CycHash(1, [])
     xs := [e]
     e.back = xs
-    box := ConcurrentSet(RwShared(Set(xs)))
-    n := AtomicInt(0)
+    box := ConcurrentSet(concurrency.RwShared(Set(xs)))
+    n := concurrency.AtomicInt(0)
     box.for_each(fn(x): n.add(x.val + x.back.len()))
     assert n.load() == 2
     assert box.fold(0, fn(a, x): a + x.back[0].back[0].val) == 1
@@ -322,7 +322,7 @@ test fn cyclic_slice_shared_map_is_not_poisoned_by_a_piece_that_needs_the_contai
     g := fn() -> int: xs.len() + 100
     xs.push(f)
     xs.push(g)
-    sl := ConcurrentList(RwShared(xs))[0..2]
+    sl := ConcurrentList(concurrency.RwShared(xs))[0..2]
     assert sl[0]() == 2
     assert sl[1]() == 102
 
@@ -335,7 +335,7 @@ test fn cyclic_slice_shares_within_itself_like_get():
     xs := [a, b]
     a.back = xs
     b.back = xs
-    box := ConcurrentList(RwShared(xs))
+    box := ConcurrentList(concurrency.RwShared(xs))
     sl := box[0..2]
     sl[1].val = 99
     assert sl[0].back[1].val == 99, "slice must share within itself, like get()"
@@ -356,7 +356,7 @@ test fn cyclic_slice_shares_when_only_a_LATER_element_is_cyclic():
     b := Cyc(2, [])
     xs := [a, b]
     b.back = xs                # element 0 is self-contained; only element 1 needs the container
-    sl := ConcurrentList(RwShared(xs))[0..2]
+    sl := ConcurrentList(concurrency.RwShared(xs))[0..2]
     sl[0].val = 55
     assert sl[1].back[0].val == 55, "slice identity must not depend on element order"
 
@@ -369,7 +369,7 @@ test fn cyclic_generator_element_rebuilds_against_the_whole_container():
         yield xs.len()
         yield 99
     xs.push(g())
-    match ConcurrentList(RwShared(xs)).at(0):
+    match ConcurrentList(concurrency.RwShared(xs)).at(0):
         ?it:
             got: List[int] = []
             for v in it:
@@ -385,7 +385,7 @@ test fn cyclic_set_contains_faults_recoverably_instead_of_aborting():
     e := CycHash(1, [])
     xs := [e]
     e.back = xs
-    box := ConcurrentSet(RwShared(Set(xs)))
+    box := ConcurrentSet(concurrency.RwShared(Set(xs)))
     r := recover: box.contains(e)
     match r:
         ?v: assert false, "expected the cyclic-equality depth fault, got " + str(v)
@@ -393,9 +393,9 @@ test fn cyclic_set_contains_faults_recoverably_instead_of_aborting():
 
 # AB-BA cross-box: W1 walks map A calling B.set; W2 walks set B calling A.set.
 test fn map_set_read_view_cross_box_no_deadlock():
-    a := ConcurrentMap(RwShared({"a": 1, "b": 2, "c": 3}))
-    b := ConcurrentSet(RwShared(Set([1, 2, 3])))
-    done := AtomicInt(0)
+    a := ConcurrentMap(concurrency.RwShared({"a": 1, "b": 2, "c": 3}))
+    b := ConcurrentSet(concurrency.RwShared(Set([1, 2, 3])))
+    done := concurrency.AtomicInt(0)
     parallel:
         spawn:
             for _round in 0..30:
@@ -415,7 +415,7 @@ test fn map_set_read_view_cross_box_no_deadlock():
 test fn rwshared_store_dag_alias_survives_get():
     inner := [1]
     outer := [inner, inner]
-    box := ConcurrentList(RwShared(outer))
+    box := ConcurrentList(concurrency.RwShared(outer))
     v := box.inner.get()
     v[0].push(2)
     assert v[0].len() == 2 and v[1].len() == 2
@@ -423,7 +423,7 @@ test fn rwshared_store_dag_alias_survives_get():
 test fn rwshared_for_each_shares_a_dag_alias_within_one_walk():
     inner := [1]
     outer := [inner, inner]
-    box := ConcurrentList(RwShared(outer))
+    box := ConcurrentList(concurrency.RwShared(outer))
     seen: List[List[int]] = []
     box.for_each(fn(x): seen.push(x))
     assert seen.len() == 2
@@ -434,7 +434,7 @@ test fn rwshared_for_each_shares_a_dag_alias_within_one_walk():
 test fn rwshared_at_twice_is_still_two_crossings():
     inner := [1]
     outer := [inner, inner]
-    box := ConcurrentList(RwShared(outer))
+    box := ConcurrentList(concurrency.RwShared(outer))
     match box.at(0):
         ?a: a.push(2)
         None: assert false, "at(0) must be Some"
@@ -448,7 +448,7 @@ test fn rwshared_at_twice_is_still_two_crossings():
 test fn rwshared_map_values_aliasing_each_other_are_one_object():
     inner := [1]
     m: Map[int, List[int]] = {1: inner, 2: inner}
-    r := ConcurrentMap(RwShared(m))
+    r := ConcurrentMap(concurrency.RwShared(m))
     vs: List[List[int]] = []
     fn grab(k: int, v: List[int]):
         vs.push(v)

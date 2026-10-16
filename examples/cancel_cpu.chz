@@ -7,10 +7,10 @@
 # golden. A self-polling *timeout* would instead stop at a deadline read inline; the nondeterminism
 # here is specific to a manual cancel of a non-yielding CPU sibling. Covered by a Rust test.
 import std.cancel
-import std.concurrency
+import Shared from std.concurrency
 import std.time
 
-fn worker(tok: Token, out: Shared[int]):
+fn worker(tok: cancel.Token, out: Shared[int]):
     i := 0
     while i < 50000000:
         if tok.cancelled():
@@ -19,7 +19,7 @@ fn worker(tok: Token, out: Shared[int]):
         i = i + 1
     out.set(i)
 
-fn canceller(tok: Token):
+fn canceller(tok: cancel.Token):
     time.sleep_ms(10)
     tok.cancel()
 

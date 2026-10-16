@@ -18,7 +18,7 @@
 # and discards the error, like Rust's `unwrap_or`.
 #
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
-import std.concurrency
+import Shared from std.concurrency
 
 struct MyErr:
     code: int

@@ -2207,7 +2207,7 @@ print("done")
 #[test]
 fn submit_to_an_executor_whose_creating_job_was_cancelled_faults_mn() {
     let src = r#"
-import std.concurrency
+import Executor from std.concurrency
 import std.time
 fn work():
     time.sleep_ms(10)
@@ -2248,7 +2248,7 @@ print("main done")
 #[test]
 fn submit_to_a_nested_executor_after_a_graceful_outer_shutdown_runs_mn() {
     let src = r#"
-import std.concurrency
+import Executor from std.concurrency
 import std.time
 fn work():
     time.sleep_ms(10)

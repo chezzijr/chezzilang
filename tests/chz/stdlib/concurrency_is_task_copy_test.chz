@@ -27,7 +27,7 @@ test fn is_task_copy_is_true_for_a_spawned_task_copy():
 test fn is_task_copy_is_true_for_an_executor_job_capture():
     xs := [1]
     out := Channel[str](1)
-    ex := Executor()
+    ex := concurrency.Executor()
     ex.submit(fn(): child_is_copy(xs, 7, out))
     ex.shutdown()
     got := out.recv()

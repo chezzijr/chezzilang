@@ -6,7 +6,7 @@
 # identical output, which is worse here than in most languages because printed output is what the
 # golden corpus compares (`docs/gaps.md` §W7-25).
 
-import std.concurrency
+import Shared from std.concurrency
 
 # ---- the motivating ambiguity ----
 

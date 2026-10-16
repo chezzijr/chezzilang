@@ -155,7 +155,7 @@ fn protocol_note_reaches_every_value_slot() {
             "type Dog does not satisfy Named (missing method 'name')",
         );
     }
-    let src = format!("import std.concurrency\n{prelude}sh := Shared[Named](d)\n");
+    let src = format!("import Shared from std.concurrency\n{prelude}sh := Shared[Named](d)\n");
     rejects(
         &src,
         "type Dog does not satisfy Named (missing method 'name')",
@@ -2251,11 +2251,11 @@ fn int_never_widens_at_every_sink() {
         "write 1.0",
     );
     entry_rejects(
-        "import std.concurrency\n\nfn main():\n    s := Shared[float](1)\n    print(s)\n",
+        "import Shared from std.concurrency\n\nfn main():\n    s := Shared[float](1)\n    print(s)\n",
         "write 1.0",
     );
     entry_rejects(
-        "import std.concurrency\n\nfn main():\n    a := Atomic[float](1)\n    print(a)\n",
+        "import Atomic from std.concurrency\n\nfn main():\n    a := Atomic[float](1)\n    print(a)\n",
         "write 1.0",
     );
 }
@@ -2359,7 +2359,7 @@ fn format_spec_on_enum_fn_bytes_shared_rejected_at_check() {
     rejects("fn f() -> int:\n    return 1\n\nprint(\"{f:d}\")\n", needle);
     rejects("b := b\"ab\"\nprint(\"{b:d}\")\n", needle);
     entry_rejects(
-        "import std.concurrency\ns := Shared[int](1)\nprint(\"{s:d}\")\n",
+        "import Shared from std.concurrency\ns := Shared[int](1)\nprint(\"{s:d}\")\n",
         needle,
     );
     ok("enum E:\n    A\n\ne := E.A\nprint(\"{e:>5}\")\n");

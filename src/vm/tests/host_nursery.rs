@@ -376,7 +376,7 @@ fn protocols_5c_3engine_parity() {
 /// Green before AND after the migration.
 #[test]
 fn concurrency_file_backed_three_engine() {
-    let src = "import std.concurrency\n\
+    let src = "import Atomic, Executor, RwShared, Shared from std.concurrency\n\
                    fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
                    fn job(id: int):\n    print(\"exec {id}\")\n\
                    fn main():\n\

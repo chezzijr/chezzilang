@@ -885,8 +885,8 @@ fn pmap_limited_bounds_in_flight_both_engines() {
     let src = "import std.concurrency\n\
                import pmap_limited from std.concurrency.pmap\n\
                fn main():\n\
-               \x20   cur := Atomic(0)\n\
-               \x20   mx := Atomic(0)\n\
+               \x20   cur := concurrency.Atomic(0)\n\
+               \x20   mx := concurrency.Atomic(0)\n\
                \x20   fn probe(x: int) -> int:\n\
                \x20       n := cur.add(1)\n\
                \x20       m := mx.load()\n\
@@ -910,7 +910,7 @@ fn task_submit_get_submission_order_both_engines() {
                fn work(n: int) -> int:\n\
                \x20   return n * n\n\
                fn main():\n\
-               \x20   ex := Executor()\n\
+               \x20   ex := concurrency.Executor()\n\
                \x20   ts: List[Task[int]] = []\n\
                \x20   for i in 1..6:\n\
                \x20       x := i\n\
@@ -931,7 +931,7 @@ fn task_get_idempotent_and_done_both_engines() {
     let src = "import std.concurrency\n\
                import submit_task from std.concurrency.task\n\
                fn main():\n\
-               \x20   ex := Executor()\n\
+               \x20   ex := concurrency.Executor()\n\
                \x20   t := submit_task(ex, fn() -> int: 42)\n\
                \x20   ex.shutdown()\n\
                \x20   print(t.done())\n\
@@ -952,7 +952,7 @@ fn task_get_idempotent_and_done_both_engines() {
 /// byte-identical serial vs M:N.
 #[test]
 fn executor_submit_result_both_engines() {
-    let src = "import std.concurrency\n\
+    let src = "import Executor from std.concurrency\n\
                fn work(n: int) -> int:\n\
                \x20   return n * n\n\
                fn main():\n\

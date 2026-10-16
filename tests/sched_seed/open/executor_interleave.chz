@@ -1,4 +1,4 @@
-import std.concurrency
+import Executor from std.concurrency
 fn main():
     ch := Channel[int](0)
     ex := Executor()

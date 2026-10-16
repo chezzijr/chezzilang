@@ -668,7 +668,7 @@ fn eq_failures() -> Vec<String> {
             ("generic", "fn eq[U](self, other: U) -> bool", false),
         ] {
             let src = format!(
-                "import std.concurrency\n{decl}\n    {sig}:\n        return true\nfn mk[T: StructuralEq](v: T) -> Atomic[T]:\n    return Atomic(v)\na := mk({one})\nprint(a.load() == {two}, a.cas({two}, {two}))\n"
+                "import Atomic, StructuralEq from std.concurrency\n{decl}\n    {sig}:\n        return true\nfn mk[T: StructuralEq](v: T) -> Atomic[T]:\n    return Atomic(v)\na := mk({one})\nprint(a.load() == {two}, a.cas({two}, {two}))\n"
             );
             let got = run(&format!("eq_structural_{kind}_{shape}"), &src, &mut bad);
             let right = if hook {

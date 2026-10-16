@@ -41,7 +41,7 @@ test fn copy_then_push_in_a_task_is_silent():
     assert r.recv() == "[1, 2]"
 
 test fn a_shared_set_from_a_task_is_silent():
-    s := Shared(1)
+    s := concurrency.Shared(1)
     r := Channel[str](1)
     parallel:
         spawn:
@@ -51,7 +51,7 @@ test fn a_shared_set_from_a_task_is_silent():
     assert s.get() == 9
 
 test fn a_shared_update_from_a_task_is_silent():
-    s := Shared(1)
+    s := concurrency.Shared(1)
     r := Channel[str](1)
     parallel:
         spawn:
@@ -61,7 +61,7 @@ test fn a_shared_update_from_a_task_is_silent():
     assert s.get() == 2
 
 test fn an_rw_shared_write_from_a_task_is_silent():
-    s := RwShared(1)
+    s := concurrency.RwShared(1)
     r := Channel[str](1)
     parallel:
         spawn:
@@ -71,7 +71,7 @@ test fn an_rw_shared_write_from_a_task_is_silent():
     assert s.get() == 2
 
 test fn an_atomic_store_from_a_task_is_silent():
-    a := Atomic(1)
+    a := concurrency.Atomic(1)
     r := Channel[str](1)
     parallel:
         spawn:
@@ -81,7 +81,7 @@ test fn an_atomic_store_from_a_task_is_silent():
     assert a.load() == 9
 
 test fn an_atomic_int_add_from_a_task_is_silent():
-    a := AtomicInt(0)
+    a := concurrency.AtomicInt(0)
     r := Channel[str](1)
     parallel:
         spawn:
@@ -141,7 +141,7 @@ test fn a_channel_received_list_pushed_by_the_receiver_is_silent():
     assert xs == [1, 2]
 
 test fn shared_get_temporary_pushed_by_the_receiver_is_silent():
-    s := Shared([1])
+    s := concurrency.Shared([1])
     v := s.get()
     v.push(1)
     assert v == [1, 1]
@@ -159,7 +159,7 @@ test fn an_outer_task_pushing_after_an_inner_nursery_read_is_silent():
             assert ys == [1, 2]
 
 struct Tally:
-    s: Shared[int]
+    s: concurrency.Shared[int]
 
     fn index(self, k: int) -> int:
         return self.s.get()
@@ -168,7 +168,7 @@ struct Tally:
         self.s.update(fn(x: int) -> int: x + v)
 
 test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
-    t := Tally(Shared(0))
+    t := Tally(concurrency.Shared(0))
     r := Channel[str](1)
     parallel:
         spawn:

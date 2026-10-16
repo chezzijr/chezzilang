@@ -67,7 +67,7 @@ fn executor_reentrant_shutdown_now_during_drain() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import std.concurrency\nfn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
+        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
     )
     .expect("write program");
 
@@ -117,7 +117,7 @@ fn executor_shutdown_now_never_cancels_a_dispatched_job() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import std.concurrency\nfn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
+        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
     )
     .expect("write program");
     let mut dropped = 0;

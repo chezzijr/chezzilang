@@ -413,7 +413,7 @@ fn infer_concurrency_box_with_inferable_element_ok() {
     // NEIGHBOR: a box whose element IS inferable from the constructor value stays legal (the fix
     // only flags a residual Unknown, never a resolved element).
     entry_ok(
-        "import std.concurrency\nfn f() -> Shared[List[int]]:\n    return Shared([1])\nfn main():\n    s := f()\n    a: List[int] = s.get()\n    print(a)\n",
+        "import Shared from std.concurrency\nfn f() -> Shared[List[int]]:\n    return Shared([1])\nfn main():\n    s := f()\n    a: List[int] = s.get()\n    print(a)\n",
     );
 }
 

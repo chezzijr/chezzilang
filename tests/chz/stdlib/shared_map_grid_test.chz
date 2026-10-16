@@ -91,10 +91,10 @@ fn _map_del_ret[K: Hashable + Eq, V](m: Map[K, V], k: K) -> Map[K, V]:
     _ := m.remove(k)
     return m
 
-fn _shared_ops[K: Hashable + Eq](s: Shared[Map[K, int]], keys: List[K]) -> str:
+fn _shared_ops[K: Hashable + Eq](s: concurrency.Shared[Map[K, int]], keys: List[K]) -> str:
     return _ops(keys, fn(k: K, v: int): s.update(fn(m): _map_put_ret(m, k, v)), fn(k: K): s.update(fn(m): _map_del_ret(m, k)), fn(k: K) -> int?: s.get().get(k), fn(k: K) -> bool: s.get().contains(k), fn() -> int: s.get().len(), fn(k: K, v: int) -> int: _shared_goi(s, k, v), fn() -> str: _map_items(s.get()))
 
-fn _shared_goi[K: Hashable + Eq](s: Shared[Map[K, int]], k: K, v: int) -> int:
+fn _shared_goi[K: Hashable + Eq](s: concurrency.Shared[Map[K, int]], k: K, v: int) -> int:
     match s.get().get(k):
         ?x:
             return x
@@ -103,29 +103,29 @@ fn _shared_goi[K: Hashable + Eq](s: Shared[Map[K, int]], k: K, v: int) -> int:
             return v
 
 # The RwShared single-entry writers (see the header).
-fn _rw_put[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K, v: V):
+fn _rw_put[K: Hashable + Eq, V](b: concurrency.RwShared[Map[K, V]], k: K, v: V):
     ConcurrentMap(b).set(k, v)
 
-fn _rw_del[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K):
+fn _rw_del[K: Hashable + Eq, V](b: concurrency.RwShared[Map[K, V]], k: K):
     ConcurrentMap(b).remove(k)
 
-fn _rw_goi[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K, v: V) -> V:
+fn _rw_goi[K: Hashable + Eq, V](b: concurrency.RwShared[Map[K, V]], k: K, v: V) -> V:
     return ConcurrentMap(b).get_or_insert(k, v)
 
-fn _rw_ops[K: Hashable + Eq](b: RwShared[Map[K, int]], keys: List[K]) -> str:
+fn _rw_ops[K: Hashable + Eq](b: concurrency.RwShared[Map[K, int]], keys: List[K]) -> str:
     return _ops(keys, fn(k: K, v: int): _rw_put(b, k, v), fn(k: K): _rw_del(b, k), fn(k: K) -> int?: ConcurrentMap(b).get(k), fn(k: K) -> bool: ConcurrentMap(b).contains(k), fn() -> int: ConcurrentMap(b).len(), fn(k: K, v: int) -> int: _rw_goi(b, k, v), fn() -> str: _rw_items(b))
 
-fn _rw_items[K: Hashable + Eq](b: RwShared[Map[K, int]]) -> str:
+fn _rw_items[K: Hashable + Eq](b: concurrency.RwShared[Map[K, int]]) -> str:
     return ConcurrentMap(b).fold_entries("", fn(a, k, v): a + _show(k, v))
 
 fn _cm_ops[K: Hashable + Eq](c: ConcurrentMap[K, int], keys: List[K]) -> str:
     return _ops(keys, fn(k: K, v: int): c.set(k, v), fn(k: K): c.remove(k), fn(k: K) -> int?: c.get(k), fn(k: K) -> bool: c.contains(k), fn() -> int: c.len(), fn(k: K, v: int) -> int: c.get_or_insert(k, v), fn() -> str: _map_items(c.snapshot()))
 
 # ---- callers ---------------------------------------------------------------------------------------
-fn _child_shared[K: Hashable + Eq](s: Shared[Map[K, int]], keys: List[K], ch: Channel[str]):
+fn _child_shared[K: Hashable + Eq](s: concurrency.Shared[Map[K, int]], keys: List[K], ch: Channel[str]):
     ch.send(_shared_ops(s, keys))
 
-fn _child_rw[K: Hashable + Eq](b: RwShared[Map[K, int]], keys: List[K], ch: Channel[str]):
+fn _child_rw[K: Hashable + Eq](b: concurrency.RwShared[Map[K, int]], keys: List[K], ch: Channel[str]):
     ch.send(_rw_ops(b, keys))
 
 fn _child_cm[K: Hashable + Eq](c: ConcurrentMap[K, int], keys: List[K], ch: Channel[str]):
@@ -141,16 +141,16 @@ fn _grid[K: Hashable + Eq](keys: List[K]) -> str:
     want := _map_ops(keys)
     bad := ""
     # parent
-    s0: Shared[Map[K, int]] = Shared({})
-    b0: RwShared[Map[K, int]] = RwShared({})
-    c0: ConcurrentMap[K, int] = ConcurrentMap(RwShared({}))
+    s0: concurrency.Shared[Map[K, int]] = concurrency.Shared({})
+    b0: concurrency.RwShared[Map[K, int]] = concurrency.RwShared({})
+    c0: ConcurrentMap[K, int] = ConcurrentMap(concurrency.RwShared({}))
     for got in [_shared_ops(s0, keys), _rw_ops(b0, keys), _cm_ops(c0, keys)]:
         if got != want:
             bad = bad + "parent: " + got + " != " + want + "\n"
     # spawned task: the child runs the ops; the parent then reads the child's writes
-    s1: Shared[Map[K, int]] = Shared({})
-    b1: RwShared[Map[K, int]] = RwShared({})
-    c1: ConcurrentMap[K, int] = ConcurrentMap(RwShared({}))
+    s1: concurrency.Shared[Map[K, int]] = concurrency.Shared({})
+    b1: concurrency.RwShared[Map[K, int]] = concurrency.RwShared({})
+    c1: ConcurrentMap[K, int] = ConcurrentMap(concurrency.RwShared({}))
     ch := Channel[str](3)
     parallel:
         spawn _child_shared(s1, keys, ch)
@@ -164,10 +164,10 @@ fn _grid[K: Hashable + Eq](keys: List[K]) -> str:
         if seen != _final(want, keys):
             bad = bad + "spawn, parent view: " + seen + "\n"
     # Executor job: same, through submit_result
-    s2: Shared[Map[K, int]] = Shared({})
-    b2: RwShared[Map[K, int]] = RwShared({})
-    c2: ConcurrentMap[K, int] = ConcurrentMap(RwShared({}))
-    ex := Executor()
+    s2: concurrency.Shared[Map[K, int]] = concurrency.Shared({})
+    b2: concurrency.RwShared[Map[K, int]] = concurrency.RwShared({})
+    c2: ConcurrentMap[K, int] = ConcurrentMap(concurrency.RwShared({}))
+    ex := concurrency.Executor()
     o1 := ex.submit_result(fn(): _shared_ops(s2, keys))
     o2 := ex.submit_result(fn(): _rw_ops(b2, keys))
     o3 := ex.submit_result(fn(): _cm_ops(c2, keys))
@@ -181,7 +181,7 @@ fn _grid[K: Hashable + Eq](keys: List[K]) -> str:
     return bad
 
 # ---- memoize ---------------------------------------------------------------------------------------
-fn _tagged[K](calls: AtomicInt, k: K) -> str:
+fn _tagged[K](calls: concurrency.AtomicInt, k: K) -> str:
     calls.add(1)
     return "v" + str(k)
 
@@ -204,11 +204,11 @@ fn _memo_grid[K: Hashable + Eq](keys: List[K]) -> str:
     for k in keys:
         want = want + "v" + str(k) + ";"
     bad := ""
-    c0 := AtomicInt(0)
+    c0 := concurrency.AtomicInt(0)
     m0 := memoize1(fn(k: K) -> str: _tagged(c0, k))
     if _call_all(m0, keys) != want or _call_all(m0, keys) != want or c0.load() != keys.len():
         bad = bad + "parent: calls=" + str(c0.load()) + "\n"
-    c1 := AtomicInt(0)
+    c1 := concurrency.AtomicInt(0)
     m1 := memoize1(fn(k: K) -> str: _tagged(c1, k))
     ch := Channel[str](1)
     parallel:
@@ -216,9 +216,9 @@ fn _memo_grid[K: Hashable + Eq](keys: List[K]) -> str:
     got := ch.recv()
     if got != want or _call_all(m1, keys) != want or c1.load() != keys.len():
         bad = bad + "spawn: " + got + " calls=" + str(c1.load()) + "\n"
-    c2 := AtomicInt(0)
+    c2 := concurrency.AtomicInt(0)
     m2 := memoize1(fn(k: K) -> str: _tagged(c2, k))
-    ex := Executor()
+    ex := concurrency.Executor()
     o := ex.submit_result(fn(): _call_all(m2, keys))
     ex.shutdown()
     got2 := must(o.recv())
@@ -264,7 +264,7 @@ test fn memoize_grid_enum_keys():
 # Each single-entry write serializes one entry; its ids must not collide with the stored map's, or a
 # whole `get()` ties entry b's inner list to entry a's.
 test fn single_entry_writes_keep_their_own_aliases():
-    b: RwShared[Map[str, List[List[int]]]] = RwShared({})
+    b: concurrency.RwShared[Map[str, List[List[int]]]] = concurrency.RwShared({})
     xs := [1]
     _rw_put(b, "a", [xs, xs])
     ys := [2]
@@ -285,7 +285,7 @@ fn _counter(start: int) -> fn() -> int:
     return bump
 
 test fn single_entry_writes_keep_their_own_cells():
-    b: RwShared[Map[str, fn() -> int]] = RwShared({})
+    b: concurrency.RwShared[Map[str, fn() -> int]] = concurrency.RwShared({})
     _rw_put(b, "a", _counter(0))
     _rw_put(b, "b", _counter(100))
     m := b.get()
@@ -301,7 +301,7 @@ test fn remove_and_overwrite_keep_a_cross_entry_alias_alive():
     m["a"] = xs
     m["b"] = xs
     m["c"] = [3]
-    b := RwShared(m)
+    b := concurrency.RwShared(m)
     _rw_del(b, "a")
     match ConcurrentMap(b).get("b"):
         ?v: assert v == [1, 2], str(v)
@@ -317,14 +317,14 @@ test fn remove_and_overwrite_keep_a_cross_entry_alias_alive():
 # it sits behind the churned keys; `has`/`get_key` of `P(14)` must never report it missing, since only
 # the looker writes it. Base (a scan, no write generation) missed 1113 / 590 / 174 of 20000 lookups
 # at CHEZZI_THREADS=2 / 0 / 1.
-fn _churn(b: RwShared[Map[P, int]], stop: AtomicInt):
+fn _churn(b: concurrency.RwShared[Map[P, int]], stop: concurrency.AtomicInt):
     i := 0
     while stop.load() == 0:
         _rw_del(b, P(i))
         _rw_put(b, P(i), i)
         i = (i + 2) % 14
 
-fn _look(b: RwShared[Map[P, int]], stop: AtomicInt, ch: Channel[int]):
+fn _look(b: concurrency.RwShared[Map[P, int]], stop: concurrency.AtomicInt, ch: Channel[int]):
     misses := 0
     for _ in 0..10000:
         _rw_del(b, P(14))
@@ -341,10 +341,10 @@ fn _look(b: RwShared[Map[P, int]], stop: AtomicInt, ch: Channel[int]):
     ch.send(misses)
 
 test fn colliding_key_lookup_never_misses_under_concurrent_churn():
-    b: RwShared[Map[P, int]] = RwShared({})
+    b: concurrency.RwShared[Map[P, int]] = concurrency.RwShared({})
     for i in 0..8:
         _rw_put(b, P(2 * i), 2 * i)
-    stop := AtomicInt(0)
+    stop := concurrency.AtomicInt(0)
     ch := Channel[int](1)
     parallel:
         spawn _churn(b, stop)

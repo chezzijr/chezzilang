@@ -1163,10 +1163,10 @@ fn deadlock_fault_is_not_recoverable_new_message() {
 fn cancel_trip_wakes_parked_wait_under_parallel() {
     let src = "import std.cancel\n\
                    import std.time\n\
-                   fn waiter(tok: Token, out: Channel[bool]):\n\
+                   fn waiter(tok: cancel.Token, out: Channel[bool]):\n\
                    \x20   wait:\n\
                    \x20       _ := tok.done().recv(): out.send(true)\n\
-                   fn canceller(tok: Token):\n\
+                   fn canceller(tok: cancel.Token):\n\
                    \x20   time.sleep_ms(5)\n\
                    \x20   tok.cancel()\n\
                    fn main():\n\
@@ -1237,7 +1237,7 @@ fn parallel_chained_near_miss_no_false_positive() {
 fn net_loopback_round_trip_over_parallel() {
     let src = r#"import std.net
 
-fn serve(server: Listener) -> int!:
+fn serve(server: net.Listener) -> int!:
     conn := server.accept()?
     msg := conn.read(64)?
     conn.write("echo:" + msg)?

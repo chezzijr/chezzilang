@@ -586,7 +586,7 @@ fn read_temporary_warning_is_a_warning_in_json_and_check_still_exits_zero() {
     let t = TmpDir::new();
     let src = t.write(
         "lost.chz",
-        "import std.concurrency\ns := Shared[List[int]]([])\ns.get().push(1)\n",
+        "import Shared from std.concurrency\ns := Shared[List[int]]([])\ns.get().push(1)\n",
     );
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .args(["check", src.to_str().unwrap(), "--errors=json"])

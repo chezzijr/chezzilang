@@ -21,7 +21,7 @@ fn shutdown_now_cancels_a_jobs_nursery_child_blocked_on_recv() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import std.concurrency\nimport std.time\nnever := Channel[int](0)\nfn job():\n    parallel:\n        spawn:\n            never.recv()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    time.sleep_ms(300)\n    print(\"awake\")\n    ex.shutdown_now()\n    print(\"done\")\nmain()\n",
+        "import Executor from std.concurrency\nimport std.time\nnever := Channel[int](0)\nfn job():\n    parallel:\n        spawn:\n            never.recv()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    time.sleep_ms(300)\n    print(\"awake\")\n    ex.shutdown_now()\n    print(\"done\")\nmain()\n",
     )
     .expect("write program");
 

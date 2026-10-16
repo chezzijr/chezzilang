@@ -66,5 +66,5 @@ struct Task[T]:
 # starts at the submit and is waited for by `shutdown()` (or exit); `task.get()` then yields
 # `?f()`, or `!message` for the job's fault. Await the handles in a fixed (e.g. submission)
 # order to keep the output deterministic.
-fn submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]:
+fn submit_task[T](ex: concurrency.Executor, f: fn() -> T) -> Task[T]:
     return Task(ch=ex.submit_result(f), cached=None)

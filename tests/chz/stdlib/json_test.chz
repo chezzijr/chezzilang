@@ -36,7 +36,7 @@ test fn parse_large_string_is_not_quadratic():
 test fn stringify_large_string_is_not_quadratic():
     n := 150000
     t0 := time.monotonic()
-    out := json.stringify(Json.Str("x".repeat(n)))
+    out := json.stringify(json.Json.Str("x".repeat(n)))
     d := time.monotonic() - t0
     assert out.len() == n + 2
     assert d < 2.0, "json.stringify({n}-char string) took {d}s, expected < 2.0s"
@@ -66,10 +66,10 @@ test fn parse_original_repro_stays_alive():
     assert true, "still alive"
 
 test fn stringify_past_depth_limit_faults_with_own_name():
-    j := Json.Null
+    j := json.Json.Null
     i := 0
     while i < 2001:
-        j = Json.Arr([j])
+        j = json.Json.Arr([j])
         i += 1
     r := recover: json.stringify(j)
     match r:
@@ -79,21 +79,21 @@ test fn stringify_past_depth_limit_faults_with_own_name():
     assert true, "still alive"
 
 test fn len_containers_count_scalars_fault():
-    assert json.len(Json.Arr([Json.Num(1.0), Json.Num(2.0)])) == 2
-    assert json.len(Json.Obj({"a": Json.Num(1.0)})) == 1
-    assert json.len(Json.Str("hi")) == 2
+    assert json.len(json.Json.Arr([json.Json.Num(1.0), json.Json.Num(2.0)])) == 2
+    assert json.len(json.Json.Obj({"a": json.Json.Num(1.0)})) == 1
+    assert json.len(json.Json.Str("hi")) == 2
 
-    r1 := recover: json.len(Json.Null)
+    r1 := recover: json.len(json.Json.Null)
     match r1:
         ?_: assert false, "Null has no length"
         !e: assert e.message() == "json.len: Null has no length"
 
-    r2 := recover: json.len(Json.Bool(true))
+    r2 := recover: json.len(json.Json.Bool(true))
     match r2:
         ?_: assert false, "Bool has no length"
         !e: assert e.message() == "json.len: Bool has no length"
 
-    r3 := recover: json.len(Json.Num(3.0))
+    r3 := recover: json.len(json.Json.Num(3.0))
     match r3:
         ?_: assert false, "Num has no length"
         !e: assert e.message() == "json.len: Num has no length"

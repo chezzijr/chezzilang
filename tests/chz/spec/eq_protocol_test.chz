@@ -222,7 +222,7 @@ test fn an_int_warmed_eq_site_still_dispatches_user_eq():
 # `Protocol` existential payload is a hole NO checker walk can close — the witness is unknown — so
 # the property is enforced in the VM: the `eq` hook is switched OFF for the window.
 
-import std.concurrency
+import Atomic from std.concurrency
 
 protocol Named:
     fn name(self) -> str

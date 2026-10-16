@@ -5,7 +5,7 @@
 # so its output is deterministic at every worker count. (A `wait` that truly blocks until a sibling
 # produces is exercised by the `vm_wait_blocks_then_wakes_on_second_channel` test.)
 
-import std.time
+import timer from std.time
 
 fn main():
     orders := Channel[str]()

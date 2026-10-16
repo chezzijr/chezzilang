@@ -157,7 +157,7 @@ fn ffi_handle_crosses_channel_send() {
 #[test]
 fn ffi_handle_crosses_shared_ctor() {
     assert_golden_out(
-        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport std.concurrency\nbox := Shared(sqrt)\nprint(box.get()(16.0))\n",
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport Shared from std.concurrency\nbox := Shared(sqrt)\nprint(box.get()(16.0))\n",
         "4.0\n",
     );
 }
@@ -167,7 +167,7 @@ fn ffi_handle_crosses_shared_ctor() {
 #[test]
 fn ffi_handle_crosses_shared_set() {
     assert_golden_out(
-        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport std.concurrency\nbox := Shared(fn(x: float) -> float: x)\nbox.set(sqrt)\nprint(box.get()(25.0))\n",
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nimport Shared from std.concurrency\nbox := Shared(fn(x: float) -> float: x)\nbox.set(sqrt)\nprint(box.get()(25.0))\n",
         "5.0\n",
     );
 }
@@ -187,7 +187,7 @@ fn ffi_handle_send_succeeds() {
 #[test]
 fn positive_shared_handle_crosses_channel() {
     assert_golden_out(
-        "import std.concurrency\ns := Shared(42)\nch := Channel[Shared[int]]()\nch.send(s)\nprint(ch.recv().get())\n",
+        "import Shared from std.concurrency\ns := Shared(42)\nch := Channel[Shared[int]]()\nch.send(s)\nprint(ch.recv().get())\n",
         "42\n",
     );
 }
@@ -197,7 +197,7 @@ fn positive_shared_handle_crosses_channel() {
 #[test]
 fn positive_nested_shared_constructs() {
     assert_golden_out(
-        "import std.concurrency\nprint(Shared(Shared(1)).get().get())\n",
+        "import Shared from std.concurrency\nprint(Shared(Shared(1)).get().get())\n",
         "1\n",
     );
 }
@@ -346,7 +346,7 @@ fn synthetic_struct_qualified_ctor_parity() {
 #[test]
 fn synthetic_struct_bare_ctor_on_import_parity() {
     let out = golden_entry(
-        "import std.regex\nm: Match = Match(\"yo\", 1, 3, [])\nprint(m.text + str(m.end))\n",
+        "import Match from std.regex\nm: Match = Match(\"yo\", 1, 3, [])\nprint(m.text + str(m.end))\n",
     );
     assert_eq!(out, "yo3\n");
 }
@@ -985,7 +985,7 @@ fn executor_submit_atomic_visible_to_parent_parity() {
     // `Arc` (via `to_snap`), NOT deep-copied, so a task-side `add` IS visible to the parent. Guards that
     // the per-task serial snapshot does not clone the Arc away (trap #1) on the Executor path too.
     let out = golden_entry(
-        "import std.concurrency\na := Atomic(0)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): a.add(1))\n    ex.submit(fn(): a.add(1))\n    ex.shutdown()\n    print(a.load())\nmain()\n",
+        "import Atomic, Executor from std.concurrency\na := Atomic(0)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): a.add(1))\n    ex.submit(fn(): a.add(1))\n    ex.shutdown()\n    print(a.load())\nmain()\n",
     );
     assert_eq!(out, "2\n");
 }

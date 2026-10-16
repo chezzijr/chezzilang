@@ -266,7 +266,7 @@ fn eager_job_os_exit_terminates_a_socket_blocked_main() {
     let entry = t.write(
         "main.chz",
         r#"import std.net
-import std.concurrency
+import Executor from std.concurrency
 import std.os
 import std.time
 
@@ -307,7 +307,7 @@ fn eager_job_os_exit_terminates_a_recv_blocked_main() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
-        r#"import std.concurrency
+        r#"import Executor from std.concurrency
 import std.os
 import std.time
 
@@ -420,7 +420,7 @@ fn eager_job_os_exit_beats_a_blocked_nurserys_deadlock_verdict() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
-        r#"import std.concurrency
+        r#"import Executor from std.concurrency
 import std.os
 import std.time
 
@@ -848,7 +848,7 @@ fn an_exit_cuts_a_running_defer_body() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
-        r#"import std.concurrency
+        r#"import Executor from std.concurrency
 import std.time
 import std.os
 hs := Channel[int](1)
@@ -888,7 +888,7 @@ fn an_exit_cuts_a_spinning_defer_body_of_a_cancelled_sibling() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
-        r#"import std.concurrency
+        r#"import Executor from std.concurrency
 import std.time
 import std.os
 hs := Channel[int](1)
@@ -1072,7 +1072,7 @@ fn a_leaked_jobs_exit_is_attributed_to_the_test_that_leaked_it() {
     let t = TmpDir::new();
     let entry = t.write(
         "leak_test.chz",
-        r#"import std.concurrency
+        r#"import Executor from std.concurrency
 import std.time
 import std.os
 
@@ -1142,7 +1142,7 @@ fn a_leaked_job_from_a_top_level_executor_still_aborts_a_later_test() {
     let t = TmpDir::new();
     let entry = t.write(
         "toplevel_leak_test.chz",
-        r#"import std.concurrency
+        r#"import Executor from std.concurrency
 import std.time
 import std.os
 
@@ -1375,7 +1375,7 @@ fn timeout_reaches_a_guard_waiter_parked_behind_a_recv() {
     let t = TmpDir::new();
     let entry = t.write(
         "guard_waiter_test.chz",
-        r#"import std.concurrency
+        r#"import Shared from std.concurrency
 
 test fn guard_waiter_hangs():
     s := Shared(0)

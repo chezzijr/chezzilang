@@ -9,7 +9,7 @@ use super::*;
 #[test]
 fn outside_executor_job_survives_owner_cut_in_shutdown() {
     let src = r#"import std.time
-import std.concurrency
+import Executor from std.concurrency
 done := Channel[int](1)
 fn job():
     time.sleep_ms(300)
@@ -47,7 +47,7 @@ print("job done? {done.try_recv()}")
 /// channel the job would have sent. Go prints the job's index panic.
 #[test]
 fn unjoined_job_fault_outranks_a_main_deadlock() {
-    let src = r#"import std.concurrency
+    let src = r#"import Executor from std.concurrency
 ch := Channel[int](0)
 fn work(xs: List[int]):
     ch.send(xs[5])
@@ -133,7 +133,7 @@ owner()
 /// buffered output reaches the in-process sink — for a finished job and for one parked forever.
 #[test]
 fn a_verdict_run_still_drains_executor_output() {
-    let finished = r#"import std.concurrency
+    let finished = r#"import Executor from std.concurrency
 import std.time
 ch := Channel[int](0)
 fn job():
@@ -143,7 +143,7 @@ ex.submit(job)
 time.sleep_ms(200)
 print(ch.recv())
 "#;
-    let parked = r#"import std.concurrency
+    let parked = r#"import Executor from std.concurrency
 import std.time
 ch := Channel[int](0)
 jstuck := Channel[int](0)
@@ -322,7 +322,7 @@ fn nested_executor_charges_its_held_bytes_in_either_visit_order() {
 /// watchdog fires) if a finished job keeps vetoing the verdict, or if the nursery prints `after`.
 #[test]
 fn a_finished_executor_job_no_longer_vetoes_a_parked_nursery_task() {
-    let src = "import std.concurrency\n\
+    let src = "import Executor from std.concurrency\n\
                c := Channel[int](0)\n\
                fn noop():\n    pass\n\
                fn waiter():\n    _v := c.recv()\n\

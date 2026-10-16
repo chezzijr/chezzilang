@@ -6,7 +6,7 @@
 # parent. Nesting `work()` under `main`'s `parallel:` forces the M:N eager nested-nursery path (which
 # wires the task at spawn time) — the exact path where a shared-callee serial engine used to read the
 # post-write value `5` while M:N read the snapshot `0`. Since the fix, it prints `0`.
-import std.concurrency
+import Shared from std.concurrency
 
 fn work():
     x := [0]

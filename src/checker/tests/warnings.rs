@@ -571,7 +571,7 @@ fn d4_spawn_named_callee_write() {
 #[test]
 fn d4_executor_submit_named_capture_write_and_read_only() {
     let errs = check_entry(
-        "import std.concurrency\nfn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    ex := Executor()\n    ex.submit(bump)\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    ex := Executor()\n    ex.submit(bump)\n    ex.shutdown()\nmain()\n",
     );
     assert!(
         errs.iter().any(|e| e
@@ -582,7 +582,7 @@ fn d4_executor_submit_named_capture_write_and_read_only() {
         "expected submit-argument error with push help at line 7, got: {errs:?}"
     );
     entry_ok(
-        "import std.concurrency\nfn main():\n    xs := [1]\n    fn read():\n        print(xs.len())\n    ex := Executor()\n    ex.submit(read)\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    fn read():\n        print(xs.len())\n    ex := Executor()\n    ex.submit(read)\n    ex.shutdown()\nmain()\n",
     );
 }
 
@@ -705,10 +705,10 @@ fn d4_rule1_silent_set_stays_clean() {
         no_warn(src);
     }
     entry_no_warn(
-        "import std.concurrency\nfn f():\n    sh := Shared(1)\n    parallel:\n        spawn:\n            sh.update(fn(x: int) -> int: x + 1)\nf()\n",
+        "import Shared from std.concurrency\nfn f():\n    sh := Shared(1)\n    parallel:\n        spawn:\n            sh.update(fn(x: int) -> int: x + 1)\nf()\n",
     );
     entry_no_warn(
-        "import std.concurrency\nstruct T:\n    value: Shared[int]\n    fn index(self, k: int) -> int:\n        return self.value.get()\n    fn set_index(self, k: int, v: int):\n        self.value.set(v)\nfn f():\n    t := T(Shared(1))\n    parallel:\n        spawn:\n            t[0] = 5\nf()\n",
+        "import Shared from std.concurrency\nstruct T:\n    value: Shared[int]\n    fn index(self, k: int) -> int:\n        return self.value.get()\n    fn set_index(self, k: int, v: int):\n        self.value.set(v)\nfn f():\n    t := T(Shared(1))\n    parallel:\n        spawn:\n            t[0] = 5\nf()\n",
     );
 }
 
@@ -772,7 +772,7 @@ fn d4_user_method_write_inference_declines() {
         no_warn(src);
     }
     entry_no_warn(
-        "import std.concurrency\nstruct Counter:\n    n: Shared[int]\n    fn bump(self):\n        self.n.update(fn(v: int) -> int: v + 1)\nfn f():\n    c := Counter(Shared(0))\n    parallel:\n        spawn:\n            c.bump()\nf()\n",
+        "import Shared from std.concurrency\nstruct Counter:\n    n: Shared[int]\n    fn bump(self):\n        self.n.update(fn(v: int) -> int: v + 1)\nfn f():\n    c := Counter(Shared(0))\n    parallel:\n        spawn:\n            c.bump()\nf()\n",
     );
 }
 
@@ -789,11 +789,11 @@ fn d4_rule3_writing_closure_crossing_a_task_is_an_error() {
         "'xs' is this task's copy",
     );
     entry_rejects(
-        "import std.concurrency\nfn f():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): xs.push(3))\n    ex.shutdown()\nf()\n",
+        "import Executor from std.concurrency\nfn f():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): xs.push(3))\n    ex.shutdown()\nf()\n",
         "'xs' is this task's copy",
     );
     entry_rejects(
-        "import std.concurrency\nfn f():\n    xs := [1]\n    g := fn(): xs.push(3)\n    ex := Executor()\n    ex.submit(g)\n    ex.shutdown()\nf()\n",
+        "import Executor from std.concurrency\nfn f():\n    xs := [1]\n    g := fn(): xs.push(3)\n    ex := Executor()\n    ex.submit(g)\n    ex.shutdown()\nf()\n",
         "'xs' is this task's copy",
     );
     rejects(
@@ -821,7 +821,7 @@ fn d4_rule3_declines() {
         no_warn(src);
     }
     entry_no_warn(
-        "import std.concurrency\nfn f():\n    seen := Atomic(0)\n    ex := Executor()\n    ex.submit(fn(): seen.add(3))\n    ex.shutdown()\nf()\n",
+        "import Atomic, Executor from std.concurrency\nfn f():\n    seen := Atomic(0)\n    ex := Executor()\n    ex.submit(fn(): seen.add(3))\n    ex.shutdown()\nf()\n",
     );
 }
 
@@ -1174,15 +1174,15 @@ fn a_projected_write_through_a_handle_a_task_local_or_before_the_nursery_stays_s
     // H1 — Shared. `entry_no_warn` (not `no_warn`): `build_graph` is the only wire that resolves a
     // native `std.concurrency` import (`checker-test-helper-key-divergence`).
     entry_no_warn(
-        "import std.concurrency\nfn main():\n    hs := [Shared[int](1)]\n    parallel:\n        spawn:\n            hs[0].set(2)\n    print(hs[0].get())\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    hs := [Shared[int](1)]\n    parallel:\n        spawn:\n            hs[0].set(2)\n    print(hs[0].get())\nmain()\n",
     );
     // H2 — RwShared.
     entry_no_warn(
-        "import std.concurrency\nfn main():\n    hs := [RwShared[int](1)]\n    parallel:\n        spawn:\n            hs[0].set(2)\n    print(hs[0].get())\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    hs := [RwShared[int](1)]\n    parallel:\n        spawn:\n            hs[0].set(2)\n    print(hs[0].get())\nmain()\n",
     );
     // H3 — Atomic.
     entry_no_warn(
-        "import std.concurrency\nfn main():\n    hs := [Atomic[int](1)]\n    parallel:\n        spawn:\n            hs[0].add(1)\n    print(hs[0].load())\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    hs := [Atomic[int](1)]\n    parallel:\n        spawn:\n            hs[0].add(1)\n    print(hs[0].load())\nmain()\n",
     );
     // H4 — Channel (a global reserved type, no import needed).
     no_warn(
@@ -1190,7 +1190,7 @@ fn a_projected_write_through_a_handle_a_task_local_or_before_the_nursery_stays_s
     );
     // H5 — a Shared behind a struct field.
     entry_no_warn(
-        "import std.concurrency\nstruct H:\n    h: Shared[int]\nfn main():\n    s := H(Shared[int](1))\n    parallel:\n        spawn:\n            s.h.set(2)\n    print(s.h.get())\nmain()\n",
+        "import Shared from std.concurrency\nstruct H:\n    h: Shared[int]\nfn main():\n    s := H(Shared[int](1))\n    parallel:\n        spawn:\n            s.h.set(2)\n    print(s.h.get())\nmain()\n",
     );
     // L1 — the task re-declares both bindings locally with `:=`; its writes are to the SHADOW.
     no_warn(&airlock_src(
@@ -1242,21 +1242,21 @@ fn a_task_side_write_warns_at_module_top_level_and_on_a_module_global() {
 #[test]
 fn a_write_through_a_handle_type_never_warns() {
     entry_no_warn(
-        "import std.concurrency\nfn f():\n    s := Shared(0)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + 1)\n    print(s.get())\nf()\n",
+        "import Shared from std.concurrency\nfn f():\n    s := Shared(0)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + 1)\n    print(s.get())\nf()\n",
     );
     entry_no_warn(
         "fn f():\n    ch := Channel[int](1)\n    parallel:\n        spawn:\n            ch.send(7)\n    print(ch.recv())\nf()\n",
     );
     entry_no_warn(
-        "import std.concurrency\nfn f():\n    s := RwShared(0)\n    parallel:\n        spawn:\n            s.set(3)\n    print(s.get())\nf()\n",
+        "import RwShared from std.concurrency\nfn f():\n    s := RwShared(0)\n    parallel:\n        spawn:\n            s.set(3)\n    print(s.get())\nf()\n",
     );
     entry_no_warn(
-        "import std.concurrency\nfn f():\n    a := AtomicInt(0)\n    parallel:\n        spawn:\n            a.add(1)\n    print(a.load())\nf()\n",
+        "import AtomicInt from std.concurrency\nfn f():\n    a := AtomicInt(0)\n    parallel:\n        spawn:\n            a.add(1)\n    print(a.load())\nf()\n",
     );
     // The `Shared` REWRITE of the filed repro — the very fix the warning's hint recommends must
     // itself be silent, or the diagnostic sends the user in a circle.
     entry_no_warn(
-        "import std.concurrency\nfn f():\n    out := Shared(0)\n    parallel:\n        spawn:\n            out.set(2)\n    print(out.get())\nf()\n",
+        "import Shared from std.concurrency\nfn f():\n    out := Shared(0)\n    parallel:\n        spawn:\n            out.set(2)\n    print(out.get())\nf()\n",
     );
 }
 

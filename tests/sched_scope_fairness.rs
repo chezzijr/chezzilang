@@ -53,7 +53,7 @@ fn run_env(
     }
 }
 
-const PINGPONG_STARVES_INNER_SIBLING: &str = r#"import std.concurrency
+const PINGPONG_STARVES_INNER_SIBLING: &str = r#"import AtomicInt from std.concurrency
 fn main():
     c := Channel[int](0)
     stop := AtomicInt(0)

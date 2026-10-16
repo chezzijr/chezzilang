@@ -8,7 +8,7 @@ use std::process::Command;
 
 const PROGRAM: &str = r#"import std.time
 import std.os
-import std.concurrency
+import Executor from std.concurrency
 fn spin():
     i := 0
     while i < 400000000:

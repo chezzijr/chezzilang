@@ -31,7 +31,7 @@ fn mk() -> List[int]:
     return [1]
 
 test fn copy_get_sees_owner_alias_as_of_the_crossing():
-    ex := Executor()
+    ex := concurrency.Executor()
     t := submit_task(ex, mk)
     ex.shutdown()
     xs := must(t.get())
@@ -45,7 +45,7 @@ fn one(k: int) -> List[int]:
     return [k]
 
 fn task_in_state(state: str) -> Task[List[int]]:
-    ex := Executor()
+    ex := concurrency.Executor()
     t := submit_task(ex, mk)
     ex.shutdown()
     if state != "unobserved":
@@ -105,7 +105,7 @@ test fn task_copy_value_through_an_executor_job():
     for s in states():
         t := task_in_state(s)
         out := Channel[str](1)
-        ex := Executor()
+        ex := concurrency.Executor()
         ex.submit(fn(): read_task(t, out))
         ex.shutdown()
         got.push("{s}: copy {out.recv()} owner {must(t.get())}")
@@ -148,7 +148,7 @@ test fn memo_copy_value_through_an_executor_job():
     for s in states():
         m := memo_in_state(s)
         out := Channel[str](1)
-        ex := Executor()
+        ex := concurrency.Executor()
         ex.submit(fn(): read_memo(m, out))
         ex.shutdown()
         got.push("{s}: copy {out.recv()} owner {m(1)}")
@@ -230,7 +230,7 @@ test fn a_copy_write_faults_in_every_owner_state_in_an_executor_job():
         t := task_in_state(state)
         m := memo_in_state(state)
         out := Channel[str](2)
-        ex := Executor()
+        ex := concurrency.Executor()
         ex.submit(fn(): copy_write(t, m, out))
         ex.shutdown()
         got := [out.recv(), out.recv()]

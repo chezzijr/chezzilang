@@ -146,7 +146,7 @@ fn json_malformed_numbers_are_errors_parity() {
 #[test]
 fn json_control_char_escape_roundtrip_parity() {
     let out = golden_entry(
-        "import std.json\ns := \"x\" + chr(1) + chr(31) + chr(0) + \"y\"\nout := json.stringify(Json.Str(s))\ncodes := List[int]()\nfor c in out.chars():\n    codes.push(ord(c))\nprint(codes)\nmatch json.parse(out):\n    ?j:\n        match j:\n            Json.Str(back):\n                if back == s:\n                    print(\"RT_OK\")\n                else:\n                    print(\"RT_FAIL\")\n            _: print(\"NOT_STR\")\n    !e: print(\"PARSE_ERR\")\n",
+        "import std.json\ns := \"x\" + chr(1) + chr(31) + chr(0) + \"y\"\nout := json.stringify(json.Json.Str(s))\ncodes := List[int]()\nfor c in out.chars():\n    codes.push(ord(c))\nprint(codes)\nmatch json.parse(out):\n    ?j:\n        match j:\n            json.Json.Str(back):\n                if back == s:\n                    print(\"RT_OK\")\n                else:\n                    print(\"RT_FAIL\")\n            _: print(\"NOT_STR\")\n    !e: print(\"PARSE_ERR\")\n",
     );
     assert_eq!(
         out,
@@ -185,7 +185,7 @@ fn json_raw_control_char_in_string_is_error_parity() {
 #[test]
 fn json_stringify_non_finite_faults_parity() {
     let out = golden_entry(
-        "import std.json\nfn tp(x: float) -> str:\n    doc := Json.Obj({\"v\": Json.Num(x)})\n    r := recover:\n        json.stringify(doc)\n    match r:\n        ?s: return \"OK \" + s\n        !e: return e.message()\nprint(tp(1.0 / 0.0))\nprint(tp(-1.0 / 0.0))\nprint(tp(0.0 / 0.0))\n",
+        "import std.json\nfn tp(x: float) -> str:\n    doc := json.Json.Obj({\"v\": json.Json.Num(x)})\n    r := recover:\n        json.stringify(doc)\n    match r:\n        ?s: return \"OK \" + s\n        !e: return e.message()\nprint(tp(1.0 / 0.0))\nprint(tp(-1.0 / 0.0))\nprint(tp(0.0 / 0.0))\n",
     );
     assert_eq!(
         out,
@@ -221,7 +221,7 @@ fn python_float_repr_str_parity() {
 #[test]
 fn json_stringify_finite_roundtrip_unchanged_parity() {
     let out = golden_entry(
-        "import std.json\ndoc := Json.Arr([Json.Num(3.0), Json.Num(1.5), Json.Num(1e300), Json.Num(0.0 - 2.5), Json.Str(\"hi\"), Json.Obj({\"k\": Json.Num(42.0)})])\ns := json.stringify(doc)\nprint(s)\nmatch json.parse(s):\n    ?v: print(\"roundtrip \" + json.stringify(v))\n    !e: print(\"ERR \" + e.message())\n",
+        "import std.json\ndoc := json.Json.Arr([json.Json.Num(3.0), json.Json.Num(1.5), json.Json.Num(1e300), json.Json.Num(0.0 - 2.5), json.Json.Str(\"hi\"), json.Json.Obj({\"k\": json.Json.Num(42.0)})])\ns := json.stringify(doc)\nprint(s)\nmatch json.parse(s):\n    ?v: print(\"roundtrip \" + json.stringify(v))\n    !e: print(\"ERR \" + e.message())\n",
     );
     // 1e300 is FINITE and far outside the i64 window: it must stringify normally (via `str(f)`),
     // NOT fault. `str(1e300)` renders in scientific notation (CPython repr parity, exponent >= 16):
@@ -1046,7 +1046,7 @@ fn airlock_running_generator_atomic_store_faults() {
     // in `Channel.send` itself, so an `Atomic.store` crossing of a running generator must fault
     // identically to the channel vehicle above.
     let src = r#"
-import std.concurrency
+import Atomic from std.concurrency
 struct H:
     g: Iterator[int]?
 h := H(None)

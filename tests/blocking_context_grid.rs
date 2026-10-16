@@ -112,7 +112,7 @@ fn c1_timed_wait_in_fiber_callback_completes() {
 /// Go at GOMAXPROCS=1 and CPython complete.
 #[test]
 fn x1_executor_shutdown_in_fiber_releases_the_runner() {
-    let src = "import std.concurrency\nfn main():\n    ch := Channel[int](0)\n    parallel:\n        spawn:\n            ex := Executor()\n            ex.submit(fn() -> None:\n                print(ch.recv())\n            )\n            ex.shutdown()\n            print(\"done\")\n        spawn:\n            ch.send(7)\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn main():\n    ch := Channel[int](0)\n    parallel:\n        spawn:\n            ex := Executor()\n            ex.submit(fn() -> None:\n                print(ch.recv())\n            )\n            ex.shutdown()\n            print(\"done\")\n        spawn:\n            ch.send(7)\nmain()\n";
     assert_cell("x1", src, "7\ndone\n");
 }
 

@@ -16,7 +16,7 @@ fn job(i: int) -> int:
     print("job {i} ran")
     return i
 fn main():
-    ex := Executor(1)
+    ex := concurrency.Executor(1)
     h1 := task.submit_task(ex, fn() -> int: job(1))
     h2 := task.submit_task(ex, fn() -> int: job(2))
     print("h2 {h2.get()}")
@@ -185,7 +185,7 @@ import std.time
 import std.concurrency
 import std.concurrency.task
 gate := Channel[int](0)
-g := Shared[int](0)
+g := concurrency.Shared[int](0)
 fn hold(x: int) -> int:
     time.sleep_ms(300)
     return x
@@ -569,11 +569,11 @@ fn boom():
 fn rd(h: task.Task[int]):
     print("defer got {h.get()}")
 fn main():
-    ex := Executor(1)
+    ex := concurrency.Executor(1)
     _b := task.submit_task(ex, fn() -> int: blocker())
     h := task.submit_task(ex, fn() -> int: target())
     defer: rd(h)
-    ex2 := Executor()
+    ex2 := concurrency.Executor()
     ex2.submit(fn(): boom())
     time.sleep_ms(100)
     print("M end")
@@ -593,10 +593,10 @@ fn boom():
 fn rd(h: task.Task[int]):
     print("defer got {h.get()}")
 fn main():
-    ex := Executor()
+    ex := concurrency.Executor()
     h := task.submit_task(ex, fn() -> int: target())
     defer: rd(h)
-    ex2 := Executor()
+    ex2 := concurrency.Executor()
     ex2.submit(fn(): boom())
     time.sleep_ms(100)
     print("M end")
@@ -622,9 +622,9 @@ fn defer_reader_settles_after_a_job_fault() {
 const TD2: &str = r#"import std.concurrency
 import std.concurrency.task
 fn main():
-    flips := AtomicInt(0)
+    flips := concurrency.AtomicInt(0)
     for r in 0..50:
-        ex := Executor()
+        ex := concurrency.Executor()
         t := task.submit_task(ex, fn() -> int: r)
         ex.shutdown()
         parallel:

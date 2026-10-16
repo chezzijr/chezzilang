@@ -42,7 +42,7 @@ fn exit_lands_inside_a_loop_free_recursion() {
 /// T {1, 2}. Each party prints only after its CPU work returns, so a halt that waited for the work
 /// shows on stdout. The halt fires after a channel handshake (DEC-050), and no clock is read.
 const GRID_HDR: &str = r#"import std.os
-import std.concurrency
+import Executor from std.concurrency
 started := Channel[int](1)
 fn fib(n: int) -> int:
     if n < 2:

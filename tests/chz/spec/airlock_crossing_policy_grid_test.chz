@@ -422,7 +422,7 @@ test fn grid_policy_r45_block_named_capture():
 
 test fn grid_policy_r16_executor_submit_fresh():
     out := Channel[str](4)
-    ex := Executor()
+    ex := concurrency.Executor()
     ex.submit(fn(): t189_w([1], out))
     ex.shutdown()
     assert out.recv() == "ok 2"
@@ -431,7 +431,7 @@ test fn grid_policy_r17_executor_submit_named():
     xs := [1]
     h := t189_w
     out := Channel[str](4)
-    ex := Executor()
+    ex := concurrency.Executor()
     ex.submit(fn(): h(xs, out))
     ex.shutdown()
     assert out.recv() == "fault"
@@ -439,14 +439,14 @@ test fn grid_policy_r17_executor_submit_named():
 
 test fn grid_policy_r46_executor_submit_result_named():
     xs := [1]
-    ex := Executor()
+    ex := concurrency.Executor()
     got := must(ex.submit_result(fn() -> str: t189_try(xs)).recv())
     ex.shutdown()
     assert got == "fault"
     assert xs == [1]
 
 test fn grid_policy_r47_executor_submit_result_fresh():
-    ex := Executor()
+    ex := concurrency.Executor()
     got := must(ex.submit_result(fn() -> str: t189_try([1])).recv())
     ex.shutdown()
     assert got == "ok 2"
@@ -482,7 +482,7 @@ test fn grid_policy_r49_channel_task_to_parent():
 # ---- Shared / RwShared / Atomic (a read is never marked) ----
 
 test fn grid_policy_r21_shared_get():
-    s := Shared[List[int]]([1])
+    s := concurrency.Shared[List[int]]([1])
     out := Channel[str](4)
     parallel:
         spawn: out.send(t189_try(s.get()))
@@ -490,7 +490,7 @@ test fn grid_policy_r21_shared_get():
     assert s.get() == [1]
 
 test fn grid_policy_r50_rwshared_get():
-    s := RwShared[List[int]]([1])
+    s := concurrency.RwShared[List[int]]([1])
     out := Channel[str](4)
     parallel:
         spawn: out.send(t189_try(s.get()))
@@ -498,7 +498,7 @@ test fn grid_policy_r50_rwshared_get():
     assert s.get() == [1]
 
 test fn grid_policy_r51_atomic_load():
-    a := Atomic[List[int]]([1])
+    a := concurrency.Atomic[List[int]]([1])
     out := Channel[str](4)
     parallel:
         spawn: out.send(t189_try(a.load()))
@@ -506,7 +506,7 @@ test fn grid_policy_r51_atomic_load():
     assert a.load() == [1]
 
 test fn grid_policy_r52_shared_store():
-    s := Shared[List[int]]([])
+    s := concurrency.Shared[List[int]]([])
     parallel:
         spawn: s.set([1])
     assert t189_try(s.get()) == "ok 2"

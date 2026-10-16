@@ -1333,7 +1333,7 @@ fn concurrency_whole_module_runs_both_engines() {
     let entry = dir.join("main.chz");
     std::fs::write(
             &entry,
-            "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    r := RwShared(1)\n    a := Atomic(2)\n    ex := Executor()\n    ex.shutdown()\n    print(s.get())\n    print(r.get())\n    print(a.load())\nmain()\n",
+            "import Atomic, Executor, RwShared, Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    r := RwShared(1)\n    a := Atomic(2)\n    ex := Executor()\n    ex.shutdown()\n    print(s.get())\n    print(r.get())\n    print(a.load())\nmain()\n",
         )
         .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);
@@ -1382,7 +1382,7 @@ fn concurrency_from_import_runs_both_engines() {
 fn net_from_import_runs_both_engines() {
     for src in [
         "import Socket from std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64)?\n    n := s.write(a)?\n    s.close()\n    return ?n\nfn main():\n    print(1)\nmain()\n",
-        "import std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64, 100)?\n    n := s.write(a, 100)?\n    s.close()\n    return ?n\nfn use_listener(l: Listener) -> str!:\n    c := l.accept()?\n    ad := l.addr()?\n    c.close()\n    l.close()\n    return ?ad\nfn main():\n    print(1)\nmain()\n",
+        "import Listener, Socket from std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64, 100)?\n    n := s.write(a, 100)?\n    s.close()\n    return ?n\nfn use_listener(l: Listener) -> str!:\n    c := l.accept()?\n    ad := l.addr()?\n    c.close()\n    l.close()\n    return ?ad\nfn main():\n    print(1)\nmain()\n",
     ] {
         let dir = std::env::temp_dir().join(format!("chezzi_vm_net_from_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1410,7 +1410,7 @@ fn timer_whole_module_runs_both_engines() {
     let entry = dir.join("main.chz");
     std::fs::write(
         &entry,
-        "import std.time\nfn main():\n    print(timer(50).recv())\nmain()\n",
+        "import timer from std.time\nfn main():\n    print(timer(50).recv())\nmain()\n",
     )
     .unwrap();
     let (vo, _ve, vr, _vc) = run_file(&entry);

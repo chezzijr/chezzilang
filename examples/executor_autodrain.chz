@@ -9,7 +9,7 @@
 # the exit join — which is why nothing here prints from inside a job in a fixed position. The last job
 # to finish reports the total, so the line appears exactly once whatever order they complete in.
 
-import std.concurrency
+import Atomic, Executor from std.concurrency
 
 fn job(id: int, done: Atomic[int], total: int):
     # `add` returns the NEW total, so this is true for exactly one job whatever order they run in:

@@ -103,7 +103,7 @@ fn write_program(name: &str, src: &str) -> std::path::PathBuf {
 fn os_exit_inside_a_box_closure_exits_with_its_status() {
     for (kind, call) in [("Shared", "update"), ("RwShared", "write")] {
         let src = format!(
-            "import std.concurrency\nimport std.os\n\nfn leave(x: int) -> int:\n    print(\"inside\")\n    os.exit(3)\n    return x\n\ns := {kind}(1)\nprint(\"before\")\ns.{call}(leave)\nprint(\"unreachable\")\n"
+            "import std.concurrency\nimport std.os\n\nfn leave(x: int) -> int:\n    print(\"inside\")\n    os.exit(3)\n    return x\n\ns := concurrency.{kind}(1)\nprint(\"before\")\ns.{call}(leave)\nprint(\"unreachable\")\n"
         );
         let path = write_program(&format!("exit-{kind}"), &src);
         for threads in [Some("1"), Some("2"), None] {
@@ -123,7 +123,7 @@ fn os_exit_inside_a_box_closure_exits_with_its_status() {
 fn a_child_task_reading_the_box_inside_its_own_closure_is_a_deadlock_fault_not_a_hang() {
     for (kind, call) in [("Shared", "update"), ("RwShared", "write")] {
         let src = format!(
-            "import std.concurrency\n\nfn peek(w: {kind}[int], out: AtomicInt):\n    out.store(w.get())\n\nfn body(w: {kind}[int], x: int) -> int:\n    out := AtomicInt(0)\n    parallel:\n        spawn peek(w, out)\n    return x + out.load() + 1\n\nw := {kind}(10)\nw.{call}(fn(x): body(w, x))\nprint(\"unreachable\")\n"
+            "import std.concurrency\n\nfn peek(w: concurrency.{kind}[int], out: concurrency.AtomicInt):\n    out.store(w.get())\n\nfn body(w: concurrency.{kind}[int], x: int) -> int:\n    out := concurrency.AtomicInt(0)\n    parallel:\n        spawn peek(w, out)\n    return x + out.load() + 1\n\nw := concurrency.{kind}(10)\nw.{call}(fn(x): body(w, x))\nprint(\"unreachable\")\n"
         );
         let path = write_program(&format!("child-{kind}"), &src);
         for threads in [Some("1"), Some("2"), None] {
@@ -168,7 +168,7 @@ fn a_child_fault_cuts_its_owner_inside_a_box_closure() {
     for (wname, wait) in waits {
         for (i, (kind, call)) in calls.into_iter().enumerate() {
             let src = format!(
-                "import std.concurrency\nch := Channel[int](0)\nstarted := Channel[int](1)\ninner := Shared(0)\nfn park(x: int) -> int:\n    started.send(1)\n{wait}\n    return x\nfn nested(x: int) -> int:\n    inner.update(park)\n    return x\nw := {kind}(0)\nparallel:\n    spawn:\n        _ := started.recv()\n        panic(\"boom\")\n    {call}\n    print(\"after\")\n"
+                "import std.concurrency\nch := Channel[int](0)\nstarted := Channel[int](1)\ninner := concurrency.Shared(0)\nfn park(x: int) -> int:\n    started.send(1)\n{wait}\n    return x\nfn nested(x: int) -> int:\n    inner.update(park)\n    return x\nw := concurrency.{kind}(0)\nparallel:\n    spawn:\n        _ := started.recv()\n        panic(\"boom\")\n    {call}\n    print(\"after\")\n"
             );
             let path = write_program(&format!("cut-{wname}-{i}"), &src);
             for threads in [Some("1"), Some("2"), None] {
@@ -214,7 +214,7 @@ fn a_deadlock_inside_a_box_closure_is_judged_as_on_the_caller() {
     for (wname, wait, faults) in waits {
         for (i, (kind, call)) in calls.into_iter().enumerate() {
             let src = format!(
-                "import std.concurrency\nch := Channel[int](0)\nch2 := Channel[int](0)\ninner := Shared(0)\nfn park(x: int) -> int:\n{wait}\n    return x\nfn nested(x: int) -> int:\n    inner.update(park)\n    return x\nw := {kind}(0)\nparallel:\n    spawn:\n        _ := ch2.recv()\n    {call}\n    print(\"after\")\n"
+                "import std.concurrency\nch := Channel[int](0)\nch2 := Channel[int](0)\ninner := concurrency.Shared(0)\nfn park(x: int) -> int:\n{wait}\n    return x\nfn nested(x: int) -> int:\n    inner.update(park)\n    return x\nw := concurrency.{kind}(0)\nparallel:\n    spawn:\n        _ := ch2.recv()\n    {call}\n    print(\"after\")\n"
             );
             let path = write_program(&format!("dl-{wname}-{i}"), &src);
             for threads in [Some("1"), Some("2"), None] {
@@ -242,7 +242,7 @@ fn a_deadlock_inside_a_box_closure_is_judged_as_on_the_caller() {
 /// the payload must render with the cycle marker and exit 1; on the base binary it hung.
 #[test]
 fn a_fault_message_renders_a_box_cycle_and_terminates() {
-    let decl = "import std.concurrency\nstruct N:\n    id: int\n    box: Shared[N?]\n    fn message(self) -> str:\n        return \"m\"\nfn f(n: N) -> int!N:\n    return !n\nb: Shared[N?] = Shared(None)\nn := N(1, b)\n";
+    let decl = "import Shared from std.concurrency\nstruct N:\n    id: int\n    box: Shared[N?]\n    fn message(self) -> str:\n        return \"m\"\nfn f(n: N) -> int!N:\n    return !n\nb: Shared[N?] = Shared(None)\nn := N(1, b)\n";
     let cyc = write_program(
         "cycle",
         &format!("{decl}b.set(?n)\nprint(\"stored\")\nx := f(n)?\nprint(\"unreachable\")\n"),
@@ -277,7 +277,7 @@ fn a_fault_message_renders_a_box_cycle_and_terminates() {
 fn the_read_temporary_warning_is_unchanged() {
     let path = write_program(
         "temp",
-        "import std.concurrency\ns: Shared[List[int]] = Shared([1])\nw: RwShared[List[int]] = RwShared([1])\ns.get().push(1)\nw.get().push(1)\nprint(s.get(), w.get())\n",
+        "import RwShared, Shared from std.concurrency\ns: Shared[List[int]] = Shared([1])\nw: RwShared[List[int]] = RwShared([1])\ns.get().push(1)\nw.get().push(1)\nprint(s.get(), w.get())\n",
     );
     let r = chezzi(&["run", path.to_str().unwrap()], None, 20);
     assert_eq!(r.code, Some(0), "stderr: {}", r.stderr);
@@ -328,7 +328,7 @@ fn a_hundred_thousand_dropped_boxes_do_not_grow_memory() {
     const SLACK_KB: i64 = 2 * 1024;
     let rss = |kind: &str| -> i64 {
         let src = format!(
-            "import std.concurrency\nfn churn():\n    for i in 0..100000:\n        b := {kind}(i)\n        _ := b\nchurn()\nprint(\"done\")\n"
+            "import std.concurrency\nfn churn():\n    for i in 0..100000:\n        b := concurrency.{kind}(i)\n        _ := b\nchurn()\nprint(\"done\")\n"
         );
         let path = write_program(&format!("rss-{kind}"), &src);
         (0..3)

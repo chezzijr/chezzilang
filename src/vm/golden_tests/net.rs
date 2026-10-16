@@ -1004,7 +1004,7 @@ fn net_faulting_sibling_aborts_accept_parked_peer() {
 fn faulter(z: int) -> int!:
     return ?(10 / z)
 
-fn acceptor(server: Listener) -> int!:
+fn acceptor(server: net.Listener) -> int!:
     conn := server.accept()?
     conn.close()
     return ?0
@@ -1141,9 +1141,9 @@ fn net_connect_top_level_dead_port_errors_not_hangs() {
 #[test]
 fn net_echo_server_services_more_conns_than_workers() {
     let src = r#"import std.net
-import std.concurrency
+import AtomicInt from std.concurrency
 
-fn acceptor(server: Listener, n: int) -> int!:
+fn acceptor(server: net.Listener, n: int) -> int!:
     for _ in 0..n:
         conn := server.accept()?
         msg := conn.read(64)?
@@ -1205,15 +1205,15 @@ fn net_echo_server_spawns_handler_per_connection() {
         return;
     }
     let src = r#"import std.net
-import std.concurrency
+import AtomicInt from std.concurrency
 
-fn handle(conn: Socket) -> int!:
+fn handle(conn: net.Socket) -> int!:
     msg := conn.read(64)?
     conn.write("echo:" + msg)?
     conn.close()
     return ?0
 
-fn acceptor(server: Listener, n: int) -> int!:
+fn acceptor(server: net.Listener, n: int) -> int!:
     parallel:
         for _ in 0..n:
             conn := server.accept()?
@@ -1279,15 +1279,15 @@ fn net_echo_sequential_client_needs_concurrent_handlers() {
         return;
     }
     let src = r#"import std.net
-import std.concurrency
+import AtomicInt from std.concurrency
 
-fn handle(conn: Socket) -> int!:
+fn handle(conn: net.Socket) -> int!:
     msg := conn.read(64)?
     conn.write("echo:" + msg)?
     conn.close()
     return ?0
 
-fn acceptor(server: Listener, n: int) -> int!:
+fn acceptor(server: net.Listener, n: int) -> int!:
     parallel:
         for _ in 0..n:
             conn := server.accept()?
@@ -1354,7 +1354,7 @@ fn net_echo_handler_fault_cancels_acceptor() {
     }
     let src = r#"import std.net
 
-fn handle(conn: Socket, i: int) -> int!:
+fn handle(conn: net.Socket, i: int) -> int!:
     msg := conn.read(64)?
     if i == 0:
         conn.close()
@@ -1364,7 +1364,7 @@ fn handle(conn: Socket, i: int) -> int!:
     conn.close()
     return ?0
 
-fn acceptor(server: Listener, n: int) -> int!:
+fn acceptor(server: net.Listener, n: int) -> int!:
     parallel:
         for i in 0..n:
             conn := server.accept()?
@@ -1454,15 +1454,15 @@ fn net_concurrent_eager_servers_do_not_exhaust_pool() {
         return;
     }
     let src = r#"import std.net
-import std.concurrency
+import AtomicInt from std.concurrency
 
-fn handle(conn: Socket) -> int!:
+fn handle(conn: net.Socket) -> int!:
     msg := conn.read(64)?
     conn.write("echo:" + msg)?
     conn.close()
     return ?0
 
-fn server_loop(server: Listener, n: int) -> int!:
+fn server_loop(server: net.Listener, n: int) -> int!:
     parallel:
         for _ in 0..n:
             conn := server.accept()?

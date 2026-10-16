@@ -17,14 +17,14 @@ import std.net
 import std.time
 
 # Demo 1: accept(timeout_ms) with NO client connecting → the accept times out.
-fn accept_demo(listener: Listener):
+fn accept_demo(listener: net.Listener):
     match listener.accept(100):
         ?_: print("accept: unexpectedly accepted")
         !e: print("accept: " + e.message())
     listener.close()
 
 # Demo 2: the server accepts but never writes; the client's read(n, timeout_ms) times out.
-fn read_server(listener: Listener) -> int!:
+fn read_server(listener: net.Listener) -> int!:
     conn := listener.accept()?
     time.sleep_ms(400)   # outlast the client's read deadline, then hang up
     conn.close()

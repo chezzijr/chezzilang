@@ -188,7 +188,7 @@ struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs
     files_reject(
         &[(
             "main.chz",
-            "import std.concurrency\nfn main():\n    ex := Executor()\n    print(ex.map(fn(x: int) -> int: x, [1]))\nmain()\n",
+            "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    print(ex.map(fn(x: int) -> int: x, [1]))\nmain()\n",
         )],
         "has no method 'map'",
     );
@@ -201,7 +201,7 @@ fn executor_has_no_submit_outcome() {
     files_reject(
         &[(
             "main.chz",
-            "import std.concurrency\nfn main():\n    ex := Executor()\n    out := Channel[int!](1)\n    ex.submit_outcome(fn() -> int: 7, out)\nmain()\n",
+            "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    out := Channel[int!](1)\n    ex.submit_outcome(fn() -> int: 7, out)\nmain()\n",
         )],
         "has no method 'submit_outcome'",
     );
@@ -1183,21 +1183,21 @@ fn multi_arg_turbofish_is_a_value() {
 #[test]
 fn executor_accepts_a_worker_limit() {
     entry_ok(
-        "import std.concurrency\nfn main():\n    ex := Executor(2)\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor(2)\n    ex.shutdown()\nmain()\n",
     );
 }
 
 #[test]
 fn executor_rejects_a_bad_worker_limit() {
     entry_rejects(
-        "import std.concurrency\nex := Executor(\"x\")\n",
+        "import Executor from std.concurrency\nex := Executor(\"x\")\n",
         "argument 1 of 'Executor': expected int, found str",
     );
     entry_rejects(
-        "import std.concurrency\nex := Executor(1, 2)\n",
+        "import Executor from std.concurrency\nex := Executor(1, 2)\n",
         "'Executor' expects 0–1 argument(s), got 2",
     );
-    entry_ok("import std.concurrency\nex := Executor()\nex.shutdown()\n");
+    entry_ok("import Executor from std.concurrency\nex := Executor()\nex.shutdown()\n");
 }
 
 #[test]

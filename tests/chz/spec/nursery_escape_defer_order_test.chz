@@ -3,7 +3,7 @@
 # enclosing block's defer runs. Go twin: cancel + wg.Wait() before return.
 # The child parks on `hold`, which nobody sends on, so only the escape's cancel ends it; `started`
 # makes the body escape only after the child's defer is registered (a handshake, not a sleep).
-import std.concurrency
+import Shared from std.concurrency
 
 
 fn flushed() -> int:

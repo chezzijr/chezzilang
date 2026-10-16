@@ -8,7 +8,7 @@
 # body hands its child a value instead (a channel handshake, never a sleep -- DEC-050, DEC-059).
 # Asserts read a Shared after the join. Gated by `chz_suite_passes` (`tests/chz_suite.rs`); the
 # fiber-owned path runs only under `CHEZZI_THREADS=1 chezzi test tests/chz`.
-import std.concurrency
+import Shared from std.concurrency
 
 fn park(ch: Channel[int]):
     _ := ch.recv()

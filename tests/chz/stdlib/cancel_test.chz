@@ -13,12 +13,12 @@
 
 import std.time
 import std.cancel
-import std.concurrency
+import Shared from std.concurrency
 
 # Derive `n` children (each with one grandchild) off `root` and ship every one out through a live
 # channel, so the caller can re-check them AFTER the nursery joins. Runs concurrently with a sibling
 # task cancelling `root` — the point is that no interleaving can leave a token uncancelled.
-fn derive_burst(root: Token, out: Channel[Token], n: int):
+fn derive_burst(root: cancel.Token, out: Channel[cancel.Token], n: int):
     i := 0
     while i < n:
         c := root.derive()
@@ -26,7 +26,7 @@ fn derive_burst(root: Token, out: Channel[Token], n: int):
         out.send(c.derive())
         i = i + 1
 
-fn cancel_root(root: Token):
+fn cancel_root(root: cancel.Token):
     root.cancel()
 
 test fn derive_chain_beats_the_every_ancestor_registry():
@@ -77,7 +77,7 @@ test fn derive_races_cancel():
     r := 0
     while r < 30:
         root := cancel.manual()
-        out := Channel[Token]()
+        out := Channel[cancel.Token]()
         parallel:
             spawn derive_burst(root, out, 200)
             spawn cancel_root(root)
@@ -126,13 +126,13 @@ test fn double_cancel_is_idempotent_with_children():
 # worker count that gives this test teeth is pinned separately by
 # `cancel_c5_gate_at_eight_workers` in `tests/chezzi_threads_cli.rs` (CHEZZI_THREADS=8, where 100
 # rounds measured 23-35 violations pre-fix, min 12 over five runs at =4).
-fn c5_waiter(leaf: Token, bad: Shared[int]):
+fn c5_waiter(leaf: cancel.Token, bad: Shared[int]):
     wait:
         _ := leaf.done().recv():
             if not leaf.cancelled():
                 bad.update(fn(n): n + 1)
 
-fn c5_canceller(root: Token):
+fn c5_canceller(root: cancel.Token):
     root.cancel()
 
 test fn cascaded_done_implies_cancelled():
@@ -196,7 +196,7 @@ test fn reason_latches_the_first_cause():
 # Post-fix this is deterministic, not probabilistic: the answer comes from the parent walk whether or
 # not the cascade finished, so there is no flake window. A run where the cascade DOES complete simply
 # under-exercises it.
-fn cancel_mid_teardown(root: Token):
+fn cancel_mid_teardown(root: cancel.Token):
     root.cancel()
 
 fn abort_the_nursery():

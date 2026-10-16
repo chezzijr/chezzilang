@@ -1,7 +1,7 @@
 # tests/chz/spec/cancel_join_and_defer_fault_test.chz — W14-12 / W14-15.
 # (1) A CANCELLED task's own `defer: panic` is a real fault (Go/asyncio surface it).
 # (2) A nursery join is a cancellation point: a cancelled owner never runs code after the join.
-import std.concurrency
+import Executor, Shared from std.concurrency
 import std.time
 
 

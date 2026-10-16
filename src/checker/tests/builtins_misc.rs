@@ -1322,7 +1322,7 @@ fn scalar_cast_rejects_option_result_bytes_bytearray_shared_arg() {
     // `Shared` is import-gated, so only `entry_rejects` (which goes through `build_graph`)
     // resolves it; `rejects` is single-module and reports `unknown type 'Shared'` instead.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    print(int(Shared(1)))\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    print(int(Shared(1)))\nmain()\n",
         "int() cannot convert Shared",
     );
 }
@@ -1337,39 +1337,39 @@ fn scalar_cast_rejects_handle_family_arg() {
         "int() cannot convert Channel",
     );
     entry_rejects(
-        "import std.concurrency\nfn f(x: Atomic[int]):\n    print(float(x))\nfn main():\n    pass\nmain()\n",
+        "import Atomic from std.concurrency\nfn f(x: Atomic[int]):\n    print(float(x))\nfn main():\n    pass\nmain()\n",
         "float() cannot convert Atomic",
     );
     entry_rejects(
-        "import std.concurrency\nfn f(x: AtomicInt):\n    print(bool(x))\nfn main():\n    pass\nmain()\n",
+        "import AtomicInt from std.concurrency\nfn f(x: AtomicInt):\n    print(bool(x))\nfn main():\n    pass\nmain()\n",
         "bool() cannot convert AtomicInt",
     );
     entry_rejects(
-        "import std.concurrency\nfn f(x: RwShared[int]):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "import RwShared from std.concurrency\nfn f(x: RwShared[int]):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
         "int() cannot convert RwShared",
     );
     entry_rejects(
-        "import std.concurrency\nfn f(x: Executor):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "import Executor from std.concurrency\nfn f(x: Executor):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
         "int() cannot convert Executor",
     );
     entry_rejects(
-        "import std.net\nfn f(x: Socket):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "import Socket from std.net\nfn f(x: Socket):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
         "int() cannot convert Socket",
     );
     entry_rejects(
-        "import std.net\nfn f(x: Listener):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "import Listener from std.net\nfn f(x: Listener):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
         "int() cannot convert Listener",
     );
     entry_rejects(
-        "import std.io\nfn f(x: Writer):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "import Writer from std.io\nfn f(x: Writer):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
         "int() cannot convert Writer",
     );
     entry_rejects(
-        "import std.io\nfn f(x: Reader):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "import Reader from std.io\nfn f(x: Reader):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
         "int() cannot convert Reader",
     );
     entry_rejects(
-        "import std.ffi\nfn f(x: ptr):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
+        "import ptr from std.ffi\nfn f(x: ptr):\n    print(int(x))\nfn main():\n    pass\nmain()\n",
         "int() cannot convert ptr",
     );
 }
@@ -1387,10 +1387,10 @@ fn scalar_cast_still_accepts_the_payload_of_a_rejected_kind() {
         "fn main():\n    ba := bytearray([1, 2])\n    print(int(ba[0]))\n    print(str(ba))\nmain()\n",
     );
     entry_ok(
-        "import std.concurrency\nfn main():\n    s := Shared(1)\n    print(int(s.get()))\n    print(str(s))\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(1)\n    print(int(s.get()))\n    print(str(s))\nmain()\n",
     );
     entry_ok(
-        "import std.concurrency\nfn main():\n    a := Atomic(1)\n    ai := AtomicInt(1)\n    rw := RwShared(1)\n    print(int(a.load()))\n    print(int(ai.load()))\n    print(int(rw.get()))\nmain()\n",
+        "import Atomic, AtomicInt, RwShared from std.concurrency\nfn main():\n    a := Atomic(1)\n    ai := AtomicInt(1)\n    rw := RwShared(1)\n    print(int(a.load()))\n    print(int(ai.load()))\n    print(int(rw.get()))\nmain()\n",
     );
 }
 

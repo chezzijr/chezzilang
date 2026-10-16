@@ -10,7 +10,7 @@
 # the shape to copy — read (or assert) after `shutdown()`, never between it and the `submit`.
 # `ex.submit_result(f)` packages this pattern into one call: its channel carries a `T!`.
 
-import std.concurrency
+import Atomic, Executor from std.concurrency
 
 fn job(id: int) -> str:
     return "job {id} ran"

@@ -15,11 +15,11 @@ import std.ffi
 # `libc` is a LOGICAL library name the loader resolves per host (docs/syntax.md §12b).
 
 extern "libc":
-    fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)
+    fn qsort(base: ffi.ptr, n: int, size: int, cmp: fn(ffi.ptr, ffi.ptr) -> int)
 
 # The comparator C hands two `const void*` (each pointing at one int64 slot). Return -1/0/1 instead
 # of `a - b` to avoid signed overflow on extreme values.
-fn cmp(a: ptr, b: ptr) -> int:
+fn cmp(a: ffi.ptr, b: ffi.ptr) -> int:
     x := ffi.load_int64(a)
     y := ffi.load_int64(b)
     if x < y:

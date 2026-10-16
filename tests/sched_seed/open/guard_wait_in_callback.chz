@@ -1,4 +1,4 @@
-import std.concurrency
+import Shared from std.concurrency
 fn slow(xs: List[str], tag: str) -> List[str]:
     i := 0
     while i < 30000:

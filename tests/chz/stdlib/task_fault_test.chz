@@ -14,7 +14,7 @@ fn bad() -> int:
     panic("job failed")
 
 test fn task_get_on_a_faulted_job_reports_the_job_error_not_deadlock():
-    ex := Executor()
+    ex := concurrency.Executor()
     t0 := submit_task(ex, bad)
     ex.shutdown()
     match t0.get():
@@ -26,7 +26,7 @@ fn ok_job() -> int:
     return 42
 
 test fn raw_submit_result_on_a_faulted_job_does_not_report_deadlock():
-    ex := Executor()
+    ex := concurrency.Executor()
     c := ex.submit_result(bad)
     ex.shutdown()
     match c.recv():
@@ -34,21 +34,21 @@ test fn raw_submit_result_on_a_faulted_job_does_not_report_deadlock():
         !e: assert e.message().contains("job failed"), e.message()
 
 test fn a_successful_task_is_unchanged_by_the_fault_path():
-    ex := Executor()
+    ex := concurrency.Executor()
     t := submit_task(ex, ok_job)
     ex.shutdown()
     assert t.done(), "done() must be true after a successful job"
     assert (t.get() ?? 0) == 42, "get() must return the job's value"
     assert (t.get() ?? 0) == 42, "get() must be memoized"
 
-    ex2 := Executor()
+    ex2 := concurrency.Executor()
     ch := ex2.submit_result(fn() -> int: 7)
     ex2.shutdown()
     assert ch.len() == 1, "the result channel must carry the value"
     assert (ch.recv() ?? 0) == 7, "recv() must return the value"
 
 test fn a_faulted_tasks_error_is_memoized():
-    ex := Executor()
+    ex := concurrency.Executor()
     t := submit_task(ex, bad)
     ex.shutdown()
     g1 := t.get()
@@ -65,7 +65,7 @@ test fn a_faulted_tasks_error_is_memoized():
             assert not e.message().contains("closed"), e.message()
 
 test fn a_faulted_tasks_error_carries_no_origin():
-    ex := Executor()
+    ex := concurrency.Executor()
     t0 := submit_task(ex, bad)
     ex.shutdown()
     match t0.get():

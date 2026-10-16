@@ -38,10 +38,10 @@ test fn hash_in_a_hole_keeps_its_accepted_neighbours():
 # through parse. Build a tree 2001 array-levels deep (parse's own cutoff -- `parse_past_depth_limit`
 # in json_test.chz rejects a 2001-deep document); stringify must refuse it too, not accept it.
 test fn stringify_depth_cap_matches_parse():
-    j := Json.Arr([])
+    j := json.Json.Arr([])
     i := 1
     while i < 2001:
-        j = Json.Arr([j])
+        j = json.Json.Arr([j])
         i += 1
     r := recover: json.stringify(j)
     match r:
@@ -50,10 +50,10 @@ test fn stringify_depth_cap_matches_parse():
 
 # W12-20a: at exactly parse's own cutoff, stringify must accept AND the output must parse back.
 test fn stringify_at_the_depth_cap_parses_back():
-    j := Json.Arr([])
+    j := json.Json.Arr([])
     i := 1
     while i < 2000:
-        j = Json.Arr([j])
+        j = json.Json.Arr([j])
         i += 1
     t := json.stringify(j)
     match json.parse(t):

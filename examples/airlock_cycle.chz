@@ -7,7 +7,7 @@
 # genuinely-unbounded ACYCLIC nest (see section 4's shallow-but-wide control). Sections 1-3 below cross
 # a LOCAL self-referential value → the `to_wire` path.
 
-import std.concurrency
+import Shared from std.concurrency
 
 struct Node:
     val: int

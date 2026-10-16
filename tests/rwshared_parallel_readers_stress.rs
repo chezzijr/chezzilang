@@ -72,7 +72,7 @@ fn torn(s: State) -> int:
         bad += 1
     return bad
 
-fn writer(w: RwShared[State], xs: ConcurrentList[int], m: ConcurrentMap[int, int], st: ConcurrentSet[int], rounds: int):
+fn writer(w: concurrency.RwShared[State], xs: ConcurrentList[int], m: ConcurrentMap[int, int], st: ConcurrentSet[int], rounds: int):
     for i in 0..rounds:
         w.write(step)
         xs.push(i)
@@ -84,7 +84,7 @@ fn some_or(o: int?, d: int) -> int:
         ?x: return x
         None: return d
 
-fn reader(w: RwShared[State], xs: ConcurrentList[int], m: ConcurrentMap[int, int], st: ConcurrentSet[int], bad: AtomicInt, rounds: int):
+fn reader(w: concurrency.RwShared[State], xs: ConcurrentList[int], m: ConcurrentMap[int, int], st: ConcurrentSet[int], bad: concurrency.AtomicInt, rounds: int):
     for _ in 0..rounds:
         bad.add(torn(w.get()))
         bad.add(w.read(torn))
@@ -101,11 +101,11 @@ fn reader(w: RwShared[State], xs: ConcurrentList[int], m: ConcurrentMap[int, int
         if m.len() < 0 or st.len() < 0:
             bad.add(1)
 
-w := RwShared(fresh())
+w := concurrency.RwShared(fresh())
 xs := ConcurrentList[int].new()
 m := ConcurrentMap[int, int].new()
 st := ConcurrentSet[int].new()
-bad := AtomicInt(0)
+bad := concurrency.AtomicInt(0)
 parallel:
     spawn writer(w, xs, m, st, 300)
     for _ in 0..16:

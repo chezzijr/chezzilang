@@ -9,7 +9,7 @@ extern "libm":
     fn fabsf(x: float32) -> float32
 
 extern "libc":
-    fn snprintf(buf: ptr, n: int, fmt: str, ...) -> int32
+    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int32
 
 test fn float32_return_is_the_c_float_value():
     assert sqrtf(2.0) == 1.4142135381698608

@@ -100,7 +100,7 @@ fn cancel_child_inherits_tightest_deadline() {
 /// the already-flipped flag.
 #[test]
 fn cancel_token_sendable_with_parent() {
-    let src = "import std.cancel\n\nfn watch(c: Token, seen: Shared[bool]):\n    if c.cancelled():\n        seen.set(true)\n\nfn main():\n    p := cancel.manual()\n    c := p.derive()\n    seen := Shared(false)\n    p.cancel()\n    parallel:\n        spawn watch(c, seen)\n    print(\"observed cancel: {seen.get()}\")\n\nmain()\n";
+    let src = "import std.cancel\n\nfn watch(c: cancel.Token, seen: Shared[bool]):\n    if c.cancelled():\n        seen.set(true)\n\nfn main():\n    p := cancel.manual()\n    c := p.derive()\n    seen := Shared(false)\n    p.cancel()\n    parallel:\n        spawn watch(c, seen)\n    print(\"observed cancel: {seen.get()}\")\n\nmain()\n";
     let out = run_cancel_src("cancel_token_sendable_parent", src);
     assert_eq!(out, "observed cancel: true\n");
 }
@@ -124,11 +124,11 @@ fn cancel_derive_free_fn_form() {
 fn cancel_cascade_crosses_the_airlock() {
     let src = "import std.cancel\n\
                    import std.time\n\
-                   fn waiter(c: Token, out: Channel[bool]):\n\
+                   fn waiter(c: cancel.Token, out: Channel[bool]):\n\
                    \x20   gk := c.derive()\n\
                    \x20   wait:\n\
                    \x20       _ := gk.done().recv(): out.send(true)\n\
-                   fn canceller(root: Token):\n\
+                   fn canceller(root: cancel.Token):\n\
                    \x20   time.sleep_ms(5)\n\
                    \x20   root.cancel()\n\
                    fn main():\n\
@@ -1272,7 +1272,7 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     std::fs::create_dir_all(&dir).unwrap();
 
     // Executor.submit path.
-    let ex_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    ex.shutdown()\nmain()\n";
+    let ex_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    ex.shutdown()\nmain()\n";
     let ex_path = dir.join("ex.chz");
     std::fs::write(&ex_path, ex_src).unwrap();
     let (_o, _e, se, _) = run_file(&ex_path);
@@ -1319,7 +1319,7 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     // B4 review edge 1: IMPLICIT end-of-program drain (no `ex.shutdown()`) — the executor is
     // reaped by `drain_live_executors` AFTER `main` returned. It printed an EMPTY trace (no
     // enclosing `run_until` to re-capture at); since TICKET-195 the drain's join adopts the job's.
-    let im_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\nmain()\n";
+    let im_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\nmain()\n";
     let im_path = dir.join("implicit.chz");
     std::fs::write(&im_path, im_src).unwrap();
     let (_o, _e, ise, _) = run_file(&im_path);
@@ -1342,7 +1342,7 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     // B4 review edge 2: `defer ex.shutdown()` while `main` is unwinding from an outer panic.
     // TICKET-208 — the fire-and-forget job's fault ends the run and outranks `main`'s own cause
     // (DEC-200), so the report is `kaboom` with the job's frames.
-    let df_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    defer ex.shutdown()\n    panic(\"outer\")\nmain()\n";
+    let df_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    defer ex.shutdown()\n    panic(\"outer\")\nmain()\n";
     let df_path = dir.join("defer_unwind.chz");
     std::fs::write(&df_path, df_src).unwrap();
     let (_o, _e, dse, _) = run_file(&df_path);

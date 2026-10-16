@@ -5,7 +5,7 @@
 # paths it touches: (a) LOCAL Display/str, (b) METHOD dispatch, (c) CROSS-HEAP (Channel across a
 # spawned task). Asserts on RECEIVED VALUES (never inter-task print order).
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
-import std.concurrency
+import Shared from std.concurrency
 
 struct Point:
     x: int

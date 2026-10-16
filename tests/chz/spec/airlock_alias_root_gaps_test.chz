@@ -250,7 +250,7 @@ gl8: List[int] = [1]
 
 test fn executor_job_alias_write_faults():
     r := Channel[str](1)
-    ex := Executor()
+    ex := concurrency.Executor()
     parallel:
         spawn:
             a := gl8

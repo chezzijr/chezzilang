@@ -1,4 +1,4 @@
-import std.time
+import timer from std.time
 
 fn main():
     t := timer(20)

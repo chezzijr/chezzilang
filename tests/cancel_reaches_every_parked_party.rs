@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 #[path = "support/hang_deadline.rs"]
 mod hang_deadline;
 
-const NET_PRELUDE: &str = "import std.time\nimport std.net\nimport std.concurrency\nfn lis() -> Listener:\n    match net.listen(\"127.0.0.1:0\"):\n        ?l: return l\n        !e: panic(\"{e}\")\n";
+const NET_PRELUDE: &str = "import std.time\nimport std.net\nimport std.concurrency\nfn lis() -> net.Listener:\n    match net.listen(\"127.0.0.1:0\"):\n        ?l: return l\n        !e: panic(\"{e}\")\n";
 
 #[test]
 fn shutdown_now_reaches_a_job_nursery_fiber_parked_in_accept() {
@@ -35,7 +35,7 @@ fn unjoined_job_fault_before_timeout_is_reported() {
     let path = dir.join("y2_test.chz");
     std::fs::write(
         &path,
-        "import std.time\nimport std.concurrency\nfn bad():\n    xs := [1]\n    print(xs[3])\ntest fn unjoined_then_times_out():\n    ex := Executor()\n    ex.submit(bad)\n    time.sleep_ms(3000)\n",
+        "import std.time\nimport Executor from std.concurrency\nfn bad():\n    xs := [1]\n    print(xs[3])\ntest fn unjoined_then_times_out():\n    ex := Executor()\n    ex.submit(bad)\n    time.sleep_ms(3000)\n",
     )
     .expect("write program");
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))

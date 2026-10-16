@@ -20,7 +20,7 @@
 import std.time
 import std.concurrency
 
-woke := AtomicInt(0)
+woke := concurrency.AtomicInt(0)
 
 fn napper():
     time.sleep_ms(3000)
@@ -37,7 +37,7 @@ fn timer_napper():
 test fn shutdown_now_interrupts_a_sleeping_job():
     woke.store(0)
     t0 := time.monotonic()
-    ex := Executor()
+    ex := concurrency.Executor()
     ex.submit(napper)
     time.sleep_ms(50)
     ex.shutdown_now()
@@ -48,7 +48,7 @@ test fn shutdown_now_interrupts_a_sleeping_job():
 test fn shutdown_now_interrupts_a_job_waiting_on_a_timer():
     woke.store(0)
     t0 := time.monotonic()
-    ex := Executor()
+    ex := concurrency.Executor()
     ex.submit(timer_napper)
     time.sleep_ms(50)
     ex.shutdown_now()

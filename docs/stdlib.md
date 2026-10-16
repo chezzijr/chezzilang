@@ -1363,9 +1363,9 @@ Sort a Chezzi list with libc `qsort` (the full composition — alloc + `store_*`
 import std.ffi
 
 extern "libc":
-    fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)
+    fn qsort(base: ffi.ptr, n: int, size: int, cmp: fn(ffi.ptr, ffi.ptr) -> int)
 
-fn cmp(a: ptr, b: ptr) -> int:           # qsort hands two const void* (each an int64 slot)
+fn cmp(a: ffi.ptr, b: ffi.ptr) -> int:           # qsort hands two const void* (each an int64 slot)
     x := ffi.load_int64(a)
     y := ffi.load_int64(b)
     if x < y: return -1

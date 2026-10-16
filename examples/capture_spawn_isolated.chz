@@ -10,7 +10,7 @@
 # task's `update` runs under the box's own lock, so the parent's `get()` after the join sees the
 # task's write. Go shares the variable directly and prints `1` (with a data race); Chezzi requires
 # the explicit `Shared` instead — the fault above is the line that used to hide that requirement.
-import std.concurrency
+import Shared from std.concurrency
 
 fn main():
     x := Shared(0)

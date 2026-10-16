@@ -1,4 +1,4 @@
-import std.concurrency
+import Executor from std.concurrency
 fn burn(n: int) -> int:
     s := 0
     for i in 0..n:

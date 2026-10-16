@@ -29,8 +29,8 @@ import std.cancel
 import std.time
 
 # ---- self-test harness: module-global pass/total counters + a check() that prints PASS/FAIL ----
-_pass := Atomic(0)
-_total := Atomic(0)
+_pass := concurrency.Atomic(0)
+_total := concurrency.Atomic(0)
 
 fn check(name: str, got: int, want: int):
     _total.add(1)
@@ -64,9 +64,9 @@ fn set_max(m: Map[str, int], k: str, v: int) -> Map[str, int]:
 # It shuts down when the collector cancels `tok` (which only happens AFTER all records are drained, so
 # no queued job is ever lost to the cancel). `defer` bumps a cleanup counter — proof the teardown ran.
 fn worker(jobs: Channel[(str, int)], report: Channel[int], tok: cancel.Token,
-          processed: Atomic[int], sum_total: Shared[int],
-          per_cat: collection.ConcurrentCounter[str], max_per_cat: RwShared[Map[str, int]],
-          cleaned: Atomic[int]):
+          processed: concurrency.Atomic[int], sum_total: concurrency.Shared[int],
+          per_cat: collection.ConcurrentCounter[str], max_per_cat: concurrency.RwShared[Map[str, int]],
+          cleaned: concurrency.Atomic[int]):
     defer cleaned.add(1)
     while true:
         wait:
@@ -165,11 +165,11 @@ fn main():
     n := 40
     cats := ["fib", "fact", "sum", "sq"]
 
-    processed := Atomic(0)
-    cleaned := Atomic(0)
-    sum_total := Shared(0)
-    per_cat: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(RwShared({}))
-    max_per_cat := RwShared[Map[str, int]]({})
+    processed := concurrency.Atomic(0)
+    cleaned := concurrency.Atomic(0)
+    sum_total := concurrency.Shared(0)
+    per_cat: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(concurrency.RwShared({}))
+    max_per_cat := concurrency.RwShared[Map[str, int]]({})
     tok := cancel.manual()
 
     jobs: Channel[(str, int)] = Channel[(str, int)]()
@@ -222,7 +222,7 @@ fn main():
     check("p1.rwshared_set", max_per_cat.get().len(), 1)
 
     print("== Phase 2: Executor checksum (submit / shutdown / collect-via-Channel) ==")
-    ex := Executor()
+    ex := concurrency.Executor()
     out := Channel[int]()
     shards := 4
     per := n / shards
@@ -240,7 +240,7 @@ fn main():
     check("p2.checksum", checksum, seq_checksum)
     # submit_result: bodied generic method on Executor — hands back a Channel[T!] carrying f()'s outcome
     # (deterministic value; the work runs on the pool and the result lands on drain).
-    ex2 := Executor()
+    ex2 := concurrency.Executor()
     rc := ex2.submit_result(fn() -> int: value(7) * 8)
     ex2.shutdown()
     match rc.recv():
@@ -331,7 +331,7 @@ fn main():
     wait:
         x := never.recv():
             wt = x
-        _ := timer(50).recv():
+        _ := time.timer(50).recv():
             wt = 7
     check("p4.wait_timer", wt, 7)
     # wait: = assign-to-outer arm + closed-arm skipped
@@ -380,7 +380,7 @@ fn main():
     check("p4.bounded_full_reject", b2i(bs3), 0)
     check("p4.bounded_after_recv", b2i(bs4), 1)
     # Atomic single-threaded full surface: store/exchange/add/sub/cas/load
-    at := Atomic(0)
+    at := concurrency.Atomic(0)
     at.store(5)
     check("p4.atomic_exchange_old", at.exchange(10), 5)
     check("p4.atomic_add", at.add(3), 13)

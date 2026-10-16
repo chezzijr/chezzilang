@@ -1,7 +1,7 @@
 # TICKET-192 crossing cost: a 10k-entry map stored into a `Shared` and read back 200 times. Every
 # store serializes the map, which since TICKET-192 also builds the wire map's hash index; this bench
 # prices that index. Prints 2000000.
-import std.concurrency
+import Shared from std.concurrency
 
 fn main():
     m: Map[int, int] = {}

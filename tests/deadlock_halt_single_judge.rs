@@ -5,7 +5,7 @@
 
 use std::process::Command;
 
-const SRC: &str = r#"import std.concurrency
+const SRC: &str = r#"import Executor, Shared from std.concurrency
 import std.time
 fn main():
     s := Shared(0)
@@ -94,7 +94,7 @@ struct Row {
 const ROWS: &[Row] = &[
     Row {
         name: "ex_guard",
-        src: r#"import std.concurrency
+        src: r#"import Executor, Shared from std.concurrency
 fn main():
     s := Shared(0)
     c := Channel[int](0)
@@ -116,7 +116,7 @@ main()
     },
     Row {
         name: "ex_send",
-        src: r#"import std.concurrency
+        src: r#"import Executor, Shared from std.concurrency
 fn main():
     s := Shared(0)
     c := Channel[int](0)
@@ -139,7 +139,7 @@ main()
     },
     Row {
         name: "ex_rw",
-        src: r#"import std.concurrency
+        src: r#"import Executor, RwShared from std.concurrency
 fn main():
     r := RwShared(0)
     c := Channel[int](0)
@@ -163,7 +163,7 @@ main()
     },
     Row {
         name: "ex_chan",
-        src: r#"import std.concurrency
+        src: r#"import Executor from std.concurrency
 import std.time
 fn main():
     c := Channel[int](0)
@@ -180,7 +180,7 @@ main()
     },
     Row {
         name: "ex_cycle",
-        src: r#"import std.concurrency
+        src: r#"import Executor from std.concurrency
 import std.time
 fn main():
     a := Channel[int](0)
@@ -199,7 +199,7 @@ main()
     },
     Row {
         name: "ex_nested",
-        src: r#"import std.concurrency
+        src: r#"import Executor from std.concurrency
 import std.time
 fn inner(c: Channel[int]):
     ex2 := Executor()
@@ -220,7 +220,7 @@ main()
     },
     Row {
         name: "sp_guard",
-        src: r#"import std.concurrency
+        src: r#"import Shared from std.concurrency
 fn main():
     s := Shared(0)
     c := Channel[int](0)
@@ -241,7 +241,7 @@ main()
     },
     Row {
         name: "sp_rw",
-        src: r#"import std.concurrency
+        src: r#"import RwShared from std.concurrency
 fn main():
     r := RwShared(0)
     c := Channel[int](0)
@@ -315,7 +315,7 @@ main()
     // the end-of-file reap, which reports it as a second `ERROR (executor job)` row.
     Row {
         name: "ex_guard_test",
-        src: r#"import std.concurrency
+        src: r#"import Executor, Shared from std.concurrency
 
 test fn a_deadlocks():
     s := Shared(0)
@@ -454,7 +454,7 @@ main()
     },
     Row {
         name: "job_defer",
-        src: r#"import std.concurrency
+        src: r#"import Executor from std.concurrency
 fn work(c: Channel[int], xs: List[int]):
     c.send(xs[5])
 fn main():
@@ -615,7 +615,7 @@ fn deadlock_verdict_grid_ends_at_the_first_party_site() {
 fn guard_deadlock_with_handshake_never_runs_the_body_after_the_verdict() {
     let row = Row {
         name: "sp_guard_handshake",
-        src: r#"import std.concurrency
+        src: r#"import Shared from std.concurrency
 fn main():
     s := Shared(0)
     c := Channel[int](0)

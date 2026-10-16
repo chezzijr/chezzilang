@@ -295,7 +295,7 @@ fn grid_cut_by_shutdown_now() {
 /// `ex.submit(ch.recv)` (a native METHOD value) is not expressible: the checker rejects it.
 #[test]
 fn fn_value_heads_complete() {
-    let src = "import std.time\nimport std.concurrency\nfn main():\n    ex := Executor(1)\n    ex.submit(time.now_ms)\n    ex.shutdown()\n    f := time.sleep_ms\n    fs := [time.sleep_ms]\n    parallel:\n        spawn f(20)\n        spawn fs[0](20)\n    print(\"end\")\nmain()\n";
+    let src = "import std.time\nimport Executor from std.concurrency\nfn main():\n    ex := Executor(1)\n    ex.submit(time.now_ms)\n    ex.shutdown()\n    f := time.sleep_ms\n    fs := [time.sleep_ms]\n    parallel:\n        spawn f(20)\n        spawn fs[0](20)\n    print(\"end\")\nmain()\n";
     let mut bad = Vec::new();
     for t in ["1", "2", "0"] {
         for seed in [None, Some(1), Some(2)] {

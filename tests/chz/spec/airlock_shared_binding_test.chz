@@ -119,7 +119,7 @@ test fn cursor_keeps_one_binding():
 # A `Shared` box is a cross-heap VALUE STORE (its own airlock arm).
 # Same-task round-trip — see the owner ruling above `channel_send_keeps_one_binding`.
 test fn shared_keeps_one_binding():
-    box := Shared(make())
+    box := concurrency.Shared(make())
     d := box.get()
     d.inc()
     d.inc()
@@ -283,7 +283,7 @@ test fn rwshared_views_over_sibling_closures():
         return n
     fn get() -> int:
         return n
-    s := ConcurrentList(RwShared([inc, get]))
+    s := ConcurrentList(concurrency.RwShared([inc, get]))
     both := s.inner.get()          # whole container, one crossing → one binding
     both[0]()
     assert both[1]() == 1
@@ -302,7 +302,7 @@ test fn rwshared_views_over_sibling_closures():
     assert calls == 2
     # one walk, one shared map: the `inc` copy returns 1 and the `get` copy reads the SAME cell -> 1.
     assert s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()) == 2
-    m := ConcurrentMap(RwShared({"i": inc, "g": get}))
+    m := ConcurrentMap(concurrency.RwShared({"i": inc, "g": get}))
     assert m.contains("i")
     match m.get("g"):
         ?f: assert f() == 0
@@ -345,7 +345,7 @@ test fn rwshared_view_survives_a_concurrent_writer():
         return n
     fn zero() -> int:
         return 0
-    s := ConcurrentList(RwShared([inc, get]))
+    s := ConcurrentList(concurrency.RwShared([inc, get]))
     d := Channel[int](2)
     parallel:
         spawn:

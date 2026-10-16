@@ -396,7 +396,7 @@ fn every_native_container_method_is_classified_by_its_return_type() {
 fn regex_sig_from_file_not_native_module_sig() {
     // A full graph check that imports std.regex still resolves regex.Match + typed fields.
     entry_ok(
-        "import std.regex\nfn main():\n    m: Match = regex.Match(\"x\", 0, 1, [])\n    t: str = m.text\n    s: int = m.start\n    g: List[str] = m.groups\n    print(t + str(s) + \",\".join(g))\n",
+        "import std.regex\nfn main():\n    m: regex.Match = regex.Match(\"x\", 0, 1, [])\n    t: str = m.text\n    s: int = m.start\n    g: List[str] = m.groups\n    print(t + str(s) + \",\".join(g))\n",
     );
 }
 
@@ -1134,21 +1134,21 @@ fn unknown_match_hint_points_at_module() {
 #[test]
 fn import_licenses_bare_match() {
     entry_ok(
-        "import std.regex\nfn main():\n    m: Match = regex.Match(\"x\", 0, 1, [])\n    print(m.text)\n",
+        "import std.regex\nfn main():\n    m: regex.Match = regex.Match(\"x\", 0, 1, [])\n    print(m.text)\n",
     );
 }
 
 #[test]
 fn import_licenses_bare_response() {
     entry_ok(
-        "import std.request\nfn main():\n    r: Response = request.Response(200, \"ok\", {})\n    print(r.body)\n",
+        "import std.request\nfn main():\n    r: request.Response = request.Response(200, \"ok\", {})\n    print(r.body)\n",
     );
 }
 
 #[test]
 fn import_licenses_bare_procresult() {
     entry_ok(
-        "import std.process\nfn main():\n    p: ProcResult = process.ProcResult(\"o\", \"e\", 0)\n    print(p.stdout)\n",
+        "import std.process\nfn main():\n    p: process.ProcResult = process.ProcResult(\"o\", \"e\", 0)\n    print(p.stdout)\n",
     );
 }
 
@@ -1474,22 +1474,22 @@ fn native_method_harvest_strips_self() {
 fn concurrency_methods_resolve_via_harvested_table_with_subst() {
     // Shared[int].set("x") — the param `T` substitutes to `int`, so a str arg is rejected.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(\"x\")\nmain()\n",
         "expected int",
     );
     // Shared[str].get() composes as a str (T substitutes to str).
     entry_ok(
-        "import std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    print(s.get() + \"!\")\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(\"hi\")\n    print(s.get() + \"!\")\nmain()\n",
     );
     // Atomic add/sub numeric gate residual survives the harvest (str box has no `add`).
     entry_rejects(
-        "import std.concurrency\nfn main():\n    a := Atomic(\"x\")\n    a.add(1)\nmain()\n",
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(\"x\")\n    a.add(1)\nmain()\n",
         "no method 'add'",
     );
     // Shared[int].update(fn(x): x+1) — the leading `self` is stripped, so the update closure is the
     // only arg the sig expects; it still type-checks after the 4c-followup strip.
     entry_ok(
-        "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x+1)\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    s.update(fn(x): x+1)\nmain()\n",
     );
 }
 
@@ -1498,10 +1498,10 @@ fn concurrency_methods_resolve_via_harvested_table_with_subst() {
 #[test]
 fn executor_submit_accepts_any_return_rejects_arity() {
     entry_ok(
-        "import std.concurrency\nfn main():\n    ex := Executor()\n    ex.submit(fn(): 42)\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.submit(fn(): 42)\n    ex.shutdown()\nmain()\n",
     );
     entry_rejects(
-        "import std.concurrency\nfn main():\n    ex := Executor()\n    ex.submit(fn(x): x)\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.submit(fn(x): x)\nmain()\n",
         "argument 1 of 'submit'",
     );
 }
@@ -1684,7 +1684,7 @@ fn time_fn_sigs_exact() {
 /// the selective `import timer from std.time` forms still license the bare `timer(ms)` call.
 #[test]
 fn import_timer_from_std_time_still_licensed_both_forms() {
-    entry_ok("import std.time\nfn main():\n    print(timer(20).recv())\nmain()\n");
+    entry_ok("import timer from std.time\nfn main():\n    print(timer(20).recv())\nmain()\n");
     entry_ok("import timer from std.time\nfn main():\n    print(timer(20).recv())\nmain()\n");
 }
 
