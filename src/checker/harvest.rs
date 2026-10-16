@@ -362,7 +362,6 @@ impl Checker {
                                 ty,
                                 certain_fn: None,
                                 is_const: true,
-                                redeclared: false,
                             },
                         );
                     }

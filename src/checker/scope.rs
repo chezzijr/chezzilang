@@ -63,7 +63,6 @@ impl Checker {
                     ty,
                     certain_fn,
                     is_const: g.is_const(),
-                    redeclared: g.redeclared(),
                 },
             );
         }

@@ -151,7 +151,7 @@ impl Checker {
             return Some(Resolution::StructCtor(key.clone()));
         }
         if self.functions.contains_key(n) {
-            // `value_head_resolution` asks `slot_holds_fn_decl`, the one fn-slot test (DEC-201).
+            // A module binds the name once, so the fn declaration is the slot (DEC-201).
             return Some(self.value_head_resolution(n));
         }
         // A bare variant: a name an `import V from Enum` binds (the prelude's four included).

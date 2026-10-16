@@ -207,37 +207,6 @@ fn executor_has_no_submit_outcome() {
     );
 }
 
-/// TICKET-196 K5x: a module that rebinds a fn name (`f := fn(b, a)`) exports the OLD fn's labels, so a
-/// keyword call from another module binds the stale labels (CPython prints `12`, Chezzi `21`).
-#[test]
-fn imported_rebound_fn_denies_keyword_call_qualified() {
-    files_reject(
-        &[
-            (
-                "lib.chz",
-                "fn f(a: int, b: int) -> str:\n    return \"{a}{b}\"\nf := fn(b: int, a: int) -> str: \"{a}{b}\"\n",
-            ),
-            ("main.chz", "import lib\nprint(lib.f(a=1, b=2))\n"),
-        ],
-        "keyword arguments through 'f' are ambiguous",
-    );
-}
-
-/// TICKET-196 K5x, from-import call form.
-#[test]
-fn imported_rebound_fn_denies_keyword_call_from_import() {
-    files_reject(
-        &[
-            (
-                "lib.chz",
-                "fn f(a: int, b: int) -> str:\n    return \"{a}{b}\"\nf := fn(b: int, a: int) -> str: \"{a}{b}\"\n",
-            ),
-            ("main.chz", "import f from lib\nprint(f(a=1, b=2))\n"),
-        ],
-        "keyword arguments through 'f' are ambiguous",
-    );
-}
-
 /// TICKET-196 Family D2: a module exports ONE record per slot (`ModuleSig::members`). Every read path
 /// of another module's name (qualified call, from-import call, qualified/from-import value, `defer` /
 /// `spawn` / `spawn:` call forms, turbofish member, generic caller) reads labels / defaults /
@@ -2066,4 +2035,31 @@ fn enum_ty_and_as_enum_are_inverse_on_every_enum_shape() {
     }
     assert!(Ty::Int.as_enum().is_none());
     assert!(Ty::list(Ty::Int).as_enum().is_none());
+}
+
+/// A type-only import holds no value slot, so a module `fn` of its name is that slot's one
+/// declaration, as a same-module `struct S` + `fn S` is: keyword calls bind the fn's labels, from a
+/// body too, and a call in a `spawn:` block carries the fn's write summary. (The slot was counted as
+/// declared twice before, which denied the keyword call as "reassigned" and left the spawned write
+/// to a runtime fault.)
+#[test]
+fn a_type_import_beside_a_fn_holds_no_slot() {
+    let lib = ("lib.chz", "struct S:\n    v: int\n");
+    files_ok(&[
+        lib,
+        (
+            "main.chz",
+            "import S from lib\nfn S(a: int, b: int) -> str:\n    return \"{a}{b}\"\nfn g() -> str:\n    return S(b=1, a=2)\nprint(g())\nprint(S(b=3, a=4))\n",
+        ),
+    ]);
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import S from lib\nxs := [0]\nfn S(a: int, b: int = 9) -> int:\n    xs.push(a)\n    return a\nfn main():\n    spawn:\n        print(S(8))\nmain()\n",
+            ),
+        ],
+        "'xs' is this task's copy",
+    );
 }

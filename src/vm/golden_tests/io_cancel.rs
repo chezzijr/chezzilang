@@ -1666,7 +1666,7 @@ fn module_scope_order_grid() {
 /// `run_file` skips the checker, so a module-level `return` (a check error since TICKET-186)
 /// still leaves a let slot uninitialized at run time. A cell passes only on `Err` with the quoted
 /// message; `Ok`, a VM panic or another message fails it. Cell c21 is the checker verdict for a
-/// fn reached through `import f from lib` and redeclared by a later let.
+/// later let of a name `import f from lib` binds: a second binding of the name.
 #[test]
 fn t186_uninit_read_paths_fault() {
     let ret = "return\nx := 5\n";
@@ -1729,9 +1729,9 @@ fn t186_uninit_read_paths_fault() {
             bad.push(format!("R5 entrypoint: want {want:?}, got {got}"));
         }
     }
-    // c21: keyword labels through an imported fn the module redeclares below the body.
+    // c21: a let below the body of a name an import binds.
     {
-        let want = "keyword arguments through 'f' are ambiguous";
+        let want = "'f' is already imported";
         let t = TmpDir::new();
         t.write(
             "lib.chz",

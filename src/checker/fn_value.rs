@@ -39,12 +39,8 @@ impl Checker {
     /// W7-42r shape (b) — reject a VALUE read of an imported name that sits ABOVE that name's own
     /// `import`. Imports are HOISTED (`check_module` runs `bind_import` for every import before the
     /// `check_stmt` loop), so the name is in `scopes[0]` from line 1 whatever line the `import` is
-    /// on, and a read above it silently resolves to the imported binding — which a later
-    /// module-scope `let` then refills, handing a closure typed against the import a value of the
-    /// let's type (`f := fn() -> str: x` / `x := 1` / `import COUNT as x from lib.st` printed `1`,
-    /// check-clean). The W7-42 re-declaration rule cannot cover it: its import gate is deliberately
-    /// one-way (source-EARLIER import only), and inverting it would reject the sound
-    /// `module_scope_redeclare_over_hoisted_import_ok`. The forward READ is the error instead.
+    /// on, and a read above it silently resolves to the imported binding. Go rejects the late
+    /// `import`; the forward READ is the error here.
     ///
     /// Deliberately also rejects programs that are TECHNICALLY SOUND today (`print(COUNT)` above
     /// `import COUNT from lib` works, because of the hoist): it reads as a use-before-definition,
@@ -239,11 +235,7 @@ impl Checker {
                 {
                     return None;
                 }
-                if let Some(sig) = self
-                    .functions
-                    .get(name)
-                    .filter(|_| self.slot_holds_fn_decl(name))
-                {
+                if let Some(sig) = self.functions.get(name) {
                     return Some(PathFn::of_fn(name.clone(), sig.clone()));
                 }
                 // A bare imported variant constructor, through the head its import stored.

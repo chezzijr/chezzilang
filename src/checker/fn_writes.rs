@@ -1625,9 +1625,7 @@ impl Checker {
                 }
             })
             .collect();
-        let saved_body_facts = std::mem::replace(&mut self.body_facts_pass, true);
         let summaries = self.infer_scan_writes(&scans, &HashMap::new(), true);
-        self.body_facts_pass = saved_body_facts;
         for (name, mut summary) in summaries {
             // The summary leaves this module (an importer reads it), so each subscript link is
             // resolved here, where the checker typed it: `Index(span)` is a span of this module.
@@ -1688,8 +1686,8 @@ impl Checker {
                 let nested = self.infer_scan_writes(&scan.nested, &visible, false);
                 for edge in &scan.calls {
                     let local_callee = nested.get(&edge.callee);
-                    // TICKET-201: a redeclared module slot holds no known fn in a body.
-                    let callee = if edge.module_slot && !self.slot_holds_fn_decl(&edge.callee) {
+                    // A module slot that holds no fn declaration holds no known fn.
+                    let callee = if edge.module_slot && !self.functions.contains_key(&edge.callee) {
                         Vec::new()
                     } else {
                         local_callee
@@ -1830,7 +1828,6 @@ impl Checker {
                 } else {
                     self.functions
                         .get(name)
-                        .filter(|_| self.slot_holds_fn_decl(name))
                         .map(|sig| (name.clone(), sig.summary.clone()))
                 }
             }
@@ -1888,7 +1885,7 @@ impl Checker {
     ) -> bool {
         let (sig, summary) = match c {
             ArgCallee::Fn(f) => {
-                if self.lookup(f).is_some() || !self.slot_holds_fn_decl(f) {
+                if self.lookup(f).is_some() || !self.functions.contains_key(f) {
                     return true;
                 }
                 let Some(sig) = self.functions.get(f) else {

@@ -117,7 +117,7 @@ impl Checker {
             .as_ref()
             .filter(|c| !c.named.is_empty())
             .map(|c| c.named.clone())
-            && self.labels_certain(name).is_err()
+            && self.labels_certain(name).is_none()
         {
             self.consume_named();
             for a in args {

@@ -68,8 +68,7 @@ impl Checker {
     }
 
     /// TICKET-183 — each top-level `let` that is the FIRST let of at least one seeded global, with
-    /// the index of each such name in the let's `names`, in source order. A name repeated in one
-    /// destructure gives its LAST index: that element is the one the slot holds (TICKET-186).
+    /// the index of each such name in the let's `names`, in source order.
     fn seeded_first_lets<'a>(&self, stmts: &'a [Stmt]) -> Vec<(&'a Stmt, Vec<usize>)> {
         let mut out = Vec::new();
         for s in stmts {
@@ -79,11 +78,9 @@ impl Checker {
             let names = target.binder_names();
             let firsts: Vec<usize> = (0..names.len())
                 .filter(|&i| {
-                    !names[i + 1..].contains(&names[i])
-                        && self
-                            .globals
-                            .get(&names[i])
-                            .is_some_and(|g| g.seeded && g.first_let() == Some(s.span))
+                    self.globals
+                        .get(&names[i])
+                        .is_some_and(|g| g.seeded && g.first_let() == Some(s.span))
                 })
                 .collect();
             if !firsts.is_empty() {
@@ -104,7 +101,6 @@ impl Checker {
     /// ctor IS seeded: those have no slot, so in every body the name is the global, in both source
     /// orders (TICKET-180).
     pub(super) fn seed_module_globals(&mut self, stmts: &[Stmt]) {
-        let saved_body_facts = std::mem::replace(&mut self.body_facts_pass, true);
         let mut hoisted: HashSet<&str> = HashSet::new();
         for s in stmts {
             match &s.kind {
@@ -140,7 +136,6 @@ impl Checker {
                 | StmtKind::Expr(_) => {}
             }
         }
-        let mut seen: HashSet<String> = HashSet::new();
         for s in stmts {
             let StmtKind::Let {
                 target, ty, value, ..
@@ -149,8 +144,7 @@ impl Checker {
                 continue;
             };
             for n in &target.binder_names() {
-                if !seen.insert(n.clone())
-                    || hoisted.contains(n.as_str())
+                if hoisted.contains(n.as_str())
                     || self.scopes[0].contains_key(n)
                     || self.functions.contains_key(n)
                 {
@@ -172,7 +166,6 @@ impl Checker {
                 }
             }
         }
-        self.body_facts_pass = saved_body_facts;
     }
 
     /// The type of each name a top-level let binds, in `binders` order. A single name takes
@@ -201,7 +194,6 @@ impl Checker {
         let mut changed = false;
         let mark = self.diag_mark();
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
-        let saved_body_facts = std::mem::replace(&mut self.body_facts_pass, true);
         self.ret_memo.clear();
         let saved_reached = self.save_reached();
         let firsts: std::collections::HashMap<Span, Vec<usize>> = self
@@ -236,7 +228,6 @@ impl Checker {
         self.restore_reached(saved_reached);
         self.ret_memo.clear();
         self.inferring_ret = saved_flag;
-        self.body_facts_pass = saved_body_facts;
         self.diag_rollback(mark);
         changed
     }
@@ -437,9 +428,9 @@ impl Checker {
         match &value.kind {
             ExprKind::Closure { .. } => Some(Vec::new()),
             ExprKind::Ident(n) if self.lookup(n).is_none() => {
-                self.slot_holds_fn_decl(n).then(Vec::new)
+                self.functions.contains_key(n).then(Vec::new)
             }
-            ExprKind::Ident(n) => self.labels_certain(n).ok(),
+            ExprKind::Ident(n) => self.labels_certain(n),
             // TICKET-187/204: `g := m.f`, a type-applied fn value (`pair[str, int]`) and a type
             // path value (`Bx[int].make`) hold one known function exactly as `g := f` does.
             ExprKind::Index { .. } | ExprKind::Field { .. } => crate::ast::type_application(value)

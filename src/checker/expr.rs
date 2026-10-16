@@ -121,7 +121,7 @@ impl Checker {
             let call = (self.graph_module_idx, call_id.0);
             match callee.kind.as_ident() {
                 Some(name) => {
-                    if let Ok(key) = self.labels_certain(name) {
+                    if let Some(key) = self.labels_certain(name) {
                         let pending = (key, super::globals::KwUse::GenStamp(call, crossing, span));
                         if !self.kw_pending.contains(&pending) {
                             self.kw_pending.push(pending);
@@ -750,7 +750,7 @@ impl Checker {
                 labels,
             } if !named.is_empty()
                 || (labels.variadic().is_some()
-                    && matches!(&callee.kind, ExprKind::Ident(n) if self.labels_certain(n).is_ok())) =>
+                    && matches!(&callee.kind, ExprKind::Ident(n) if self.labels_certain(n).is_some())) =>
             {
                 // TICKET-139 (W14-2) — labels are surface-only (equality-neutral, DEC-108), so a
                 // callee that is not certain to hold ONE known function may bind a permuted set of
@@ -758,24 +758,17 @@ impl Checker {
                 // `ren`. Only a `kw_certain` `Ident` binding keeps keyword calls; everything else
                 // is a compile error (positional calls are unaffected).
                 // TICKET-186: `labels_certain` is the one decider, shared with the by-name path.
-                let key = match callee.kind.as_ident() {
-                    Some(n) => self.labels_certain(n),
-                    None => Err(super::globals::KwDeny::NotOneFn),
-                };
+                let key = callee.kind.as_ident().and_then(|n| self.labels_certain(n));
                 self.consume_named();
-                let key = match key {
-                    Ok(key) => key,
-                    Err(deny) => {
-                        for a in args {
-                            self.infer(a);
-                        }
-                        for (_, v) in named {
-                            self.infer(v);
-                        }
-                        let name = callee.kind.as_ident().map(|n| n.as_str());
-                        self.error(span, super::globals::kw_deny_msg(name, deny));
-                        return *ret;
+                let Some(key) = key else {
+                    for a in args {
+                        self.infer(a);
                     }
+                    for (_, v) in named {
+                        self.infer(v);
+                    }
+                    self.error(span, super::globals::KW_NOT_ONE_FN.to_string());
+                    return *ret;
                 };
                 // Settled at the binding's `pop_scope` (a write may come after this call). Nothing
                 // is recorded under the generic-arg prepass, and a closure body inferred more than

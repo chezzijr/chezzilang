@@ -697,20 +697,9 @@ struct MemberSig {
     certain_fn: Option<FnSig>,
     /// A `const` top-level let, or a native constant.
     is_const: bool,
-    /// The home `GlobalBinding::redeclared()`.
-    redeclared: bool,
 }
 
 impl MemberSig {
-    /// May a keyword call bind this slot's labels?
-    fn labels(&self) -> Result<&FnSig, globals::KwDeny> {
-        match &self.certain_fn {
-            Some(f) => Ok(f),
-            None if self.redeclared => Err(globals::KwDeny::Redeclared),
-            None => Err(globals::KwDeny::NotOneFn),
-        }
-    }
-
     /// The slot holds a function value.
     fn holds_fn(&self) -> bool {
         matches!(self.ty, Ty::Func { .. } | Ty::BuiltinFn { .. })
@@ -770,7 +759,6 @@ impl ModuleSig {
                 ty,
                 certain_fn: Some(f),
                 is_const: false,
-                redeclared: false,
             },
         );
     }
@@ -977,11 +965,6 @@ struct Checker {
     /// `current_ret`/`in_fn_body` around this copy for `?`. Read by
     /// [`Checker::report_uninferable_result_params`]. Saved/restored 1:1 around each copy.
     decl_site_default: bool,
-    /// TICKET-201 — true while a pass computes facts that bodies read: the global seed
-    /// (`seed_module_globals`), the global typing pass (`type_globals_pass`) and the write-summary
-    /// fixpoint (`infer_fn_writers`). Read by [`Checker::runs_after_later_decls`]. Saved/restored
-    /// around each pass; never left set by a body walk.
-    body_facts_pass: bool,
     /// TICKET-201 — the struct-body binders a default of the type being checked could name:
     /// `(name, binder span, owner type name)` for each field that carries a default and each
     /// method. Read by [`Checker::check_default_scope`]. Set and restored by the struct and enum

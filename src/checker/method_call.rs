@@ -181,7 +181,7 @@ impl Checker {
                 if let Some(m) = member.as_ref().filter(|m| m.holds_fn())
                     && let Some(c) = &self.call_ctx
                     && !c.named.is_empty()
-                    && let Err(deny) = m.labels()
+                    && m.certain_fn.is_none()
                 {
                     let named = c.named.clone();
                     self.consume_named();
@@ -189,7 +189,7 @@ impl Checker {
                     for (_, v) in &named {
                         self.infer(v);
                     }
-                    self.error(span, super::globals::kw_deny_msg(Some(method), deny));
+                    self.error(span, super::globals::KW_NOT_ONE_FN.to_string());
                     return Ty::Unknown;
                 }
                 // W7-21 — a module GLOBAL that HOLDS a function value is callable through the module

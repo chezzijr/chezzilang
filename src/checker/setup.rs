@@ -110,7 +110,6 @@ impl Checker {
             coalesce_join: false,
             in_default_provider: false,
             decl_site_default: false,
-            body_facts_pass: false,
             default_binders: Vec::new(),
             ret_declared: false,
             ret_owner: None,

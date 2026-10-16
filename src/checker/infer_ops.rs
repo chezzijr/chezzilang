@@ -82,8 +82,7 @@ impl Checker {
             }
             return ty;
         }
-        // A module-level fn slot. A slot a later `:=` redeclares answers `Global` (the compiler
-        // loads the slot) and is still typed by its fn declaration here.
+        // A module-level fn slot, typed by its fn declaration.
         if let Resolution::Fn { .. } | Resolution::Global { .. } = res
             && let Some(sig) = self.functions.get(name)
         {
