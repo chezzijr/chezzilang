@@ -745,7 +745,15 @@ fn expectation(
                 Expect::Rejects(EXPECTED_FN)
             };
         }
-        _ => {}
+        CallPath::Direct
+        | CallPath::Binding
+        | CallPath::Slot
+        | CallPath::Param
+        | CallPath::Field
+        | CallPath::Lib
+        | CallPath::CallResult
+        | CallPath::Defer
+        | CallPath::Spawn => {}
     }
     Expect::Twin(direct(args))
 }
