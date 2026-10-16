@@ -1326,31 +1326,13 @@ fn extern_duplicate_name_rejected() {
 }
 
 #[test]
-fn extern_named_after_struct_rejected() {
-    // A struct registers a same-named constructor the backends resolve before a plain call, so an
-    // extern colliding with a struct name is dead. The guard is order-independent: the struct is
-    // declared AFTER the extern, yet the collision must still fire.
-    rejects(
-        "extern \"libc.so.6\":\n    fn S(x: int) -> int\n\nstruct S:\n    a: int\n",
-        "already names a struct or variant",
-    );
-}
-
-#[test]
-fn extern_named_after_struct_rejected_entry_path() {
-    // W6-6 — the bare-keyed single-module `ok()`/`rejects()` helper CANNOT catch this class: the CLI
-    // graph path keys `self.structs` module-scoped (`main::S`), so a bare `structs.contains_key(name)`
-    // lookup always missed and `struct strlen` + `extern fn strlen` silently called the CTOR. The
-    // sweep now consults `struct_names` (the BARE-visible ctor set), which is bare in BOTH paths.
-    // Both decl orders, because the sweep runs after the hoist loop.
-    entry_rejects(
-        "extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n\nstruct strlen:\n    s: str\n",
-        "already names a struct or variant",
-    );
-    entry_rejects(
-        "struct S:\n    a: int\n\nextern \"libc.so.6\":\n    fn S(x: int) -> int\n",
-        "already names a struct or variant",
-    );
+fn extern_named_after_struct_is_the_value_beside_the_type() {
+    // A struct is a type and an extern fn is a value: the two namespaces hold one each, and a call
+    // reaches the value, as a module `fn S` beside `struct S` does (TICKET-029). Both decl orders,
+    // on the single-module and the graph path (which keys `self.structs` module-scoped).
+    ok("extern \"libc.so.6\":\n    fn S(x: int) -> int\n\nstruct S:\n    a: int\n");
+    entry_ok("extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n\nstruct strlen:\n    s: str\n");
+    entry_ok("struct S:\n    a: int\n\nextern \"libc.so.6\":\n    fn S(x: int) -> int\n");
 }
 
 #[test]
@@ -1364,23 +1346,18 @@ fn extern_named_after_unimported_native_struct_ok() {
 }
 
 #[test]
-fn extern_named_after_imported_native_struct_rejected() {
-    // …and the import DOES bind the bare ctor name (`struct_names`), so the collision still fires
-    // there. This pins that the `struct_names` predicate did not widen the
-    // hole open.
-    entry_rejects(
-        "import Match from std.regex\n\nextern \"libc.so.6\":\n    fn Match(x: int) -> int\n",
-        "already names a struct or variant",
-    );
+fn extern_named_after_imported_native_struct_ok() {
+    // An imported native struct binds the type namespace only, so an extern of its name is the
+    // value beside it, as a `fn` of that name is.
+    entry_ok("import Match from std.regex\n\nextern \"libc.so.6\":\n    fn Match(x: int) -> int\n");
 }
 
 #[test]
-fn extern_named_after_variant_rejected() {
-    // An enum variant is keyed globally and resolved as a constructor before a plain call.
-    rejects(
-        "extern \"libc.so.6\":\n    fn Leaf(x: int) -> int\n\nenum Tree:\n    Leaf\n    Node\n",
-        "already names a struct or variant",
-    );
+fn extern_named_after_variant_ok() {
+    // A variant is scoped under its enum (`Tree.Leaf`), so a top-level extern `Leaf` binds a free
+    // name, as a `fn Leaf` does. An `import Leaf from Tree` would bind it (`'Leaf' is already
+    // imported`).
+    ok("extern \"libc.so.6\":\n    fn Leaf(x: int) -> int\n\nenum Tree:\n    Leaf\n    Node\n");
 }
 
 #[test]

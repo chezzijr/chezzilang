@@ -187,9 +187,10 @@ the freeze.
   first cut let `e.message()` type-check on a payload with no `message`, then fault at runtime.
 - **A hoisted declaration's guard must be symmetric in source position.** A top-level `fn` is defined
   into its slot before any statement runs, so `fn_span < let_span` tests a quantity the runtime does
-  not have; one statement swap defeats it. Gate on *readers* (was anything above already typed against
-  the fn?). `Ty::Func` equality ignores optional arity, so a stricter re-binding needs its own
-  directional check.
+  not have; one statement swap defeats it. Judge the slot itself: its type is frozen at its first
+  binding, hoisted or not. (A gate on *readers* was symmetric too, but it gave a fn slot a different
+  answer from a value slot: `import f` + `f := 1` passed while `import V` + `V := "s"` failed.)
+  `Ty::Func` equality ignores optional arity, so a stricter re-binding needs its own directional check.
 - **A guard keyed on a module-wide bare-name table fires on a parameter or local that merely shadows
   the name.** `fn f(pi: float)` + a later `import pi from std.math` reported "`pi` is used before its
   import" — factually false. Require scope-0 resolution (`scopes.iter().skip(1).any(...)` means

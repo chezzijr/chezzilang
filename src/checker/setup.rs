@@ -78,7 +78,6 @@ impl Checker {
             fn_write_scopes: Vec::new(),
             local_fn_names: std::collections::HashSet::new(),
             raw_ctor_owner: None,
-            fn_reads: std::collections::HashSet::new(),
             structs: HashMap::new(),
             protocols: prebuilt_protocols(),
             type_params: HashMap::new(),

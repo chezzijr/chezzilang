@@ -568,12 +568,12 @@ fn carrier_enum_grid() {
     );
     only(
         c,
-        "V19 a global shadows a variant import",
+        "V19 a variant import is a constant: a global cannot re-bind it",
         &[(
             "main.chz",
-            &format!("{COLOR}import Red from Color\nRed := 5\nprint(Red, Color.Red)\n"),
+            &format!("{COLOR}import Red from Color\nRed := Color.Green\nprint(Red, Color.Red)\n"),
         )],
-        Prints("5 Red"),
+        Rejects("cannot re-declare const binding 'Red'"),
     );
     only(
         c,

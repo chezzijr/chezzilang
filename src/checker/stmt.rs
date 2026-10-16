@@ -1109,25 +1109,6 @@ impl Checker {
         }
     }
 
-    /// Record that this module has resolved `name` through `functions` — see [`Checker::fn_reads`]
-    /// and the fn arm of [`Self::reject_redeclare`]. Called from the two sites that really type user
-    /// code against a `FnSig` (`infer_ident`'s value read and `infer_named_call`'s by-name dispatch);
-    /// the display/hover/existence lookups decide nothing and must not record.
-    ///
-    /// Skipped while `inferring_ret`, because that pre-pass walks EVERY un-annotated fn's body before
-    /// the first statement is checked, so it also reads names for fns declared BELOW the let — where
-    /// the in-order walk will re-resolve the name to the let's binding, which is the typing that
-    /// actually stands. Recording those rejected the sound `fn f(a: int, b: int = 2)` / `f := fn(a:
-    /// int) -> int: …` / `test fn …: f(1)` (a `test fn` is un-annotated by definition, so the whole
-    /// chz spec fixture tripped it). The case the pre-pass is there for is not lost: an un-annotated
-    /// fn declared ABOVE the let has its body checked again by `check_stmt` at its own statement, and
-    /// that read — the load-bearing one — is recorded.
-    pub(super) fn record_fn_read(&mut self, name: &str) {
-        if !self.inferring_ret {
-            self.fn_reads.insert(name.to_string());
-        }
-    }
-
     /// The two re-declaration carve-outs every binding `let` must pass before `declare` overwrites
     /// the previous binding (W7-42, W7-42r). Shared by the single-name let and — per name — by
     /// `check_destructure`'s tuple SUCCESS arm, because both reach the same `declare` and so the same
@@ -1174,61 +1155,26 @@ impl Checker {
         // the SHAPE is unknown, so `int -> Unknown` would otherwise fire off the don't-know
         // sentinel. Skipped during return inference, whose truncate-and-rerun can re-walk a
         // body within one scope.
-        // When `prev` is an IMPORT's binding, it fires only if the `import` is SOURCE-EARLIER
-        // than this let. Imports are HOISTED, so the checker binds them before every top-level
-        // statement no matter where they sit in the file; keying on "the name was ever imported"
-        // would reject the sound `x := 1` … `import … as x from lib` (nothing before the let can
-        // read the import's binding), while the span comparison rejects the unsound
-        // `import COUNT from lib` … `COUNT := "s"` (the closure between them reads the one slot).
-        // `import_binds` already records that span, per bound name, per module.
-        // The span is consulted ONLY while `prev` really is the import's binding: a module-scope
-        // `declare` hands the name back to this module and clears `imported_values`
-        // (`setup.rs:1764-1766`), so after one `let` the previous binding is that LET's and where
-        // some later `import` happens to sit stopped being the question — keying on the span
-        // unconditionally made an unused source-later import a per-NAME suppressor that re-opened
-        // the original defect (`x := 1` / closure / `x := "s"` / `import … as x`).
-        // Two axes make the comparison total: imports are syntactically top-level only, so there
-        // is no nested-scope case, and the language has no statement separator, so two top-level
-        // statements can never share a position — `<` has no reachable tie, and a tie-break for
-        // it would be dead code. (A destructuring let passes each name's OWN span, which is on the
-        // same line as the statement and so orders identically against any import.)
-        // A top-level `fn` — same-module or from-imported — is NEVER declared into `scopes`; it lives
-        // only in `functions`, a disjoint namespace. But `collect_globals` gives it the very same
-        // slot: imports, then fns (`compiler/mod.rs:1050-1053`), then lets (`:1080-1086`) all go
-        // through one idempotent-by-name `add`. So when `scopes[0]` has nothing, fall back to
-        // `functions` and judge the let against the fn's VALUE type (the construction `infer_ident`
-        // hands out at `pattern.rs:1963-1970`, min-arity included — section 4 below needs it).
-        // That fn arm — and ONLY that arm — is gated on `fn_reads`: it fires when some code above
-        // has already been typed against the fn's signature, which is exactly when re-declaring the
-        // slot breaks something. The value arm keeps firing with no reader at all, deliberately (the
-        // check is on the SLOT, not the readers — `module_scope_redeclare_to_a_subtype_rejected_
-        // deliberately`); the two are not one gate. Without the reader condition the fn arm rejects
-        // `fn f(a: int, b: int = 2)` / `f := fn(a: int) -> int: a * 100` / `print("{f(1)}")`, which
-        // is SOUND (measured: prints 100, and so does CPython) — every reader follows the let and is
-        // typed against it. Move that one reader above the let and it must reject, which it does.
-        // The gate is on the READERS' position, never on the `fn`'s: a top-level fn's slot is filled
-        // before any statement runs (`compiler/mod.rs:1404`: "top-level `fn`s are hoisted as globals
-        // before the body"; `desugar/mod.rs:689`: "declaration position is irrelevant"), so the rule
-        // stays symmetric in the fn's position — `f := fn() -> int: helper()` / `helper := 3` /
-        // `fn helper() -> int` rejects, and a source-order test on the fn would let it through.
+        // `prev` is the slot's FIRST binding, in source order or hoisted before it: an import's
+        // or a top-level fn's (or extern's) slot is filled before any statement runs, so the let is
+        // a re-declaration wherever it sits, and the rule is symmetric in position. It does not
+        // look at READERS either: a slot's type is frozen at its first binding whatever kind
+        // declared it, as Go and Rust reject every second binding (`f redeclared in this block`,
+        // E0255) and Python's same-type rebinding is the part this keeps. A top-level `fn` is
+        // never declared into `scopes` (it lives in `functions`), so when `scopes[0]` has nothing
+        // the let is judged against the fn's VALUE type (the construction `infer_ident` hands out,
+        // min-arity included, which the arity disjunct needs). An imported variant is a const
+        // binding (`collect_module_globals`). A type of the same name is another namespace and no
+        // prior binding (`GlobalBinding::clashes`).
         // A const module global declared twice was reported once by `collect_module_globals`, and
         // it must report that message alone (TICKET-186).
         else if !self.inferring_ret
             && self.scopes.len() == 1
             && !self.globals.get(name).is_some_and(|g| g.is_const())
-            && let Some((prev, from_fn)) = self.scopes[0]
+            && let Some(prev) = self.scopes[0]
                 .get(name)
                 .cloned()
-                .map(|t| (t, false))
-                .or_else(|| {
-                    self.functions.get(name).map(|sig| (fn_value_ty(sig), true))
-                })
-            && (!from_fn || self.fn_reads.contains(name))
-            && (!(self.imported_values.contains_key(name) || matches!(prev, Ty::Module(_)))
-                || self
-                    .import_binds
-                    .get(name)
-                    .is_some_and(|i| (i.line, i.col) < (span.line, span.col)))
+                .or_else(|| self.functions.get(name).map(fn_value_ty))
             && !matches!(declared, Ty::Unknown)
             // `merge_unknown` has no `Func` arm, so for a `Func` `prev` it falls to `_ => a.clone()`
             // and returns `prev` — this conjunct is then a tautology of `prev != declared`, which is
@@ -1244,10 +1190,6 @@ impl Checker {
                     "cannot re-declare module-level binding '{name}' at a stricter arity: calls compiled against the previous binding may pass as few as {} argument(s) — the omitted ones are filled from ITS defaults — while the new binding requires {}, and a module global is ONE storage slot, so those call sites now hand the OLD binding's defaults to the new one (rename it, or give the new binding the same defaults)",
                     min_arity(&prev),
                     min_arity(declared)
-                )
-            } else if from_fn {
-                format!(
-                    "cannot re-declare module-level binding '{name}': a top-level `fn` and a module global are ONE storage slot, and the fn is defined into it before any statement runs, so code above this line that already reads '{name}' is typed against {prev_s} while the slot now holds {declared_s} (rename one of them; declaration order does not separate them)"
                 )
             } else {
                 format!(

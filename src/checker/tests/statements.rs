@@ -668,23 +668,33 @@ fn module_scope_redeclare_inferred_return_no_double_fire() {
 }
 
 #[test]
-fn module_scope_redeclare_over_hoisted_import_ok() {
-    // Imports are HOISTED: the checker binds `x` from the import before every top-level statement,
-    // whatever line the import sits on. When the `import` is source-LATER than the `let`, firing
-    // would reject a SOUND program — nothing ahead of the `let` can read the import's binding, and
-    // at runtime the hoisted import lands first so `x` is `1` from line 1 onward (measured: prints
-    // `1`, identical on the pre-fix binary). So the rule compares the import's OWN span.
+fn module_scope_redeclare_over_hoisted_import_rejected() {
+    // Imports are HOISTED, so the import is the slot's first binding wherever it sits, and a let of
+    // the name at another type is a retype in either source order (Go rejects `var x` beside a
+    // dot-imported `x` in both orders). The same type stays legal.
+    files_reject(
+        &[
+            ("lib/st.chz", "COUNT := \"s\"\n"),
+            (
+                "main.chz",
+                "x := 1\nf := fn() -> int: x\nimport COUNT as x from lib.st\nprint(f())\n",
+            ),
+        ],
+        "cannot re-declare module-level binding 'x' with a different type (str -> int)",
+    );
+    files_reject(
+        &[
+            ("lib/st.chz", "COUNT := \"s\"\n"),
+            ("main.chz", "st := 1\nimport lib.st\nprint(1)\n"),
+        ],
+        "cannot re-declare module-level binding 'st'",
+    );
     files_ok(&[
-        ("lib/st.chz", "COUNT := \"s\"\n"),
+        ("lib/st.chz", "COUNT := 0\n"),
         (
             "main.chz",
             "x := 1\nf := fn() -> int: x\nimport COUNT as x from lib.st\nprint(f())\n",
         ),
-    ]);
-    // A whole-module bind is the same shape: `import lib.st` after `st := 1` keeps its pre-fix verdict.
-    files_ok(&[
-        ("lib/st.chz", "COUNT := \"s\"\n"),
-        ("main.chz", "st := 1\nimport lib.st\nprint(1)\n"),
     ]);
 }
 
@@ -853,13 +863,12 @@ fn value_read_above_its_own_import_rejected() {
 
 #[test]
 fn value_read_above_its_own_import_boundaries_ok() {
-    // THE load-bearing neighbour (`module_scope_redeclare_over_hoisted_import_ok`, above) in the
-    // form that pins the "still the import's binding" test: the closure reads `x` AFTER `x := 1`
-    // has handed the name back to this module (a module-scope `declare` clears `imported_values`),
-    // so the read is of the LET's binding and the gate must not fire even though the `import` is
-    // source-later. Same two statements as the rejected program, in the other ORDER.
+    // The closure reads `x` AFTER `x := 1` has handed the name back to this module (a module-scope
+    // `declare` clears `imported_values`), so the read is of the LET's binding and the gate must not
+    // fire even though the `import` is source-later. Same two statements as the rejected program,
+    // in the other ORDER; the import is an `int`, so the let is no retype.
     files_ok(&[
-        ("lib/st.chz", "COUNT := \"s\"\n"),
+        ("lib/st.chz", "COUNT := 0\n"),
         (
             "main.chz",
             "x := 1\nf := fn() -> int: x\nimport COUNT as x from lib.st\nprint(f())\n",
@@ -1279,46 +1288,26 @@ fn module_scope_redeclare_of_a_fn_boundaries_ok() {
 }
 
 #[test]
-fn module_scope_redeclare_of_a_fn_keys_on_the_readers_not_the_declaration() {
-    // The fn arm fires on READS, not on source position — and this pair is why. Both programs
-    // declare the same fn and re-bind it at a different fn type; they differ ONLY in where the one
-    // reader sits.
-    //
-    // LEGAL — every reader follows the let, so every call is typed against the LET's binding. This
-    // is the shipped W7-24 fixture `interpolation_fragment_respects_local_shadowing`: measured on
-    // the pre-change binary it printed `100`, and so does CPython
-    // (`def f(a, b=2): …` / `f = lambda a: a * 100` / `print(f(1))` → `100`). Rejecting it would be
-    // drift from the owning ancestor, not a soundness win.
-    ok_desugared(
+fn module_scope_redeclare_of_a_fn_is_judged_on_the_slot_not_the_readers() {
+    // A top-level fn's slot is frozen at the fn's type, like a let's: a let of the name at another
+    // type is rejected wherever the readers sit (Go: `f redeclared in this block`; Rust: E0428).
+    // The rule once fired only when a reader sat above the let, which left `import f from lib` +
+    // `f := 1` accepted while `import COUNT from lib` + `COUNT := "s"` was rejected.
+    for src in [
+        // every reader follows the let
         "fn f(a: int, b: int = 2) -> int:\n    return a + b\nf := fn(a: int) -> int: a * 100\nprint(\"{f(1)}\")\n",
-    );
-    // ORDER neighbour — move that single reader ABOVE the let and the same shapes must reject: `g`'s
-    // body was typed against `fn(int, int) -> int` and desugar spliced the default in, so the closure
-    // is called with 2 arguments. Measured on the pre-change binary: "ok: no type errors", then
-    // "runtime error (line 3, col 19): closure expects 1 argument(s), got 2" (CPython prints `100`,
-    // so this is Chezzi's own static-arity contract, caught at check time instead of at runtime).
-    rejects_desugared(
+        // a reader above the let
         "fn f(a: int, b: int = 2) -> int:\n    return a + b\ng := fn() -> int: f(1)\nf := fn(a: int) -> int: a * 100\nprint(g())\n",
-        "cannot re-declare module-level binding 'f'",
-    );
-    // A read from an UNANNOTATED fn's body counts: return inference really did type `g` against
-    // `helper`'s signature, so the let breaks it. Measured pre-change: "ok: no type errors", then
-    // "runtime error (line 4, col 12): 'int' is not callable" (CPython: TypeError, same shape).
-    rejects(
-        "fn helper() -> int:\n    return 7\nfn g() -> int:\n    return helper()\nhelper := 3\nprint(g())\n",
-        "cannot re-declare module-level binding 'helper'",
-    );
-    // …but only a read the IN-ORDER walk makes counts. `infer_returns` walks every un-annotated
-    // body BEFORE the first statement, so it also reads through `functions` for a fn declared BELOW
-    // the let, where the real walk re-resolves the name to the LET's binding — the typing that
-    // stands. Counting those rejected this sound program (measured pre-change and in CPython: both
-    // print `100`), and every `test fn` in the chz suite is un-annotated by definition, so the whole
-    // fixture file tripped it. Hence `record_fn_read` skips while `inferring_ret`.
-    ok(
+        // a reader in a fn body declared below the let
         "fn f(a: int, b: int = 2) -> int:\n    return a + b\nf := fn(a: int) -> int: a * 100\nfn g() -> int:\n    return f(1)\nprint(g())\n",
-    );
-    // No reader at all → nothing to break, and the program runs (measured pre-change: prints `3`).
-    ok("helper := 3\nfn helper() -> int:\n    return 7\nprint(helper)\n");
+        // no reader at all, and the fn below the let
+        "helper := 3\nfn helper() -> int:\n    return 7\nprint(helper)\n",
+    ] {
+        rejects_desugared(src, "cannot re-declare module-level binding");
+    }
+    // The same-type re-bind stays legal in both orders.
+    ok("fn helper() -> int:\n    return 7\nhelper := fn() -> int: 9\nprint(helper())\n");
+    ok("helper := fn() -> int: 9\nfn helper() -> int:\n    return 7\nprint(helper())\n");
 }
 
 #[test]

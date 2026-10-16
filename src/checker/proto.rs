@@ -537,9 +537,6 @@ impl Checker {
             return;
         }
         let key = self.bare_key(name);
-        if self.protocols.contains_key(&key) {
-            self.error(span, format!("protocol '{name}' is already defined"));
-        }
         let mut saved = self.type_params.clone();
         std::mem::swap(&mut self.type_params, &mut saved); // start clean, with only Self visible
         self.type_params.insert("Self".to_string(), Vec::new());

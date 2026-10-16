@@ -2012,7 +2012,7 @@ fn interpolation_fragment_unknown_named_arg_rejected_by_the_checker() {
 #[test]
 fn interpolation_fragment_respects_local_shadowing() {
     ok_desugared(
-        "fn f(a: int, b: int = 2) -> int:\n    return a + b\nf := fn(a: int) -> int: a * 100\nprint(\"{f(1)}\")\n",
+        "fn f(a: int, b: int = 2) -> int:\n    return a + b\nfn g():\n    f := fn(a: int) -> int: a * 100\n    print(\"{f(1)}\")\ng()\n",
     );
 }
 

@@ -92,10 +92,7 @@ impl Checker {
             // M24 — the fn-as-value wall, at the BARE read (`g := reset`): both for the Scope-A pin
             // below and for the rigid fallback after it.
             let wparams = sig.witness_params.clone();
-            // W7-42r: this expression's type is now fixed against the fn's signature, so a later
-            // module-scope `name := …` would retype the ONE slot underneath it (see `fn_reads`).
-            self.record_fn_read(name);
-            // …and a FROM-IMPORTED fn read above its own `import` is the same use-before-import the
+            // A FROM-IMPORTED fn read above its own `import` is the same use-before-import the
             // value arm rejects (`g := h` above `import h from lib.fns`). Leaving it accepted gave
             // two verdicts for one user-visible concept; both ancestors reject it too (CPython:
             // `NameError`; Go refuses the late `import`). `import_binds` is the whole gate — a

@@ -29,6 +29,9 @@ struct Kind {
     decl: &'static str,
     /// The argument the call cell passes (the defaulted-fn kind calls `f(1)`).
     arg: u32,
+    /// The type of the module slot the declaration fills, when it fills one (a builtin and a
+    /// type fill none). A top-level let of the name re-binds that slot, whose type is frozen.
+    slot_ty: Option<&'static str>,
 }
 
 const KINDS: &[Kind] = &[
@@ -37,54 +40,63 @@ const KINDS: &[Kind] = &[
         name: "ord",
         decl: "",
         arg: 4,
+        slot_ty: None,
     },
     Kind {
         tag: "builtin_ctor",
         name: "Channel",
         decl: "",
         arg: 4,
+        slot_ty: None,
     },
     Kind {
         tag: "std_ctor",
         name: "timer",
         decl: "import std.time\n",
         arg: 4,
+        slot_ty: None,
     },
     Kind {
         tag: "struct",
         name: "P",
         decl: "struct P:\n    x: int\n",
         arg: 4,
+        slot_ty: None,
     },
     Kind {
         tag: "enum",
         name: "E",
         decl: "enum E:\n    A\n",
         arg: 4,
+        slot_ty: None,
     },
     Kind {
         tag: "alias",
         name: "Q",
         decl: "struct P:\n    x: int\ntype Q = P\n",
         arg: 4,
+        slot_ty: None,
     },
     Kind {
         tag: "imported_fn",
         name: "f",
         decl: "import f from lib\n",
         arg: 4,
+        slot_ty: Some("fn(int) -> str"),
     },
     Kind {
         tag: "imported_type",
         name: "T",
         decl: "import T from lib\n",
         arg: 4,
+        slot_ty: None,
     },
     Kind {
         tag: "module",
         name: "math",
         decl: "import std.math\n",
         arg: 4,
+        slot_ty: Some("module math"),
     },
     // A defaulted fn: the checker binds its omitted argument (TICKET-182).
     Kind {
@@ -92,6 +104,7 @@ const KINDS: &[Kind] = &[
         name: "f",
         decl: "fn f(a: int, b: int = 10) -> int:\n    return a + b\n",
         arg: 1,
+        slot_ty: Some("fn(int, int = 10) -> int"),
     },
 ];
 
@@ -186,7 +199,12 @@ const BINDERS: &[&str] = &[
 ];
 
 /// Cells the language rejects by a named declaration rule, with the rule.
-fn named_rejection(binder: &str, k: &Kind) -> Option<&'static str> {
+fn named_rejection(binder: &str, k: &Kind, p: &Pos) -> Option<&'static str> {
+    // A module global's type is frozen at its first binding (the import or the hoisted fn), so a
+    // top-level let at another type is rejected.
+    if binder == "toplevel_let" && k.slot_ty.is_some_and(|t| t != p.ty) {
+        return Some("cannot re-declare module-level binding");
+    }
     match (binder, k.tag) {
         // Only keywords are reserved (owner rule 2026-10-15): an import alias or a top-level `fn`
         // named after a builtin shadows it, like every other binder here.
@@ -197,10 +215,9 @@ fn named_rejection(binder: &str, k: &Kind) -> Option<&'static str> {
         ("import_alias", "struct" | "enum" | "alias" | "defaulted_fn") => {
             Some("is already imported")
         }
-        // Two top-level declarations of one name.
-        ("toplevel_fn", "imported_fn" | "defaulted_fn") => Some("is already defined"),
-        // A module global's type is frozen at its first declaration (the import).
-        ("toplevel_let", "module") => Some("cannot re-declare module-level binding"),
+        // Two top-level declarations of one name (Go: `redeclared in this block`).
+        ("toplevel_fn", "imported_fn") => Some("is already imported"),
+        ("toplevel_fn", "defaulted_fn") => Some("is already defined"),
         // A top-level `fn` over an imported module name: the import and the fn would share one
         // runtime global slot; Go rejects the redeclaration.
         ("toplevel_fn", "module") => Some("is already imported"),
@@ -217,7 +234,7 @@ fn grid() -> Vec<Cell> {
                     continue;
                 };
                 let src = format!("{}{S_DECL}{body}", k.decl);
-                let expect = match named_rejection(binder, k) {
+                let expect = match named_rejection(binder, k, &p) {
                     Some(frag) => Expect::Rejects(frag),
                     None => Expect::Prints(p.expect.clone()),
                 };

@@ -71,7 +71,6 @@ impl Checker {
             ret_coerce: self.ret_coerce.clone(),
             wraps: self.wraps.clone(),
             const_overflow_seen: self.const_overflow_seen.clone(),
-            fn_reads: self.fn_reads.clone(),
             tyvars: self.tyvars.borrow().mark(),
             hover_result: self.hover_result.clone(),
             poison_reads: self.poison_reads,
@@ -92,7 +91,6 @@ impl Checker {
         self.ret_coerce = m.ret_coerce;
         self.wraps = m.wraps;
         self.const_overflow_seen = m.const_overflow_seen;
-        self.fn_reads = m.fn_reads;
         self.tyvars.borrow_mut().rollback(m.tyvars);
         self.hover_result = m.hover_result;
         self.poison_reads = m.poison_reads;
@@ -143,7 +141,6 @@ impl Checker {
         self.functions.clear();
         self.fn_homes.clear();
         self.local_fn_names.clear();
-        self.fn_reads.clear();
         self.name_docs.clear();
         self.type_params.clear();
         self.imported_modules.clear();
@@ -220,7 +217,6 @@ impl Checker {
             self.bind_import(imp);
         }
         self.note_variant_import_binds(stmts);
-        self.reject_import_decl_collisions(stmts);
         self.collect_names(stmts);
         self.collect_docs(stmts);
         self.hoist(stmts);
@@ -275,63 +271,6 @@ impl Checker {
         }
         self.import_binds.insert(bind.to_string(), span);
         false
-    }
-
-    /// A whole-module import bind (`import lib`, `import lib as E`, `import a.b`) or a variant
-    /// import bind (`import Red from Color`) and a same-module top-level `fn` or type may not
-    /// share a name, in either source order (Go: `E redeclared in this block`; Rust: `use
-    /// Color::Red` + `fn Red` is E0255). The module-level name registry is `import_binds` (import
-    /// vs import) plus this one check (import vs declaration); the error lands on the later of the
-    /// two. Without it the import and a `fn` would share one runtime global slot, and a type head
-    /// would have two meanings with no source order to choose between them.
-    fn reject_import_decl_collisions(&mut self, stmts: &[Stmt]) {
-        let variant_binds: HashSet<String> = variant_import_binds(stmts)
-            .into_iter()
-            .map(|(bind, ..)| bind)
-            .filter(|bind| self.import_binds.contains_key(bind))
-            .collect();
-        for s in stmts {
-            let name = match &s.kind {
-                StmtKind::Fn(decl) => &decl.name,
-                StmtKind::Struct { name, .. }
-                | StmtKind::Enum { name, .. }
-                | StmtKind::TypeAlias { name, .. }
-                | StmtKind::Protocol { name, .. } => name,
-                StmtKind::Let { .. }
-                | StmtKind::Assign { .. }
-                | StmtKind::If { .. }
-                | StmtKind::For { .. }
-                | StmtKind::While { .. }
-                | StmtKind::Match { .. }
-                | StmtKind::Return(_)
-                | StmtKind::Yield(_)
-                | StmtKind::Defer(_)
-                | StmtKind::Parallel { .. }
-                | StmtKind::Spawn(_)
-                | StmtKind::Wait { .. }
-                | StmtKind::Break
-                | StmtKind::Continue
-                | StmtKind::Pass
-                | StmtKind::Import(_)
-                | StmtKind::Extern { .. }
-                | StmtKind::Native(_)
-                | StmtKind::NativeStruct { .. }
-                | StmtKind::NativeEnum { .. }
-                | StmtKind::NativeType { .. }
-                | StmtKind::Assert { .. }
-                | StmtKind::Expr(_) => continue,
-            };
-            if !self.imported_modules.contains_key(name) && !variant_binds.contains(name) {
-                continue;
-            }
-            let imp = self.import_binds.get(name).copied().unwrap_or(s.span);
-            let later = if (imp.line, imp.col) > (s.span.line, s.span.col) {
-                imp
-            } else {
-                s.span
-            };
-            self.error(later, format!("'{name}' is already imported"));
-        }
     }
 
     /// Enter every variant import of this module into the import registry (TICKET-229). A name the
@@ -728,7 +667,6 @@ pub(super) struct DiagMark {
     /// something the rollback already undoes. Each field below is written during a body walk and is
     /// restored wholesale, never re-derived.
     /// A NEW `Checker` field written during a body walk must be added here in the same commit.
-    fn_reads: std::collections::HashSet<String>,
     /// TICKET-225 — the type-variable store (DEC-157): a walk binds vars and creates them.
     tyvars: super::tyvar::TyVarMark,
     hover_result: Option<(Ty, HoverKind, Option<String>)>,

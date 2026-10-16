@@ -110,10 +110,6 @@ impl Checker {
             return Ty::Unknown;
         };
         let diverges = self.resolution_diverges(&self.fn_resolution(name));
-        // W7-42r: this call site's arity/defaults/arg types are now fixed against the
-        // fn's signature, so a later module-scope `name := …` retypes the ONE slot it
-        // dispatches through (see `fn_reads`).
-        self.record_fn_read(name);
         // TICKET-186: keyword labels through a module slot bind only where
         // `labels_certain` says the slot holds this fn (K5).
         if let Some(named) = self

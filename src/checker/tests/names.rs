@@ -258,6 +258,9 @@ fn imported_const_cannot_be_redeclared() {
 #[test]
 fn module_export_grid() {
     const FO: &str = "fn f(a: int, b: int = 5) -> str:\n    return \"{a}{b}\"\n";
+    // A let re-binds a fn slot at the fn's type and arity only (a module slot's type is frozen,
+    // and a closure has no defaults), so the re-bound fn `F2` has none; the labels differ.
+    const F2: &str = "fn f(a: int, b: int) -> str:\n    return \"{a}{b}\"\n";
     const LET_F: &str = "f := fn(b: int, a: int) -> str: \"{a}{b}\"\n";
     const VF: &str = "fn f(a: int, ...rest: int) -> str:\n    return \"{a}\"\nf := fn(a: int, b: int) -> str: \"{a}{b}\"\n";
     const GF: &str = "fn idt[T](x: T) -> T:\n    return x\nidt := fn(x: int) -> int: x + 1\n";
@@ -268,16 +271,17 @@ fn module_export_grid() {
     const CO: &str = "Y: const int = 5\n";
     const PL: &str = "Y: int = 5\n";
     const VAL: &str = "need a binding that holds one known function";
+    const REDECL: &str = "cannot re-declare module-level binding";
     const COPY: &str = "is this task's copy";
     const WF: &str =
         "fn w(xs: List[int], out: Channel[int]):\n    xs.push(3)\n    out.send(xs.len())\n";
     const WN: &str = "fn w(xs: List[int], out: Channel[int]) -> int:\n    return xs.len()\nw := fn(xs: List[int], out: Channel[int]) -> int: wpush(xs)\nfn wpush(xs: List[int]) -> int:\n    xs.push(3)\n    return 0\n";
     const WL: &str = "protocol Zero:\n    fn zero() -> Self\nstruct N:\n    v: int\n\n    fn zero() -> N:\n        return N(v=0)\nfn mk[T: Zero](x: T) -> T:\n    return T.zero()\n";
     const RE_Y: &str = "cannot reassign 'Y' — it is declared const in module 'lib'";
-    let ft = format!("{FO}{LET_F}");
-    let lf = format!("{LET_F}{FO}");
+    let ft = format!("{F2}{LET_F}");
+    let lf = format!("{LET_F}{F2}");
     let sfl = format!("{SF}S := fn(m: int) -> int: m * 100\n");
-    let wo = format!("{WF}w := fn(xs: List[int], out: Channel[int]) -> int: xs.len()\n");
+    let wo = format!("{WF}w := fn(xs: List[int], out: Channel[int]): out.send(xs.len())\n");
     let wll = format!("{WL}mk := fn(x: N) -> N: N(v=1)\n");
     let amb = |x: &str| format!("keyword arguments through '{x}' are ambiguous");
     let konst = |x: &str| format!("cannot re-declare const binding '{x}'");
@@ -301,12 +305,9 @@ fn module_export_grid() {
         ("fn_then_let_positional", ft.clone(), "import lib\nimport f from lib\nprint(lib.f(1, 2))\nprint(f(1, 2))\n".into(), None),
         ("let_then_fn_qualified_kw", lf.clone(), "import lib\nprint(lib.f(a=1, b=2))\n".into(), Some(&amb_f)),
         ("let_then_fn_from_default", lf.clone(), "import f from lib\nprint(f(1))\n".into(), Some("expects 2 argument(s), got 1")),
-        ("variadic_then_let_two", VF.into(), "import lib\nprint(lib.f(1, 2))\n".into(), None),
-        ("variadic_then_let_qualified_three", VF.into(), "import lib\nprint(lib.f(1, 2, 3))\n".into(), Some("expects 2 argument(s), got 3")),
-        ("variadic_then_let_from_three", VF.into(), "import f from lib\nprint(f(1, 2, 3))\n".into(), Some("expects 2 argument(s), got 3")),
-        // Any error: the slot holds a non-generic fn.
-        ("generic_then_let_turbofish", GF.into(), "import lib\nprint(lib.idt[int](1))\n".into(), Some("")),
-        ("generic_then_let_plain", GF.into(), "import lib\nprint(lib.idt(1))\n".into(), None),
+        // A variadic or generic fn and a plain let are two types, so the home module rejects the let.
+        ("variadic_then_let", VF.into(), "import lib\nprint(lib.f(1, 2))\n".into(), Some(REDECL)),
+        ("generic_then_let", GF.into(), "import lib\nprint(lib.idt(1))\n".into(), Some(REDECL)),
         ("struct_fn_qualified_kw", SF.into(), "import lib\nprint(lib.S(n=2))\n".into(), None),
         ("struct_fn_let_qualified_kw", sfl.clone(), "import lib\nprint(lib.S(n=2))\n".into(), Some(&amb_s)),
         ("struct_let_fn_calls_slot", SL.into(), "import lib\nx: int = lib.S(2)\nprint(x)\n".into(), None),
@@ -332,7 +333,7 @@ fn module_export_grid() {
         ("write_new_qualified_spawn", WN.into(), par("import lib", "spawn lib.w(xs, out)"), None),
         ("write_new_from_spawn", WN.into(), par("import w from lib", "spawn w(xs, out)"), None),
         ("witness_fn_only_charges", WL.into(), "import lib\nfn g[T: lib.Zero](x: T) -> T:\n    return lib.mk(x)\nh := g\nprint(g(lib.N(v=5)).v)\n".into(), Some("cannot be used as a function value")),
-        ("witness_then_let_calls_slot", wll.clone(), "import lib\nfn g[T: lib.Zero](x: T) -> T:\n    return lib.mk(x)\nprint(g(lib.N(v=5)).v)\n".into(), Some("found T")),
+        ("witness_then_let", wll.clone(), "import lib\nfn g[T: lib.Zero](x: T) -> T:\n    return lib.mk(x)\nprint(g(lib.N(v=5)).v)\n".into(), Some(REDECL)),
     ];
     let mut wrong = Vec::new();
     for (name, lib, main, want) in &cells {

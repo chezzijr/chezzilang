@@ -3,7 +3,7 @@
 import module_export_slot_lib
 import f from module_export_slot_lib
 
-test fn rebound_variadic_slot_runs_the_final_fn():
+test fn rebound_fn_slot_runs_the_final_fn():
     assert module_export_slot_lib.f(1, 2) == "12"
     assert f(1, 2) == "12"
 

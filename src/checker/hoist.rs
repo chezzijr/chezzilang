@@ -11,20 +11,11 @@ impl Checker {
     pub(super) fn collect_names(&mut self, stmts: &[Stmt]) {
         for s in stmts {
             match &s.kind {
+                // A second declaration of a type name is reported by `GlobalBinding::clashes`.
                 StmtKind::Struct { name, .. } => {
-                    // Cross-kind name clash: a struct and an enum can't share a name (they'd both
-                    // register, the enum silently shadowed, and — sharing a `Name[args]` Display —
-                    // produce nonsense like "cannot assign Foo[int] to … Foo[int]"). Same-kind dups
-                    // are caught later in the resolve pass. A name an import binds is taken too.
-                    if self.enum_names.contains(name) || self.import_binds.contains_key(name) {
-                        self.error(s.span, format!("type '{name}' is already defined"));
-                    }
                     self.struct_names.insert(name.clone());
                 }
                 StmtKind::Enum { name, .. } => {
-                    if self.struct_names.contains(name) || self.import_binds.contains_key(name) {
-                        self.error(s.span, format!("type '{name}' is already defined"));
-                    }
                     self.enum_names.insert(name.clone());
                 }
                 // A file-backed native std module (`std/regex.chz`) checked STANDALONE as the ENTRY
@@ -40,13 +31,7 @@ impl Checker {
                 StmtKind::TypeAlias { name, ty, .. } => {
                     // Only keywords are reserved: an alias named after a builtin type shadows it in
                     // this module (`tests/shadowing_grid.rs`).
-                    if self.aliases.contains_key(name)
-                        || self.struct_names.contains(name)
-                        || self.enum_names.contains(name)
-                        || self.import_binds.contains_key(name)
-                    {
-                        self.error(s.span, format!("type '{name}' is already defined"));
-                    } else {
+                    if !self.aliases.contains_key(name) {
                         self.aliases.insert(name.clone(), ty.clone());
                         // TICKET-262: a width type describes the C boundary only, and an alias body
                         // expands at any use, so an alias body never carries one.
@@ -233,13 +218,6 @@ impl Checker {
                 self.validate_protocol_embeds(name, type_params, methods, embeds, s.span);
             }
         }
-        // extern fn (name, span) pairs, collected during the hoist loop and checked against the
-        // fully-built struct/variant/enum registries AFTER the loop (so a `struct S` declared *after*
-        // an `extern fn S` still collides — the check is order-independent).
-        // `mut` + the post-loop sweep are unix-only (only the `#[cfg(unix)]` arm pushes); on other
-        // targets extern is rejected wholesale, leaving this empty.
-        #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut extern_names: Vec<(String, Span)> = Vec::new();
         // Extern param/return marshallability is validated AFTER this loop (collected here), so a
         // struct passed/returned BY VALUE may be DECLARED AFTER the extern block: `self.structs`
         // (field info, which `assert_marshallable` inspects for a flat-scalar struct) is only fully
@@ -254,13 +232,8 @@ impl Checker {
                 StmtKind::Fn(decl) => {
                     // Only keywords are reserved: a fn named after a builtin fn or constructor (`ord`,
                     // `range`, `Range`) shadows it in this module; the name resolves to the user fn
-                    // first (`resolve::classify_ident`).
-                    if self.functions.contains_key(&decl.name) {
-                        self.error(
-                            s.span,
-                            format!("function '{}' is already defined", decl.name),
-                        );
-                    }
+                    // first (`resolve::classify_ident`). A second declaration of the name is
+                    // reported by `GlobalBinding::clashes`.
                     let sig = self.fn_sig(decl, s.span, None);
                     self.functions.insert(decl.name.clone(), sig);
                     // Same-module fn name (top-level `fn` only, NOT an import) — licenses the
@@ -276,21 +249,8 @@ impl Checker {
                     ..
                 } => {
                     // Only keywords are reserved: a struct named after a builtin type shadows it in
-                    // this module. A name an import binds is "already defined" in `collect_names`.
-                    //
-                    // A pre-seeded synthetic stdlib struct (`Match`/`Response`/`ProcResult`, always
-                    // present in `self.structs` under its bare key tagged `StructOrigin::Builtin` for
-                    // import-free field access) is NOT a real prior definition — a user `struct
-                    // Response` shadows it (the hoist insert below overwrites the seed with the user's
-                    // `User`-origin layout). Only a genuine User-origin entry is "already defined".
-                    let already_defined = !self.import_binds.contains_key(name)
-                        && self
-                            .structs
-                            .get(&self.bare_key(name))
-                            .is_some_and(|i| i.origin != StructOrigin::Builtin);
-                    if already_defined {
-                        self.error(s.span, format!("type '{name}' is already defined"));
-                    }
+                    // this module (the hoist insert below overwrites a pre-seeded stdlib layout). A
+                    // second declaration of the name is reported by `GlobalBinding::clashes`.
                     // The struct's type parameters are in scope across its field and method
                     // signatures (so `first: A` and `fn push(self, x: T)` resolve `A`/`T`).
                     let saved = self.enter_type_params(type_params);
@@ -396,9 +356,6 @@ impl Checker {
                     // resolves its variants here and across module boundaries. `enum_names`/
                     // `variant_owners` (bare-visibility + qualify-hint) stay bare.
                     let key = self.bare_key(name);
-                    if self.enums.contains_key(&key) {
-                        self.error(s.span, format!("type '{name}' is already defined"));
-                    }
                     // The enum's type parameters are in scope across its variant payloads (so a
                     // `Node(T, Tree[T])` resolves `T`). Validate each bound names a known protocol.
                     let saved = self.enter_type_params(type_params);
@@ -496,15 +453,8 @@ impl Checker {
                     // C-marshallable (int/float/bool/str, or void return).
                     #[cfg(unix)]
                     for ef in fns {
-                        // An extern fn named after a builtin shadows it, as a `fn` does. A collision
-                        // with this module's own struct or variant is checked after the loop.
-                        extern_names.push((ef.name.clone(), ef.span));
-                        if self.functions.contains_key(&ef.name) {
-                            self.error(
-                                ef.span,
-                                format!("function '{}' is already defined", ef.name),
-                            );
-                        }
+                        // An extern fn named after a builtin shadows it, as a `fn` does; a second
+                        // declaration of the name is reported by `GlobalBinding::clashes`.
                         // `owned_str` is a return-only extern marshalling form — license its
                         // `resolve_type` arm only while resolving THIS signature's params + return
                         // (and the harvested C signature below), then reset so a bare non-extern use
@@ -915,39 +865,6 @@ impl Checker {
                     sig.min_params =
                         crate::ast::min_callable_params(&m.params, !sig.witness_params.is_empty());
                 }
-            }
-        }
-        // Order-independent extern/registry collision sweep: a struct or enum variant registers a
-        // same-named constructor the backends resolve before a plain call, so an extern sharing that
-        // name is unreachable. Done after the loop so a `struct S`/`enum {Leaf}` declared *after* an
-        // `extern fn S`/`fn Leaf` still collides (the maps are fully built by now). `extern_names` is
-        // only populated on unix (the `#[cfg(unix)]` arm above); on other targets the extern was
-        // already rejected wholesale, so the sweep is a no-op.
-        for (name, span) in &extern_names {
-            // The predicate is the BARE-VISIBLE CTOR SET — exactly "what the backends resolve before
-            // a plain call" — which is `struct_names` (NOT `self.structs`: that map is keyed
-            // MODULE-SCOPED (`main::S`) on the graph/CLI path, so the old `structs.contains_key(name)`
-            // against the bare `extern_names` spelling was DEAD CODE there, and `seed_stdlib_structs`
-            // additionally parks UN-LICENSED stdlib layouts (`Match`/`Response`/…) in it, which would
-            // over-reject an extern whose owning std module was never imported). Same predicate the
-            // nested-fn collision guard uses. Plus enum *variant* names (`variant_owners`), the four
-            // prelude `Result`/`Option` variant names (a binder reservation of its own, kept until
-            // TICKET-228 removes those names from the surface). ENUMERATE the whole
-            // bare-visible ctor set here — a predicate that covers only SOME of its sources is the
-            // very partial-coverage class this sweep exists to close.
-            // NOT a collision: an enum/`Result`/`Option` *type* name (not callable in either engine,
-            // so `extern fn Foo` alongside `enum Foo` resolves to the extern, exactly as a plain
-            // `fn Foo` does), nor an un-imported stdlib layout name.
-            // The implicit prelude import (`Range`) is shadowed, not collided with.
-            let own_struct =
-                self.struct_names.contains(name) && !self.implicit_import_names.contains(name);
-            if own_struct || self.variant_owners.contains_key(name) {
-                self.error(
-                    *span,
-                    format!(
-                        "'{name}' already names a struct or variant and cannot be an extern fn"
-                    ),
-                );
             }
         }
         // Now every type of the module is inserted: discharge what the loop deferred, each in the

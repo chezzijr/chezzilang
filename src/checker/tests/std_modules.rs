@@ -191,7 +191,7 @@ fn path_from_import_still_reserves_the_name_against_a_user_struct() {
     // even though std.path now also has a same-named fn.
     entry_rejects(
         "import Path from std.path\nstruct Path:\n    x: int\nfn main():\n    print(1)\nmain()\n",
-        "type 'Path' is already defined",
+        "'Path' is already imported",
     );
 }
 
@@ -1208,10 +1208,10 @@ fn import_plus_same_name_struct_decl_rejected() {
     ] {
         let errs = check_entry(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("already defined")
+            errs.iter().any(|e| e.message.contains("already imported")
                 && e.message.contains(name)
                 && !e.message.contains("reserved")),
-            "expected `{name}` already-defined error, got: {errs:?}"
+            "expected `{name}` already-imported error, got: {errs:?}"
         );
     }
     // A whole-module import binds no bare name, so a local `struct Match` is its own type beside
@@ -1249,10 +1249,10 @@ fn import_alias_native_struct_same_name_ok() {
 // PARITY TARGET: the enum sibling arm already reports `already defined` for the same import
 // collision (it collides via `struct_names`) — pin it so the struct arm keeps matching it.
 #[test]
-fn import_plus_same_name_enum_still_already_defined() {
+fn import_plus_same_name_enum_rejected() {
     entry_rejects(
         "import Match from std.regex\nenum Match:\n    A\nfn main():\n    print(1)\nmain()\n",
-        "already defined",
+        "'Match' is already imported",
     );
 }
 

@@ -1,4 +1,5 @@
-fn f(a: int, ...rest: int) -> str:
+# A module slot's type is frozen at its first binding, so the let re-binds the fn at its type.
+fn f(a: int, b: int) -> str:
     return "old"
 f := fn(a: int, b: int) -> str: "{a}{b}"
 struct S:
