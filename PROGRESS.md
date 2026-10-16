@@ -86,15 +86,18 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
      `Deque`/`Heap`/`Counter` `Iterable`, the collection convention table, the U5 sibling gaps.
 2. **Group D, fact 11.** One `WireValue` visitor for `wire_summary`, `collect_core_gcrefs` and the
    `to_snap`/`to_wire` budget (row 93).
-3. **Group E.** Overflow fault labels in `consteval`, `vm/arith.rs` and `vm/shared_methods.rs` (row 61).
-4. **Group F, syntax.** Row 25 (waits on G5); top-level `return`; the empty enum; `g()?` in `defer:`
+3. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): `resolve_ty_ro_d` and
+   `resolve_type` resolve the same annotations; `src/checker/resolve_ctype.rs:89`, `:137`, `:145`, `:160`
+   say "mirrors". One resolver must call the other. Its own refactor unit, after TICKET-264.
+4. **Group E.** Overflow fault labels in `consteval`, `vm/arith.rs` and `vm/shared_methods.rs` (row 61).
+5. **Group F, syntax.** Row 25 (waits on G5); top-level `return`; the empty enum; `g()?` in `defer:`
    and `defer` in a generator (U11); a line break inside a hole (U8); the 1-tuple (U9); CRLF (U14);
    the exponential `.map[int](f)` chain (U17); `oo(x)??` (S2-3). Statuses in
    `docs/contributing/special-cases.md`.
-5. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
+6. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
    name (`:=`, `fn`, import) never share a name in one module, as Go does and as Rust does for a
    callable type (`struct E(i32);` + `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
-6. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+7. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 
