@@ -7,7 +7,7 @@
 **Carriers.** `T?` and `T!E` are ordinary enums that the prelude declares. User code writes the types
 `T?` / `T!E`, the values `x`, `?x`, `!e`, `None` and the patterns `?v`, `!e`, `None`, so patterns and
 exhaustiveness treat them like a user enum. Any module can import the variants of its own enum with
-`import Red, Green from Color` ([`syntax.md` §12 "Variant import"](../syntax/01-lexical-and-literals.md)).
+`import Red, Green from Color` ([`syntax.md` §12 "Variant import"](../syntax/16-imports.md)).
 - `T!E` has two params, and `T!` = `T!Error` (E defaults to the built-in `Error` protocol).
   Diagnostics print types in this sugar (`int?`, `str!IoErr`, `int!`, `None!E`).
 - `None` as a type means "returns nothing". A `None!E` fn (also written `!E`) succeeds by a bare
@@ -41,7 +41,7 @@ exhaustiveness treat them like a user enum. Any module can import the variants o
   truncates. An unknown type char or a type/value mismatch is reported before any output
   (runtime-prefixed; `check` does not catch it). A bare interpolated ternary works; parenthesize it to
   give it a spec (`{(if b: 1 else: 2):>5}`). One module (`src/fmtspec.rs`) parses and formats specs.
-  Full grammar in [`syntax.md` §10](../syntax/01-lexical-and-literals.md).
+  Full grammar in [`syntax.md` §10](../syntax/14-strings.md).
 - **Literal forms**: int (`42`, `0xFF`/`0b1010`/`0o17`, `_` separators); float (`3.14`, scientific
   `6.022e23`/`1e3`/`1.5e-9`; any exponent ⇒ float); str in `"…"` or `'…'` (same escapes and
   interpolation), also **triple-quoted** `"""…"""` / `'''…'''` (unescaped quotes allowed inside), with
@@ -74,7 +74,7 @@ exhaustiveness treat them like a user enum. Any module can import the variants o
 methods; static methods and static protocol requirements through a bound; the `Iterator[T]` /
 `Iterable[T]` protocols and `yield` generators; match guards + range patterns; slicing + indexing
 protocols (`xs[a..b]`, negative indexing, `Index`/`IndexSet`/`Slice`); concurrency and `defer`; an
-in-language test framework (`assert`, `test fn`, `chezzi test`, see [`syntax.md §9c`](../syntax/01-lexical-and-literals.md)).
+in-language test framework (`assert`, `test fn`, `chezzi test`, see [`syntax.md §9c`](../syntax/13-testing-and-entry.md)).
 Milestone history: [`PROGRESS.md`](../../../PROGRESS.md).
 
 **Non-goals (by design):** classes & inheritance (Chezzi is composition-only with structural
@@ -274,7 +274,7 @@ collection/`<params>`/`<argList>` productions in [`grammar.bnf`](../grammar.bnf)
 - **A bare discarded `T!E`/`T?`** (at module top level, inside a function, or inside a `spawn:`/`defer:`
   block) is thrown away at run time, in every position alike. `chezzi check` **warns** on exactly those
   positions (Rust's `unused_must_use`; `r := …` / `_ := …` are the escapes). See
-  [`syntax.md` §9](../syntax/01-lexical-and-literals.md) for the position table.
+  [`syntax.md` §9](../syntax/12-errors.md) for the position table.
 - `?` is valid at module top level (the runtime unwinds the propagated `!e`/`None` at the program
   boundary) and inside a `T!E`/`T?`-returning fn. A **None-returning fn (a `main` you write included)
   may not use `?`**: it would swallow the error.

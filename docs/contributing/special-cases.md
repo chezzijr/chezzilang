@@ -43,7 +43,7 @@ behaviour before a ticket can be written. Status as of 2026-10-16.
 | # | Rule | Removes | Status | Decision needed |
 |---|---|---|---|---|
 | U1 | A dedent ends a block expression; an `else` belongs to the statement whose header starts at its column | Family A of wave 23, S1-1, S1-2 | TICKET-249 (landed) | no (owner: indentation decides) |
-| U2 | A hook is the method that satisfies the builtin protocol; a declared type with methods is one kind (struct and enum alike) | Family D of wave 23, enum half-hooks, `List(s)` for a bounded parameter | TICKET-250 (in progress) | no |
+| U2 | A hook is the method that satisfies the builtin protocol; a declared type with methods is one kind (struct and enum alike) | Family D of wave 23, enum half-hooks, `List(s)` for a bounded parameter | TICKET-250 (done) | no |
 | U3 | A receiver is the first parameter of a method and nothing else | the `self` universal cast (P0) | TICKET-250 (note added) | no (owner: `self` is the special word) |
 | U4 | An un-hinted `?x` is a carrier from creation; a wrapper holds its operand | Families B and C of wave 23 | TICKET-248, TICKET-247 (landed) | no |
 | U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed) | decided, see below |

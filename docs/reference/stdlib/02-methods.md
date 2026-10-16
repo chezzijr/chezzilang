@@ -128,7 +128,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 
 > **Set operators.** `\| & - ^` on two `Set[T]` are union / intersection / difference /
 > symmetric-difference, identical to the methods above (`^` has no method form). Lists support `+`
-> (concat) and `*` (repeat); see [`syntax.md` §4](../syntax/01-lexical-and-literals.md).
+> (concat) and `*` (repeat); see [`syntax.md` §4](../syntax/03-operators.md).
 
 > **Cyclic keys fault (recoverably).** Map/Set membership and key-equality (`has`, `get`, `remove`,
 > `add`, `m[k]`, `in`, set algebra, and `List.contains`/`index_of`/`unique`/`dedup`) are *defined by*

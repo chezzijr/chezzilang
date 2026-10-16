@@ -15,9 +15,16 @@ fn read(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-/// The count a `**N open rows**` / `**N OPEN ROWS**` claim states, whatever its case.
+/// The count a `**N open rows**` / `**N OPEN ROWS**` claim states, whatever its case. A file holds
+/// exactly one claim: a merge that keeps two versions of the line would otherwise leave a stale
+/// second count that this test never reads.
 fn claimed(text: &str, path: &str) -> usize {
     let lower = text.to_lowercase();
+    assert_eq!(
+        lower.matches(" open rows**").count(),
+        1,
+        "{path}: must hold exactly one '**N open rows**' claim"
+    );
     let idx = lower
         .find(" open rows**")
         .unwrap_or_else(|| panic!("{path}: no '**N open rows**' claim found"));

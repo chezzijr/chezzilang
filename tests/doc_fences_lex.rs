@@ -48,6 +48,38 @@ fn every_reference_chapter_is_bundled() {
         }
     }
     assert!(chapters.len() > 20, "found only {chapters:?}");
+    // `chezzi docs` prints each topic's chapters in the order DOC_TOPICS lists them, so the list
+    // must group each folder and keep its file-name order.
+    let mut ordered = paths.clone();
+    ordered.sort();
+    let dirs: Vec<&str> = paths
+        .iter()
+        .map(|p| p.rsplit_once('/').unwrap().0)
+        .collect();
+    let mut grouped = dirs.clone();
+    grouped.dedup();
+    let mut unique = grouped.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        grouped.len(),
+        unique.len(),
+        "a topic's chapters are split up in DOC_TOPICS: {paths:?}"
+    );
+    for dir in &unique {
+        let in_dir: Vec<&String> = paths
+            .iter()
+            .filter(|p| p.starts_with(&format!("{dir}/")))
+            .collect();
+        let sorted: Vec<&String> = ordered
+            .iter()
+            .filter(|p| p.starts_with(&format!("{dir}/")))
+            .collect();
+        assert_eq!(
+            in_dir, sorted,
+            "{dir}: DOC_TOPICS lists chapters out of file-name order"
+        );
+    }
     let missing: Vec<&String> = chapters.iter().filter(|c| !paths.contains(c)).collect();
     assert!(
         missing.is_empty(),

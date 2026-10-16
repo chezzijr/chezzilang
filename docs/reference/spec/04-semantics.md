@@ -139,7 +139,7 @@ seam as any native fn. `extern` fns become ordinary module globals, so normal ca
 checking apply. The checker enforces **C-marshallability** on the resolved type, so a
 non-marshallable param is a compile error. The user surface (marshalling types, `owned_str`, `str?`,
 `ptr`, fixed-width integers, `float32`, structs by value, callbacks, varargs) is in
-[`syntax.md` §12b](../syntax/01-lexical-and-literals.md); the `load_*`/`store_*`/`alloc` builtins are in
+[`syntax.md` §12b](../syntax/17-ffi.md); the `load_*`/`store_*`/`alloc` builtins are in
 [`std.ffi`](../stdlib/06-native-network-ffi.md#stdffi).
 
 | Shipped | Notes |

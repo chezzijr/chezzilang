@@ -214,7 +214,7 @@ task's line is visible before its nursery joins).
 - **These rules cover the VM's own sink only.** Bytes that an FFI call writes to the descriptor itself
   (`extern "libc": fn puts`) are outside every guarantee here: not line-atomic against `print`, not
   unbuffered, not ordered with it, and invisible to the broken-pipe halt, so a `| head -1` loop of C
-  writes never faults. `ctypes` and `cgo` behave the same; see [`syntax.md` §12b](../syntax/01-lexical-and-literals.md).
+  writes never faults. `ctypes` and `cgo` behave the same; see [`syntax.md` §12b](../syntax/17-ffi.md).
 
 **Input contract (`read_line` / `read_all` / `read_char` / `input`).** stdin is **ONE source, shared
 by every task**, like Go's `os.Stdin` and Python's `sys.stdin`. Any task may read it (`spawn:`/

@@ -114,12 +114,13 @@ fn link_targets(text: &str) -> Vec<String> {
 }
 
 /// A target that is not a local doc link: a URL, or unfenced code such as `f[T](x)` or `xs[0](1)`.
-/// A local link is an `#anchor` or a path whose last segment has a `name.ext` file name.
+/// A local link is an `#anchor`, a directory path ending in `/`, or a path whose last segment has a
+/// `name.ext` file name.
 fn is_external(target: &str) -> bool {
     if target.contains("://") || target.starts_with("mailto:") {
         return true;
     }
-    if target.starts_with('#') {
+    if target.starts_with('#') || target.split('#').next().unwrap().ends_with('/') {
         return false;
     }
     let file = target.split('#').next().unwrap();
@@ -178,7 +179,6 @@ fn every_relative_link_resolves() {
 fn every_live_doc_stays_small() {
     let big: Vec<String> = live_docs()
         .iter()
-        .filter(|d| d.starts_with("docs"))
         .map(|d| (d, read(d).lines().count()))
         .filter(|(_, n)| *n > MAX_LINES)
         .map(|(d, n)| format!("{}: {n} lines", d.display()))
@@ -219,4 +219,14 @@ fn anchors_follow_the_github_slug_rules() {
     assert!(a.contains("6b-indexing--slicing"));
     assert!(a.contains("hello-world-1"));
     assert!(!a.contains("not-a-heading"));
+}
+
+#[test]
+fn directory_and_file_links_are_checked_and_code_is_not() {
+    assert!(!is_external("history/progress/"));
+    assert!(!is_external("../PROGRESS.md#status"));
+    assert!(!is_external("#anchor"));
+    assert!(is_external("https://example.com/a.md"));
+    assert!(is_external("1"));
+    assert!(is_external("..."));
 }

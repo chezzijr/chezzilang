@@ -9,8 +9,9 @@ to std. `import std.concurrency.collection` (or `as col`), or
 
 **Why over raw `RwShared`:** `get`/`read` copy the whole container on every access, raw `read`/`write`
 closures are verbose, and the **compound** mutations (insert-if-absent, increment a count) MUST happen
-inside a **single** `write` lock or they race. The collections read and write ONE entry at a time and
-build in the correct single-lock idiom.
+inside a **single** `write` lock or they race. The collections' keyed reads and writes touch ONE entry
+and build in the correct single-lock idiom. A walk (`for_each_entry`, `fold_entries`) copies the
+collection once.
 
 **Airlock sharing:** a struct whose only field is an `RwShared` crosses the `spawn`/`parallel:` airlock
 as a **shared `Arc` handle, NOT a deep copy**, so the parent sees a spawned task's mutation after the
@@ -59,7 +60,7 @@ and inserts are O(1) expected (the stored map keeps the heap map's hash index). 
 | `.contains(key)` | `(K) -> bool` | **concurrent read**. |
 | `.len()` | `() -> int` | **concurrent read**. |
 | `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the probe and the insert run under ONE update guard with no user closure, so a concurrent `remove` cannot slip between them. Returns the existing value, or `default` if it was absent. |
-| `.for_each_entry(f)` | `(fn(K, V) -> R) -> None` | Calls `f` once per entry, one entry in the caller's heap at a time. |
+| `.for_each_entry(f)` | `(fn(K, V) -> R) -> None` | Calls `f` once per entry present when the walk starts. The walk copies the whole map once (one snapshot), so a change `f` makes is not visited. |
 | `.fold_entries(init, f)` | `(R, fn(R, K, V) -> R) -> R` | Reduces the entries; `R` is inferred from `init`. |
 | `.snapshot()` | `() -> Map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
 

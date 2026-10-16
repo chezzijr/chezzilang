@@ -47,7 +47,7 @@ fn main():
 |--------|-----------|
 | `submit(f)` | **start** a detached, side-effect-only job at once (results leave via a `Channel`, like `spawn`); returns immediately without waiting for it. **Faults** on an executor that no longer accepts work: after its own `shutdown()`/`shutdown_now()` (`submit on a shut-down Executor (it no longer accepts work)`), or — because the inherited cancel chain is sticky — after the job that CREATED it was cancelled (`submit on an Executor whose creating job was cancelled`) |
 | `submit_result(f)` | like `submit`, and returns a sealed `Channel[T!]` with the outcome ([§5b](02-channel.md#5b-stdconcurrencytask--result-handles-for-executor-work)) |
-| `shutdown()` | **graceful** — stop accepting new work, then **wait** for the submitted work (every job runs on an ordinary fault; a hard halt is a separate kill switch, below) |
+| `shutdown()` | **graceful** — stop accepting new work, then **wait** for the submitted work (a handle job's fault does not stop its siblings; a fire-and-forget job's fault ends the run, see [Faults and the drain contract](#faults-and-the-drain-contract)) |
 | `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point (a bare CPU loop with no back-edge, a syscall already in the kernel) still finishes. A job **sleeping, waiting a timer, or parked in a nested `Executor` join IS ended**, and so is a task of a nursery the job opened that is parked on a channel or in a socket `accept`/`read`/`write`/`connect`. It reaches jobs of a NESTED executor too |
 
 - **`defer` is the lifetime knob.** Bind the owner's reaping to any scope with `defer ex.shutdown()` (a
@@ -111,10 +111,20 @@ settling its handle. Grid: `tests/executor_stop_grid.rs`.
   is the report.
 - **A handle job** (`submit_result`, `submit_task`) never faults by itself: its fault is its handle's
   `!e`, and `shutdown()` raises no job fault.
-- **Every submitted job runs.** A faulting job costs its own result, never a sibling's work (Python's
+- **A handle job's fault costs only its own result.** Its siblings still run (Python's
   `ThreadPoolExecutor`, Java's `ExecutorService`, Go's `errgroup`, none of which abort siblings by
-  default). A non-terminating sibling therefore still blocks `shutdown()`: if one job faults and another
-  never reaches a cancellation point, `shutdown()` waits for it.
+  default). A non-terminating sibling therefore still blocks `shutdown()`.
+- **A fire-and-forget job's fault stops the siblings with the run.** A held sibling never starts:
+
+  ```chezzi
+  ex := Executor(1)
+  ex.submit(bad)      # faults: index 5 out of bounds
+  ex.submit(slow)     # never runs; "sibling ran" is not printed
+  ex.shutdown()
+  ```
+
+  Output: `runtime error (...): index 5 out of bounds (len 1)`, exit 1. Use `submit_result` when a
+  sibling must still run after a fault.
 - **Want the siblings to stop?** Thread a `std.cancel.Token` through the closures and poll
   `tok.cancelled()` ([§6e](05-cancel.md#6e-stdcancel--cooperative-cancellation--timeouts)) — the
   same split Go uses (`errgroup` + `context`), and the reason there is no abort flag on the Executor.

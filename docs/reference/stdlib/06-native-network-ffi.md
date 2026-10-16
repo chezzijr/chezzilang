@@ -168,7 +168,7 @@ itself realloc/free the buffer.
 > **The contract covers stream output too.** A C function that writes stdout writes the file descriptor
 > directly, so its bytes do not interleave with `print` and the broken-pipe halt cannot see them: a
 > `chezzi run x.chz | head -1` loop of C writes never faults. `ctypes` and `cgo` do the same; the C
-> function's own return value is your only error channel. See [`syntax.md` §12b](../syntax/01-lexical-and-literals.md).
+> function's own return value is your only error channel. See [`syntax.md` §12b](../syntax/17-ffi.md).
 
 Sort a Chezzi list with libc `qsort` (alloc + `store_*` + a callback comparator + `load_*`):
 
