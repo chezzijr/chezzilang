@@ -294,21 +294,19 @@ Every compound form rebinds the name, so a `const List[int]` rejects `xs += ys` 
   is a **parse error** on a parameter and on a `:=`/destructuring binding. An explicit type is required
   (`const` sits in the type slot).
 - **No laundering via re-declaration.** A live const cannot be re-declared in the **same scope** —
-  `PI := 9.0` or a second `PI: float = 9.0` after `PI: const float = 3.14` is a **type error**, so
-  the guarantee can't be dropped by swapping `=` for `:=`. A genuine **inner-scope** shadow (a fresh
+  `PI := 9.0` or a second `PI: float = 9.0` after `PI: const float = 3.14` is a **type error**
+  (at module level the plain bind-once error, `variable 'PI' is already defined`), so the guarantee
+  can't be dropped by swapping `=` for `:=`. A genuine **inner-scope** shadow (a fresh
   local of the same name in a nested block/fn) is still fine — it leaves the outer const untouched.
 - **Across modules.** A `const` module global (and a native constant like `math.pi`/`e`/`inf`/`nan`)
   carries its const-ness to importers: `import PI from m; PI = x` and the qualified `m.PI = x` both
   report *"it is declared const in module 'm'"* rather than the generic snapshot/field message. (Note
   that *any* imported global is already read-only — a from-imported value is a snapshot copy — so the
-  const marking sharpens the message, it doesn't add the restriction.) A from-imported const cannot be
-  re-declared at module scope either: `import PI from m; PI := 9.0` is the same error as a local
-  re-declaration (an inner-scope shadow stays fine). A module slot declared more than once (`fn f`
-  plus `f := ...`) is called through by its final type, so keyword, defaulted and variadic calls
-  through `m.f` / `import f from m` bind no stale labels (TICKET-196). A keyword call through a
-  let-only closure of another module (`g := fn(a, b)` in `m`, then `m.g(a=1, b=2)`) is rejected with
-  "need a binding that holds one known function": the checker cannot see whether `m` rebinds `g`, so
-  it declines (before this, the same call checked OK and then failed to compile with
+  const marking sharpens the message, it doesn't add the restriction.) No imported name can be
+  re-declared at module scope: `import PI from m; PI := 9.0` is `'PI' is already imported` (an
+  inner-scope shadow stays fine). A keyword call through a let-only closure of another module
+  (`g := fn(a, b)` in `m`, then `m.g(a=1, b=2)`) is rejected with "need a binding that holds one
+  known function": the checker cannot see whether `m` reassigns `g` (`g = …`), so it declines (before this, the same call checked OK and then failed to compile with
   `internal: no call plan recorded`). The same call inside `m` is accepted.
 
 #### The blank identifier `_`
@@ -357,45 +355,36 @@ Measured, silent (never warns), and why:
 
 #### Declaring one name twice at module level
 
-A module has two namespaces, as in Rust: a **type** (`struct`, `enum`, `type`, `protocol`) and a
-**value** (`fn`, `extern` fn, `:=`). A type and a value of one name coexist, and a call reaches the
-value (a module `fn S` beside `struct S` is its constructor, see §7a). A second
+A module binds each name once, as Go (`x redeclared in this block`) and Rust (E0428, E0255; no
+top-level `let`, and a `static` twice is E0428) do. A top-level `:=` or typed let is a declaration;
+`=` reassigns. A module has two namespaces, as in Rust: a **type** (`struct`, `enum`, `type`,
+`protocol`) and a **value** (`fn`, `extern` fn, `:=`). A type and a value of one name coexist, and a
+call reaches the value (a module `fn S` beside `struct S` is its constructor, see §7a). A second
 declaration in a namespace that a prior one binds is an error, in either source order:
-
-| prior binding | `fn` / `extern` fn | `struct` / `enum` / `type` / `protocol` | top-level `:=` |
-|---|---|---|---|
-| fn, extern fn, value import | ✗ already defined / imported | ✓ both live | ✓ same type, ✗ other type |
-| type, type import | ✓ both live | ✗ already defined / imported | ✓ both live (an expression reads the value) |
-| whole-module import | ✗ already imported | ✗ already imported | ✗ other type |
-| variant import (a constant) | ✗ already imported | ✗ already imported | ✗ const |
-| top-level `:=` | ✓ same type, ✗ other type | ✓ both live | ✓ same type, ✗ other type |
-| builtin (`ord`, `str`) | ✓ shadows | ✓ shadows | ✓ shadows |
-
-A binding inside a fn body (a param, a `:=`, a nested `fn`) shadows every row. Go rejects every
-top-level pair (`x redeclared in this block`), Rust rejects each same-namespace pair (E0428, E0255),
-and Python re-binds every pair; Chezzi keeps Python's same-type re-binding of a value.
-`tests/redeclaration_grid.rs` runs every cell.
-
-#### Re-declaring an ordinary binding — rebind anywhere, retype only in a fn
-
-Re-declaring a name with `:=` (or a second typed let) is legal, but what it *means* differs by scope,
-and the asymmetry is deliberate:
 
 ```chezzi
 x := 1
-x := 2          # ✓ same type — Python-style late binding, the SAME storage slot
-x := "9"        # ✗ type error: module-level binding 'x' re-declared with a different type
+x := 2          # ✗ variable 'x' is already defined
+x = 2           # ✓ reassignment
 
 fn f():
     y := 1
-    y := "9"    # ✓ a fn-local re-declare is a FRESH binding (Rust-style shadowing)
+    y := "9"    # ✓ a fn-local re-declare is a FRESH binding (Rust's `let` shadowing)
 ```
 
-- **A module global is one storage slot, and its type is frozen at the first declaration.** Both `x`s
-  above are the same slot, so code on *either* side of the re-declaration is typed against the old
-  type: a closure written before it (`f := fn() -> int: x`) would hand a `str` out of a fn declared
-  `-> int`, and a `fn` that *writes* the slot (`fn setx(): x = 42`) would put an `int` into what is now
-  a `str`. Rebinding the value is fine; **changing the type is a type error**.
+| prior binding | `fn` / `extern` fn / `:=` | `struct` / `enum` / `type` / `protocol` |
+|---|---|---|
+| fn, extern fn, top-level `:=`, value import | ✗ already defined / imported | ✓ both live |
+| type, type import | ✓ both live (an expression reads the value) | ✗ already defined / imported |
+| whole-module or variant import | ✗ already imported | ✗ already imported |
+| builtin (`ord`, `str`) | ✓ shadows | ✓ shadows |
+
+A binding inside a fn or block body (a param, a `:=`, a nested `fn`, a top-level `if:` body) shadows
+every row. Where Go and Rust split, Chezzi follows Rust: a fn-local re-declare is a fresh shadow,
+and a type and a value of one name coexist. `tests/redeclaration_grid.rs` runs every cell.
+
+#### What a module-level binding means
+
 - **Module scope and initialization order (TICKET-183).** A function body (a top-level `fn`, a
   method, a nested `fn`, a closure) sees every top-level binding, including one declared *below* it,
   as Go's package scope and Python's module globals do. It sees the binding's type, whether it is
@@ -427,79 +416,25 @@ fn f():
     the error is at `z := None`. Write `z: str? = None`; the body above then checks against `str?`.
   - A module-level `return` is an error: `return` then `x := 5` at top level is
     `'return' outside a function` (CPython's `SyntaxError`). A `return` belongs in a fn body.
-  - One name declared both `const` and plain at module scope is an error, in either order:
-    `PI := 1.0` then `PI: const float = 2.0` is `'PI' is declared both const and plain at module
-    scope` (JavaScript's `let`/`const` rule). A module global is one storage slot.
-  - Keyword arguments through a module name declared more than once (a `fn` and a `:=`, an import
-    and a `:=`, two `:=`) are an error in code that may run after a later declaration: a fn or
-    closure body, a `defer:` block, a `spawn:` block. Positional calls stay legal. A top-level
-    statement runs in source order, so it binds the declaration above it.
-
-    ```chezzi
-    fn f(a: int, b: int) -> int:
-        return a * 10 + b
-    fn call() -> int:
-        return f(a=1, b=2)   # ✗ keyword arguments through 'f' are ambiguous
-    print(f(a=1, b=2))       # ✓ 12: this statement runs before the let below
-    f := fn(b: int, a: int) -> int: a * 10 + b
-    ```
-  - A let that shares its name with a `fn`, `extern`, `native` declaration or an import keeps the
-    lexical view: the hoisted binding owns the name until the let runs. A let named like a type, a
-    builtin or a builtin ctor (`P := fn..` beside `struct P`, `ord := fn..`) is an ordinary global: a
-    body sees it in both orders, and a call before the let runs faults as any other global's does.
+  - A name a module binds is bound once, so no body can see two declarations of it, and a
+    keyword call through a module `fn` binds that fn's labels.
+  - A let named like a type, a builtin or a builtin ctor (`P := fn..` beside `struct P`,
+    `ord := fn..`) is an ordinary global: a body sees it in both orders, and a call before the let
+    runs faults as any other global's does.
 - **A fn-local (or block-local) re-declare is a genuinely fresh binding**, so it may change type and a
   closure made earlier keeps the *old* one — the same as Rust's `let` shadowing. This includes a
   binding inside a top-level `if:`/`for:`/`while:` body: those are inner scopes, not the module scope.
-- **A re-declaration never fills in a type** (TICKET-238). The first declaration must be complete on
-  its own line: `x := []` then `x := [1]`, `y := {}` then `y := {"a": 1}`, and `z := None` then
-  `z := ?1` are each an error at the FIRST line (``cannot infer the element type of `x` ``); write
-  `x: List[int] = []`. A retype is rejected as before: `x: List[int] = []` then `x := 42`, and
-  `x := 1` then `x := None`, both fire (the second would hand a `None` out of a closure declared
-  `-> int`).
-- **Narrowing counts as a change too** — `v: Any = 1` then `v := "s"`, or `s: Shape = Circle(1)` then
-  `s := Circle(2)`, are rejected even though nothing *reads* a lie. The slot's declared type is what is
-  frozen, and an earlier writer typed against `Any`/`Shape` can still store a non-`str`/non-`Circle`.
-- **Escapes:** **re-annotate** at the declared type (`s: Shape = Circle(2)` and `v: Any = "s"` are both
-  accepted — the annotation restates the frozen type instead of changing it), **rename**, or move the
-  pair into a `fn`.
-- **Imports are hoisted, so source position does not matter.** The import is the slot's first binding
-  wherever it sits: `import COUNT from lib` then `COUNT := "s"`, and `x := 1` then `import COUNT as x
-  from lib` (with a `str` `COUNT`), are both retypes and both rejected (Go: `x redeclared in this
-  block`). At the import's type both orders stay legal.
-- **The from-import hand-back (`import COUNT from lib` then `COUNT := COUNT + 1`) keeps working, at the
-  same type only.** Handing the name back at a *different* type is a retype of the same slot; there is
-  no annotation escape (`COUNT: int = 0` declares the same `int`), so **rename**.
-- **A destructuring `let` is covered too, per name.** `x := 1` then `x, y := ("s", 2)` is rejected —
-  the destructure writes the same one global slot, so it was the same lie (measured before the fix:
-  check-clean, then a `str` out of a closure declared `-> int`). A name that is **fresh** in the tuple
-  is a first declaration and may be any type (`x := 1` / `x, y := (2, "s")` is fine), and — like the
-  single-name let — a fn-local or block-scope destructure is a fresh shadow and may retype. A
-  destructure also cannot **un-const** a prior `X: const int = 1`, even at the same type.
-- **A name repeated inside one destructure is legal and the LAST value wins.** `a, a := 1, 2` binds
-  `a` to `2`, as CPython does; Go rejects it (`a repeated on left side of :=`) and Rust rejects the
-  equivalent pattern (E0416). Chezzi follows CPython here on purpose: `x := 1` then `x := 2` in the
-  same scope is already a rebind, so rejecting the one-statement form would make `:=` inconsistent
-  with itself (`docs/gaps.md` W13-23, decided 2026-09-16).
-- **A top-level `fn` shares the slot too, and its type is frozen at the fn's signature.** `fn helper()`
-  and `helper := 3` are the same storage slot, and the `fn` is defined into it *before any statement
-  runs*, so the let is rejected in either source order and whether or not anything reads `helper`.
-  The same holds for an `extern` fn and a from-imported fn. A let at the fn's own
-  type (`helper := fn() -> int: 9`) is late binding through the slot and stays legal.
-
-  ```chezzi
-  import f from lib          # f: fn(int) -> int
-  f := 1                     # ✗ cannot re-declare module-level binding 'f' with a different type
-  ```
-- **Optional arity counts as part of the signature here.** A re-declaration may not be *stricter* than
-  what the previous binding promised: `fn helper(a: int = 77)` (callable as `helper()`) re-bound to
-  `fn(a: int) -> int` is rejected, because a call compiled to omit the argument would hand the deleted
-  function's default to the new one. The other direction — the new binding accepting *more* omissions —
-  keeps every existing call valid and is allowed.
+- **The first declaration must be complete on its own line** (TICKET-238): `x := []`,
+  `y := {}` and `z := None` are each an error (``cannot infer the element type of `x` ``); write
+  `x: List[int] = []`.
+- **A name is bound once per target and per parameter list.** `a, a := (1, 2)`, `for a, a in xs`
+  and `[a for a, a in xs]` are `identifier 'a' is bound more than once in this pattern`, the same
+  error a match pattern `(a, a)` gives; `fn g(a: int, a: int)` and `fn(a: int, a: int)` are
+  `identifier 'a' is bound more than once in this parameter list`. Go and Rust both reject these
+  (`a repeated on left side of :=`, `duplicate argument a`; E0416, E0415). `_` may repeat.
 - **Reading an imported name *above* its own `import` is an error.** Imports are hoisted, so the name
-  is bound from line 1 whatever line the `import` sits on — which let a closure written above it be
-  typed against the import and then be refilled by a later `let` (`f := fn() -> str: x` / `x := 1` /
-  `import COUNT as x from lib.st` checked clean and printed `1` out of a `fn() -> str`). So the read
-  itself is rejected: *"'x' is used before its `import` on line 3"* — move the `import` above the line
+  is bound from line 1 whatever line the `import` sits on, and a read above the `import` reads like a
+  use before the definition. So the read itself is rejected: *"'x' is used before its `import` on line 3"* — move the `import` above the line
   that uses it. This also rejects `print(COUNT)` above `import COUNT from lib`, which the hoist makes
   technically work, because both ancestors refuse it (CPython raises `NameError`, Go will not even
   parse an `import` placed after a declaration) and it reads as a use-before-definition. A
@@ -513,9 +448,7 @@ fn f():
 - **A deferred read counts as a read** — a top-level `fn` body that reads an imported name above the
   `import` is rejected too, and here the ancestors split (both measured): CPython *accepts* it, since
   the body runs after the import; Go still refuses, since it takes no late `import` at all. Chezzi
-  follows Go, because the hoist makes the sound and the unsound case indistinguishable **at the read
-  site**: the same read is fine until some later `let` refills the slot, and nothing there tells the
-  two apart. Move the `import` up; do not expect this to be loosened to "immediate reads only".
+  follows Go: one rule for every read above an `import`, immediate or deferred. Move the `import` up.
 
 ### Closure capture — uniformly by reference
 
@@ -4950,9 +4883,9 @@ import Red from Color            # error: 'Red' is already imported (one bind pe
   it is a variant import only when none does. `import V from a.b` (a dotted path) is always a module.
 - **Collisions.** A variant import and a same-module `fn`, `struct`, `enum`, alias or protocol of
   the same name, or a second import of the name, is `'V' is already imported` (Rust: E0255 / E0252).
-- **Shadowing.** A local binding of the same name shadows the variant. A variant import is a
-  constant, so a top-level `Red := …` is `cannot re-declare const binding 'Red'` in either order
-  (Rust E0530): a pattern `Red` and an expression `Red` always mean the same variant.
+- **Shadowing.** A local binding of the same name shadows the variant. A top-level `Red := …` is
+  `'Red' is already imported` in either order (Rust E0530): a pattern `Red` and an expression `Red`
+  always mean the same variant.
 - **`T?` and `T!E` are prelude enums.** The prelude declares the two carrier enums and keeps
   their names to itself. User code writes the types `T?` and `T!E`, the values `x`, `?x`, `!e`
   and `None`, and the patterns `?v`, `!e` and `None`. The enums cannot be named, qualified or

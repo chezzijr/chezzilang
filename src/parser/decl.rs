@@ -632,6 +632,19 @@ impl Parser {
                     seen_variadic = true;
                 }
                 let name = self.expect_ident()?;
+                // A name is bound once per list (Go: `duplicate argument`; Rust: E0415). A second
+                // `self` is never first, so the callers' `self` rule reports it.
+                if !is_blank_name(&name)
+                    && !crate::ast::is_self_name(&name)
+                    && params.iter().any(|p: &Param| p.name == name)
+                {
+                    return Err(ParseError {
+                        message: format!(
+                            "identifier '{name}' is bound more than once in this parameter list"
+                        ),
+                        span: name_span,
+                    });
+                }
                 let ty = if self.eat(&Token::Colon) {
                     // `const` is a binding modifier (locals + module globals), never valid on a
                     // parameter — reject it explicitly rather than letting `parse_type` fail obscurely.

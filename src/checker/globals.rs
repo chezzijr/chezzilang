@@ -41,16 +41,20 @@ enum Namespace {
 }
 
 impl DeclKind {
-    /// Does this declaration bind `ns`? A let binds the value namespace too, but a second binding
-    /// of a let's name is judged by `reject_redeclare` on its type, so the clash rule skips lets.
+    /// Does this declaration bind `ns`?
     fn declares(self, ns: Namespace) -> bool {
         match (self, ns) {
-            (DeclKind::Fn | DeclKind::Hoisted, Namespace::Value) => true,
+            (
+                DeclKind::Let | DeclKind::ConstLet | DeclKind::Fn | DeclKind::Hoisted,
+                Namespace::Value,
+            ) => true,
             (DeclKind::Type(_), Namespace::Type) => true,
             (DeclKind::Import(f), Namespace::Value) => f.value,
             (DeclKind::Import(f), Namespace::Type) => f.ty,
-            (DeclKind::Let | DeclKind::ConstLet, _)
-            | (DeclKind::Fn | DeclKind::Hoisted, Namespace::Type)
+            (
+                DeclKind::Let | DeclKind::ConstLet | DeclKind::Fn | DeclKind::Hoisted,
+                Namespace::Type,
+            )
             | (DeclKind::Type(_), Namespace::Value) => false,
         }
     }
@@ -59,11 +63,8 @@ impl DeclKind {
     fn word(self) -> &'static str {
         match self {
             DeclKind::Type(w) => w,
-            DeclKind::Let
-            | DeclKind::ConstLet
-            | DeclKind::Fn
-            | DeclKind::Hoisted
-            | DeclKind::Import(_) => "function",
+            DeclKind::Let | DeclKind::ConstLet => "variable",
+            DeclKind::Fn | DeclKind::Hoisted | DeclKind::Import(_) => "function",
         }
     }
 }
@@ -78,11 +79,12 @@ impl DeclKind {
 ///   `pop_scope` at every depth.
 #[derive(Debug, Clone, Default)]
 pub(super) struct GlobalBinding {
-    /// Every top-level declaration of the name's slot, in source order, with its statement span.
-    pub(super) decls: Vec<(DeclKind, Span)>,
+    /// Every top-level declaration of the name's slot, in source order, with its statement span
+    /// and the span of the name itself (a destructure's element; `clashes` points at it).
+    pub(super) decls: Vec<(DeclKind, Span, Span)>,
     /// Every top-level `struct`/`enum`/`type`/`protocol` of the name. A type holds no slot, so
     /// only `clashes` reads these.
-    pub(super) types: Vec<(DeclKind, Span)>,
+    pub(super) types: Vec<(DeclKind, Span, Span)>,
     /// `seed_module_globals` typed it before any body was walked (TICKET-183).
     pub(super) seeded: bool,
     /// The walk has reached its first let: top-level statements see it from here on.
@@ -128,7 +130,7 @@ pub(super) fn kw_deny_msg(name: Option<&str>, deny: KwDeny) -> String {
 
 impl GlobalBinding {
     pub(super) fn is_const(&self) -> bool {
-        self.decls.iter().any(|(k, _)| match k {
+        self.decls.iter().any(|(k, _, _)| match k {
             DeclKind::ConstLet => true,
             DeclKind::Import(f) => f.is_const,
             DeclKind::Let | DeclKind::Fn | DeclKind::Hoisted | DeclKind::Type(_) => false,
@@ -138,30 +140,35 @@ impl GlobalBinding {
     pub(super) fn imported_redeclared(&self) -> bool {
         self.decls
             .iter()
-            .any(|(k, _)| matches!(k, DeclKind::Import(f) if f.redeclared))
+            .any(|(k, _, _)| matches!(k, DeclKind::Import(f) if f.redeclared))
     }
     pub(super) fn has_let(&self) -> bool {
         self.decls
             .iter()
-            .any(|(k, _)| matches!(k, DeclKind::Let | DeclKind::ConstLet))
+            .any(|(k, _, _)| matches!(k, DeclKind::Let | DeclKind::ConstLet))
     }
     pub(super) fn first_let(&self) -> Option<Span> {
         self.decls
             .iter()
-            .find(|(k, _)| matches!(k, DeclKind::Let | DeclKind::ConstLet))
-            .map(|(_, s)| *s)
+            .find(|(k, _, _)| matches!(k, DeclKind::Let | DeclKind::ConstLet))
+            .map(|(_, s, _)| *s)
     }
     pub(super) fn redeclared(&self) -> bool {
         self.decls.len() > 1
     }
-    /// The one "already defined" rule for a module's top level (Go's `redeclared in this block`,
-    /// Rust's E0428/E0255, per namespace): a second declaration of a name in a namespace a prior
-    /// one binds is an error at the later of the two. Two imports are `note_import_bind`'s ("is
-    /// already imported"), a let is `reject_redeclare`'s, and an import no one wrote (`Span::NOWHERE`,
-    /// the prelude's) is shadowed like a builtin.
+    /// The one "already defined" rule for a module's top level, per namespace: a name is bound
+    /// once (Go: `x redeclared in this block`; Rust: E0428 / E0255, and a `static` twice is E0428),
+    /// so a second declaration in a namespace a prior one binds is an error at the later of the
+    /// two. A top-level `:=` is a declaration; `=` reassigns. Two imports are `note_import_bind`'s
+    /// ("is already imported"); an import no one wrote (`Span::NOWHERE`, the prelude's) is shadowed
+    /// like a builtin. A name repeated in one target is a parse error (`reject_repeated_binders`).
     fn clashes(&self, name: &str) -> Vec<(Span, String)> {
-        let mut all: Vec<(DeclKind, Span)> =
-            self.decls.iter().chain(&self.types).copied().collect();
+        let mut all: Vec<(DeclKind, Span)> = self
+            .decls
+            .iter()
+            .chain(&self.types)
+            .map(|&(kind, _, at)| (kind, at))
+            .collect();
         all.sort_by_key(|(_, s)| (s.line, s.col));
         let mut out = Vec::new();
         for ns in [Namespace::Value, Namespace::Type] {
@@ -174,12 +181,11 @@ impl GlobalBinding {
                     prior = Some(kind);
                     continue;
                 };
+                // The message names the PRIOR binding: the one this declaration collides with.
                 let msg = match (first, kind) {
                     (DeclKind::Import(_), DeclKind::Import(_)) => continue,
-                    (DeclKind::Import(_), _) | (_, DeclKind::Import(_)) => {
-                        format!("'{name}' is already imported")
-                    }
-                    _ => format!("{} '{name}' is already defined", kind.word()),
+                    (DeclKind::Import(_), _) => format!("'{name}' is already imported"),
+                    _ => format!("{} '{name}' is already defined", first.word()),
                 };
                 out.push((span, msg));
             }
@@ -200,7 +206,7 @@ impl Checker {
     pub(super) fn collect_module_globals(&mut self, stmts: &[Stmt], imports: &[ResolvedImport]) {
         self.globals.clear();
         for s in stmts {
-            let mut add = |name: &str, kind: DeclKind, span: Span| {
+            let mut add = |name: &str, kind: DeclKind, span: Span, at: Span| {
                 if !crate::ast::is_blank_name(name) {
                     let g = self.globals.entry(name.to_string()).or_default();
                     let list = match kind {
@@ -211,7 +217,7 @@ impl Checker {
                         | DeclKind::Import(_)
                         | DeclKind::Hoisted => &mut g.decls,
                     };
-                    list.push((kind, span));
+                    list.push((kind, span, at));
                 }
             };
             match &s.kind {
@@ -223,11 +229,11 @@ impl Checker {
                     } else {
                         DeclKind::Let
                     };
-                    for n in &target.binder_names() {
-                        add(n, kind, s.span);
+                    for (n, at) in target.binders() {
+                        add(n, kind, s.span, at);
                     }
                 }
-                StmtKind::Fn(d) => add(&d.name, DeclKind::Fn, s.span),
+                StmtKind::Fn(d) => add(&d.name, DeclKind::Fn, s.span, s.span),
                 StmtKind::Import(Import::Module { path, alias, .. }) => {
                     let name = alias
                         .clone()
@@ -237,7 +243,7 @@ impl Checker {
                         ty: true,
                         ..ImportFacts::default()
                     };
-                    add(&name, DeclKind::Import(facts), s.span);
+                    add(&name, DeclKind::Import(facts), s.span, s.span);
                 }
                 StmtKind::Import(Import::From { names, .. }) => {
                     let home = imports
@@ -257,6 +263,7 @@ impl Checker {
                             alias.as_ref().unwrap_or(member),
                             DeclKind::Import(facts),
                             s.span,
+                            s.span,
                         );
                     }
                 }
@@ -275,19 +282,24 @@ impl Checker {
                             alias.as_ref().unwrap_or(member),
                             DeclKind::Import(facts),
                             s.span,
+                            s.span,
                         );
                     }
                 }
                 StmtKind::Extern { fns, .. } => {
                     for f in fns {
-                        add(&f.name, DeclKind::Hoisted, f.span);
+                        add(&f.name, DeclKind::Hoisted, f.span, f.span);
                     }
                 }
-                StmtKind::Native(d) => add(&d.name, DeclKind::Hoisted, s.span),
+                StmtKind::Native(d) => add(&d.name, DeclKind::Hoisted, s.span, s.span),
                 StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
-                | StmtKind::TypeAlias { name, .. } => add(name, DeclKind::Type("type"), s.span),
-                StmtKind::Protocol { name, .. } => add(name, DeclKind::Type("protocol"), s.span),
+                | StmtKind::TypeAlias { name, .. } => {
+                    add(name, DeclKind::Type("type"), s.span, s.span)
+                }
+                StmtKind::Protocol { name, .. } => {
+                    add(name, DeclKind::Type("protocol"), s.span, s.span)
+                }
                 StmtKind::Assign { .. }
                 | StmtKind::If { .. }
                 | StmtKind::For { .. }
@@ -309,30 +321,7 @@ impl Checker {
                 | StmtKind::Expr(_) => {}
             }
         }
-        // Module const-ness is decided here, once per slot: a module global is one storage slot,
-        // so a `const` declaration next to any other declaration of the name is an error, in
-        // either order (owner decision 2026-09-30, JavaScript's let/const rule). This runs outside
-        // every speculative walk, so it needs no `inferring_ret` gate.
-        let mut reports: Vec<(Span, String)> = self
-            .globals
-            .iter()
-            .filter(|(_, g)| g.is_const() && g.redeclared())
-            .map(|(name, g)| {
-                let first_const = match g.decls[0].0 {
-                    DeclKind::ConstLet => true,
-                    DeclKind::Import(f) => f.is_const,
-                    DeclKind::Let | DeclKind::Fn | DeclKind::Hoisted | DeclKind::Type(_) => {
-                        false
-                    }
-                };
-                let msg = if first_const {
-                    format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)")
-                } else {
-                    format!("'{name}' is declared both const and plain at module scope — a module global is one storage slot, so it cannot be const at one line and rebindable at another (declare it once)")
-                };
-                (g.decls[1].1, msg)
-            })
-            .collect();
+        let mut reports: Vec<(Span, String)> = Vec::new();
         reports.extend(self.globals.iter().flat_map(|(name, g)| g.clashes(name)));
         reports.sort_by_key(|(s, _)| (s.line, s.col));
         for (span, msg) in reports {

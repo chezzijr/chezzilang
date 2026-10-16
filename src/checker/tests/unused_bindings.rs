@@ -781,9 +781,10 @@ fn a_fn_body_resolves_a_type_named_global_in_both_orders() {
         &format!("{ORD_BIND}{G_ORD}y: str = g()\n"),
         "cannot assign int to variable of type str",
     );
-    // (5) a top-level `fn f` keeps its slot: a later `f := ..` does not replace it in a body.
-    ok(
+    // (5) a top-level `fn f` and a later `f := ..` are two bindings of one name.
+    rejects(
         "fn f() -> int:\n    return 1\nfn g() -> int:\n    return f()\nf := fn() -> int: 2\nprint(g())\n",
+        "function 'f' is already defined",
     );
 }
 
@@ -793,9 +794,14 @@ fn a_fn_body_resolves_a_type_named_global_in_both_orders() {
 #[test]
 fn a_fn_or_type_named_like_a_module_import_is_rejected() {
     const LIB: &str = "fn h(n: int) -> str:\n    return \"L{n}\"\nstruct P:\n    x: int\n";
-    let reject_at = |main: &str, name: &str, line: u32| {
+    // The error lands on the later of the two and names the prior one.
+    let reject_at = |main: &str, name: &str, line: u32, prior_import: bool| {
         let errs = check_files(&[("main.chz", main), ("lib.chz", LIB)]);
-        let want = format!("'{name}' is already imported");
+        let want = if prior_import {
+            format!("'{name}' is already imported")
+        } else {
+            format!("'{name}' is already defined")
+        };
         assert!(
             errs.iter()
                 .any(|e| e.message.contains(&want) && e.span.line == line),
@@ -812,12 +818,13 @@ fn a_fn_or_type_named_like_a_module_import_is_rejected() {
     for (decl, name) in decls {
         let lines = decl.lines().count() as u32;
         // Import first: the declaration (line 2) is the later one.
-        reject_at(&format!("import lib as f\n{decl}print(1)\n"), name, 2);
+        reject_at(&format!("import lib as f\n{decl}print(1)\n"), name, 2, true);
         // Declaration first: the import is the later one.
         reject_at(
             &format!("{decl}import lib as f\nprint(1)\n"),
             name,
             lines + 1,
+            false,
         );
     }
     // The un-aliased spelling binds the last path segment.
@@ -825,8 +832,14 @@ fn a_fn_or_type_named_like_a_module_import_is_rejected() {
         "import lib\nfn lib(a: int) -> int:\n    return a\nprint(1)\n",
         "lib",
         2,
+        true,
     );
-    reject_at("struct lib:\n    x: int\nimport lib\nprint(1)\n", "lib", 3);
+    reject_at(
+        "struct lib:\n    x: int\nimport lib\nprint(1)\n",
+        "lib",
+        3,
+        false,
+    );
     // A from-imported type is not a module bind.
     files_ok(&[
         (
@@ -1457,8 +1470,9 @@ fn module_return_in_top_level_block_reports_once() {
 /// any error, `Some(s)` = an error containing `s`.
 #[test]
 fn t186_module_global_record_grid() {
-    const MIX: &str = "is declared both const and plain";
-    const AMB: &str = "keyword arguments through 'f' are ambiguous";
+    // A module name is bound once (`GlobalBinding::clashes`), so every cell that declares `f` or
+    // `PI` twice is that error, whatever reads it.
+    const DUP: &str = "is already defined";
     const RET: &str = "'return' outside a function";
     let f = "fn f(a: int, b: int) -> int:\n    return a * 10 + b\n";
     let l1 = "f := fn(a: int, b: int) -> int: a * 10 + b\n";
@@ -1473,28 +1487,26 @@ fn t186_module_global_record_grid() {
         ("c04", "fn w():\n    xs = [\"a\"]\nxs := []\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
         ("c05", "xs := []\nfn w():\n    xs = [\"a\"]\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
         ("c06", "xs := []\nfn w():\n    xs = [\"a\"]\nxs := []\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
-        ("c07", "PI := 2.0\nfn bump():\n    PI = 3.0\nPI: const float = 3.14\nbump()\nprint(PI)\n".into(), Some(MIX)),
-        ("c20", "PI := 1.0\nPI: const float = 2.0\nprint(PI)\n".into(), Some(MIX)),
-        ("c08", "PI: const float = 3.14\nPI := 2.0\nprint(PI)\n".into(), Some("cannot re-declare const binding 'PI'")),
+        ("c07", "PI := 2.0\nfn bump():\n    PI = 3.0\nPI: const float = 3.14\nbump()\nprint(PI)\n".into(), Some(DUP)),
+        ("c20", "PI := 1.0\nPI: const float = 2.0\nprint(PI)\n".into(), Some(DUP)),
+        ("c08", "PI: const float = 3.14\nPI := 2.0\nprint(PI)\n".into(), Some(DUP)),
         ("c09", "fn bump():\n    PI = 3.0\nPI: const float = 3.14\nbump()\nprint(PI)\n".into(), Some("cannot reassign const binding 'PI'")),
         ("c10", "PI: const float = 3.14\nfn bump():\n    PI = 3.0\nbump()\nprint(PI)\n".into(), Some("cannot reassign const binding 'PI'")),
-        ("c11", "PI: const float = 1.0\nPI: const float = 2.0\nprint(PI)\n".into(), Some("cannot re-declare const binding 'PI'")),
-        ("c12", format!("{f}fn call() -> int:\n    return f(a=1, b=2)\n{l2}print(call())\n"), Some(AMB)),
-        ("c13", format!("{f}x := call()\n{l2}fn call() -> int:\n    return f(a=1, b=2)\nprint(x)\n"), Some(AMB)),
-        ("c14", format!("{l1}fn call() -> int:\n    return f(a=1, b=2)\n{l2}print(call())\n"), Some(AMB)),
-        ("c15", format!("{f}fn call() -> int:\n    return f(1, 2)\n{l2}print(call())\n"), None),
+        ("c11", "PI: const float = 1.0\nPI: const float = 2.0\nprint(PI)\n".into(), Some(DUP)),
+        ("c12", format!("{f}fn call() -> int:\n    return f(a=1, b=2)\n{l2}print(call())\n"), Some(DUP)),
+        ("c13", format!("{f}x := call()\n{l2}fn call() -> int:\n    return f(a=1, b=2)\nprint(x)\n"), Some(DUP)),
+        ("c14", format!("{l1}fn call() -> int:\n    return f(a=1, b=2)\n{l2}print(call())\n"), Some(DUP)),
+        ("c15", format!("{f}fn call() -> int:\n    return f(1, 2)\n{l2}print(call())\n"), Some(DUP)),
         ("c16", format!("{f}fn call() -> int:\n    return f(a=1, b=2)\nprint(call())\n"), None),
-        ("c22", format!("{f}print(f(a=1, b=2))\n{l2}"), None),
-        ("c23", format!("{f}{l2}print(f(a=1, b=2))\n"), None),
-        ("c24", format!("{l1}{l2}print(f(a=1, b=2))\n"), Some(AMB)),
-        ("c25", format!("{l1}{l2}fn call() -> int:\n    return f(a=1, b=2)\nprint(call())\n"), Some(AMB)),
-        ("c26", format!("{f}defer print(f(a=1, b=2))\n{l2}print(0)\n"), None),
-        // Owner note 2026-09-30: a closure, a top-level `defer:` block and a `spawn:` block run
-        // after later declarations; a `parallel:` body runs in place.
-        ("c27", format!("{l1}g := fn() -> int: f(a=1, b=2)\n{l2}print(g())\n"), Some(AMB)),
-        ("c28", format!("{f}defer:\n    print(f(a=1, b=2))\n{l2}"), Some(AMB)),
-        ("c29", format!("{f}spawn:\n    print(f(a=1, b=2))\n{l2}"), Some(AMB)),
-        ("c30", format!("{f}parallel:\n    print(f(a=1, b=2))\n{l2}"), None),
+        ("c22", format!("{f}print(f(a=1, b=2))\n{l2}"), Some(DUP)),
+        ("c23", format!("{f}{l2}print(f(a=1, b=2))\n"), Some(DUP)),
+        ("c24", format!("{l1}{l2}print(f(a=1, b=2))\n"), Some(DUP)),
+        ("c25", format!("{l1}{l2}fn call() -> int:\n    return f(a=1, b=2)\nprint(call())\n"), Some(DUP)),
+        ("c26", format!("{f}defer print(f(a=1, b=2))\n{l2}print(0)\n"), Some(DUP)),
+        ("c27", format!("{l1}g := fn() -> int: f(a=1, b=2)\n{l2}print(g())\n"), Some(DUP)),
+        ("c28", format!("{f}defer:\n    print(f(a=1, b=2))\n{l2}"), Some(DUP)),
+        ("c29", format!("{f}spawn:\n    print(f(a=1, b=2))\n{l2}"), Some(DUP)),
+        ("c30", format!("{f}parallel:\n    print(f(a=1, b=2))\n{l2}"), Some(DUP)),
         ("c17", "return\nx := 5\n".into(), Some(RET)),
         ("c18", "if true:\n    return\nx := 5\n".into(), Some(RET)),
         ("c19", "fn f():\n    return\nf()\n".into(), None),

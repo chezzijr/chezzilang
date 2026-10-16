@@ -594,65 +594,6 @@ impl Checker {
     }
 }
 
-/// The FEWEST arguments a call through this value may pass — `params.len()` unless the underlying
-/// declaration's trailing parameters carry defaults the CALLEE fills. `0` for a non-function (never
-/// reached: only [`fn_min_arity_grew`]'s `true` arm leads here).
-pub(super) fn min_arity(ty: &Ty) -> usize {
-    match ty {
-        Ty::Func { params, labels, .. } => labels.min_or(params.len()),
-        Ty::Int
-        | Ty::Float
-        | Ty::Bool
-        | Ty::Str
-        | Ty::Bytes
-        | Ty::ByteArray
-        | Ty::Nil
-        | Ty::List(_)
-        | Ty::Map(..)
-        | Ty::Set(_)
-        | Ty::BuiltinFn { .. }
-        | Ty::Tuple(_)
-        | Ty::Struct(..)
-        | Ty::Enum(..)
-        | Ty::Param(_)
-        | Ty::Result(..)
-        | Ty::Option(_)
-        | Ty::Channel(_)
-        | Ty::Shared(_)
-        | Ty::Atomic(_)
-        | Ty::AtomicInt
-        | Ty::RwShared(_)
-        | Ty::Executor
-        | Ty::Socket
-        | Ty::Listener
-        | Ty::Writer
-        | Ty::Reader
-        | Ty::Ptr
-        | Ty::Width(_)
-        | Ty::Protocol(..)
-        | Ty::Module(_)
-        | Ty::Unknown
-        | Ty::Var(_) => 0,
-    }
-}
-
-/// DIRECTIONAL — the new binding is STRICTER than the previous one: it demands MORE arguments than
-/// the previous binding promised. `FnLabels`'s `PartialEq` is deliberately always-`true`
-/// (`ty.rs:178-182`), so two `Ty::Func`s differing only in optional arity are EQUAL and
-/// `prev != declared` cannot see this — yet a call site compiled against the old, lower minimum omits
-/// arguments the new binding never declared a default for, and the callee prologue then fills them
-/// from the REPLACED function's defaults (measured: `fn helper(a: int = 77)` re-bound to
-/// `fn(a: int) -> int: a * 2` printed `154`).
-///
-/// The reverse direction must stay LEGAL: a LOOSER new binding (min ≤ the old min) still accepts
-/// every call the previous binding promised, so nothing compiled against it breaks. A symmetric test
-/// here would reject that sound program — the mistake this guard's family has been mis-cut with
-/// three times. `min_or` is the existing directional idiom (`ty.rs:505`, `proto.rs:1115`).
-pub(super) fn fn_min_arity_grew(prev: &Ty, declared: &Ty) -> bool {
-    matches!((prev, declared), (Ty::Func { .. }, Ty::Func { .. }))
-        && min_arity(declared) > min_arity(prev)
-}
-
 /// Does the SYNTACTIC type `ty` mention the type-parameter name `t` anywhere? A plain occurs-check
 /// over the AST type — no resolution, so it is usable before/independently of `resolve_type`. Read by
 /// [`Checker::ty_param_in_sig`] and by [`Checker::member_call_forwards_a_witness`], which asks it of a

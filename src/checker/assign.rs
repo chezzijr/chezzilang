@@ -25,33 +25,18 @@ impl Checker {
     /// The one declare policy for the leaves of a binding target (`:=`, `for`, comprehension, wait
     /// arm), each with the type `bind_subpattern` collected for it.
     pub(super) fn declare_target_leaves(&mut self, leaves: &[(String, Span, Ty)], stmt_span: Span) {
-        let names: Vec<String> = leaves.iter().map(|(name, _, _)| name.clone()).collect();
-        // These `declare`s hit the SAME storage slots the single-name let does, so they owe
-        // the same two carve-outs — per name, at that name's own span. An unproven leaf carries
-        // `Unknown`: the const branch does not skip it, the retype branch does.
-        // Run every check BEFORE any `declare`, so each name is judged against the binding as
-        // it stood before this statement — and skip a name a LATER element rebinds, because a
-        // repeated name (`x, x := (1, "s")`) is one slot written twice with no code in
-        // between: only the last element can ever be read, so the earlier one is a transient
-        // the program cannot observe (CPython prints the last, measured). Judging it fired on
-        // the sound `x := "a"` / `x, x := (1, "b")`; judging only the FIRST occurrence would
-        // instead miss the real retype in `x := 1` / closure `-> int` / `x, x := (2, "s")`.
-        // TICKET-142 (W14-32): a `_` element is the blank identifier — never declared.
-        // TICKET-186: a name whose first let this is, and whose element refines its seed, is
-        // not re-declared (`refine_first_let`); a retype of the seed is judged as before.
-        let refines: Vec<bool> = names
+        // Each name is bound once per target (`reject_repeated_binders`, parser). Every check runs
+        // BEFORE any `declare`, so each name is judged against the binding as it stood before this
+        // statement. TICKET-142 (W14-32): a `_` element is the blank identifier, never declared.
+        // TICKET-186: a name whose first let this is, and whose element refines its seed, is not
+        // re-declared (`refine_first_let`).
+        let refines: Vec<bool> = leaves
             .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                !names[i + 1..].contains(name)
-                    && self
-                        .first_let_merge(name, &leaves[i].2, stmt_span)
-                        .is_some()
-            })
+            .map(|(name, _, ty)| self.first_let_merge(name, ty, stmt_span).is_some())
             .collect();
-        for (i, name) in names.iter().enumerate() {
-            if !names[i + 1..].contains(name) && !refines[i] {
-                self.reject_redeclare(name, &leaves[i].2, leaves[i].1);
+        for (i, (name, name_span, _)) in leaves.iter().enumerate() {
+            if !refines[i] {
+                self.reject_redeclare(name, *name_span);
             }
         }
         for (i, (name, name_span, ty)) in leaves.iter().enumerate() {
@@ -59,16 +44,7 @@ impl Checker {
             // not an `Expr` the probe visits; record its tuple-element type at its own span
             // (no-op unless a probe is armed → zero overhead on normal checks).
             self.hover_record_at(*name_span, ty, HoverKind::Local, None);
-            // An earlier occurrence of a refined name is a transient no code observes.
-            let refined_later = names[i + 1..].contains(name)
-                && names
-                    .iter()
-                    .rposition(|n| n == name)
-                    .is_some_and(|j| refines[j]);
-            if refined_later
-                || (refines[i]
-                    && self.refine_first_let(name, ty.clone(), stmt_span, BindSite::Other))
-            {
+            if refines[i] && self.refine_first_let(name, ty.clone(), stmt_span, BindSite::Other) {
                 continue;
             }
             self.declare(name, ty.clone());

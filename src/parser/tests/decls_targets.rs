@@ -1579,3 +1579,33 @@ fn i64_min_literal_folds_to_int_min() {
         other => panic!("expected Match, got {other:?}"),
     }
 }
+
+#[test]
+fn a_name_is_bound_once_per_target_and_parameter_list() {
+    // Go (`a repeated on left side of :=`, `duplicate argument a`) and Rust (E0416, E0415) agree.
+    for src in [
+        "a, a := (1, 2)\n",
+        "a, (b, a) := (1, (2, 3))\n",
+        "for a, a in xs:\n    pass\n",
+        "ys := [a for a, a in xs]\n",
+    ] {
+        let e = parse_err(src);
+        assert_eq!(
+            e.message, "identifier 'a' is bound more than once in this pattern",
+            "{src:?}"
+        );
+    }
+    for src in [
+        "fn g(a: int, a: int):\n    pass\n",
+        "f := fn(a: int, a: int): 1\n",
+    ] {
+        let e = parse_err(src);
+        assert_eq!(
+            e.message, "identifier 'a' is bound more than once in this parameter list",
+            "{src:?}"
+        );
+    }
+    // `_` may repeat in both.
+    parse_ok("_, _ := (1, 2)\n");
+    parse_ok("fn g(_: int, _: int):\n    pass\n");
+}

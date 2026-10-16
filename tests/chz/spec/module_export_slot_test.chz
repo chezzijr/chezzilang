@@ -1,13 +1,12 @@
-# TICKET-196: a module exports one record per slot. A slot declared more than once is called
-# through its final value from another module (CPython gives the same four values).
+# TICKET-196: a module exports one record per slot, and an importer calls it through that slot.
 import module_export_slot_lib
 import f from module_export_slot_lib
 
-test fn rebound_fn_slot_runs_the_final_fn():
+test fn a_let_slot_runs_its_closure():
     assert module_export_slot_lib.f(1, 2) == "12"
     assert f(1, 2) == "12"
 
-test fn rebound_struct_slot_calls_the_slot():
+test fn a_value_beside_a_struct_is_the_call():
     assert module_export_slot_lib.S(2) == 200
 
 test fn single_fn_keeps_labels_and_defaults():

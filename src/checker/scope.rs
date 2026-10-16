@@ -21,7 +21,7 @@ impl Checker {
         // (with `certain_fn` set), never `sig.types` (an extern fn is not a type, so it must not
         // enter the ctor-shadowing path).
         for (name, g) in &self.globals {
-            let exported = g.decls.iter().any(|(k, _)| {
+            let exported = g.decls.iter().any(|(k, _, _)| {
                 matches!(
                     k,
                     globals::DeclKind::Fn

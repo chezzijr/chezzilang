@@ -847,9 +847,8 @@ fn grid() -> Vec<Cell> {
 /// A default read of a struct-body binder (an earlier field default, or a method) is declined.
 const CLASS_BODY: &str = "is bound in the body of";
 
-/// TICKET-201 (family N3): what a bare name denotes at this point. Each cell is judged against
-/// CPython 3.14.7 (Rust for divergence): after a top-level `:=` rewrites a `fn` slot, every later
-/// reader sees the new value, not the declaration.
+/// TICKET-201 (family N3): what a bare name denotes at this point. A module binds a name once (Go
+/// and Rust), so a top-level `:=` of a `fn`'s or an import's name is a clash, whatever reads it.
 fn n3_cells() -> Vec<Cell> {
     let f = "fn f(a: int, b: int) -> str:\n    return \"f a={a} b={b}\"\nfn o(b: int, a: int) -> str:\n    return \"o a={a} b={b}\"\n";
     let c = "count := 0\nfn f() -> int:\n    count = count + 1\n    return 1\nfn o() -> int:\n    return 2\n";
@@ -864,14 +863,14 @@ fn n3_cells() -> Vec<Cell> {
         cell(
             "n3/labels/fn_then_let",
             &format!("{f}f := o\ng := f\nprint(g(a=1, b=2))\n"),
-            prints("o a=1 b=2"),
+            Expect::Rejects("is already defined"),
         ),
         cell(
             "n3/labels/fn_then_closure",
             &format!(
                 "{f}f := fn(b: int, a: int) -> str: \"c a={{a}} b={{b}}\"\ng := f\nprint(g(a=1, b=2))\n"
             ),
-            prints("c a=1 b=2"),
+            Expect::Rejects("is already defined"),
         ),
         Cell {
             name: "n3/labels/import_then_let".to_string(),
@@ -880,31 +879,31 @@ fn n3_cells() -> Vec<Cell> {
                 "fn f(a: int, b: int) -> str:\n    return \"f a={a} b={b}\"\n".to_string(),
                 "import f from lib\nfn o(b: int, a: int) -> str:\n    return \"o a={a} b={b}\"\nf := o\ng := f\nprint(g(a=1, b=2))\n".to_string(),
             ),
-            expect: prints("o a=1 b=2"),
+            expect: Expect::Rejects("is already imported"),
         },
         cell(
             "n3/labels/body_alias_of_redeclared",
             &format!(
                 "{f}f := o\nfn use() -> str:\n    g := f\n    return g(a=1, b=2)\nprint(use())\n"
             ),
-            Expect::Rejects(FN_VALUE_KW),
+            Expect::Rejects("is already defined"),
         ),
         cell(
             "n3/defaults/alias_after_let",
             "fn f(a: int, b: int = 2, c: int = 3) -> str:\n    return \"f a={a} b={b} c={c}\"\nfn o(a: int, c: int = 30, b: int = 20) -> str:\n    return \"o a={a} b={b} c={c}\"\nf := o\ng := f\nprint(g(1, c=9))\n",
-            prints("o a=1 b=20 c=9"),
+            Expect::Rejects("is already defined"),
         ),
         cell(
             "n3/defaults/body_direct_redeclared",
             "fn f(a: int, b: int = 2) -> str:\n    return \"f a={a} b={b}\"\nfn o(a: int, b: int = 20) -> str:\n    return \"o a={a} b={b}\"\nfn use() -> str:\n    return f(1)\nf := o\nprint(use())\n",
-            prints("o a=1 b=20"),
+            Expect::Rejects("is already defined"),
         ),
         cell(
             "n3/diverge/import_then_let",
             &format!(
                 "import exit from std.os\nexit := fn(c: int): print(\"fake {{c}}\")\n{div}print(f(-1) + 1)\n"
             ),
-            Expect::Rejects("can fall off the end"),
+            Expect::Rejects("is already imported"),
         ),
         cell(
             "n3/diverge/import",
@@ -916,24 +915,24 @@ fn n3_cells() -> Vec<Cell> {
             &format!(
                 "import exit from std.os\nexit, n := fn(c: int): print(\"fake {{c}}\"), 0\n{div}print(f(-1) + 1)\n"
             ),
-            Expect::Rejects("can fall off the end"),
+            Expect::Rejects("is already imported"),
         ),
         cell(
             "n3/writes/spawn_in_body_redeclared",
             &format!("{c}{run_spawn}f := o\nrun()\nprint(count)\n"),
-            prints("0"),
+            Expect::Rejects("is already defined"),
         ),
         cell(
             "n3/writes/summary_edge_redeclared",
             &format!("{c}fn run() -> int:\n    return f()\nf := o\nspawn:\n    run()\nprint(count)\n"),
-            prints("0"),
+            Expect::Rejects("is already defined"),
         ),
         cell(
             "n3/writes/spawn_in_body_writer",
             &format!(
                 "count := 0\nfn f() -> int:\n    return 1\nfn o() -> int:\n    count = count + 1\n    return 2\n{run_spawn}f := o\nrun()\nprint(count)\n"
             ),
-            Expect::Rejects("is this task's copy"),
+            Expect::Rejects("is already defined"),
         ),
         cell(
             "n3/writes/spawn_in_body_decl",
@@ -945,7 +944,7 @@ fn n3_cells() -> Vec<Cell> {
         cell(
             "n3/turbofish/body_above_redeclared",
             "fn id[T](x: T) -> T:\n    return x\nfn use() -> str:\n    return id[str](\"a\")\nid := fn(x: int) -> int: x + 1\nprint(use())\n",
-            Expect::Rejects("cannot re-declare module-level binding 'id'"),
+            Expect::Rejects("is already defined"),
         ),
         cell(
             "n3/turbofish/hoisted",

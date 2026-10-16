@@ -238,28 +238,14 @@ fn imported_rebound_fn_denies_keyword_call_from_import() {
     );
 }
 
-/// TICKET-196 K6x: an imported const cannot be re-declared in the importer.
-#[test]
-fn imported_const_cannot_be_redeclared() {
-    files_reject(
-        &[
-            ("lib.chz", "Y: const int = 5\n"),
-            ("main.chz", "import Y from lib\nY := 7\nprint(Y)\n"),
-        ],
-        "cannot re-declare const binding 'Y'",
-    );
-}
-
 /// TICKET-196 Family D2: a module exports ONE record per slot (`ModuleSig::members`). Every read path
 /// of another module's name (qualified call, from-import call, qualified/from-import value, `defer` /
-/// `spawn` / `spawn:` call forms, turbofish member, generic caller) x every declaration shape reads
-/// the slot's final type, and labels / defaults / variadic / type params / witnesses / write summary
-/// only from a name declared once as a fn. Each cell's same-module twin is pinned by DEC-186's cells.
+/// `spawn` / `spawn:` call forms, turbofish member, generic caller) reads labels / defaults /
+/// variadic / type params / witnesses / write summary from the one declaration. A module that binds
+/// a value name twice is rejected at home (`GlobalBinding::clashes`), so no importer sees two.
 #[test]
 fn module_export_grid() {
     const FO: &str = "fn f(a: int, b: int = 5) -> str:\n    return \"{a}{b}\"\n";
-    // A let re-binds a fn slot at the fn's type and arity only (a module slot's type is frozen,
-    // and a closure has no defaults), so the re-bound fn `F2` has none; the labels differ.
     const F2: &str = "fn f(a: int, b: int) -> str:\n    return \"{a}{b}\"\n";
     const LET_F: &str = "f := fn(b: int, a: int) -> str: \"{a}{b}\"\n";
     const VF: &str = "fn f(a: int, ...rest: int) -> str:\n    return \"{a}\"\nf := fn(a: int, b: int) -> str: \"{a}{b}\"\n";
@@ -271,69 +257,47 @@ fn module_export_grid() {
     const CO: &str = "Y: const int = 5\n";
     const PL: &str = "Y: int = 5\n";
     const VAL: &str = "need a binding that holds one known function";
-    const REDECL: &str = "cannot re-declare module-level binding";
+    const DUP: &str = "is already defined";
+    const IMP: &str = "is already imported";
     const COPY: &str = "is this task's copy";
     const WF: &str =
         "fn w(xs: List[int], out: Channel[int]):\n    xs.push(3)\n    out.send(xs.len())\n";
-    const WN: &str = "fn w(xs: List[int], out: Channel[int]) -> int:\n    return xs.len()\nw := fn(xs: List[int], out: Channel[int]) -> int: wpush(xs)\nfn wpush(xs: List[int]) -> int:\n    xs.push(3)\n    return 0\n";
     const WL: &str = "protocol Zero:\n    fn zero() -> Self\nstruct N:\n    v: int\n\n    fn zero() -> N:\n        return N(v=0)\nfn mk[T: Zero](x: T) -> T:\n    return T.zero()\n";
     const RE_Y: &str = "cannot reassign 'Y' — it is declared const in module 'lib'";
-    let ft = format!("{F2}{LET_F}");
-    let lf = format!("{LET_F}{F2}");
-    let sfl = format!("{SF}S := fn(m: int) -> int: m * 100\n");
-    let wo = format!("{WF}w := fn(xs: List[int], out: Channel[int]): out.send(xs.len())\n");
-    let wll = format!("{WL}mk := fn(x: N) -> N: N(v=1)\n");
-    let amb = |x: &str| format!("keyword arguments through '{x}' are ambiguous");
-    let konst = |x: &str| format!("cannot re-declare const binding '{x}'");
     let par = |i: &str, c: &str| {
         format!(
             "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\n{i}\nfn main():\n    xs := [1]\n    out := Channel[int](8)\n    parallel:\n        {c}\n    print(xs)\nmain()\n"
         )
     };
-    let (amb_f, amb_s, konst_y, konst_pi) = (amb("f"), amb("S"), konst("Y"), konst("pi"));
     let cells: Vec<(&str, String, String, Option<&str>)> = vec![
         ("fn_only_all_paths", FO.into(), "import lib\nimport f from lib\nprint(lib.f(a=1, b=2))\nprint(f(b=2, a=1))\nprint(lib.f(1))\nprint(f(1))\nh := lib.f\nprint(h(a=1))\n".into(), None),
-        ("fn_then_let_qualified_kw", ft.clone(), "import lib\nprint(lib.f(a=1, b=2))\n".into(), Some(&amb_f)),
-        ("fn_then_let_from_kw", ft.clone(), "import f from lib\nprint(f(a=1, b=2))\n".into(), Some(&amb_f)),
-        ("fn_then_let_defer_kw", ft.clone(), "import lib\nfn g():\n    defer lib.f(a=1, b=2)\ng()\n".into(), Some(&amb_f)),
-        ("fn_then_let_spawn_kw", ft.clone(), "import f from lib\nfn g():\n    spawn f(a=1, b=2)\ng()\n".into(), Some(&amb_f)),
-        ("fn_then_let_qualified_default", ft.clone(), "import lib\nprint(lib.f(1))\n".into(), Some("expects 2 argument(s), got 1")),
-        ("fn_then_let_from_default", ft.clone(), "import f from lib\nprint(f(1))\n".into(), Some("expects 2 argument(s), got 1")),
-        ("fn_then_let_qualified_value_kw", ft.clone(), "import lib\nh := lib.f\nprint(h(a=1, b=2))\n".into(), Some(VAL)),
-        ("fn_then_let_from_value_kw", ft.clone(), "import f from lib\nh := f\nprint(h(a=1, b=2))\n".into(), Some(VAL)),
-        ("fn_then_let_qualified_value_default", ft.clone(), "import lib\nh := lib.f\nprint(h(1))\n".into(), Some("expects 2 argument(s), got 1")),
-        ("fn_then_let_positional", ft.clone(), "import lib\nimport f from lib\nprint(lib.f(1, 2))\nprint(f(1, 2))\n".into(), None),
-        ("let_then_fn_qualified_kw", lf.clone(), "import lib\nprint(lib.f(a=1, b=2))\n".into(), Some(&amb_f)),
-        ("let_then_fn_from_default", lf.clone(), "import f from lib\nprint(f(1))\n".into(), Some("expects 2 argument(s), got 1")),
-        // A variadic or generic fn and a plain let are two types, so the home module rejects the let.
-        ("variadic_then_let", VF.into(), "import lib\nprint(lib.f(1, 2))\n".into(), Some(REDECL)),
-        ("generic_then_let", GF.into(), "import lib\nprint(lib.idt(1))\n".into(), Some(REDECL)),
+        // A home module that binds a value name twice, in each shape: rejected at home.
+        ("fn_then_let", format!("{F2}{LET_F}"), "import lib\nprint(lib.f(1, 2))\n".into(), Some(DUP)),
+        ("let_then_fn", format!("{LET_F}{F2}"), "import f from lib\nprint(f(1, 2))\n".into(), Some(DUP)),
+        ("variadic_then_let", VF.into(), "import lib\nprint(lib.f(1, 2))\n".into(), Some(DUP)),
+        ("generic_then_let", GF.into(), "import lib\nprint(lib.idt(1))\n".into(), Some(DUP)),
+        ("struct_fn_then_let", format!("{SF}S := fn(m: int) -> int: m * 100\n"), "import lib\nprint(lib.S(2))\n".into(), Some(DUP)),
+        ("witness_then_let", format!("{WL}mk := fn(x: N) -> N: N(v=1)\n"), "import lib\nprint(lib.N(v=5).v)\n".into(), Some(DUP)),
+        ("write_fn_then_let", format!("{WF}w := fn(xs: List[int], out: Channel[int]): out.send(xs.len())\n"), par("import lib", "spawn lib.w(xs, out)"), Some(DUP)),
+        // A type and a value of one name: the value is the slot.
         ("struct_fn_qualified_kw", SF.into(), "import lib\nprint(lib.S(n=2))\n".into(), None),
-        ("struct_fn_let_qualified_kw", sfl.clone(), "import lib\nprint(lib.S(n=2))\n".into(), Some(&amb_s)),
         ("struct_let_fn_calls_slot", SL.into(), "import lib\nx: int = lib.S(2)\nprint(x)\n".into(), None),
         ("struct_let_int_keeps_ctor", SN.into(), "import lib\nprint(lib.S(2))\n".into(), None),
         ("let_only_closure_qualified_kw", LO.into(), "import lib\nprint(lib.g(a=1, b=2))\n".into(), Some(VAL)),
-        ("const_from_import_colon_eq", CO.into(), "import Y from lib\nY := 7\nprint(Y)\n".into(), Some(&konst_y)),
-        ("const_from_import_typed_let", CO.into(), "import Y from lib\nY: int = 7\nprint(Y)\n".into(), Some(&konst_y)),
-        ("const_from_import_fn", CO.into(), "import Y from lib\nfn Y() -> int:\n    return 1\n".into(), Some(&konst_y)),
+        // An imported name is bound once in the importer too.
+        ("const_from_import_colon_eq", CO.into(), "import Y from lib\nY := 7\nprint(Y)\n".into(), Some(IMP)),
+        ("const_from_import_typed_let", CO.into(), "import Y from lib\nY: int = 7\nprint(Y)\n".into(), Some(IMP)),
+        ("const_from_import_fn", CO.into(), "import Y from lib\nfn Y() -> int:\n    return 1\n".into(), Some(IMP)),
+        ("plain_from_import_colon_eq", PL.into(), "import Y from lib\nY := 7\nprint(Y)\n".into(), Some(IMP)),
+        ("native_const_from_import_colon_eq", PL.into(), "import pi from std.math\npi := 3.0\nprint(pi)\n".into(), Some(IMP)),
         ("const_from_import_inner_shadow", CO.into(), "import Y from lib\nfn g():\n    Y := 3\n    print(Y)\ng()\n".into(), None),
         ("const_from_import_assign", CO.into(), "import Y from lib\nY = 7\n".into(), Some(RE_Y)),
         ("const_from_import_compound", CO.into(), "import Y from lib\nY += 1\n".into(), Some(RE_Y)),
         ("const_list_from_import_extend", "XS: const List[int] = [1]\n".into(), "import XS from lib\nXS += [2]\n".into(), Some("cannot reassign 'XS' — it is declared const in module 'lib'")),
         ("const_qualified_assign", CO.into(), "import lib\nlib.Y = 3\n".into(), Some(RE_Y)),
-        ("plain_from_import_colon_eq", PL.into(), "import Y from lib\nY := 7\nprint(Y)\n".into(), None),
-        ("native_const_from_import_colon_eq", PL.into(), "import pi from std.math\npi := 3.0\nprint(pi)\n".into(), Some(&konst_pi)),
         ("write_fn_only_qualified_spawn", WF.into(), par("import lib", "spawn lib.w(xs, out)"), Some(COPY)),
         ("write_fn_only_from_spawn_block", WF.into(), par("import w from lib", "spawn: w(xs, out)"), Some(COPY)),
-        ("write_old_qualified_spawn", wo.clone(), par("import lib", "spawn lib.w(xs, out)"), None),
-        ("write_old_from_spawn", wo.clone(), par("import w from lib", "spawn w(xs, out)"), None),
-        ("write_old_qualified_spawn_block", wo.clone(), par("import lib", "spawn: lib.w(xs, out)"), None),
-        // The runtime layer C fault owns this write; the checker declines, as for a same-module
-        // value callee.
-        ("write_new_qualified_spawn", WN.into(), par("import lib", "spawn lib.w(xs, out)"), None),
-        ("write_new_from_spawn", WN.into(), par("import w from lib", "spawn w(xs, out)"), None),
         ("witness_fn_only_charges", WL.into(), "import lib\nfn g[T: lib.Zero](x: T) -> T:\n    return lib.mk(x)\nh := g\nprint(g(lib.N(v=5)).v)\n".into(), Some("cannot be used as a function value")),
-        ("witness_then_let", wll.clone(), "import lib\nfn g[T: lib.Zero](x: T) -> T:\n    return lib.mk(x)\nprint(g(lib.N(v=5)).v)\n".into(), Some(REDECL)),
     ];
     let mut wrong = Vec::new();
     for (name, lib, main, want) in &cells {

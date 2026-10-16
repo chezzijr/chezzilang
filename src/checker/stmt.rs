@@ -5,9 +5,7 @@
 use super::setup::BindSite;
 use super::sig::TempWrite;
 use super::sig::TypePos;
-use super::sig::fn_min_arity_grew;
 use super::sig::method_binders;
-use super::sig::min_arity;
 use super::*;
 
 impl Checker {
@@ -110,7 +108,7 @@ impl Checker {
                     self.hover_record_at(span, &declared, HoverKind::Local, doc);
                 }
                 if !refined {
-                    self.reject_redeclare(name, &declared, span);
+                    self.reject_redeclare(name, span);
                 }
                 // Computed BEFORE `declare` so `h := h` cannot see itself.
                 let one_known_fn = self.let_holds_one_known_fn(target, ty, value);
@@ -1109,24 +1107,14 @@ impl Checker {
         }
     }
 
-    /// The two re-declaration carve-outs every binding `let` must pass before `declare` overwrites
-    /// the previous binding (W7-42, W7-42r). Shared by the single-name let and — per name — by
-    /// `check_destructure`'s tuple SUCCESS arm, because both reach the same `declare` and so the same
-    /// one storage slot; a destructuring let re-typed a module global silently until it called this.
-    /// The two branches are NOT one gate and must stay exclusive: the const check fires at ANY scope
-    /// depth off `const_decls.last()`, the retype check only at module scope, and a live const must
-    /// report the const message ALONE. Call it only where a REAL type is being declared — the error
-    /// arms of `check_destructure` declare `Ty::Unknown` to suppress a cascade, and while the retype
-    /// branch skips `Unknown` the const branch does not.
-    pub(super) fn reject_redeclare(&mut self, name: &str, declared: &Ty, span: Span) {
-        // A live const in THIS scope cannot be re-declared away (`X := 2` / `X: T = 2` after
-        // `X: const T = 1`). For a module global that is the SAME storage slot, so a silent
-        // re-bind would defeat the guarantee, not shadow it (`declare` would otherwise drop the
-        // const mark). An INNER-scope binding of the same name is a genuine fresh shadow and is
-        // untouched (the outer scope's const set is not `.last()`). Skipped during return
-        // inference, whose truncate-and-rerun can re-walk a body within one open scope. Module
-        // scope is decided once by `collect_module_globals` (TICKET-186), so this branch runs only
-        // at scope depth 2 or more.
+    /// A live const cannot be re-declared away in its own scope. Shared by the single-name let and,
+    /// per name, by `check_destructure`'s tuple arm. A second module-level binding of a name is
+    /// `GlobalBinding::clashes`'s, so this judges scope depth 2 and more only.
+    pub(super) fn reject_redeclare(&mut self, name: &str, span: Span) {
+        // `X := 2` / `X: T = 2` after `X: const T = 1` in one fn scope would drop the const mark
+        // (`declare`). An INNER-scope binding of the same name is a fresh shadow and is untouched
+        // (the outer scope's const set is not `.last()`). Skipped during return inference, whose
+        // truncate-and-rerun can re-walk a body within one open scope.
         if !self.inferring_ret
             && self.scopes.len() > 1
             && self.const_decls.last().is_some_and(|s| s.contains(name))
@@ -1135,68 +1123,6 @@ impl Checker {
                 span,
                 format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)"),
             );
-        }
-        // A MODULE-scope re-declaration may rebind the global but not RETYPE it. At scope 0 the
-        // compiler's `collect_globals` is idempotent by NAME, so `x := "9"` after `x := 1` reuses
-        // the ONE global slot: a closure built before this line still reads it and hands the new
-        // type out of its declared one (`fn() -> int` yielding a `str`, check-clean). The
-        // fn-local path is deliberately untouched — `add_local` pushes a FRESH slot there, so a
-        // local re-declare is a genuine Rust-style shadow and may change type. `scopes.len() == 1`
-        // is the discriminator that maps 1:1 onto the compiler's `is_global_scope()`; a top-level
-        // `if:`/`for:` block body is scope > 1 and routes to `add_local`, so it stays legal.
-        // The `Unknown` carve-out is ONE-SIDED, not a two-sided veto: the question is only "is
-        // `declared` a REFINEMENT of `prev`?", which is exactly `merge_unknown` (fill `prev`'s
-        // `Unknown` slots from `declared`'s shape; unchanged on a shape/name/arity mismatch). So
-        // a `prev` the hole check rejected (bare `Unknown`) takes any `declared`, while
-        // `x := 1` then `x := None` is a retype and fires. A symmetric "either side has an
-        // `Unknown` ⇒ skip" test silenced the rule for BOTH, letting a closure declared
-        // `-> int` hand out a `None`, check-clean (the original W7-42 defect). The bare
-        // `declared == Unknown` guard is load-bearing: `merge_unknown` early-returns `a` when
-        // the SHAPE is unknown, so `int -> Unknown` would otherwise fire off the don't-know
-        // sentinel. Skipped during return inference, whose truncate-and-rerun can re-walk a
-        // body within one scope.
-        // `prev` is the slot's FIRST binding, in source order or hoisted before it: an import's
-        // or a top-level fn's (or extern's) slot is filled before any statement runs, so the let is
-        // a re-declaration wherever it sits, and the rule is symmetric in position. It does not
-        // look at READERS either: a slot's type is frozen at its first binding whatever kind
-        // declared it, as Go and Rust reject every second binding (`f redeclared in this block`,
-        // E0255) and Python's same-type rebinding is the part this keeps. A top-level `fn` is
-        // never declared into `scopes` (it lives in `functions`), so when `scopes[0]` has nothing
-        // the let is judged against the fn's VALUE type (the construction `infer_ident` hands out,
-        // min-arity included, which the arity disjunct needs). An imported variant is a const
-        // binding (`collect_module_globals`). A type of the same name is another namespace and no
-        // prior binding (`GlobalBinding::clashes`).
-        // A const module global declared twice was reported once by `collect_module_globals`, and
-        // it must report that message alone (TICKET-186).
-        else if !self.inferring_ret
-            && self.scopes.len() == 1
-            && !self.globals.get(name).is_some_and(|g| g.is_const())
-            && let Some(prev) = self.scopes[0]
-                .get(name)
-                .cloned()
-                .or_else(|| self.functions.get(name).map(fn_value_ty))
-            && !matches!(declared, Ty::Unknown)
-            // `merge_unknown` has no `Func` arm, so for a `Func` `prev` it falls to `_ => a.clone()`
-            // and returns `prev` — this conjunct is then a tautology of `prev != declared`, which is
-            // exactly right, not a bug to "fix".
-            && ((prev != *declared
-                && crate::checker::merge_unknown(&prev, declared) != *declared)
-                || fn_min_arity_grew(&prev, declared))
-        {
-            let [prev_s, declared_s] = Ty::render_distinct([&prev, declared]);
-            let msg = if prev == *declared {
-                // Only the arity disjunct can have fired here.
-                format!(
-                    "cannot re-declare module-level binding '{name}' at a stricter arity: calls compiled against the previous binding may pass as few as {} argument(s) — the omitted ones are filled from ITS defaults — while the new binding requires {}, and a module global is ONE storage slot, so those call sites now hand the OLD binding's defaults to the new one (rename it, or give the new binding the same defaults)",
-                    min_arity(&prev),
-                    min_arity(declared)
-                )
-            } else {
-                format!(
-                    "cannot re-declare module-level binding '{name}' with a different type ({prev_s} -> {declared_s}) — a module global is ONE storage slot whose type is frozen at its first declaration, so any code that reads or writes '{name}' is typed against {prev_s} while the slot now holds {declared_s} (rename it, or keep its type; a fn-local ':=' is a fresh binding and may change type)"
-                )
-            };
-            self.error(span, msg);
         }
     }
 }

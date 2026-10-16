@@ -6,15 +6,15 @@
 //! - A second declaration in a namespace a prior one binds is an error (Go: `redeclared in this
 //!   block`; Rust: E0428 / E0255): "is already imported" when either is an import, else "is already
 //!   defined". Imports and top-level fns are hoisted, so source order does not matter.
-//! - A top-level `:=` of a value's name re-binds its slot, whose type is frozen at its first
-//!   binding: the same type is legal (Python's re-binding), another type is rejected, wherever the
-//!   readers sit. A variant import is a constant, so no let re-binds it (Rust E0530).
+//! - A top-level `:=` is a declaration of the value namespace, so a name is bound once whatever the
+//!   types (Go and Rust agree); `=` reassigns.
 //! - A builtin is shadowed, and an inner scope (a fn body) shadows everything (all three ancestors).
 //!
 //! Every cell names `abs`, so an `extern "libc"` binder resolves a real symbol and the run is real.
 //! Measured on the ancestors (2026-10-16): Go rejects every top-level pair (`x redeclared in this
 //! block`, `F already declared through dot-import`); Rust rejects every same-namespace pair
-//! (E0428/E0255) and accepts `enum N` / `type N` beside `fn N`; Python re-binds every pair.
+//! (E0428/E0255) and accepts `enum N` / `type N` beside `fn N`. Python re-binds every pair, but a
+//! dynamically typed language is no oracle for a static name rule (owner decision 2026-10-16).
 
 use std::path::Path;
 use std::process::Command;
@@ -35,11 +35,6 @@ struct Prior {
     value: bool,
     ty: bool,
     same_type: Option<&'static str>,
-    /// A constant (a variant import): no let re-binds it (Rust E0530).
-    is_const: bool,
-    /// A top-level `:=`: a hoisted binder (`fn`, `extern`) fills the slot first, so the let is the
-    /// second binding and the let's rule judges the pair.
-    is_let: bool,
 }
 
 const LIB: &[(&str, &str)] = &[
@@ -57,8 +52,6 @@ const PRIORS: &[Prior] = &[
         value: true,
         ty: false,
         same_type: Some("fn(x: int) -> int: x"),
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "import-value",
@@ -67,8 +60,6 @@ const PRIORS: &[Prior] = &[
         value: true,
         ty: false,
         same_type: Some("7"),
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "import-type",
@@ -77,8 +68,6 @@ const PRIORS: &[Prior] = &[
         value: false,
         ty: true,
         same_type: None,
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "import-module",
@@ -87,8 +76,6 @@ const PRIORS: &[Prior] = &[
         value: true,
         ty: true,
         same_type: None,
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "import-variant",
@@ -97,8 +84,6 @@ const PRIORS: &[Prior] = &[
         value: true,
         ty: true,
         same_type: Some("Color.B"),
-        is_let: false,
-        is_const: true,
     },
     Prior {
         tag: "own-fn",
@@ -107,8 +92,6 @@ const PRIORS: &[Prior] = &[
         value: true,
         ty: false,
         same_type: Some("fn(x: int) -> int: x"),
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "own-extern",
@@ -117,8 +100,6 @@ const PRIORS: &[Prior] = &[
         value: true,
         ty: false,
         same_type: Some("fn(x: int) -> int: x"),
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "own-value",
@@ -127,8 +108,6 @@ const PRIORS: &[Prior] = &[
         value: true,
         ty: false,
         same_type: Some("7"),
-        is_let: true,
-        is_const: false,
     },
     Prior {
         tag: "own-struct",
@@ -137,8 +116,6 @@ const PRIORS: &[Prior] = &[
         value: false,
         ty: true,
         same_type: None,
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "own-enum",
@@ -147,8 +124,6 @@ const PRIORS: &[Prior] = &[
         value: false,
         ty: true,
         same_type: None,
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "own-alias",
@@ -157,8 +132,6 @@ const PRIORS: &[Prior] = &[
         value: false,
         ty: true,
         same_type: None,
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "own-protocol",
@@ -167,8 +140,6 @@ const PRIORS: &[Prior] = &[
         value: false,
         ty: true,
         same_type: None,
-        is_let: false,
-        is_const: false,
     },
     // `ord` is a builtin fn and `str` a builtin type; neither is a libc symbol, so an extern binder
     // of those names reaches the extern and stops at its `dlsym`.
@@ -179,8 +150,6 @@ const PRIORS: &[Prior] = &[
         value: true,
         ty: false,
         same_type: None,
-        is_let: false,
-        is_const: false,
     },
     Prior {
         tag: "builtin-type",
@@ -189,8 +158,6 @@ const PRIORS: &[Prior] = &[
         value: false,
         ty: true,
         same_type: None,
-        is_let: false,
-        is_const: false,
     },
 ];
 
@@ -278,25 +245,11 @@ fn expected(p: &Prior, b: Binder) -> Option<&'static str> {
     if p.origin == Origin::Builtin || !((bv && p.value) || (bt && p.ty)) {
         return None;
     }
-    match b {
-        Binder::LetSame | Binder::LetOther if p.is_const => Some("cannot re-declare const binding"),
-        Binder::LetSame => None,
-        Binder::LetOther => Some("cannot re-declare module-level binding"),
-        Binder::Fn | Binder::Extern if p.is_let => Some("cannot re-declare module-level binding"),
-        Binder::Fn
-        | Binder::Extern
-        | Binder::Struct
-        | Binder::Enum
-        | Binder::Alias
-        | Binder::Protocol
-        | Binder::LocalLet
-        | Binder::NestedFn
-        | Binder::Param => Some(if p.origin == Origin::Import {
-            "is already imported"
-        } else {
-            "is already defined"
-        }),
-    }
+    Some(if p.origin == Origin::Import {
+        "is already imported"
+    } else {
+        "is already defined"
+    })
 }
 
 fn run(dir: &Path, src: &str) -> (bool, String) {

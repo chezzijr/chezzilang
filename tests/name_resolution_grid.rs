@@ -22,6 +22,13 @@ struct Cell {
     expect: Expect,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Slot {
+    None,
+    Import,
+    Own,
+}
+
 /// A name the binder shadows, and the declaration that puts it in scope.
 struct Kind {
     tag: &'static str,
@@ -29,9 +36,8 @@ struct Kind {
     decl: &'static str,
     /// The argument the call cell passes (the defaulted-fn kind calls `f(1)`).
     arg: u32,
-    /// The type of the module slot the declaration fills, when it fills one (a builtin and a
-    /// type fill none). A top-level let of the name re-binds that slot, whose type is frozen.
-    slot_ty: Option<&'static str>,
+    /// The module value slot the declaration fills, if any (a builtin and a type fill none).
+    slot: Slot,
 }
 
 const KINDS: &[Kind] = &[
@@ -40,63 +46,63 @@ const KINDS: &[Kind] = &[
         name: "ord",
         decl: "",
         arg: 4,
-        slot_ty: None,
+        slot: Slot::None,
     },
     Kind {
         tag: "builtin_ctor",
         name: "Channel",
         decl: "",
         arg: 4,
-        slot_ty: None,
+        slot: Slot::None,
     },
     Kind {
         tag: "std_ctor",
         name: "timer",
         decl: "import std.time\n",
         arg: 4,
-        slot_ty: None,
+        slot: Slot::None,
     },
     Kind {
         tag: "struct",
         name: "P",
         decl: "struct P:\n    x: int\n",
         arg: 4,
-        slot_ty: None,
+        slot: Slot::None,
     },
     Kind {
         tag: "enum",
         name: "E",
         decl: "enum E:\n    A\n",
         arg: 4,
-        slot_ty: None,
+        slot: Slot::None,
     },
     Kind {
         tag: "alias",
         name: "Q",
         decl: "struct P:\n    x: int\ntype Q = P\n",
         arg: 4,
-        slot_ty: None,
+        slot: Slot::None,
     },
     Kind {
         tag: "imported_fn",
         name: "f",
         decl: "import f from lib\n",
         arg: 4,
-        slot_ty: Some("fn(int) -> str"),
+        slot: Slot::Import,
     },
     Kind {
         tag: "imported_type",
         name: "T",
         decl: "import T from lib\n",
         arg: 4,
-        slot_ty: None,
+        slot: Slot::None,
     },
     Kind {
         tag: "module",
         name: "math",
         decl: "import std.math\n",
         arg: 4,
-        slot_ty: Some("module math"),
+        slot: Slot::Import,
     },
     // A defaulted fn: the checker binds its omitted argument (TICKET-182).
     Kind {
@@ -104,7 +110,7 @@ const KINDS: &[Kind] = &[
         name: "f",
         decl: "fn f(a: int, b: int = 10) -> int:\n    return a + b\n",
         arg: 1,
-        slot_ty: Some("fn(int, int = 10) -> int"),
+        slot: Slot::Own,
     },
 ];
 
@@ -199,21 +205,23 @@ const BINDERS: &[&str] = &[
 ];
 
 /// Cells the language rejects by a named declaration rule, with the rule.
-fn named_rejection(binder: &str, k: &Kind, p: &Pos) -> Option<&'static str> {
-    // A module global's type is frozen at its first binding (the import or the hoisted fn), so a
-    // top-level let at another type is rejected.
-    if binder == "toplevel_let" && k.slot_ty.is_some_and(|t| t != p.ty) {
-        return Some("cannot re-declare module-level binding");
+fn named_rejection(binder: &str, k: &Kind) -> Option<&'static str> {
+    // A top-level name is bound once (Go and Rust), so a top-level let of a name an import or a
+    // `fn` already binds is rejected.
+    match (binder, k.slot) {
+        ("toplevel_let", Slot::Import) => return Some("is already imported"),
+        ("toplevel_let", Slot::Own) => return Some("is already defined"),
+        _ => {}
     }
     match (binder, k.tag) {
         // Only keywords are reserved (owner rule 2026-10-15): an import alias or a top-level `fn`
         // named after a builtin shadows it, like every other binder here.
         // Two imports under one name.
         ("import_alias", "imported_fn" | "imported_type" | "module") => Some("already"),
-        // A whole-module import and a same-module `fn` or type under one name (owner decisions
-        // 2026-09-29; Go: `redeclared in this block`).
+        // A whole-module import after a same-module `fn` or type of its name (Go: `redeclared in
+        // this block`); the message names the prior declaration.
         ("import_alias", "struct" | "enum" | "alias" | "defaulted_fn") => {
-            Some("is already imported")
+            Some("is already defined")
         }
         // Two top-level declarations of one name (Go: `redeclared in this block`).
         ("toplevel_fn", "imported_fn") => Some("is already imported"),
@@ -234,7 +242,7 @@ fn grid() -> Vec<Cell> {
                     continue;
                 };
                 let src = format!("{}{S_DECL}{body}", k.decl);
-                let expect = match named_rejection(binder, k, &p) {
+                let expect = match named_rejection(binder, k) {
                     Some(frag) => Expect::Rejects(frag),
                     None => Expect::Prints(p.expect.clone()),
                 };
@@ -557,12 +565,10 @@ fn field_bind(binder: &str, n: &str, ty: &str, e: &str, r: &str, ctx: &str) -> O
 
 fn field_rejection(binder: &str, tag: &str) -> Option<&'static str> {
     match (binder, tag) {
-        ("toplevel_let", "module" | "qualified_enum") => {
-            Some("cannot re-declare module-level binding")
-        }
+        ("toplevel_let", "module" | "qualified_enum") => Some("is already imported"),
         ("import_alias", "module" | "qualified_enum" | "imported_type") => Some("already"),
-        // A whole-module import and a same-module type under one name.
-        ("import_alias", "struct" | "enum" | "enum_alias" | "alias") => Some("is already imported"),
+        // A whole-module import after a same-module type of its name.
+        ("import_alias", "struct" | "enum" | "enum_alias" | "alias") => Some("is already defined"),
         _ => None,
     }
 }
@@ -691,16 +697,17 @@ fn order_cells() -> Vec<Cell> {
             format!("{p}{g_p}{fn_p}print(g())\n"),
             Expect::Prints("B4".into()),
         ),
-        // A whole-module import and a same-module type may not share a name, in either order.
+        // A whole-module import and a same-module type may not share a name, in either order;
+        // the enum comes first in both, so the error names it.
         (
             "swap/import_first/enum_field",
             format!("{e}{imp}{g_e}print(g())\n"),
-            Expect::Rejects("'E' is already imported"),
+            Expect::Rejects("type 'E' is already defined"),
         ),
         (
             "swap/import_last/enum_field",
             format!("{e}{g_e}{imp}print(g())\n"),
-            Expect::Rejects("'E' is already imported"),
+            Expect::Rejects("type 'E' is already defined"),
         ),
         // Top-level statements keep lexical order (owner 07:27Z, Q2 (b); CPython).
         (

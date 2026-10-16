@@ -167,8 +167,6 @@ fn hgen(xs: List[int]) -> Iterator[int]:
 fn hpush(xs: List[int]) -> int:
     HG.push(xs)
     return 0
-fn hesc(xs: List[int]) -> int:
-    return xs.len()
 hesc := fn(xs: List[int]) -> int: hpush(xs)
 "#;
 
@@ -214,7 +212,7 @@ fn generator_slot_privacy_grid() {
         ("g28", 0b1),
         ("g29", 0),
         ("g30", 0),
-        // TICKET-196: h's slot 'hesc' is redeclared; the final closure escapes 'acc' into HG.
+        // h's slot 'hesc' holds a closure that escapes 'acc' into HG.
         ("g31", 0),
     ];
     for (name, mask) in want {

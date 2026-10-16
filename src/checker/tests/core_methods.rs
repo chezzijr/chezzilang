@@ -745,16 +745,17 @@ fn rebinding_from_imported_global_rejected() {
             "import COUNT, LST from lib.st\nLST.push(7)\nprint(COUNT)\nfn f():\n    COUNT := 1\n    COUNT = 2\n    print(COUNT)\nf()\n",
         ),
     ]);
-    // …and RE-DECLARING the name at MODULE scope (`:=`, which `declare` sanctions as a fresh, mutable
-    // binding) hands the name back to the module: the import bind is gone, so assigning is legal
-    // again. The gate must key on the CURRENT binding, not on the name having ever been imported.
-    files_ok(&[
-        st,
-        (
-            "main.chz",
-            "import COUNT from lib.st\nCOUNT := COUNT + 1\nCOUNT = COUNT + 1\nprint(COUNT)\n",
-        ),
-    ]);
+    // …and a module-level `:=` of the name is a second binding (`GlobalBinding::clashes`).
+    files_reject(
+        &[
+            st,
+            (
+                "main.chz",
+                "import COUNT from lib.st\nCOUNT := COUNT + 1\nprint(COUNT)\n",
+            ),
+        ],
+        "'COUNT' is already imported",
+    );
 }
 
 /// `nil` is an ordinary name (TICKET-231), so a module may be named it or aliased to it. `None`,

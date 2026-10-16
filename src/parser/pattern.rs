@@ -443,9 +443,12 @@ impl Parser {
                     span,
                 });
             }
+            reject_repeated_binders(&only)?;
             Ok(only)
         } else {
-            Ok(Pattern::Tuple(elems))
+            let target = Pattern::Tuple(elems);
+            reject_repeated_binders(&target)?;
+            Ok(target)
         }
     }
 
@@ -464,11 +467,13 @@ impl Parser {
             && (elems.len() > 1 || !matches!(elems[0], Pattern::Tuple(_)))
         {
             self.advance(); // ':='
-            return Ok(Some(if elems.len() == 1 {
+            let target = if elems.len() == 1 {
                 elems.pop().expect("one element")
             } else {
                 Pattern::Tuple(elems)
-            }));
+            };
+            reject_repeated_binders(&target)?;
+            return Ok(Some(target));
         }
         self.pos = save;
         self.depth = save_depth;
@@ -498,6 +503,21 @@ impl Parser {
             true,
         ))
     }
+}
+
+/// A binding target binds each name once (Go: `a repeated on left side of :=`; Rust: E0416), as a
+/// match pattern does (`Checker::bind_match_arm`).
+fn reject_repeated_binders(target: &Pattern) -> PResult<()> {
+    let names = target.binders();
+    for (i, (name, span)) in names.iter().enumerate() {
+        if names[..i].iter().any(|(n, _)| n == name) {
+            return Err(ParseError {
+                message: format!("identifier '{name}' is bound more than once in this pattern"),
+                span: *span,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The one leaf of a binding target: `_` skips a slot (`Pattern::Wildcard`), any other name binds
