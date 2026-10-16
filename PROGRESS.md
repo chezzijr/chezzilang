@@ -93,10 +93,7 @@ Details of each step are in [`docs/history/progress/2026-10.md`](docs/history/pr
 
 ### Open questions for the owner
 
-- Does `Hashable` imply `Eq`?
-- The bound of the JSON timing test.
-- `Iterable` for `Deque`, `Heap` and `Counter`.
-- `Hashable` for a payload-less enum.
+None open on 2026-10-16.
 
 ### Owner decisions not yet implemented
 
@@ -109,8 +106,22 @@ Details of each step are in [`docs/history/progress/2026-10.md`](docs/history/pr
   faults on a bad index; the concurrent collections follow the same rows. A protocol only where
   generic code needs one (`Iterable`, `Contains`, `Sized`, `Extend`); a new protocol goes in a std
   module, not the global namespace.
-- Top-level `return` (TICKET-178). `print(1)` / `return` / `print(2)` at module level prints `1` and
-  exits 0. CPython rejects it with `SyntaxError: 'return' outside function`.
+- **Top-level `return` is an error** (TICKET-178, 2026-10-16). Today `print(1)` / `return` /
+  `print(2)` at module level prints `1` and exits 0. CPython: `SyntaxError: 'return' outside
+  function`; Go and Rust have no top-level statements.
+- **Protocols move to modules, grouped by job** (2026-10-16). `Any` and `Error` stay global (Go keeps
+  `any` and `error`). `std.ops`: the operator protocols, `Index`, `IndexSet`, `Slice`, `Contains`;
+  `std.cmp`: `Eq`, `Comparable`, `Hashable`; `std.iter`: `Iterator`, `Iterable`; the rest to the module
+  that owns the job. Satisfaction stays structural, so only a bound (`[T: Add]`) needs the import.
+- **`Hashable` embeds `Eq`** (2026-10-16), as `Comparable` does: `[T: Hashable]` replaces
+  `[T: Hashable + Eq]`. No `PartialEq`: `float` keeps `==` and stays out of `Hashable`.
+- **`Hashable` is opt-in for user types** (2026-10-16). No `struct` or `enum` is `Hashable` on its own
+  (the zero-field struct loses it); a user type becomes a key by defining `fn hash` and `fn eq`, as
+  Rust requires a derive. Tuples of `Hashable` stay `Hashable` (Rust, Python).
+- **`Deque`, `Heap` and `Counter` are `Iterable`** (2026-10-16). Deque front to back; Heap in no order
+  (Rust `BinaryHeap::iter`, Java `PriorityQueue`); Counter like a Map (Python `Counter` is a `dict`).
+- **The `json.stringify` timing bound becomes `< 4.0 s`** (`tests/chz/stdlib/json_test.chz:42`,
+  2026-10-16), as its `json.parse` sibling (TICKET-115). Gate runs measured 2.2–2.7 s under load.
 
 ## JIT entry rule
 
