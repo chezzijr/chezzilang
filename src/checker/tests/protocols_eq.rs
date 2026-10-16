@@ -1331,7 +1331,7 @@ fn the_budget_refusal_names_the_type_the_walk_started_from() {
 
 /// **The depth cap must not refuse an ordinary deep chain.** It exists for shapes that cannot
 /// terminate (polymorphic recursion), and a plain 140-link chain is not one — the VM's own equality
-/// has no cap and runs it. The ceiling that remains is filed as `docs/gaps.md` W7-55.
+/// has no cap and runs it. The ceiling that remains is filed as `docs/contributing/gaps.md` W7-55.
 #[test]
 fn a_deep_but_finite_chain_stays_within_the_eq_budget() {
     let mut src = String::from("struct S0:\n    v: int\n");
@@ -1395,7 +1395,7 @@ fn runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused() {
 /// re-enter the same nominal name (`Pair`) under a SMALLER instantiation one level down (`Pair[int]`,
 /// walking `Pair[Pair[int]]`'s field `v: T`). That is not polymorphic recursion — it terminates in one
 /// more step on its own — so growth detection must not refuse it. A guard built from a SYMMETRIC "the
-/// args differ" test (the recorded failure mode, `docs/gaps.md` W7-42) would wrongly reject this: it
+/// args differ" test (the recorded failure mode, `docs/contributing/gaps.md` W7-42) would wrongly reject this: it
 /// cannot tell shrinking from growing, only that the two instantiations are not equal.
 #[test]
 fn a_self_nested_generic_instantiation_shrinking_inward_is_accepted() {
@@ -1428,7 +1428,7 @@ fn use_it(a: Pair[Pair[Pair[int]]], b: Pair[Pair[Pair[int]]]) -> bool:
 /// recursion shape as `conditional_eq_bound_recursion_terminates`, but timed: growth detection must
 /// catch `N[int]` → `N[List[int]]` at depth ~2, so this stays fast and cheap REGARDLESS of how high
 /// `EQ_BOUNDS_MAX_IN_PROGRESS` is set — the O(cap²)-memory failure mode this guard exists to prevent
-/// (`docs/gaps.md` W7-55) only shows up if the walk is left to grow the `Ty` all the way to the cap.
+/// (`docs/contributing/gaps.md` W7-55) only shows up if the walk is left to grow the `Ty` all the way to the cap.
 #[test]
 fn polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection() {
     let (errs, entries) = eq_obligations_for(
@@ -1750,7 +1750,7 @@ b := Box(5) == Box(\"hello\")
     entry_rejects(src, "cannot compare Box[int] and Box[str] for equality");
 }
 
-/// **B2** (`docs/gaps.md`) — `==`/`!=` between provably-disjoint types is rejected at check time.
+/// **B2** (`docs/contributing/gaps.md`) — `==`/`!=` between provably-disjoint types is rejected at check time.
 /// Python answers `False` at runtime; a statically-typed language rejects it (mypy
 /// `--strict-equality`, Go/Rust compile errors), so this is a deliberate, documented divergence.
 #[test]
@@ -2641,7 +2641,7 @@ xs.sort()
 // directions by measurement — a `compare` covering every field in declaration order agrees with
 // structural `==` exactly (the rule would fire, wrongly), while the repo's own motivating `Ver`
 // DOES define both and still disagrees (the rule would not fire). **Rust owns this** and permits a
-// manual `Ord` beside a derived `Eq` — a clippy lint, not an error. `docs/syntax.md` already
+// manual `Ord` beside a derived `Eq` — a clippy lint, not an error. `docs/reference/syntax.md` already
 // concedes the checker cannot verify the coherence the rule pretended to enforce.
 //
 // The two surviving halves of those tests — the BARE wordings, which are now the only wordings —

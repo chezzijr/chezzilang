@@ -111,7 +111,7 @@ fn p0_shim_div_mod_negatives() {
     }
 }
 
-/// Float `/` is total IEEE-754 in Chezzi (`docs/spec.md:472`): a zero divisor is `inf`/`-inf`/`NaN`,
+/// Float `/` is total IEEE-754 in Chezzi (`docs/reference/spec.md:472`): a zero divisor is `inf`/`-inf`/`NaN`,
 /// never a fault — a DELIBERATE divergence from CPython, which raises `ZeroDivisionError` on the
 /// same expression (Chezzi follows Rust/Go here, confirmed by the project owner 2026-08-07). The
 /// shim's `_chz_fdiv` absorbs this, exactly like `_chz_div`/`_chz_mod` absorb truncating int
@@ -219,7 +219,7 @@ fn p0_mixed_int_float_compare_above_2_53() {
     }
 }
 
-/// Float `%` is `fmod` in Chezzi — sign follows the DIVIDEND (`docs/spec.md`) — and total (never
+/// Float `%` is `fmod` in Chezzi — sign follows the DIVIDEND (`docs/reference/spec.md`) — and total (never
 /// faults), same two properties `p0_shim_float_div_signed_zero` pins for `/`. Two things a careless
 /// edit would break, both pinned here:
 ///
@@ -745,7 +745,7 @@ fn fuzz_range_cfg(cfg: &Config, feat: Features, start: u64, end: u64) {
     // from one that really compared 120 programs. Acknowledging the capture in a comment is not a
     // guard; this is. A hard "zero comparisons" floor is CERTAIN — deliberately not a "too many
     // timeouts" threshold, which is a heuristic, and an uncertain heuristic must decline rather
-    // than guess (`docs/gaps.md` W7-12, W7-38). It also closes the empty-range hole the sibling
+    // than guess (`docs/contributing/gaps.md` W7-12, W7-38). It also closes the empty-range hole the sibling
     // arg parsers had: `fuzz_range(feat, 5, 5)` now fails instead of passing over nothing.
     assert!(
         compared > 0,
@@ -1096,7 +1096,7 @@ fn gen_emits_float_div() {
 }
 
 /// `gen_float`'s op list did not include `Mod` — float `%` (`_chz_fmod`) was the last unreached
-/// float operator in the differential generator (`docs/gaps.md` W7-37). Mutation-proven: reverting
+/// float operator in the differential generator (`docs/contributing/gaps.md` W7-37). Mutation-proven: reverting
 /// `gen_float`'s op list back to `[Add, Sub, Mul, Div]` turns this red.
 #[test]
 fn gen_emits_float_mod() {
@@ -1132,7 +1132,7 @@ fn is_int_operand(e: &Expr) -> bool {
 }
 
 /// `gen_float`'s composite arm used to draw both operands from `gen_float` only — int↔float
-/// mixed arithmetic (`1 + 2.0`) was never generated, the last item `docs/gaps.md` W7-37 deferred.
+/// mixed arithmetic (`1 + 2.0`) was never generated, the last item `docs/contributing/gaps.md` W7-37 deferred.
 /// `is_int_operand`/`is_float_operand` are each an UNDER-count (the `Var` blind spot), so this
 /// probe can go red spuriously but never pass vacuously: it only fires on a `Bin { ty: Float }`
 /// where it can positively identify one int-shaped operand AND one float-shaped operand, which

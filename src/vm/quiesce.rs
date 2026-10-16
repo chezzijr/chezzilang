@@ -1,4 +1,4 @@
-//! Process-wide quiescence detection — `docs/future.md` §2d **step 0**, the sound successor to
+//! Process-wide quiescence detection — `docs/design/roadmap.md` §2d **step 0**, the sound successor to
 //! W7-12's per-executor predicate (`gaps.md` `W7-12r`).
 //!
 //! # The rule

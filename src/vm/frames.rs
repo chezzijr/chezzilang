@@ -532,7 +532,7 @@ impl Vm {
         //
         // W7-3 CARVE-OUT — the (a) `Cut::Cancelled` marker ONLY. `Cut::Cancelled` is a
         // task-wide LATCH that stays set while the cancelled task's `defer`s run, but "a
-        // `defer` is never itself cancelled" (docs/concurrency.md) and `cancel_suppressed`
+        // `defer` is never itself cancelled" (docs/reference/concurrency.md) and `cancel_suppressed`
         // already carries the same `deferring > 0` suppression. So a `recover:` owned by
         // THIS nested dispatch loop (`frame_len > base_level` — i.e. installed inside the
         // defer body, not outside it) catches while `deferring > 0`. A `recover:` OUTSIDE
@@ -905,7 +905,7 @@ impl Vm {
     /// [`Vm::halt_requested`], with the owned half read only when `owned`. The two CPU checkpoints
     /// ([`Vm::jump_checked`], [`Vm::guarded_checkpoint`]) pass their 1-in-1024 sample: walking the
     /// open nurseries on every element cost +11.6 % on `benches/chz/hof_nursery.chz` (TICKET-188,
-    /// `docs/benchmarks.md`). The cancel half still runs every time; it is the same `halt_of`.
+    /// `docs/contributing/benchmarks.md`). The cancel half still runs every time; it is the same `halt_of`.
     fn halt_read(&self, owned: bool) -> Option<Halt> {
         if self.cancel_suppressed() {
             return None;
@@ -1100,7 +1100,7 @@ impl Vm {
         // §2c1 — EVERY nursery on the M:N engine activates an EAGER sched NOW, so a `spawn`
         // in the body injects a LIVE fiber that runs concurrently with the rest of the body.
         // That is Go's `go f()`: the task starts at the `spawn`, and the join keeps its own
-        // (orthogonal) job of guaranteeing COMPLETION by the barrier (`docs/future.md` §2b/§2c1).
+        // (orthogonal) job of guaranteeing COMPLETION by the barrier (`docs/design/roadmap.md` §2b/§2c1).
         //
         // A nursery entered inside a spawned task (`mn.is_some()`) never builds a private sched:
         // at EVERY worker count it registers a scope on the fiber's OWN sched
@@ -1116,7 +1116,7 @@ impl Vm {
         // worker for a joiner that can park (TICKET-125 and TICKET-127 false-faulted `i6n2` at
         // T=4); a joiner inside a native callback cannot park and hands its slot over in
         // `Vm::joiner_shell` (TICKET-245). Cost: while the OUTER body is open, these tasks share the outer sched's
-        // runners (`docs/gaps.md` W13-27).
+        // runners (`docs/contributing/gaps.md` W13-27).
         //
         // A top-level nursery has no outer worker to starve and creates exactly ONE drainer per
         // thread, so it stays eager; if that drainer thread fails, `activate_fiber_owned_nursery`

@@ -7,8 +7,8 @@
 # receiver's closure still reads its own (unwritten) value — D2's isolation still holds, now
 # enforced at the write instead of by a silent drop. CPython threading and Go see one shared
 # object; the divergence is the deliberate "module globals isolate per task, and a task may not
-# write one" rule (docs/concurrency.md) — use `Shared`/`Channel` to share.
-# TICKET-111 (docs/gaps.md W12-5) — a task-local alias of a global is the SAME object as the
+# write one" rule (docs/reference/concurrency.md) — use `Shared`/`Channel` to share.
+# TICKET-111 (docs/contributing/gaps.md W12-5) — a task-local alias of a global is the SAME object as the
 # task's copy of the global (adoption), not a second copy. That still holds; a write through
 # either the alias or the global now faults identically (both denote the one copied object).
 import std.concurrency
@@ -135,7 +135,7 @@ test fn local_alias_of_a_global_generator_is_one_generator():
     got := r.recv()
     assert got == "1 2", "generator alias is two live copies: {got}"
 
-# W13-1 (docs/gaps.md) — a spawn-ADOPTED alias of a module global (`a := gl` in the parent,
+# W13-1 (docs/contributing/gaps.md) — a spawn-ADOPTED alias of a module global (`a := gl` in the parent,
 # `a.push(2)` in the task). Under D2/TICKET-111 the adopted alias IS the task's copy of the global.
 # TICKET-169: writing it now faults instead of silently landing only in the sender's copy.
 gl2: List[int] = [1]
@@ -289,7 +289,7 @@ test fn two_hop_closure_alias_write_faults():
     got := d.recv()()
     assert got == "[1]", "two-hop forwarded closure read {got}"
 
-# W13-2 (docs/gaps.md) — a receiver's OWN in-place mutation of a module global used to be silently
+# W13-2 (docs/contributing/gaps.md) — a receiver's OWN in-place mutation of a module global used to be silently
 # overwritten by an arriving closure whose sender also mutated it. TICKET-169: the SENDER's mutation
 # now faults (a spawned task may not write its global copy), so it can no longer overwrite anything;
 # the receiver's own write (also inside a spawned task, so it faults identically) is asserted to

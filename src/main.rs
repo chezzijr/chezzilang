@@ -1,8 +1,8 @@
 //! Chezzi — a fast, statically-typed, Python-feel scripting language.
 //!
-//! Design spec: docs/spec.md
+//! Design spec: docs/reference/spec.md
 //!
-//! Pipeline (built incrementally — see roadmap in docs/spec.md):
+//! Pipeline (built incrementally — see roadmap in docs/reference/spec.md):
 //!   source.chz → lexer → parser → checker → compiler → bytecode VM
 //!
 //! Status: pre-M1 scaffold. Subcommands below are stubs.
@@ -77,7 +77,7 @@ fn main() -> ExitCode {
     // `args_os`, not `args`: `std::env::args()` PANICS on a non-UTF-8 argument, so hostile bytes in
     // argv (or in the script path) aborted the CLI with rc=101 before the program ever started.
     // Decoding is LOSSY (invalid bytes → U+FFFD) — argv reaches Chezzi as `str`; documented in
-    // docs/stdlib.md under std.os.
+    // docs/reference/stdlib.md under std.os.
     let args: Vec<String> = std::env::args_os()
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
@@ -815,7 +815,7 @@ fn scaffold_project(dir: &std::path::Path) -> Result<ScaffoldReport, String> {
         "# chezzi.toml — project manifest.\n\
          #\n\
          # This file is BOTH a project ROOT MARKER (module resolution walks up for it; see\n\
-         # docs/spec.md \"Imports & module resolution\") AND a parsed manifest. The toolchain reads\n\
+         # docs/reference/spec.md \"Imports & module resolution\") AND a parsed manifest. The toolchain reads\n\
          # `[project]` keys: `entrypoint` is what a bare `chezzi run` executes — a dotted module\n\
          # path, optionally suffixed with `:function` to call that function directly after the\n\
          # module loads (swap which function runs by editing the part after the colon). Without a\n\
@@ -837,7 +837,7 @@ fn scaffold_project(dir: &std::path::Path) -> Result<ScaffoldReport, String> {
     let main_chz = "# src/main.chz — program entry.\n\
         #\n\
         # chezzi.toml's `entrypoint = \"src.main:main\"` calls `main` for you after this module\n\
-        # loads, so no trailing `main()` call is needed (see docs/syntax.md \"9b. Program entry\").\n\
+        # loads, so no trailing `main()` call is needed (see docs/reference/syntax.md \"9b. Program entry\").\n\
         # Swap the function a bare `chezzi run` invokes by editing the part after the `:`. Run a\n\
         # *file* directly (`chezzi run src/main.chz`) and it is scripting-style: top-level only.\n\
         \n\
@@ -848,7 +848,7 @@ fn scaffold_project(dir: &std::path::Path) -> Result<ScaffoldReport, String> {
 
     let test_chz = "# src/main_test.chz — example test.\n\
         #\n\
-        # `chezzi test` discovers every `test fn` in *_test.chz files (see docs/syntax.md \"9c\").\n\
+        # `chezzi test` discovers every `test fn` in *_test.chz files (see docs/reference/syntax.md \"9c\").\n\
         # Run it with:  chezzi test .\n\
         \n\
         test fn arithmetic():\n\
@@ -866,9 +866,9 @@ fn scaffold_project(dir: &std::path::Path) -> Result<ScaffoldReport, String> {
 /// (`src/main.rs`), so the docs live at `../docs/...`. Bundling them into the binary means
 /// `chezzi docs` works anywhere (no repo checkout), e.g. piping the full reference to an LLM.
 const DOC_TOPICS: &[(&str, &str)] = &[
-    ("spec", include_str!("../docs/spec.md")),
-    ("syntax", include_str!("../docs/syntax.md")),
-    ("stdlib", include_str!("../docs/stdlib.md")),
+    ("spec", include_str!("../docs/reference/spec.md")),
+    ("syntax", include_str!("../docs/reference/syntax.md")),
+    ("stdlib", include_str!("../docs/reference/stdlib.md")),
 ];
 
 /// The topics, in order, that make up the `llms` bundle (`chezzi docs` with no topic): the essentials
@@ -1146,7 +1146,7 @@ fn parse_file_and_flags(cmd: &str, args: &[String]) -> Option<(String, bool)> {
 /// values surfaced to Chezzi as `str` stay lossy (they select nothing); a path does not.
 ///
 /// ponytail: refusing is the v1 ceiling — running a genuinely non-UTF-8-named script needs `OsString`
-/// threaded through the resolver and module graph, its own milestone (docs/gaps.md W7-6).
+/// threaded through the resolver and module graph, its own milestone (docs/contributing/gaps.md W7-6).
 fn reject_lossy_path(path: &str) -> bool {
     if path.contains('\u{FFFD}') {
         chezzi::errln!(

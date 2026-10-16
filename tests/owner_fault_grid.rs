@@ -45,7 +45,7 @@ fn run_with(
         cmd.env_remove("CHEZZI_SCHED_SEED");
     }
     let mut child = cmd.spawn().expect("spawn chezzi");
-    // A blocking stdin read has no checkpoint until it returns (`docs/stdlib.md` "Blocking calls
+    // A blocking stdin read has no checkpoint until it returns (`docs/reference/stdlib.md` "Blocking calls
     // cannot be interrupted"; Go's `os.Stdin.Read` and CPython's `input()` are not cancelled either),
     // so the Stdin row is satisfied at `DEADLINE_MS` and the cut is judged AT the return.
     let mut held_stdin = child.stdin.take();

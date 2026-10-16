@@ -883,7 +883,7 @@ fn golden_parallel_deadlock_still_faults() {
 /// The program's own print order IS deterministic, not a race: every print is causally chained
 /// through a channel handoff (`pong 0` → `a.send(100)` → `a.recv()` → `ping 100` → `b.send(1)` →
 /// `pong 1` → …), and the real CLI's stdout sink is one locked write per `print` — line-atomic, no
-/// per-thread buffering (`docs/concurrency.md:1030`) — so the happens-before chain pins the
+/// per-thread buffering (`docs/reference/concurrency.md:1030`) — so the happens-before chain pins the
 /// interleaving exactly there (verified against the release binary: 20/20 runs identical,
 /// `pong 0\nping 100\n…`).
 ///
@@ -914,7 +914,7 @@ fn fibers_all_blocked_is_deadlock() {
 
 /// Native-reentry guard, M:N: a blocking `recv` reached inside a list-HOF callback (the HOF's loop
 /// state is on the Rust stack, so it cannot PARK in place) now completes via the M:N engine's
-/// DEMOTION path instead — same C5/N6g mechanism as a `defer`red `recv` (`docs/gaps.md` N6g): a
+/// DEMOTION path instead — same C5/N6g mechanism as a `defer`red `recv` (`docs/contributing/gaps.md` N6g): a
 /// replacement worker takes over scheduling while this thread blocks synchronously waiting for the
 /// sibling's send. On the (removed) cooperative engine this had no replacement worker to demote to
 /// and faulted `deadlock` instead — a documented, accepted engine-capability difference, not a bug.
@@ -935,7 +935,7 @@ fn fibers_recv_inside_index_overload_demotes_on_mn() {
 
 /// Native-reentry guard, M:N: a blocking `recv` inside a `defer`red call (run during frame
 /// teardown, off the suspendable path) now completes via M:N's demotion path — the exact mechanism
-/// `docs/gaps.md` N6g documents ("M:N demotes and completes the cleanup"). The `recv` is in the
+/// `docs/contributing/gaps.md` N6g documents ("M:N demotes and completes the cleanup"). The `recv` is in the
 /// deferred function's body — only the receiver handle is captured at the `defer` statement — so it
 /// runs at teardown.
 #[test]

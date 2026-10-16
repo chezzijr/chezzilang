@@ -1,4 +1,4 @@
-//! TICKET-167 — the seeded scheduler mode (`docs/future.md` §2b). `CHEZZI_SCHED_SEED=<u64>` makes
+//! TICKET-167 — the seeded scheduler mode (`docs/design/roadmap.md` §2b). `CHEZZI_SCHED_SEED=<u64>` makes
 //! every free scheduling choice (queue pick, steal victim, preemption budget, handoff slot) draw from
 //! a seeded PRNG instead of timing, so a schedule/netpoller race can be found and replayed
 //! mechanically. Unset, `on()` is one relaxed atomic load — see `## Decisions` "Unset costs one

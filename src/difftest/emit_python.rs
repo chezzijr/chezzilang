@@ -344,7 +344,7 @@ impl Emitter {
 
     /// Integer `/` and `%` route through the shim (Chezzi semantics: truncate-toward-zero,
     /// sign-of-dividend). Float `/` and `%` also route through the shim: Chezzi's float division
-    /// is total IEEE-754 (`docs/spec.md:472`) — a zero divisor is `inf`/`-inf`/`NaN`, never a
+    /// is total IEEE-754 (`docs/reference/spec.md:472`) — a zero divisor is `inf`/`-inf`/`NaN`, never a
     /// fault — and float `%` is `fmod` (sign-of-dividend, total: a zero divisor or an `inf`
     /// dividend is `NaN`), both deliberate divergences from CPython (`/` raises
     /// `ZeroDivisionError`; `%` is floored — sign-of-divisor — and raises `ValueError` on the same

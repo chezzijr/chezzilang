@@ -91,7 +91,7 @@ pub struct WitnessTable {
 /// key (measured, in [`WitnessKey`] too, which had shipped with it). The
 /// fix is a file identity on [`Span`] itself, so this tuple and every record/lookup site are
 /// unchanged. One residual, backstopped loudly rather than silently: the same default spliced twice
-/// into the SAME module — see `docs/gaps.md` W7-49 and `Checker::record_carrier`.
+/// into the SAME module — see `docs/contributing/gaps.md` W7-49 and `Checker::record_carrier`.
 pub type CarrierKey = (usize, Span, usize, Span);
 
 /// W7-43 — which lowering a `?.` carrier takes. The checker decides it from the OPERAND's type; the

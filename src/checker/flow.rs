@@ -12,7 +12,7 @@
 //! name, so a user fn, method, local or parameter named `exit`/`panic` returns normally.
 //!
 //! `wait:` falls through only if an arm or its `else` does: a `wait:` without `else` runs exactly one
-//! arm or faults ("all-closed + no ready send + no `else` faults", `docs/syntax.md`). If `wait:` ever
+//! arm or faults ("all-closed + no ready send + no `else` faults", `docs/reference/syntax.md`). If `wait:` ever
 //! completes without running an arm, the `Wait` arm of [`stmt`] must join [`Flow::NEXT`].
 //!
 //! Escapes are lexical: a `break` after a `return` in one block still counts. A `spawn:` / `defer:`

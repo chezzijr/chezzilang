@@ -8,51 +8,51 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and no cross-engine gate; see the entry directly below.
 
 - **A name is bound once (2026-10-16, owner decision: follow Go and Rust where they agree; Python is no oracle for a static name rule).** A top-level `:=` / typed let is now a value-namespace declaration in `GlobalBinding::clashes`, so `x := 1` then `x := 2`, `fn h` then `h := …` (either order), and `import COUNT` then `COUNT := …` are "already defined" / "already imported" (Go: `x redeclared in this block`; Rust: no top-level `let`, `static` twice is E0428). `=` reassigns. A name repeated in one binding target (`a, a := …`, `for a, a in`, comprehensions) or parameter list (`fn g(a, a)`, `fn(a, a)`) is a parse error with Rust's E0416 / E0415 text, the same rule a match pattern already had (W13-23's CPython choice is reversed). Where Go and Rust split, Chezzi keeps Rust: a fn-local re-declare is a fresh shadow; a type and a value of one name coexist. Deleted: the module-scope frozen-type branch of `reject_redeclare`, `fn_min_arity_grew`/`min_arity`, the module const/plain report, the same-statement repeat handling in `declare_target_leaves`. Tests: `a_module_level_name_is_bound_once` replaces 25 module re-declaration tests; `redeclaration_grid`, `name_resolution_grid`, `carrier_enum_grid`, `module_export_grid`, `t186_module_global_record_grid` follow the rule. Then deleted the redeclared-slot machinery that no checked program reaches: `GlobalBinding::redeclared`, `imported_redeclared`, `ImportFacts.redeclared`, `MemberSig.redeclared`/`labels`, `KwDeny` (`labels_certain` returns `Option`), `slot_holds_fn_decl` (callers read `functions`), `runs_after_later_decls`, `body_facts_pass`, and the repeated-name filters of the global seed; a type-only import sits with the types (it holds no slot). Two behaviour changes follow, both toward the same-module `struct S` + `fn S` answer: `import S from lib` (a type) + `fn S(a, b)` + `S(b=1, a=2)` in a body checks and runs (was "keyword arguments through 'S' are ambiguous: 'S' is reassigned"), and a `spawn:` call of such an `S` that writes a module global is a check error (was a runtime fault). Test: `a_type_import_beside_a_fn_holds_no_slot`.
-- **Refactor phase 3, fact 8 step 2 (2026-10-16): builtin dispatch by id.** `enum Builtin` (`base/builtin.rs`: 19 ids with `name`, `from_name`, `lowering`, `first_class`) is the one table of the builtins a bare name reaches. `Resolution::Builtin`, `Op::CallBuiltin`/`Op::LoadBuiltin`, `Obj::Builtin`, `FnKey::Builtin`, `WireValue::Builtin`, `SnapValue::Builtin` and `Callee::Builtin` carry the id; `infer_builtin_call`, `compile_builtin_call`, `do_builtin` and `invoke_value` match it exhaustively (no `_ => unreachable!` on a name). Deleted: the `PRELUDE` table, `PreludeFn`, `Intrinsic`, the compiler's `if name == "Channel"` ladder and the duplicated `panic` arm (`builtin_panic` is the one owner). `prelude_fn` and `BuiltinType::has_opcode_ctor` are views of the enum. No observable behaviour change. Bench (`docs/benchmarks.md`): a builtin-call loop 5% faster; `fib.chz` +7% median, which a one-line unrelated change on the base also moves +4% (layout), other benches -0.7%..+1.4%.
-- **Redeclaration grid (2026-10-16): one answer per (binder × prior binding × scope); a module slot's type is frozen at its first binding.** Probed 154 cells on the release binary; red cells were: `import f from lib` + `f := 1` accepted (the fn arm of `reject_redeclare` fired only when a reader sat above the let, the value arm always), `import V` + `fn V` accepted, `import f` + `struct f` rejected while `fn f` + `struct f` was legal, `struct S` / variant `Leaf` + `extern fn` rejected while `fn` was legal, and `import Red from Color` + `Red := 1` accepted (with `Red := Color.Green`, a pattern `Red` and an expression `Red` meant two variants). Rule now, derived from the ancestors (Go: every top-level pair is `redeclared in this block`; Rust: each same-namespace pair is E0428/E0255, `enum N`/`type N` beside `fn N` compile; Python re-binds all): a module has a type and a value namespace; a second declaration in a bound namespace is "already defined" / "already imported" in either order; a top-level `:=` over a value re-binds it at the same type only, wherever the readers sit and wherever the import or fn sits; builtins and inner scopes shadow. One owner: `GlobalBinding::clashes` over the `collect_module_globals` records (now with type declarations and the namespaces each import binds) replaces six per-kind checks (`collect_names`, `hoist` fn/struct/enum/extern, the extern struct/variant sweep, `hoist_protocol`, `reject_import_decl_collisions`); a variant import is a const binding (Rust E0530), so the existing const rule rejects any top-level let of its name in either order; `fn_reads`/`record_fn_read` and the import span gate are deleted. Behaviour changes: `fn f(a, b = 2)` + `f := fn(a) …` and `x := 1` + a later `import … as x` of a `str` are now rejected (same type stays legal); an extern of a struct's name is the value beside it. Grid: `tests/redeclaration_grid.rs` (146 cells, verdicts derived from the rule); `name_resolution_grid`, `carrier_enum_grid` V19, `module_export_grid` and two chz fixtures follow the rule. Docs: `docs/syntax.md` (new §"Declaring one name twice at module level", the fn/import/variant/extern bullets), `docs/lessons.md`, `docs/owners.md`.
+- **Refactor phase 3, fact 8 step 2 (2026-10-16): builtin dispatch by id.** `enum Builtin` (`base/builtin.rs`: 19 ids with `name`, `from_name`, `lowering`, `first_class`) is the one table of the builtins a bare name reaches. `Resolution::Builtin`, `Op::CallBuiltin`/`Op::LoadBuiltin`, `Obj::Builtin`, `FnKey::Builtin`, `WireValue::Builtin`, `SnapValue::Builtin` and `Callee::Builtin` carry the id; `infer_builtin_call`, `compile_builtin_call`, `do_builtin` and `invoke_value` match it exhaustively (no `_ => unreachable!` on a name). Deleted: the `PRELUDE` table, `PreludeFn`, `Intrinsic`, the compiler's `if name == "Channel"` ladder and the duplicated `panic` arm (`builtin_panic` is the one owner). `prelude_fn` and `BuiltinType::has_opcode_ctor` are views of the enum. No observable behaviour change. Bench (`docs/contributing/benchmarks.md`): a builtin-call loop 5% faster; `fib.chz` +7% median, which a one-line unrelated change on the base also moves +4% (layout), other benches -0.7%..+1.4%.
+- **Redeclaration grid (2026-10-16): one answer per (binder × prior binding × scope); a module slot's type is frozen at its first binding.** Probed 154 cells on the release binary; red cells were: `import f from lib` + `f := 1` accepted (the fn arm of `reject_redeclare` fired only when a reader sat above the let, the value arm always), `import V` + `fn V` accepted, `import f` + `struct f` rejected while `fn f` + `struct f` was legal, `struct S` / variant `Leaf` + `extern fn` rejected while `fn` was legal, and `import Red from Color` + `Red := 1` accepted (with `Red := Color.Green`, a pattern `Red` and an expression `Red` meant two variants). Rule now, derived from the ancestors (Go: every top-level pair is `redeclared in this block`; Rust: each same-namespace pair is E0428/E0255, `enum N`/`type N` beside `fn N` compile; Python re-binds all): a module has a type and a value namespace; a second declaration in a bound namespace is "already defined" / "already imported" in either order; a top-level `:=` over a value re-binds it at the same type only, wherever the readers sit and wherever the import or fn sits; builtins and inner scopes shadow. One owner: `GlobalBinding::clashes` over the `collect_module_globals` records (now with type declarations and the namespaces each import binds) replaces six per-kind checks (`collect_names`, `hoist` fn/struct/enum/extern, the extern struct/variant sweep, `hoist_protocol`, `reject_import_decl_collisions`); a variant import is a const binding (Rust E0530), so the existing const rule rejects any top-level let of its name in either order; `fn_reads`/`record_fn_read` and the import span gate are deleted. Behaviour changes: `fn f(a, b = 2)` + `f := fn(a) …` and `x := 1` + a later `import … as x` of a `str` are now rejected (same type stays legal); an extern of a struct's name is the value beside it. Grid: `tests/redeclaration_grid.rs` (146 cells, verdicts derived from the rule); `name_resolution_grid`, `carrier_enum_grid` V19, `module_export_grid` and two chz fixtures follow the rule. Docs: `docs/reference/syntax.md` (new §"Declaring one name twice at module level", the fn/import/variant/extern bullets), `docs/contributing/lessons.md`, `docs/contributing/owners.md`.
 - **Refactor phase 3, fact 8 (2026-10-16): a std module member is an ordinary module member; no name-keyed special case (owner decisions 2026-10-16).** `timer` (std.time), `Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Executor`/`StructuralEq` (std.concurrency), `Socket`/`Listener` (std.net), `Reader`/`Writer` (std.io) and `ptr`/`owned_str`/the widths (std.ffi) used to be handled by name: bare after a whole-module import, "cannot be renamed on import", `time.timer` "has no member", five license sets (`imported_concurrency`, `imported_time`, …) and four VM import skips. Now (1) `BuiltinType::owner` is the one owner of "which module owns this builtin type", and one per-module map `builtin_binds` (filled by the ordinary import arm, an alias included) replaces the license sets, the rename vetoes and the stdlib exemption; (2) `timer` is an ordinary `native fn` of `std/time.chz` run through a new `Kind::InterceptTimer` (`Op::NewTimer`, `time_timer_sig` and the harvest carve-out are gone), so `f := time.timer` and `import timer as after from std.time` work; (3) an import binds only the names it lists for a std module too: `import std.regex` gives `regex.Match`, never a bare `Match`, so a local `struct Match` is its own type (was "already defined"); (4) `owned_str` is declared in `std/ffi.chz` and imported like `ptr`, and an aliased FFI type marshals as the type it names (`resolve_ctype` reads the binding); (5) the removal messages are gone with their tables (`REMOVED_NAMES`, `REMOVED_RANGE`, `removed_name_message`, `REMOVED_METHODS`, the colon-slice parse, the `nil` hint): `Some(1)`, `Option[int]`, `range(3)`, `xs[1:2]` and `s.reverse()` report like any unknown name or bad syntax; (6) `BUILTIN_CALLEES` and the test-only `BUILTIN_CALLABLES` lists are gone: a bare callee is a `PRELUDE` row or a `BuiltinType` with `has_opcode_ctor` (`builtin_callee`), and (7) a top-level `struct`/`enum`/`type` named like a name an import binds is "type 'X' is already defined" for every import (`import_binds`, the one owner; the `imported_builtin_types` set is gone): `import Shared from std.concurrency` + `struct Shared` was accepted, and `import Al from lib` + `type Al = str` was accepted, while every other pair was rejected; the import hint for a type or protocol comes from the declarations themselves (`std_type_owners`, read once from the embedded std sources; the hard-coded `Match`/`Response`/`ProcResult`/`FileInfo` list and the `StructuralEq` hint are gone). Test programs now import what they use (commit `53239f27` rewrote them first, behaviour-neutral); the VM and front-end `run_capture` helpers compile through the module graph (`compiler::compile_source`), as `chezzi run` does, so a test program is a real program. New `tests/module_member_grid.rs` (215 cells: every std member above × no import / whole-module / qualified / from-import / alias × value / call / annotation / ctor) derives each cell's expected outcome from a user-module member of the same kind; it was 41 red on the old binary. `tests/chz/spec/std_module_names_test.chz` runs the programs. Still name-keyed (the next step of fact 8): the constructor arms of `infer_builtin_call`, the compiler's opcode ladder and the VM's `do_builtin`/`invoke_value` name matches.
 - **Only keywords are reserved (owner rule, 2026-10-15).** Every other name — a builtin fn (`print`, `ord`), a builtin type (`int`, `List`), a std type (`int32`, `Socket`, `Range`), a prebuilt protocol (`Eq`, `Comparable`) and a removed spelling (the old carrier names, `range`) — is ordinary: a module-level declaration, import or type parameter of it is legal and SHADOWS the builtin inside that module, as a local already did (Go/Python predeclared names). Was: `type 'X' is reserved (builtin)` / `function name 'X' is reserved` / `import alias 'X' is reserved` at about ten declaration sites. How: the declaration rejects are gone; lookup tries the module's own declarations first (`declares_type_here` for annotations, struct constructors before builtins in `classify_ident`, `user_protocol_key` prefers the module's own protocol at the sites a user spells a protocol, an implicit prelude import yields to a local declaration); the carriers behind `T?`/`T!E` are private to user modules — the parser, desugar and the checker spell them `ast::private_name` (`$Option`, `$Some`, …), which no source can write, and `seed_carrier_enums_from` binds the public names only in std modules; the parser's removed-name bans moved to the checker, which reports `` `Some(x)` is removed; write `x` or `?x` `` (and `range()`, `Result[T, E]`, …) only when nothing declares the name. Tests: `tests/shadowing_grid.rs` (25 declaration-kind cells + keyword + removed-spelling messages); about 45 tests that pinned the reserved rule are deleted or flipped (`keyword_binder_grid`, `name_resolution_grid`, `carrier_enum_grid`, `reserved_fn_names_grid`, `removed_names_grid`). A user type named like a builtin prints module-qualified next to it (`expected main.int, found int`, `expected main.List, found List[int]`). `a..b` builds the prelude's `Range` whatever the module declares: `resolver::range_key` owns that key for the checker and the compiler. Known rough edge: a TYPE PARAMETER named like a builtin has no module to qualify it, so `fn f[int]() -> int: return 3` still says `expected return type int, found int`.
 - **Refactor phase 3, fact 6 (2026-10-15): one walk over a pattern's bare names, `Pattern::bare_names`.** `binders` and the compiler's or-pattern binding names (was its own `collect_binding_names` walk) read it. The language rule is unchanged and matches Rust (checked against `rustc`: an unqualified variant name is an error, E0170 there and "write it qualified" here; any other bare name binds the whole value). `first_duplicate_binder` stays separate: it decides a different fact (duplicates, scoped per or-alternative).
 - **Refactor review fixes (2026-10-15).** `else _:` on an optional is now accepted, like `else:` (it binds nothing; it was "`else _:` needs an error to bind"); pinned by `syntax_gaps_w22_test.chz::else_guard_with_a_blank_binder_on_an_optional`. The wildcard-lint gate counts the `chezzi-syntax` crate root. `slice::norm_index`/`range_indices` are `#[inline]`, since the VM now calls them across a crate boundary with no LTO. Open for the owner (from fact 7): the one reserved set also rejects an un-aliased `import uint8 from lib` (a lib fn named after a width) and a module file named `int32.chz`, as `import int from lib` already was — while a fn may still be DECLARED with such a name.
 - **Refactor phase 3, fact 9 (2026-10-15): checker↔compiler keys from one source.** `resolver::user_type_keys` is the one derivation of `<module-key>::Name`; the checker's and the compiler's `type_keys` are built from it (the checker keeps user protocols, the compiler skips them). `resolver::module_global_binds` is the one list of a module's run-time globals in slot order; the compiler's `collect_globals` builds the slot table from it and the checker's `entry_module_binds` (was "MUST stay in lockstep with `collect_globals`") reads it. No observable change.
-- **Refactor phase 5, stage 2 (2026-10-16): six crates.** `crates/chezzi-native` (`native/`), `crates/chezzi-base` (`base/`), `crates/chezzi-front` (`resolver/`, `desugar/`, `checker/`, `compiler/`) and `crates/chezzi-vm` (`vm/`) join `chezzi-syntax`; each builds its files under `src/` by `#[path]` and re-exports the layers below at their old paths, and `chezzi` re-exports them all. `chezzi-vm` does not depend on `chezzi-front`: its tests do (dev-dependency, with the front end's `test-api` feature for the single-module compile helpers), and the front end's tests run programs through `compiler::run_for_tests` on `vm::run_built` (a dev-dependency the other way). Moved: the 15 FFI tests that run programs from `native/cffi/tests.rs` to `vm/golden_tests/ffi.rs`, with `build_callback_so` into `test_support.rs`; the rendered stack-trace golden to `examples/stack_trace.expected` (`# golden: stderr`, run from the repo root by `tests/examples_golden.rs`); deleted `golden_sys_via_run_file`, which repeated `examples/sys.expected`. Fixed on the way: `resolver::std_root` read `env!("CARGO_MANIFEST_DIR")`, which inside a crate names that crate's directory; `native::std_embed::checkout_root` now owns the checkout path for it and for every test fixture. Measured (`docs/build-times.md`, interleaved): a one-line release rebuild after a checker edit is 45 s (was 64 s), after a VM edit 37–53 s (was 63 s).
+- **Refactor phase 5, stage 2 (2026-10-16): six crates.** `crates/chezzi-native` (`native/`), `crates/chezzi-base` (`base/`), `crates/chezzi-front` (`resolver/`, `desugar/`, `checker/`, `compiler/`) and `crates/chezzi-vm` (`vm/`) join `chezzi-syntax`; each builds its files under `src/` by `#[path]` and re-exports the layers below at their old paths, and `chezzi` re-exports them all. `chezzi-vm` does not depend on `chezzi-front`: its tests do (dev-dependency, with the front end's `test-api` feature for the single-module compile helpers), and the front end's tests run programs through `compiler::run_for_tests` on `vm::run_built` (a dev-dependency the other way). Moved: the 15 FFI tests that run programs from `native/cffi/tests.rs` to `vm/golden_tests/ffi.rs`, with `build_callback_so` into `test_support.rs`; the rendered stack-trace golden to `examples/stack_trace.expected` (`# golden: stderr`, run from the repo root by `tests/examples_golden.rs`); deleted `golden_sys_via_run_file`, which repeated `examples/sys.expected`. Fixed on the way: `resolver::std_root` read `env!("CARGO_MANIFEST_DIR")`, which inside a crate names that crate's directory; `native::std_embed::checkout_root` now owns the checkout path for it and for every test fixture. Measured (`docs/contributing/build-times.md`, interleaved): a one-line release rebuild after a checker edit is 45 s (was 64 s), after a VM edit 37–53 s (was 63 s).
 - **Refactor phase 5, stage 2 step 1 (2026-10-15): the VM no longer depends on the front end.** New `src/base/` holds what the checker, the compiler and the VM all read: the bytecode (`base/op.rs`, with `CompileError`), the airlock crossing marks (`base/crossing.rs`, with `CROSSING_CLOSURE_METHODS`), the operator hooks (`base/hooks.rs`), module identity (`base/module_id.rs`), the `json.decode` descriptor (`base/json_desc.rs`; its builder `from_ty` moved to `checker/json_decode.rs`), the provider-name encoding (`base/provider_name.rs`) and the shared message words (`base/words.rs`). `strip_num_underscores_radix` moved to the lexer, `is_mutating_native_kind` and `std_embed` to `native`. The run drivers (`run_file_with_entry`, `run_file_bytes`, `run_graph_with_entry`) moved from `vm/entry.rs` to `src/run.rs`; the VM keeps `run_built(make, …)`, which takes the front end as a closure, and `compiler::compile_entry_file` is the one way from an entry path to a `Program`. Outside `#[cfg(test)]`, `vm` and `base` now name no `checker`/`compiler`/`resolver`/`desugar` item, so the next step can cut the crates. No behaviour change.
-- **Refactor phase 5, stage 1 (2026-10-15): `chezzi-syntax` crate.** The repo is a Cargo workspace (`default-members` = both crates, so `cargo test`/`nextest`/`build` at the root still cover everything). `crates/chezzi-syntax` builds the lexer, AST, parser, `fmtspec`, `printable` and `slice` from their files under `src/` (`#[path]`), and `chezzi` re-exports them, so no path in code or docs moved. Cut on the way: the lexer no longer calls the editor (`word_end_col`, `measure_number`, `measure_string`, `is_word` moved into the lexer, their owner), and `consteval_matches_vm_arith` moved to the VM tests. Measured (`docs/build-times.md`): a one-line release rebuild is 64.9 s vs 67.3 s, 3.5%. Stage 2 (front end / VM crates over a shared core) is not started: it needs the bytecode, `Hook` and airlock-crossing definitions moved to a core crate and the run drivers lifted out of the VM.
+- **Refactor phase 5, stage 1 (2026-10-15): `chezzi-syntax` crate.** The repo is a Cargo workspace (`default-members` = both crates, so `cargo test`/`nextest`/`build` at the root still cover everything). `crates/chezzi-syntax` builds the lexer, AST, parser, `fmtspec`, `printable` and `slice` from their files under `src/` (`#[path]`), and `chezzi` re-exports them, so no path in code or docs moved. Cut on the way: the lexer no longer calls the editor (`word_end_col`, `measure_number`, `measure_string`, `is_word` moved into the lexer, their owner), and `consteval_matches_vm_arith` moved to the VM tests. Measured (`docs/contributing/build-times.md`): a one-line release rebuild is 64.9 s vs 67.3 s, 3.5%. Stage 2 (front end / VM crates over a shared core) is not started: it needs the bytecode, `Hook` and airlock-crossing definitions moved to a core crate and the run drivers lifted out of the VM.
 - **Refactor phase 3, fact 7 (2026-10-15): one reserved set at every declaration site.** `is_reserved_type` now derives from `is_builtin_type_name` (every builtin type, the `std.ffi` widths and `ptr` included) plus the removed/callable names. Before, the struct, enum, alias and type-parameter guards each added `|| ffi::is_width(name)` by hand and the protocol and import-alias guards did not, so `protocol int32:` and `import x as int32` were accepted while `struct int32:` was rejected. Now all six sites reject them (`reserved_type_names_grid`). `import int8 as int32 from std.ffi` now reports the reserved alias target first. Fact 6 (one walk for pattern binders) is postponed: the three walks disagree on a payload-free bare name (`rest:`), which needs a decision before they merge.
-- **Refactor phase 3, fact 5 (2026-10-15): operator → protocol has one owner, `Hook::of_binary` + the `HOOKS` rows.** `binary_protocol`, the per-operator protocol seeds of `prebuilt_protocols` and the `-`/`+` hint literals now derive from them (`Hook::row`/`protocol`/`method`/`is_arithmetic`); `builtin_arith_kind` (a second hand-written builtin × operator grid) now derives from `INTRINSIC_PROTO_METHODS`. No observable change: `builtin_operator_protocol_grid` writes the old table out and passes. Still DUPLICATE (in `docs/owners.md`): `RESERVED_PROTOCOLS` names, the `INTRINSIC_PROTO_METHODS` method column, and the overflow labels shared by `consteval` and the VM.
+- **Refactor phase 3, fact 5 (2026-10-15): operator → protocol has one owner, `Hook::of_binary` + the `HOOKS` rows.** `binary_protocol`, the per-operator protocol seeds of `prebuilt_protocols` and the `-`/`+` hint literals now derive from them (`Hook::row`/`protocol`/`method`/`is_arithmetic`); `builtin_arith_kind` (a second hand-written builtin × operator grid) now derives from `INTRINSIC_PROTO_METHODS`. No observable change: `builtin_operator_protocol_grid` writes the old table out and passes. Still DUPLICATE (in `docs/contributing/owners.md`): `RESERVED_PROTOCOLS` names, the `INTRINSIC_PROTO_METHODS` method column, and the overflow labels shared by `consteval` and the VM.
 - **Refactor phase 3, fact 4 (2026-10-15): S3-3 fixed — `t.0[i](5)` indexes then calls.** One of the parser's three "may `head[X]` take type arguments" sites kept its own copy without the tuple-index exclusion, so `t.0[i](5)` (a tuple whose slot 0 is a list of fns) read `[i]` as a type argument: `unknown type 'i'`. All three now call `ExprKind::is_named_head`; `tests/owner_guards.rs` rejects the inline spelling. Rust and CPython index first. Test: `tests/chz/spec/fn_value_tuple_slot_call_test.chz::tuple_slot_list_index_then_call`.
 - **Refactor phase 3, fact 3 (2026-10-15): "is this the receiver `self`" has one owner, `ast::is_self_name` + `ast::SELF` (read by `Param::is_self`, `FnDecl::takes_self`).** 13 sites in the parser, desugar, checker and compiler (the compiler's `is_static_method` said "must match the checker exactly") spelled `== "self"` themselves; `tests/owner_guards.rs` now rejects that spelling outside `ast/mod.rs`. No observable change.
 - **Refactor phase 3, fact 2 (2026-10-15): "is this a place `=` can store into" has one owner, `ExprKind::is_place` (`ast/mod.rs`, was the parser's `is_assign_target`).** The checker's and compiler's four "invalid assignment target" arms decided it again; they are now `internal:` errors (unreachable from source: every `Assign` is built by the parser behind `is_place`, or by the compiler as an index place). No observable change: the parser's message stays. Also: three doc comments that sat stacked above `is_assign_target` since before the split go back to their own fns (`infix_op`, `is_compound_assign`).
 - **Refactor phase 3, fact 1 (2026-10-15): `_` has one owner, `ast::is_blank_name`.** Seven sites compared a name with `"_"` themselves; they now call it, and `tests/owner_guards.rs` (new: one spelling per fact, allowed only in its owner file) fails on an eighth. The copies disagreed at the `else` guard: the parser kept `else _:` as a binder named `_`, the checker bound it and the compiler did not, so `x := f() else _:` + `print(_)` was check-OK and then a compiler panic (`global '_' has no slot`). The parser now encodes `else _:` as no binder, and the read is the usual `cannot use '_' as a value`. Tests: `checker::tests::unify_rules::else_guard_blank_binder_binds_nothing`, `tests/chz/spec/syntax_gaps_w22_test.chz::else_guard_with_a_blank_binder_binds_nothing`.
-- **Refactor phase 2 (2026-10-15): every file owns one topic.** Byte-exact moves only (no behaviour change; a moved-line multiset check per split, test names identical). Test suites: `checker/tests.rs` (42k) → 24 topic files, `vm/tests.rs` → 17, `vm/golden_tests.rs` → 9, and the inline test modules of the parser, compiler, checker graph, lexer, editor, cffi and test runner into their own files. Production: `checker/{sig,pattern,proto,mod,expr,setup}.rs`, `parser/mod.rs`, `compiler/mod.rs` and `vm/{mod,sched,call,netio,arith,stmt,exec}.rs` split by topic (e.g. statement checking left `sig.rs`, expression inference left `pattern.rs`, the M:N scheduler left `vm/mod.rs`). Largest production file 8,113 → 2,087 lines. `tests/source_layout.rs` caps production files at 2,500 lines and test files at 3,500, requires a topic line, and checks that every `name` (`path`) row of `docs/owners.md` names the file that defines it. Test-infra owners unified on the way: one `TmpDir` (`test_support.rs`, was 7 copies; the two TICKET-102 collision guards are gone with the second helper), `rerun_in_child` derives its test path from `module_path!()`, and the source-text guards (TICKET-114/126, FFI gating, conformance) read every file of their directory instead of one named file. Next: phase 3 (dedup, one owner per fact).
-- **Refactor phase 0–1 (2026-10-15): owner index + build baseline.** `docs/owners.md` names the one owner of each fact (or lists every copy as DUPLICATE, the phase-3 dedup queue) and maps each source file to the topic it owns; CLAUDE.md and the pipeline planning/implementing/plan-validation/review prompts point at it. `docs/build-times.md` records the baseline: a real one-line edit costs 4–6 s dev, 10 s lib tests, 20 s nextest build and **67 s release** (37 s with release incremental, not adopted). Next: phase 2 (split files by topic, byte-exact moves).
-- **TICKET-261 (2026-10-15): one unpacking grammar at `:=`, `=`, `for`, a comprehension, a wait arm and `match` (owner rule U9).** `a, (b, c) := t`, `for a, (b, c) in xs`, `[a for a, (_, c) in xs]`, `a, (b, c) = t` and `a, (b, c) := ch.recv():` parse and run; `for a, b in {(1, "x")}` over a Set of tuples unpacks (it was `` `for k, v` requires a map ``); `x := 1, 2`, `x: (int, int) = 1, 2`, `x = 3, 4`, `return a / b, a % b` and `yield a, b` end a statement with a tuple (CPython's output for each, run). No outer parentheses (`(a, b) := t`, `for (a, b) in xs` are errors); `_` skips a slot at every site, so `for _ in xs: print(_)` is now `cannot use '_' as a value` (narrows DEC-142's loop-variable clause; 0 of 718 tracked `.chz` files read a loop `_`). Outside `match` only tuples unpack. One source per fact: `Parser::parse_bind_target` / `try_parse_walrus_target` (one binding-target parser; `parse_paren_list` is shared with `match`), `Parser::parse_value_list` (the bare tuple), `Checker::bind_subpattern` with `BindMode::Target` (one checker binder; `for_bindings` reads `iterable_elem` and lost every per-type arm and the Map arm; `check_destructure`'s two messages and the `MatchKind::Tuple` arity copy are deleted, `MatchKind::scrut_ty` is the one scrutinee type), `Compiler::emit_pattern` with `BindInto` (the Let, `for` and wait-arm `GetField` loops are deleted), `ast::Pattern::binders` (every reader of a bound name list). `ast::WaitTarget` is gone (a wait arm carries a `Pattern`); `Let.names`/`name_spans`, `For.vars`/`var_spans` and `CompClause.vars` became `target: Pattern`. The parse-time arity checks (`destructuring binds N name(s) but M value(s)`, `assignment has N target(s) but M value(s)`) are gone: the checker reports `tuple pattern has N element(s), but the value has M` and `assignment has N target(s) but the value has M element(s)`. One tuple message pair serves every site (`tuple pattern has N element(s), but the value has M`, `tuple pattern cannot match a value of type T`); `cannot match a tuple against T` is now the second. A removed carrier name (`Some`, `Ok`, `Err`, `Option`, `Result`) is still no binder at `:=`. Tests: `tests/unpack_grid.rs` (site x shape x source, check and run: 584 cells (516 before the `a, ((b, c))` shape); plus the bare-tuple statement ends), `tests/chz/spec/unpack_grammar_test.chz`, `parser::tests::nested_bind_targets_parse_at_every_site` / `for_outer_parens_rejected` / `bare_tuple_ends_a_statement_at_parse`, corpus `unpack_nested` / `bare_tuple_statement_end` / `for_outer_parens`. `docs/grammar.bnf` (`<bindList>` replaces `<identList>`; `<lvalueElem>`) and `docs/syntax.md` carry the rule.
-- **TICKET-262 (2026-10-15): a width type describes the C boundary only, and every store into a width slot is range-checked (owner decision 2026-10-14, option A; supersedes DEC-218's "slot tag" clause).** Rule 1: `int8`..`uint64` and `float32` may be written in an `extern` fn param or return (a callback type there included) and as a struct field's own type; anywhere else (local or global annotation, normal fn/method/lambda param or return, type argument such as `List[int8]` or `int8?`, alias body) is a compile error: `'int8' describes the C boundary only: write it in an extern fn signature or a struct field, and use `int` here`. One predicate, `TypePos::width_ok`, read by `Checker::width_at`, which both resolver arms (bare and `ffi.int8`) call; the alias decl rejects its body in `collect_names`. Rule 2: a runtime value outside a width struct field faults with the C boundary's text (`value 300 does not fit int8 (-128..127)`) at the constructor, the field store (IC and probe paths), the compound store (`s.q += 300`, DEC-258) and as `json.decode`'s `Err`; the VM calls `CType::check_fits`, so there is still one range check. The widths reach the VM through `FieldWidthTable` (14th `CallTables` element, keyed by the runtime identity key) into `Program::struct_widths`. No tracked `.chz` file (721 checked) changes verdict. Grid: `checker::tests::width_position_grid` (every `TypePos` x every width x in-range, out-of-range constant, out-of-range runtime value; check and run). Docs: `docs/syntax.md` FFI section, `docs/spec.md`, `docs/ffi-and-packaging.md`, `examples/ffi_int.chz` header.
-- **TICKET-260 (2026-10-15): a block expression is legal in value position only, and a `recover:` block has type `!` (owner rule U8).** Two rules. (1) A multi-line `match` used as a value and a `recover:` block are *block expressions*: legal as the right side of `:=` and `=` (typed let and destructuring included), a `return` or `yield` value, a lambda body, an inline fn body (`fn g() -> int: match n:` + arms), a field default, a parameter default, a statement that starts its line and a match-expression arm value; anywhere else (call argument, list/tuple/map element, `(E)`, an interpolation hole, an inline `if c: E` body, an operand, `assert`/`defer`/`+=`) it is one error that names the rule and the fix (`bind it first: v := match ...`). The one-line forms (the inline `recover: expr`, the one-line `if a: b else: c`, a lambda) are ordinary expressions in every position. One predicate decides it, `Parser::block_ok(kw)` over `value_start`, set only by `Parser::open_value(ValueSite, at)`, which `parse_value` and `parse_fn` call; the per-position copies (`recover_inline`, `call_arg`, the `parse_fn` inline-`if` branch, `BLOCK_EXPR_DRIFT` and two `GRAMMAR_LOOSER` entries) are deleted. A block inside brackets (a parameter default, a lambda body in call parentheses) gets its layout when the block parser asks (`lexer::open_layout`), so a map literal that breaks after `:` stays one line. (2) The `recover:` block has no tail value: its type is `!` (the error or nothing, Rust `Result<(), Error>`); the inline form `recover: expr` keeps `T!`. To take a value out of a block, assign inside it. Reading a block as a `T` is a type error that says `this value has type `!`` and shows the assign-inside form (`slot_note`, was `float_fix_note`). `ExprKind::Recover` carries `RecoverForm`; `infer_recover_tail_*`, `block_produces_value`, `match_tail_is_value`, `if_tail_is_value` and `compile_match_value_tail` are deleted. Migration: 72 tail-value sites (23 in `examples`, 41 in `tests/chz`, 8 in parse-only corpus files left as they are) plus about 35 Rust-embedded programs; every `examples/*.expected` is byte-identical; an inline `recover: <statement>` (`recover: n = 100`) is now a block. Tests: `tests/block_value_position_grid.rs` (position x form, check and run, rows from `ValueSite::ALL` and every grammar rule with an `<expr>`), `parser::tests::block_value_*`, `lexer::tests::open_layout_*`, `checker::tests::recover_block_*`. `docs/syntax.md` and `docs/grammar.bnf` (`<value>`, `<valueExpr>`, `<blockLambda>`, `<fnBlock>` replace `<exprEnd>`, `<tailExpr>` and the tail rules) carry both rules.
-- **TICKET-259 (2026-10-15): a type name is never a value (rule U10, Names family).** `[1, 2].map(P)` was a type error, `[1, 2].map(E.V)` ran and printed 2, and `[1, 2].map(str)` said `unknown name 'str'`. Now all three give `'<name>' is a type, not a value`, with the call-or-closure advice when the type has a constructor (`fn(e): E.V(e)`). One list of builtin type names, `BuiltinType` (`src/checker/builtin_type.rs`), is read by `is_reserved_type`, `scalar_bound_ty`, `resolve_type_at`, `resolve_ty_ro_d` and `qualified_builtin_ty`; one decider per spelling, `bare_type_read` and `qualified_type_read`, answers the value read, and an alias is a type whatever its body (`type C = int`, `m.C`). `Self` in a method body is a type too. The compiler's variant-as-fn lowering (`SynthFn::Variant`, `emit_variant_fn_value`, `build_variant_fn`) and `Resolution::VariantFn::arity` are deleted. Migrated: the alias tests that expected `unknown name`, `tests/turbofish_value_grid.rs`, `tests/path_call_grid.rs`, `path_values_survive_gc_stress`, and five `tests/chz/spec` files. Grid: `type_name_is_never_a_value_grid`. Docs: `docs/syntax.md` "A type name is never a value".
+- **Refactor phase 2 (2026-10-15): every file owns one topic.** Byte-exact moves only (no behaviour change; a moved-line multiset check per split, test names identical). Test suites: `checker/tests.rs` (42k) → 24 topic files, `vm/tests.rs` → 17, `vm/golden_tests.rs` → 9, and the inline test modules of the parser, compiler, checker graph, lexer, editor, cffi and test runner into their own files. Production: `checker/{sig,pattern,proto,mod,expr,setup}.rs`, `parser/mod.rs`, `compiler/mod.rs` and `vm/{mod,sched,call,netio,arith,stmt,exec}.rs` split by topic (e.g. statement checking left `sig.rs`, expression inference left `pattern.rs`, the M:N scheduler left `vm/mod.rs`). Largest production file 8,113 → 2,087 lines. `tests/source_layout.rs` caps production files at 2,500 lines and test files at 3,500, requires a topic line, and checks that every `name` (`path`) row of `docs/contributing/owners.md` names the file that defines it. Test-infra owners unified on the way: one `TmpDir` (`test_support.rs`, was 7 copies; the two TICKET-102 collision guards are gone with the second helper), `rerun_in_child` derives its test path from `module_path!()`, and the source-text guards (TICKET-114/126, FFI gating, conformance) read every file of their directory instead of one named file. Next: phase 3 (dedup, one owner per fact).
+- **Refactor phase 0–1 (2026-10-15): owner index + build baseline.** `docs/contributing/owners.md` names the one owner of each fact (or lists every copy as DUPLICATE, the phase-3 dedup queue) and maps each source file to the topic it owns; CLAUDE.md and the pipeline planning/implementing/plan-validation/review prompts point at it. `docs/contributing/build-times.md` records the baseline: a real one-line edit costs 4–6 s dev, 10 s lib tests, 20 s nextest build and **67 s release** (37 s with release incremental, not adopted). Next: phase 2 (split files by topic, byte-exact moves).
+- **TICKET-261 (2026-10-15): one unpacking grammar at `:=`, `=`, `for`, a comprehension, a wait arm and `match` (owner rule U9).** `a, (b, c) := t`, `for a, (b, c) in xs`, `[a for a, (_, c) in xs]`, `a, (b, c) = t` and `a, (b, c) := ch.recv():` parse and run; `for a, b in {(1, "x")}` over a Set of tuples unpacks (it was `` `for k, v` requires a map ``); `x := 1, 2`, `x: (int, int) = 1, 2`, `x = 3, 4`, `return a / b, a % b` and `yield a, b` end a statement with a tuple (CPython's output for each, run). No outer parentheses (`(a, b) := t`, `for (a, b) in xs` are errors); `_` skips a slot at every site, so `for _ in xs: print(_)` is now `cannot use '_' as a value` (narrows DEC-142's loop-variable clause; 0 of 718 tracked `.chz` files read a loop `_`). Outside `match` only tuples unpack. One source per fact: `Parser::parse_bind_target` / `try_parse_walrus_target` (one binding-target parser; `parse_paren_list` is shared with `match`), `Parser::parse_value_list` (the bare tuple), `Checker::bind_subpattern` with `BindMode::Target` (one checker binder; `for_bindings` reads `iterable_elem` and lost every per-type arm and the Map arm; `check_destructure`'s two messages and the `MatchKind::Tuple` arity copy are deleted, `MatchKind::scrut_ty` is the one scrutinee type), `Compiler::emit_pattern` with `BindInto` (the Let, `for` and wait-arm `GetField` loops are deleted), `ast::Pattern::binders` (every reader of a bound name list). `ast::WaitTarget` is gone (a wait arm carries a `Pattern`); `Let.names`/`name_spans`, `For.vars`/`var_spans` and `CompClause.vars` became `target: Pattern`. The parse-time arity checks (`destructuring binds N name(s) but M value(s)`, `assignment has N target(s) but M value(s)`) are gone: the checker reports `tuple pattern has N element(s), but the value has M` and `assignment has N target(s) but the value has M element(s)`. One tuple message pair serves every site (`tuple pattern has N element(s), but the value has M`, `tuple pattern cannot match a value of type T`); `cannot match a tuple against T` is now the second. A removed carrier name (`Some`, `Ok`, `Err`, `Option`, `Result`) is still no binder at `:=`. Tests: `tests/unpack_grid.rs` (site x shape x source, check and run: 584 cells (516 before the `a, ((b, c))` shape); plus the bare-tuple statement ends), `tests/chz/spec/unpack_grammar_test.chz`, `parser::tests::nested_bind_targets_parse_at_every_site` / `for_outer_parens_rejected` / `bare_tuple_ends_a_statement_at_parse`, corpus `unpack_nested` / `bare_tuple_statement_end` / `for_outer_parens`. `docs/reference/grammar.bnf` (`<bindList>` replaces `<identList>`; `<lvalueElem>`) and `docs/reference/syntax.md` carry the rule.
+- **TICKET-262 (2026-10-15): a width type describes the C boundary only, and every store into a width slot is range-checked (owner decision 2026-10-14, option A; supersedes DEC-218's "slot tag" clause).** Rule 1: `int8`..`uint64` and `float32` may be written in an `extern` fn param or return (a callback type there included) and as a struct field's own type; anywhere else (local or global annotation, normal fn/method/lambda param or return, type argument such as `List[int8]` or `int8?`, alias body) is a compile error: `'int8' describes the C boundary only: write it in an extern fn signature or a struct field, and use `int` here`. One predicate, `TypePos::width_ok`, read by `Checker::width_at`, which both resolver arms (bare and `ffi.int8`) call; the alias decl rejects its body in `collect_names`. Rule 2: a runtime value outside a width struct field faults with the C boundary's text (`value 300 does not fit int8 (-128..127)`) at the constructor, the field store (IC and probe paths), the compound store (`s.q += 300`, DEC-258) and as `json.decode`'s `Err`; the VM calls `CType::check_fits`, so there is still one range check. The widths reach the VM through `FieldWidthTable` (14th `CallTables` element, keyed by the runtime identity key) into `Program::struct_widths`. No tracked `.chz` file (721 checked) changes verdict. Grid: `checker::tests::width_position_grid` (every `TypePos` x every width x in-range, out-of-range constant, out-of-range runtime value; check and run). Docs: `docs/reference/syntax.md` FFI section, `docs/reference/spec.md`, `docs/design/ffi-and-packaging.md`, `examples/ffi_int.chz` header.
+- **TICKET-260 (2026-10-15): a block expression is legal in value position only, and a `recover:` block has type `!` (owner rule U8).** Two rules. (1) A multi-line `match` used as a value and a `recover:` block are *block expressions*: legal as the right side of `:=` and `=` (typed let and destructuring included), a `return` or `yield` value, a lambda body, an inline fn body (`fn g() -> int: match n:` + arms), a field default, a parameter default, a statement that starts its line and a match-expression arm value; anywhere else (call argument, list/tuple/map element, `(E)`, an interpolation hole, an inline `if c: E` body, an operand, `assert`/`defer`/`+=`) it is one error that names the rule and the fix (`bind it first: v := match ...`). The one-line forms (the inline `recover: expr`, the one-line `if a: b else: c`, a lambda) are ordinary expressions in every position. One predicate decides it, `Parser::block_ok(kw)` over `value_start`, set only by `Parser::open_value(ValueSite, at)`, which `parse_value` and `parse_fn` call; the per-position copies (`recover_inline`, `call_arg`, the `parse_fn` inline-`if` branch, `BLOCK_EXPR_DRIFT` and two `GRAMMAR_LOOSER` entries) are deleted. A block inside brackets (a parameter default, a lambda body in call parentheses) gets its layout when the block parser asks (`lexer::open_layout`), so a map literal that breaks after `:` stays one line. (2) The `recover:` block has no tail value: its type is `!` (the error or nothing, Rust `Result<(), Error>`); the inline form `recover: expr` keeps `T!`. To take a value out of a block, assign inside it. Reading a block as a `T` is a type error that says `this value has type `!`` and shows the assign-inside form (`slot_note`, was `float_fix_note`). `ExprKind::Recover` carries `RecoverForm`; `infer_recover_tail_*`, `block_produces_value`, `match_tail_is_value`, `if_tail_is_value` and `compile_match_value_tail` are deleted. Migration: 72 tail-value sites (23 in `examples`, 41 in `tests/chz`, 8 in parse-only corpus files left as they are) plus about 35 Rust-embedded programs; every `examples/*.expected` is byte-identical; an inline `recover: <statement>` (`recover: n = 100`) is now a block. Tests: `tests/block_value_position_grid.rs` (position x form, check and run, rows from `ValueSite::ALL` and every grammar rule with an `<expr>`), `parser::tests::block_value_*`, `lexer::tests::open_layout_*`, `checker::tests::recover_block_*`. `docs/reference/syntax.md` and `docs/reference/grammar.bnf` (`<value>`, `<valueExpr>`, `<blockLambda>`, `<fnBlock>` replace `<exprEnd>`, `<tailExpr>` and the tail rules) carry both rules.
+- **TICKET-259 (2026-10-15): a type name is never a value (rule U10, Names family).** `[1, 2].map(P)` was a type error, `[1, 2].map(E.V)` ran and printed 2, and `[1, 2].map(str)` said `unknown name 'str'`. Now all three give `'<name>' is a type, not a value`, with the call-or-closure advice when the type has a constructor (`fn(e): E.V(e)`). One list of builtin type names, `BuiltinType` (`src/checker/builtin_type.rs`), is read by `is_reserved_type`, `scalar_bound_ty`, `resolve_type_at`, `resolve_ty_ro_d` and `qualified_builtin_ty`; one decider per spelling, `bare_type_read` and `qualified_type_read`, answers the value read, and an alias is a type whatever its body (`type C = int`, `m.C`). `Self` in a method body is a type too. The compiler's variant-as-fn lowering (`SynthFn::Variant`, `emit_variant_fn_value`, `build_variant_fn`) and `Resolution::VariantFn::arity` are deleted. Migrated: the alias tests that expected `unknown name`, `tests/turbofish_value_grid.rs`, `tests/path_call_grid.rs`, `path_values_survive_gc_stress`, and five `tests/chz/spec` files. Grid: `type_name_is_never_a_value_grid`. Docs: `docs/reference/syntax.md` "A type name is never a value".
 - **TICKET-257 (2026-10-14): builtin types satisfy the protocol of every operator they accept (owner rule U5; U6 channels; U9 map pairs; U16 `contains`).** `a in b` asks `Contains`, `+`/`-` ask `Add`/`Sub`, the bit operators ask the new `BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr`, `<` asks `Comparable`, `==` asks `Eq`, display asks `Stringable`, `for` asks `Iterable`; the operator and the bound read one table (`INTRINSIC_PROTO_METHODS` keyed by the new `RecvKind`) and one needle rule (`builtin_contains_verdict`). A grid test (`builtin_operator_and_bound_agree_grid`) runs every `RecvKind` x `HOOKS` cell on both forms. New: bytes/bytearray `+ < in` (an int byte or a subsequence), `1 in [1.0]`, `Set`/`List`/`str` `Add`/`Sub` bounds, handles and cursors `Eq` by identity, every kind `Stringable`, `Channel[T]` is `Iterable[T]` (`List(ch)` blocks until closed; the comprehension veto is gone). **Breaking:** a Map iterates `(key, value)` pairs (`m.keys()` for keys; `IsMap`, `ForBindTable` and `Op::IsMap` are deleted, DEC-113/DEC-161 superseded), and `Map.has`/`Set.has` are `contains` (a `.has(` call is a migration error). Out of scope, owner input pending: Deque/Heap/Counter/Concurrent*/`io.Reader` as Iterable, the U16 `remove` table, Hashable for payload-less enums and `T?`.
-- **TICKET-258 (2026-10-14): an operator returns a new value; `x OP= v` is `x = x OP v` for every type, at run time and at check time (owner rule U15; supersedes DEC-015).** `xs += ys` on a `List` used to extend in place (`Op::AddInPlace`), so an alias saw the change while `s |= t` rebound. Now every compound form lowers through its plain binary opcode, and the checker types `x OP v` through `binary_result` (split out of `infer_binary`) and then runs `=`'s check. Deleted: `Op::AddInPlace`, `BinKind::AddInPlace`, `Vm::arith_in_place`, the checker's compound type table, its compound-operand width check (`x += 300` on an `int8` now type-checks, as `x = x + 300` did), its compound-only `index`/`set_index` coherence rule and its `List += List` exemption from the loop-variable and const guards. Compound errors now read as the desugar's (`cannot apply + to bool and int`, `cannot assign float to int`). Append in place with `push`/`extend`. A loop of `xs += [i]` is now O(n^2) (`docs/benchmarks.md`). Grid: `tests/compound_assign_grid.rs`.
+- **TICKET-258 (2026-10-14): an operator returns a new value; `x OP= v` is `x = x OP v` for every type, at run time and at check time (owner rule U15; supersedes DEC-015).** `xs += ys` on a `List` used to extend in place (`Op::AddInPlace`), so an alias saw the change while `s |= t` rebound. Now every compound form lowers through its plain binary opcode, and the checker types `x OP v` through `binary_result` (split out of `infer_binary`) and then runs `=`'s check. Deleted: `Op::AddInPlace`, `BinKind::AddInPlace`, `Vm::arith_in_place`, the checker's compound type table, its compound-operand width check (`x += 300` on an `int8` now type-checks, as `x = x + 300` did), its compound-only `index`/`set_index` coherence rule and its `List += List` exemption from the loop-variable and const guards. Compound errors now read as the desugar's (`cannot apply + to bool and int`, `cannot assign float to int`). Append in place with `push`/`extend`. A loop of `xs += [i]` is now O(n^2) (`docs/contributing/benchmarks.md`). Grid: `tests/compound_assign_grid.rs`.
 - **TICKET-256 (2026-10-14): a nursery deadlock is reported at the first blocked party's own site (Blocking).** The latch held the scheduler's `parallel:` text when a scheduler judged first and the body's wait when the body did, so one program had two reports; under the debug `party` pin the scheduler also cut the guard holder with nothing latched, and the body ran `print("AFTER")`. The latch now holds the first party's site, a pinned judge cuts nothing, and the faulted tasks carry the latched report (`MnSched::verdict_err`). The seven guard rows of `tests/deadlock_halt_single_judge.rs` use a `started` hand-shake instead of a 50 ms sleep. Supersedes DEC-232 bullet 6.
-- **TICKET-255 (2026-10-14): startup of `chezzi run` is back at the pre-253 level.** TICKET-253 made every run parse the prelude 2 times, check it 3 times and compile the `Range` methods. `ModuleGraph::range_used` (set by the resolver when a non-prelude module spells `Range`, and by `desugar::run` for a range literal that is not a counting-loop iterand, `ast::counting_range`) now tells the checker (`skip_range_bodies`) and the compiler (`range_free`) to skip the prelude `Range` method bodies; `Compiler::emit_new_struct` stops the build when a `Range` is built in a graph that recorded none. `chezzi run` builds one graph (`type_check` returns it, `vm::run_graph_with_entry` runs it; `run_file_with_entry_source` is gone) and `compile_graph` runs one checker pass (`checker::resolve_compile_tables`). `chezzi run` of `print(1)`, release median: pre-253 6600 us, main 10646 us, fix 6504 us; debug: 21221, 43429, 19024 us (`docs/benchmarks.md`). Tests: `range_free_graph_checks_no_prelude_fn_bodies`, `range_use_grid_matches_the_compiled_methods`, `program_without_a_range_compiles_no_prelude_fn_protos`. `chezzi test tests/chz`: 1724 passed at the default worker count and `CHEZZI_THREADS=2`.
+- **TICKET-255 (2026-10-14): startup of `chezzi run` is back at the pre-253 level.** TICKET-253 made every run parse the prelude 2 times, check it 3 times and compile the `Range` methods. `ModuleGraph::range_used` (set by the resolver when a non-prelude module spells `Range`, and by `desugar::run` for a range literal that is not a counting-loop iterand, `ast::counting_range`) now tells the checker (`skip_range_bodies`) and the compiler (`range_free`) to skip the prelude `Range` method bodies; `Compiler::emit_new_struct` stops the build when a `Range` is built in a graph that recorded none. `chezzi run` builds one graph (`type_check` returns it, `vm::run_graph_with_entry` runs it; `run_file_with_entry_source` is gone) and `compile_graph` runs one checker pass (`checker::resolve_compile_tables`). `chezzi run` of `print(1)`, release median: pre-253 6600 us, main 10646 us, fix 6504 us; debug: 21221, 43429, 19024 us (`docs/contributing/benchmarks.md`). Tests: `range_free_graph_checks_no_prelude_fn_bodies`, `range_use_grid_matches_the_compiled_methods`, `program_without_a_range_compiles_no_prelude_fn_protos`. `chezzi test tests/chz`: 1724 passed at the default worker count and `CHEZZI_THREADS=2`.
 - **TICKET-254 (2026-10-13): a range subscript is a slice or a key, and a mutating call on a fresh temporary has one answer (family Airlock, follow-up of TICKET-253).** (A) A type that declares a range `slice` AND an `index` whose key accepts a `Range` is the declaration error `a type takes a range as a slice or as a key, not both` (also at the use `x[a..b]`, on a bound `T: Slice[R]` + `Index[Range, V]`, and on a protocol); the old precedence "`Slice` before `Index`" is deleted, a `Map` has no `slice` so `m[0..3]` stays a key lookup (`range_key_conflict` in `src/checker/pattern.rs`, read by `range_subscript` and `record_hook_table`). A generic `S[K]` with `index(k: K)` and a `slice` is legal to declare; `x[a..b]` on `S[Range]` is the use-site error. (B.1) The `Shared` read-temporary warning is now one rule, `temporary_write` in `src/checker/sig.rs`: a mutating call or a store on a value no name holds warns `changes a temporary copy; the result is dropped`; the fresh rows come from `fresh_shape` (builtin slice, native method that returns a container by its DECLARED return type, operator result, box read) and a write whose chain goes on through an element of a shallow copy stays silent, and so does a store through a user `set_index` hook (`store_is_native`: the hook runs user code). (B.2) The write summaries run in two phases: `pretype_place_subscripts` types the bodies with a subscript write (diagnostics rolled back), `Checker::fresh_subscripts` records the builtin slices, and `infer_fn_writers` stores each summary link as `ChainLink::Element` or `ChainLink::Slice`, so an importing module reads the fact from the summary. `g[0..2].push([9])` in a spawned fn is a warning, no D4 error; `g[0].push(9)`, `g[0..2][0].push(9)` and `m[0..3].push(9)` on a `Map[Range, V]` stay the error. Moved cells: `fresh_shape_grid` (`xs + xs`), `generator_deep_privacy_grid` (`n10`, `n12`), `generator_slot_privacy_grid` (`g21`). Sweep of 714 tracked `.chz` files: 0 changed (`chezzi check`, base against branch). `chezzi test tests/chz`: 1724 passed at the default worker count, `CHEZZI_THREADS=2` and `=1`. Tests: `fresh_temporary_grid`, `range_subscript_ambiguity_grid`, `native_container_results_are_new_objects`, `tests/chz/spec/fresh_temporary_test.chz`.
-- **TICKET-253 (2026-10-13): a range is a value (rules U6 and U7 of `docs/special-cases.md`).** `a..b`, `a..=b`, `..b`, `a..` and `..` build a `Range`, an ordinary struct of `std/prelude.chz` that every module sees (the resolver adds `import Range from std.prelude`): fields `start: int?`, `end: int?`, `step: int = 1`, `inclusive: bool = false`; `Range(a, b, step)` is the only place for a step; a zero step faults at construction. `Range` is `Iterable[int]` (not an `Iterator`), `Contains[int]`, Eq and Hashable, so `for`, comprehensions, `List()`, `Set()`, `S: Iterable[int]` bounds, `in`, `len()` and map keys all work through the protocol table with no `for`-only case. `..` binds below `|` and above the comparisons (`0..1 << 2` is `0..4`; `x in 0..3` needs no parentheses) and `a()..b()` runs `a()` first everywhere. A literal `for i in a..b` keeps the allocation-free counter loop; `for i in r` over a value resumes a generator per step (measured in `docs/benchmarks.md`). **`range()` is removed** (`range(n)` is `0..n`, a list is `List(0..n)`). **Slices take a `Range`:** `xs[a..b]`, `xs[..]`, `xs[Range(0, 10, 2)]`; one function (`slice::range_indices`) resolves it for `List`, `str`, `bytes`, `bytearray` and `ConcurrentList` (a negative bound counts from the end, an inclusive end adds one after that, both bounds clamp); the checker decides once whether a `Range` subscript slices or looks a key up and the compiler emits `Op::SliceRange` from its record. The colon slice and `[::-1]` are removed with errors that name the replacement; `str.reverse()` is replaced by `reversed()` on `List`/`str`/`bytes`/`bytearray` (`reverse()` stays in place on `List` and `bytearray`). The `Slice` requirement is `slice(self, r: Range) -> R`. Match patterns take `a..=b`. A user `fn range` and a user `fn Range` stay `reserved (builtin)` errors (`Range` from the fact that the implicit prelude import binds it; the other reserved type names stay legal `fn` names, as on main, pinned by `tests/reserved_fn_names_grid.rs`). The implicit import has the span `Span::NOWHERE` and no import registry holds it, so no message prints its line. `Range.contains` tests alignment on the two remainders, so it never overflows. Grid: `tests/range_value_grid.rs` (form x use x position at worker counts 1, 2, default), `tests/chz/spec/range_value_test.chz`. **D4 consequence of the single subscript form:** the write walkers (`chain`, `view_root`, `path`, `self_chain`, `chain_path`) run before any body is checked and read a subscript as one place link, so `grid[0..2].push([9])` inside a function that a `spawn` calls is the D4 type error `'grid' is this task's copy: a write to it would be lost at the join; ...` (`help: call to 't' writes 'grid' through 'push'`), as `grid[0].push(9)` is. The colon spelling gave no report before; that statement changed a dropped temporary. 0 of 713 tracked `.chz` files change; `docs/decision-d4-airlock.md` and `docs/syntax.md` carry the program and the message. `range` is also gone from the type names the suggester reads, so `x: rnge = 1` gets no `did you mean 'range'?`.
-- **TICKET-252 (2026-10-12): the lexer owns what a hole's text is and where it ends (family U12; P0 silent wrong values).** Three readers used to read one hole one after the other and disagreed: the string lexer resolved escapes over the whole literal, `parse_interpolation` scanned the post-escape text for `{`, `}`, quotes, `#` and `:`, and `tokenize_frag` lexed it again with a fresh lexer (a second escape pass, bracket depth 0). Result: `"{'\\n'.len()}"` printed `1` (CPython `2`), `"{line.replace('\\n', ' ')}"` replaced nothing, `"\u{7B}x\u{7D}"` interpolated `x` (CPython `{x}`), and `"""{x +⏎ 1}"""` failed. **Now:** `Lexer::quoted` finds each hole while it scans the literal and lexes its code once, in place, one bracket deep (layout off, real spans); `Lexer::escape` is the only escape reader; `Token::Str` carries `StrLit { parts: [Text | Hole], len }`; the parser builds `ExprKind::Interp` from those parts (`ExprKind::Str` is final text); `fmtspec::parse_nested` takes `SpecItem`s and scans no brace. Deleted: `src/interpolation.rs`, `tokenize_frag`, `PosMap`, `split_spec`, `is_ternary_head`, `take_field`, `compile_str`, `interp_exprs`, `check_interpolation` and the `ExprKind::Str` re-parse arms of desugar, checker and compiler. **Owner answers (2026-10-12):** (1c) a nested literal may use the enclosing quote (`"{d["k"]}"`); a backslash in hole code is an error that says to write the quote directly. (2b) the first `:` at hole depth starts the spec, no keyword exception: `{if c: 1 else: 2}` is an error that says to use parentheses, `{(if c: 1 else: 2)}` works. (3a) seven `.chz` files migrated. **Choices to confirm:** `MAX_HOLE_NEST = 149` (CPython 3.14.7's measured limit); `extern "lib{x}"` is an error; a lone `}` in a nested literal is `unmatched '}'` (write `'}}'`; CPython writes `'}'`). **Editor:** `StrLit.len` is the one extent of a plain string; `measure_string` keeps only `b"…"` / `r"…"`; the TextMate grammar nests a same-quote hole. Docs: `docs/syntax.md` §10 states the three rules; `docs/grammar.bnf` says the lexer finds holes. **Depth:** a hole parses on the same parser and costs one depth level like a parenthesis, so the last fold count that builds moved for `x := "{1+1..}"` from 15 998 to 15 995 and for `x := "{1+1..}".len()` from 15 996 to 15 993 (`(1+1..)` is 15 995 on both); `tests/check_errors_json.rs` arm (a0) pins 15 993 (monitor decision, no depth discount per hole).
+- **TICKET-253 (2026-10-13): a range is a value (rules U6 and U7 of `docs/contributing/special-cases.md`).** `a..b`, `a..=b`, `..b`, `a..` and `..` build a `Range`, an ordinary struct of `std/prelude.chz` that every module sees (the resolver adds `import Range from std.prelude`): fields `start: int?`, `end: int?`, `step: int = 1`, `inclusive: bool = false`; `Range(a, b, step)` is the only place for a step; a zero step faults at construction. `Range` is `Iterable[int]` (not an `Iterator`), `Contains[int]`, Eq and Hashable, so `for`, comprehensions, `List()`, `Set()`, `S: Iterable[int]` bounds, `in`, `len()` and map keys all work through the protocol table with no `for`-only case. `..` binds below `|` and above the comparisons (`0..1 << 2` is `0..4`; `x in 0..3` needs no parentheses) and `a()..b()` runs `a()` first everywhere. A literal `for i in a..b` keeps the allocation-free counter loop; `for i in r` over a value resumes a generator per step (measured in `docs/contributing/benchmarks.md`). **`range()` is removed** (`range(n)` is `0..n`, a list is `List(0..n)`). **Slices take a `Range`:** `xs[a..b]`, `xs[..]`, `xs[Range(0, 10, 2)]`; one function (`slice::range_indices`) resolves it for `List`, `str`, `bytes`, `bytearray` and `ConcurrentList` (a negative bound counts from the end, an inclusive end adds one after that, both bounds clamp); the checker decides once whether a `Range` subscript slices or looks a key up and the compiler emits `Op::SliceRange` from its record. The colon slice and `[::-1]` are removed with errors that name the replacement; `str.reverse()` is replaced by `reversed()` on `List`/`str`/`bytes`/`bytearray` (`reverse()` stays in place on `List` and `bytearray`). The `Slice` requirement is `slice(self, r: Range) -> R`. Match patterns take `a..=b`. A user `fn range` and a user `fn Range` stay `reserved (builtin)` errors (`Range` from the fact that the implicit prelude import binds it; the other reserved type names stay legal `fn` names, as on main, pinned by `tests/reserved_fn_names_grid.rs`). The implicit import has the span `Span::NOWHERE` and no import registry holds it, so no message prints its line. `Range.contains` tests alignment on the two remainders, so it never overflows. Grid: `tests/range_value_grid.rs` (form x use x position at worker counts 1, 2, default), `tests/chz/spec/range_value_test.chz`. **D4 consequence of the single subscript form:** the write walkers (`chain`, `view_root`, `path`, `self_chain`, `chain_path`) run before any body is checked and read a subscript as one place link, so `grid[0..2].push([9])` inside a function that a `spawn` calls is the D4 type error `'grid' is this task's copy: a write to it would be lost at the join; ...` (`help: call to 't' writes 'grid' through 'push'`), as `grid[0].push(9)` is. The colon spelling gave no report before; that statement changed a dropped temporary. 0 of 713 tracked `.chz` files change; `docs/design/adr-d4-airlock.md` and `docs/reference/syntax.md` carry the program and the message. `range` is also gone from the type names the suggester reads, so `x: rnge = 1` gets no `did you mean 'range'?`.
+- **TICKET-252 (2026-10-12): the lexer owns what a hole's text is and where it ends (family U12; P0 silent wrong values).** Three readers used to read one hole one after the other and disagreed: the string lexer resolved escapes over the whole literal, `parse_interpolation` scanned the post-escape text for `{`, `}`, quotes, `#` and `:`, and `tokenize_frag` lexed it again with a fresh lexer (a second escape pass, bracket depth 0). Result: `"{'\\n'.len()}"` printed `1` (CPython `2`), `"{line.replace('\\n', ' ')}"` replaced nothing, `"\u{7B}x\u{7D}"` interpolated `x` (CPython `{x}`), and `"""{x +⏎ 1}"""` failed. **Now:** `Lexer::quoted` finds each hole while it scans the literal and lexes its code once, in place, one bracket deep (layout off, real spans); `Lexer::escape` is the only escape reader; `Token::Str` carries `StrLit { parts: [Text | Hole], len }`; the parser builds `ExprKind::Interp` from those parts (`ExprKind::Str` is final text); `fmtspec::parse_nested` takes `SpecItem`s and scans no brace. Deleted: `src/interpolation.rs`, `tokenize_frag`, `PosMap`, `split_spec`, `is_ternary_head`, `take_field`, `compile_str`, `interp_exprs`, `check_interpolation` and the `ExprKind::Str` re-parse arms of desugar, checker and compiler. **Owner answers (2026-10-12):** (1c) a nested literal may use the enclosing quote (`"{d["k"]}"`); a backslash in hole code is an error that says to write the quote directly. (2b) the first `:` at hole depth starts the spec, no keyword exception: `{if c: 1 else: 2}` is an error that says to use parentheses, `{(if c: 1 else: 2)}` works. (3a) seven `.chz` files migrated. **Choices to confirm:** `MAX_HOLE_NEST = 149` (CPython 3.14.7's measured limit); `extern "lib{x}"` is an error; a lone `}` in a nested literal is `unmatched '}'` (write `'}}'`; CPython writes `'}'`). **Editor:** `StrLit.len` is the one extent of a plain string; `measure_string` keeps only `b"…"` / `r"…"`; the TextMate grammar nests a same-quote hole. Docs: `docs/reference/syntax.md` §10 states the three rules; `docs/reference/grammar.bnf` says the lexer finds holes. **Depth:** a hole parses on the same parser and costs one depth level like a parenthesis, so the last fold count that builds moved for `x := "{1+1..}"` from 15 998 to 15 995 and for `x := "{1+1..}".len()` from 15 996 to 15 993 (`(1+1..)` is 15 995 on both); `tests/check_errors_json.rs` arm (a0) pins 15 993 (monitor decision, no depth discount per hole).
 - **TICKET-251 (2026-10-12): no wildcard arm on an enum in the library or the binaries (refactor, no behaviour change).** The lint `clippy::wildcard_enum_match_arm` flagged 481 arms on main at `2c04518d` (483 on the branch base: two more on the foreign `std::num::IntErrorKind`, which keep their `| _`). A `_ =>` on a language enum gave every later variant the old behaviour and the build stayed green (TICKET-247's `Unary` arm; S3-4's `stmt_expr_recover_blocks`). Every arm is now one of: a call to an exhaustive accessor or classifier (61 projections through `Obj::as_list`, `Obj::as_map`, `Obj::as_set`, `ExprKind::as_ident`, `StmtKind::as_expr`; 5 through `Obj::as_enum`; 3 through `ExprKind::is_named_head`; one duplicate method, `declared_methods`, deleted for `nominal_method_table`), or the named variants. `PINNED_ALLOWS` is 0. The price is variant lists, not logic: `git diff --shortstat main -- src` is 52 files, 12376 insertions, 682 deletions (rustfmt puts one variant on one line). **Gate:** `Cargo.toml` `[lints.clippy] wildcard_enum_match_arm = "deny"`; test code is scoped out by `#![cfg_attr(test, allow(...))]` in four crate roots and `#![allow(...)]` in nine `tests/*.rs` crates; `tests/wildcard_enum_lint_gate.rs` (3 tests) pins the deny, pins the allow count and runs `cargo clippy --lib --bins --features lsp` inside `cargo test`, so the suite gate and `cargo nextest run` see the lint and `chezzi-lsp` is covered. **Checked on base and branch:** lib `5075 passed` before, `5078 passed` after (three new unit tests); `tests/chz` `1687 passed` at the default worker count and at `CHEZZI_THREADS=2`; `examples_golden`, `chz_suite`, conformance green. The arms the named lists made visible (13 silent absorbers that look wrong, for example `StmtKind::Assert` in `stmt_expr_recover_blocks`) are listed in the ticket thread, not fixed here.
-- **TICKET-249 (2026-10-11): indentation ends a block expression (wave 23, parser, P0; supersedes one bullet of DEC-242).** The lexer emits no `Newline` after a `Dedent`, and every loop that continues an expression or a statement tested `peek()` alone, so the first token of the line after a `match` / indented `recover:` value continued it. `f := match n:` + arms, then `(c.bump())`, called the match value (CPython and Rust: a new statement); an arm `?_: v` after an arm whose value is a nested `match` was a postfix `?` that returned from the function early (Rust: `Some(-1)`); arms `(x, _): v` and `-1: v` there were `expected identifier, found ':'`. Single source: `Parser::ended_at_block` (previous token is a `Dedent`), read by the infix, comparison-chain and postfix loops, by the simple-statement tail and `eat_in_line` (target and value list commas, `:=` / `=` after a target list and in a `wait` arm, the `assert` message), and by `expect_stmt_end` / `expect_member_end`, whose two inline copies are deleted. A match-expression arm ends its line (`expect_stmt_end`). **Now rejected, on the offending line:** a line starting with a binary operator (`+ 1`), `.abs()`, `?.`, `|> f()`, `, 2` or an assignment operator after a block expression, and two match-expression arms on one line; no tracked `.chz` file used one. **Whose `else`:** `Parser::else_is_guard` (three copies deleted) reads `ended_at_block` and `Parser::stmt_inline`; after a block inside an inline body a dedented `else` is the header's (`if`, `elif`, a `wait` arm) and an error after `for`, `while` or a match arm. **Reversed pin:** `if c: x := match n:` + arms, then `else:`, was an `else` guard on `x` and is now the `if`'s else block, as in the indented form and in Rust (`j_let_guard`: `0 3 0` before, `0 0 3` now); a `wait` arm no longer loses its `else: break` (`w_loop`: `1` before, `3` now). Eight of eleven `BLOCK_EXPR_DRIFT` entries are deleted; `docs/grammar.bnf` gains `<inlineStmt>`. Tests: `parser::tests::block_end_grid` (7 kinds x 14 positions x 46 first tokens = 4508 cells, each asserting where the line lands in the tree; 2353 red before), `parser::tests::else_owner_after_block_grid` (408 cells, 102 red before), ten corpus files, `tests/chz/spec/block_expr_end_test.chz`, five migrated cells of `tests/inline_if_grid.rs`.
-- **TICKET-247 (2026-10-11): a wrapped name holds its operand in the airlock use walk (wave 23, Airlock, P0).** `?x` is `Some(x)`: the wrapper holds the object bound to `x`. The checker's use walk (`UseWalk::value`) matched `Unary { expr, .. }` with a wildcard on the operator, written when `UnaryOp` was `{Neg, Not}`, so `?x` and `!x` recorded `RootUse::Op` and a generator frame slot stayed `Root`. A generator that did `yield ?buf` and then `buf.push(1)` in a spawned task lost the write silently: the parent still saw `[0]` (D4 broken; CPython prints `[0, 1]`). It composed through `[?buf]`, `(?buf, 1)`, `{k: ?buf}`, `W(?buf)`, `if c: ?buf else: None`, `match ?buf:`, `(?buf) ?? d`, an `else:` guard, `unw(?buf)` and `recover: ?buf`, by yield, field store, argument, callee `return` and callee store, for List, Map and Set roots. Each now faults with `this value is this task's copy`, as the bare name does. Single source: `aliases_operand(&ExprKind) -> OperandAlias { Holds, Fresh, Child }` (`src/checker/fn_writes.rs`) matches `UnaryOp` and `BinaryOp` with no wildcard and defaults every other kind to `Holds`; `UseWalk::operator` and `Checker::fresh_shape` both read it. Deleted: the four per-operator arms of `UseWalk::value`, the two hand `UnaryOp` arms of `fresh_shape`, and the compound-assign type list in `sig.rs` (it now reads `use_keeps_root(&RootUse::Op, ..)`). Ceiling (false fault, never a lost write): a frame-local that is only wrapped inside the frame (`o: T? = ?buf`) is escaped, as `o := buf` is. Grid: `tests/airlock_wrap_alias_grid.rs`, 13 leak forms x 6 root types x 5 routes x 3 crossings x `CHEZZI_THREADS` {1, 2, default} = 3510 runs (1431 silent on base, 0 after), plus 9 fresh-operator controls that must stay writable. Rules: `docs/decision-d4-airlock.md`.
+- **TICKET-249 (2026-10-11): indentation ends a block expression (wave 23, parser, P0; supersedes one bullet of DEC-242).** The lexer emits no `Newline` after a `Dedent`, and every loop that continues an expression or a statement tested `peek()` alone, so the first token of the line after a `match` / indented `recover:` value continued it. `f := match n:` + arms, then `(c.bump())`, called the match value (CPython and Rust: a new statement); an arm `?_: v` after an arm whose value is a nested `match` was a postfix `?` that returned from the function early (Rust: `Some(-1)`); arms `(x, _): v` and `-1: v` there were `expected identifier, found ':'`. Single source: `Parser::ended_at_block` (previous token is a `Dedent`), read by the infix, comparison-chain and postfix loops, by the simple-statement tail and `eat_in_line` (target and value list commas, `:=` / `=` after a target list and in a `wait` arm, the `assert` message), and by `expect_stmt_end` / `expect_member_end`, whose two inline copies are deleted. A match-expression arm ends its line (`expect_stmt_end`). **Now rejected, on the offending line:** a line starting with a binary operator (`+ 1`), `.abs()`, `?.`, `|> f()`, `, 2` or an assignment operator after a block expression, and two match-expression arms on one line; no tracked `.chz` file used one. **Whose `else`:** `Parser::else_is_guard` (three copies deleted) reads `ended_at_block` and `Parser::stmt_inline`; after a block inside an inline body a dedented `else` is the header's (`if`, `elif`, a `wait` arm) and an error after `for`, `while` or a match arm. **Reversed pin:** `if c: x := match n:` + arms, then `else:`, was an `else` guard on `x` and is now the `if`'s else block, as in the indented form and in Rust (`j_let_guard`: `0 3 0` before, `0 0 3` now); a `wait` arm no longer loses its `else: break` (`w_loop`: `1` before, `3` now). Eight of eleven `BLOCK_EXPR_DRIFT` entries are deleted; `docs/reference/grammar.bnf` gains `<inlineStmt>`. Tests: `parser::tests::block_end_grid` (7 kinds x 14 positions x 46 first tokens = 4508 cells, each asserting where the line lands in the tree; 2353 red before), `parser::tests::else_owner_after_block_grid` (408 cells, 102 red before), ten corpus files, `tests/chz/spec/block_expr_end_test.chz`, five migrated cells of `tests/inline_if_grid.rs`.
+- **TICKET-247 (2026-10-11): a wrapped name holds its operand in the airlock use walk (wave 23, Airlock, P0).** `?x` is `Some(x)`: the wrapper holds the object bound to `x`. The checker's use walk (`UseWalk::value`) matched `Unary { expr, .. }` with a wildcard on the operator, written when `UnaryOp` was `{Neg, Not}`, so `?x` and `!x` recorded `RootUse::Op` and a generator frame slot stayed `Root`. A generator that did `yield ?buf` and then `buf.push(1)` in a spawned task lost the write silently: the parent still saw `[0]` (D4 broken; CPython prints `[0, 1]`). It composed through `[?buf]`, `(?buf, 1)`, `{k: ?buf}`, `W(?buf)`, `if c: ?buf else: None`, `match ?buf:`, `(?buf) ?? d`, an `else:` guard, `unw(?buf)` and `recover: ?buf`, by yield, field store, argument, callee `return` and callee store, for List, Map and Set roots. Each now faults with `this value is this task's copy`, as the bare name does. Single source: `aliases_operand(&ExprKind) -> OperandAlias { Holds, Fresh, Child }` (`src/checker/fn_writes.rs`) matches `UnaryOp` and `BinaryOp` with no wildcard and defaults every other kind to `Holds`; `UseWalk::operator` and `Checker::fresh_shape` both read it. Deleted: the four per-operator arms of `UseWalk::value`, the two hand `UnaryOp` arms of `fresh_shape`, and the compound-assign type list in `sig.rs` (it now reads `use_keeps_root(&RootUse::Op, ..)`). Ceiling (false fault, never a lost write): a frame-local that is only wrapped inside the frame (`o: T? = ?buf`) is escaped, as `o := buf` is. Grid: `tests/airlock_wrap_alias_grid.rs`, 13 leak forms x 6 root types x 5 routes x 3 crossings x `CHEZZI_THREADS` {1, 2, default} = 3510 runs (1431 silent on base, 0 after), plus 9 fresh-operator controls that must stay writable. Rules: `docs/design/adr-d4-airlock.md`.
 - **TICKET-245 (2026-10-10): a `parallel:` nursery inside a native callback no longer hangs at one or two workers.** The repro (three tasks, each calling `RwShared.write` with a closure that opens a nursery of four spawns, 20 rounds) hung 5 of 5 at `CHEZZI_THREADS=1` and `=2`; Go (`sync.Mutex` held across four goroutines joined by a `sync.WaitGroup`, `GOMAXPROCS(1)`) prints `240`, and Chezzi now prints `240` at every worker count. **Cause:** a nursery joiner that cannot park ran ANY runnable fiber on its own stack, over a buried host frame; the fiber it picked then waited in place for what only that frame could give (the update guard it holds, a value it sends after the join). It is not `GUARD_DEMOTE_BUDGET`, and it needs no box (`p3`, a `map` callback, hung the same way). **Fix:** the question "may this joiner run fibers on its own stack" has one owner, the `Nursery` row of `block::mode` (new `BlockMode::Help`), read by `Vm::joiner_helps` and by `Vm::joiner_shell`, which all ten join and abort sites call; a joiner inside a callback hands its runner slot to one replacement runner and only waits. `Vm::demote_once` is the one handover of a worker's slot (three callers). Supersedes one bullet each of DEC-131 and DEC-103 (owner answer, 2026-10-10). **Grid:** `tests/callback_nursery_grid.rs` (5 operations x 6 callback kinds x 3 caller counts x 3 worker counts, plus `p1b`, `p3`, `p5`); base had 9 and 5 red cell runs, each `TIMEOUT`. Its sampling pass ran `i6n2`, its in-callback twin and `child_writes_held_box` 20 of 20 correct at T=1, 2, 4 and the default count, debug and release: no false `deadlock`. **Ledger:** row `W23-1` (P3, declined verdict): a `recv` inside a `write` closure on `main` with no sender hangs with no report, because `main` inside a callback is unjudged.
-- **TICKET-243 (2026-10-10): the collections own the shared-container surface, and a `_` name of a std module is hidden from user code (owner decision 2026-10-10).** (1) **`RwShared[T]` has exactly `get`, `set`, `read`, `write` for every `T`.** The container methods of `RwShared[List/Map/Set]` (`len`, `at`, `slice`, `for_each`, `fold`, `get_key`, `has`, `set_key`, `remove_key`, `get_or_insert`, `for_each_entry`, `fold_entries`, `contains`) are gone from the box; a call is `has no method` with the help `use ConcurrentList from std.concurrency.collection` (or `ConcurrentMap` / `ConcurrentSet`), which wins over a `did you mean 'set'?` near-miss. (2) **`std.concurrency.collection` has four collections.** New `ConcurrentList[E]` (`new`, `push`, `len`, `at`, `slice`, `for_each`, `fold`, `snapshot`) and `ConcurrentSet[E]` (`new`, `add`, `remove`, `contains`, `len`, `for_each`, `fold`, `snapshot`); `ConcurrentMap` gains `for_each_entry` and `fold_entries`. `push` and `add` splice ONE element under the box's update guard (DEC-016): 200 calls on a 100k container take 16 ms and 2 ms on the release binary, against 1465 ms and 3547 ms for a whole-value `write` (`docs/benchmarks.md`). A stored wire list carries no id ceiling, so the first `push` after a whole store re-encodes the list once (`RwSharedCore.list_ceiling`); `add` / `remove` reuse the Map entry writer (`Vm::rwshared_write_entry`). `ConcurrentSet.remove` is O(n), as `ConcurrentMap.remove`. `at(i)` is constant time (200 calls on a 100k list: 0 ms); the 49 ms in the ticket did not reproduce. (3) **One rule decides "internal to std": `is_std_internal_name` (`src/checker/mod.rs`), a name that starts with `_` and is declared by a std module.** `ModuleSig::seal_std_internals` removes every such member, type and struct/enum method from a std module's export record at publication, and `Checker::std_internal_hidden` hides a native `_` method. So `import _exists from std.fs`, `concurrency._settle(..)`, `ex._submit_settled(..)`, `t._mark()` on a `cancel.Token` and `import _PmapCell from std.concurrency.pmap` are `has no member` / `has no method` in a user module; a user module's own `_` names are untouched. The box primitives the collections call are such names (`_len`, `_at`, `_push`, ..., listed once in `RWSHARED_VIEWS`, `src/checker/expr.rs`). The "`_` is convention only" sentence is deleted from `std/fs.chz` and `docs/stdlib.md`. Grids: `checker::tests::std_internal_names_are_hidden_from_user_modules` (every primitive, every top-level `_` name and every `_` method of every std file) and `tests/concurrent_collection_grid.rs` (collection x method x {single task, eight tasks} x `CHEZZI_THREADS` {1, 2, default}). Migrated: `tests/chz` (4 files), `benches/shared_map/lookup_100k.chz`, `tests/cancellation_point_grid.rs`, sixteen lib tests.
-- **TICKET-240 (2026-10-10): a fresh value graph crosses unmarked at every depth (wave 22 family D, Airlock).** A fresh value passed to `spawn` was falsely "this task's copy" whenever it was not the outermost object: under a `T?` / `T!E` parameter, or one level inside a fresh struct, list, map, tuple or variant. The checker now decides freshness once, recursively over the operand expression (`Checker::fresh_shape`, returning a `vm::crossing::Fresh` shape); the compiler stores the shape (`Program.fresh_calls`) and the runtime unmarks exactly the objects it names (`Vm::unmark_fresh`). `crossing_of`, the `Crossing` enum and both one-bit masks are deleted. A generator frame slot is `Marked`, `Root` or `All` (`Checker::deep_private`): `buf: List[int]? = []` then `match buf: ?a: a.push(1)` runs in a crossed generator. Still faults, as before: a named child (`spawn f([xs])`), a child of `xs.copy()`, a call result, a named struct map key (`{k: []}`). Ceilings (false faults): a struct `.copy()`, a provider default, a shape past 16 levels or 64 positional children, a generator frame-local built by a comprehension. Grids: `tests/airlock_fresh_graph_grid.rs` (19 wrappers x 7 inner values x 3 write depths, at one worker, two workers and default), `fresh_shape_grid`, `generator_deep_privacy_grid`. Perf: `benches/sched/spawn_fresh_graph.chz` 0.363 s before and after (`docs/benchmarks.md`). Rules: `docs/decision-d4-airlock.md`.
-- **TICKET-242 (2026-10-10): the one-line `if … else` statement, and seven grammar-versus-parser drifts (wave 22 family F).** (1) **`if c: a() else: b()` on one line is the if-expression used as a statement**, with or without `elif`; it was `` `else` needs a `T?` or `T!E` value `` (read as an `else` guard on the body) or `expected end of line, found 'elif'`. `parse_if` hands its inline body to `parse_if_expr_tail`, the tail the expression form uses, so both forms build `ExprKind::IfElse`; no backtracking. The rule: after the ONE statement of an inline `if` body, a bare `else:` or `elif` on the line belongs to the `if` (`Parser::if_line`, `if_line_else`, read by `at_line_end`, the statement guard site, `parse_else_guard`, `reject_else_guard`); `else e:` stays a guard; a nested block on the line (a `recover:` body, a guard body) keeps its own `else:`. **Now rejected**: a bare-`else:` guard on an inline `if` body (`if c: f() else: return` ran; no tracked `.chz` file used it) and a statement branch, both with ``a one-line `if`/`else` takes an expression in each branch; …``; a one-line `elif b: X else: Y` with ``an `elif` body ends its line; …``. `Parser::at_line_end` is the one line-end test (`expect_stmt_end` and `parse_return` both read it). (2) **A one-line `if … else` statement does not join its branch types** (`if c: print(1) else: xs.len()` runs): `Checker::check_discarded`, the body of the one discarded-value arm, checks each branch as a discarded value, so a carrier branch still warns, once per branch. Every value-used position keeps `branches have incompatible types`. `(if c: print(1) else: 2)` as a statement now runs too. (3) **`recover: <expr>` as a whole parenthesized value or a whole call argument** (`print(recover: 1 / 0)`; `recover_inline`, `call_arg`); not as an operand, tuple, list or map element. (4) A `where` entry with no bound is ``a `where` entry needs a bound (`where T: Proto`)`` (`where T, U: Eq` parsed before); a type list on a non-name head (`1[T, U]`) has one message, `a type list in brackets needs a name before the '[' …`. (5) **Grammar**: a block expression (`match`, `recover:` + block) is the LAST operand of its statement (`<exprEnd>`, `<tailExpr>`, `<stmtTail>`), not a `<primary>`, so `docs/grammar.bnf` derives `x := 1 + match n:` and no longer derives an inline `match` body, `import None from m`, a boundless `where` entry or a type list on a value. Nine `GRAMMAR_LOOSER` entries are gone; `BLOCK_EXPR_DRIFT` (eleven entries, test `block_expr_drift_entries_hold`) records what the BNF cannot state: the parser reads the line after a block expression's `DEDENT` as a continuation. Tests: `tests/inline_if_grid.rs` (185 cells), `parser::tests::one_line_if_statement_is_the_if_expression`, `checker::tests::one_line_if_statement_branches_need_not_join`, twenty-four corpus files.
-- **TICKET-241 (2026-10-10): three parser gaps over the new syntax, and a grammar-alternative enumerator (wave 22 family F).** (1) **An inline body is exactly one `<simpleStmt>`.** `fn adder(n: int) -> fn(int) -> int: fn(x: int) -> int: x + n` was `expected identifier, found '('`; a statement-initial `fn (` is now a closure literal in every position. `Parser::compound_keyword` is the one list of `<compoundStmt>` starts; `parse_stmt_in(inline)` dispatches through it and refuses each start as an inline body, replacing a four-token deny-list in `parse_block`. `spawn <call>` is a simple statement (`<spawnCallStmt>`, `parse_spawn_call`), so `if c: spawn f()` stays legal. **Now rejected** with `a nested block must be indented, not written inline after ':'`: inline `fn name`, `parallel:`, `wait:`, `spawn:`, `defer <call>` and `defer:` (`if c: defer f()` ran `f` at once: the inline body was the defer's whole block). No tracked `.chz` file used one. A missing fn name before `(` now reports a closure-body error. (2) **`T!= v` is `T! = v`.** `y: int!= 6`, `y: const int!= 6`, `fn f(a: int!=5)` and a field `a: int!= 5` were `expected '=', found '!='`. `parse_type_postfix` takes the `!` of the fused token without rewriting it (`Parser::bang_eq`, read by `eat_type_assign` at the four `=`-after-type sites); `a != b` in an expression is unchanged. (3) **The `else` guard on a destructuring binding** (owner decision 2026-10-10): `a, b := f() else e:` and `a, b := find() else:`. An assignment, a compound assignment and `return` refuse the guard with one text: ``an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return` ``. (4) **`conformance::grammar_alternatives_parse`**: for each statement-level rule of `docs/grammar.bnf` and each nonterminal reachable from it, one sentence per alternative (4410 sentences); the grammar engine and the hand parser must agree, except for the 17 `GRAMMAR_LOOSER` entries (7 context rules, 10 rows of six listed divergences F1-F6, none fixed here). It is red with one sentence, `FN LPAREN RPAREN COLON PASS NEWLINE EOF`, when the old `fn` arm is restored. Tests: `parser::tests::{inline_body_is_exactly_a_simple_stmt, fused_bang_eq_is_bang_then_assign, else_guard_binds_only_on_a_let_or_a_bare_call}`, `tests/else_guard_grid.rs::else_guard_binding_form_grid` (13 forms x 3 carriers; 21 of 39 cells red before the guard change), `tests/chz/spec/syntax_gaps_w22_test.chz`, four accept and seven reject corpus files.
+- **TICKET-243 (2026-10-10): the collections own the shared-container surface, and a `_` name of a std module is hidden from user code (owner decision 2026-10-10).** (1) **`RwShared[T]` has exactly `get`, `set`, `read`, `write` for every `T`.** The container methods of `RwShared[List/Map/Set]` (`len`, `at`, `slice`, `for_each`, `fold`, `get_key`, `has`, `set_key`, `remove_key`, `get_or_insert`, `for_each_entry`, `fold_entries`, `contains`) are gone from the box; a call is `has no method` with the help `use ConcurrentList from std.concurrency.collection` (or `ConcurrentMap` / `ConcurrentSet`), which wins over a `did you mean 'set'?` near-miss. (2) **`std.concurrency.collection` has four collections.** New `ConcurrentList[E]` (`new`, `push`, `len`, `at`, `slice`, `for_each`, `fold`, `snapshot`) and `ConcurrentSet[E]` (`new`, `add`, `remove`, `contains`, `len`, `for_each`, `fold`, `snapshot`); `ConcurrentMap` gains `for_each_entry` and `fold_entries`. `push` and `add` splice ONE element under the box's update guard (DEC-016): 200 calls on a 100k container take 16 ms and 2 ms on the release binary, against 1465 ms and 3547 ms for a whole-value `write` (`docs/contributing/benchmarks.md`). A stored wire list carries no id ceiling, so the first `push` after a whole store re-encodes the list once (`RwSharedCore.list_ceiling`); `add` / `remove` reuse the Map entry writer (`Vm::rwshared_write_entry`). `ConcurrentSet.remove` is O(n), as `ConcurrentMap.remove`. `at(i)` is constant time (200 calls on a 100k list: 0 ms); the 49 ms in the ticket did not reproduce. (3) **One rule decides "internal to std": `is_std_internal_name` (`src/checker/mod.rs`), a name that starts with `_` and is declared by a std module.** `ModuleSig::seal_std_internals` removes every such member, type and struct/enum method from a std module's export record at publication, and `Checker::std_internal_hidden` hides a native `_` method. So `import _exists from std.fs`, `concurrency._settle(..)`, `ex._submit_settled(..)`, `t._mark()` on a `cancel.Token` and `import _PmapCell from std.concurrency.pmap` are `has no member` / `has no method` in a user module; a user module's own `_` names are untouched. The box primitives the collections call are such names (`_len`, `_at`, `_push`, ..., listed once in `RWSHARED_VIEWS`, `src/checker/expr.rs`). The "`_` is convention only" sentence is deleted from `std/fs.chz` and `docs/reference/stdlib.md`. Grids: `checker::tests::std_internal_names_are_hidden_from_user_modules` (every primitive, every top-level `_` name and every `_` method of every std file) and `tests/concurrent_collection_grid.rs` (collection x method x {single task, eight tasks} x `CHEZZI_THREADS` {1, 2, default}). Migrated: `tests/chz` (4 files), `benches/shared_map/lookup_100k.chz`, `tests/cancellation_point_grid.rs`, sixteen lib tests.
+- **TICKET-240 (2026-10-10): a fresh value graph crosses unmarked at every depth (wave 22 family D, Airlock).** A fresh value passed to `spawn` was falsely "this task's copy" whenever it was not the outermost object: under a `T?` / `T!E` parameter, or one level inside a fresh struct, list, map, tuple or variant. The checker now decides freshness once, recursively over the operand expression (`Checker::fresh_shape`, returning a `vm::crossing::Fresh` shape); the compiler stores the shape (`Program.fresh_calls`) and the runtime unmarks exactly the objects it names (`Vm::unmark_fresh`). `crossing_of`, the `Crossing` enum and both one-bit masks are deleted. A generator frame slot is `Marked`, `Root` or `All` (`Checker::deep_private`): `buf: List[int]? = []` then `match buf: ?a: a.push(1)` runs in a crossed generator. Still faults, as before: a named child (`spawn f([xs])`), a child of `xs.copy()`, a call result, a named struct map key (`{k: []}`). Ceilings (false faults): a struct `.copy()`, a provider default, a shape past 16 levels or 64 positional children, a generator frame-local built by a comprehension. Grids: `tests/airlock_fresh_graph_grid.rs` (19 wrappers x 7 inner values x 3 write depths, at one worker, two workers and default), `fresh_shape_grid`, `generator_deep_privacy_grid`. Perf: `benches/sched/spawn_fresh_graph.chz` 0.363 s before and after (`docs/contributing/benchmarks.md`). Rules: `docs/design/adr-d4-airlock.md`.
+- **TICKET-242 (2026-10-10): the one-line `if … else` statement, and seven grammar-versus-parser drifts (wave 22 family F).** (1) **`if c: a() else: b()` on one line is the if-expression used as a statement**, with or without `elif`; it was `` `else` needs a `T?` or `T!E` value `` (read as an `else` guard on the body) or `expected end of line, found 'elif'`. `parse_if` hands its inline body to `parse_if_expr_tail`, the tail the expression form uses, so both forms build `ExprKind::IfElse`; no backtracking. The rule: after the ONE statement of an inline `if` body, a bare `else:` or `elif` on the line belongs to the `if` (`Parser::if_line`, `if_line_else`, read by `at_line_end`, the statement guard site, `parse_else_guard`, `reject_else_guard`); `else e:` stays a guard; a nested block on the line (a `recover:` body, a guard body) keeps its own `else:`. **Now rejected**: a bare-`else:` guard on an inline `if` body (`if c: f() else: return` ran; no tracked `.chz` file used it) and a statement branch, both with ``a one-line `if`/`else` takes an expression in each branch; …``; a one-line `elif b: X else: Y` with ``an `elif` body ends its line; …``. `Parser::at_line_end` is the one line-end test (`expect_stmt_end` and `parse_return` both read it). (2) **A one-line `if … else` statement does not join its branch types** (`if c: print(1) else: xs.len()` runs): `Checker::check_discarded`, the body of the one discarded-value arm, checks each branch as a discarded value, so a carrier branch still warns, once per branch. Every value-used position keeps `branches have incompatible types`. `(if c: print(1) else: 2)` as a statement now runs too. (3) **`recover: <expr>` as a whole parenthesized value or a whole call argument** (`print(recover: 1 / 0)`; `recover_inline`, `call_arg`); not as an operand, tuple, list or map element. (4) A `where` entry with no bound is ``a `where` entry needs a bound (`where T: Proto`)`` (`where T, U: Eq` parsed before); a type list on a non-name head (`1[T, U]`) has one message, `a type list in brackets needs a name before the '[' …`. (5) **Grammar**: a block expression (`match`, `recover:` + block) is the LAST operand of its statement (`<exprEnd>`, `<tailExpr>`, `<stmtTail>`), not a `<primary>`, so `docs/reference/grammar.bnf` derives `x := 1 + match n:` and no longer derives an inline `match` body, `import None from m`, a boundless `where` entry or a type list on a value. Nine `GRAMMAR_LOOSER` entries are gone; `BLOCK_EXPR_DRIFT` (eleven entries, test `block_expr_drift_entries_hold`) records what the BNF cannot state: the parser reads the line after a block expression's `DEDENT` as a continuation. Tests: `tests/inline_if_grid.rs` (185 cells), `parser::tests::one_line_if_statement_is_the_if_expression`, `checker::tests::one_line_if_statement_branches_need_not_join`, twenty-four corpus files.
+- **TICKET-241 (2026-10-10): three parser gaps over the new syntax, and a grammar-alternative enumerator (wave 22 family F).** (1) **An inline body is exactly one `<simpleStmt>`.** `fn adder(n: int) -> fn(int) -> int: fn(x: int) -> int: x + n` was `expected identifier, found '('`; a statement-initial `fn (` is now a closure literal in every position. `Parser::compound_keyword` is the one list of `<compoundStmt>` starts; `parse_stmt_in(inline)` dispatches through it and refuses each start as an inline body, replacing a four-token deny-list in `parse_block`. `spawn <call>` is a simple statement (`<spawnCallStmt>`, `parse_spawn_call`), so `if c: spawn f()` stays legal. **Now rejected** with `a nested block must be indented, not written inline after ':'`: inline `fn name`, `parallel:`, `wait:`, `spawn:`, `defer <call>` and `defer:` (`if c: defer f()` ran `f` at once: the inline body was the defer's whole block). No tracked `.chz` file used one. A missing fn name before `(` now reports a closure-body error. (2) **`T!= v` is `T! = v`.** `y: int!= 6`, `y: const int!= 6`, `fn f(a: int!=5)` and a field `a: int!= 5` were `expected '=', found '!='`. `parse_type_postfix` takes the `!` of the fused token without rewriting it (`Parser::bang_eq`, read by `eat_type_assign` at the four `=`-after-type sites); `a != b` in an expression is unchanged. (3) **The `else` guard on a destructuring binding** (owner decision 2026-10-10): `a, b := f() else e:` and `a, b := find() else:`. An assignment, a compound assignment and `return` refuse the guard with one text: ``an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return` ``. (4) **`conformance::grammar_alternatives_parse`**: for each statement-level rule of `docs/reference/grammar.bnf` and each nonterminal reachable from it, one sentence per alternative (4410 sentences); the grammar engine and the hand parser must agree, except for the 17 `GRAMMAR_LOOSER` entries (7 context rules, 10 rows of six listed divergences F1-F6, none fixed here). It is red with one sentence, `FN LPAREN RPAREN COLON PASS NEWLINE EOF`, when the old `fn` arm is restored. Tests: `parser::tests::{inline_body_is_exactly_a_simple_stmt, fused_bang_eq_is_bang_then_assign, else_guard_binds_only_on_a_let_or_a_bare_call}`, `tests/else_guard_grid.rs::else_guard_binding_form_grid` (13 forms x 3 carriers; 21 of 39 cells red before the guard change), `tests/chz/spec/syntax_gaps_w22_test.chz`, four accept and seven reject corpus files.
 - **TICKET-237 (2026-10-10): `None` is a keyword, and only keywords cannot be bound (Names family; owner decision 2026-10-10).** Before, `None` lexed as an identifier, so `None := 5`, a parameter or a loop variable named `None` changed every `None` in scope, including the one the `?.` lowering synthesized (`g(q, 7)` printed `7`). Now the lexer's `KEYWORDS` row `(NONE, Token::NoneKw)` is the one owner; the parser builds `ExprKind::NoneLit`, `Type::Nil` and a `Pattern::Variant` head, and no later phase tests the spelling (`is_none_lit`, `is_inline_default`, `scalar_bound_ty`, the `?.` lowering, `is_reserved_type` and `is_builtin_variant` lost their `"None"` test). **One message** for a keyword in any name position, from `Parser::keyword_name_error`: `expected identifier, found reserved keyword 'None' (a keyword cannot be used as a name)`; the three `:=` sites (single, destructuring, `wait` arm) reach it through `Parser::bind_target_error`, and `pass := 5`, `true := 5`, `fn f(true: int)` give the same text. A local, a parameter or a loop variable may still shadow a builtin function or type (`print := 5`, `int := 5`, `len := 3` run). **Migration:** a user enum variant named `None` must be renamed (`enum E: None` is a parse error; four corpus sources now say `Nothing`); `E.None` and `import X as None` are parse errors too. The prelude-variant clash text is now `'Some' is already imported by the prelude`. `self` is unchanged and not a keyword: `self := 5` in a method then `return self` prints `5`, a free `fn f(self: int)` prints `3` for `f(2)`, and `for self in [1, 2]:` in a method leaves `self.x` reading the receiver after the loop. Grid: `tests/keyword_binder_grid.rs` (26 binder forms x 11 names, every accepted cell run).
 - **2026-10-09: `ConcurrentMap[K, V].new()` and `ConcurrentCounter[K].new()`.** Static constructors in `std.concurrency.collection`; the type arguments come from the call (`ConcurrentMap[str, int].new()`) or an annotation. `ConcurrentMap(RwShared({}))` still works. The old note that a no-argument generic factory cannot bind `K`/`V` was stale. Test: `tests/chz/stdlib/concurrent_collection_new_test.chz`.
-- **TICKET-236 (2026-10-10): a reader of a cut job is no longer a false deadlock (wave 22 family B, Blocking).** A nursery task parked on an Executor job's result channel was declared deadlocked while `shutdown_now()` cut that job: `deadlock: every task in this parallel: block is blocked …` in 10 of 10 runs at `CHEZZI_THREADS=2` and 9 of 10 at the default count (300 rounds, release); the handle settled every time. Two mechanisms, each with one owner now. (1) **Every blocked thing is asked.** A parked task was only counted (`parked_n`); its channel was never read, so the window between the cut job's seal and the reader's wake read as "all parked". `recv_satisfiable` and `wait_satisfiable` (`src/vm/quiesce.rs`) are the one answer for a blocked party, a demoted waiter and a parked task (`ParkedEntry::satisfiable`). (2) **A verdict stands only inside one epoch.** A judge reads schedulers one lock at a time, so a job can send and finish between two reads (3 to 5 false faults in 60 runs for a reader inside a callback, with no `shutdown_now()`). The run's epoch `QuiesceState::left` moves on every way out of the counts a verdict reads, through nine methods (`SchedCore::leave_running`, `task_done`, `scope_retired`, `owner_blocked`, `body_closed`, `body_wait`, `builder_joined`, `MnSched::leave_inflight`, `QuiesceState::block_shared`) plus `SchedCore::settle_job` after its seal; `decide_since` declines a walk the epoch moved under. `latch_own_verdict(licence)` now checks the cut's licence before it latches. Dedupe: `MnSched::can_still_move` and `SchedCore::join_over` replace four and six inline copies. A real deadlock still faults (a job cut before it sends on a plain channel). Grid: `tests/executor_reader_grid.rs`, reader x wait x job end x cutter x worker count; bump-site grid `vm::tests::every_way_out_of_the_counts_moves_the_epoch`. One cell stays open as `docs/gaps.md` **W22-1** (a missed verdict that hangs, on base too). Field table and rules: `docs/concurrency.md`; cost: `docs/benchmarks.md` §TICKET-236.
-- **TICKET-235 (2026-10-09): every spawned task starts in a frame (Blocking family).** A one-line `spawn ch.send(v)` on a full channel, `spawn ch.recv()` on an empty one and `spawn l.accept()` crashed the VM with a Rust panic (`src/vm/netio.rs:1945:32: called Option::unwrap() on a None value`). Cause: `spawn recv.m(args)` compiled to `Op::SpawnMethod`, and `Vm::start_task` ran the native method with `self.frames` empty; a park then rewound the `ip` of a frame that did not exist. Fix: one decider, `Vm::task_entry` in `spawn_into` (read by `spawn` and `Executor.submit`). A head that pushes its own frame (a non-generator Chezzi fn or closure) runs directly, unchanged. Any other head (a receiver, a native fn value, a builtin, a ctor, a generator fn) rides as argument 0 of an entry thunk the compiler emits per `spawn <call>` site (`<spawned task>`; `<task entry>` behind `submit`), whose body is the `Op::Call` / `Op::CallMethod` the block form runs. Deleted: `Op::SpawnMethod` (now `Op::SpawnRecv`, which carries the thunk), `PendingCall::Method`, `Lowered::Method`, `ReadyCall::Method` and the `Method` arm of `start_task`. `start_task` refuses a callee for which `Vm::enters_frame` is false. The nine park sites read one accessor, `Vm::rewind_op`; none gained a branch. Operands are still evaluated in the parent at the `spawn`. A fault inside a one-line native spawn now carries one trace frame, `at <spawned task> (called at <the spawn line>)`; it had none. A receiver is serialized before its arguments now (`Crossing::behind_entry` moves the mask one bit). Tests: `tests/spawn_form_wait_grid.rs` (8 waiting ops x 3 spawn forms x 3 outcomes, each cell at `CHEZZI_THREADS` 1, 2, 0 unseeded and under seeds 1 and 2; 12 cells red before the fix), `vm::tests::{spawn_one_line_native_call_that_waits_does_not_panic, start_task_refuses_a_callee_that_enters_no_frame, spawn_call_operands_are_evaluated_in_the_parent, a_fault_in_a_one_line_native_spawn_names_the_spawn_line}`. Perf: `docs/benchmarks.md` TICKET-235.
+- **TICKET-236 (2026-10-10): a reader of a cut job is no longer a false deadlock (wave 22 family B, Blocking).** A nursery task parked on an Executor job's result channel was declared deadlocked while `shutdown_now()` cut that job: `deadlock: every task in this parallel: block is blocked …` in 10 of 10 runs at `CHEZZI_THREADS=2` and 9 of 10 at the default count (300 rounds, release); the handle settled every time. Two mechanisms, each with one owner now. (1) **Every blocked thing is asked.** A parked task was only counted (`parked_n`); its channel was never read, so the window between the cut job's seal and the reader's wake read as "all parked". `recv_satisfiable` and `wait_satisfiable` (`src/vm/quiesce.rs`) are the one answer for a blocked party, a demoted waiter and a parked task (`ParkedEntry::satisfiable`). (2) **A verdict stands only inside one epoch.** A judge reads schedulers one lock at a time, so a job can send and finish between two reads (3 to 5 false faults in 60 runs for a reader inside a callback, with no `shutdown_now()`). The run's epoch `QuiesceState::left` moves on every way out of the counts a verdict reads, through nine methods (`SchedCore::leave_running`, `task_done`, `scope_retired`, `owner_blocked`, `body_closed`, `body_wait`, `builder_joined`, `MnSched::leave_inflight`, `QuiesceState::block_shared`) plus `SchedCore::settle_job` after its seal; `decide_since` declines a walk the epoch moved under. `latch_own_verdict(licence)` now checks the cut's licence before it latches. Dedupe: `MnSched::can_still_move` and `SchedCore::join_over` replace four and six inline copies. A real deadlock still faults (a job cut before it sends on a plain channel). Grid: `tests/executor_reader_grid.rs`, reader x wait x job end x cutter x worker count; bump-site grid `vm::tests::every_way_out_of_the_counts_moves_the_epoch`. One cell stays open as `docs/contributing/gaps.md` **W22-1** (a missed verdict that hangs, on base too). Field table and rules: `docs/reference/concurrency.md`; cost: `docs/contributing/benchmarks.md` §TICKET-236.
+- **TICKET-235 (2026-10-09): every spawned task starts in a frame (Blocking family).** A one-line `spawn ch.send(v)` on a full channel, `spawn ch.recv()` on an empty one and `spawn l.accept()` crashed the VM with a Rust panic (`src/vm/netio.rs:1945:32: called Option::unwrap() on a None value`). Cause: `spawn recv.m(args)` compiled to `Op::SpawnMethod`, and `Vm::start_task` ran the native method with `self.frames` empty; a park then rewound the `ip` of a frame that did not exist. Fix: one decider, `Vm::task_entry` in `spawn_into` (read by `spawn` and `Executor.submit`). A head that pushes its own frame (a non-generator Chezzi fn or closure) runs directly, unchanged. Any other head (a receiver, a native fn value, a builtin, a ctor, a generator fn) rides as argument 0 of an entry thunk the compiler emits per `spawn <call>` site (`<spawned task>`; `<task entry>` behind `submit`), whose body is the `Op::Call` / `Op::CallMethod` the block form runs. Deleted: `Op::SpawnMethod` (now `Op::SpawnRecv`, which carries the thunk), `PendingCall::Method`, `Lowered::Method`, `ReadyCall::Method` and the `Method` arm of `start_task`. `start_task` refuses a callee for which `Vm::enters_frame` is false. The nine park sites read one accessor, `Vm::rewind_op`; none gained a branch. Operands are still evaluated in the parent at the `spawn`. A fault inside a one-line native spawn now carries one trace frame, `at <spawned task> (called at <the spawn line>)`; it had none. A receiver is serialized before its arguments now (`Crossing::behind_entry` moves the mask one bit). Tests: `tests/spawn_form_wait_grid.rs` (8 waiting ops x 3 spawn forms x 3 outcomes, each cell at `CHEZZI_THREADS` 1, 2, 0 unseeded and under seeds 1 and 2; 12 cells red before the fix), `vm::tests::{spawn_one_line_native_call_that_waits_does_not_panic, start_task_refuses_a_callee_that_enters_no_frame, spawn_call_operands_are_evaluated_in_the_parent, a_fault_in_a_one_line_native_spawn_names_the_spawn_line}`. Perf: `docs/contributing/benchmarks.md` TICKET-235.
 
 - **TICKET-234 (2026-10-09): a plain value pins an open `None` slot (owner decision: "`int?` means an int or None, with automatic wrap").** `z := None` / `z = 7` makes `z` an `int?`; before, the plain spelling was `cannot assign int to ??` and only `?7` worked. One rule at every site: `merge_unknown` lifts an open optional beside a present value, `Checker::pin_open_slot` reads (slot, value) into the pinned slot for a plain value, a `?x` and a carrier alike, and the unchanged TICKET-227 path then wraps against the concrete slot. Sites: assignment (ident, field, index, tuple and destructuring targets, a module global written from a fn), `push`/`insert`/`extend`, map set, any method argument typed by the receiver's type parameter (read from the method's declaration through `Checker::receiver_decl`, not from a name list: `b.set(7)`, `Shared.set`, `Atomic.store`, `xs.contains(1)`), a closure argument (`s.update(fn(x): 7)`), and a generic call argument (pins, never wraps). A literal `None` beside a value joins to its optional through the one `Checker::join_fill` (nine sites): `[None, 7]`, a map literal, `if`/`match` expressions, the inline body `fn pick(c: bool): if c: None else: 7` (now accepted), and a `recover:` tail (`None` beside `7` is `int?!`; it was typed `None!` and dropped). A pin is stored through the place it was written to (`Checker::repin_place`): `b.v = 7`, `b.v.push(7)`, `xss[0].push(7)` pin the root binding, for an empty collection too (`nonident_receiver_is_refined_through_its_root` replaces the documented hole). **Holes closed for the `?x` and carrier spellings** (check-clean heterogeneous values on base): `insert`, list literal then `push`, `[None, w, ws]`, map literal then set, `if` then assign, `match` then assign, tuple; plus every field / nested-index / method / closure conflict, two of which faulted at run time (`cannot apply Add to str and int`, `cannot match on int`). A whole-binding write that misses a pin now reports `cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use` for every spelling. **Display:** an open optional prints `<unknown>?` (was `??`) with one note naming both fixes. Declines that stay: `[n, 7]` with `n := None`, `[w, 7]`, `xs += [7]`, `put(b, 7)`, set elements, an open `!e`, an alias through a projection (`c := b.v`). Supersedes one clause of DEC-228 ("an implicit wrap pins nothing"). Tests: `tests/open_none_slot_grid.rs` (602 cells, site x spelling x outcome, every cell run; 308 red before the fix), `plain_value_meets_open_none_carrier_slot`, moved expectations in `carrier_wrap_check_grid` and `tests/carrier_slot_grid.rs`.
 
-- **TICKET-232 (2026-10-09): Executor job state and the sched's own deadlock verdict, three facts with one owner each (wave 21 family E2).** All rates are release, base `61a27a6b`. (1) **A submit that returned without a fault and is under the cap always starts** (a run halt is the one exception). `SchedCore::job_event`'s `Submit` arm read the cancel, and `submit` starts runner threads between the slot reservation and the submit, so a job's `shutdown_now()` landed there and the next job vanished with exit status zero: the ticket program lost `C` in 13 to 25 of 200 runs, and with a handle the job was dropped in 255 of 300 runs at `--threads=0`. The arm's cancel read is deleted; the tail of `job_event` is the one cancel read (held jobs). A `submit` racing a job's `shutdown_now()` either starts its job or faults `submit on a shut-down Executor`. CPython twin: `C` dropped 0 of 100. (2) **A cut handle is sealed inside the transition** (`SchedCore::settle_job`, under the sched lock; `seal_settles` is deleted). The seal ran after the unlock, the join returned on the slot, and `h.get()` reported a false deadlock at `task.chz:54` (1 of 600 at `--threads=0`; 60 of 60 with a 30 ms delay before the seal). (3) **A sched's own deadlock verdict latches before it cuts a victim** (`MnSched::latch_own_verdict`, the one entry; four inline `flag_deadlock` copies deleted; `QuiesceState::decide` takes the judging sched's report; `block_party_guard` registers the party before it lifts the body veto). Main ran past the verdict and printed `AFTER` in 78, 76 and 94 of 600 runs at `--threads=1`, `2`, `0`; 0 of 600 each after. Tests: `tests/executor_stop_grid.rs` (state x stop call x stopper x kind x T; 44 of 80 Dispatched x `shutdown_now` x same-job runs red on base), `tests/deadlock_verdict_stress.rs`, `tests/executor_reentrant_shutdown.rs`, `vm::tests::{a_cut_job_handle_is_sealed_in_the_lock_hold_that_ends_the_job, the_sched_idle_judge_latches_the_verdict_before_it_flags_a_leaf}`, `vm::quiesce::tests::decide_latches_the_judging_scheds_own_report`. Perf: all 7 `ab_pair.py` rows `ok` (`docs/benchmarks.md` TICKET-232). Pinned, not decided: a job that calls `shutdown()` on its own `Executor(1)` with a job held behind it ends the run with a deadlock fault (CPython raises `cannot join current thread` in the job).
+- **TICKET-232 (2026-10-09): Executor job state and the sched's own deadlock verdict, three facts with one owner each (wave 21 family E2).** All rates are release, base `61a27a6b`. (1) **A submit that returned without a fault and is under the cap always starts** (a run halt is the one exception). `SchedCore::job_event`'s `Submit` arm read the cancel, and `submit` starts runner threads between the slot reservation and the submit, so a job's `shutdown_now()` landed there and the next job vanished with exit status zero: the ticket program lost `C` in 13 to 25 of 200 runs, and with a handle the job was dropped in 255 of 300 runs at `--threads=0`. The arm's cancel read is deleted; the tail of `job_event` is the one cancel read (held jobs). A `submit` racing a job's `shutdown_now()` either starts its job or faults `submit on a shut-down Executor`. CPython twin: `C` dropped 0 of 100. (2) **A cut handle is sealed inside the transition** (`SchedCore::settle_job`, under the sched lock; `seal_settles` is deleted). The seal ran after the unlock, the join returned on the slot, and `h.get()` reported a false deadlock at `task.chz:54` (1 of 600 at `--threads=0`; 60 of 60 with a 30 ms delay before the seal). (3) **A sched's own deadlock verdict latches before it cuts a victim** (`MnSched::latch_own_verdict`, the one entry; four inline `flag_deadlock` copies deleted; `QuiesceState::decide` takes the judging sched's report; `block_party_guard` registers the party before it lifts the body veto). Main ran past the verdict and printed `AFTER` in 78, 76 and 94 of 600 runs at `--threads=1`, `2`, `0`; 0 of 600 each after. Tests: `tests/executor_stop_grid.rs` (state x stop call x stopper x kind x T; 44 of 80 Dispatched x `shutdown_now` x same-job runs red on base), `tests/deadlock_verdict_stress.rs`, `tests/executor_reentrant_shutdown.rs`, `vm::tests::{a_cut_job_handle_is_sealed_in_the_lock_hold_that_ends_the_job, the_sched_idle_judge_latches_the_verdict_before_it_flags_a_leaf}`, `vm::quiesce::tests::decide_latches_the_judging_scheds_own_report`. Perf: all 7 `ab_pair.py` rows `ok` (`docs/contributing/benchmarks.md` TICKET-232). Pinned, not decided: a job that calls `shutdown()` on its own `Executor(1)` with a job held behind it ends the run with a deadlock fault (CPython raises `cannot join current thread` in the job).
 
 - **TICKET-233 (2026-10-09): every Rust growth test counts instead of timing; two goldens declare their unforced order.** The sixteen Rust tests that held a wall-clock ceiling for a growth claim (not linear / quadratic / exponential) now assert a count read through `run_capture_counting` or its graph-path twin `golden_entry_counting` (wire nodes encoded / decoded, element comparisons, characters a `str` subscript read, receiver bytes a `str` method cloned, module replays per run), `check_counting_fn_body_checks` (fn bodies the checker checked) or `eq_obligations_for`. Each was measured red on its bug (for example `unique()` 2000 comparisons against 4,000,000 for the scan; a deep module global 10,004 wire nodes against 50,025,004). All sixteen left `CLOCK_READING_TESTS` (33 -> 17); the 17 left are liveness and sleep deadlines. The ten `tests/chz` cost ceilings stay (DEC-049; measured 77 loaded file runs, 0 red). The three stall ceilings of `tests/shared_update_contention.rs` stay too: the defect they guard is parked time, which no operation count or CPU time sees (measured under 2x-cores busy loops: debug 44 of 44 target runs green, release 40 of 40). `examples/channel_block.chz` and `examples/parallel_cross_nursery_ok.chz` now carry `# golden: unordered`: `Channel[T]()` is unbounded, so no hand-off orders the two tasks' prints (the Go twins vary too); the `channel_block` header no longer says "deterministically".
 - **TICKET-228 (2026-10-09): error/optional surface part B — the `else` guard, carrier patterns, and the long names removed (design Part 2 D4-D6; design complete).** (D4) `v := f() else e: <block>` binds on success; on failure the block runs and must leave (`else block must leave (return, break, continue, panic)`; the check is `block_flow`, DEC-184). `else:` is the `T?` form. Rejected in `spawn:` and `defer:` blocks. (D5) Patterns `?v`, `!e`, `None`, nested `?(?v)`, `?(a, b)`, `!IoErr(code)`; one classifier (`Checker::bare_pattern_name`) decides what a bare pattern name is, and a bare constant in a pattern is an error (it used to bind silently and take the arm). Witnesses and fault texts print pattern syntax (`?None`, `!_`). (D6) `Option`, `Result`, `Some`, `Ok`, `Err` are rejected wherever the parser reads a bare name (`Parser::reject_removed_name`, one table `REMOVED_NAMES`); a member position (`Shadow.Some`, `s.Ok`) stays legal; the prelude still declares the two enums. A carrier alias (`type O = int?`) is no longer a variant head, and no near-miss help offers a removed name. Also: the prefix type `!E` = `None!E`; `None` is rejected as a value type (`List[None]`); a carrier prints as the user writes it (`5`, `None`, `!boom`, `?None`). **Migration** (old → new): `Option[T]` → `T?`; `Result[T, E]` → `T!E`; `Result[T]` → `T!`; `Result[None, E]` → `None!E` or `!E`; `Some(x)` / `Ok(x)` → `x` at a typed slot, or `?x`; `Ok()` → fall off the end or a bare `return`; `Err(e)` → `!e`; patterns `Some(v)` / `Ok(v)` → `?v`, `Err(e)` → `!e`, `Some(None)` → `?None`; `Option.None` → `None`; a `match` whose failure arm only logs and leaves → `else e:`; an arm that names a constant → `x if x == LIMIT`; printed output `Some(5)` / `Ok(5)` → `5`, `Err('boom')` → `!boom` (`!'boom'` in a container), `Some(None)` → `?None`, `Ok(None)` → `None`. A test of wrap depth or carrier kind reads the value by `match`, never from printed text. Tests: `tests/else_guard_grid.rs`, `tests/carrier_pattern_grid.rs`, `tests/carrier_display_grid.rs`, `tests/removed_names_grid.rs`, `checker::tests::{pattern_bare_name_grid, none_type_position_grid, carrier_wrap_check_grid}`.
@@ -79,25 +79,25 @@ Single source of truth for "what am I doing next." Update after every work sessi
   | `Option[?]` (unpinned) | `??` | display |
 
 - **TICKET-229 (2026-10-08): the optional/error carriers are ordinary prelude enums, and enum variants can be imported (generics design R3 + R3b; wave 21 S2).** (1) The prelude's `native enum Option[T]` / `Result[T, E]` are registered in the ordinary enum tables of every module (`harvest_native_enums`, `seed_carrier_enums`); `Ty::enum_ty` / `Ty::as_enum` are the one map between an enum key and the carrier type, and `variants_of` is the one variant reader (`match_kind` calls it). Deleted: the inline `variants_of` / `match_kind` / `resolve_type` / `resolve_ty_ro_d` carrier arms, the prelude drift assert, `builtin_ok`, `builtin_variant_enum`, the `Ok`/`Some`/`Err` arms of `infer_builtin_call`, `builtin_variant_pair` and the compiler's bare-variant fallback. Now accepted, as for a user enum: `Result[int, str].Ok(5)`, `Option[int].None`, `Option.Some(1)`, `f := Some` (pinned by a later use, DEC-225), `[1, 2].map(Some)`, `type F = Option[int]` then `F.Some(1)` / pattern `F.Some(n)`. (2) `import Red, Green from Color` binds enum variants as bare names (values, calls, fn values, patterns); `Checker::imported_variants` is the only table that makes a bare name a variant, and the prelude feeds it with `import Some, None from Option` / `import Ok, Err from Result`. A module that resolves wins over a variant import; a variant import clashes with a same-named declaration or import (`'V' is already imported`), is shadowed by a global or local, and may not rebind a prelude variant name. A missing-pattern witness prints a variant bare exactly when every variant of its enum is imported (`Checker::sum_dom`, one rule for the top-level and nested slot). Kept as named interims for TICKET-228: `Result[T]` = `Result[T, Error]` in type position (`carrier_default_args`), zero-arg `Ok()`, the verdict-driven carrier wraps (`emit_carrier_wrap`), `is_builtin_variant` at three binder-reservation sites. Tests: `tests/carrier_enum_grid.rs` (79 cells: 29 user/carrier twins + 21 variant-import cells), `checker::tests::{carrier_variants_resolve_like_user_enums, an_unpinned_carrier_variant_value_is_rejected_like_a_user_one, enum_ty_and_as_enum_are_inverse_on_every_enum_shape, native_enum_option_result_register_as_ordinary_enums}`, `ast::tests::import_from_an_enum_is_a_variant_import_unless_a_module_resolves`.
-- **TICKET-230 (2026-10-08): one process-wide runner budget of N, main included (wave 21 family E2 fact 4: CHAN1).** `--threads=N` now caps the threads that run Chezzi code at N for the whole process, as Go's `GOMAXPROCS`: `width::RUNNERS` holds `worker_count()` permits at every N, and main (`Vm::run`), drainers, helpers, pool threads and Executor runners each hold one while they run. Before, the gate counted runners only at `--threads=1`, so each `Executor` and each sched got its own N. Four CPU cells at `--threads=2` (`tests/runner_budget_process_wide.rs`, cores = CPU/wall, before -> after): two Executors 4.02 -> 2.00, Executor + `parallel:` 3.98 -> 1.98, Executor + busy main 2.86 -> 1.97, a body that blocks once then burns 2.86 -> 1.95 (closes `docs/gaps.md` **W15-9**). Deleted: `width::convert`, `born_gated`, the `worker_count() == 1` gate conditions and the ungated idle branches; `NestedDrainerSlot` is a thread cap only. Gate rules that keep the cost down: a grant by queue position, a reserve only when the gate is full, a worker keeps its permit while no thread queues, an idle unseeded worker takes a free permit to look for work, a preempted fiber with nothing else runnable keeps its worker, and an idle worker is listed for a waker's ticket only when fewer than two permits are free (`width::tight()`). Lib tests that force a worker count re-run themselves in a child process (`rerun_in_child`). Benches (`docs/benchmarks.md` §TICKET-230, base `e93d7299`, n=7 and n=15, pinned and unpinned): all 54 rows inside base's spread. **Hand-over quantum:** when runner threads outnumber permits (two Executors, or an Executor beside a `parallel:`), a hand-over at every slice end made each thread run part of the time on its own core, and `schedutil` clocked those cores down (`w8.chz` at `--threads=2`: 15.6-17.9 s user against 7.4 s of work; Go `GOMAXPROCS=2` 8.5 s). The hand-over count was not the cost: a 10 ms quantum cut hand-overs 77x and left 16.9 s. A preempted permit holder now hands over once per `width::HANDOVER_QUANTUM` (100 ms, the smallest value measured that meets the bound at T=2 and T=4; `width::handover_due` is the one owner); a park, a finish and an in-place wait hand over at once, and seeded mode keeps the per-slice rule. Six oversubscription rows (`benches/sched/oversub_pair.py`, user / wall against the same work on at most N runner threads, bound 1.15x): `two_executors` T=1 0.98x / 0.99x, T=2 1.07x / 1.05x, T=4 1.04x / 1.04x; `executor_and_parallel` T=1 0.97x / 0.98x, T=2 1.02x / 1.02x, T=4 1.02x / 1.03x. The 54 base-vs-branch rows were re-run with the hand-over quantum and all stay inside base's spread. Grid: `vm::tests::runner_threads_reach_the_worker_count_in_every_nesting_shape` (12 shapes x T {1, 2, 4, 8}, peak permit holders <= T).
+- **TICKET-230 (2026-10-08): one process-wide runner budget of N, main included (wave 21 family E2 fact 4: CHAN1).** `--threads=N` now caps the threads that run Chezzi code at N for the whole process, as Go's `GOMAXPROCS`: `width::RUNNERS` holds `worker_count()` permits at every N, and main (`Vm::run`), drainers, helpers, pool threads and Executor runners each hold one while they run. Before, the gate counted runners only at `--threads=1`, so each `Executor` and each sched got its own N. Four CPU cells at `--threads=2` (`tests/runner_budget_process_wide.rs`, cores = CPU/wall, before -> after): two Executors 4.02 -> 2.00, Executor + `parallel:` 3.98 -> 1.98, Executor + busy main 2.86 -> 1.97, a body that blocks once then burns 2.86 -> 1.95 (closes `docs/contributing/gaps.md` **W15-9**). Deleted: `width::convert`, `born_gated`, the `worker_count() == 1` gate conditions and the ungated idle branches; `NestedDrainerSlot` is a thread cap only. Gate rules that keep the cost down: a grant by queue position, a reserve only when the gate is full, a worker keeps its permit while no thread queues, an idle unseeded worker takes a free permit to look for work, a preempted fiber with nothing else runnable keeps its worker, and an idle worker is listed for a waker's ticket only when fewer than two permits are free (`width::tight()`). Lib tests that force a worker count re-run themselves in a child process (`rerun_in_child`). Benches (`docs/contributing/benchmarks.md` §TICKET-230, base `e93d7299`, n=7 and n=15, pinned and unpinned): all 54 rows inside base's spread. **Hand-over quantum:** when runner threads outnumber permits (two Executors, or an Executor beside a `parallel:`), a hand-over at every slice end made each thread run part of the time on its own core, and `schedutil` clocked those cores down (`w8.chz` at `--threads=2`: 15.6-17.9 s user against 7.4 s of work; Go `GOMAXPROCS=2` 8.5 s). The hand-over count was not the cost: a 10 ms quantum cut hand-overs 77x and left 16.9 s. A preempted permit holder now hands over once per `width::HANDOVER_QUANTUM` (100 ms, the smallest value measured that meets the bound at T=2 and T=4; `width::handover_due` is the one owner); a park, a finish and an in-place wait hand over at once, and seeded mode keeps the per-slice rule. Six oversubscription rows (`benches/sched/oversub_pair.py`, user / wall against the same work on at most N runner threads, bound 1.15x): `two_executors` T=1 0.98x / 0.99x, T=2 1.07x / 1.05x, T=4 1.04x / 1.04x; `executor_and_parallel` T=1 0.97x / 0.98x, T=2 1.02x / 1.02x, T=4 1.02x / 1.03x. The 54 base-vs-branch rows were re-run with the hand-over quantum and all stay inside base's spread. Grid: `vm::tests::runner_threads_reach_the_worker_count_in_every_nesting_shape` (12 shapes x T {1, 2, 4, 8}, peak permit holders <= T).
 
 - **TICKET-227 (2026-10-08): error/optional surface part A — `!e` error values, `None!E`, `?x`, implicit wrap at every typed slot (design Part 2 D2 + D3).** (1) Prefix `!e` builds an error value (`return !e`; the operand must satisfy `Error`, `!5` is `int does not satisfy Error`); prefix `?x` builds a present/success value of the expected carrier; `??x` is `?(?x)`; `int??` is a type (`Option[Option[int]]`). (2) `None` is the void type name (a parser alias for `nil` until TICKET-231); a `None!E` fn that falls off its end returns `Ok(nil)` (`FallOff::OkNil`). (3) ONE wrap decision: `Checker::infer` meets the slot of the node that owns its expected-type hint (`hint_owner`, `meet_slot` -> `wrap_mode`) and records a NodeId-keyed `WrapTable`; ONE apply site: `compile_expr` (`emit_wrap_at`). `ret_coerce_sink`, `coerce_branches_at_sink`, the span-keyed `WrapSome`/`WrapOk` verdicts and six `emit_ret_coerce` calls are deleted; every `elif` tail compiles through `compile_expr`. Hint seams closed: every assignment value (tuple targets per element; a struct `obj[k] = v` takes `set_index`'s value type), conversion ctors (`List[int?]([5])`), `Shared`/`RwShared`/`Atomic` ctors, comprehension elements (projected, DEC-032), yield / inline / closure bodies, an unannotated closure in a typed `fn` slot, both halves of a default. A `wait` recv-assign `x = ch.recv():` now parses to `$waitN := ch.recv():` plus `x = $waitN` (`WaitTarget::Assign` deleted). (4) With no expected type, `?x`/`!e` take an R5 frame type variable: an unpinned `?x` is `T?`, an unpinned `!e` is `cannot infer the success type`. **Migration (old -> new):** `return Err(e)` -> `return !e` (done across std, examples, tests); `Some(x)`/`Ok(x)` at a typed slot -> `x` (not migrated here: part B, with type information); `Result[nil, E]` -> `None!E`; `Option[Option[T]]` -> `T??`; `nil` -> `None` and the sugar display of types in messages are TICKET-231. Tests: `tests/carrier_slot_grid.rs` (1173 cells, every accept cell RUNS), `tests/chz/spec/carrier_wrap_test.chz`, `checker::tests::{success_coercion_wraps_at_every_typed_slot, multi_target_assignment_wraps_each_element, wait_recv_assign_wraps_into_an_optional_target, question_prefix_*, bang_prefix_*, none_is_the_void_type_name}`.
 
 - **TICKET-226 (2026-10-07): a fn value is (item, type args) — one compiler memo and one callable classifier (generics design R4; wave 21 family P3: CK3, A4).** (1) `Compiler::synth_fn_proto` keyed by `SynthFn::{Variant, ParamMethod, Decode}` replaces `variant_fns`, `param_method_fns` and the per-site decode proto, so `json.decode[int] == json.decode[int]` is `true` in any module and after a crossing (Rust `decode::<i32>`). The decode value is homed in std.json through the provider table (`Op::MakeFuncIn`) and reads std.json's own `parse` slot, so it reads no reader global. (2) `FnKey::Builtin`: `Vm::fn_value` allocates every bare fn kind. (3) `Vm::callable` (exhaustive `match`, no `_` arm) is read by call, `lower_task`, `Executor.submit` and the entrypoint; a non-closure spawn callee crosses as `Lowered::Value` (`Lowered::Func`/`Lowered::Builtin` deleted), so `g := math.sqrt; spawn g(9.0)` and `ex.submit(time.now_ms)` run (Go `go g(9.0)`, CPython `ex.submit(time.time)`). Tests: `tests/chz/spec/fn_value_grid_test.chz` (9 kinds x 12 consumers), `tests/chz/spec/fn_value_callable_test.chz`, `vm::tests::callable_classifies_every_fn_kind`, `json_decode::tests::shape_drops_default_payloads_only`.
-- **TICKET-224 (2026-10-08): a run-wide halt lands at every function entry (wave 21 family E2, the recursive-main finding).** `os.exit` at 100 ms beside `print(fib(36))` printed `14930352` after 8.5 s, and a fire-and-forget job fault waited the same way: a loop-free recursion has no back-edge and no wait. Go prints nothing and exits at about 100 ms. `Vm::frame_depth_guard` now calls `Vm::call_halt` behind `run_halt_hint`, and `call_halt` reads `Vm::exit_halt`, the funnel the back-edge and the HOF re-entry already read (no new predicate). A cancel and a nursery child's fault stay at waits and back-edges (owner decision 2026-10-07; DEC-194 unchanged). Tests: `tests/recursion_cut_point.rs` (`exit_lands_inside_a_loop_free_recursion`, and the grid `run_wide_halts_land_inside_every_cpu_bound_shape`, 24 cells red on base). Perf: every `ab_pair.py` row `ok` (`docs/benchmarks.md` TICKET-224). Runner width (CHAN1) is TICKET-230.
+- **TICKET-224 (2026-10-08): a run-wide halt lands at every function entry (wave 21 family E2, the recursive-main finding).** `os.exit` at 100 ms beside `print(fib(36))` printed `14930352` after 8.5 s, and a fire-and-forget job fault waited the same way: a loop-free recursion has no back-edge and no wait. Go prints nothing and exits at about 100 ms. `Vm::frame_depth_guard` now calls `Vm::call_halt` behind `run_halt_hint`, and `call_halt` reads `Vm::exit_halt`, the funnel the back-edge and the HOF re-entry already read (no new predicate). A cancel and a nursery child's fault stay at waits and back-edges (owner decision 2026-10-07; DEC-194 unchanged). Tests: `tests/recursion_cut_point.rs` (`exit_lands_inside_a_loop_free_recursion`, and the grid `run_wide_halts_land_inside_every_cpu_bound_shape`, 24 cells red on base). Perf: every `ab_pair.py` row `ok` (`docs/contributing/benchmarks.md` TICKET-224). Runner width (CHAN1) is TICKET-230.
 - **TICKET-225 (2026-10-07): type variables for generic fn values and untyped constants (generics design R5; wave 21 families P4 CK5 and W2 FF1).** A generic fn value read with no pin takes one `Ty::Var` per type param (`src/checker/tyvar.rs`); any later use in its frame (one fn body, or one top-level statement) pins it: a call, an argument, a return, or a join — `(o ?? g)(5)` prints `6`, as Rust's `o.unwrap_or(g)(5)`. `Checker::join_ty` replaces every free `compatible` call in the checker; only it and `assignable` bind a var. A read still unpinned when its frame closes is rejected with the instantiate hint; `generic_fn_value_prepass` and `report_undetermined_generic_fn_value_args` are deleted. Constants are untyped until they meet a slot (Go): `check_const_fits` and its hand-placed calls are deleted, `Checker::const_meets_slot` checks the width at the hint, and `m[300] = "a"` on `Map[int8, str]`, `b: Bx[int8] = Bx(300)`, `y: int8 = id(300)`, `z: int8 = 1 << 8` and `w: float32 = 3e38 + 3e38` now reject (were check OK). One evaluator `src/ast/consteval.rs` replaces `ast::const_int_scan`, `ast::const_float` and the peephole arithmetic; `1 << 63` is now a compile error (Go: `constant ... overflows int`), and the peephole folds `i64::MIN % -1` to `0` as the VM does. Tests: `generic_value_join_grid`, `generic_value_later_use_grid`, `untyped_constant_width_grid`, `ast::consteval::tests::consteval_matches_vm_arith` (runs every op pair on the VM), `tests/chz/spec/generic_value_inference_test.chz`.
 - **CK6 (2026-10-07, in place): the CLI's own messages survive a closed pipe (wave 21 CK6).** `chezzi check bad.chz 2>&1 | head -1` (and `run`, and `check`'s `ok: no type errors` on a closed stdout) panicked with rc=101. `src/main.rs`'s 43 `println!`/`eprintln!`/`print!` sites and `test_runner`'s warning line now go through `chezzi::outln!`/`errln!`/`out!` (`src/lib.rs`), which drop a failed write; the command keeps its own exit code (`go vet` rc=1). A program's own output is unchanged (VM `emit_out`/`stream_halt`). Test: `tests/cli_dogfood_gaps.rs::check_and_run_diagnostics_on_a_closed_pipe_keep_their_exit_code`.
 - **TICKET-223 (2026-10-07): a deadlock verdict is one latched run halt (wave 21 family E2 fact 3: CHAN4).** Two judges acted on one verdict: main's party judge (`block_halt_check`) and a sched worker's (`MnSched::take_runnable`). When the sched judge won on G.chz, it cut the job that held a `Shared` guard, the unwind freed the guard, and main took it and printed past the deadlock (3 of 20 runs at T=1). Now `QuiesceState::decide` is the one latch both judges call: it latches the verdict under the party lock, before any victim is cut, with the report of the first registered party's site, and `RunHalt::Deadlock` delivers it to every party through `run_exit_err`, the funnel of exit and job fault. A party gives its deadlock text once, at registration (`block_party_guard(wait, site)`); `block_halt_check`'s `deadlock_msg` parameter is deleted. Main blocked on a guard now reports `update guard wait: deadlock — …` (`GUARD_DEADLOCK`) instead of the "parallel: block" text. `rank_end` is the only taker of the report, so the reap after a verdict waits for the victims. `RunHalt::Deadlock` settles no handle and is due inside a `defer`. `CHEZZI_TEST_VERDICT_JUDGE` (`party`/`sched`, `debug_assertions` builds only) pins which judge may decide first. Tests: `tests/deadlock_halt_single_judge.rs` (`deadlock_verdict_grid_ends_at_the_first_party_site`: 11 shapes x judge pin x T x 8 seeds), `vm::quiesce::tests::decide_latches_once_and_reports_the_party_site`. Replan 3: `RunHalt::cuts_cleanup` is the one rule for which halts cut a `defer` (`run_halt_due`, `next_deferred`); `Vm::cleanup_halt` is the one post-drain check (`do_try`, `on_step_fault`), so a cleanup's verdict is fatal; `run_halt` ranks the verdict above a job fault; a no-site verdict latches nothing; `cut_cause_grid` Child x Shutdown x Stuck now expects the fatal end; the grid gained six cleanup-funnel rows.
 - **TICKET-222 (2026-10-07): one bracket node and one path resolver (generics design R1 + R2; wave 21 family P2: S1, CK1).** (R2) `head[X…]` is one `ExprKind::Index { obj, index, types }` carrying the expression reading and the real type-grammar reading; the checker picks from the head, so `idt[(int, str)]`, `idt[fn(int) -> int]`, `idt[int?]`, `json.decode[Map[str, int]]` and `Bx[Map[str, int]].make` are values (Rust `idt::<(i32, String)>`). `ast::index_as_type`, `ExprKind::TypeApply` and the parser's comma rule are deleted; a type-only bracket on a value reports `a subscript takes an expression, found the type '…'`. (R1) `src/checker/resolve.rs`: `classify_path` is the one rule table and `resolve_path` the one memoised writer of a path's resolution; `commit_resolution` has four callers (`resolve_path`, pattern heads, `IndexCall`, `Decode`). The call side and the value side bind its answer and branch on a `match` over it; their predicate chains (`infer_named_call`'s struct/fn/variant tests, the seven type-head call arms) are deleted. A bare call of a top-level `fn Circle` beside a variant `Shape.Circle` now calls the fn (was a false `write it qualified` reject; Rust prints `1`), and `None(1)` reports `Option[?] is not callable` (base: a `resolved twice` debug panic). One kind per path in every position: a module fn is `Fn`, a type method `MethodFn`, a payload variant `VariantFn`; `Resolution::Static` and the call-side fallback are deleted, so `(math.abs[int])(-6)`, `(lib.g[int])(6)`, `(json.decode[int])('3')` run (were `internal: two different name resolution decisions`), and `spawn json.decode[T](s)` no longer faults. Tests: `type_arg_bracket_grid` (`tests/turbofish_value_grid.rs`), `parenthesised_turbofish_call_grid` (`tests/path_call_grid.rs`), `parser::tests::bracket_keeps_both_readings`, `tests/chz/spec/type_arg_bracket_test.chz`.
-- **TICKET-221 (2026-10-07): `std.request` follows redirects itself, so each hop's own method decides its retry, as Go's (wave 21 C3).** ureq followed redirects inside one call, so a dropped `GET` hop after `POST` -> `303` was judged by `POST` and stayed `Err`, and a retried chain re-sent every earlier hop. Now the agent runs with `max_redirects(0)` and `send` follows each redirect by Go's `Client.do` rules (method/body per status, credential headers dropped after a host change, `Referer`, a 3xx without `Location` is the response, the ten-redirect cap unchanged); `send_hop` is the one place a retry is decided, on the hop's own method and headers, and re-sends only that hop. Also fixed by matching Go: a 307/308 for POST/PUT/DELETE was `Err(redirect failed)` and is now followed with its method and body; `Authorization`/`Cookie` now survive a same-host redirect. New dependency `url` (Location resolution). Tests: `native::request::tests::a_dropped_redirect_hop_is_retried_iff_go_would_retry_that_hop` (66-cell grid measured against Go 1.27.0, 32 red before), `redirect_hops_carry_gos_headers_and_drop_credentials_after_a_host_change`, `ten_redirects_are_followed_and_an_eleventh_is_too_many_redirects`, `a_redirect_status_without_a_location_is_the_response_like_go`. Docs: `docs/stdlib.md` `std.request`, `docs/root-causes-w21.md`.
+- **TICKET-221 (2026-10-07): `std.request` follows redirects itself, so each hop's own method decides its retry, as Go's (wave 21 C3).** ureq followed redirects inside one call, so a dropped `GET` hop after `POST` -> `303` was judged by `POST` and stayed `Err`, and a retried chain re-sent every earlier hop. Now the agent runs with `max_redirects(0)` and `send` follows each redirect by Go's `Client.do` rules (method/body per status, credential headers dropped after a host change, `Referer`, a 3xx without `Location` is the response, the ten-redirect cap unchanged); `send_hop` is the one place a retry is decided, on the hop's own method and headers, and re-sends only that hop. Also fixed by matching Go: a 307/308 for POST/PUT/DELETE was `Err(redirect failed)` and is now followed with its method and body; `Authorization`/`Cookie` now survive a same-host redirect. New dependency `url` (Location resolution). Tests: `native::request::tests::a_dropped_redirect_hop_is_retried_iff_go_would_retry_that_hop` (66-cell grid measured against Go 1.27.0, 32 red before), `redirect_hops_carry_gos_headers_and_drop_credentials_after_a_host_change`, `ten_redirects_are_followed_and_an_eleventh_is_too_many_redirects`, `a_redirect_status_without_a_location_is_the_response_like_go`. Docs: `docs/reference/stdlib.md` `std.request`, `docs/history/bug-hunts/w21.md`.
 - **TICKET-220 (2026-10-07): one task-copy marking walk (wave 21 family A2, A3).** A task copy's read of an unobserved `Task.get()` or `memoize1` result is rebuilt under `Route::CopyRead` by `std.concurrency.task_copy_of` (engine-run, `Kind::InterceptAirlock`, through `Vm::from_wire_on`), so TICKET-190's frame mask applies: a generator's frame-local list the parent never saw is writable (CPython `copy: ran 2`); a write to any other part still faults (D4). `arg_mark_task_copy` and `concurrency.mark_task_copy` are deleted. Grid: `generator_route_grid` gains `task_get` and `memoize` rows (cells 0, 2, 4, 6, 9, 11 red before).
-- **TICKET-219 (2026-10-07): an Executor job's life has one owner (wave 21 family E2: C1, C1b, C2, CHAN3).** Before: a held `Executor(1)` job started after another job's `os.exit` and main printed `job 2 ran` / `h2 Ok(2)` (CPython `os._exit` and Go `os.Exit` print nothing); a held job started after a fire-and-forget fault; a held `submit_task`/`submit_result` job dropped by `shutdown_now()` never settled and `get()` faulted `recv on an empty channel: deadlock`; `Task.done()` read false after true (618 times at T=2). (1) One transition, `SchedCore::job_event` (events: submit, end, deadlock reap, `shutdown_now`), is the only reader and writer of `exec_held`, `exec_active` and the new `job_settle`. It reads `QuiesceState::run_halt()` (new `RunHalt { Running, Fault, Exit }`, also the source of `Vm::run_halt_due`) and the Executor's cancel before it releases anything: an exit drops held jobs and settles nothing; a job fault or a cancel drops them and settles each handle with `Err("task cancelled: ...")` (CPython `cancel_futures=True`), so a `defer` reader after a fault gets the `Err`; else held jobs release under the cap. Deleted: `admit_or_hold`, the release loop in `finish`, `job_ended`, `drop_held_jobs`. (2) A handle's outcome is one seal of its cap-1 channel (`ChanState::seal`; first writer wins): a sealed receive copies the value and takes nothing. The job body seals `recover: f()` (`concurrency._settle`); the transition seals the cancel. `Task.get()` is `ch.recv()`, `Task.done()` is `concurrency.is_settled(ch)`. Deleted: `TaskState`, `Task.core`, `_outcome`'s recv/try_send/set, `run_outcome`'s `settled` channel and `defer:`. (3) **Removed `Executor.submit_outcome(f, out)`**: it settled into a caller's channel, which may be full, unbuffered or fanned in. Replacement: `submit_result(f)`, whose channel std creates; keep a list of them to collect several outcomes. `submit_result`'s channel is sealed, so do not iterate it with `for`. Kept for CHAN4's own ticket: `join_executor`'s `Deadlocked -> Cancelled` remap and the deadlock publish exclusion. Bench (release, n=5, `ab_pair.py`, base `a555bad5`): `storm.chz` 5563 (128) -> 5574 (60) ms, 1.00x ok; `trips.chz` 112 (30) -> 97 (21), 0.87x ok; `primes_parallel.chz` 10108 (192) -> 10112 (272), 1.00x ok. Tests: `tests/executor_job_owner.rs` (`job_owner_grid`: 3 parties x 3 handles x 6 states x 7 events at T=1/2/0 and seeds 7/11, 58 cells red before; `defer_reader_settles_after_a_job_fault`; `done_is_monotone_while_another_task_reads`), `vm::core::tests::sealed_channel_receive_copies_and_refuses_a_second_seal`, `vm::quiesce::tests::run_halt_reads_exit_before_job_fault`, `checker::tests::executor_has_no_submit_outcome`, `tests/chz/stdlib/task_cancel_test.chz` (`a_held_job_dropped_by_shutdown_now_settles_err` and two hostile-input tests). Docs: `docs/concurrency.md` "Job states", `docs/stdlib.md` (`Executor`, `is_settled`, `Task`), `docs/root-causes-w21.md` E2 status.
+- **TICKET-219 (2026-10-07): an Executor job's life has one owner (wave 21 family E2: C1, C1b, C2, CHAN3).** Before: a held `Executor(1)` job started after another job's `os.exit` and main printed `job 2 ran` / `h2 Ok(2)` (CPython `os._exit` and Go `os.Exit` print nothing); a held job started after a fire-and-forget fault; a held `submit_task`/`submit_result` job dropped by `shutdown_now()` never settled and `get()` faulted `recv on an empty channel: deadlock`; `Task.done()` read false after true (618 times at T=2). (1) One transition, `SchedCore::job_event` (events: submit, end, deadlock reap, `shutdown_now`), is the only reader and writer of `exec_held`, `exec_active` and the new `job_settle`. It reads `QuiesceState::run_halt()` (new `RunHalt { Running, Fault, Exit }`, also the source of `Vm::run_halt_due`) and the Executor's cancel before it releases anything: an exit drops held jobs and settles nothing; a job fault or a cancel drops them and settles each handle with `Err("task cancelled: ...")` (CPython `cancel_futures=True`), so a `defer` reader after a fault gets the `Err`; else held jobs release under the cap. Deleted: `admit_or_hold`, the release loop in `finish`, `job_ended`, `drop_held_jobs`. (2) A handle's outcome is one seal of its cap-1 channel (`ChanState::seal`; first writer wins): a sealed receive copies the value and takes nothing. The job body seals `recover: f()` (`concurrency._settle`); the transition seals the cancel. `Task.get()` is `ch.recv()`, `Task.done()` is `concurrency.is_settled(ch)`. Deleted: `TaskState`, `Task.core`, `_outcome`'s recv/try_send/set, `run_outcome`'s `settled` channel and `defer:`. (3) **Removed `Executor.submit_outcome(f, out)`**: it settled into a caller's channel, which may be full, unbuffered or fanned in. Replacement: `submit_result(f)`, whose channel std creates; keep a list of them to collect several outcomes. `submit_result`'s channel is sealed, so do not iterate it with `for`. Kept for CHAN4's own ticket: `join_executor`'s `Deadlocked -> Cancelled` remap and the deadlock publish exclusion. Bench (release, n=5, `ab_pair.py`, base `a555bad5`): `storm.chz` 5563 (128) -> 5574 (60) ms, 1.00x ok; `trips.chz` 112 (30) -> 97 (21), 0.87x ok; `primes_parallel.chz` 10108 (192) -> 10112 (272), 1.00x ok. Tests: `tests/executor_job_owner.rs` (`job_owner_grid`: 3 parties x 3 handles x 6 states x 7 events at T=1/2/0 and seeds 7/11, 58 cells red before; `defer_reader_settles_after_a_job_fault`; `done_is_monotone_while_another_task_reads`), `vm::core::tests::sealed_channel_receive_copies_and_refuses_a_second_seal`, `vm::quiesce::tests::run_halt_reads_exit_before_job_fault`, `checker::tests::executor_has_no_submit_outcome`, `tests/chz/stdlib/task_cancel_test.chz` (`a_held_job_dropped_by_shutdown_now_settles_err` and two hostile-input tests). Docs: `docs/reference/concurrency.md` "Job states", `docs/reference/stdlib.md` (`Executor`, `is_settled`, `Task`), `docs/history/bug-hunts/w21.md` E2 status.
 - **TICKET-217 (2026-10-06): C FFI gains `float32`, nested structs by value and C variadic functions (owner request 2026-10-05; motivating use: raylib).** (1) `float32` is a ninth `std.ffi` width name (import-gated like `int32`) for C `float`; the program sees `float`. A param rounds to nearest f32, a return widens exactly (ctypes `c_float`, Go `float32(x)`). `ffi_width_ty` (checker) is the one owner of a width's Chezzi type and `cffi::width_ctype` of its C type, so a `type Real = float32` alias crosses modules as `float` on both sides. (2) A struct field may be another C-marshallable struct, to any depth; layout comes from libffi (`parent offset + inner offset`). The seam `Host::arg_c_value` carries a nested `NativeRet::List` shape and replaces the flat `arg_struct_fields`; `write_field`/`read_field` recurse and the private struct-return read loop is gone; the checker's `struct_fields_marshallable` is the one recursive rule, and it rejects a recursive struct. `str` fields stay rejected. (3) A bare trailing `...` in an extern fn (`fn printf(fmt: str, ...) -> int`) is C varargs: the checker types each surplus arg (`int` -> `long`, `float` -> `double`, `bool` -> `int`, `str`, `ptr`; anything else is *cannot be passed to a C variadic parameter*), `CType::vararg_promoted` is the one promotion table, and every call builds its CIF with `ffi_prep_cif_var` (no per-call-site cache: `prep_cif_var` 61.3 ns vs a 337.7 ns `snprintf`). C reference (`cc ref.c -lm`, run): `f32_add(0.1,0.2)=0.30000001192092896`, `f32_id(16777217)=16777216`, `f32_id(1e39)=inf`, `sqrtf(2)=1.4142135381698608`, `sizeof Camera2D=24`, `sizeof Deep=24 off Deep.d=16`, `cam_sum=11.75`, `cam_shift offset.x=11 target.y=14 zoom=2.5 rotation=0.5`, `deep_sum=6.5`, `vsum=9.5`, `snprintf n=9 buf=x-42-3.14`. Tests: `tests/ffi_c_types_grid.rs` (every accept cell vs the C reference, plus 11 reject cells), `tests/chz/stdlib/ffi_c_types_test.chz`, `native::cffi::tests::{float32_*,nested_struct_offsets_are_parent_plus_inner,vararg_promotion_table_matches_c_default_promotions,snprintf_with_mixed_varargs_matches_c}`, `checker::tests::extern_{float32,nested,recursive,c_variadic}_*`, three parser tests, and the corpus files `extern_c_variadic.chz` / `c_variadic_outside_extern.chz`.
-- **TICKET-216 (2026-10-06): `newtype` is removed (owner decision 2026-10-05).** Its inheritance was a list of exceptions: operators came through for `int`/`float` only, unary `-` and static methods never did, and a `str`/`List` underlying inherited nothing. `newtype` is now an ordinary identifier; `newtype X = int` is a parse error (`expected end of line, found identifier 'X'`). A one-field `struct` with methods is the distinct-type idiom (`struct UserId:` / `id: int`), as Rust's `struct UserId(i64)` is. Deleted whole: `Token::NewType`, `StmtKind::NewType`, `parse_newtype`, `<newtypeDecl>` in `docs/grammar.bnf`, `Ty::NewType`, `Resolution::NewTypeCtor`, `SumSeed::NewType` (`SumSeed` keeps `Float`), `TypeHeadKind::Newtype`, the checker's newtype tables, `Op::NewType`, `Obj::NewType`, `WireValue::NewType`, `SnapValue::NewType`, `Program.newtype_methods`/`newtype_home`, and the VM's unwrap/op/rewrap arms. Test surface removed: `examples/newtype{,_generic}.chz`, `tests/chz/spec/{newtype,newtype_fn_ctor,format_spec_newtype}_test.chz`, `tests/corpus/{accept/newtype,reject/newtype_nested}.chz`, about 80 Rust tests, and the newtype rows of five grids. Incidental uses became one-field structs with the same assertions (`compound_overload`, `self_method`, `conditional_method`, `native_qualified`, `type_alias_expr_pattern_lib`, the checker's `ALIAS_LIB`). The VSCode grammar is regenerated.
+- **TICKET-216 (2026-10-06): `newtype` is removed (owner decision 2026-10-05).** Its inheritance was a list of exceptions: operators came through for `int`/`float` only, unary `-` and static methods never did, and a `str`/`List` underlying inherited nothing. `newtype` is now an ordinary identifier; `newtype X = int` is a parse error (`expected end of line, found identifier 'X'`). A one-field `struct` with methods is the distinct-type idiom (`struct UserId:` / `id: int`), as Rust's `struct UserId(i64)` is. Deleted whole: `Token::NewType`, `StmtKind::NewType`, `parse_newtype`, `<newtypeDecl>` in `docs/reference/grammar.bnf`, `Ty::NewType`, `Resolution::NewTypeCtor`, `SumSeed::NewType` (`SumSeed` keeps `Float`), `TypeHeadKind::Newtype`, the checker's newtype tables, `Op::NewType`, `Obj::NewType`, `WireValue::NewType`, `SnapValue::NewType`, `Program.newtype_methods`/`newtype_home`, and the VM's unwrap/op/rewrap arms. Test surface removed: `examples/newtype{,_generic}.chz`, `tests/chz/spec/{newtype,newtype_fn_ctor,format_spec_newtype}_test.chz`, `tests/corpus/{accept/newtype,reject/newtype_nested}.chz`, about 80 Rust tests, and the newtype rows of five grids. Incidental uses became one-field structs with the same assertions (`compound_overload`, `self_method`, `conditional_method`, `native_qualified`, `type_alias_expr_pattern_lib`, the checker's `ALIAS_LIB`). The VSCode grammar is regenerated.
 - **TICKET-214 (2026-10-05): native module fns are values with real signatures; built-in Num protocol (wave 20 family P1, S1 + S2).** (1) `Num` is a reserved protocol, the bundle `Arithmetic + Mod + Neg + Comparable`, SEALED to `int`/`float` by one arm in `satisfies_args_d` (a struct with all eight methods does not satisfy it; a `[T: Arithmetic + Mod + Neg + Comparable]` param is not `Num`). A `T: Num` body gets `+ - * / %`, unary `-`, ordering and `==`; `x + 1` stays refused. (2) `std/math.chz` declares `native fn abs[T: Num](x: T) -> T` and `sign` alike; the call-only side-set `MODULE_NUMERIC_POLY` / `ModuleSig.numeric_poly` / `Checker.imported_poly` / `infer_numeric_poly` is deleted, so `[-1, 2].map(math.abs)` is `[1, 2]` (CPython), `math.abs[int]` is a value and `g := math.abs` gets the instantiate hint (Go). `register_native_decl` now enters a native decl's own type params, so `chezzi check std/math.chz` stays clean. (3) `json.decode[T]` is a value of type `fn(str) -> Result[T]` (Rust `str::parse::<i32>`): `json_decode_member` is the one "is this std.json's decode" test, `json_decode_sig` reaches every generic-fn-value reader through `module_fn`/`path_fn`, the value is a compiled one-param thunk per descriptor (`compile_decode_fn_value`, sharing `emit_json_decode` with the call) (value lowering superseded by TICKET-226: one proto per descriptor, homed in std.json), and `Resolution::Decode` is recorded only on a final `Pinned` verdict — everything else, `[].map(json.decode)` included, is rejected with the hint. The fixtures that declared a user `enum Num` are renamed `Numeral`. Tests: `checker::tests::native_fn_and_num_protocol_grid`, `tests/chz/stdlib/math_num_test.chz`, `tests/chz/stdlib/json_decode_value_test.chz`. ~~Not fixed here: a parenthesised turbofish CALLEE `(m.f[int])(x)`~~ (fixed by TICKET-222).
-- **TICKET-215 (2026-10-05): a path value has one identity (wave 20 K1).** `P.mk == P.mk`, `E.A == E.A`, `T.get == T.get`, `math.sqrt` and an `extern` fn compare equal however they are read: twice, in two modules, inside a task, or after a `spawn:` capture, a `Channel` or an `Atomic.load` (CPython `True`, Rust fn items). Single source: `Vm::fn_value` over the heap-keyed memo `Vm::fn_values` (`FnKey` = `Proto` | `Native(name, fn ptr)` | `Cffi(Arc address)`) is the only allocator of `Obj::Func`, `Obj::Native` and `Obj::Cffi`; the thirteen per-read / per-crossing allocations in `exec.rs`, `call.rs`, `arith.rs` and `sched.rs` are deleted. The memo is a GC root, swapped with the heap in `swap_ctx` and carried in `FiberCtx`. Fn `==` is still slot identity, so `Atomic.cas` still refuses a fn (DEC-177); nested `fn`s stay distinct per call. Grid: `tests/chz/spec/path_value_identity_test.chz`, `path_value_identity_modules_test.chz`. Perf: 1M `P.mk` + `E.A` reads, release, n=5 interleaved: base median 390 ms, branch 393 ms (within spread; `docs/benchmarks.md`).
+- **TICKET-215 (2026-10-05): a path value has one identity (wave 20 K1).** `P.mk == P.mk`, `E.A == E.A`, `T.get == T.get`, `math.sqrt` and an `extern` fn compare equal however they are read: twice, in two modules, inside a task, or after a `spawn:` capture, a `Channel` or an `Atomic.load` (CPython `True`, Rust fn items). Single source: `Vm::fn_value` over the heap-keyed memo `Vm::fn_values` (`FnKey` = `Proto` | `Native(name, fn ptr)` | `Cffi(Arc address)`) is the only allocator of `Obj::Func`, `Obj::Native` and `Obj::Cffi`; the thirteen per-read / per-crossing allocations in `exec.rs`, `call.rs`, `arith.rs` and `sched.rs` are deleted. The memo is a GC root, swapped with the heap in `swap_ctx` and carried in `FiberCtx`. Fn `==` is still slot identity, so `Atomic.cas` still refuses a fn (DEC-177); nested `fn`s stay distinct per call. Grid: `tests/chz/spec/path_value_identity_test.chz`, `path_value_identity_modules_test.chz`. Perf: 1M `P.mk` + `E.A` reads, release, n=5 interleaved: base median 390 ms, branch 393 ms (within spread; `docs/contributing/benchmarks.md`).
 - **TICKET-210 (2026-10-05): one answer for what a fn-like path denotes, in every position (wave 20 family P1: K2-K6).** (1) K3: a call through a type is the path's value applied — `infer_static_call` reads `type_member_fn`, so `P.get(p)`, `Bx[int].put[str](b, "s")`, `E.tag(e)`, `Cm.twice(c)` (newtype), `lib.L.get(l)`, `BI.get(b)` take the receiver first (Rust `Type::method(&v)`); the native and protocol refusals are one function, `type_member_refusal`. (2) K2: a caller's type param pins a generic fn value like a concrete type at every slot — `freshen_params` (shared with `instantiate_method`) renames the callee's params first, `rigid_param` is the one "in-scope param stands as a type" answer, and `ty_all_holes` is the one walk under `ty_fully_concrete` / `ty_concrete_but`; seven seed-only hint gates read it (decl-site defaults, reassign, `Some`/`Ok`/`Err`, tuple, `ctor_arg_hints`, `hint_want`). (3) K4: `lib.Nope[str](1)` reports `module 'lib' has no member 'Nope'`; `Nope[int].make` no longer adds `unknown name 'int'`. (4) K6: `written_head_args` is the one alias-given-type-args decision (value path, call head, ctor, index, annotation). (5) K5: the parser keeps a one-arg call bracket's expression reading (`ExprKind::Call::bracket`); `bracket_is_index` chooses, `Resolution::IndexCall` lowers index-then-call — `fs[k](10)`, `h.fs[k](10)`, `lib.fs[k](10)` print `12` (CPython); parens no longer needed. (6) `T.get(v)` / `g := T.get` through a protocol-bound type param (Rust `T::get(&v)`): one memoised proto per (method, arity) that runs `CallMethod` on its first argument. Grid: `tests/path_call_grid.rs` (158 cells). Split off: TICKET-214 (S1+S2), TICKET-215 (K1).
-- **TICKET-209 (2026-10-05): seeded T=1 replay of the nursery join and the `Shared` guard wait stays a measured rate (owner decision).** The seed is a fuzzer first; byte-for-byte replay is not required for every wait kind, and a wait becomes exact only when the fix costs nothing unseeded. Both measured fixes failed that: a direct guard hand-off 7.6x at T=1, the exact nursery-join fix about 2x. `nursery_join_in_callback.chz` and `guard_wait_in_callback.chz` stay in `tests/sched_seed/open/` (60 and 33 of 80 idle); `docs/gaps.md` **W15-10** stays OPEN with the rates. No engine change. Decision text: `docs/bug-discovery.md` "Seeded scheduler oracle", `docs/concurrency.md`.
+- **TICKET-209 (2026-10-05): seeded T=1 replay of the nursery join and the `Shared` guard wait stays a measured rate (owner decision).** The seed is a fuzzer first; byte-for-byte replay is not required for every wait kind, and a wait becomes exact only when the fix costs nothing unseeded. Both measured fixes failed that: a direct guard hand-off 7.6x at T=1, the exact nursery-join fix about 2x. `nursery_join_in_callback.chz` and `guard_wait_in_callback.chz` stay in `tests/sched_seed/open/` (60 and 33 of 80 idle); `docs/contributing/gaps.md` **W15-10** stays OPEN with the rates. No engine change. Decision text: `docs/contributing/bug-discovery.md` "Seeded scheduler oracle", `docs/reference/concurrency.md`.
 - **TICKET-212 (2026-10-05): `std.request` retries a request dropped on a reused keep-alive connection, Go's rule (wave 20 S3).**
   A server that closes an idle keep-alive connection as the next request goes out made a pooled
   request fail with `io: Peer disconnected` on 0-5 of 40 GETs. Fix: `LenientHead` tags a read
@@ -108,10 +108,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
   A retried redirect chain re-sends its earlier hops (Go re-sends only the failed hop). Tests:
   `native::request::tests::a_request_dropped_on_a_reused_connection_is_retried_iff_go_would_retry_it`
   (eleven-cell grid, six red before), plus the redirect-hop, redirect-loop and fresh-connection
-  tests. Docs: `docs/stdlib.md` `std.request`, `docs/root-causes-w20.md`.
-- **TICKET-211 (2026-10-05): a nursery inside a spawned task or an Executor job uses every worker (wave 20 family W1).** Before: runners were recruited once, at the outer `close_body`, so `parallel:` around one `spawn fan()` ran fan's 8 spawns on 2 cores at any `--threads`, and an Executor job's nursery on 1. Now one claim, `MnSched::claim_runners`, runs under the core lock at `inject_or_extend`, `Executor.submit` and a body block, and `Vm::start_runners` starts what it claimed; the three farm functions, the blocked-body latch and the wid ranges are deleted. Runner threads are reused across nurseries through the new `src/vm/runner_cache.rs` (a finished runner parks for up to 1 s), so nursery churn stays at base. Measured, release, 8 workers: `nested_closed` 317 -> 138 ms, `exec_open` 560 -> 152 ms; churn, storm, round trips and primes within base's spread (`docs/benchmarks.md` §TICKET-211, `benches/sched/ab_pair.py`). Tests: `vm::tests::runner_threads_reach_the_worker_count_in_every_nesting_shape`, `vm::tests::claim_runners_never_exceeds_the_worker_count`, `vm::tests::nursery_rounds_reuse_their_runner_threads`, `vm::tests::nested_nursery_in_spawned_task_uses_all_workers`.
+  tests. Docs: `docs/reference/stdlib.md` `std.request`, `docs/history/bug-hunts/w20.md`.
+- **TICKET-211 (2026-10-05): a nursery inside a spawned task or an Executor job uses every worker (wave 20 family W1).** Before: runners were recruited once, at the outer `close_body`, so `parallel:` around one `spawn fan()` ran fan's 8 spawns on 2 cores at any `--threads`, and an Executor job's nursery on 1. Now one claim, `MnSched::claim_runners`, runs under the core lock at `inject_or_extend`, `Executor.submit` and a body block, and `Vm::start_runners` starts what it claimed; the three farm functions, the blocked-body latch and the wid ranges are deleted. Runner threads are reused across nurseries through the new `src/vm/runner_cache.rs` (a finished runner parks for up to 1 s), so nursery churn stays at base. Measured, release, 8 workers: `nested_closed` 317 -> 138 ms, `exec_open` 560 -> 152 ms; churn, storm, round trips and primes within base's spread (`docs/contributing/benchmarks.md` §TICKET-211, `benches/sched/ab_pair.py`). Tests: `vm::tests::runner_threads_reach_the_worker_count_in_every_nesting_shape`, `vm::tests::claim_runners_never_exceeds_the_worker_count`, `vm::tests::nursery_rounds_reuse_their_runner_threads`, `vm::tests::nested_nursery_in_spawned_task_uses_all_workers`.
 
-- **TICKET-213 (2026-10-04): Executor rebuild part 2 — A1, `Executor(n)`, the exit rule, and TICKET-208's perf regression fixed.** (1) A task copy's write to a `Task.get()` / `memoize1` result its owner had not read faults (D4) instead of vanishing: the snapshot is marked through `Route::CopyRead` by `concurrency.mark_task_copy`. (2) `Executor(n)` runs at most `n` jobs at once; a held job starts when one ends, never after `shutdown_now()` or a deadlock reap; `Executor(0)` faults. (3) `os.exit` runs no `defer` in any task and cuts a running `defer` body; one function, `Vm::next_deferred`, pops every `defer` and delivers a foreign exit. (4) Seeded replay of the Executor is NOT byte-for-byte yet: `executor_join.chz` 72-76 of 80, the new `executor_interleave.chz` one differing run in 480 under 40 hogs; both stay in `tests/sched_seed/open/` (W15-10, TICKET-209). (5) Perf: TICKET-208 rebuilt the module snapshot at every spawn (2000 spawns over a 100000-item global: 2.1x slower, killed at 6 GB at one worker) and started one runner thread per `submit` (2.5x slower round trips). Now `Heap::get_mut` moves a view epoch and `Vm::fresh_view` rebuilds only a mutated view, an idle Executor runner waits 5 ms for a next job, and the auto worker count is read once. Storm and round trips are back at the pre-208 base in time and max RSS; table in `docs/benchmarks.md`. Regression tests: `tests/spawn_storm_memory.rs` (max RSS under 300 MB), `vm::tests::sequential_executor_round_trips_reuse_their_runner`.
+- **TICKET-213 (2026-10-04): Executor rebuild part 2 — A1, `Executor(n)`, the exit rule, and TICKET-208's perf regression fixed.** (1) A task copy's write to a `Task.get()` / `memoize1` result its owner had not read faults (D4) instead of vanishing: the snapshot is marked through `Route::CopyRead` by `concurrency.mark_task_copy`. (2) `Executor(n)` runs at most `n` jobs at once; a held job starts when one ends, never after `shutdown_now()` or a deadlock reap; `Executor(0)` faults. (3) `os.exit` runs no `defer` in any task and cuts a running `defer` body; one function, `Vm::next_deferred`, pops every `defer` and delivers a foreign exit. (4) Seeded replay of the Executor is NOT byte-for-byte yet: `executor_join.chz` 72-76 of 80, the new `executor_interleave.chz` one differing run in 480 under 40 hogs; both stay in `tests/sched_seed/open/` (W15-10, TICKET-209). (5) Perf: TICKET-208 rebuilt the module snapshot at every spawn (2000 spawns over a 100000-item global: 2.1x slower, killed at 6 GB at one worker) and started one runner thread per `submit` (2.5x slower round trips). Now `Heap::get_mut` moves a view epoch and `Vm::fresh_view` rebuilds only a mutated view, an idle Executor runner waits 5 ms for a next job, and the auto worker count is read once. Storm and round trips are back at the pre-208 base in time and max RSS; table in `docs/contributing/benchmarks.md`. Regression tests: `tests/spawn_storm_memory.rs` (max RSS under 300 MB), `vm::tests::sequential_executor_round_trips_reuse_their_runner`.
 - **TICKET-208 (2026-10-04): an Executor job is a spawned task on a detached sched; the job engine is deleted.** `ex.submit(f)` starts its task through `Vm::spawn_into`, the function `spawn` calls, so a job copies its globals at submit, inherits its creator's cancel chain, parks like any fiber (socket ops included) and runs under the one runner gate. `Task.get()`, `submit_result` and `submit_outcome` return `Result[T]`: a handle job's fault is its handle's `Err`, and `shutdown()` raises no job fault. A fire-and-forget job's fault ends the run at once, past every `recover:`, with that job's frames. A deadlocked job is reported at its own blocking op. TICKET-213 owns A1, `Executor(n)`, the exit rule (`os.exit` runs no `defer`), replay, perf and the reference docs.
 - **TICKET-206 (2026-10-04): a gated worker and a callback thread queue their own next turn; callback replay rates rise, `wait:` and `recv` in a callback stay a measured rate when the box is oversubscribed.**
   `tests/sched_seed/open/callback_wait_interleave.chz` replayed at 76-78 of 80 (seeds 1-8 x 10 runs,
@@ -126,7 +126,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `tests/sched_seed/open/` (TICKET-209). `callback_send_interleave.chz` pinned to one core went
   from 67-77 to 80 and has its own test. The
   open fixtures are unchanged in kind (`tests/sched_seed/open/`): nursery join 60 of 80, guard wait
-  35-36, Executor join 69; `docs/gaps.md` **W15-10** stays OPEN (TICKET-209, TICKET-208) and also
+  35-36, Executor join 69; `docs/contributing/gaps.md` **W15-10** stays OPEN (TICKET-209, TICKET-208) and also
   carries the one-core (`taskset -c 3`) rates. Perf, interleaved n=7, release, wall ms, base median
   -> fix median, load average 1.6-3.9: `rendezvous_pingpong` T=1 3221 -> 3347 (1.04x), T=4 3221 ->
   3201, default 4112 -> 3502; `primes_parallel` T=1 29279 -> 29795 (1.018x), T=4 9803 -> 9926,
@@ -143,7 +143,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `body_width_yield`, `body_gate_retire`, `Vm::body_gate`/`width_gated`/`holds_width`, the per-sched
   gate, four raw thread spawns, twelve bare channel notifies. Supersedes DEC-141, DEC-168, DEC-167.
   **Replay:** T=1 seeded replay is byte-for-byte for seven wait shapes (80/80 idle and under 8 hogs;
-  base 22-80); `docs/gaps.md` **W15-10** stays OPEN, narrowed to the in-place nursery join and a
+  base 22-80); `docs/contributing/gaps.md` **W15-10** stays OPEN, narrowed to the in-place nursery join and a
   `Shared` guard wait (TICKET-209) and the `Executor` join and job start (TICKET-208). **`--max-heap`:** a job's
   submit-time bytes are charged to the submitter until the job FINISHES, not until it starts (300
   jobs under an 8 MB cap: 280 MB peak without the rule, 18 MB with it). **Probe:** the
@@ -153,9 +153,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `vm::width` unit test, `tests/chezzi_threads_cli.rs`. **Perf, a measured cost at T=1:**
   `benches/sched/rendezvous_pingpong.chz` 1.10x-1.25x and `examples/primes_parallel.chz` 1.03x,
   both outside the run-to-run spread; T=4, T=0 and the 11 `benches/run.chz` programs are inside it
-  (`docs/benchmarks.md` §TICKET-205). Owner decision 2026-10-03: the T=1 cost is accepted, bounded at 1.3x (ping-pong) and 1.05x (`primes_parallel`).
-  Docs: `docs/concurrency.md`, `docs/bug-discovery.md`, `docs/gaps.md`, `docs/root-causes-w19.md`,
-  `docs/benchmarks.md`, `CLAUDE.md`.
+  (`docs/contributing/benchmarks.md` §TICKET-205). Owner decision 2026-10-03: the T=1 cost is accepted, bounded at 1.3x (ping-pong) and 1.05x (`primes_parallel`).
+  Docs: `docs/reference/concurrency.md`, `docs/contributing/bug-discovery.md`, `docs/contributing/gaps.md`, `docs/history/bug-hunts/w19.md`,
+  `docs/contributing/benchmarks.md`, `CLAUDE.md`.
 
 - **TICKET-204 (2026-10-02): a multi-arg turbofish is a value; type paths follow Rust's path-value
   rule (wave 19 K4).** `p := pair[str, int]` was `expected ']', found ','`; it is now a value in
@@ -199,7 +199,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   every pick reset the reduction budget. `LocalQ::pop` now returns a `Slice`: a `runnext` pick is
   `Inherit` (Go `inheritTime`: keep the current reds, do not advance `tick`), every other pick is
   `Fresh`. Test: `h2_fairness_grid_every_cell_finishes` (96 cells; on base 2 cells hung). W17-1
-  `rendezvous_pingpong` re-measured: no change (`docs/benchmarks.md` §TICKET-199).
+  `rendezvous_pingpong` re-measured: no change (`docs/contributing/benchmarks.md` §TICKET-199).
 
 - **TICKET-199 (2026-10-02): Family S1, scheduler scope identity (H1).** A nursery opened inside a
   spawned task, whose child faulted, crashed a worker with `panicked at src/vm/mod.rs:5328:31: index
@@ -214,7 +214,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 - **Wave-18 in-place fix (2026-10-01): the `z` format option.** `"{-0.0001:z.1f}"` is `0.0` (CPython
   3.11+): a float that rounds to zero drops its minus sign; `z` is rejected on an integer type and on a
   string, as CPython does. `src/fmtspec.rs`, tests `tests/chz/spec/format_spec_zero_coerce_test.chz`.
-  Wave 18 (JIT sweep #3) was not clean: `docs/root-causes-w18.md`, tickets TICKET-194..197.
+  Wave 18 (JIT sweep #3) was not clean: `docs/history/bug-hunts/w18.md`, tickets TICKET-194..197.
 
 - **Wave-17 isolated fixes (2026-10-01, in place).** `a, _ = (1, 2)` and `_, b[0] = t` now
   discard the `_` element (was `cannot assign to undeclared variable '_'`; Python and Go accept both):
@@ -229,7 +229,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   on the built binary and must produce it; only hand-picked examples had a golden before, which is
   how `executor_results` stayed broken unseen. Eight examples whose prints race declare
   `# golden: unordered`, `log_demo` declares `# golden: stderr`. 0 failures in 12 runs at
-  CHEZZI_THREADS=1/2/4/0 after marking; an injected break in two examples is caught. `docs/syntax.md`'s `Box.top()` example now
+  CHEZZI_THREADS=1/2/4/0 after marking; an injected break in two examples is caught. `docs/reference/syntax.md`'s `Box.top()` example now
   quotes the real error (`type Socket does not satisfy Eq` — `Comparable` embeds `Eq`). The
   `two_leaf_deadlock_on_a_main_channel_still_faults_at_every_worker_count` T=1 hang no longer
   reproduces after TICKET-188 (0 of 150 debug runs at T=1; 0 of 210 release runs at T=1/2/0, idle and
@@ -313,7 +313,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   Deleted: `gen_frame_observable`, `SpawnOperands`, `WireMemo::gen_operands`, `FrameObservable`,
   the DEC-179 `set_copied` carry. Now runs: an Executor job draining a started generator (A6), a
   module-global started generator in a task. Perf (A7): 200 crossings with a 200k-object parent
-  3971 ms -> 84 ms (`docs/benchmarks.md`). Ceilings, each a false fault: a generator created
+  3971 ms -> 84 ms (`docs/contributing/benchmarks.md`). Ceilings, each a false fault: a generator created
   through a method or a function value has no stamp; slots 64 and up; a struct `.copy()`. Grids:
   `compiler::gen_frame_tests::generator_slot_privacy_grid`,
   `checker::tests::every_native_container_method_is_classified_by_its_return_type`,
@@ -328,7 +328,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 - **TICKET-198 (2026-10-01): json.decode[T] takes a struct field's default for a missing key (W18 S1).** The decode descriptor now carries each field's constructor fill: `Checker::default_fill` is the one map from a classified default to an `ArgFill` (read by `plan_call` and `infer_decode`), and `Compiler::compile_default_fill` is the one lowering (the ctor plan loop and the per-field decode thunk). A default runs only for an absent key, afresh per decode, and a fault in it is a fault. A missing key with no default is still `Err`; `null` for a non-`Option` field is still `Err`. `coerce_json` roots every decoded child on the operand stack across a default (gc-stress goldens `json_decode_field_defaults_survive_gc_stress`, `json_decode_map_and_tuple_children_survive_gc_stress`). Grid: `tests/chz/stdlib/json_default_test.chz`.
 - **TICKET-194 (2026-10-01): Family A2, an op is cut only where it would wait.** X1: a send with room (and a recv with a value ready, a ready `wait:` arm) checked cancel BEFORE it committed, so a `shutdown_now()` after a job returned lost its result, or reported both `Some(7)` and `task cancelled`. `Vm::wait_halt` (`block.rs`) is now the one pre-wait check, made only after an op's ready check failed (owner decision 1). `ChannelCore::recv_ready` is the one receive ready decision (`chan_recv_step`, `block_recv`, `try_recv`, `wait:` recv arm); `Vm::send_settled` is the one settled-offer mapping (four copies gone). `Vm::reentered` is the re-entry bracket with no checkpoint; 14 single-call sites (operator/protocol hooks, generator resume, `update`/`read`/`write`) moved to it, native loops keep `guarded`. G1: guard stage 1 waits holding no width permit (`guard_free_then_take`, shared with `guard_wait_block`); seeded two-box q6 at T=1, debug: 8.7-9.6 s -> 0.24-0.28 s. Grids: `tests/cancellation_point_grid.rs` (132 cells x T=1/2/4/0), `tests/shared_update_contention.rs::seeded_two_box_update_is_fast_at_every_worker_count`. Verifying follow-up: a socket op refused in an `Executor` job (`would block`) never waits, so `park_on_fd` now decides `Refuse` before `wait_halt` for `read`/`read_bytes`/`write`/`accept` (the four caller copies of the refusal are gone; `connect` already refused before any halt); grid `a_refused_socket_op_is_not_a_cancellation_point`.
 - **TICKET-193 (2026-10-01): contended `Shared.update`/`RwShared.write` at small worker counts.** `guard_wait_block` took the update guard with no width permit and then queued for one, while the permit holders waited in place for that guard: each handoff cost one 5 ms `GUARD_DEMOTE_BUDGET`. A waiter now takes the permit first, then the guard; `core.rs` has one guard wait loop and one decider (`guard_state`), and the satisfiability mirror is gone. 6 x 2000 `update`s at T=2: 16-22 s -> 0.04 s. Grid: `tests/shared_update_contention.rs`.
-- **TICKET-192 (2026-10-01): Family C3, shared maps are O(1); `memoize1` works in any task (A3).** A stored `RwShared` `Map`/`Set` is a `WireTable` (`src/vm/wire.rs`) that carries the same `HashIndex` as the heap `MapData`/`SetData` (moved there, one index type). One probe, `rwshared_probe`, replaces the three linear scans of `has`/`get_key`/`contains`; it restarts when the core's write generation moves while it ran a user `eq`, so a concurrent remove of another colliding key can no longer make a present key read as missing (monitor note). New `RwShared[Map[K, V]]` writers `set_key`/`remove_key`/`get_or_insert` take the update guard and splice one entry: ids minted above the stored map's id ceiling, overwrite keeps the stored key, and remove/overwrite on a map whose pieces are not self-contained decode, mutate and re-encode. `ConcurrentMap` calls these views directly (its four closures are deleted). `std.memoize` caches in an `RwShared[Map]` plus an owner-only alias map (DEC-191), so the owner keeps result identity and a task copy gets a snapshot. 100k `get_key` on 100k entries: ~100 s -> 0.18 s; `memoize_8k` 2.3x the private map; a map crossing pays about +18% for the index (`docs/benchmarks.md`). Grid: `tests/chz/stdlib/shared_map_grid_test.chz`.
+- **TICKET-192 (2026-10-01): Family C3, shared maps are O(1); `memoize1` works in any task (A3).** A stored `RwShared` `Map`/`Set` is a `WireTable` (`src/vm/wire.rs`) that carries the same `HashIndex` as the heap `MapData`/`SetData` (moved there, one index type). One probe, `rwshared_probe`, replaces the three linear scans of `has`/`get_key`/`contains`; it restarts when the core's write generation moves while it ran a user `eq`, so a concurrent remove of another colliding key can no longer make a present key read as missing (monitor note). New `RwShared[Map[K, V]]` writers `set_key`/`remove_key`/`get_or_insert` take the update guard and splice one entry: ids minted above the stored map's id ceiling, overwrite keeps the stored key, and remove/overwrite on a map whose pieces are not self-contained decode, mutate and re-encode. `ConcurrentMap` calls these views directly (its four closures are deleted). `std.memoize` caches in an `RwShared[Map]` plus an owner-only alias map (DEC-191), so the owner keeps result identity and a task copy gets a snapshot. 100k `get_key` on 100k entries: ~100 s -> 0.18 s; `memoize_8k` 2.3x the private map; a map crossing pays about +18% for the index (`docs/contributing/benchmarks.md`). Grid: `tests/chz/stdlib/shared_map_grid_test.chz`.
 - **TICKET-191 (2026-10-01): Family C3, `Task` over one shared core.** `std.concurrency.task` keeps a task's outcome in one `Shared[TaskState[T]]` (`Pending`/`Done`/`Failed`) that every copy of the handle reads, so `Task.get()`/`done()` work from a spawned task or an Executor job and agree with the parent (CPython `Future`). The task holding the original handle gets the same object from every `get()`; a copy gets a snapshot, chosen by the new `concurrency.is_task_copy(v)`, which reads the D4 copy mark (`Heap::is_copied`). Deleted: the by-value `failed` field and the outcome writes that faulted in a task. Grid: caller x state x value kind in `tests/chz/stdlib/task_memoize_shared_state_test.chz`. `memoize1` in a task (A3) moved to TICKET-192.
 - **TICKET-189 (2026-10-01): Family C1, one crossing policy per bound slot.** The checker's
   `crossing_of` decides each spawn operand once; `bound_slots` maps every parameter through
@@ -358,7 +358,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `nursery_ancestors`. An owner blocked in a socket read/accept/write, `recv`, `sleep_ms`, `wait:`
   or a join is now cut at its child's fault (it hung or ran on for seconds). Grid:
   `tests/owner_fault_grid.rs` (every `WaitSpec` × owner kind × context). Benches within 3%
-  (`docs/benchmarks.md`).
+  (`docs/contributing/benchmarks.md`).
 - **TICKET-187 (2026-09-30): Family F, names resolved in one place.** (1) Protocol parameter names
   are part of conformance for user and prelude protocols (`param_name_mismatch`); a protocol call
   binds by the protocol's own parameter list and omitting an argument is an arity error (DEC-075's
@@ -402,8 +402,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   close, at T=1, 2, 0 and one seed); repro `unbuffered_send_never_returns_its_own_value_to_the_sender`.
   Perf, accepted by the owner with a residual: `send_one_channel` -12% (T=4) / +3% (T=0);
   unpinned `rendezvous_pingpong` +16% (T=0) / +25% (T=4) and bimodal, ~10% faster than base pinned
-  to two distinct cores. The residual is **W17-1** (`docs/gaps.md`); per-lever and counter tables in
-  `docs/benchmarks.md` §TICKET-185. Levers 1-3 (send before allocating, one lock hold in settle,
+  to two distinct cores. The residual is **W17-1** (`docs/contributing/gaps.md`); per-lever and counter tables in
+  `docs/contributing/benchmarks.md` §TICKET-185. Levers 1-3 (send before allocating, one lock hold in settle,
   recycle `PendingOp`) were measured and reverted.
 
 - **TICKET-184 (2026-09-30): Family E, one control-flow summary.** `src/checker/flow.rs` is the one
@@ -431,7 +431,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   (`tests/chz/stdlib/string_rsplit_test.chz`). (3) `math.parse_int_base(s, 0)` accepted a leading
   zero (`"017"` → `Ok(17)`); base 0 decimal now Errs on a leading zero unless the value is zero, as
   CPython `int(s, 0)`; an explicit base 10 still accepts it (`native::math` test
-  `parse_int_base_base0_rejects_leading_zeros_like_cpython`). Docs: `docs/stdlib.md` rsplit and
+  `parse_int_base_base0_rejects_leading_zeros_like_cpython`). Docs: `docs/reference/stdlib.md` rsplit and
   parse_int_base entries.
 - **Wave-16 cleanup (2026-09-30).** (1) A module-global initialization cycle (`x := f()` where `f`
   returns `x`) is now reported ONCE, as `initialization cycle: ...` — the derived `cannot infer
@@ -484,8 +484,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `'x' is read before its initialization at line N` instead of reading `nil` (a spawn snapshot carries
   the marker as `SnapValue::Uninit`). A speculative (`inferring_ret`) walk skips the constant-overflow
   scan. Grid `vm::golden_tests::module_scope_order_grid`: 38 of 67 cells red on base, 0 on the branch.
-  Chezzi cells `tests/chz/spec/module_scope_order_test.chz`. Rule: `docs/syntax.md` "Module scope and
-  initialization order". Perf (`docs/benchmarks.md`): run-time
+  Chezzi cells `tests/chz/spec/module_scope_order_test.chz`. Rule: `docs/reference/syntax.md` "Module scope and
+  initialization order". Perf (`docs/contributing/benchmarks.md`): run-time
   benches within box noise (medians ±3.5 %); `chezzi check` on the largest tests/chz and examples
   files is level; a synthetic file of 3000 chained globals checks in 44 ms vs 24 ms on base (the
   globals fixpoint re-walks each let value), linear in the global count.
@@ -506,7 +506,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
     `Ok 2633835 of 16777216` with no `close()`. It never parked, so the closer won only by luck.
     `write`/`write_bytes` now send every byte before `Ok(len)` (Go's `Conn.Write`). The sent offset
     is latched on the fiber (`Vm::poll_written`) across a park. Any early stop (close, deadline,
-    poll-once, OS error) is `Err`, and the sent count is not reported. `docs/stdlib.md` states it.
+    poll-once, OS error) is `Err`, and the sent count is not reported. `docs/reference/stdlib.md` states it.
     Repro `closing_a_socket_fails_a_parked_write_at_every_seed_one_worker`: base 15 of 16 seeds
     failed, fix 0.
   - **W15-6 (P2, sched).** The deadlock veto peeked a demoted fiber's channels only for a queued
@@ -537,7 +537,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   through a whole-module import to the same protocol key as `import Named from m`, and static
   requirements dispatch through the witness. The parser keeps the dotted spelling (any depth);
   `Checker::protocol_key` resolves it, and `check_bounds` rejects a 3+ segment bound with the
-  two-level-path hint. The "qualified generic bound does not parse" limit in `docs/syntax.md` is gone.
+  two-level-path hint. The "qualified generic bound does not parse" limit in `docs/reference/syntax.md` is gone.
 - **TICKET-172 (2026-09-28) — imported and qualified `type` aliases work in expression and pattern
   position.** `import Position from m`, `m.Position`, and a local `type P = m.Point` now construct,
   call statics, build variants, and match patterns exactly like the aliased type (TICKET-174 folded
@@ -566,19 +566,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
   W8-8 had already made every other T=1 shape correctly serial. `Vm::body_gate` now shares one
   `src/vm/width.rs` permit between the two, gated only when `worker_count() == 1` and only for the
   outermost eager nursery; `op_wait_poll`'s in-place wait (`src/vm/netio.rs`) needed its own
-  DEC-141 bracket or a body `wait:` hangs at T=1. Measured (release, `docs/benchmarks.md`
+  DEC-141 bracket or a body `wait:` hangs at T=1. Measured (release, `docs/contributing/benchmarks.md`
   §TICKET-168): 196% → 96% CPU (Go `GOMAXPROCS=1` reference: 100%); a second shape (blocked-then-
-  burn) 152% → 99%; T=2/T=0 unchanged. Closes `docs/gaps.md` **W15-2**. Two shapes stay open by
+  burn) 152% → 99%; T=2/T=0 unchanged. Closes `docs/contributing/gaps.md` **W15-2**. Two shapes stay open by
   owner decision: **W15-9** (a body that blocks once then burns runs n+1 runners at T>=2, a TICKET-159
   blocked-helper-retirement gap) and **W15-10** (byte-for-byte T=1 seeded replay — two residual races
   in the drainer's pick-then-acquire order and a woken body's queue timing; both fixed by TICKET-205,
   which narrowed the row to four other in-place waits). Tests:
   `tests/chezzi_threads_cli.rs` (+4: the triage repro plus a blocked-then-burn repro, a T>=2/default
-  two-wide pin, and 11 blocking-point probes). Docs: `docs/gaps.md`, `docs/concurrency.md`,
-  `docs/bug-discovery.md`, `docs/future.md`, `docs/benchmarks.md`, `CLAUDE.md`,
+  two-wide pin, and 11 blocking-point probes). Docs: `docs/contributing/gaps.md`, `docs/reference/concurrency.md`,
+  `docs/contributing/bug-discovery.md`, `docs/design/roadmap.md`, `docs/contributing/benchmarks.md`, `CLAUDE.md`,
   `tests/sched_seed_cli.rs`.
 
-- **TICKET-167 (2026-09-23) — a seeded scheduler mode for the M:N engine, the last of `docs/future.md`
+- **TICKET-167 (2026-09-23) — a seeded scheduler mode for the M:N engine, the last of `docs/design/roadmap.md`
   §2b's four replacement oracles.**
   `CHEZZI_SCHED_SEED=<u64>` (`src/vm/sched_seed.rs`) drives every scheduler free choice — which
   runnable fiber a pop returns (`LocalQ::pop`, the three `global.pop_front()` sites), the
@@ -588,16 +588,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
   byte-for-byte for channel waits since TICKET-205); at
   `CHEZZI_THREADS>=2` it also injects random yields/spins/sleeps at every sync point, widening real
   thread-timing race windows. Behind a cached `AtomicBool::load(Relaxed)` — unset cost is noise-level on
-  all 11 `benches/run.chz` cases (`docs/benchmarks.md` "TICKET-167"). A `src/schedfuzz/` +
+  all 11 `benches/run.chz` cases (`docs/contributing/benchmarks.md` "TICKET-167"). A `src/schedfuzz/` +
   `src/bin/schedfuzz` long-runner sweeps `tests/chz` + concurrency `examples/*.chz` under a seed range,
   judged against an unseeded baseline of the same fixed binary; a `FINDING` line names its replay
-  command. Mutation-tested against three historical fixes (full table: `docs/bug-discovery.md` "Seeded
+  command. Mutation-tested against three historical fixes (full table: `docs/contributing/bug-discovery.md` "Seeded
   scheduler oracle") — catches W15-1 (TICKET-166) only at the default worker count, catches W14-39
   (TICKET-135) at T=1/T=2 but at a rate BELOW raw unseeded fuzzing (it replays a jitter-found failure,
   it does not widen past it), misses the TICKET-128 mutation on release entirely (found only on
-  debug). Its first corpus sweep found a genuine new race on `main`: **W15-3** (`docs/gaps.md`) — a
+  debug). Its first corpus sweep found a genuine new race on `main`: **W15-3** (`docs/contributing/gaps.md`) — a
   `write` parked on a `Socket` that a racing `close()` should fault, and instead returns `Ok`; TICKET-166
-  covered the `Listener.accept()` case but not this one. **W15-10** (`docs/gaps.md`, found 2026-09-23
+  covered the `Listener.accept()` case but not this one. **W15-10** (`docs/contributing/gaps.md`, found 2026-09-23
   under TICKET-168 once W15-2 — the top-level body racing its unseeded `chezzi-eager` drainer — was
   fixed): T=1 replay of a top-level fan-out still holds only at a measured rate, not byte-for-byte
   (nested-in-`spawn:` fixture 144/160 pre-fix, flat fixture 86/160 pre-fix / 58/160 post-fix), because
@@ -605,12 +605,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
   once its own thread runs; fixing it is a separate ticket (done: TICKET-205 fixed both, and W15-10
   now lists only the four in-place waits that are still a measured rate). Tests: `tests/sched_seed_cli.rs` (5
   interface/replay tests + 1 smoke gate, ~4s wall);
-  `tests/sched_seed/*.chz` fixtures. Docs: `docs/future.md` §2b (Scheduler-races row now BUILT),
-  `docs/bug-discovery.md`, `CLAUDE.md`, `docs/benchmarks.md`, `docs/gaps.md`.
+  `tests/sched_seed/*.chz` fixtures. Docs: `docs/design/roadmap.md` §2b (Scheduler-races row now BUILT),
+  `docs/contributing/bug-discovery.md`, `CLAUDE.md`, `docs/contributing/benchmarks.md`, `docs/contributing/gaps.md`.
   **Follow-up (2026-09-23, owner review):** `corpus()`'s two-run unseeded baseline used to score
   `try_recv.chz`/`parallel.chz`/`parallel_cross_nursery_ok.chz` as clean `output` findings on an
   unmodified tree — a false positive, not a bug. `--threads 1,2,0` also replaces `--threads 1,2` in
-  the step-6 sweep, `CLAUDE.md` and `docs/bug-discovery.md`'s default-sweep example, per the same
+  the step-6 sweep, `CLAUDE.md` and `docs/contributing/bug-discovery.md`'s default-sweep example, per the same
   review: W15-1 only reproduces at the default worker count, so a sweep without it is the sweep that
   would have missed it. JIT entry condition 1's status was reverted from `met` to `built, not yet
   judged` — that condition is the owner's call, not this ticket's to close.
@@ -623,12 +623,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
   (`contains("spawn")` also matched comments) — dropped entirely; `target_for` always loads
   `.expected`, and the SAMPLED baseline alone decides `check_output`. That sampled check still can't
   bound a real-but-rare race (`parallel_cross_nursery_ok.chz`, measured 0/40 unseeded), so a
-  `KNOWN_TARGETS` list skips such targets BY FILE NAME on a default sweep, citing the `docs/gaps.md`
+  `KNOWN_TARGETS` list skips such targets BY FILE NAME on a default sweep, citing the `docs/contributing/gaps.md`
   row that explains each (new: **W15-4** the documented streaming-CLI contract, **W15-5** two
   wall-clock-ratio Chezzi tests that flake under the sweep's own CPU contention, **W15-6** a
   generator-over-channel hang, **W15-7** a cancel-propagation hang — both real, both open, both a
   separate ticket to fix). A clean-tree sweep (`--seeds 1..17 --threads 1,2,0`) now exits 0 with 0
-  unexplained findings across four full corpus runs; full measurements in `docs/bug-discovery.md`
+  unexplained findings across four full corpus runs; full measurements in `docs/contributing/bug-discovery.md`
   "Seeded scheduler oracle".
 - **TICKET-166 (2026-09-22) — `close()` on a `Socket`/`Listener` wakes a parked op instead of hanging
   or crashing the netpoller (closes W15-1, and the `Listener` sub-item of W8-19).** Closing a
@@ -646,16 +646,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `CHEZZI_THREADS=2` and 3 at the default, bounded by `hang_deadline::run_with_hang_deadline`),
   `vm::poller::tests::register_refuses_a_closed_socket`, and
   `tests/chz/stdlib/net_close_test.chz` (`accept`/`read`/`read_bytes`/`write`/`write_bytes`, with and
-  without `timeout_ms`, both worker counts). Docs: `docs/gaps.md`, `CLAUDE.md`, `docs/stdlib.md`,
-  `docs/concurrency.md`.
+  without `timeout_ms`, both worker counts). Docs: `docs/contributing/gaps.md`, `CLAUDE.md`, `docs/reference/stdlib.md`,
+  `docs/reference/concurrency.md`.
 - **TICKET-165 (2026-09-22) — the airlock warning fires on a same-path field/index read and on a
   mutator through an element or field (closes W11-13).** A task write now records its constant
   field/key path, and a parent read along it, a prefix of it or an extension of it warns (`s.v = 2`
   then `print(s.v)`; `xs[0].push(2)` then `print(xs)`); a disjoint constant path stays silent, and a
   computed or negative index declines. Runtime unchanged. Tests:
   `checker::tests::a_same_path_read_of_a_projected_task_write_warns` and five siblings. Docs:
-  `docs/syntax.md`, `docs/concurrency.md`, `docs/gaps.md`, `CLAUDE.md`.
-- **`str.pad_right(width, fill)` (2026-09-22) — the mirror of `pad_left`, CPython's `str.ljust` (closes deferred TICKET-083).** `"ab".pad_right(6, " ")` → `"ab    "`; the free-fn form `string.pad_right(s, w, fill)` delegates to it. Shares `pad_left`'s VM arm (`src/vm/call.rs`), so it has the same never-shrink rule, exact-width fill cycle and faults (`pad_right: fill must not be empty`, `string pad capacity overflow`). 083's other half, a runtime width in a format spec (`"{s:<{w}}"`), had already landed in TICKET-162. Tests: `tests/chz/stdlib/fault_contracts_test.chz` `string_pad_right_mirrors_pad_left` (values match CPython 3.14 `ljust`). Docs: `docs/stdlib.md`, `docs/syntax.md`, `docs/gaps.md`, `CLAUDE.md`.
+  `docs/reference/syntax.md`, `docs/reference/concurrency.md`, `docs/contributing/gaps.md`, `CLAUDE.md`.
+- **`str.pad_right(width, fill)` (2026-09-22) — the mirror of `pad_left`, CPython's `str.ljust` (closes deferred TICKET-083).** `"ab".pad_right(6, " ")` → `"ab    "`; the free-fn form `string.pad_right(s, w, fill)` delegates to it. Shares `pad_left`'s VM arm (`src/vm/call.rs`), so it has the same never-shrink rule, exact-width fill cycle and faults (`pad_right: fill must not be empty`, `string pad capacity overflow`). 083's other half, a runtime width in a format spec (`"{s:<{w}}"`), had already landed in TICKET-162. Tests: `tests/chz/stdlib/fault_contracts_test.chz` `string_pad_right_mirrors_pad_left` (values match CPython 3.14 `ljust`). Docs: `docs/reference/stdlib.md`, `docs/reference/syntax.md`, `docs/contributing/gaps.md`, `CLAUDE.md`.
 - **TICKET-090 (2026-09-22) — a local binding that is never read now warns.** A fn-local or
   block-local `:=`/`let` binding, or a `for` loop variable, that is never read emits `unused variable
   '<name>': it is never read; prefix it with '_' if that is intended` — a WARNING (Rust's shape),
@@ -667,48 +667,48 @@ Single source of truth for "what am I doing next." Update after every work sessi
   comprehension binding, a module-scope global (an importer may read it), or any `_`-prefixed name.
   Tests: `checker::tests::{unused_local_binding_warns,unused_local_accumulator_typo_warns_once_at_the_inner_binding,unused_local_warn_table_fires,unused_local_warn_table_stays_silent}`,
   `tests::unused_local_warning_is_a_warning_in_json_and_run_still_prints_zero` (`tests/check_errors_json.rs`).
-  Docs: `docs/syntax.md` §"Unused locals warn", `CLAUDE.md`.
-- **TICKET-086 (2026-09-22) — `regex.find_all_text(pat, s) -> Result[List[str]]` returns the matched strings directly (closes deferred TICKET-086).** The obvious tokenizer, `find_all` plus a `.text` loop, built a `Match` struct (text/start/end/groups) per hit and cost 1.64-1.83s over 1 000 000 tokens on the release binary; `find_all_text` skips that seam and measured 0.31s over the same input. Semantics follow Go's `FindAllString`/Rust's `find_iter`: the WHOLE match text of every hit, never capture groups (unlike Python's `re.findall`, which switches to groups when the pattern has any). `find_all` itself is unchanged. Tests: `tests/chz/stdlib/regex_test.chz` (rewritten perf repro + `find_all_text_is_the_text_of_every_find_all_match`), `native::regex::tests::find_all_text_matches_every_find_all_text`, `checker::tests::regex_fn_sigs_exact` (6 fns). Docs: `docs/stdlib.md`, `docs/spec.md`, `docs/gaps.md` row 086, `CLAUDE.md`.
-- **TICKET-163 (2026-09-21) — the wall clock has a millisecond reading (closes deferred TICKET-087).** `time.now_ms() -> int` is epoch milliseconds (a wall clock, never clamped, separate from `monotonic()`); `time.now()` stays whole seconds. `DateTime` gains `milli: int = 0`, APPENDED after `weekday` so 7-arg construction still works; `datetime.to_epoch_ms(dt)` is the ms twin of `to_epoch`; `datetime.now()` fills `milli`. `to_iso8601` emits `.SSS` only when `milli != 0` (CPython `isoformat`'s rule), so every golden is byte-identical; `parse_iso8601` keeps the first three fraction digits (right-padded, rest truncated, as CPython `fromisoformat`). Tests: `tests/chz/stdlib/time_ms_test.chz`; `docs/stdlib.md` §std.time / §std.datetime updated.
-- **TICKET-162 (2026-09-21) — a format spec's width and precision may be a nested `{expr}` field measured at runtime (`"|{s:<{w}}|"`, `"{x:.{p}f}"`), closing the nested-field half of the deferred TICKET-083.** CPython `f"|{'ab':<{w}}|"`, Go `%-*s` and Rust `{:<width$}` all render `|ab    |` for `w = 6`. Legal in exactly two slots, width and precision (CPython also allows fill/align/type by re-parsing the spec at runtime, which would defeat the check-time shape check, so any other `{` is `a nested field is allowed only as the width or the precision`). The field must be an `int` (checker: `a nested width field must be an int, found str`). Value, then width, then precision evaluate in that order. **The `MAX_FIELD` (4096) cap moved with the value:** `fmtspec::field_from_int` rejects a nested value over 4096 (`format spec: width exceeds maximum 4096`) or below 0 (`width must not be negative, got -1`) in `Vm::op_to_str_fmt` BEFORE any buffer is sized; CPython has no cap (`{s:<{9999999999}}` allocates ~10 GB). `Chunk::Expr` gained a third field (`Vec<Expr>`, the nested fields) and every walker visits it, `chunk_exprs` included (a closure reading `w` only inside a spec still captures it). `pad_right` (the other half of 083) stays deferred. Tests: `fmtspec::tests::{nested_field_slots_parse,runtime_field_value_is_bounded}`, `compiler::interp_tests::parse_interpolation_nested_fields_are_exprs`, `checker::tests::interpolation_spec_{nested_field_must_be_int,nested_field_positions,runtime_width_nested_field_accepted}`, `tests/chz/spec/format_spec_runtime_width_test.chz` (9). Docs: `docs/syntax.md`, `docs/gaps.md` row 083.
-- **TICKET-161 (2026-09-21) — a tuple is `Hashable` exactly when every element type is, so `{(1, 2): "a"}` and `{("a", true)}` are a `Map` key / `Set` element (the tuple-key half of W8-19 and the deferred TICKET-082).** CPython's rule (`hash((1, [2]))` → `unhashable type: 'list'`; Rust derives `Hash` for `(A, B)` the same way). Checker: `("Hashable", "hash", "tuple")` row + a recursive arm in `satisfies_args_d` (`src/checker/proto.rs`) asking `satisfies(elem, "Hashable")` per element; `unhashable_tuple_elem` names the innermost failing element, so a rejection reads `... found (int, List[int]): element List[int] is not Hashable` (also on the `[T: Hashable]` bound path). `float` stays unhashable, so `(int, float)` is still rejected, naming `float`. Runtime: `Vm::hash_value_d` (`src/vm/arith.rs`) combines the element hashes in order, charges `walk_base + depth` and runs an element's user `hash` under `guarded_walk`, so nested tuples and re-entrant hooks share the one `MAX_STRUCTURAL_DEPTH` budget; `snapshot_key` deep-copies a tuple key, because a tuple holds a struct by reference (`p.x = 5` after `{(1, p): "a"}` must not change the stored key). **DEC-113's precondition:** an N-name `for` whose iterand is statically `Ty::Param`/`Ty::Protocol` now records `ForBind::Destructure` (`ForBindTable`, eighth element of `resolve_call_tables`) and the compiler skips the runtime `IsMap` test there, so a `Map[(A, B), V]` reaching an `Iterable[(A, B)]` slot destructures its keys instead of binding (key, value); a statically-typed `Map` still binds (key, value). `List.unique()` keeps its scan path for tuples (DEC-019). Five tests moved their non-Hashable example from `(int, int)` to `(int, float)`. Tests: `tests/chz/spec/tuple_hashable_key_test.chz` (10), seven `checker::tests::tuple_key_*`. Docs: `docs/syntax.md`, `docs/stdlib.md`, `std/memoize.chz`, `docs/gaps.md` (W8-19 stays OPEN, DEC-037).
-- **TICKET-159 (2026-09-21) — W13-27 closed: a nursery inside a spawned task no longer runs on one runner while its enclosing body is blocked.** `Vm::farm_blocked_body_helpers` (`src/vm/sched.rs`) farms `worker_count() - 1` RAW `chezzi-eager-helper` threads (wids `blocked_body_helper_wids` = `2..n+1`, empty at `--threads=1`) from the `NestedDrainerSlot` budget once the OUTERMOST eager body is blocked (`MnSched::claim_blocked_body_helpers`: `body_open && body_blocked && !awaiting_builder`, at least two tasks outstanding, latched once per sched). It fires at `register_task` (a task injected after the block) and at `blocked_bodies_guard_with` (a flat body that spawned before it blocked). While those helpers live the join's inline joiner and the join-time pool farm stand down, so the runner count stays `worker_count()`; `activate_eager_nursery` sizes `locals` to `n + 1`; `join_blocked_body_helpers` latches `terminate` (`MnSched::latch_terminate_if_done`) before joining, because a sentinel helper stops only on `terminate` and `finish` never latches it when every task ended before `close_body` (first cut hung `fan_open` at every T>=2). Raw threads, never the pool (DEC-103 bullet 19); `EnterNursery`'s `self.mn.is_none()` gate is untouched, so W13-6 stays fixed. Release, 6 interleaved runs/cell, base vs branch, 0 output mismatches: `fan_open` T=8 348-400 -> 68-79 ms, T=2 371-418 -> 206-236 ms, default 341-386 -> 97-114 ms, T=1 unchanged; `fan_closed` unchanged (`docs/benchmarks.md`). Tests: `nested_nursery_fans_out_while_outer_body_is_open` and `flat_nursery_fans_out_while_body_is_blocked` (`tests/chz/spec/nested_nursery_open_outer_body_test.chz`, one 1350 ms ceiling, returns early on a build where a solo `burn(1500000)` takes 1000 ms or more — the debug binary), `blocked_body_helper_wids_leave_one_runner_per_worker`.
-- **TICKET-154 (2026-09-21) — W11-15 closed: a DAG alias stored in an `RwShared` is ONE object, and W12-5's last shape (G6) is recorded as D2-governed.** `Op::NewRwShared`, `RwShared.set` and `RwShared.write` now serialize through `to_wire_crossable`; `elem_split`, `elem_gen` and `to_wire_crossable_split` are deleted. `outer := [inner, inner]` stored and read with `get()` now gives `2 2` like CPython and Rust. The cliff that forced the old rule is answered on the read side: `for_each`, `fold`, `for_each_entry` and `fold_entries` share ONE rebuild map taken under ONE read guard (`Vm::rwshared_snapshot_pieces`, `RwShared.slice`'s discipline generalized), so `rwshared_view_over_shared_bindings_is_not_quadratic` stays green. Two recorded trades: a looping view over an ALIASED store is a snapshot, not a live walk (`rwshared_views_over_sibling_closures` folds to 2, as CPython and Go do); and `at`/`get_key` pay the whole root, not the element, on an alias's second occurrence (`docs/benchmarks.md`, ceiling `rwshared_at_over_an_aliased_store_stays_under_its_ceiling`). Two separate `at` calls stay two independent copies, as CPython's separate deep copies do. Commits `ee4e1a38` (repro golden), `d551a37b` (tests), `510598f8` (fix). The channel-adoption half (G6) was withdrawn by the owner on 2026-09-20: DEC-137 (D2) makes a received closure read the running task's own module globals, so `[1, 2] [1]` is the rule's answer; it is not on this branch. DEC-100's `RwShared` paragraph is superseded. `docs/gaps.md` W11-15 struck, open rows 7 to 6.
-- **TICKET-089 (2026-09-21) — a mutating write thrown away on a `Shared`/`RwShared`/`Atomic` read temporary now warns.** A fourth rule on the checker's warning channel; runtime behaviour, exit code and opcodes are unchanged. `Checker::read_temporary_of_box` (`src/checker/setup.rs`) matches a NULLARY `s.get()` / `r.get()` / `a.load()` on a bare-name box; the `StmtKind::Expr` arm warns when `mutates_receiver` names the payload's method, and the `StmtKind::Assign` arm warns on a field/index assign whose innermost base is such a read. The message names `s.update(…)` / `r.write(…)` / `a.store(…)` with the argument elided (`s.update(fn(xs): xs.push(1))` is a type error, `push` returns `nil`). The statement arm returns before the W8-2 carrier match, so `s.get().remove(k)` carries one warning, not two. Measured on the release binary, one program per shape, rc=0: warns — `List` push `0`, `RwShared`/`Atomic` twins `0`, `b.get().v = 9` `0`, `s.get()[0] = 9` `7` (unchanged), `Set.add` `0`, `Map.remove` `1` (unchanged), and top level / plain fn / `spawn:` block all lose it. Silent by design, each losing the write: bound temporary `v := s.get(); v.push(1)` `0`, user struct method `b.get().bump()` `0` (DEC-097), `r.read(fn(xs): xs.push(1))` `0`, `defer s.get().push(1)` `0`. Tests: 7 in `src/checker/tests.rs` plus `read_temporary_warning_is_a_warning_in_json_and_check_still_exits_zero` in `tests/check_errors_json.rs`. Not done: the `RwShared({})` error location sibling (widens what is rejected; file separately). Docs: `docs/concurrency.md` §6, `docs/gaps.md`, `CLAUDE.md`.
-- **TICKET-157 (2026-09-21) — W12-12 closed: nested `fn` declarations nest 100 deep, and the checker's walk is memoized instead of exponential.** The nested-fn arm of `check_stmt` ran `infer_fn_ret` then `check_fn_body` on the same un-annotated body, and every enclosing speculative walk repeated both (`2^(N+2) - 4` walks), so TICKET-109 capped the depth at 16. `Checker::ret_memo` now memoizes the speculative `infer_fn_ret` per nested-fn decl span (its type plus the diagnostics it emits after its own rollback) and `check_fn_body` still runs on every encounter. That is why probe p1 still reports `conflicting branches (str vs int)` at 1:4: skipping the check walk moves it to `expected return type int, found str` at 9:16 (the enclosing walk reads the nested walk's `drop_empty_site` pin mid-walk). `DiagMark` now also snapshots `fn_reads`, `empty_coll_sites`, `empty_coll_aliases`, `carrier_pins`, `hover_result`, `hover_pending`, `table_conflicts`, `kw_certain`, `kw_written`, `kw_pending`, so the skipped walk leaves nothing behind. The memo is cleared at both outermost fn walks (`infer_fn_ret` and `check_fn_body`) because `infer_returns`' fixpoint and finalize pass change the stored sigs between them. `CHEZZI_MEMO_VERIFY=1` recomputes every hit and prints `MEMO MISMATCH`: zero over the whole suite. `desugar::MAX_FN_NESTING` is 100, CPython's indentation bound (`IndentationError: too many levels of indentation`), no longer a performance bound. Release `chezzi check`, 16/20/24/30/50/100 deep unannotated: 0.011/0.012/0.016/0.036/0.216/2.545 s (was 0.328 s at 16, 4.093 s at 20, over 60 s at 24); still superlinear past 50 (the per-`diag_mark` clone grows with depth), see `docs/benchmarks.md`. A `check` sweep of 396 corpus files is byte-identical to base. Tests: `nested_fn_decl_check_is_not_exponential` (N=30, clean), `deep_nested_fn_decl_chain_checks_clean_and_fast`, the p1 canary `a_nested_fn_returning_a_captured_empty_list_reports_the_outer_conflict`, the memo-on/off twin `the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables`, `hover_inside_a_deeply_nested_fn_chain_reports_the_binding_type`.
-- **TICKET-155 (2026-09-21) — W11-14 closed: a child's fault now cuts short a nursery OWNER running a native-HOF callback.** Before: a `parallel:` owner running `xs.map(..)` over 3 000 001 elements printed `owner finished map len=3000001` and only then reported the child's `child boom`. `Vm::guarded_checkpoint` (`src/vm/exec.rs`) gained the owner rung (`Vm::deliver_owner_fault`, now `#[inline(never)]`) below the exit halt, sharing the 1-in-1024 `back_edge_tick` sample, which `Vm::hof_sampled_tick` (was `hof_deadline_tick`) now takes whenever `eager_scheds` is non-empty. New bench `benches/chz/hof_nursery.chz` (`hof.chz` inside a `parallel:`) is the only bench that reaches the rung: level against the base binary in a same-box A/B (`docs/benchmarks.md` § TICKET-155; the single-shot BEFORE/AFTER table there is box drift). Tests: `tests/owner_hof_fault.rs` (map at three worker counts, fold, defer not truncated, outer `recover:` still catches, healthy-nursery and no-nursery neighbours).
-- **TICKET-158 (2026-09-21) — W8-17 closed: three diagnostic defects, none changes a program's result.** (1) One `match`-arm variant typo prints ONE error: `check_pattern_qualifier` now returns whether it reported, `bind_match_arm` and `bind_subpattern` skip their duplicate `'X' is not a variant of E` when it did, and each of the three `check_exhaustive` callers skips the derived `non-exhaustive match` when binding an arm PATTERN (never the guard or body) reported. rustc twin, RUN: one `error[E0599]: no variant, associated function, or constant named 'Alpah' found for enum 'E'` plus `help: there is a variant with a similar name`, no exhaustiveness complaint. A `Set[(int,int)]`/`Map` annotation and its literal report once (`pending_key_reject`, cleared per statement). (2) `editor::word_end_col` measures a string or number literal, so `x: int = "hello there"` gives `"end_col":23` and the LSP squiggle and plain-text caret span the literal (rustc draws thirteen carets). (3) `unexpected an indented block in expression` is now `unexpected indented block in expression` via `parser::describe_unexpected` (CPython 3.14: `IndentationError: unexpected indent`). Tests: `tests/check_errors_json.rs` (12 new), `parser::tests::describe_unexpected_drops_only_the_leading_article`. Docs: `docs/gaps.md` (W8-17 row removed, 8 open rows), `CLAUDE.md`.
-- **TICKET-156 (2026-09-21) — W14-30c and W14-30d closed: `std.request` accepts an `HTTP/1.2` status line and an obs-fold continuation, names the bad header line, and honours the proxy env off loopback.** A new `LenientHeadConnector` (`src/native/request_head.rs`) wraps the ureq 3 transport and rewrites each response head before `httparse` sees it: `HTTP/1.<d>` becomes `HTTP/1.1`, a folded value joins with one space (Go's rule), and a control byte or NUL in a header value is an `Err` naming the line (`malformed MIME header line: "X-Bad: a\x01b"`, Go's text). `HTTP/2.0` stays an `Err`. `send` sets the proxy per request from the env (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` and lowercase) except for a loopback host (`127.0.0.0/8`, `::1`, `localhost`), Go's rule; CPython does not exempt loopback. Judged against RUN Go 1.27.0 and CPython 3.14.7 twins. `docs/gaps.md` and `CLAUDE.md` go from eleven open rows to nine.
-- **TICKET-153 (2026-09-20) — W14-30b closed: `std.request` runs on ureq 3.4.2 and keeps a non-ASCII response header.** Before: a server sending `X-Ascii: ok` and `X-Cafe: café` gave `['date', 'server', 'x-ascii']` (ureq 2's `Header::value()` dropped the value and `Response.headers` was `pub(crate)`); now `x-cafe` is present, every value read as raw `HeaderValue` bytes and decoded latin-1 (UTF-8 `café` → `cafÃ©`, as CPython 3.14.7 does). The agent pins `http_status_as_error(false)`, `allow_non_standard_methods(true)` and `.proxy(None)`, and leaves the body-phase timeouts unset (ureq 3's are whole-phase deadlines). An empty body on POST/PUT/PATCH is framed `content-length: 0` (ureq 3's `()` body would send `chunked`). Measured changes: custom request header names go out lowercased; the redirect cap moves from ureq 2's effective four to ten (CPython `hops=10 OK` / `hops=11 ERR`, Go `hops=9 OK` / `hops=10 ERR`; Chezzi `/r/10` OK, `/r/11` `too many redirects`); `get_bytes`' non-2xx `Err` names the canonical reason; an `Err` message starts with the URL; a timeout now reads `timeout: global`. The one regression: a control byte or NUL in a header value, `HTTP/1.2`, and an obs-fold line are now `Err(... http parse fail ...)` where ureq 2 answered `Ok` with the header dropped (CPython accepts all four, Go rejects the first two) — filed OPEN as W14-30c, whose message does not yet name the offending line. `std.request` still ignores the proxy env vars (W14-30d, open). Verified: `cargo clippy --lib -- -D warnings` clean, whole suite through `.project/run-test.sh` rc=0 (lib 4824 passed, 0 failed), `tests/chz` on the release binary `1071 test(s): 1071 passed, 0 failed, 0 errored` at `CHEZZI_THREADS=1`, `2` and default. Docs: `docs/stdlib.md` `std.request`, `docs/gaps.md`.
-- **TICKET-151 (2026-09-20) — W14-40 closed: a blocking stdin read no longer keeps the worker from a runnable sibling.** The four `std.io` stdin readers (`read_line`, `read_all`, `read_char`, `input`) are a new fifth `native::Kind::HostWait` (`Kind::blocks()` stays false: they touch host stdio, so the offload gate must not take them). `Vm::invoke_native` (`src/vm/call.rs`) brackets a `HostWait` call with `demote_enter`/`demote_exit` (runner slot to one replacement worker, accounted `running -> inflight` so a read still vetoes the deadlock verdict) plus DEC-141's `width_release`/`width_acquire`, selected by the new `Kind::holds_host_thread()`. The defect was wider than filed: a DIRECT `io.input` starved a sibling too (no permit involved). Measured at `CHEZZI_THREADS=1`, stdin withheld 6 s: before, `read done` printed before `sibling woke 1` for a direct read, a callback read and spin-then-callback read; after, `sibling woke 1` prints first in the direct and callback shapes, as Go 1.27 at `GOMAXPROCS=1` does (`sibling woke 1` at 16:36:01, `read done hi` at 16:36:07). Tests: `tests/native_callback_stdin_read_frees_width.rs` (3: callback, direct, and a reader-blocked-on-stdin run that must not fault as a deadlock), two `Kind` unit tests; `tests/chz` 1071/1071 at T=1, T=2 and default. Docs: `CLAUDE.md`, `docs/concurrency.md`, `docs/future.md`, `docs/gaps.md`.
-- **TICKET-152 (2026-09-20) — W14-37 closed: a fatal deadlock runs no `defer` on any task.** `Vm::unwind_no_defer` (`src/vm/stmt.rs`, a `run_defers = false` call of `unwind_deferred_escaped`) drops the frames without draining them, and the `run_until` Err funnel in `src/vm/exec.rs` calls it whenever `rte.is_deadlock`; escaped nurseries are still aborted (W14-39) and the suppression is per-call, never a VM latch. Matches Go's `fatal error: all goroutines are asleep - deadlock!`; an ordinary fault, a recoverable callback-`recv` deadlock message and every cancel still run their `defer`s. Tests: `fatal_deadlock_runs_no_defer`, `nursery_verdict_deadlock_runs_no_defer`, `an_ordinary_uncaught_fault_still_runs_its_defer` in `tests/deadlock_runs_no_defer.rs`. Docs: `docs/concurrency.md` (the `recv`-blocks bullet and §6e's "One deliberate exception"), `docs/gaps.md` W14-37.
-- **TICKET-150 (2026-09-19) — W14-35c closed: three runtime/CLI diagnostics.** (1) A generator fault's trace frame names the resume that faulted, not the first `.next()`: `Vm::generator_next` rewrites the body frame's `call_span` on every non-first resume (CPython names the faulting `next(g)`/`list(g)` line). (2) A manifest entrypoint the entry module never binds is rejected by `chezzi check` and bare `chezzi run` before any user code runs (checker entry arm + `entry_module_binds`, mirroring `Compiler::collect_globals`), and `split_entrypoint` rejects a function part that is not one identifier (`src.e3:main:x`). (3) A list/map/set/default-repr struct that re-enters itself during print/str renders `[...]` / `{...}` / `Set(...)` / `...` via an in-progress stack `Vm::repr_active` (not a visited set, so `[x, x]` prints in full); `==`/hash on cycles still fault. Tests: `tests/ticket150_runtime_cli_diagnostics.rs`, `tests/module_root.rs`, `tests/chz/spec/cyclic_print_test.chz`, `golden_tests::generator_fault_trace_names_the_faulting_drain_site`. Docs: `docs/syntax.md`, `docs/spec.md`, `docs/gaps.md`, `examples/cycle_guard.*`.
-- **TICKET-149 (2026-09-20) — W14-35b closed: three diagnostic defects, none changes a program's result.** (1) `duplicate match arm 'A'` and `'IB' is not a constructor` now report at the offending arm (new diagnostic-only `MatchArm.span` / `MatchExprArm.span`, the arm's first pattern token; desugar-synthesized `??`/`?.` arms take their scrutinee's span, so their diagnostics stay put), and `variant 'A' is already defined` at the second `A` (`Variant.name_span`). `check_exhaustive` keeps the scrutinee span, as rustc's E0004 does. (2) An empty or inverted range pattern (`5..1`, `3..3`, `0..-5`) is a compile error `empty range pattern` at every position (arm, or-alternative, payload); the verdict is exact, so an error, not a warning. rustc E0579 rejects the same shapes. The grammar and parser still accept `0..-5`. (3) A type diagnostic naming two DIFFERENT types with one bare name qualifies both by module (`expected a.Col, found b.Col`; the full dotted path when last segments collide; bare when still ambiguous, e.g. a `#<idx>` duplicate-label key). `Display for Ty` is unchanged; the new stateless `Ty::render_distinct` is called at the ~50 two-type message sites in `src/checker/{expr,pattern,proto,sig}.rs`. Tests: `src/checker/tests.rs` (`*_points_at_the_*`, `range_pattern_*`, `same_named_types_*`, `a_message_without_a_name_collision_stays_bare`), `src/checker/ty.rs` (`render_distinct_*`). Docs: `docs/syntax.md`, `docs/grammar.bnf`, `docs/spec.md`, `docs/gaps.md`.
-- **TICKET-148 (2026-09-19) — W14-13 closed: `shutdown_now()` no longer strands a `submit_task` Task or a `submit_result` channel.** `run_outcome` (`std/concurrency.chz`) now opens a `defer:` that, when neither arm settled the job (a `Channel[bool](1)` `settled` flag each arm sends last), queues `task cancelled: shutdown_now() stopped it before it finished` into `err` and closes `out`. A cancel is not a fault `recover:` catches, so neither arm ran before; `t.get()` hung or false-deadlocked and `done()` stayed false. Now `done()` is true and `get()`/`recv()` raise at once, at `CHEZZI_THREADS=1`/`2`/default (CPython 3.14: `CancelledError`). Tests: `tests/chz/stdlib/task_cancel_test.chz` (5). Docs: `docs/stdlib.md`, `docs/concurrency.md`, `docs/gaps.md`. **Part (2), W14-35: a NATIVE fault raised inside std is now located at the user's call into std** (Rust `#[track_caller]`): `Vm::std_entry_call_site` (`src/vm/exec.rs`) walks the innermost run of std frames before the unwind and relocates the fault span, so the caught `e.file()`/`line()`/`col()` and the uncaught headline agree (`e1.chz`: `runtime error (…/e1.chz:5:14): submit on a shut-down Executor…`, was `<native:std.concurrency>:110:13`); the trace keeps its frames. `RuntimeError::is_panic` (set at both `panic` sites) keeps a std `panic(...)` — e.g. `Task.get()`'s re-raise — unstamped (supersedes DEC-045's stamping paragraph for native faults). A raw `ex.submit` fault caught on main still answers `None` (innermost frame is user code: decline). Tests: `tests/chz/stdlib/std_fault_origin_test.chz` (4), `tests/run_stack_trace_paths.rs` (2). Docs: `docs/syntax.md`, `docs/gaps.md`.
-- **TICKET-147 W14-12/W14-15 (2026-09-19) — a cancelled task's own `defer` fault is now a real fault, and a nursery join is a cancellation point for its owner.** (1) W14-12: `classify_mn_outcome` / `ReadyWorker::run_outcome` returned `Cancelled` whenever `cancelled` was set and ignored the fault a `defer` (or a nested nursery the task aborted) had put in place of the `cancelled` sentinel, and `abort_eager_nursery` / `abort_enlisted_scope` / `abort_fiber_owned_nursery` ended in `let _ = reduce_task_slots(..)`. New `TaskOutcome::CancelledFault` (latched by `Vm::cancel_unwind_faulted`, set by `unwind_cancelled` in `run_until`'s cancel bypass and the `resume_native` cancel arm); the aborts and `drain_escaped_nursery` now return the first child fault (`unwind_escaped_levels`, `do_try`, `do_return`, `Op::ReclaimNursery` keep a body/caught fault first). `reduce_task_slots` ranks `Exit` > hard-halt `Fault` > ordinary `Fault` > `CancelledFault` > `Deadlocked`, so a sibling's `boom` still outranks a cancelled task's `cleanup failed` (asyncio 3.14 `['boom', 'cleanup failed']`) and a stuck cleanup's `deadlock` stays swallowed (`is_deadlock` is never latched). (2) W14-15: `Vm::cancel_at_join` runs after `Op::JoinNursery`, `do_return`'s implicit-nursery join and the `Executor.shutdown()` / `shutdown_now()` joins; it reads `cancel_requested()` (enclosing-scope flags only — DEC-096 untouched — never inside a `defer`, skipped while the join parks). Tests: `tests/chz/spec/cancel_join_and_defer_fault_test.chz` (8: `return`, `break` and `?` escapes, `Executor.shutdown_now()` twice, the ranking pin, the join-inside-a-`defer` guard). Docs: `docs/concurrency.md` (checkpoint list + "A cancelled task's own `defer` fault is a real fault"), `docs/gaps.md` (W14-12, W14-15 CLOSED).
-- **TICKET-146 (2026-09-19) — W14-23 closed: a tuple, `List[T]` and `Option[T]` are `Comparable` when every element type is (lexicographic; a shorter prefix first; `None < Some(_)`).** `(1, 2) < (1, 3)`, `[(2, "b"), (1, "z")].sort()`, `min`/`max`, `sort_by_key` with a tuple key and `std.cmp` now match CPython 3.14.7 / rustc; a tuple holding a non-`Comparable` element is still rejected, structs keep W7-41's no-default-ordering, `Map`/`Set`/`Result` stay unordered. Checker: three `INTRINSIC_PROTO_METHODS` rows, a grant in `satisfies_args_d`, an arm in `cmp_overload_allowed`. VM: `Vm::seq_order` walks the elements (operators use the partial order — a NaN pair is all-`false`; `sort`/`min`/`max`/`.compare()` use `order_key`'s total order, floats through DEC-144's `float_order`), placed before each struct/enum `compare` gate because an `Option` is an `Obj::Enum`. Tests: `tests/chz/spec/tuple_list_option_ordering_test.chz`, `comparable_enum_test.chz`, `src/checker/tests.rs`, `src/vm/gc_tests.rs`. Docs: `docs/syntax.md`, `docs/stdlib.md`, `docs/gaps.md`.
-- **TICKET-145 (2026-09-19) — three W14-35 diagnostic defects closed (parser/checker message defects); the other six items stay open as W14-35b / W14-35c.** (1) An inline fn body starting with `if` (`fn a(n: int) -> int: if n > 0: 1 else: 2`) now parses as an if-EXPRESSION and is the implicit return, as a closure body and `x := if …` already were; `else` is required, and `parse_block`'s nested-block rule is unchanged for every other compound statement. (2) `y: int?? = …` now says `'??' is not a type suffix: write a nested optional as Option[T?]`, and `describe` renders every operator token by its source spelling (`'??'`, not `'questionquestion'`). (3) `?` in a closure with no declared return type says `'?' used in a function whose return type is not declared; declare it to return Result or Option (e.g. `-> int?`)` instead of `returns ?`. Tests: 3 repro + 4 neighbour tests in `src/checker/tests.rs`, `tests/chz/spec/inline_fn_if_body_test.chz`. Docs: `docs/syntax.md` §5, `docs/grammar.bnf`, `docs/gaps.md` W14-35.
+  Docs: `docs/reference/syntax.md` §"Unused locals warn", `CLAUDE.md`.
+- **TICKET-086 (2026-09-22) — `regex.find_all_text(pat, s) -> Result[List[str]]` returns the matched strings directly (closes deferred TICKET-086).** The obvious tokenizer, `find_all` plus a `.text` loop, built a `Match` struct (text/start/end/groups) per hit and cost 1.64-1.83s over 1 000 000 tokens on the release binary; `find_all_text` skips that seam and measured 0.31s over the same input. Semantics follow Go's `FindAllString`/Rust's `find_iter`: the WHOLE match text of every hit, never capture groups (unlike Python's `re.findall`, which switches to groups when the pattern has any). `find_all` itself is unchanged. Tests: `tests/chz/stdlib/regex_test.chz` (rewritten perf repro + `find_all_text_is_the_text_of_every_find_all_match`), `native::regex::tests::find_all_text_matches_every_find_all_text`, `checker::tests::regex_fn_sigs_exact` (6 fns). Docs: `docs/reference/stdlib.md`, `docs/reference/spec.md`, `docs/contributing/gaps.md` row 086, `CLAUDE.md`.
+- **TICKET-163 (2026-09-21) — the wall clock has a millisecond reading (closes deferred TICKET-087).** `time.now_ms() -> int` is epoch milliseconds (a wall clock, never clamped, separate from `monotonic()`); `time.now()` stays whole seconds. `DateTime` gains `milli: int = 0`, APPENDED after `weekday` so 7-arg construction still works; `datetime.to_epoch_ms(dt)` is the ms twin of `to_epoch`; `datetime.now()` fills `milli`. `to_iso8601` emits `.SSS` only when `milli != 0` (CPython `isoformat`'s rule), so every golden is byte-identical; `parse_iso8601` keeps the first three fraction digits (right-padded, rest truncated, as CPython `fromisoformat`). Tests: `tests/chz/stdlib/time_ms_test.chz`; `docs/reference/stdlib.md` §std.time / §std.datetime updated.
+- **TICKET-162 (2026-09-21) — a format spec's width and precision may be a nested `{expr}` field measured at runtime (`"|{s:<{w}}|"`, `"{x:.{p}f}"`), closing the nested-field half of the deferred TICKET-083.** CPython `f"|{'ab':<{w}}|"`, Go `%-*s` and Rust `{:<width$}` all render `|ab    |` for `w = 6`. Legal in exactly two slots, width and precision (CPython also allows fill/align/type by re-parsing the spec at runtime, which would defeat the check-time shape check, so any other `{` is `a nested field is allowed only as the width or the precision`). The field must be an `int` (checker: `a nested width field must be an int, found str`). Value, then width, then precision evaluate in that order. **The `MAX_FIELD` (4096) cap moved with the value:** `fmtspec::field_from_int` rejects a nested value over 4096 (`format spec: width exceeds maximum 4096`) or below 0 (`width must not be negative, got -1`) in `Vm::op_to_str_fmt` BEFORE any buffer is sized; CPython has no cap (`{s:<{9999999999}}` allocates ~10 GB). `Chunk::Expr` gained a third field (`Vec<Expr>`, the nested fields) and every walker visits it, `chunk_exprs` included (a closure reading `w` only inside a spec still captures it). `pad_right` (the other half of 083) stays deferred. Tests: `fmtspec::tests::{nested_field_slots_parse,runtime_field_value_is_bounded}`, `compiler::interp_tests::parse_interpolation_nested_fields_are_exprs`, `checker::tests::interpolation_spec_{nested_field_must_be_int,nested_field_positions,runtime_width_nested_field_accepted}`, `tests/chz/spec/format_spec_runtime_width_test.chz` (9). Docs: `docs/reference/syntax.md`, `docs/contributing/gaps.md` row 083.
+- **TICKET-161 (2026-09-21) — a tuple is `Hashable` exactly when every element type is, so `{(1, 2): "a"}` and `{("a", true)}` are a `Map` key / `Set` element (the tuple-key half of W8-19 and the deferred TICKET-082).** CPython's rule (`hash((1, [2]))` → `unhashable type: 'list'`; Rust derives `Hash` for `(A, B)` the same way). Checker: `("Hashable", "hash", "tuple")` row + a recursive arm in `satisfies_args_d` (`src/checker/proto.rs`) asking `satisfies(elem, "Hashable")` per element; `unhashable_tuple_elem` names the innermost failing element, so a rejection reads `... found (int, List[int]): element List[int] is not Hashable` (also on the `[T: Hashable]` bound path). `float` stays unhashable, so `(int, float)` is still rejected, naming `float`. Runtime: `Vm::hash_value_d` (`src/vm/arith.rs`) combines the element hashes in order, charges `walk_base + depth` and runs an element's user `hash` under `guarded_walk`, so nested tuples and re-entrant hooks share the one `MAX_STRUCTURAL_DEPTH` budget; `snapshot_key` deep-copies a tuple key, because a tuple holds a struct by reference (`p.x = 5` after `{(1, p): "a"}` must not change the stored key). **DEC-113's precondition:** an N-name `for` whose iterand is statically `Ty::Param`/`Ty::Protocol` now records `ForBind::Destructure` (`ForBindTable`, eighth element of `resolve_call_tables`) and the compiler skips the runtime `IsMap` test there, so a `Map[(A, B), V]` reaching an `Iterable[(A, B)]` slot destructures its keys instead of binding (key, value); a statically-typed `Map` still binds (key, value). `List.unique()` keeps its scan path for tuples (DEC-019). Five tests moved their non-Hashable example from `(int, int)` to `(int, float)`. Tests: `tests/chz/spec/tuple_hashable_key_test.chz` (10), seven `checker::tests::tuple_key_*`. Docs: `docs/reference/syntax.md`, `docs/reference/stdlib.md`, `std/memoize.chz`, `docs/contributing/gaps.md` (W8-19 stays OPEN, DEC-037).
+- **TICKET-159 (2026-09-21) — W13-27 closed: a nursery inside a spawned task no longer runs on one runner while its enclosing body is blocked.** `Vm::farm_blocked_body_helpers` (`src/vm/sched.rs`) farms `worker_count() - 1` RAW `chezzi-eager-helper` threads (wids `blocked_body_helper_wids` = `2..n+1`, empty at `--threads=1`) from the `NestedDrainerSlot` budget once the OUTERMOST eager body is blocked (`MnSched::claim_blocked_body_helpers`: `body_open && body_blocked && !awaiting_builder`, at least two tasks outstanding, latched once per sched). It fires at `register_task` (a task injected after the block) and at `blocked_bodies_guard_with` (a flat body that spawned before it blocked). While those helpers live the join's inline joiner and the join-time pool farm stand down, so the runner count stays `worker_count()`; `activate_eager_nursery` sizes `locals` to `n + 1`; `join_blocked_body_helpers` latches `terminate` (`MnSched::latch_terminate_if_done`) before joining, because a sentinel helper stops only on `terminate` and `finish` never latches it when every task ended before `close_body` (first cut hung `fan_open` at every T>=2). Raw threads, never the pool (DEC-103 bullet 19); `EnterNursery`'s `self.mn.is_none()` gate is untouched, so W13-6 stays fixed. Release, 6 interleaved runs/cell, base vs branch, 0 output mismatches: `fan_open` T=8 348-400 -> 68-79 ms, T=2 371-418 -> 206-236 ms, default 341-386 -> 97-114 ms, T=1 unchanged; `fan_closed` unchanged (`docs/contributing/benchmarks.md`). Tests: `nested_nursery_fans_out_while_outer_body_is_open` and `flat_nursery_fans_out_while_body_is_blocked` (`tests/chz/spec/nested_nursery_open_outer_body_test.chz`, one 1350 ms ceiling, returns early on a build where a solo `burn(1500000)` takes 1000 ms or more — the debug binary), `blocked_body_helper_wids_leave_one_runner_per_worker`.
+- **TICKET-154 (2026-09-21) — W11-15 closed: a DAG alias stored in an `RwShared` is ONE object, and W12-5's last shape (G6) is recorded as D2-governed.** `Op::NewRwShared`, `RwShared.set` and `RwShared.write` now serialize through `to_wire_crossable`; `elem_split`, `elem_gen` and `to_wire_crossable_split` are deleted. `outer := [inner, inner]` stored and read with `get()` now gives `2 2` like CPython and Rust. The cliff that forced the old rule is answered on the read side: `for_each`, `fold`, `for_each_entry` and `fold_entries` share ONE rebuild map taken under ONE read guard (`Vm::rwshared_snapshot_pieces`, `RwShared.slice`'s discipline generalized), so `rwshared_view_over_shared_bindings_is_not_quadratic` stays green. Two recorded trades: a looping view over an ALIASED store is a snapshot, not a live walk (`rwshared_views_over_sibling_closures` folds to 2, as CPython and Go do); and `at`/`get_key` pay the whole root, not the element, on an alias's second occurrence (`docs/contributing/benchmarks.md`, ceiling `rwshared_at_over_an_aliased_store_stays_under_its_ceiling`). Two separate `at` calls stay two independent copies, as CPython's separate deep copies do. Commits `ee4e1a38` (repro golden), `d551a37b` (tests), `510598f8` (fix). The channel-adoption half (G6) was withdrawn by the owner on 2026-09-20: DEC-137 (D2) makes a received closure read the running task's own module globals, so `[1, 2] [1]` is the rule's answer; it is not on this branch. DEC-100's `RwShared` paragraph is superseded. `docs/contributing/gaps.md` W11-15 struck, open rows 7 to 6.
+- **TICKET-089 (2026-09-21) — a mutating write thrown away on a `Shared`/`RwShared`/`Atomic` read temporary now warns.** A fourth rule on the checker's warning channel; runtime behaviour, exit code and opcodes are unchanged. `Checker::read_temporary_of_box` (`src/checker/setup.rs`) matches a NULLARY `s.get()` / `r.get()` / `a.load()` on a bare-name box; the `StmtKind::Expr` arm warns when `mutates_receiver` names the payload's method, and the `StmtKind::Assign` arm warns on a field/index assign whose innermost base is such a read. The message names `s.update(…)` / `r.write(…)` / `a.store(…)` with the argument elided (`s.update(fn(xs): xs.push(1))` is a type error, `push` returns `nil`). The statement arm returns before the W8-2 carrier match, so `s.get().remove(k)` carries one warning, not two. Measured on the release binary, one program per shape, rc=0: warns — `List` push `0`, `RwShared`/`Atomic` twins `0`, `b.get().v = 9` `0`, `s.get()[0] = 9` `7` (unchanged), `Set.add` `0`, `Map.remove` `1` (unchanged), and top level / plain fn / `spawn:` block all lose it. Silent by design, each losing the write: bound temporary `v := s.get(); v.push(1)` `0`, user struct method `b.get().bump()` `0` (DEC-097), `r.read(fn(xs): xs.push(1))` `0`, `defer s.get().push(1)` `0`. Tests: 7 in `src/checker/tests.rs` plus `read_temporary_warning_is_a_warning_in_json_and_check_still_exits_zero` in `tests/check_errors_json.rs`. Not done: the `RwShared({})` error location sibling (widens what is rejected; file separately). Docs: `docs/reference/concurrency.md` §6, `docs/contributing/gaps.md`, `CLAUDE.md`.
+- **TICKET-157 (2026-09-21) — W12-12 closed: nested `fn` declarations nest 100 deep, and the checker's walk is memoized instead of exponential.** The nested-fn arm of `check_stmt` ran `infer_fn_ret` then `check_fn_body` on the same un-annotated body, and every enclosing speculative walk repeated both (`2^(N+2) - 4` walks), so TICKET-109 capped the depth at 16. `Checker::ret_memo` now memoizes the speculative `infer_fn_ret` per nested-fn decl span (its type plus the diagnostics it emits after its own rollback) and `check_fn_body` still runs on every encounter. That is why probe p1 still reports `conflicting branches (str vs int)` at 1:4: skipping the check walk moves it to `expected return type int, found str` at 9:16 (the enclosing walk reads the nested walk's `drop_empty_site` pin mid-walk). `DiagMark` now also snapshots `fn_reads`, `empty_coll_sites`, `empty_coll_aliases`, `carrier_pins`, `hover_result`, `hover_pending`, `table_conflicts`, `kw_certain`, `kw_written`, `kw_pending`, so the skipped walk leaves nothing behind. The memo is cleared at both outermost fn walks (`infer_fn_ret` and `check_fn_body`) because `infer_returns`' fixpoint and finalize pass change the stored sigs between them. `CHEZZI_MEMO_VERIFY=1` recomputes every hit and prints `MEMO MISMATCH`: zero over the whole suite. `desugar::MAX_FN_NESTING` is 100, CPython's indentation bound (`IndentationError: too many levels of indentation`), no longer a performance bound. Release `chezzi check`, 16/20/24/30/50/100 deep unannotated: 0.011/0.012/0.016/0.036/0.216/2.545 s (was 0.328 s at 16, 4.093 s at 20, over 60 s at 24); still superlinear past 50 (the per-`diag_mark` clone grows with depth), see `docs/contributing/benchmarks.md`. A `check` sweep of 396 corpus files is byte-identical to base. Tests: `nested_fn_decl_check_is_not_exponential` (N=30, clean), `deep_nested_fn_decl_chain_checks_clean_and_fast`, the p1 canary `a_nested_fn_returning_a_captured_empty_list_reports_the_outer_conflict`, the memo-on/off twin `the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables`, `hover_inside_a_deeply_nested_fn_chain_reports_the_binding_type`.
+- **TICKET-155 (2026-09-21) — W11-14 closed: a child's fault now cuts short a nursery OWNER running a native-HOF callback.** Before: a `parallel:` owner running `xs.map(..)` over 3 000 001 elements printed `owner finished map len=3000001` and only then reported the child's `child boom`. `Vm::guarded_checkpoint` (`src/vm/exec.rs`) gained the owner rung (`Vm::deliver_owner_fault`, now `#[inline(never)]`) below the exit halt, sharing the 1-in-1024 `back_edge_tick` sample, which `Vm::hof_sampled_tick` (was `hof_deadline_tick`) now takes whenever `eager_scheds` is non-empty. New bench `benches/chz/hof_nursery.chz` (`hof.chz` inside a `parallel:`) is the only bench that reaches the rung: level against the base binary in a same-box A/B (`docs/contributing/benchmarks.md` § TICKET-155; the single-shot BEFORE/AFTER table there is box drift). Tests: `tests/owner_hof_fault.rs` (map at three worker counts, fold, defer not truncated, outer `recover:` still catches, healthy-nursery and no-nursery neighbours).
+- **TICKET-158 (2026-09-21) — W8-17 closed: three diagnostic defects, none changes a program's result.** (1) One `match`-arm variant typo prints ONE error: `check_pattern_qualifier` now returns whether it reported, `bind_match_arm` and `bind_subpattern` skip their duplicate `'X' is not a variant of E` when it did, and each of the three `check_exhaustive` callers skips the derived `non-exhaustive match` when binding an arm PATTERN (never the guard or body) reported. rustc twin, RUN: one `error[E0599]: no variant, associated function, or constant named 'Alpah' found for enum 'E'` plus `help: there is a variant with a similar name`, no exhaustiveness complaint. A `Set[(int,int)]`/`Map` annotation and its literal report once (`pending_key_reject`, cleared per statement). (2) `editor::word_end_col` measures a string or number literal, so `x: int = "hello there"` gives `"end_col":23` and the LSP squiggle and plain-text caret span the literal (rustc draws thirteen carets). (3) `unexpected an indented block in expression` is now `unexpected indented block in expression` via `parser::describe_unexpected` (CPython 3.14: `IndentationError: unexpected indent`). Tests: `tests/check_errors_json.rs` (12 new), `parser::tests::describe_unexpected_drops_only_the_leading_article`. Docs: `docs/contributing/gaps.md` (W8-17 row removed, 8 open rows), `CLAUDE.md`.
+- **TICKET-156 (2026-09-21) — W14-30c and W14-30d closed: `std.request` accepts an `HTTP/1.2` status line and an obs-fold continuation, names the bad header line, and honours the proxy env off loopback.** A new `LenientHeadConnector` (`src/native/request_head.rs`) wraps the ureq 3 transport and rewrites each response head before `httparse` sees it: `HTTP/1.<d>` becomes `HTTP/1.1`, a folded value joins with one space (Go's rule), and a control byte or NUL in a header value is an `Err` naming the line (`malformed MIME header line: "X-Bad: a\x01b"`, Go's text). `HTTP/2.0` stays an `Err`. `send` sets the proxy per request from the env (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` and lowercase) except for a loopback host (`127.0.0.0/8`, `::1`, `localhost`), Go's rule; CPython does not exempt loopback. Judged against RUN Go 1.27.0 and CPython 3.14.7 twins. `docs/contributing/gaps.md` and `CLAUDE.md` go from eleven open rows to nine.
+- **TICKET-153 (2026-09-20) — W14-30b closed: `std.request` runs on ureq 3.4.2 and keeps a non-ASCII response header.** Before: a server sending `X-Ascii: ok` and `X-Cafe: café` gave `['date', 'server', 'x-ascii']` (ureq 2's `Header::value()` dropped the value and `Response.headers` was `pub(crate)`); now `x-cafe` is present, every value read as raw `HeaderValue` bytes and decoded latin-1 (UTF-8 `café` → `cafÃ©`, as CPython 3.14.7 does). The agent pins `http_status_as_error(false)`, `allow_non_standard_methods(true)` and `.proxy(None)`, and leaves the body-phase timeouts unset (ureq 3's are whole-phase deadlines). An empty body on POST/PUT/PATCH is framed `content-length: 0` (ureq 3's `()` body would send `chunked`). Measured changes: custom request header names go out lowercased; the redirect cap moves from ureq 2's effective four to ten (CPython `hops=10 OK` / `hops=11 ERR`, Go `hops=9 OK` / `hops=10 ERR`; Chezzi `/r/10` OK, `/r/11` `too many redirects`); `get_bytes`' non-2xx `Err` names the canonical reason; an `Err` message starts with the URL; a timeout now reads `timeout: global`. The one regression: a control byte or NUL in a header value, `HTTP/1.2`, and an obs-fold line are now `Err(... http parse fail ...)` where ureq 2 answered `Ok` with the header dropped (CPython accepts all four, Go rejects the first two) — filed OPEN as W14-30c, whose message does not yet name the offending line. `std.request` still ignores the proxy env vars (W14-30d, open). Verified: `cargo clippy --lib -- -D warnings` clean, whole suite through `.project/run-test.sh` rc=0 (lib 4824 passed, 0 failed), `tests/chz` on the release binary `1071 test(s): 1071 passed, 0 failed, 0 errored` at `CHEZZI_THREADS=1`, `2` and default. Docs: `docs/reference/stdlib.md` `std.request`, `docs/contributing/gaps.md`.
+- **TICKET-151 (2026-09-20) — W14-40 closed: a blocking stdin read no longer keeps the worker from a runnable sibling.** The four `std.io` stdin readers (`read_line`, `read_all`, `read_char`, `input`) are a new fifth `native::Kind::HostWait` (`Kind::blocks()` stays false: they touch host stdio, so the offload gate must not take them). `Vm::invoke_native` (`src/vm/call.rs`) brackets a `HostWait` call with `demote_enter`/`demote_exit` (runner slot to one replacement worker, accounted `running -> inflight` so a read still vetoes the deadlock verdict) plus DEC-141's `width_release`/`width_acquire`, selected by the new `Kind::holds_host_thread()`. The defect was wider than filed: a DIRECT `io.input` starved a sibling too (no permit involved). Measured at `CHEZZI_THREADS=1`, stdin withheld 6 s: before, `read done` printed before `sibling woke 1` for a direct read, a callback read and spin-then-callback read; after, `sibling woke 1` prints first in the direct and callback shapes, as Go 1.27 at `GOMAXPROCS=1` does (`sibling woke 1` at 16:36:01, `read done hi` at 16:36:07). Tests: `tests/native_callback_stdin_read_frees_width.rs` (3: callback, direct, and a reader-blocked-on-stdin run that must not fault as a deadlock), two `Kind` unit tests; `tests/chz` 1071/1071 at T=1, T=2 and default. Docs: `CLAUDE.md`, `docs/reference/concurrency.md`, `docs/design/roadmap.md`, `docs/contributing/gaps.md`.
+- **TICKET-152 (2026-09-20) — W14-37 closed: a fatal deadlock runs no `defer` on any task.** `Vm::unwind_no_defer` (`src/vm/stmt.rs`, a `run_defers = false` call of `unwind_deferred_escaped`) drops the frames without draining them, and the `run_until` Err funnel in `src/vm/exec.rs` calls it whenever `rte.is_deadlock`; escaped nurseries are still aborted (W14-39) and the suppression is per-call, never a VM latch. Matches Go's `fatal error: all goroutines are asleep - deadlock!`; an ordinary fault, a recoverable callback-`recv` deadlock message and every cancel still run their `defer`s. Tests: `fatal_deadlock_runs_no_defer`, `nursery_verdict_deadlock_runs_no_defer`, `an_ordinary_uncaught_fault_still_runs_its_defer` in `tests/deadlock_runs_no_defer.rs`. Docs: `docs/reference/concurrency.md` (the `recv`-blocks bullet and §6e's "One deliberate exception"), `docs/contributing/gaps.md` W14-37.
+- **TICKET-150 (2026-09-19) — W14-35c closed: three runtime/CLI diagnostics.** (1) A generator fault's trace frame names the resume that faulted, not the first `.next()`: `Vm::generator_next` rewrites the body frame's `call_span` on every non-first resume (CPython names the faulting `next(g)`/`list(g)` line). (2) A manifest entrypoint the entry module never binds is rejected by `chezzi check` and bare `chezzi run` before any user code runs (checker entry arm + `entry_module_binds`, mirroring `Compiler::collect_globals`), and `split_entrypoint` rejects a function part that is not one identifier (`src.e3:main:x`). (3) A list/map/set/default-repr struct that re-enters itself during print/str renders `[...]` / `{...}` / `Set(...)` / `...` via an in-progress stack `Vm::repr_active` (not a visited set, so `[x, x]` prints in full); `==`/hash on cycles still fault. Tests: `tests/ticket150_runtime_cli_diagnostics.rs`, `tests/module_root.rs`, `tests/chz/spec/cyclic_print_test.chz`, `golden_tests::generator_fault_trace_names_the_faulting_drain_site`. Docs: `docs/reference/syntax.md`, `docs/reference/spec.md`, `docs/contributing/gaps.md`, `examples/cycle_guard.*`.
+- **TICKET-149 (2026-09-20) — W14-35b closed: three diagnostic defects, none changes a program's result.** (1) `duplicate match arm 'A'` and `'IB' is not a constructor` now report at the offending arm (new diagnostic-only `MatchArm.span` / `MatchExprArm.span`, the arm's first pattern token; desugar-synthesized `??`/`?.` arms take their scrutinee's span, so their diagnostics stay put), and `variant 'A' is already defined` at the second `A` (`Variant.name_span`). `check_exhaustive` keeps the scrutinee span, as rustc's E0004 does. (2) An empty or inverted range pattern (`5..1`, `3..3`, `0..-5`) is a compile error `empty range pattern` at every position (arm, or-alternative, payload); the verdict is exact, so an error, not a warning. rustc E0579 rejects the same shapes. The grammar and parser still accept `0..-5`. (3) A type diagnostic naming two DIFFERENT types with one bare name qualifies both by module (`expected a.Col, found b.Col`; the full dotted path when last segments collide; bare when still ambiguous, e.g. a `#<idx>` duplicate-label key). `Display for Ty` is unchanged; the new stateless `Ty::render_distinct` is called at the ~50 two-type message sites in `src/checker/{expr,pattern,proto,sig}.rs`. Tests: `src/checker/tests.rs` (`*_points_at_the_*`, `range_pattern_*`, `same_named_types_*`, `a_message_without_a_name_collision_stays_bare`), `src/checker/ty.rs` (`render_distinct_*`). Docs: `docs/reference/syntax.md`, `docs/reference/grammar.bnf`, `docs/reference/spec.md`, `docs/contributing/gaps.md`.
+- **TICKET-148 (2026-09-19) — W14-13 closed: `shutdown_now()` no longer strands a `submit_task` Task or a `submit_result` channel.** `run_outcome` (`std/concurrency.chz`) now opens a `defer:` that, when neither arm settled the job (a `Channel[bool](1)` `settled` flag each arm sends last), queues `task cancelled: shutdown_now() stopped it before it finished` into `err` and closes `out`. A cancel is not a fault `recover:` catches, so neither arm ran before; `t.get()` hung or false-deadlocked and `done()` stayed false. Now `done()` is true and `get()`/`recv()` raise at once, at `CHEZZI_THREADS=1`/`2`/default (CPython 3.14: `CancelledError`). Tests: `tests/chz/stdlib/task_cancel_test.chz` (5). Docs: `docs/reference/stdlib.md`, `docs/reference/concurrency.md`, `docs/contributing/gaps.md`. **Part (2), W14-35: a NATIVE fault raised inside std is now located at the user's call into std** (Rust `#[track_caller]`): `Vm::std_entry_call_site` (`src/vm/exec.rs`) walks the innermost run of std frames before the unwind and relocates the fault span, so the caught `e.file()`/`line()`/`col()` and the uncaught headline agree (`e1.chz`: `runtime error (…/e1.chz:5:14): submit on a shut-down Executor…`, was `<native:std.concurrency>:110:13`); the trace keeps its frames. `RuntimeError::is_panic` (set at both `panic` sites) keeps a std `panic(...)` — e.g. `Task.get()`'s re-raise — unstamped (supersedes DEC-045's stamping paragraph for native faults). A raw `ex.submit` fault caught on main still answers `None` (innermost frame is user code: decline). Tests: `tests/chz/stdlib/std_fault_origin_test.chz` (4), `tests/run_stack_trace_paths.rs` (2). Docs: `docs/reference/syntax.md`, `docs/contributing/gaps.md`.
+- **TICKET-147 W14-12/W14-15 (2026-09-19) — a cancelled task's own `defer` fault is now a real fault, and a nursery join is a cancellation point for its owner.** (1) W14-12: `classify_mn_outcome` / `ReadyWorker::run_outcome` returned `Cancelled` whenever `cancelled` was set and ignored the fault a `defer` (or a nested nursery the task aborted) had put in place of the `cancelled` sentinel, and `abort_eager_nursery` / `abort_enlisted_scope` / `abort_fiber_owned_nursery` ended in `let _ = reduce_task_slots(..)`. New `TaskOutcome::CancelledFault` (latched by `Vm::cancel_unwind_faulted`, set by `unwind_cancelled` in `run_until`'s cancel bypass and the `resume_native` cancel arm); the aborts and `drain_escaped_nursery` now return the first child fault (`unwind_escaped_levels`, `do_try`, `do_return`, `Op::ReclaimNursery` keep a body/caught fault first). `reduce_task_slots` ranks `Exit` > hard-halt `Fault` > ordinary `Fault` > `CancelledFault` > `Deadlocked`, so a sibling's `boom` still outranks a cancelled task's `cleanup failed` (asyncio 3.14 `['boom', 'cleanup failed']`) and a stuck cleanup's `deadlock` stays swallowed (`is_deadlock` is never latched). (2) W14-15: `Vm::cancel_at_join` runs after `Op::JoinNursery`, `do_return`'s implicit-nursery join and the `Executor.shutdown()` / `shutdown_now()` joins; it reads `cancel_requested()` (enclosing-scope flags only — DEC-096 untouched — never inside a `defer`, skipped while the join parks). Tests: `tests/chz/spec/cancel_join_and_defer_fault_test.chz` (8: `return`, `break` and `?` escapes, `Executor.shutdown_now()` twice, the ranking pin, the join-inside-a-`defer` guard). Docs: `docs/reference/concurrency.md` (checkpoint list + "A cancelled task's own `defer` fault is a real fault"), `docs/contributing/gaps.md` (W14-12, W14-15 CLOSED).
+- **TICKET-146 (2026-09-19) — W14-23 closed: a tuple, `List[T]` and `Option[T]` are `Comparable` when every element type is (lexicographic; a shorter prefix first; `None < Some(_)`).** `(1, 2) < (1, 3)`, `[(2, "b"), (1, "z")].sort()`, `min`/`max`, `sort_by_key` with a tuple key and `std.cmp` now match CPython 3.14.7 / rustc; a tuple holding a non-`Comparable` element is still rejected, structs keep W7-41's no-default-ordering, `Map`/`Set`/`Result` stay unordered. Checker: three `INTRINSIC_PROTO_METHODS` rows, a grant in `satisfies_args_d`, an arm in `cmp_overload_allowed`. VM: `Vm::seq_order` walks the elements (operators use the partial order — a NaN pair is all-`false`; `sort`/`min`/`max`/`.compare()` use `order_key`'s total order, floats through DEC-144's `float_order`), placed before each struct/enum `compare` gate because an `Option` is an `Obj::Enum`. Tests: `tests/chz/spec/tuple_list_option_ordering_test.chz`, `comparable_enum_test.chz`, `src/checker/tests.rs`, `src/vm/gc_tests.rs`. Docs: `docs/reference/syntax.md`, `docs/reference/stdlib.md`, `docs/contributing/gaps.md`.
+- **TICKET-145 (2026-09-19) — three W14-35 diagnostic defects closed (parser/checker message defects); the other six items stay open as W14-35b / W14-35c.** (1) An inline fn body starting with `if` (`fn a(n: int) -> int: if n > 0: 1 else: 2`) now parses as an if-EXPRESSION and is the implicit return, as a closure body and `x := if …` already were; `else` is required, and `parse_block`'s nested-block rule is unchanged for every other compound statement. (2) `y: int?? = …` now says `'??' is not a type suffix: write a nested optional as Option[T?]`, and `describe` renders every operator token by its source spelling (`'??'`, not `'questionquestion'`). (3) `?` in a closure with no declared return type says `'?' used in a function whose return type is not declared; declare it to return Result or Option (e.g. `-> int?`)` instead of `returns ?`. Tests: 3 repro + 4 neighbour tests in `src/checker/tests.rs`, `tests/chz/spec/inline_fn_if_body_test.chz`. Docs: `docs/reference/syntax.md` §5, `docs/reference/grammar.bnf`, `docs/contributing/gaps.md` W14-35.
 - **TICKET-144 (2026-09-19) — W14-24 and the rest of W14-34 closed: seven numeric / stdlib edges now match a RUN CPython 3.14.7 / Go twin.** (1) `Atomic.cas` on a payload holding a `fn` value (a closure, or a std native fn like `math.sqrt`) is a compile error at the `cas` call, and a payload hidden behind a type param faults at runtime — it used to answer `false` forever, spinning the `cas(a.load(), …)` loop; a global builtin (`ord`) keeps `cas`. (2) `E`/`F`/`G` print `INF`/`-INF`/`NAN`; `F` is now a type char. (3) `List[float].sum()` is CPython 3.12+'s Neumaier sum (`[0.1, 0.2, 0.3].sum()` is `0.6`). (4) `+0.0` and `-0.0` are Equal in `sort`/`sort_by_key`/`min`/`max` (`float_order`, the one float ordering; NaN placement unchanged). (5) `0x_ff` lexes and `parse_int_base` accepts one `_` after a radix prefix. (6) `path.with_ext` trims trailing `/` and `/.` and faults on an empty name. (7) `datetime.from_epoch`/`to_epoch` no longer overflow at the i64 edge; `days_from_civil` rejects month 13 / Feb 29 2023. Tests: `tests/chz/stdlib/numeric_edges_w14_test.chz`, `lexer::tests::radix_literal_accepts_underscore_after_prefix`, `checker::tests::atomic_cas_on_fn_payload_rejected`, `vm::golden_tests::sort_and_sort_by_key_keep_signed_zeros_in_input_order`.
 - **TICKET-143 (2026-09-19) — six host IO / CLI / encoding divergences from Go and CPython closed (W14-7, W14-20, W14-29, W14-30 duplicates, W14-31, W14-34 json).** Each was measured against a RUN Go 1.27.0 / CPython 3.14.7 twin.
-  (1) `io.read_line`/`io.input`/`Reader.read_line`/`Reader.lines()` strip ONE `\n`, then ONE `\r` (Go `bufio.Scanner`) through one helper, `native::strip_eol`; `"a\r\r\r\nb\r\r"` gives `a\r\r`, `b\r` (was `a`, `b`). (2) `chezzi run f.chz a -- b` forwards `['a', '--', 'b']`; only a `--` in terminator position is consumed (`docs/syntax.md`). (3) `std.flag` ints are Go `ParseInt(s, 0, 64)` (`010` → 8, `0x10` → 16, `0_10` → 8, `" 3"` Err) and `---name`/`-=x`/`--=x` are `bad flag syntax: <tok>`; `examples/flag_demo.expected` unchanged. (4) `std.request` joins duplicate response headers with `, `; a header value holding a byte outside `0x20..=0x7E` (UTF-8 included) is still absent — ureq 2.12.1 drops it; filed as **W14-30b**, fix = ureq 3 migration. (5) every base64 decoder ignores `\r`/`\n`; space/tab still Err. (6) `json.decode[(int, str)]` takes a JSON array of exactly the tuple's arity (also as a struct field / `List` element); a shorter or longer array is an `Err`.
+  (1) `io.read_line`/`io.input`/`Reader.read_line`/`Reader.lines()` strip ONE `\n`, then ONE `\r` (Go `bufio.Scanner`) through one helper, `native::strip_eol`; `"a\r\r\r\nb\r\r"` gives `a\r\r`, `b\r` (was `a`, `b`). (2) `chezzi run f.chz a -- b` forwards `['a', '--', 'b']`; only a `--` in terminator position is consumed (`docs/reference/syntax.md`). (3) `std.flag` ints are Go `ParseInt(s, 0, 64)` (`010` → 8, `0x10` → 16, `0_10` → 8, `" 3"` Err) and `---name`/`-=x`/`--=x` are `bad flag syntax: <tok>`; `examples/flag_demo.expected` unchanged. (4) `std.request` joins duplicate response headers with `, `; a header value holding a byte outside `0x20..=0x7E` (UTF-8 included) is still absent — ureq 2.12.1 drops it; filed as **W14-30b**, fix = ureq 3 migration. (5) every base64 decoder ignores `\r`/`\n`; space/tab still Err. (6) `json.decode[(int, str)]` takes a JSON array of exactly the tuple's arity (also as a struct field / `List` element); a shorter or longer array is an `Err`.
   Tests: `tests/chz/stdlib/{host_io_divergences,read_line_cr,json_tuple_decode}_test.chz`, `tests/interactive.rs::stdin_read_line_strips_one_cr`, `tests/module_root.rs::{file_run_forwards_a_mid_args_double_dash,bare_run_forwards_a_second_double_dash}`, golden `request_joins_duplicate_headers_against_local_server`.
 - **TICKET-142 (2026-09-19) — checker papercuts closed: W14-19 (format spec on a concrete type), W14-32 (`_` at top level), W14-33 (constant overflow, `Channel(1)` hint, nested-fn default).**
   (1) A format spec is checked at `check` against every concrete non-scalar type (struct, enum, `bytes`, fn value, every native struct) by the string rules; a numeric newtype formats as its underlying number when a spec is present (`{N(7):04}` = `0007`, `{M(1.5):.2f}` = `1.50`; Go prints the same), a bare `{n}` still prints `N(7)`. (2) `_` is the blank identifier in `:=`, `=` and destructuring at every scope (never declared, no global slot); reading it is `cannot use '_' as a value`. `_ := 5; print(_)` no longer prints `5`. (3) An all-constant int expression under `+ - * / %` and unary `-` that overflows i64 is a check error (`Checker::const_overflow_seen`, restored by `diag_rollback`; one scan per maximal arithmetic tree, `constant_int_overflow_scan_is_linear`); `examples/edge_cases.chz` now takes a variable operand so its `.expected` is unchanged. `Channel(1)` takes its element type from the let annotation / param slot. A nested `fn`'s default applies at a call and through a value alias (`src/vm/call.rs` admits `min_arity..=arity` for a closure proto with `min_arity < arity`; a lambda keeps exact arity), and a nested default that reads an enclosing local, param, sibling fn or a local shadowing a global is a check error (defaults are evaluated in module scope).
-  Tests: `tests/chz/spec/{blank_identifier,blank_identifier_toplevel_let,format_spec_newtype,checker_papercuts_w14}_test.chz`, plus checker tests in `src/checker/tests.rs`. Docs: `docs/syntax.md` (format specs, newtypes, blank identifier, constant overflow, nested defaults), `docs/gaps.md`.
-- **TICKET-141 W14-14 (2026-09-19) — a CPU loop inside a native callback (`List.map`, `sort`, `Shared.update`) is now preempted at every worker count, `--threads=1` included.** Was: the D3 budget fired only at `native_reentry == 0`, so a callback spin pinned its thread and a sibling that had to run to release it starved (hang, rc=124 5/5 at T=1; Go `GOMAXPROCS=1` completes). Now the safepoint calls `Vm::callback_preempt` (`src/vm/sched.rs`): when a sibling is runnable or queued, the thread converts its implicit runner slot into a permit of the per-scheduler FIFO `WidthGate` (`src/vm/width.rs`), spawns one replacement worker and takes a permit back in arrival order, so `--threads=N` stays N runners (DEC-059). A gated `Vm` releases the permit around every wait in place: the four `demote_*` waits, `guard_wait_block`, inline nursery joins and aborts, `block_until_deadline`, `block_wait_tick`, `join_eager_jobs` and an inline `Kind::Blocking` native; `spawn_shell` copies the gating. Known limit at the time: `W14-40` (CLOSED 2026-09-20, TICKET-151). Tests: `tests/native_callback_preempt_threads_one.rs` (5, T=1), `tests/chz/spec/callback_preempt_test.chz` (4), `tests/chezzi_threads_cli.rs::threads_one_serializes_cpu_bound_callback_tasks`, three `vm::width` unit tests. Docs: `docs/concurrency.md`, `docs/gaps.md` W14-14 closed + W14-40.
-- **TICKET-140 W14-4 (2026-09-19) — an escape from `parallel:` (`return`, `?`, `break`, `continue`) runs the block's own defers, then cancels its children and waits for their defers, then runs the enclosing blocks' defers (supersedes DEC-132's post-defer park bullet).** Was: `do_return` drained every frame defer before cancelling the escaped levels, and `break`/`continue` emitted every `LeaveDeferScope` before any `ReclaimNursery`, so an enclosing `defer` that flushed a log channel saw nothing (`log lines flushed: 0`, Go and asyncio 1). Now `Vm::unwind_escaped_levels` (`src/vm/sched.rs`) walks the escaped levels innermost-first from `do_return`, and `emit_loop_escape_drain` (`src/compiler/mod.rs`, fed by `FnComp::nursery_defer_marks`) emits the same order for `break`/`continue`. Above an implicit nursery a faulted body defer returns `Err` instead of joining. The fault path (`child, body, owner`) is unchanged. Tests: `tests/chz/spec/nursery_escape_defer_order_test.chz` (7). Docs: `docs/syntax.md` defer, `docs/concurrency.md` early exit, `docs/gaps.md` W14-4 row. Parts (2)-(5) of the ticket moved to two new tickets.
+  Tests: `tests/chz/spec/{blank_identifier,blank_identifier_toplevel_let,format_spec_newtype,checker_papercuts_w14}_test.chz`, plus checker tests in `src/checker/tests.rs`. Docs: `docs/reference/syntax.md` (format specs, newtypes, blank identifier, constant overflow, nested defaults), `docs/contributing/gaps.md`.
+- **TICKET-141 W14-14 (2026-09-19) — a CPU loop inside a native callback (`List.map`, `sort`, `Shared.update`) is now preempted at every worker count, `--threads=1` included.** Was: the D3 budget fired only at `native_reentry == 0`, so a callback spin pinned its thread and a sibling that had to run to release it starved (hang, rc=124 5/5 at T=1; Go `GOMAXPROCS=1` completes). Now the safepoint calls `Vm::callback_preempt` (`src/vm/sched.rs`): when a sibling is runnable or queued, the thread converts its implicit runner slot into a permit of the per-scheduler FIFO `WidthGate` (`src/vm/width.rs`), spawns one replacement worker and takes a permit back in arrival order, so `--threads=N` stays N runners (DEC-059). A gated `Vm` releases the permit around every wait in place: the four `demote_*` waits, `guard_wait_block`, inline nursery joins and aborts, `block_until_deadline`, `block_wait_tick`, `join_eager_jobs` and an inline `Kind::Blocking` native; `spawn_shell` copies the gating. Known limit at the time: `W14-40` (CLOSED 2026-09-20, TICKET-151). Tests: `tests/native_callback_preempt_threads_one.rs` (5, T=1), `tests/chz/spec/callback_preempt_test.chz` (4), `tests/chezzi_threads_cli.rs::threads_one_serializes_cpu_bound_callback_tasks`, three `vm::width` unit tests. Docs: `docs/reference/concurrency.md`, `docs/contributing/gaps.md` W14-14 closed + W14-40.
+- **TICKET-140 W14-4 (2026-09-19) — an escape from `parallel:` (`return`, `?`, `break`, `continue`) runs the block's own defers, then cancels its children and waits for their defers, then runs the enclosing blocks' defers (supersedes DEC-132's post-defer park bullet).** Was: `do_return` drained every frame defer before cancelling the escaped levels, and `break`/`continue` emitted every `LeaveDeferScope` before any `ReclaimNursery`, so an enclosing `defer` that flushed a log channel saw nothing (`log lines flushed: 0`, Go and asyncio 1). Now `Vm::unwind_escaped_levels` (`src/vm/sched.rs`) walks the escaped levels innermost-first from `do_return`, and `emit_loop_escape_drain` (`src/compiler/mod.rs`, fed by `FnComp::nursery_defer_marks`) emits the same order for `break`/`continue`. Above an implicit nursery a faulted body defer returns `Err` instead of joining. The fault path (`child, body, owner`) is unchanged. Tests: `tests/chz/spec/nursery_escape_defer_order_test.chz` (7). Docs: `docs/reference/syntax.md` defer, `docs/reference/concurrency.md` early exit, `docs/contributing/gaps.md` W14-4 row. Parts (2)-(5) of the ticket moved to two new tickets.
 - **TICKET-138 (2026-09-19) — an int never widens into a `float` slot; write `1.0` (owner decision D3; closes W14-21; supersedes DEC-124's numeric-widen half and the int→float bullets of DEC-054/DEC-094).**
   Was Go's untyped-constant rule, implemented per sink. Now `x: float = 1`, `l.push(3)`, `l.extend([3])`, `ch.send(1)`, `mx(1, 2.5)`, `Box(1)` into `Box[float]`, `if c: 1 else: 2.5`, `[1, 2.5]`, `return 3` at `-> float`, `math.sqrt(16)` and `cos(2)` at an `extern` are ONE type error at every sink, and it names the fix: `expected float, found int — write 1.0 (or float(x))` (`float_fix_note` / `float_fix_note_join`, `src/checker/mod.rs`). Unchanged: mixed arithmetic and comparison on values (`2 * 1.5` → `3.0`, `i * f`, `f += 1`, `i < f`; the VM promotes by runtime tag), `Any` keeping an int an int, and protocol widening (`widen_targs_from_hint`, `Box[Named] = Box(A())`).
-  Deleted: `assignable_w`, `widen_mixed_numeric_args`, `branch_widen`, `elem_widen`, `record_list_widen`/`record_map_widen`/`record_arg_float_widen`, `ArgFloatWidenTable`, `ListWidenTable`, `float_elem_hint`, `ast::{const_num, untyped_int_const, ElemFloatHint}`, the compiler's `FloatAliases`/`float_shadow`/`literal_numeric_mix` and every `Op::CoerceFloat` emit, and `Op::CoerceFloat` itself — no runtime coercion remains, so the checker alone keeps an int out of a `float` slot (close a future int-under-float bug in the checker, never with a runtime coercion). Tests: `int_never_widens_at_every_sink` (the sink table), `int_never_widens_dot_zero_spellings_check`, the migrated `d3_*` checker tests, `tests/chz/spec/int_never_widens_to_float_test.chz` (mixed arithmetic, `json.decode` into a float, extern/native float returns); `float_elem_widen_sinks_test.chz` and `generic_numeric_widen_test.chz` deleted. Docs: `docs/syntax.md` §3/§8, `docs/spec.md`, `docs/stdlib.md`, `docs/lessons.md`, `docs/future.md`, `docs/gaps.md` (W14-21 closed).
+  Deleted: `assignable_w`, `widen_mixed_numeric_args`, `branch_widen`, `elem_widen`, `record_list_widen`/`record_map_widen`/`record_arg_float_widen`, `ArgFloatWidenTable`, `ListWidenTable`, `float_elem_hint`, `ast::{const_num, untyped_int_const, ElemFloatHint}`, the compiler's `FloatAliases`/`float_shadow`/`literal_numeric_mix` and every `Op::CoerceFloat` emit, and `Op::CoerceFloat` itself — no runtime coercion remains, so the checker alone keeps an int out of a `float` slot (close a future int-under-float bug in the checker, never with a runtime coercion). Tests: `int_never_widens_at_every_sink` (the sink table), `int_never_widens_dot_zero_spellings_check`, the migrated `d3_*` checker tests, `tests/chz/spec/int_never_widens_to_float_test.chz` (mixed arithmetic, `json.decode` into a float, extern/native float returns); `float_elem_widen_sinks_test.chz` and `generic_numeric_widen_test.chz` deleted. Docs: `docs/reference/syntax.md` §3/§8, `docs/reference/spec.md`, `docs/reference/stdlib.md`, `docs/contributing/lessons.md`, `docs/design/roadmap.md`, `docs/contributing/gaps.md` (W14-21 closed).
 - **TICKET-137 (2026-09-19) — a received closure or generator reads the RUNNING task's module globals; the airlock installs nothing (owner decision D2; closes W14-5, W14-6, W14-17, W14-18, W14-25, W14-26, W14-27, W14-28; supersedes DEC-016/051/097/105/116's install clauses).**
-  Each task owns a deep copy of every module global, and a crossing carries captures only. Deleted: `Vm::install_global_slot`, `closure_global_snapshot` and the baseline/`slot_changed_since_*` helpers, `Proto::global_free` + `Compiler::fill_global_free`, `Op::TouchGlobalSlot`/`TouchGlobalSlotByName`, `ModuleData.assigned`/`carried`/`origin`, `ModuleSnap.carried`, `root_baseline`, `wire_content_differs`/`wire_cmp`, `WireMemo.module_replay`, the DEC-116 `MakeClosure` fault, and `WireValue::Closure.globals`/`home_origin`. Repro (`g: List[int] = [1]`, a task pushes 2 and sends `fn: "{g}"`): `[1] [1]`; W8-25's module-scope case now prints `3` BY RULE (Go/CPython `300`, migration path is a `Shared`, `docs/concurrency.md` §7).
+  Each task owns a deep copy of every module global, and a crossing carries captures only. Deleted: `Vm::install_global_slot`, `closure_global_snapshot` and the baseline/`slot_changed_since_*` helpers, `Proto::global_free` + `Compiler::fill_global_free`, `Op::TouchGlobalSlot`/`TouchGlobalSlotByName`, `ModuleData.assigned`/`carried`/`origin`, `ModuleSnap.carried`, `root_baseline`, `wire_content_differs`/`wire_cmp`, `WireMemo.module_replay`, the DEC-116 `MakeClosure` fault, and `WireValue::Closure.globals`/`home_origin`. Repro (`g: List[int] = [1]`, a task pushes 2 and sends `fn: "{g}"`): `[1] [1]`; W8-25's module-scope case now prints `3` BY RULE (Go/CPython `300`, migration path is a `Shared`, `docs/reference/concurrency.md` §7).
   W14-27: a generator reached a second time off-stack is a `Backref` (one copy per crossing, alias kept; `h4.chz` prints `t 2 3` at T=1 and T=2), replacing DEC-100's reject; `gens_seen`/`gens_undo` are gone. A module generator the snapshot cannot copy (`r1.chz`: it was running at the spawn) becomes `GenState::Unsendable` and faults `... was running when this task was spawned ...` on resume instead of reading as `nil`. W14-28: the deleted comparator was the O(depth²) cost; `dv.chz` at depth 4999 is 0.113 s (base 25.6 s).
   Tests: `tests/chz/spec/airlock_received_closure_globals_test.chz` (5), `airlock_alias_root_gaps_test.chz` and `airlock_global_free_gaps_test.chz` migrated to the D2 values, 12 Rust goldens + 2 `ticket_016_*` flipped, `airlock_generator_reached_twice_is_one_copy`, checker test pinning the W14-25 warning. Two module-global generator goldens changed with the `Unsendable` state (`..._parked_slot_nonsendable_rejects_both` now asserts the new message; `..._in_data_cycle_...` crosses as one copy and prints `got 1`).
 - **TICKET-136 (2026-09-19) — three deadlock-verdict misses closed after D1 (W14-10 pinned, W14-11, W14-16; W14-35's rendezvous message).**
   (1) A `defer` on the `main` thread (or module top level, or a `parallel:` body's post-join `defer`) that can never complete hung: `main` inside `run_one_deferred` has `native_reentry > 0`, so `is_counted_party` never registered it. It is now `owns_os_thread() && native_reentry == deferring` (`src/vm/netio.rs`); `may_block_socket_in_place` keeps `native_reentry == 0`; a pending run-wide `os.exit` outranks the verdict while `deferring > 0`. (2) `Op::ChanRecvOrClosed` called `chan_recv_step` directly, so `for v in c:` in a generator driven from a spawned task faulted a false `deadlock`; both it and the `recv` method now go through `Vm::recv_step_or_demote`. (3) A rendezvous send deadlock says `send on a rendezvous channel: deadlock — the channel has no buffer …` (`RENDEZVOUS_SEND_DEADLOCK`). (4) W14-10 was already fixed by TICKET-135; `tests/deadlock_verdict_misses.rs` pins it at every worker count. Tests: `tests/deadlock_verdict_misses.rs` (11, including three sampled live-defer negative controls and an exit-outranks-verdict case), `tests/chz/spec/generator_channel_test.chz`, `tests/chz/spec/rendezvous_channel_test.chz`.
 
 - **TICKET-135 (2026-09-19) — a deadlock verdict is FATAL, not `recover:`-able (D1; closes W14-3, W14-8, W14-9; supersedes DEC-092).**
-  `RuntimeError::is_deadlock` (`src/vm/mod.rs`, sibling of `is_over_memory`/`is_timed_out`) is stamped at the scheduler verdict sites only: the four per-scope `deadlock_err`s and `JOIN_DEADLOCK_MSG` in `src/vm/sched.rs`, and the run-wide verdict at the end of `block_halt_check` in `src/vm/netio.rs`. The `run_until` Err funnel (`src/vm/exec.rs`) makes `recover:` transparent to it: the fault takes the uncaught path and the marker is re-stamped after the unwind. The "cannot park inside a native callback" messages and the `Shared` guard faults stay recoverable. `reduce_task_slots` ranks a deadlock-marked `Fault` with the hard halts, so an `Executor` whose job 0 panicked and job 1 deadlocked aborts at `shutdown()` (the `Deadlocked`-slot precedence of TICKET-062 is unchanged). `chezzi test` buckets a deadlocking test ERROR and continues the suite. The retained divergence (an uncaught deadlock still ran the unwound frames' `defer`s) was closed by TICKET-152 as `docs/gaps.md` W14-37. No verdict machinery was deleted (the Summary asked to list any that only served post-recover continuation; that audit is a follow-up). Tests migrated: `recover:`-then-continue shapes now assert a fatal `deadlock`. `docs/concurrency.md` bullet rewritten.
+  `RuntimeError::is_deadlock` (`src/vm/mod.rs`, sibling of `is_over_memory`/`is_timed_out`) is stamped at the scheduler verdict sites only: the four per-scope `deadlock_err`s and `JOIN_DEADLOCK_MSG` in `src/vm/sched.rs`, and the run-wide verdict at the end of `block_halt_check` in `src/vm/netio.rs`. The `run_until` Err funnel (`src/vm/exec.rs`) makes `recover:` transparent to it: the fault takes the uncaught path and the marker is re-stamped after the unwind. The "cannot park inside a native callback" messages and the `Shared` guard faults stay recoverable. `reduce_task_slots` ranks a deadlock-marked `Fault` with the hard halts, so an `Executor` whose job 0 panicked and job 1 deadlocked aborts at `shutdown()` (the `Deadlocked`-slot precedence of TICKET-062 is unchanged). `chezzi test` buckets a deadlocking test ERROR and continues the suite. The retained divergence (an uncaught deadlock still ran the unwound frames' `defer`s) was closed by TICKET-152 as `docs/contributing/gaps.md` W14-37. No verdict machinery was deleted (the Summary asked to list any that only served post-recover continuation; that audit is a follow-up). Tests migrated: `recover:`-then-continue shapes now assert a fatal `deadlock`. `docs/reference/concurrency.md` bullet rewritten.
   W14-39 (same ticket): a sibling's fault cancels a task parked in its nested nursery's body; `run_until`'s cancel bypass called `unwind_deferred(base_level, false)`, so `drain_escaped_nursery` never ran, the nested nursery's parked child was orphaned, and at `CHEZZI_THREADS=1` no worker was left to drain it (hang, 8/8; Go prints `panic: boom`). Two calls changed: `Vm::run_until`'s cancel bypass in `src/vm/exec.rs` now passes `cancel_bypass`, and `Vm::run_one_fiber`'s `resume_native` arm in `src/vm/sched.rs` now passes `self.cancelled`; the hard halts keep `false`. Pinned by `tests/chezzi_nested_nursery_deadlock.rs::a_sibling_fault_cancels_a_task_parked_in_its_nested_nursery_body_at_every_worker_count`. For TICKET-140's planner: these are the only cancel-unwind sites this ticket touched; `abort_fiber_owned_nursery` and `drain_escaped_nursery` are unchanged.
 
 - **TICKET-131 (2026-09-17) — a nursery inside a spawned task parks its owner at its join at every worker count, so two recoverers fanning in to the main body no longer hang at CHEZZI_THREADS>=2 (W13-6).**
@@ -755,14 +755,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `Op::ReclaimNursery` to park the owner fiber, the way `join_nursery` already parked a plain join —
   instead of `abort_fiber_owned_nursery` running the scheduler loop INLINE on the owner's own OS
   worker, where it could pop its own ancestor off the global queue and wait on a fiber beneath it
-  (`docs/gaps.md` W13-6 residual). `esc_anc.chz`, `esc_brk.chz` (`break`), `esc_impl.chz` (an implicit-
+  (`docs/contributing/gaps.md` W13-6 residual). `esc_anc.chz`, `esc_brk.chz` (`break`), `esc_impl.chz` (an implicit-
   nursery escape) and `nat_anc.chz` (traced to the same escape-abort cause, not the separate
   `native_reentry > 0` join) all sit at base rates now — 0/12 hangs at `CHEZZI_THREADS=1`, and 0/12 at
   T=2/T=4/default under TICKET-131's still-uncommitted predicate patch, where the unfixed binary hangs
   3-9/12 in those same cells. The `native_reentry > 0` join stays inline by design (measured: removing
   only the escape from `nat_anc.chz` leaves it clean 36/36). A new `tests/chz/spec/` file is the entire
   regression surface for the park (a full `tests/chz` run reaches it 0 times without
-  `CHEZZI_THREADS=1`). See `docs/gaps.md`'s W13-6 residual for the `esc_rec.chz` fault-unwind finding
+  `CHEZZI_THREADS=1`). See `docs/contributing/gaps.md`'s W13-6 residual for the `esc_rec.chz` fault-unwind finding
   this ticket did not target but measured resolved on this branch — re-verify before relying on it.
 - **TICKET-130 (2026-09-17) — a peer sched's `wake_key` no longer broadcasts on an empty drain: a nested ping-pong no longer gets slower as the worker pool grows (W13-26).**
   `wake_run_wide` calls `MnSched::wake_key` on every OTHER live sched once per channel wake; `wake_key`
@@ -810,7 +810,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   deferral for W13-5 at T>=2 and a replacement-worker handoff for W13-6 (two siblings recovering an
   inner deadlock then fanning in) were both built and both measured WORSE than the plan's own
   rollback threshold (a false fault, not a hang) at `CHEZZI_THREADS=4`, so both are reverted; the
-  every-worker-count tests for `d2a`/`d2d` are `#[ignore]`d and `docs/gaps.md`'s W13-5/W13-6 rows
+  every-worker-count tests for `d2a`/`d2d` are `#[ignore]`d and `docs/contributing/gaps.md`'s W13-5/W13-6 rows
   record the measured rates. New: `tests/chezzi_threads_cli.rs`'s harness runs every nested-deadlock
   shape at the default worker count too (was 1/2/4 only), plus a 16-cell owner×depth×recovered edge
   table (320 sampled runs, 8s).
@@ -830,7 +830,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   stayed 20/20 clean. The pre-existing, NOT-owned-by-this-ticket `two_leaf` hang at `CHEZZI_THREADS=1`
   is unaffected: a temporary trace showed its hangs never reach the new `may_fault_unproven` path, and
   an interleaved comparative sample put the fix's hang rate at or below base's (18/280 vs 29/280). That
-  hang is closed separately by TICKET-128 under `docs/gaps.md` **W13-25**.
+  hang is closed separately by TICKET-128 under `docs/contributing/gaps.md` **W13-25**.
 - **TICKET-124 (2026-09-16) — the expected-type / untyped-constant widening TICKET-106 wired into one sink now reaches its neighbours: a generic ctor's own hint, a nested ctor argument, a reassignment/index-assign/field-assign target, and a `float`-slot collection-method argument; plus a check-OK container format spec (W13-12/13/14/15/18).**
   W13-12: `widen_mixed_numeric_args` (`src/checker/proto.rs`) grew a `want: Option<&HashMap>` — a
   turbofish or a ctor's own expected-type hint via the new `hint_want` — beside its existing
@@ -857,7 +857,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   W13-18: `check_interp_chunks` (`src/checker/pattern.rs`) now checks a concrete `List`/`Map`/`Set`/
   tuple/`Option`/`Result` value's format spec against `ScalarKind::Str`'s rules too (it renders via the
   same runtime text-form path a scalar `str` does), so `o: float? = Some(1.5); "{o:.2f}"` is now a
-  compile error naming the container type, matching `docs/syntax.md`'s "caught at check time whenever
+  compile error naming the container type, matching `docs/reference/syntax.md`'s "caught at check time whenever
   the static type is concrete" rule.
 - **TICKET-118 (2026-09-16) — an Executor job's nursery join no longer pins its pool thread at T=1 or T=2, and `shutdown_now()` now reaches a job's nursery children (W13-7, W13-8).**
   W13-7: a job's own OS thread parked at a nursery join — `MnSched::wait_for_scope`, `MnSched::wait_for_completion`, and the idle park in `MnSched::take_runnable` — never called `pool::yield_slot`, so a queued sibling `ex.submit` job never started while the joiner waited. `MnSched::pool_joiner_guard` now marks the joining thread (only the top-level `Vm`, `mn.is_none()`, per DEC-052), and `MnSched::joiner_step`/`joiner_wait` hand the pool slot to a replacement after one `DEMOTE_POLL_BACKOFF` tick of the sched having no running or runnable fiber — gated on idle, not merely on elapsed time, so a CPU-bound nursery inside a job still serializes at `CHEZZI_THREADS=1` (measured: 1.00 cores gated vs 1.86-1.95 with the idle term removed — `threads_one_serializes_a_cpu_bound_nursery_inside_an_executor_job`, the third gate in W8-8's form, DEC-059). W13-8: `shutdown_now` trips a flag a job's nursery scope carries in `JoinScope::ancestors`, but a `recv`-parked fiber's re-check (`park`/`park_send`/`park_wait`) read only its own scope's flag, so the fiber never requeued and the nursery's deadlock verdict fired instead of the cancel. `SchedCore::scope_cancel_tripped` now reads the scope's own flag OR any ancestor's, and `MnSched::take_runnable` runs a `cancelled_scope_awaiting_drain` trigger (one read per lock hold, threaded through `is_deadlocked_given`/`local_quiesced_given` so the two never disagree inside one hold) before its deadlock verdict, requeuing a cancelled family's parked fibers via `cancel_drain`. `shutdown_now` also pokes every live sched (`poke_live_scheds`, lock-then-notify) right after storing the cancel flag, closing a lost-wakeup window where a worker could read the flag on both sides of the trip under its own core lock. Before: `h1c`/`h1`/`h3` rc=124 at one worker (rc=0 at two/default), `h2`/`h2b` rc=124 at two/default (deadlock fault at one), `h2c` `deadlock` fault at every count, `two.chz` rc=124 at one and two workers. After: all rc=0 in 5/5 runs at every worker count.
@@ -910,7 +910,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   under. 11 new tests pin both mechanisms across container/timing/forwarding shapes; the "push before
   the nursery opens" control (`d20`) stays clean.
 - **TICKET-122 (2026-09-12) — a struct/enum body member must end its line (W13-16).** Six member-
-  append arms called `skip_newlines()` (zero or more) where `docs/grammar.bnf`'s `<field>`,
+  append arms called `skip_newlines()` (zero or more) where `docs/reference/grammar.bnf`'s `<field>`,
   `<variant>` and `<nativeMethodDecl>` all mandate exactly one NEWLINE: `parse_enum`'s variant arm,
   `parse_struct`'s field arm, `parse_native_struct`'s field and native-method arms, and
   `parse_native_enum`'s variant and native-method arms. `enum Lv:` / `Lo` / `static fn zero() -> Lv:`
@@ -931,7 +931,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `tests/mn_pool_ignores_cpu_quota_hangs.rs` now pre-builds the lib test target outside its hog
   window. `parallel_many_spawns_cheap_and_correct` and `fibers_scale_ready_queue_not_quadratic` stay:
   no CPU loop, and pool size did not move them. Engine unchanged; the debug stall is a
-  `docs/future.md` §4 lead.
+  `docs/design/roadmap.md` §4 lead.
 - **TICKET-113 (2026-09-11) — `for a, b in xs` destructures a tuple element from ANY iterable (W12-16(b)).**
   A generator, an `.iter()` cursor, a user `next` struct, a pure-`Iterable` struct, an
   `Iterable[(A, B)]` param or bound and a `Channel[(A, B)]` now destructure like a `List[(A, B)]`
@@ -966,13 +966,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
   parameter `int = …` via `FnLabels::min_or`, so `[a, b]` over a defaulted/non-defaulted pair reports
   `fn(int = …) -> int vs fn(int) -> int` instead of two identical strings. W12-16(e) (turbofish +
   named args, keyword call through a fn-typed field/tuple slot) is a documented decline in
-  `docs/syntax.md`, not lifted — both workarounds already run. W12-17: the parser's destructuring-let
+  `docs/reference/syntax.md`, not lifted — both workarounds already run. W12-17: the parser's destructuring-let
   branch now reads a comma-separated value list after `:=` when more than one target is present,
-  arity-checked at parse time (`destructuring binds N name(s) but M value(s)`); `docs/grammar.bnf`'s
+  arity-checked at parse time (`destructuring binds N name(s) but M value(s)`); `docs/reference/grammar.bnf`'s
   `<letStmt>` and `tests/corpus/accept/destructure_let.chz` move in the same commit. W12-16(b) (`for
   a, b` over a generator/cursor/`Iterable`) stays OPEN — `compile_for`'s multi-name branch indexes a
   list or walks a map, so a checker-only widening would be check-OK-then-broken; needs its own
-  ticket. Docs: `docs/syntax.md` (four sections), `docs/grammar.bnf`, `docs/gaps.md` (W12-10/17
+  ticket. Docs: `docs/reference/syntax.md` (four sections), `docs/reference/grammar.bnf`, `docs/contributing/gaps.md` (W12-10/17
   closed, W12-16 split by sub-item).
 - **TICKET-107 (2026-09-11) — three checker over-rejects: a bare-name catch-all on an enum/Option
   scrutinee, missing success-coercion in a mixed if/match EXPRESSION at a `T?`/`T!E` return sink,
@@ -991,8 +991,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   guard). W12-14: `check_assign` exempts `List += List` (the exact `Op::AddInPlace` pair, DEC-015)
   from the loop-variable and const-binding rebind guards, since it extends in place and never
   rebinds the name. All three fixes are independently revertible (disjoint functions). Docs:
-  `docs/syntax.md` (struct catch-all note, §8 mixed-branch coercion, Success-coercion, `+=`/const
-  sections), `docs/gaps.md` (W12-11/13/14 closed).
+  `docs/reference/syntax.md` (struct catch-all note, §8 mixed-branch coercion, Success-coercion, `+=`/const
+  sections), `docs/contributing/gaps.md` (W12-11/13/14 closed).
 - **TICKET-105 (2026-09-11) — a crossing closure now carries a module global the sender changed
   through a LOCAL ALIAS, a callee PARAM alias, or a user struct METHOD (W12-6, closes W11-5).**
   `assigned`/`carried` (TICKET-051/097) catch a write through an op that names the global directly;
@@ -1006,7 +1006,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   "changed" would clobber a receiver's own in-place push, the DEC-051 no-clobber invariant. The
   verdict also folds into `ModuleSnap.carried` at each snapshot build, so an ancestor's alias write
   reaches a grandchild's send. Cost: O(size) per closure crossing, for each free global that is a
-  mutable aggregate and not already carried — see `docs/benchmarks.md` TICKET-105 (worst case
+  mutable aggregate and not already carried — see `docs/contributing/benchmarks.md` TICKET-105 (worst case
   measured ~144x on an adversarial repeated-send-of-an-unmutated-large-global loop, accepted by
   design; every real bench in `benches/chz` stayed within ±5%). The G6/G7 identity residual (a
   task-local alias of a global element crosses as a SEPARATE wire identity, not the same shared
@@ -1116,7 +1116,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   fns `2^(N+2) - 4` times, and `run` is three checker passes over that walk. `desugar` now rejects the
   17th nesting level with one located resolve error naming the fn and the limit; W12-12 stayed
   OPEN-DEFERRED until TICKET-157 closed it (2026-09-21: memoized walk, cap now 100; see the entry at
-  the top) (`docs/gaps.md` enumerated the four side-effect readers a real fix must snapshot to
+  the top) (`docs/contributing/gaps.md` enumerated the four side-effect readers a real fix must snapshot to
   make the nested walk idempotent: the error count, `fn_reads`, hover decl-site records, and
   `drop_empty_site` pins). `chezzi ast` now prints the pretty `{:#?}` form only up to bracket depth 128
   (`ast::AST_DUMP_MAX_PRETTY_DEPTH`) and the one-line `{:?}` form past it, via a streaming
@@ -1163,7 +1163,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   refuse an arriving install, and marking it would make an in-place mutator start refusing a sender's
   newer value. The by-name op refuses to mark a `Struct`, so a user method sharing a mutator name
   (`add`, `insert`, …) that mutates nothing cannot over-mark. Residual, deliberately left open
-  (`docs/gaps.md` W11-5): a user struct METHOD that mutates `self` (`g.bump()`) still marks nothing,
+  (`docs/contributing/gaps.md` W11-5): a user struct METHOD that mutates `self` (`g.bump()`) still marks nothing,
   because the write targets `self`, not a global root — needs a self-mutation summary per method
   (`src/checker/mod.rs:3717`).
 - **TICKET-096 (2026-09-08) — a nursery OWNER, top-level `main` included, was not a cancel
@@ -1181,7 +1181,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   top-level fault now delivers once at rc=1 in 17 ms (was `r=Err('boom')` then a second abort); its
   top-level CPU loop is cut at 31 ms where it previously ran for seconds.
 - **TICKET-103 (2026-09-10) — a nested nursery whose owner blocks on a channel op was falsely `deadlock`-faulted at `CHEZZI_THREADS=1` and past the nested-drainer budget, and a recovered inner deadlock poisoned the enclosing nursery (W12-1, W12-4).** The fallback registers a scope on the spawning fiber's own sched at `EnterNursery`, so tasks start at `spawn`; a spawn into a non-last scope opens a continuation scope; the owner parks at its join (`Disp::JoinPark`), including the implicit-nursery join `do_return` runs, and the rewound op completes the return after the wake; the deadlock flag faults joined leaf nurseries first. Residual: the T>=2 depth cliff on the granted-slot path (TICKET-112).
-- **TICKET-112 (2026-09-11) — a private nested nursery's own open body vetoed every PEER's genuine deadlock forever at `CHEZZI_THREADS>=2` (a cousin nursery whose only child was truly stuck hung with no output), and separately false-faulted `main` at the default worker count while a deep nested chain still ran (W12-4 addendum, `recursive`'s T>=2 depth cliff).** `MnSched::body_is_fiber` marks a private nested sched whose scope-0 body is run by a fiber of ANOTHER sched (already counted on that sched's own counters and registries); `quiesced_core`'s body clause and `is_deadlocked_ignoring_jobs` no longer veto or self-fault on such a body, and NESTED scheds now register with the process-wide `live` count too, judged with `quiesced_core(c, false)` (DEC-101's allowed relaxation). `recursive` now runs 30 deep at every worker count with no false fault; `cousin_fed` and `nofeed_join` complete instead of hanging. Limit: an OUTERMOST sched keeps `local_quiesced`, so an Executor job whose nursery's only undone fiber is an owner blocked at a nested join (`exec_join`) still hangs at `CHEZZI_THREADS>=2` (open, `docs/gaps.md`).
+- **TICKET-112 (2026-09-11) — a private nested nursery's own open body vetoed every PEER's genuine deadlock forever at `CHEZZI_THREADS>=2` (a cousin nursery whose only child was truly stuck hung with no output), and separately false-faulted `main` at the default worker count while a deep nested chain still ran (W12-4 addendum, `recursive`'s T>=2 depth cliff).** `MnSched::body_is_fiber` marks a private nested sched whose scope-0 body is run by a fiber of ANOTHER sched (already counted on that sched's own counters and registries); `quiesced_core`'s body clause and `is_deadlocked_ignoring_jobs` no longer veto or self-fault on such a body, and NESTED scheds now register with the process-wide `live` count too, judged with `quiesced_core(c, false)` (DEC-101's allowed relaxation). `recursive` now runs 30 deep at every worker count with no false fault; `cousin_fed` and `nofeed_join` complete instead of hanging. Limit: an OUTERMOST sched keeps `local_quiesced`, so an Executor job whose nursery's only undone fiber is an owner blocked at a nested join (`exec_join`) still hangs at `CHEZZI_THREADS>=2` (open, `docs/contributing/gaps.md`).
 - **TICKET-095 (2026-09-08) — a nested-nursery deadlock hung forever at `CHEZZI_THREADS=1` where
   every other worker count faulted `deadlock: …` in ~11 ms.** `Vm::op_enter_nursery` makes a nursery
   entered inside a spawned task LAZY at one worker, so it ran as a scope on the ENCLOSING sched with
@@ -1192,7 +1192,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   nursery span (`dd6.chz:3:5`) every other worker count already did. Measured on the release binary:
   `CHEZZI_THREADS=1 chezzi run` on the ticket's five-line repro now faults at rc=1 in ~11 ms instead
   of hanging past a 10 s timeout at rc=124; `--threads=1` still runs 1.00 CPU runners (W8-8 unchanged).
-- **TICKET-092 (2026-09-08) — `docs/concurrency.md` compared the deadlock verdict to Go's
+- **TICKET-092 (2026-09-08) — `docs/reference/concurrency.md` compared the deadlock verdict to Go's
   `fatal error` but never said Chezzi's IS catchable.** A reader carried Go's un-catchability over,
   so a broad top-level `recover:` silently turned a deadlock into `Err(...)` at rc=0. Docs-only: the
   `recv`-blocks bullet now states the divergence, shows the recovered program, and records that the
@@ -1212,8 +1212,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   item: an unknown command now suggests a near miss (`ruc` → `did you mean 'run'?`) via
   `checker::suggest::did_you_mean`, made `pub`. Test-then-fix commit pairs per DEC-006/DEC-003;
   `cargo test` green, `cargo clippy -- -D warnings` clean.
-- **TICKET-085 (2026-09-08) — a string-keyed map bench (map_str), plus a correction to the filed 4.1x figure.** `benches/chz/map.chz` prices int keys by its own deliberate header comment, so nothing measured string-content hashing, the shape of word counts, group-bys and JSON records. `benches/chz/map_str.chz` and `benches/py/map_str.py` (1000 keys, 1000 rounds of get-then-increment, 1M gets + 1M sets, both printing `1000000`) close that gap and are wired into `benches/run.chz`'s driver list, `benches/README.md`'s table and `tests/difftest.rs`'s `p0_existing_bench_pairs_match`. Measured 0.328 s vs 0.129 s = 2.54x whole-program, inside the band, and 0.674 s vs 0.123 s = 5.48x for the isolated map phase against a map-free control, above it. No optimisation landed here by the human's 2026-09-07 decision, and the isolated figure warrants a follow-up optimisation ticket. The filed 4.1x was measured on a non-equivalent program and is corrected in `docs/benchmarks.md`.
-- **TICKET-081 (2026-09-08) — five stdlib/render contract fixes: `os.chdir`, `pmap_limited`, `trim`/`strip`, `split_lines`, and nested `repr`.** `os.chdir`'s `Err` now names the path (`src/native/os.rs`, `src/native/fs.rs`), matching every other `fs` native. `pmap_limited(xs, f, 0)` now faults naming `limit` instead of surfacing an internal deadlock trace (`std/concurrency/pmap.chz`). `trim`/`strip` now strip U+001C..U+001F, matching CPython's `str.isspace()` (`src/vm/call.rs`), which also widens `split_whitespace`'s blank class. `split_lines` now splits on `"\r\n"`, `"\n"` or a lone `"\r"` and drops a trailing empty piece — a BREAKING output change for plain `"\n"` input too (`src/vm/call.rs`, `std/string.chz`, DEC-068 delegate). A nested `repr` (TICKET-088) now keeps 2100 combining-mark codepoints literal via a new generated 375-range table (`src/printable.rs`); the residual now runs the other way, 4764 codepoints CPython escapes as unassigned print literally here, a Unicode-version skew (`docs/gaps.md` W7-25). Five commits (tests already landed in triage, one fix commit per defect, one docs commit) per DEC-006/DEC-003; `cargo test` green, `cargo clippy -- -D warnings` clean.
+- **TICKET-085 (2026-09-08) — a string-keyed map bench (map_str), plus a correction to the filed 4.1x figure.** `benches/chz/map.chz` prices int keys by its own deliberate header comment, so nothing measured string-content hashing, the shape of word counts, group-bys and JSON records. `benches/chz/map_str.chz` and `benches/py/map_str.py` (1000 keys, 1000 rounds of get-then-increment, 1M gets + 1M sets, both printing `1000000`) close that gap and are wired into `benches/run.chz`'s driver list, `benches/README.md`'s table and `tests/difftest.rs`'s `p0_existing_bench_pairs_match`. Measured 0.328 s vs 0.129 s = 2.54x whole-program, inside the band, and 0.674 s vs 0.123 s = 5.48x for the isolated map phase against a map-free control, above it. No optimisation landed here by the human's 2026-09-07 decision, and the isolated figure warrants a follow-up optimisation ticket. The filed 4.1x was measured on a non-equivalent program and is corrected in `docs/contributing/benchmarks.md`.
+- **TICKET-081 (2026-09-08) — five stdlib/render contract fixes: `os.chdir`, `pmap_limited`, `trim`/`strip`, `split_lines`, and nested `repr`.** `os.chdir`'s `Err` now names the path (`src/native/os.rs`, `src/native/fs.rs`), matching every other `fs` native. `pmap_limited(xs, f, 0)` now faults naming `limit` instead of surfacing an internal deadlock trace (`std/concurrency/pmap.chz`). `trim`/`strip` now strip U+001C..U+001F, matching CPython's `str.isspace()` (`src/vm/call.rs`), which also widens `split_whitespace`'s blank class. `split_lines` now splits on `"\r\n"`, `"\n"` or a lone `"\r"` and drops a trailing empty piece — a BREAKING output change for plain `"\n"` input too (`src/vm/call.rs`, `std/string.chz`, DEC-068 delegate). A nested `repr` (TICKET-088) now keeps 2100 combining-mark codepoints literal via a new generated 375-range table (`src/printable.rs`); the residual now runs the other way, 4764 codepoints CPython escapes as unassigned print literally here, a Unicode-version skew (`docs/contributing/gaps.md` W7-25). Five commits (tests already landed in triage, one fix commit per defect, one docs commit) per DEC-006/DEC-003; `cargo test` green, `cargo clippy -- -D warnings` clean.
 - **TICKET-077 (2026-09-08) — two bundled bugs: `os.exit` was not bottom-typed in value position,
   and `a == b == c` parsed as `(a == b) == c` instead of chaining like Python.** (1) `os.exit`'s
   declared return type (`nil`) was used at both call seams (`src/checker/expr.rs`), so `Err(e):
@@ -1228,7 +1228,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `Checker::infer_compare_chain`/`compare_pair` (extracted from `infer_binary`), and a
   `JumpIfFalseKeep`-based compiler lowering beside the `and`/`or` short-circuit. `1 < 2 == true` is
   now a NEW rejection (`cannot compare int and bool for equality`) where it used to silently print
-  `true`. `docs/grammar.bnf`'s `<eqExpr>`/`<relExpr>` merged into one `<cmpExpr>`/`<cmpOp>`; two
+  `true`. `docs/reference/grammar.bnf`'s `<eqExpr>`/`<relExpr>` merged into one `<cmpExpr>`/`<cmpOp>`; two
   `tests/corpus/accept/*.chz` rule tags updated to match. `cargo test` green (both worker counts on
   `tests/chz`), `cargo clippy -- -D warnings` clean.
 - **TICKET-076 (2026-09-08) — a `match` over a tuple (or a nested `Option`/`Result`) whose arms
@@ -1254,7 +1254,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   five tests in `src/checker/tests.rs`. The permissive dual (a witness's default filling an
   UNDECLARED protocol parameter, e.g. `x.f(1)` through `protocol P: fn f(self,a,b)` and
   `struct A: fn f(self,a,b=10)`) is the shipped W7-51 feature and is deliberately left open — see
-  `docs/syntax.md`'s default-resolution list, item 6. `cargo test` green, `cargo clippy -- -D
+  `docs/reference/syntax.md`'s default-resolution list, item 6. `cargo test` green, `cargo clippy -- -D
   warnings` clean.
 - **TICKET-073 (2026-09-08) — a `parallel:` nested inside another nursery scaled wrong two
   different ways.** Nested in a nursery BODY it was pinned to 2 CPU runners regardless of
@@ -1271,7 +1271,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   same liveness price this shape already pays at `--threads=1`. Measured: nested cores now match the
   flat form at every `--threads` (100/197/388/759 vs flat 100/197/390/752), and the depth-7 tree now
   peaks at 4/6/12/20 threads (depth-11, 2048 leaves: 6 at `=2`, was 2050). `src/vm/sched.rs`,
-  `src/vm/mod.rs`, `src/vm/pool.rs`, `docs/future.md`, `docs/concurrency.md`.
+  `src/vm/mod.rs`, `src/vm/pool.rs`, `docs/design/roadmap.md`, `docs/reference/concurrency.md`.
 - **TICKET-072 (2026-09-08) — `s[i]`/`s[a:b]` were O(n) per operation, and every `str` method
   cloned its whole receiver before dispatch.** `get_index`/`get_slice` re-collected a `Vec<char>` of
   the whole string per subscript (`src/vm/stmt.rs:665`/`:473`), so an index loop was O(n²)
@@ -1282,7 +1282,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `HeapAscii(Box<str>)` variant — `size_of::<ChzStr>()` stays 24), so an all-ASCII string indexes and
   slices in O(1) per operation (a byte index IS a codepoint index), and moving the five borrow-only
   `str` methods above the clone. Non-ASCII index/slice is unchanged, still O(n) per operation, by
-  decision — the `Vec<char>` collect is kept verbatim as the fallback arm. See `docs/benchmarks.md`.
+  decision — the `Vec<char>` collect is kept verbatim as the fallback arm. See `docs/contributing/benchmarks.md`.
 - **TICKET-071 (2026-09-07) — an empty `List[float].sum()` returned int `0` at runtime under a
   static `float`.** The compiler picked the fold's accumulator kind from the RUNTIME elements
   (`elems.iter().any(|v| v.is_float())`), and an empty list has none, so `(s + 1) / 2` answered `0`
@@ -1299,9 +1299,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
   and only a `:port` after the closing `]` splits off; a scheme separator (`://`) must be anchored at
   position 0 (`is_scheme` filter), so `/p/a://b` no longer loses its path; the scheme is lowercased,
   the host keeps its case. `host` still mirrors Go's `URL.Host` minus the port, never CPython's
-  `.hostname` — see `docs/stdlib.md`.
+  `.hostname` — see `docs/reference/stdlib.md`.
 - **TICKET-074 (2026-09-07) -- plain `=` on an index/field/key target now evaluates the RHS first (Python order).** `xs[bump()] = xs[bump()] + 10` on `[1, 2, 3]` printed `[12, 2, 3]` and now prints `[1, 11, 3]`, matching CPython 3.14.7; the order probes moved `K, G` to `G, K` for `xs[k()] = g()`, `OBJ, RHS` to `RHS, OBJ` for `obj().v = rhs()`, and `KEY, RHS` to `RHS, KEY` for `m[key()] = rhs()`. `compile_assign`'s plain-`=` Field and Index arms now compile the value first and reuse `emit_assign_value_first`, the stash-and-reload helper the `wait` `=` arm already had (renamed from `emit_wait_assign`). The compound (`+=`) and multi-target arms are unchanged -- both already matched Python, and two ceiling tests now pin them. Landed as three commits (tests, fix, docs) per DEC-006; `cargo test` green, `cargo clippy -- -D warnings` clean.
-- **TICKET-069 (2026-09-06) — six stdlib/render contract violations fixed (`docs/gaps.md`
+- **TICKET-069 (2026-09-06) — six stdlib/render contract violations fixed (`docs/contributing/gaps.md`
   W10-18, W10-21, W10-23..26).** `cmp.min` was second-wins on a non-`<` tie while `cmp.max` was
   first-wins; `min` now mirrors `max`'s shape so both return the first argument on a tie
   (Python's rule — a `NaN` operand propagates from the left), and `clamp` now faults
@@ -1321,7 +1321,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   Landed as three commits (tests, fix, docs) per DEC-006; `cargo test` green at both worker
   counts, `cargo clippy -- -D warnings` clean.
 
-- **TICKET-068 (2026-09-06) — three quadratic stdlib builders fixed (`docs/gaps.md` W10-22).**
+- **TICKET-068 (2026-09-06) — three quadratic stdlib builders fixed (`docs/contributing/gaps.md` W10-22).**
   `std/json.chz`'s `Parser.parse_string`, `parse_number`'s `raw`, `escape`, and `stringify_depth`'s
   `Json.Arr`/`Json.Obj` arms built their output with `out = out + c` per codepoint (O(n) copy each,
   O(n^2) overall); all four now build into a `List[str]` and call `"".join` once. `std/string.chz`'s
@@ -1334,7 +1334,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   (`tests/chz_suite.rs:24`), where the fixed parse is ~8x slower than release, so the original
   release-sized bound had only 2.6% margin there.
 
-- **TICKET-060 (2026-09-05) — two FFI defects fixed (`docs/gaps.md` W10-6).** (1) A `ptr` returned
+- **TICKET-060 (2026-09-05) — two FFI defects fixed (`docs/contributing/gaps.md` W10-6).** (1) A `ptr` returned
   into a `str` arg's marshalled `CString` used to dangle the instant the extern call returned (the
   buffer was freed unconditionally at the end of `Cffi::call`); `libc.strchr("hello world", 32)` then
   printed heap-layout-dependent garbage (measured: `_int8`, `int64`, `uint64_at`, `ptr_at`) instead of
@@ -1347,7 +1347,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   the trampoline now short-circuits to a zeroed result once `ctx.fault` is set, and both fault stores
   keep the value already there. `cargo test --lib native::cffi::` was 43 passed/2 failed before, 50
   passed/0 failed after (5 new RED tests + 2 new mechanism tests).
-- **TICKET-061 (2026-09-05) — two FFI checker defects fixed (`docs/gaps.md` W10-7, W10-14).**
+- **TICKET-061 (2026-09-05) — two FFI checker defects fixed (`docs/contributing/gaps.md` W10-7, W10-14).**
   (1) A void-returning callback param (`fn(int) -> nil`) was rejected as not C-marshallable even
   though `-> nil` was already accepted on the extern fn's own return; `assert_marshallable`'s callback
   arm now accepts `nil` for the callback's RETURN slot only (a `nil` PARAM stays rejected — no `CType`
@@ -1364,7 +1364,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `main.chz`'s `print(c.strlen("abc"))` and `print(strlen("abcd"))` print `3` then `4`, rc=0.
   `cargo test --lib` was 4493 passed/2 failed/2 ignored before, 4498 passed/0 failed/2 ignored after
   (5 new tests: an over-widening guard, 3 new RED repros, 1 new mechanism test).
-- **TICKET-062 (2026-09-05) — two scheduler-verdict defects fixed (`docs/gaps.md` W10-16, W10-1).**
+- **TICKET-062 (2026-09-05) — two scheduler-verdict defects fixed (`docs/contributing/gaps.md` W10-16, W10-1).**
   (1) A child task's fault used to surface as the nursery OWNER's synthesized `deadlock`: `spawn:
   panic("task died")` while the owner sat parked in `ch.recv()` reported `recv on an empty channel:
   deadlock` — `task died` never shown, though a parked SIBLING (not the owner) already surfaced the
@@ -1385,7 +1385,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   4507 passed/0 failed/2 ignored (the 2 RED-then-GREEN tests already committed by triage are counted
   in that total); `chezzi test tests/chz`: 780 passed/0 failed (774 pre-existing + the 6 new).
 - **TICKET-063 (2026-09-05) — a `Shared`/`RwShared` update-guard waiter now counts as a blocked
-  party, so the deadlock verdict and `--timeout` both reach it (`docs/gaps.md` W10-15).** A guard wait
+  party, so the deadlock verdict and `--timeout` both reach it (`docs/contributing/gaps.md` W10-15).** A guard wait
   longer than `GUARD_DEMOTE_BUDGET` was accounted `inflight` via `Vm::demote_enter`, which promises
   external progress a guard wait does not have (it returns only when the owner — one of the parties
   already being judged — releases), so one guard waiter vetoed the process-wide deadlock verdict
@@ -1403,7 +1403,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `runtime error (repro.chz:4:1): deadlock: every task in this parallel: block is blocked on a
   channel it cannot proceed on (an empty recv() or a full send()) and no sibling can unblock it — the
   nursery cannot progress`, rc=1, measured at both worker counts.
-- **TICKET-066 (2026-09-05) — three parser/desugar false rejections fixed (`docs/gaps.md` W10-3,
+- **TICKET-066 (2026-09-05) — three parser/desugar false rejections fixed (`docs/contributing/gaps.md` W10-3,
   W10-17, W10-20).** (1) A module-qualified turbofish on a NULLARY variant used as a VALUE
   (`mod.Box[int].Empty`, no call) reported `module 'lib' has no member 'Box'` — a whole-module import
   keys the enum into `self.enums`/`self.variants` under `type_key(mid, name)` but never into the bare
@@ -1422,14 +1422,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
   a new leaf `ExprKind::Pass`, produced only by `Parser::parse_closure`, typed `Ty::Nil`
   (`Checker::infer_kind`), lowered to `Op::Nil` (`Compiler::compile_expr`) — 9 non-exhaustive-match
   compile errors across `src/checker/pattern.rs`, `src/compiler/mod.rs` (5 sites),
-  `src/desugar/mod.rs` (2 sites) and `src/editor/mod.rs` fixed as leaf `|` arms. `docs/grammar.bnf`'s
+  `src/desugar/mod.rs` (2 sites) and `src/editor/mod.rs` fixed as leaf `|` arms. `docs/reference/grammar.bnf`'s
   `<closure>` production now allows a `<closureBody> ::= <expr> | "PASS"`, and
   `tests/corpus/accept/closures.chz` gained a `fn(): pass` line so `cargo test conformance` covers it.
-  `docs/syntax.md`/`docs/spec.md` now name `fn(): pass` as the no-op closure spelling instead of the
+  `docs/reference/syntax.md`/`docs/reference/spec.md` now name `fn(): pass` as the no-op closure spelling instead of the
   previous broken form. `cargo test --lib`: 4537 passed/0 failed before (repro-only), 4541 passed/0
   failed after (4 new checker/desugar/parser tests); `cargo test` green at both worker counts;
   `cargo test conformance` and `cargo clippy -- -D warnings` clean.
-- **TICKET-067 (2026-09-06) — five test-runner/diagnostic defects fixed (`docs/gaps.md` W10-9..
+- **TICKET-067 (2026-09-06) — five test-runner/diagnostic defects fixed (`docs/contributing/gaps.md` W10-9..
   W10-13).** (1) `chezzi test --errors=json` used to drop a whole-file diagnostic (resolve/check/
   compile/init failure) entirely — `render_json` emitted only `file_errors.len()`, never the message.
   Fixed with a new `FileError` type carrying both renderings (human + JSON) from all four producers
@@ -1459,7 +1459,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   unchanged. `cargo test --lib`: 4541 passed/0 failed before, 4546 passed/0 failed after (5 new
   `test_runner`/`vm::exec` tests); `chezzi test tests/chz`: 797 passed/0 failed/0 errored at both the
   default and `CHEZZI_THREADS=2` worker counts; `cargo clippy -- -D warnings` clean.
-- **TICKET-065 (2026-09-05) — two checker false rejections fixed (`docs/gaps.md` W10-2, W10-4).**
+- **TICKET-065 (2026-09-05) — two checker false rejections fixed (`docs/contributing/gaps.md` W10-2, W10-4).**
   (1) A `match` on `bool` with both `true` and `false` arms and no `_` was `non-exhaustive match: add
   a `_` arm` — `check_exhaustive`'s `MatchKind::Literal` arm treated `bool` like the infinite `int`/
   `str` domains. Fixed with `bool_domain_closed` (`src/checker/pattern.rs`), OR-ed into `has_wildcard`
@@ -1487,16 +1487,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
   the defining module's alias body during `compile_module`. `cargo test --lib checker::`: 2066
   passed/2 failed (this ticket's committed repros) before, 2086 passed/0 failed after (18 new tests:
   8 bool-exhaustiveness + 1 flipped, 7 alias, 2 pre-existing repros now green).
-- **Bug-hunt wave 10 (2026-09-05) — 26 confirmed findings, `W10-1..W10-26` in `docs/gaps.md`, filed as
+- **Bug-hunt wave 10 (2026-09-05) — 26 confirmed findings, `W10-1..W10-26` in `docs/contributing/gaps.md`, filed as
   TICKET-060..069 (pipeline queue, unattended overnight). Landed so far: TICKET-060 (W10-6, W10-8 — a `str` arg's C buffer is retained when a `ptr` can point back into it; first callback fault wins) and TICKET-061 (W10-7, W10-14 — void callbacks, extern fns exported as module members), and TICKET-062 (W10-16, W10-1 — a child fault outranks the owner's deadlock verdict; main blocks in place inside a native re-entry), TICKET-063 (W10-15 — a guard waiter is a blocked party; `--timeout` reaches it), TICKET-064 (W10-5 — a `None`/nullary-variant payload pins at its first constraining use), and TICKET-065 (W10-2, W10-4 — bool match closes without `_`; a type alias works in expression and pattern position), and TICKET-066 (W10-3, W10-17, W10-20 — qualified nullary turbofish, named args before a variadic, `fn(): pass`), and TICKET-067 (W10-9..W10-13 — the test runner reports file-level errors in JSON, a faulting `after_all`, captured stderr, and a test's own leaked executor job; `run --errors=json` emits warnings as JSON), and TICKET-068 (W10-22 — `std.json` parse/stringify and `std.string.replace` are linear: 2.7 s → 0.05 s and 12.3 s → 0.1 ms at 100 KB), and TICKET-069 (W10-18, W10-21, W10-23..26 — `(1,)` renders with its comma, PEP-515 underscores parse, `cmp.min` ties first-wins with `clamp` faulting on inverted bounds, `fs.mkdir("")` errs, `csv` round-trip is total, `path.with_ext` normalises or faults). **All ten tickets landed 2026-09-06 (overnight, unattended); every W10 row is closed**, each re-verified on the merged release binary at both worker counts.** Same six domains as wave 9, ~400 probes;
   every candidate re-run on the release binary at two worker counts, 30 → 26 confirmed. Headline: a
   **P0 FFI use-after-free** (W10-6, a `ptr` returned into a `str` arg dangles), a child fault MASKED by
   the owner's deadlock verdict (W10-16), `x := None` never pinned (W10-5, the write shape W8-46's
   read-only measurement missed, CLOSED by TICKET-064), five test-runner PASS/diagnostic-loss rows (W10-9..13), and quadratic
   `std.json`/`std.string.replace` builders (W10-22). W10-19 documented in place; regex dialect list
-  gained its fifth RE2 difference. Read the wave-10 session log in `docs/gaps.md` before working any row.
+  gained its fifth RE2 difference. Read the wave-10 session log in `docs/contributing/gaps.md` before working any row.
 - **Bug-hunt wave 9 (2026-09-03/05) — 8 findings, all 8 fixed, merged and post-merge verified; ledger
-  rows `W9-1..W9-9` in `docs/gaps.md`.** Six agents over disjoint domains, ~450 probe programs, each
+  rows `W9-1..W9-9` in `docs/contributing/gaps.md`.** Six agents over disjoint domains, ~450 probe programs, each
   finding re-run on the release binary before filing and each fix re-run on the MERGED binary rather
   than trusted from its gate. Three silent wrong answers (`W9-1` a crossed closure kept a private
   third copy of the module globals, so one global denoted two objects inside one task; `W9-3` an unmet
@@ -1512,7 +1512,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   ranges. Every one of the eight came from a hand-built adversarial program judged against a RUN
   reference program in Go, Rust or CPython. That is the wave's finding above the findings, and it
   repeats W8's: **a green suite measures the assertions you thought to write.**
-  Two process corrections are recorded in the `docs/gaps.md` W9 session log because both cost real
+  Two process corrections are recorded in the `docs/contributing/gaps.md` W9 session log because both cost real
   time: one filed ticket's premise contradicted an ACTIVE decision record (DEC-029) and would have
   deleted a shipped `std.path` API — the planning stage caught it, not the hunt; and a subagent's
   `0/30`-on-base flake measurement reversed under a 40-sample re-run (`branch 3/40, main 2/40`),
@@ -1558,7 +1558,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   surfaces closed with it: `tests/chezzi_threads_cli.rs`'s `CHEZZI_THREADS` causal-proof test swapped
   its channel-close starvation vehicle for a CPU spin (a spin never blocks, so it never yields — the
   only shape left that still needs a second worker), and ten stale "needs ≥2 free pool threads" notes
-  in `src/vm/tests.rs` were retired. `docs/gaps.md`'s "Bounded-pool starvation" residual is closed. A
+  in `src/vm/tests.rs` were retired. `docs/contributing/gaps.md`'s "Bounded-pool starvation" residual is closed. A
   third surface went with them — `test_runner::tests::over_memory_counts_jobs_queued_but_not_started`
   needs 60 jobs to sit QUEUED to trip an 8 MB `--max-heap`, which a `sleep_ms` body no longer achieves,
   so its job body is now a CPU spin on a shared absolute deadline.
@@ -1638,7 +1638,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `strip_prefix("//")` fallback now also splits a protocol-relative `//host/path`, following CPython
   on the `///p` edge case per the reference-ancestor rule. Also decided and documented (not changed):
   `std.flag` keeps parsing flags after the first positional (CPython `argparse` behaviour), diverging
-  from Go on purpose — `docs/stdlib.md` and the `std/flag.chz` header now say so. Gate: `cargo test`
+  from Go on purpose — `docs/reference/stdlib.md` and the `std/flag.chz` header now say so. Gate: `cargo test`
   4707 passed / 0 failed; `cargo clippy -- -D warnings` clean; `chezzi test tests/chz` 765 passed / 0
   failed at both the default and `CHEZZI_THREADS=2` worker counts.
 
@@ -1715,7 +1715,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   nursery and was previously ungated for any bare spawn at all. Re-measured:
   `cargo test --lib recover_nursery_prescan_tests` 6 passed, 0 failed (was 1 failed);
   `./target/release/chezzi test tests/chz` 740 passed, 0 failed at both worker counts (up from 738).
-- **`??` now accepts a `Result`, discarding the error (TICKET-039, `docs/gaps.md` W8-19, supersedes
+- **`??` now accepts a `Result`, discarding the error (TICKET-039, `docs/contributing/gaps.md` W8-19, supersedes
   DEC-037).** `r ?? 0` used to be one error, `'??' applies to an Option, found Result[int, str] — a
   Result carries an error that must be handled: use a match with Ok/Err arms`; it now lowers to
   `match r: Ok(__optN): __optN; Err(_): 0` — Rust's `r.unwrap_or(0)`. New `CarrierMode::ResultCoalesce`
@@ -1729,7 +1729,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   methods decline from DEC-037/TICKET-037 survives unchanged.
 
 - **A bare discarded `Result`/`Option` at module top level no longer aborts; the W8-2 checker warning
-  is the only check and now fires there too (TICKET-038, `docs/gaps.md` W8-2).** Reverses the
+  is the only check and now fires there too (TICKET-038, `docs/contributing/gaps.md` W8-2).** Reverses the
   top-level exemption recorded 2026-08-17: `Op::PopExprStmt`'s top-level abort (`src/vm/exec.rs`) is
   deleted, and the checker's three-way `in_fn_body || in_spawn_block || in_defer_block` gate
   (`src/checker/sig.rs`) is deleted, so the warning fires on every dropped carrier, top level
@@ -1748,7 +1748,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 - **An un-annotated alias of an unrefined empty collection now pins with the binding it aliases, and
   a list/map literal element now reports against the declared element type instead of laundering
-  (TICKET-032, `docs/gaps.md` W8-45/W8-46).** A1: `c := b` used to move the pending pin requirement to
+  (TICKET-032, `docs/contributing/gaps.md` W8-45/W8-46).** A1: `c := b` used to move the pending pin requirement to
   `c` alone, so `c.push(1)` then a typed `addstr(b)` was `ok: no type errors` and faulted at run time
   with *type int has no method 'upper'*. A new `(scope, name)`-keyed `empty_coll_aliases` pin group
   (drained at `pop_scope`, untainted at `declare`, unlinked in `check_assign`'s funnel) propagates a
@@ -1761,7 +1761,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   into a clause iterand.
 
 - **W8-19's `Option`/`Result`-methods sub-item is DECLINED, recorded with its measured spellings
-  (TICKET-037, `docs/gaps.md` W8-19).** The row ranked `Option`/`Result` methods as its top fix and
+  (TICKET-037, `docs/contributing/gaps.md` W8-19).** The row ranked `Option`/`Result` methods as its top fix and
   nothing blocked a re-file. Measured, every `Option` affordance it names already has a spelling:
   `unwrap_or` IS `??` (`o ?? 0` -> `3`, `n ?? 0` -> `0`), `is_some` is `o != None`, `is_none` is
   `o == None`, and the general form is a `match` — CPython spells the comparisons the same way
@@ -1774,7 +1774,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   OPEN and unstruck for tuple `Hashable`, `path.join` on `PathLike`, the un-selectable `Listener`,
   statement-only `recover:` and multi-statement closures; no open-row counter moves.
 
-- **A member-miss diagnostic now carets the member NAME, not the receiver (TICKET-036, `docs/gaps.md`
+- **A member-miss diagnostic now carets the member NAME, not the receiver (TICKET-036, `docs/contributing/gaps.md`
   W8-17's caret sub-item).** `src/checker/expr.rs` (20 `has no method` sites), `src/checker/pattern.rs`
   (4 `infer_field` sites) and `src/checker/sig.rs` (the assign-target field miss) all passed the
   whole-call or receiver span to their error while `name_span` — the method/field-name token's own
@@ -1801,7 +1801,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   element instead of falling through to bottom-up) was implemented and measured to move 10 existing
   diagnostics, so it is its own change; and the int→float widen has a checker twin and a compiler
   twin that must move together, so it does not reach through a carrier either.
-  `docs/gaps.md` **W8-45**.
+  `docs/contributing/gaps.md` **W8-45**.
 
 - **Two name captures closed: a generic method can no longer witness a protocol, and a decl-site
   default seeds its declared type (W8-44's residuals).** Both were alpha-renaming violations — the
@@ -1842,7 +1842,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   **W8-47** and CLOSED 2026-09-02 (TICKET-035) — the generic free fn's `min_params` arity gate and
   the generic struct's forwarded-turbofish provider, two separate mechanisms behind one symptom.
   Review also found a fourth un-recovered witness shape — a protocol EXISTENTIAL (`p: Produces[int]`) — now closed with
-  the same recipe `satisfies_methods` uses. `docs/gaps.md` **W8-44**; `docs/syntax.md` documents the
+  the same recipe `satisfies_methods` uses. `docs/contributing/gaps.md` **W8-44**; `docs/reference/syntax.md` documents the
   witness rule.
 
 - **A parameterized protocol bound now recovers its type args from a BUILTIN witness and through an
@@ -1857,8 +1857,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   re-spell an embedded signature in the owner's type-param vocabulary — tested with the params
   deliberately named differently, since a name-coincidence version would prove nothing. W8-44's
   neighbour table re-run and unchanged: a missing method, a wrong arity, a wrong param type and a
-  non-conforming builtin each still report their own true message alone. `docs/gaps.md` **W8-44**;
-  `docs/syntax.md`'s residual table is now one row.
+  non-conforming builtin each still report their own true message alone. `docs/contributing/gaps.md` **W8-44**;
+  `docs/reference/syntax.md`'s residual table is now one row.
 
 - **Constraining an empty collection now PINS its element type, at every site (W8-46).** Dropping a
   binding's *cannot infer element type* requirement without fixing the element left the `Unknown` slot
@@ -1881,7 +1881,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   alias (`c := b`) has no sink to pin from, so the requirement moves and the two names pin
   independently over one runtime list — closing it needs alias-identity tracking, which would falsely
   reject a rebound alias — and it is not benign: the two static types disagree about a shared value,
-  so it reaches a `List[str]` parameter and faults at run time. `docs/syntax.md` carries that repro and
+  so it reaches a `List[str]` parameter and faults at run time. `docs/reference/syntax.md` carries that repro and
   the annotation escape. **Adversarial review (2 prosecutors) on the shipped commit found 3 real
   defects, all fixed:** the pin's binding gate was the broad `contains_unknown_in_slot`, so
   `e := Box.Empty` / `a: Box[int] = e` / `b: Box[str] = e` (and the `None` twin) went from running to
@@ -1890,7 +1890,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `empty_coll_sites.is_empty()`, a perf shortcut that decided SEMANTICS (moving an unrelated
   `z.push(1)` flipped acceptance); and the barrier-removal note's justifying claim was false.
   A prosecutor swept every `.chz` in `examples/`/`tests/`/`std/`/`benches/` pre-vs-post: zero diffs.
-  `docs/gaps.md` **W8-46**.
+  `docs/contributing/gaps.md` **W8-46**.
 
 - **A return-only type parameter that nothing binds is now reported AT THE CALL (W8-45).** `fn
   empty[T]() -> List[T]` called as `xs := empty()`, and `fn make[U]() -> U` called as `z := make()`,
@@ -2007,9 +2007,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 - A user protocol name is module-scoped like a struct: two modules may each declare `protocol Drawable`, and a bare unimported protocol name no longer resolves (TICKET-027).
 
-- **Intrinsic struct `copy()` (TICKET-030, 2026-08-30, closes `docs/gaps.md` W8-19's struct-copy sub-item — the row itself stays open).** Every struct now has a SHALLOW `copy()`: each field's value is copied, so a `List`/`Map`/`Set`/nested-struct/handle field is shared afterward, matching Python's `copy.copy` (there is no `deepcopy()`). It is an intrinsic method resolved MISS-ONLY — after the declared-method lookup and the fn-typed-field fallback — in `Checker::infer_method_call`'s `Ty::Struct` arm (`src/checker/expr.rs`) and `Vm::do_method_call`'s `Obj::Struct` arm (`src/vm/call.rs`), so a struct declaring its own `copy` or holding a fn-typed `copy` field keeps it. Enums and newtypes get nothing.
+- **Intrinsic struct `copy()` (TICKET-030, 2026-08-30, closes `docs/contributing/gaps.md` W8-19's struct-copy sub-item — the row itself stays open).** Every struct now has a SHALLOW `copy()`: each field's value is copied, so a `List`/`Map`/`Set`/nested-struct/handle field is shared afterward, matching Python's `copy.copy` (there is no `deepcopy()`). It is an intrinsic method resolved MISS-ONLY — after the declared-method lookup and the fn-typed-field fallback — in `Checker::infer_method_call`'s `Ty::Struct` arm (`src/checker/expr.rs`) and `Vm::do_method_call`'s `Obj::Struct` arm (`src/vm/call.rs`), so a struct declaring its own `copy` or holding a fn-typed `copy` field keeps it. Enums and newtypes get nothing.
 
-- **Rendezvous `Channel[T](0)` (TICKET-028, 2026-08-30, closes `docs/gaps.md` W8-19's rendezvous-Channel sub-item).** `Channel[T](0)` used to fault (capacity must be strictly positive); it now constructs a rendezvous channel — Go's `make(chan T)` — whose `send` blocks until a receiver is already waiting. `Channel[T]()` is UNCHANGED (stays unbounded); this divergence from Go's rendezvous no-arg `make(chan T)` is now named in `docs/concurrency.md` and `docs/stdlib.md`. `cap()` now reports `-1` for unbounded (was `0` — `0` now means rendezvous), `0` for rendezvous, the bound for bounded. Mechanism: a `recv_waiting` count on `ChanState`, maintained by an RAII `RecvWait` guard armed at every receiver-wait site and dropped when the receiver's fiber next RUNS (errs high, never low — an under-count would false-`deadlock`); bucket wakes are kind-selective (`WakeKind::Send` wakes only parked senders + `wait:` send-arm tokens, gated per-token by `WaitPark::send_keys` to avoid a `wait:` recv-arm pair livelock).
+- **Rendezvous `Channel[T](0)` (TICKET-028, 2026-08-30, closes `docs/contributing/gaps.md` W8-19's rendezvous-Channel sub-item).** `Channel[T](0)` used to fault (capacity must be strictly positive); it now constructs a rendezvous channel — Go's `make(chan T)` — whose `send` blocks until a receiver is already waiting. `Channel[T]()` is UNCHANGED (stays unbounded); this divergence from Go's rendezvous no-arg `make(chan T)` is now named in `docs/reference/concurrency.md` and `docs/reference/stdlib.md`. `cap()` now reports `-1` for unbounded (was `0` — `0` now means rendezvous), `0` for rendezvous, the bound for bounded. Mechanism: a `recv_waiting` count on `ChanState`, maintained by an RAII `RecvWait` guard armed at every receiver-wait site and dropped when the receiver's fiber next RUNS (errs high, never low — an under-count would false-`deadlock`); bucket wakes are kind-selective (`WakeKind::Send` wakes only parked senders + `wait:` send-arm tokens, gated per-token by `WaitPark::send_keys` to avoid a `wait:` recv-arm pair livelock).
 
 > **✅ CLOSED, 2026-08-30 (TICKET-025, W8-21) — implicit success-coercion at a declared `T?`/`T!E`
 > return sink.** A bare success value now coerces: `T -> T?` gives `Some(v)`, `T -> T!E` gives
@@ -2020,7 +2020,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`src/compiler/mod.rs`'s `emit_ret_coerce`), emitting the same `Op::NewEnum` pair a written
 > `Some(v)`/`Ok(v)` would. `None`/`Some`/`Ok`/`Err` stay explicit; a value already a carrier is never
 > re-wrapped; the coercion never chains onto the int→float widen; a sink mentioning a type parameter
-> or `Unknown` declines; and a synthesized default-argument provider is excluded. `docs/gaps.md`'s
+> or `Unknown` declines; and a synthesized default-argument provider is excluded. `docs/contributing/gaps.md`'s
 > rejected third rule (`E -> T!E`) stays rejected — `str -> Error` remains a general assignability
 > grant, unchanged. `tests/chz/spec/success_coercion_test.chz` proves the runtime value, not just
 > checker acceptance.
@@ -2036,7 +2036,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `mod.Named` and `import Named from mod` (with or without `as`) both resolve now; a qualified generic
 > bound (`[T: mod.Named]`) still does not parse — unchanged, out of scope.
 >
-> **✅ FIXED, 2026-08-29 (TICKET-021) — `docs/gaps.md` W8-17 (residual): an unknown variable, a
+> **✅ FIXED, 2026-08-29 (TICKET-021) — `docs/contributing/gaps.md` W8-17 (residual): an unknown variable, a
 > module-member miss and an enum-variant miss now get the same "did you mean" `help` a method/field
 > miss already had, and a module used in value position is now its own check-time diagnostic
 > instead of a check-clean runtime fault.** Three new candidate-list helpers
@@ -2056,7 +2056,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > than deleted, so the sweep is re-exercised the moment another non-sendable `Ty` lands. Error codes
 > remain the only open half of W8-17.
 
-> **✅ FIXED, 2026-08-29 (TICKET-020) — `docs/gaps.md` W8-31 (residual): `int()`/`float()`/`bool()`
+> **✅ FIXED, 2026-08-29 (TICKET-020) — `docs/contributing/gaps.md` W8-31 (residual): `int()`/`float()`/`bool()`
 > now reject an `Option`, `Result`, `bytes`, `bytearray`, `Shared`, `Channel`, `Atomic`, `AtomicInt`,
 > `RwShared`, `Executor`, `Socket`, `Listener`, `Writer`, `Reader` or `ptr` argument at check time,
 > closing the residual half of W8-31 that TICKET-017 left open.** `Checker::reject_non_scalar_cast`
@@ -2064,14 +2064,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Vm::type_name` (`src/vm/stmt.rs`) — `Ty::Option`/`Ty::Result` both report `enum` since both are
 > `Obj::Enum` at runtime. `Ty::Protocol` and `Ty::Module` stay excluded (see the ticket's
 > `## Decisions`): a module deserves its own diagnostic, and a protocol existential could hold a
-> scalar once `docs/gaps.md` W8-32 lands. **`docs/gaps.md` W8-32 landed 2026-08-30 (TICKET-024);
+> scalar once `docs/contributing/gaps.md` W8-32 lands. **`docs/contributing/gaps.md` W8-32 landed 2026-08-30 (TICKET-024);
 > the `Ty::Protocol` arm here was re-checked and needs no change** — it already excludes
 > `Ty::Protocol` (never rejects it), so a protocol existential now witnessing a user protocol out of
 > a built-in's method table cannot turn this arm into a false positive, and an existential holding a
 > scalar under a non-empty protocol was already unreachable (the three bare scalars have no method
 > table, TICKET-024's gotcha 3).
 
-> **✅ FIXED, 2026-08-29 (TICKET-022) — `docs/gaps.md` W8-42: `{x:spec}` now accepts the four
+> **✅ FIXED, 2026-08-29 (TICKET-022) — `docs/contributing/gaps.md` W8-42: `{x:spec}` now accepts the four
 > remaining CPython-accepted forms.** `src/fmtspec.rs` alone: the `#` alternate form
 > (`#x`/`#X`/`#o`/`#b`, plus a decimal point forced on a float, guarded against non-finite values),
 > the `g`/`G` general float format, `=` sign-aware fill (`Align::Pad`, extending DEC-018's grouping
@@ -2082,7 +2082,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > notation, and the `0` flag now sets the fill under an explicit `<`/`>`/`^` align, superseding
 > DEC-022's deliberate-divergence paragraph.
 
-> **✅ FIXED, 2026-08-29 (TICKET-019) — `docs/gaps.md` W8-34: `List.unique()` is one pass over a
+> **✅ FIXED, 2026-08-29 (TICKET-019) — `docs/contributing/gaps.md` W8-34: `List.unique()` is one pass over a
 > hash index.** `Vm::is_flat_hash_key` (`src/vm/arith.rs`) gates the `"unique"` arm in
 > `src/vm/call.rs` all-or-nothing over the whole list: when every element is a flat scalar key it
 > dedupes through a local `SetData` hash index in one pass, taking its insertion-ordered `entries`
@@ -2092,7 +2092,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > 20.2 ms (~423×); the new permanent bench pair (`benches/chz/unique.chz` / `benches/py/unique.py`,
 > 500 000/250 000 distinct) now runs 1.29× CPython's time instead of quadratically worse.
 
-> **✅ FIXED, 2026-08-29 (TICKET-018) — `docs/gaps.md` `W8-1`/`W8-28`/`W8-29`: leading-zero decimal
+> **✅ FIXED, 2026-08-29 (TICKET-018) — `docs/contributing/gaps.md` `W8-1`/`W8-28`/`W8-29`: leading-zero decimal
 > literals are rejected, `not` and `??` are retuned, and a bare-digit interpolation hole is
 > literal.** **W8-29:** `0755` is now a lex error (`src/lexer/mod.rs::number`) naming the fix —
 > `leading zeros in a decimal integer literal are not permitted; write 0o755 for octal or 755 for
@@ -2102,7 +2102,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > new `NOT_BP = 6`), so `not x in xs` is `not (x in xs)` instead of `(not x) in xs`; `??`'s binding
 > power moved from `(4, 4)` to `(25, 25)`, tighter than every binary operator, so
 > `m.get("a") ?? 0 + 1` is `(m.get("a") ?? 0) + 1` (`2`) instead of `m.get("a") ?? (0 + 1)` (`1`).
-> `docs/grammar.bnf` and `docs/syntax.md` §4's 17-row table are the updated contract; `1 + not y` is
+> `docs/reference/grammar.bnf` and `docs/reference/syntax.md` §4's 17-row table are the updated contract; `1 + not y` is
 > now a parse error, pinned by `tests/corpus/reject/not_in_tight_position.chz`. **W8-1:** a hole in
 > an interpolated string whose whole text is ASCII digits (`{4}`) now renders as literal text
 > instead of interpolating (`src/interpolation.rs::parse_interpolation`), so
@@ -2112,10 +2112,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > radix-grouping behaviour, measured against `python3` for every rendered pair.
 > Full gate re-run at the fix, `.project/run-test.sh` (no args): `EXIT: 0`, lib target
 > `4288 passed; 0 failed; 2 ignored`, every other target `0 failed`. `./target/debug/chezzi test
-> tests/chz`: `672 test(s): 672 passed, 0 failed, 0 errored`. `docs/gaps.md`'s open-row counter:
+> tests/chz`: `672 test(s): 672 passed, 0 failed, 0 errored`. `docs/contributing/gaps.md`'s open-row counter:
 > `10` before this ticket, `7` after (DEC-011).
 
-> **✅ FIXED, 2026-08-29 (TICKET-016) — `docs/gaps.md` `W8-3`/`W8-25`: `Shared`/`RwShared` reentrancy
+> **✅ FIXED, 2026-08-29 (TICKET-016) — `docs/contributing/gaps.md` `W8-3`/`W8-25`: `Shared`/`RwShared` reentrancy
 > no longer loses a write or hangs undetected, and a closure over a module global no longer loses the
 > global's value at the airlock.** **W8-3:** a process-global wait-for-graph update guard
 > (`Vm::acquire_update_guard`/`release_update_guard`, `src/vm/core.rs`) now serialises `Shared.set`/
@@ -2128,7 +2128,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > guard the other is waiting for`) instead of hanging at rc=124 with `--timeout` unable to reach it.
 > `Vm::demote_enter`/`demote_exit` (`src/vm/sched.rs`, generalised from the socket-only
 > `demote_socket_enter`/`_exit`) keep a blocking guard wait from starving the worker pool.
-> `docs/concurrency.md:596-605` and the `docs/stdlib.md` reentrancy table are corrected to match.
+> `docs/reference/concurrency.md:596-605` and the `docs/reference/stdlib.md` reentrancy table are corrected to match.
 > **W8-25:** a closure's reference to its home module's `let`-bound globals is now snapshot-copied at
 > the airlock, the same way a captured local already was — `Compiler::fill_global_free` (a
 > whole-program bytecode post-pass) names every free global slot a closure tree reads and never
@@ -2159,7 +2159,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `ticket_016_cross_box_update_without_cycle_still_runs` used to run a genuine AB-BA program (two
 > spawns nesting into each other's box), so it was flaky under load; it now runs two tasks on
 > disjoint box pairs (`a`/`b` and `c`/`d`), verified green on 20 consecutive runs. And
-> `docs/gaps.md:59`'s header claimed 12 open rows against its own 10-row table; corrected to 10.
+> `docs/contributing/gaps.md:59`'s header claimed 12 open rows against its own 10-row table; corrected to 10.
 > Full gate re-run at the fix, `.project/run-test.sh` (no args): `EXIT: 0`, lib target
 > `4280 passed; 0 failed; 2 ignored`, every other target `0 failed`. `cargo clippy --all-targets --
 > -D warnings`: `Finished` with no `warning:` lines. `CHEZZI_THREADS=2 cargo run --quiet --bin chezzi
@@ -2168,7 +2168,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > after `855.63s` with `could not demote the worker`; after the fix the same command exits `0` in
 > `0.61s`.
 
-> **✅ FIXED, 2026-08-29 (TICKET-017) — `docs/gaps.md` `W8-31`/`W8-30`/`W8-40`: `int()`/`float()`/
+> **✅ FIXED, 2026-08-29 (TICKET-017) — `docs/contributing/gaps.md` `W8-31`/`W8-30`/`W8-40`: `int()`/`float()`/
 > `bool()` reject a struct/enum/function argument at check time, `Ok()` (zero-arg) spells
 > `Result[nil, E]`'s success value, and an unreachable `match` arm now warns.** `Checker::
 > reject_non_scalar_cast` (`src/checker/expr.rs`, renamed from `reject_aggregate_scalar_cast`) gained
@@ -2184,7 +2184,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `ok_zero_arg_is_result_nil`, the 8-warn/3-silent match reachability table) and
 > `tests/chz/spec/result_nil_test.chz`.
 
-> **✅ FIXED, 2026-08-29 (TICKET-015) — `docs/gaps.md` `W8-27`/`W8-4`: `+=` on a `List` extends in
+> **✅ FIXED, 2026-08-29 (TICKET-015) — `docs/contributing/gaps.md` `W8-27`/`W8-4`: `+=` on a `List` extends in
 > place, and a mutating sort callback faults instead of vanishing.** A new `Op::AddInPlace` replaces
 > `Op::Add` in `Compiler::compile_assign`'s `PlusEq` lowering; `Vm::arith_in_place` extends the LEFT
 > list in place when both operands are `Obj::List` (the decision is made at runtime — the compiler is
@@ -2201,7 +2201,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `src/vm/tests.rs::compound_assign_lowers_to_inc_local_end_to_end`, and
 > `src/vm/golden_tests.rs::sort_by_comparator_mutating_the_list_faults`.
 
-> **✅ FIXED, 2026-08-28 (TICKET-014) — `docs/gaps.md` `W8-23`: a mixed `int`/`float` comparison now
+> **✅ FIXED, 2026-08-28 (TICKET-014) — `docs/contributing/gaps.md` `W8-23`: a mixed `int`/`float` comparison now
 > compares exactly, never through `as_f64`.** `Vm::compare` (backs `<`/`>`/`<=`/`>=`) and
 > `Vm::values_equal_guarded` (backs `==`/`!=`), both `src/vm/arith.rs`, route the mixed arm through
 > the new `cmp_int_f64(i64, f64)` free fn — CPython's `float_richcompare` rule — so an i64 above 2^53
@@ -2214,7 +2214,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `tests/difftest.rs::gen_emits_int_above_2_53`, and
 > `src/vm/tests.rs::cmp_int_f64_is_exact_at_the_i64_and_2_53_boundaries`.
 
-> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/gaps.md` `W8-9`: `duration.parse` bounds magnitude by
+> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/contributing/gaps.md` `W8-9`: `duration.parse` bounds magnitude by
 > VALUE, not digit count.** `_num_ms` (`std/duration.chz`) now checks `intpart_value > i64_max /
 > unit_ms` per unit instead of `intpart.len() > 12`, so `"2562047788015ms"` (13 digits, fits) is `Ok`
 > and `"2562047788016h"` (13 digits, does not fit) is `Err`; a summed fraction that would overflow the
@@ -2223,7 +2223,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > extremes. Gated by `tests/chz/stdlib/input_judged_by_wrong_rule_test.chz`'s
 > `duration_parse_bounds_by_value_not_digit_count` and `duration_round_trips_the_int_extremes`.
 
-> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/gaps.md` `W8-38`: `std.flag` resets positionals per
+> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/contributing/gaps.md` `W8-38`: `std.flag` resets positionals per
 > call and wires `--help`/`-h`.** `FlagSet.parse` rebinds `self.pos = []` as its first statement
 > (never `.clear()`, since `pos` is a reference value a previous caller may still hold), and the
 > unregistered-flag arm now returns `Err("flag: help requested\n" + usage())` for `--help`/`-h`
@@ -2232,7 +2232,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `tests/chz/stdlib/input_judged_by_wrong_rule_test.chz`, plus `examples/flag_demo.chz`'s new
 > `--help` demo.
 
-> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/gaps.md` `W8-12`: `datetime.parse_iso8601` widened to
+> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/contributing/gaps.md` `W8-12`: `datetime.parse_iso8601` widened to
 > three CPython-accepted forms.** `parse_iso8601` (`std/datetime.chz`) now accepts minute-precision
 > time (`"...T12:34"`), the ISO basic/compact date+time form (`"20240101T123456Z"`), and a
 > colon-less UTC offset (`"+0530"`). It remains a documented SUBSET of CPython 3.14.7's
@@ -2240,7 +2240,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Err`). Gated by `datetime_parse_iso8601_accepts_cpython_forms` in
 > `tests/chz/stdlib/input_judged_by_wrong_rule_test.chz`.
 
-> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/gaps.md` `W8-33`: `fs.glob` supports POSIX character
+> **✅ FIXED, 2026-08-28 (TICKET-012) — `docs/contributing/gaps.md` `W8-33`: `fs.glob` supports POSIX character
 > classes and rejects a malformed pattern.** `wildcard_match` (`src/native/fs.rs`) now matches
 > `[abc]`/`[a-z]`/`[^abc]` classes (the Go `filepath.Match` dialect); `glob` validates the pattern
 > with the new `check_pattern` before reading the directory, returning `Err("bad pattern: ...")` on
@@ -2249,7 +2249,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `tests/chz/stdlib/input_judged_by_wrong_rule_test.chz` and new `src/native/fs.rs` unit tests
 > (`wildcard_matches_posix_character_classes`, `check_pattern_rejects_a_malformed_class`).
 
-> **✅ FIXED, 2026-08-28 (TICKET-013) — `docs/gaps.md` `W8-35`/`W8-36`/`W8-20`: `std.json` keeps an
+> **✅ FIXED, 2026-08-28 (TICKET-013) — `docs/contributing/gaps.md` `W8-35`/`W8-36`/`W8-20`: `std.json` keeps an
 > integer exact, locates its parse errors, and gains `encode`.** A new `Json.Int(int)` variant holds
 > an integer-shaped numeral parsed through `to_int` (no f64); `Json.Num(float)` now holds only
 > fractional/exponent numerals, and `num_str` is plain `str(f)` so a `Num` always renders as a float
@@ -2264,18 +2264,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Gated by `tests/chz/stdlib/json_number_test.chz` (new) and `tests/chz/stdlib/json_encode_test.chz`
 > (`encode_round_trips_through_decode`, previously a file error).
 
-> **✅ FIXED, 2026-08-27 (TICKET-011) — `docs/gaps.md` `W8-39`: `fs.walk`'s `Err` names the
+> **✅ FIXED, 2026-08-27 (TICKET-011) — `docs/contributing/gaps.md` `W8-39`: `fs.walk`'s `Err` names the
 > directory that actually failed.** `walk_into` (`src/native/fs.rs`) now returns `Result<(), String>`
 > and formats `"{path}: {io_error}"` at the level that failed — `read_dir` and the entry `collect`
 > blame the directory being read, `file_type` blames the entry's own path — instead of `walk`
 > reporting its `root` argument for a failure several levels down. An unreadable or missing root
 > still names the root; the walk still aborts at the first unreadable directory (no partial listing).
-> `docs/stdlib.md` corrected in the same change. Gated by two new `src/native/fs.rs` tests,
+> `docs/reference/stdlib.md` corrected in the same change. Gated by two new `src/native/fs.rs` tests,
 > `fs_walk_error_names_the_failing_subdir_not_the_root` and
 > `fs_walk_unreadable_root_still_names_the_root`, plus the committed repro
 > `tests/chz/stdlib/fs_walk_unreadable_subdir_test.chz`.
 
-> **✅ FIXED, 2026-08-27 (TICKET-009) — `docs/gaps.md` `W8-13`: a failing comparison `assert` now
+> **✅ FIXED, 2026-08-27 (TICKET-009) — `docs/contributing/gaps.md` `W8-13`: a failing comparison `assert` now
 > renders both operand values around the operator.** `assert xs.len() == 4` on a 3-element list
 > faults `assertion failed: 3 == 4` (was bare `assertion failed`); with a custom message,
 > `assertion failed: x must be two (1 == 2)`. Non-comparison asserts (`in`, bare, custom `msg`) are
@@ -2284,7 +2284,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `src/compiler/mod.rs::assert_lowering_tests` (the bytecode pins) and
 > `tests/chz/spec/assert_operand_message_test.chz`.
 >
-> **✅ FIXED, 2026-08-27 (TICKET-008) — `docs/gaps.md` `W8-16`: a protocol-conformance mismatch
+> **✅ FIXED, 2026-08-27 (TICKET-008) — `docs/contributing/gaps.md` `W8-16`: a protocol-conformance mismatch
 > through a value slot now names the missing/wrong-signature method, matching the generic-bound
 > wording.** `Checker::protocol_note` (`src/checker/proto.rs`) is the value-slot twin of the
 > generic-bound sentence `satisfies_args` already produces; it is appended at all 14 value-slot
@@ -2294,7 +2294,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `found Dog`. `.project/run-test.sh --one
 > src/checker/tests.rs::protocol_mismatch_via_value_slot_names_missing_method` passes.
 >
-> **✅ FIXED, 2026-08-27 (TICKET-005) — `docs/gaps.md` `W8-6`: `regex.replace_all` rejects Python
+> **✅ FIXED, 2026-08-27 (TICKET-005) — `docs/contributing/gaps.md` `W8-6`: `regex.replace_all` rejects Python
 > group refs instead of silently emitting literal backslashes.** `check_replacement_dialect`
 > (`src/native/regex.rs`) runs from `do_replace_all` after the pattern compiles, so a bad pattern
 > still reports first. A backslash followed by an ASCII digit, or `\g<name>`, is now an `Err`:
@@ -2305,7 +2305,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > tests/chz/stdlib/regex_test.chz::replace_all_rejects_python_backslash_group_refs` →
 > `1 test(s): 1 passed, 0 failed, 0 errored (3 filtered out)`.
 >
-> **✅ FIXED, 2026-08-27 (TICKET-003) — `docs/gaps.md` `W8-10`: `chezzi run -- <args>` now forwards
+> **✅ FIXED, 2026-08-27 (TICKET-003) — `docs/contributing/gaps.md` `W8-10`: `chezzi run -- <args>` now forwards
 > args after `--` in manifest mode, and file-mode now strips a literal `--` it was previously
 > forwarding through unchanged.** `cmd_run`'s arg loop (`src/main.rs`) tracks a `forwarding` bool set
 > by a `"--"` match arm checked ahead of every other arm; once set, every remaining arg — including
@@ -2325,9 +2325,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > threads the one read into both `type_check` and `vm::run_file_with_entry_source`; on-disk callers keep
 > `build_graph`/`build_graph_with_root`/`run_file_with_entry`. A zero-byte entry is now an ERROR (rc=1),
 > a deliberate CPython divergence confined to `cmd_run`/`cmd_check`. A named FIFO used to hang; the same
-> fix closes that half too. `docs/gaps.md:8664`'s pipe-idiom repro is unblocked.
+> fix closes that half too. `docs/contributing/gaps.md:8664`'s pipe-idiom repro is unblocked.
 >
-> **📋 DOGFOOD WAVE 9 FILED, 2026-08-18 — `docs/gaps.md` `W8-23..W8-42`; open W8 rows 15 → 35.**
+> **📋 DOGFOOD WAVE 9 FILED, 2026-08-18 — `docs/contributing/gaps.md` `W8-23..W8-42`; open W8 rows 15 → 35.**
 > A second external pass (nine independent agents, no model of the implementation, every answer judged
 > against CPython 3.14.7 / go1.26.6 running on this box) filed 30 findings. **All 30 were re-run in-repo
 > on `main@f6f7f8c4` before anything was written down:** 27 reproduced, **20 filed as new rows**, **3
@@ -2345,7 +2345,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **The dedupe is the part worth reading.** Before filing, **all 15 then-open W8 rows were re-run and
 > every one still reproduces** — that is what showed that wave 9's cross-task lost `set` and its
 > cross-box `update`-in-`update` hang are **W8-3 seen from two other axes**, not new rows. Their root
-> cause is documented as deliberate: `docs/concurrency.md:598` drops the guard **before** running the
+> cause is documented as deliberate: `docs/reference/concurrency.md:598` drops the guard **before** running the
 > closure, two lines under `:596`'s promise that concurrent writers "can't lose each other's updates".
 > That re-derivation also **invalidates half of W8-3's filed Fix** (faulting the lost `set` is right for
 > the same-task shape, wrong for the cross-task one, which must *block*) and adds an ordering
@@ -2361,15 +2361,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > silently stopped reproducing), `W8-25` (a closure over a module global loses it at the airlock: 3 at
 > module scope, 300 in a fn, Go/Python 300), plus W8-3's two new shapes. **None of the 30 was reachable
 > by a standing gate.** Full walk, the two non-reproductions, and the suggested fix order:
-> `docs/gaps.md` `## Session log — 2026-08-18`. Docs-only change; no code touched, gates unchanged.
+> `docs/contributing/gaps.md` `## Session log — 2026-08-18`. Docs-only change; no code touched, gates unchanged.
 
 > **✅ W8-41 CLOSED, 2026-08-27 — every `chezzi` fence in the bundled docs now lexes, and a gate keeps
-> it that way.** Four documentation lines used `;` as a statement separator (`docs/stdlib.md:1369`,
-> `:1370`, `docs/syntax.md:1732`, `:1737`); `;` is not a token, so each was
+> it that way.** Four documentation lines used `;` as a statement separator (`docs/reference/stdlib.md:1369`,
+> `:1370`, `docs/reference/syntax.md:1732`, `:1737`); `;` is not a token, so each was
 > `lex error: unexpected character ';'` — and all four shipped inside `chezzi docs`, the bundle that
 > exists to be read by a model that would then write `;` into user code. Measured pre-fix:
 > `chezzi docs | grep -c "; month: int"` printed `1`; post-fix it prints `0`. A fifth non-lexing line
-> the report never named, `docs/syntax.md:60`'s `"""say "hi""""`, was found by the new guard and
+> the report never named, `docs/reference/syntax.md:60`'s `"""say "hi""""`, was found by the new guard and
 > fixed too — CPython rejects that literal as an unterminated string, so the doc was wrong, not the
 > lexer. Gated by `tests/doc_fences_lex.rs::every_chezzi_fence_in_docs_lexes`, which derives its file
 > list from `src/main.rs`'s `include_str!("../docs/` calls so it follows the bundle automatically, plus
@@ -2426,8 +2426,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >     `maximum structural depth (10000) exceeded` crossing a `spawn` (4 999 crosses, 5 000 faults; two
 >     structural levels per link). The branch's claim that deleting `parent` fixed a depth-9 990 airlock
 >     fault, and that a `Token` encodes in O(1) at any depth, is corrected everywhere it was stated
->     (`std/cancel.chz`, `docs/concurrency.md` §6e, `docs/stdlib.md`, `docs/benchmarks.md`,
->     `PROGRESS.md`, `docs/gaps.md`). There is no `cancel_deep_tree_crosses_the_airlock` Rust test to
+>     (`std/cancel.chz`, `docs/reference/concurrency.md` §6e, `docs/reference/stdlib.md`, `docs/contributing/benchmarks.md`,
+>     `PROGRESS.md`, `docs/contributing/gaps.md`). There is no `cancel_deep_tree_crosses_the_airlock` Rust test to
 >     retire — it was never written.
 >   * The **C5 ordering fix is untouched**: `_mark` still sets the cancel bit BEFORE tripping `done()`,
 >     and `cancel_c5_gate_at_eight_workers` still gates it.
@@ -2522,7 +2522,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `cargo clippy --all-targets --features lsp -- -D warnings` clean. Docs updated in the same
 > commit: `MAX_STRUCTURAL_DEPTH` + `VM_STACK_BYTES` sizing rationale (`src/vm/mod.rs`), the two false
 > source comments (`arith.rs`, `stmt.rs`), `checker::proto`'s `EQ_BOUNDS_MAX_NODES` note,
-> `docs/stdlib.md`, `docs/spec.md`, and `docs/gaps.md` (row `W8-43` filed already-CLOSED + a session
+> `docs/reference/stdlib.md`, `docs/reference/spec.md`, and `docs/contributing/gaps.md` (row `W8-43` filed already-CLOSED + a session
 > log entry).
 
 > **✅ W8-8 CLOSED — `chezzi run --threads=1` now runs exactly ONE CPU runner in BOTH the outermost
@@ -2542,7 +2542,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Tests: `vm::tests::eager_runner_budget_sums_to_worker_count` (pure-function invariant, n in 1..=12)
 > and `tests/chezzi_threads_cli.rs`'s `threads_one_serializes_cpu_bound_parallel_tasks` (1x vs 8x CPU
 > burn under `CHEZZI_THREADS=1`, ratio > 5.5; measured pre-fix ratio ~3.94-4.0 on a debug build, matching
-> `docs/gaps.md`'s ~4.4 release-binary measurement). `cargo test --lib` 4199/0/2, `cargo test --test
+> `docs/contributing/gaps.md`'s ~4.4 release-binary measurement). `cargo test --lib` 4199/0/2, `cargo test --test
 > chezzi_threads_cli` 3/3, `cargo clippy --all-targets -- -D warnings` clean.
 >
 > **T1-fix follow-up, same day/branch — the fix above only covered the OUTERMOST arm; a NESTED eager
@@ -2578,7 +2578,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > > base `088c202a` — and it errs toward UNDER-subscription, which is the safe direction. It stays
 > > that way deliberately: farming the bounded pool from a nested scope is what `exec.rs:1694`'s
 > > `worker_count() >= 2` gate exists to prevent, because nesting can exhaust the fixed pool into an
-> > undetectable hang (measured, `docs/future.md:418`: depth 7 / 128 leaves went 3 threads → 130).
+> > undetectable hang (measured, `docs/design/roadmap.md:418`: depth 7 / 128 leaves went 3 threads → 130).
 > > Recorded here so it is not mistaken for a fresh idle-spin defect while W8-7 is worked.
 >
 > **Adversarial-review fix wave on `fix/mn-idle-policy-w8-8-w8-7`, 2026-08-18 — the W8-7 sys-time gate
@@ -2699,14 +2699,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > on a small CI box) and its `use std::process::Command` is now `#[cfg(unix)]`-gated so
 > `clippy --all-targets -- -D warnings` stays clean on non-unix targets.
 >
-> **Docs sweep + branch-final gate, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** `docs/gaps.md` rows
+> **Docs sweep + branch-final gate, 2026-08-18 (`fix/mn-idle-policy-w8-8-w8-7`).** `docs/contributing/gaps.md` rows
 > **W8-7 and W8-8 are struck through and closed** (W8-7's closure records that its own filed
 > prescription — *"an idle worker must park on a condvar, not spin"* — was **measured wrong**: idle
 > workers already parked untimed; the cost was the wake side. Third instance of the read-the-closed-row's-
 > prescription convention, after W8-2). **Open W8 rows: 17 → 15** (W8-1, W8-3, W8-4, W8-6, W8-9..W8-13,
 > W8-16, W8-17, W8-19, W8-20, plus the milestones W8-21/W8-22), counted off the table. The scheduler
-> session-log section, the "Fix order" list, `docs/concurrency.md`'s `--threads=1` corrective callout,
-> `docs/stdlib.md`, `docs/future.md`, `docs/bug-discovery.md`, `CLAUDE.md` and two source doc-comments
+> session-log section, the "Fix order" list, `docs/reference/concurrency.md`'s `--threads=1` corrective callout,
+> `docs/reference/stdlib.md`, `docs/design/roadmap.md`, `docs/contributing/bug-discovery.md`, `CLAUDE.md` and two source doc-comments
 > (`src/vm/netio.rs`, `src/vm/golden_tests.rs` — comment-only) all carry the re-derivation: **all nine
 > claims that rested on a two-wide `CHEZZI_THREADS=1` were re-run on the genuinely 1-wide binary and
 > every one came back CONFIRMED or UNCHANGED-BY-DESIGN — none false.** Load-bearing one: the N8 shape
@@ -2766,7 +2766,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > close is still in flight. Gate: `cargo test` full suite green, `cargo test --features lsp --test
 > lsp_smoke` green (11 tests, one new), `cargo clippy --all-targets --features lsp -- -D warnings` clean.
 >
-> **📋 EXTERNAL DOGFOOD PASS filed, 2026-08-17 — `docs/gaps.md` W8-1..W8-20, and the table is no longer
+> **📋 EXTERNAL DOGFOOD PASS filed, 2026-08-17 — `docs/contributing/gaps.md` W8-1..W8-20, and the table is no longer
 > empty.** Ten developers new to Chezzi, one area each, **343 Chezzi programs vs 45 reference programs**
 > (Python/Go/Rust), nothing taken on the docs' word — their counts and darwin timings, not re-run here.
 > **Nineteen of the twenty were re-reproduced in-repo on Linux at `c197d128` before filing**; **W8-11**
@@ -2807,7 +2807,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > resolves per platform, and the goldens skip loudly instead of compiling out). Carry into the freeze:
 > **a green suite measures the assertions you thought to write.**
 > The detectors that did earn their keep are the ones comparing against something outside this repo —
-> which is CLAUDE.md's ancestor rule paying out, and the argument for `docs/future.md` §2b's unbuilt
+> which is CLAUDE.md's ancestor rule paying out, and the argument for `docs/design/roadmap.md` §2b's unbuilt
 > Go-paired-programs differential. **Fix order** is in the session log; short version: the six silent
 > wrong answers, then W8-8 before W8-7 (**both done 2026-08-18**), then Levenshtein suggestions, then
 > `assert` operand values + a `file` key in `--errors=json` (**done 2026-08-18**).
@@ -2828,7 +2828,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Every code snippet added was executed before it was written down.
 >
 > **✅ Stdlib fault-contract sweep, 2026-08-18 (`feat/span-file-and-stdlib-contracts`, CLOSED) — six
-> code fixes (closing `docs/gaps.md` **W8-5** and part of **W8-17**), a 23-row second-round audit, and
+> code fixes (closing `docs/contributing/gaps.md` **W8-5** and part of **W8-17**), a 23-row second-round audit, and
 > a follow-up fix for a hang the audit itself found.** Tasks B1/B2, run concurrently with the
 > `check`/`test`/LSP file-attribution work above in the same working tree (their commit `a078a977`,
 > credited to the A5 review-fix-wave entry below, landed interleaved with these). **B1 (six fixes):**
@@ -2840,21 +2840,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > a named, `recover:`-able fault (`json.stringify: exceeded max depth`) via a new `stringify_depth`
 > inner helper, replacing the same opaque VM message. Measured on the release binary,
 > `json.parse("[".repeat(100000)+"]".repeat(100000))` behind a plain `match`, no `recover:`: `err:
-> exceeded max depth` then `still alive`, rc=0 (was rc=1, `still alive` never printed). `docs/gaps.md`
+> exceeded max depth` then `still alive`, rc=0 (was rc=1, `still alive` never printed). `docs/contributing/gaps.md`
 > **W8-5 CLOSED** (task C, same day). (3) **`json.len`** now faults on a scalar (`Null`/`Bool`/`Num`)
 > instead of silently returning `0`, matching CPython's `len(None)` `TypeError`. (4) **`std.string.repeat`**
 > now delegates to the capacity-guarded native `s.repeat(n)` method instead of an unbounded `.chz`
 > `while` loop — a huge `n` used to OOM the process, now `string repeat capacity overflow`, recoverable.
 > (5) **`datetime.weekday_name`** faults via `panic(...)` naming the bad value (`weekday_name: wd must
 > be 0..6 (0=Sunday), got 7`) instead of a bare `assert` that printed no operand — closes half of
-> `docs/gaps.md` **W8-13**'s complaint for this one call site (the general `assert`-prints-no-values gap
+> `docs/contributing/gaps.md` **W8-13**'s complaint for this one call site (the general `assert`-prints-no-values gap
 > stays open). (6) **A missing map key's fault now names the key** (`src/vm/stmt.rs`): `key not found`
 > → `key not found: 'zz'` / `key not found: 99`, rendered through the same `stringify_nested_into`
-> helper nested containers already use. Closes `docs/gaps.md` **W8-17 sub-item (b)**. Plus a doc-only
+> helper nested containers already use. Closes `docs/contributing/gaps.md` **W8-17 sub-item (b)**. Plus a doc-only
 > fix: `math.lcm`'s doc comment claimed "never faults," true only of the private `lcm_i64` helper in
 > isolation — the exported `lcm` native fn maps its `Err` into a fault, reworded to say so. **B2
 > (second-round stdlib fault-contract audit):** measured 23 new fault rows against CPython 3.14.7 and Go
-> 1.26.6 (installed this session), added to `docs/stdlib.md`'s fault table with 19 pinned
+> 1.26.6 (installed this session), added to `docs/reference/stdlib.md`'s fault table with 19 pinned
 > `tests/chz/stdlib/fault_contracts_test.chz` tests. Found and flagged (not fixed, per that task's
 > zero-behavior-change scope) a **real latent bug**: `std.string.pad_left`'s free-function form had no
 > capacity guard and **hung** rather than faulting on a huge `width` (measured: `timeout 15` still
@@ -2862,7 +2862,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > fix, same day (`3b0d1354`):** `std.string.pad_left` now delegates to the native `s.pad_left(...)`
 > receiver method the same way `repeat` does — one line, the hand-rolled unbounded loop is gone with
 > it. Measured (release binary, `recover:`): `string.pad_left("a", i64::MAX, "x")` → `err: string pad
-> capacity overflow`, process alive, where it previously hung indefinitely. `docs/stdlib.md`'s "two
+> capacity overflow`, process alive, where it previously hung indefinitely. `docs/reference/stdlib.md`'s "two
 > safety divergences" callout is now "no divergence" — both free-fn siblings fault exactly like their
 > native methods. One more follow-up (`f0a9421e`): a real-process CLI test (`tests/interactive.rs`)
 > pins `io.read_all()`'s non-UTF-8 stdin contract (`stdin: stream is not valid UTF-8`) from an actual
@@ -2973,7 +2973,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `b`; `a` imports `c`) is the one that actually catches a wrong id→path mapping — `file` ids are
 > DFS pre-order while `Program::modules` is deps-first post-order, so the two disagree in that graph
 > and a naive `file - 1` index would misattribute a frame even though the single-file case stays
-> accidentally correct by luck. `docs/gaps.md` W8-14 closed; `check`'s plain-text/JSON diagnostics
+> accidentally correct by luck. `docs/contributing/gaps.md` W8-14 closed; `check`'s plain-text/JSON diagnostics
 > (`--errors=json` `file` key) are the next consumer of the same helper, left to **W8-15**.
 >
 > **✅ W8-15 (check half) + W8-17(a) — `check --errors=json` names its file and end range, and the
@@ -3003,7 +3003,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > parse-error stutter's root cause: the resolver's parse-error arm built its message from
 > `e.to_string()` (`ParseError`'s own `Display`, which already prefixes `parse error (...)`) instead of
 > `e.message` — the lex arm two lines up already did this correctly and said why in its comment; the
-> parse arm just hadn't matched it, one-line fix. `docs/gaps.md` W8-15's `test --errors=json` `message`
+> parse arm just hadn't matched it, one-line fix. `docs/contributing/gaps.md` W8-15's `test --errors=json` `message`
 > half was closed the same day in a follow-up task — see the entry below. W8-17's (b)/(c)/(d) cosmetics
 > are UNTOUCHED, still open.
 >
@@ -3035,11 +3035,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **21 targets / 4406 passed / 0 failed / 3 ignored** (lib **4188/0/2**), `cargo test conformance`
 > **8/8**, clippy `--all-targets -D warnings` clean, `chezzi test tests/chz` **590 passed / 0 failed**
 > at the default worker count **and** at `CHEZZI_THREADS=2` (**zero** warning lines from the suite at
-> either count), `chezzi docs` renders. Rows closed in `docs/gaps.md`: **W8-2** and the un-numbered
+> either count), `chezzi docs` renders. Rows closed in `docs/contributing/gaps.md`: **W8-2** and the un-numbered
 > **airlock-trap** section; **the `read_line` deferral (item 3) narrowed** to its carrier shape.
 >
 > **✅ The airlock trap warns — a `spawn:`-task write read after the join, 2026-08-17
-> (`docs/gaps.md`'s un-numbered airlock section, CLOSED).** `results = […]` inside `spawn:`, read after
+> (`docs/contributing/gaps.md`'s un-numbered airlock section, CLOSED).** `results = […]` inside `spawn:`, read after
 > the join, gave `for r in results:` **zero iterations** — a green test that asserted nothing. Now:
 > *"'results' is read here as its pre-`spawn:` value — a captured binding crosses the task airlock as an
 > independent copy, so the write inside the `spawn:` block (line 4) is not visible after the join (carry
@@ -3084,7 +3084,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > **✅ `ord()` faults on a multi-character `str` — a silent wrong answer, 2026-08-17.** `ord("ab")`
 > returned **`97`**, rc=0 — a plausible number for input the function cannot represent, and
-> `docs/stdlib.md` documented it as though it were a design choice. Measured CPython 3.14.7:
+> `docs/reference/stdlib.md` documented it as though it were a design choice. Measured CPython 3.14.7:
 > `TypeError: ord() expected a character, but string of length 2 found`. Rust's `char` has no
 > 1-char-string coercion either. Now `ord() expects a 1-character str, got 2 characters`, recoverable via
 > `recover:`. The guard counts **characters, not bytes** (`s.chars()`), so `ord("é")` is still `233`
@@ -3108,7 +3108,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > fault non-sticky would move it *toward* Python's silent loss, the exact inversion
 > `correct > silent > wrong` forbids. **Zero lines of `src/` changed.** What landed is the missing
 > ancestor evidence, with an explicit *"do NOT 'fix' it into a skip"*: `std/io.chz` names **three**
-> outcomes where the `Option[str]` spells two, `docs/stdlib.md` gains *"Why sticky rather than
+> outcomes where the `Option[str]` spells two, `docs/reference/stdlib.md` gains *"Why sticky rather than
 > skip-ahead — the ancestors, measured"*, and `tests/chz/stdlib/io_reader_carry_test.chz` gains a
 > "WHICH ANCESTOR THIS PINS" header (no assert changed — they already pinned the right behaviour).
 > Also landed: the **`-1` `index_of` hazard** documented with its measured trap in *both* languages
@@ -3116,7 +3116,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > — `str.index_of` **is** Python's `str.find`, trap and all, but `List.index_of`'s `-1` has **no** Python
 > twin (`list.index` raises), so the list half is Chezzi applying one uniform shape, not inheriting one;
 > and a **14-row fault table** (Chezzi message · measured CPython behaviour · carrier alternative) at the
-> end of `docs/stdlib.md` §1 so the audit is not re-run. Twelve of the fourteen confirmed
+> end of `docs/reference/stdlib.md` §1 so the audit is not re-run. Twelve of the fourteen confirmed
 > ancestor-aligned; `str.join` on a non-`str` turned out to be a **static type error** here (better than
 > Python's runtime `TypeError`, so it moved out of the fault table), and `ord` was the one genuine
 > divergence — fixed above.
@@ -3158,7 +3158,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > **✅ The checker has a WARNING severity, 2026-08-17 — plumbing (the rule above is its first user).** The
 > checker could report hard errors and nothing else, so the two diagnostics queued behind it
-> (`docs/gaps.md` W8-2's discarded `Result`, and the airlock trap at `gaps.md:418`) had no non-fatal
+> (`docs/contributing/gaps.md` W8-2's discarded `Result`, and the airlock trap at `gaps.md:418`) had no non-fatal
 > channel to land on. `CheckError` gains `pub severity: Severity` (`Error`/`Warning`) with
 > `CheckError::error` / `::warning` constructors; `Display` renders `warning (line N, col M): …` and
 > the error rendering is **byte-identical to before** — hundreds of tests, the LSP and `--errors=json`
@@ -3200,7 +3200,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > branch with it — its only machine-mode caller is `run`, whose stderr is shared with the program's, so
 > a JSON array there could never be parsed back out.
 >
-> **🗳️ TWO LANGUAGE MILESTONES DECIDED, 2026-08-17 — `docs/gaps.md` W8-21 (CLOSED 2026-08-30,
+> **🗳️ TWO LANGUAGE MILESTONES DECIDED, 2026-08-17 — `docs/contributing/gaps.md` W8-21 (CLOSED 2026-08-30,
 > TICKET-025) / W8-22 (CLOSED 2026-08-30, TICKET-026).** Both came out of the W8-2 / W8-19 discussion, and both are
 > filed with their **rejected** alternatives.
 >
@@ -3243,12 +3243,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > hostname. Changed to the shape its own siblings `os.env`/`os.home_dir` already use: `None` on the
 > syscall failure, `Some(name)` otherwise (`std/os.chz:36` signature, `src/native/os.rs:55-76` body,
 > `Kind::Inline` unchanged — it still touches host OS state). `examples/os_info.chz:6` migrated to
-> `os.hostname() ?? "<unknown>"`. Docs: `docs/stdlib.md:613` row. The syscall doesn't fail on a healthy
+> `os.hostname() ?? "<unknown>"`. Docs: `docs/reference/stdlib.md:613` row. The syscall doesn't fail on a healthy
 > box, so the `None` arm is a code-reading fact, not forceable from `tests/chz` — covered instead
 > by asserting `Some(...)` + non-empty + `??` composition (`tests/chz/stdlib/os_test.chz`, new file —
 > no dedicated os-module Chezzi test existed before this).
 >
-> **✅ `List[<numeric newtype>].sum()` works and returns the NEWTYPE, 2026-08-17 — `docs/gaps.md:1954`
+> **✅ `List[<numeric newtype>].sum()` works and returns the NEWTYPE, 2026-08-17 — `docs/contributing/gaps.md:1954`
 > struck.** `.sort()`/`.min()`/`.max()` on a `List[Cents]` (`newtype Cents = int`) already unwrapped the
 > newtype, but `.sum()` was gated out at check time (`sum() requires a numeric list, found List[Cents]`) —
 > a same-family asymmetry. **Decided semantics: `sum` returns `T`.** Measured ancestors: Go
@@ -3283,8 +3283,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`fn f[T](xs: List[T])`) keeps its pre-existing rejection, so no per-instantiation key conflict is
 > reachable. Verified working across `?.` chains, closures, `map`, `spawn`/`parallel:`, cross-module and
 > name-colliding newtypes (`money.Cents = int` vs `other.Cents = float`), and alias underlyings
-> (`type F = float; newtype R = F`). Docs: `docs/stdlib.md` `sum` row, `docs/syntax.md` (newtype numeric
-> auto-flow + the List-method cheat line), `docs/gaps.md`; the stale
+> (`type F = float; newtype R = F`). Docs: `docs/reference/stdlib.md` `sum` row, `docs/reference/syntax.md` (newtype numeric
+> auto-flow + the List-method cheat line), `docs/contributing/gaps.md`; the stale
 > `src/checker/expr.rs` comment naming the deleted `interp` engine corrected. Tests:
 > `tests/chz/spec/newtype_test.chz` **+6** (non-empty/empty int, float both ways, overflow fault,
 > two-sums-in-one-line/one-interpolation aliasing backstop, plain-list controls) + `src/checker/tests.rs`
@@ -3320,7 +3320,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > targets 0 failed, `cargo clippy --all-targets -- -D warnings` clean, `chezzi test tests/chz`
 > **576 → 584** (same at `CHEZZI_THREADS=2`).
 
-> **✅ `i64::MIN % -1` is now `0`, 2026-08-17 — `docs/gaps.md:1950` struck.** `%` at that one input used
+> **✅ `i64::MIN % -1` is now `0`, 2026-08-17 — `docs/contributing/gaps.md:1950` struck.** `%` at that one input used
 > to fault `integer overflow in Mod`; Go and Python both give `0`, and that IS the mathematically
 > correct remainder — Rust's `checked_rem` returns `None` there only to dodge the x86 `IDIV` hardware
 > trap, not because the answer overflows. Measured: pre-change binary on `MIN % -1` (`MIN` spelled
@@ -3340,7 +3340,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > compute the same `0` at runtime. **What did NOT change:** `MIN / -1` still faults
 > `integer overflow in Div` (a real overflow — the true quotient `2^63` doesn't fit an `i64`); `% 0`
 > still faults `modulo by zero`; the sign convention (`-7 % 3 == -1`, `7 % -3 == 1` — dividend-sign,
-> Rust/C/Go, NOT Python's floored `%`) is pinned, unchanged. Docs: `docs/spec.md`'s integer-overflow
+> Rust/C/Go, NOT Python's floored `%`) is pinned, unchanged. Docs: `docs/reference/spec.md`'s integer-overflow
 > policy paragraph corrected (it previously claimed `%` "trips the same `i64` checked-op overflow" as
 > `/`). Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (general arms, Div/`%0` fault controls,
 > sign pins) + `tests/chz/spec/newtype_test.chz` (the numeric-newtype arm) — **5 new**.
@@ -3349,7 +3349,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `chezzi test tests/chz` **571 → 576**.
 
 > **✅ `List.min` / `max` / `min_by` / `max_by` return `Option[T]`, 2026-08-17 — the last OPEN row in
-> `docs/gaps.md` is struck.** All four used to FAULT on an empty list (`runtime error: min() of empty
+> `docs/contributing/gaps.md` is struck.** All four used to FAULT on an empty list (`runtime error: min() of empty
 > list`) while their siblings `first`/`last`/`pop` returned `Option[T]`. That is mixed lineage inside
 > one method family — Python's `min([])` → `ValueError` and Go's `slices.Max(nil)` panic for one half,
 > **Rust's `[].iter().min()` → `None`** for the other — and the `-> T` signature **hid** the failure, so
@@ -3379,7 +3379,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Option` with no bound) — the bound still rejects `[[1],[2]].min()` byte-identically to the
 > pre-change binary — and an `Option[T]` whose `T` comes from the **receiver** while `K` comes from the
 > closure, which `subst`'s `Ty::Option` arm does carry.
-> **Callers migrated with `??` and `match`** (there is deliberately no `.unwrap()` — `docs/gaps.md`
+> **Callers migrated with `??` and `match`** (there is deliberately no `.unwrap()` — `docs/contributing/gaps.md`
 > `L1`): `tests/chz/spec/list_test.chz`, `tests/chz/spec/newtype_test.chz`, `examples/list_methods.chz`
 > + its `.expected` golden, and `src/vm/tests.rs`, where the two empty-**fault** tests **invert** to
 > assert `None` and no fault. `tests/chz/README.md`'s fault-path example was `recover: [].min()`; it is
@@ -3397,7 +3397,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > anyone else** — `Channel.recv()` on a closed channel, `index_of`'s `-1` sentinel, and
 > `Reader.read_line`'s fault-beside-an-`Option`. Each is a surface break wanting its own milestone.
 > Recorded with the measured Go/Python/Rust table — and with the reason each was deferred — in
-> **`docs/gaps.md`, "Considered and DEFERRED BY DECISION, 2026-08-17"**, directly under the ledger
+> **`docs/contributing/gaps.md`, "Considered and DEFERRED BY DECISION, 2026-08-17"**, directly under the ledger
 > table. They are deliberately NOT ledger rows: that table means "open bugs to fix now", and these are
 > settled scope decisions. Read that entry before re-deriving any of them from scratch. (**`read_line`
 > narrowed 2026-08-17**: only the CARRIER SHAPE is still open — the *stickiness* was measured against
@@ -3406,7 +3406,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **✅ The dead-engine comment/doc sweep + the self-comparison purge, 2026-08-17 (11 commits).**
 > The `--serial`/`interp` removals left ~1750 lines across the tree still describing the deleted
 > engines in the present tense. Swept everything except the two dated logs (`PROGRESS.md`,
-> `docs/gaps.md`, both already guarded by the reading note above) — 112 files, +1712/−2262.
+> `docs/contributing/gaps.md`, both already guarded by the reading note above) — 112 files, +1712/−2262.
 >
 > **Three classes, and only one of them is safe to automate.** (1) *Naming drift* — the fact is about
 > the one engine; delete the name, keep the fact. (2) *A live code arm NAMED after the dead engine*
@@ -3459,7 +3459,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 > **✅ The `--serial` engine is REMOVED, 2026-08-16 (14 commits).** The cooperative single-thread VM,
 > the `--serial` and `--check-parity` flags, the cooperative scheduler and every per-engine fork are
-> gone. **The bytecode VM on its M:N scheduler is the sole engine.** `docs/future.md` §2b is marked
+> gone. **The bytecode VM on its M:N scheduler is the sole engine.** `docs/design/roadmap.md` §2b is marked
 > SHIPPED — and it shipped **pre**-freeze, reversing its own "not before the JIT freeze" ordering,
 > because doing it first means the JIT is not designed against a byte-identity constraint that was
 > already scheduled to die.
@@ -3482,7 +3482,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > out while `=2` and the default fault fast. *A knob is not a gate until you have shown it changes an
 > outcome.*
 >
-> **Ledger:** `docs/gaps.md` **N10** is struck (closed **for the cooperative fiber**), **N6g** is
+> **Ledger:** `docs/contributing/gaps.md` **N10** is struck (closed **for the cooperative fiber**), **N6g** is
 > dissolved, and **W6-9r items 1–3** are closed — **item 4 (the `captured()` DISPLAY boundary) stays
 > OPEN on its own terms**, since it is a property of the capture surface, not of the deleted
 > comparators. Six new rows were added for work this branch did beyond the removal.
@@ -3524,7 +3524,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > those paths — only removals** — so the attribution (*stated as an attribution, not a measured cause*)
 > is struct/code layout drift: `Vm` lost a `bool` and a `Vec` (~24 B), repacking every field after them.
 > Review judged that plausible and found nothing that genuinely got slower. Full numbers in
-> `docs/benchmarks.md`.
+> `docs/contributing/benchmarks.md`.
 
 > **Three more findings from an adversarial panel on the same `--serial`-removal branch, fixed same
 > day.** (a) Five would-block socket-op errors (`connect`/`read`/`read_bytes`/`write`/`accept`) still
@@ -3553,7 +3553,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > clippy clean.
 
 > **✅ `W6-9r` closes in full — `chezzi test --show-output` is byte-exact, 2026-08-16 (6 commits).**
-> Item 4, the one residual left open by the `--serial` removal (`docs/gaps.md` `W6-9r`), is closed: a
+> Item 4, the one residual left open by the `--serial` removal (`docs/contributing/gaps.md` `W6-9r`), is closed: a
 > failing test's captured stdout used to round-trip through `String::from_utf8_lossy` before printing,
 > so raw bytes written inside a `test fn` (`io.stdout().write_bytes(b"\xff\xfe")`) rendered as U+FFFD.
 > `Vm::take_out_bytes()` now sits beside the (kept) lossy `Vm::take_out()`; `Outcome.captured_out` and
@@ -3626,7 +3626,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `62 65 66 6f 72 65 0a **ff fe**`.
 
 > **✅ M24's last four residuals CLOSED + the generic-function-value family, 2026-08-15 (21 commits).**
-> `docs/gaps.md` rows **M24-1, M24-2, M24-5, M24-7** are all struck through FIXED, and **no new row was
+> `docs/contributing/gaps.md` rows **M24-1, M24-2, M24-5, M24-7** are all struck through FIXED, and **no new row was
 > filed** — every defect found while fixing them was closed in-branch. Gate at merge: 18 targets,
 > **4396 passed / 0 failed**, clippy `--all-targets -D warnings` clean, `chezzi test tests/chz/`
 > **550/550 identical on M:N and `--serial`**, corpus 438 `.chz` files with **0 verdict changes**.
@@ -3669,7 +3669,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > that way.
 
 > **✅ §2c1 landed 2026-08-14 — a `spawn`ed task starts at the `spawn`, like Go's `go f()`, instead of
-> at its nursery's join.** `docs/gaps.md`'s `bare spawn: start time` row is CLOSED; `docs/future.md`
+> at its nursery's join.** `docs/contributing/gaps.md`'s `bare spawn: start time` row is CLOSED; `docs/design/roadmap.md`
 > §2c1 is SHIPPED. Measured on the release binary: `print("A")` / `spawn: print("SPAWNED")` /
 > `time.sleep_ms(300)` / `print("B")` went **`A B SPAWNED` → `A SPAWNED B`**, which is what the paired Go
 > program (`go fmt.Println(...)`, go1.26.5) prints; `spawn: ch.send(1)` beside `print(ch.recv())` went
@@ -3680,7 +3680,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > deliberate:** eager on M:N (the default `chezzi run`), **lazy on `--serial`**, which has one
 > cooperative thread and so cannot reach Go's semantics by construction and is slated for removal
 > (`future.md` §2b). That makes **two** places the engines deliberately disagree; the first is
-> `Executor.submit` (D3, `docs/stdlib.md`). **The `EnterNursery` eager gate dropped both its clauses**
+> `Executor.submit` (D3, `docs/reference/stdlib.md`). **The `EnterNursery` eager gate dropped both its clauses**
 > (`self.parallel && self.mn.is_some() && worker_count() >= 2` → `self.parallel`), each re-derived
 > rather than carried forward: `mn.is_some()` WAS the defect (a top-level nursery has no worker shell,
 > so it was lazy by construction), and `worker_count() >= 2` guarded an eager inner join starving its
@@ -3723,7 +3723,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > sibling scheds of (1); and the dead-feeder reading of (2). **None of the four was caught by a repro**
 > — all ten hand-written repro programs stayed green through every one of them; `cargo test --lib` found
 > them all. **Perf, measured A/B against pristine `main`:** 120k-`spawn` storm **0.965 s → 0.646 s
-> (−33%)**, which closes `docs/gaps.md`'s open +10.2% spawn-storm residual; `primes_parallel`
+> (−33%)**, which closes `docs/contributing/gaps.md`'s open +10.2% spawn-storm residual; `primes_parallel`
 > **14.349 s → 13.300 s (−7%)**; `parallel:` in a tight loop **1.579 s → 2.016 s (+28%)**, one raw
 > drainer thread per nursery — halved from the first cut by skipping the join-time pool farm for a
 > nursery holding fewer than 2 unfinished tasks. **Collateral, deliberate:** the
@@ -3739,7 +3739,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > per-test **verdicts**, never output, and no suite file asserts inter-task print order.
 
 > **✅ W7-59 landed 2026-08-14 — `net.connect` stopped blocking a shared pool worker in a private
-> sleep-spin, and the "obvious" fix shape was measured wrong before it shipped.** `docs/gaps.md`'s
+> sleep-spin, and the "obvious" fix shape was measured wrong before it shipped.** `docs/contributing/gaps.md`'s
 > `W7-59` is CLOSED. The in-flight (`EINPROGRESS`) arm gated on a bare `self.mn.is_some()` and everything
 > else fell into `Vm::block_until_connected` — a 1 ms poll under a 10 s cap that bypassed
 > `Vm::demote_block_socket` entirely, so it had no cancel check, no `run_exit_err`, no `sched.terminate`,
@@ -3767,7 +3767,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > identically pre- and post-fix, which is why it detected none of this.
 
 > **✅ W7-60 landed 2026-08-14 — an `Executor` join observes `--timeout` and cancel, so a job parked in a
-> nested join stops outliving the run that gave up on it.** `docs/gaps.md`'s `W7-60` is CLOSED. **The row
+> nested join stops outliving the run that gave up on it.** `docs/contributing/gaps.md`'s `W7-60` is CLOSED. **The row
 > as filed was partly stale and is corrected in the fix:** `W7-58` had already replaced the untimed
 > `eager_cv.wait` with a `DEMOTE_POLL_BACKOFF` `wait_timeout` poll asking `quiesced_only_joins`, so the
 > deadlock verdict was covered — what was genuinely missing, and what the function's own doc admitted, is
@@ -3795,7 +3795,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > cut's stated reason for omitting an `os.exit` rung was **false** — it claimed `W7-47` makes
 > `outstanding()` drop, which holds only for a job that HAS a checkpoint; measured, `os.exit(3)` beside a
 > `process.run("sleep 5")` job exits after **5.014 s**. The rung stays omitted, but for the real reason:
-> it would unblock the waiter while the uninterruptible child kept running — `docs/stdlib.md`'s
+> it would unblock the waiter while the uninterruptible child kept running — `docs/reference/stdlib.md`'s
 > documented blocking-native ceiling, not something a join can lift. Two charges were **dismissed** on
 > evidence (a stale `poll_partial` cannot reach `connect`; `may_block_socket_in_place` admits, not
 > refuses, the contexts alleged). **Accepted collateral:** a cancel bail leaves the joined
@@ -3809,7 +3809,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `process.run("sleep 6")`: **6 011 ms → 213 ms**; **`--timeout`** — `chezzi test --timeout=500` over a
 > job running `process.run("sleep 9")`: pre-fix `TIMED-OUT` only after **9 010 ms** with the "could not be
 > aborted" suffix, post-fix **509 ms**. This closes a violation of Chezzi's OWN documented contract:
-> `docs/stdlib.md`'s "a scope cancel or an `Executor.shutdown_now()` ends the wait within ~5 ms" promise
+> `docs/reference/stdlib.md`'s "a scope cancel or an `Executor.shutdown_now()` ends the wait within ~5 ms" promise
 > did not hold once the blocked party was a nested join.
 
 > **✅ Default-argument caller-scope hazard CLOSED, 2026-08-13 (phase 1 of 2).** A non-literal default
@@ -3836,7 +3836,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Three user-visible consequences.** (1) The `510` hazard is gone. (2) A default naming an import
 > the caller cannot see now **compiles** — `z` without `import u` was `unknown name 'u'` on
 > `0104d57b` and now prints `12`, so a whole class of program that could not be written now can be.
-> (3) `docs/syntax.md` §5 **rule 4** narrows: a `Self`-typed default on a NON-generic host is
+> (3) `docs/reference/syntax.md` §5 **rule 4** narrows: a `Self`-typed default on a NON-generic host is
 > substituted to the concrete owner type and gets a real provider (measured: definer's `mkq()`, `6`,
 > where `0104d57b` printed the caller's `901`). A GENERIC host (`Self` = `Q[T]`, `T` unbound in a free
 > fn) still takes the inline clone — that residual is phase 2b.
@@ -3861,7 +3861,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Gate: `cargo test` **4093 lib + all 16 integration targets, 0 failed**; conformance 8/8; clippy
 > `--all-targets -D warnings` clean.
 >
-> **✅ Phase 2, same day — `docs/future.md` §3d is DELETED.** The two shapes no call-site rewrite can
+> **✅ Phase 2, same day — `docs/design/roadmap.md` §3d is DELETED.** The two shapes no call-site rewrite can
 > reach are now filled by the CALLEE, from a prologue compiled into the declaring module:
 > `f := g; f()` (was `'closure' expects 1 argument(s), got 0`, now `4`) and the generic-host `Self`
 > carve-out (measured on the phase-1 commit `cd9d609b`: the CALLER's `mkl()` ran; now the definer's).
@@ -3968,7 +3968,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > + fmt clean; chz **505/505 identical** on M:N and `--serial`; 231 examples check clean.
 
 > **✅ W7-51 landed 2026-08-13 — a non-literal default argument is compiled ONCE, in the module that
-> DECLARES it, instead of being cloned into every caller that omits it.** `docs/gaps.md`'s **W7-51**
+> DECLARES it, instead of being cloned into every caller that omits it.** `docs/contributing/gaps.md`'s **W7-51**
 > is CLOSED, and with it the last open row of the W7-50/51 pair. The row as filed named only a
 > pass-count symptom and asked for a repro first; two defects were then measured on `b1307258`.
 >
@@ -3991,7 +3991,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > residual (see that entry). Perf A/B vs `925dd0f7`: flat, 1.00–1.05×, since every default in `std/`,
 > `examples/` and `benches/` is a literal.
 >
-> **Five behaviour changes ship with it — all documented in `docs/syntax.md` §*Default + named
+> **Five behaviour changes ship with it — all documented in `docs/reference/syntax.md` §*Default + named
 > arguments*, none filed as a gap.** (1) `?` may not propagate OUT of a default (tailored message,
 > replacing the generic `'?' used in a function that returns int`) — and it also **widens**, since
 > `fn f(x: int!str = Ok(getr()?.len()))` was rejected on `b1307258` and now prints `4` / `-1`.
@@ -4017,10 +4017,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (its absence is why this shipped broken) — `b1307258` cannot even build it.
 >
 > Chezzi suite **505/505 identical** on M:N and `--serial` (504 before the post-review fix wave's
-> `Self`-default test). Full write-up: `docs/gaps.md` **W7-51**.
+> `Self`-default test). Full write-up: `docs/contributing/gaps.md` **W7-51**.
 
 > **✅ W7-50 landed 2026-08-13 — the two parser depth constants are RE-DERIVED from a measurement,
-> and the margin is an assertion instead of a prose claim.** `docs/gaps.md`'s **W7-50** is CLOSED.
+> and the margin is an assertion instead of a prose claim.** `docs/contributing/gaps.md`'s **W7-50** is CLOSED.
 > Half (b) shipped first: `editor::semantic_tokens` (and `cmd_ast`'s `{:#?}` walk) now hop onto
 > `crate::on_frontend_stack` like `diagnostics`/`hover`, so **no production parse runs on a small
 > stack any more** — which is what let half (a) happen at all. Half (a) is not a bump. An `--ignored`
@@ -4158,11 +4158,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > 2-node narrowing.
 >
 > Chezzi suite **494/494 identical** on M:N and `--serial` at the time (504/504 as of W7-51). Full
-> write-up: `docs/gaps.md` **W7-50**.
+> write-up: `docs/contributing/gaps.md` **W7-50**.
 
 > **✅ W7-55 landed 2026-08-12, redesigned 2026-08-13 — the `Eq` walk is now bounded by a CUMULATIVE
 > NODE BUDGET over the in-progress path (`EQ_BOUNDS_MAX_NODES = 50 000`), and the growth CLASSIFIER
-> that preceded it was deleted rather than patched a third time.** `docs/gaps.md`'s
+> that preceded it was deleted rather than patched a third time.** `docs/contributing/gaps.md`'s
 > `W7-55` is CLOSED (Task 4 of the four-task `Eq` residual close-out on `w7-52-55-eq-residuals`, and
 > the last one). The original defect: `EQ_BOUNDS_MAX_IN_PROGRESS = 160` was sized on the Rust
 > test-harness's AMBIENT stack, not production's already-1-GiB `on_frontend_stack` — an inversion —
@@ -4205,7 +4205,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > production path), so every one of the ~4000 Rust test-harness callers is on the SAME 1 GiB stack as
 > production, structurally rather than by convention. Per-call thread-spawn overhead is negligible:
 > measured, 4 000 scoped 1 GiB-stack spawns = 194.5 ms total (48.6 µs avg), against a
-> `cargo test --lib checker::` suite that runs in ~14 s. `docs/gaps.md` **W7-50**'s
+> `cargo test --lib checker::` suite that runs in ~14 s. `docs/contributing/gaps.md` **W7-50**'s
 > `editor::semantic_tokens` row is UNCHANGED (checked, not assumed): `semantic_overlay` calls
 > `lexer::tokenize`/`parser::parse` directly, never either wrapped checker entry point. **The exact
 > boundary of THAT landing, both directions, resource-appropriately:** `S0..S77999` (78 000 obligations) is the last
@@ -4221,7 +4221,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`#[ignore]`d, the reusable by-hand floor-measurement harness); updated:
 > `a_long_chain_of_conditional_eq_types_is_decided_not_waved_through` (past-cap case 180 → 79 000),
 > `the_budget_refusal_names_the_type_the_walk_started_from` (`S200` → `S78500`). Full write-up:
-> `docs/gaps.md` **W7-55**; session report: `.superpowers/sdd/w752-task-4-report.md`.
+> `docs/contributing/gaps.md` **W7-55**; session report: `.superpowers/sdd/w752-task-4-report.md`.
 >
 > **Third correction (2026-08-13, adversarial review) — the growth classifier is GONE.** Three
 > independent prosecutors attacked the branch; two of them defeated the classifier *in both
@@ -4264,11 +4264,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `on_frontend_stack_scoped` too — the doc block's "no smaller-stack caller left" claim was false and
 > is deleted. `cargo build --release` clean; `cargo clippy --all-targets -- -D warnings` clean;
 > `cargo test` **4290 passed / 0 failed** (was 4288; +2 new Rust test fns); `chezzi test tests/chz/`
-> **493/493 identical** on M:N and `--serial` (unchanged). Full write-up: `docs/gaps.md` **W7-55**'s
+> **493/493 identical** on M:N and `--serial` (unchanged). Full write-up: `docs/contributing/gaps.md` **W7-55**'s
 > "Same-day corrections" section; session report: `.superpowers/sdd/w752-task-4-report.md`.
 
 > **✅ W7-52 landed 2026-08-12 — a protocol-typed value satisfies a `[T: Eq]` bound too, agreeing with
-> the `==` it was already measured to agree with.** `docs/gaps.md`'s `W7-52` was first closed as a
+> the `==` it was already measured to agree with.** `docs/contributing/gaps.md`'s `W7-52` was first closed as a
 > pure VERDICT (comparing a protocol-typed value defers to its witness at runtime, exactly Go's
 > interface `==` — no code change, test-only). An independent review of that verdict found it
 > **under-scoped**: `fn generic_eq[T: Eq](a: T, b: T) -> bool: return a == b` fed the SAME
@@ -4302,10 +4302,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > assertions were tightened from `msg.contains("compare")` (which also matched the checker's own
 > unrelated "cannot compare" text) to `msg.contains("has no method 'compare'")`. `cargo clippy
 > --all-targets -D warnings` clean; `cargo test` **4283 passed / 0 failed**; `chezzi test tests/chz/`
-> **483/483 identical on M:N and `--serial`** (was 481). Full write-up: `docs/gaps.md` **W7-52**.
+> **483/483 identical on M:N and `--serial`** (was 481). Full write-up: `docs/contributing/gaps.md` **W7-52**.
 
 > **✅ W7-54 landed 2026-08-12 — a function value satisfies `Eq`, so `==`, `.eq()` and a `[T: Eq]`
-> bound give one answer.** `docs/gaps.md`'s `W7-54` is CLOSED (Task 1 of the four-task `Eq` residual
+> bound give one answer.** `docs/contributing/gaps.md`'s `W7-54` is CLOSED (Task 1 of the four-task `Eq` residual
 > close-out on `w7-52-55-eq-residuals`). Chezzi's `==` on a function value already matched CPython
 > exactly (identity: two loads of one `fn`/nested-`fn` def equal, two calls to a factory or two
 > closures with equal captures unequal) — this was a **checker gap, not a runtime one**. `Ty::Func`
@@ -4327,7 +4327,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the same `"func"` kind rather than minting a second one; the matrix sweep stayed green again. Also
 > from the same review: the `Box[T]` fixture's `eq` body now dispatches a real `self.val == o.val`
 > (was a `return true` stub that couldn't tell "dispatched" from "structurally equal anyway"), and a
-> stale `docs/gaps.md`/`PROGRESS.md`/`proto.rs` comment trail was corrected (a leftover "does not
+> stale `docs/contributing/gaps.md`/`PROGRESS.md`/`proto.rs` comment trail was corrected (a leftover "does not
 > satisfy Eq" exclusion note, a `:285` cite that had drifted to `:310`, and this row's own now-stale
 > residual mention further down this file). **Tests:** `tests/chz/spec/eq_func_test.chz` (10, gated
 > serial==M:N — 6 from the original fix + 4 builtin-fn/Box-strengthening rows from the follow-up), plus
@@ -4337,10 +4337,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `entry_ok` for the function-payload `Box[T]` row (now pins the fix, not the bug). Every new/changed
 > assertion measured failing on the pre-change binary first. `cargo test`: 4048 lib + integration, 0
 > failed; clippy clean; `chezzi test tests/chz/` 476/476 on both engines (was 466 before this row, 472
-> after the first pass). Full write-up: `docs/gaps.md` **W7-54**.
+> after the first pass). Full write-up: `docs/contributing/gaps.md` **W7-54**.
 
 > **✅ W7-53 landed 2026-08-12 — a generic body that compares must declare the bound, matching both
-> owning ancestors.** `docs/gaps.md`'s `W7-53` is CLOSED (Task 3 of the four-task `Eq` residual
+> owning ancestors.** `docs/contributing/gaps.md`'s `W7-53` is CLOSED (Task 3 of the four-task `Eq` residual
 > close-out on `w7-52-55-eq-residuals`, the largest of the four). Three measured instances — the `==`
 > operator, `List.contains`, and a `Set(xs)` built inside a `[T: Hashable]` body — were `ok: no type
 > errors` then `runtime error: struct 'Tag' has no method 'compare'` on both engines, because the
@@ -4427,10 +4427,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > structural equality, so an assertion can only pass if dispatch went the right way. `cargo test`
 > **4284 passed / 0 failed**; `chezzi test tests/chz/` **493/493 identical on M:N and `--serial`**;
 > `cargo clippy --all-targets -D warnings` clean.
-> Full write-up: `docs/gaps.md` **W7-53**.
+> Full write-up: `docs/contributing/gaps.md` **W7-53**.
 
 > **✅ W7-57 landed 2026-08-12 — a run-wide `os.exit` reaches every party, not just the polling ones.**
-> `docs/gaps.md`'s `W7-57` is CLOSED, and with it the whole `W7-47` → `W7-56` → `W7-58` → `W7-57`
+> `docs/contributing/gaps.md`'s `W7-57` is CLOSED, and with it the whole `W7-47` → `W7-56` → `W7-58` → `W7-57`
 > chain. **The row as filed understated the bug**: it said "none is a correctness hazard — the exit
 > code is right in every case, only its latency is wrong", and both halves were false. Measured
 > against Go 1.26.5:
@@ -4475,7 +4475,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > sibling fault (5013 ms), `os.exit` (5015 ms) and `--timeout=500` (5008 ms, **test still PASSED**), so
 > it is not exit-specific; it is the price of offloading these calls so they never pin a worker.
 > Reaching it needs a signal, an fd close, or `process::exit`, and `stream.rs` refuses the last. So
-> instead: `docs/stdlib.md` gained a shared *"Blocking calls cannot be interrupted"* section (the
+> instead: `docs/reference/stdlib.md` gained a shared *"Blocking calls cannot be interrupted"* section (the
 > `std.io` file seams, every `std.fs` syscall, every `std.process` runner, every `std.request` call,
 > linked from all four module sections **and** from `std.cancel`, which advertises "cooperative
 > cancellation & timeouts" and would otherwise mislead), and **`chezzi test --timeout` stopped
@@ -4527,7 +4527,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `TEST_UUID_LOCK` + `clear_seed()` so the unseeded suite stops racing the seeded golden.
 
 > **✅ W7-58 landed 2026-08-12 — a nursery owner is a counted party AND a judge, so a run stuck across
-> the nursery/executor boundary faults instead of hanging.** `docs/gaps.md`'s `W7-58` is CLOSED, and
+> the nursery/executor boundary faults instead of hanging.** `docs/contributing/gaps.md`'s `W7-58` is CLOSED, and
 > with it the last of the `W7-47`/`W7-56` chain. Measured: a job blocked forever on one channel beside a
 > `spawn`ed task blocked forever on another went **rc=124 at 20 s → rc=1 at 7 ms**.
 >
@@ -4564,7 +4564,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > answer too, not a gap.
 
 > **✅ W7-56 landed 2026-08-12 — an eager `Executor` job can feed a nursery task; the nursery no longer
-> declares a live program deadlocked.** `docs/gaps.md`'s `W7-56` is CLOSED. Measured, M:N: **`deadlock`,
+> declares a live program deadlocked.** `docs/contributing/gaps.md`'s `W7-56` is CLOSED. Measured, M:N: **`deadlock`,
 > rc=1 at 7 ms (the feeder never ran) → `job sending` / `child got 7` / `after nursery`, rc=0 at 58 ms**,
 > matching Go.
 >
@@ -4588,7 +4588,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > out of `parity_tests.rs`/`tests/chz/`.
 
 > **✅ W7-47 landed 2026-08-12 — `os.exit` from an eager `Executor` job halts the process while `main`
-> is blocked, instead of sitting in a slot nobody reads.** `docs/gaps.md`'s `W7-47` is CLOSED. Measured
+> is blocked, instead of sitting in a slot nobody reads.** `docs/contributing/gaps.md`'s `W7-47` is CLOSED. Measured
 > on the release binary under `timeout 12`: a socket-blocked `main` went **rc=124 (hang) → rc=3**, and
 > the `Channel` variant **rc=1 (`recv on an empty channel: deadlock`) → rc=3** — so the socket was only
 > the *reachable* example, not the trigger. Go is rc=3 on both. `--serial` is bit-for-bit unchanged (it
@@ -4624,7 +4624,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > *code* is right in every case, only its latency is wrong.
 
 > **✅ W7-48 landed 2026-08-12 — a `?`/`?.` inside a `spawn:` block is a compile error, so the silent
-> swallow is gone.** `docs/gaps.md`'s `W7-48` is CLOSED. `SpawnTarget::Block` carried the enclosing
+> swallow is gone.** `docs/contributing/gaps.md`'s `W7-48` is CLOSED. `SpawnTarget::Block` carried the enclosing
 > frame's `current_ret`/`in_fn_body`/`recover_depth` across the task boundary, so `spawn: v := g()?`
 > inside `fn main() -> Result[int, str]` was `chezzi check` → *ok: no type errors*, and at runtime the
 > `Err` early-returned out of the **task**, where the nursery discards it by design (`W7-46`) —
@@ -4648,12 +4648,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `W7-43` to assert the buggy acceptance) — rewritten by moving the `?.` into the `parallel:` body
 > (parent frame), asserted `Ok(20)` unchanged, green on both engines. Six `ok()` neighbours pinned
 > (`parallel:` body, nested `fn`, closure, `defer:`/`recover:` inside the task, `spawn f(g()?)`), plus
-> two regression tests from the review. Docs in the same commit: `docs/gaps.md`, `docs/syntax.md`
+> two regression tests from the review. Docs in the same commit: `docs/contributing/gaps.md`, `docs/reference/syntax.md`
 > (the `spawn:`-escape bullet list + the `?.` context rules).
 
 > **✅ W7-41 + W7-45 landed 2026-08-11 — `Eq` satisfaction is now exactly what `==` accepts, and a
 > conditional `eq` bound is enforced by the operator, not only by the method spelling.** Two linked
-> soundness rows in `docs/gaps.md` are CLOSED. `struct Box[T]` with
+> soundness rows in `docs/contributing/gaps.md` are CLOSED. `struct Box[T]` with
 > `fn eq(self, other: Self) -> bool where T: Comparable` over a non-`Comparable` `Tag` used to be
 > `chezzi check` → *ok: no type errors*, `chezzi run` → `runtime error (line 7, col 12): struct 'Tag'
 > has no 'compare' method` — the `checker-superset-of-compiler` class, which two-engine parity is
@@ -4720,7 +4720,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `tests/chz/spec/eq_protocol_test.chz` and `eq_protocol_containers_test.chz`, including the positive
 > control that a *satisfied* conditional `eq` still dispatches under a forced hash collision.
 >
-> **Residuals** — `docs/gaps.md` **W7-52** (`Ty::Protocol`: a fail-open hole in the `Eq` walk that
+> **Residuals** — `docs/contributing/gaps.md` **W7-52** (`Ty::Protocol`: a fail-open hole in the `Eq` walk that
 > cannot simply be refused, because `Ty::result(inner)` is literally
 > `Ty::Result(inner, Ty::Protocol("Error"))`, plus the existential-operand leak past
 > `may_be_equal`'s `(Protocol, Protocol)` short-circuit), **since RESOLVED 2026-08-12 as ancestor-
@@ -4855,7 +4855,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `a_spliced_default_*` + the residual backstop), each verified **failing on a binary built from
 > `19f7696a`** and passing now, and `tests/chz/spec/default_splice_keys_test.chz` (4 `test fn`, both
 > engines) for the two guards' over-fire modes. Bench: flat-or-faster everywhere except `map`, whose
-> delta a padding control shows is **alignment, not size** — recorded in `docs/benchmarks.md` and left
+> delta a padding control shows is **alignment, not size** — recorded in `docs/contributing/benchmarks.md` and left
 > to the perf track. Two pre-existing findings from the same dig are filed, not fixed: **`W7-50`**
 > (`parser::MAX_DEPTH = 64` is a real edge — 65 passes, 66 aborts on a ~2 MiB thread — and two LSP
 > entry points reach the parser without the `on_frontend_stack` wrapper) and **`W7-51`** (third-level
@@ -4941,7 +4941,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`v: Any = "s"`) is the escape and stays legal. Evidence is a **36-program before/after table from the
 > pre- and post-change release binaries** (23 rows keep their verdict *and* their byte-identical output;
 > all 13 changes are module-slot retypes) plus a `chezzi check` sweep of all 422 shipped `.chz` — **0**
-> hits. `docs/syntax.md` documents the scope asymmetry, the import carve-out and the re-annotate escape;
+> hits. `docs/reference/syntax.md` documents the scope asymmetry, the import carve-out and the re-annotate escape;
 > destructuring and the forward-read-of-a-hoisted-import were filed as `W7-42r` and are **now closed**
 > (2026-08-14, see the `W7-42r` entry below).
 >
@@ -4967,9 +4967,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `atomic.Int64`) only from a client whose full round-trip returned `echo:ping`, read after the nursery
 > joins — default engine prints the real `50`, `--serial` prints a truthful `0`, all rc=0. The three
 > `parity_tests.rs` tests that asserted the vacuous lines now assert the real counts (`0` / `all served:
-> 100`). `docs/concurrency.md` states the two-channel contract once, with the measured Go output.
+> 100`). `docs/reference/concurrency.md` states the two-channel contract once, with the measured Go output.
 
-> **✅ W7-44a landed 2026-08-10 — `docs/stdlib.md` now names the CSPRNG surface's Linux-only wiring,
+> **✅ W7-44a landed 2026-08-10 — `docs/reference/stdlib.md` now names the CSPRNG surface's Linux-only wiring,
 > and warns `uuid.v4()` is not cryptographically secure.** The `std.crypto` CSPRNG paragraph gets a
 > platform caveat: Linux `getrandom(2)` is the only wired entropy source, and `secure_bytes`/`token_hex`
 > fail closed on macOS/Windows with the exact message `secure_bytes: no secure entropy source on this
@@ -4994,7 +4994,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > Nine independent external testers wrote programs against Chezzi. **Six findings re-verified on HEAD
 > `2a27697e`; all six reproduce.** Two are fixed here, the rest filed open, plus three found while
-> doing the work — ledger rows + full write-ups in `docs/gaps.md` **W7-39..W7-46**.
+> doing the work — ledger rows + full write-ups in `docs/contributing/gaps.md` **W7-39..W7-46**.
 >
 > **Two of the three fixes first written were wrong, with the full 4164-test suite green for both.**
 > `W7-41`'s was reverted whole; `W7-40`'s was narrowed. Adversarial review caught both by running the
@@ -5057,18 +5057,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `net.connect` still blocks in place on every engine (bounded at 10 s, so `W7-40`'s R2 family an order
 > of magnitude less severe — deliberately out of scope), `join_eager_jobs` is an untimed condvar wait
 > (ignores cancel and `--timeout`), and a bare top-level `spawn:` does not start until end-of-main where
-> Go's `go func()` starts immediately (check `docs/concurrency.md` before filing that as a defect).
+> Go's `go func()` starts immediately (check `docs/reference/concurrency.md` before filing that as a defect).
 >
 > **The batch's theme is this file's oldest one, arriving from outside:** all three findings are *a rule
 > that held on some arms of an N-way set* — one nursery seam of three, four socket ops of five, one
 > operator of five. Wave 6's meta-finding is still the highest-yield lever, and outsiders hit three more
 > instances of it without knowing it had a name.
 >
-> **Docs:** `docs/gaps.md` (eight `W7-` rows + three smaller-item rows and their write-ups; §Net
+> **Docs:** `docs/contributing/gaps.md` (eight `W7-` rows + three smaller-item rows and their write-ups; §Net
 > rewritten to the narrowed rule, with the wave-5 residual's "only known serial≠M:N divergence"
 > correction left STANDING — an earlier draft of both claimed the divergence was gone, written against
-> the reverted attempt), `docs/concurrency.md` (`shutdown_now()` row + a measured Python/Go block +
-> "what detached means, precisely" under A2), `docs/stdlib.md`, `docs/syntax.md`.
+> the reverted attempt), `docs/reference/concurrency.md` (`shutdown_now()` row + a measured Python/Go block +
+> "what detached means, precisely" under A2), `docs/reference/stdlib.md`, `docs/reference/syntax.md`.
 
 > # ✅ M24 COMPLETE — a protocol's STATIC requirement is callable through a generic bound (2026-08-10)
 >
@@ -5090,7 +5090,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > print(reset(Counter(1)).n)      # 7
 > ```
 >
-> **What shipped — witness passing, the `docs/future.md §3a1` ruling, built.** A type parameter whose
+> **What shipped — witness passing, the `docs/design/roadmap.md §3a1` ruling, built.** A type parameter whose
 > bounds carry a static requirement **and whose body needs it** gets a **hidden trailing parameter**
 > holding the concrete type's runtime identity key. `T.method(...)` lowers to a new
 > `Op::CallStaticDyn`, which pops that key and runs the same `Vm::do_static_call` as an ordinary
@@ -5141,7 +5141,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Closes `Convert[S]`'s last slice.** `fn make[T: Convert[int]](seed: T, n: int) -> T: return
 > T.convert(n)` runs. Slice 3 was deferred 2026-07-07 on the premise that a *concrete-pinned checker
 > rewrite* delivers nothing under erased generics — true of that model, and exactly why the answer was
-> witness passing instead. `docs/future.md` items 13 and 15 are now closed; item 14 (`cast[T]`) stays
+> witness passing instead. `docs/design/roadmap.md` items 13 and 15 are now closed; item 14 (`cast[T]`) stays
 > closed for its own reason (no consumer).
 >
 > **The trap this milestone paid for three times — a span used as a cross-half table key must not
@@ -5156,7 +5156,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > restarting at column 1, so their two witness calls shared a key and both printed the last one's
 > type.) The key is now the **callee token**, and the anchor is **gone**: a fragment was re-lexed with
 > the literal's absolute line AND column (`Lexer::base_col` — superseded 2026-08-11 by the per-literal
-> `PosMap`, `docs/gaps.md` **M24-6**), so its own span is a real source position, a fragment error
+> `PosMap`, `docs/contributing/gaps.md` **M24-6**), so its own span is a real source position, a fragment error
 > points at the expression exactly as CPython's f-string diagnostics do, and two call sites can no
 > longer alias. No span is mutated and nothing is re-anchored, so the next instance is
 > unrepresentable rather than merely fixed.
@@ -5164,10 +5164,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Cost: measured, nothing moved.** `hyperfine` 20 runs, branch vs a pre-milestone binary built from
 > `b6c17369` in a separate `CARGO_TARGET_DIR`: `fib` 1.00 ±0.03, `loop` 1.02 ±0.07, `poly_method`
 > 1.00 ±0.04, `primes` 1.03 ±0.06 against a 1.00 ±0.06 noise floor (baseline vs a copy of itself). No
-> new number in `docs/benchmarks.md` — the opcode is on a cold path and the charge is off unless a
+> new number in `docs/contributing/benchmarks.md` — the opcode is on a cold path and the charge is off unless a
 > body uses it.
 >
-> **Residuals, filed honestly** as `docs/gaps.md` **M24-1..M24-5**: witness **over-charge** and
+> **Residuals, filed honestly** as `docs/contributing/gaps.md` **M24-1..M24-5**: witness **over-charge** and
 > **unused captures** (one `str` per witness per nested body). **M24-2 is now FIXED** (2026-08-14):
 > a nested body keeps `$w:T` only when it can REACH a witness — it names `T`, or it makes a call that
 > could forward one. The predicate reads the free-name walk that capture site already ran (no second
@@ -5297,7 +5297,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > key and printed the last one's type — the *same silent wrong value*, one line further in. The offset
 > now HOLDS past a newline, which is what makes the position strictly increasing and the aliasing
 > unrepresentable; the price was a column that could exceed its physical line inside a multi-line
-> literal, filed as `docs/gaps.md` **M24-6** with the reason that direction was chosen (an
+> literal, filed as `docs/contributing/gaps.md` **M24-6** with the reason that direction was chosen (an
 > out-of-range column reads as degraded; a shifted LINE accuses innocent code). **That price was paid
 > off on 2026-08-11**: the per-literal `PosMap` makes every fragment position physical, so there is
 > no offset left to hold. (B) the shadow rule
@@ -5305,10 +5305,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > lines up resolved to the parameter, and a module global did the same — so `Checker::infer_ident`
 > asks the one predicate too.
 >
-> **Docs:** `docs/syntax.md §7a` ("Static protocol requirements — calling `T.method(...)` through a
-> bound", incl. the decline table), `docs/spec.md` (the M24 row + the `Convert[S]` note),
-> `docs/future.md` (items 13/15 closed, §3a1's ruling marked built + the fn-value wall added to "what
-> stays impossible"), `docs/gaps.md` (M24-1..4), `docs/grammar.bnf` (comment only — `T.default()`
+> **Docs:** `docs/reference/syntax.md §7a` ("Static protocol requirements — calling `T.method(...)` through a
+> bound", incl. the decline table), `docs/reference/spec.md` (the M24 row + the `Convert[S]` note),
+> `docs/design/roadmap.md` (items 13/15 closed, §3a1's ruling marked built + the fn-value wall added to "what
+> stays impossible"), `docs/contributing/gaps.md` (M24-1..4), `docs/reference/grammar.bnf` (comment only — `T.default()`
 > already parsed as the `Type.method(args)` postfix form; the comment now says the head may also be a
 > type PARAMETER). Running proof: `tests/chz/spec/static_witness_test.chz` (dual-engine gated) and the
 > golden `examples/static_witness.chz`.
@@ -5318,7 +5318,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `assert_native_protocol_shape_matches` (the debug-only guard that `debug_assert_eq!`s each reserved
 > protocol's `std/prelude.chz` decl against its `prebuilt_protocols` Rust seed) carried 20 of the 21
 > names. `PathLike` was mirrored in the prelude but absent from the list, so its shape was the one that
-> could drift with nothing noticing — pre-existing since W7-8, surfaced by M23. `docs/gaps.md` §L4b is
+> could drift with nothing noticing — pre-existing since W7-8, surfaced by M23. `docs/contributing/gaps.md` §L4b is
 > retired.
 >
 > **The harvest running was the deliverable, not the list entry.** `PathLike`'s decl round-trips
@@ -5331,7 +5331,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > # ✅ M23 follow-up — the `Comparable: Eq` migration hint now fires on the BOUND path too (2026-08-08)
 >
 > **SUPERSEDED 2026-08-11 — the rule this diagnostic explained is GONE, and so is the diagnostic's
-> struct/enum arm (`docs/gaps.md` W7-41).** A struct/enum now satisfies `Eq` structurally, so a
+> struct/enum arm (`docs/contributing/gaps.md` W7-41).** A struct/enum now satisfies `Eq` structurally, so a
 > `compare`-only type satisfies `Comparable` and nothing rejects it: measured on the two binaries,
 > `struct Ver` with `compare` and no `eq` was *type error: type Ver does not satisfy Eq (missing method
 > 'eq'): `Comparable` embeds `Eq`, so a type defining `compare` must define `eq` too* twice (once for
@@ -5400,18 +5400,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   so `a: Any = Box(1)` vs `b: Any = Box("x")` dispatches `Box`'s `eq` across instantiations. Verified
 >   against the owning ancestor: CPython's identical program raises `TypeError` out of `__eq__`, and
 >   Chezzi's is a normal `recover:`-catchable fault. Documented as the erasure ceiling
->   (`docs/syntax.md` §7b) with a test that pins the recoverable-fault guarantee.
+>   (`docs/reference/syntax.md` §7b) with a test that pins the recoverable-fault guarantee.
 > * **MEDIUM — the newtype-`Eq` docs contradicted the code.** Ruled for the CODE: a **numeric** newtype
 >   satisfies `Eq` intrinsically via the underlying's native equality, because `Comparable` embeds `Eq`
 >   (M23) and a numeric newtype satisfies `Comparable` intrinsically — denying it would make
 >   `fn sorted[T: Comparable]` unsatisfiable for `newtype Meters = float`, a regression of M21. No
->   newtype ever satisfies `Eq` through a METHOD. `docs/spec.md` ×2 and `PROGRESS.md` ×2 corrected to
->   match `docs/syntax.md` and the code.
-> * **LOW —** "the eight other benches" is seven others (`docs/benchmarks.md`'s table is 8 rows
+>   newtype ever satisfies `Eq` through a METHOD. `docs/reference/spec.md` ×2 and `PROGRESS.md` ×2 corrected to
+>   match `docs/reference/syntax.md` and the code.
+> * **LOW —** "the eight other benches" is seven others (`docs/contributing/benchmarks.md`'s table is 8 rows
 >   *including* `map`).
 >
 > **Cost: free.** Every bench flat-to-faster (`map` −0.4%, `struct` +0.1%, `primes` −1.6%; full table
-> in [`benchmarks.md`](docs/benchmarks.md)) — both hot additions are gated on `Vm::eq_may_reenter`.
+> in [`benchmarks.md`](docs/contributing/benchmarks.md)) — both hot additions are gated on `Vm::eq_may_reenter`.
 > The first cut did regress **`struct` by +3.3%**, a bench with no `==` in it: the new container-arm
 > closures had bloated `values_equal_guarded` enough to hurt the neighbouring codegen in `arith.rs`.
 > `#[inline(never)]` on `with_elem_roots` restored it.
@@ -5454,7 +5454,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   check-time error, never a silently wrong `==`.
 > * **`match` never dispatches `eq`** — literal patterns are `int`/`str`/`bool` only, and a
 >   struct/enum arm compares `variant_id` and binds fields.
-> * **`docs/gaps.md` §B2 landed with it:** `==`/`!=` between provably-disjoint types is now a compile
+> * **`docs/contributing/gaps.md` §B2 landed with it:** `==`/`!=` between provably-disjoint types is now a compile
 >   error, decided by **`Checker::may_be_equal`** (CO-INHABITABILITY, not assignability), with the
 >   `Any` existential as the escape hatch — a deliberate divergence from Python's runtime `False`,
 >   matching Go, Rust and mypy `--strict-equality`. §L5's "Missing: `Eq`" is retired.
@@ -5469,15 +5469,15 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > via a user `eq` — which is why a type defining `eq` is a rejected `Atomic[T]` payload.
 > (5) A **newtype may not declare `eq` at all** — on any underlying, numeric or not, and at any operand
 > signature: its `==` unwraps to the underlying's native equality and reaches no user method, so the
-> name is a compile error at the declaration (W6-3d's numeric-only gate widened; `docs/gaps.md` §L5,
+> name is a compile error at the declaration (W6-3d's numeric-only gate widened; `docs/contributing/gaps.md` §L5,
 > closed 2026-08-08). Use a `struct` if you need your own equality.
 >
-> **Cost.** `map` **+4.1%**, the seven other benches flat-to-faster (`docs/benchmarks.md`); the price
+> **Cost.** `map` **+4.1%**, the seven other benches flat-to-faster (`docs/contributing/benchmarks.md`); the price
 > of `values_equal_guarded`/`*_slot` becoming `&mut self` so a probe can call user code.
 >
-> **Docs:** `docs/syntax.md §7b` (the `Eq` surface + the ceilings), `docs/spec.md` (M23 row, the
-> intrinsic-grant table, the newtype note), `docs/stdlib.md`, `docs/concurrency.md` (`cas`),
-> `docs/gaps.md` §B2/§L5, `docs/benchmarks.md`. The four slice logs below are the build record.
+> **Docs:** `docs/reference/syntax.md §7b` (the `Eq` surface + the ceilings), `docs/reference/spec.md` (M23 row, the
+> intrinsic-grant table, the newtype note), `docs/reference/stdlib.md`, `docs/reference/concurrency.md` (`cas`),
+> `docs/contributing/gaps.md` §B2/§L5, `docs/contributing/benchmarks.md`. The four slice logs below are the build record.
 
 > **✅ M23 slice 4 landed 2026-08-08 — a user `eq` now reaches EVERY equality site, not just the
 > operator.** Slice 3 knowingly shipped an inconsistency: `x == y` could be `true` while `y in xs` was
@@ -5527,13 +5527,13 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > non-reentrant mutex; safe because slice 1 already made a user-`eq` type an illegal `Atomic[T]` payload,
 > with a `ponytail:` comment naming the upgrade path. (5) The `hash`/`eq` contract stays the
 > implementor's: a probe can only scan `candidates(hash(key))`, so an `eq` coarser than its type's `hash`
-> is structurally *unreachable* — documented in `docs/syntax.md`, not enforced (Rust and Python don't
+> is structurally *unreachable* — documented in `docs/reference/syntax.md`, not enforced (Rust and Python don't
 > either).
 >
 > Tests: `tests/chz/spec/eq_protocol_containers_test.chz` (13 `test fn` — 11 of them FAIL on `035de7ee`,
 > 2 are controls) + the 2 Rust gc-stress cases. Full suite 3897 lib + integration green, clippy clean,
 > `chezzi test tests/chz/` 352/352 identical on both engines. Perf: `map` **+4.1% SLOWER**, the seven other benches
-> flat-to-faster (`docs/benchmarks.md`).
+> flat-to-faster (`docs/contributing/benchmarks.md`).
 
 > **✅ M23 slice 3 follow-up 2026-08-08 — the `==` dispatch is now GATED on `eq`'s signature; a
 > malformed `eq` is a check error, never a silently wrong `==`.** Review found the operator dispatched
@@ -5555,7 +5555,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > syntactic twin of the checker's split, so the two agree by construction on any program that
 > type-checks. Side effect: the string hash is off the MISS path of every struct/enum `==` (including
 > every `Option`/`Result` compare) — measured on a 4M-compare miss micro-bench, see
-> `docs/benchmarks.md`. The operator's `eq() must return bool` fault is now a backstop no checked
+> `docs/contributing/benchmarks.md`. The operator's `eq() must return bool` fault is now a backstop no checked
 > program can reach (its Chezzi test moved to `checker::tests::malformed_eq_rejected_at_decl`).
 
 > **✅ M23 slice 3 landed 2026-08-08 — `==` / `!=` now DISPATCH to a user `eq`; the milestone's bug is
@@ -5608,29 +5608,29 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > routed through `compare`/`eq` in this slice, so no example's printed output could move. **NOT in
 > this slice:** `==`'s dispatch to a user `eq` — still a later slice.
 
-> **✅ M23 slice 1 landed 2026-08-08 — the `Eq` protocol exists in the checker, and `docs/gaps.md` §B2 is closed.** `Eq` (`eq(self, other: Self) -> bool`) is now a reserved prebuilt protocol wired at all four parallel sites (`is_reserved_protocol`, `prebuilt_protocols`, `std/prelude.chz`, the drift-guard list): the four scalars satisfy it intrinsically (`bool` included — `==` is defined on every scalar, unlike ordering), a struct/enum satisfies it structurally, and a newtype never through a **method** (its `==` unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is now rejected at the decl site alongside `add`/`compare` — W6-3d; a *numeric* newtype does satisfy `Eq` intrinsically via that native equality, as `Comparable` embeds `Eq`). Five `INTRINSIC_PROTO_METHODS` rows + the `("eq", 1)` arm in `Vm::intrinsic_proto_method` (routing `values_equal_guarded`, the operator's own worker — so `x.eq(y)` can never disagree with `x == y`, and a cyclic operand raises the same depth fault). **§B2:** `==`/`!=` between provably-disjoint types is now a compile error — a deliberate, documented divergence from Python's runtime `False`, with the `Any` existential as the dynamic escape hatch (widening **one** side is enough). "Provably disjoint" is decided by **`Checker::may_be_equal`** — CO-INHABITABILITY ("can these two ever be the same value?"), *not* assignability, which answers the stricter STORAGE question and carries container invariance + a sendability witness that equality has no use for. So a protocol existential vs a conforming concrete (`Shape == Sq`, `Error == MyErr`, `Any == int`), **two** different existentials (`Shape == Error` — one type can conform to both), an existential nested in an invariant container or concurrency handle (`List[Error] == List[MyErr]`, `Map`/`Box`/tuple/`Option`/`Shared` alike), and any erased `Ty::Param` bare or nested **at any depth** — including inside the native generic handles (`Channel[T] == Channel[int]`, whose `==` is the runtime's identity shortcut) and inside a parameterized protocol's own arguments (`Container[T] == Bag[int]`, where the args are erased to `Unknown` so the METHOD SET still decides) — all stay legal; a **non**-conforming concrete (`Shape == str`, `List[Shape] == List[str]`, `Container[T] == int`), a handle over disjoint elements (`Channel[int] == Channel[str]`) and a `where T: <scalar>`-pinned param still reject. The runtime's cross-type arms (mixed `int`/`float`, `bytes`/`bytearray`) live INSIDE that recursion, so `[1.0] == [1]` compiles and prints `true` like CPython. Also: an `Atomic[T]` payload may not define `eq` (`cas` compares structurally and could never route through it). **NOT in this slice:** the `Comparable: Eq` embed and `==`'s dispatch to a user `eq` — both later slices. `docs/gaps.md` **§B2**, **§L5**.
+> **✅ M23 slice 1 landed 2026-08-08 — the `Eq` protocol exists in the checker, and `docs/contributing/gaps.md` §B2 is closed.** `Eq` (`eq(self, other: Self) -> bool`) is now a reserved prebuilt protocol wired at all four parallel sites (`is_reserved_protocol`, `prebuilt_protocols`, `std/prelude.chz`, the drift-guard list): the four scalars satisfy it intrinsically (`bool` included — `==` is defined on every scalar, unlike ordering), a struct/enum satisfies it structurally, and a newtype never through a **method** (its `==` unwraps to the underlying's native equality, so a numeric newtype declaring `eq` is now rejected at the decl site alongside `add`/`compare` — W6-3d; a *numeric* newtype does satisfy `Eq` intrinsically via that native equality, as `Comparable` embeds `Eq`). Five `INTRINSIC_PROTO_METHODS` rows + the `("eq", 1)` arm in `Vm::intrinsic_proto_method` (routing `values_equal_guarded`, the operator's own worker — so `x.eq(y)` can never disagree with `x == y`, and a cyclic operand raises the same depth fault). **§B2:** `==`/`!=` between provably-disjoint types is now a compile error — a deliberate, documented divergence from Python's runtime `False`, with the `Any` existential as the dynamic escape hatch (widening **one** side is enough). "Provably disjoint" is decided by **`Checker::may_be_equal`** — CO-INHABITABILITY ("can these two ever be the same value?"), *not* assignability, which answers the stricter STORAGE question and carries container invariance + a sendability witness that equality has no use for. So a protocol existential vs a conforming concrete (`Shape == Sq`, `Error == MyErr`, `Any == int`), **two** different existentials (`Shape == Error` — one type can conform to both), an existential nested in an invariant container or concurrency handle (`List[Error] == List[MyErr]`, `Map`/`Box`/tuple/`Option`/`Shared` alike), and any erased `Ty::Param` bare or nested **at any depth** — including inside the native generic handles (`Channel[T] == Channel[int]`, whose `==` is the runtime's identity shortcut) and inside a parameterized protocol's own arguments (`Container[T] == Bag[int]`, where the args are erased to `Unknown` so the METHOD SET still decides) — all stay legal; a **non**-conforming concrete (`Shape == str`, `List[Shape] == List[str]`, `Container[T] == int`), a handle over disjoint elements (`Channel[int] == Channel[str]`) and a `where T: <scalar>`-pinned param still reject. The runtime's cross-type arms (mixed `int`/`float`, `bytes`/`bytearray`) live INSIDE that recursion, so `[1.0] == [1]` compiles and prints `true` like CPython. Also: an `Atomic[T]` payload may not define `eq` (`cas` compares structurally and could never route through it). **NOT in this slice:** the `Comparable: Eq` embed and `==`'s dispatch to a user `eq` — both later slices. `docs/contributing/gaps.md` **§B2**, **§L5**.
 
-> **✅ Float `%` landed 2026-08-08 — the last unreached float operator in the CPython differential generator, closing `docs/gaps.md` §W7-37 entirely.** Chezzi's float `%` is `fmod` (sign of the DIVIDEND, total — matches Rust/Go, diverges deliberately from CPython's floored, raising `%`); `gen_float`'s op list gained `BinOp::Mod` beside `Div` (no non-zero-divisor guard) and mixed int↔float `%` came for free via the shared `op` variable; the Python shim's new `_chz_fmod` absorbs both the sign rule and totality (zero divisor / `inf` dividend → `NaN`). 5000-seed `difffuzz --floats` sweep + `fuzz_full_heavy` (0..3000): 0 findings. `docs/gaps.md` **§W7-37**.
+> **✅ Float `%` landed 2026-08-08 — the last unreached float operator in the CPython differential generator, closing `docs/contributing/gaps.md` §W7-37 entirely.** Chezzi's float `%` is `fmod` (sign of the DIVIDEND, total — matches Rust/Go, diverges deliberately from CPython's floored, raising `%`); `gen_float`'s op list gained `BinOp::Mod` beside `Div` (no non-zero-divisor guard) and mixed int↔float `%` came for free via the shared `op` variable; the Python shim's new `_chz_fmod` absorbs both the sign rule and totality (zero divisor / `inf` dividend → `NaN`). 5000-seed `difffuzz --floats` sweep + `fuzz_full_heavy` (0..3000): 0 findings. `docs/contributing/gaps.md` **§W7-37**.
 
-> **✅ W7-37's LAST deferred item landed 2026-08-07 — the CPython differential generator mixes int↔float arithmetic and comparison.** The filed premise ("needs a coercion model in the IR") was WRONG: `Expr::Bin`'s `ty` is the result type, both emitters already render a mixed node correctly with zero IR change. `gen_float`'s composite arm and `gen_bool`'s float-comparison arm each mix in an int operand via a new shared `gen_int_float_pair` helper (0.3 chance, side randomized so both `int op float` and `float op int` generate), exact under `MAX_BOUND < 2^53`; the mixed zero-divisor chain needed nothing new (`_chz_fdiv`'s `b == 0.0` already matches an int `0`). §W7-37 is now fully closed — only float `%` remains, not filed as deferred. 5000-seed `difffuzz --floats` sweep + `fuzz_full_heavy` (0..3000): 0 findings. `docs/gaps.md` **§W7-37**.
+> **✅ W7-37's LAST deferred item landed 2026-08-07 — the CPython differential generator mixes int↔float arithmetic and comparison.** The filed premise ("needs a coercion model in the IR") was WRONG: `Expr::Bin`'s `ty` is the result type, both emitters already render a mixed node correctly with zero IR change. `gen_float`'s composite arm and `gen_bool`'s float-comparison arm each mix in an int operand via a new shared `gen_int_float_pair` helper (0.3 chance, side randomized so both `int op float` and `float op int` generate), exact under `MAX_BOUND < 2^53`; the mixed zero-divisor chain needed nothing new (`_chz_fdiv`'s `b == 0.0` already matches an int `0`). §W7-37 is now fully closed — only float `%` remains, not filed as deferred. 5000-seed `difffuzz --floats` sweep + `fuzz_full_heavy` (0..3000): 0 findings. `docs/contributing/gaps.md` **§W7-37**.
 
-> **✅ W7-37 deferred item (2) landed 2026-08-07 — the CPython differential generator now divides floats.** `gen_float` emits `BinOp::Div` with NO non-zero-divisor guard (inverted from `gen_int`'s discipline: float `/` is total IEEE-754, `docs/spec.md:472`, so a zero divisor is a legitimate value to reach, not one to avoid). The Python shim's new `_chz_fdiv` absorbs Chezzi's deliberate divergence from CPython's `ZeroDivisionError` (signed-zero-correct via `copysign`). Premise re-derived first — half stale: the "widens formatting" half predated `W7-32`; the zero-divisor half is real but owner-confirmed deliberate. 5000-seed `difffuzz --floats` sweep: 0 findings. Remaining: int↔float mixing, float `%`. `docs/gaps.md` **§W7-37**.
+> **✅ W7-37 deferred item (2) landed 2026-08-07 — the CPython differential generator now divides floats.** `gen_float` emits `BinOp::Div` with NO non-zero-divisor guard (inverted from `gen_int`'s discipline: float `/` is total IEEE-754, `docs/reference/spec.md:472`, so a zero divisor is a legitimate value to reach, not one to avoid). The Python shim's new `_chz_fdiv` absorbs Chezzi's deliberate divergence from CPython's `ZeroDivisionError` (signed-zero-correct via `copysign`). Premise re-derived first — half stale: the "widens formatting" half predated `W7-32`; the zero-divisor half is real but owner-confirmed deliberate. 5000-seed `difffuzz --floats` sweep: 0 findings. Remaining: int↔float mixing, float `%`. `docs/contributing/gaps.md` **§W7-37**.
 
-> **✅ W7-37 deferred item (1) landed 2026-08-07 — the CPython differential generator now compares floats, not just ints.** `gen_bool`'s comparison arm sometimes draws BOTH operands from `gen_float` instead of `gen_int` (never mixed), gated `feat.floats && chance(0.3)`. Premise verified first: 4005 cases byte-identical against CPython. 5000-seed `difffuzz --floats` sweep: 0 findings. `docs/gaps.md` **§W7-37**.
+> **✅ W7-37 deferred item (1) landed 2026-08-07 — the CPython differential generator now compares floats, not just ints.** `gen_bool`'s comparison arm sometimes draws BOTH operands from `gen_float` instead of `gen_int` (never mixed), gated `feat.floats && chance(0.3)`. Premise verified first: 4005 cases byte-identical against CPython. 5000-seed `difffuzz --floats` sweep: 0 findings. `docs/contributing/gaps.md` **§W7-37**.
 
-> **✅ W7-34 RESIDUAL FIXED 2026-08-07 (whole-branch review of the `W7-30`–`W7-37` oracle-hardening series) — `HarnessError` closed "the child never started" but not "the children started and *nothing was compared*": at `--timeout-ms 1` both fuzzers printed `done: 20 seeds, 0 finding(s)` with exit 0, byte-identical to a real clean sweep.** Both binaries now tally `kind_label(&outcome)` per seed and print the histogram in the `done:` line (`[Timeout 20]` vs `[Match 200]`) — legibility, deliberately **not** an abort heuristic (`W7-12`: an uncertain verdict must decline, never confidently mislabel). Same commit: `panicfuzz::classify` dropped its `Option<Capture>` so the `W7-35` bug is unrepresentable rather than merely fixed, `run_sources`'s `py.code == Some(0)` hang guard is now pinned by a test, and four stale doc/comment claims were corrected. `docs/gaps.md` **§W7-34** (residual subsection), **§W7-35**, **§W7-36**.
+> **✅ W7-34 RESIDUAL FIXED 2026-08-07 (whole-branch review of the `W7-30`–`W7-37` oracle-hardening series) — `HarnessError` closed "the child never started" but not "the children started and *nothing was compared*": at `--timeout-ms 1` both fuzzers printed `done: 20 seeds, 0 finding(s)` with exit 0, byte-identical to a real clean sweep.** Both binaries now tally `kind_label(&outcome)` per seed and print the histogram in the `done:` line (`[Timeout 20]` vs `[Match 200]`) — legibility, deliberately **not** an abort heuristic (`W7-12`: an uncertain verdict must decline, never confidently mislabel). Same commit: `panicfuzz::classify` dropped its `Option<Capture>` so the `W7-35` bug is unrepresentable rather than merely fixed, `run_sources`'s `py.code == Some(0)` hang guard is now pinned by a test, and four stale doc/comment claims were corrected. `docs/contributing/gaps.md` **§W7-34** (residual subsection), **§W7-35**, **§W7-36**.
 
-> **✅ W7-35 FIXED 2026-08-07 — `panicfuzz` had the identical `W7-34` bug (a child that could not even spawn collapsed into the non-finding `Outcome::Timeout`); `run_one` now returns `Result<Capture, RunErr>`, `Outcome::HarnessError(String)` is fatal to both callers (the CI-gate sweep panics, `src/bin/panicfuzz.rs` exits 2 — distinct from 1 for real findings).** `docs/gaps.md` **§W7-35**.
+> **✅ W7-35 FIXED 2026-08-07 — `panicfuzz` had the identical `W7-34` bug (a child that could not even spawn collapsed into the non-finding `Outcome::Timeout`); `run_one` now returns `Result<Capture, RunErr>`, `Outcome::HarnessError(String)` is fatal to both callers (the CI-gate sweep panics, `src/bin/panicfuzz.rs` exits 2 — distinct from 1 for real findings).** `docs/contributing/gaps.md` **§W7-35**.
 
-> **✅ W7-38 FIXED 2026-08-07 — an adversarial review (prosecute → defend → judge) of the whole `W7-30`–`W7-37` series found the series' OWN theme, "a real bug must never be reportable as a non-finding", still live in the arg parser (`--seeds 5..5` = 0 comparisons, `0 finding(s)`, exit 0), the abort path (`process::exit(2)` inside the seed loop → no `done:` line, no histogram, and a real finding's exit 1 masked by exit 2), and the CI gate it had just added (libtest captures the histogram on a PASSING test, so an all-timeout sweep is a silent green).** Plus the mirror-image defect: `code.is_none() => HostPanic` could not tell a SIGSEGV from a SIGKILL, so the cgroup OOM-killer under the `MemoryMax=6G` scope CLAUDE.md mandates reported an OOM as a real Chezzi crash. Fixed: `end <= start` in both bins; the abort `break`s and always prints `done: {ran} of {total}` + histogram with **findings winning the exit code**; both gates assert a hard zero-comparison floor (not a flaky "too many timeouts" threshold); `Capture` gained `signal: Option<i32>` in both oracles, only crash signals stay a finding and every other signal declines into the fatal `HarnessError`, with both reports NAMING the signal; the hang tests' `locate_chezzi_for_test` no longer falls back to PATH (a 10-day-stale `~/.cargo/bin/chezzi`); and `gen_float`'s exactness proof was replaced by the real one (IEEE-754 determinism). A seventh charge (hang-verdict flake) was dismissed with evidence — the pre-change code failed at a 1.9x slowdown where the new code needs 5.6x. `docs/gaps.md` **§W7-38**.
+> **✅ W7-38 FIXED 2026-08-07 — an adversarial review (prosecute → defend → judge) of the whole `W7-30`–`W7-37` series found the series' OWN theme, "a real bug must never be reportable as a non-finding", still live in the arg parser (`--seeds 5..5` = 0 comparisons, `0 finding(s)`, exit 0), the abort path (`process::exit(2)` inside the seed loop → no `done:` line, no histogram, and a real finding's exit 1 masked by exit 2), and the CI gate it had just added (libtest captures the histogram on a PASSING test, so an all-timeout sweep is a silent green).** Plus the mirror-image defect: `code.is_none() => HostPanic` could not tell a SIGSEGV from a SIGKILL, so the cgroup OOM-killer under the `MemoryMax=6G` scope CLAUDE.md mandates reported an OOM as a real Chezzi crash. Fixed: `end <= start` in both bins; the abort `break`s and always prints `done: {ran} of {total}` + histogram with **findings winning the exit code**; both gates assert a hard zero-comparison floor (not a flaky "too many timeouts" threshold); `Capture` gained `signal: Option<i32>` in both oracles, only crash signals stay a finding and every other signal declines into the fatal `HarnessError`, with both reports NAMING the signal; the hang tests' `locate_chezzi_for_test` no longer falls back to PATH (a 10-day-stale `~/.cargo/bin/chezzi`); and `gen_float`'s exactness proof was replaced by the real one (IEEE-754 determinism). A seventh charge (hang-verdict flake) was dismissed with evidence — the pre-change code failed at a 1.9x slowdown where the new code needs 5.6x. `docs/contributing/gaps.md` **§W7-38**.
 
-> **✅ W7-37 FIXED 2026-08-07 — the CPython differential generator emitted float arithmetic *never* and called two thirds of the functions it generated *never*, so both engines "agreed" on code neither of them ran.** `gen_float` ignored its `depth` and always returned a literal both emitters rendered from the same shared `float_lit` (byte-identical by construction), and `try_call`/`try_index` were only ever asked for `Ty::Int`. **The proof that this cost something: `W7-32` — a real float-repr bug in exactly this oracle's seam — was invisible to it and had to be found by a hand-written differential.** `gen_float` is now recursive (`Add`/`Sub`/`Mul` + var/call/index leaves, leaves scaled by a power of two so they actually straddle the sci-notation crossover), `gen_bool`/`gen_str`/`gen_float` all attempt calls and index reads, floats are assignable, and `Features::full()` has `floats: true`. Float `Div` and int↔float mixing are the deferred next steps. `docs/gaps.md` **§W7-37**.
+> **✅ W7-37 FIXED 2026-08-07 — the CPython differential generator emitted float arithmetic *never* and called two thirds of the functions it generated *never*, so both engines "agreed" on code neither of them ran.** `gen_float` ignored its `depth` and always returned a literal both emitters rendered from the same shared `float_lit` (byte-identical by construction), and `try_call`/`try_index` were only ever asked for `Ty::Int`. **The proof that this cost something: `W7-32` — a real float-repr bug in exactly this oracle's seam — was invisible to it and had to be found by a hand-written differential.** `gen_float` is now recursive (`Add`/`Sub`/`Mul` + var/call/index leaves, leaves scaled by a power of two so they actually straddle the sci-notation crossover), `gen_bool`/`gen_str`/`gen_float` all attempt calls and index reads, floats are assignable, and `Features::full()` has `floats: true`. Float `Div` and int↔float mixing are the deferred next steps. `docs/contributing/gaps.md` **§W7-37**.
 
-> **✅ W7-36 FIXED 2026-08-07 — the CPython differential's `run_sources` now runs Python before giving up on a Chezzi timeout (a generator-bounded program that never terminates is a Chezzi bug, gated by a 3x-timeout re-run false-positive guard — `Outcome::Divergence { kind: DivKind::ChezziHang, .. }`), and `classify`'s both-failed arm now diffs stdout PREFIX-compatibly instead of discarding it (`DivKind::BothErrorStdout`).** `docs/gaps.md` **§W7-36**.
+> **✅ W7-36 FIXED 2026-08-07 — the CPython differential's `run_sources` now runs Python before giving up on a Chezzi timeout (a generator-bounded program that never terminates is a Chezzi bug, gated by a 3x-timeout re-run false-positive guard — `Outcome::Divergence { kind: DivKind::ChezziHang, .. }`), and `classify`'s both-failed arm now diffs stdout PREFIX-compatibly instead of discarding it (`DivKind::BothErrorStdout`).** `docs/contributing/gaps.md` **§W7-36**.
 
-> **✅ W7-34 FIXED 2026-08-07 — a child the CPython differential oracle could not even START (e.g. `chezzi` missing from `PATH`) used to print "N seeds, 0 finding(s), exit 0"; `run_one` now returns `Result<Capture, RunErr>`, a new `Outcome::HarnessError(String)` is fatal to both callers (`fuzz_range` panics, `difffuzz` exits 2 — distinct from 1 for real findings), and the staged-temp-file failure moved off `BothError` onto it too.** `docs/gaps.md` **§W7-34**. **Fix pass (review follow-up, same day):** `tests/difftest.rs::fuzz_range` split into a `Config`-parametrized `fuzz_range_cfg` + a new `fuzz_range_aborts_on_harness_error` test pinning the panic, so a regression back to "swallow and continue" now fails the suite (was previously undetected — deleting the abort block left `cargo test --test difftest` at 38/38 green); the first `write_file` staging arm now calls `cleanup()` too (was leaking a stub `.chz` on a `write_all` failure after a successful `File::create`); and the stale `Capture::code` doc comment (`Option<Capture>`-era) was updated for the `Result<Capture, RunErr>` types. **`panicfuzz` has the identical F1 bug, filed not fixed as `W7-35`.**
+> **✅ W7-34 FIXED 2026-08-07 — a child the CPython differential oracle could not even START (e.g. `chezzi` missing from `PATH`) used to print "N seeds, 0 finding(s), exit 0"; `run_one` now returns `Result<Capture, RunErr>`, a new `Outcome::HarnessError(String)` is fatal to both callers (`fuzz_range` panics, `difffuzz` exits 2 — distinct from 1 for real findings), and the staged-temp-file failure moved off `BothError` onto it too.** `docs/contributing/gaps.md` **§W7-34**. **Fix pass (review follow-up, same day):** `tests/difftest.rs::fuzz_range` split into a `Config`-parametrized `fuzz_range_cfg` + a new `fuzz_range_aborts_on_harness_error` test pinning the panic, so a regression back to "swallow and continue" now fails the suite (was previously undetected — deleting the abort block left `cargo test --test difftest` at 38/38 green); the first `write_file` staging arm now calls `cleanup()` too (was leaking a stub `.chz` on a `write_all` failure after a successful `File::create`); and the stale `Capture::code` doc comment (`Option<Capture>`-era) was updated for the `Result<Capture, RunErr>` types. **`panicfuzz` has the identical F1 bug, filed not fixed as `W7-35`.**
 
-> **✅ W7-33 FIXED 2026-08-07 — the CPython differential's `classify` now treats a signal-killed chezzi (`code: None`, e.g. a Rust stack overflow) and a worker-thread panic on an exit-0 both-match arm as `HostPanic`, not a buried non-finding/`Match`.** Two holes, same shape as `W7-31`: the highest-value finding this oracle can produce was invisible on the arms that never checked for it — the twin `panicfuzz::classify` already had the `code.is_none()` rule. `docs/gaps.md` **§W7-33**.
+> **✅ W7-33 FIXED 2026-08-07 — the CPython differential's `classify` now treats a signal-killed chezzi (`code: None`, e.g. a Rust stack overflow) and a worker-thread panic on an exit-0 both-match arm as `HostPanic`, not a buried non-finding/`Match`.** Two holes, same shape as `W7-31`: the highest-value finding this oracle can produce was invisible on the arms that never checked for it — the twin `panicfuzz::classify` already had the `code.is_none()` rule. `docs/contributing/gaps.md` **§W7-33**.
 
 > **✅ W7-32 FIXED 2026-08-07 — a float's shortest `repr` broke an EXACT tie away from zero; CPython
 > breaks it to EVEN.** A real language bug (observable output moved): `print(771.5462036132812)` gave
@@ -5640,7 +5640,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > fixed-precision formatter is exact + half-even) — which is also the fix: re-render an odd-last-digit
 > shortest repr at the same significant-digit count, keeping it only if it round-trips (load-bearing —
 > at a binade boundary like `2^-24` the even candidate names a different float). Found by re-deriving
-> W7-31's premise. 213 791 floats now byte-identical to CPython 3.14.6. `docs/gaps.md` **§W7-32**.
+> W7-31's premise. 213 791 floats now byte-identical to CPython 3.14.6. `docs/contributing/gaps.md` **§W7-32**.
 
 > **✅ W7-31 FIXED 2026-08-07 — the CPython differential's float allow-list could downgrade a CHEZZI
 > CRASH to a non-finding; deleted rather than gated.** `float_scientific_crossover`'s premise (Rust `{}`
@@ -5649,7 +5649,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `MATCHERS` is now empty and `allowlist::check` returns `None` up front whenever either side exited
 > non-zero, before the (now-empty) loop. That claim is about the **crossover only**: a 20 000-value
 > fuzz against CPython found a *different*, real float divergence (shortest-repr ties round away from
-> zero, not to even), filed as **W7-32**. Full write-up: `docs/gaps.md` **§W7-31**.
+> zero, not to even), filed as **W7-32**. Full write-up: `docs/contributing/gaps.md` **§W7-31**.
 
 > **✅ THE SUITE IS FULLY GREEN AGAIN (2026-08-07) — 4014 passed, 0 failed.** The last standing
 > failure, `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout`, was a wall-clock bound that
@@ -5712,7 +5712,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **closed as WON'T FIX**: its ~60 hand-rolled cross-engine compares (under-recorded as "~31") all die
 > with `--serial` per `future.md` §2b, which converts each into a single-engine golden test against a
 > UTF-8 literal, where a decode hides nothing. The same re-derivation found the identical hole in the
-> oracle that *outlives* `--serial`. Full write-up: `docs/gaps.md` **§W7-30**.
+> oracle that *outlives* `--serial`. Full write-up: `docs/contributing/gaps.md` **§W7-30**.
 
 > **✅ W7-29 FIXED 2026-08-07 — a task whose whole body is ONE native call was never sampled: the cap
 > tracked who ran BYTECODE, not who held bytes.** Closes `W6-10s` residual (a), open since 2026-08-06
@@ -5748,7 +5748,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > it** (`set_worker_count(4)` behind an RAII guard restoring on any panic), verified red-on-the-real-
 > assertion under `taskset -c 0`. (3) Stale doc claims re-pinned. **Cost ceiling, stated up front:** a
 > mark-sweep per task start — cheap on M:N, O(live heap × tasks) on serial, reachable only through the
-> test helper. Full write-up: `docs/gaps.md` **§W7-29**.
+> test helper. Full write-up: `docs/contributing/gaps.md` **§W7-29**.
 
 > **✅ W7-28 FIXED 2026-08-07 — `--max-heap`'s trigger counted EVENTS, not bytes, so the most ordinary
 > runaway loop in the language rode 77× past the cap.** Closes `W6-10s` residual (b) — the
@@ -5789,12 +5789,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the loop body replaced by `pass`.
 >
 > **Cost, recorded not argued away: ~+1% on `struct`** (the alloc-heaviest bench, reproduced 3×, same
-> sign) — the `mem_cap != 0` branch now sits in `alloc` and `get_mut`, both hot. `docs/benchmarks.md`
+> sign) — the `mem_cap != 0` branch now sits in `alloc` and `get_mut`, both hot. `docs/contributing/benchmarks.md`
 > Round 4. **Also closed: `W7-26r`'s per-process-containment residual, as BY DESIGN**, decided by
 > measuring the ancestors against a rule fixed in advance: CPython (`RLIMIT_AS`) aborts, Go
 > (`GOMEMLIMIT`) does not (5 GC cycles, 128 MiB live against a 32 MiB limit, exit 0). They disagree, so
 > there is no ancestor verdict to copy, and Chezzi's per-heap PASS already matches Go. Full write-up:
-> `docs/gaps.md` **§W7-28**.
+> `docs/contributing/gaps.md` **§W7-28**.
 
 > **✅ W7-26r FIXED 2026-08-06, both halves — `--max-heap` was never observed while the parent sat in
 > a join.** `over_cap` is assigned only in `sweep()`, which runs only at the parent fiber's own
@@ -5846,9 +5846,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > new test's footprint (fixed by shortening the sleeps to 60 ms). Still open: `W6-10s` residual (a),
 > per-heap containment ≠ per-process containment, and the pre-existing
 > `eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout` flake — **FIXED 2026-08-07**, see the
-> W7-13 note in `docs/gaps.md` — (~5.2 s against its 1 s bound
-> under full-suite load, reproduced on a clean stashed tree — now filed in `docs/gaps.md`). Full
-> write-up: `docs/gaps.md` **§W7-26r**.
+> W7-13 note in `docs/contributing/gaps.md` — (~5.2 s against its 1 s bound
+> under full-suite load, reproduced on a clean stashed tree — now filed in `docs/contributing/gaps.md`). Full
+> write-up: `docs/contributing/gaps.md` **§W7-26r**.
 >
 > **✅ W7-27 FIXED 2026-08-06 — an `Executor` job's RETURN VALUE was retained until `shutdown()`
 > although nothing can read it.** `submit` returns nil (no futures), `reduce_task_slots` reads only
@@ -5872,7 +5872,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **Still open, unchanged, filed under `W7-26r`:** the CAPTURED-blob variant is 410 MB (was 666 MB) —
 > each `submit` wires its own copy of the capture into a `ReadyWorker` queued in the process-global
 > pool, owned by no heap. CPython's 17 MB there comes from sharing the `str` by reference, which the
-> by-value airlock cannot do. Full write-up: `docs/gaps.md` **§W7-27**.
+> by-value airlock cannot do. Full write-up: `docs/contributing/gaps.md` **§W7-27**.
 
 > **✅ W7-26 FIXED 2026-08-06 — `--max-heap` never counted an `Executor`'s EAGER half, which is the
 > only half the default M:N engine uses.** `ExecutorCore` has two payload halves; `Heap::live_bytes`
@@ -5934,7 +5934,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `test_runner::over_memory_counts_an_executor_result_backlog` (both engines + generous-cap negative),
 > and `vm::heap::nested_executor_charges_its_eager_half_in_either_visit_order` (the review finding, both
 > visit orders). Mutation-verified red: deleting the charge in `finish` kills the first and third,
-> reverting the nested arm to `inner`-only kills the fourth. Full write-up: `docs/gaps.md`
+> reverting the nested arm to `inner`-only kills the fourth. Full write-up: `docs/contributing/gaps.md`
 > **§W7-26**.
 
 > **✅ W7-25 FIXED 2026-08-06 (BREAKING output change) — a string nested inside a container, struct
@@ -5964,7 +5964,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > those tests compare sorted), 15 Rust expectations, 8 `tests/chz` assertions. Fenced by
 > `tests/chz/spec/repr_test.chz` (8 `test fn`s, serial==M:N) + `slice::tests::str_repr_python_style`.
 > Docs: `syntax.md` §"A nested `str` is quoted", `stdlib.md` `str()` row, `bug-discovery.md`.
-> Full write-up: `docs/gaps.md` **§W7-25**.
+> Full write-up: `docs/contributing/gaps.md` **§W7-25**.
 
 > **✅ W7-24 FIXED 2026-08-06 — an interpolation fragment is now a first-class call site: named
 > args, defaults, struct-ctor defaults, method defaults and variadics all work inside `"{…}"`.**
@@ -5992,7 +5992,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > follows ("parsed later, by whoever needs it") silently exempts it from every guarantee upstream.
 > Fenced by 8 `test fn`s in `tests/chz/spec/interpolation_test.chz` (one per surface + the shadowing
 > guard, serial==M:N) and 5 checker tests, including the paired negatives — a wrong-arity fragment
-> call is still rejected, now with the accurate count. Full write-up: `docs/gaps.md` **§W7-24**.
+> call is still rejected, now with the accurate count. Full write-up: `docs/contributing/gaps.md` **§W7-24**.
 
 > **✅ W7-23 FIXED 2026-08-06 — the interpolation fragment scanner is now quote- and depth-aware.**
 > `parse_interpolation` scanned to the FIRST `}` with no state, so a brace that belonged to the
@@ -6002,11 +6002,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > quote-aware since it shipped; the layer FEEDING it was not. The scanner now carries `split_spec`'s
 > own `in_str` + bracket-`depth` state. Second defect found while testing it: a fragment is lexed as
 > its own line, so leading padding (`"{ 1 + 2 }"`, legal in CPython) opened an INDENT token —
-> `parse_expr_str` now trims. Two limits remain and are documented (`docs/syntax.md` §10), both
+> `parse_expr_str` now trims. Two limits remain and are documented (`docs/reference/syntax.md` §10), both
 > shared with CPython < 3.12: a fragment cannot nest the SAME quote style (the lexer ends the string
 > first), and a nested literal interpolates too, so a literal brace inside it is still doubled.
 > Fenced by `tests/chz/spec/interpolation_test.chz` (6 `test fn`s, serial==M:N) +
-> `parse_interpolation_scanner_is_quote_and_depth_aware`. Full write-up: `docs/gaps.md` **§W7-23**.
+> `parse_interpolation_scanner_is_quote_and_depth_aware`. Full write-up: `docs/contributing/gaps.md` **§W7-23**.
 
 > **✅ ALL FOUR W7-4 RESIDUALS CLOSED (2026-08-05/06) — W7-4a + W7-4b + W7-4c FIXED, W7-4d closed as
 > not-a-bug — the module SNAPSHOT path now keeps one cell per binding.** Two of W7-4's four shipped residuals were real
@@ -6095,7 +6095,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > single-source and cannot reach the lazy per-module fault path). `cargo test --lib` 3832 green; `chezzi
 > test tests/chz/` 297/297 on both engines; 29-test `airlock_` panel green; thread sweep `1/2/4/8` × 25
 > runs, 0 wrong. **Perf**: the W7-4 snapshot stress (400 module-global closures × 1000 nurseries) main
-> 2.585 s → 2.573 s, flat. Full write-up: `docs/gaps.md` **§W7-4a/b** and **§W7-4c**.
+> 2.585 s → 2.573 s, flat. Full write-up: `docs/contributing/gaps.md` **§W7-4a/b** and **§W7-4c**.
 
 > **✅ W6-10r FIXED 2026-08-06 — a backlog reachable only through a NESTED core was counted nowhere,
 > so 304 MB passed an 8 MB `--max-heap`.** `Heap::live_bytes` reached an off-heap payload's bytes only
@@ -6141,7 +6141,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > accounting only; a worker result carries no parent-heap `GcRef` (B3.2), which is why `children` has
 > no `eager` arm either. Review also caught that the headline test reached only the single-value arm
 > — the queued-message and cycle arms are now covered by their own test, the "fixed on SOME arms of an
-> N-way set" guard. Full write-up: `docs/gaps.md` **§W6-10** (residual section) and **§W7-26**.
+> N-way set" guard. Full write-up: `docs/contributing/gaps.md` **§W6-10** (residual section) and **§W7-26**.
 
 > **✅ W7-22 FIXED 2026-08-06 — every container crossing the airlock was rebuilt at 22× the capacity
 > it needs, and kept it for the object's lifetime.** `from_wire_memo`'s eight container arms were
@@ -6173,7 +6173,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > "failed open". That row's own premise did not survive the check either (see below). Fourth:
 > `benches/run.chz` prices none of this — it is
 > single-threaded and never crosses the airlock, so the bench set has no coverage of airlock memory at
-> all. Full write-up: `docs/gaps.md` **§W7-22**.
+> all. Full write-up: `docs/contributing/gaps.md` **§W7-22**.
 
 > **✅ W6-10s FIXED 2026-08-06 (after re-scoping — its filed premise did not hold).** The fix:
 > `Heap::request_collect`, set in `Vm::spawn_worker` — the one door every worker heap is born through,
@@ -6272,7 +6272,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > alone, and hung identically before this work, so it was never a regression — merely never
 > triggered. *"I fixed the exponential walk" was a claim about the three walkers I had touched, not
 > about the class; grepping for the SHAPE would have found all four at once.*
-> Full write-up: `docs/gaps.md` **§2026-08-06**.
+> Full write-up: `docs/contributing/gaps.md` **§2026-08-06**.
 
 > **✅ W7-21 FIXED 2026-08-05 — a module global that HOLDS a function is now callable through the
 > module.** `BARE := k.one` in `l.chz`, then `l.BARE()` in an importer: `type error (line 3, col 6):
@@ -6305,7 +6305,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > line removed). "The helper doesn't fit" was a claim about the helper, not the feature. (c) The
 > STRICT-vs-widening rule was **asserted by a comment and pinned by no test** — arity and `str`-vs-`int`
 > fail under either helper. The deciding case is now asserted both ways: `l.FL(2)` (a fn VALUE) errors
-> `expected float, found int`, `k.half(2)` (a DECLARED fn) widens. Full write-up: `docs/gaps.md`
+> `expected float, found int`, `k.half(2)` (a DECLARED fn) widens. Full write-up: `docs/contributing/gaps.md`
 > **W7-21**.
 
 > **✅ W7-17 FIXED 2026-08-05 — `--timeout` now reaches a fiber PARKED on a timer.** A `timer(ms)` wait
@@ -6357,7 +6357,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `the_deadline_does_not_truncate_a_defer_whose_recv_can_complete` (mutation-verified), and
 > `a_live_timer_still_delivers_under_a_generous_timeout` for the other direction of the clamp.
 > The one shape it left open — a fiber parked on the **netpoller** — is **W7-18, fixed the same day**
-> (below). Full write-up: `docs/gaps.md` **W7-17**.
+> (below). Full write-up: `docs/contributing/gaps.md` **W7-17**.
 
 > **✅ W7-18 FIXED 2026-08-05 — `--timeout` now reaches a fiber parked on the NETPOLLER, the last shape
 > that HUNG.** A nursery `spawn` on an untimed `l.accept()` nobody connects to produced no verdict and
@@ -6389,7 +6389,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `a_netpoller_aborted_task_still_runs_its_defers`,
 > `a_socket_timeout_is_still_catchable_under_a_generous_timeout` — all four behind
 > `run_tests_timed_watchdog`, because a regression here hangs `cargo test` rather than failing it. See
-> `docs/gaps.md` **W7-18**.
+> `docs/contributing/gaps.md` **W7-18**.
 
 > **✅ W7-5d FIXED 2026-08-05 — a dead stdout no longer cancels sibling `Executor` jobs.** The bug was
 > a **process-GLOBAL read inside a predicate that answers "is this ERROR a hard halt"**
@@ -6432,7 +6432,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (measured). Fenced by six tests in `tests/interactive.rs`
 > (`dead_stdout_does_not_{cancel_sibling_executor_jobs,tear_a_multi_native_sibling}_*`), all asserting
 > `rc != 0` + the pipe message so none can pass with `stream_halt` deleted. Full write-up:
-> `docs/gaps.md` **W7-5d**.
+> `docs/contributing/gaps.md` **W7-5d**.
 
 > **✅ W7-5e FIXED 2026-08-05 — the gate W7-5d added can no longer be bypassed.** That gate asks "did
 > THIS native emit to stdout" via a `Vm::stdout_writes` delta, which only `Vm::emit_out_bytes` bumped —
@@ -6457,7 +6457,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`extern "libc.so.6": fn puts`) writes the descriptor directly, so `OUT_DEAD` never sets and that
 > `| head -1` loop still spins — **6002 ms, no fault**, against 3 ms for the same loop using `print`.
 > Pre-existing and untouched by this change; filed as **W7-20** and since **closed as not-a-bug**
-> (below). Full write-up: `docs/gaps.md` **W7-5e**.
+> (below). Full write-up: `docs/contributing/gaps.md` **W7-5e**.
 
 > **✅ N5 CLOSED 2026-08-06 — not a bug; a deadlock skipping `defer`s is the contract.** Filed since
 > 2026-07-14 as "arguably the same silent-lie class as N4 — **Go still runs deferred fns on a panic**".
@@ -6476,12 +6476,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Chezzi is the strictest of the three — it detects and reports where CPython hangs until something
 > external kills it. No code change: `flag_deadlock`'s two engineering blockers (no `Vm` shell under the
 > core lock; a fix moves deadlock-path stdout ordering) were always accurate, they were just answering a
-> question that was never open. `docs/concurrency.md` now states the exception as a contract instead of
+> question that was never open. `docs/reference/concurrency.md` now states the exception as a contract instead of
 > pointing at a filed debt. **The lesson: "both engines agree, so it is a known limit" carried this
 > entry from 2026-07-14 to 2026-08-06, and it proves nothing** — engine agreement is a detector, the
 > ancestors are the standard, and nobody had run them. Third entry this week closed by running the
 > reference program instead of re-reading the filing (W7-17, W7-20, N5). Full write-up:
-> `docs/gaps.md` **N5**.
+> `docs/contributing/gaps.md` **N5**.
 >
 > **✅ W7-20 CLOSED 2026-08-05 — not a bug; FFI's stdout contract is now documented.** FFI writes the
 > file descriptor itself, so the broken-pipe halt cannot see it and a `| head -1` loop of C writes
@@ -6496,8 +6496,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > Output ordering is byte-identical to CPython's too (`chezzi-1 chezzi-3 ffi-2 ffi-4` — the C library
 > buffers its bytes until exit; `io.flush()` does not change it, 3/3 runs). So the fix is documentation:
-> `docs/syntax.md` §12b gains the contract plus two runnable examples, with cross-references from
-> `docs/stdlib.md`'s `std.ffi` unsafe-contract blockquote and its `print`/stdout guarantee list (which
+> `docs/reference/syntax.md` §12b gains the contract plus two runnable examples, with cross-references from
+> `docs/reference/stdlib.md`'s `std.ffi` unsafe-contract blockquote and its `print`/stdout guarantee list (which
 > now ends by saying it covers the VM's own sink only). No code change, no test — there is no behaviour
 > to regress and the only assertable shape is a hang.
 >
@@ -6523,7 +6523,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > file. The corrected number strengthens the ancestor match: CPython `ctypes` also detects at i=1638.
 > Generalized: **"the library does not report X" is a claim about someone else's code made from one
 > local observation** — the honest sentence is "my call did not observe X". Full write-up:
-> `docs/gaps.md` **W7-20**.
+> `docs/contributing/gaps.md` **W7-20**.
 >
 > **✅ W7-14 FIXED 2026-08-04 — a `wait:` timer arm no longer swallows a sibling value that arrives
 > first.** `WAIT-1`'s fix (`0b72ad60`) is gated on `self.mn.is_some()`, and a party that owns its OS
@@ -6597,7 +6597,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault`,
 > `test_runner::timeout_aborts_a_sleeping_test_everywhere` (6 fixtures × both engines; renamed when W7-17 closed the park half), and the renamed
 > + tightened `parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines`. See
-> `docs/gaps.md` **W7-16**.
+> `docs/contributing/gaps.md` **W7-16**.
 
 > **✅ W7-11 FIXED 2026-08-04 — the last ledger item that ABORTED THE HOST is gone.** An `RwShared`
 > copy-out view (`at`/`slice`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/`fold_entries`/
@@ -6611,7 +6611,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Vm::from_wire_piece` re-rebuilds the WHOLE container under **the caller's own read guard** and
 > returns the piece by its wire id (`WireValue::node_id()`). The cycle survives, byte-identically to
 > CPython (`copy.deepcopy(xs[0])` follows the cycle; `b.next[0] is b` → `True`; `pickle` agrees).
-> Read `docs/gaps.md` **W7-11** before touching the airlock rebuild — especially the table showing why
+> Read `docs/contributing/gaps.md` **W7-11** before touching the airlock rebuild — especially the table showing why
 > the W7-4 round-2 rejection of "rebuild the whole container" does **not** transfer (that one fired on
 > every piece and re-read the box under a SECOND guard).
 >
@@ -6624,11 +6624,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > through a **copy-out view**. A documented residual is not a fenced one.
 >
 > **▶ NEXT SESSION, START HERE (2026-08-04).** Branch **`eager-executor`** is **MERGED** into `main`
-> (`5af067d9`, `--no-ff`): `217f9ffc` ships eager `Executor` execution (`docs/future.md` §2c),
+> (`5af067d9`, `--no-ff`): `217f9ffc` ships eager `Executor` execution (`docs/design/roadmap.md` §2c),
 > `5983af49` documents the follow-ups, and `0787e39d` closes **`W7-12`** — the one regression §2c
 > introduced (a job blocked on a channel only its own joiner could fill hung on M:N). Its residuals
 > (`W7-12r`) are since CLOSED by the process-wide quiescence detector — see item 5 below and
-> `docs/gaps.md` section `W7-12r / W7-15`.
+> `docs/contributing/gaps.md` section `W7-12r / W7-15`.
 >
 > 1. ✅ **Merged and re-verified on the merged-HEAD binary** (per `auto-task-review-unreliable`), not
 >    just on the branch: full `cargo test` green (3794 lib + 121 across the other targets, 0 failed),
@@ -6682,7 +6682,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    consumer to arrive first fixed it (0.01 s green vs 1.55 s red). **Mutation-verify every timing
 >    test — "it passes" is not evidence it executes the code you think it does.**
 >
-> 5. ✅ **PROCESS-WIDE quiescence detector SHIPPED 2026-08-04 — `docs/future.md` §2d step 0, and it
+> 5. ✅ **PROCESS-WIDE quiescence detector SHIPPED 2026-08-04 — `docs/design/roadmap.md` §2d step 0, and it
 >    closes `W7-12r` + a new `W7-15`.** Owner's call: *"we should not let it hang; what could be done
 >    should be done."* `src/vm/quiesce.rs`. It did NOT lift `MnSched::is_deadlocked` (that stays
 >    per-nursery, with every veto it earned intact) — it added a second, independent layer over the
@@ -6717,7 +6717,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >    (iv)+(v): a satisfiability arm must mirror what its own site SETTLES on, condition for condition.
 >    Health fences all green,
 >    cap-1 pipeline 0/40 false faults (the rejected progress counter was 6/40). Four new watchdogged
->    M:N tests, each mutation-verified. Residuals in `docs/gaps.md`: an all-joiner cycle, bounded-pool
+>    M:N tests, each mutation-verified. Residuals in `docs/contributing/gaps.md`: an all-joiner cycle, bounded-pool
 >    starvation, partial deadlock (§2d step 3), scheduler parties (§2d step 2).
 > 6. **Do NOT** apply `.superpowers/sdd/task-3-mn-half.patch` (wrong lifetime, superseded), and do NOT
 >    re-grow a local per-executor predicate — step 5 replaced that wholesale.
@@ -6728,7 +6728,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Still open and NOT part of this: `W7-5d` (hard halt mid-`shutdown()` engine asymmetry — note its M:N
 > half is written against `run_workers_on_pool`, which eager execution DELETED, so re-derive it before
 > closing it). The whole `W7-13` family is now closed. Two known limits it did NOT touch, both
-> pre-existing and both recorded in `docs/gaps.md`: a blocked eager job holds its pool thread, so
+> pre-existing and both recorded in `docs/contributing/gaps.md`: a blocked eager job holds its pool thread, so
 > `--threads=1` still hangs two-job programs (`pool.rs`'s fixed-size-pool hazard), and nothing fences
 > the no-hot-spin property of the eager send loop (`cargo test` measures verdicts, not CPU).
 
@@ -6755,7 +6755,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   return type, which is what removes the erasure blocker that made `os.getcwd[bytes]()`
 >   unimplementable (type args are erased before `Vm::call_native`).
 > - **SEAM** — every path-taking native is now `_`-prefixed and typed `bytes` (`_exists`, `_list_dir`,
->   `_getcwd`, …, documented once in `docs/stdlib.md` as the internal byte seam); the public name is a
+>   `_getcwd`, …, documented once in `docs/reference/stdlib.md` as the internal byte seam); the public name is a
 >   bodied pure-Chezzi wrapper doing `_native(p.as_path())` and re-wrapping into `path.Path`. All four
 >   production decodes are byte-exact via `OsStrExt`, and `glob`'s matcher runs over `&[u8]` (so an
 >   ASCII pattern matches a non-UTF-8 name; `?` still counts one Unicode SCALAR — see the panel
@@ -6802,14 +6802,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   where T: PathLike` — which keeps every homogeneous list callable and touches invariance not at all
 >   (fenced both ways in `pathlike_grant_does_not_widen_container_invariance` and by the Chezzi
 >   `t_join_of_variables`). The literal-only test table that hid this grew variable-typed cases.
->   (d) Both doc sites for `glob` (`docs/stdlib.md`, `std/fs.chz`) still claimed `?` counts one BYTE —
+>   (d) Both doc sites for `glob` (`docs/reference/stdlib.md`, `std/fs.chz`) still claimed `?` counts one BYTE —
 >   the pre-panel behavior that finding (b) had already reversed; a user following them would write
 >   `a??c` and match nothing. Corrected, and pinned end-to-end by a Chezzi test on a real `aéc.txt`.
 >   (e) The byte-exact rewrite cost `std.path` **2.70×** against main's native-`str` module and shipped
->   with no `docs/benchmarks.md` entry. `bytearray.extend` (one native memcpy per piece) replaces the
+>   with no `docs/contributing/benchmarks.md` entry. `bytearray.extend` (one native memcpy per piece) replaces the
 >   per-byte `push` loops and one shared `_last_idx` backwards scan replaces three duplicate forward
 >   scans plus a whole `_split` allocation in `basename` → **1.56× faster, 1.73× vs main**, measured
->   and recorded in `docs/benchmarks.md`. The residual is `_split`'s per-byte VM loop; `bytes` has no
+>   and recorded in `docs/contributing/benchmarks.md`. The residual is `_split`'s per-byte VM loop; `bytes` has no
 >   native `split`, so a `bytes.split(sep)` (natural companion to the `ByteSeq` milestone) is the
 >   named upgrade path.
 
@@ -6855,9 +6855,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   what two sibling closures produce, was re-serialized as a fresh `WireValue::Cell` and `from_wire`
 >   built two. Cycles round-tripped; shared bindings did not.
 > - **Why it is a bug and not the DAG rule:** the off-path-alias-becomes-two-copies rule is documented
->   and deliberate **for DATA** (`docs/concurrency.md`; `pair := [xs, xs]` gives `2 1`, a knowing
+>   and deliberate **for DATA** (`docs/reference/concurrency.md`; `pair := [xs, xs]` gives `2 1`, a knowing
 >   divergence from CPython `deepcopy`). **A cell is not a data node — it is a BINDING's identity.**
->   `docs/syntax.md` already says a write through a capture is visible "across sibling closures", and
+>   `docs/reference/syntax.md` already says a write through a capture is visible "across sibling closures", and
 >   the crossing snapshot-copies a captured local into **one** per-task cell — one per *binding*, not
 >   per reference. Go agrees (`f(); f(); g()` inside a goroutine prints `2`).
 > - **Fix:** `Obj::Cell` alone moves to a **persistent** `WireMemo::cells` map (never popped); every
@@ -6872,7 +6872,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > - **Intended contract flip:** `airlock_aliased_closure_stays_independent` (`[bump, bump]`) →
 >   `airlock_aliased_closure_shares_its_binding`, `1` → `2`. The closure *values* are still two
 >   independent copies; the one *binding* they close over is now one cell.
-> - **Stated ceilings** (`ponytail:` comments + `docs/gaps.md`), all the same shape — *two independent
+> - **Stated ceilings** (`ponytail:` comments + `docs/contributing/gaps.md`), all the same shape — *two independent
 >   serializations reaching one cell*: (a) **one task, two serializations** — a `spawn:` block's captures
 >   and the module-global snapshot cross into the same task but are separate memos rebuilt at different
 >   times (the snapshot faults in lazily), so a module global + a captured local over one factory-local
@@ -6947,7 +6947,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > arm among live ones still parks; the detector is untouched. Verified 0/60 at `--threads=8` (main
 > 3/60), real deadlocks still reported.
 >
-> **✅ EAGER `Executor` — SHIPPED 2026-08-03 (`docs/future.md` §2c, decisions D1–D5).** `submit(f)` now
+> **✅ EAGER `Executor` — SHIPPED 2026-08-03 (`docs/design/roadmap.md` §2c, decisions D1–D5).** `submit(f)` now
 > **starts the job immediately** on the shared pool and `shutdown()` **waits** for it — the Python
 > `ThreadPoolExecutor` / Java `ExecutorService` model, replacing the submit-only-enqueues drift that
 > manufactured the never-run backlog, the reap-point question, the A2 auto-drain rescue and W7-5b.
@@ -6972,16 +6972,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > poll on the channel condvar mirroring `demote_recv_block`'s settle order), which is what makes
 > `submit(recv) … send … shutdown()` work rather than fault — the exact regression the rejected attempt
 > shipped. Blocking `send`-on-full and `wait:` get the same treatment.
-> **Regression this milestone introduced, and CLOSED in it — `W7-12`, see `docs/gaps.md`.** The
+> **Regression this milestone introduced, and CLOSED in it — `W7-12`, see `docs/contributing/gaps.md`.** The
 > blocking fix is right for a job waiting on a value `main` sends next line, and WRONG for a job waiting
 > on a value only its own joiner could send (`ex.submit(fn(): ch.recv()); ex.shutdown(); ch.send(42)`):
 > that faulted in 0s on both engines pre-eager and then HUNG on M:N while `--serial` still faulted. Now
 > fixed by asking the one question the `netio.rs` arms could not: is this executor already being JOINED,
 > with every job it still owes parked? (`ExecutorCore::joining`/`blocked` + `Vm::eager_join_deadlocked`,
 > two consecutive observations required, existing fault text reused so M:N == `--serial` byte for byte.)
-> Deliberately LOCAL and left narrow — four residuals in `docs/gaps.md` row `W7-12r`, chiefly that a
+> Deliberately LOCAL and left narrow — four residuals in `docs/contributing/gaps.md` row `W7-12r`, chiefly that a
 > program with no explicit `shutdown()` still hangs at the exit drain. The principled successor is a
-> wait-for-graph (AND-OR knot) detector — designed in `docs/future.md` **§2d**, which also records why
+> wait-for-graph (AND-OR knot) detector — designed in `docs/design/roadmap.md` **§2d**, which also records why
 > the "no scheduler ⇒ no sender" arms cannot decide this at all, and how Go/Python/Java/Rust/Erlang
 > handle it.
 > **Second hazard, found by self-review:** `submit` must not hold the executor's `core.inner` lock while
@@ -6999,7 +6999,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 > **✅ W7-5 + W7-5c (the M:N `Executor` drain) — FIXED 2026-08-01: every queued job now runs, and
 > `shutdown()` raises the lowest-submission-index fault.** The two earlier fix attempts logged here were
-> superseded, not vindicated — see `docs/gaps.md`'s W7-5 session-log section for why both were rejected
+> superseded, not vindicated — see `docs/contributing/gaps.md`'s W7-5 session-log section for why both were rejected
 > on a measurement (`os.exit` "0.006s → 18.9s") that turned out to reproduce identically on pre-fix
 > `main` and is very likely a misattribution to an unrelated sleep-cancellability limit. The landed fix
 > keeps run-all (an ordinary job fault no longer aborts its siblings — Python `ThreadPoolExecutor` / Java
@@ -7008,10 +7008,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `Vm::executor_hard_halt` predicate, so the resource-cap/`os.exit` kill switches survive
 > un-swallowable. (That predicate ALSO carried a dead-stdout term until **W7-5d**, 2026-08-05, which
 > removed it: a broken pipe is an ordinary per-job fault, not a whole-queue kill.)
-> Early-stop is now opt-in in the caller via `std.cancel.Token` (`docs/concurrency.md` §6e/§8). Of the
+> Early-stop is now opt-in in the caller via `std.cancel.Token` (`docs/reference/concurrency.md` §6e/§8). Of the
 > original rejection's four charges, three are answered above and by W7-5c below; the fourth — a
 > faulting job leaves a non-terminating sibling unkillable — is **upheld and accepted by design**
-> (run-all's whole point), not fixed; see `docs/gaps.md`'s W7-5 session log. **W7-5c**
+> (run-all's whole point), not fixed; see `docs/contributing/gaps.md`'s W7-5 session log. **W7-5c**
 > (a second faulting task's buffered output was silently dropped once two jobs could fault in one
 > drain — latent under the old abort-on-first-fault semantics, live under run-all) is fixed alongside
 > it: every faulting task's output now flushes at its task-order slot. Acceptance test:
@@ -7022,7 +7022,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > this doc pass): the run-all guarantee is for an ORDINARY fault only — a HARD halt mid-`shutdown()`
 > stops `--serial`'s drain from popping the rest of the queue at all, while M:N has already dispatched
 > every job before the halt can fire; the exact asymmetry is unverified under a thread-starved pool and
-> has zero test coverage. `docs/gaps.md` OPEN ITEMS.
+> has zero test coverage. `docs/contributing/gaps.md` OPEN ITEMS.
 
 > **✅ BUG-HUNT (2026-07-28, wave 7 batch A, gaps.md W7-1/W7-6/W7-7) — three HOST-BOUNDARY fixes: the
 > CLI no longer host-panics on hostile OS bytes, and `fs.copy` no longer eats a file.** All three live
@@ -7040,7 +7040,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   `library/std/src/env.rs` **before the program started** — a host panic `recover:` cannot see, hitting
 >   even a `print("hi")` program with no imports. Now `args_os()` (`src/main.rs`) / `vars_os()`
 >   (`src/native/mod.rs`) with a **lossy** decode (invalid byte → `U+FFFD`; two raw env keys can collide,
->   last wins) — documented in `docs/stdlib.md §std.os`, not silent. `os.environ`'s sorted-by-key
+>   last wins) — documented in `docs/reference/stdlib.md §std.os`, not silent. `os.environ`'s sorted-by-key
 >   lowering lives downstream in `src/vm/mod.rs`, was NOT touched, and its golden was re-run.
 >   **A path is never taken from a lossy decode** (adversarial-review fix): `U+FFFD` substitution is not
 >   injective, so a raw `sc\xffipt.chz` and a real `sc\u{FFFD}ipt.chz` decode alike — opening the alias
@@ -7088,8 +7088,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `deferring` counter now restores on an unwind like `guarded`'s `native_reentry`, because since this
 > change a leaked `deferring` would also permanently disable the cancel bypass. Honest limit: the
 > `caught_here` conjunct is the conservative arm and no constructible program distinguishes it from
-> `deferring == 0` — see `docs/gaps.md`. Docs:
-> `docs/concurrency.md`, `docs/gaps.md` (new wave-7 session log; nothing added to OPEN ITEMS — ships fixed).
+> `deferring == 0` — see `docs/contributing/gaps.md`. Docs:
+> `docs/reference/concurrency.md`, `docs/contributing/gaps.md` (new wave-7 session log; nothing added to OPEN ITEMS — ships fixed).
 >
 > **✅ RULING (2026-07-27, gaps.md W6-3d) — a NUMERIC newtype may no longer define an operator-named
 > method; the declaration is a compile error.** `newtype Score = int:` with an `add`/`compare` method
@@ -7109,8 +7109,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Tests: `checker::tests::numeric_newtype_operator_named_method_is_rejected` (all 7 names) +
 > `…_ordinary_method_and_non_numeric_operator_name_still_ok` (the boundary); the old Chezzi pin that
 > asserted the divergence was REWRITTEN (not deleted) as
-> `numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work`. Docs: `docs/syntax.md`,
-> `docs/gaps.md` (W6-3d RESOLVED, index row removed — wave 6 carries no open DEFECTS; three disclosed
+> `numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work`. Docs: `docs/reference/syntax.md`,
+> `docs/contributing/gaps.md` (W6-3d RESOLVED, index row removed — wave 6 carries no open DEFECTS; three disclosed
 > residuals remain as their own index rows: `W6-9r`, `W6-10s`, `W6-10r` — the last two closed 2026-08-06).
 > **Corrected 2026-07-28 by adversarial review:** the first cut also rejected `neg`, which was WRONG
 > and has been removed from the list. Unary `-` has no newtype path (`Neg` is never granted), so `-m`
@@ -7184,7 +7184,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > shape for the single-engine literal/`contains` sites.
 
 > **✅ FIX (2026-07-27, gaps.md W6-8) — a STORED FFI callback aborts loudly instead of segfaulting.**
-> **This was the last memory-unsafety in `docs/gaps.md`.** `signal(10, handler)`
+> **This was the last memory-unsafety in `docs/contributing/gaps.md`.** `signal(10, handler)`
 > then `raise(10)` — checker-clean
 > — used to give `rc=139` (SIGSEGV, core dumped, empty stderr) on both engines: `CallbackClosure::drop`
 > `ffi_closure_free`d the libffi trampoline when the extern call returned, while C still held its code
@@ -7234,8 +7234,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > check, and a self-`RLIMIT_AS`-capped pool-exhaustion run — plus a `write_all_fd` unit test against a
 > full non-blocking fd (subprocess tests: the repro dies on SIGABRT so it can never be a stdout golden,
 > and FFI UB is layout-dependent; children run with `RLIMIT_CORE=1` so the deliberate abort leaves no
-> core dumps). Docs: `docs/gaps.md` (W6-8 FIXED, open-items table row removed — no memory-unsafety left),
-> `docs/syntax.md`, `docs/ffi-and-packaging.md §1b`.
+> core dumps). Docs: `docs/contributing/gaps.md` (W6-8 FIXED, open-items table row removed — no memory-unsafety left),
+> `docs/reference/syntax.md`, `docs/design/ffi-and-packaging.md §1b`.
 > **✅ FIX (2026-07-27, gaps.md W6-7 + W6-10 — ONE root cause) — a wire core now caches its payload's
 > GC summary, so the collector stops re-walking it and `--max-heap` finally sees it.** A value moved
 > across the airlock into a `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` lives as a `WireValue`
@@ -7302,9 +7302,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `live_bytes_sums_every_distinct_core`/
 > `replacing_store_refreshes_the_gc_summary`, `vm::gc_tests::gc_stress_values_parked_in_cores`,
 > `test_runner::over_memory_counts_offheap_wire_payload`/`under_cap_still_passes_with_many_handles_to_one_core`/`over_memory_trips_without_object_churn`,
-> `vm::heap::wire_bytes_pace_a_sweep_only_under_a_cap`. Docs: `docs/gaps.md` (both retired FIXED;
-> the sampling residuals kept in the open-items index as `W6-10s`, alongside `W6-10r` — both since closed, 2026-08-06), `docs/benchmarks.md`, `docs/concurrency.md` (the read-view's
-> O(1)-memory claim kept; the false *time* implication corrected), `docs/future.md §1b` (the cap now
+> `vm::heap::wire_bytes_pace_a_sweep_only_under_a_cap`. Docs: `docs/contributing/gaps.md` (both retired FIXED;
+> the sampling residuals kept in the open-items index as `W6-10s`, alongside `W6-10r` — both since closed, 2026-08-06), `docs/contributing/benchmarks.md`, `docs/reference/concurrency.md` (the read-view's
+> O(1)-memory claim kept; the false *time* implication corrected), `docs/design/roadmap.md §1b` (the cap now
 > counts off-heap wire bytes — the inline-scalar escape in that same section is a DIFFERENT hole and
 > remains OPEN).
 
@@ -7343,8 +7343,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `compare_on_nan_faults_explicitly`, `tests/chz/spec/intrinsic_proto_methods_test.chz`) — it pins the NaN
 > end RELATIVE to `sort()` plus antisymmetry rather than hardcoding `-1`, since the signbit of `0.0/0.0` is
 > target-dependent (x86: NaN sorts FIRST). serial==M:N, verified on the release binary both engines.
-> Docs: `docs/gaps.md` (W6-3c retired FIXED — 1 carve-out left, W6-3d), `docs/spec.md`, `docs/syntax.md`,
-> `docs/stdlib.md` (incl. the honest note that `std.cmp`'s `min`/`max`/`clamp` are written with `<`, so
+> Docs: `docs/contributing/gaps.md` (W6-3c retired FIXED — 1 carve-out left, W6-3d), `docs/reference/spec.md`, `docs/reference/syntax.md`,
+> `docs/reference/stdlib.md` (incl. the honest note that `std.cmp`'s `min`/`max`/`clamp` are written with `<`, so
 > they follow the operator rule, not the total order).
 
 > **✅ FIX (2026-07-30, gaps.md W6-3e) — `Iterable[T]` works in TYPE position, not only as a bound.**
@@ -7382,7 +7382,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > must not move) + 5 `tests/chz/spec` `test fn`s covering list/set/map/str/cursor/generator/`next`-struct/
 > `iter`-only-struct, a comprehension, the stateful-cursor drain, and the full cross product of
 > `List()`/`Set()`/`Map()`/`.iter()` × the `iter`-only witness. serial==M:N, verified on
-> the release binary both engines. Docs: `docs/syntax.md`, `docs/spec.md`, `docs/gaps.md` (W6-3e FIXED,
+> the release binary both engines. Docs: `docs/reference/syntax.md`, `docs/reference/spec.md`, `docs/contributing/gaps.md` (W6-3e FIXED,
 > the "Known limits" line scoped to BOUND position, plus a filed cosmetic diagnostic-wording drift).
 > **Round 2** closed the protocol-SELECTION half of the same N-way set: the checker admitted a struct as
 > `Iterable` by WELL-FORMEDNESS while the runtime picks by NAME PRESENCE, so a struct with a MALFORMED
@@ -7415,9 +7415,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`vm::tests::intrinsic_grants_all_have_vm_arms`) went RED on the narrowing and green on the retirement,
 > exactly as designed. 3 new checker tests (6 rejects + accept controls for cursor/generator/`next`-struct
 > + `Iterable` recovery incl. a wrong-element boundary reject) + 1 `tests/chz/spec` `test fn` (both
-> engines). Docs: `docs/syntax.md` (teaches `Iterable` vs `Iterator` = Rust `IntoIterator` vs `Iterator`,
-> Go `range` vs an iterator value), `docs/spec.md` M13, `docs/stdlib.md § std.iter`, `docs/grammar.bnf`,
-> `docs/gaps.md` (W6-3b retired).
+> engines). Docs: `docs/reference/syntax.md` (teaches `Iterable` vs `Iterator` = Rust `IntoIterator` vs `Iterator`,
+> Go `range` vs an iterator value), `docs/reference/spec.md` M13, `docs/reference/stdlib.md § std.iter`, `docs/reference/grammar.bnf`,
+> `docs/contributing/gaps.md` (W6-3b retired).
 
 > **✅ FIX (2026-07-26, gaps.md W6-12/13/14/15/17/18) — the wave-6 tail, six independent findings on
 > disjoint seams, one batch.** All behavior-scoped (no new API surface); serial==M:N verified on the
@@ -7488,9 +7488,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > module and function level), and 2 unit tests: the cache's BUILD COUNT per epoch (one build for N spawns
 > in a nursery, one per nursery for an aggregate view, one per assignment) and the carried build error
 > surfacing at task preparation; the two parity tests that PINNED the frozen rule were flipped to the fresh
-> expectation with the reason recorded in place. **Docs:** `docs/concurrency.md`
-> §2/§7 rewritten (the frozen-snapshot rule AND the long-retired G1 compile-error claim), `docs/spec.md`,
-> `docs/concurrency-tier-d.md`, `docs/concurrency-b3.md` (annotated as history). **Perf:** the 9
+> expectation with the reason recorded in place. **Docs:** `docs/reference/concurrency.md`
+> §2/§7 rewritten (the frozen-snapshot rule AND the long-retired G1 compile-error claim), `docs/reference/spec.md`,
+> `docs/history/designs/concurrency-tier-d.md`, `docs/history/designs/concurrency-b3.md` (annotated as history). **Perf:** the 9
 > `benches/run.chz` benches moved only within noise (−4.5%…+2.6%, no nurseries in any of them); a
 > 200k-nursery `--serial` loop is FLAT with scalar-only globals (0.598s → 0.594s: the cache short-circuits
 > — one snapshot for the whole run, asserted by build count) and **+5.4%** with a `List[int]` global (one
@@ -7499,8 +7499,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > cut: 1.272s, 91×), and 40k spawns + 40k global writes 0.074s → 0.090s (rejected cut: 1.721s, 23×). One
 > measurable regression, recorded: the same nested storm on `--serial` (3000 tasks × 20000-element copies,
 > 10GB churn) is +10.6% from the changed allocation order — same build count (2), same peak RSS, and flat at
-> realistic global sizes. Full table in `docs/benchmarks.md`; the precise per-mutation invalidation
-> refinement (now that `src/vm/call.rs` is unfenced) is a recorded follow-up in `docs/gaps.md`.
+> realistic global sizes. Full table in `docs/contributing/benchmarks.md`; the precise per-mutation invalidation
+> refinement (now that `src/vm/call.rs` is unfenced) is a recorded follow-up in `docs/contributing/gaps.md`.
 
 > **✅ FIX (2026-07-25, gaps.md W6-1, P0) — `Writer.flush()`/`close()` on a `buffered` writer now
 > actually persists.** `flush_core`'s `Backing::Buffered` arm returned `None` on an empty in-VM buffer,
@@ -7566,7 +7566,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > compiler/native touch, so parity is structurally unaffected (nothing new runs). **W6-6 (P0)** — the
 > extern/struct collision guard was DEAD CODE on the CLI path: the sweep looked up the bare `extern_names`
 > spelling in `self.structs`, which the graph path keys MODULE-SCOPED (`main::S`), so `struct strlen` +
-> `extern fn strlen` type-checked and silently called the **struct ctor** while `docs/syntax.md` promised a
+> `extern fn strlen` type-checked and silently called the **struct ctor** while `docs/reference/syntax.md` promised a
 > reject (the tracked `checker-test-helper-key-divergence` class — the bare-keyed `rejects()` helper passed).
 > Fixed by keying the sweep off **`struct_names`**, the BARE-visible ctor set (the same predicate the
 > nested-fn guard uses), which is bare in BOTH paths. Deliberate delta: an UN-imported stdlib layout name
@@ -7586,7 +7586,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > is blind, both decl orders, imported-vs-un-imported native struct, the four variants, `Result`/`Option`
 > ok, once-only count, zero-field param+return+entry). Controls re-verified on `target/release/chezzi`,
 > `--serial` == default M:N byte-identical: `examples/ffi{,_struct,_str,_int}.chz`, a plain `extern strlen`,
-> and a `struct Cplx{re,im}` + `cabs` by-value-struct extern. Docs: `docs/syntax.md` extern section (the
+> and a `struct Cplx{re,im}` + `cabs` by-value-struct extern. Docs: `docs/reference/syntax.md` extern section (the
 > promise now true + names the variant ctors, the accepted TYPE-name cases, and the zero-field limit).
 > **Fifth arm, folded in (`7abe925`) rather than deferred:** the first cut left `newtype N = int` +
 > `extern fn N` OPEN as "its own follow-up" — but two of three adversarial reviewers charged the
@@ -7598,7 +7598,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `variant_owners` + builtin variants). Test: `extern_named_after_newtype_rejected` (both decl orders,
 > single-module + graph path, plus a non-colliding control).
 
-> **✅ TEST RUNNER (2026-07-24) — `chezzi test` selection + output ergonomics batch (docs/future.md §3b
+> **✅ TEST RUNNER (2026-07-24) — `chezzi test` selection + output ergonomics batch (docs/design/roadmap.md §3b
 > #5/#6/#7).** Seven opt-in, low-risk CLI+formatting flags on the runner — NO VM/checker/compiler touch,
 > pure `cmd_test` (flag parse) + `test_runner.rs` (formatting/filtering/timing). **Central refactor:** a
 > `RunOpts { max_heap, timeout_ms, filter, fail_fast, show_output, json, verbosity, color }` struct + a
@@ -7617,10 +7617,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `--color=auto|always|never` (auto = isatty on stdout, resolved in `cmd_test` so the runner never emits
 > ANSI under the captured harness). **Timing is `-v`/json ONLY — never in default/quiet** (non-deterministic
 > → would break the byte-identity gate). +9 runner unit tests (filter/zero-match/fail-fast/show-output/
-> json/verbose-timing/quiet-dots/color); all 33 runner tests + the full suite green. Docs: `docs/future.md
-> §3b #5/#6/#7` marked SHIPPED, `docs/gaps.md T4/T6` gaps struck, USAGE updated per flag.
+> json/verbose-timing/quiet-dots/color); all 33 runner tests + the full suite green. Docs: `docs/design/roadmap.md
+> §3b #5/#6/#7` marked SHIPPED, `docs/contributing/gaps.md T4/T6` gaps struck, USAGE updated per flag.
 
-> **✅ TEST RUNNER (2026-07-24) — `chezzi test --timeout=<ms>` per-test wall-clock cap (docs/future.md
+> **✅ TEST RUNNER (2026-07-24) — `chezzi test --timeout=<ms>` per-test wall-clock cap (docs/design/roadmap.md
 > §3b item #4; the wall-clock sibling of `--max-heap`).** Opt-in per-test timeout: a `test fn` running
 > longer than `N` ms is **hard-aborted** (un-recoverable — `recover:` CANNOT swallow it) and bucketed in
 > a new `Verdict::TimedOut` (rendered `TIMED-OUT name (file) msg`, counts as failure, exit non-zero;
@@ -7662,7 +7662,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > next seam. Ms granularity; sub-ms overshoot. Verified end-to-end on the release binary (TIMED-OUT + exit
 > 1; `--serial` guard error + exit 1; bad value + exit 1; timeout-off byte-identical PASS).
 >
-> **✅ TEST RUNNER (2026-07-24) — `chezzi test --max-heap=<bytes>` per-test memory cap (docs/future.md
+> **✅ TEST RUNNER (2026-07-24) — `chezzi test --max-heap=<bytes>` per-test memory cap (docs/design/roadmap.md
 > §3b item #1b; builds on the FAIL/ERROR bucket infra).** An opt-in runaway-allocation guard: a single
 > test whose in-VM live heap exceeds `N` bytes is **hard-aborted** (un-recoverable — `recover:` CANNOT
 > swallow it, so a `for: recover: <alloc>` loop can't defeat it) and bucketed in a new
@@ -7714,7 +7714,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Verified end-to-end on the release binary both ways
 > (OVER-MEMORY + exit 1; bad value + exit 1; cap-off byte-identical PASS).
 >
-> **✅ TEST RUNNER (2026-07-24) — `chezzi test` FAIL vs ERROR split (docs/future.md §3b item #1, the
+> **✅ TEST RUNNER (2026-07-24) — `chezzi test` FAIL vs ERROR split (docs/design/roadmap.md §3b item #1, the
 > foundation wave).** A `test fn`/method is void, so `assert` is the ONLY intended failure signal; every
 > other runtime fault (OOB, div-by-zero, missing key, native fault, a crashed setup hook) is unexpected
 > and now renders **ERROR**, not FAIL — pytest's FAILED-vs-ERROR distinction. **Seam 1 (VM):**
@@ -7781,8 +7781,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > branch BEFORE the table lookup. `unique_member_owner`'s `str`/`bytes` pin now reads the seeded tables
 > (`src/checker/pattern.rs`). Every reserved-type method sig is now file-backed — no bespoke `*_method_sig`
 > fn remains. Tests: `tests/chz/spec/reserved_method_tables_test.chz` (10 tests, both engines) + extended
-> `prelude_container_checker`/`builtin_method_slices_all_resolve`. Docs: `docs/gaps.md` item 1 (mirror-gap half
-> closed; VM `handle_key` half still out of scope), `docs/concurrency.md`.
+> `prelude_container_checker`/`builtin_method_slices_all_resolve`. Docs: `docs/contributing/gaps.md` item 1 (mirror-gap half
+> closed; VM `handle_key` half still out of scope), `docs/reference/concurrency.md`.
 
 > **✅ CHECKER DIAGNOSTIC (2026-07-23) — imported native-struct redeclare now says "already defined".**
 > `import Match from std.regex` + `struct Match` reported "type 'Match' is reserved (builtin)" — wrong:
@@ -7793,7 +7793,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > moved `imported_builtin_types.contains(name)` out of the reserved branch into `already_defined`. Still
 > a hard reject (no accept-then-trap); message-only. Genuine global reserved types (`int`/`Channel`/…)
 > keep "reserved (builtin)". Tests: updated `import_plus_same_name_struct_decl_rejected` + 3 regressions.
-> Docs: `docs/gaps.md` (note RESOLVED-as-reframed), `docs/stdlib.md`.
+> Docs: `docs/contributing/gaps.md` (note RESOLVED-as-reframed), `docs/reference/stdlib.md`.
 
 > **✅ AIRLOCK (2026-07-23) — value-store paths now handle-gated (serial==M:N).** An FFI/native/module
 > handle crossing `Channel.send`/`try_send`/`wait:`-send or stored into a `Shared`/`RwShared`/`Atomic`
@@ -7806,7 +7806,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > site with the `a module handle cannot cross` message. Legit `Channel`/`Shared`/
 > `Executor`/socket handles (shared-`Arc` wire arms, `has_handle()`==false) still cross unchanged —
 > regressed by `positive_*` parity tests. VM-only; checker/compiler untouched. Tests: 4 fault + 2
-> positive in `vm/parity_tests.rs`. Docs: `docs/gaps.md` L7 (the "caught at the runtime airlock" claim
+> positive in `vm/parity_tests.rs`. Docs: `docs/contributing/gaps.md` L7 (the "caught at the runtime airlock" claim
 > was false for value-store paths — now noted CLOSED). (**Update 2026-07-23:** the 4 FFI-fault tests
 > were later FLIPPED to positive — native/FFI fn VALUES now cross by value; see next entry.)
 
@@ -7824,7 +7824,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `a module handle cannot cross` (Module is source-unreachable → defensive-only). Serial == M:N
 > byte-identical (native + FFI via Channel/Shared/spawn-arg/spawn-block). VM-only; checker/compiler/parser
 > untouched (the checker was already correct). Tests: `tests/chz/spec/airlock_native_test.chz` (4 native)
-> + 5 flipped `ffi_handle_crosses_*`/`ffi_handle_send_succeeds` parity tests. Docs: `docs/gaps.md`
+> + 5 flipped `ffi_handle_crosses_*`/`ffi_handle_send_succeeds` parity tests. Docs: `docs/contributing/gaps.md`
 > session log + settled-note split.
 
 > **✅ FIX (2026-07-23, `auto-task/newtype-sort-minmax`) — numeric-newtype `.sort()`/`.min()`/`.max()`
@@ -7838,7 +7838,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Checker untouched (its grant was correct). Regression: `tests/chz/spec/newtype_test.chz` (int + float
 > sort/min/max + bare `<`/`==` + `sort_by_key` positive controls), gated serial==M:N. A `str`/`bool`
 > newtype is not `Comparable` (checker grants numeric only), so its sort is rejected at `check`. See
-> `docs/gaps.md` session log 2026-07-23.
+> `docs/contributing/gaps.md` session log 2026-07-23.
 >
 > **↳ Follow-up (2026-07-23, `auto-task/order-key-newtype`) — `Vm::order_key` was the MISSED sibling.**
 > The above fix covered `.sort()` (`value_order`) but the `.min()`/`.max()`/`.min_by`/`.max_by`/`.sort_by_key`
@@ -7870,7 +7870,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`list_hof_3engine_parity`), missing-hash runtime-bypass. Follow-up: iterate remaining clusters (str
 > methods, tuples, encoding/crypto → `tests/chz/stdlib/`). Drive-by: unstuck a pre-existing
 > stale golden `examples/str_more.expected` (`count("")`=len+1 from the prior commit, golden never
-> updated). Docs: `docs/syntax.md §9c`, `tests/chz/README.md`.
+> updated). Docs: `docs/reference/syntax.md §9c`, `tests/chz/README.md`.
 
 > **✅ CONCURRENCY (2026-07-24, `auto-task/rwshared-readview`) — zero-copy READ-view methods on
 > `RwShared[List[E]]`.** Purely ADDITIVE; `get`/`read`/`write`/`set`/`update` + the `WireValue` storage
@@ -7897,8 +7897,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (walks a heap-independent wire form) — proven by
 > `tests/chz/suites/rwshared_readview_test.chz` (both engines via `chz_suite_passes`, incl. a
 > nested-read-under-concurrent-writer stress case that deadlocked the pre-fix impl) + checker `rejects`/`ok`
-> pair. Extended to `Map`/`Set` — see the entry above. Docs: `std/concurrency.chz`, `docs/stdlib.md`,
-> `docs/concurrency.md §6f`.
+> pair. Extended to `Map`/`Set` — see the entry above. Docs: `std/concurrency.chz`, `docs/reference/stdlib.md`,
+> `docs/reference/concurrency.md §6f`.
 
 > **✅ CONCURRENCY (2026-07-24, `auto-task/rwshared-map-set-readview`) — zero-copy READ-view extended to
 > `RwShared[Map[K,V]]` + `RwShared[Set[E]]`** (Tuple EXCLUDED — heterogeneous). ADDITIVE; storage model +
@@ -7923,10 +7923,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `chz_suite_passes`, incl. Map+Set nested-read-under-writer + AB-BA cross-box deadlock
 > regressions) + checker `rejects`/`ok` boundary tests (`container_where_bound_*`, `rwshared_map/set_*`).
 > The `where T: List/Map/Set` bound is now a genuine, tested surface bound (a user generic `fn f[T: List]`
-> accepts a list, rejects an int). Docs: `std/concurrency.chz`, `docs/stdlib.md`, `docs/concurrency.md §6f`.
+> accepts a list, rejects an int). Docs: `std/concurrency.chz`, `docs/reference/stdlib.md`, `docs/reference/concurrency.md §6f`.
 
 > **✅ CONCURRENCY (2026-07-22, `auto-task/atomic-int`) — `AtomicInt`, a monomorphic LOCK-FREE int atomic.**
-> Purely ADDITIVE; `Atomic[T]` untouched (zero regression). The reframed backlog item from `docs/future.md
+> Purely ADDITIVE; `Atomic[T]` untouched (zero regression). The reframed backlog item from `docs/design/roadmap.md
 > §4` (a lock-free fast path on the GENERIC `Atomic[T]` was UNSOUND — VM is type-blind at construction, so
 > `Atomic[Any]` holding an int then `.store("hi")` faults; a monomorphic type removes the cause). Shipped
 > mirroring the four reserved `std.concurrency` names at every checker/VM site as a UNIT type (no `[T]`):
@@ -7938,7 +7938,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > i64-overflow fault byte-identical to `Atomic` (`"integer overflow in Add/Sub"`); `SeqCst` on every op →
 > serial == M:N byte-identical. Import-gated + reserved like `Atomic` (bind_import skip closes the
 > reserved-name hole). **Perf: ~2.7× faster than Mutex-backed `Atomic` on an 8-way contended int counter**
-> (16M adds, 1.73s vs 4.73s; uncontended a wash) — `docs/benchmarks.md §AtomicInt`. Tests (both engines):
+> (16M adds, 1.73s vs 4.73s; uncontended a wash) — `docs/contributing/benchmarks.md §AtomicInt`. Tests (both engines):
 > `atomic_int_{roundtrip,add_overflow,sub_overflow,contention,from_import_runs}_parity` +
 > `atomic_int_bare_unlicensed_errors` + harvest-drift/reserved-name loops + `examples/atomic_int.chz`.
 > Docs: `future.md` (LANDED), `stdlib.md`, `concurrency.md §6b`, `syntax.md`, `benchmarks.md`.
@@ -7968,8 +7968,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `wait_send_arm_closed_channel_faults_both_engines`, `wait_unbounded_send_arm_always_ready_both_engines`,
 > `wait_send_source_order_first_ready_wins_both_engines`, `wait_send_arm_in_callback_faults_same_on_both_engines`;
 > checker `wait_send_arm_*` (incl. `wait_send_arm_non_channel_receiver_rejected`) / `wait_bare_*`; parser
-> `parses_wait_bare_send_arm`. Docs: this note, `docs/grammar.bnf` (new `<waitArm>` bare-expr form),
-> `docs/concurrency.md §6d`, `docs/syntax.md`. `cargo test` / `conformance` / `clippy` green.
+> `parses_wait_bare_send_arm`. Docs: this note, `docs/reference/grammar.bnf` (new `<waitArm>` bare-expr form),
+> `docs/reference/concurrency.md §6d`, `docs/reference/syntax.md`. `cargo test` / `conformance` / `clippy` green.
 
 > **✅ REFACTOR (2026-07-22, `auto-task/unify-native-dispatch-prefix`) — UNIFIED native-handle dispatch
 > prefix (checker + VM), behavior-preserving.** Kills the check-OK/run-fault bug class STRUCTURALLY (the
@@ -7981,7 +7981,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > its native op body (tails byte-identical: Socket/Listener `poll_park`, Writer `stream_halt`); a `None`
 > falls straight to the hot collection arms. Adding a handle to that one match auto-enables bodied
 > dispatch — no arm can be forgotten. Bonus: this REMOVES the eight `if matches!` probes that used to sit
-> on the hot list/map/struct method path (net fewer branches; benches flat, `docs/benchmarks.md`).
+> on the hot list/map/struct method path (net fewer branches; benches flat, `docs/contributing/benchmarks.md`).
 > *Checker (`src/checker/expr.rs`, `infer_method_call`):* the shared lookup + hover + generic-branch
 > (`native_handle_method` → `record_method_hover` → prepend-receiver `infer_generic_method`) extracted
 > into `resolve_native_handle_method` (returns `Generic(Ty)`/`Concrete(FnSig)`/`Miss`); each arm keeps
@@ -7992,7 +7992,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > stdlib/behavior change: proven by the two existing bodied methods flowing through the unified prefix
 > (`Executor.submit_result[T]` generic + `Reader.lines` non-generic, both engines) plus every existing
 > special-case/parity/golden test staying green. Tests: unchanged (behavior-preserving); full `--lib`
-> (3688) + all targets + conformance green, clippy clean. Docs: this note, `docs/benchmarks.md`.
+> (3688) + all targets + conformance green, clippy clean. Docs: this note, `docs/contributing/benchmarks.md`.
 
 > **✅ CONCURRENCY (2026-07-22, `auto-task/bounded-channel-pmap`) — BOUNDED `Channel[T](cap)` +
 > `pmap`/`pmap_limited` stdlib helpers.** *(1) Bounded channel:* `Channel[T]()` stays unbounded (`send`
@@ -8018,10 +8018,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > never completion order; `pmap_limited` caps in-flight tasks with a channel-as-semaphore token bucket).
 > Tests: `src/vm/tests.rs` `bounded_channel_*` (cap/try_send-full/zero-cap-fault/full-send-deadlock/
 > fan-out golden, all serial==M:N) + `pmap_*`; checker `channel_bounded_capacity_*`. Docs: this note,
-> `docs/concurrency.md` §5/§6d, `docs/stdlib.md`, `docs/spec.md`.
+> `docs/reference/concurrency.md` §5/§6d, `docs/reference/stdlib.md`, `docs/reference/spec.md`.
 
 > **✅ CHECKER + VM (2026-07-22, `auto-task/generic-native-methods`) — generic methods on RESERVED
-> built-in receivers, 3 mirror-edits.** `docs/gaps.md` "Generic methods on RESERVED built-in receiver
+> built-in receivers, 3 mirror-edits.** `docs/contributing/gaps.md` "Generic methods on RESERVED built-in receiver
 > types" **1a/1b/2 RESOLVED**: (1a) `method_has_own_type_params` (`src/checker/expr.rs`) gained
 > reserved-receiver arms (bare-table lookup like `Ty::Struct`), so member turbofish `[1,2,3].map[int](…)`
 > and any bodied generic method are no longer rejected "takes no type argument(s)"; (1b) the
@@ -8035,7 +8035,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (semantically identical). Tests: `vm::tests::executor_submit_result_both_engines`, checker
 > `reserved_receiver_generic_method_turbofish_ok` / `reserved_receiver_nongeneric_method_turbofish_rejected`
 > / `executor_bodied_generic_method_infers_from_closure`; the two existing `task_*` tests stay green. Docs:
-> this note, `docs/gaps.md`, `docs/stdlib.md`, `docs/concurrency.md`. **Residual (by design):** list/map/set
+> this note, `docs/contributing/gaps.md`, `docs/reference/stdlib.md`, `docs/reference/concurrency.md`. **Residual (by design):** list/map/set
 > bodied methods stay unharvested (hot `core_method` arm untouched — M19 perf); `ex.submit_task(f)` dot-form
 > still needs the deferred Task-placement change (Option A).
 
@@ -8053,7 +8053,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > legs share the one real stdin fd sequentially → a stdin-reading program diverges by construction (used
 > as the negative test). A divergence is a signal to investigate (order-dependence / airlock / scheduler
 > / accepted `--parallel`-only path), not automatically a bug. Tests: `tests/check_parity.rs` (conflict,
-> OK on `concurrent_jobs.chz`, stdin-drain divergence). Docs: this note, `docs/concurrency.md` §6g,
+> OK on `concurrent_jobs.chz`, stdin-drain divergence). Docs: this note, `docs/reference/concurrency.md` §6g,
 > `chezzi run` `--help`.
 
 > **✅ CONCURRENCY (2026-07-22) — `std.concurrency.task`: result handles for `Executor` work.** Bare
@@ -8066,11 +8066,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > byte-identical *iff awaited in a fixed (submission) order*; deliberately **no `join_next()`**
 > (completion-order = parity-hostile). Canonical shape: submit all → `shutdown()` → `.get()` each. No
 > native/VM change (like `pmap`). Tests: `src/vm/tests.rs` `task_submit_get_submission_order_both_engines`,
-> `task_get_idempotent_and_done_both_engines`. Docs: this note, `docs/concurrency.md` §5b, `docs/stdlib.md`.
+> `task_get_idempotent_and_done_both_engines`. Docs: this note, `docs/reference/concurrency.md` §5b, `docs/reference/stdlib.md`.
 > **Deferred:** making `Executor.submit` itself return `Task[T]` natively (needs a native/VM change +
 > always-alloc a result channel on every detached submit — the free helper avoids both).
 
-> **✅ CONCURRENCY / AIRLOCK (2026-07-21, `auto-task/module-global-generator-sendable`) — `docs/gaps.md`
+> **✅ CONCURRENCY / AIRLOCK (2026-07-21, `auto-task/module-global-generator-sendable`) — `docs/contributing/gaps.md`
 > backlog item **B** CLOSED: a MODULE-GLOBAL live generator now crosses the airlock BY VALUE (deep copy),
 > exactly like a frame-local one (F3 path C). The reach-gate + Option-B poison→`nil` model is RETIRED.**
 > `to_snap_depth`'s fast path no longer excludes generator-embedding values (`!value_embeds_generator`
@@ -8108,7 +8108,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > dismissed it — re-verified by hand per `auto-task-review-unreliable`). The memories
 > `generator-airlock-option-b-reach-gate` + `airlock-sendability-architecture` describe the RETIRED model.
 
-> **✅ CONCURRENCY / SOUNDNESS (2026-07-21, `auto-task/serial-module-globals`) — `docs/gaps.md` §B3
+> **✅ CONCURRENCY / SOUNDNESS (2026-07-21, `auto-task/serial-module-globals`) — `docs/contributing/gaps.md` §B3
 > CLOSED by construction: the SERIAL engine now snapshots module globals per spawned task, matching M:N.**
 > Root cause: a cooperative child aliased the shell's real `module_objs` while an M:N fiber installed its
 > own snapshot — so a task mutating a module global leaked on `--serial` (shared) but was lost on M:N
@@ -8154,7 +8154,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **NEXT SESSION** (not this one) — sendability completeness, ranked, each its own spec: (1) protocol
 > sendable under option (a) — Go `chan interface` parity, decision settled **[DONE]**; (2) recursive-local-fn
 > sendability **[DONE 2026-07-21 — see below]**; (3) reject-case generators (mid-`recover:`/`defer`/multi-frame).
-> Full backlog + decisions: `docs/gaps.md` "NEXT-SESSION BACKLOG".
+> Full backlog + decisions: `docs/contributing/gaps.md` "NEXT-SESSION BACKLOG".
 
 > **✅ RECURSIVE-LOCAL-FN SENDABILITY (2026-07-21, `auto-task/recursive-fn-sendable`) — a nested recursive
 > `fn` (and a mutually-recursive closure pair) now CROSSES the airlock and computes correctly on both
@@ -8232,7 +8232,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > DISMISSED this as unobservable — caught on independent re-verification of the merged HEAD (VM
 > soundness: never trust the auto-task's own review). The reach-gate `check_task_generator_reach` is
 > **retained** (now-redundant; its over-gate + doc cleanup is the remaining open F3 follow-up in
-> `docs/gaps.md`). No checker change (`Iterator[T]` already
+> `docs/contributing/gaps.md`). No checker change (`Iterator[T]` already
 > sendable-permissive). No hot-path change (`CallFrame` already derived `Clone`; the diff is additive to
 > the cold wire arms). Touched: `src/vm/wire.rs` (`WireValue::Generator` + `WireGenState` + `WireCallFrame`
 > + `has_handle`), `src/vm/sched.rs` (`to_wire`/`from_wire`), `src/vm/core.rs` (`collect_core_gcrefs`),
@@ -8256,14 +8256,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >   convert (unlike a `struct`, whose `Convert` witnessing is a documented deferral), so the runtime
 >   always faulted. New `reject_aggregate_scalar_cast` turns it into a clean compile error.
 > - **F2 (doc) — `Shared.update` lock semantics + reentrancy limit** were only documented under
->   `RwShared`; added the note at `Shared.update` itself (`docs/stdlib.md`): `update(f)` runs under the
+>   `RwShared`; added the note at `Shared.update` itself (`docs/reference/stdlib.md`): `update(f)` runs under the
 >   box's exclusive write lock, and re-touching the same box inside `f` self-deadlocks (M:N hangs;
 >   `--serial` silently loses the inner write).
 > - **F3 (HELD) — generator reach-gate over-gates** (any task that makes a call/captures faults if any
 >   module-global generator exists), contradicting the docs' "an untouched generator global does not
 >   fault." NOT fixed: tightening the reach analysis risks an unsafe *under*-gate (a live generator
 >   crossing the airlock = VM frames on another thread), the exact hazard the gate over-approximates to
->   avoid — too risky pre-freeze. Needs a scoped precision spike; see `docs/gaps.md`.
+>   avoid — too risky pre-freeze. Needs a scoped precision spike; see `docs/contributing/gaps.md`.
 
 > **✅ CHECKER / CONCURRENCY (2026-07-21, `auto-task/protocol-sendable`) — Task 2: ALL user protocol
 > existentials are now sendable (Go `chan interface` parity), generalizing the earlier `Error`-only
@@ -8279,7 +8279,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `false` only for `Ty::Module`. **Bench-neutral** (checker-only, no VM change). Migration: 14 old-policy
 > tests flipped to accepted (each a genuinely-sendable witness — the old rejection was a false positive);
 > genuine-rejection coverage moved to `vm::parity_tests::ffi_handle_cannot_cross_airlock_three_engine`.
-> Full suite green. Details: `docs/gaps.md` item 1 + §L7 (superseded banner).
+> Full suite green. Details: `docs/contributing/gaps.md` item 1 + §L7 (superseded banner).
 
 > **✅ CHECKER / CONCURRENCY (2026-07-20, `feat/l7-sendable-error`) — L7: sendability-bounded `Error`
 > existential landed; `Channel[int!]` / `Channel[Error]` now admitted and sound.** *(Superseded
@@ -8290,7 +8290,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > not laundered** across a task boundary (closes the F2 check-OK-then-run-fault). Design ("Option B", 5
 > checker edits): inference sites **preserve** a non-sendable concrete error (in-task use stays legal);
 > the explicit/direct-literal widening chokepoint (`assignable`'s `Protocol` arm) rejects. Commits
-> `c1b4ab4` · `997e642` · `2b29ed3` · `ba2ea7c`. Details + deferred follow-ups: `docs/gaps.md §L7`.
+> `c1b4ab4` · `997e642` · `2b29ed3` · `ba2ea7c`. Details + deferred follow-ups: `docs/contributing/gaps.md §L7`.
 
 > **✅ LANGUAGE (2026-07-19, `auto-task/remove-ref`) — the `ref` keyword, the `Ref[T]` reserved box, and
 > `std.ref` were REMOVED entirely (pure subtraction, minimalism/coherence — NOT a sendability change).**
@@ -8299,7 +8299,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > already share by reference on assignment and scalars copy. Nothing real depended on it: **zero** stdlib
 > `.chz` imported `std.ref`; the sole non-demonstrator example used `ref` only to show it now behaves like
 > a plain local. Ripped across the whole pipeline: `Token::Ref` (lexer) + the `REF` grammar production
-> (`docs/grammar.bnf`, conformance stays green); `Param.is_ref`/`StmtKind::Let.is_ref` (ast) + the parser
+> (`docs/reference/grammar.bnf`, conformance stays green); `Param.is_ref`/`StmtKind::Let.is_ref` (ast) + the parser
 > eats; the entire `lower_refs`/`ref_names`/`callee_param_is_ref` desugar subsystem (variadic-collapse
 > kept via a renamed `first_pass` flag); the checker `ref_decls`/`ref_seed`/`is_ref_decl`/`ref_display`/
 > `check_ref_ty` plumbing + the `Ref` reserved-type arm + the dead `name=="Ref"` arm in `sendable_rec`;
@@ -8317,7 +8317,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > **✅ CHECKER (2026-07-18, `auto-task/checker-overreject-fixes`) — two disjoint over-rejection /
 > diagnostic fixes (all checker-side, parity-neutral, runtime unchanged).**
 > **F2 (dropped — was unsound) — ✅ SUPERSEDED by L7 (2026-07-20): the SOUND version landed.** See the
-> L7 entry below / `docs/gaps.md §L7`. The naive whitelist was unsound because it erased field-level
+> L7 entry below / `docs/contributing/gaps.md §L7`. The naive whitelist was unsound because it erased field-level
 > sendability; L7 ships the sound form (sendable-*bounded* `Error`: the existential is sendable AND
 > every value widened into it is required sendable at the widening site). `Channel[int!]`/`Channel[Error]`
 > now type-check and cross a task boundary; the `channel_of_protocol_existential_is_non_sendable` test
@@ -8408,7 +8408,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > transitive reach). Docs: `concurrency-b3.md`, tests.rs comments. Full `cargo test`/`clippy`/
 > `conformance` green.
 >
-> **✅ SOUNDNESS (2026-07-18, `auto-task/try-nil-fn-reject`) — `docs/gaps.md` §B6: `?` in a nil fn
+> **✅ SOUNDNESS (2026-07-18, `auto-task/try-nil-fn-reject`) — `docs/contributing/gaps.md` §B6: `?` in a nil fn
 > silently swallowed the error (check-OK-then-data-loss).** The checker accepted `?` whenever the
 > enclosing return was `Nil` — but `Nil` covers BOTH module top-level (legit — the runtime unwinds the
 > unhandled `Err`/`None` at the program boundary) AND a nil-returning fn body (the bug — the propagated
@@ -8422,7 +8422,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `top_level_error`, so a returned `Err`/`None` surfaces as `unhandled error: <msg>` (rc=1) — letting an
 > entrypoint legitimately be `-> T!` and use `?` (both engines, one edit). Migrated `examples/hello.chz`
 > + `examples/socket_timeout.chz` to `-> int!` + `return Ok(0)` (output-identical goldens hold).
-> Docs: `docs/syntax.md` §9 `?` rule, `docs/spec.md` entry model + the safe_div example, `docs/gaps.md`
+> Docs: `docs/reference/syntax.md` §9 `?` rule, `docs/reference/spec.md` entry model + the safe_div example, `docs/contributing/gaps.md`
 > §B6. Checker + runner change → parity preserved; `cargo test`/`clippy`/`conformance` green.
 >
 > **✅ LANGUAGE (2026-07-18, `auto-task/python-float-fmt`) — Python-compatible float formatting.**
@@ -8438,8 +8438,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Single-sourced: `vm::format_float` delegates to `fmtspec::repr_float`; both the spec arm and repr path share
 > `normalize_exp`. This is a **deliberate reversal** of the old "never scientific" divergence (commit 4f1ec35) —
 > Python parity is the goal. CPython differential shim (`emit_python.rs`) switched to `repr(v)` in lockstep.
-> Goldens updated: `examples/{float_large_integral,literals,format_specs}.expected`. Docs: `docs/syntax.md`,
-> `docs/spec.md`. Two-engine parity green (serial==M:N, one shared formatter). `cargo test`/`clippy`/`conformance` green.
+> Goldens updated: `examples/{float_large_integral,literals,format_specs}.expected`. Docs: `docs/reference/syntax.md`,
+> `docs/reference/spec.md`. Two-engine parity green (serial==M:N, one shared formatter). `cargo test`/`clippy`/`conformance` green.
 >
 > **✅ LANGUAGE (2026-07-17, `auto-task/check-fmtspec`) — Nit 2: static format-spec/value-type check.**
 > A `{expr:spec}` interpolation whose spec is provably wrong for a **concrete scalar** value
@@ -8451,10 +8451,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > calls the SAME predicate, but ONLY for `Ty::Int/Float/Str/Bool` — `Unknown`, a generic `Param(T)`,
 > protocols, structs, lists, bytes fall through and keep the runtime backstop (a generic `"{v:.2f}"`
 > body is NOT statically rejected; instantiating it with str still faults at runtime, both engines).
-> Docs: `docs/syntax.md` (format specs). Checker-only + pure runtime refactor → parity untouched.
+> Docs: `docs/reference/syntax.md` (format specs). Checker-only + pure runtime refactor → parity untouched.
 > `cargo test`/`clippy`/`conformance` green.
 >
-> **✅ PARITY (2026-07-17, `auto-task/b4-executor-backtrace`) — `docs/gaps.md` §B4: converge the
+> **✅ PARITY (2026-07-17, `auto-task/b4-executor-backtrace`) — `docs/contributing/gaps.md` §B4: converge the
 > `Executor`-task uncaught-error backtrace frames across engines (was: cosmetic serial≠M:N).** An
 > uncaught fault from an `Executor.submit(...)` closure printed a full backtrace on `--serial`
 > (`at boom`/`at <closure>`/`at main`) but only `at main` on M:N (same message/location/rc). Serial's
@@ -8470,7 +8470,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Test: `executor_task_fault_trace_matches_on_both_engines` (all 3 cases + nursery neighbor guard) in
 > `src/vm/parity_tests.rs`. Full `cargo test`/`clippy`/`conformance` green.
 >
-> **✅ SOUNDNESS (2026-07-17, `auto-task/b3-frozen-aggregate-mutation`) — `docs/gaps.md` §B3: freeze
+> **✅ SOUNDNESS (2026-07-17, `auto-task/b3-frozen-aggregate-mutation`) — `docs/contributing/gaps.md` §B3: freeze
 > IN-PLACE mutation of a captured module-global aggregate in a task (was: serial≠M:N divergence).** The
 > frozen-module-global rule (checker already REJECTED *reassigning* a captured module global inside a
 > `spawn`/`parallel:` task) now ALSO rejects **in-place mutation** — `.push`/`.add`/`m[k]=v`/`s.field=x`
@@ -8489,7 +8489,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `module_global_aggregate_mutation_in_task_parity` (serial==M:N==3, the accepted fn-local path). Docs:
 > `gaps.md §B3` (→ FIXED core forms), `concurrency.md §7`. Full `cargo test`/`clippy`/`conformance` green.
 >
-> **✅ LANGUAGE (2026-07-17, `feat/const-binding`) — `docs/gaps.md` L4: `const` immutable bindings.**
+> **✅ LANGUAGE (2026-07-17, `feat/const-binding`) — `docs/contributing/gaps.md` L4: `const` immutable bindings.**
 > `const T` is a binding modifier in the same type-slot as `ref` (`PI: const float = 3.14`); the
 > checker rejects any later reassignment of the name (`=` + every compound). Immutable *binding*, not a
 > compile-time constant — runtime RHS is fine (JS `const`/Java `final`), and **shallow** (freezes the
@@ -8532,7 +8532,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > clippy clean. Docs: `syntax.md` (native-struct-mix note extended + module-level hybrid), `stdlib.md
 > §std.math`, `gaps.md §5`.
 
-> **✅ STDLIB (2026-07-16, `auto-task/crypto-secure-random`) — `docs/gaps.md` §7: CSPRNG in
+> **✅ STDLIB (2026-07-16, `auto-task/crypto-secure-random`) — `docs/contributing/gaps.md` §7: CSPRNG in
 > `std.crypto`.** Two members added to the file-backed native `std.crypto` (bodyless `native fn` sigs
 > in `std/crypto.chz`, impls in `src/native/crypto.rs`, zero new deps — libc `getrandom` like
 > `uuid.rs::auto_seed`): `secure_bytes(n: int) -> bytes` (Python `secrets.token_bytes`) and
@@ -8568,7 +8568,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`time_fn_sigs_exact`: functions still exactly 4) + both-engine runtime + golden timer test stays green
 > unchanged. Full suite 3599 green, clippy clean, conformance green.
 
-> **✅ STDLIB (2026-07-16, `auto-task/crypto-hash-hmac`) — `docs/gaps.md` §7: sha1 / sha512 / HMAC in
+> **✅ STDLIB (2026-07-16, `auto-task/crypto-hash-hmac`) — `docs/contributing/gaps.md` §7: sha1 / sha512 / HMAC in
 > `std.crypto`.** Five members added to the file-backed native `std.crypto` (bodyless `native fn` sigs
 > in `std/crypto.chz`, hand-rolled impls in `src/native/crypto.rs`, zero new deps — same seam as the
 > existing `sha256`/`md5`): `sha1(s)`/`sha1_bytes(b)` (FIPS 180-4, 5×u32 80-round; NOT
@@ -8584,9 +8584,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `crypto_fn_sigs_exact`. **NOT shipped** (ponytail follow-up note in the module docstring):
 > `hmac_sha1`/`hmac_sha512` (want a block-size param + `&[u8]` adapters — add if a caller needs them).
 > **STILL OPEN §7**: secure-random-bytes / token, password hashing (bcrypt/argon2). Docs:
-> `docs/stdlib.md §std.crypto`, `docs/gaps.md §7` (SHIPPED). Full `cargo test`/`clippy`/`conformance` green.
+> `docs/reference/stdlib.md §std.crypto`, `docs/contributing/gaps.md §7` (SHIPPED). Full `cargo test`/`clippy`/`conformance` green.
 >
-> **✅ STDLIB (2026-07-16, `auto-task/fs-stat-walk`) — `docs/gaps.md` §6: fs metadata READ + recursive
+> **✅ STDLIB (2026-07-16, `auto-task/fs-stat-walk`) — `docs/contributing/gaps.md` §6: fs metadata READ + recursive
 > walk.** Two natives on the file-backed `std.fs` + a new native struct `FileInfo`. `fs.stat(path) ->
 > Result[FileInfo]` reads real filesystem metadata into `struct FileInfo { size, mtime, mode: int,
 > is_dir, is_file, is_symlink: bool }` — FOLLOWS symlinks for size/mtime/mode/is_dir/is_file (matches
@@ -8600,12 +8600,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `ProcResult` (no is_reserved_type entry, no bespoke exec.rs skip). Tests: `native/fs.rs` unit
 > (`fs_stat_reads_metadata`, `fs_stat_follows_symlink_but_flags_it`, `fs_walk_recursive_sorted`,
 > `fs_walk_does_not_follow_symlink_dirs`) + `fs_stat_walk_fileinfo_parity` (RUNS `import FileInfo from
-> std.fs` + stat/walk on BOTH engines — the reserved-type-hole regression guard). Docs: `docs/stdlib.md
-> § std.fs`, `docs/gaps.md §6` (SHIPPED). Field order is load-bearing across `std/fs.chz` /
+> std.fs` + stat/walk on BOTH engines — the reserved-type-hole regression guard). Docs: `docs/reference/stdlib.md
+> § std.fs`, `docs/contributing/gaps.md §6` (SHIPPED). Field order is load-bearing across `std/fs.chz` /
 > `compiler/mod.rs` / `checker/setup.rs` / `native/fs.rs` — guarded by the parity test's size+is_file
 > asserts.
 >
-> **✅ STDLIB (2026-07-16, `auto-task/std-duration`) — `docs/gaps.md` §9: Go-like first-class `Duration`.**
+> **✅ STDLIB (2026-07-16, `auto-task/std-duration`) — `docs/contributing/gaps.md` §9: Go-like first-class `Duration`.**
 > NEW pure-Chezzi module `std/duration.chz` (zero native seam; only Rust touch = one `include_str!` line
 > in `src/resolver/std_embed.rs`, guarded by `embedded_std_table_matches_disk`). `Duration` is a plain
 > user struct over an int of **milliseconds** (matches `sleep_ms`/`timer(ms)`; i64-ms overflows at ~292M
@@ -8621,9 +8621,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (5 `test fn`s, wired into `d1_dogfood_example_tests_pass`) + `golden_duration_via_run_file`
 > (`examples/duration.chz`/`.expected` + `assert_file_parity` = serial==M:N). `parse` pre-collects
 > codepoints into a `List` for O(1) indexing (avoids the pure-Chezzi `s[i:i+1]` O(n²) trap). Docs:
-> `docs/stdlib.md § std.duration`, `docs/gaps.md §9` (SHIPPED). `sleep_ms`/`timer` stay int-ms (additive).
+> `docs/reference/stdlib.md § std.duration`, `docs/contributing/gaps.md §9` (SHIPPED). `sleep_ms`/`timer` stay int-ms (additive).
 >
-> **✅ STDLIB (2026-07-16, `auto-task/std-csv`) — `docs/gaps.md` §7: CSV read/write.** NEW pure-Chezzi
+> **✅ STDLIB (2026-07-16, `auto-task/std-csv`) — `docs/contributing/gaps.md` §7: CSV read/write.** NEW pure-Chezzi
 > module `std/csv.chz` (zero native seam — RFC 4180 quote state machine over the core `str` primitives
 > + `std.string.replace`/`index_of`; only Rust touch = one `include_str!` line in
 > `src/resolver/std_embed.rs`, guarded by `embedded_std_table_matches_disk`). `parse(text) ->
@@ -8636,10 +8636,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and was fixed pre-merge). `parse` pre-collects codepoints into a `List` for O(1) indexing (the
 > per-char `s[i:i+1]` slice was O(n²) — a large CSV hung; also fixed pre-merge). Tests:
 > `golden_csv_via_run_file` (`examples/csv.chz`/`.expected` +
-> `assert_file_parity` = serial==M:N). Docs: `docs/stdlib.md § std.csv`, `docs/gaps.md §7` (SHIPPED).
+> `assert_file_parity` = serial==M:N). Docs: `docs/reference/stdlib.md § std.csv`, `docs/contributing/gaps.md §7` (SHIPPED).
 > Deferred v1: streaming/Reader, header→Map mapping, custom-delimiter/TSV `parse_sep`.
 >
-> **✅ STDLIB (2026-07-16, `auto-task/std-os-sysfns`) — `docs/gaps.md` §6: OS / system fns.** Eight
+> **✅ STDLIB (2026-07-16, `auto-task/std-os-sysfns`) — `docs/contributing/gaps.md` §6: OS / system fns.** Eight
 > module-level natives on the file-backed `std.os`: queries `getpid() -> int`, `platform() -> str`
 > (`std::env::consts::OS`), `hostname() -> str` (libc `gethostname`, `""` on failure — no new dep),
 > `home_dir() -> Option[str]` (`$HOME` via the injected env), `temp_dir() -> str`, `environ() -> Map[str,str]`;
@@ -8655,11 +8655,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (proves setenv↔env↔environ), `golden_os_setenv_visible_across_tasks` (setenv-in-task visible to the parent,
 > both engines), `golden_os_environ_deterministic_order` (sorted, serial==M:N), `golden_os_queries` (shape +
 > engine agreement), `golden_os_chdir` (Ok/Err under `FS_SCRATCH_LOCK` + cwd-restore). Example
-> `examples/os_info.chz` (no `.expected`). Docs: `docs/stdlib.md §std.os`, `docs/gaps.md §6` (SHIPPED; the
+> `examples/os_info.chz` (no `.expected`). Docs: `docs/reference/stdlib.md §std.os`, `docs/contributing/gaps.md §6` (SHIPPED; the
 > os.env/process.cmd note reworded — os.env axis resolved, child-process axis unchanged by design). Deferred:
 > `os_name` alias, Windows `USERPROFILE`, signals/atexit, metadata-reader.
 >
-> **✅ STDLIB (2026-07-16, `auto-task/io-isatty`) — `docs/gaps.md` §6: TTY detection.** Three
+> **✅ STDLIB (2026-07-16, `auto-task/io-isatty`) — `docs/contributing/gaps.md` §6: TTY detection.** Three
 > module-level bool natives on the file-backed `std.io` module: `io.isatty()` / `io.isatty_stdin()` /
 > `io.isatty_stderr()` `-> bool`, each one line via `std::io::IsTerminal` on stdout/stdin/stderr. Lets
 > a CLI colorize only when not piped (Python `sys.stdout.isatty()` / Go `isatty`). Engine-agnostic (an
@@ -8667,10 +8667,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > launching fds — a pipe/redirect → false, an attached terminal → true; libtest capture doesn't touch the fd).
 > Seam reused as-is: `NativeRet::Bool` → `Value::Bool`, no new plumbing. Test `golden_isatty_via_run_file`
 > asserts bool-shape + engine agreement (not a fixed value). Manual eyeball: terminal → all true; `| cat`
-> pipes fd1 only → stdout false, stdin/stderr true. Docs: `docs/stdlib.md §std.io`, `docs/gaps.md §6` (SHIPPED). Deferred
+> pipes fd1 only → stdout false, stdin/stderr true. Docs: `docs/reference/stdlib.md §std.io`, `docs/contributing/gaps.md §6` (SHIPPED). Deferred
 > (deliberate second step): terminal-size / echo-off / raw-mode.
 >
-> **✅ STDLIB (2026-07-16, `auto-task/lazy-iter`) — `docs/gaps.md` §3: LAZY ITERATORS (itertools) in
+> **✅ STDLIB (2026-07-16, `auto-task/lazy-iter`) — `docs/contributing/gaps.md` §3: LAZY ITERATORS (itertools) in
 > `std.iter`.** `std.iter` was all-eager (returns `List`); added lazy `Iterator[T]` adapters as
 > pure-Chezzi **generators** (`yield`) in the existing `std/iter.chz` (it is pure-Chezzi — no native
 > seam, no dead-code hazard): `count(start=0, step=1) -> Iterator[int]` (infinite counter),
@@ -8684,9 +8684,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `islice(_, 5)` terminates; `imap`/`ifilter` compose over `count()` and terminate under `islice`.
 > Pure-Chezzi ⇒ serial-VM == M:N automatically; 5 inline `parity_entry` tests (both engines) in a
 > labeled block. Dropped: `take(it, n)` alias (collides with eager `take`; `islice` covers it). Docs:
-> `docs/stdlib.md § std.iter`, `docs/gaps.md §3` (SHIPPED). Full `cargo test`/`clippy`/`conformance` green.
+> `docs/reference/stdlib.md § std.iter`, `docs/contributing/gaps.md §3` (SHIPPED). Full `cargo test`/`clippy`/`conformance` green.
 >
-> **✅ STDLIB (2026-07-16, `auto-task/std-bisect-memoize`) — `docs/gaps.md` §10: `std.bisect` +
+> **✅ STDLIB (2026-07-16, `auto-task/std-bisect-memoize`) — `docs/contributing/gaps.md` §10: `std.bisect` +
 > `std.memoize`, two pure-Chezzi modules.** Both are NEW pure-Chezzi files (zero native seam — the only
 > Rust touch = two `include_str!` lines in `src/resolver/std_embed.rs`, guarded by
 > `embedded_std_table_matches_disk`). `std/bisect.chz`: `bisect_left`/`bisect_right`/`bisect` (alias) +
@@ -8700,10 +8700,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `golden_memoize_via_run_file` (single-eval proven by a captured call-counter → counter == 2 for two
 > distinct args). v1 ceilings (in `ponytail:` comments): bisect has no key-fn / no bare `insort` alias;
 > memoize is single-arg only (N-arg needs `Map[tuple, V]` but tuples aren't Hashable map keys yet).
-> Docs: `docs/stdlib.md § std.bisect` + `§ std.memoize`, `docs/gaps.md §10` (both SHIPPED). Full
+> Docs: `docs/reference/stdlib.md § std.bisect` + `§ std.memoize`, `docs/contributing/gaps.md §10` (both SHIPPED). Full
 > `cargo test`/`clippy`/`conformance` green.
 >
-> **✅ STDLIB (2026-07-16, `auto-task/list-ergonomics`) — `docs/gaps.md` §2 wave-1: LIST value/ergonomics
+> **✅ STDLIB (2026-07-16, `auto-task/list-ergonomics`) — `docs/contributing/gaps.md` §2 wave-1: LIST value/ergonomics
 > methods.** Nine methods added to the file-backed `native struct List[T]` seam (bodyless sigs in
 > `std/prelude.chz` → name-keyed VM dispatch in `src/vm/call.rs`; zero new checker code — the generic
 > `Ty::List` arm harvests sigs, `where T: Comparable` enforced via `enforce_bounds`, `min_by`/`max_by`'s
@@ -8718,11 +8718,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > root the source/snapshot/keys on the operand stack and re-fetch per iteration, mirroring
 > `list_sort_structs`/`list_sort_by_key`. Tests: 8 inline dual-engine parity/fault tests (`assert_mc_parity`
 > + `assert_fault_parity`) + extended `examples/list_methods.chz` golden (serial==M:N). Docs:
-> `docs/stdlib.md § List[T]`, `docs/gaps.md §2` (SHIPPED bullets struck). **STILL OPEN §2**: `iter.min`/`max`,
+> `docs/reference/stdlib.md § List[T]`, `docs/contributing/gaps.md §2` (SHIPPED bullets struck). **STILL OPEN §2**: `iter.min`/`max`,
 > `unique`/`dedup`/`chunk`/`windows`/`group_by`/`partition`/`flat_map`/`take_while`/`drop_while`, Map/Set
 > ergonomics — separate waves.
 >
-> **✅ STDLIB (2026-07-16, `auto-task/list-ergonomics`) — `docs/gaps.md` §2 wave-2: LIST iter-ergonomics
+> **✅ STDLIB (2026-07-16, `auto-task/list-ergonomics`) — `docs/contributing/gaps.md` §2 wave-2: LIST iter-ergonomics
 > methods.** Eight more methods on the same file-backed `native struct List[T]` seam (bodyless sigs in
 > `std/prelude.chz` → name-keyed VM dispatch in `src/vm/call.rs`, appended to `LIST_METHODS`; zero new
 > checker logic): `unique`/`dedup` (NEW list — first-occurrence dedup via `values_equal` vs
@@ -8732,11 +8732,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `take_while`/`drop_while`/`count`/`position` (predicate methods routed through `list_hof`'s snapshot+root
 > discipline — a re-entrant pred that shrinks the receiver can't OOB; `position` → `Option[int]`).
 > Tests: 5 inline dual-engine parity/fault tests incl. `list_predicate_shrinking_no_panic` +
-> extended `examples/list_methods.chz` golden (serial==M:N). Docs: `docs/stdlib.md § List[T]`,
-> `docs/gaps.md §2` (wave-2 bullet struck). **STILL OPEN §2**: `iter.min`/`max`, `group_by`/`partition`/
+> extended `examples/list_methods.chz` golden (serial==M:N). Docs: `docs/reference/stdlib.md § List[T]`,
+> `docs/contributing/gaps.md §2` (wave-2 bullet struck). **STILL OPEN §2**: `iter.min`/`max`, `group_by`/`partition`/
 > `flat_map`, Map/Set ergonomics — later waves.
 >
-> **✅ STDLIB (2026-07-16, `auto-task/math-number-fns`) — `docs/gaps.md` §5: NUMBER/MATH surface in
+> **✅ STDLIB (2026-07-16, `auto-task/math-number-fns`) — `docs/contributing/gaps.md` §5: NUMBER/MATH surface in
 > `std.math`.** Ten native fns + two float constants added to the file-backed native module (mirroring
 > the existing `sqrt`/`abs`/`pi` pattern — zero new seam machinery): `gcd`/`lcm` (int; Python `math.gcd`
 > semantics, `lcm` divides-before-multiplies + overflow-faults like `abs`), `sign` (numeric-poly like
@@ -8749,8 +8749,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `factorial_i64`/`comb_i64`/`perm_i64`/`parse_int_base_impl`); `sign` added to `MODULE_NUMERIC_POLY`.
 > **`divmod` — SHIPPED 2026-07-17 (see top entry)** as a bodied Chezzi fn via the hybrid module form; no
 > `NativeRet::Tuple` was needed. (Originally deferred here for lack of that seam.) Tests: `src/native/math.rs` helper units + `math_number_fns_parity`
-> (graph path, serial==M:N). Docs: `docs/stdlib.md §std.math`, `docs/gaps.md §5` (SHIPPED + divmod deferral).
-> **✅ STDLIB (2026-07-16, `auto-task/encoding-url-parse`) — `docs/gaps.md` §7: URL PARSING read-half in
+> (graph path, serial==M:N). Docs: `docs/reference/stdlib.md §std.math`, `docs/contributing/gaps.md §5` (SHIPPED + divmod deferral).
+> **✅ STDLIB (2026-07-16, `auto-task/encoding-url-parse`) — `docs/contributing/gaps.md` §7: URL PARSING read-half in
 > `std.encoding`.** Two native read-half members round out the module's existing write-half
 > (`url_encode`/`url_decode`/`query_encode`): `query_decode(q: str) -> Map[str,str]` (strips a leading
 > `?`, splits `&`/first-`=`, percent-decode + `+`→space, no-`=` key → `""`, DUPLICATE key = **last-wins**
@@ -8763,9 +8763,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `percent_decode(bytes, plus_as_space)` reused by `url_decode` (false) + `query_decode` (true);
 > `url_decode` byte-identical after (regression test green). Tests: unit `percent_decode`/`query_decode`/
 > `url_parse` + `examples/encoding.chz`/`.expected` extended (`golden_encoding_crypto_via_run_file` +
-> `assert_file_parity` = serial==M:N). Docs: `docs/stdlib.md §std.encoding`, `docs/gaps.md §7` (SHIPPED +
+> `assert_file_parity` = serial==M:N). Docs: `docs/reference/stdlib.md §std.encoding`, `docs/contributing/gaps.md §7` (SHIPPED +
 > label fix). Full `cargo test`/`clippy`/`conformance` green.
-> **✅ STDLIB (2026-07-16, `auto-task/std-log`) — `docs/gaps.md` §10: `std.log`, leveled logging.**
+> **✅ STDLIB (2026-07-16, `auto-task/std-log`) — `docs/contributing/gaps.md` §10: `std.log`, leveled logging.**
 > NEW pure-Chezzi module `std/log.chz` over `std.io` (only Rust touch = one `include_str!` line in
 > `src/resolver/std_embed.rs`, guarded by `embedded_std_table_matches_disk`). `log.new(min_level=INFO,
 > to_stderr=true) -> Logger`; `debug/info/warn/error(msg)` format `"LEVEL message"` gated by
@@ -8775,9 +8775,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > bakes in no clock (ungoldenable), so the default path stays golden-able. Pure-Chezzi ⇒ serial-VM ==
 > M:N. Tests: `parity_std_log_defaults_to_stderr` (gating+stderr routing) + `examples/log_demo.chz`/
 > `.expected` (`golden_log_demo_via_run_file` pins the STDERR stream + stream-discrimination asserts +
-> `assert_file_parity`). Docs: `docs/stdlib.md § std.log`, `docs/gaps.md §10` (SHIPPED). Deferred:
+> `assert_file_parity`). Docs: `docs/reference/stdlib.md § std.log`, `docs/contributing/gaps.md §10` (SHIPPED). Deferred:
 > handlers/formatters, hierarchical loggers, structured fields. Full `cargo test`/`clippy`/`conformance` green.
-> **✅ STDLIB (2026-07-16, `auto-task/std-flag`) — `docs/gaps.md` §10: `std.flag`, a Go-`flag`-style
+> **✅ STDLIB (2026-07-16, `auto-task/std-flag`) — `docs/contributing/gaps.md` §10: `std.flag`, a Go-`flag`-style
 > CLI arg parser.** NEW pure-Chezzi module `std/flag.chz` (zero native seam — consumes the existing
 > `os.args()`; only Rust touch = one `include_str!` line in `src/resolver/std_embed.rs`, guarded by
 > `embedded_std_table_matches_disk`). `flag.new()` → a `FlagSet` you register `str_flag`/`bool_flag`/
@@ -8788,9 +8788,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (Go-parity programmer error). Pure-Chezzi ⇒ serial-VM == M:N structurally. Tests: 4 inline
 > `parity_entry` cases (value/=-form, bool+terminator, 3 error paths, deterministic usage) +
 > `examples/flag_demo.chz`/`.expected` (`golden_flag_demo_via_run_file` + `assert_file_parity`).
-> Docs: `docs/stdlib.md §5 std.flag`, `docs/gaps.md §10` (SHIPPED). Deferred: required flags,
+> Docs: `docs/reference/stdlib.md §5 std.flag`, `docs/contributing/gaps.md §10` (SHIPPED). Deferred: required flags,
 > subcommands, dup-registration detection. Full `cargo test`/`clippy`/`conformance` green.
-> **✅ STDLIB (2026-07-16, `auto-task/string-ergonomics`) — `docs/gaps.md` §1: STRING ERGONOMICS in
+> **✅ STDLIB (2026-07-16, `auto-task/string-ergonomics`) — `docs/contributing/gaps.md` §1: STRING ERGONOMICS in
 > `std.string`.** Seven pure-Chezzi free fns (zero Rust, no native method-table change), Python `str`
 > semantics: `capitalize` / `title` / `swapcase` / `find(s, sub, from_index)` /
 > `split(s, sep, maxsplit=-1)` / `rsplit(s, sep, maxsplit=-1)` / `split_whitespace`. `find` generalizes
@@ -8800,9 +8800,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > empty `sep` (Python `ValueError`); `split_whitespace` drops empties on whitespace runs. Free-fn-only
 > (NOT receiver-method aliases — no Rust seam). ASCII-guaranteed; exotic Unicode case-fold follows Rust.
 > Pure-Chezzi ⇒ serial-VM == M:N structurally. Tests: `examples/str_more.chz` + `.expected` extended
-> (`golden_str_more_via_run_file` + `assert_file_parity`, both engines). Docs: `docs/stdlib.md §std.string`,
-> `docs/gaps.md §1` (SHIPPED). Full `cargo test`/`clippy`/`conformance` green.
-> **✅ STDLIB (2026-07-16, `auto-task/datetime-parse`) — `docs/gaps.md` §9: `datetime.parse_iso8601`,
+> (`golden_str_more_via_run_file` + `assert_file_parity`, both engines). Docs: `docs/reference/stdlib.md §std.string`,
+> `docs/contributing/gaps.md §1` (SHIPPED). Full `cargo test`/`clippy`/`conformance` green.
+> **✅ STDLIB (2026-07-16, `auto-task/datetime-parse`) — `docs/contributing/gaps.md` §9: `datetime.parse_iso8601`,
 > the string→`DateTime` half (`datetime` was write-only).** Pure-Chezzi, single-file seam (NO Rust) —
 > `parse_iso8601(s: str) -> Result[DateTime]`, the exact inverse of `to_iso8601`, reusing the existing
 > `to_epoch`/`from_epoch`/`days_in_month` machinery. Parses ISO-8601 / RFC-3339 (matches Python
@@ -8818,10 +8818,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > 5 `test fn` vectors (round-trip, forms, tz, frac, 8 Err cases) + `examples/datetime.chz` parse-tour
 > extended (golden `golden_datetime_via_run_file` runs serial VM **and** M:N via `assert_file_parity` —
 > the checker-superset gate). **Remaining follow-up:** `strftime`/`strptime`/`from_string` (format-token
-> vocabulary) deferred. Docs: `docs/stdlib.md` (§std.datetime table + ceilings), `docs/gaps.md` §9
+> vocabulary) deferred. Docs: `docs/reference/stdlib.md` (§std.datetime table + ceilings), `docs/contributing/gaps.md` §9
 > (parse landed, write-only de-stale'd). Full `cargo test`/`clippy`/`conformance` green.
 >
-> **✅ LANGUAGE (2026-07-16, `auto-task/contains-protocol`) — `docs/gaps.md` L5: the `Contains` operator
+> **✅ LANGUAGE (2026-07-16, `auto-task/contains-protocol`) — `docs/contributing/gaps.md` L5: the `Contains` operator
 > protocol (`x in my_struct`).** A user struct/enum with a `contains(self, item) -> bool` method makes
 > `x in that_value` dispatch to it, yielding `bool` (Python's `__contains__`, Go's idiom). Registered
 > `Contains[Item]` as a reserved operator protocol mirroring `Index[K,V]` — 4 drift-locked sites
@@ -8838,9 +8838,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (`assert_mc_parity`: struct true/false, generic `Box[int]`, enum), 5 checker guards, +
 > `examples/contains_protocol.chz` golden (`golden_contains_protocol_via_run_file` + `assert_file_parity`).
 > Newtypes deliberately out of scope (consistent with the proto.rs method-operator-on-newtype carve-out).
-> Docs: `docs/syntax.md §7b`, `docs/spec.md`, `docs/gaps.md` L5 (FIXED). Full `cargo test`/`clippy`/`conformance` green.
+> Docs: `docs/reference/syntax.md §7b`, `docs/reference/spec.md`, `docs/contributing/gaps.md` L5 (FIXED). Full `cargo test`/`clippy`/`conformance` green.
 >
-> **✅ LANGUAGE (2026-07-15, `auto-task/struct-match-patterns`) — `docs/gaps.md` L2: STRUCT PATTERNS in
+> **✅ LANGUAGE (2026-07-15, `auto-task/struct-match-patterns`) — `docs/contributing/gaps.md` L2: STRUCT PATTERNS in
 > `match` (positional field destructuring).** `match p: Point(x, y):` now binds a struct's fields
 > positionally, mirroring enum-variant patterns — closing the "enums destructure, structs don't"
 > asymmetry. A struct has exactly ONE constructor, so a lone all-binding `Point(x, y)` arm is
@@ -8866,11 +8866,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > load-bearing check the parity oracle is blind to), 11 checker guards, `examples/match_struct.chz`
 > golden (+ picked up by `all_shipped_examples_typecheck`, the real `check_graph` path). **Still
 > deferred:** `let Point(x, y) = p` (Let carries `names`, not a `Pattern` — separate seam) + fn-param
-> destructuring. Docs: `docs/syntax.md §8`, `docs/spec.md`, `docs/grammar.bnf` (prose — productions
-> already admitted `Name(subpatterns)`), `docs/gaps.md` L2. Full `cargo test`/`clippy`/`conformance` green.
+> destructuring. Docs: `docs/reference/syntax.md §8`, `docs/reference/spec.md`, `docs/reference/grammar.bnf` (prose — productions
+> already admitted `Name(subpatterns)`), `docs/contributing/gaps.md` L2. Full `cargo test`/`clippy`/`conformance` green.
 >
 > **✅ LANG+STDLIB (2026-07-15, `auto-task/native-struct-bodied-methods`) — bodied Chezzi methods on a
-> `native struct`, first user `Reader.lines() -> Iterator[str]` (`docs/gaps.md` R2b `lines()` DONE).**
+> `native struct`, first user `Reader.lines() -> Iterator[str]` (`docs/contributing/gaps.md` R2b `lines()` DONE).**
 > A `native struct` (a RESERVED opaque VM handle — `Ty::Reader`/`Writer`/…, no `StructDef`/`tid`) may now
 > MIX Rust-backed bodyless `native fn` sigs (dispatch stays native, name-keyed) with pure-Chezzi bodied
 > `fn` methods (COMPILED to bytecode, routed via new `Program::native_methods`/`native_home`, keyed by
@@ -8887,10 +8887,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `check_module`), so the mandated dual-engine RUN test is the safety net for any future bodied method.
 > Spawn-across-airlock for a generator holding a native handle: noted, not exercised (the handle itself is
 > sendability-tested). New tests: `reader_lines_parity` + `reader_lines_lazy_early_break_parity` (both
-> engines) + parser unit tests. Docs: `docs/stdlib.md` (Reader.lines), `docs/gaps.md` (R2b + IO §4 flip).
+> engines) + parser unit tests. Docs: `docs/reference/stdlib.md` (Reader.lines), `docs/contributing/gaps.md` (R2b + IO §4 flip).
 > Full `cargo test`/`clippy`/`conformance` green.
 >
-> **✅ STDLIB (2026-07-15, `auto-task/stdin-read-all-char`) — `docs/gaps.md` R2 stdin grab-bag DONE:
+> **✅ STDLIB (2026-07-15, `auto-task/stdin-read-all-char`) — `docs/contributing/gaps.md` R2 stdin grab-bag DONE:
 > `io.read_all()` + `io.read_char()`.** Two module-level stdin readers in `std.io`, plain name-dispatched
 > natives (siblings of `read_line`, NOT engine-intercepted), routed through the SAME shared `Stdin` seam
 > so they inherit shared-stdin / no-new-false-EOF task behavior for free. `read_all() -> str` drains ALL
@@ -8908,9 +8908,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > is untouched (out of scope). 2 parity tests (single entry task → exact `assert_eq`: drain + scalar-by-
 > scalar-then-`None`) + 2 real-process `tests/interactive.rs` tests (byte-exact multibyte over `Stdin::Real`,
 > which the injected `Lines` model can't observe), each mn+serial. Ratchet `std.io` members 15→17. Docs:
-> `docs/stdlib.md` (table + input-contract + v1-limit), `docs/gaps.md` bullet closed.
+> `docs/reference/stdlib.md` (table + input-contract + v1-limit), `docs/contributing/gaps.md` bullet closed.
 
-> **✅ STDLIB (2026-07-15, `auto-task/fs-trio`) — `docs/gaps.md` fs grab-bag DONE: `canonicalize` +
+> **✅ STDLIB (2026-07-15, `auto-task/fs-trio`) — `docs/contributing/gaps.md` fs grab-bag DONE: `canonicalize` +
 > `chmod` + `atomic_write` in `std.fs`.** Three pure blocking-OS natives in `src/native/fs.rs`, each
 > mirroring an existing fs native's idiom. `canonicalize(path) -> Result[str]` resolves symlinks +
 > `.`/`..` against the REAL filesystem to an absolute real path (requires the path to EXIST — distinct
@@ -8924,10 +8924,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `NativeArg::Int`. Two-engine parity is automatic (pure blocking native, no scheduler). 3 new unit
 > tests (canonicalize resolves a real symlink + errs on nonexistent; chmod sets then metadata-read
 > confirms 0o644/0o600; atomic_write writes/overwrites + leaves exactly one entry — no stray temp).
-> Registered in `std/fs.chz` decls. Docs: `docs/stdlib.md` (§std.fs surface), `docs/gaps.md` (fs
+> Registered in `std/fs.chz` decls. Docs: `docs/reference/stdlib.md` (§std.fs surface), `docs/contributing/gaps.md` (fs
 > grab-bag SHIPPED + metadata-READ still-missing note). Full `cargo test`/`clippy` green.
 >
-> **✅ STDLIB (2026-07-15, `auto-task/std-io-reader`) — `docs/gaps.md` R2b DONE: a read-only `Reader` /
+> **✅ STDLIB (2026-07-15, `auto-task/std-io-reader`) — `docs/contributing/gaps.md` R2b DONE: a read-only `Reader` /
 > file-handle type in `std.io`, the read twin of R2's `Writer`.** Line/chunk streaming of a large file
 > (past the 64 MB whole-file `read_file`/`read_bytes` cap). Opener `open(path)`, methods
 > `read_line()` / `read_bytes(n)` / `close()`. `read_line() -> Option[str]` streams one line at a time
@@ -8944,8 +8944,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > — no shared-read parity test (meaningless); sendability tested via send-across-`spawn`. (`lines() ->
 > Iterator[str]` since SHIPPED as a bodied Chezzi method — see the top entry.) 11 new tests (7 run-parity
 > both engines incl. bare-`\r` strip + 2 checker-level guarding the
-> `Ty::Reader` method arm + the reserved-name ratchet + the io member-count bump). Docs: `docs/stdlib.md`
-> (Reader surface), `docs/gaps.md` (R2b DONE + IO §4 refreshed). Full `cargo test`/`clippy` green.
+> `Ty::Reader` method arm + the reserved-name ratchet + the io member-count bump). Docs: `docs/reference/stdlib.md`
+> (Reader surface), `docs/contributing/gaps.md` (R2b DONE + IO §4 refreshed). Full `cargo test`/`clippy` green.
 >
 > **✅ STDLIB (2026-07-15, `auto-task/request-get-bytes`) — R2 follow-up DONE: binary HTTP download in
 > `std.request`.** New `request.get_bytes(url, timeout_ms?) -> Result[bytes]` reads the body via
@@ -8957,9 +8957,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > the dirty pool (never pins a core worker) + the cancel checkpoint fires before it — same as every
 > other request verb. Parity is automatic (blocking ureq native, not netio-gated). 5 new unit tests
 > (byte-exact, corruption-contrast, truncated→Err, 404→Err, every-request-member-is-blocking).
-> `docs/gaps.md:153` closed, `docs/stdlib.md` binary-download note. Full `cargo test`/`clippy` green.
+> `docs/contributing/gaps.md:153` closed, `docs/reference/stdlib.md` binary-download note. Full `cargo test`/`clippy` green.
 >
-> **✅ STDLIB (2026-07-15, `auto-task/writer-r2`) — `docs/gaps.md` R2 DONE: a write-only `Writer` /
+> **✅ STDLIB (2026-07-15, `auto-task/writer-r2`) — `docs/contributing/gaps.md` R2 DONE: a write-only `Writer` /
 > file-handle type in `std.io`.** Buffered + streaming write output, the escape hatch Chezzi's unbuffered
 > stdout default was missing. Openers `create` (truncate) / `append` (create-if-absent), stream handles
 > `stdout()`/`stderr()` (routing through the same `Vm::emit_out`/`emit_err` sink as `print` — never a raw
@@ -8976,10 +8976,10 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > parity test uses `assert_same_lines`; single-task buffered stdout is byte-identical serial vs M:N.
 > `fs.append(path, text)` UNTOUCHED (no collision — `std.io` owns the handle verbs). 15 new tests (11
 > run-parity + 2 checker-level guarding the `Ty::Writer` method arm that `run_file` can't see, + the
-> reserved-name ratchet + the native uniqueness exemption). Docs: `docs/stdlib.md` (Writer surface),
-> `docs/gaps.md` (R2 retired + IO §4 refreshed). Full `cargo test`/`clippy` green.
+> reserved-name ratchet + the native uniqueness exemption). Docs: `docs/reference/stdlib.md` (Writer surface),
+> `docs/contributing/gaps.md` (R2 retired + IO §4 refreshed). Full `cargo test`/`clippy` green.
 >
-> **✅ LANGUAGE SEMANTICS + FIX (2026-07-14, `auto-task/cancel-points`) — CANCELLATION POINTS; `docs/gaps.md`
+> **✅ LANGUAGE SEMANTICS + FIX (2026-07-14, `auto-task/cancel-points`) — CANCELLATION POINTS; `docs/contributing/gaps.md`
 > N6 FIXED, N4's "defers now always run" overclaim corrected.** A cancel (sibling fault, `os.exit`, scope
 > teardown) is now delivered at **checkpoints — loop back-edges + blocking/park ops** — *not* at every
 > instruction (the loop-top check in `run_until` is **deleted**; the back-edge check is `Vm::jump_checked`,
@@ -9008,7 +9008,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > thread a loop back-edge away, or hot loops become uncancellable). **N5 untouched** (a genuine deadlock
 > still skips defers, identically on both engines). Perf side-effect of
 > deleting the per-instruction check: `loop` 1.32× → **1.12×** CPython, `fib` 3.54× → **3.16×**
-> (`docs/benchmarks.md`).
+> (`docs/contributing/benchmarks.md`).
 >
 > **Post-review corrections (same branch — the first cut shipped two of these as bugs).**
 > (a) **`gaps.md` N6b — every spawned task STARTS, even into an already-cancelled scope.** M:N is
@@ -9031,7 +9031,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > 4 shapes × 2 engines × **200 runs under full CPU load = 0 failures**.
 
 > **Post-review round 2 (same branch) — three MORE confirmed bugs in the first cut, all fixed
-> (`docs/gaps.md` N6d/N6e/N6f), each RED-first.**
+> (`docs/contributing/gaps.md` N6d/N6e/N6f), each RED-first.**
 > (d) **A `defer` was itself cancelled.** Every deferred call runs through `Vm::guarded`, whose new
 > checkpoint fired on the FIRST (LIFO) defer of any task that returned normally / faulted on its own
 > under an already-tripped scope cancel (`cancelled` still false there) — the defer body never ran.
@@ -9051,7 +9051,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > engines × **200 runs under CPU load = 0 failures** (before, on `main`: serial 0/50 on all three shapes;
 > M:N probe 0/50). Full `cargo test` green ×2, clippy clean, benches unmoved.
 
-> **Post-review round 3 (same branch) — a `defer` whose body BLOCKS (`docs/gaps.md` N6g), both M:N-only,
+> **Post-review round 3 (same branch) — a `defer` whose body BLOCKS (`docs/contributing/gaps.md` N6g), both M:N-only,
 > both RED-first.** (g1) The M:N demote loops read the raw `self.cancel` flag instead of
 > `Vm::cancel_requested()`, so a blocking op *inside* cleanup (a `sleep`, a `sock.close()`, a final
 > `send`) saw the already-tripped scope cancel and **truncated the defer mid-body** — `CLEANUP-ENTER`,
@@ -9063,7 +9063,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > window** it exists for — an *undrained parked* fiber of the cancelled scope
 > (`SchedCore::any_cancelled_scope_awaiting_drain` + `scope_has_undrained_park`) — so the quiesce fires,
 > the stuck cleanup is reported as a deadlock, and the sibling's real fault propagates: same line set on
-> both engines. **The rule (now in `docs/concurrency.md`):** cleanup that blocks on time/IO is
+> both engines. **The rule (now in `docs/reference/concurrency.md`):** cleanup that blocks on time/IO is
 > uninterruptible and delays the teardown by exactly that long, no cap (Go's deferred-fn-during-panic
 > rule); cleanup that can never complete is REPORTED as a deadlock, never a silent hang. New tests:
 > `mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock`,
@@ -9073,7 +9073,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > Race bar: 2 new shapes × 2 engines × **200 runs under full CPU load = 0 failures** (before: the
 > forever-defer hung **200/200** on M:N).
 
-> **Post-review round 4 (same branch) — the bounded N4 veto lost the DEMOTED half (`docs/gaps.md` N6g.3),
+> **Post-review round 4 (same branch) — the bounded N4 veto lost the DEMOTED half (`docs/contributing/gaps.md` N6g.3),
 > RED-first.** Bounding the veto to "an undrained PARKED fiber of a cancelled scope" was too narrow in the
 > other direction: a fiber demoted (`blocked_native` — a `recv` reached inside a native HOF callback /
 > `Shared.update` / an `Executor` handler) is not in `parked`, yet a **cancel WILL wake it**
@@ -9091,12 +9091,12 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > gate (only at a candidate quiesce), keeping the `parked` scan off the idle/steal hot path. New test:
 > `mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock`. Also corrected an overclaim: a fiber
 > already **parked inside a NESTED nursery** when the outer scope is cancelled does not run its `defer`s on
-> **either** engine (the drain is scope-scoped; N5 family, both engines agree — `docs/gaps.md` N6g "out of
+> **either** engine (the drain is scope-scoped; N5 family, both engines agree — `docs/contributing/gaps.md` N6g "out of
 > scope"). Race bar re-run: `defer_blocking` × 2 engines × **200 runs under 8-way CPU load = 0 failures**;
 > full `cargo test` green ×2, clippy clean.
 
 > **Post-review round 5 (same branch) — the cleanup's own SPAWNED work was still being killed
-> (`docs/gaps.md` N6h), RED-first.** The `deferring > 0` suppression that makes a `defer` uncancellable is
+> (`docs/contributing/gaps.md` N6h), RED-first.** The `deferring > 0` suppression that makes a `defer` uncancellable is
 > **per-`Vm`** and does not cross the airlock — a worker fiber is a fresh `Vm` with `deferring == 0` —
 > while the cancel-flag CHAIN does (`Vm::scope_ancestors` → `JoinScope::ancestors` → `cancel_outer`). So a
 > `parallel:`/`spawn` opened by a cancelled task's cleanup inherited the already-tripped enclosing flag and
@@ -9109,7 +9109,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > inside a `map` callback + a faulting sibling + an innocent parked outer sibling; **7/8 RED** with the veto
 > removed), and `cancel_requested` / `demote_cancel_flags` now share ONE flag set + ONE suppression
 > predicate (`Vm::cancel_flags` / `Vm::cancel_suppressed`) instead of a hand-copied duplicate that could
-> drift. **Corrected overclaim (`docs/gaps.md` N6g):** the residual serial/M:N defer-blocking divergence is
+> drift. **Corrected overclaim (`docs/contributing/gaps.md` N6g):** the residual serial/M:N defer-blocking divergence is
 > **not** "message-only" — a `defer` that `recv`s a value a LIVE sibling will send cannot park on `--serial`
 > (a defer body runs guarded; the **C5** no-park-inside-native limit), so serial faults it in place while
 > M:N demotes and completes. Outcome-level, recorded as OPEN N6g, pinned by
@@ -9117,7 +9117,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > cancellation work. Race bar: nursery-in-defer + `defer_blocking` × 2 engines × **200 runs under 8-way CPU
 > load = 0 failures**; full `cargo test` green ×2, clippy clean.
 
-> **✅ PACKAGING (2026-07-14, `auto-task/std-embed-repl-drop`) — `docs/gaps.md` T1 FIXED: an installed
+> **✅ PACKAGING (2026-07-14, `auto-task/std-embed-repl-drop`) — `docs/contributing/gaps.md` T1 FIXED: an installed
 > `chezzi` now carries its own stdlib.** `std/**/*.chz` is `include_str!`'d into the binary (new
 > `src/resolver/std_embed.rs`: a flat `STD_FILES` table + `lookup`, mirroring the existing `docs/*.md`
 > embedding), and *every* `std.*` source read — `Builder::visit` (incl. the always-linked
@@ -9134,16 +9134,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > fails until you add its `include_str!` line.** Known delta: a *pre-built* binary + an edited `std/*.chz`
 > is stale until rebuilt (`cargo run`/`cargo test` rebuild automatically; else use `CHEZZI_STD=./std`).
 
-> **✅ CLI (2026-07-14, same branch) — `docs/gaps.md` T2 FIXED: `chezzi repl` de-advertised.** The stub
+> **✅ CLI (2026-07-14, same branch) — `docs/contributing/gaps.md` T2 FIXED: `chezzi repl` de-advertised.** The stub
 > arm and its USAGE line are deleted, so `chezzi repl` is now a plain unknown command (prints USAGE, exits
-> 1). **No REPL was ever built and none was built here** — `docs/spec.md`'s M1 row no longer claims one
-> shipped. The idea stays parked in `docs/future.md` (Tier 4, Ecosystem) as explicitly unbuilt. The CLI now
+> 1). **No REPL was ever built and none was built here** — `docs/reference/spec.md`'s M1 row no longer claims one
+> shipped. The idea stays parked in `docs/design/roadmap.md` (Tier 4, Ecosystem) as explicitly unbuilt. The CLI now
 > ships exactly the 8 commands it documents: `init run test check tokens ast docs help`.
 
 > **Mode:** Claude implements directly — working, tested code each session (see `CLAUDE.md`).
 > Full per-milestone detail lives in git history; this file is a forward-looking tracker, not a changelog.
 
-> **Gap backlog:** [`docs/gaps.md`](docs/gaps.md) — catch-all backlog; currently ranked stdlib
+> **Gap backlog:** [`docs/contributing/gaps.md`](docs/contributing/gaps.md) — catch-all backlog; currently ranked stdlib
 > depth/ergonomics gaps (string format-spec, list/iter helpers, lazy itertools, file handles, …) +
 > dependency-bump notes. Draw from it when a feature earns its own milestone.
 
@@ -9184,7 +9184,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > over-rejection guard, a hint-leak guard) + 3 new/4 rewritten two-engine parity RUN tests; 4 pinned tests
 > FLIPPED to rejections and 1 (which pinned the un-annotated leak AS behavior) deleted. `widen_three_engines`
 > lost its stale "interp" label (it called the M:N engine twice). No VM/opcode change ⇒ no perf delta.
-> Docs: `docs/syntax.md §3`, `docs/spec.md`, `docs/stdlib.md`, `docs/future.md`, `gaps.md`.
+> Docs: `docs/reference/syntax.md §3`, `docs/reference/spec.md`, `docs/reference/stdlib.md`, `docs/design/roadmap.md`, `gaps.md`.
 >
 > **Follow-up (same branch, adversarial review): the four sinks the first cut still leaked.** The
 > "checker ⊆ compiler BY CONSTRUCTION" claim was only true where the compiler's coercion site actually
@@ -9258,8 +9258,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > `sum[T](xs: List[T]) -> T where T: Add` does not type-check (`sum() requires a numeric list, found List[T]`)
 > and a pure-Chezzi generic has no typed zero for the empty case; relaxing the checker gate would re-open the
 > MONOID hole 02586a0 closed. A generic/float `iter.sum` needs that gate re-litigated — its own milestone.
-> Docs: `docs/syntax.md` §11 (now a real, running example + the continuation rule), `docs/spec.md` tour,
-> `docs/stdlib.md` (`std.iter`), `docs/grammar.bnf` (layout-continuation note; token classes unchanged →
+> Docs: `docs/reference/syntax.md` §11 (now a real, running example + the continuation rule), `docs/reference/spec.md` tour,
+> `docs/reference/stdlib.md` (`std.iter`), `docs/reference/grammar.bnf` (layout-continuation note; token classes unchanged →
 > no production change), `tests/corpus/accept/pipe_multiline.chz` (conformance).
 
 > **📝 DOCS — pre-freeze Low clarifications (2026-07-12, `docs/low-clarifications`).** Documented four
@@ -9280,7 +9280,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > compiler gained a matching `qualified_turbofish_key` and additive `NewEnum`/`CallStatic` lowering blocks
 > (incl. the combined `mod.Box[int].make[str](x)`). Single-arg only — *multi-arg* qualified
 > (`mod.Pair[int,str].X`) stays deferred (no qualified parser carrier; clean parse-error, no panic).
-> 6 tests (checker `entry_ok`/`files_reject` + `src/vm/parity_tests.rs` run-both). Docs: `docs/syntax.md` §7a.
+> 6 tests (checker `entry_ok`/`files_reject` + `src/vm/parity_tests.rs` run-both). Docs: `docs/reference/syntax.md` §7a.
 >
 > **✅ BUGFIX — `parallel:` block defer/join order (2026-07-12, `auto-task/parallel-defer-join-order`).**
 > A `defer` directly inside an explicit `parallel:` block flushed *before* the block's spawned children
@@ -9290,7 +9290,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > (EnterNursery, [EnterDeferScope], body, JoinNursery, [LeaveDeferScope]). Defer-free blocks stay
 > byte-identical; the break/continue jump-out drain path is unchanged (each marker still pops once). 3
 > parity tests in `src/vm/parity_tests.rs` (ordering, deferred-`ch.close()`-after-join, break-once).
-> Docs: `docs/concurrency.md` join-semantics bullet.
+> Docs: `docs/reference/concurrency.md` join-semantics bullet.
 >
 > **✅ BUGFIX — `std.json` RFC-8259 conformance (2026-07-12, `auto-task/json-escape-leading-zero`).**
 > Three same-file fixes in `std/json.chz`: (1) `stringify` now `\u00XX`-escapes control chars
@@ -9324,7 +9324,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 >
 > **It was also masking a live gate defect.** `derive_chain_beats_the_every_ancestor_registry` at
 > n = 1 000 measured **4 889 ms in DEBUG at `CHEZZI_THREADS=2` against its own 5 000 ms bound** —
-> 1.02x — and failed under full-suite contention; every headroom figure in `docs/benchmarks.md` had
+> 1.02x — and failed under full-suite contention; every headroom figure in `docs/contributing/benchmarks.md` had
 > been quoted from RELEASE while the gate runs DEBUG. Post-fix the same measurement is **390 ms
 > (12.8x)**, so the gate keeps n = 1 000 instead of being scaled down to hide it.
 >
@@ -9380,7 +9380,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 
 Six parallel agents over disjoint domains + FFI/`std.net` in the main loop; every row re-verified by
 the judging loop on the release binary at `699be0d2`, every candidate judged against a RUN Go / CPython
-/ Rust reference. Index and full session log: the end of **[`docs/gaps.md`](docs/gaps.md)**
+/ Rust reference. Index and full session log: the end of **[`docs/contributing/gaps.md`](docs/contributing/gaps.md)**
 (`W11-1..W11-13`).
 
 - **TICKET-093 (P0) — CLOSED 2026-09-08.** `fn`-type parameters compared covariantly; `check` clean,
@@ -9466,7 +9466,7 @@ Rust-embedded both-hook programs: `Two` in `vm::golden_tests::for_over_pure_iter
 went from the `next` golden `"100\n101\n"` to the `iter` golden `"999\n"`; `Odd`, `Bad` and `Both`
 in `checker::tests::a_nonconforming_next_is_an_ordinary_method` went from rejected (`Odd`, `Bad`)
 to checking clean. `tests/cancellation_point_grid.rs` renamed the operand of `PE.eq` and `PH.eq`
-from `o` to `other`, so each stays the `Eq` hook. Hit-path cost: `docs/benchmarks.md`, TICKET-250.
+from `o` to `other`, so each stays the `Eq` hook. Hit-path cost: `docs/contributing/benchmarks.md`, TICKET-250.
 
 Review round 1 (conditional hooks). A conditional hook (`fn iter(self) -> .. where T: P`) set the
 run-time hook bit for every instantiation while the checker decided per instantiation, so `for` on
@@ -9588,12 +9588,12 @@ Landed so far, in plan-step order:
    direct write to a captured local in a box closure is the D4 error at check time; the run time
    reads it in `Vm::cross_closure`. Sweep: `chezzi check` over 696 tracked `.chz` files, 0
    pre-existing files change. A "stale global" warning was measured and declined
-   (`docs/concurrency.md`, "Box closures and module globals: measured").
+   (`docs/reference/concurrency.md`, "Box closures and module globals: measured").
 9. Tests: `tests/box_private_heap_grid.rs` (the four grids at `CHEZZI_THREADS` 1, 2, default plus
    process-level rules), `tests/chz/suites/box_rules_test.chz`,
    `tests/rwshared_parallel_readers_stress.rs` (16 readers, one writer, no torn copy), 17 new rows
    in `tests/cancellation_point_grid.rs`, a `RwShared` gc-stress cell.
-10. Perf (`docs/benchmarks.md`, "TICKET-246"): `update` / `write` on a 100000-item value costs 3 to
+10. Perf (`docs/contributing/benchmarks.md`, "TICKET-246"): `update` / `write` on a 100000-item value costs 3 to
     8 us against 6425 to 9892 us. Slower, and explained there: whole-value `get` of a big value
     (about 1.8 times), `Shared.get` with 8 callers, box creation (about 4 us more per box), nested
     box calls. `Shared.get` tries the state lock before the update guard.
@@ -9612,14 +9612,14 @@ Landed so far, in plan-step order:
 11. Also tested: a socket wait inside a box closure (`box_rules_test.chz`, loopback), 100000 boxes
     created and dropped within 2 MB of the `Atomic` loop's max RSS, a `Shared.read` row in
     `tests/callback_nursery_grid.rs`. Not done: ThreadSanitizer (no nightly toolchain on this box,
-    `docs/bug-discovery.md`).
+    `docs/contributing/bug-discovery.md`).
 
 Measured cost, not yet explained: small-value `update` with one caller is 401-432 ms before and
 450-493 ms after per 200000 calls.
 
 ### TICKET-239 — the expected type has one channel (2026-10-10)
 
-Closes wave 22 Family E (`docs/root-causes-w22.md`): closures and generic calls now get the wrap,
+Closes wave 22 Family E (`docs/history/bug-hunts/w22.md`): closures and generic calls now get the wrap,
 the width check and the `!e` type every other slot gets.
 
 - **Closures.** A closure literal reads its expected type in the `Closure` arm of `infer`, through
@@ -9656,7 +9656,7 @@ the width check and the `!e` type every other slot gets.
 
 Owner decision: inference never reads a later statement. `xs := []`, `m := {}`, `z := None`,
 `h := [None]`, `c := Cell(None)`, `v := Box.new()`, `ys := id([])` and `g := ident` are errors on the
-line that creates them. This closes wave 22 Family A (19 repros; `docs/root-causes-w22.md`).
+line that creates them. This closes wave 22 Family A (19 repros; `docs/history/bug-hunts/w22.md`).
 The collection-mismatch note reads "fixed where the binding is declared" (was "fixed by its
 annotation or an earlier use": no use fixes a type now).
 
@@ -9678,13 +9678,13 @@ annotation or an earlier use": no use fixes a type now).
 
 ### JIT entry rule (owner decision, 2026-09-22)
 
-The bug-hunt phase ends, and the JIT (Tier 2 quickening and Tier 3 Cranelift, `docs/future.md` §4) starts,
+The bug-hunt phase ends, and the JIT (Tier 2 quickening and Tier 3 Cranelift, `docs/design/roadmap.md` §4) starts,
 when **all four** of these hold. The ledger does not have to be empty. Bugs never reach zero; the bar is
 that no serious one is still turning up in the part of the engine the JIT compiles.
 
 | # | condition | status 2026-09-23 |
 |---|---|---|
-| 1 | The seeded scheduler oracle is built and has been shown to re-find reverted historical races (TICKET-167) | built, not yet judged — re-finds 2 of 3 reverted historical races (W15-1 at the default worker count only, W14-39 at T=1/T=2), the third (TICKET-128) is masked on release; whether that clears this condition is the owner's call, held pending the full sweep numbers; see `docs/bug-discovery.md` "Seeded scheduler oracle" |
+| 1 | The seeded scheduler oracle is built and has been shown to re-find reverted historical races (TICKET-167) | built, not yet judged — re-finds 2 of 3 reverted historical races (W15-1 at the default worker count only, W14-39 at T=1/T=2), the third (TICKET-128) is masked on release; whether that clears this condition is the owner's call, held pending the full sweep numbers; see `docs/contributing/bug-discovery.md` "Seeded scheduler oracle" |
 | 2 | **Two consecutive bug-hunt sweeps with zero new P0/P1 in the core**: lexer, parser, checker, compiler, VM exec/call/arith/stmt, scheduler, GC, value model | not started |
 | 3 | Every open P0/P1 ledger row is closed | met 2026-09-28 — W15-3 closed (TICKET-176); open rows are P2/record only |
 | 4 | Feature freeze during the window: no new language surface or std API unless it IS a sweep finding (e.g. a missing ancestor idiom), so the surface under test stops moving | starts now |
@@ -9695,7 +9695,7 @@ Rules for counting:
 - Findings in `std.*`, `std.net`, FFI, diagnostics wording, LSP and perf do **not** reset the count. They are
   fixed in parallel; the JIT does not compile them.
 - A P0/P1 in the core found by either sweep resets the count to zero once it is fixed.
-- **D4 (approved 2026-09-22, `docs/decision-d4-airlock.md`) is allowed under the freeze.** It is a sweep-driven
+- **D4 (approved 2026-09-22, `docs/design/adr-d4-airlock.md`) is allowed under the freeze.** It is a sweep-driven
   design fix that REMOVES silent semantics: a task-side write to an airlock copy faults. Layer C
   (runtime) landed 2026-09-23, TICKET-169 — this also closes the W12-5 / D2 revisit this row used to
   carry as "not a gate" (G6 now faults instead of being a documented divergence). Layer A (checker),
@@ -9704,12 +9704,12 @@ Rules for counting:
   JIT, byte-identical on `tests/chz` and the CPython differential corpus.
 
 **Live phase (2026-07-23, engine note updated 2026-08-16):** pre-JIT/pre-freeze **bug-hunt +
-drift-fix hunt** — Go-concurrency, checker↔runtime, and IO drift; live ledger in `docs/gaps.md`.
+drift-fix hunt** — Go-concurrency, checker↔runtime, and IO drift; live ledger in `docs/contributing/gaps.md`.
 **M19 — Perf track** is paused in-progress alongside it (see "Next perf batch" below). The
 Type-Conversion track below is a **completed/paused** milestone, kept for reference, not the current
 focus.
 
-**Engine count is ONE.** The cooperative `--serial` VM was removed 2026-08-16 (`docs/future.md` §2b),
+**Engine count is ONE.** The cooperative `--serial` VM was removed 2026-08-16 (`docs/design/roadmap.md` §2b),
 so there is no cross-engine parity gate and no `serial == M:N` bar on a change. The standing
 accidental-divergence detectors are the **CPython differential** (`src/difftest/`) and the
 **two-worker-count** run of `tests/chz` (`tests/chezzi_threads_cli.rs`). Correctness is judged against
@@ -9718,7 +9718,7 @@ enums/errors — by **running the reference program**, never by citing a second 
 below dated before 2026-08-16 that measure `--serial`, compare `serial` against `M:N`, or call it the
 parity oracle are **dated records** and are kept verbatim.
 
-**TICKET-079 (2026-09-08, closes `docs/gaps.md` W8-17's remaining bundle):** a fatal resolve/lex/
+**TICKET-079 (2026-09-08, closes `docs/contributing/gaps.md` W8-17's remaining bundle):** a fatal resolve/lex/
 parse error now renders the same `|`-gutter caret snippet a type error already had (`report_fatal`
 routed through `render_diag`'s renderer); an unclosed delimiter (`xs := [1, 2, 3`) spans its OPENER,
 not the token the parser gave up on; the near-miss suggester no longer discounts the edit distance
@@ -9740,13 +9740,13 @@ T.convert(n)`). Only multi-source remains deferred. **Everything below is the 20
 for its reasoning — read the slice-3 entries as history, not current state; the M24 entry at the top
 of this file is what shipped.**
 
-Closes the documented gap in `docs/spec.md` "Type conversions & casting" / `docs/future.md §15`: today
+Closes the documented gap in `docs/reference/spec.md` "Type conversions & casting" / `docs/design/roadmap.md §15`: today
 conversion is a fixed builtin set (`int`/`float`/`str`/`ord`/`chr`, safe `to_int`/`to_float`) + one-way
 `int→float` widening + one-way newtype wrap/unwrap — **no extensible mechanism**. Brainstorm outcome:
 build a structural `Convert[S]` protocol, **phased**, anchored on a reference generics model so it stays
 consistent (this lang's generics are the buggy-if-improvised part — anchor or bust).
 
-- **Reference model = Java (erased) generics.** Chezzi generics are **erased** (`docs/future.md §14`
+- **Reference model = Java (erased) generics.** Chezzi generics are **erased** (`docs/design/roadmap.md §14`
   erasure contract), so Java — the only mainstream *erased* model — is the anchor, NOT Rust/Swift (their
   `T.from`-anywhere freedom comes from monomorphization / reified witness tables, machinery that
   contradicts erasure; copying their ergonomics without their mechanism is exactly how generics go
@@ -9780,7 +9780,7 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   not even parse (`expected identifier, found 'from'`). Rather than make `from` a contextual keyword
   (parser risk), use the non-reserved `convert` — which pairs EXACTLY with the protocol name (Rust
   `From`/`from` coherence, here `Convert`/`convert`), is self-documenting, and matches the existing
-  "Convert/From protocol" naming in `docs/future.md §15`/`docs/spec.md`. The method is **target-keyed**
+  "Convert/From protocol" naming in `docs/design/roadmap.md §15`/`docs/reference/spec.md`. The method is **target-keyed**
   (`Target.convert(source)`), so a `to`/`into`-family name would read backwards — `convert`/`of`/`make`
   are the right family; `convert` wins on protocol-name match. This makes slice 1a a trivial reserved
   name, NOT a parser change.
@@ -9797,7 +9797,7 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   whether it yields `T` or `Result[T,E]`; if witnesses could return either, the bound is ambiguous and
   the whole generic payoff breaks. So the protocol **commits to `-> Self`**. Fallible conversions are
   ordinary **Result-returning named static ctors** (already work today, e.g. `Email.parse(s) -> Result[Email,str]`
-  in `docs/syntax.md §7a`) — they just don't ride the `Convert` protocol/generic (generic-over-fallible
+  in `docs/reference/syntax.md §7a`) — they just don't ride the `Convert` protocol/generic (generic-over-fallible
   is rare). A `TryConvert[S]: try_convert(x) -> Result[Self,E]` protocol is a **clean additive follow-up**
   (exactly how Rust shipped `TryFrom` after `From`) — built ONLY if generic-over-fallible proves needed.
   Design C (Result-only protocol) is REJECTED: forces `Ok(...)` boilerplate on conversions that never fail.
@@ -9888,7 +9888,7 @@ consistent (this lang's generics are the buggy-if-improvised part — anchor or 
   no site needs `T` to be concrete in the checker. Memory: auto-task over-reaches on checker soundness
   → slice 1 was auto-task, 2 and 3 were hand-done.
 - **Out of scope:** `Into`/`x.into()` (needs top-down expected-type threading; Chezzi is bottom-up),
-  `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/future.md §14`),
+  `cast[T](Any)` (needs runtime type tags — separate reflection milestone, `docs/design/roadmap.md §14`),
   `TryConvert` (deferred additive), general method overloading (this is type-keyed witness selection).
 
 **✅ MODULE-ROOT "ONE ROOT PER RUN" — silent-wrong-module fix + spec correction (2026-07-11).** A bare
@@ -9909,7 +9909,7 @@ every import. `resolver::build_graph_with_root(entry, root)` (routes through the
 Both engines identical (serial + M:N route through `run_file_inner`). Tests: new `tests/module_root.rs`
 (CLI-level, real on-disk trees — the bug is invisible to the library `build_graph` helpers): bare run
 (both engines) → OUTER, explicit file-run → INNER, single-root bare/file/cwd-invariance agree. SPEC:
-`docs/spec.md` "One root governs the whole graph" rewrote the false "nested `chezzi.toml` is silently
+`docs/reference/spec.md` "One root governs the whole graph" rewrote the false "nested `chezzi.toml` is silently
 ignored" claim to the actual **nearest-marker-from-origin** rule (origin = entry file for `run FILE`,
 cwd/manifest for bare run) + the fixed-once invariant.
 
@@ -9935,7 +9935,7 @@ the read-only resolver Generic arm (`proto.rs` — mints `Ty::Protocol` so it no
 protocols are not exported as value types (rejected at the annotation, not silent-accepted). Tests:
 11 checker units (accept/wrong-arg-reject/bare-non-generic/both-direction-invariance/return recovery/
 three write-site rejects/nesting) + 3 two-engine goldens (`vm::tests`, byte-identical serial-VM == M:N).
-Docs: `docs/syntax.md` (limitation lifted), `docs/spec.md` (M14 rows).
+Docs: `docs/reference/syntax.md` (limitation lifted), `docs/reference/spec.md` (M14 rows).
 
 **✅ MUTABLE-CONTAINER GENERIC INVARIANCE — covariance soundness hole closed (2026-07-07).**
 (HIGH — checker soundness.) The M14 "strictly invariant" guarantee (parameterized protocols) now also
@@ -9975,7 +9975,7 @@ receiver for `T=str` is intercepted + re-alloc'd or it would fault in struct dis
 every sibling intrinsic arm: a direct `(5).str()` on a concrete scalar stays a compile error (matches
 `(5).compare(3)`; use the free `str(5)` builtin). Parity: serial-VM == M:N-VM (both share
 `do_method_call`). Tests: `checker::tests::stringable_scalar_satisfies_ok` + `scalar_str_direct_call_is_bound_only`,
-`vm::tests::primitive_str_method_on_vm` (two-engine). Docs: `docs/syntax.md`/`docs/spec.md`/`docs/stdlib.md`.
+`vm::tests::primitive_str_method_on_vm` (two-engine). Docs: `docs/reference/syntax.md`/`docs/reference/spec.md`/`docs/reference/stdlib.md`.
 
 **✅ EXACT-DUPLICATE LITERAL MATCH ARMS ERROR (2026-07-05).** `match n: 1: … 1: …` (and `"x":` twice,
 `1 | 1`) is now a `duplicate match arm` error — dead code under first-match — matching the existing
@@ -10013,7 +10013,7 @@ the block is `Result[nil]` the nil-in-value-position ban makes the `Ok(v)` paylo
 value context, so the heterogeneous runtime value can never be observed (no checker/runtime divergence,
 no channel needed). TDD: checker `recover_tail_stmt_{match,if}_{value_*,heterogeneous_*}` + parity
 `recover_tail_{stmt_match,stmt_if,match_heterogeneous,if_heterogeneous}_*` (RED-first: the pre-fix
-branch binary rejected `match cmd: "a": "hello"; _: 42` with `str and int`). Docs: `docs/syntax.md`
+branch binary rejected `match cmd: "a": "hello"; _: 42` with `str and int`). Docs: `docs/reference/syntax.md`
 recover section.
 
 **✅ MULTI-BRANCH RETURN INFERENCE — JOIN merge + finalize, `Unknown`-leak fix (2026-07-05).**
@@ -10040,7 +10040,7 @@ suppresses the finalize diagnostic. 18 new checker tests (repro a–e + must-not
 closure-gated); 4 existing tests updated to the new documented semantics (int-vs-str/int-vs-str method
 conflicts now say `conflicting branches`; pure self-/mutual recursion now REJECTED not permissive).
 Acceptance demo: `fn res(): if …: return Err("a")` then `return Ok("h")` infers `Result[str, Error]`
-(byte-identical serial == M:N). Docs: `docs/syntax.md` "Return type inference", `docs/spec.md` widening
+(byte-identical serial == M:N). Docs: `docs/reference/syntax.md` "Return type inference", `docs/reference/spec.md` widening
 note. Full suite (3065) + conformance + clippy green.
 
 **↳ ADDENDUM (2026-07-05) — inferred `Result` error slot defaults to `Error` when the payload
@@ -10091,7 +10091,7 @@ tests in `src/checker/tests.rs` + `src/vm/parity_tests.rs`. **Known v1 limits (d
 first-class / rank-N polymorphism — a bare un-pinned generic fn value (`g := ident` then `g(5)`), or one
 binding used at two different types, stays a clean error (hint: turbofish or a `fn(...) -> ...`
 annotation); and an **imported** generic fn used bare as a value stays the un-pinned error (same-module
-only — resolves the accept⟺erase lockstep without a span side-table). Docs: `docs/syntax.md` fn-value
+only — resolves the accept⟺erase lockstep without a span side-table). Docs: `docs/reference/syntax.md` fn-value
 section. Full suite + conformance + clippy green.
 
 **✅ GENERIC FN VALUE PIN NOW COMPOSES THROUGH A BUILTIN `.map`/`.fold` SLOT (2026-07-05).** Scope A
@@ -10112,7 +10112,7 @@ runtime generic-erased (serial == M:N automatic; both-engine RUN tests). Must-no
 unannotated-closure loop-back (`.map(fn(x): x*2)`), `.filter(keep)`, user-HOF `mymap`, turbofish,
 two-distinct-pins-no-launder (fresh map per call), un-inferable `produce[V]` stays a leaked-`V` reject
 (not degraded to `List[Unknown]`), and a user struct uniquely owning `.map` still resolves to the USER
-method. Tests in `src/checker/tests.rs` + `src/vm/tests.rs`; docs: `docs/syntax.md` fn-value section.
+method. Tests in `src/checker/tests.rs` + `src/vm/tests.rs`; docs: `docs/reference/syntax.md` fn-value section.
 
 **✅ CHECKER LENIENCY — five decl footguns now rejected (2026-07-05).** All checker-only,
 reject-earlier in the decl-hoist pass (`src/checker/setup.rs` Struct/Enum/NewType arms) + a
@@ -10131,13 +10131,13 @@ not implemented). Reuse: one `report_dup_names(iter<(name,span)>, kind)` helper 
 method-dup checks in all three arms + the field-dup check. Tests: 7 new negative tests in
 `src/checker/tests.rs` (beside `duplicate_variant_within_one_enum_is_reported`). Full suite + conformance
 + clippy green; `all_shipped_examples_typecheck` unaffected (std/examples sweep found zero real clashes).
-Docs: `docs/spec.md` M21 row + newtype note de-staled.
+Docs: `docs/reference/spec.md` M21 row + newtype note de-staled.
 
 **✅ BUGFIX — `for`/`List()`/`Set()` over a NAMED builtin cursor now CONSUMES it in place (2026-07-04).**
 A `for x in it:` (or `List(it)`/`Set(it)`) driven by a NAMED `Obj::Iter` cursor from `xs.iter()` used to
 snapshot a private copy and never advance the shared cursor, while `.next()` and struct iterators DID
 advance in place — so `for` had opposite semantics depending on the iterand kind, contradicting
-`docs/syntax.md` ("reusing one exhausted cursor yields nothing on a second pass"). Fixed: added an
+`docs/reference/syntax.md` ("reusing one exhausted cursor yields nothing on a second pass"). Fixed: added an
 `IsCursor` opcode (mirrors `IsGenerator`); `compile_for` now routes a named/converted cursor onto the
 lazy `next()` step (advances the shared heap cursor via `call.rs`), and `drain_iterable` consumes a
 cursor in place (clone remaining, advance `pos` to end). Now `it := [1,2,3,4].iter(); for … break at 2;
@@ -10146,7 +10146,7 @@ returns `None`. Invariants kept: non-cursor collections still fresh-snapshot eac
 is one fresh cursor; a fresh temp `for x in xs.iter():` still fully iterates; generators unchanged.
 Serial==M:N byte-identical. (Multi-var `for a,b in named_cursor:` still snapshots — out of scope,
 behavior unchanged; noted as a follow-up.) Tests: 6 new in `vm/parity_tests.rs` + golden
-`examples/iterable.chz`. Docs: `docs/syntax.md` clause added.
+`examples/iterable.chz`. Docs: `docs/reference/syntax.md` clause added.
 
 **✅ REFACTOR — split the mega-files + REMOVED the tree-walk interpreter (2026-07-04).** Two parts:
 - **File split (behavior-preserving).** `impl Vm` (one ~12.4k-line block) split across
@@ -10195,8 +10195,8 @@ collided with `pass`-as-variable + `protocol pass:`). Three roles off the single
   list. `prebuilt_protocols()` stays the Rust source of truth; the prelude is the additive
   drift-guarded mirror. A USER redeclare of `Any` stays rejected (`is_reserved_protocol`); the prelude
   is exempt via the validate-and-no-op stdlib hoist. Empty protocols are NO LONGER "unparseable".
-- Docs (same commit): docs/syntax.md `pass` section + Any update; docs/spec.md `pass` keyword + empty
-  structs note; docs/grammar.bnf `PASS` terminal + `<passStmt>`/`<structBody>`/`<protoBody>`; corpus
+- Docs (same commit): docs/reference/syntax.md `pass` section + Any update; docs/reference/spec.md `pass` keyword + empty
+  structs note; docs/reference/grammar.bnf `PASS` terminal + `<passStmt>`/`<structBody>`/`<protoBody>`; corpus
   accept/reject files; 3 two-engine goldens (`examples/pass_noop`/`empty_protocol`/`empty_struct`);
   regenerated the editor TextMate grammar (pass now highlights as a keyword).
 
@@ -10231,7 +10231,7 @@ synthetic signature (2026-07-03).** One coherent feature in two phases.
   bound value — a design-sanctioned split, not a gap); the existing `print` value-form / `defer` / `spawn`
   tests stay green.
 - **Deferred (docs only):** `cast[T](val: Any) -> Option[T]` checked downcast — design + runtime-erasure
-  policy recorded in `docs/future.md §3.14` (parameterized targets like `cast[List[int]]` unsound until
+  policy recorded in `docs/design/roadmap.md §3.14` (parameterized targets like `cast[List[int]]` unsound until
   runtime type tags exist). cFFI stays fixed-arity (`Any` does not feed the C vararg ABI — `docs/ffi-and-
   packaging.md §5`).
 - **Heterogeneous args into `...xs: Any` (and `List[Any]`) — supported (the honest top-type element).**
@@ -10343,7 +10343,7 @@ where-bounding the receiver struct's OWN param — the "conditional method" shap
 SHIPPED; see the conditional-methods entry above.) **BEHAVIOR-PRESERVING / three-engine byte-identical:** `where` lowers to NOTHING at runtime —
 `src/interp` is UNTOUCHED and `src/vm` gets only a golden test; `examples/where_sort_sum.chz` (sort int/float/
 struct-with-`compare`, sum int/float) is asserted byte-identical on interp / --serial VM / M:N VM
-(`golden_where_sort_sum_chz_matches_expected_and_interp`). `docs/grammar.bnf` gains `<whereClause>`/`<whereList>`
+(`golden_where_sort_sum_chz_matches_expected_and_interp`). `docs/reference/grammar.bnf` gains `<whereClause>`/`<whereList>`
 (WHERE terminal + `parse_where_bounds` mapped in conformance; `tests/corpus/accept/where_clause.chz`). The
 sort-arm-DELETED changes two existing tests' expected message from the bespoke `sort() requires …` to the
 standard `does not satisfy Comparable` bound diagnostic. Lexer+parser+ast+checker+prelude+grammar+docs; both
@@ -10970,7 +10970,7 @@ byte-identical parity via new golden `examples/ref_no_import.chz` (ref keyword +
 closure-capture aliasing; `run_file` == `interp` == `run_file_parallel`); checker tests
 `ref_keyword_and_type_work_without_import` / `import_std_ref_is_harmless_noop` /
 `user_struct_named_ref_now_reserved`. `ref T` semantics (Rc<RefCell> box, persists through closure
-capture) unchanged — only the import requirement removed. Docs: `docs/syntax.md`/`docs/stdlib.md`.
+capture) unchanged — only the import requirement removed. Docs: `docs/reference/syntax.md`/`docs/reference/stdlib.md`.
 
 **✅ Swift-style KEYWORD ARGUMENTS through a function VALUE (2026-07-01).** Named arguments now work
 through a first-class **function value**, not just a direct call: `g := greet; g(name="Bob",
@@ -11073,7 +11073,7 @@ handle, so identity was wrong; interp already name-compares via derived `Partial
 `use_before_def_global_shadowing_builtin_rejected` / `user_binding_shadows_firstclass_builtin_typechecks`
 (checker), `builtin_value_equality_both_engines` / `builtin_value_sendable_across_airlock_both_engines` /
 `user_binding_shadows_firstclass_builtin_both_engines` / `print_as_value_arg_rooted_under_gc_stress`
-(VM==interp==M:N). Docs: `docs/syntax.md` §`defer` (first-class list + value-form 1-arg limit +
+(VM==interp==M:N). Docs: `docs/reference/syntax.md` §`defer` (first-class list + value-form 1-arg limit +
 sendable + shadowing + use-before-def). **Post-review parity fixes (2026-07-01):** (1) a first-class
 builtin spawned as a **call callee** (`f := ord; spawn f("a")`, and bare `spawn print("hi")`) faulted
 `spawn: 'function' is not an isolable task` on the **M:N engine only** — `prepare_worker`'s
@@ -11105,7 +11105,7 @@ rule), so the large stack is load-bearing. `MAX_DEPTH` unchanged. Coverage: pars
 `deep_iterative_chains_error_not_crash` (binary + postfix over-cap reject, under-cap + wide-breadth accept),
 `vm::deep_accepted_chains_run_without_stack_overflow` (a ~12k-deep accepted AST runs on the 384 MiB VM
 debug stack), CLI `deep_chains_never_signal_crash_the_host` (the 6000-fold repro exits with a code, never a
-signal). Docs: `docs/bug-discovery.md` deep-nesting section.
+signal). Docs: `docs/contributing/bug-discovery.md` deep-nesting section.
 
 **✅ Parser — deep-nested-pattern host-crash backstop (pre-JIT audit, 2026-07-12).** A `match` arm
 with a deeply-nested pattern (`Some(Some(… ))` variant payloads, or `((( … )))` tuple elements)
@@ -11137,7 +11137,7 @@ independent recursion, so the single resolver guard covers both `check` and `run
 `resolver::build_graph`). Verified end-to-end on the 8MB main thread: a generated 2100-deep chain now
 prints the clean diagnostic and exits 1 (no 134/SIGABRT) on both paths. TDD with an injected small
 limit (the test-harness worker stack is far smaller than main — a real 2000-deep test would overflow
-the *test* thread, per `parser::MAX_DEPTH`). Docs: `docs/spec.md` §Imports.
+the *test* thread, per `parser::MAX_DEPTH`). Docs: `docs/reference/spec.md` §Imports.
 
 **✅ Turbofish construction on the value-first concurrency boxes `Shared`/`RwShared`/`Atomic`
 (checker-only, 2026-06-30).** `Shared[int](0)` / `RwShared[Map[str, int]]({…})` / `Atomic[int](0)`
@@ -11153,7 +11153,7 @@ VM↔interp (+ `--parallel`) parity holds by construction: `examples/shared.chz`
 `rwshared.chz` converted to the turbofish form with **unchanged `.expected`**, exercised on both
 engines by the existing goldens; value-first runtime stays covered by `examples/parallel_shared.chz`.
 Out of scope (untouched): the global `Result`/`Option` ctors `Some`/`Ok`/`Err`, and `Executor`
-(non-generic, stays rejected). Docs synced: `docs/stdlib.md`, `docs/syntax.md`, `docs/concurrency.md`.
+(non-generic, stays rejected). Docs synced: `docs/reference/stdlib.md`, `docs/reference/syntax.md`, `docs/reference/concurrency.md`.
 
 **✅ Capture-sendability gate + permissive `Func` — B3.3 checker half (Task 2a, 2026-07-10, `b33-checker-gate`).**
 Makes the checker consistent with the by-value airlock runtime (B3.3e, below). Two changes, checker-only
@@ -11190,14 +11190,14 @@ Makes the checker consistent with the by-value airlock runtime (B3.3e, below). T
   Tests: 3 new both-engine fault parity tests (`ref_capturing_closure_through_channel_faults`,
   `..._in_struct_field_spawn_arg_faults`, `ref_nested_in_captured_list_faults`) + 2 regression pins
   (`module_global_ref_read_in_task_still_ok`, `sendable_capturing_closure_through_channel_still_runs`).
-  Full `cargo test` green, clippy clean. Docs: `docs/concurrency.md §7`, `docs/gaps.md` #1/#2, `gaps.md`.
+  Full `cargo test` green, clippy clean. Docs: `docs/reference/concurrency.md §7`, `docs/contributing/gaps.md` #1/#2, `gaps.md`.
 - **Tests:** 7 new checker tests + 3 new both-engine parity run tests. Updated 9 existing checker tests
   that encoded the old "Func non-sendable" rule: `channel_non_sendable_element/struct_field_rejected` +
   `spawn_non_sendable_struct_field_arg_rejected` re-pointed at a still-non-sendable `Ref` field/element
   (the deep-sendability mechanism, not the now-sendable closure); the two `spawn_non_sendable_arg/keyword`
   tests re-pointed at ref-capturing closures (now caught by the capture gate); four block/submit
   capture-free-closure tests flipped to `_ok` (closures cross by value — verified run). Full `cargo test`
-  green, clippy clean. Docs: `docs/concurrency.md §7` + A3a row, `docs/syntax.md`, `docs/gaps.md` #1/#2,
+  green, clippy clean. Docs: `docs/reference/concurrency.md §7` + A3a row, `docs/reference/syntax.md`, `docs/contributing/gaps.md` #1/#2,
   `gaps.md`.
 
 **✅ Executor.submit coop==M:N by value — serial-vs-M:N parity divergence FIXED (2026-07-11, `executor-submit-parity`).**
@@ -11218,7 +11218,7 @@ per-job isolation falls out. Tests (all serial==M:N): `executor_submit_ref_captu
 `executor_submit_generator_capturing_closure_faults_both_engines`,
 `executor_submit_mutating_closure_isolated_parity`, `executor_submit_sendable_closure_runs_parity` (control,
 `Channel` still shared by Arc → `7`), + the rewritten `executor_cooperative_submit_isolates_captures_by_value`.
-Docs: `docs/concurrency.md`, `docs/concurrency-b3.md` (C-01 superseded), `docs/gaps.md` #3 (RESOLVED),
+Docs: `docs/reference/concurrency.md`, `docs/history/designs/concurrency-b3.md` (C-01 superseded), `docs/contributing/gaps.md` #3 (RESOLVED),
 `src/vm/netio.rs` submit comment. VM-only; checker untouched.
 
 **✅ Closures / bare `fn`s cross the airlock BY VALUE — B3.3e runtime (2026-07-10, `b33-closures-by-value`).**
@@ -11249,8 +11249,8 @@ no longer `Handle`; see the native/FFI-airlock entry below.)
   untouched. Runtime half only. Tests: 5 new both-engine parity (`closure_as_data_into_spawn_callee_parity`,
   `nestedfn_...`, `generator_captured_...still_faults` regression pin, `bare_func_crosses_...renders_fn_name`,
   + `d_used_sibling_closure_crosses_by_value_parity` replacing the now-obsolete `d_used_non_sendable_still_faults`).
-  Full `cargo test` green (3264 lib + integration + conformance), clippy clean. Docs: `docs/concurrency.md §7`,
-  `docs/concurrency-b3.md` (B3.3e row), `docs/gaps.md` #1/#2.
+  Full `cargo test` green (3264 lib + integration + conformance), clippy clean. Docs: `docs/reference/concurrency.md §7`,
+  `docs/history/designs/concurrency-b3.md` (B3.3e row), `docs/contributing/gaps.md` #1/#2.
 
 **✅ Nested `fn` decls are first-class local functions (2026-07-10, `auto-task/nested-fn-firstclass`).**
 Closed a checker/compiler soundness divergence: a `fn` declared inside a body was compiled to a
@@ -11290,7 +11290,7 @@ that check-passed then run-faulted). Now a nested `fn` is a **closure-with-a-nam
 - Tests: 11 checker (`nested_fn_*`/`nested_generic_fn_clean_reject` + 4 `nested_fn_shadows_*_rejected`,
   entry/graph path) + 7 runtime parity (`nested_fn_recursion_parity`, capture read/write, loopvar-fresh
   in-fn + top-level ×2, spawn-airlock-isolated). Full `cargo test` (3247 lib + integration + conformance)
-  green, clippy clean, serial==M:N. Docs: `docs/syntax.md` new "Nested function declarations" section.
+  green, clippy clean, serial==M:N. Docs: `docs/reference/syntax.md` new "Nested function declarations" section.
 
 **✅ Finding D — free-variable capture (over-capture soundness fix, 2026-07-10).** Every `MakeClosure`
 site captured via `fc.snapshot_entries()` = ALL locals visible in the enclosing frame, so an unused
@@ -11311,7 +11311,7 @@ nested-fn + closure-value spawn), used-sibling-still-faults (no over-narrow), sp
 a no-under-capture battery (method call on captured receiver, interpolation-only ref, grandparent
 through two frames, recursion self-ref, ref-capture mutate, match+comprehension, non-recursive nested
 fn). Full `cargo test` green, clippy clean, serial==M:N. Bench-neutral (benches don't stress capture).
-Docs: `docs/syntax.md` capture section, `src/vm/op.rs` CapSrc comment.
+Docs: `docs/reference/syntax.md` capture section, `src/vm/op.rs` CapSrc comment.
 
 **✅ Uniform by-reference capture — Task B WIRED (semantics + airlock, 2026-07-09).** Closure/`defer:`/
 `spawn:` capture is now **uniformly by reference**: a capturing frame shares the closest binding of a
@@ -11357,7 +11357,7 @@ captured name and sees/makes writes to it (was: plain local snapshotted by value
   because **Chezzi closures are expression-only** — a closure VALUE cannot *reassign* a captured scalar
   cell (only mutate its inner heap value via a method call, or read it); D1's Go increment-and-return
   counter is likewise inexpressible (only the escape property ships). **Docs migration (Task C) landed**
-  (`docs/syntax.md` capture section rewritten, `docs/spec.md` migration note, `future.md`/`bug-discovery.md`/
+  (`docs/reference/syntax.md` capture section rewritten, `docs/reference/spec.md` migration note, `future.md`/`bug-discovery.md`/
   `benchmarks.md` + example comments; stale-claim grep clean).
 
 **✅ Closure-capture model documented + golden-locked, pre-JIT (docs + golden only, 2026-06-30).**
@@ -11373,13 +11373,13 @@ graph because the example uses `import std.ref` for the `ref int` annotation, wh
 `compile_module_standalone`/`run_capture` does not resolve). Reworded the over-claiming uniform-"snapshot"
 header in `examples/closure_capture.chz` (and narrowed the `examples/edge_cases.chz` capture comment) to
 the precise local/global/`ref` rule. Docs: a **capture subsection** (3-row table + example pointer) in
-`docs/syntax.md` next to `ref T`. **Plus two doc-only clarifications:** (a) **float formatting never uses
+`docs/reference/syntax.md` next to `ref T`. **Plus two doc-only clarifications:** (a) **float formatting never uses
 scientific notation** — a plain `print`/`str`/`{x}` always renders the full decimal expansion
 (`1.0e20` → `100000000000000000000.0`, `1.5e-9` → `0.0000000015`), shortest-round-trip-correct but verbose;
-an intended Python-feel divergence, with `:e` available when an exponent is wanted (`docs/syntax.md`).
+an intended Python-feel divergence, with `:e` available when an exponent is wanted (`docs/reference/syntax.md`).
 (b) **single project root** — `find_root` runs once on the entry and governs every import in the graph;
 a nested `chezzi.toml` in a subdirectory is silently ignored (not a second root), so a root-level file
-silently shadows a same-named subdir file (`docs/spec.md`). *(Correction — the nested-marker claim was
+silently shadows a same-named subdir file (`docs/reference/spec.md`). *(Correction — the nested-marker claim was
 wrong: `find_root` DOES stop at the nearest `chezzi.toml`, and bare `chezzi run` re-derived a second
 root from the entry file, which could silently disagree. Both fixed in the root-disagreement entry at
 the top of this file.)*
@@ -11446,7 +11446,7 @@ real typo. No grammar.bnf change (both surfaces stay two-level; Part 1 is an exi
 error-text only) — conformance green. Tests: `src/checker/mod.rs` graph_tests
 (`qualified_type_struct_static_ok` / `_enum_static_ok` / `_unknown_rejects` + 3 KEEP-WORKING regressions +
 `multilevel_expr_*` positives/negatives), parser `multilevel_type_path_two_level_hint`, three-engine
-golden `examples/qualified_static/` (VM/interp/M:N byte-identical). Docs: `docs/syntax.md`.
+golden `examples/qualified_static/` (VM/interp/M:N byte-identical). Docs: `docs/reference/syntax.md`.
 
 **✅ First-class native (Rust-implemented) types — qualified / aliased module-member path (additive,
 2026-06-29).** The import-gated native types/ctors — `Shared`/`RwShared`/`Atomic`/`Executor`
@@ -11473,7 +11473,7 @@ own later milestone (one-way ratchet). Tests: `src/checker/tests.rs`
 (`qualified_native_type_annotation_resolves` / `qualified_native_ctor_call_infers` /
 `alias_and_newtype_over_qualified_builtin` / `ffi_qualified_width_in_extern_sig` + unlicensed/timer/Socket
 negatives), three-engine goldens `examples/native_qualified.chz` (VM/interp/M:N) and
-`examples/ffi_qualified.chz` (CLI-verified libc `abs(ffi.int32)`). Docs: `docs/syntax.md`, `docs/stdlib.md`.
+`examples/ffi_qualified.chz` (CLI-verified libc `abs(ffi.int32)`). Docs: `docs/reference/syntax.md`, `docs/reference/stdlib.md`.
 
 **✅ Checker — Closure-parameter type inference (v1) + structural-match-over-`Unknown` soundness close
 (2026-06-28).** Checker-only, three-engine-parity-safe by construction (rejected programs never run;
@@ -11512,9 +11512,9 @@ scan can't corrupt unification, e.g. `Mapped(int_iter, fn(x): x.upper())` still 
 End-to-end verified on both engines: every reject errors at `check` (never executes — no trap); every
 accept runs byte-identically (corpus: `iterable`/`iter_adapters`/`shared`/`parallel_shared`/`rwshared`/
 `fn_field`). Tests in `src/checker/tests.rs` (real `build_graph`+`check_graph` CLI path) + migrated
-graph_tests. Docs: `docs/syntax.md` (Closure-parameter inference + §match).
+graph_tests. Docs: `docs/reference/syntax.md` (Closure-parameter inference + §match).
 
-**✅ Docs + resolver polish (2026-06-28).** Two low-severity fixes: (1) `docs/syntax.md` "Generic
+**✅ Docs + resolver polish (2026-06-28).** Two low-severity fixes: (1) `docs/reference/syntax.md` "Generic
 newtypes" `Stack[T].top` example used a Python-style **postfix** ternary
 (`return None if … else Some(…)`) that does not parse in Chezzi (only the **prefix** `if c: a else: b`
 conditional-expression form exists) — rewritten to `return if xs.len() == 0: None else: Some(…)`,
@@ -11543,7 +11543,7 @@ sig (`add(self, o: int) -> int`) STILL fails — no laundering. The newtype oper
 (generic newtype operators stay intentionally method-only/unreachable) is untouched (the fix lives
 after that early-return). Parity-safe by construction (one shared checker; no per-engine logic). TDD:
 new checker tests (generic struct/enum add/neg/compare, multi-param, wrong-sig boundary) + twin golden
-`examples/generic_operator_overload.chz` (run byte-identical on VM, interp, parallel). `docs/syntax.md`
+`examples/generic_operator_overload.chz` (run byte-identical on VM, interp, parallel). `docs/reference/syntax.md`
 already documented this as working — the bug was the gap between spec and checker; now closed.
 **Two soundness boundaries hardened in the same change** (adversarial-review findings): (1) the operator
 now requires **matching type ARGS**, not just the same type name — `op_overload_result`/`ordering_allowed`
@@ -11576,7 +11576,7 @@ unimported `struct Ref` (no import) and a merely-similar name (`struct RefBox` w
 legal. Tests: `import_plus_same_name_struct_decl_rejected` (all four + whole-module form),
 `import_does_not_over_reject_distinct_struct_name`, `bare_struct_procresult_without_import_ok`; existing
 `user_struct_response_without_import_ok` / `user_struct_match_without_import_ok` / `user_struct_named_ref_is_sendable`
-/ `from_import_licenses_bare_response` stay green. Docs: `docs/syntax.md` module-owned note.
+/ `from_import_licenses_bare_response` stay green. Docs: `docs/reference/syntax.md` module-owned note.
 
 **✅ Manual feature-audit sweep — 3 correctness bugs found + fixed, playbook documented (2026-06-27).**
 A structured adversarial hand-audit of the feature domains the *automated* oracles can't reach
@@ -11592,7 +11592,7 @@ type param. All TDD, two-engine-parity-green, merged via `auto-task` → `post-m
 The repeatable method — domains, per-agent protocol, bug taxonomy, and the procedure gotchas (verify the
 CLI via `cargo run --bin chezzi` not a hardcoded `target/` path; an `ok()` unit test passing ≠ the CLI
 is correct; adversarially verify every fix) — is now the **"Manual feature-audit playbook"** in
-[`docs/bug-discovery.md`](docs/bug-discovery.md) (lever #9). Run it every pre-freeze session.
+[`docs/contributing/bug-discovery.md`](docs/contributing/bug-discovery.md) (lever #9). Run it every pre-freeze session.
 
 **✅ Checker — reserved-type-name `protocol` decl hole closed (2026-07-11).** Checker-only, parity-safe
 by construction (rejected programs never reach the VM; accepted programs byte-identical — NO runtime/opcode
@@ -11938,7 +11938,7 @@ helpers that drive inference (zero drift) via a new `record_method_hover` probe 
 `native_module_sig(module).functions` in the `Ty::Module` arm; (3) **free/ctor builtins** (`print`,
 `range`, `int`/`float`/`str`, `ord`/`chr`, `panic`, `List`/`Set`/`Map`/`bytes`/`bytearray`,
 `Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`) get a NEW DISPLAY-only `builtin_sig(name)`
-(mirrored by hand from `docs/stdlib.md §1`; polymorphic-input slots render `?`, the concrete return is
+(mirrored by hand from `docs/reference/stdlib.md §1`; polymorphic-input slots render `?`, the concrete return is
 the payload, e.g. `print`→`fn(?) -> nil`, `range`→`fn(int) -> List[int]`) consulted by
 `callee_display_ty` before its `None`. **Drift guard:** `is_reserved_name` is refactored onto a
 `const RESERVED_CALLABLE` slice (behavior-identical) and a test asserts every name in it has a
@@ -11969,7 +11969,7 @@ same `embeds` field (no special-casing). `Div`/`Mod`/`Neg`/`Arithmetic` + the pr
 `Error` are now reserved protocol names. Both-engine operator dispatch (vm `struct_arith` + `Op::Neg`;
 interp mirror); golden `examples/arithmetic_protocol.chz` runs byte-identical on vm/interp/parallel;
 grammar.bnf `protocolDecl` updated (+`tests/corpus/accept/protocol_embed.chz`, conformance green).
-Surface in [`docs/syntax.md`](docs/syntax.md), [`docs/spec.md`](docs/spec.md) (M22 row).
+Surface in [`docs/reference/syntax.md`](docs/reference/syntax.md), [`docs/reference/spec.md`](docs/reference/spec.md) (M22 row).
 
 **✅ Editor tooling — LSP server + VSCode TextMate grammar (2026-06-26).** Two highlight/diagnostic
 paths, both single-sourced from the lexer so language changes flow through with no separate grammar to
@@ -12043,7 +12043,7 @@ panicfuzz` green (8); release sweep `0..100000` (overflow-checks OFF) and debug 
 (overflow-checks ON) both **0 findings** — front-end crash-safe so far. NOTE: a *release* `chezzi` has
 overflow-checks OFF so arithmetic-overflow wraps invisibly there; the debug CI gate catches overflow
 panics, and a full overflow sweep needs `RUSTFLAGS="-C overflow-checks=on"`. Usage + design:
-[`docs/bug-discovery.md` "Panic-fuzz harness"]. Next: Tier-1 done (#1 + #2); Tier-2/3 (proptest,
+[`docs/contributing/bug-discovery.md` "Panic-fuzz harness"]. Next: Tier-1 done (#1 + #2); Tier-2/3 (proptest,
 grammar-accept fuzzer, TSan/loom, coverage) remain.
 
 **✅ Bug-discovery lever #2 — CPython differential oracle (2026-06-26).** `src/difftest/` generates
@@ -12059,7 +12059,7 @@ Chezzi fault ⇒ real bug). Wired as `tests/difftest.rs` (P0 formatting probes +
 non-tautology guard + fixed-seed fuzz) and `src/bin/difffuzz` (unattended; `--seed N` reproduces).
 3000-seed release sweep clean; manually confirmed it flags the i64-overflow class (the June-2026
 `sum()` blind spot). `cargo test --test difftest` green, clippy clean. Usage + design:
-[`docs/bug-discovery.md` "Differential oracle"]. Lever #1 (panic-fuzzer) now also built — see above.
+[`docs/contributing/bug-discovery.md` "Differential oracle"]. Lever #1 (panic-fuzzer) now also built — see above.
 
 **✅ DSA known-answer harness — `judge/` (2026-06-27).** A third bug-discovery oracle, complementary
 to panic-fuzz (#1) and the CPython differential (#2). Where the differential generator is correct
@@ -12089,7 +12089,7 @@ all-equal, value extremes, exact multiples, empty/full grids (incl. `counting_ro
 flood-fill and `cf_theatre_square` 1e18 i64-product boundary). `generate.py` writes them as
 `e{k}.in/.out` through the same oracle; 318 cases (random + edges) across 12 problems run clean. Adversarial-reviewed (4 findings
 fixed: token-insensitive compare, NOEXP-as-skip, fetch stale-clear, stem-collision warn). Usage +
-design: [`docs/bug-discovery.md` "DSA known-answer harness"].
+design: [`docs/contributing/bug-discovery.md` "DSA known-answer harness"].
 Remaining: P5 (IR shrinker + corpus dump + opt-in overflow-metamorphic mode).
 
 **✅ Oracle coverage widened (2026-06-26).** The differential oracle's IR + both emitters + generator
@@ -12127,7 +12127,7 @@ free function, `tuple` (left lowercase — possible later follow-up), internal `
 helpers, and list/map/set **literal** syntax (`[…]`/`{…}`). TDD: `pascal_containers_resolve` +
 `pascal_ctor_calls` (green) and `lowercase_containers_rejected` (lowercase now "unknown"). Migrated
 ~52 examples + their `.expected` goldens (empty-set `set()`→`Set()`), all `std/*.chz`, the conformance
-corpus, `docs/grammar.bnf` prose, and all docs. `cargo test` (2711) + conformance + clippy clean;
+corpus, `docs/reference/grammar.bnf` prose, and all docs. `cargo test` (2711) + conformance + clippy clean;
 three-engine parity green. **Global-namespace cleanup batch COMPLETE (5/5).**
 
 **✅ global-namespace cleanup — `timer`→`import std.time` (2026-06-25).** The opcode-backed `timer(ms)
@@ -12267,8 +12267,8 @@ NOT enough — it's dropped across the user closure, so two writers could otherw
 discipline as `Shared.update`). Reentrancy limit (documented, mirrors `Shared.update`): a closure that
 re-acquires the **same** box's write lock deadlocks. Golden `examples/rwshared.chz` (N tasks each
 `write` a distinct key into one `RwShared[map]`, join, parent `read`s — order-independent →
-byte-identical on VM/`--serial`/`--parallel`/interp). Docs: `docs/concurrency.md` §6c, `docs/stdlib.md`
-§3, `docs/spec.md`/`docs/syntax.md` reserved-name + sendable enumerations. 2618+ tests + conformance
+byte-identical on VM/`--serial`/`--parallel`/interp). Docs: `docs/reference/concurrency.md` §6c, `docs/reference/stdlib.md`
+§3, `docs/reference/spec.md`/`docs/reference/syntax.md` reserved-name + sendable enumerations. 2618+ tests + conformance
 green, clippy clean.
 **✅ stdlib — `std.concurrency.collection`: thread-safe collections over `RwShared` (2026-06-24).**
 The capstone of the concurrency-collections work: pure-Chezzi ergonomic wrappers over the just-landed
@@ -12288,8 +12288,8 @@ Rust touched is the two golden-test registrations (no engine code). Golden
 `examples/concurrent_collection.chz` (deterministic: 100-task counter race → exactly 100, each-own-key
 map → 285) byte-identical on VM/`--serial`/`--parallel`/interp. Tests: `examples/concurrent_collection_test.chz`
 (6 `test fn`s incl. the airlock-sharing crux guard + `counter_race_exact`), VM
-`golden_concurrent_collection_via_run_file` + interp twin. Docs: `docs/stdlib.md` §5 new
-`### std.concurrency.collection`, `docs/concurrency.md` §6f pointer, `gaps.md` resolved. Resolves the
+`golden_concurrent_collection_via_run_file` + interp twin. Docs: `docs/reference/stdlib.md` §5 new
+`### std.concurrency.collection`, `docs/reference/concurrency.md` §6f pointer, `gaps.md` resolved. Resolves the
 concurrent-collections / data-structures-concurrency gap (queue = `Channel`, atomic scalar = `Atomic`;
 no `ConcurrentList`/`Set`/`Queue`). Full suite + conformance + clippy clean.
 **✅ fix — FFI callback SIGSEGV (dangling `Cif`) (2026-06-24).** `chezzi run examples/ffi_qsort.chz`
@@ -12324,7 +12324,7 @@ helper reused by `url_encode`, no duplicated escaper), **keys sorted by RAW valu
 golden, empty map → `""`. Lives in `std.encoding` (NOT `std.request`) because a native module name shadows
 a same-named `std/<name>.chz` (the rand-task lesson) — no clean place for a pure-Chezzi request helper.
 Pure CPU → NOT `is_blocking`. Golden `examples/encoding.chz` extended (sorted-key + empty + URL-compose
-cases), 3-engine parity verified. Docs: `docs/stdlib.md` (§std.request timeout note + §std.encoding
+cases), 3-engine parity verified. Docs: `docs/reference/stdlib.md` (§std.request timeout note + §std.encoding
 query_encode), `gaps.md` (std.request nit struck → ✅ resolved). 2602 tests + conformance green, clippy clean.
 
 **✅ stdlib — `std.collections` pure-Chezzi generic data structures (gaps.md "data structures
@@ -12345,7 +12345,7 @@ builtin `map` is already insertion-ordered (documented note only). TDD: `example
 (12 `test fn`s — heap min/max/reverse/empty/from_list, deque fifo/lifo/both-ends/interleaved/empty,
 counter counts/total/most_common+ties+k-clamp) RED→GREEN; golden `examples/collections.chz` +
 `.expected` + `#[test] golden_collections_via_run_file` (VM==interp via `assert_file_parity`),
-3-engine parity spot-checked. Docs: `docs/stdlib.md` (new `### std.collections` in §5), `gaps.md`
+3-engine parity spot-checked. Docs: `docs/reference/stdlib.md` (new `### std.collections` in §5), `gaps.md`
 (data-structures struck → ✅ landed; ordered-map note). cargo test + conformance green, clippy clean.
 
 **✅ stdlib — `std.datetime` pure-Chezzi civil-calendar date/time (gaps.md "duration/date
@@ -12356,7 +12356,7 @@ struct (`year`/`month`/`day`/`hour`/`minute`/`second`/`weekday`), `from_epoch`/`
 `to_epoch(from_epoch(e))==e`), `now`, `days_from_civil`/`civil_from_days` (a `(int,int,int)` tuple),
 `is_leap_year`/`days_in_month`, `weekday`/`weekday_name`, fixed formatters `to_iso8601`/
 `to_date_string`/`to_time_string`/`to_string`, and epoch-int duration helpers `add_seconds`/`add_days`/
-`diff_seconds`/`diff_days`. **Contractual semantics** (in `docs/stdlib.md §5`): **UTC-only** (timezones/
+`diff_seconds`/`diff_days`. **Contractual semantics** (in `docs/reference/stdlib.md §5`): **UTC-only** (timezones/
 DST/tz-database explicitly deferred); **weekday Sunday=0..Saturday=6** (matches native `std.time`:
 epoch 0 == 1970-01-01 is Thursday == wd 4, differs from Python's Monday=0); **negative epochs floored**
 (Chezzi `/`/`%` truncate toward zero, so internal `fdiv`/`fmod` floor-div helpers split the day/seconds
@@ -12364,7 +12364,7 @@ epoch 0 == 1970-01-01 is Thursday == wd 4, differs from Python's Monday=0); **ne
 2023-11-14 22:13:20, `days_from_civil(2024,2,29)`==19782, leap 2000/2024, non-leap 1900/2023.
 Pure-Chezzi → 3-engine parity automatic; still added `examples/datetime_test.chz` (9 `test fn` TDD
 table) + golden `examples/datetime.chz`/`.expected` wired into `golden_datetime_via_run_file` (VM,
-`assert_file_parity`) + `golden_datetime_chz` (interp twin). Docs: `docs/stdlib.md` (new `### std.datetime`
+`assert_file_parity`) + `golden_datetime_chz` (interp twin). Docs: `docs/reference/stdlib.md` (new `### std.datetime`
 in §5), `gaps.md` (duration/date struck from the dogfood list — was falsely listed as landed). Full
 suite + conformance + `clippy --all-targets -D warnings` clean.
 
@@ -12375,13 +12375,13 @@ pure-Chezzi module `std/path.chz` (no native Rust, no seam — like `std/str.chz
 `is_abs`/`is_rel`, `basename`/`dirname`/`split` (a `(str, str)` tuple = `(dirname, basename)`),
 `ext`/`stem`/`with_ext`, `normalize`, `join`. Edge-case semantics match Python `os.path` (basename/
 dirname/splitext) and Go `path.Clean`/`path.Join` for `normalize`/`join` (chose Go's simple join, NOT
-Python's absolute-resets-earlier footgun) — every case is contractual in `docs/stdlib.md §5` (the
+Python's absolute-resets-earlier footgun) — every case is contractual in `docs/reference/stdlib.md §5` (the
 hard ones: `basename("a/b/")`→`""`, `dirname("/a")`→`"/"`, `ext(".bashrc")`→`""`, `ext("dir.d/file")`
 →`""`, `normalize("/a/../../b")`→`"/b"`, `normalize("a/../../b")`→`"../b"`, `normalize("")`→`"."`).
 Separator policy: `/` only, no Windows `\`. Pure-Chezzi → 3-engine parity is automatic (same `.chz`
 on all engines); still added `examples/path_test.chz` (9 `test fn` TDD table, `cargo run -- test`) +
 golden `examples/path.chz`/`.expected` wired into `golden_path_via_run_file` (`assert_file_parity` =
-VM == interp). Docs: `docs/stdlib.md` (new `### std.path` in §5), `gaps.md` (path ops struck from the
+VM == interp). Docs: `docs/reference/stdlib.md` (new `### std.path` in §5), `gaps.md` (path ops struck from the
 pure-Chezzi dogfood list). Full suite + conformance + `clippy --all-targets -D warnings` clean.
 
 **✅ stdlib — `std.process` polish (gaps.md "std.process polish") (2026-06-24).** `std.process` had
@@ -12403,7 +12403,7 @@ synthetic stdlib structs in the compiler (`src/compiler/mod.rs`, declaration-ord
 seeded in the checker (`seed_stdlib_structs` + `native_module_sig` std.process arm). Golden (VM ==
 interp via `assert_file_parity`, byte-identical under run/--serial/--parallel):
 `examples/process_polish.chz` — proves nonzero-is-Ok-with-code, the `$(...)`/`;`/`&&` injection-safety
-of `run_args`, and the spawn-failure `Err` path. Docs: `docs/stdlib.md` (§std.process extended +
+of `run_args`, and the spawn-failure `Err` path. Docs: `docs/reference/stdlib.md` (§std.process extended +
 `ProcResult` reserved), `gaps.md` (std.process polish → ✅ RESOLVED). **Deferred:** stdin piping,
 output streaming, per-process env/cwd overrides. Full suite + conformance + `clippy --all-targets -D
 warnings` clean.
@@ -12425,7 +12425,7 @@ the uniqueness/non-blocking test lists — `uuid` reseed is named `uuid_seed`, n
 member names unique since `std.rand` owns `seed`), `src/checker/mod.rs` `native_module_sig` arms.
 Goldens (VM == interp via `assert_file_parity`): `examples/encoding.chz` / `crypto.chz` (deterministic
 round-trips + digests) and `examples/uuid_shape.chz` (`uuid_seed`-deterministic stream + shape check,
-serialized on `TEST_UUID_LOCK`). Docs: `docs/stdlib.md` (new §std.encoding/§std.crypto/§std.uuid),
+serialized on `TEST_UUID_LOCK`). Docs: `docs/reference/stdlib.md` (new §std.encoding/§std.crypto/§std.uuid),
 `gaps.md` (Encoding/crypto → ✅ RESOLVED). **Deferred:** the str-only seam can't return raw bytes, so
 binary round-trip (image → bytes) needs a bytes-arg/return seam expansion; `sha512`/`sha1`/`uuid-v7`
 not added. Full suite + conformance + `clippy --all-targets -D warnings` clean.
@@ -12450,7 +12450,7 @@ provided — `remove_dir` is empty-only to avoid an accidental wipe. Tests (RED-
 (VM + interp twins, serialized via `FS_SCRATCH_LOCK` on the shared `examples/.fs_scratch`; gitignored;
 fixed status lines + read-back contents, no absolute paths) — manually verified byte-identical under
 run / --serial / --parallel and leaves no scratch behind. No grammar change (plain import + member
-calls; conformance clean). Docs: `docs/stdlib.md` (§std.fs split into Queries/Mutations + the
+calls; conformance clean). Docs: `docs/reference/stdlib.md` (§std.fs split into Queries/Mutations + the
 non-recursive/never-truncate limits), `gaps.md` (fs mutations → ✅ RESOLVED). Full suite + conformance +
 `clippy --all-targets -D warnings` clean.
 
@@ -12477,7 +12477,7 @@ non-blocking + uniqueness lists, and 3 run-file goldens (`rand_seeded` all-four-
 `rand_shape` unseeded range-only "ok" lines, `rand_iter` shuffle/choice/sample) run as ONE serialized
 test (shared global RNG) + `assert_file_parity` (VM == interp); manually verified VM == `--serial` ==
 `--parallel` byte-identical on the seeded goldens. No grammar change (plain import + member calls;
-conformance clean). Docs: `docs/stdlib.md` (new §std.rand + std.iter shuffle/choice/sample),
+conformance clean). Docs: `docs/reference/stdlib.md` (new §std.rand + std.iter shuffle/choice/sample),
 `gaps.md` (std.rand → ✅ RESOLVED). Full suite + conformance + `clippy --all-targets -D warnings` clean.
 
 **✅ DX — print `sep=`/`end=` + assert message format (gaps.md DX gaps #5 + #6) (2026-06-23).** Two
@@ -12499,7 +12499,7 @@ byte-identical across engines. Tests (all RED-first): 4 desugar (sep/end kept, u
 3 checker (sep/end str ok, sep/end non-str rejected), 7 VM behavior (end="", sep=, both, default unchanged,
 runtime expr, only-end), 1 VM↔interp print parity (8 forms), updated assert tests + new lazy-on-pass guards
 on both engines, and golden `examples/print_kwargs.chz` (VM == interp == `.expected`). Docs:
-`docs/syntax.md` (assert fault wording + lazy msg), `docs/stdlib.md` (print signature with `sep=`/`end=`),
+`docs/reference/syntax.md` (assert fault wording + lazy msg), `docs/reference/stdlib.md` (print signature with `sep=`/`end=`),
 `gaps.md` (gaps #5/#6 → RESOLVED log). No grammar change (print kwargs are ordinary call named-args;
 conformance clean). Full suite + conformance + `clippy --all-targets -D warnings` clean.
 
@@ -12523,7 +12523,7 @@ untouched; conformance clean). **Parity by construction** (shared helper). Tests
 `slice::range_values` unit tests (up/down/by-N, empty + zero-step, overflow/INT_MIN edges) + interp +
 VM runtime tests (up/down/step-zero/empty/range-slice) + 2 checker tests (1/2/3-arg accept, 0/>3 reject,
 non-int reject; range-slice infers `List[int]`) + golden `examples/range_step.chz` (VM == interp ==
-`.expected`). Docs: `docs/syntax.md` (range section + slicing note), `docs/stdlib.md` (range signature),
+`.expected`). Docs: `docs/reference/syntax.md` (range section + slicing note), `docs/reference/stdlib.md` (range signature),
 `gaps.md` (gap #4 → RESOLVED log, open DX items renumbered 1..3). Full suite + conformance +
 `clippy --all-targets -D warnings` clean.
 
@@ -12547,8 +12547,8 @@ Plain int bitwise + `<< >>` are unchanged (`<< >>` stay int-only). **Parity:** g
 `examples/collection_ops.chz` runs VM == interp == `.expected` (via `assert_file_parity`), confirmed on
 `--serial` and `--parallel` too. Tests: 11 checker inference/rejection tests + VM eval-correctness +
 list-repeat overflow recoverable-fault + the golden parity test (all RED-first). Docs:
-`docs/syntax.md` §4 operator table + collection-operators note, `docs/stdlib.md` (list/set method
-operator forms), `docs/grammar.bnf` (bitwise cascade note — same tokens, no grammar change; conformance
+`docs/reference/syntax.md` §4 operator table + collection-operators note, `docs/reference/stdlib.md` (list/set method
+operator forms), `docs/reference/grammar.bnf` (bitwise cascade note — same tokens, no grammar change; conformance
 clean), `gaps.md` (gap #3 → RESOLVED log, open DX items renumbered 1..4). Full suite (2517) +
 conformance + `clippy --all-targets -D warnings` clean.
 
@@ -12556,7 +12556,7 @@ conformance + `clippy --all-targets -D warnings` clean.
 chain is REPLACED by a single `elif` keyword (Python "one obvious way"; `else if` no longer parses — a
 hard parse error). Pure front-end change: lexer (`Token::Elif` + `("elif", Token::Elif)` keyword +
 reserved-words coverage), parser (`parse_if` statement + `parse_if_expr` expression forms key on
-`Token::Elif` instead of `Else`+`If`), `docs/grammar.bnf` (`<elseIf> ::= "ELIF" …`, `<ifExprTail>` gains
+`Token::Elif` instead of `Else`+`If`), `docs/reference/grammar.bnf` (`<elseIf> ::= "ELIF" …`, `<ifExprTail>` gains
 the `"ELIF"` arm), conformance `symbol()` (`Token::Elif => "ELIF"`), editor tmLanguage regenerated. No
 checker/compiler/VM edit → serial-VM == M:N-VM parity by construction (both consume the same AST from one
 front-end). Migrated every `.chz` (examples/, std/, corpus) + embedded fixtures + docs. Tests: lexer
@@ -12572,7 +12572,7 @@ else-branch (right-associative nested `ExprKind::IfElse`), else the existing `el
 AST shape the hand-parenthesized workaround produced, so both engines already evaluate it byte-identically.
 **Parity by construction.** Tests: 2 parser unit tests (chain nests right-associatively; chain still
 requires final else) + golden `examples/expr_else_if.chz` (VM == interp == `.expected`). Docs:
-`docs/grammar.bnf` (`<ifExpr>` + new `<ifExprTail>` tail rule), `docs/syntax.md` (chained example),
+`docs/reference/grammar.bnf` (`<ifExpr>` + new `<ifExprTail>` tail rule), `docs/reference/syntax.md` (chained example),
 `gaps.md` (gap #2 → RESOLVED log, others renumbered). Full suite + conformance + `clippy --all-targets
 -D warnings` clean.
 
@@ -12600,10 +12600,10 @@ free(null) no-op, MEMBERS coverage) + 1 checker sig test + 2 cffi two-engine par
 read+free; alloc_zeroed) + the **capstone `examples/ffi_qsort.chz`** golden on BOTH engines (sort a
 Chezzi `int` list via libc `qsort` with a Chezzi `fn(ptr,ptr)->int` comparator that `load_int64`s both
 sides — the marquee proof callbacks + deref + alloc all compose; also verified on `--parallel`). Full
-suite + conformance + `clippy --all-targets -D warnings` clean. Docs: `docs/stdlib.md` (new alloc
-surface + qsort idiom), `docs/ffi-and-packaging.md §1b` (tier 3 → LANDED; `qsort`/`bsearch` of a Chezzi
+suite + conformance + `clippy --all-targets -D warnings` clean. Docs: `docs/reference/stdlib.md` (new alloc
+surface + qsort idiom), `docs/design/ffi-and-packaging.md §1b` (tier 3 → LANDED; `qsort`/`bsearch` of a Chezzi
 list now fully works; honest about what remains deferred: stored/cross-thread callbacks + variadics +
-a GC-tracked owned-buffer), `docs/spec.md` + `docs/syntax.md` (FFI limits: manual C-buffer alloc now
+a GC-tracked owned-buffer), `docs/reference/spec.md` + `docs/reference/syntax.md` (FFI limits: manual C-buffer alloc now
 available).
 
 **✅ Feature — FFI memory-deref builtins `std.ffi.load_*`/`store_*` (feasibility-ladder tier 2)
@@ -12630,10 +12630,10 @@ but every call errors). **Parity by construction:** pure-additive on the engine-
 width store, NULL-error, MEMBERS coverage) + 3 checker sig tests + 3 cffi two/three-engine parity
 tests (a `cc`-built `mkrec()` returning a `ptr` to `{int32 a@0; int64 b@8; double c@16}`, read/written
 field-by-field). Full suite (2478) + conformance + `clippy --all-targets -D warnings` clean. Docs:
-`docs/stdlib.md` (new `std.ffi` surface), `docs/ffi-and-packaging.md §1b` (tier 2 → LANDED; the
+`docs/reference/stdlib.md` (new `std.ffi` surface), `docs/design/ffi-and-packaging.md §1b` (tier 2 → LANDED; the
 remaining gap at the time — `qsort`/`bsearch` of a Chezzi *list* needing a C-buffer alloc layer — has
-**since landed**, see the tier-3 entry above), `docs/spec.md` (FFI v1 limits: `ptr` memory now
-readable/writable), `docs/syntax.md`.
+**since landed**, see the tier-3 entry above), `docs/reference/spec.md` (FFI v1 limits: `ptr` memory now
+readable/writable), `docs/reference/syntax.md`.
 
 **✅ Feature — FFI sync scalar callbacks (callbacks #4, sync subset) (2026-06-22).** An `extern "lib":`
 fn can now take a **function-typed parameter** spelled with the *existing* `fn(a, b) -> r` type (no new
@@ -12655,8 +12655,8 @@ re-raises it as the extern call's own error (ctypes swallows to stderr + returns
 `cc`-built `.so` fixture (`int apply(int,int(*)(int))` + a `double` variant) drives int/float
 round-trips, fault + panic re-raise, and **two-engine + three-engine** (`--parallel`) parity (sync
 callback fires on the calling worker thread — no cross-thread hand-off). 7 cffi tests + 6 checker tests
-green; full suite (2459) + conformance + `clippy --all-targets -D warnings` clean. Docs: `docs/spec.md`,
-`docs/syntax.md`, `docs/ffi-and-packaging.md §1b` (incl. the **feasibility ladder**: (1) sync scalar
+green; full suite (2459) + conformance + `clippy --all-targets -D warnings` clean. Docs: `docs/reference/spec.md`,
+`docs/reference/syntax.md`, `docs/design/ffi-and-packaging.md §1b` (incl. the **feasibility ladder**: (1) sync scalar
 done, (2) pointer-deref builtins → `qsort`/`bsearch`, (3) stored/cross-thread = own milestone, needs a
 GC-rooting registry + thread-safe re-entry; **biggest caveat:** `--parallel` has **no GIL**, so
 cross-thread is strictly harder than Python — needs a mini-GIL or thread-marshalling). `cc` added to
@@ -12685,11 +12685,11 @@ the type-blind compiler could coerce, leaving a runtime `Int` under a static `fl
 return / field / collection sinks (no annotation could fix them). Narrowed to Go's untyped-constant
 rule; see the 2026-07-13 entry below. A plain reassign `x = 3` to a float local remains a strict
 (rejected) target. Native `sqrt(16)` / extern `cos(2)` widening confirmed hole-free (host promotes).
-Docs: `gaps.md` → RESOLVED log, `docs/syntax.md §3`, `docs/spec.md`, `docs/stdlib.md`.
+Docs: `gaps.md` → RESOLVED log, `docs/reference/syntax.md §3`, `docs/reference/spec.md`, `docs/reference/stdlib.md`.
 
 **✅ Bug fix — `ref` shared-method-name dispatch no longer falsely rejects an EXPRESSION receiver
 (2026-06-22).** When ≥2 structs share a method name with differing param ref-ness (the receiver type
-disambiguates which signature applies, per `docs/syntax.md §3`), a call with a *named-local* receiver
+disambiguates which signature applies, per `docs/reference/syntax.md §3`), a call with a *named-local* receiver
 (`a := A(0); a.apply(r)`) type-checked but the equivalent *inline-expression* receiver (`A(0).apply(r)`,
 or `mk().apply(r)` where `fn mk() -> A`) was falsely rejected ("expected Ref[int], found int") — an
 over-rejection of valid code (safe, not unsound). Root cause was **desugar-only, pre-type**:
@@ -12724,7 +12724,7 @@ statically known — bind it to a typed local or pass positionally"). Desugar ru
 (`builtin_named_method_*`, `enum_builtin_named_method_annotated_receiver`, accurate-error +
 no-struct-defines guards) + the `real_builtin_set_add_untouched` / `builtin_method_name_not_normalized` /
 `ambiguous_method_named_errors` boundary guards stay green; new `examples/builtin_named_method.chz` golden
-+ `golden_builtin_named_method_chz_matches_expected_and_interp` (VM == interp). Docs: `docs/syntax.md`
++ `golden_builtin_named_method_chz_matches_expected_and_interp` (VM == interp). Docs: `docs/reference/syntax.md`
 limitation sentence rewritten; the `BUILTIN_METHODS` doc-comment updated. Known boundary (pre-existing,
 not introduced here): an inferred enum receiver `m := E.Variant` is Field-shaped so its type isn't
 statically known → falls to the accurate diagnostic (annotate the local or pass positionally).
@@ -12913,7 +12913,7 @@ explicit `chezzi run <file>` is always top-level-only. Implemented via `main::sp
 `vm::invoke_entrypoint` (reuses `invoke_value`/`entry_home`) threaded through a new
 `run_file_with_entry`; the old `run_file_with`/`run_file_parallel` became `#[cfg(test)]` parity-test
 helpers. Scaffold now writes `entrypoint = "src.main:main"` and a `main.chz` with no trailing call.
-(3) **New [`docs/stdlib.md`](docs/stdlib.md)** — the previously-undocumented stdlib/builtin surface
+(3) **New [`docs/reference/stdlib.md`](docs/reference/stdlib.md)** — the previously-undocumented stdlib/builtin surface
 (global builtins, per-type methods, runtime types, native + pure-Chezzi `std.*` modules); `syntax.md
 §13` shrank to a pointer + orientation. Docs synced (`spec.md`, `syntax.md §9b`, `CLAUDE.md`,
 `manifest.rs`). VM↔interp parity untouched (entrypoint is VM-only; no `examples/*.chz` changed).
@@ -12987,7 +12987,7 @@ a type bare-VISIBLE in the importing module. Imported `type` aliases are **trans
 resolved in the defining module's scope, carrying the FFI-width license; an unlicensed alias embedding
 an un-imported width is rejected at import). Reserved/native types (`Result`/`Option`/`Some`/`Ok`,
 `Ref`, the std type surface on `import std.*`, FFI widths) stay global/bare always. New grammar
-production in `docs/grammar.bnf` (`conformance` green). Docs: `docs/spec.md` + `docs/syntax.md`
+production in `docs/reference/grammar.bnf` (`conformance` green). Docs: `docs/reference/spec.md` + `docs/reference/syntax.md`
 (Imports). This is a **pre-JIT sequencing gate**, not a feature freeze — new language work can still land.
 
 **✅ Redesign follow-up — two regressions fixed (2026-06).** The qualified-identity-key redesign
@@ -13004,7 +13004,7 @@ resolution note above), deterministic + identical on VM / `--serial` / `--parall
 **✅ CLI cleanup + parsed `chezzi.toml` entrypoint (5 scoped changes; no engine/semantic change).**
 Quality-of-life + a small manifest reader, zero new deps. (1) **Sample-string rename** `"thuan"` →
 `"chezzi"` across docs/examples/tests (input + expected kept in sync; width-10 format examples in
-`docs/syntax.md` recomputed for the 6-char name). (2) **Milestone tags removed** from the `chezzi help`
+`docs/reference/syntax.md` recomputed for the 6-char name). (2) **Milestone tags removed** from the `chezzi help`
 COMMANDS block. (3) **`--interp` CLI flag dropped** — the tree-walk interpreter stays as the FROZEN
 two-engine parity oracle (golden VM-vs-interp tests call it directly), but it has no CLI surface; `mod
 interp` is now `#[cfg(test)]` (test-only, where every reference lives). (4) **Hand-rolled
@@ -13021,7 +13021,7 @@ Imports stay **root-relative** (`build_graph` walks up to the same marker) — l
 so a freshly-init'd project runs with a bare `chezzi run`. Verified end-to-end: `init` a tmp project →
 bare `chezzi run` (+ `--serial`, + nested-cwd) prints `Hello from Chezzi!`, `chezzi run src/main.chz`
 unchanged, `chezzi test .` passes, `chezzi run --interp` → `unknown flag`, `chezzi help` shows no
-`(M..)` tags/`--interp`. Docs: `docs/spec.md`, `docs/syntax.md`, `CLAUDE.md`, this file.
+`(M..)` tags/`--interp`. Docs: `docs/reference/spec.md`, `docs/reference/syntax.md`, `CLAUDE.md`, this file.
 
 **✅ Project tooling — `install.sh` + `chezzi init [dir]`.** Quality-of-life, no runtime/semantic
 change, no new deps. `install.sh` (POSIX `sh`, `set -e`, executable) guards for `cargo` on PATH
@@ -13035,7 +13035,7 @@ root marker AND a parsed manifest (see the CLI-cleanup entry above): the toolcha
 `run <file>` stays top-to-bottom and `test` still discovers `*_test.chz`. Verified end-to-end:
 `chezzi init <tmp>` → `chezzi run <tmp>/src/main.chz`
 prints `Hello from Chezzi!` → `chezzi test <tmp>` reports `2 passed`, and re-`init` refuses with a
-non-zero exit. Docs: `docs/syntax.md` §9b, `docs/spec.md` (module-resolution section), `CLAUDE.md`.
+non-zero exit. Docs: `docs/reference/syntax.md` §9b, `docs/reference/spec.md` (module-resolution section), `CLAUDE.md`.
 
 **✅ Generator return-type inference (`-> Iterator[T]` now OPTIONAL) — Q1 (2026-07-07).** A generator
 (a `fn` whose body uses `yield`, auto-detected via `is_generator`) no longer MUST declare `-> Iterator[T]`:
@@ -13060,8 +13060,8 @@ so both engines are parity-clean by construction. Tests: checker `generator_infe
 `generator_uninferable_element_rejected` / `generator_inferred_struct_method_no_annotation` /
 `generator_explicit_annotation_still_works`; VM (serial + M:N) `vm_generator_inferred_no_annotation` /
 `vm_generator_inferred_struct_method` / `golden_generators_inferred_chz`; golden
-`examples/generators_inferred.chz` (auto-covered by `all_shipped_examples_typecheck`). Docs: `docs/syntax.md`
-(yield block), `docs/spec.md` (generators section). Grammar unchanged (no new syntax; `cargo test
+`examples/generators_inferred.chz` (auto-covered by `all_shipped_examples_typecheck`). Docs: `docs/reference/syntax.md`
+(yield block), `docs/reference/spec.md` (generators section). Grammar unchanged (no new syntax; `cargo test
 conformance` green).
 
 **✅ Formal `Iterable[T]` protocol + `.iter()` cursor (owner-requested; the decoupled follow-on the
@@ -13171,7 +13171,7 @@ you can't call `.next()` on a `list`. Wired (mirroring the `bytes`/`bytearray` O
   + `recover:`), `generator_module_global_executor_untouched_runs_clean_both` (innocent job stays clean),
   `generator_module_global_executor_transitive_helper_faults_both` (transitive/OPAQUE),
   `generator_module_global_executor_reassigned_before_shutdown_faults_both` (submit→shutdown TOCTOU).
-  Docs: `docs/spec.md`, `docs/concurrency.md`, `docs/concurrency-b3.md` §5.1.
+  Docs: `docs/reference/spec.md`, `docs/reference/concurrency.md`, `docs/history/designs/concurrency-b3.md` §5.1.
 - **NON-GOALS (documented, not built):** multi-pass/single-pass TYPE SAFETY (unfixable without
   move/ownership — `count_twice([list]) == 6` via two independent cursors vs `count_twice(generator) ==
   3` consumed once; each `.iter()` is fresh, but reusing an exhausted cursor yields nothing); auto-
@@ -13199,7 +13199,7 @@ on valid code: an `if`/`else` where every branch returns, an exhaustive `match` 
 `while true:` with no reachable `break`, and an `exit(...)` tail all count as terminating. A bare
 `fn a(): 10` (no annotation → infers `nil`) and closures are **exempt**. `examples/edge_cases.chz`'s 6
 inline non-void fns rewritten to multiline `return <expr>` (two-engine golden byte-identical). Docs:
-`docs/syntax.md §5`, `docs/grammar.bnf` (comment), `gaps.md` (RESOLVED). All cargo wrapped at MemoryMax=6G;
+`docs/reference/syntax.md §5`, `docs/reference/grammar.bnf` (comment), `gaps.md` (RESOLVED). All cargo wrapped at MemoryMax=6G;
 full `cargo test` (2040) + `cargo test conformance` green, `cargo clippy --all-targets -- -D warnings`
 clean.
 
@@ -13230,8 +13230,8 @@ clean.
   unchanged by design.
 - Composition: `fn a(): print("x")` infers `-> nil` (a void fn, OK), but `y := a()` is then rejected.
   No grammar change (both reuse existing productions) → `cargo test conformance` stays green.
-  `examples/inline_fn.chz` + `.expected` goldened (VM == interp). Docs: `docs/syntax.md §5`,
-  `docs/grammar.bnf` (`<fnDecl>` comment), `gaps.md` (void-discard footgun → RESOLVED, cross-ref the
+  `examples/inline_fn.chz` + `.expected` goldened (VM == interp). Docs: `docs/reference/syntax.md §5`,
+  `docs/reference/grammar.bnf` (`<fnDecl>` comment), `gaps.md` (void-discard footgun → RESOLVED, cross-ref the
   bare-fn entry). NOTE (since 2026-06-21 superseded): string-interpolation operands ARE now checked —
   the `ExprKind::Str` arm parses `{…}` fragments and `infer_value`s each (see the soundness-fix entry
   below), so void-call / nil fragments are nil-banned too. All cargo
@@ -13251,7 +13251,7 @@ clean.
 **✅ Built-in conversions — str ↔ bytes (UTF-8) methods + `List()`/`Set()`/`Map()` constructors
 (owner-requested; the natural follow-on to the just-landed `bytes`/`bytearray` types).** Two
 conversion surfaces, mirroring the `bytes`/`bytearray` builtin-wiring exactly (3-engine parity), with
-**no new syntax** — every form is an existing call/method production, so **`docs/grammar.bnf` is
+**no new syntax** — every form is an existing call/method production, so **`docs/reference/grammar.bnf` is
 intentionally UNCHANGED** (`cargo test conformance` stays green, proving no new terminal):
 
 - **str ↔ bytes (UTF-8), as METHODS (not constructors — `bytes(x)`/`str(b)` names are already taken):**
@@ -13278,7 +13278,7 @@ intentionally UNCHANGED** (`cargo test conformance` stays green, proving no new 
   builtin names (added to `is_reserved_name` + both `is_builtin` sites + per-engine dispatch). The
   argument is **required** — an empty `list`/`map` is the `[]`/`{}` literal, so `List()`/`Map()` are
   checker errors pointing there. `Map(pairs)` (free call) and `xs.map(f)` (list HOF method) are separate
-  namespaces — verified the parser routes them distinctly; documented in `docs/syntax.md`.
+  namespaces — verified the parser routes them distinctly; documented in `docs/reference/syntax.md`.
 - **Runtime drain helper (the one genuinely new runtime piece).** Built-in collections copy elements
   directly (list/set elems, str→per-char `str`, bytes/bytearray→per-byte `int`, map→keys, range is
   already a materialized list). A user `next(self) -> Option[T]` struct (or a VM generator) is drained by
@@ -13307,7 +13307,7 @@ A heap byte buffer modeled on `list` (mutation flows through shared references),
 (no literal), mirroring the just-landed `bytes` variant-for-variant across the whole pipeline:
 
 - **Constructor-only — no `ba"..."` literal** (the `b"..."` literal already owns `bytes`, so no lexer/
-  parser/grammar change; `docs/grammar.bnf` is intentionally unchanged — a `bytearray(...)` call is the
+  parser/grammar change; `docs/reference/grammar.bnf` is intentionally unchanged — a `bytearray(...)` call is the
   existing IDENT-LPAREN production). `bytearray` lexes as a plain identifier (guarded test). Four forms:
   `bytearray()` (empty), `bytearray(N)` (N zero bytes, Python; an absurd N faults **recoverably** via
   `try_reserve`, never a SIGABRT — same recoverable-fault invariant as `range()`/format-width), `bytearray(b)`/`bytearray(ba)` (mutable
@@ -13366,7 +13366,7 @@ beyond a `b"..."` literal + the const op):
 - **Tests/golden:** `byte_string_*` (lexer), `bytes_*` (checker), `vm_bytes_*` + `bytes_crosses_channel`
   (VM, incl. recover: + map key + `--parallel`), `interp_bytes_*`, `bytes_repr_python_style` (slice),
   and `examples/bytes.chz` + `.expected` goldened on **VM + `--serial` + `--interp`** (byte-identical).
-  `docs/grammar.bnf` gained the `BYTES` primary terminal (`cargo test conformance` executes it; corpus
+  `docs/reference/grammar.bnf` gained the `BYTES` primary terminal (`cargo test conformance` executes it; corpus
   `bytes_literal.chz`). +16 tests (1984 green); clippy clean.
 - **Non-goals (v1):** `byte`/`u8` scalar, bignum, non-UTF-8 codecs (latin1/utf16) + base64/hex/sha
   (a separate `std.*` gap), a `{b:spec}` format-spec, and `ConstBytes` interning (allocs per push, like
@@ -13593,7 +13593,7 @@ exactly like `b`). Short form can't contain its own quote; triple form embeds qu
 work still lands (e.g. module-scoped types, 2026-06). This milestone is otherwise pure
 optimization, so the bar is **behavior-preserving + two-engine parity** on every change. Measure first
 (`cargo run --release -- run benches/run.chz`), land behind a failing-then-green correctness test, keep
-parity green, re-measure, record the delta in [`docs/benchmarks.md`](docs/benchmarks.md). Several levers
+parity green, re-measure, record the delta in [`docs/contributing/benchmarks.md`](docs/contributing/benchmarks.md). Several levers
 moved a *different* bench than predicted — trust the measurement, not the a-priori guess. The frozen
 interp is untouched by VM-only work, so parity is automatic for those changes.
 
@@ -13609,11 +13609,11 @@ range. The parser owns the colon (`parser::parse_subscript`, replacing the old p
 by both engines — it replaced the duplicated `clamp_range`. User `Slice` structs get the full surface via
 default params: `slice(self, start: int?=None, end: int?=None, step: int?=None) -> R` (the runtime passes
 real `Option[int]` components). Strict TDD, both-engine parity green, `examples/slicing.chz` +
-`examples/edge_cases.chz` + `std/str.chz` migrated, `docs/grammar.bnf` colon-slice rule + `cargo test
+`examples/edge_cases.chz` + `std/str.chz` migrated, `docs/reference/grammar.bnf` colon-slice rule + `cargo test
 conformance` green.
 
 **Landed phases** (all TDD'd, two-engine-parity-clean; numbers + per-lever notes in
-[`docs/benchmarks.md`](docs/benchmarks.md), ranked backlog in [`docs/future.md §4`](docs/future.md)):
+[`docs/contributing/benchmarks.md`](docs/contributing/benchmarks.md), ranked backlog in [`docs/design/roadmap.md §4`](docs/design/roadmap.md)):
 
 - **Phase 1** — killed the per-call `Obj` clone in `invoke_value`; jump-relocating peephole + constant
   fold (`src/compiler/peephole.rs`, replicating the VM's checked overflow/div-by-zero semantics);
@@ -13664,7 +13664,7 @@ conformance` green.
   `do_call`'s happy path is already lean (the deref a call-IC skips is ~2–3 instrs); fib's residual is
   frame-setup in `finish_frame`, which a dispatch cache doesn't touch. A correct call-IC also can't avoid
   a heap-specific callee handle ⇒ `swap_ctx` hazard for ~0 gain. fib's real lever is Tier 2 (PEP 659) /
-  Tier 3 (JIT). Full rationale in [`docs/benchmarks.md`](docs/benchmarks.md).
+  Tier 3 (JIT). Full rationale in [`docs/contributing/benchmarks.md`](docs/contributing/benchmarks.md).
 - **Memory layout #3 — positional closure captures.** `Obj::Closure.captured` moved from a per-closure
   `HashMap<String, Value>` to a positional `Vec<Value>` indexed by a compile-time slot; `Op::GetCaptured`
   carries a `u32` slot (hash-free `captured[slot]` hot read, no string hash) instead of a name; capture
@@ -13675,7 +13675,7 @@ conformance` green.
   construct+capture-read micro (`benches/chz/closure.chz`); standard suite neutral (no closure-heavy
   bench). `Obj::Closure` shrank 88→64 B (Module still caps `Obj` at 88 B, guard intact). JIT groundwork:
   constant capture offsets for the future Cranelift codegen. (Memory layout land order **#1 ✅ → #3 ✅ →
-  #2 ✅**; see `docs/future.md` §4.)
+  #2 ✅**; see `docs/design/roadmap.md` §4.)
 - **Memory layout #2 — enum `variant_id` (completes the #1→#3→#2 sequence).** `Obj::Enum` dropped its two
   per-instance `Box<str>` (the type name + variant name, both program-global) for a single dense
   `variant_id: u32` — the enum analogue of struct `tid`. Match-arm dispatch, `==`, and `?` are now
@@ -13789,7 +13789,7 @@ conformance` green.
     isize::MAX` bound doubled (Value 16B→8B), so a marginally larger repeat now succeeds. **Measure gate
     (same machine/session, 16B→8B): the dispatch-floor benches got FASTER — `loop` 1.13×→1.03× CPython
     (near parity), `fib` 3.29×→2.95× (first sub-3×), `map`→1.77×, `poly_method`→3.94×; only `primes`
-    +2.7% (in-noise). Cache-density win beat the tag decode tax.** Full numbers in `docs/benchmarks.md`.
+    +2.7% (in-noise). Cache-density win beat the tag decode tax.** Full numbers in `docs/contributing/benchmarks.md`.
     Prereq soundness fix (`ccbd3c4`): int `==` was lossy `as_f64` above 2^53 → now exact i64. Float-const
     interning (plan Task 5) DEFERRED — no measured float regression on the int-heavy bench set.
 - **String concat/split builder/rope** moves no current bench — `join` already buffers into one `String`;
@@ -13809,7 +13809,7 @@ floor), startup ~11× **faster**. **1607 tests** green, conformance 7/7, `clippy
 neutral** (FxHashMap-probe-bound, not rooting/dispatch-bound — the predicted target didn't move, the
 recurring "measure, don't guess" lesson). Behavior-preserving (7 `idxspec_*` VM==interp guards, incl.
 the Int/Float key-collision trap). Moving `map` needs a denser int-keyed map, not this in-place tweak.
-See `docs/benchmarks.md` "M19 Tier-2".
+See `docs/contributing/benchmarks.md` "M19 Tier-2".
 
 **Denser int-keyed map/set index landed (2026-06-13):** the map index was
 `FxHashMap<u64, Vec<usize>>`, paying a tiny `Vec<usize>` heap alloc per distinct key (200k of them in
@@ -13821,10 +13821,10 @@ index logic into one shared `HashIndex(FxHashMap<u64, Pos>)` in `src/vm/heap.rs`
 `candidates`/`push` signatures are identical → **VM hot paths in `mod.rs` unchanged, parity by construction**
 (interp keeps its `Vec<usize>` oracle; both confirm hits with `values_equal`). **`map` 2.68× → 1.94×
 CPython (−26%, remeasured on merged HEAD `2a934a8`; the dev-base figure was ~1.7×/−36% — variance +
-heavier base, see `docs/benchmarks.md` merge-remeasure note)** — the predicted target landed. Others flat (touch no
+heavier base, see `docs/contributing/benchmarks.md` merge-remeasure note)** — the predicted target landed. Others flat (touch no
 map/set). 2 new collision-upgrade guards (RED on a `One`-only stub, GREEN with `Many`), 1712 green,
 conformance green, clippy clean. **Next `map` suspect:** `values_equal` per-probe cost + `FxHashMap`
-lookup/rehash (no longer the `Vec` alloc). See `docs/benchmarks.md` "M19 — denser int-keyed map/set".
+lookup/rehash (no longer the `Vec` alloc). See `docs/contributing/benchmarks.md` "M19 — denser int-keyed map/set".
 
 **Positional struct layout landed (memory-layout lever #1, 2026-06-16):** `Obj::Struct` instance
 fields went from `Vec<(Box<str>, Value)>` to a flat positional `Vec<Value>` (hidden-class / `__slots__`
@@ -13840,12 +13840,12 @@ construction). **Bench-neutral** (the suite is dispatch/alloc-bound and the `str
 instances — predicted in `gaps.md`), but a 4-field struct-construction micro went **827 ms → 510 ms
 (−38%)**; primary value is the alloc reduction + **JIT groundwork** (positional storage → constant
 field offsets Cranelift codegen needs). 1968 green (+2: positional-layout type guard +
-`struct_layout.chz` two-engine golden), conformance 7/7, clippy clean. See `docs/benchmarks.md` "M19
-memory-layout lever #1" + `docs/future.md §4`. **Land order #1 ✅ → #3 (closure captures) ✅ → #2 (enum
+`struct_layout.chz` two-engine golden), conformance 7/7, clippy clean. See `docs/contributing/benchmarks.md` "M19
+memory-layout lever #1" + `docs/design/roadmap.md §4`. **Land order #1 ✅ → #3 (closure captures) ✅ → #2 (enum
 variant id) ✅ — sequence complete.**
 
 **▶ Next perf batch (Tier 1 DONE — Phases 6+7 landed, 8 deferred; Tier 2 is next; full detail +
-`file:line`s in [`docs/future.md §4` "Post-M19 next levers"](docs/future.md)).** Diagnosis: the
+`file:line`s in [`docs/design/roadmap.md §4` "Post-M19 next levers"](docs/design/roadmap.md)).** Diagnosis: the
 remaining gap is **call frame-setup + the alloc/hash paths**, not per-op dispatch (Phase 7 took `loop`
 to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
 - **Tier 1 (cheap→medium):** ✅ 1. method-call IC + flatten `do_method_call` (Phase 6, `struct` −9%).
@@ -13853,7 +13853,7 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   faster, `loop`/`list` −15/−17%). The other two sub-levers (lazy `span`, and a serial/MN loop split
   that is moot now that there is one scheduler) were left unshipped — predictably-false cheap branches,
   low expected payoff vs the inline win; revisit only if a profile shows them. ⏸️ 3. call-site specialization for `Op::Call` — **deferred (no-gain after inline);**
-  see the Phase 8 bullet above + `docs/benchmarks.md`.
+  see the Phase 8 bullet above + `docs/contributing/benchmarks.md`.
 - **Tier 2 (structural):** ✅ 4. **adaptive opcode quickening (PEP 659) — v1 binops LANDED (2026-06-13):**
   the un-fused generic binop arms (`Add..GtEq` reached by stack operands; `Eq`/`NotEq`, never fused)
   specialize to an int/int fast path behind a per-`Vm`, per-site `(proto,ip)` deopt guard. Side table
@@ -13862,7 +13862,7 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   (its never-fused `% … == 0` int `Eq` left `values_equal_guarded`), `fib` marginal, others flat (fused /
   alloc / hash-bound — as scoped). Gotcha pinned by test: the int `Eq` fast path **replicates the generic
   lossy `as_f64==as_f64`** (so `2^53 == 2^53+1` stays true), not exact `x==y`, to keep parity. 6 new guards,
-  1613 green, clippy clean. See `docs/benchmarks.md` "M19 Tier-2 … quickening, v1". ✅ **CallMethod
+  1613 green, clippy clean. See `docs/contributing/benchmarks.md` "M19 Tier-2 … quickening, v1". ✅ **CallMethod
   adaptive LANDED (2026-06-13): `poly_method` −33% (6.0× → 4.28× CPython)** — the method-call IC's
   single `MethodIcCell` is widened to an N-way (4-way) `MethodIcSite` with the binop quickening's
   one-way sticky-deopt: a bounded-megamorphic site (≤4 receiver types) HITS a way per type and flattens
@@ -13911,7 +13911,7 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   `scalar_keys_unchanged`, `map_value_not_snapshotted`, `cyclic_struct_key_inserts_and_resolves`,
   `generator_field_key_inserts_and_resolves`, `closure_field_key_resolves_after_insert`,
   `map_update_merge_snapshot_keys`, `deep_acyclic_struct_key_inserts_and_resolves` (parity_tests),
-  `map_struct_key_snapshot_survives_gc_stress` (gc_tests). Docs: `docs/syntax.md` Hashable section.
+  `map_struct_key_snapshot_survives_gc_stress` (gc_tests). Docs: `docs/reference/syntax.md` Hashable section.
 - **Import-alias guard now symmetric on reserved TYPE names (Finding B, 2026-07-10).** The
   `import X as ALIAS from M` / `import M as ALIAS` guards rejected reserved CALLABLE aliases
   (`import who as int` → `reserved (builtin)`) but silently ACCEPTED reserved TYPE names
@@ -14017,7 +14017,7 @@ carries **no `.expected`** (manual cancel of a CPU sibling diverges by engine �
 `--serial`/`--interp` run to completion) and is covered by a Rust `#[test]`. A cross-task
 cancel→`wait:` lost-wakeup regression (`MnSched::park`/`park_wait` gap re-check now includes
 `done_latch`) is guarded by `cancel_trip_wakes_parked_wait_under_parallel`. Closes the `gaps.md`
-cancellation gap (timeouts + manual cancel). See `docs/concurrency.md` §6e/§6c'.
+cancellation gap (timeouts + manual cancel). See `docs/reference/concurrency.md` §6e/§6c'.
 
 **`std.cancel` TREE PROPAGATION — parent/child derivation SHIPPED (2026-06-17).** `Token.derive()`
 (and the free-fn `cancel.derive(parent)`) builds a **child** token (Go `context.WithCancel`):
@@ -14042,7 +14042,7 @@ twin), plus eight VM unit tests (`cancel_child_*`, `cancel_transitive_grandchild
 — the transitive-`done()` guards, `cancel_token_sendable_with_parent` — the cross-airlock live-link
 guard). **Known v1 limit:** the per-ancestor registry only **grows** (no token-drop hook); tokens are
 request-scoped/short-lived, a future prune-on-cancel could clear it. Closes the `gaps.md`
-tree-propagation gap. See `docs/concurrency.md` §6e.
+tree-propagation gap. See `docs/reference/concurrency.md` §6e.
 
 > **RE-SHAPED TO GO'S REGISTRATION MODEL (2026-08-18).** The every-ancestor registry above is **gone**;
 > the paragraph is kept as history, and its "the link is the parent's `Shared` flag plus a `Shared`
@@ -14094,7 +14094,7 @@ tree-propagation gap. See `docs/concurrency.md` §6e.
 > and `=2` shows **zero** violations, so on a 1-2 core box the default IS 2 and the gate would vanish:
 > `cancel_c5_gate_at_eight_workers` (`tests/chezzi_threads_cli.rs`) runs that one file at
 > `CHEZZI_THREADS=8` in its own process. Retention is narrower, not gone: a `cancel()` drains what it walks, but an **uncancelled**
-> long-lived parent still retains its children's handles. See `docs/benchmarks.md`.
+> long-lived parent still retains its children's handles. See `docs/contributing/benchmarks.md`.
 
 > **`Channel.recv_timeout(ms)` — attempted then reverted (2026-06-12).** A bounded-wait `recv` was
 > implemented with a **demote-always** shortcut (reuse `demote_recv_block` + a deadline) to avoid the
@@ -14118,7 +14118,7 @@ tree-propagation gap. See `docs/concurrency.md` §6e.
 > - **`Atomic[T]`** (commit `07ae080`) — generic atomic box mirroring `Shared[T]` (Mutex-backed, sendable
 >   handle, value-first `Atomic(v)`): `load`/`store`/`exchange`/`cas` for any `T`, `add`/`sub` on numeric
 >   `T` (checked-overflow like `+`/`-`). Two-engine parity; `--parallel` add/cas atomicity stress tests
->   (300-thread exact sum, 200-fiber CAS-retry). See `docs/concurrency.md §6b`.
+>   (300-thread exact sum, 200-fiber CAS-retry). See `docs/reference/concurrency.md §6b`.
 > - **`timer(ms) -> Channel[bool]`** (commit `cd1673e`) — one-shot, **level-triggered** timeout channel.
 >   Delivery is scheduled **at `recv` time in the receiver's own scheduler** (NOT at construction — a
 >   top-level timer can be recv'd in a `--parallel` child): `--parallel` schedules a background `send` +
@@ -14130,8 +14130,8 @@ tree-propagation gap. See `docs/concurrency.md` §6e.
 > - **`recv_timeout` DROPPED** — `wait` + `timer` subsume it (`ch.recv_timeout(500)` ≡ `wait` over `ch`
 >   and `timer(500)`), and it was the unsound/reverted one. No separate primitive.
 > - **`wait` (select) — SHIPPED on ALL THREE engines (2026-06-13; M:N blocking park landed 2026-06-13).**
->   Full design + grammar + per-engine semantics in **`docs/concurrency.md §6d`** (cheat row in
->   `docs/syntax.md §11b`; `examples/wait_select.chz`). A `wait:` compound statement races channel
+>   Full design + grammar + per-engine semantics in **`docs/reference/concurrency.md §6d`** (cheat row in
+>   `docs/reference/syntax.md §11b`; `examples/wait_select.chz`). A `wait:` compound statement races channel
 >   `recv`s — arms `v := ch.recv():` (`:=`/`=`/`_` targets), optional non-blocking `else:` (last), `timer`
 >   arms, recv-only (unbounded channels → sends never block); source-order priority; closed+empty arm
 >   **skipped**; all-closed+no-`else` faults. **Done:** lexer→parser (`parse_wait`)→checker (`check_wait`)
@@ -14163,8 +14163,8 @@ tree-propagation gap. See `docs/concurrency.md` §6e.
 
 ### Tier-D — complete (D0–D6c)
 
-Designed in [`docs/concurrency.md §10`](docs/concurrency.md); the full per-phase TDD breakdown lives in
-**[`docs/concurrency-tier-d.md`](docs/concurrency-tier-d.md)**. Landed, in one summary:
+Designed in [`docs/reference/concurrency.md §10`](docs/reference/concurrency.md); the full per-phase TDD breakdown lives in
+**[`docs/history/designs/concurrency-tier-d.md`](docs/history/designs/concurrency-tier-d.md)**. Landed, in one summary:
 
 - **D0** — O(N²)→O(N·logN) cooperative ready-queue (per-nursery `ready` set + parked-index buckets).
 - **D1** — lazy module snapshot: a shared read-only `Arc<ModuleSnapshot>` faulted into each worker heap
@@ -14305,7 +14305,7 @@ interp order is restored).
 
 ### Group B (B3.0–B3.6) — the OS-thread multicore epic, complete
 
-Decomposed and documented in **[`docs/concurrency-b3.md`](docs/concurrency-b3.md)** (validated
+Decomposed and documented in **[`docs/history/designs/concurrency-b3.md`](docs/history/designs/concurrency-b3.md)** (validated
 shared-nothing architecture, decisions A–G, risk register). Summary of the landing:
 
 - **B3.0–B3.2** — a `WireValue` airlock (`src/vm/wire.rs`) replaced `deep_clone`; `Channel`/`Shared`/
@@ -14335,7 +14335,7 @@ shared-nothing architecture, decisions A–G, risk register). Summary of the lan
 Every function body and the module top level is an implicit nursery that joins at its `return`/end
 (module top joins at program exit); a bare `spawn` is legal anywhere, dropping the explicit `parallel:`
 requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earlier joins. Design:
-[`docs/concurrency.md §10`](docs/concurrency.md). Concurrency is now feature-complete (no Tier-E).
+[`docs/reference/concurrency.md §10`](docs/reference/concurrency.md). Concurrency is now feature-complete (no Tier-E).
 
 - **Join-on-exit.** `return <value>`, fall-through end, and `?` early-return are all join points —
   spawned tasks run FIFO, *then* control leaves; `defer`s run after the join (tasks, then cleanup). A
@@ -14401,7 +14401,7 @@ requirement. `parallel:` is demoted to an explicit *inner* sub-nursery for earli
   (delivery order may differ, or it deadlock-faults — never panics/hangs); the inline outer-body's
   *blocking* recv (case B — wake-side fix only; put blocking work in a `spawn:`); and eager
   (per-connection) nurseries' private sched.
-  Fix design + resolution in [`docs/cross-nursery-flat-scheduler.md`](docs/cross-nursery-flat-scheduler.md);
+  Fix design + resolution in [`docs/history/designs/cross-nursery-flat-scheduler.md`](docs/history/designs/cross-nursery-flat-scheduler.md);
   correct cooperative pattern in `examples/parallel_cross_nursery_ok.chz`.
   Documented residuals: a narrow parked-sibling false-positive under multi-demote; the `Shared.update`
   same-box recv hazard; a saturated-pool queued-task counted live (no-false-positive choice).
@@ -14427,11 +14427,11 @@ trampoline C calls back synchronously, same-thread, scalars only; faults caught 
 engines + `--parallel` parity; `src/native/cffi.rs` `CType::Callback` + `Host::invoke_callback`);
 nested structs / `str` struct fields / **the rest of callbacks (#4 — stored/cross-thread + pointer-deref
 builtins)** / **varargs (#5)** (with design notes + the callback feasibility ladder +
-a varargs fixed-arity workaround in `docs/ffi-and-packaging.md §1b`),
+a varargs fixed-arity workaround in `docs/design/ffi-and-packaging.md §1b`),
 a custom user-named deallocator, C-spelling int aliases (`c_int`), and the rich Rust
 `Box<dyn Any>` userdata handle still deferred — see "Done" below; forward design for the Rust
 userdata Value + the package registry is in
-[`docs/ffi-and-packaging.md`](docs/ffi-and-packaging.md)). **`yield`/generators are likewise
+[`docs/design/ffi-and-packaging.md`](docs/design/ffi-and-packaging.md)). **`yield`/generators are likewise
 no longer a non-goal — complete VM-only support shipped** (see below).
 
 > **`yield`/generators — complete, VM-only (landed on `feat/yield-generators`).** No longer a
@@ -14452,9 +14452,9 @@ One bullet per milestone/epic. Full landing detail (TDD notes, review-panel find
 branch names) is in the git log.
 
 - **TICKET-218 (2026-10-06) — `native type`; a C width is range-checked at the C boundary.** `std/ffi.chz` is the one list of `std.ffi`'s exports: `native type ptr` and `native type int8 = int` … `float32 = float` (new std-only declaration form), read by `native::ffi::declared_types()`; `TYPE_NAMES` and `native_module_sig` are deleted, and module constants are harvested `NAME: const T = value` lets (`math.pi`; `native_consts` deleted). A width is a slot tag `Ty::Width(CType)` erased from every value type. A constant outside a width is a compile error at every value-into-slot site (`constant 300 does not fit int8 (-128..127)`, one helper `check_const_fits`); a runtime value faults where it crosses into C (extern param, struct field, `ffi.store_<w>`, callback return: `value 300 does not fit int8 (-128..127)`). Ranges come from `CType` (Rust's primitive bounds); uint64 passes its bit pattern at run time; float32 passes NaN/inf. Explicit wrap: `ffi.cast_<w>(v)`; range constants `ffi.INT8_MIN` … `ffi.FLT_MAX`. Grids: `checker::tests::ffi_width_constant_grid`, `tests/ffi_width_range_grid.rs`.
-- **TICKET-181 (2026-09-29) — Blocking contexts: one table (wave 16 Family 2).** Every blocking op asks `block::mode(ctx, spec)` (`src/vm/block.rs`) how to block; the context is derived by `Vm::block_ctx()`. One demote bracket (`Vm::block_enter`) accounts a wait by `WaitSpec::will_return` (`inflight`) or registers a `Waiter` in the one registry `SchedCore::waiters`, which replaced `demoted_chans`, `demote_cancel_watch`, `demoted_groups`, `body_waits`, `guard_waits` and `blocked_native`. The four predicates (`is_counted_party`, `owns_os_thread`, `can_block_in_place`, `may_block_socket_in_place`) and `demote_enter`/`demote_exit`/`demote_socket_*` are gone. Fixed C1/E1-E4 (timed `wait:` in a callback), X1 (`Executor.shutdown()` in a fiber at T=1), X2 (socket read in a `main` callback/`defer:`), F1 (`request.get` in a fiber callback at T=1), a `wait:` send arm in a `main`/job callback, and a `timer.recv()` in a fiber callback. Grids: `block::tests::every_cell_matches_the_table`, `tests/blocking_context_grid.rs::grid_every_op_in_every_context` (210 cells × T=1/2/0 + seeds). Table and deliberate differences: `docs/concurrency.md` "Blocking-context table".
+- **TICKET-181 (2026-09-29) — Blocking contexts: one table (wave 16 Family 2).** Every blocking op asks `block::mode(ctx, spec)` (`src/vm/block.rs`) how to block; the context is derived by `Vm::block_ctx()`. One demote bracket (`Vm::block_enter`) accounts a wait by `WaitSpec::will_return` (`inflight`) or registers a `Waiter` in the one registry `SchedCore::waiters`, which replaced `demoted_chans`, `demote_cancel_watch`, `demoted_groups`, `body_waits`, `guard_waits` and `blocked_native`. The four predicates (`is_counted_party`, `owns_os_thread`, `can_block_in_place`, `may_block_socket_in_place`) and `demote_enter`/`demote_exit`/`demote_socket_*` are gone. Fixed C1/E1-E4 (timed `wait:` in a callback), X1 (`Executor.shutdown()` in a fiber at T=1), X2 (socket read in a `main` callback/`defer:`), F1 (`request.get` in a fiber callback at T=1), a `wait:` send arm in a `main`/job callback, and a `timer.recv()` in a fiber callback. Grids: `block::tests::every_cell_matches_the_table`, `tests/blocking_context_grid.rs::grid_every_op_in_every_context` (210 cells × T=1/2/0 + seeds). Table and deliberate differences: `docs/reference/concurrency.md` "Blocking-context table".
 - **TICKET-179 (2026-09-29) — D4 airlock: the mark means "the parent can observe it" (wave 16 Family 4).** One receiver-write table, `vm::is_mutating_native_kind`, read by the checker's `mutates_receiver`; `Map.merge` is not a write; `bytearray.copy()` exists. A fresh `spawn` operand (literal, comprehension, container `.copy()`) is decided once by the checker and crosses with its root unmarked. A crossing generator marks only the frame slots the sending task can still reach (`Vm::gen_frame_observable`). Layer A reports a write only when every path reaches it. Grids: `checker::tests::receiver_write_table_matches_observed_behavior`, `checker::tests::airlock_crossing_grid_compile_cells`, `tests/chz/spec/airlock_crossing_grid_test.chz`.
-- **TICKET-178 (2026-09-28) — type declarations and `test fn` are top-level only.** One list, `Parser::item_keyword`, decides it: `parse_module` dispatches items through it and every block rejects them (`struct must be a top-level declaration`); the `depth > 1` denylist for `extern`/`native`/`import` is gone, and `docs/grammar.bnf` has an `<item>` rule. Grid: `parser::tests::item_declarations_are_top_level_only_grid`.
+- **TICKET-178 (2026-09-28) — type declarations and `test fn` are top-level only.** One list, `Parser::item_keyword`, decides it: `parse_module` dispatches items through it and every block rejects them (`struct must be a top-level declaration`); the `depth > 1` denylist for `extern`/`native`/`import` is gone, and `docs/reference/grammar.bnf` has an `<item>` rule. Grid: `parser::tests::item_declarations_are_top_level_only_grid`.
 
 - **TICKET-160 (2026-09-21) — `Map.items()` and a shallow `copy()` on `List`/`Map`/`Set`.** `m.items()` returns `List[(K, V)]` in `keys()` order, so `Map(m.items()) == m`; `copy()` is shallow like CPython's and snapshots struct keys like `merge`. Declared in `std/prelude.chz`, dispatched in `Vm::core_method` (`src/vm/call.rs`). `Map` still iterates by key.
 - **TICKET-139 W14-2 (2026-09-19) — a keyword call through a fn value needs a binding of ONE known fn; anything else is a compile error.** Labels are surface-only, so `fs := [f, ren]; fs[1](a=1, b=2)` bound by `f`'s names and ran `ren` (`201`; CPython `102`). Decision (owner-approved 2026-09-18): the checker (`kw_certain`/`kw_written`/`kw_pending`, settled at `pop_scope`) accepts a keyword call only through an unannotated `:=` of a top-level fn or closure literal, or a nested `fn`'s name, never written afterwards; a param, list slot, returned value or reassigned binding is rejected with a message naming the positional workaround. CPython-style runtime rebinding was rejected as unsound (`fn(a: int, b: str)` vs `fn(b: int, a: str)` share one type). `kw_value_call_hof_param_labels` became `kw_value_call_through_a_param_is_rejected`; `examples/keyword_value.chz` lost its HOF-param and curried keyword calls. Pinned by `kw_value_call_through_*` and `tests/chz/spec/fn_value_named_arg_labels_test.chz`.
@@ -14488,11 +14488,11 @@ branch names) is in the git log.
   alongside `path`/`cells` (`src/vm/sched.rs`); a generator reached twice in one crossing is now a
   clean fault (`a generator cannot be sent across tasks twice in one crossing`) instead of a silent
   duplicate, since a generator carries no wire id to back-reference. **Exception, recorded as W11-15
-  (`docs/gaps.md`):** the three `RwShared` stores keep the old per-crossing splitting
+  (`docs/contributing/gaps.md`):** the three `RwShared` stores keep the old per-crossing splitting
   (`to_wire_crossable_split`), because their read views drain one stored wire through many
   independent rebuild maps and a cross-element back-ref would make a rebuild quadratic
   (`rwshared_view_over_shared_bindings_is_not_quadratic`). No regression measured on the spawn path
-  (`docs/benchmarks.md`).
+  (`docs/contributing/benchmarks.md`).
 - **TICKET-050's seven deferred wall-clock tests are converted to counted measures, the Rust ratio
   ban now scans all of `src/`+`tests/`, both W8-8 serialization gates bound child CPU against child
   wall on one run instead of dividing two wall-clock samples, the wall-clock allowlist is down to 19,
@@ -14559,8 +14559,8 @@ branch names) is in the git log.
   weaker proof) and refuses the erasure, naming the bound (``Box[Tag]'s `eq` requires Tag:
   Comparable``) through `protocol_note`. Three `tests/chz/spec/eq_protocol_existential_test.chz` tests
   that pinned this as a RUNTIME fault no longer compile and moved to
-  `checker::tests::protocol_erasure_eq_where_bound_boundaries` as compile-time rejections; `docs/gaps.md`
-  W7-52 and `docs/syntax.md` are corrected — the erasure gate is Rust's compile-time model, not Go's
+  `checker::tests::protocol_erasure_eq_where_bound_boundaries` as compile-time rejections; `docs/contributing/gaps.md`
+  W7-52 and `docs/reference/syntax.md` are corrected — the erasure gate is Rust's compile-time model, not Go's
   runtime one.
 - **Five Rust `#[test]`s that asserted a wall-clock bound or a `time.sleep_ms` handshake now assert a
   counted probe or a channel handshake instead (2026-09-03, TICKET-050).** CPU contention reddened
@@ -14611,9 +14611,9 @@ branch names) is in the git log.
   type BEFORE any carrier unwrap. Gate: `cargo test` green (4397 lib tests, up from 4394 + the ticket's
   own previously-failing pinned test), `chezzi test tests/chz/spec/float_elem_widen_sinks_test.chz`
   (6 new tests, all RUN the widened value, not just check-clean), `cargo clippy -- -D warnings` clean.
-  `docs/spec.md`/`docs/syntax.md` updated in the same commit.
+  `docs/reference/spec.md`/`docs/reference/syntax.md` updated in the same commit.
 - **`chezzi test` now prints the same fault trace, line:col and warning path as `run`/`check`
-  (2026-08-27, TICKET-010, `docs/gaps.md` W8-37 closed).** Three drops, one root cause
+  (2026-08-27, TICKET-010, `docs/contributing/gaps.md` W8-37 closed).** Three drops, one root cause
   (`src/test_runner.rs` rendered all three diagnostics from `message` alone): a fault lost its
   callee frames and its col (`ERROR t (f37_test.chz:2) index 9 out of bounds (len 1)` →
   `ERROR t (f37_test.chz:2:12) index 9 out of bounds (len 1)` plus
@@ -14633,7 +14633,7 @@ branch names) is in the git log.
   `639 test(s): 639 passed, 0 failed, 0 errored`, zero `  at ` lines. New CLI gate
   `tests/test_diagnostics.rs` (5 cases) plus 3 `#[cfg(test)]` cases in `src/test_runner.rs`.
 - **A method/field miss now suggests a near-miss "did you mean" (2026-08-27, TICKET-007,
-  `docs/gaps.md` W8-17 partially closed).** `xs.lenght()` → `type List[int] has no method 'lenght'`
+  `docs/contributing/gaps.md` W8-17 partially closed).** `xs.lenght()` → `type List[int] has no method 'lenght'`
   now also carries `help: did you mean 'len'?`, on every method-miss and field-miss site (native
   handle, struct, newtype, enum, protocol, type-param bound). `CheckError` gained a `help: Option
   <String>` field (never module-attributed), scored by `src/checker/suggest.rs`'s restricted
@@ -14646,7 +14646,7 @@ branch names) is in the git log.
   width) before the `help:` line; the caret survives a piped/`/dev/stdin` entry because the entry
   source is threaded down rather than re-read (DEC-001). `--errors=json` gained a `"help"` key
   (after `"message"`, omitted when absent) and the LSP appends `help: <h>` to the diagnostic
-  message. Out of scope (recorded in `docs/gaps.md` W8-17): error codes; a suggestion for an unknown
+  message. Out of scope (recorded in `docs/contributing/gaps.md` W8-17): error codes; a suggestion for an unknown
   variable, a module member, or an enum variant miss.
 - **A bare generic fn passed to a GENERIC hof is now INFERRED, the way Go and Rust infer it
   (2026-08-15).** The leftover the entry below named: the deferral it built lived only on
@@ -14686,7 +14686,7 @@ branch names) is in the git log.
   `Holder(0).m(Bx(ident), 5)` had been wrongly accepted since the licence was introduced. 438-file
   `.chz` corpus sweep, pre vs post binary (both built from THIS worktree, so no stdlib-path noise):
   **zero** verdict changes. 4160 lib tests + 550 Chezzi tests identical on both engines.
-  `docs/syntax.md` §7b, `docs/spec.md`.
+  `docs/reference/syntax.md` §7b, `docs/reference/spec.md`.
 - **The empty-receiver carve-out suppresses the REPORT, never the PIN — and stops hiding the rule's
   own subject (2026-08-15).** Two defects in the argument-position rule below, both found by
   adversarial review and reproduced against the `69aa9efc` binary. (1) **A regression.** The
@@ -14751,7 +14751,7 @@ branch names) is in the git log.
   what is ACCEPTED, so it got its own change with its own proof (the entry above, same day).
   438-file `.chz` corpus sweep,
   pre vs post binary: **zero** verdict changes outside the file the new tests were added to. 4156 lib
-  tests + 549 Chezzi tests identical on both engines. `docs/syntax.md` §7b, `docs/spec.md`.
+  tests + 549 Chezzi tests identical on both engines. `docs/reference/syntax.md` §7b, `docs/reference/spec.md`.
 - **An UNINSTANTIATED generic fn value is refused at the binding, Go's rule (2026-08-15).** `g := id`
   for `fn id[T](x: T) -> T` was accepted, and the mistake surfaced at the eventual call as
   *argument 1 of 'closure': expected T, found int* — blaming a `closure` the user never wrote and
@@ -14777,7 +14777,7 @@ branch names) is in the git log.
   (`reject_witness_fn_value`) still fires first — its advice differs, since a turbofish does not help
   there. 438-file `.chz` corpus sweep, pre vs post binary: **one** verdict change, the
   `g := tagged` probe in `tests/chz/spec/static_witness_test.chz` (now `tagged[Node]`, and it asserts
-  the call). `docs/syntax.md` §7b, `docs/spec.md`.
+  the call). `docs/reference/syntax.md` §7b, `docs/reference/spec.md`.
 - **Adversarial review of the rule above, applied (2026-08-15).** Two prosecutors ran the change
   against the pre-change binary over ~160 probes plus a 104-case context fuzz. Four defects, all fixed
   in the follow-up commit. (1) **The message was FACTUALLY FALSE in three positions.** A parameter or
@@ -14812,7 +14812,7 @@ branch names) is in the git log.
   col 6 (the `0`); `y := "a\qb"` → col 9 (the `q`); `y := "abc` unterminated on line 2 of a 2-line
   file → `(line 3, col 1)` → `(line 2, col 6)`, the opening quote — which fixes the **line** too, as
   the position was being read off the cursor after it ran to EOF. **The rule** (measured against
-  rustc + CPython, table in `docs/gaps.md` M24-7 and in the test's doc comment): point at the
+  rustc + CPython, table in `docs/contributing/gaps.md` M24-7 and in the test's doc comment): point at the
   offending character; an unterminated delimiter points at its opener; a malformed number points at
   the literal's start — **except a misplaced `'_'` separator, which points at the `_` itself**
   (CPython measured: `y = 1__0` → offset 6; rustc has no opinion, it accepts `1__0`) — and an escape
@@ -14897,7 +14897,7 @@ branch names) is in the git log.
   separately, plus the cross-stream discrimination. Both examples now say so in their header comments.
 
 - **Refactor — a native's behavioural properties now ride its REGISTRY ENTRY, so forgetting one is a
-  compile error (2026-08-05, `docs/future.md` §3c option B + the interception fold).** A native's
+  compile error (2026-08-05, `docs/design/roadmap.md` §3c option B + the interception fold).** A native's
   properties used to live in string matches far from where it is registered: a 40-name `is_blocking`
   list (with a `strip_prefix('_')` patch bolted on so the W7-8 rename would not silently un-classify
   every `std.fs` syscall), three `"sleep_ms"` arms in `vm/call.rs`, a `name == "connect" || "listen"`
@@ -14984,7 +14984,7 @@ branch names) is in the git log.
   Tests: `tests/chz/spec/intrinsic_proto_methods_test.chz` (20 `test fn`, operator-equivalence AND
   fault-message equality via `recover:`, user-method-wins controls, plus the W6-3d divergence pin, the
   NaN total-order pin and the Iterator-is-a-cursor pin),
-  serial==M:N. Docs: `docs/gaps.md` (W6-3 FIXED + new W6-3b/c/d), `docs/spec.md`, `docs/syntax.md`.
+  serial==M:N. Docs: `docs/contributing/gaps.md` (W6-3 FIXED + new W6-3b/c/d), `docs/reference/spec.md`, `docs/reference/syntax.md`.
 - **Diagnostic — recursive *local* fn crossing the airlock (2026-07-18, bug-hunt).** A nested (local)
   recursive `fn` sent across a task boundary used to fault with the misleading `maximum structural depth
   (10000) exceeded (cyclic data structure?)` — there is no cyclic *data*, just the compiler letrec's
@@ -14998,7 +14998,7 @@ branch names) is in the git log.
   recursive-local-fn sendability stays DEFERRED** (a risky VM change past the JIT freeze); the fix is to
   hoist the fn to module scope (crosses as a plain `Func`, no capture, sendable). Genuine cyclic *data*
   still reports the depth message (regression-locked). +2 tests (`airlock_recursive_local_fn_clear_diagnostic_both_engines`,
-  `airlock_module_global_recursive_fn_control_sends`). Docs: `docs/concurrency.md` §7, `docs/gaps.md`.
+  `airlock_module_global_recursive_fn_control_sends`). Docs: `docs/reference/concurrency.md` §7, `docs/contributing/gaps.md`.
 - **QoL — int-const if/match-EXPRESSION branch widens to float (2026-07-17).** A bug-hunt papercut:
   `x := if c: 1 else: 2.5` was a compile error while the equivalent list literal `[1, 2.5]` coerced fine —
   an inconsistency in where the untyped-int-constant→float peephole applied. Extended the SAME
@@ -15036,7 +15036,7 @@ branch names) is in the git log.
   `parallel_defer_runs_when_enlisted_nursery_escapes` covers the escaped-enlisted-nursery seam; the
   invariants are pinned by `mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock`,
   `panic_fault_trips_the_scope_cancel` and `poll_park_rejects_cancelled_inner_scope`.
-  See `docs/gaps.md` **N4**. Two related holes found while verifying it, both pre-existing, both left
+  See `docs/contributing/gaps.md` **N4**. Two related holes found while verifying it, both pre-existing, both left
   open with their own entries: **N5** (a GENUINE deadlock also tears parked fibers down without
   `unwind_deferred`, so it skips `defer`s too — closed 2026-08-06 as **not a bug**: Go's deadlock
   `fatal error` skips its `defer`s too, and CPython just hangs) and **N6** (`--serial` does **not** run a PARKED task's `defer` on a sibling fault — it
@@ -15067,7 +15067,7 @@ branch names) is in the git log.
   `close()`; the str `read` keeps its documented decode contract, unchanged). **Not done (out of
   scope):** `std.request` binary bodies (ureq `into_string()` needs its own reader plumbing → "download
   a file" stays blocked on *request*, not on R1), gzip/zlib, `NativeRet::ByteArray`, and any
-  `Writer`/file-handle type (that is R2). Docs: `docs/stdlib.md`, `docs/gaps.md` (R1 DONE, B1 FIXED,
+  `Writer`/file-handle type (that is R2). Docs: `docs/reference/stdlib.md`, `docs/contributing/gaps.md` (R1 DONE, B1 FIXED,
   dependent bullets re-graded), `std/{io,net,crypto,encoding}.chz`.
 
 - **`Socket.read` no longer CORRUPTS data — B1 MITIGATED (2026-07-14).** `src/vm/netio.rs` decoded every
@@ -15119,7 +15119,7 @@ branch names) is in the git log.
   both timeout sites through the shared `Vm::sock_incomplete_err`. Also: the decode's hot path (no carry, valid chunk) decodes the fd buffer BORROWED
   (`Cow`), so it costs one `String` alloc — exactly what `from_utf8_lossy(..).into_owned()` cost, no
   regression on the IO path. **Known v1 limit (unchanged): binary sockets are UNSUPPORTED** — they need
-  `Socket.read_bytes`/`write_bytes`, which need the `bytes` native seam (`docs/gaps.md` R1, the honest
+  `Socket.read_bytes`/`write_bytes`, which need the `bytes` native seam (`docs/contributing/gaps.md` R1, the honest
   fix). B1 is downgraded from *silent corruption* to *a clear, recoverable limitation*, not closed. Pinned
   by nine M:N tests (`net_read_reassembles_split_codepoint_over_parallel`,
   `net_read_invalid_utf8_errs_not_replacement_chars`, `net_read_incomplete_tail_at_eof_errs`,
@@ -15163,7 +15163,7 @@ branch names) is in the git log.
   limit:** `read_line`/`input` are deliberately outside `is_blocking` (off-heap `OffloadHost::read_line`
   is `unreachable!`), so a task blocked in a read now **pins an M:N core worker** (K blocked readers ⇒ K
   pinned workers) — previously impossible, since tasks got an instant EOF. Accepted + documented
-  (`docs/gaps.md`); offloading stdin reads is its own milestone.
+  (`docs/contributing/gaps.md`); offloading stdin reads is its own milestone.
 
 - **Interactive CLI — `chezzi run` STREAMS stdout; the buffered sink stays for tests (2026-07-13).**
   `src/main.rs` used to capture the whole run into a `String` and `print!` it once, after the VM
@@ -15231,39 +15231,39 @@ branch names) is in the git log.
   `CpCursor` over `captures_iter`'s monotonically increasing spans) — a from-zero prefix rescan per
   match would have been O(n·m), turning a document scan into a hang; pinned by a timing test
   (200k matches / 400k chars: 2.9s quadratic vs ~0.1s linear, debug).
-- ✅ **A module bind that shadows a same-named USER type now NAMES the collision** (2026-07-13) — wave-5 audited residual 4, **downgraded from a soundness gap to a message fix**. `import lib.Point` + `struct Point` puts the module in the VALUE namespace, where it beats the ctor in expression position — but unlike the reserved-name case (which *silently destroyed* the builtin, hence the `is_reserved_module_bind` gate), a shadowed USER ctor is a **hard type error at the call**, so no program can run wrong, and `import lib.Point as pt` is the cure — i.e. ordinary Python-style shadowing, plus a diagnostic Python does not give. The only real defect was that the diagnostic was `module Point is not callable`, which never said where the ctor went. The not-callable arm (`src/checker/expr.rs`) gained a `Ty::Module` case gated on the bare-key type tables (`self.structs`/`self.enums`, so it is module-prefix-key correct): `module bind 'Point' shadows the same-named type 'Point' — alias the import: \`import ... as point\``. Checker-only, no compiler/VM change → parity- and perf-neutral. +1 test RED-first (`module_bind_shadowing_user_type_names_the_collision`): struct ctor + enum ctor collide, the alias escape hatch reaches BOTH the module and the ctor, and a module bind with no same-named type keeps the generic `is not callable` error (no over-rejection). A real **module namespace** (module names legal only in field position) remains the principled fix and is NOT planned — it is a resolver change that buys only the loss of an alias keystroke. Docs: `docs/gaps.md` (residual 4 downgraded).
-- ✅ **Module/import seam: 4 fixes — `std.str` renamed to `std.string`, a reserved module bind is rejected, a nested `import` is a parse error, a from-imported global can't be rebound, and a qualified generic fn's turbofish/hint reach it** (2026-07-13, `auto-task/module-import-seam`) — front-end only (parser + checker + one std file rename); compiler/VM untouched, so both engines stay consistent by construction. **(1) A module bind silently shadowed a builtin ctor.** `import std.str` + `print(str(5))` → `type error: module str is not callable` — importing the documented std module DESTROYED the global `str()` ctor (the whole-module bind puts the last path segment into the VALUE namespace, where it beats the reserved builtin in expression position). Fixed in two parts: **(A)** the std string module is RENAMED `std.str` → `std.string` (`std/string.chz`; `str` was the ONLY std module name colliding with a reserved name — the scalar TYPE `str` and the `str()` ctor are UNCHANGED; matches Python/C++); **(B)** a module bind — aliased OR the un-aliased last path segment — whose name is reserved is now REJECTED (`module name 'int' is reserved (builtin) — alias it: import lib.int as ints` / `import alias 'Ok' is reserved (builtin)`). The gate is `is_reserved_module_bind` = the existing `is_reserved_alias_target` (reserved callables + reserved type names) + `nil` (carved out of the ALIAS gate because an alias binds a VALUE and a value still works as a value — but a MODULE is not a value, so `import lib.nil` would silently retype the `nil` literal) + the extracted `is_builtin_variant` (`Ok`/`Err`/`Some`/`None`, which `is_reserved_type` deliberately excludes so decl-site shadowing keeps working) — 34 names, no new list. Escape hatch: `import lib.int as ints`. The gate is ROOT-SWEPT to every bind that lands in the VALUE namespace, so the `from` form is covered too — a reserved ALIAS (`import x as Ok from M`) *and* a reserved bare MEMBER (`import str from lib.sh`, where a module global/fn named `str` destroyed the `str()` ctor exactly like `import std.str` did) are both rejected (`imported name 'str' is reserved (builtin) — alias it: …`); a reserved TYPE member binds no value and is the LICENSING import of the builtin itself (`import Shared from std.concurrency`, `import ptr from std.ffi`), so it stays legal un-aliased. RESIDUAL (out of scope): a module bind colliding with a USER struct/enum ctor of the same name still wins in expression position. **(2) A nested `import` was a LYING ACCEPT** — an `import` in a fn body/block parsed, checked clean and was a complete NO-OP (even for a module that does not exist): the resolver only scans module-level stmts. It is now a PARSE error (`import must be a top-level declaration`), the third instance of the existing `extern`/`native` depth>1 gate; `<importStmt>` moved from `<simpleStmt>` to `<topLevelStmt>` in `docs/grammar.bnf` + `tests/corpus/reject/import_nested.chz`. **(3) Rebinding a from-imported global was silently accepted** — `import COUNT from lib.st` + `COUNT = 99` wrote a local alias, lost forever, while the qualified `st.COUNT = 5` correctly errored. The SNAPSHOT semantics are correct (verified CPython-identical) and unchanged; only the WRITE path is now rejected (`cannot assign to 'COUNT' imported from module 'lib.st' …`), gated on the name resolving at module scope so a fn-local `:=` shadow stays assignable — and RE-DECLARING the name at module scope (`COUNT := COUNT + 1`) hands it back to this module (`declare` drops the import entry, like it drops a loop-var mark), so the module's own binding stays assignable — and only for VALUE binds — mutating THROUGH a from-imported container (`LST.push(7)`) is a different arm and keeps working. **(4) A module-qualified generic fn whose type param appears only in the return type was unreachable** — `geo.empty_list[int]()` said *"method 'empty_list' takes no type argument(s) (it declares no own type parameters)"* (it plainly does) and the escape hatch `xs: List[int] = geo.empty_list()` leaked an unsolved `List[T]`. `method_has_own_type_params` gained a `Ty::Module` arm, and the module-fn arm of `infer_method_call` now threads BOTH the turbofish and the expected-type hint into `infer_generic_call` (fixing only the first would silently IGNORE the turbofish). Multi-arg qualified TYPE turbofish stays a documented clean parse error. Tests RED-first: parser (nested import) + conformance reject corpus + checker `files_ok`/`files_reject` over a REAL module graph (reserved bind/alias + escape hatch, rebind vs mutate-through vs local shadow, qualified generic turbofish + hint + arity boundary) + two-engine parity runs (`import std.string` with `str(5)` in the same module; `geo.empty_list[int]()`). Docs: `docs/syntax.md` §12 (import is top-level-only, reserved module-bind rule, `from M import X` snapshot semantics, qualified generic-fn turbofish), `docs/grammar.bnf`, `docs/stdlib.md` / `docs/spec.md` / `docs/ffi-and-packaging.md` / `gaps.md` (the `std.str` → `std.string` rename; older dated changelog entries below keep the historical `std.str`/`std/str.chz` spelling).
-- ✅ **A range in a value position is now a check-time TYPE ERROR (was: check-OK, then the program could not run at all)** (2026-07-13, `auto-task/range-not-a-value`) — `x := 0..3` type-checked `ok: no type errors` and then died on both engines with `runtime error: a range can only be used as the iterable of a \`for\` loop`, printing **nothing at all** (not even a preceding `print("before")`): a COMPILE error surfaced at run time, so `chezzi check` and the LSP were blind to a whole class of programs that cannot execute. Root cause: `infer_kind`'s `ExprKind::Range` arm (`src/checker/pattern.rs`) laundered `a..b` as **`List[int]`**, so every list operation on it type-checked — the checker's own `y: str = 0..3` diagnostic (*"cannot assign **List[int]** to variable of type str"*) named the bug. The compiler, which is type-blind, then rejected the range everywhere except the 3 positions it can actually lower. **Fix (checker-only, ONE arm → zero compiler/VM/codegen change, so parity- and perf-neutral):** every value position (assign RHS, call arg, collection element, binary operand, method receiver, plain index object, return, generic `Iterator[T]` bound arg, interpolation, pipe) funnels through `infer` → `infer_kind`, so that single arm now reports `a range is only valid as the iterable of a \`for\` loop or comprehension, as a slice receiver, or as a \`match\` pattern — use \`range(a, b)\` to materialize a \`List[int]\`` and yields `Ty::Unknown` (not `List[int]`) to suppress a misleading cascade. **No `Ty::Range` variant:** a range has no runtime value in any engine, so a new `Ty` would ripple through unify/compatible/assignable/Display/sendable/hover and buy nothing — the honest model is "a syntactic form legal in exactly 3 expression positions", which is already what the code assumed. The sanctioned positions never reach `infer_kind` and so keep working untouched: `for_bindings` (`src/checker/sig.rs`) pattern-matches `ExprKind::Range` **syntactically** for BOTH iterable forms (so `for i in 0..10`, `0..xs.len()`, expression bounds, and comprehensions are free, and **laziness is preserved** — `for i in 0..100000000000` still never materializes), and `case 1..5:` is a `Pattern::Range`, a different AST node entirely. Two deliberate bypasses were needed: `infer_slice` special-cases a range receiver → `List[int]` (mirroring the compiler's materialize-then-slice, keeping `(0..10)[::2]` / `(0..5)[::-1]` alive), and `infer_comprehension`'s Channel-drain guard now skips a `Range` clause iter (it re-infers `clause.iter` a second time AFTER `for_bindings`, which would otherwise have rejected `[i for i in 0..3]` — the likeliest over-rejection). Also DELETES the piecemeal prior-art guard in `infer_binary`'s `In` arm (a range RHS is now rejected by the generic arm, so keeping it would DOUBLE-report — pinned by an exactly-one-error assertion). **`List(0..3)` / `Set(0..3)` are deliberately REJECTED, not made to work:** the materialization escape hatch ALREADY EXISTS and is documented — the `range(start, end[, step])` builtin returns a real `List[int]`, so `Set(range(0, 3))` works today; range-aware ctors would be pure surface duplication (a checker whitelist + a compiler special-case + grammar/docs churn) for zero new capability. The hint therefore points at something TRUE TODAY with **zero surface addition**. **INVARIANT (the acceptance bar):** the checker's accepted `Range` set is now exactly {for-iterable, comprehension-clause iterable, slice receiver} — the only three sites that reach a `Range` without `infer_kind` — and that is exactly the compiler's lowered set, so **no check-clean program can reach the compiler's error**. Note `(0..10)[2]` (a plain INDEX, not a slice) was a third instance of the bug nobody had listed; the single arm rejects it for free, and no Index bypass was added (one would make the compiler error reachable again). The compiler's `CompileError` (`src/compiler/mod.rs`) STAYS as a defensive backstop — unreachable from a check-clean program, but the compiler is also driven WITHOUT the checker (synthesized ASTs from difftest/panicfuzz; the `run_capture` / `run_capture_parallel` VM test helpers skip type-checking) — and now carries a comment saying exactly that. **Blast radius: ONE in-repo `.chz`** — `tests/corpus/accept/ranges.chz` (`r := 0..10`, a parse-only corpus that never runs the checker, but it encoded a now-illegal program) rewritten to `for i in 0..10:`, still covering `# rule: rangeExpr`; ZERO changes in `std/*.chz`, `examples/*.chz`, `benches/chz/*.chz`, `judge/` (a corpus grep confirms the only non-`for` range uses are the slices in `examples/range_step.chz` and the comprehensions in `examples/comprehensions*.chz`, all still legal), and `docs/grammar.bnf` needs no edit — `x := 0..3` still PARSES, the rejection is a TYPE error. +2 checker tests RED-first via `entry_rejects`/`entry_ok` (the real `build_graph` + `check_graph` path): 14 escape forms (incl. the repro, `List`/`Set` ctors, `.len()`, `.push()`, `+ [7]`, `== [0,1,2]` — which pins that the permissive `Eq | NotEq` arm still INFERS its operands, the one place the invariant could have leaked — a list/map literal element, a `List[int]` param, an `[S: Iterator[T], T]` bound, plain index, `in`, and the no-longer-laundered `y: str = 0..3`) and 15 must-keep-working boundary positions; + 2 two-engine RUN guards in `src/vm/parity_tests.rs` pinning the COMPILER half (all sanctioned lowerings still execute byte-identically, and `range(0, 3)` → `[0, 1, 2]`, i.e. the hint is true) and the backstop. Docs: `docs/syntax.md` (the range section — a range is not a value + the `range(a, b)` escape hatch; the slice section), `docs/spec.md` (M15 row — the `..`-stays-a-for/match-range design is now actually ENFORCED).
-- ✅ **`os.exit(<negative>)` no longer reports SUCCESS to the shell/CI** (2026-07-13, `auto-task/three-runtime-fixes`) — `os.exit(-1)` — the canonical failure idiom — exited the process with status **0** on both engines: `VmHost::request_exit` (`src/vm/mod.rs`) did `code.clamp(0, 255)`, clamping every negative code UP to 0, so a deliberate failure exit was invisible to a shell/CI `$?` check (the real severity: a silent green build). **Fix (one line):** the status is now the POSIX **low 8 bits** of the code (`code & 0xff`) — exactly what `exit(3)` / bash / Python / Go all do: `-1` → **255**, `-2` → 254, `0` → 0, `1` → 1, `255` → 255, `-256` → 0. It is a *mask*, not a clamp, so this deliberately also changes **`os.exit(300)` → 44** (was 255; POSIX `exit(300)` is 44), making the rule total and one-sentence documentable, and idempotent with the CLI's existing `ExitCode::from(code as u8)`. No in-repo `.chz` is affected (`examples/exit.chz` = 2, `examples/parallel_cancel.chz` = 7 — all small positives, bit-identical). +2 tests RED-first in a NEW `tests/exit_status.rs` asserting the REAL PROCESS EXIT STATUS via `Command` on the built binary across `{run, run --serial}` (an in-VM assertion on `pending_exit` could not have caught this bug at all) + an in-VM `vm::parity_tests::exit_negative_code_masks_to_255` pinning the code on both engines through the cross-thread re-store. Docs: `docs/stdlib.md` (the `exit` row), `docs/future.md`.
-- ✅ **A re-entrant `.next()` on a currently-RUNNING generator faults instead of silently reporting exhaustion** (2026-07-13, `auto-task/three-runtime-fixes`) — resuming a generator from inside its own body (`holder[0].next()` where `holder[0]` is the generator now executing) answered **`None`** on both engines: a live, non-exhausted generator reporting itself EXHAUSTED — a silently-wrong `Option`, not a fault. Root cause: `generator_next` (`src/vm/exec.rs`) parks `GenState::Done` in the heap object as the placeholder while the generator runs (`mem::replace`), so the re-entrant call hit the `Done` short-circuit and got `None`. **Fix (one guard, 3 lines):** at the TOP of `generator_next` — before the heap borrow and before the state take — `if self.active_generators.contains(&h) { return Err(self.err("generator already running", span)) }`, reusing the resume path's OWN root list (pushed/popped around the run) rather than adding a `GenState::Running` variant that would need explicit write-back on every early-return path. Because the pop happens on **every** unwind path, the guard is **self-clearing** — a generator can never be poisoned as permanently "running" (pinned by a test per path: normal exhaustion, an early consumer `break` then a legitimate resume, a body that faults and is caught by `recover:` then a fresh generator still runs, and a generator driving a *different* generator — no over-rejection). The fault is an ordinary `RuntimeError`: catchable by `recover:`, never a host panic, byte-identical on both engines (Python: `ValueError: generator already executing`). A generator whose body faulted stays **closed**, like Python's (later `.next()` → `None`) — unchanged, now documented. +3 two-engine tests RED-first (the repro printed `1 / reentrant: None / 2` before the fix). Docs: `docs/stdlib.md` ("Iterator cursors & generators" re-entrancy rule), `docs/spec.md` (beside the existing sendability caveat).
-- ✅ **`iter.reduce` on an empty list gives a named fault instead of leaking the std module's internal index error** (2026-07-13, `auto-task/three-runtime-fixes`) — `iter.reduce([], f)` faulted with `runtime error (line 72, col 12): index 0 out of bounds (len 0)` — a std-module implementation detail (a line number *inside* `std/iter.chz`, at an index the user never wrote) surfacing as the user-facing diagnostic. **Fix (`std/iter.chz`, pure Chezzi — it must stay Chezzi for `--parallel` callback parking, D5):** a leading `if xs.len() == 0: panic("reduce: empty list with no initial value")` guard (the existing std fault idiom — cf. `std/str.chz`'s `pad_left: fill must not be empty`), matching Python's `TypeError: reduce() of empty iterable with no initial value`. Still a recoverable fault, just an honest message. **Sibling audit of the same leaked-internal-error-on-empty class** (per the fix-at-the-root rule): `reduce` was the ONLY unguarded `[0]`-class index — `str.reverse` and `iter.shuffle` compute `len() - 1` but their `while` guards make `-1` a no-op on empty; `path.basename` gets a 1-element list from `split`; every `collections.chz` index (`min_heap` pop/peek, `deque` peek_front/back) is already `len`-guarded. Nothing else to fix. +2 two-engine tests RED-first (named-message + `recover:`-catchable, with a non-empty `[1,2,3]`→`6` / single-element `[7]`→`7` boundary). Docs: `docs/stdlib.md` (`std.iter` `reduce` entry).
-- ✅ **Two check-OK → runtime-fault holes closed: a bound method is no longer readable as a value, and `index`/`set_index` must now be V-coherent** (2026-07-13, `auto-task/checker-method-value-index-coherence`) — both were checker-only accepts of programs the runtime cannot execute; both fixes are checker-only rejects (no compiler/VM change → parity- and perf-neutral). **(1) Bound-method value.** `g := s.get` on a `struct S` with `fn get(self) -> int` type-checked, then faulted on both engines with `no field 'get' on S(n=5)`. Root cause: `infer_field`'s `Ty::Struct` arm (`src/checker/pattern.rs`) fell back to the METHOD table after the data-field lookup missed and handed back a `Ty::Func` still carrying the **un-bound `self` slot typed `Ty::Unknown`** — nothing lowers that (the compiler emits a plain field load), and the `?` self slot **laundered types**: `g("anything")`, `apply(s.get, s)` against a `fn(S) -> int` param, `xs := [s.get, s.get]`, and `g := self.get` inside a method body ALL checked OK and then faulted. The four sibling receiver kinds (enum / newtype / protocol existential / the assign path) already rejected correctly, which pinned the seam exactly. Methods are **not first-class values** (nowhere sanctioned in the docs — an accidental accept, not a feature): the fallback is deleted, so control falls through to the sibling error, with a method-aware hint — `type S has no field 'get' ('get' is a method — methods are not values: call it (\`x.get(…)\`) or wrap it (\`fn(): x.get()\`))`. The misleading follow-on arity message (`'closure' expects 1 argument(s), got 0`) disappears for free: the expr is now `Ty::Unknown` and `infer_call`'s Unknown arm stays silent — exactly ONE diagnostic (asserted). Fields are searched BEFORE methods in the same arm, so the closest neighbour — a genuinely **fn-TYPED field** (`f: fn(int) -> int`, `s.f(3)` AND `g := s.f; g(3)`) — still works, as do method calls, chained calls, calls on a nested field, a field whose name collides with a method, and static/associated CALLS (a bare `S.make` VALUE is not legal today anyway — `unknown name 'S'`). **(2) `index`/`set_index` V-incoherence on a COMPOUND index-assign.** A struct with `index(self, int) -> str` but `set_index(self, int, val: int)` accepted `s[0] += 1`, then faulted with `cannot apply Add to str and int`. `x OP= v` is defined as exactly `x = x OP v` (`docs/syntax.md` §3) — and the compiler lowers it that way (`Dup2 → GetIndex → op → SetIndex`) — so a compound index-assign's LHS must be typed from **`index`'s RETURN**; the direct index-assign path took it from `set_index`'s `val` instead. Fix (`src/checker/sig.rs`, the one `other =>` arm of `check_assign`): a compound now types its LHS through the existing `index_kv` (the READ side) and then requires that value to fit `set_index`'s `val` (and the keys to agree) — the same `IndexSet[K, V]` coherence the bounded `[C: IndexSet[K, V]]` path already enforces — reporting exactly ONE error, `type S does not satisfy IndexSet (index returns str but set_index's val is int)`, with no `cannot apply +=` cascade. A **plain** `s[k] = v` is deliberately NOT gated: it never reads through `index`, so an asymmetric pair (a safe-read `index -> V?`, a widening writer) is sound and keeps type-checking and running exactly as before — `index_set_kv` still returns the `set_index`-derived write slot, so the write side loses no checking (an un-pinned generic receiver still rejects `b[0] = ["oops"]` against a `List[int]` val). Behaviour preserved: coherent user `Index`/`IndexSet` pairs (read / write / compound / negative index / all open+step slice bounds), `index`-only (read-only) and `set_index`-only structs, builtin targets (`m[k] += 1`, `xs[i] += 1`, `obj.f += 1`), and the once-only evaluation of a side-effecting index expr (Python parity). **Blast radius: ZERO in-repo `.chz`** — no example/std/bench/test reads a bound method or compound-assigns an incoherent pair (`examples/slicing.chz`'s `Ring` and the parity `BUF_PROG` are coherent). +11 checker tests RED-first via `check_entry`/`entry_ok`/`entry_rejects` (the real `build_graph` + `check_graph` path) incl. every launder variant, the exactly-one-error assertions and the no-over-rejection guards, + 4 two-engine RUN guards in `src/vm/parity_tests.rs` (coherent `str`-valued IndexSet, asymmetric plain write, index-expr-evaluated-exactly-once, fn-typed-field-as-value). Docs: `docs/syntax.md` (§3 compound-assign ≡ `x = x OP v` + the read-side coherence rule + once-only index eval; §7 methods are not first-class values — call or wrap; §7b `IndexSet` compound-read coherence).
-- ✅ **`pad_left` with an empty `fill` no longer LIVELOCKS; a multi-char `fill` no longer overshoots `width`** (2026-07-13, `auto-task/pad-left-empty-fill`) — `"a".pad_left(5, "")` type-checked `ok` and then SPUN FOREVER on both engines with zero output and no diagnostic (stdout is buffered to process exit, so the user saw literally nothing). Root cause: two independent copies of the same unbounded prepend loop — the native method (`src/vm/call.rs`) and the pure-Chezzi free fn (`std/str.chz`) — grew the string until it reached `width`, which an empty `fill` never does. Both now raise the recoverable fault `pad_left: fill must not be empty` **eagerly**, before the `width <= len` early-out, so the diagnostic can't depend on whether padding was even needed (`"".pad_left(0, "")` faults too — deliberate, pinned by a test). Same commit fixes the sibling overshoot bug: a multi-char `fill` is now a repeating cycle **truncated to fit**, so the result is exactly `width` codepoints (`"a".pad_left(4, "xy")` → `"xyxa"`, was the 5-char `"xyxya"`). The never-shrinks early-out (`width <= len` → `s` unchanged) is taken BEFORE the `need = width - len` subtraction in BOTH copies, so a very negative `width` — down to `i64::MIN`, reachable from safe source — can neither overflow i64 (debug host panic / release wrap into a colossal `take`) nor raise Chezzi's checked-`-` `integer overflow in Sub` in the free fn, counting is by codepoint throughout (`chars()`, never byte length or byte slicing, so a non-ASCII fill counts as 1 and no mid-char slice can panic), and the native pad allocation routes through `repeat`'s existing capacity guard (`checked_mul` + `isize::MAX` + `try_reserve_exact`) → a recoverable `string pad capacity overflow` instead of an OOM/abort for a huge `width`. The O(n²) `format!`-in-a-loop is gone (one allocation). **Documented divergence:** that capacity guard has no counterpart in the `.chz` free fn, which cannot probe the allocator — the second sanctioned exception to the byte-identical-alias contract, written down at `docs/stdlib.md`. +6 tests RED-first (the empty-fill test HUNG for the full 900s timeout before the fix, it did not merely fail): 4 native in `src/vm/tests.rs` (empty-fill fault incl. a `recover:`-catch, exactly-`width` multi-char, codepoints-not-bytes, huge-width capacity fault) + 2 free-fn in `src/vm/parity_tests.rs` via the module-graph runner, all on both engines; `examples/str_methods.chz` gained the multi-char/non-ASCII/negative-width/no-shrink golden lines. In-repo callers (`std/datetime.chz`, `examples/std_demo.chz` — all single-char fill, `width >= len`) are bit-identical. Docs: `docs/stdlib.md` (`pad_left` row + the alias carve-out). `str.pad_right`/`center` remain unimplemented (`docs/gaps.md`) — untouched.
-- ✅ **`return` inside a `defer:` / `spawn:` block is now a check-time error (was: type-checked, then silently discarded at runtime)** (2026-07-13, `auto-task/reject-return-defer-spawn`) — `fn f() -> int!: defer: return Err("hijack")` / `spawn: return 7` checked OK (the return was even validated against the enclosing fn's return type) and then the value was dropped at runtime on both engines — the worst of both worlds. Chezzi has no named return values: a `defer:` block is its own closure and a spawned task outlives the frame, so such a `return` can never mean anything. **Fix (checker-only, zero runtime/codegen change → parity- and perf-neutral):** reuse the escaping-flow guard `recover:` already uses — renamed `recover_escaping_flow` → `escaping_flow` (`src/checker/mod.rs`) and called it at the `Defer(DeferTarget::Block)` + `SpawnTarget::Block` arms (`src/checker/sig.rs`) with `in_loop = true` (both arms already zero `loop_depth`, so `break`/`continue` keep their own "break outside loop" message — no double diagnostic). Messages: `'return' is not allowed inside a defer block` / `… spawn block` — one diagnostic, naming the block the `return` is LEXICALLY in: the walker does NOT descend into a nested `defer:`/`spawn:` block (each is guarded at its own site), so `defer: > parallel: > spawn: > return` reports "spawn block" once (it used to double-report, and `recover:` + `spawn: return` regressed the same way). The walker DOES descend into `wait:` arms + their `else` (a `return` there was the same silently-discarded bug; this tightens `recover:` identically). Still legal (boundary-tested): a `return` inside a nested `fn` DECLARED in either block, `return` in a `parallel:` body, `?`-in-`defer:` (still short-circuits + discards), and every defer/spawn/parallel nesting combination. (A closure body is a single expression, so it can't hold a `return` at all.) +14 checker tests (RED-first via `entry_rejects` / error-count assertions, incl. `wait:`-arm + `wait:`-`else` + nested-block-noun) + a two-engine `vm::defer_spawn_nesting_matrix_parity` regression net. Docs: `docs/syntax.md` (defer block form + spawn nursery; also fixed a stale `# prints "x = 1" — snapshotted here` comment → by-reference, reads `2` at exit).
-- ✅ **L3-1: a pure-panic inline body (`fn boom(): panic("x")`) now infers `-> nil`** (2026-07-12, `auto-task/inline-panic-infers-nil`) — a function whose SOLE body is a diverging call was spuriously rejected with "cannot infer return type of '<name>'; add a -> annotation", even though a void body (`fn v(): print(...)`) infers `-> nil` and an annotated `fn b() -> int: panic(...)` type-checks (bottom fits any return). Root cause: `panic(...)` is bottom-typed `Ty::Unknown` (`expr.rs`), so the inline-expr body path (`src/checker/sig.rs:390`) set `inline_ret = Some(Unknown)`, which the finalizer rejected as residual un-inferable. Fix (checker-only, ~one branch): bind `let t = self.infer(e)` and substitute `Ty::Nil` iff `t.is_unknown() && Self::expr_is_diverging_call(e)` (the existing narrow bare-`panic`/`exit`/`os.exit` predicate) — so the caller can't use a value anyway, `nil` is the natural default. `self.infer(e)` still runs so panic's arg checks fire in pass 2. Genuine un-inferable cases (Err-only/None-only/`[]`/pure recursion — all block-body `return` forms) still rejected untouched. +2 tests RED-first: `checker::inline_diverging_body_infers_nil` (infers nil; `panic(123)` still rejected) + two-engine `vm::inline_panic_body_faults_both_engines` (caller prints "start", faults "x", exit 1; `recover:`→`Err("x")`). CLI-verified on `run` + `run --serial`. Docs: `docs/syntax.md`.
-- ✅ **Deadlock fault message is now engine-agnostic + manifest entrypoint rejects `/` path separators** (2026-07-12, `auto-task/low-fixes-deadlock-entrypoint`) — two small independent fixes. (1) A blocking `recv`/`for v in ch:`/`wait:` with no producer and no runnable task deadlocks on BOTH engines, but the message hardcoded "sequential executor cannot block waiting for a producer" — misleading under the default M:N engine (one code path serves both). Reworded the two `self.err(...)` sites (`src/vm/netio.rs:934`, `:1109`) to engine-agnostic "deadlock — nothing is queued and no task can ever send" (recv keeps its C5 mid-flight hint). Detection/exit/`recover:` catchability unchanged (text-independent). (2) `entrypoint_file` (`src/main.rs`) split the module path only on `.`, so a manifest `entrypoint = "src/main:main"` (slash instead of dotted) resolved by accident via `PathBuf::push`; added a guard rejecting embedded `/`/`\\` with "the module path must use '.' separators, not '/'". Valid dotted forms unaffected. +3 tests RED-first (two-engine `deadlock_fault_message_is_engine_agnostic` + `deadlock_fault_is_recoverable_new_message` via `parity_entry_fault`; extended `entrypoint_file_validates_dotted_path`). Docs: `docs/cross-nursery-flat-scheduler.md`, `docs/concurrency.md` (paraphrased fault quotes updated). Text-only + guard-only; no engine-behavior change.
-- ✅ **`i64::MIN` decimal literal `-9223372036854775808` now lexes/parses (was "number too large")** (2026-07-11, `auto-task/three-small-fixes`) — the boundary value i64::MIN was unwritable as a literal: the lexer read the positive magnitude `9223372036854775808` (== i64::MAX+1 == 2^63, which overflows i64) BEFORE the parser applied the unary minus, so it lex-errored "number too large to fit in target type"; users had to write `-9223372036854775807 - 1`. **Fix (lexer + parser, no checker/VM change):** the lexer's decimal-int branch (`src/lexer/mod.rs`), on an i64 parse overflow, now emits a distinct nullary `Token::IntMinMagnitude` iff the magnitude is EXACTLY 2^63 (via a `u64` reparse), else propagates the original error — so `9223372036854775809`+ still lex-errors. `parse_unary` (`src/parser/mod.rs`) folds `Neg` + `IntMinMagnitude` straight into `ExprKind::Int(i64::MIN)` (NOT `Unary(Neg,…)` — runtime-negating the magnitude would overflow); `expect_pattern_int` mirrors the fold for match/range patterns (`-9223372036854775808:` works). A BARE (un-negated) `9223372036854775808` still errors "number too large" (via new arms in `parse_primary`/`expect_int`), so the value can never leak as a positive int. `IntMinMagnitude` maps to the `INT` grammar terminal in `conformance.rs::symbol()` (no grammar.bnf drift — `-INT` already covered). Radix forms (`0x8000000000000000` etc.) are a SEPARATE lexer branch and still error at i64::MIN — deliberately out of this minimal scope (known v1 limit). +3 tests RED-first (`lexer::lexes_i64_min_magnitude`, `parser::i64_min_literal_folds_to_int_min`, two-engine `vm::parity_tests::i64_min_literal_runs_parity` covering print + arithmetic + `match`), CLI-verified `-9223372036854775808` prints correctly on `run` + `run --serial`, bare 2^63 and `-9223372036854775809` still error. Docs: `docs/syntax.md` (literal examples).
-- ✅ **`json.parse` rejects non-finite/overflowing numbers at decode (Go `encoding/json` policy)** (2026-07-11, `auto-task/three-small-fixes`) — `json.parse("1e400")` returned `Ok(Json.Num(+inf))`, manufacturing a value its OWN `json.stringify` then FAULTED on ("cannot serialize non-finite float to JSON") — parse produced something that could not round-trip, violating the documented invariant that parse "never emits [a value] that Chezzi's own `parse` would reject." (`decode[int]("1e400")` already returned a clean `Err`; only the raw `Json` parse layer was the outlier.) **Fix (one guard, pure Chezzi, `std/json.chz` `parse_number`):** after `f := float(raw)`, `if f - f != 0.0: return Err("invalid number: value out of range")` (the same finite-check idiom `num_str` uses — `f - f` is `0.0` for finite `f`, `NaN` for `±inf`/`NaN`), matching Go's reject-at-decode. Underflow to `0.0` (`1e-400`) is finite and stays `Ok`. +1 two-engine parity test (`json_parse_rejects_non_finite_parity`: `1e400`/`-1e400`/`[1e400]`→Err, `1.5`/`123`/`1e-400`→Ok); the existing `json_as_int_out_of_range_parity`'s `1e400` probe flips `NONE`→`PARSEERR` (updated same commit). CLI-verified on `run` + `run --serial`. Docs: `docs/stdlib.md` json section (parse-rejects-overflow, symmetric with the stringify fault).
-- ✅ **`str.split` empty-input invariant locked (regression guard)** (2026-07-11, `auto-task/three-small-fixes`) — investigated a reported `"".split(",") == []` bug; it does NOT exist. `"".split(",")` already correctly returns a one-element list holding `""` (length 1, `x[0] == ""`) via Rust's `str::split` at `src/vm/call.rs`, honoring `pieces == separators + 1` on both engines. The report misread the list's DEBUG RENDERING: a single empty string renders as `[]` because `""` prints as nothing (same as `",".split(",")` → `[, ]`). No production change; added a regression test (`str_empty_split_returns_single_empty_element_parity`) asserting length + element rather than rendering. Docs: `docs/stdlib.md` split entry now states the empty-input result explicitly.
-- ✅ **`Self` usable in inherent struct/enum/newtype method signatures + bodies (checker-only)** (2026-07-11, `auto-task/self-and-compound-overload`) — `Self` resolved inside a `protocol` method sig but was rejected (`unknown type 'Self'`) in a plain `struct`/`enum`/`newtype` inherent method — an arbitrary asymmetry (Rust allows `Self` in inherent impls, not just traits). Fix: a new checker field `current_self_ty: Option<Ty>` set (via `mem::replace`) at the method-sig hoist sites (struct/enum/newtype in `setup.rs`) and at `infer_fn_ret`/`check_fn_body` entry from their `self_ty` arg, plus ONE `resolve_type` arm (`"Self" if self.current_self_ty.is_some()`) placed AFTER the type-param arm — so a PROTOCOL method's `Self` (already in `type_params` as `Ty::Param("Self")`, `current_self_ty` left `None`) keeps its existential-param binding UNCHANGED, and `Self` outside any method stays `unknown type 'Self'`. Resolves to the CONCRETE enclosing `Ty::Struct/Enum/NewType(key, [own type params])`, so `-> Self` enforces the real type (returning a different type is still a type error) and a generic `Box[T]`'s `-> Self` carries `[Param(T)]` matching `return self`. Newtype included (deliberate consistency: it routes through the same `infer_fn_ret`/`check_fn_body` funnel). Checker-only — runtime already dispatches these methods; both engines byte-identical. +7 checker tests (RED-first, `entry_ok`/`entry_rejects` module-graph path) + golden `examples/self_method.chz` (struct/enum/newtype/generic, two-engine parity). Docs: `docs/syntax.md` (Self in inherent methods).
-- ✅ **Compound assignment honors struct/enum/newtype operator overloading (checker-only)** (2026-07-11, `auto-task/self-and-compound-overload`) — `x OP= v` is documented as exactly `x = x OP v`, but `check_assign_value` (`sig.rs`) whitelisted only str+str / non-widening numeric / three collection forms, so `a += V(10)` was rejected (`cannot apply += to V and V`) for a `struct V` with an `add` overload even though `a = a + V(10)` type-checked. Fix: the arith-compound arm now also computes `overload_ok = op_overload_result(target, val, proto).is_some_and(|res| assignable(target, &res))` — reusing the SAME `op_overload_result` the binary-operator checker (`infer_binary`) consults (`Add`/`Sub`/`Mul`/`Div`/`Mod` from the op) — and accepts when it holds. Because `op_overload_result` returns `Some` only for same-typed operands satisfying the operator protocol (or a same numeric-newtype auto-flow), a no-overload struct / `V += int` / `Box[int] += Box[str]` all stay rejected — no blanket compound-assign acceptance; existing str/numeric/collection forms unchanged. Runtime already lowers `a OP= b` through the same `Op::Add`/… opcodes as `a = a OP b`, so parity is automatic (verified by running both engines). +6 checker tests (RED-first) + golden `examples/compound_overload.chz` (struct `+=` == explicit form, numeric newtype `+=`, two-engine parity). Docs: `docs/syntax.md` (compound-assignment overload note).
-- ✅ **Named-factory-import member resolution fixed (checker-only) (gap #4)** (2026-07-08, `auto-task/named-factory-import-member-resolution`) — a NAMED import of a factory *function* (not its return type) — `import make from lib; w := make()` — left the returned struct/enum/newtype's FIELDS and METHODS unresolvable (`type Widget has no method 'bump'`), even though the checker correctly TYPED the value (it rejected `x: int = w`). Member lookup was wrongly gated on whether the type NAME was imported into the current module (the per-module `self.structs`/`enum_methods`/`newtype_defs` tables are populated only by a whole-module OR named-TYPE import; a named-fn import injects nothing), so only `Match`/`Response`/`ProcResult` (globally seeded) resolved import-free. Broke the documented equivalence — `import lib; lib.make().bump()` and `import make, Widget from lib` both WORKED while `import make from lib` alone FAILED for an identically-typed value — and documented stdlib APIs (`import manual from std.cancel; manual().cancelled()`; `import min_heap from std.collections; min_heap().push(3)`). **Fix:** a LAZY, MISS-ONLY fallback keyed on the value's OWN module-scoped identity — on a local-table miss, resolve the shape from the OWNING module's `ModuleSig` by scanning `module_sigs` for the def whose `type_key(mid,name)` == the value's key (helpers `struct_shape`/`owning_struct_def`, `enum_methods_of`/`enum_type_params_of`/`owning_enum_def`, `newtype_methods_of`/`newtype_type_params_of`/`owning_newtype_def` in `src/checker/setup.rs`; swapped 6 member sites in `expr.rs`/`pattern.rs`/`sig.rs`). Purely additive: fires only on a miss (never shadows the globally-seeded seeds, zero cost on the local-hit path), reads `module_sigs` only — does NOT touch `struct_names`/`bare_types`, so **naming/constructing an un-imported type still errors** (`import make from lib; w := Widget(1)` → `unknown type 'Widget'`) and a same-named LOCAL type is unaffected (distinct keys, local table hits first). Transitive cross-module works (a `helper` returning a `cancel.Token`, `main` importing only `helper` → `.cancelled()` resolves; `cancel` is a transitive graph dep present before `main` is checked). Checker-only — no VM/runtime change (whole-module import already ran at runtime on both engines). +9 checker tests (RED-first, `check_graph`/multi-file graph) + 3 two-engine runtime parity tests; CLI-verified all three import forms print `11` and the stdlib APIs run on `run` + `run --serial`. Docs: `docs/spec.md` (member-access-is-import-free clarification).
-- ✅ **`json.stringify` faults (Go-style) on non-finite floats instead of emitting invalid JSON (Finding C)** (2026-07-10, `auto-task/json-nonfinite-fault`) — `stringify` emitted a `Json.Num` holding `NaN`/`+inf`/`-inf` as the bare tokens `NaN`/`inf`/`-inf` (`num_str` in `std/json.chz` fell through to `str(f)`), which are (a) not valid JSON and (b) rejected by Chezzi's own `json.parse` — so `parse(stringify(x))` failed and the library silently produced malformed output with no fault. **Policy chosen: FAULT, Go `encoding/json`-style** (over JS `null`-emission / Python's non-standard tokens) — clean here because `stringify` returns bare `str` with no `Result` channel, and prelude `panic(msg)` raises a recoverable `RuntimeError` catchable under `recover:` with a byte-identical message on both engines. **Fix (pure Chezzi, one guard, `std/json.chz` `num_str`):** as the FIRST body line, `if f - f != 0.0: panic("cannot serialize non-finite float to JSON")` — `f - f` is `0.0` for every finite `f` and `NaN` (≠ 0.0) for `NaN`/`±inf`, so it fires iff non-finite, INDEPENDENTLY of the ±9e15 int-collapse range below (a large FINITE float like `1e300` is outside ±9e15 but must NOT fault — reusing the range check would be wrong). +2 two-engine parity tests (`json_stringify_non_finite_faults_parity` covering NaN/+inf/-inf via `recover:` + `e.message()`; `json_stringify_finite_roundtrip_unchanged_parity` regression guard proving `1e300`/whole-floats/negatives/strings/nested Arr+Obj stringify byte-identically and round-trip), RED-first. Auto-applies to all engines (pure-Chezzi, identical bytecode). CLI-verified the task repro faults identically on `run` + `run --serial`. Docs: `docs/stdlib.md` json section (non-finite policy, previously unspecified).
-- ✅ **Two JSON number→int boundary bugs fixed at the shared f64→i64 seam (both total, consistent)** (2026-07-08, `auto-task/json-int-boundary`) — JSON stores every number as an f64 and both int-conversion paths mishandled the float→i64 boundary in opposite wrong directions. **Bug 1 (`json.decode[int]`)** SILENTLY SATURATED an out-of-range JSON integer: `decode[int]("1000000000000000000000000000000")` (10^30) returned `Ok(9223372036854775807)` (i64::MAX), `-1e30` → `Ok(i64::MIN)`, u64-max → saturated — Rust's `f as i64` cast saturates and the `D::Int` arm (`src/vm/call.rs`) range-checked nothing (only `fract`/`finite`). Fix: a range guard before the cast — `if f < i64::MIN as f64 || f > 9_223_372_036_854_775_808.0 { Err(out of range) }` — STRICT `> 2^63` upper bound so i64::MAX (which f64-rounds to exactly 2^63) still round-trips via the saturating cast while everything strictly beyond is rejected. **Bug 2 (`json.as_int -> Option[int]`)** FAULTED (uncaught, aborts the program) on out-of-range: `as_int` on `9999999999999999999` called the builtin `int()` which RAISES out-of-range. Fix (pure Chezzi, `std/json.chz`): gate on the same i64 window and `return None` when unrepresentable/non-finite, with a `n == 2^63` saturate special-case → `Some(i64::MAX)` (since `int(2^63)` itself faults). Both sites now map 2^63→i64::MAX, reject `|x|>2^63`, accept i64::MIN — for the identical out-of-range input `decode[int]` returns `Err` and `as_int` returns `None`; neither saturates, neither faults. Return type stays `Option[int]`; fractional truncation (`as_int(2.5)`→`Some(2)`) unchanged. +3 two-engine parity tests (`json_as_int_out_of_range_parity`, `json_decode_int_out_of_range_parity`, `json_int_boundary_consistency_parity`), RED-first, incl. the i64::MAX/MIN round-trip fences. Residual (inherent): a value exactly `2^63` (`"9223372036854775808"`) maps to i64::MAX at both sites — f64 cannot distinguish it from i64::MAX — consistent, not a saturation of the reported `|x|>2^63` class. Docs: `docs/stdlib.md` json section.
+- ✅ **A module bind that shadows a same-named USER type now NAMES the collision** (2026-07-13) — wave-5 audited residual 4, **downgraded from a soundness gap to a message fix**. `import lib.Point` + `struct Point` puts the module in the VALUE namespace, where it beats the ctor in expression position — but unlike the reserved-name case (which *silently destroyed* the builtin, hence the `is_reserved_module_bind` gate), a shadowed USER ctor is a **hard type error at the call**, so no program can run wrong, and `import lib.Point as pt` is the cure — i.e. ordinary Python-style shadowing, plus a diagnostic Python does not give. The only real defect was that the diagnostic was `module Point is not callable`, which never said where the ctor went. The not-callable arm (`src/checker/expr.rs`) gained a `Ty::Module` case gated on the bare-key type tables (`self.structs`/`self.enums`, so it is module-prefix-key correct): `module bind 'Point' shadows the same-named type 'Point' — alias the import: \`import ... as point\``. Checker-only, no compiler/VM change → parity- and perf-neutral. +1 test RED-first (`module_bind_shadowing_user_type_names_the_collision`): struct ctor + enum ctor collide, the alias escape hatch reaches BOTH the module and the ctor, and a module bind with no same-named type keeps the generic `is not callable` error (no over-rejection). A real **module namespace** (module names legal only in field position) remains the principled fix and is NOT planned — it is a resolver change that buys only the loss of an alias keystroke. Docs: `docs/contributing/gaps.md` (residual 4 downgraded).
+- ✅ **Module/import seam: 4 fixes — `std.str` renamed to `std.string`, a reserved module bind is rejected, a nested `import` is a parse error, a from-imported global can't be rebound, and a qualified generic fn's turbofish/hint reach it** (2026-07-13, `auto-task/module-import-seam`) — front-end only (parser + checker + one std file rename); compiler/VM untouched, so both engines stay consistent by construction. **(1) A module bind silently shadowed a builtin ctor.** `import std.str` + `print(str(5))` → `type error: module str is not callable` — importing the documented std module DESTROYED the global `str()` ctor (the whole-module bind puts the last path segment into the VALUE namespace, where it beats the reserved builtin in expression position). Fixed in two parts: **(A)** the std string module is RENAMED `std.str` → `std.string` (`std/string.chz`; `str` was the ONLY std module name colliding with a reserved name — the scalar TYPE `str` and the `str()` ctor are UNCHANGED; matches Python/C++); **(B)** a module bind — aliased OR the un-aliased last path segment — whose name is reserved is now REJECTED (`module name 'int' is reserved (builtin) — alias it: import lib.int as ints` / `import alias 'Ok' is reserved (builtin)`). The gate is `is_reserved_module_bind` = the existing `is_reserved_alias_target` (reserved callables + reserved type names) + `nil` (carved out of the ALIAS gate because an alias binds a VALUE and a value still works as a value — but a MODULE is not a value, so `import lib.nil` would silently retype the `nil` literal) + the extracted `is_builtin_variant` (`Ok`/`Err`/`Some`/`None`, which `is_reserved_type` deliberately excludes so decl-site shadowing keeps working) — 34 names, no new list. Escape hatch: `import lib.int as ints`. The gate is ROOT-SWEPT to every bind that lands in the VALUE namespace, so the `from` form is covered too — a reserved ALIAS (`import x as Ok from M`) *and* a reserved bare MEMBER (`import str from lib.sh`, where a module global/fn named `str` destroyed the `str()` ctor exactly like `import std.str` did) are both rejected (`imported name 'str' is reserved (builtin) — alias it: …`); a reserved TYPE member binds no value and is the LICENSING import of the builtin itself (`import Shared from std.concurrency`, `import ptr from std.ffi`), so it stays legal un-aliased. RESIDUAL (out of scope): a module bind colliding with a USER struct/enum ctor of the same name still wins in expression position. **(2) A nested `import` was a LYING ACCEPT** — an `import` in a fn body/block parsed, checked clean and was a complete NO-OP (even for a module that does not exist): the resolver only scans module-level stmts. It is now a PARSE error (`import must be a top-level declaration`), the third instance of the existing `extern`/`native` depth>1 gate; `<importStmt>` moved from `<simpleStmt>` to `<topLevelStmt>` in `docs/reference/grammar.bnf` + `tests/corpus/reject/import_nested.chz`. **(3) Rebinding a from-imported global was silently accepted** — `import COUNT from lib.st` + `COUNT = 99` wrote a local alias, lost forever, while the qualified `st.COUNT = 5` correctly errored. The SNAPSHOT semantics are correct (verified CPython-identical) and unchanged; only the WRITE path is now rejected (`cannot assign to 'COUNT' imported from module 'lib.st' …`), gated on the name resolving at module scope so a fn-local `:=` shadow stays assignable — and RE-DECLARING the name at module scope (`COUNT := COUNT + 1`) hands it back to this module (`declare` drops the import entry, like it drops a loop-var mark), so the module's own binding stays assignable — and only for VALUE binds — mutating THROUGH a from-imported container (`LST.push(7)`) is a different arm and keeps working. **(4) A module-qualified generic fn whose type param appears only in the return type was unreachable** — `geo.empty_list[int]()` said *"method 'empty_list' takes no type argument(s) (it declares no own type parameters)"* (it plainly does) and the escape hatch `xs: List[int] = geo.empty_list()` leaked an unsolved `List[T]`. `method_has_own_type_params` gained a `Ty::Module` arm, and the module-fn arm of `infer_method_call` now threads BOTH the turbofish and the expected-type hint into `infer_generic_call` (fixing only the first would silently IGNORE the turbofish). Multi-arg qualified TYPE turbofish stays a documented clean parse error. Tests RED-first: parser (nested import) + conformance reject corpus + checker `files_ok`/`files_reject` over a REAL module graph (reserved bind/alias + escape hatch, rebind vs mutate-through vs local shadow, qualified generic turbofish + hint + arity boundary) + two-engine parity runs (`import std.string` with `str(5)` in the same module; `geo.empty_list[int]()`). Docs: `docs/reference/syntax.md` §12 (import is top-level-only, reserved module-bind rule, `from M import X` snapshot semantics, qualified generic-fn turbofish), `docs/reference/grammar.bnf`, `docs/reference/stdlib.md` / `docs/reference/spec.md` / `docs/design/ffi-and-packaging.md` / `gaps.md` (the `std.str` → `std.string` rename; older dated changelog entries below keep the historical `std.str`/`std/str.chz` spelling).
+- ✅ **A range in a value position is now a check-time TYPE ERROR (was: check-OK, then the program could not run at all)** (2026-07-13, `auto-task/range-not-a-value`) — `x := 0..3` type-checked `ok: no type errors` and then died on both engines with `runtime error: a range can only be used as the iterable of a \`for\` loop`, printing **nothing at all** (not even a preceding `print("before")`): a COMPILE error surfaced at run time, so `chezzi check` and the LSP were blind to a whole class of programs that cannot execute. Root cause: `infer_kind`'s `ExprKind::Range` arm (`src/checker/pattern.rs`) laundered `a..b` as **`List[int]`**, so every list operation on it type-checked — the checker's own `y: str = 0..3` diagnostic (*"cannot assign **List[int]** to variable of type str"*) named the bug. The compiler, which is type-blind, then rejected the range everywhere except the 3 positions it can actually lower. **Fix (checker-only, ONE arm → zero compiler/VM/codegen change, so parity- and perf-neutral):** every value position (assign RHS, call arg, collection element, binary operand, method receiver, plain index object, return, generic `Iterator[T]` bound arg, interpolation, pipe) funnels through `infer` → `infer_kind`, so that single arm now reports `a range is only valid as the iterable of a \`for\` loop or comprehension, as a slice receiver, or as a \`match\` pattern — use \`range(a, b)\` to materialize a \`List[int]\`` and yields `Ty::Unknown` (not `List[int]`) to suppress a misleading cascade. **No `Ty::Range` variant:** a range has no runtime value in any engine, so a new `Ty` would ripple through unify/compatible/assignable/Display/sendable/hover and buy nothing — the honest model is "a syntactic form legal in exactly 3 expression positions", which is already what the code assumed. The sanctioned positions never reach `infer_kind` and so keep working untouched: `for_bindings` (`src/checker/sig.rs`) pattern-matches `ExprKind::Range` **syntactically** for BOTH iterable forms (so `for i in 0..10`, `0..xs.len()`, expression bounds, and comprehensions are free, and **laziness is preserved** — `for i in 0..100000000000` still never materializes), and `case 1..5:` is a `Pattern::Range`, a different AST node entirely. Two deliberate bypasses were needed: `infer_slice` special-cases a range receiver → `List[int]` (mirroring the compiler's materialize-then-slice, keeping `(0..10)[::2]` / `(0..5)[::-1]` alive), and `infer_comprehension`'s Channel-drain guard now skips a `Range` clause iter (it re-infers `clause.iter` a second time AFTER `for_bindings`, which would otherwise have rejected `[i for i in 0..3]` — the likeliest over-rejection). Also DELETES the piecemeal prior-art guard in `infer_binary`'s `In` arm (a range RHS is now rejected by the generic arm, so keeping it would DOUBLE-report — pinned by an exactly-one-error assertion). **`List(0..3)` / `Set(0..3)` are deliberately REJECTED, not made to work:** the materialization escape hatch ALREADY EXISTS and is documented — the `range(start, end[, step])` builtin returns a real `List[int]`, so `Set(range(0, 3))` works today; range-aware ctors would be pure surface duplication (a checker whitelist + a compiler special-case + grammar/docs churn) for zero new capability. The hint therefore points at something TRUE TODAY with **zero surface addition**. **INVARIANT (the acceptance bar):** the checker's accepted `Range` set is now exactly {for-iterable, comprehension-clause iterable, slice receiver} — the only three sites that reach a `Range` without `infer_kind` — and that is exactly the compiler's lowered set, so **no check-clean program can reach the compiler's error**. Note `(0..10)[2]` (a plain INDEX, not a slice) was a third instance of the bug nobody had listed; the single arm rejects it for free, and no Index bypass was added (one would make the compiler error reachable again). The compiler's `CompileError` (`src/compiler/mod.rs`) STAYS as a defensive backstop — unreachable from a check-clean program, but the compiler is also driven WITHOUT the checker (synthesized ASTs from difftest/panicfuzz; the `run_capture` / `run_capture_parallel` VM test helpers skip type-checking) — and now carries a comment saying exactly that. **Blast radius: ONE in-repo `.chz`** — `tests/corpus/accept/ranges.chz` (`r := 0..10`, a parse-only corpus that never runs the checker, but it encoded a now-illegal program) rewritten to `for i in 0..10:`, still covering `# rule: rangeExpr`; ZERO changes in `std/*.chz`, `examples/*.chz`, `benches/chz/*.chz`, `judge/` (a corpus grep confirms the only non-`for` range uses are the slices in `examples/range_step.chz` and the comprehensions in `examples/comprehensions*.chz`, all still legal), and `docs/reference/grammar.bnf` needs no edit — `x := 0..3` still PARSES, the rejection is a TYPE error. +2 checker tests RED-first via `entry_rejects`/`entry_ok` (the real `build_graph` + `check_graph` path): 14 escape forms (incl. the repro, `List`/`Set` ctors, `.len()`, `.push()`, `+ [7]`, `== [0,1,2]` — which pins that the permissive `Eq | NotEq` arm still INFERS its operands, the one place the invariant could have leaked — a list/map literal element, a `List[int]` param, an `[S: Iterator[T], T]` bound, plain index, `in`, and the no-longer-laundered `y: str = 0..3`) and 15 must-keep-working boundary positions; + 2 two-engine RUN guards in `src/vm/parity_tests.rs` pinning the COMPILER half (all sanctioned lowerings still execute byte-identically, and `range(0, 3)` → `[0, 1, 2]`, i.e. the hint is true) and the backstop. Docs: `docs/reference/syntax.md` (the range section — a range is not a value + the `range(a, b)` escape hatch; the slice section), `docs/reference/spec.md` (M15 row — the `..`-stays-a-for/match-range design is now actually ENFORCED).
+- ✅ **`os.exit(<negative>)` no longer reports SUCCESS to the shell/CI** (2026-07-13, `auto-task/three-runtime-fixes`) — `os.exit(-1)` — the canonical failure idiom — exited the process with status **0** on both engines: `VmHost::request_exit` (`src/vm/mod.rs`) did `code.clamp(0, 255)`, clamping every negative code UP to 0, so a deliberate failure exit was invisible to a shell/CI `$?` check (the real severity: a silent green build). **Fix (one line):** the status is now the POSIX **low 8 bits** of the code (`code & 0xff`) — exactly what `exit(3)` / bash / Python / Go all do: `-1` → **255**, `-2` → 254, `0` → 0, `1` → 1, `255` → 255, `-256` → 0. It is a *mask*, not a clamp, so this deliberately also changes **`os.exit(300)` → 44** (was 255; POSIX `exit(300)` is 44), making the rule total and one-sentence documentable, and idempotent with the CLI's existing `ExitCode::from(code as u8)`. No in-repo `.chz` is affected (`examples/exit.chz` = 2, `examples/parallel_cancel.chz` = 7 — all small positives, bit-identical). +2 tests RED-first in a NEW `tests/exit_status.rs` asserting the REAL PROCESS EXIT STATUS via `Command` on the built binary across `{run, run --serial}` (an in-VM assertion on `pending_exit` could not have caught this bug at all) + an in-VM `vm::parity_tests::exit_negative_code_masks_to_255` pinning the code on both engines through the cross-thread re-store. Docs: `docs/reference/stdlib.md` (the `exit` row), `docs/design/roadmap.md`.
+- ✅ **A re-entrant `.next()` on a currently-RUNNING generator faults instead of silently reporting exhaustion** (2026-07-13, `auto-task/three-runtime-fixes`) — resuming a generator from inside its own body (`holder[0].next()` where `holder[0]` is the generator now executing) answered **`None`** on both engines: a live, non-exhausted generator reporting itself EXHAUSTED — a silently-wrong `Option`, not a fault. Root cause: `generator_next` (`src/vm/exec.rs`) parks `GenState::Done` in the heap object as the placeholder while the generator runs (`mem::replace`), so the re-entrant call hit the `Done` short-circuit and got `None`. **Fix (one guard, 3 lines):** at the TOP of `generator_next` — before the heap borrow and before the state take — `if self.active_generators.contains(&h) { return Err(self.err("generator already running", span)) }`, reusing the resume path's OWN root list (pushed/popped around the run) rather than adding a `GenState::Running` variant that would need explicit write-back on every early-return path. Because the pop happens on **every** unwind path, the guard is **self-clearing** — a generator can never be poisoned as permanently "running" (pinned by a test per path: normal exhaustion, an early consumer `break` then a legitimate resume, a body that faults and is caught by `recover:` then a fresh generator still runs, and a generator driving a *different* generator — no over-rejection). The fault is an ordinary `RuntimeError`: catchable by `recover:`, never a host panic, byte-identical on both engines (Python: `ValueError: generator already executing`). A generator whose body faulted stays **closed**, like Python's (later `.next()` → `None`) — unchanged, now documented. +3 two-engine tests RED-first (the repro printed `1 / reentrant: None / 2` before the fix). Docs: `docs/reference/stdlib.md` ("Iterator cursors & generators" re-entrancy rule), `docs/reference/spec.md` (beside the existing sendability caveat).
+- ✅ **`iter.reduce` on an empty list gives a named fault instead of leaking the std module's internal index error** (2026-07-13, `auto-task/three-runtime-fixes`) — `iter.reduce([], f)` faulted with `runtime error (line 72, col 12): index 0 out of bounds (len 0)` — a std-module implementation detail (a line number *inside* `std/iter.chz`, at an index the user never wrote) surfacing as the user-facing diagnostic. **Fix (`std/iter.chz`, pure Chezzi — it must stay Chezzi for `--parallel` callback parking, D5):** a leading `if xs.len() == 0: panic("reduce: empty list with no initial value")` guard (the existing std fault idiom — cf. `std/str.chz`'s `pad_left: fill must not be empty`), matching Python's `TypeError: reduce() of empty iterable with no initial value`. Still a recoverable fault, just an honest message. **Sibling audit of the same leaked-internal-error-on-empty class** (per the fix-at-the-root rule): `reduce` was the ONLY unguarded `[0]`-class index — `str.reverse` and `iter.shuffle` compute `len() - 1` but their `while` guards make `-1` a no-op on empty; `path.basename` gets a 1-element list from `split`; every `collections.chz` index (`min_heap` pop/peek, `deque` peek_front/back) is already `len`-guarded. Nothing else to fix. +2 two-engine tests RED-first (named-message + `recover:`-catchable, with a non-empty `[1,2,3]`→`6` / single-element `[7]`→`7` boundary). Docs: `docs/reference/stdlib.md` (`std.iter` `reduce` entry).
+- ✅ **Two check-OK → runtime-fault holes closed: a bound method is no longer readable as a value, and `index`/`set_index` must now be V-coherent** (2026-07-13, `auto-task/checker-method-value-index-coherence`) — both were checker-only accepts of programs the runtime cannot execute; both fixes are checker-only rejects (no compiler/VM change → parity- and perf-neutral). **(1) Bound-method value.** `g := s.get` on a `struct S` with `fn get(self) -> int` type-checked, then faulted on both engines with `no field 'get' on S(n=5)`. Root cause: `infer_field`'s `Ty::Struct` arm (`src/checker/pattern.rs`) fell back to the METHOD table after the data-field lookup missed and handed back a `Ty::Func` still carrying the **un-bound `self` slot typed `Ty::Unknown`** — nothing lowers that (the compiler emits a plain field load), and the `?` self slot **laundered types**: `g("anything")`, `apply(s.get, s)` against a `fn(S) -> int` param, `xs := [s.get, s.get]`, and `g := self.get` inside a method body ALL checked OK and then faulted. The four sibling receiver kinds (enum / newtype / protocol existential / the assign path) already rejected correctly, which pinned the seam exactly. Methods are **not first-class values** (nowhere sanctioned in the docs — an accidental accept, not a feature): the fallback is deleted, so control falls through to the sibling error, with a method-aware hint — `type S has no field 'get' ('get' is a method — methods are not values: call it (\`x.get(…)\`) or wrap it (\`fn(): x.get()\`))`. The misleading follow-on arity message (`'closure' expects 1 argument(s), got 0`) disappears for free: the expr is now `Ty::Unknown` and `infer_call`'s Unknown arm stays silent — exactly ONE diagnostic (asserted). Fields are searched BEFORE methods in the same arm, so the closest neighbour — a genuinely **fn-TYPED field** (`f: fn(int) -> int`, `s.f(3)` AND `g := s.f; g(3)`) — still works, as do method calls, chained calls, calls on a nested field, a field whose name collides with a method, and static/associated CALLS (a bare `S.make` VALUE is not legal today anyway — `unknown name 'S'`). **(2) `index`/`set_index` V-incoherence on a COMPOUND index-assign.** A struct with `index(self, int) -> str` but `set_index(self, int, val: int)` accepted `s[0] += 1`, then faulted with `cannot apply Add to str and int`. `x OP= v` is defined as exactly `x = x OP v` (`docs/reference/syntax.md` §3) — and the compiler lowers it that way (`Dup2 → GetIndex → op → SetIndex`) — so a compound index-assign's LHS must be typed from **`index`'s RETURN**; the direct index-assign path took it from `set_index`'s `val` instead. Fix (`src/checker/sig.rs`, the one `other =>` arm of `check_assign`): a compound now types its LHS through the existing `index_kv` (the READ side) and then requires that value to fit `set_index`'s `val` (and the keys to agree) — the same `IndexSet[K, V]` coherence the bounded `[C: IndexSet[K, V]]` path already enforces — reporting exactly ONE error, `type S does not satisfy IndexSet (index returns str but set_index's val is int)`, with no `cannot apply +=` cascade. A **plain** `s[k] = v` is deliberately NOT gated: it never reads through `index`, so an asymmetric pair (a safe-read `index -> V?`, a widening writer) is sound and keeps type-checking and running exactly as before — `index_set_kv` still returns the `set_index`-derived write slot, so the write side loses no checking (an un-pinned generic receiver still rejects `b[0] = ["oops"]` against a `List[int]` val). Behaviour preserved: coherent user `Index`/`IndexSet` pairs (read / write / compound / negative index / all open+step slice bounds), `index`-only (read-only) and `set_index`-only structs, builtin targets (`m[k] += 1`, `xs[i] += 1`, `obj.f += 1`), and the once-only evaluation of a side-effecting index expr (Python parity). **Blast radius: ZERO in-repo `.chz`** — no example/std/bench/test reads a bound method or compound-assigns an incoherent pair (`examples/slicing.chz`'s `Ring` and the parity `BUF_PROG` are coherent). +11 checker tests RED-first via `check_entry`/`entry_ok`/`entry_rejects` (the real `build_graph` + `check_graph` path) incl. every launder variant, the exactly-one-error assertions and the no-over-rejection guards, + 4 two-engine RUN guards in `src/vm/parity_tests.rs` (coherent `str`-valued IndexSet, asymmetric plain write, index-expr-evaluated-exactly-once, fn-typed-field-as-value). Docs: `docs/reference/syntax.md` (§3 compound-assign ≡ `x = x OP v` + the read-side coherence rule + once-only index eval; §7 methods are not first-class values — call or wrap; §7b `IndexSet` compound-read coherence).
+- ✅ **`pad_left` with an empty `fill` no longer LIVELOCKS; a multi-char `fill` no longer overshoots `width`** (2026-07-13, `auto-task/pad-left-empty-fill`) — `"a".pad_left(5, "")` type-checked `ok` and then SPUN FOREVER on both engines with zero output and no diagnostic (stdout is buffered to process exit, so the user saw literally nothing). Root cause: two independent copies of the same unbounded prepend loop — the native method (`src/vm/call.rs`) and the pure-Chezzi free fn (`std/str.chz`) — grew the string until it reached `width`, which an empty `fill` never does. Both now raise the recoverable fault `pad_left: fill must not be empty` **eagerly**, before the `width <= len` early-out, so the diagnostic can't depend on whether padding was even needed (`"".pad_left(0, "")` faults too — deliberate, pinned by a test). Same commit fixes the sibling overshoot bug: a multi-char `fill` is now a repeating cycle **truncated to fit**, so the result is exactly `width` codepoints (`"a".pad_left(4, "xy")` → `"xyxa"`, was the 5-char `"xyxya"`). The never-shrinks early-out (`width <= len` → `s` unchanged) is taken BEFORE the `need = width - len` subtraction in BOTH copies, so a very negative `width` — down to `i64::MIN`, reachable from safe source — can neither overflow i64 (debug host panic / release wrap into a colossal `take`) nor raise Chezzi's checked-`-` `integer overflow in Sub` in the free fn, counting is by codepoint throughout (`chars()`, never byte length or byte slicing, so a non-ASCII fill counts as 1 and no mid-char slice can panic), and the native pad allocation routes through `repeat`'s existing capacity guard (`checked_mul` + `isize::MAX` + `try_reserve_exact`) → a recoverable `string pad capacity overflow` instead of an OOM/abort for a huge `width`. The O(n²) `format!`-in-a-loop is gone (one allocation). **Documented divergence:** that capacity guard has no counterpart in the `.chz` free fn, which cannot probe the allocator — the second sanctioned exception to the byte-identical-alias contract, written down at `docs/reference/stdlib.md`. +6 tests RED-first (the empty-fill test HUNG for the full 900s timeout before the fix, it did not merely fail): 4 native in `src/vm/tests.rs` (empty-fill fault incl. a `recover:`-catch, exactly-`width` multi-char, codepoints-not-bytes, huge-width capacity fault) + 2 free-fn in `src/vm/parity_tests.rs` via the module-graph runner, all on both engines; `examples/str_methods.chz` gained the multi-char/non-ASCII/negative-width/no-shrink golden lines. In-repo callers (`std/datetime.chz`, `examples/std_demo.chz` — all single-char fill, `width >= len`) are bit-identical. Docs: `docs/reference/stdlib.md` (`pad_left` row + the alias carve-out). `str.pad_right`/`center` remain unimplemented (`docs/contributing/gaps.md`) — untouched.
+- ✅ **`return` inside a `defer:` / `spawn:` block is now a check-time error (was: type-checked, then silently discarded at runtime)** (2026-07-13, `auto-task/reject-return-defer-spawn`) — `fn f() -> int!: defer: return Err("hijack")` / `spawn: return 7` checked OK (the return was even validated against the enclosing fn's return type) and then the value was dropped at runtime on both engines — the worst of both worlds. Chezzi has no named return values: a `defer:` block is its own closure and a spawned task outlives the frame, so such a `return` can never mean anything. **Fix (checker-only, zero runtime/codegen change → parity- and perf-neutral):** reuse the escaping-flow guard `recover:` already uses — renamed `recover_escaping_flow` → `escaping_flow` (`src/checker/mod.rs`) and called it at the `Defer(DeferTarget::Block)` + `SpawnTarget::Block` arms (`src/checker/sig.rs`) with `in_loop = true` (both arms already zero `loop_depth`, so `break`/`continue` keep their own "break outside loop" message — no double diagnostic). Messages: `'return' is not allowed inside a defer block` / `… spawn block` — one diagnostic, naming the block the `return` is LEXICALLY in: the walker does NOT descend into a nested `defer:`/`spawn:` block (each is guarded at its own site), so `defer: > parallel: > spawn: > return` reports "spawn block" once (it used to double-report, and `recover:` + `spawn: return` regressed the same way). The walker DOES descend into `wait:` arms + their `else` (a `return` there was the same silently-discarded bug; this tightens `recover:` identically). Still legal (boundary-tested): a `return` inside a nested `fn` DECLARED in either block, `return` in a `parallel:` body, `?`-in-`defer:` (still short-circuits + discards), and every defer/spawn/parallel nesting combination. (A closure body is a single expression, so it can't hold a `return` at all.) +14 checker tests (RED-first via `entry_rejects` / error-count assertions, incl. `wait:`-arm + `wait:`-`else` + nested-block-noun) + a two-engine `vm::defer_spawn_nesting_matrix_parity` regression net. Docs: `docs/reference/syntax.md` (defer block form + spawn nursery; also fixed a stale `# prints "x = 1" — snapshotted here` comment → by-reference, reads `2` at exit).
+- ✅ **L3-1: a pure-panic inline body (`fn boom(): panic("x")`) now infers `-> nil`** (2026-07-12, `auto-task/inline-panic-infers-nil`) — a function whose SOLE body is a diverging call was spuriously rejected with "cannot infer return type of '<name>'; add a -> annotation", even though a void body (`fn v(): print(...)`) infers `-> nil` and an annotated `fn b() -> int: panic(...)` type-checks (bottom fits any return). Root cause: `panic(...)` is bottom-typed `Ty::Unknown` (`expr.rs`), so the inline-expr body path (`src/checker/sig.rs:390`) set `inline_ret = Some(Unknown)`, which the finalizer rejected as residual un-inferable. Fix (checker-only, ~one branch): bind `let t = self.infer(e)` and substitute `Ty::Nil` iff `t.is_unknown() && Self::expr_is_diverging_call(e)` (the existing narrow bare-`panic`/`exit`/`os.exit` predicate) — so the caller can't use a value anyway, `nil` is the natural default. `self.infer(e)` still runs so panic's arg checks fire in pass 2. Genuine un-inferable cases (Err-only/None-only/`[]`/pure recursion — all block-body `return` forms) still rejected untouched. +2 tests RED-first: `checker::inline_diverging_body_infers_nil` (infers nil; `panic(123)` still rejected) + two-engine `vm::inline_panic_body_faults_both_engines` (caller prints "start", faults "x", exit 1; `recover:`→`Err("x")`). CLI-verified on `run` + `run --serial`. Docs: `docs/reference/syntax.md`.
+- ✅ **Deadlock fault message is now engine-agnostic + manifest entrypoint rejects `/` path separators** (2026-07-12, `auto-task/low-fixes-deadlock-entrypoint`) — two small independent fixes. (1) A blocking `recv`/`for v in ch:`/`wait:` with no producer and no runnable task deadlocks on BOTH engines, but the message hardcoded "sequential executor cannot block waiting for a producer" — misleading under the default M:N engine (one code path serves both). Reworded the two `self.err(...)` sites (`src/vm/netio.rs:934`, `:1109`) to engine-agnostic "deadlock — nothing is queued and no task can ever send" (recv keeps its C5 mid-flight hint). Detection/exit/`recover:` catchability unchanged (text-independent). (2) `entrypoint_file` (`src/main.rs`) split the module path only on `.`, so a manifest `entrypoint = "src/main:main"` (slash instead of dotted) resolved by accident via `PathBuf::push`; added a guard rejecting embedded `/`/`\\` with "the module path must use '.' separators, not '/'". Valid dotted forms unaffected. +3 tests RED-first (two-engine `deadlock_fault_message_is_engine_agnostic` + `deadlock_fault_is_recoverable_new_message` via `parity_entry_fault`; extended `entrypoint_file_validates_dotted_path`). Docs: `docs/history/designs/cross-nursery-flat-scheduler.md`, `docs/reference/concurrency.md` (paraphrased fault quotes updated). Text-only + guard-only; no engine-behavior change.
+- ✅ **`i64::MIN` decimal literal `-9223372036854775808` now lexes/parses (was "number too large")** (2026-07-11, `auto-task/three-small-fixes`) — the boundary value i64::MIN was unwritable as a literal: the lexer read the positive magnitude `9223372036854775808` (== i64::MAX+1 == 2^63, which overflows i64) BEFORE the parser applied the unary minus, so it lex-errored "number too large to fit in target type"; users had to write `-9223372036854775807 - 1`. **Fix (lexer + parser, no checker/VM change):** the lexer's decimal-int branch (`src/lexer/mod.rs`), on an i64 parse overflow, now emits a distinct nullary `Token::IntMinMagnitude` iff the magnitude is EXACTLY 2^63 (via a `u64` reparse), else propagates the original error — so `9223372036854775809`+ still lex-errors. `parse_unary` (`src/parser/mod.rs`) folds `Neg` + `IntMinMagnitude` straight into `ExprKind::Int(i64::MIN)` (NOT `Unary(Neg,…)` — runtime-negating the magnitude would overflow); `expect_pattern_int` mirrors the fold for match/range patterns (`-9223372036854775808:` works). A BARE (un-negated) `9223372036854775808` still errors "number too large" (via new arms in `parse_primary`/`expect_int`), so the value can never leak as a positive int. `IntMinMagnitude` maps to the `INT` grammar terminal in `conformance.rs::symbol()` (no grammar.bnf drift — `-INT` already covered). Radix forms (`0x8000000000000000` etc.) are a SEPARATE lexer branch and still error at i64::MIN — deliberately out of this minimal scope (known v1 limit). +3 tests RED-first (`lexer::lexes_i64_min_magnitude`, `parser::i64_min_literal_folds_to_int_min`, two-engine `vm::parity_tests::i64_min_literal_runs_parity` covering print + arithmetic + `match`), CLI-verified `-9223372036854775808` prints correctly on `run` + `run --serial`, bare 2^63 and `-9223372036854775809` still error. Docs: `docs/reference/syntax.md` (literal examples).
+- ✅ **`json.parse` rejects non-finite/overflowing numbers at decode (Go `encoding/json` policy)** (2026-07-11, `auto-task/three-small-fixes`) — `json.parse("1e400")` returned `Ok(Json.Num(+inf))`, manufacturing a value its OWN `json.stringify` then FAULTED on ("cannot serialize non-finite float to JSON") — parse produced something that could not round-trip, violating the documented invariant that parse "never emits [a value] that Chezzi's own `parse` would reject." (`decode[int]("1e400")` already returned a clean `Err`; only the raw `Json` parse layer was the outlier.) **Fix (one guard, pure Chezzi, `std/json.chz` `parse_number`):** after `f := float(raw)`, `if f - f != 0.0: return Err("invalid number: value out of range")` (the same finite-check idiom `num_str` uses — `f - f` is `0.0` for finite `f`, `NaN` for `±inf`/`NaN`), matching Go's reject-at-decode. Underflow to `0.0` (`1e-400`) is finite and stays `Ok`. +1 two-engine parity test (`json_parse_rejects_non_finite_parity`: `1e400`/`-1e400`/`[1e400]`→Err, `1.5`/`123`/`1e-400`→Ok); the existing `json_as_int_out_of_range_parity`'s `1e400` probe flips `NONE`→`PARSEERR` (updated same commit). CLI-verified on `run` + `run --serial`. Docs: `docs/reference/stdlib.md` json section (parse-rejects-overflow, symmetric with the stringify fault).
+- ✅ **`str.split` empty-input invariant locked (regression guard)** (2026-07-11, `auto-task/three-small-fixes`) — investigated a reported `"".split(",") == []` bug; it does NOT exist. `"".split(",")` already correctly returns a one-element list holding `""` (length 1, `x[0] == ""`) via Rust's `str::split` at `src/vm/call.rs`, honoring `pieces == separators + 1` on both engines. The report misread the list's DEBUG RENDERING: a single empty string renders as `[]` because `""` prints as nothing (same as `",".split(",")` → `[, ]`). No production change; added a regression test (`str_empty_split_returns_single_empty_element_parity`) asserting length + element rather than rendering. Docs: `docs/reference/stdlib.md` split entry now states the empty-input result explicitly.
+- ✅ **`Self` usable in inherent struct/enum/newtype method signatures + bodies (checker-only)** (2026-07-11, `auto-task/self-and-compound-overload`) — `Self` resolved inside a `protocol` method sig but was rejected (`unknown type 'Self'`) in a plain `struct`/`enum`/`newtype` inherent method — an arbitrary asymmetry (Rust allows `Self` in inherent impls, not just traits). Fix: a new checker field `current_self_ty: Option<Ty>` set (via `mem::replace`) at the method-sig hoist sites (struct/enum/newtype in `setup.rs`) and at `infer_fn_ret`/`check_fn_body` entry from their `self_ty` arg, plus ONE `resolve_type` arm (`"Self" if self.current_self_ty.is_some()`) placed AFTER the type-param arm — so a PROTOCOL method's `Self` (already in `type_params` as `Ty::Param("Self")`, `current_self_ty` left `None`) keeps its existential-param binding UNCHANGED, and `Self` outside any method stays `unknown type 'Self'`. Resolves to the CONCRETE enclosing `Ty::Struct/Enum/NewType(key, [own type params])`, so `-> Self` enforces the real type (returning a different type is still a type error) and a generic `Box[T]`'s `-> Self` carries `[Param(T)]` matching `return self`. Newtype included (deliberate consistency: it routes through the same `infer_fn_ret`/`check_fn_body` funnel). Checker-only — runtime already dispatches these methods; both engines byte-identical. +7 checker tests (RED-first, `entry_ok`/`entry_rejects` module-graph path) + golden `examples/self_method.chz` (struct/enum/newtype/generic, two-engine parity). Docs: `docs/reference/syntax.md` (Self in inherent methods).
+- ✅ **Compound assignment honors struct/enum/newtype operator overloading (checker-only)** (2026-07-11, `auto-task/self-and-compound-overload`) — `x OP= v` is documented as exactly `x = x OP v`, but `check_assign_value` (`sig.rs`) whitelisted only str+str / non-widening numeric / three collection forms, so `a += V(10)` was rejected (`cannot apply += to V and V`) for a `struct V` with an `add` overload even though `a = a + V(10)` type-checked. Fix: the arith-compound arm now also computes `overload_ok = op_overload_result(target, val, proto).is_some_and(|res| assignable(target, &res))` — reusing the SAME `op_overload_result` the binary-operator checker (`infer_binary`) consults (`Add`/`Sub`/`Mul`/`Div`/`Mod` from the op) — and accepts when it holds. Because `op_overload_result` returns `Some` only for same-typed operands satisfying the operator protocol (or a same numeric-newtype auto-flow), a no-overload struct / `V += int` / `Box[int] += Box[str]` all stay rejected — no blanket compound-assign acceptance; existing str/numeric/collection forms unchanged. Runtime already lowers `a OP= b` through the same `Op::Add`/… opcodes as `a = a OP b`, so parity is automatic (verified by running both engines). +6 checker tests (RED-first) + golden `examples/compound_overload.chz` (struct `+=` == explicit form, numeric newtype `+=`, two-engine parity). Docs: `docs/reference/syntax.md` (compound-assignment overload note).
+- ✅ **Named-factory-import member resolution fixed (checker-only) (gap #4)** (2026-07-08, `auto-task/named-factory-import-member-resolution`) — a NAMED import of a factory *function* (not its return type) — `import make from lib; w := make()` — left the returned struct/enum/newtype's FIELDS and METHODS unresolvable (`type Widget has no method 'bump'`), even though the checker correctly TYPED the value (it rejected `x: int = w`). Member lookup was wrongly gated on whether the type NAME was imported into the current module (the per-module `self.structs`/`enum_methods`/`newtype_defs` tables are populated only by a whole-module OR named-TYPE import; a named-fn import injects nothing), so only `Match`/`Response`/`ProcResult` (globally seeded) resolved import-free. Broke the documented equivalence — `import lib; lib.make().bump()` and `import make, Widget from lib` both WORKED while `import make from lib` alone FAILED for an identically-typed value — and documented stdlib APIs (`import manual from std.cancel; manual().cancelled()`; `import min_heap from std.collections; min_heap().push(3)`). **Fix:** a LAZY, MISS-ONLY fallback keyed on the value's OWN module-scoped identity — on a local-table miss, resolve the shape from the OWNING module's `ModuleSig` by scanning `module_sigs` for the def whose `type_key(mid,name)` == the value's key (helpers `struct_shape`/`owning_struct_def`, `enum_methods_of`/`enum_type_params_of`/`owning_enum_def`, `newtype_methods_of`/`newtype_type_params_of`/`owning_newtype_def` in `src/checker/setup.rs`; swapped 6 member sites in `expr.rs`/`pattern.rs`/`sig.rs`). Purely additive: fires only on a miss (never shadows the globally-seeded seeds, zero cost on the local-hit path), reads `module_sigs` only — does NOT touch `struct_names`/`bare_types`, so **naming/constructing an un-imported type still errors** (`import make from lib; w := Widget(1)` → `unknown type 'Widget'`) and a same-named LOCAL type is unaffected (distinct keys, local table hits first). Transitive cross-module works (a `helper` returning a `cancel.Token`, `main` importing only `helper` → `.cancelled()` resolves; `cancel` is a transitive graph dep present before `main` is checked). Checker-only — no VM/runtime change (whole-module import already ran at runtime on both engines). +9 checker tests (RED-first, `check_graph`/multi-file graph) + 3 two-engine runtime parity tests; CLI-verified all three import forms print `11` and the stdlib APIs run on `run` + `run --serial`. Docs: `docs/reference/spec.md` (member-access-is-import-free clarification).
+- ✅ **`json.stringify` faults (Go-style) on non-finite floats instead of emitting invalid JSON (Finding C)** (2026-07-10, `auto-task/json-nonfinite-fault`) — `stringify` emitted a `Json.Num` holding `NaN`/`+inf`/`-inf` as the bare tokens `NaN`/`inf`/`-inf` (`num_str` in `std/json.chz` fell through to `str(f)`), which are (a) not valid JSON and (b) rejected by Chezzi's own `json.parse` — so `parse(stringify(x))` failed and the library silently produced malformed output with no fault. **Policy chosen: FAULT, Go `encoding/json`-style** (over JS `null`-emission / Python's non-standard tokens) — clean here because `stringify` returns bare `str` with no `Result` channel, and prelude `panic(msg)` raises a recoverable `RuntimeError` catchable under `recover:` with a byte-identical message on both engines. **Fix (pure Chezzi, one guard, `std/json.chz` `num_str`):** as the FIRST body line, `if f - f != 0.0: panic("cannot serialize non-finite float to JSON")` — `f - f` is `0.0` for every finite `f` and `NaN` (≠ 0.0) for `NaN`/`±inf`, so it fires iff non-finite, INDEPENDENTLY of the ±9e15 int-collapse range below (a large FINITE float like `1e300` is outside ±9e15 but must NOT fault — reusing the range check would be wrong). +2 two-engine parity tests (`json_stringify_non_finite_faults_parity` covering NaN/+inf/-inf via `recover:` + `e.message()`; `json_stringify_finite_roundtrip_unchanged_parity` regression guard proving `1e300`/whole-floats/negatives/strings/nested Arr+Obj stringify byte-identically and round-trip), RED-first. Auto-applies to all engines (pure-Chezzi, identical bytecode). CLI-verified the task repro faults identically on `run` + `run --serial`. Docs: `docs/reference/stdlib.md` json section (non-finite policy, previously unspecified).
+- ✅ **Two JSON number→int boundary bugs fixed at the shared f64→i64 seam (both total, consistent)** (2026-07-08, `auto-task/json-int-boundary`) — JSON stores every number as an f64 and both int-conversion paths mishandled the float→i64 boundary in opposite wrong directions. **Bug 1 (`json.decode[int]`)** SILENTLY SATURATED an out-of-range JSON integer: `decode[int]("1000000000000000000000000000000")` (10^30) returned `Ok(9223372036854775807)` (i64::MAX), `-1e30` → `Ok(i64::MIN)`, u64-max → saturated — Rust's `f as i64` cast saturates and the `D::Int` arm (`src/vm/call.rs`) range-checked nothing (only `fract`/`finite`). Fix: a range guard before the cast — `if f < i64::MIN as f64 || f > 9_223_372_036_854_775_808.0 { Err(out of range) }` — STRICT `> 2^63` upper bound so i64::MAX (which f64-rounds to exactly 2^63) still round-trips via the saturating cast while everything strictly beyond is rejected. **Bug 2 (`json.as_int -> Option[int]`)** FAULTED (uncaught, aborts the program) on out-of-range: `as_int` on `9999999999999999999` called the builtin `int()` which RAISES out-of-range. Fix (pure Chezzi, `std/json.chz`): gate on the same i64 window and `return None` when unrepresentable/non-finite, with a `n == 2^63` saturate special-case → `Some(i64::MAX)` (since `int(2^63)` itself faults). Both sites now map 2^63→i64::MAX, reject `|x|>2^63`, accept i64::MIN — for the identical out-of-range input `decode[int]` returns `Err` and `as_int` returns `None`; neither saturates, neither faults. Return type stays `Option[int]`; fractional truncation (`as_int(2.5)`→`Some(2)`) unchanged. +3 two-engine parity tests (`json_as_int_out_of_range_parity`, `json_decode_int_out_of_range_parity`, `json_int_boundary_consistency_parity`), RED-first, incl. the i64::MAX/MIN round-trip fences. Residual (inherent): a value exactly `2^63` (`"9223372036854775808"`) maps to i64::MAX at both sites — f64 cannot distinguish it from i64::MAX — consistent, not a saturation of the reported `|x|>2^63` class. Docs: `docs/reference/stdlib.md` json section.
 
-- ✅ **`print`'s `str(self)` display hook is gated on ACTUAL `Stringable` conformance, killing an uncatchable SIGABRT** (2026-07-04, Bug B) — the VM stringifier selected a user `str(self)` method as the implicit display hook by NAME + ARITY only, ignoring its return type. A `fn str(self) -> S` (returns the struct, not `str`) was chosen; the stringifier got an `S` back, re-stringified it, re-invoked the hook, and recursed forever → `fatal runtime error: stack overflow` (SIGABRT, uncatchable by `recover:`) on a check-accepted program. Fix (VM-only, `src/vm/stmt.rs` struct/enum/newtype display-hook arms): invoke the hook, then use its result ONLY when the RETURNED VALUE is a `str` (new `Vm::is_str_value`, mirroring `arith.rs` `struct_hash`/`enum_hash`'s invoke-then-check shape); a non-`str` result is NOT re-stringified — it falls back to the default repr, like a wrong-arity `str` already did. Checking the returned VALUE (not the declared syntax) covers an annotated `-> str`, an INFERRED (un-annotated) str, and a str type-ALIAS return alike — an earlier syntactic `-> str` gate was rejected in review because it silently regressed idiomatic un-annotated/aliased `str` hooks to the default repr (checker-vs-VM `Stringable` divergence). GC-safety: the non-`str` fallback re-reads the LIVE rooted struct/enum/newtype (the hook may have mutated a field and swept the pre-hook clone), so the default render never dereferences a dangling GcRef. `str` stays a normal user method — a direct `obj.str()` returning non-str is untouched (no checker rejection). +5 tests (`src/vm/tests.rs`, all `assert_mc_parity` → serial + M:N): the repro (struct/enum/newtype self-return → default repr), annotated/inferred/aliased str all still used by print + interpolation, direct-call-returns-non-str still works, and a GC-stress fallback (hook mutates a non-interned `List` field + 100k-alloc loop + returns self → correct re-read state, no panic). Docs: `docs/syntax.md` Stringable section now documents the display-hook resolution rule.
+- ✅ **`print`'s `str(self)` display hook is gated on ACTUAL `Stringable` conformance, killing an uncatchable SIGABRT** (2026-07-04, Bug B) — the VM stringifier selected a user `str(self)` method as the implicit display hook by NAME + ARITY only, ignoring its return type. A `fn str(self) -> S` (returns the struct, not `str`) was chosen; the stringifier got an `S` back, re-stringified it, re-invoked the hook, and recursed forever → `fatal runtime error: stack overflow` (SIGABRT, uncatchable by `recover:`) on a check-accepted program. Fix (VM-only, `src/vm/stmt.rs` struct/enum/newtype display-hook arms): invoke the hook, then use its result ONLY when the RETURNED VALUE is a `str` (new `Vm::is_str_value`, mirroring `arith.rs` `struct_hash`/`enum_hash`'s invoke-then-check shape); a non-`str` result is NOT re-stringified — it falls back to the default repr, like a wrong-arity `str` already did. Checking the returned VALUE (not the declared syntax) covers an annotated `-> str`, an INFERRED (un-annotated) str, and a str type-ALIAS return alike — an earlier syntactic `-> str` gate was rejected in review because it silently regressed idiomatic un-annotated/aliased `str` hooks to the default repr (checker-vs-VM `Stringable` divergence). GC-safety: the non-`str` fallback re-reads the LIVE rooted struct/enum/newtype (the hook may have mutated a field and swept the pre-hook clone), so the default render never dereferences a dangling GcRef. `str` stays a normal user method — a direct `obj.str()` returning non-str is untouched (no checker rejection). +5 tests (`src/vm/tests.rs`, all `assert_mc_parity` → serial + M:N): the repro (struct/enum/newtype self-return → default repr), annotated/inferred/aliased str all still used by print + interpolation, direct-call-returns-non-str still works, and a GC-stress fallback (hook mutates a non-interned `List` field + 100k-alloc loop + returns self → correct re-read state, no panic). Docs: `docs/reference/syntax.md` Stringable section now documents the display-hook resolution rule.
 - ✅ **A runtime fault inside a `"{…}"` interpolation fragment now reports the fragment's real source LINE (was `line 1, col 1`)** (2026-07-04, `auto-task/interp-span-fix`) — any runtime fault (div-by-zero, index-out-of-bounds, integer overflow, …) whose faulting op sat INSIDE a string-interpolation fragment reported its span as `line 1, col 1` instead of the fragment's true line; the identical fault OUTSIDE interpolation reported correctly. This was the runtime/compiler counterpart of the 2026-06-30 `never-recover-span` checker fix (which corrected only the fragment ROOT nil-error span). Root cause: interpolation fragments are re-lexed from the escape-processed `raw` substring via `lexer::tokenize` (`src/interpolation.rs`), and `Lexer::new` hardcodes `line = 1`, so every fragment token span — and thus the arith/index opcode span the compiler emits and `Vm::err` renders — was fragment-relative (root at 1,1). Both serial and M:N VM share this codegen, so both printed the identical wrong span (why two-engine parity never caught it — it is a shared misleading-diagnostic bug, not a divergence). Fix (Strategy A, span-metadata only, runtime-inert): added a `base_line: usize` field to `Lexer` (default 0 → all normal lexing byte-identical) applied in the sole span funnel `span_at` as `line: self.line + self.base_line`, plus `Lexer::new_at` / free `lexer::tokenize_at`; `parse_interpolation` passes `base_line = span.line - 1` per fragment — the string literal's OPENING source line — so a fault inside any fragment reports that real line instead of `line 1`. We anchor to the opening line rather than the fragment's exact inner line ON PURPOSE: `raw` is the post-escape payload, where a `\n` ESCAPE and a genuine (triple-quoted) source newline are indistinguishable, so counting newlines in `raw` would inflate the reported line past an escape and point at UNRELATED code (a confidently-wrong diagnostic — flagged and fixed in review before merge). Opening-line is honest and never misattributes. COLUMN stayed best-effort/fragment-relative (`col 1`) at the time — **superseded on 2026-08-10 (M24 round 4)**, which added the matching `base_col` after fragment-relative columns turned out to alias two witness-table keys onto one entry; it was exact for a single-quoted literal and short by a bounded, documented amount past a triple quote or an escape — **both offsets superseded 2026-08-11 (M24-6)** by a per-literal `PosMap`, which deletes `base_line`/`base_col`/`new_at`/`tokenize_at` and makes every fragment span a real physical position. The shared parser hands the checker opening-line fragment spans too (symmetric, zero blast radius). +6 tests (`src/vm/tests.rs`): div-by-zero / index-OOB / overflow inside interpolation each report line 4 on BOTH engines, a multi-line triple-quoted fragment attributes to the string's OPENING line 4, a `\n`-escape-before-fragment fault stays on line 4 (regression guard against the escape miscount), and a non-interpolation fault + valid interpolation regression proves `base_line=0` leaves normal lexing byte-identical — all RED-first. Docs: refreshed the now-stale span doc comment in `src/checker/pattern.rs::check_interpolation`.
-- ✅ **A nursery deadlock-abort now preserves a still-parked task's buffered stdout (two-engine parity)** (2026-07-05, `auto-task/deadlock-flush-parked-stdout`) — when a `parallel:` nursery was aborted by the M:N scheduler's deadlock detector, a still-PARKED task's ALREADY-buffered stdout was silently DISCARDED on the default M:N engine, while `--serial` printed it — a two-engine divergence on a DETERMINISTIC program (a consumer that prints three lines then blocks forever on a second `recv()` lost all three on `chezzi run`, kept them on `run --serial`). This was the exact gap the fault-output-flush entry below left open: `SchedCore::flag_deadlock` (`src/vm/mod.rs`) wrote each parked fiber's `TaskOutcome::Fault` slot with `out: String::new()`, discarding the fiber's own buffered output (`swap_ctx` had moved it into `f.ctx.out`/`f.ctx.stderr` when it parked), so the downstream `reduce_task_slots` propagated the deadlock error with an EMPTY buffer. Fix (~4 lines, the exact analogue of 888684d's real-fault fix): `flag_deadlock` now moves `f.ctx.out`/`f.ctx.stderr` into the `Fault` slot instead of allocating empties (`task_index`/`scope_id` are Copy, read before the partial move). `reduce_task_slots` was UNCHANGED at the time — it flushed only the lowest-index propagating fault's buffer at its task-order slot, so for a sole-printer parked task the transcript is byte-identical to serial; the MULTI-parked case was left open (now closed by the entry below). Scoped to the ONE `flag_deadlock` method (reached only by the M:N nursery deadlock detector); serial, real-fault, completed-sibling, and non-nursery-deadlock paths never route through it, so none regress. +1 two-engine parity test (`parallel_nursery_deadlock_flushes_parked_stdout_2engine`, sole-printer, looped 50× for interleaving flakiness), RED-first on the M:N arm only (serial passed pre-fix). Docs: `docs/concurrency-tier-d.md` (Decision F), `docs/concurrency-b3.md` (B3.5).
-- ✅ **A MULTI-parked nursery deadlock-abort now flushes EVERY parked task's buffered stdout (two-engine parity)** (2026-07-05, `auto-task/multiparked-deadlock-flush`) — closes the remaining gap the entry above left open. When a `parallel:` nursery deadlocked with TWO-OR-MORE parked fibers, only the LOWEST-index propagating fault's buffer flushed on M:N, so a HIGHER-index parked fiber that printed before blocking had its output SILENTLY DROPPED — while `--serial` printed it live (a two-engine divergence on a DETERMINISTIC program: `silent`/idx0 parks empty and wins `first_fault`, so `printer`/idx1's `HI-FROM-PRINTER` was lost on `chezzi run`, kept on `run --serial`). Root cause: `flag_deadlock` faulted every parked fiber into a `TaskOutcome::Fault` slot, and `reduce_task_slots`'s `first_fault.is_none()` guard flushed only the first. Fix (3 touch points, additive): a DISTINCT `TaskOutcome::Deadlocked{err,out,stderr}` variant (`src/vm/mod.rs`), emitted by `flag_deadlock` instead of `Fault`; `reduce_task_slots` (`src/vm/sched.rs`) gets a `Deadlocked` arm that ALWAYS flushes out/stderr at its task-order slot (no `is_none()` gate) and a `deadlock_err` local, propagating ONE deadlock error (terminal match precedence Exit>Fault>Deadlock). Chosen over string-matching `DEADLOCK_MSG` (collision-fragile with a user `panic("deadlock: …")`) — a separate variant keeps the REAL-fault multi-fault ordering (the residual race the prior entry documented) provably byte-identical. `Deadlocked` never coexists with a real `Fault`/`Exit` (a real fault/exit trips `terminate` first). +2 two-engine parity tests: `parallel_nursery_deadlock_multiparked_flushes_higher_index_2engine` (2-fiber, sole-printer, order-deterministic exact match) and `parallel_nursery_deadlock_multiparked_multiprinter_set_3parked` (3-parked, two disjoint printers, order-insensitive SET via `assert_same_lines` per mn-parity discipline), both looped 50×; RED-first on the M:N arm only. Unit `mnsched_deadlock_when_all_parked_runq_empty` updated to assert `Deadlocked`. Verified end-to-end on the release binary at `--serial` and `--threads=1/2/8` (byte-identical `HI-FROM-PRINTER` on stdout, deadlock error on stderr, exit 1, thread-count independent). Docs: `docs/concurrency-tier-d.md` (Decision F), `docs/concurrency-b3.md` (B3.5).
-- ✅ **A faulting `--parallel` task now preserves the stdout it buffered before the fault (two-engine parity)** (2026-07-04, `auto-task/fault-output-flush`) — a spawned task that FAULTS (panic / uncaught runtime error propagating to the nursery join) silently DROPPED all stdout it emitted *before* the fault, but ONLY on the default M:N OS-thread engine — the `--serial`/interp oracle preserved it (a two-engine divergence losing the user's debug output right before a crash, on the DEFAULT `chezzi run`). Root cause in `src/vm/mod.rs`: `TaskOutcome::Fault` was a tuple variant carrying NO buffered output, unlike `Exit { code, out, stderr }` and `Done(WorkerResult)`; every Fault construction site dropped the shell buffer and `reduce_task_slots` flushed only `Done`/`Exit` output in task order. The old rationale ("a faulting worker's partial output never had a deterministic position") was wrong for the LOWEST-index *propagating* fault: it has exactly the slot position the serial engine emits it at (after lower-index Done/Exit, before the propagated error is handled). Fix (localized to the fault-output-flush seam): made `Fault` a struct variant `{ err, out, stderr }` mirroring `Exit`; the real Fault sites that own a live buffer (`run_outcome`, `classify_mn_outcome`) `mem::take` the shell `out`/`stderr` (the Rust-panic-to-fault site carries an empty buffer; the deadlock-terminate site was later fixed to carry the parked fiber's own buffer — see the deadlock-flush entry above); `reduce_task_slots` flushes the terminal (`first_fault.is_none()`) fault's buffer INLINE at its task-order slot, then records the error. Higher-index racy faults + `Cancelled` still drop (no deterministic slot); `Exit`-over-`Fault` precedence byte-for-byte unchanged; the cooperative/`--serial` oracle untouched (the fix makes the default engine MATCH it). Fault-free goldens only ever hit `Done`, so byte-identical. **Residual (intentionally not chased):** byte-for-byte oracle parity holds only when the faulting task is the nursery's SOLE output-producer — with additional output-producing siblings the M:N transcript can still diverge from serial's stop-at-first-fault order (a sibling reaching `Done` before the faulter's cancel-trip keeps output serial never produced; `Fault`-vs-`Cancelled` classification is itself a scheduler race), a pre-existing nondeterminism the buffer-and-flush model cannot reconcile. +1 three-engine parity test (`parallel_faulting_task_flushes_partial_output_3engine`, single-faulter — the only deterministic fault-output shape), RED-first on the `--parallel` arm only. Docs: `docs/concurrency-tier-d.md` (Decision F), `docs/concurrency-b3.md`.
-- ✅ **Float→string for large integral floats now shortest-round-trip-correct** (2026-07-01, `auto-task/float-shortest-roundtrip`) — the integral-valued branch of float formatting used `format!("{x:.1}")` (exact fixed-point expansion of the binary `f64`), so a large whole-valued float printed the artifact digits of its binary value instead of the documented shortest decimal that round-trips: `1.5e23` → `150000000000000004194304.0` (should be `150000000000000000000000.0`), `6.022e23` → `602200000000000027262976.0`. Contract (`docs/syntax.md:1787`, unchanged — the docs already promised "shortest-round-trip-correct … spelled out in full") was violated by the implementation. Fix: render the integral branch via Rust's default shortest `{}` Display (guaranteed fewest round-tripping digits AND never scientific notation for f64) then append a literal `.0` to preserve Chezzi's always-a-decimal-point invariant — `format!("{x:.1}")` → `format!("{x}.0")` in ALL THREE lockstep sites (`vm::format_float`, `interp::value::format_float`, `fmtspec::format_float_like`, single commit) so the stringify path and the bare-format-spec path stay identical and VM==interp holds. Behavior-preserving for every already-correct case (`3.0`, `-0.0`, `0.0`, `100.0`, `1e20`→`100000000000000000000.0`, negatives); the explicit `:e`/`:f`/precision spec arms are untouched. +1 golden `examples/float_large_integral.chz` (bare interpolation + bare-spec + small-integral controls, VM==interp==`.expected`), RED-first; `examples/literals.expected` avogadro artifact updated to the shortest form.
+- ✅ **A nursery deadlock-abort now preserves a still-parked task's buffered stdout (two-engine parity)** (2026-07-05, `auto-task/deadlock-flush-parked-stdout`) — when a `parallel:` nursery was aborted by the M:N scheduler's deadlock detector, a still-PARKED task's ALREADY-buffered stdout was silently DISCARDED on the default M:N engine, while `--serial` printed it — a two-engine divergence on a DETERMINISTIC program (a consumer that prints three lines then blocks forever on a second `recv()` lost all three on `chezzi run`, kept them on `run --serial`). This was the exact gap the fault-output-flush entry below left open: `SchedCore::flag_deadlock` (`src/vm/mod.rs`) wrote each parked fiber's `TaskOutcome::Fault` slot with `out: String::new()`, discarding the fiber's own buffered output (`swap_ctx` had moved it into `f.ctx.out`/`f.ctx.stderr` when it parked), so the downstream `reduce_task_slots` propagated the deadlock error with an EMPTY buffer. Fix (~4 lines, the exact analogue of 888684d's real-fault fix): `flag_deadlock` now moves `f.ctx.out`/`f.ctx.stderr` into the `Fault` slot instead of allocating empties (`task_index`/`scope_id` are Copy, read before the partial move). `reduce_task_slots` was UNCHANGED at the time — it flushed only the lowest-index propagating fault's buffer at its task-order slot, so for a sole-printer parked task the transcript is byte-identical to serial; the MULTI-parked case was left open (now closed by the entry below). Scoped to the ONE `flag_deadlock` method (reached only by the M:N nursery deadlock detector); serial, real-fault, completed-sibling, and non-nursery-deadlock paths never route through it, so none regress. +1 two-engine parity test (`parallel_nursery_deadlock_flushes_parked_stdout_2engine`, sole-printer, looped 50× for interleaving flakiness), RED-first on the M:N arm only (serial passed pre-fix). Docs: `docs/history/designs/concurrency-tier-d.md` (Decision F), `docs/history/designs/concurrency-b3.md` (B3.5).
+- ✅ **A MULTI-parked nursery deadlock-abort now flushes EVERY parked task's buffered stdout (two-engine parity)** (2026-07-05, `auto-task/multiparked-deadlock-flush`) — closes the remaining gap the entry above left open. When a `parallel:` nursery deadlocked with TWO-OR-MORE parked fibers, only the LOWEST-index propagating fault's buffer flushed on M:N, so a HIGHER-index parked fiber that printed before blocking had its output SILENTLY DROPPED — while `--serial` printed it live (a two-engine divergence on a DETERMINISTIC program: `silent`/idx0 parks empty and wins `first_fault`, so `printer`/idx1's `HI-FROM-PRINTER` was lost on `chezzi run`, kept on `run --serial`). Root cause: `flag_deadlock` faulted every parked fiber into a `TaskOutcome::Fault` slot, and `reduce_task_slots`'s `first_fault.is_none()` guard flushed only the first. Fix (3 touch points, additive): a DISTINCT `TaskOutcome::Deadlocked{err,out,stderr}` variant (`src/vm/mod.rs`), emitted by `flag_deadlock` instead of `Fault`; `reduce_task_slots` (`src/vm/sched.rs`) gets a `Deadlocked` arm that ALWAYS flushes out/stderr at its task-order slot (no `is_none()` gate) and a `deadlock_err` local, propagating ONE deadlock error (terminal match precedence Exit>Fault>Deadlock). Chosen over string-matching `DEADLOCK_MSG` (collision-fragile with a user `panic("deadlock: …")`) — a separate variant keeps the REAL-fault multi-fault ordering (the residual race the prior entry documented) provably byte-identical. `Deadlocked` never coexists with a real `Fault`/`Exit` (a real fault/exit trips `terminate` first). +2 two-engine parity tests: `parallel_nursery_deadlock_multiparked_flushes_higher_index_2engine` (2-fiber, sole-printer, order-deterministic exact match) and `parallel_nursery_deadlock_multiparked_multiprinter_set_3parked` (3-parked, two disjoint printers, order-insensitive SET via `assert_same_lines` per mn-parity discipline), both looped 50×; RED-first on the M:N arm only. Unit `mnsched_deadlock_when_all_parked_runq_empty` updated to assert `Deadlocked`. Verified end-to-end on the release binary at `--serial` and `--threads=1/2/8` (byte-identical `HI-FROM-PRINTER` on stdout, deadlock error on stderr, exit 1, thread-count independent). Docs: `docs/history/designs/concurrency-tier-d.md` (Decision F), `docs/history/designs/concurrency-b3.md` (B3.5).
+- ✅ **A faulting `--parallel` task now preserves the stdout it buffered before the fault (two-engine parity)** (2026-07-04, `auto-task/fault-output-flush`) — a spawned task that FAULTS (panic / uncaught runtime error propagating to the nursery join) silently DROPPED all stdout it emitted *before* the fault, but ONLY on the default M:N OS-thread engine — the `--serial`/interp oracle preserved it (a two-engine divergence losing the user's debug output right before a crash, on the DEFAULT `chezzi run`). Root cause in `src/vm/mod.rs`: `TaskOutcome::Fault` was a tuple variant carrying NO buffered output, unlike `Exit { code, out, stderr }` and `Done(WorkerResult)`; every Fault construction site dropped the shell buffer and `reduce_task_slots` flushed only `Done`/`Exit` output in task order. The old rationale ("a faulting worker's partial output never had a deterministic position") was wrong for the LOWEST-index *propagating* fault: it has exactly the slot position the serial engine emits it at (after lower-index Done/Exit, before the propagated error is handled). Fix (localized to the fault-output-flush seam): made `Fault` a struct variant `{ err, out, stderr }` mirroring `Exit`; the real Fault sites that own a live buffer (`run_outcome`, `classify_mn_outcome`) `mem::take` the shell `out`/`stderr` (the Rust-panic-to-fault site carries an empty buffer; the deadlock-terminate site was later fixed to carry the parked fiber's own buffer — see the deadlock-flush entry above); `reduce_task_slots` flushes the terminal (`first_fault.is_none()`) fault's buffer INLINE at its task-order slot, then records the error. Higher-index racy faults + `Cancelled` still drop (no deterministic slot); `Exit`-over-`Fault` precedence byte-for-byte unchanged; the cooperative/`--serial` oracle untouched (the fix makes the default engine MATCH it). Fault-free goldens only ever hit `Done`, so byte-identical. **Residual (intentionally not chased):** byte-for-byte oracle parity holds only when the faulting task is the nursery's SOLE output-producer — with additional output-producing siblings the M:N transcript can still diverge from serial's stop-at-first-fault order (a sibling reaching `Done` before the faulter's cancel-trip keeps output serial never produced; `Fault`-vs-`Cancelled` classification is itself a scheduler race), a pre-existing nondeterminism the buffer-and-flush model cannot reconcile. +1 three-engine parity test (`parallel_faulting_task_flushes_partial_output_3engine`, single-faulter — the only deterministic fault-output shape), RED-first on the `--parallel` arm only. Docs: `docs/history/designs/concurrency-tier-d.md` (Decision F), `docs/history/designs/concurrency-b3.md`.
+- ✅ **Float→string for large integral floats now shortest-round-trip-correct** (2026-07-01, `auto-task/float-shortest-roundtrip`) — the integral-valued branch of float formatting used `format!("{x:.1}")` (exact fixed-point expansion of the binary `f64`), so a large whole-valued float printed the artifact digits of its binary value instead of the documented shortest decimal that round-trips: `1.5e23` → `150000000000000004194304.0` (should be `150000000000000000000000.0`), `6.022e23` → `602200000000000027262976.0`. Contract (`docs/reference/syntax.md:1787`, unchanged — the docs already promised "shortest-round-trip-correct … spelled out in full") was violated by the implementation. Fix: render the integral branch via Rust's default shortest `{}` Display (guaranteed fewest round-tripping digits AND never scientific notation for f64) then append a literal `.0` to preserve Chezzi's always-a-decimal-point invariant — `format!("{x:.1}")` → `format!("{x}.0")` in ALL THREE lockstep sites (`vm::format_float`, `interp::value::format_float`, `fmtspec::format_float_like`, single commit) so the stringify path and the bare-format-spec path stay identical and VM==interp holds. Behavior-preserving for every already-correct case (`3.0`, `-0.0`, `0.0`, `100.0`, `1e20`→`100000000000000000000.0`, negatives); the explicit `:e`/`:f`/precision spec arms are untouched. +1 golden `examples/float_large_integral.chz` (bare interpolation + bare-spec + small-integral controls, VM==interp==`.expected`), RED-first; `examples/literals.expected` avogadro artifact updated to the shortest form.
 - ✅ **Never/bottom `recover:` payload now CONSISTENT + accurate interpolation-fragment nil-error span** (2026-06-30, `auto-task/never-recover-span`) — two coupled checker-only corner fixes. (A) `infer_recover` (`src/checker/mod.rs`) typed a `recover:` block by its tail: a direct `recover: panic(...)` went through the `StmtKind::Expr` arm and `infer`'d `panic` to bottom (`Ty::Unknown`, accepted as an `Ok` payload in value position), but a tail whose panic was reached through one more **statement-form** layer (`recover:\n  match 1:\n    _: panic("boom")`) went through `_ => check_stmt` and left `value_ty = Ty::Nil`, so the `Ok(v)` payload typed as `nil` and was rejected ("expression returns no value (nil) and cannot be used as a value") — the SAME bottom value usable in one path, banned in the other. Fix: after the tail check, `if value_ty == Ty::Nil && Self::stmt_terminates(last) { value_ty = Ty::Unknown; }`, reusing the existing sound, conservative divergence predicate (statement-form match all-arms-terminate, `while true:`, all-branch-returning `if/else`, trailing `exit`/`panic`). Both repro forms now accept; the `== Ty::Nil` guard keeps concrete-tail (`recover: 5` → `int`) and non-diverging-statement-tail (`recover: x := 5` → `Result[nil]`, still nil-banned) recovers untouched. (B) `check_interpolation` (`src/checker/mod.rs`) inferred each `{…}` fragment from a sub-parse with fragment-relative spans (root at `line 1, col 1`), so a nil-in-value-position error keyed on the fragment ROOT reported the bogus `(1,1)` fallback instead of the offending string literal; now stamps the whole-string-literal span onto the fragment root (`e.span = span`) before `infer_value`, matching the compiler's emit site, so the diagnostic carries the real line/col. Parity-safe by construction (check-time only; rejected programs never run, and the newly-accepted match-panic recover runs identically on VM and `--serial` → the panic takes the `Err` branch, the `Ok(v)`/`Unknown` arm is statically unreachable). +4 checker tests via `entry_ok`/`entry_rejects`/`check_entry` (diverging-match-tail accepts, direct-vs-match-panic consistency, concrete/non-diverging-tail regression fence, interpolation-void-fragment span ≠ (1,1)), all RED-first.
-- ✅ **Expected-type inference: a type ANNOTATION now pins a generic ctor / generic fn-call's type params** (2026-06-30, `auto-task/expected-type-generic-inference`) — checker had checking-mode ("expected type flows IN") only for empty container literals and closures bound to `fn`-typed annotations; a generic constructor or generic function call was always inferred bottom-up, with the annotation used only as a POST-HOC `assignable_w` check. So `a: Heap[int] = Heap([], fn(x, y): x < y)` (and the return-type / call-arg forms) hit the un-inferable-closure-param deadlock — the empty `[]` couldn't pin `T`, the bare comparator params couldn't either, and `report_uninferable_closure_params` fired *before* the annotation could break the tie ("cannot infer type parameter `T` of `Heap`" + "cannot infer type of parameter 'x'/'y'"). Fix (checker-only, parity-safe by construction — generics are type-erased at runtime, no opcode/runtime change): a new `expected_hint: Option<Ty>` field threads the expected type from the three annotation sites — a `let`-binding's declared type (`StmtKind::Let` non-`ref` single-name non-closure branch), a function's declared **return** type (`check_return` non-closure branch), and a call **argument**'s declared parameter type (`infer_arg` non-closure branch) — into `infer_call`, which `take()`s it FIRST (so nested arg calls see `None`, no leak) and threads it through every generic ctor/call dispatcher (`infer_named_call` struct/newtype arms, `infer_qualified_struct_call`, `infer_newtype_call`, `infer_variant_call`, `infer_generic_call`). Each consumes it via a new `seed_from_hint(hint, &<declared-return-SHAPE>, &mut sub)` (`Struct(key,[Param…])` / `NewType` / `Enum` / a generic fn's `sig.ret`) placed AFTER arg-unification + `recover_iter_elems`/`recover_index_args` and BEFORE `report_uninferable_closure_params` — so precedence is **turbofish > arguments > annotation** (`unify` only binds a still-free param; an arg that pins `T` differently is the usual mismatch). Once `T` is seeded the existing `check_generic_arg` re-infers the comparator closure in checking-mode against `fn(int,int)->bool`, so the secondary "cannot infer parameter 'x'/'y'" errors also vanish. Bonus (same seam, for free): generic **newtype** ctor annotations (`e: Stack[str] = Stack([])` — previously needed a turbofish) and a return-only param of a generic fn (`xs: List[int] = empty()` for `fn empty[T]() -> List[T]`, previously "cannot assign List[T] to List[int]"). +6 graph_tests (3 primary repros let/return/call-arg + qualified-ctor + free-fn-return + a turbofish/annotated-closure/args-win-mismatch regression guard), all RED-first. **Remaining gap (documented, not forced):** a generic ctor nested inside a *container literal* (`a: List[Heap[int]] = [Heap([], …)]`) — the outer expr is a list literal, never reaches `infer_call`, so it would need a separate `infer_list` element-hint; annotate the closure params or turbofish there. Docs: `docs/syntax.md` (closure-param inference + generic-newtype §), `docs/spec.md` (new expected-type-inference note + newtype ctor), `docs/stdlib.md` (Heap §).
-- ✅ **Container constructors `List[T]()` / `Map[K,V]()` / `Set[T]()` + bare `List()`/`Map()`; un-inferable-closure-param diagnostic; std standalone-check; std-module test wiring** (2026-06-29, `auto-task/container-ctor-turbofish`) — four bundled audit findings. **A (the ask):** the turbofish was rejected on every builtin but `Channel` — `name_is_generic` (`src/checker/mod.rs`) now also accepts `List`/`Map`/`Set`, and the three ctor arms read the type args (1 for List/Set, 2 for Map; arity-checked), so `List[int]()` pins an empty list's element type, `List[int]([1,2])` checks elements against it, and bare `List()`/`Map()` are now legal (mirroring the already-legal `Set()`), refined from the expected type / first use. **A is NOT checker-only** (audit's claim was wrong): 0-arg `List()`/`Map()` were rejected at RUNTIME in both engines too, so `builtin_list`/`builtin_map` in `src/vm/mod.rs` AND `src/interp/mod.rs` now return an empty container for 0 args (Set's existing shape) — two-engine parity held via a new `examples/container_ctor.chz` golden. **B:** `Heap([], fn(a,b): a<b)` leaked a misleading "cannot compare T and T" from inside the lambda; a new `report_uninferable_closure_params` guard (bare struct-ctor path + `infer_generic_call` + the module-qualified struct-ctor path `infer_qualified_struct_call`, so `c.Heap([], fn(a,b): a<b)` gets the same message) detects the genuine deadlock — an unbound type param appearing in an *unannotated* closure's PARAMETER slot — and emits "cannot infer type parameter `T` of `Heap`; annotate `Heap[T](…)` or the closure parameters", binding the param to `Unknown` to suppress the cascade. Scoped to parameter positions only (so `Mapped`-style `fn(T)->U` with `U` inferred from the body does NOT trip it) AND **probed against the closure body** (`trial_check_closure_args`, two trials — params left as the unbound `Ty::Param` vs. bound to `Unknown`): it fires ONLY when the body actually constrains the param (`a < b` errors unbound but is clean under `Unknown`), so a harmless body that doesn't need `T` (`each([], fn(x): print(x))`, `mapper([], fn(x): 42)`) keeps type-checking — it ran on `main` and must not be newly rejected — and an unrelated body error (errors under BOTH trials) is left for the normal per-arg check to report as itself. **C:** standalone `chezzi check std/…chz` reported phantom "unknown type 'RwShared'/'Shared'" — stdlib auto-privilege was granted only on the import path; `LoadedModule::is_std` (`src/resolver/mod.rs`) is now path-aware (file under `std_root()`), fixing the editor/LSP false positives; new lib test standalone-checks every `std/**/*.chz`. **D:** the committed per-module std test files (`collections`/`concurrent_collection`/`datetime`/`path`) existed but only 4 unrelated `_test.chz` were in the `cargo test` dogfood guard — all four are now registered (`src/test_runner.rs`). Docs: `docs/syntax.md` + `docs/stdlib.md` (turbofish + bare-empty constructor forms). `Shared`/`RwShared`/`Atomic` turbofish left OUT (value-first; tests intentionally reject it). **[SUPERSEDED 2026-06-30:** the value-first concurrency boxes now ALSO accept an optional, value-checked turbofish — see the "Turbofish construction on the value-first concurrency boxes" entry in *Current focus*.**]** Checker/resolver-only on the type side; both engines exercised; conformance green.
-- ✅ **Negative int literal/range patterns + match-doc qualifier fix** (2026-06-28, `auto-task/neg-match-patterns`) — two bundled match-pattern changes, one commit. PART 1 (parser/grammar only — AST/checker/compiler/vm/interp already `i64`-signed, NO runtime change): a leading `-` in a pattern was a hard parse error ("expected identifier, found '-'"). Root cause: `parse_pattern_primary` (`src/parser/mod.rs`) only entered its int branch on `Token::Int`. Fix: new `expect_pattern_int` helper (eats an optional `Token::Minus` then `expect_int`), and widened the literal arm to `Token::Int(_) | Token::Minus`, using it for the literal AND both range bounds → `-3:`, `-10..-5:`, `-10..5:`, `0..-5:` all parse (and compose with guards/or-patterns). Stays **int-only**: a negative float `-3.0:` now routes through `expect_int` and is rejected "expected integer, found float" (no float pattern added; positive `3.0:` unchanged). A negative literal arm is still refutable — `_` is still required for exhaustiveness. `docs/grammar.bnf` `<patternPrimary>`: +4 `MINUS` alternatives + int-only comment; new accept/reject conformance corpus (`tests/corpus/accept/match_neg.chz`, `tests/corpus/reject/match_neg_float.chz`). +2 parser tests, +2 VM `run_parity` tests (neg literal/range + neg-with-guard/or), +2 checker exhaustiveness tests. PART 2 (doc-only): `docs/syntax.md` match/enum examples showed BARE arms (`Circle(r):`, `Leaf:`) but the impl requires QUALIFIED `Enum.Variant` — qualified all of them (Shape/Tree/Color groups) to match the implementation + prose; each edited snippet CLI-`check`ed clean. i64::MIN (`-9223372036854775808`) stays unparseable (lexer rejects the magnitude) — known limit, unchanged. Two-engine parity (VM==interp) green; `cargo test conformance` green.
-- ✅ **`?` sum-type KIND soundness: a Result-`?` is rejected in an Option-returning fn (and vice versa)** (2026-06-27, `auto-task/try-kind-check`) — checker hole in `infer_try` (`src/checker/mod.rs`): the pre-computed `ret_err` collapsed both `Ty::Option(_)` and `Ty::Nil` enclosing returns to `None`, so (1) the `Ty::Result` operand arm SKIPPED its compatibility check whenever `ret_err==None` (a `Result`-`?` slipped through an `Option`-returning fn) and (2) the `Ty::Option` operand arm never inspected `current_ret` (an `Option`-`?` slipped through a `Result`-returning fn). The mistyped fn then returned the wrong sum-type and FAULTED a downstream exhaustive `match`/`??` at runtime ("no match arm for variant 'Err'/'None'") even though `check` passed. Fix (checker-only, no runtime/parity change — both engines inherit the stricter validation): dropped `ret_err`, folded a `current_ret` KIND match into each operand arm — `Result`-operand ⇒ enclosing must be `Result` (keeps the existing error-TYPE check) or `Nil`; `Option`-operand ⇒ enclosing must be `Option` or `Nil`; mismatched kinds get distinct errors ("'?' propagates a Result error, but the enclosing function returns Option, not Result" / "…returns Result, not Option"). `Nil` (top-level/`main`) still accepts either; `Unknown` enclosing (inferred-closure return) stays REJECTED. +4 checker tests (2 RED-first KIND-mismatch repros + 2 compatible-still-ok guards); existing error-TYPE + closure + recover guards stay green. Docs: `docs/syntax.md` §9 `?`-kind clarification.
-- ✅ **Inferred struct/enum method return types now FLOW (soundness; closed an unchecked-struct-body hole too)** (2026-06-27, `auto-task/method-return-inference`) — checker bare-key vs module-key divergence: in the `build_graph`/`check_graph` path the struct layout is stored under `<module-key>::Name`, but `struct_self_ty` + `infer_returns_pass`'s struct branch + the pass-2 struct body-check guard all looked up `self.structs.get(name)` by the BARE name → misses. Three coupled defects, one root: (1) an un-annotated method's inferred return was written to a non-existent slot, so `s: str = P(3).val()` silently accepted `int` into `str` (and protocol satisfaction read `Unknown` — an inferred `compare→bool` wrongly satisfied `Comparable`); (2) `struct_self_ty` built `Ty::Struct(BARE, [])` corrupting `self`'s type; (3) the pass-2 guard missed → struct method **bodies were entirely UNCHECKED** in the entry path (`y: str = self.x` passed). Plus (4) `infer_returns_pass`/`count_uninferred` had no `Enum` arm → enum method returns never inferred. Fix (checker-only, parity-safe by construction — no opcode/runtime change): bare_key the three struct lookups + the `Ty::Struct` key (mirror the already-correct `enum_self_ty`), and add the `Enum` arm. Turning struct-body checking ON surfaced a pre-existing latent checker bug — the duplicate-binder pre-pass (`first_duplicate_binder`) counted a bare nullary-variant ident (`None`) as a binder, so `(None, None, None)` was falsely "bound more than once" (only ever hit inside struct method bodies, e.g. `examples/slicing.chz`); fixed by passing it the same variant-name predicate `bind_subpattern` uses. +11 checker tests (entry_rejects/entry_ok on build_graph path — the single-module `ok()`/`rejects()` helpers mask the bug). Newtype method-return inference left intentionally unfixed (out of scope; `newtype_self_ty` already key-correct) — known consistency follow-up. Docs: `docs/syntax.md` return-inference note (methods + protocol satisfaction).
-- ✅ **Match-exhaustiveness soundness: guarded / refutable-payload variant arms no longer close a variant** (2026-06-27, `auto-task/match-exhaustiveness-guard`) — checker hole: `bind_match_arm` inserted a variant into the `covered` set UNCONDITIONALLY, ignoring (a) the arm's guard and (b) refutable payload sub-patterns (literals/ranges/nested-variants). So `E.A if false: …` / `Some(0): …` / `P.Pair(0, y): …` passed `chezzi check` then FAULTED at runtime ("no match arm for variant …"). Fix (checker-only, no runtime/parity change — both engines already fault identically): threaded `guarded: bool` into `bind_match_arm`, collected `payload_irref` from the existing `bind_subpattern` zip loop, and gated coverage on `!guarded && payload_irref`; duplicate-arm detection now keys on `covered.contains` (a PRIOR fully-closing arm) so the standard `E.A(n) if c` → `E.A(n)` guard-then-fallback idiom is ACCEPTED instead of wrongly rejected as "duplicate match arm". Tuple + int/str/bool literal scrutinees untouched (already conservative). +5 checker tests (4 RED-first repros + a duplicate-still-rejected regression guard). Docs: `docs/syntax.md` §8 refutable-payload clarification.
+- ✅ **Expected-type inference: a type ANNOTATION now pins a generic ctor / generic fn-call's type params** (2026-06-30, `auto-task/expected-type-generic-inference`) — checker had checking-mode ("expected type flows IN") only for empty container literals and closures bound to `fn`-typed annotations; a generic constructor or generic function call was always inferred bottom-up, with the annotation used only as a POST-HOC `assignable_w` check. So `a: Heap[int] = Heap([], fn(x, y): x < y)` (and the return-type / call-arg forms) hit the un-inferable-closure-param deadlock — the empty `[]` couldn't pin `T`, the bare comparator params couldn't either, and `report_uninferable_closure_params` fired *before* the annotation could break the tie ("cannot infer type parameter `T` of `Heap`" + "cannot infer type of parameter 'x'/'y'"). Fix (checker-only, parity-safe by construction — generics are type-erased at runtime, no opcode/runtime change): a new `expected_hint: Option<Ty>` field threads the expected type from the three annotation sites — a `let`-binding's declared type (`StmtKind::Let` non-`ref` single-name non-closure branch), a function's declared **return** type (`check_return` non-closure branch), and a call **argument**'s declared parameter type (`infer_arg` non-closure branch) — into `infer_call`, which `take()`s it FIRST (so nested arg calls see `None`, no leak) and threads it through every generic ctor/call dispatcher (`infer_named_call` struct/newtype arms, `infer_qualified_struct_call`, `infer_newtype_call`, `infer_variant_call`, `infer_generic_call`). Each consumes it via a new `seed_from_hint(hint, &<declared-return-SHAPE>, &mut sub)` (`Struct(key,[Param…])` / `NewType` / `Enum` / a generic fn's `sig.ret`) placed AFTER arg-unification + `recover_iter_elems`/`recover_index_args` and BEFORE `report_uninferable_closure_params` — so precedence is **turbofish > arguments > annotation** (`unify` only binds a still-free param; an arg that pins `T` differently is the usual mismatch). Once `T` is seeded the existing `check_generic_arg` re-infers the comparator closure in checking-mode against `fn(int,int)->bool`, so the secondary "cannot infer parameter 'x'/'y'" errors also vanish. Bonus (same seam, for free): generic **newtype** ctor annotations (`e: Stack[str] = Stack([])` — previously needed a turbofish) and a return-only param of a generic fn (`xs: List[int] = empty()` for `fn empty[T]() -> List[T]`, previously "cannot assign List[T] to List[int]"). +6 graph_tests (3 primary repros let/return/call-arg + qualified-ctor + free-fn-return + a turbofish/annotated-closure/args-win-mismatch regression guard), all RED-first. **Remaining gap (documented, not forced):** a generic ctor nested inside a *container literal* (`a: List[Heap[int]] = [Heap([], …)]`) — the outer expr is a list literal, never reaches `infer_call`, so it would need a separate `infer_list` element-hint; annotate the closure params or turbofish there. Docs: `docs/reference/syntax.md` (closure-param inference + generic-newtype §), `docs/reference/spec.md` (new expected-type-inference note + newtype ctor), `docs/reference/stdlib.md` (Heap §).
+- ✅ **Container constructors `List[T]()` / `Map[K,V]()` / `Set[T]()` + bare `List()`/`Map()`; un-inferable-closure-param diagnostic; std standalone-check; std-module test wiring** (2026-06-29, `auto-task/container-ctor-turbofish`) — four bundled audit findings. **A (the ask):** the turbofish was rejected on every builtin but `Channel` — `name_is_generic` (`src/checker/mod.rs`) now also accepts `List`/`Map`/`Set`, and the three ctor arms read the type args (1 for List/Set, 2 for Map; arity-checked), so `List[int]()` pins an empty list's element type, `List[int]([1,2])` checks elements against it, and bare `List()`/`Map()` are now legal (mirroring the already-legal `Set()`), refined from the expected type / first use. **A is NOT checker-only** (audit's claim was wrong): 0-arg `List()`/`Map()` were rejected at RUNTIME in both engines too, so `builtin_list`/`builtin_map` in `src/vm/mod.rs` AND `src/interp/mod.rs` now return an empty container for 0 args (Set's existing shape) — two-engine parity held via a new `examples/container_ctor.chz` golden. **B:** `Heap([], fn(a,b): a<b)` leaked a misleading "cannot compare T and T" from inside the lambda; a new `report_uninferable_closure_params` guard (bare struct-ctor path + `infer_generic_call` + the module-qualified struct-ctor path `infer_qualified_struct_call`, so `c.Heap([], fn(a,b): a<b)` gets the same message) detects the genuine deadlock — an unbound type param appearing in an *unannotated* closure's PARAMETER slot — and emits "cannot infer type parameter `T` of `Heap`; annotate `Heap[T](…)` or the closure parameters", binding the param to `Unknown` to suppress the cascade. Scoped to parameter positions only (so `Mapped`-style `fn(T)->U` with `U` inferred from the body does NOT trip it) AND **probed against the closure body** (`trial_check_closure_args`, two trials — params left as the unbound `Ty::Param` vs. bound to `Unknown`): it fires ONLY when the body actually constrains the param (`a < b` errors unbound but is clean under `Unknown`), so a harmless body that doesn't need `T` (`each([], fn(x): print(x))`, `mapper([], fn(x): 42)`) keeps type-checking — it ran on `main` and must not be newly rejected — and an unrelated body error (errors under BOTH trials) is left for the normal per-arg check to report as itself. **C:** standalone `chezzi check std/…chz` reported phantom "unknown type 'RwShared'/'Shared'" — stdlib auto-privilege was granted only on the import path; `LoadedModule::is_std` (`src/resolver/mod.rs`) is now path-aware (file under `std_root()`), fixing the editor/LSP false positives; new lib test standalone-checks every `std/**/*.chz`. **D:** the committed per-module std test files (`collections`/`concurrent_collection`/`datetime`/`path`) existed but only 4 unrelated `_test.chz` were in the `cargo test` dogfood guard — all four are now registered (`src/test_runner.rs`). Docs: `docs/reference/syntax.md` + `docs/reference/stdlib.md` (turbofish + bare-empty constructor forms). `Shared`/`RwShared`/`Atomic` turbofish left OUT (value-first; tests intentionally reject it). **[SUPERSEDED 2026-06-30:** the value-first concurrency boxes now ALSO accept an optional, value-checked turbofish — see the "Turbofish construction on the value-first concurrency boxes" entry in *Current focus*.**]** Checker/resolver-only on the type side; both engines exercised; conformance green.
+- ✅ **Negative int literal/range patterns + match-doc qualifier fix** (2026-06-28, `auto-task/neg-match-patterns`) — two bundled match-pattern changes, one commit. PART 1 (parser/grammar only — AST/checker/compiler/vm/interp already `i64`-signed, NO runtime change): a leading `-` in a pattern was a hard parse error ("expected identifier, found '-'"). Root cause: `parse_pattern_primary` (`src/parser/mod.rs`) only entered its int branch on `Token::Int`. Fix: new `expect_pattern_int` helper (eats an optional `Token::Minus` then `expect_int`), and widened the literal arm to `Token::Int(_) | Token::Minus`, using it for the literal AND both range bounds → `-3:`, `-10..-5:`, `-10..5:`, `0..-5:` all parse (and compose with guards/or-patterns). Stays **int-only**: a negative float `-3.0:` now routes through `expect_int` and is rejected "expected integer, found float" (no float pattern added; positive `3.0:` unchanged). A negative literal arm is still refutable — `_` is still required for exhaustiveness. `docs/reference/grammar.bnf` `<patternPrimary>`: +4 `MINUS` alternatives + int-only comment; new accept/reject conformance corpus (`tests/corpus/accept/match_neg.chz`, `tests/corpus/reject/match_neg_float.chz`). +2 parser tests, +2 VM `run_parity` tests (neg literal/range + neg-with-guard/or), +2 checker exhaustiveness tests. PART 2 (doc-only): `docs/reference/syntax.md` match/enum examples showed BARE arms (`Circle(r):`, `Leaf:`) but the impl requires QUALIFIED `Enum.Variant` — qualified all of them (Shape/Tree/Color groups) to match the implementation + prose; each edited snippet CLI-`check`ed clean. i64::MIN (`-9223372036854775808`) stays unparseable (lexer rejects the magnitude) — known limit, unchanged. Two-engine parity (VM==interp) green; `cargo test conformance` green.
+- ✅ **`?` sum-type KIND soundness: a Result-`?` is rejected in an Option-returning fn (and vice versa)** (2026-06-27, `auto-task/try-kind-check`) — checker hole in `infer_try` (`src/checker/mod.rs`): the pre-computed `ret_err` collapsed both `Ty::Option(_)` and `Ty::Nil` enclosing returns to `None`, so (1) the `Ty::Result` operand arm SKIPPED its compatibility check whenever `ret_err==None` (a `Result`-`?` slipped through an `Option`-returning fn) and (2) the `Ty::Option` operand arm never inspected `current_ret` (an `Option`-`?` slipped through a `Result`-returning fn). The mistyped fn then returned the wrong sum-type and FAULTED a downstream exhaustive `match`/`??` at runtime ("no match arm for variant 'Err'/'None'") even though `check` passed. Fix (checker-only, no runtime/parity change — both engines inherit the stricter validation): dropped `ret_err`, folded a `current_ret` KIND match into each operand arm — `Result`-operand ⇒ enclosing must be `Result` (keeps the existing error-TYPE check) or `Nil`; `Option`-operand ⇒ enclosing must be `Option` or `Nil`; mismatched kinds get distinct errors ("'?' propagates a Result error, but the enclosing function returns Option, not Result" / "…returns Result, not Option"). `Nil` (top-level/`main`) still accepts either; `Unknown` enclosing (inferred-closure return) stays REJECTED. +4 checker tests (2 RED-first KIND-mismatch repros + 2 compatible-still-ok guards); existing error-TYPE + closure + recover guards stay green. Docs: `docs/reference/syntax.md` §9 `?`-kind clarification.
+- ✅ **Inferred struct/enum method return types now FLOW (soundness; closed an unchecked-struct-body hole too)** (2026-06-27, `auto-task/method-return-inference`) — checker bare-key vs module-key divergence: in the `build_graph`/`check_graph` path the struct layout is stored under `<module-key>::Name`, but `struct_self_ty` + `infer_returns_pass`'s struct branch + the pass-2 struct body-check guard all looked up `self.structs.get(name)` by the BARE name → misses. Three coupled defects, one root: (1) an un-annotated method's inferred return was written to a non-existent slot, so `s: str = P(3).val()` silently accepted `int` into `str` (and protocol satisfaction read `Unknown` — an inferred `compare→bool` wrongly satisfied `Comparable`); (2) `struct_self_ty` built `Ty::Struct(BARE, [])` corrupting `self`'s type; (3) the pass-2 guard missed → struct method **bodies were entirely UNCHECKED** in the entry path (`y: str = self.x` passed). Plus (4) `infer_returns_pass`/`count_uninferred` had no `Enum` arm → enum method returns never inferred. Fix (checker-only, parity-safe by construction — no opcode/runtime change): bare_key the three struct lookups + the `Ty::Struct` key (mirror the already-correct `enum_self_ty`), and add the `Enum` arm. Turning struct-body checking ON surfaced a pre-existing latent checker bug — the duplicate-binder pre-pass (`first_duplicate_binder`) counted a bare nullary-variant ident (`None`) as a binder, so `(None, None, None)` was falsely "bound more than once" (only ever hit inside struct method bodies, e.g. `examples/slicing.chz`); fixed by passing it the same variant-name predicate `bind_subpattern` uses. +11 checker tests (entry_rejects/entry_ok on build_graph path — the single-module `ok()`/`rejects()` helpers mask the bug). Newtype method-return inference left intentionally unfixed (out of scope; `newtype_self_ty` already key-correct) — known consistency follow-up. Docs: `docs/reference/syntax.md` return-inference note (methods + protocol satisfaction).
+- ✅ **Match-exhaustiveness soundness: guarded / refutable-payload variant arms no longer close a variant** (2026-06-27, `auto-task/match-exhaustiveness-guard`) — checker hole: `bind_match_arm` inserted a variant into the `covered` set UNCONDITIONALLY, ignoring (a) the arm's guard and (b) refutable payload sub-patterns (literals/ranges/nested-variants). So `E.A if false: …` / `Some(0): …` / `P.Pair(0, y): …` passed `chezzi check` then FAULTED at runtime ("no match arm for variant …"). Fix (checker-only, no runtime/parity change — both engines already fault identically): threaded `guarded: bool` into `bind_match_arm`, collected `payload_irref` from the existing `bind_subpattern` zip loop, and gated coverage on `!guarded && payload_irref`; duplicate-arm detection now keys on `covered.contains` (a PRIOR fully-closing arm) so the standard `E.A(n) if c` → `E.A(n)` guard-then-fallback idiom is ACCEPTED instead of wrongly rejected as "duplicate match arm". Tuple + int/str/bool literal scrutinees untouched (already conservative). +5 checker tests (4 RED-first repros + a duplicate-still-rejected regression guard). Docs: `docs/reference/syntax.md` §8 refutable-payload clarification.
 - ✅ **str methods (split-brain, minimal subset) + safe numeric parse** (2026-06-23,
   `auto-task/str-methods-safe-parse`) — gaps #1 (str half) + #7. Added 11 receiver methods on `str`
   that forward to the existing `std.str` free fns (`ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/
@@ -15276,8 +15276,8 @@ branch names) is in the git log.
   `count` guard the empty-arg edge, `repeat` n≤0 → `""`. The `std.str` free fns are untouched
   (`examples/str_more.chz` still green). Golden `examples/str_methods.chz` exercises every method incl.
   multibyte + `Some`/`None`, asserted byte-identical across all three engines. Out of scope (left open):
-  the full `std.iter`/`std.cmp` receiver re-export half of #1. Docs: `docs/stdlib.md` str method table +
-  `std.str` note, `docs/syntax.md` method cheat-sheet, `gaps.md` (#1 str half + #7 → resolved log).
+  the full `std.iter`/`std.cmp` receiver re-export half of #1. Docs: `docs/reference/stdlib.md` str method table +
+  `std.str` note, `docs/reference/syntax.md` method cheat-sheet, `gaps.md` (#1 str half + #7 → resolved log).
 - ✅ **Left-shift overflow now a recoverable fault** (2026-06-23, `auto-task/shift-overflow`) — `1 << 63`
   silently wrapped to `i64::MIN`, violating the "every i64 overflow is a recoverable fault" policy
   (the shift handler validated only the shift-*amount* range, never value overflow, unlike `+ - * / %`).
@@ -15285,8 +15285,8 @@ branch names) is in the git log.
   round-trip check — `(a << b) >> b != a` ⇒ raise the shared `integer overflow in Shl`. Round-trip-safe
   shifts incl. `-1 << 63 == INT_MIN` still succeed; `>>` is unchanged (arithmetic, never overflows).
   Golden `examples/edge_cases.chz` `shift_ovf63` probe pins it on all three engines + a VM unit test
-  guards the non-overflow regressions. Docs: `gaps.md` nit resolved, `docs/spec.md` overflow policy +
-  `docs/syntax.md` shift note updated.
+  guards the non-overflow regressions. Docs: `gaps.md` nit resolved, `docs/reference/spec.md` overflow policy +
+  `docs/reference/syntax.md` shift note updated.
 - ✅ **`list.map`/`.filter`/`.fold` OOB-on-shrink fixed** (2026-06-21, `auto-task/list-hof-shrink-oob`) —
   VM `list_hof` captured `n = v.len()` once then indexed the *live* heap list, so a callback that
   shrank the receiver (`xs.pop()`) ran a stale index past the now-shorter `Vec` → `index out of bounds`
@@ -15296,7 +15296,7 @@ branch names) is in the git log.
   map/filter/fold iterate the receiver's elements as of call time; a callback that shrinks **or** grows
   the receiver does not perturb iteration (consistent with comprehensions/`for`-loops/Python). Tests:
   `map`/`filter`/`fold`_shrinking_callback_no_panic + golden `examples/list_hof_shrink.chz` (VM==interp).
-  Docs: `docs/stdlib.md` (snapshot note), `gaps.md` (entry → ✅ RESOLVED).
+  Docs: `docs/reference/stdlib.md` (snapshot note), `gaps.md` (entry → ✅ RESOLVED).
 
 - ✅ **User-callable `panic(msg: str)` builtin** (2026-06-20, `auto-task/panic-builtin`) — exposes a
   user-facing way to raise the **same** recoverable `RuntimeError` the runtime already uses internally
@@ -15326,8 +15326,8 @@ branch names) is in the git log.
   and key on the same `(enum, variant)` identity as the bare/named-import form, so VM == interp ==
   `--serial` == `--parallel` byte-for-byte (exhaustiveness unchanged, by identity). A bare user-variant
   is still rejected with the "write it qualified" hint; `Ok/Err/Some/None` stay bare; a 2-part
-  `module.Variant` (dropping the enum) is NOT accepted. Docs: `docs/grammar.bnf` (+conformance green),
-  `docs/syntax.md` match section.
+  `module.Variant` (dropping the enum) is NOT accepted. Docs: `docs/reference/grammar.bnf` (+conformance green),
+  `docs/reference/syntax.md` match section.
 - ✅ **C-ABI FFI: module-qualified type at the extern boundary (`mod.Type` / `mod.Alias`)**
   (2026-06-20, `auto-task/ffi-qualified-type`) — fixed a scoping bug in the module-scoped-types
   feature: a module-qualified type written at an `extern` boundary (`cdefs.DivT`, `w3.Len`, AST
@@ -15591,8 +15591,8 @@ branch names) is in the git log.
   `Shared[T]`). `ref` is now a keyword (corpus-safe; `import std.ref` paths still parse via a path-segment
   exception). Goldens `examples/ref_binding.chz` + `examples/ref_airlock.chz` (byte-identical on
   run/--serial/--interp); parser/desugar/checker unit tests + grammar.bnf REF terminal + corpus
-  accept/reject fixtures. Docs: `docs/syntax.md` §3, `gaps.md` (RESOLVED), `docs/future.md` (item 12
-  landed), `docs/concurrency.md`. `cargo test` green (2052+), `cargo test conformance` green, clippy clean.
+  accept/reject fixtures. Docs: `docs/reference/syntax.md` §3, `gaps.md` (RESOLVED), `docs/design/roadmap.md` (item 12
+  landed), `docs/reference/concurrency.md`. `cargo test` green (2052+), `cargo test conformance` green, clippy clean.
 - ✅ **`ref T` arg coercion is type-directed (indirect callees + closures + protocols)** (2026-06-17) —
   follow-up hardening the `ref` arg alias/deref/error decision so it follows the *resolved* callee, not a
   purely-syntactic name lookup. The decision still lives in `src/desugar/mod.rs` (it must — desugar runs
@@ -15610,7 +15610,7 @@ branch names) is in the git log.
   parser/desugar/checker tests. Known boundary: a method whose receiver's struct type is NOT statically
   known locally (e.g. `foo().apply(r)`) still resolves only when all same-named methods agree on ref-ness
   — otherwise it falls back to deref (the checker then gives a transparent `ref T` error). Docs:
-  `docs/syntax.md` §3. `cargo test` green (2068), conformance green, clippy clean.
+  `docs/reference/syntax.md` §3. `cargo test` green (2068), conformance green, clippy clean.
 - ✅ **C-ABI opaque `ptr` handle for `extern "lib":`** (2026-06-18) — the first half of the FFI
   handle-unlock: a C library built around a `void*` handle (`FILE*`/`sqlite3*`/`create→use→destroy`)
   can now be driven over a dlopen'd `.so` with **no chezzi recompile**. New builtin opaque type `ptr`
@@ -15731,7 +15731,7 @@ branch names) is in the git log.
   ("use Shared[T]"); bounded pool, parent participates inline.
 - ✅ **B3.0–B3.2 — `WireValue` airlock + cores into `Arc<…Core>` + `Arc<Program>` + isolated worker VMs**
   — `deep_clone` → wire round-trip; `Channel`/`Shared`/`Executor` cores out of the heap; cross-heap safety
-  enforced (`ensure_crossable`). All single-thread, byte-identical. See `docs/concurrency-b3.md`.
+  enforced (`ensure_crossable`). All single-thread, byte-identical. See `docs/history/designs/concurrency-b3.md`.
 - ✅ **Concurrency A1 — `Channel.try_recv() -> T?`** — non-blocking poll (both engines), un-deferred once
   B1/B2 landed.
 - ✅ **Concurrency C5 / Group B — B1 + B2 cooperative fibers + blocking `recv`** (VM) — suspendable
@@ -15807,7 +15807,7 @@ branch names) is in the git log.
   `T?`/`T!` sugar, expression-valued `match`/`if`, Go-style error accumulation.
 - ✅ **M3 — tree-walk interpreter** — full expr/stmt set, `?` operator, interpolation, 256 MB-stack thread
   + `MAX_CALL_DEPTH` guard.
-- ✅ **M2.5 — canonical grammar + conformance** — `docs/grammar.bnf` executed via the `bnf` crate,
+- ✅ **M2.5 — canonical grammar + conformance** — `docs/reference/grammar.bnf` executed via the `bnf` crate,
   differential-tested vs the parser. `cargo test conformance`.
 - ✅ **M2 — parser → AST** — recursive descent + Pratt; spans; depth-capped.
 - ✅ **M1 — lexer** — full `examples/hello.chz` incl. Indent/Dedent; string escapes, numeric underscores.
@@ -15839,7 +15839,7 @@ compile and fixed). All TDD'd; suite at **1630 green**.
   headers-carrying form stays in `is_blocking()` and offloads to the `--parallel` dirty pool without
   pinning a core worker. Two-engine parity locked by `request_verbs_and_headers_parity_against_local_server`.
 - **Considered, not built:** `json.decode[T]` — already shipped (`src/json_decode.rs` + parser/compiler/
-  checker); first-class compiled `Regex` — deferred, blocked on Level-3 Userdata (see `docs/spec.md`).
+  checker); first-class compiled `Regex` — deferred, blocked on Level-3 Userdata (see `docs/reference/spec.md`).
 
 ## Syntax ergonomics (post-M18, 2026-06-13)
 
@@ -15856,7 +15856,7 @@ then `parser::parse`; interp untouched). TDD'd, conformance + clippy clean; suit
   call arguments + fn/closure params (`[1,2,]` ≡ `[1,2]`; lone `[,]`/`(,)`/`f(,)` still error).
 - **One-element tuples** — `(x,)` is now a 1-tuple (was rejected); `(x)` stays grouping. Flipped the
   `reject/one_element_tuple` corpus → `accept/`, added `accept/trailing_comma.chz`, and relaxed the
-  `<primary>`/`<params>`/`<argList>` productions in `docs/grammar.bnf` (conformance green). Golden:
+  `<primary>`/`<params>`/`<argList>` productions in `docs/reference/grammar.bnf` (conformance green). Golden:
   `examples/multiline_literals.chz` (VM == interp == `--parallel`).
 
 ## QoL syntax batch (post-M18, 2026-06-14)
@@ -15900,19 +15900,19 @@ VM == interp == `--parallel` on every registered example. Conformance + clippy c
   `std.request` wants a client-side timeout, and `std.fs`/`std.io` stay uninterruptible because Go
   does not cancel those either. Full design, the three measured traps (process **group** not PID; kill
   `.output()`; `TERM`→grace→`KILL`), the ambient-vs-explicit divergence from Go, the four phases and
-  the verification bar: [`docs/concurrency.md` §6h](docs/concurrency.md).
+  the verification bar: [`docs/reference/concurrency.md` §6h](docs/reference/concurrency.md).
 
 - VM/GC optimizations beyond M19 — NaN-boxing (own milestone), register VM, generational/incremental GC,
-  Cranelift AOT/JIT. Written up in [`docs/future.md`](docs/future.md).
+  Cranelift AOT/JIT. Written up in [`docs/design/roadmap.md`](docs/design/roadmap.md).
 - **Bug-discovery track (pre-JIT)** — automated bug finding. ✅ **CPython output-differential built**
   (`src/difftest/`, see Current focus). Remaining: cargo-fuzz parser (lever #1), Miri/sanitizers,
-  proptest, metamorphic. Ranked plan + rationale in [`docs/bug-discovery.md`](docs/bug-discovery.md).
+  proptest, metamorphic. Ranked plan + rationale in [`docs/contributing/bug-discovery.md`](docs/contributing/bug-discovery.md).
   Recommended to stand up Tier 1 before the JIT, so the reference semantics are fuzzed + differentially validated first.
 - ~~**M-C — implicit nurseries**~~ — **shipped 2026-06-12** (see Concurrency above).
 
 ### Ideas — record-only (not scheduled)
 
-- **Native FFI / Rust-library bindings** — let Chezzi call into Rust libs; design sketch in `docs/spec.md`
+- **Native FFI / Rust-library bindings** — let Chezzi call into Rust libs; design sketch in `docs/reference/spec.md`
   → *Standard library* → "Future idea — native FFI". **Dynamic C-ABI FFI v1 has since shipped** (`extern
   "lib":` scalar calls via dlopen+libffi — see "Done" below; **plus opaque `ptr` handles, `char*`
   ownership (`owned_str`/`str?`), flat-scalar structs by value, and sync scalar callbacks — all

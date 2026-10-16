@@ -3,7 +3,7 @@
 # `parse` is recursive-descent in pure Chezzi, so nesting depth in the INPUT becomes call-stack
 # depth in the program; past `MAX_NEST_DEPTH` (2000, measured — the release binary dies at nesting
 # depth 5000 with a bare document) it now returns a clean `!e` instead of aborting the process
-# (`docs/gaps.md` W8-5). `stringify` has no `T!E` to put an error in, so it faults instead, with a
+# (`docs/contributing/gaps.md` W8-5). `stringify` has no `T!E` to put an error in, so it faults instead, with a
 # message naming the cause. `json.len` faults on the three scalar variants instead of silently
 # returning `0`. Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
@@ -58,7 +58,7 @@ test fn parse_past_depth_limit_returns_err_and_keeps_running():
     assert true, "still alive"
 
 test fn parse_original_repro_stays_alive():
-    # The exact shape from docs/gaps.md W8-5's original repro (100k-deep, well past the limit).
+    # The exact shape from docs/contributing/gaps.md W8-5's original repro (100k-deep, well past the limit).
     huge := "[".repeat(100000) + "]".repeat(100000)
     match json.parse(huge):
         ?_: assert false, "expected Err on a 100k-deep document"
@@ -101,7 +101,7 @@ test fn len_containers_count_scalars_fault():
 test fn stringify_round_trips_negative_zero_and_large_int():
     # W8-35 — numbers go through f64, so -0.0 loses its sign and a 19-digit
     # integer leaves in exponent form instead of round-tripping byte-exact
-    # (docs/gaps.md W8-35; CPython and Go both round-trip these).
+    # (docs/contributing/gaps.md W8-35; CPython and Go both round-trip these).
     match json.parse("-0.0"):
         ?j: assert json.stringify(j) == "-0.0"
         !e: assert false, "expected Ok: " + e.message()
@@ -111,7 +111,7 @@ test fn stringify_round_trips_negative_zero_and_large_int():
 
 test fn parse_error_names_a_location():
     # W8-36 — a json.parse error carries no line/column/offset, so a failure
-    # in a large document locates nothing (docs/gaps.md W8-36).
+    # in a large document locates nothing (docs/contributing/gaps.md W8-36).
     match json.parse(r'{"a": 1,
  "b": }'):
         ?_: assert false, "expected a parse Err"

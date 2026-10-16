@@ -18,7 +18,7 @@ impl Parser {
         Ok(Module { stmts })
     }
 
-    /// THE list of top-level-only declarations (`<item>` in `docs/grammar.bnf`): each item keyword,
+    /// THE list of top-level-only declarations (`<item>` in `docs/reference/grammar.bnf`): each item keyword,
     /// the name its block-position diagnostic uses, and its parser. [`Self::parse_item`] dispatches
     /// through it at module level; [`Self::parse_stmt`], which parses every block, rejects every
     /// keyword on it. The checker, compiler and resolver harvest declarations from module-level
@@ -150,7 +150,7 @@ impl Parser {
 
     // ----- statements -----
 
-    /// THE list of `<compoundStmt>` starts (`docs/grammar.bnf`): the parser of each statement that
+    /// THE list of `<compoundStmt>` starts (`docs/reference/grammar.bnf`): the parser of each statement that
     /// owns a block and ends at its `Dedent`. [`Self::parse_stmt_in`] dispatches through it, and
     /// refuses every start on it as an inline body. `next` is the token after `tok`: `fn (` opens a
     /// closure literal (an expression) and `spawn <call>` is a simple statement, so neither is here.
@@ -268,7 +268,7 @@ impl Parser {
         if self.depth > MAX_DEPTH {
             return Err(self.err("statement nested too deeply".to_string()));
         }
-        // A block never holds an item: `<stmts>` does not reach `<item>` (`docs/grammar.bnf`).
+        // A block never holds an item: `<stmts>` does not reach `<item>` (`docs/reference/grammar.bnf`).
         if let Some((kind, _)) = Self::item_keyword(self.peek()) {
             return Err(self.err(format!("{kind} must be a top-level declaration")));
         }

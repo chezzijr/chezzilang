@@ -4,7 +4,7 @@
 # list/tuple/map/set, a struct field, or an enum payload is quoted and escaped. Before this,
 # `["a", "b"]` and `["a, b"]` both printed `[a, b]` and `[""]` printed `[]` — different values with
 # identical output, which is worse here than in most languages because printed output is what the
-# golden corpus compares (`docs/gaps.md` §W7-25).
+# golden corpus compares (`docs/contributing/gaps.md` §W7-25).
 
 import Shared from std.concurrency
 
@@ -105,6 +105,6 @@ test fn non_printable_characters_escape():
 # Combining marks (Mn/Mc/Me) are the VISIBLE content of Devanagari/Hebrew/Arabic/Thai text, not
 # invisible whitespace like U+00A0/U+200B above — `char::escape_debug` wrongly lumps them in with
 # those, so a nested Devanagari string renders as escaped hex instead of literal text (TICKET-081/
-# TICKET-088, `docs/gaps.md` W7-25). CPython's `repr` prints them literally.
+# TICKET-088, `docs/contributing/gaps.md` W7-25). CPython's `repr` prints them literally.
 test fn combining_marks_stay_literal_in_nested_repr():
     assert str(["नमस्ते"]) == "['नमस्ते']"

@@ -21,7 +21,7 @@ test fn float_repr_breaks_an_exact_tie_to_even():
     # When the two shortest candidate reprs are EXACTLY equidistant from the value, CPython
     # (David Gay's dtoa) breaks the tie to EVEN. Rust's shortest formatter breaks it away from
     # zero, which used to leak straight into `str`/`print`/interpolation/`json.stringify`.
-    # docs/gaps.md W7-32; every expected string below is a real CPython 3.14.6 `repr()`.
+    # docs/contributing/gaps.md W7-32; every expected string below is a real CPython 3.14.6 `repr()`.
     assert str(771.5462036132812) == "771.5462036132812"     # exact 771.54620361328125
     assert str(1007730844620651.2) == "1007730844620651.2"   # exact 1007730844620651.25
     assert str(-887777373534812.25) == "-887777373534812.2"  # negative

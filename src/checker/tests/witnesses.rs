@@ -1143,7 +1143,7 @@ fn a_nested_literal_after_an_escape_composes() {
     );
 }
 
-/// The `docs/gaps.md` M24-6 repro itself: a fragment past a REAL newline points at the fragment,
+/// The `docs/contributing/gaps.md` M24-6 repro itself: a fragment past a REAL newline points at the fragment,
 /// not at an offset from the literal's opening delimiter that runs off the end of its line.
 #[test]
 fn a_fragment_past_a_real_newline_points_at_the_fragment() {
@@ -1211,7 +1211,7 @@ fn padded_fragment_column_points_past_the_padding() {
     assert_eq!((e.span.line, e.span.col), (1, 12));
 }
 
-/// A LEX error inside a hole reports its REAL line AND column (`docs/gaps.md` M24-6 + M24-7). The
+/// A LEX error inside a hole reports its REAL line AND column (`docs/contributing/gaps.md` M24-6 + M24-7). The
 /// lexer lexes the hole in place, so the position is the lexer's own; there is no second lexer
 /// whose cursor says line 1.
 #[test]

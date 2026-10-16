@@ -1,7 +1,7 @@
 //! Panic-fuzz harness: feed adversarial / malformed inputs to `chezzi check` (the full front-end —
 //! `lexer` → `parser` → `checker`) and assert the crash-safety invariant: malformed input yields a
 //! clean diagnostic, never a Rust **panic** or a **signal** crash (SIGSEGV / SIGABRT /
-//! stack-overflow). Bug-discovery lever #1 (`docs/bug-discovery.md`).
+//! stack-overflow). Bug-discovery lever #1 (`docs/contributing/bug-discovery.md`).
 //!
 //! Self-contained, no `crate::` references, so the same sources compile into both the
 //! `tests/panicfuzz.rs` CI gate and the `src/bin/panicfuzz.rs` long-runner via `#[path]`. Chezzi now

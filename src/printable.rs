@@ -7,7 +7,7 @@
 //! here — is a Unicode-VERSION skew, not something this table chases: every one of those 4764 is
 //! category `Cn` to CPython 3.14.7 (`unicodedata.unidata_version == 16.0.0`), i.e. assigned after
 //! Unicode 16 in rustc's newer tables. Matching that would mean pinning Chezzi's printability to a
-//! specific CPython release, so it is documented (`docs/gaps.md` W7-25, `src/slice.rs`) instead.
+//! specific CPython release, so it is documented (`docs/contributing/gaps.md` W7-25, `src/slice.rs`) instead.
 //!
 //! Regenerate with the two programs in TICKET-081's `## Digest` if rustc's or CPython's Unicode
 //! tables move; do not hand-edit a range.

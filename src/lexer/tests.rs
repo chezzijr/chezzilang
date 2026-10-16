@@ -1652,7 +1652,7 @@ fn span_file_is_stamped_by_the_lex_and_carried_by_hole_tokens() {
     assert!(saw_hole, "expected one hole");
 }
 
-/// A `LexError` points at the offending CHARACTER, on both axes (`docs/gaps.md` M24-7).
+/// A `LexError` points at the offending CHARACTER, on both axes (`docs/contributing/gaps.md` M24-7).
 ///
 /// Every expected column below is hand-counted from the source, from the position rule the
 /// ancestors set (measured 2026-08-14, rustc 1.x):

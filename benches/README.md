@@ -1,8 +1,8 @@
 # benches/ — Chezzi vs CPython microbenchmarks
 
 A small sweep that measures the Chezzi VM against CPython on the same workload, to track
-where the runtime spends time and whether the optimization track (`docs/future.md §4`,
-roadmap **M19**) is moving the numbers. The baseline lives in **[`docs/benchmarks.md`](../docs/benchmarks.md)**.
+where the runtime spends time and whether the optimization track (`docs/design/roadmap.md §4`,
+roadmap **M19**) is moving the numbers. The baseline lives in **[`docs/contributing/benchmarks.md`](../docs/contributing/benchmarks.md)**.
 
 ## Layout
 
@@ -41,7 +41,7 @@ cargo run -- run benches/run.chz
 `run.chz` builds the release binary (`cargo build --release`), then runs each pair under
 [`hyperfine`](https://github.com/sharkdp/hyperfine) (`--warmup 2 -N`). It needs `hyperfine`
 and `python3` on `PATH`. Per-bench markdown tables are exported to `benches/last-*.md`
-(gitignored) — copy the figures into `docs/benchmarks.md` when refreshing the baseline.
+(gitignored) — copy the figures into `docs/contributing/benchmarks.md` when refreshing the baseline.
 
 To check a single pair by hand:
 
@@ -62,7 +62,7 @@ RUNS=3 python3 maxrss.py ./target/release/chezzi run chz/map.chz   # Chezzi
 
 RSS is the honest number — the internal `CHEZZI_HEAP_STATS=1 peak_live_bytes` probe
 under-measures (ignores off-heap `Vec`/`HashMap` capacity). Baseline table + reading:
-`docs/benchmarks.md` → "Memory baseline — Go vs Chezzi".
+`docs/contributing/benchmarks.md` → "Memory baseline — Go vs Chezzi".
 
 ## Scheduler ancestor references (Go / Rust / Python vs `--threads`)
 
@@ -70,8 +70,8 @@ under-measures (ignores off-heap `Vec`/`HashMap` capacity). Baseline table + rea
 `examples/primes_parallel.chz` (4-task CPU fan-out), each taking a worker-count argument
 (`GOMAXPROCS` env for Go, argv N for Rust, `max_workers` argv for Python) so a sweep lines up
 against `chezzi run --threads=N`. Used to check the M:N scheduler's idle-worker policy
-(`docs/gaps.md` W8-7/W8-8) against the owning ancestors instead of reasoning about it — see
-`docs/benchmarks.md` → "W8-7 / W8-8 idle-worker-policy fix".
+(`docs/contributing/gaps.md` W8-7/W8-8) against the owning ancestors instead of reasoning about it — see
+`docs/contributing/benchmarks.md` → "W8-7 / W8-8 idle-worker-policy fix".
 
 ## Scheduler cost shapes (`sched/`, no CPython twin)
 
@@ -80,7 +80,7 @@ where a run-wide send-wake walk (`MnSched::wake_run_wide`) is most likely to cos
 once per send on a single channel, and a long registry (one live sched per nursery-nesting level).
 `tests/bench_coverage.rs` and `tests/difftest.rs` only scan `benches/chz/` + `benches/py/` by name,
 so `sched/` sits outside both gates and outside `run.chz`'s driver list — CPython has no nursery, so
-neither fixture has a twin to pair with. Time by hand (see `docs/benchmarks.md`'s TICKET-099 section):
+neither fixture has a twin to pair with. Time by hand (see `docs/contributing/benchmarks.md`'s TICKET-099 section):
 
 ```sh
 CHEZZI_THREADS=4 ./target/release/chezzi run benches/sched/send_one_channel.chz  # 19999900000

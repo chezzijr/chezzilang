@@ -9,7 +9,7 @@ struct DivT:
     quot: int32
     rem: int32
 
-# `libc` is a LOGICAL library name the loader resolves per host (docs/syntax.md §12b).
+# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax.md §12b).
 
 extern "libc":
     fn div(numer: int32, denom: int32) -> DivT

@@ -144,7 +144,7 @@ fn do_find_all(pat: &str, s: &str) -> Result<Vec<MatchData>, String> {
 
 /// Python's `re.sub` replacement dialect is not RE2's: `\1` and `\g<name>` are group references in
 /// Python, and mean NOTHING to the `regex` crate's expander, which copies them through as literal
-/// text — so the call returned a plausible `Ok` (`docs/gaps.md` W8-6). Reject both and name the RE2
+/// text — so the call returned a plausible `Ok` (`docs/contributing/gaps.md` W8-6). Reject both and name the RE2
 /// form. A backslash NOT followed by a digit or `g<` stays literal, so `r"\n"` and `r"C:\tmp"` are
 /// untouched; that is the only way left to put a backslash in a replacement, and it is deliberate.
 fn check_replacement_dialect(repl: &str) -> Result<(), String> {
@@ -630,19 +630,19 @@ mod tests {
         assert!(e.contains("regex parse error"), "{e}");
     }
 
-    /// W8-6's doc half: `docs/stdlib.md` documented the OLD `Ok('\2/\1')` result. That sentence is now
+    /// W8-6's doc half: `docs/reference/stdlib.md` documented the OLD `Ok('\2/\1')` result. That sentence is now
     /// false, and prose has no other gate — this one reads the shipped file (`src/main.rs:707` compiles
     /// the same doc into `chezzi docs`), so a revert of the fix without a revert of the doc fails here.
     #[test]
     fn stdlib_doc_no_longer_claims_the_old_ok_result() {
-        let doc = include_str!("../../docs/stdlib.md");
+        let doc = include_str!("../../docs/reference/stdlib.md");
         assert!(
             !doc.contains(r"Ok('\\2/\\1')"),
-            "docs/stdlib.md still claims replace_all(r\"(\\d+)-(\\d+)\", \"10-20\", r\"\\2/\\1\") returns Ok"
+            "docs/reference/stdlib.md still claims replace_all(r\"(\\d+)-(\\d+)\", \"10-20\", r\"\\2/\\1\") returns Ok"
         );
         assert!(
             doc.contains("W8-6") && doc.contains("closed 2026-08-27"),
-            "docs/stdlib.md must record W8-6 as closed on 2026-08-27"
+            "docs/reference/stdlib.md must record W8-6 as closed on 2026-08-27"
         );
     }
 }

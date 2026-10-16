@@ -1,7 +1,7 @@
 # Chezzi — Claude Code Guide
 
 Chezzi is a fast, statically-typed, Python-feel scripting language, hand-built in Rust.
-Full design + roadmap: **[`docs/spec.md`](docs/spec.md)**. Syntax cheat-sheet: **[`docs/syntax.md`](docs/syntax.md)**. Stdlib/builtin reference: **[`docs/stdlib.md`](docs/stdlib.md)**. Canonical grammar: **[`docs/grammar.bnf`](docs/grammar.bnf)** (executed + drift-checked by `cargo test conformance`). Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**. Bug-discovery strategy (fuzzing / CPython differential / sanitizers, pre-JIT): **[`docs/bug-discovery.md`](docs/bug-discovery.md)**. Hard-won engineering rules (distilled from working memory — read the section for the area you touch): **[`docs/lessons.md`](docs/lessons.md)**. **Where each fact lives (its one owner) and which file owns each topic: [`docs/owners.md`](docs/owners.md) — read it before you grep.** The docs are also emitted by the CLI: `chezzi docs <topic>` / `chezzi docs` (full LLM bundle).
+Full design + roadmap: **[`docs/reference/spec.md`](docs/reference/spec.md)**. Syntax cheat-sheet: **[`docs/reference/syntax.md`](docs/reference/syntax.md)**. Stdlib/builtin reference: **[`docs/reference/stdlib.md`](docs/reference/stdlib.md)**. Canonical grammar: **[`docs/reference/grammar.bnf`](docs/reference/grammar.bnf)** (executed + drift-checked by `cargo test conformance`). Progress tracker: **[`PROGRESS.md`](PROGRESS.md)**. Bug-discovery strategy (fuzzing / CPython differential / sanitizers, pre-JIT): **[`docs/contributing/bug-discovery.md`](docs/contributing/bug-discovery.md)**. Hard-won engineering rules (distilled from working memory — read the section for the area you touch): **[`docs/contributing/lessons.md`](docs/contributing/lessons.md)**. **Where each fact lives (its one owner) and which file owns each topic: [`docs/contributing/owners.md`](docs/contributing/owners.md) — read it before you grep.** The docs are also emitted by the CLI: `chezzi docs <topic>` / `chezzi docs` (full LLM bundle).
 
 ## How we work
 
@@ -15,8 +15,8 @@ Claude implements directly. Ship working, tested code each session.
 - **Docs are part of the change, not a follow-up.** When a change adds/alters/removes observable
   behavior — syntax, stdlib/builtin surface, engine semantics, a flag, a limit lifted/added, or a perf
   delta — update the affected `.md` in the **same commit**: `PROGRESS.md` always, plus as relevant
-  `docs/syntax.md`, `docs/spec.md`, `docs/grammar.bnf`, `docs/concurrency*.md`, `docs/future.md`,
-  `docs/benchmarks.md`. Grep the docs for any now-stale claim about what you changed (`deferred`,
+  `docs/reference/syntax.md`, `docs/reference/spec.md`, `docs/reference/grammar.bnf`, `docs/concurrency*.md`, `docs/design/roadmap.md`,
+  `docs/contributing/benchmarks.md`. Grep the docs for any now-stale claim about what you changed (`deferred`,
   `experimental`, `not yet`, `follow-up`, `mooted`) and fix or delete it. A green build with stale docs
   is not done.
 - Match the existing code's style and patterns; reuse before adding new abstractions.
@@ -25,7 +25,7 @@ Claude implements directly. Ship working, tested code each session.
   another copy, clause or veto next to the failing site in a family that already has sibling fixes.
   A new "Mirrors the checker's …" / "keep in sync with …" comment, or a drift test with an exemption,
   is a red flag. Family fixes land with one test that enumerates the whole grid. Why and where:
-  `docs/lessons.md` §1, `docs/root-causes-w16.md`.
+  `docs/contributing/lessons.md` §1, `docs/history/bug-hunts/w16.md`.
 
 ## Workflow per milestone
 
@@ -46,24 +46,24 @@ cargo test --lib checker::       # scope to the area you edit -> seconds
 cargo test -p chezzi-syntax      # one crate's tests: chezzi-syntax (lexer, ast, parser), chezzi-native,
 cargo test -p chezzi-front       #   chezzi-base, chezzi-front (resolver, desugar, checker, compiler),
 cargo test -p chezzi-vm          #   chezzi-vm; the root `chezzi` crate holds the CLI, `run`, the editor
-cargo test conformance           # execute docs/grammar.bnf, differential-test vs the parser
+cargo test conformance           # execute docs/reference/grammar.bnf, differential-test vs the parser
 cargo clippy -- -D warnings      # lint (must be clean before commit)
 cargo run -- check examples/hello.chz   # type-check only; also: run <file>, test <file|dir>
 ```
 
 Flags go **before** the file path. Every other command (`--errors=json` shapes, `--threads`,
 `CHEZZI_SCHED_SEED`, `schedfuzz`, the LSP build, editor assets, benches) is in
-**[`docs/dev-commands.md`](docs/dev-commands.md)**.
+**[`docs/contributing/dev-commands.md`](docs/contributing/dev-commands.md)**.
 
 ## Conventions
 
-One line per rule. The full text is in **[`docs/code-conventions.md`](docs/code-conventions.md)**:
+One line per rule. The full text is in **[`docs/contributing/code-conventions.md`](docs/contributing/code-conventions.md)**:
 before you change an area a rule names (native fns, checker warnings, tests, enums, std modules),
 read that rule's entry there.
 
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
-- Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` → `desugar` → `checker` → `compiler` → `vm` (the engine of record), plus `native` (builtins / std), `resolver` (module paths), `base` (what both the front end and the VM read: bytecode, hooks, crossing marks) and `run` (the CLI's run drivers). The VM never calls the checker or the compiler; a driver hands it a `Program`. Each layer is its own crate (`crates/chezzi-{syntax,native,base,front,vm}`, sources still under `src/`, included by `#[path]`): an edit rebuilds only its crate and the crates above it. A test that must run a program lives in `chezzi-vm` (it dev-depends on the front end) or calls `compiler::run_for_tests` in the front end. Each phase is split into one file per topic: `docs/owners.md` maps each area to its files.
-- Keep modules small and single-purpose: one topic per file, a first line that names it, at most 2,500 lines (3,500 for a test file). `cargo test --test source_layout` enforces it and checks `docs/owners.md`.
+- Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` → `desugar` → `checker` → `compiler` → `vm` (the engine of record), plus `native` (builtins / std), `resolver` (module paths), `base` (what both the front end and the VM read: bytecode, hooks, crossing marks) and `run` (the CLI's run drivers). The VM never calls the checker or the compiler; a driver hands it a `Program`. Each layer is its own crate (`crates/chezzi-{syntax,native,base,front,vm}`, sources still under `src/`, included by `#[path]`): an edit rebuilds only its crate and the crates above it. A test that must run a program lives in `chezzi-vm` (it dev-depends on the front end) or calls `compiler::run_for_tests` in the front end. Each phase is split into one file per topic: `docs/contributing/owners.md` maps each area to its files.
+- Keep modules small and single-purpose: one topic per file, a first line that names it, at most 2,500 lines (3,500 for a test file). `cargo test --test source_layout` enforces it and checks `docs/contributing/owners.md`.
 - **No wildcard arm on an enum in library or binary code.**
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global namespace.** (No name but a keyword is reserved: a module declaration shadows a builtin. An import binds only the names it lists, for a std module too.)
 - **A new native fn's `MEMBERS` entry is `(name, fn, Kind)` — the third element is not paperwork.**

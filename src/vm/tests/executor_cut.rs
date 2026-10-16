@@ -5,7 +5,7 @@ use super::*;
 
 /// TICKET-195 C1: an owner cut by a nursery child's panic while it waits in `ex.shutdown()` of an
 /// Executor created OUTSIDE the nursery must not cancel that Executor's running job — CPython lets
-/// it finish (docs/concurrency.md: such an Executor is not cancelled).
+/// it finish (docs/reference/concurrency.md: such an Executor is not cancelled).
 #[test]
 fn outside_executor_job_survives_owner_cut_in_shutdown() {
     let src = r#"import std.time

@@ -333,7 +333,7 @@ impl Checker {
     /// elements, entries, tuple slots, struct fields and enum payloads, so `Atomic[List[P]]`,
     /// `Atomic[Option[P]]`, `Atomic[(int, P)]` and `Atomic[Wrapper]{p: P}` all reach `P`'s `eq` on
     /// the same compare that a bare `Atomic[P]` does. Keying on the payload's own `eq` let every one
-    /// of those through the gate (`docs/gaps.md` — M23 review, CRITICAL 2).
+    /// of those through the gate (`docs/contributing/gaps.md` — M23 review, CRITICAL 2).
     pub(super) fn reject_eq_atomic_payload(&mut self, elem: &Ty, span: Span) {
         if let Some(reach) = self.reaches_user_eq(elem, &mut Vec::new()) {
             let msg = match reach {

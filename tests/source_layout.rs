@@ -1,4 +1,4 @@
-//! Source layout rules (`docs/owners.md`, `docs/code-conventions.md`). A file small enough to read
+//! Source layout rules (`docs/contributing/owners.md`, `docs/contributing/code-conventions.md`). A file small enough to read
 //! whole, a header that names its topic, and an owner index that names only real files:
 //!
 //! 1. A production file under `src/` has at most `PROD_MAX_LINES` lines; a test file (in a `tests/`
@@ -6,7 +6,7 @@
 //!    by topic before it reaches the cap.
 //! 2. The first line of every `src/` file that is not an inner attribute (`#![...]`) is a comment
 //!    that names the file's topic.
-//! 3. Every `src/`-relative `.rs` path that `docs/owners.md` names exists.
+//! 3. Every `src/`-relative `.rs` path that `docs/contributing/owners.md` names exists.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -123,7 +123,8 @@ fn defines(text: &str, name: &str) -> bool {
 
 #[test]
 fn every_path_in_the_owner_index_exists() {
-    let index = fs::read_to_string("docs/owners.md").expect("read docs/owners.md");
+    let index = fs::read_to_string("docs/contributing/owners.md")
+        .expect("read docs/contributing/owners.md");
     let spans: Vec<&str> = index.split('`').skip(1).step_by(2).collect();
     let mut named = 0;
     let mut missing = Vec::new();
@@ -147,10 +148,10 @@ fn every_path_in_the_owner_index_exists() {
             missing.push(rel.to_string());
         }
     }
-    assert!(named > 0, "docs/owners.md names no src file");
+    assert!(named > 0, "docs/contributing/owners.md names no src file");
     assert!(
         missing.is_empty(),
-        "docs/owners.md names paths that do not exist under src/:\n{}",
+        "docs/contributing/owners.md names paths that do not exist under src/:\n{}",
         missing.join("\n")
     );
 }
@@ -159,7 +160,8 @@ fn every_path_in_the_owner_index_exists() {
 /// that carries an owner to another file must update its row.
 #[test]
 fn every_owner_in_the_index_lives_in_its_named_file() {
-    let index = fs::read_to_string("docs/owners.md").expect("read docs/owners.md");
+    let index = fs::read_to_string("docs/contributing/owners.md")
+        .expect("read docs/contributing/owners.md");
     let mut pairs = 0;
     let mut wrong = Vec::new();
     for (at, _) in index.match_indices("` (`") {
@@ -183,10 +185,13 @@ fn every_owner_in_the_index_lives_in_its_named_file() {
             wrong.push(format!("`{name}` is not defined in src/{rel}"));
         }
     }
-    assert!(pairs > 0, "docs/owners.md has no `name` (`path`) pair");
+    assert!(
+        pairs > 0,
+        "docs/contributing/owners.md has no `name` (`path`) pair"
+    );
     assert!(
         wrong.is_empty(),
-        "fix these rows of docs/owners.md:\n{}",
+        "fix these rows of docs/contributing/owners.md:\n{}",
         wrong.join("\n")
     );
 }

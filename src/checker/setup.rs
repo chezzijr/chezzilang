@@ -619,7 +619,7 @@ impl Checker {
     // `self.structs`) and costs nothing on the local-hit path; it reads `module_sigs` only — it does
     // NOT touch `struct_names`/`bare_types`, so NAMING/CONSTRUCTING an un-imported type still errors
     // (`resolve_type` stays gated) and a same-named LOCAL type is unaffected (distinct keys; the local
-    // table hits first). Aligns the impl with docs/spec.md's "reading their fields off a returned value
+    // table hits first). Aligns the impl with docs/reference/spec.md's "reading their fields off a returned value
     // works import-free".
     //
     // ASSUMPTION (identity-key uniqueness): the scan resolves the FIRST `ModuleSig` def whose

@@ -1,5 +1,5 @@
 # W7-4 — a captured local is ONE BINDING, so two sibling closures over it must still share ONE cell
-# after crossing the airlock. `docs/syntax.md` says a write through a capture is visible "across
+# after crossing the airlock. `docs/reference/syntax.md` says a write through a capture is visible "across
 # sibling closures", and a crossing snapshot-copies the binding into ONE independent per-task cell —
 # per BINDING, not per reference. The serializer used to re-serialize an off-DFS-stack cell as a fresh
 # `WireValue::Cell`, so `d.inc()` and `d.get()` landed on TWO cells and the shared binding silently
@@ -203,7 +203,7 @@ test fn discarded_snapshot_walk_rolls_back_its_cell_ids():
     assert r.recv() == 1
 
 # FENCE — TICKET-100 inverted the DATA DAG rule: an acyclic alias reached twice is now ONE object on
-# the far side, same as a cell (docs/concurrency.md). Goes red if a store ever stops back-referencing
+# the far side, same as a cell (docs/reference/concurrency.md). Goes red if a store ever stops back-referencing
 # an off-stack alias.
 test fn data_dag_alias_is_one_object():
     xs := [1]
@@ -218,7 +218,7 @@ test fn data_dag_alias_is_one_object():
 # FENCE — the OTHER boundary of the new rule: identity is preserved within ONE crossing, never BETWEEN
 # crossings. TICKET-169: the first task's write now faults (its captured cell crossed the airlock and
 # is marked), so it can never reach the parent OR a second task either way; a second task's own read
-# still sees the parent's unwritten `0` (F1 per-task isolation, docs/syntax.md rule 2). Goes red if the
+# still sees the parent's unwritten `0` (F1 per-task isolation, docs/reference/syntax.md rule 2). Goes red if the
 # cell memo is ever widened to Vm-lived state.
 test fn separate_tasks_each_get_their_own_binding():
     c := make()

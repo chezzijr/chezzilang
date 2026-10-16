@@ -80,13 +80,13 @@ pub enum DivKind {
     /// Compared prefix-compatibly (`chz.stdout[..n] == py.stdout[..n]`, `n = min(len, len)`),
     /// never by plain inequality: CPython failing at parse time writes nothing to stdout while
     /// Chezzi fails at runtime after printing, and plain `!=` would flag that routine
-    /// generator-quirk shape (`b"" != b"1\n"`) as a divergence (F4, `docs/gaps.md` §W7-36).
+    /// generator-quirk shape (`b"" != b"1\n"`) as a divergence (F4, `docs/contributing/gaps.md` §W7-36).
     BothErrorStdout,
     /// The Chezzi child did not exit within the timeout, but Python finished the SAME program
     /// cleanly (exit 0). `generate.rs` bounds every loop by construction (`LOOP_CAP`, a bounded
     /// `for`, a mandatory `while` increment), so a generated program that does not terminate is a
     /// Chezzi bug, not the "slow input" excuse that makes a timeout uninteresting in the
-    /// panic-fuzz oracle (F3, `docs/gaps.md` §W7-36). `chz` here is a SYNTHESIZED `Capture`
+    /// panic-fuzz oracle (F3, `docs/contributing/gaps.md` §W7-36). `chz` here is a SYNTHESIZED `Capture`
     /// (`run_one` returns nothing on timeout) — empty stdout, a stderr note, `code: None`. That
     /// is deliberately NOT the same `code: None` `classify` treats as a signal kill: this capture
     /// is built directly in `run_sources` and never passed through `classify`, so that invariant
@@ -121,7 +121,7 @@ pub enum Outcome {
     /// stays false — this is not a Chezzi bug — but a caller must still treat it as FATAL, not
     /// silently skip it: a differential oracle that never started a child has proven nothing
     /// about either engine, and reporting that as "0 findings" is a false negative dressed up as
-    /// a clean pass (see `docs/bug-discovery.md` / `docs/gaps.md` for the concrete trigger).
+    /// a clean pass (see `docs/contributing/bug-discovery.md` / `docs/contributing/gaps.md` for the concrete trigger).
     HarnessError(String),
 }
 
@@ -308,7 +308,7 @@ fn classify(chz: Capture, py: Capture, prog: Option<&Program>) -> Outcome {
     // caller, never scored as a clean pass), not a `HostPanic` finding. The allow-list runs the
     // safe way round — only the signals a crash actually raises are promoted to a finding, and an
     // unrecognized signal DECLINES into the fatal-but-not-a-finding arm rather than emitting a
-    // confident "Chezzi crashed" (the standing rule, `docs/gaps.md` W7-12).
+    // confident "Chezzi crashed" (the standing rule, `docs/contributing/gaps.md` W7-12).
     if let Some(sig) = chz.signal
         && !is_crash_signal(sig)
     {
@@ -585,7 +585,7 @@ mod tests {
     /// injective — `ff fe` and `fe ff` both decode to two U+FFFD — so a decoded compare reports
     /// `Match` for a run where Chezzi and CPython put DIFFERENT bytes on fd 1. Both sides can
     /// emit non-UTF-8 today (`io.stdout().write_bytes` since W6-9; CPython's
-    /// `sys.stdout.buffer.write` always could), and this oracle is the one `docs/future.md §2b`
+    /// `sys.stdout.buffer.write` always could), and this oracle is the one `docs/design/roadmap.md §2b`
     /// keeps now that `--serial` is deleted. Same class as the parity-oracle hole W6-9b closed.
     #[test]
     fn a_byte_only_divergence_is_not_a_match() {

@@ -1,0 +1,5763 @@
+# Chezzi — Syntax Reference
+
+A scannable cheat-sheet for the whole language. Revise from this; feed it to an LLM as context.
+For the *why* behind each choice see [`spec.md`](spec.md); for token names see [`../src/lexer/mod.rs`](../../src/lexer/mod.rs).
+
+> **Implementation status:** the language is fully designed but built incrementally.
+> Tags like `(M3)` mark which milestone first makes a feature *run*. Syntax is stable regardless.
+
+---
+
+## 1. Lexical basics
+
+```chezzi
+# comments start with '#' and run to end of line
+
+# A '#' comment block touching a declaration (no blank line between) is its DOC-COMMENT,
+# shown on editor hover (LSP) above the type. Stacked '#' lines join into one doc.
+fn greet(name: str):           # ^ this two-line block documents `greet`
+    print("hi {name}")
+
+# detached — a BLANK line below breaks the run, so this line is NOT part of the doc
+
+# this line IS the doc for Point (adjacent, no gap)
+struct Point:
+    x: int
+```
+
+- **Blocks = indentation** (spaces only; tabs are a lex error). A block opens after a `:` line.
+- **Source encoding:** files are UTF-8. A single byte-order mark (`U+FEFF`) at the very start of a
+  file is stripped, as CPython and Go do, so a file saved by a Windows editor or VS Code runs
+  unchanged; a `U+FEFF` anywhere else, including a second one at the start, stays a lex error. The
+  project manifest gets the same strip: a `chezzi.toml` whose first bytes are `EF BB BF` parses
+  exactly as the same file without them.
+- **Logical lines** end at a newline. Blank / comment-only lines are ignored. A struct, enum, protocol
+  or native body takes one declaration per logical line: two fields, two variants, or a variant and a
+  method packed onto one line is a parse error.
+- **Identifiers:** letter or `_`, then letters/digits/`_`. Case-sensitive.
+- **Doc-comments:** any plain `#` line(s) *immediately above* a declaration (`fn`/method, `struct`,
+  `enum`, `protocol`, `type` alias, top-level binding) become its doc. The doc surfaces on
+  LSP hover above the `chezzi` type fence **today for free functions, methods, struct constructors, and
+  top-level bindings**; for `enum`, `protocol`, and `type` aliases the doc is parsed and
+  attached to the declaration but does **not** yet surface on hover (their names/constructors record no
+  hover info). Enum-variant **constructor names** are the exception: they hover their ctor signature at
+  both the declaration and the use site (e.g. `Val(int)` → `fn(int) -> Col`, generic `Full(T)` →
+  `fn(T) -> Box[T]`), but a variant carries no doc-comment of its own (there is no per-variant doc
+  field), so only the signature surfaces. The doc is the *contiguous* run of comment lines with NO blank line
+  between the last one and the declaration — a blank line detaches earlier comments. Stacked lines join
+  with newlines (one leading `# ` stripped per line). An inline trailing comment on the decl line is
+  not a doc. Purely informational: doc-comments never affect type-checking or execution.
+  *(Reinstall the LSP after upgrading — `cargo install --path . --features lsp --bin chezzi-lsp` — the
+  installed binary is a snapshot.)*
+
+## 2. Literals
+
+```chezzi
+42            # int   (i64)
+1_000_000     # int   — '_' is a digit-group separator (only between digits)
+0xFF 0b1010 0o17   # int — hex / binary / octal literals ('_' ok between digits, and ONE right after the prefix: `0x_ff`)
+-9223372036854775808   # int — the i64::MIN boundary literal (the magnitude 2^63 is legal ONLY when
+              #       immediately negated; a bare `9223372036854775808` is "number too large")
+3.14          # float (f64)
+1_234.567_8   # float — '_' works in both parts
+6.022e23  1e3  1.5e-9  2E10  1e+5   # float — scientific notation (any exponent ⇒ float, so 1e3 = 1000.0)
+true  false   # bool
+"hello"       # str
+'hello'       # str — single quotes are equivalent to double (same escapes & interpolation)
+"""say "hi" out loud"""  # str — triple-quoted; unescaped quotes allowed inside (same escapes & interpolation)
+'''it's "ok"'''  # str — triple single-quote, equivalent
+"hi {name}"   # str with interpolation — see §10
+"emoji \u{1F600}, A=\u{41}"   # str — \u{HEX} unicode escape (1-6 hex digits)
+r"\d+\s"      # str — raw string: VERBATIM; no escapes (\ is literal), no interp ({ } are literal)
+r'C:\tmp'     # str — raw, single-quote / uppercase R"…" both work; cannot contain its own quote
+r"""{"k": [1,2]}"""  # str — triple raw: embeds quotes + braces verbatim (best for JSON / brace-heavy)
+b"\x01\x02AB"  # bytes — byte-string literal; \xHH hex byte + \n \t \r \\ \" \' \0; no \u, no interp
+b'\xff'       # bytes — single quotes / uppercase B'…' both work; raw byte >=0x80 must use \xHH
+bytearray([1, 2, 3])  # bytearray — MUTABLE byte buffer; constructor-only (no literal), see below
+[1, 2, 3]     # List[int]
+{"a": 1}      # Map[str, int]
+```
+
+**`bytes` — immutable byte sequence (Python `bytes` model).** A `b"..."` / `b'...'` literal holds raw
+bytes (the lexer applies escapes + strips the `b` prefix). Accepted escapes: `\xHH` (exactly two hex
+digits → one byte `0x00`–`0xFF`, the only way to write a byte ≥ 0x80) plus `\n \t \r \\ \" \' \0`.
+`\u{…}` is **rejected** (a byte literal is byte-exact, not UTF-8), as is a raw non-ASCII source char.
+No interpolation. Operations: `b[i]` → `int` 0–255 (Index protocol; out-of-range is a recoverable
+panic), `b[a..b]` → `bytes` (Slice protocol over byte offsets — open bounds / `Range` step / `reversed()` /
+negative), `for x in b` yields `int`, `b.len()` is the byte count, `==`/`!=` are structural, and `bytes`
+is `Hashable` (valid `map`/`set` key). `str(b)` / `print(b)` / interpolation use the Python `b'...'`
+repr (printable ASCII literal, others `\xHH`). `bytes` is immutable — `b[i] = x` is a type error.
+
+**Raw strings — `r"..."` / `r'...'` and triple `r"""..."""` / `r'''...'''`.** A raw string is an
+ordinary `str` (`Ty::Str`, identical downstream) but lexed **verbatim**: there is **no escape
+processing** (`r"\d+"` is a backslash, `d`, `+` — *not* an escape; `r"C:\tmp"` is a literal Windows
+path) and **no interpolation** (the always-on `{expr}` of normal strings is OFF — `r"{}"` prints a
+literal `{}`, and `r"{x}"` stays `{x}` even with `x` in scope). It is the escape hatch for the
+always-on interpolation: instead of doubling braces (`"{{}}"`) you write `r"{}"`. The `r`/`R` prefix
+fires only when immediately followed by a quote (so a variable named `r` is unaffected, exactly like
+`b`). The **short** form `r"..."` cannot contain its own closing quote (no escaping in raw — switch
+quote style or use the triple form); the **triple** form `r"""..."""` embeds lone single/double
+quotes verbatim, which is how you write brace-and-quote-heavy data like JSON: `r"""{"k": [1,2]}"""`.
+Uppercase `R"..."` is accepted (mirrors `B"..."`). (Out of scope for now: a combined raw-bytes
+prefix `rb"..."`, and Rust-style `r#"..."#` hash delimiters — the triple form already embeds quotes.)
+
+**`bytearray` — the MUTABLE sibling (Python `bytearray` model).** Constructor-only — there is **no**
+`ba"..."` literal (the `b"..."` literal already makes a `bytes`). Four forms: `bytearray()` (empty),
+`bytearray(N)` (N zero bytes, Python semantics), `bytearray(b)` (a mutable copy of a `bytes`),
+`bytearray([ints])` (each element 0–255). Operations: `ba[i]` → `int` 0–255, **`ba[i] = x`** mutates
+in place (`IndexSet`; the value must be 0–255 and the index in range, else a recoverable panic — the
+new capability `bytes` lacks), `ba[a..b]` → a NEW `bytearray` (mutable copy, byte offsets),
+`for x in ba` yields `int`, `ba.len()`, `.push(int)` (append one byte 0–255), `.pop() -> int?`,
+`.extend(bytes | bytearray | List[int])` (append in place). `==`/`!=` are structural; cross-type
+`b"a" == bytearray([97])` is **content-equal** (Python parity). `bytearray` is **NOT `Hashable`**
+(mutable ⇒ not a `map`/`set` key, like `list`/`set`/`map`). `str(ba)` / `print(ba)` / interpolation
+use the Python `bytearray(b'...')` repr (the wrapper distinguishes it from `bytes`' bare `b'...'`).
+**Conversion bridge:** `bytes(ba)` → an immutable snapshot, `bytearray(b)` → a mutable copy. Crosses
+the `--parallel` airlock by value (deep copy — a fresh independent buffer, like `list`). Not yet: a
+`byte`/`u8` scalar, or non-UTF-8 codecs (latin1/utf16) / base64/hex.
+
+**Built-in conversions.** Two conversion surfaces bridge the core types — see the table below.
+
+| Conversion | Form | Gives | Notes |
+| --- | --- | --- | --- |
+| str → bytes (UTF-8) | `s.encode()` | `bytes` | method on `str`; always succeeds (str is UTF-8 internally) |
+| bytes → str (UTF-8) | `b.decode()` | `str` | method on `bytes`; **recoverable** fault on invalid UTF-8 |
+| bytearray → str (UTF-8) | `ba.decode()` | `str` | identical to `bytes.decode()` (decodes the current buffer) |
+| any iterable → list | `List(it)` | `List[T]` | `it` is any **for-iterable**; `T` is the element type. `List[T]()` / `List()` are the empty forms. |
+| any iterable → set | `Set(it)` | `Set[T]` | dedup; `T` must be `Hashable`; `Set[T]()` / `Set()` (0 args) is the empty set |
+| iterable of 2-tuples → map | `Map(it)` | `Map[K, V]` | `it` yields `(K, V)` pairs; last-wins on dup keys; `K` `Hashable`. `Map[K, V]()` / `Map()` are the empty forms. |
+
+`.encode()`/`.decode()` are **UTF-8 only** — there is no encoding-name argument (latin1/utf16 are an
+explicit future non-goal). `"héllo".encode().decode() == "héllo"` round-trips through a multi-byte
+char; `b"\xff\xfe".decode()` faults **recoverably** (catchable by `recover:`), never a panic.
+
+`List(it)` / `Set(it)` / `Map(it)` accept **any for-iterable** — exactly what `for x in it` accepts:
+`list`, `set`, `str` (per-char `str`), `bytes`/`bytearray` (per-byte `int`), `map` (`(key, value)` pairs),
+`Channel` (`List(ch)` drains it until the channel is closed and empty), a `Range` value, and a user struct with `next(self) -> T?`. They do **not** require a formal
+`Iterable[T]` bound — they reuse the same internal iterable union as the `for` loop. The empty
+**container constructors** are first-class: `List[T]()` / `Map[K, V]()` / `Set[T]()` take a
+**turbofish** that pins the element/key/value type, and the bare `List()` / `Map()` / `Set()`
+zero-arg forms take their type from the expected type on the same statement
+(`xs: List[int] = List()`), exactly like the `[]` / `{}` literals. (An untyped `xs := List()` is an
+error on that line; see "Inference" in §10.) (The `[]` / `{}` literals remain the idiomatic empty forms; the
+constructors are there for when a literal is awkward, e.g. binding a type parameter.) A turbofish with
+an iterable argument checks the elements against the type arg: `List[int]([1, 2])` is fine,
+`List[int](["a"])` is a static error. `Map(it)`'s element must be **exactly a 2-tuple** `(K, V)` — a
+non-2-tuple is a **static** type error (caught by the checker, not at runtime).
+
+> **`Map(it)` vs `xs.map(f)` — these do NOT clash.** `Map(pairs)` is the free-function **constructor**
+> (a bare-name call). `xs.map(f)` is the `List` higher-order **method** (a field/method call on a
+> receiver). They live in separate namespaces — the parser routes a bare `Map(...)` as a builtin call
+> and a `obj.map(...)` as a method dispatch — so `Map([(1, "a")])` builds a `Map[int, str]` while
+> `[1, 2].map(double)` transforms a list.
+
+**Multi-line literals & trailing commas.** Inside `[]`, `{}`, and `()` the layout (newlines /
+indentation) is suppressed, so a collection literal, a call's arguments, or a function's parameter
+list may span lines. A single **optional trailing comma** is allowed before the closing delimiter
+— `[1, 2,]` is identical to `[1, 2]` (a lone `[,]` / `(,)` / `f(,)` is still an error):
+
+```chezzi
+nums := [
+    1, 2, 3,
+    4, 5, 6,
+]
+m := {
+    "a": 1,
+    "b": 2,
+}
+t := (
+    1,
+    2,
+)
+```
+
+A parenthesised expression is grouping; a trailing comma makes a tuple, so **`(x)` is just `x`**
+while **`(x,)` is a one-element tuple** — and it RENDERS with the comma too: `print((1,))` writes
+`(1,)`, as in Python.
+
+**Tuple elements are read positionally with `.0`, `.1`, … (Rust's spelling), never `t[0]`.** The index
+must be a literal — it is part of the type, not a runtime value — and tuples are **immutable**, so
+`.N` is read-only. Accesses chain like Rust's: `t.0.1` is the second element of `t.0` (the lexer
+never reads `0.1` after a field `.` as a float):
+
+```chezzi
+t := ("a", 1)
+print(t.0)        # a
+print(t.1)        # 1
+# t[0]  → type error: cannot index into (str, int)   (a tuple is not Indexable)
+# t.0 = "b"  → type error: cannot assign to field '0' of (str, int)
+a, b := t         # destructuring is the other way in — see §3
+a, b := 1, 2      # a value list destructures the same way (Go, CPython)
+a, (b, c) := (1, (2, 3))   # a nested target takes parentheses; `_` skips a slot
+x := 1, 2         # a bare tuple ends a statement: `x` is `(1, 2)` (CPython); so do `x = 3, 4`,
+                  # `return a / b, a % b` and `yield a, b`
+```
+
+**One unpacking grammar (rule U9).** `:=`, `=`, `for`, a comprehension clause and a `wait:` arm share
+one target grammar: names separated by commas, a nested target in parentheses, `_` for a skipped slot
+(`a, (b, c) := t`, `for k, (a, b) in xs`, `[a for a, (_, c) in xs]`). The whole target takes **no outer
+parentheses** (`(a, b) := t` and `for (a, b) in xs` are errors; CPython accepts both — a deliberate
+divergence). Outside `match` only **tuples** unpack, and the element of any iterable unpacks the same
+way: `for a, b in {(1, "x")}` over a Set, a Map's `(key, value)` pair, a generator, a channel. A struct or
+an enum variant unpacks in `match` only; a list pattern and `*rest` do not exist. The checker owns the
+arity (`tuple pattern has 2 element(s), but the value has 3`; `tuple pattern cannot match a value of
+type int`). `_` is never a value: `for _ in xs: print(_)` is `cannot use '_' as a value`.
+
+Destructuring (`a, b := t`, or `for a, b in pairs`) is usually what you want; `.N` matters where you
+can't bind names — inside a single-expression closure, for instance `xs.sort_by_key(fn(p) -> int: p.1)`.
+
+## 3. Variables & types
+
+```chezzi
+x := 5                 # declare + infer  (type = int)
+name: str = "chezzi"   # declare with explicit type
+count := 0
+count += 1             # compound assignment — see below
+a, b = b, a            # tuple swap — multi-target assignment, see below
+```
+
+- **Local inference:** inside function bodies you rarely write types — `:=` infers.
+- **Explicit annotation** (`name: T = ...`) is allowed anywhere and **required on function signatures** (§5).
+
+**Evaluation order -- the right-hand side runs first (Python semantics).** In `place = value`,
+`value` is evaluated **before** the target's own sub-expressions: before `obj` and `i` in
+`obj[i] = value`, before `obj` in `obj.f = value`, and before `k` in `m[k] = value`. So
+`xs[bump()] = xs[bump()] + 10` on `[1, 2, 3]`, with a `bump` returning `0` then `1`, gives
+`[1, 11, 3]` -- CPython's answer. **Compound** assignment is the one that touches the target
+first, because `x OP= v` is `x = x OP v` and the read is part of the right-hand side:
+`xs[k()] += g()` calls `k` then `g`, which is Python's order too. **Multi-target** assignment
+evaluates the whole right-hand side first. Both are described below.
+
+**Compound assignment.** `x OP= v` is exactly `x = x OP v`, on variables, list elements, struct
+fields, and map values. The full set is `+= -= *= /= %=` (numeric; `+=` also concatenates `str`)
+and `&= |= ^= <<= >>=` (they follow the bitwise operators: `int`, and `& | ^` on two sets). Because `x OP= v` is `x = x OP
+v`, it also accepts a **struct/enum whose operator overload** (an `add`/`sub`/`mul`/… method)
+makes `x = x OP v` type-check — e.g. `a += V(10)` for a `struct V`
+with `add`. It is rejected exactly when `x OP v` is itself a type error (a type with no matching
+overload, or a mismatched operand). No implicit widening — `int /=
+float` is a type error (the result would be a float, which can't flow back into an `int` slot).
+The index expression is evaluated **exactly once** (`t[f()] += 1` calls `f` once, as in Python).
+
+Because `x OP= v` is `x = x OP v`, a compound assign to a **user index target** (`obj[k] += v`, §7b)
+**reads the LHS through `index`** — so its type is `index`'s **return**, not `set_index`'s `val`, and
+the two must agree (§7b's coherence rule): a compound on an incoherent pair — e.g. `index -> str` with
+`set_index(_, val: int)` — is a **check-time error** (`type S does not satisfy IndexSet (…)`), never a
+runtime fault. A plain `obj[k] = v` never reads, so it only type-checks against `set_index`'s `val`.
+(`//=` and `**=` are not provided — there is no `//`/`**` base operator yet.)
+
+```chezzi
+x *= 3        # x = x * 3
+xs[0] <<= 1   # xs[0] = xs[0] << 1
+p.n |= 4      # p.n = p.n | 4
+```
+
+**Multi-target (tuple) assignment.** `a, b = b, a` assigns several targets at once. The **whole**
+right-hand side is evaluated **first** (Python semantics), then stored into each target left-to-
+right — so a swap is correct even when the same place appears on both sides. Targets may be
+variables, list elements, or struct fields; the RHS is a same-arity value list or a single tuple-
+valued expression (`a, b = f()` where `f` returns a 2-tuple). Only plain `=` is allowed (a compound
+op with multiple targets is a parse error).
+
+```chezzi
+a, b = b, a                              # swap two variables
+data[0], data[1] = data[1], data[0]      # swap two list elements
+p, q, r = r, p, q                        # three-way rotation (RHS evaluated first)
+a, b = compute()                         # compute() returns (int, int)
+```
+
+### `const T` — immutable bindings
+
+`const T` is a **binding modifier** (in the type slot of a single-name typed let) that freezes the
+**name**: the checker rejects any later reassignment. It is an **immutable binding**, *not* a compile-time
+constant (Rust `const`/Go `const`) — the RHS is any runtime expression, evaluated once. Think JS
+`const` / Java `final`.
+
+```chezzi
+PI: const float = 3.14159
+ANSWER: const int = 6 * 7     # runtime RHS is fine — const ≠ constexpr
+PI = 3.0                      # ✗ type error: cannot reassign const binding 'PI'
+ANSWER += 1                   # ✗ every compound form is caught too
+```
+
+Every compound form rebinds the name, so a `const List[int]` rejects `xs += ys` too. Extend it in place with `xs.extend(ys)`: `const` is shallow.
+
+- **Shallow.** `const` freezes the binding, not the object it points at. A `const` container's own
+  contents stay mutable — only the name can't be rebound:
+
+  ```chezzi
+  xs: const List[int] = [1, 2]
+  xs.push(3)                    # ✓ mutating THROUGH the const is fine
+  xs[0] = 9                     # ✓ (index/field assignment is object mutation, not a rebind)
+  xs = [4]                      # ✗ rebinding the NAME is the error
+  ```
+- **Where it's allowed.** Locals + module globals **only**, and a **single-name typed** let. `const`
+  is a **parse error** on a parameter and on a `:=`/destructuring binding. An explicit type is required
+  (`const` sits in the type slot).
+- **No laundering via re-declaration.** A live const cannot be re-declared in the **same scope** —
+  `PI := 9.0` or a second `PI: float = 9.0` after `PI: const float = 3.14` is a **type error**
+  (at module level the plain bind-once error, `variable 'PI' is already defined`), so the guarantee
+  can't be dropped by swapping `=` for `:=`. A genuine **inner-scope** shadow (a fresh
+  local of the same name in a nested block/fn) is still fine — it leaves the outer const untouched.
+- **Across modules.** A `const` module global (and a native constant like `math.pi`/`e`/`inf`/`nan`)
+  carries its const-ness to importers: `import PI from m; PI = x` and the qualified `m.PI = x` both
+  report *"it is declared const in module 'm'"* rather than the generic snapshot/field message. (Note
+  that *any* imported global is already read-only — a from-imported value is a snapshot copy — so the
+  const marking sharpens the message, it doesn't add the restriction.) No imported name can be
+  re-declared at module scope: `import PI from m; PI := 9.0` is `'PI' is already imported` (an
+  inner-scope shadow stays fine). A keyword call through a let-only closure of another module
+  (`g := fn(a, b)` in `m`, then `m.g(a=1, b=2)`) is rejected with "need a binding that holds one
+  known function": the checker cannot see whether `m` reassigns `g` (`g = …`), so it declines (before this, the same call checked OK and then failed to compile with
+  `internal: no call plan recorded`). The same call inside `m` is accepted.
+
+#### The blank identifier `_`
+
+`_` is Go's blank identifier in `:=`, `=` and destructuring, at **every** scope (TICKET-142):
+`_ := e` and `_ = e` evaluate `e` and discard it, any number of times, with any types — so the
+discarded-`T!E` warning's own escape (`_ := f()`, then `_ := g()`) works at module top level too.
+A `_` element of a multi-target `=` discards its element too: `a, _ = (1, 2)` and `_, b[0] = t`
+(Python and Go accept both).
+`_` is never declared, so it has no type to freeze and no global slot, and reading it is an error
+(`cannot use '_' as a value`; Go: `cannot use _ as value or type`). `_ := 5; print(_)` printed `5`
+before. A `for` loop variable and a comprehension variable named `_` skip the slot too (rule U9:
+`for _ in xs: print(_)` is `cannot use '_' as a value`, as in Go); a parameter or match pattern named
+`_` still binds as before. `_ := f()`
+stays a `let`, not an expression statement, so it does not fire the discarded-`T!E` warning.
+
+#### Unused locals warn (TICKET-090)
+
+A fn-local or block-local `:=`/`let` binding, or a `for` loop variable, that is never read emits a
+**warning** (never an error — Go's compile error would reject programs that check clean today; Rust's
+shape is the model):
+
+```chezzi
+fn total(xs: List[int]) -> int:
+    total := 0
+    for x in xs:
+        total := total + x    # `:=` typo instead of `=` — a new binding each iteration
+    return total
+print(total([1, 2, 3]))       # 0, silently wrong, before this rule
+```
+
+`chezzi check` now reports `unused variable 'total': it is never read; prefix it with '_' if that is
+intended` at the inner `total := total + x`, `"severity":"warning"` in `--errors=json`, exit code
+unchanged. Prefix the name with `_` (or name it exactly `_`) to opt out — the same escape as the blank
+identifier above.
+
+Measured, silent (never warns), and why:
+- a **parameter** — Go does not warn on an unused parameter either
+- `x += e` — a compound assign reads `x` before writing it (Go counts it a use); a plain `x = e` is a
+  write only and is not a read, but does not itself make `x` a *candidate* — only `:=`/`let`/`for` do
+- a `match` / `wait:` arm binding, or a comprehension `for` variable — pattern-bound, not tracked
+- a name read only inside a closure, `defer:`, `spawn:`/`parallel:` body, a nested `fn`, or an
+  interpolated fragment (`"{x}"`, `"{s:<{w}}"`) — all are reads
+- a module-scope global — an importer may read it, so it can never be judged from one module
+- anything inside a `std.*` module
+
+#### Declaring one name twice at module level
+
+A module binds each name once, as Go (`x redeclared in this block`) and Rust (E0428, E0255; no
+top-level `let`, and a `static` twice is E0428) do. A top-level `:=` or typed let is a declaration;
+`=` reassigns. A module has two namespaces, as in Rust: a **type** (`struct`, `enum`, `type`,
+`protocol`) and a **value** (`fn`, `extern` fn, `:=`). A type and a value of one name coexist, and a
+call reaches the value (a module `fn S` beside `struct S` is its constructor, see §7a). A second
+declaration in a namespace that a prior one binds is an error, in either source order:
+
+```chezzi
+x := 1
+x := 2          # ✗ variable 'x' is already defined
+x = 2           # ✓ reassignment
+
+fn f():
+    y := 1
+    y := "9"    # ✓ a fn-local re-declare is a FRESH binding (Rust's `let` shadowing)
+```
+
+| prior binding | `fn` / `extern` fn / `:=` | `struct` / `enum` / `type` / `protocol` |
+|---|---|---|
+| fn, extern fn, top-level `:=`, value import | ✗ already defined / imported | ✓ both live |
+| type, type import | ✓ both live (an expression reads the value) | ✗ already defined / imported |
+| whole-module or variant import | ✗ already imported | ✗ already imported |
+| builtin (`ord`, `str`) | ✓ shadows | ✓ shadows |
+
+A binding inside a fn or block body (a param, a `:=`, a nested `fn`, a top-level `if:` body) shadows
+every row. Where Go and Rust split, Chezzi follows Rust: a fn-local re-declare is a fresh shadow,
+and a type and a value of one name coexist. `tests/redeclaration_grid.rs` runs every cell.
+
+#### What a module-level binding means
+
+- **Module scope and initialization order (TICKET-183).** A function body (a top-level `fn`, a
+  method, a nested `fn`, a closure) sees every top-level binding, including one declared *below* it,
+  as Go's package scope and Python's module globals do. It sees the binding's type, whether it is
+  `const`, and whether it holds one known function (so keyword arguments work through it). Top-level
+  *statements* stay lexical: `print(x)` above `x := 5` is `unknown name 'x'`, and `X = 7` above it is
+  `cannot assign to undeclared variable 'X'`.
+
+  ```chezzi
+  fn f() -> int:
+      return x        # ✓ x is declared below
+  print(f())          # ✗ runtime error: 'x' is read before its initialization at line 4
+  x := 5
+  print(f())          # 5
+  ```
+
+  - A body that reads a global before the top-level statement that initializes it has *run* faults
+    `'x' is read before its initialization at line N` (CPython's `NameError`). It is a runtime fault,
+    not a compile error, because the read may sit on a branch the call does not take.
+  - A body that *writes* the global first initializes the slot (a Go or CPython `global` write); the
+    let then rebinds it when it runs.
+  - Global types are computed once, before any body is checked, in dependency order. A typing cycle
+    (`x := f()` where `f` returns `x`) is a compile error naming the `initialization cycle`; annotate
+    `x` (`x: int = f()`) or give `f` a return type. An annotated cycle checks, and its read faults.
+  - An un-annotated global with an open type (`xs := []`, `z := None`) is an error on its own line
+    (see "Inference" in §10). A body above it that reads it reports
+    `'xs' is declared below this function and its type is not known here` as well.
+  - An `import` below a body that uses it stays rejected (`'pi' is used before its import`, Go's rule).
+  - A body never decides a global's type (TICKET-238): with `fn w(): z = ?"ab"` above `z := None`,
+    the error is at `z := None`. Write `z: str? = None`; the body above then checks against `str?`.
+  - A module-level `return` is an error: `return` then `x := 5` at top level is
+    `'return' outside a function` (CPython's `SyntaxError`). A `return` belongs in a fn body.
+  - A name a module binds is bound once, so no body can see two declarations of it, and a
+    keyword call through a module `fn` binds that fn's labels.
+  - A let named like a type, a builtin or a builtin ctor (`P := fn..` beside `struct P`,
+    `ord := fn..`) is an ordinary global: a body sees it in both orders, and a call before the let
+    runs faults as any other global's does.
+- **A fn-local (or block-local) re-declare is a genuinely fresh binding**, so it may change type and a
+  closure made earlier keeps the *old* one — the same as Rust's `let` shadowing. This includes a
+  binding inside a top-level `if:`/`for:`/`while:` body: those are inner scopes, not the module scope.
+- **The first declaration must be complete on its own line** (TICKET-238): `x := []`,
+  `y := {}` and `z := None` are each an error (``cannot infer the element type of `x` ``); write
+  `x: List[int] = []`.
+- **A name is bound once per target and per parameter list.** `a, a := (1, 2)`, `for a, a in xs`
+  and `[a for a, a in xs]` are `identifier 'a' is bound more than once in this pattern`, the same
+  error a match pattern `(a, a)` gives; `fn g(a: int, a: int)` and `fn(a: int, a: int)` are
+  `identifier 'a' is bound more than once in this parameter list`. Go and Rust both reject these
+  (`a repeated on left side of :=`, `duplicate argument a`; E0416, E0415). `_` may repeat.
+- **Reading an imported name *above* its own `import` is an error.** Imports are hoisted, so the name
+  is bound from line 1 whatever line the `import` sits on, and a read above the `import` reads like a
+  use before the definition. So the read itself is rejected: *"'x' is used before its `import` on line 3"* — move the `import` above the line
+  that uses it. This also rejects `print(COUNT)` above `import COUNT from lib`, which the hoist makes
+  technically work, because both ancestors refuse it (CPython raises `NameError`, Go will not even
+  parse an `import` placed after a declaration) and it reads as a use-before-definition. A
+  from-imported **fn** is the same rule, in both spellings (`g := h` and `h()`), so the two do not
+  disagree; a **same-module** top-level `fn` is untouched and stays position-independent. It is a rule
+  about **value/callable** reads only: a *type* name used above its import is fine, and — unlike Go —
+  an `import` may still sit anywhere at top level, as long as nothing above it reads *that import's
+  binding*. A read that **shadows** the name — a parameter, a fn-local `:=`, a loop variable, a
+  block-scope local — resolves to its own binding, not the import's, so it is legal wherever it sits:
+  `fn circumference(pi: float, r: float)` above `import pi from std.math` is fine.
+- **A deferred read counts as a read** — a top-level `fn` body that reads an imported name above the
+  `import` is rejected too, and here the ancestors split (both measured): CPython *accepts* it, since
+  the body runs after the import; Go still refuses, since it takes no late `import` at all. Chezzi
+  follows Go: one rule for every read above an `import`, immediate or deferred. Move the `import` up.
+
+### Closure capture — uniformly by reference
+
+Capture is **by reference, always**. A closure (and a `spawn:` / `parallel:` / `defer:` block)
+shares the *closest binding* of each captured name: reads see later writes, and a write through the
+capture is visible in the defining scope and across sibling closures. There is no by-binding-kind
+distinction any more — a plain local and a global both share the live binding.
+
+| binding | captured as | `x := 10; f := fn() -> int: x; x = 20; f()` |
+|---|---|---|
+| plain local | shared (live) | `20` |
+| global | shared (live) | `20` |
+
+A closure captures **only the names its body actually references** (its free variables) — not every
+local visible in the enclosing scope. So an unrelated non-sendable sibling in scope (another closure
+value, a live generator) that the task never touches does **not** block a `spawn` / `parallel:`
+airlock crossing; only names the task really uses are checked for sendability.
+
+Two rules cover everything:
+
+1. **Capture is by reference.** A closure reads a captured name's *current* value, so a write after
+   the closure is created is visible: `x := 10; f := fn() -> int: x; x = 20; f()` → `20`. A captured
+   **loop variable** rebinds into a **fresh** cell each iteration (matches Go ≥1.22), so
+   `for i in [0,1,2]: fns.push(fn() -> int: i)` yields closures that return `0`, `1`, `2` — not three
+   `2`s. A variable declared *outside* the loop stays one shared cell.
+2. **The task boundary is the one place sharing stops.** Across `spawn` / `parallel:` (a real OS
+   thread) a plain captured local is **snapshot-copied** into an independent per-task cell — one cell
+   per **binding**, not one per reference, so *sibling closures that cross together still share it
+   inside the task* (rule 1 survives the crossing: two closures over one local, sent through a
+   `Channel` or handed to a `spawn` as two separate args, read and write the same cell on the far side,
+   exactly as in Go). "Together" means **one task**: two *separate* tasks each get their own snapshot,
+   but the two halves of ONE task that reaches a cell through *both* a captured local and a module
+   global do share it — those are two separate serializations that are made to agree on the binding
+   (`gaps.md` W7-4c). **A write inside the task to a copy — the captured cell or a container/struct it
+   points into — is a runtime fault** (D4, TICKET-169): `x := 0; parallel: spawn: x = x + 1;
+   print(x)` faults inside the `spawn:` body (`'x' is this task's copy: a write to it would be lost at
+   the join; share it through Shared/Channel, or make a task-local copy with .copy()`), an ordinary
+   recoverable fault (`recover:` catches it) rather than a silent lost write. This is the one
+   deliberate divergence from Go; it is the memory-safety line, now enforced instead of merely
+   documented. For genuine cross-task shared mutation use `Shared[T]` / `RwShared[T]` / `Atomic` /
+   `Channel[T]`, which cross the airlock by reference (see [`concurrency.md`](concurrency.md)) and are
+   never marked, so writes through them are real sharing and never fault. `.copy()` of a copy is itself
+   unmarked, so `ys := xs.copy(); ys.push(v)` inside a task is a legitimate task-local write.
+
+**The checker rejects visible writes before the program runs** (D4 layer A, TICKET-170). A direct
+write inside a `spawn:` task to a captured binding or module global is a compile-time error with the
+same message as the runtime fault. This covers reassignment, compound assignment, field/index stores,
+and mutating native methods on the binding or a declared-type projection. A `defer:` inside the task
+is still inside the task. The checker also infers, to a fixed point, which user methods store through
+`self` or call another such method, so `spawn: counter.bump()` is rejected when `bump` writes `self`.
+
+```chezzi
+results: List[str] = []
+parallel:
+    spawn:
+        results = ["ok", "ok"]     # compile error: 'results' is this task's copy: ...
+for r in results:
+    assert r == "ok"
+```
+
+The checker also rejects a closure known to write a capture when the closure is executed across a task
+boundary: a captured call inside `spawn:`, `spawn g()`, or `Executor.submit(g)`/an inline literal.
+It also reports proven writes made by a directly called named function, including a nested `fn` or
+one reached through another named function (TICKET-171). A function may write through a parameter,
+a lexical capture, or a module global. The diagnostic points at the task-side call and names the
+mutating operation in help. It does not treat `spawn run(g)` arguments or `Channel.send(g)` as
+execution, because the receiver may never call `g`. Calls through function values, unresolved
+projections, and protocol/generic receivers still rely on the runtime fault. `spawn f(args)`
+evaluates `args` in the parent, so those expressions are not task positions.
+
+Reads, parent-side writes, task-created values, `.copy()` followed by mutation, handle writes, and a
+task-local `:=` shadow remain valid. Layer C remains the backstop for every declined shape. An error
+must never fire unless the same program would fault at runtime with checking disabled.
+
+**Mutating a captured local.** A **closure body is a single expression** (`fn(x): expr`), so a closure
+cannot contain a reassignment statement — `fn(): n = n + 1` is a *parse error*. Three ways to write
+through a captured binding: (a) a **method call**, which *is* an expression, so a closure can mutate a
+captured heap value — `bump := fn(): xs.push(2)`; (b) a **`defer:` / `spawn:` block**, whose body
+*is* statements, so a reassignment is fine there — `defer: n = n + 1`; or (c) a **nested `fn`
+declaration** (below), which also has a statement body — `fn bump(): n = n + 1`. (A bare `n = n + 1`
+in the enclosing scope always works; it's only *inside a closure value* that you need a method call.)
+
+If you relied on the old snapshot-at-creation behaviour, take an explicit copy: `snap := x` and
+capture `snap` (a fresh binding nothing else writes is effectively frozen).
+Runnable demo: [`examples/closure_capture_scopes.chz`](../../examples/closure_capture_scopes.chz).
+
+### Nested function declarations
+
+A `fn` statement written **inside** another function body (or any block) is a **first-class local
+function** — a closure with a name and a multi-statement body. It is not just sugar for a top-level
+fn; it captures the enclosing scope exactly like a closure value:
+
+- **Lexical nearest-scope.** The name resolves to the *nearest* binding in both the type-checker and
+  the runtime, so a nested `fn f(x: int)` **shadows** a top-level `fn f()`. Its body is fully
+  type-checked (a wrong-typed `return` is a compile error), and a call site is checked against the
+  *nested* signature — `f()` with zero args against the shadowing `fn f(x: int)` is a **check-time**
+  arity error, not a run-time fault.
+- **Recursion.** A nested fn may call **itself** (`fn fact(n: int) -> int: … fact(n - 1)`), just like
+  a top-level fn.
+- **Uniform by-reference capture.** It captures outer bindings **by reference** under the same cell
+  model as any closure — reads see later writes, and because its body *is* statements it can
+  **reassign** a captured local (`fn bump(): x = x + 1`), with the write visible in the defining scope.
+  A captured loop variable rebinds into a fresh cell each iteration (Go ≥1.22), and across the
+  `spawn` / `parallel:` airlock a plain captured local is snapshot-copied (isolated), identical to a
+  closure's capture — see the two rules above. A task's write to that copy is a runtime **fault**
+  (D4, `docs/design/adr-d4-airlock.md`): `x = x + 1` on a captured local, a
+  `.push`/index-store/field-store on a captured container, and a write to a module global all fault
+  inside the task with a recoverable `'<name>' is this task's copy: ...` error. Three shapes still
+  lose the write silently (see `docs/reference/concurrency.md`'s ceilings). Share state a task and
+  its parent both observe through `Shared`/`RwShared`/`Atomic*`/`Channel` instead. A value no parent
+  binding can reach is the task's own: a fresh `spawn` operand (`spawn work([], out)`, a
+  comprehension, `xs.copy()`) crosses unmarked and is writable (TICKET-179), and so is every object
+  its expression builds below the root: `spawn f([[]])`, `spawn f(S([]))`, a `T?` parameter given `[]`
+  (TICKET-240). A NAMED child stays a copy (`spawn f([xs])`), and `xs.copy()` is fresh for its own
+  level only. So does a
+  literal default fill (`acc: List[int] = []`) and a variadic pack, through every spawn callee form
+  (`f()`, `obj.m()`, `lib.f()`, `lib.K.f()`, a function value); a parameter the callee rebinds
+  before writing it (`ys = [1, 2]; ys.push(3)`) is not a task copy (TICKET-189).
+
+  A builtin slice is a new value, not a place (TICKET-254). `grid[0..2]` builds a new list whose
+  elements are the elements of `grid`, so a mutating call or a store on it changes a copy that the
+  program drops. It is no write to `grid`: inside a function that a `spawn` calls it is no D4 error
+  either, and the checker warns instead (see "A mutating call on a temporary" below):
+
+  ```
+  fn t(grid: List[List[int]]):
+      grid[0..2].push([9])
+
+  grid := [[1], [2], [3]]
+  parallel:
+      spawn t(grid)
+  print(grid)
+  ```
+
+  ```
+  warning (d4.chz:2:5): 'push' changes a temporary copy; the result is dropped: bind the value to a name first, or call 'push' on the source
+  [[1], [2], [3]]
+  ```
+
+  A write that goes on through an element of the slice (`grid[0..2][0].push(9)`) or through an index
+  (`grid[0].push(9)`) is a real write to `grid` and stays the D4 error in a spawned function. A
+  `Map[Range, V]` key (`m[0..3].push(9)`) is an index, so it stays a place. A user `slice` hook may
+  return a value that aliases the receiver, so its result is never judged a temporary.
+
+  **A mutating call on a temporary.** The checker warns, on the same channel as the `Shared` read
+  temporary of `docs/reference/concurrency.md` §6, when a mutating builtin call (`push`, `extend`, `sort`, `add`,
+  `remove`, `update`, ...) or a field or index store lands on a value that no name holds and the
+  program drops: a slice of a builtin (`g[0..2]`, `g[r]`), `.reversed()`, `.copy()`, any other native
+  `List`/`Map`/`Set`/`bytearray` method that returns a container, an operator result (`xs + ys`), a
+  comprehension, a literal, a struct or variant constructor, and a `Shared`/`RwShared`/`Atomic` read
+  (`s.get()`). The text is `'push' changes a temporary copy; the result is dropped: bind the value
+  to a name first, or call 'push' on the source`; the box read keeps its own text. A write that goes
+  on through an element of a shallow copy (`xs.copy()[0].push(1)`) is silent: the element is shared
+  with `xs`. Four ceilings stay silent: a user struct method on a temporary (it can do I/O), a store
+  through a user `set_index` hook (it runs user code), a user `slice` hook, and a builtin constructor
+  call (`List[int]().push(1)`).
+
+`fn` is the only declaration allowed inside a block. `struct`, `enum`, `protocol`, `type`, `test fn`, `import`, `extern` and `native` are top-level only; inside any block each is a parse error (`struct must be a top-level declaration`).
+
+```chezzi
+fn main():
+    n := 0
+    fn fact(k: int) -> int:          # recursive nested fn
+        if k <= 1:
+            return 1
+        return k * fact(k - 1)
+    fn bump():                       # statement body → can reassign a captured local
+        n = n + 1
+    bump()
+    bump()
+    print(fact(5))                   # 120
+    print(n)                         # 2 (write is visible in the enclosing scope)
+
+main()
+```
+
+**v1 limits.** `fn` declarations nest at most **100** deep: a top-level `fn`, a `test fn` or a method is
+level 1, and each `fn` declared in its body adds one. The 101st level is a resolve error at its name —
+`fn 'f100' is nested 101 deep; fn declarations nest at most 100 deep (declare it at an outer level)` —
+the same bound as CPython's indentation limit (`IndentationError: too many levels of indentation`).
+The checker memoizes an un-annotated inline nested fn's body type, so depth is not exponential (a
+30-deep chain checks in 0.04 s; see `docs/contributing/benchmarks.md`). A nested
+fn may **not** be generic (`fn id[T](x: T)` inside a body is rejected — declare
+it at the top level), and **mutual recursion** between two sibling nested fns is unsupported: a nested
+fn is only in scope *after* its own declaration, so `a` referencing a later-declared sibling `b` is a
+`unknown name 'b'` error (declare such a pair at the top level instead). Both are clean compile-time
+rejects, never a check-OK/run-fault. A nested fn may take **any name a local may take**, including a
+builtin (`ord`), a builtin ctor (`Channel`), a same-module **struct**, and it shadows
+that name in its scope, as a `def ord` inside a Python function does (TICKET-180: the checker records
+what each call head means and the backend reads that record, so the local wins at runtime too).
+
+### Built-in types
+
+| Type | Example | Notes |
+|------|---------|-------|
+| `int` | `42` | 64-bit signed |
+| `float` | `3.14` | 64-bit |
+| `bool` | `true` | |
+| `str` | `"hi"` | UTF-8 |
+| `bytes` | `b"\x01AB"` | immutable byte sequence; `b[i]`→int, `b[a..b]`→bytes, iterates int; `Hashable` |
+| `bytearray` | `bytearray([1,2])` | MUTABLE byte buffer (constructor-only); `ba[i]`→int, `ba[i]=x`, slice→bytearray, `push`/`pop`/`extend`; NOT `Hashable` |
+| `List[T]` | `[1, 2]` | growable |
+| `Map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
+| `Set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `Set()` |
+| `tuple` | `(1, "a")` | fixed-arity, immutable |
+| `T!E` | `x` / `?x` / `!e` | §9; `T!` means `T!Error`; a `None!E` fn succeeds by falling off the end or by a bare `return` |
+| `T?` | `?x` / `None` | §9; shorthand `T?` |
+
+Diagnostics print a type in this shorthand: `int?`, `str!IoErr`, `int!` (E = `Error`), `!E`.
+The prefix type `!E` is `None!E` (and a bare `!` is `None!`): a fallible call with no value, as in
+`fn save(p: str) -> !IoErr`. Both spellings are one type.
+As a type, `None` means "returns nothing". It is legal only as a return type (`-> None`,
+`fn() -> None`) and as the success side of `None!E`. Every value position rejects it
+(`List[None]`, `x: None`, `int!None`): `'None' is not a value type`.
+
+> **Naming.** The three builtin containers spell their type **and** constructor in PascalCase —
+> `List`/`Map`/`Set` (e.g. `List[int]`, `Set(xs)`). The lowercase `list`/`map`/`set` are no longer
+> type/ctor names. (Literal syntax is unchanged: `[…]`, `{k: v}`, `{a, b}`.) `tuple` is deliberately
+> left lowercase for now — a possible later follow-up.
+
+**Type shorthand.** In any type position, `T?` is sugar for `T?`; `T!E` for `T!E`;
+and `T!` for `T!Error` (E defaults to the built-in `Error` protocol). Examples: `int?`,
+`List[int]?`, `int!` (= `int!Error`), `int!DbErr` (= `int!DbErr`). Pure spelling —
+`?v`/`None`/`?v`/`!e`, `match`, and `?` behave exactly as on the long forms.
+
+**`T!= v` is `T! = v`.** The lexer reads an adjacent `!=` as one token. After a type it is the
+type's `!` and then `=`: `y: int!= 6`, `y: const int!= 6`, a parameter `a: int!=5` and a field
+`a: int!= 5` mean the spaced form. The `!` binds where the spaced form binds it, so
+`g: fn() -> int!= one` has the type `fn() -> int!`. `!=` between two expressions is unchanged
+(`x: bool!= a != b`), and `y: int!== 6` is a parse error.
+
+**Success-coercion (implicit wrap, TICKET-227).** At EVERY typed slot — a typed binding, an
+assignment target, an argument, a field, a collection or tuple element, a conversion or box ctor
+element, a comprehension element, `return`, `yield`, an inline or closure body, a parameter or field
+default — a plain success value implicitly wraps: `T -> T?` gives a present value, `T -> T!E` gives a success value —
+and a bare `return` (or falling off the end) at a `None!E` fn gives its success value. `None`
+and error values (`!e`) stay explicit; a value that is ALREADY a `T?`/`T!E` is never
+re-wrapped (`int??: return ?1` still needs `?(?1)`); the wrap never chains
+onto the int→float rule (`float?: return 1` is still an error, D3); and it declines at a slot
+mentioning a type parameter. An operator operand is not a slot, nor is the return of a fn with no `->`.
+Each branch of an **if/match expression** at a slot wraps on its own (see §8): `x: int? = if c: n else:
+None` wraps only the bare `n`, leaving the already-wrapped `None` alone. Full table: §9.
+
+**Closure literals and generic slots are typed slots too (TICKET-239).** A closure literal reads its
+expected type through one carrier layer, like a list literal: `cb: (fn(int) -> int)? = fn(a): a + 1`
+types `a` as `int` and stores a present value, at a binding, an argument, a field, an element and a
+`return` alike. A generic call's slot is known when its type is **written**, by type arguments
+(`Box[int?](5)`, `opt[int?](5)`, `B[int?].mk(5)`, `s.gm[int?](5)`) or by the annotation
+(`c: Box[int?] = Box(5)`): the argument then wraps and types its closure parameters exactly as at a non-generic slot.
+With neither written, the type parameter is solved from the arguments and nothing wraps.
+
+**The join rule.** Sibling values (the branches of an `if` / `match` value, the sides of `??`, the
+elements of a list / set / map literal) must have one type. A value wraps into a carrier only under
+one of two triggers: a **written type** at the slot, or a **written `None`** beside it (next
+paragraph). A `T!E` sibling types a bare `!e` the same way (`if c: a() else: !"e"` is `a()`'s
+`int!str`), at module scope and in a fn body. A `T?` or `T!E` beside a plain `T` with neither trigger
+is an error that names the fix: `[w, 3]` with `w: int?` is `list elements differ: int? vs int — a
+plain int joins int? only under a written type: annotate the binding (x: int? = ..., xs: List[int?] =
+[...])`. Two `T!E` values join to `T!E`; no join rewrites the error type. A `??` mismatch names the
+operator: `'??' sides have incompatible types: int and str`.
+
+**A literal `None` joins the value beside it (TICKET-234, same-line half).** A `None` takes its
+payload type from its own statement, never from a later one: `z := None` then `z = 7` is an error at
+`z := None`. With the type written, a plain value wraps at the slot as everywhere else:
+`z: int? = None` then `z = 7` stores `?7`, and `xs: List[int?] = [None]` then `xs.push(7)` /
+`xs[0] = 3` gives `[3, 7]`. A literal `None` **beside** a value joins to that value's optional:
+`[None, 7]` is a `List[int?]`, `{"a": None, "b": 7}` a `Map[str, int?]`, `if c: None else: 7` and a
+`match` with a `None` arm are `int?`, and so is the inline body `fn pick(c: bool): if c: None else: 7`.
+`[None, w]` joins to `w`'s own type. Declines that stay: only the LITERAL `None` joins
+(`n: int? = None`, `[n, 7]` is rejected, and so are `[w, 7]` and `[[None], [7]]`); `xs += [7]` on a
+`List[int?]` never wraps (`+=` does not wrap, write `xs += [?7]`); a generic call argument never
+wraps, so `put(b, 7)` with `fn put[T](b: Box[T], x: T)` and `b: Box[int?]` is rejected; a set
+element is never a carrier; and an open `!e` is not inferred this way. A `None` with no value
+beside it and no annotation (`z := None`) is an error on its own line: see "Inference" in §10.
+
+**No `int`→`float` widening at any slot (rule D3, TICKET-138).** An `int`-typed expression — a literal
+or not — is **never** accepted where a `float` is expected: not at a typed binding, a reassignment /
+index-assign / field-assign, a call / method / constructor / enum-payload argument, a `return` (a
+closure's own too), a parameter or field default, a collection element or map value, a
+`Channel[float]`/`Shared[float]`/`Atomic[float]` send / constructor, a `yield`, a generic type-argument
+binding (`mx(1, 2.5)` with one `T`), or an `if`/`match` branch join. Every one is the same type error,
+and the message names the fix:
+
+```
+x: float = 1              # cannot assign int to variable of type float — write 1.0 (or float(x))
+l: List[float] = [1.5]
+l.push(3)                 # argument 1 of 'push': expected float, found int — write 1.0 (or float(x))
+```
+
+Write `1.0` for a constant (Rust's `let x: f64 = 1;` is E0308 too), or `float(i)` for a typed value.
+The reverse (`float`→`int`) is a type error as well (lossy). A `float` sink spelled through a type
+ALIAS (`type F = float`) or a whole-collection alias (`type LF = List[float]`) follows the same rule.
+
+What does **not** change is arithmetic and comparison on **values**: `2 * 1.5` (`3.0`), `i * f`,
+`x + 1` with `x: float`, `f += 1`, `i < f` and `1 == 2.3` mix an `int` and a `float` operand and yield
+a `float` / `bool` — the VM promotes by runtime tag, so no slot rule is involved. A mixed literal such
+as `[1, 2.5]` or `if c: 1 else: 2.5` is *not* arithmetic: it is an `int` and a `float` meeting in one
+slot, so it is an error (`list elements differ: int vs float — write 1.0 (or float(x))`). Nothing
+coerces at runtime, so a `float` slot always holds a real float, and `x: float = 3.0` makes `x / 2 ==
+1.5`. An `Any` slot keeps an `int` an `int` (`x: Any = if c: 1 else: 2.5` stores `1`; `xs: List[Any] =
+[1, -2.5]` keeps the `1`), as Go's `var x any = 1` does.
+
+The bare success-value coercion above never chains onto this rule: `float?: return 1` is still an
+error (write `return 1.0`). *Protocol* widening is unrelated and stays: `b: Box[Named] = Box(A())`
+re-binds `T` to a protocol the argument satisfies.
+
+## 4. Operators & precedence
+
+Highest → lowest. Same row = same precedence, left-associative unless noted.
+
+| Level | Operators | Notes |
+|-------|-----------|-------|
+| 1 | `f(x)` `a.b` `a[i]` `a?.b` | call, field access, index, optional chaining |
+| 2 | `?` | error propagation (postfix, §9) |
+| 3 | `-` (unary) | |
+| 4 | `??` | null-coalescing, RIGHT-associative, `T?` or `T!E` (see below) |
+| 5 | `*` `/` `%` | `*` also list repeat: `[0] * 3` (and `3 * [0]`, commutative) |
+| 6 | `+` `-` | `+` also list concat: `[1,2] + [3,4]`; `-` also set difference: `a - b` |
+| 7 | `<<` `>>` | bitwise shift (int-only) |
+| 8 | `&` | bitwise and (int) / set intersection (`Set[T]`) |
+| 9 | `^` | bitwise xor (int) / set symmetric-difference (`Set[T]`) |
+| 10 | `\|` | bitwise or (int) / set union (`Set[T]`) |
+| 11 | `..` `..=` | range value (`Range`); does not chain; either bound may be omitted: `..b`, `a..`, `..` |
+| 12 | `<` `<=` `>` `>=` `==` `!=` `in` | ALL SEVEN comparisons — one level, and they CHAIN (see below); `in` = membership, yields `bool` |
+| 13 | `not` (prefix) | looser than the comparisons, tighter than `and` (Python's grammar) |
+| 14 | `and` | |
+| 15 | `or` | |
+| 16 | `\|>` | pipe (§11), left-assoc |
+
+> This table is the contract for the Pratt parser. The relative order follows Python (comparison
+> looser than `..` < `\|` < `^` < `&` < shifts). `0..1 << 2` is `0..4`; `x in 0..3` and `0..3 == 0..3` need no parentheses. A shift amount outside `0..64` is a runtime error. A left
+> shift (`<<`) that drops a significant bit overflows like `+ - * /` — a recoverable
+> `integer overflow in Shl` (e.g. `n := 1; n << 63`), not a silent wrap; round-trip-safe shifts
+> incl. `-1 << 63 == INT_MIN` still succeed. `>>` never overflows. An **all-constant** int expression
+> under `+ - * / % & | ^ << >>` and unary `-` that overflows `i64` (`print(9223372036854775807 + 1)`,
+> `print(1 << 63)`) is a **compile error** (TICKET-142, TICKET-225; Go: `cannot use 1 << 63 (untyped
+> int constant 9223372036854775808) as int value ... (overflows)`); the same overflow with a
+> non-constant operand (`m := 9223372036854775807; m + 1`) stays the runtime fault. A constant zero
+> divisor and a constant shift amount outside `0..64` also stay runtime faults. One evaluator
+> (`src/ast/consteval.rs`) folds constants for the checker and the compiler's peephole alike.
+>
+> `??` binds tighter than every binary operator, so `m.get("a") ?? 0 + 1` is
+> `(m.get("a") ?? 0) + 1`, yielding `2`. `not` binds looser than the comparisons, so `not x in xs`
+> is `not (x in xs)`, while `1 + not y` is a parse error — write `1 + (not y)` instead.
+>
+> **Comparisons chain, like Python.** `0 <= i < n` means `0 <= i and i < n`, not
+> `(0 <= i) < n`. Each interior operand is evaluated exactly once (`1 < f() < 3` calls `f` once),
+> and the chain short-circuits at the first false link (`f()`/`g()` in `1 < f() < 0 < g()` — `g`
+> never runs once `f() < 0` is false). Parentheses stop a chain: `(a < b) == c` is two ordinary
+> comparisons, not a chain. A link whose operand types cannot be compared is a type error, exactly
+> as an unchained comparison would be — and because the seven comparisons now share one level,
+> `1 < 2 == true` is a NEW rejection versus the old two-level grammar: it used to parse as
+> `(1 < 2) == true` and print `true`; it now chains as `1 < 2 and 2 == true`, and the second link
+> is `cannot compare int and bool for equality` — a type error, where CPython's dynamically-typed
+> `1 < 2 == True` answers `False`.
+>
+> **Collection operators.** `+ *` and `& ^ |` also operate on collections, with behaviour identical
+> to the equivalent methods (so a mismatched element type is a type error, same as the method form):
+> - `List[T] + List[T]` → concat (= `.concat`); element types must match. `[] + [1]` infers `List[int]`.
+> - `List[T] * int` / `int * List[T]` → repeat (commutative, Python-style); `n <= 0` → `[]`. A giant
+>   `n` raises a recoverable `list repeat capacity overflow`, never a process abort. An empty source
+>   repeats to `[]` in constant time for any `n`.
+> - `Set[T] | Set[T]` → union (= `.union`), `& ` → intersection (= `.intersection`), `-` → difference
+>   (= `.difference`), `^` → symmetric-difference (no method form). The result preserves insertion order.
+>
+> The compound-assign forms work too, and every one is `x = x OP v`: an operator returns a new
+> value and never mutates an operand (owner rule U15). `xs += ys` builds a new list and rebinds
+> `xs`; an alias taken before the statement keeps its old value. This departs from CPython, whose
+> `list.__iadd__` and `set.__ior__` mutate in place. To change a collection in place, call a method:
+> `xs.push(v)`, `xs.extend(ys)`. A user type's operator hook can still mutate `self`; for user
+> types the rule is a convention, not a check. The checker types `x OP= v` exactly as
+> `x = x OP v`, so a loop variable and a `const` binding reject every compound form, `+=` on a
+> list included, and `int += float` is rejected as `x = 1.5` is.
+>
+>     xs := [1]
+>     ys := xs
+>     xs += [2]
+>     print(ys)        # [1]: `+=` built a new list
+>     s := {1}
+>     t := s
+>     s |= {2}
+>     print(t)         # {1}
+>
+> Plain bitwise (`& ^ | << >>`) on **int** operands is unchanged; `<< >>` are int-only (no set form),
+> and a float operand is still a type error.
+
+**Membership `in`.** `x in xs` is a `bool`: element-of for a `list`/`set`, **key**-of for a `map`
+(Python-style — `k in m` tests keys, not values), and substring-of for a `str`. The container type
+directs the check; the element/key/`str` types must match the left operand.
+
+```chezzi
+3 in [1, 2, 3]      # true   — list element
+20 in {10, 20}      # true   — set element
+"a" in {"a": 1}     # true   — map KEY
+"ell" in "hello"    # true   — substring
+```
+
+## 5. Functions  (M3)
+
+```chezzi
+fn add(a: int, b: int) -> int:     # param types REQUIRED; '-> T' optional
+    return a + b
+
+fn double(x: int): x * 2           # inline expression body, no '-> T' → the expression's type (int)
+
+fn log(msg: str):                  # block body, no '-> T' → returns nothing ('None')
+    print(msg)
+
+# closures / anonymous functions — body after ':'
+twice := fn(x: int) -> int: x * 2
+nums.map(fn(x): x * 2)             # param/return types inferred in closures
+```
+
+**Closure-parameter inference.** An unannotated closure parameter is resolved to a concrete type from
+the context the closure appears in (it is never left dynamic). In priority order: **(1)** the
+*expected type* of the slot the closure sits in — a call argument matching a `fn(...)` parameter
+(`s.update(fn(x): x + 1)` → `x: T` of `Shared[T]`; `[1,2,3].map(fn(x): x + 1)` → `x: int`;
+`Mapped(it, fn(x): x * 2)` → `x` from the field type), an assignment/`:=` to a `fn`-typed target, a
+struct `fn`-field, or a `fn`-typed return position; **(2)** a `match` whose scrutinee is the bare
+param (`fn(x): match x: E.A: …; E.B: …` → `x: E`); **(3)** a member access **uniquely owned by one
+type** — a method only `str`/`bytes` has (`fn(x): x.upper()` → `x: str`) or a field/method exactly
+one struct declares (`fn(x): x.f`). Arithmetic/comparison/indexing and any member shared by >1 type
+(`x.len()` — on `str`/`list`/`map`/`set`, so it never pins) do **not** pin — they are *checked*
+against a type a higher source resolved. Once resolved, the closure's `fn` signature is filled in and
+**call sites are type-checked** like a named function. A parameter that *nothing* resolves
+(`g := fn(x): x + 1` with no slot or match) is an error:
+`cannot infer type of parameter 'x'; add a type annotation` — annotate it (`fn(x: int): …`). A
+closure passed to a **generic** slot whose type parameter only *it* would pin (`store(fn(a): a + 1)`
+for `fn store[T](x: T) -> T`) is likewise un-inferable → annotate (`fn(a: int): …`): the param is
+never silently left dynamic, so a later call can never trap.
+
+**Return-only type params recover from an inferable closure/fn body.** A generic higher-order
+function whose type parameter appears **only in its return** (e.g.
+`fn applyone[U](x: int, f: fn(int) -> U) -> U`, `fn mymap[U](xs: List[int], f: fn(int) -> U) ->
+List[U]`) recovers that `U` from the body of the closure/fn passed for `f` — exactly as the builtin
+methods `.map`/`.fold` do. So `applyone(5, fn(x): x * 2)` yields `int` (and `+ 1` type-checks) and
+`mymap([1,2,3], fn(x): str(x))` yields `List[str]`. The closure body is re-inferred with its param
+types pinned, then its return flows back to fix `U` — the same principle as omitting a function's
+return type and inferring it from the body. This works whether the body is a direct expression, a
+`.method(…)` call, or a **nested generic call** (`fn(x): ident(x)` for `fn ident[T](x: T) -> T`). When
+`U` is instead **already pinned** by a sibling value argument or an explicit slot (`fn f[U](init: U, g:
+fn(int) -> U) -> U` with `init = 0` ⇒ `U = int`), the closure's return is *checked* against that pin,
+so a mismatching body (`fn(x): str(x)` where `U = int`) is a clean type error, not laundered. A
+return-only param that **no** body can pin (`fn make[U]() -> U`) stays genuinely un-inferable.
+
+A type *annotation* also counts as expected-type context for source **(1)** when it surrounds a
+generic constructor or generic function call: a `let`-binding's declared type, a function's declared
+return type, and a call argument's declared parameter type each pin the called generic's type
+parameters, which in turn fix any closure params that depend on them. So
+`h: Heap[int] = Heap([], fn(x, y): x < y)` type-checks — the `Heap[int]` annotation pins `T=int`,
+which gives the comparator `x, y: int` — and likewise for `fn mk() -> Heap[int]: return Heap([], fn(x,
+y): x < y)` and `take(Heap([], fn(x, y): x < y))` where `take(h: Heap[int])`. The annotation only
+fills type params the *arguments* leave free, so an explicit turbofish or a concrete argument still
+wins over it (an argument that pins `T` differently from the annotation is the usual mismatch error).
+When the bound value is an `if`/`match` *expression*, the annotation reaches **every** branch
+(`h: Heap[int] = if rev: Heap([], fn(x, y): x > y) else: Heap([], fn(x, y): x < y)`), independent of
+branch order. The annotation likewise
+reaches BOTH operands of a binary operator, so `xs: List[G[int]] = mkl() + mkl()` pins a generic call
+on the right-hand side by the same slot as one on the left. One visible consequence: a concat at a
+`List[Any]` element slot is now accepted and renders like the equivalent literal (`c: List[Any] = [1]
++ ["a"]` prints `[1, 'a']`, as CPython does). The one remaining gap: an annotation does **not** yet reach a generic ctor nested inside a *container
+literal* (`a: List[Heap[int]] = [Heap([], fn(x, y): x < y)]`) — annotate the closure params or use a
+turbofish there.
+
+**A parameterized protocol bound infers its type args from the type that satisfies it.** In
+`fn produce_as[R, T: Produces[R]](x: T) -> R`, the call `produce_as(IntProducer())` binds `T` from
+the argument and then recovers `R` from `IntProducer.produce`'s own return type — no annotation
+needed, exactly as an `Iterator[T]` bound has always recovered `T`:
+
+```
+protocol Produces[R]:
+    fn produce(self) -> R
+
+struct IntProducer:
+    fn produce(self) -> int:
+        return 7
+
+fn produce_as[R, T: Produces[R]](x: T) -> R:
+    return x.produce()
+
+x := produce_as(IntProducer())   # R = int
+```
+
+Conformance is structural, so a type has exactly one method of a given name and the witnessing
+signature is unique — there is no ambiguity to resolve. Every protocol param is recovered
+independently (`Pair[A, B]` pins both), and the recovery runs on a generic **method** too.
+Precedence is turbofish > arguments > this recovery > a result annotation, and a recovered type
+that disagrees with what an argument already pinned is discarded — the mismatch is still reported.
+
+**A bound's type arguments mean what they mean at the declaration.** A method's `[U: Conv[T]]`
+inside `struct Box[T]` names the receiver's `T`, never a caller's: `Box(v="s").pick(i)` needs
+`Conv[str]`, whatever the calling function calls its own params. An abstract argument satisfies
+`P[X]` only through its own bound `P[X]` for the same `X`, as in Rust and Go: inside
+`fn go[X, Y: Conv[str]](y: Y, x: X)`, the call `need(y, x)` to `fn need[S, B: Conv[S]](u: B, s: S)`
+is rejected (`type Y does not satisfy Conv[X]`). An embed line resolves the same way, in its own
+protocol, so `protocol Bag[T]:` with the embed line `Contains[List[T]]` is accepted.
+
+Where the recovery cannot reach, the checker says so — `cannot infer type parameter R for
+'produce_as'; add a result annotation or explicit type arguments` — and both escapes work, on a
+free function and on a method alike. Three cases reach it, each measured:
+
+| the bound arg is not recovered when… | example |
+|---|---|
+| no requirement method mentions the param | `protocol Tagged[R]: fn tag(self) -> str` |
+
+That is the only case left. The witness may be a **builtin** (`take([1, 2, 3])` against `Popper[R]`
+infers `R = int?` with no annotation), a **protocol existential** (a value annotated `Produces[int]`
+recovers `R = int` from the args it carries), and the parameter may come from an **embedded** protocol
+(a `protocol Q[S]` whose body is the embed line `Produces[S]`, used as `[T: Q[S]]`, recovers `S` — the
+embedded signature is re-spelled in `Q`'s own type-param vocabulary, so the two need not share a name).
+
+A **generic method** behaves identically — the recovery runs there, and a result annotation pins the
+parameter there too:
+
+```
+struct W:
+    fn take[R, T: Popper[R]](self, x: T) -> R:
+        return x.pop()
+
+v := W().take([1, 2, 3])        # 3 — inferred
+v2: int? = W().take([1, 2, 3])  # 3 — or pinned by the annotation
+```
+
+A method that could not conform for *any* instantiation (wrong arity, wrong parameter type, missing
+entirely) keeps its own conformance message instead — annotating would not help it. A **generic**
+method recovers nothing either: its signature is written in terms of its own type parameters, which
+mean nothing at the call site.
+
+**A return-only type parameter must be pinnable.** If a type parameter appears only in the return
+type and nothing at the call binds it, the call is rejected there rather than leaking an un-inferable
+type onto the value — the same rule Rust applies (`E0282: type annotations needed`):
+
+```
+fn empty[T]() -> List[T]:
+    return []
+
+xs := empty()              # cannot infer type parameter T for 'empty';
+                           # add a result annotation or explicit type arguments
+xs: List[int] = empty()    # ok
+xs := empty[int]()         # ok
+```
+
+Any sink on the same statement that supplies the type counts, not just a `let` annotation — an
+argument slot (`takes(empty())`), a declared return (`return empty()`), a `match` arm, and a struct
+field at construction. The rule is *return-only*: a parameter that also appears in a value
+parameter is the open-binding error instead (`x := tag([])` is rejected on that line, see
+"Inference" in §10). A parameter default is exempt where it is declared — it is re-checked where
+it is spliced. No later statement supplies the type: `xs := empty()` then `xs.push(1)` is still the
+error above.
+
+**Inline-expr body implicitly returns (choice A, inline-only).** A named function written in the
+**inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
+**bare expression** implicitly **returns that expression's value** — exactly like a closure
+`fn(x): expr`. This is the only place a function body returns implicitly:
+
+```chezzi
+fn ten(): 10               # inferred '-> int'; ten() == 10
+fn dbl(x: int): x * 2      # usable as a value / .map argument: [1,2,3].map(dbl) == [2, 4, 6]
+fn answer() -> int: 42     # annotated inline-expr body is valid (the expr is the implicit return)
+```
+
+An inline body may also be an **if-expression** — the same form a closure or `x := if …` uses. It is
+the implicit return, and `else` is required. On a line of its own, `if c: a() else: b()` is that
+same if-expression used as a statement (see **if-expression** below), and so it is after any `:`
+(`for i in xs: if c: a() else: b()`, a statement `match` arm). An inline `fn` body may also be a
+multi-line `match` or a `recover:` block (`fn g() -> int: match n:` + arms): the body starts a whole
+value, and the block expression rules above apply. Every other compound statement (`for`, `while`, a
+statement-`if` without `else`) still needs an indented block.
+
+```chezzi
+fn pick(n: int) -> int: if n > 0: 1 else: 2     # pick(5) == 1, pick(-5) == 2
+```
+
+An inline body may be a **closure literal**: `fn (` opens a closure, `fn name` a declaration.
+
+```chezzi
+fn adder(n: int) -> fn(int) -> int: fn(x: int) -> int: x + n    # adder(1)(2) == 3
+```
+
+**An inline body is exactly one simple statement.** This holds after every `:` that opens a block
+(a fn, a method, `if`, `for`, `while`, a `match` arm, `parallel:`, an `else` guard). A simple
+statement is a let, an assignment, `return`, `yield`, `break`, `continue`, `pass`, `assert`, an
+expression (a closure literal and the one-line `if … else` included) or `spawn f()`. So
+`if c: spawn f()` is legal: the call form of `spawn` is a simple statement. A statement that opens
+its own block needs an indented line: `for`, `while`, `fn name`, `parallel:`, `wait:`, `spawn:` and
+both `defer` forms. Written inline, each one is `a nested block must be indented, not written inline
+after ':'`. An inline `if` is the one-line if-expression and needs its `else`; an inline `match` is
+a block expression, which is no whole value after the `:` of an `if` or `for`.
+
+Only a *bare expression* inline body returns implicitly. An inline **non-expression** statement does
+not: `fn a(): x = 5` (an assignment) returns `None`, and `fn a(): return 10` is an explicit return as
+written. An inline **call** returns the call's value (it is an expression-statement): `fn a(): foo()`
+returns `foo()`'s value — which is `None` if `foo` is void (that just makes `a` a void fn). An
+annotated inline-expr body is checked against its return type exactly like `return <expr>` would be:
+`fn a() -> int: "x"` is a type error, and a **non-None** expr against an explicit `-> None`
+(`fn a() -> None: 10`) is rejected with *"function returns nothing, cannot return a value"* (a None-typed
+inline expr against `-> None`, e.g. a bare void call, stays legal).
+
+**Multiline bodies are statement sequences (no implicit return).** A multiline body — even a
+1-statement one — does **not** implicitly return: `fn a():\n    10` evaluates `10` and falls through to
+`None`. Multiline functions return via an explicit `return`.
+
+**Return types.** A named function's return type is **written**. It is never inferred from `return`
+statements. Param types stay required. With no `-> T` the body shape decides:
+
+| Body | No `-> T` means | Example |
+|---|---|---|
+| **block** (statements) | returns nothing (`None`) | `fn log(m: str):` + `print(m)` |
+| **inline expression** | the type of that one expression, as for a lambda | `fn ten(): 10` is `-> int` |
+
+- A block body with no `-> T` that returns a value is an error at the returned expression, and the
+  message prints the annotation to add:
+  `'f' declares no return type, so it returns nothing; add '-> int' to 'f'`
+  (`add a '->' return type to 'f'` when the value's type is not fully known).
+- An inline body is typed only from a walk in which **every call had a type**. A callee declared
+  below its caller is fine (`fn c(): d() + 1` above `fn d(): 2`). A recursive or mutually recursive
+  inline function never gets a type and must write it:
+  `cannot infer return type of 'fact': a call in its body has no known type yet (return types that depend on each other are not inferred); add a -> annotation`.
+  A function that only calls such a function reports the same text.
+- An inline body whose type has an open slot (`fn f(): []`) reports
+  `cannot infer return type of 'f'; add a -> annotation`.
+- A function whose **sole body is a diverging call** (`fn boom(): panic("msg")`, `os.exit(...)`) is
+  `None`, for a named function and for a lambda alike. An annotated diverging body
+  (`fn b() -> int: panic(...)`) is valid: bottom fits any return position.
+- A generator writes `-> Iterator[T]`; see generators below.
+- An inline body that forwards a call has that call's exact declared type: `fn f(): g()` with
+  `g() -> int!str` is `-> int!str`.
+
+**A `!e` value takes its type from an annotation or an expected type.** A `T!E` type is never built
+from sibling `return`s or branches. `fn f(c: bool) -> int!str:` returning `1` and `!"bad"`,
+`x: int!str = if c: 1 else: !"bad"`, and an argument `take(!"bad")` are typed by the written type.
+With neither, the `!e` reports, once:
+``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``.
+
+The same rules apply to **struct/enum methods**. A method's return type flows to call sites and to
+**protocol satisfaction** (a `compare(self, o)` returning `bool` fails `Comparable`, which requires
+`-> int`).
+
+**Returns on every path (enforced).** A **multiline** function with a **declared non-void return
+type** (`-> int`, `-> str`, …) must return a value on *every* control-flow path. The checker rejects a
+body that can fall off the end:
+
+```chezzi
+fn a() -> int:             # ERROR: 'a' can fall off the end without returning a value
+    10                     #   (a multiline 1-stmt body does NOT implicitly return)
+fn a() -> int:
+    return 10              # fix: an explicit `return`
+fn a() -> int: 10          # OK: an inline-expr body implicitly returns its expression
+```
+
+The check is path-aware and conservative. These count as terminating: an `if`/`else`, exhaustive
+`match`, or `wait:` whose every branch/arm (and `else`) returns; a `return` inside `parallel:`; a
+`while true:` with no `break` of its own (a `break` in an `if`/`match`/`wait:` arm or a `parallel:`
+body counts); a tail call whose resolved callee diverges (`panic`, `os.exit`, `exit` imported from
+`std.os` under any name — a user fn, method, local or parameter named `exit`/`panic` does not count).
+A `for` body may run zero times, so a `return` inside it does not terminate. An inline-expr body is exempt (it implicitly returns). A bare `fn a(): 10` with **no**
+return annotation infers `int` from the inline expr and is unaffected — the enforcement only fires on a
+multiline body whose *declared* non-void return can be reached by falling off the end.
+
+**`None` is the one "nothing" word.** As a **type**, `None` means "returns nothing" and is a
+return annotation only (`fn log(m: str) -> None`); `None?` is not a type. As a **value**, `None`
+means absent and is legal only where a `T?` is expected. (`nil` is an ordinary identifier.) A void
+function's result (e.g. `print(...)`, `list.push(...)`, `list.sort()`) may **not** be used in value
+position. Binding it
+(`x := print("hi")`), passing it as an argument (`print(print("hi"))`), putting it in a collection
+(`[print("hi")]`), or using it as an operand (`1 + print("hi")`) is a type error: *"expression returns
+no value (None) and cannot be used as a value"*. A bare void call **as a statement** (`print("hi")` on
+its own line) is the normal use and stays legal. Declaring `-> None` (making the fn void) is
+*not* "using a void result as a value" — that is how you write a void fn.
+
+**Default + named arguments.** A free function (or a struct constructor) may give trailing
+parameters a **default** — any expression that does **not** reference another parameter (`= 10`,
+`= 1 + 2`, `= GLOBAL * 2`, `= compute()`).
+
+A default is **evaluated once per omitting call**, and it is **resolved and evaluated in the module
+that DECLARES it** — never in the caller's. Those are two separate rules and Chezzi follows a
+different ancestor on each:
+
+* **Scope — same as Python, Ruby and Kotlin.** The names a default expression sees are the definer's:
+  its own module globals, its own functions, its own imports. A caller that happens to declare a
+  same-named global (or a local that shadows one) cannot reach in. So `g.chz` holding `K := 7` +
+  `fn f(x: int = K)`, imported by a `main.chz` that declares its own `K := 99`, prints **`7`** —
+  exactly what the two-module Python equivalent prints.
+* **Timing — a deliberate divergence from Python.** Python evaluates a default **once, at `def`
+  time**, and shares that one object with every call, which is the classic mutable-default footgun
+  (`def f(xs=[])` accumulates). Chezzi re-evaluates on **every omitting call**, so `f(n: int = bump())`
+  returns `1`, `2`, `3` on three calls, and `f(xs: List[int] = [])` hands each call a fresh list.
+  Passing the argument explicitly does not evaluate the default at all.
+
+A **nested** `fn`'s defaults apply at a direct call **and** through a value alias (`g := f; g()`), and
+are evaluated in **module scope**, like a top-level fn's (TICKET-142). A default that reads the
+enclosing fn's param, a local, a sibling nested fn, or a local shadowing a module global is a check
+error: *"a nested fn's default cannot read the enclosing fn's locals: 'n' is local here, and a
+default is evaluated in module scope (pass it as an argument, or read a module-level binding)"*.
+CPython reads the enclosing local at `def` time; Chezzi rejects it rather than silently reading a
+global. A lambda (`fn(x: int) -> int: x`) cannot declare a default, so it keeps exact arity.
+
+A default is evaluated in **module scope**, where no parameter of its own function is bound
+(TICKET-201). So a default may read a module binding named like a parameter, as CPython does:
+`k := 1; fn f(k: int = k) -> int: return k` returns `1` from `f()`. A name the module does not bind
+is an unknown name: `fn f(a: int, b: int = a)` is *"unknown name 'a'"* (CPython raises `NameError`
+at `def`). The same holds inside an **interpolated fragment**: with `n := 100`,
+`fn f(n: int, x: str = "n={n}")` gives `n=100` for `f(3)` and for `g := f; g(3)`. A binder inside
+the default is its own: `g: fn(int) -> int = fn(x: int) -> int: x * 2` beside a parameter `x`, and
+`xs: List[int] = [n * 2 for n in 0..3]` beside a parameter `n`, both check clean and give CPython's value at a direct call, through
+`g := f`, and from another module (the prologue allocates a binder's slot like any other local).
+
+A struct field default and a method default are evaluated in module scope too. CPython evaluates
+them in the class body, where an earlier field or method is bound, so Chezzi declines that read
+rather than silently reading the module binding: with `a := 100`, `struct S: a: int = 1; b: int = a`
+is *"default value cannot read 'a': 'a' is bound in the body of 'S' where the default is written (an
+earlier field default or method), but a default runs in module scope; pass it explicitly or read a
+module-level binding"*. A binder is an earlier field that carries a default, or a method; the field
+that owns the default is never its own binder, so `k := 1; struct S: k: int = k` reads module `k`.
+`Self` in a field default is an unknown name.
+
+Callers may also pass arguments **by name**:
+
+```chezzi
+fn greet(name: str, greeting: str = "Hello", punct: str = "!") -> str:
+    return greeting + ", " + name + punct
+
+greet("Ada")                       # "Hello, Ada!"  — both defaults
+greet("Ada", "Hi")                 # "Hi, Ada!"     — override one positionally
+greet("Ada", punct="?")            # "Hello, Ada?"  — name an arg, skip a middle default
+greet(punct=".", name="Bo", greeting="Hey")        # all named, any order
+
+struct Server:
+    host: str
+    port: int = 8080               # default field
+    tls: bool = false
+
+Server("localhost")                # port=8080, tls=false
+Server("db", port=9000)            # named field; tls defaults
+```
+
+Rules: a parameter with a default may not be followed by a required one; at a call, positional
+arguments must precede named ones (`f(y=2, 1)` is an error); each parameter may be supplied at most
+once. Named arguments are **reordered into parameter-declaration order**, so a side-effecting named
+argument evaluates in parameter order, not source-text order (`f(y=g(), x=h())` runs `h()` before
+`g()`). A default is an arbitrary expression, so it **does** have an observable order, and it is the
+same one: **every** filled slot evaluates in **parameter-declaration order**, whether its value came
+from a positional argument, a named one, or a default, and a default runs **once per omitting call**.
+Measured — `fn f(x = p("d-x"), y = p("d-y"), z = p("d-z"))` called as `f(z=p("arg-z"), x=p("arg-x"))`
+prints `arg-x`, `d-y`, `arg-z`. Scope: free functions
+(own module, `from`-imported, or module-qualified `mod.f(...)`), struct constructors, **and struct
+methods** (`p.greet(punct="?")`, `p.scale()` filling a default) — a method's default is compiled in
+its declaring module like any other, and resolves there however the caller reaches it (see *"Where a
+default is compiled"* below). Named and default arguments bind against the declaration the
+checker resolved (TICKET-182): for any struct or enum receiver of known type, and for a protocol or
+bound-type-parameter receiver through its implementors' shared parameter shape (implementors whose
+parameters differ cannot bind named arguments: pass them positionally). A call through a function
+value uses the same binder and the same messages (`unknown named argument 'x'`, `missing required
+argument 'a'`, ...). A builtin, native or `extern` callee takes **no** named arguments, as in CPython:
+`s.add(x=3)` on a `Set` is `'add' takes no named arguments; pass its arguments positionally`, and so
+are `chr(65, n=66)` and `Set(xs=[1])`. A **static** method (no `self` parameter) takes defaults like any other — its explicit arguments
+start at parameter 0, so `S.mk()` fills them. Defaults are **not**
+supported on **closures** or on **enum variant constructors** — note this is the variant
+*constructor*; an enum's *methods* take defaults just like struct methods. (Per §above, a default may
+be any expression that doesn't
+reference another parameter — a literal, a global, arithmetic, or a call; only param-referencing
+defaults are rejected.)
+
+**Where a default is compiled, and the five rules that follow from it.** A non-literal default is
+compiled **once**, as a hidden zero-arg function in the module that declares it; an omitting call site
+calls that function. (A self-contained literal — `= 1`, `= -1`, `= 1 + 2`, `= None`, `= []`, a
+brace-free string — is still copied inline.) Five
+consequences are worth writing down, because each is a rule you can hit:
+
+1. **`?` cannot propagate *out of* a default.** `fn f(x: int = getr()?.len()) -> int` is a compile
+   error: *"a default expression cannot propagate with `?` — defaults are evaluated in their defining
+   module, which has no caller to propagate to; use `??` or produce a `T?` value"*. An error escaping into
+   the *caller* from an expression owned by the *definer* is exactly the coupling this design removes.
+   It also **widens**: a `T!E`-typed parameter whose default propagates *inside* its own scope now
+   works, where it used to be rejected — `fn f(x: int!str = ?(getr()?.len()))` compiles, and returns
+   `4` on the `?v` path and the `!e` unchanged on the other. `T?`-mode `?.` and `??` never
+   propagated, so both are unaffected (`x: int? = geto()?.len()`, `x: int = geto() ?? 0`).
+   `??` on a `T!E` also never propagates — it DISCARDS the error, so a default containing
+   `getr() ?? 0` is still legal where `getr()?` is not.
+2. **A default always resolves in the module that DECLARES it — including where the caller cannot
+   name that module.** Because a method call is resolved by *name* before types are known, a method
+   default declared in module `a` can be reached from a module `z` that never imports `a`; a
+   protocol-typed parameter is the ordinary way that happens (`z` declares the protocol, `a` declares
+   the struct that satisfies it, and `z` cannot import `a` without a cycle). Where the definer *is* a
+   transitive dependency, a hidden `from` import binds the provider and the call resolves through it.
+   Where it is not, no import may be synthesized — an import edge is resolved when the *caller's*
+   module loads, and a non-dependency can load later — so the call site instead holds a **direct,
+   call-time reference** to the definer's provider. Either way the answer is the definer's.
+
+   This used to be a documented **hazard**: the expression was copied into the call site and resolved
+   in the caller's scope, so `z`'s own `av()` won (measured: `510` where the definer wrote `11`), and
+   a name `z` could not see was a compile error (`unknown name 'u'` in module `z`) even though the
+   definer's module imported it perfectly well. Both are gone. The equivalent two-module CPython
+   program prints the definer's value, and so does this.
+
+   Passing the argument explicitly is unchanged and still reads the *caller's* scope — that is the
+   difference between passing a value and omitting one.
+
+3. **A default that needs itself is a compile error.** `fn f(x: int = f())` is refused, naming the
+   parameter: *"the default for 'x' of 'f' is cyclic: evaluating it requires evaluating the default for
+   'x' of 'f' again"*. Mutual and indirect provider cycles are caught the same way.
+4. **A `Self`-typed parameter's default gets a provider on a non-generic host, and the inline clone
+   on a generic one; a struct FIELD's default has no callee at all.** A provider is a free top-level
+   `fn` declared `-> <the parameter's type>`, and `Self` names the receiver type, which a free fn
+   cannot spell (see *"`Self`"* below). On a **non-generic** host `Self` names exactly one concrete
+   type, so it is substituted for that type in the provider's declared return type and the default
+   behaves like any other: `fn combine(self, other: Self = mkq())` — and any default whose type
+   merely mentions `Self`, like `List[Self]` — resolves in its defining module.
+
+   A **parameter** whose type mentions an enclosing type parameter (or, on a generic host, `Self`)
+   has a callee to fall back on: the **callee** fills it from a prologue compiled into the declaring
+   module, where the type parameter and `Self` are both in scope, and the call site simply omits the
+   argument. A **struct field** in the same shape has no such callee — a constructor call lowers
+   straight to an allocation sized by the arguments the call site pushes, with no prologue that could
+   fill a missing trailing one. So instead the field's provider is made GENERIC in the struct's own
+   type parameters, and a ctor call fills it by forwarding its own explicit type arguments to that
+   provider: `struct Holder[T]: n: int, items: List[G[T]] = mkl()` called `Holder[int](1)` runs, but
+   `Holder(1)` (no turbofish to forward) or a call on a struct whose type parameter carries a bound
+   (nothing to forward the bound's witness to) both keep the field required. So every non-literal
+   default resolves in its definer, whichever route it takes.
+
+   The one shape that cannot: a **keyword** call that supplies a later parameter while omitting an
+   earlier callee-filled one (`G(1).m(k=3)` over `fn m(self, xs: List[Self] = mkl(), k: int = 9)`).
+   A short call drops a suffix; it cannot leave a gap. That is a compile error naming the parameter
+   to pass explicitly — not a silent fall back to the caller's scope.
+
+5. **A cycle routed through an ordinary function is a runtime fault, not a compile error.**
+   `struct S: n: int = mk().n` with `fn mk() -> S: return S()` type-checks clean and then faults with
+   `maximum call depth (10000) exceeded (infinite recursion?)`, rc 1, identically —
+   the same shape as CPython's `RecursionError` on the equivalent program. A documented limit, not a
+   defect: the compile-time check sees provider→provider edges, and this cycle's edge runs through
+   `mk`.
+6. **A call through a protocol-typed or protocol-bounded receiver binds against the PROTOCOL's
+   parameter list, and never borrows an implementor's default** (TICKET-187). Given
+   `protocol P: fn f(self, a: int, b: int)` and `struct A: fn f(self, a: int, b: int = 10)`,
+   `x: P = A(100)` rejects `x.f(1)` with `'f' expects 2 argument(s), got 1`; pass `b` explicitly.
+   A direct `A`-typed receiver still takes the default. Go (`not enough arguments in call`) and Rust
+   (`E0061`) do the same: the interface or trait signature is the whole contract. Named arguments
+   bind by the protocol's parameter names (see "Protocol parameter names" in §7b).
+
+A default may also be a **variadic call** (`fn f(a: int = sum_all(1, 2), ...xs: int, tail: int =
+sum_all(3, 4))`), in the pre-variadic slot and in the keyword-only tail alike; that shape used to be
+rejected and now matches CPython's `def f(a=sum_all(1,2), *xs, tail=sum_all(3,4))` byte for byte.
+
+Built-ins take no named arguments, with **one** exception: **`print`** accepts `sep=` (default `" "`,
+joins the positional args) and `end=` (default `"\n"`, appended after) — both `str` (see `docs/reference/stdlib.md`).
+So `print("a", end="")` writes `a` with no trailing newline, and `print("a","b", sep="-", end="!")`
+writes `a-b!`. Any other named argument on a built-in is an error. `print`'s signature is the
+file-backed variadic decl `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None`.
+
+**Variadic parameters (`...name: T`).** A parameter written `...xs: T` is **variadic**: it collects
+the surplus trailing positional arguments into a fresh `List[T]` (Go/Swift `T...` style).
+
+```chezzi
+fn sum_all(...xs: int) -> int:
+    total := 0
+    for x in xs:                 # `xs` is a `List[int]`
+        total = total + x
+    return total
+
+sum_all(1, 2, 3)                 # 6
+sum_all()                        # 0  — zero args → empty list
+```
+
+Rules: **at most one** variadic per signature; it must carry an element type (`...xs: T`, never bare
+`...xs`); it may **not** carry a default. Everything **after** a variadic is **keyword-only** — the
+variadic eats all trailing positionals, so a following parameter can only be supplied by name. A
+post-variadic parameter *with* a default is an optional keyword arg; *without* a default it is a
+**required keyword arg**:
+
+```chezzi
+fn labeled(prefix: str, ...xs: int, sep: str = ", ") -> str: ...
+labeled("nums: ", 1, 2, 3)             # sep defaults to ", "
+labeled("dash: ", 4, 5, 6, sep="-")    # keyword-only `sep`
+```
+
+Variadics are allowed on free functions, methods, and `native fn` decls — **not** on closures or
+`extern` (C) functions (the C ABI needs fixed per-arg types; see `docs/design/ffi-and-packaging.md §5`). Used
+as a first-class **value** through a binding certain to hold that one fn (see "Keyword arguments
+through a function VALUE" below), a variadic fn packs its surplus and fills its defaults exactly like
+a direct call (`g := sum_all; g(1, 2, 3)`, TICKET-197). Any other value — a list slot, a parameter —
+takes the collapsed `List[T]` slot (`fs := [sum_all]; fs[0]([1, 2, 3])`), the same fixed-value-form
+rule as `print`.
+
+**`Any` (the top type).** `Any` is an **empty structural protocol** — zero required methods, so **every**
+type satisfies it (scalars `int`/`float`/`bool`/`str` and `None` included, not just structs/enums). It
+is the honest element type of a universal slot such as `print(...args: Any)`, and can annotate any
+binding or parameter (`x: Any = 42`, `fn log(v: Any) -> None`). It is **not** dynamic typing: an `Any`
+value carries no methods, so you can pass it around and display it but not call methods on it (a
+downcast `cast[T]` is a documented future addition — see `docs/design/roadmap.md`). `Any` is a prebuilt
+protocol name (a module that declares its own `Any` shadows it there). `Any` is now **expressible** as an ordinary empty
+protocol — it is defined in the prelude as `protocol Any:` with a lone `pass` body — and **any**
+user empty protocol behaves identically to it (see [`pass`](#the-pass-keyword) below): an empty
+protocol is a general accept-all top type, not a special case keyed on the name `Any`.
+
+**Keyword arguments through a function VALUE (Swift-style labels).** Named arguments also work through a
+first-class **function value**, not just a direct call — a `fn(...)` type carries its parameters'
+**labels**, so a binding that holds **one known function** accepts keyword args (TICKET-139/W14-2):
+that is an unannotated `g := some_fn`, `g := fn(...): ...` (a closure literal), a nested `fn`'s own
+name, an alias of such a binding (`g := v` over a nested `fn v`, then `h := g`), or a turbofish
+instantiation of a generic fn (`g := f[int]`, `g := lib.f[int]`) (TICKET-197), and it is **never
+written afterwards**. An alias is voided by a write to either name:
+
+```chezzi
+fn greet(name: str, greeting: str):
+    print(greeting, name)
+
+g := greet
+g(name="Bob", greeting="Hi")           # "Hi Bob" — by label, through a value
+g(greeting="Hi", name="Bob")           # same — labels may be reordered
+g("Bob", "Hi")                         # positional through the value still works
+
+fn apply(f: fn(name: str) -> None):
+    f(name="X")     # ERROR: keyword arguments through a function value need a binding that
+                    # holds one known function (...); pass the arguments positionally
+    f("X")          # fine — positional through any value
+```
+
+Any other callee — a **parameter**, a list/map slot, a loop variable, a match binding, an annotated
+binding, a returned value (`mk(a)(x=1)`), or a binding that is **reassigned** anywhere in its
+lifetime (even after the call, in a loop, or from a nested fn) — takes **no keyword arguments**, and
+the call is a compile error naming the positional workaround. The reason: labels are **surface-only**
+(Swift SE-0111), so `fn(a: int, b: int)` and `fn(b: int, a: int)` are the **same type**. A value
+of that type may hold either function, so `fs := [f, ren]; fs[1](a=1, b=2)` would have bound `a`/`b` by
+`f`'s labels and run `ren` (`201` where CPython's rebinding by the callee's own names prints `102`),
+and binding by the runtime callee's names instead is unsound when the two functions type their
+same-position parameters differently. The gate is deliberately conservative: `h := f; h = f2` with
+identical labels is rejected too.
+
+Labels stay **surface-only for typing**: `fn(str) -> None` and `fn(name: str) -> None` are the **same
+type** — mutually assignable, so an unlabelled callback flows into a labelled parameter and vice-versa
+(no impact on existing HOF/callback/protocol code). A value call through a binding certain to hold
+one fn binds that fn's own parameter slots (TICKET-197), so it fills every default it can name, a
+hole before a supplied argument included: `h := f; h(1, c=9)` over `fn f(a, b=2, c=3)` passes `b=2`
+(CPython agrees). Two limits, both by design: **(1)** a default that names a type parameter is filled
+by the CALLEE, so a value call may omit it only from the **end** of the call — `h := f[int]; h(1,
+c=9)` over `fn f[T](a: T, b: List[T] = List[T](), c: int = 3)` is refused, because a short call is
+exactly "fewer values pushed" and cannot express a gap; call the function directly by name for that
+shape; **(2)**
+first-class **built-in** function values (`p := ord`) take **no** keyword arguments (labels are a
+user-function surface).
+
+**One call shape takes no keyword arguments** (a documented limit, W12-16): a keyword call through a fn-typed struct field or a tuple slot (`h.f(x=4)`, `t.0(x=4)`) is refused, because member-call syntax resolves as a method before it is seen as a value, so bind the function first (`g := h.f` then `g(x=4)`).
+
+How few arguments a function value may be called with is part of what it means to store one: a
+binding typed from `fn a(x: int = 1)` may be called with none, so a function that *requires* an
+argument cannot be assigned into it (`h := a; h = b` over `fn b(x: int)` is a type error). The
+reverse is fine — a defaulted function is strictly more permissive, so it flows into a plain
+`fn(int) -> int` slot. Named arguments through a value evaluate in **parameter-declaration order**, the
+same as a direct named call, and work in `defer`/`spawn` position too (`defer d(name="Zoe")`). Resolution
+is fully static (the checker rewrites the keyword call to a positional one; the runtime `Op::Call` /
+`DeferCall` / `SpawnCall` stay positional), so the VM produce identical output. Diagnostics print an omittable parameter as `int = …`, so `[a, b]` over those two functions reports `fn(int = …) -> int vs fn(int) -> int`.
+
+A function type's **parameter types** are strictly **invariant** — neither covariant nor
+contravariant. `h: fn(Any) -> Dog = idd` over `fn idd(d: Dog) -> Dog` is a type error (covariance
+would let a `Cat` value reach a `Dog`-typed slot), and so is the reverse `h: fn(int) -> str = wide`
+over `fn wide(a: Any) -> str` (contravariance would let that through, but Chezzi rejects it, matching
+Go and Rust, which both make function types invariant in their parameters). The **return** type
+stays covariant.
+
+**A GENERIC fn as a value.** A generic function (`fn ident[T](x: T) -> T`) becomes a usable **value**
+once its type parameters are **pinned** — either with an explicit **turbofish** or against a **known
+concrete `fn(...) -> ...` type** (an annotation, a HOF parameter, a return position, or an assignment
+target). The value then has the fully-substituted concrete function type; calling it works like any
+other fn value.
+
+```chezzi
+fn ident[T](x: T) -> T:
+    return x
+
+g := ident[int]                      # turbofish pins T=int  ⇒ g : fn(int) -> int
+print(g(5) + 1)                      # 6
+p := pair[str, int]                  # one type argument per parameter ⇒ p : fn(str, int) -> (str, int)
+
+h: fn(int) -> int = ident            # annotation pins T=int
+print(h(5) + 1)                      # 6
+
+fn applyit(f: fn(int) -> int, x: int) -> int:
+    return f(x)
+print(applyit(ident, 5) + 1)         # 6 — HOF parameter pins T against the param type
+
+print([1, 2, 3].map(ident))          # [1, 2, 3] — a builtin HOF slot fn(int) -> U also pins T=int
+
+fn getf() -> fn(int) -> int:
+    return ident                     # return position pins T against the declared return type
+```
+
+**Path values (Rust's rule, TICKET-204).** A type path is a value when it names something callable:
+a static method and an instance method named through its type
+(the receiver is the first argument, keyword `self`), at any type-argument arity, bare, imported or
+module-qualified. A payload variant is no path value: see rule U10 below. An alias head pins its own type arguments; one that fixes them takes no more
+(`type BI = Bx[int]`: `BI[str].make`, `x: BI[str]` → *already fixes its type arguments*). A call
+through a path is the path's value applied (`P.get(p)`, `(Bx[int].get)(b)`), and a caller's type
+parameter pins a generic fn value like a concrete type: inside `fn o[U]`, `h: fn(U) -> U = ident`,
+`ap(Bx.get, b)`, `?ident` at `(fn(U) -> U)?` and a default `f: fn(U) -> U = ident` all
+accept, whatever `ident`'s own parameter is spelled (TICKET-210).
+
+```chezzi
+m := Bx[int].make                    # fn(int) -> Bx[int]
+g := Bx[int].get   # g(b): the receiver is the first argument
+type B = Bx[int]
+m2 := B.make   # an alias head pins its args
+```
+
+Three paths are refused, each with its own message: a bound method `b.get` (`a bound method is not
+a value`), a type `Bx[int]` (`'Bx' is a type, not a value — constructors are not values`), and a
+protocol method `Show.show` (`a protocol method is not a value`). A reserved native handle's method
+(`io.Reader.close`) is not a value either (`a native method is not a value`): it has no compiled body
+to point at.
+
+**A type name is never a value (U10, TICKET-259).** A struct, an enum, a protocol, an alias of any
+type, a payload variant and a builtin type name (`int`, `str`, `List`, `Shared`, `int32`, `Self`)
+are types. Each one read in value position gives one error. Rust and CPython accept a constructor as a
+value; Chezzi does not, by owner decision. Call the constructor, or wrap it in a closure:
+
+```chezzi
+struct P:
+    x: int
+enum E:
+    V(int)
+    A
+[1, 2].map(P)                  # error: 'P' is a type, not a value
+[1, 2].map(E.V)                # error: 'E.V' is a type, not a value
+[1, 2].map(str)                # error: 'str' is a type, not a value
+[1, 2].map(fn(e): E.V(e))      # ok: [V(1), V(2)]
+```
+
+The message for a name that has a constructor reads `'E.V' is a type, not a value — constructors are
+not values: call it (`E.V(…)`) or wrap it in a closure (`fn(e): E.V(e)`)`. An alias of any type
+(`type C = int`) and a builtin type give the same error. These stay values: a payload-less variant
+(`E.A`), a top-level fn, a method through its type (`P.mk`), a lambda and a nested fn.
+
+Ancestors, measured 2026-10-15. Rust 1.98.1: `[1, 2].map(E::V)` prints `[V(1), V(2)]` and
+`[1, 2].map(P)` prints `[P(1), P(2)]`. CPython 3.14.7: `len(list(map(P, [1, 2])))` prints `2` and
+`list(map(str, [1, 2]))` prints `['1', '2']`. Both accept a constructor as a value; Chezzi does not,
+by owner decision.
+
+The pin is checked strictly: an **unsatisfiable** target (`g: fn(str) -> int = ident` — `ident` can't be
+both) is a type error, a **bound violation** (`addone[str]` where `str` is not `Add`) is rejected, a
+**turbofish arity mismatch** (`pair[int]` for a two-param `pair[A, B]`) is a clean error, and the value
+keeps its **concrete** type downstream (`g := ident[int]` then `s: str = g(5)` is rejected — `g(5)` is
+`int`). The pin works through a **builtin container HOF parameter slot** exactly as through a
+user-defined HOF: passing a bare generic fn (same-module or imported) to `.map`/`.filter`/`.fold` (and the other
+closure-taking container methods) pins its `[T]` from the element type — `[1,2,3].map(conv)` for a
+`conv[T](x: T) -> str` type-checks to `List[str]`, and `[1,2,3].fold(0, add)` for an `add[T: Add]` pins
+`T=int` and enforces the bound — even though those methods also carry their own result type parameter.
+The runtime is generic-**erased** — the value *is* the underlying function — so an indirect call
+adds no overhead and behaves identically.
+
+A **bare** generic fn value — `g := ident`, with no turbofish and no expected type — is an error
+where it is bound (TICKET-238): inference never reads a later statement, so a later `g(5)` does not
+pin it. Inside ONE statement the value still solves: an argument (`apply(ident, 5)`), a typed
+binding (`f: fn(int) -> int = ident`), or a **join** with a sibling — `if`/`elif`/`match` branches,
+`??`, a list/map literal, `==`, `in`, list `+`, an inline `recover: expr`. `(o ?? g)(5)` with
+`o: (fn(int) -> int)?` pins `T = int`, and so does `if c: inc else: g`. The read is rejected at its
+own span with the instantiate hint:
+
+```chezzi
+fn main():
+    g := ident    # 'ident' is generic and T is not determined here, so it cannot become a function
+    print(g)      # value — instantiate it (`ident[<T>]`), or give this position a concrete function
+                  # type (`fn(<T>) -> <T>`), writing a real type in place of each `<…>`
+```
+
+The same holds inside a `[...]`/`{...}` literal, in a `return` from a fn with an **inferred** return
+type, and in a generic **constructor** / generic **free fn** argument (`b := Bx(ident)` is rejected on that line, and so is
+`print(take(ident))` on `fn take[U](f: U) -> int`). Two unpinned generics joined
+together (`if c: g else: h`, `g == h`) pin nothing and stay rejected. A generic with
+**two or more** type parameters takes them all in one turbofish (`pair[str, int]`, Go's
+`pair[string, int]`), and the diagnostic offers `pair[<A>, <B>]`. First-class (rank-N) polymorphism — one binding used at two
+different types — is a future addition; Go and Rust refuse it too.
+
+**Argument position asks the same question.** A bare generic fn handed to a HOF — a user one, or any
+builtin container HOF (`map`, `filter`, `fold`, `sort_by`, `sort_by_key`, `min_by`, `max_by`,
+`take_while`, `drop_while`, `count`, `position`, `Shared.update`,
+`RwShared.write`), or a `std.concurrency.collection` method (`ConcurrentList.for_each`,
+`ConcurrentMap.fold_entries`) — is refused with the *same* diagnostic when the slot cannot determine its type
+parameters: `[1,2,3].filter(pred)` for a `pred[T](n: int) -> bool` whose `T` appears nowhere, and
+`[1,2,3].map(mk)` for a return-only `mk[T](n: int) -> List[T]`, are both errors. Go answers the same
+(`in call to takeBool, cannot infer T`). The check runs at the **end of the call**, once every
+argument has had its chance to pin: `[1,2,3].fold(0, pick)` for `pick[T](a: T, b: T) -> T` is pinned
+by the accumulator, which is the *first* argument while `pick` is the second — and a user generic
+method may spell the two slots either way round (`b.app(ident, 5)` works as well as
+`b.app2(5, ident)`). An **empty** receiver is the one carve-out, and it suppresses only the *report*:
+its element type is `?`, which is a slot nothing filled rather than a type parameter nothing
+determined, so `[].map(ident)` and `[].map(mk)` still type-check and print `[]`. The **pin is never
+suppressed** — a slot the other arguments determine still pins straight through an empty receiver, so
+`[].fold(0, add)` runs and prints `0`, exactly as Go's `Fold([]int{}, 0, add)` returns `0`. And the
+carve-out is the *receiver's* `?` only: a type parameter of the method itself that ends up
+undetermined is still reported, so `Bx(0).two(ident, ident)` on
+`fn two[U](self, f: fn(U) -> U, g: fn(U) -> U) -> List[U]` is an error (Go: `cannot infer U`).
+
+**The HOF may be generic itself.** When the slot belongs to a *generic* callee, that callee's own type
+parameters are pinned first — by the other arguments, a call-site turbofish, or the enclosing
+annotation — and only then does the passed fn unify against the now-concrete slot. So for
+`fn applyg[U](f: fn(U) -> U, n: U) -> U`, all of `applyg(ident, 5)`, `applyr(5, ident)`,
+`applyg[int](ident, 5)` and `xs: List[int] = mklist(ident)` type-check and run, and
+`fn twop[A, B](f: fn(A) -> B, a: A) -> B` infers `B` from the passed fn's own return
+(`twop(text, 5)` is `str`). Go and Rust infer the same instantiations. What the callee cannot pin is
+still refused with the same diagnostic: `nopin(ident)` on `fn nopin[U](f: fn(U) -> U) -> int` has
+nothing that determines `U` (Go: `cannot infer U`), `twop(mk, 5)` can reach `B` only through `mk`'s own
+undetermined `T` (Go: `cannot infer B`), and `applyg(mk, 5)` cannot match the shapes at all.
+
+One position is deliberately **not** covered, because the concrete type is present but does not reach
+the read: a parameter or field **default value** (`fn run(f: fn(int) -> int = id)`) has a concrete slot
+the checker does not thread into the expected-type hint, so the bare read is refused there and
+`= id[int]` is the spelling that works. It works for an imported generic fn too: `= lib.idt[int]`,
+or `= idt[int]` after `import idt from lib` (TICKET-197; Go accepts `lib.Idt[int]`).
+
+**Imported generic fns follow the same rule** (TICKET-187). A from-imported (`import max from
+std.cmp`) or qualified (`cmp.max`) generic fn read as a value pins from the expected type exactly like
+a same-module one: `g: fn(int, int) -> int = cmp.max` and `[1, 5, 3].fold(0, cmp.max)` work, and
+`f := cmp.max` with nothing to pin it is `'cmp.max' is generic and T is not determined here` (Go:
+`cannot use generic function cmp.Max without instantiation`). The callee's own `T` never reaches the
+caller, so inside `fn pick[T](a: T, b: T)`, `f := cmp.max; f(a, b)` is that error too, not a call that
+merges the caller's `T` with `max`'s.
+
+**`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
+**explicit `-> …!`/`-> …?`** return type. The `?` propagates to *that closure's*
+return, not the enclosing function. A closure with an inferred or non-`T!E`/`T?` return type
+that uses `?` is a type error.
+
+```chezzi
+fn parse(s: str) -> int!: ...
+rs := ["2"].map(fn(s: str) -> int!: ?(parse(s)? * 2))   # ? lands in the closure's own return type
+```
+
+## 6. Control flow  (M3)
+
+```chezzi
+if x > 0:
+    print("pos")
+elif x == 0:           # 'elif' (Python-style single keyword), chainable
+    print("zero")
+else:
+    print("neg")
+
+for i in 0..10:        # range: 0..10 is 0 through 9 (end-exclusive, ascending only)
+    print(i)
+for i in 0..=10:       # inclusive: 0 through 10
+
+# A range is a VALUE of type `Range` (the struct of `std/prelude.chz`, in scope in every module):
+#   a..b  a..=b  ..b  a..  ..          the literal forms; `..` binds below `|` and above `==`/`in`
+#   Range(a, b)  Range(a, b, step)      the constructor: the ONLY place for a step; a negative step counts
+#                                       down (`Range(3, 0, -1)` yields 3, 2, 1); a step of 0 faults
+# Fields `start: int?`, `end: int?`, `step: int = 1`, `inclusive: bool = false` are readable.
+r := 0..3              # a value: bind it, pass it, return it, store it, send it across a spawn
+print(r)               # 0..3       — display is the source form (`0..=3`, `..3`, `3..`, `Range(0, 10, 3)`)
+print(3 in r, r.len()) # false 3    — `Contains[int]`; `len` needs a start and an end
+print(List(r), Set(r)) # [0, 1, 2] {0, 1, 2}  — `Iterable[int]` (NOT an `Iterator`: iterate it twice)
+print(r == Range(0, 3))  # true      — Eq and Hashable on the four fields; a `Range` is a map key
+for i in Range(10, 0, -1):   # 10, 9, 8, … , 1
+    print(i)
+
+# Open ends: `for i in 5..:` runs lazily until a `break` (at the top of `int` it faults with `integer
+# overflow in Add`, as `+` does); `3 in 5..` and `xs[5..]` work; `List(5..)` runs until memory ends,
+# as `List(g())` does for an endless generator. A range with no start (`..5`, `..`) cannot be
+# iterated: `a range with no start cannot be iterated` (a check error for a literal, a fault for a value).
+# `a()..b()` runs `a()` first, in every position (`for`, comprehension, binding).
+# PERFORMANCE: `for i in a..b` over a LITERAL range is a counter loop (no allocation). Iterating a range
+# VALUE (`for i in r`) resumes a generator per step (about 3.3x the cost of the literal loop,
+# docs/contributing/benchmarks.md).
+
+for item in items:     # iterate a list
+    print(item)
+
+for kv in counts:      # iterate a map → (key, value) pairs (insertion order)
+    print(kv)
+
+for k in counts.keys():  # the keys are `counts.keys()`
+    print(k)
+
+for k, v in counts:    # two names unpack each (key, value) pair like any tuple element
+    print("{k}={v}")
+
+for a, b in pairs:     # destructure a tuple element — a tuple target over any iterable of tuples: a
+    print("{a}:{b}")   #    List[(A, B)], a Set, a generator, an .iter() cursor, a `next` struct, a
+                        #    Channel[(A, B)], a Map or an Iterable[(A, B)] value (one name binds the whole
+                        #    tuple; a nested target `for k, (a, b) in xs` unpacks the nested tuple).
+                        #    enumerate/zip live in std.iter.
+
+# `for` over a List/Map/Set iterates a SNAPSHOT of the SPINE, taken once when the loop starts —
+# shallow: the elements are the same objects (mutating a struct element IS visible), but pushing,
+# popping or inserting inside the body cannot change how many steps run, and the new entries are
+# never visited. This is a deliberate DIVERGENCE from Python, which detects the mutation and raises:
+m := {"a": 1}
+for k in m.keys():         # runs ONCE. Chezzi: 1 visit, m.len() ends at 2, rc=0.
+    m["b"] = 2             # CPython: RuntimeError: dictionary changed size during iteration
+# The snapshot means the mutation is SAFE (no fault, no aliasing bug) — it is just INVISIBLE to this
+# loop. Collect the additions and apply them after the loop if you need to see them. Same rule for a
+# `.iter()` cursor (below) and for the callback methods listed under "snapshotting" in stdlib.md.
+# The snapshot holds the element VALUES, not the slots: overwriting an existing slot in the body
+# (`xs[2] = 30`, `m["b"] = 99`) is likewise invisible to this loop, while mutating a struct element
+# in place (`ps[1].v = 20`) IS visible. CPython and Go both read `xs[i]` live here (W10-19).
+
+# A user struct is iterable too: give it `next(self) -> T?` and `for` drives it lazily,
+# calling next() each step until it returns None (so an infinite iterator + `break` terminates).
+struct Counter:
+    n: int
+    limit: int
+    fn next(self) -> int?:
+        if self.n >= self.limit:
+            return None
+        v := self.n
+        self.n = self.n + 1
+        return ?v
+
+for x in Counter(0, 5):    # x binds the element type (int); a next() yielding a tuple destructures (for a, b in …)
+    print(x)
+
+# `Iterable[T]` is a real protocol bound: a generic fn can take ANY iterable — built-in
+# list/set/map/str/bytes, a `.iter()` cursor, a generator, or a user struct with `next`/`iter` — and
+# recover its element type `T`. (`Iterator[T]` is the stricter sibling: a CURSOR, see below.)
+fn first_or[S: Iterable[T], T](xs: S, default: T) -> T:
+    for x in xs:           # x is typed `T`
+        return x
+    return default
+first_or([10, 20], 0)      # 10   (T = int, recovered from the list element)
+first_or("hi", "?")        # "h"  (T = str)
+# The bound is not the only spelling — `Iterable[T]` works in TYPE position too, as a plain
+# (non-generic) parameter whose element type comes from the annotation:
+fn total(xs: Iterable[int]) -> int:
+    n := 0
+    for v in xs:           # v is typed `int`
+        n += v
+    return n
+total([1, 2, 3])           # 6   (a set, a map's keys, a cursor or a generator work the same)
+# Lazy sequences are normally built as adapter structs over this protocol (Rust-style; see
+# examples/iter_adapters.chz for Take/Mapped) — the parity-clean, recommended form.
+
+# `Iterable[T]` + `.iter()` — "can produce a cursor". Every collection now has `.iter()`, returning a
+# COMPOSABLE cursor typed as the existing `Iterator[T]` existential, with `.next() -> T?`
+# (a value… then idempotent None). This lets a PLAIN collection flow into the same adapter pipeline as a
+# hand-written struct iterator (you can't call `.next()` on a `list` directly — `.iter()` bridges it):
+pipe := Mapped(Take([10, 20, 30, 40].iter(), 2), fn(x): x * 2)   # a list → Take → Mapped
+for v in pipe:             # 20, 40
+    print(v)
+it := {1: "a", 2: "b"}.iter()   # map iterates (key, value) pairs; str → 1-char str; bytes/bytearray → int 0..=255
+print(it.next())           # 1
+# `Iterable` is the LOOSER sibling of `Iterator`: an `Iterable` only promises `iter()`; an `Iterator`
+# also has `next`. So every `Iterator` IS `Iterable` — `iter()` on a cursor / generator returns SELF
+# (idempotent), and `s.iter()` in an `[S: Iterable[T]]` body or on an `Iterable[T]` slot returns the
+# value itself when its type has the `next` hook and no `iter` hook. All three flow into the bound. A user struct with
+# ONLY `iter(self) -> Iterator[E]` (no `next`) is for-iterable too (driven by a one-time `.iter()`):
+fn total[S: Iterable[int]](src: S) -> int:
+    sum := 0
+    for x in src.iter():
+        sum = sum + x
+    return sum
+total([1, 2, 3])           # 6   (a list)  — also accepts a generator or a `next`-struct
+List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/Set() drain it)
+# A cursor SNAPSHOTS the collection at `.iter()` (later mutation doesn't change the sequence). NOTE
+# (no compile-time multi-pass safety, unfixable without ownership): each `.iter()` is a fresh cursor,
+# but reusing one exhausted cursor yields nothing on a second pass. Driving a NAMED cursor with `for`,
+# `List(it)` or `Set(it)` CONSUMES it in place (advances the shared position, exactly like `.next()`),
+# so a partial `for … break` then leaves the remainder for a later `next()`/`List()`. A cursor IS sendable across
+# `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are prebuilt names.
+
+# `yield` / generators (run on the sole M:N VM engine; a live frame-local generator IS sendable across a task airlock — it crosses by value as an independent deep copy of its execution state, incl. one suspended mid-`recover:`; a module-GLOBAL generator crosses by value too — the earlier reach-gate + poison-snapshot model was RETIRED 2026-07-21. D4, TICKET-179: at a `spawn` crossing each frame value is a task copy only when the parent can still reach it — a frame-local list the parent never saw stays writable in the task, a list the generator yielded and the parent still holds faults on write). Any fn that
+# uses `yield` is a generator: calling it returns a suspendable iterator, not a value. It runs lazily,
+# suspending at each `yield` and resuming on the next `.next()`. The `-> Iterator[T]` annotation is
+# REQUIRED: the element type `T` is written, and every `yield` must be assignable to it.
+fn count_up(n: int) -> Iterator[int]:
+    i := 0
+    while i < n:
+        yield i            # produce a value, suspend until the next .next()
+        i = i + 1
+for x in count_up(3):      # drives the generator: prints 0, 1, 2
+    print(x)
+# An explicit `-> Iterator[T]` still works (and validates every yield against `T`):
+fn count_up2(n: int) -> Iterator[int]:
+    i := 0
+    while i < n:
+        yield i
+        i = i + 1
+# A generator can also be a struct method (`fn m(self)`, annotation optional), and a generator value
+# is a real `Iterator[T]`: drive it by `for`, pass it to an `[S: Iterator[T], T]` bound, or call
+# `.next()` explicitly — it returns `v` per yield, then `None` once exhausted:
+g := count_up(2)
+match g.next():            # 0
+    ?v: print(v)
+    None: print(-1)
+# `return` (bare only) stops a generator early; `defer`/`spawn`/`parallel:`/`wait:` are not allowed
+# inside a generator. Inference REJECTS an un-inferable element (`yield []` alone, or an int-then-float
+# mix — no silent int->float coercion at a `yield`): annotate `-> Iterator[T]` in that case. `Iterator`
+# is a prebuilt type name. See examples/generators.chz (full showcase), examples/generators_inferred.chz
+# (inference-only), and examples/generators_basic.chz.
+
+while cond:
+    cond = step()
+
+# `break` exits the innermost loop; `continue` skips to the next iteration.
+```
+
+### The `pass` keyword
+
+`pass` is a reserved keyword with two roles.
+
+**(1) A no-op statement.** `pass` does nothing. It is valid anywhere a statement is — a fn/method
+body, an `if`/`else` branch, a `for`/`while` body, a statement `match` arm, or a concurrency block —
+and is the idiomatic way to write an empty body. A function whose body is a lone `pass` runs, falls
+off the end, and returns `None` — exactly like a lone `return`:
+
+```chezzi
+fn todo():
+    pass                # empty body; returns None (same as `return`)
+
+for x in xs:
+    pass                # a deliberately-empty loop body
+```
+
+`pass` is a **statement**, not an expression, so it is not valid where a single expression is
+expected — an expression-position `match` arm. The one exception is a closure body right after
+`:` (`fn(): pass`), which is the no-op closure spelling.
+
+**(2) An empty-body marker for `protocol` and `struct`.** Protocol and struct bodies hold
+*declarations* (method signatures / fields), not statements, so a **sole** `pass` line there means
+"empty body":
+
+```chezzi
+protocol Top:          # zero methods → an accept-all top type (like `Any`)
+    pass
+
+struct Unit:           # zero fields → `Unit()` takes no args
+    pass
+```
+
+An empty **protocol** is a general accept-all top type: with no methods, structural satisfaction is
+vacuous, so **every** type satisfies it. This is exactly how the reserved `Any` (see §5) is
+defined, and any user empty protocol behaves identically (`fn f(x: Top)` accepts an `int`, a `str`, a
+struct…; `xs: List[Top] = [1, "a", true]` type-checks). An empty **struct** has zero fields: `Unit()`
+constructs it, it prints as `Unit()`, two `Unit()` compare equal, and it is usable as a `Set` element
+or `Map` key (a zero-field struct is intrinsically `Hashable`). It still heap-allocates like any
+Chezzi value (no Go zero-size optimization). `pass` must be the **only** line of such a body — `pass`
+mixed with a field/method, or a repeated `pass`, is a parse error. An **empty enum** is *not*
+supported: `pass` in an enum body is rejected (an enum needs at least one variant).
+
+Because `pass` is a real keyword it cannot be used as a name (variable, parameter, field, function,
+type, module alias) — `pass := 5` is an error.
+
+## 6b. Indexing & slicing  (M15)
+
+```chezzi
+xs := [10, 20, 30, 40]
+print(xs[1])           # 20    — index
+xs[1] = 99             # mutate in place
+print(xs[-1])          # 40    — negative index counts from the end
+xs[-1] = 0             # negative index works as an assignment target too
+sub := xs[1..3]        # slice: a Range value → [99, 30]
+print("hello"[0..2])   # he    — strings slice too (→ a new str)
+print(xs[1..99])       # [99, 30, 0]   — slice bounds are clamped (no panic)
+print(xs[2..])         # [30, 0]       — open end (defaults to len)
+print(xs[..2])         # [10, 99]      — open start (defaults to 0)
+print(xs[..])          # full copy
+print(xs[0..=2])       # [10, 99, 30]  — inclusive end
+print(xs[Range(0, 4, 2)])   # [10, 30]  — a step goes through the constructor
+print(xs.reversed())   # [0, 30, 99, 10]  — a NEW list
+print(xs[-2..])        # [30, 0]       — negative bounds count from the end
+```
+
+Slicing takes a `Range` value: `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[..]`, or any `Range` (`xs[r]`,
+`xs[Range(a, b, step)]`). ONE function resolves it against a length, for `List`, `str`, `bytes`,
+`bytearray` and `ConcurrentList`: (1) a missing start is `0` and a missing end is `len` (for a negative
+step: `len - 1` and "before index 0", as CPython); (2) a negative bound `b` becomes `b + len`; (3) an
+inclusive end adds one AFTER step 2 (for a negative step it subtracts one); (4) both bounds clamp to
+the sequence; (5) a start at or past the end gives an empty result. So with `xs = [10, 20, 30]`:
+`xs[-2..]` is `[20, 30]`, `xs[0..=-1]` is `[10, 20, 30]`, `xs[2..1]` and `xs[-1..0]` are `[]`, `xs[1..99]`
+is `[20, 30]`. A plain index stays strict: `xs[-4]` faults. A `step` of `0` cannot be built
+(`Range() step cannot be zero`). A subscript by a `Range` is a slice, or — on a `Map[Range, V]` —
+a key lookup. A type takes a range as a slice or as a key, not both: a type that declares both a range `slice` and an `index` whose key accepts a `Range` is the declaration error `a type takes a range as a slice or as a key, not both`, and a `Map` has no `slice`, so `m[0..3]` stays a key lookup. The checker decides once and the compiler emits that choice.
+`xs[a..b] = v` is the check error `cannot assign to a slice`.
+
+**Negative indexing** counts from the end (`xs[-1]` is the last element) for plain indexing *and*
+slice bounds, on `list`/`str`, including as an assignment target (`xs[-1] = v`). The out-of-range
+rule follows Python's asymmetry: a plain `xs[-100]` on a short list **faults** (`index -100 out of
+bounds (len N)`), while a slice bound `xs[-100..]` **clamps** to the start (never faults).
+
+`List[T]` slices to `List[T]`, `str` to `str`. Indexing and slicing are **protocols**, so custom
+types opt in — see `Index`/`IndexSet`/`Slice` in §7b. A user `Slice` impl is `slice(self, r: Range) -> R`
+(the parameter is named `r`); it hands the range to the list it holds (`return self.items[r]`) to get the
+standard result.
+
+`reversed()` returns a NEW value on `List`, `str`, `bytes` and `bytearray`; `reverse()` changes in place
+and exists on `List` and `bytearray` only.
+
+## 6c. Comprehensions  (M16)
+
+```chezzi
+[x * 2 for x in xs]              # list: map each element
+[x for x in xs if x > 0]         # list: with an `if` guard
+[i for i in 0..10]               # over a range (any iterable works)
+{x % 3 for x in xs}              # set: duplicates collapse
+{k: v * 10 for k, v in scores}   # map: `for k, v` binds a map's entries
+[x + y for x in xs for y in ys]  # nested: cartesian product (ys inner-most, like nested for-loops)
+[y for xs in xss for y in xs]    # nested: a later clause references an earlier clause's variable
+[x for x in xs if x > 0 for y in ys]   # a guard may follow ANY clause (filters that clause)
+```
+
+One or more `for` clauses, each binding one name (or a tuple target — `for k, v in m`, `for a, (b, c) in xs`)
+and optionally followed by one or more `if` guards. With multiple clauses the iteration nests like
+nested `for` loops — the first clause is outermost, the last innermost — so a later clause may
+reference an earlier clause's binding (`for xs in xss for y in xs`), and a guard after a non-final
+clause filters at that level (Python semantics). The loop variables are scoped to the comprehension.
+The iterable is anything a `for` loop accepts (list/map/set/str/range and struct iterators); set
+elements and map keys must be `Hashable`.
+
+## 7. Structs  (M3)
+
+Type declarations (`struct`, `enum`, `protocol`, `type`) are top-level only. Python accepts a `class` inside a function; Chezzi rejects the nested form at parse time (owner decision 2026-09-28, TICKET-178), because a nested type would otherwise be silently ignored.
+
+```chezzi
+struct Point:
+    x: int
+    y: int
+
+    fn dist(self) -> float:           # method: first param is 'self'
+        return math.sqrt(float(self.x*self.x + self.y*self.y))   # needs: import std.math
+
+p := Point(3, 4)        # construct positionally
+print(p.x)              # field access
+print(p.dist())         # method call
+```
+
+No inheritance (by design). Composition only.
+
+**Struct instances are REFERENCE values (Python's object model, not Go's).** `q := p` binds the *same*
+instance — it does not copy — so a write through either name is visible through both, and passing a
+struct to a function lets the callee mutate the caller's value. Same for a struct stored in a `List`
+or as a `Map` **value**:
+
+```chezzi
+q := p
+q.x = 99
+print(p.x)              # 99  — one object, two names (CPython prints 99; Go would print 3)
+```
+
+Every struct has an intrinsic `copy()` returning a **shallow** duplicate. Each field's *value* is
+copied, so a `List`/`Map`/`Set`, nested-struct, or handle field is referenced by **both** structs
+afterward — exactly like Python's `copy.copy` and unlike `copy.deepcopy`, which Chezzi does not have.
+A struct declaring its own `copy` method, or holding a fn-typed `copy` field, keeps it. A struct holding
+a `Channel`, `Shared`, or `Socket` copies fine and shares the handle. `List`, `Map` and `Set` have a
+shallow `copy()` too (see stdlib.md §2).
+
+```chezzi
+struct P:
+    x: int
+    tag: str = "none"
+
+p := P(1, "hi")
+print(P(p.x))            # P(x=1, tag='none')  -- a hand-written duplicate drops the field
+print(p.copy())           # P(x=1, tag='hi')    -- copy() carries every field
+
+q := p.copy()
+q.x = 99
+print(p.x)                # 1  -- independent instances
+```
+
+The one place a struct *is* snapshotted is as a `Map`/`Set` **key** or a `Set` **element** (see
+§"Keys are value types (Go model)" under Maps) — so keys are the language's single value-semantics
+island; everything else is by reference. A `spawn:`/`parallel:` boundary is a third model again:
+values cross **by copy** through the airlock (§11b).
+
+**A bound method is not a value; a method named through its type is** (Rust's path rule,
+TICKET-204). `p.dist` is not an expression — it would hide its `self` capture (Rust E0615) — so
+reading it is a check-time error: `type Point has no field 'dist' ('dist' is a method — a bound
+method is not a value: …)`. Name it through its TYPE instead: `d := Point.dist` is a fn that takes
+the receiver first (`d(p)`, or `d(self=p)`), and a static method `Point.origin` is a fn too. Or wrap
+it in a closure: `f := fn(): p.dist()`. (A struct **field** that is *fn-typed* — `f: fn(int) -> int`
+— is an ordinary value: `s.f(3)` and `g := s.f; g(3)` both work.) See "Path values" in §5.
+
+### 7a. Static (associated) methods — the "no self ⇒ static" rule
+
+A method's **first parameter** decides its call shape. If it is named `self`, the method is an
+**instance method**, called `value.method(args)` (unchanged). If the first parameter is **not** `self`
+— or the method takes **no parameters** — it is a **static (associated) method**, called
+`Type.method(args)` on the type name itself (the Rust `fn new` ergonomic). An instance method is also
+callable through its type, receiver first — `P.get(p)`, `Bx[int].put[str](b, "s")`, `E.tag(e)`, as
+Rust's `Type::method(&v)` (TICKET-210); a call with no receiver is an arity error (`'get' expects …`).
+A reserved native handle's method is not (`io.Reader.close()` → *call it on a value*). A static method
+is **not** callable as `value.method` (it errors clearly, pointing at the other form).
+
+Static methods are **additive** — the positional all-fields constructor `Name(...)` still works. They
+unlock **named / alternative** constructors and **validating** constructors (returning `T!E` /
+`T?`) that the positional ctor cannot express:
+
+```chezzi
+struct Rect:
+    w: int
+    h: int
+    fn square(s: int) -> Rect:        # static: first param is not `self`
+        return Rect(s, s)
+    fn area(self) -> int:             # ordinary instance method coexists
+        return self.w * self.h
+
+struct Email:
+    addr: str
+    fn parse(s: str) -> Email!str:   # validating ctor
+        if "@" in s:
+            return ?Email(s)
+        return !"missing @"
+
+r := Rect.square(5)        # Type.method(args) — static call
+print(r.area())            # 25
+match Email.parse("a@b"):
+    ?e: print(e.addr)
+    !m: print(m)
+```
+
+**A module-level `fn` named after a struct in the same module replaces its positional
+constructor** (TICKET-029) — this is different from a static method (which lives *inside* the
+struct body and is called `Type.method(...)`, never `Type(...)`):
+
+```chezzi
+struct Path:
+    raw: bytes
+
+fn Path(p: PathLike) -> Path:      # module-level, same name as the struct
+    return Path(p.as_path())       # inside THIS body only, Path(...) is still the raw field ctor
+
+p := Path("/a/b")                  # calls the fn, not the field ctor
+```
+
+The fn wins wherever it is in scope: bare in the declaring module, `import Path from m` then
+`Path(args)`, and `m.Path(args)`. Inside the fn's own body the bare name is the one place the raw
+field constructor is still reachable — without that escape, a normalizing ctor like the one above
+would recurse forever. A **whole-module** `import std.x` binds no bare name, so `path.Path(args)` calls
+the fn too. A **nested** fn may still not be named after a same-module struct ctor
+(see the v1 limits above) — only a **module-level** fn can win, because it is hoisted into a global
+slot the backend can dispatch through.
+
+**Enums** get static methods too (e.g. a `from_str(s) -> Color?`). For an enum, a **variant**
+name **always wins** over a static-method name on `Enum.x` — so a variant and a static method may
+**not** share a name (a collision is a declaration-time error). This keeps `Color.Red` always the
+variant.
+
+**Generic static methods** are reached with a **type-level turbofish** — the enclosing type's args sit
+on the **type**:
+
+```chezzi
+struct Box[T]:
+    items: List[T]
+    fn empty() -> Box[T]:
+        return Box([])
+
+b := Box[int].empty()      # turbofish on the TYPE: Box[int].empty()
+```
+
+The type-level turbofish takes **one or more** type args — multi-param types use the comma form
+(`Pair[K, V].empty()`).
+
+A **module-qualified** base takes the **single-arg** type-level turbofish too:
+`shapes.Tree[int].Leaf(9)` (qualified enum-variant ctor) and `shapes.Box[int].make(5)` (qualified
+static method) both work in expression position, as does the combined form
+`shapes.Box[int].make[str]("hi")`, and so does the *multi-arg* qualified form
+`shapes.Pair[int, str].X` (TICKET-204).
+
+A static method may **also declare its OWN `[U]`** type parameters — they sit on the **member**
+(`make[U]`), the **declaration-site rule**: a type argument is written where its parameter is
+declared. Member-level args are **inferred** from the call by default; a **member-level turbofish**
+pins them only when they can't be (`Box.make[str]("hi")`). The two compose — `Box[int].make[str](x)`
+supplies the enclosing `T = int` *and* the method `U = str`:
+
+```chezzi
+struct Box[T]:
+    val: T
+    fn make[U](x: U) -> Box[U]:       # member declares its own [U]
+        return Box(x)
+
+a := Box[int].make(5)                 # U inferred from the arg ⇒ Box[int]
+b := Box[int].make[str]("hi")         # combined turbofish: T=int + U=str ⇒ Box[str]
+```
+
+A method param name may **not shadow** an enclosing type param (`fn make[T]` inside `Box[T]` is an
+error). A method-level turbofish on a member that declares **no** type params (or a builtin like
+`xs.len[int]()` / `xs.iter[int]()`) is an arity error. **Instance** methods take the same member-level
+turbofish, multi-arg: `pair.first[int, str](1, "x")`.
+
+#### Static protocol requirements — calling `T.method(...)` through a bound  (M24)
+
+A protocol may require a **static** method — one whose first parameter is not `self`. A type
+witnesses it by declaring that method statically (an instance `default(self)` does **not** witness
+it), and a generic bounded by such a protocol may **call it through the type parameter**. This is the
+one thing an instance-only protocol cannot express: *construct* a `T` you were never handed:
+
+```chezzi
+protocol Default:
+    fn default() -> Self          # STATIC requirement: no `self` receiver
+
+struct Counter:
+    n: int
+    fn default() -> Counter:
+        return Counter(7)
+
+fn reset[T: Default](old: T) -> T:
+    return T.default()            # dispatches to the CONCRETE type
+
+print(reset(Counter(1)).n)        # 7
+```
+
+**How it works — witness passing, not monomorphization.** Generics stay erased: there is still one
+body per generic fn and no type argument reaches the VM. A type parameter whose bound carries a
+static requirement, *and* whose body needs it, is given a **hidden trailing parameter** holding the
+concrete type's runtime identity key; `T.method(...)` compiles to a call that pops that key and runs
+the same dispatch as an ordinary `Type.method(...)`. The parameter is charged **only** to a body that
+uses one, so a generic that merely *has* a static-carrying bound (`fn tagged[T: Spawnable](x: T) ->
+str: return x.tag()`) is untouched and keeps every position it had before.
+
+**What works.** A struct or an enum host; same-module and cross-module calls in every import
+spelling (`m.reset(x)`, `import reset from m`, `import reset as again from m`); a `T` inferred from
+an argument, pinned by turbofish (`empty[Counter]()`), or fixed by an annotated result
+(`c: Counter = empty()`); **forwarding** a still-abstract `T` from one generic into another,
+transitively, recursively and mutually; a type parameter declared by a **member** — instance or
+static, on a plain or generic host (`h.make(x)`, `Holder.build(x)`, and the member turbofish
+`h.make[Counter](x)`); the call inside a **closure** (including one that escapes its defining frame),
+a **nested `fn`**, a **`defer:`** block and a **`spawn:`/`parallel:`** block (the witness is a value,
+so it crosses the airlock); and the reserved **`Convert[S]`** protocol, whose witness is a static
+`convert(x: S) -> Self`:
+
+```chezzi
+fn make[T: Convert[int]](seed: T, n: int) -> T:
+    return T.convert(n)
+```
+
+**What does not, each with a diagnostic naming the workaround.**
+
+| shape | why | do this instead |
+|---|---|---|
+| `T` declared by the enclosing **TYPE** (`struct Bx[T: Default]` … `T.default()` in a method) | the concrete type is erased once a `Bx` *value* exists — only a value could hold the witness | declare the parameter on the **member** (`fn fresh[T: Default](self, …)`), whose witness rides on the call |
+| reading a witness-taking fn as a **function value** — `g := reset`, `reset[Counter]` as a value, passing it to a HOF, a cross-module read | a `fn` value erases which declaration it came from, so no witness can be recovered. **A permanent wall, not a v1 limit** | call it directly, or take a factory closure: `fn make[T](mk: fn() -> T) -> T` |
+| a `T` **not determined** at the call site | there is no concrete type to build a key from | pin it (`nodet[Counter]()`) or annotate the result |
+| a bound witnessed by a **scalar** | it cannot host a static method | use a struct or an enum |
+| a **manifest entrypoint** that takes a witness or any declared parameter (`entrypoint = "src.main:main"` where `fn main[T: Default]()` or `fn main(a: int)`) | it is invoked with no arguments, so nothing supplies the key (or the argument) | give the entrypoint a nullary, non-generic signature and construct / read inputs in a helper it calls. Reported by `chezzi check` and by bare `chezzi run`; an explicit `chezzi run <file>` is script mode and runs the top level regardless |
+
+The turbofish *call* form is fine — `reset[Counter](Counter(1))` works; it is only reading
+`reset[Counter]` as a **value** that hits the wall.
+
+**When the hidden parameter is charged.** Only a body that can actually use one pays: it names `T`
+in expression position (`T.default()`), or it *forwards* — it calls a witness-taking fn in a way that
+could pass its own still-abstract `T` along. A call whose arguments are all concrete forwards nothing
+(`fn concrete[T: Default](x: T) -> int: return reset(Counter(1)).n` keeps its value position), and
+merely naming a module that exports a witness-taking fn is not a call to it (`lib.plain(1)` costs
+nothing, `lib.reset(x)` charges). Anything the rule cannot positively read as concrete charges —
+a zero-argument call, a local, a turbofish naming `T`, a generic constructor head — because an
+under-charge is a forward the checker then has to refuse.
+
+A **member** forward charges too (`h.build[T](x)`, and `h.build(x)` with `x: T`) — even when that is
+the body's ONLY use of `T`, which no free-name reading of the body could see: the type argument is
+not a name, and the receiver is not a module. A member call has no callee to resolve before types
+exist, so it is judged on **two** conditions, both required: this **call site** carries something of
+the enclosing fn's (a type argument naming one of its type params, or an argument mentioning one of
+its parameters whose annotation does — at any depth, so `h.build(xs[0])` with `xs: List[T]` charges),
+**and** the method **name** is declared as witness-taking somewhere in the program. It therefore
+costs nothing to call a method that merely shares a name with a witnessed one (`p.build(1)`), or to
+call an ordinary builtin from inside a static-bounded generic — `m.get("a")` fails the first
+condition, and `xs.push(x)` with `x: T` on a `List[T]` fails the second, since `List.push` is a
+builtin that can take no witness.
+
+One shape is still refused for want of a charge: a member forward whose `T` reaches the argument
+through a **local** rather than a parameter (`v := x` then `h.build(v)`) — the call site alone cannot
+see where `v` got its type. An **explicit turbofish**, in either call syntax, always charges even when
+`T` occurs in **neither** a parameter type nor the return type of its own fn — `h.build[T](v)` and a
+free-fn call like `empty[T]()` both charge their enclosing fn's `T` now, and that fn's own call sites
+must then pin `T` themselves (`outer[SomeType](...)`). For the local-carried shape, give `T` a place
+in the signature, spell the member turbofish (`h.build[T](v)`, always charged), or construct through
+it directly (`T.default()`, charged regardless).
+
+A type parameter **SHADOWS a same-named declaration for its whole body, in every position** — the
+annotation `x: Item`, the static call `Item.tag()`, the type-level turbofish `Item[int].tag()`, the
+constructor `Item(99)`, a nullary variant `Item.Red`, and a same-named *function* `foo()`. Chezzi has
+one namespace, so this is Go's rule (`func fv[foo any](x foo) int { return foo() }` → *missing
+argument in conversion to foo*; `Item{}` under `[Item any]` → *invalid composite literal type Item*).
+`fn f[Item: Tagged](x: Item) -> int: return Item.tag()` beside a `struct Item` therefore dispatches on
+the *argument's* type. A type parameter is erased — it has no constructor and takes no type
+arguments. Through one you reach the methods its bounds declare: an instance method as a value or a
+call, `g := T.get` / `T.get(v)` / `ap(T.get, v)` (Rust's `T::get(&v)`, dispatched on the receiver's
+runtime type, so it needs no witness and works in a method of `struct Bx[T: Getter]` too), and a
+static method only as a call, `T.mk()` (TICKET-210). A real local binding still wins over the
+parameter. Rename the type parameter
+if you meant the outer declaration.
+
+Static methods still do **not** participate in *instance*-method protocol satisfaction: a protocol
+requirement is matched static-to-static and instance-to-instance, never across. Worked demo:
+`examples/static_witness.chz`.
+
+**Uniform parse rule (any receiver).** `recv.name[X](args)` parses as a method turbofish on **any**
+receiver — not just a bare ident, but a call result, a field, or an index:
+
+```chezzi
+W(1).cast[str]("a")          # call-result receiver
+mk().cast[str]("a")          # factory-result receiver
+h.w.cast[str]("a")           # field receiver
+xs[0].cast[str]("a")         # index receiver
+W(1).cast[Map[str, int]](m)  # nested-generic type arg, non-bare receiver
+```
+
+The parser keeps both readings of a one-arg `head[k](args)` and the checker chooses (TICKET-210),
+as Go and CPython do: a head that denotes **data** re-reads the bracket as index-then-call — a local
+or global name (`fs[k](10)`), a struct field with no method of that name (`h.fs[k](10)`,
+`hs[0].fs[k](10)`), a module global that is not a fn (`lib.fs[k](10)`). A fn-like path or a method
+keeps the turbofish reading (`idt[int](3)`, `W(1).cast[str]("a")`). Parens are no longer needed. A
+fn-typed field is data, so `h.f[int](3)` reports *cannot index into* (Go's `cannot index h.f`). A
+**numeric** index (`arr[0].handlers[0](20)`) always parses as index-then-call, and a plain subscript
+with no following call (`obj.items[0]`, `m.data[k]`) is always an ordinary index.
+
+**One bracket, both readings, the head decides (TICKET-222).** Without a call too, `head[X…]` is
+one bracket whose `X` the parser reads twice: by the real type grammar and as an expression. The
+head picks, as in Rust and Go: a generic fn or a type head takes the type arguments, any value
+indexes. So every type spelling works as a type argument in value position, and a parenthesised
+path is the path value applied (Rust's `(i64::abs)(-6)`):
+
+```chezzi
+g := idt[(int, str)]            # tuple type argument
+h := idt[fn(int) -> int]        # fn type argument
+d := json.decode[Map[str, int]] # nested generic
+print((math.abs[int])(-6))      # 6
+K := 1
+print(fs[K](10))                # a value head indexes: fs[1](10)
+```
+
+A type-only bracket on a value is rejected: `xs[fn(int) -> int]` reports *a subscript takes an
+expression, found the type 'fn(int) -> int'*, and `xs[int, str]` *a subscript takes one index,
+found 2* (Go: `more than one index`).
+
+## 7b. Generics & protocols  (M7)
+
+A protocol must be imported to be used in another module -- `import Drawable from shapes` or the qualified `shapes.Drawable`.
+
+**Generic functions** take type parameters in `[…]` after the name. A parameter may carry a
+**bound** — a protocol the instantiating type must satisfy. Type arguments are normally **inferred**
+from the call, but may be **given explicitly** at the call site: `id[int](42)` and the struct form
+`Pair[int, str](1, "one")`. For a generic **enum** the args go on the **type** (the declaration-site
+rule), not the variant — `Box[int].Full(9)` (see §8). Explicit args pin the
+type; inference fills any that are left off.
+
+```chezzi
+fn first[T](a: T, b: T) -> T:        # unbounded: works for any type
+    return a
+
+fn max[T: Comparable](a: T, b: T) -> T:   # bounded: T must be Comparable
+    if a < b:
+        return b
+    return a
+
+print(max(3, 7))                     # 7   (int is Comparable)
+print(max("apple", "banana"))        # banana
+```
+
+A bound may equivalently be written in a **`where` clause** after the return type — an alternative
+spelling of the same bounds, useful to keep a long parameter list readable. Each `where` entry names
+a declared type parameter and lists its protocols (`+`-joined, comma-separated across entries); the
+checker merges them into the matching `[T]` parameter, so the two forms are interchangeable. A
+`where` entry needs a bound: `where T:` and `where T, U: Eq` are
+``a `where` entry needs a bound (`where T: Proto`)``:
+
+```chezzi
+fn max[T](a: T, b: T) -> T where T: Comparable:   # same as `fn max[T: Comparable](a, b)`
+    if a < b:
+        return b
+    return a
+
+fn combine[A, B](a: A, b: B) where A: Add + Mul, B: Comparable:   # multi-entry, multi-bound
+    ...
+```
+
+A `where` entry naming a type parameter that isn't declared in `[…]` **and** isn't the enclosing
+type's own parameter is an error.
+
+**Conditional methods.** A `where` on a *method* may name the **enclosing struct/enum's own
+type parameter** (not the method's `[U]`): the method is then callable only when the receiver's
+concrete type argument satisfies the bound — Rust's `impl<T: Ord> Box<T> { fn top(…) }`. It mirrors
+the built-in `List[T].sort` / `sum` (each a `where T: …` on `T` = the list's element). This is a
+**checker-only** bound — it lowers to nothing at runtime — so a satisfying instance runs exactly like
+an ordinary method on every engine.
+
+```chezzi
+struct Box[T]:
+    val: T
+    fn top(self) -> T where T: Comparable:   # conditional on the RECEIVER's own T
+        return self.val
+
+    fn max2(self, other: T) -> T where T: Comparable:
+        if self.val < other:                 # the body MAY use the bounded op (`<` needs Comparable)
+            return other
+        return self.val
+
+b := Box(5)
+print(b.top())                       # 5   — int is Comparable
+print(b.max2(9))                     # 9
+
+import std.net
+fn f(s: net.Socket):
+    bad := Box(s)
+    bad.top()                        # ERROR at check time: type Socket does not satisfy Eq
+                                     # (Comparable embeds Eq; the first unmet bound is named)
+```
+
+Just like a free fn's `where`, the method **body** may use the bounded operation (`<` above needs
+`Comparable`) — the receiver bound is in scope on the enclosing type parameter for the whole body.
+The receiver-param bound is enforced wherever the concrete type argument becomes known — on an
+instance call (`b.top()`) **and** on a static factory reached as `Type.method(…)` (a no-`self`
+method: `fn of(x: T) -> Box[T] where T: Comparable` rejects `Box.of(q)` when `q`'s type isn't
+`Comparable`).
+
+**Conditional conformance.** When the conditional method *is* a protocol's required method — e.g. a
+`compare(self, other: Self) -> int where T: Comparable` makes `Box[T]` *structurally* satisfy
+`Comparable` (no companion `eq` is needed: `Comparable` embeds `Eq`, and a type whose `==` is the
+structural derive satisfies `Eq` without writing one) — the receiver bound makes that conformance **conditional**: `Box[int]` satisfies
+`Comparable` (so `Box(1) < Box(2)` and passing a `Box[int]` to a `[U: Comparable]` generic are both
+fine), but `Box[Tag]` (with `Tag` not `Comparable`) does **not** — the `<`, and the bound-check, are
+rejected at compile time. The bound is honoured *everywhere* conformance is queried — operator
+dispatch (`<`, `+`, …), generic bounds, and protocol-typed parameters — not just at an explicit
+`.compare()` call.
+
+**A conditional hook never falls back to the hookless path (TICKET-250).** A conditional method
+that is an operator's hook is the hook of the *declaration*. The run time keeps one answer per
+declared type, so it calls the method for every instantiation. An operator on an instantiation
+that fails the bound is therefore a compile error that names the bound, even where the type has
+another way to satisfy the operator:
+
+```
+struct Box[T]:
+    v: T
+    fn next(self) -> int?: return None
+    fn iter(self) -> Iterator[str] where T: Comparable: return ["a"].iter()
+for q in Box(Tag(1)):   →  type error: cannot iterate over Box[Tag]
+                            (method 'iter' requires Tag: Comparable)
+```
+
+`Box[Tag]` does not iterate through `next`, a zero-field `struct Z[T]` with a conditional `hash`
+gets no constant hash for `Z[Tag]`, and `Box[Tag]` is not a `StructuralEq` payload when `Box` has a
+conditional `eq`. `for`, comprehensions, `List()` / `Set()` / `Map()`, `x[k]`, `x[k] = v`,
+`x[a..b]`, `in`, the arithmetic operators, unary `-` and a `Set` / `Map` key all report the bound.
+One exception stays open: `print` accepts every value and has no compile-time decider, so a
+conditional `str` runs for every instantiation.
+
+**The declaration decides a hook, never the instantiation (TICKET-250).** A generic type has one
+verdict per hook, taken from the signature as written. A method whose signature conforms for one
+instantiation only is the hook of no instantiation: it is an ordinary method, the near-miss
+warning applies at the declaration, and the operator reports its ordinary error.
+
+```
+struct Key[T]:
+    v: T
+    fn hash(self) -> T: return self.v      # `T` is not `int`: never the Hashable hook
+s: Set[Key[int]] = Set()                    →  type error: Set element type must implement Hashable
+
+struct Box[T]:
+    v: T
+    fn compare(self, other: Box[int]) -> int: return -1   # the operand is not `Self`
+Box(1) < Box(2)                             →  type error: cannot compare Box[int] and Box[int]
+```
+
+Write the signature for every instantiation (`other: Self`, `-> int`) and put a restriction in a
+`where` bound.
+
+**`==` honours the bound too** (`docs/contributing/gaps.md` **W7-41** / **W7-45**, both fixed 2026-08-11). A
+conditional `fn eq(self, other: Self) -> bool where T: Comparable` is the hook `==`/`!=` dispatch to,
+and the equality path consults conformance exactly as `<` does:
+
+```
+Box[Tag] == Box[Tag]  →  type error: cannot compare Box[Tag] and Box[Tag] for equality
+                         — Box[Tag]'s `eq` requires Tag: Comparable
+```
+
+while `Box(1) == Box(2)` still runs and prints `false`. Rust agrees (`impl<T: Ord> PartialEq for
+Boxy<T>` leaves `Boxy<Tag> == Boxy<Tag>` un-callable, `error[E0369]`). The same rule covers `!=`,
+containers and payloads (`[a] == [b]`, `?a == ?b`, tuples, map values, struct fields),
+`x in xs`, and the builtins whose runtime is `values_equal` —
+`list.contains`/`index_of`/`dedup`/`unique`, and every map-key / set-element position, each with its
+own message naming the site (*contains() compares List[Box[Tag]] elements for equality — …*,
+*map key type Box[Tag]'s `eq` requires …*).
+
+**An UNMET `eq` `where` bound is refused where the value is ERASED into the protocol slot, not at the
+comparison — TICKET-053.** Chezzi can see the concrete witness at the point it is assigned into a
+protocol-typed slot (a `let`, a field, a `List`/`T?`/`T!E` element, a return), so a witness
+whose own `eq` cannot be satisfied for this instantiation is rejected THERE, at compile time, naming
+the bound:
+
+```
+protocol Tagged: fn tag(self) -> int
+struct Box[T]:
+    v: T
+    fn eq(self, other: Box[T]) -> bool where T: Comparable: return true
+a: Tagged = Box(Tag(1))  →  type error: cannot assign Box[Tag] to variable of type Tagged
+                             — Box[Tag]'s `eq` requires Tag: Comparable
+```
+
+The escape is the same one direct comparison already uses: `fn wrap[T: Comparable](x: Box[T]) ->
+Tagged` compiles. **A protocol-typed (existential) operand whose witness's `eq` bound DOES hold still
+defers the comparison itself to runtime, by design, not by gap** — protocols are Go-style interfaces,
+and comparing two protocol-typed values is exactly Go's `interface{} == interface{}`: the checker
+cannot know which concrete witness inhabits the protocol at the comparison site (existentials are
+erased there), so it compiles the comparison and dispatches to the witness's `eq`, the same shape as
+Go's own interface `==` deferring to the dynamic type (`docs/contributing/gaps.md` **W7-52**, resolved 2026-08-12
+as ancestor-correct; amended 2026-09-04, TICKET-053, for the unmet-bound half above). `Ty::Protocol`
+also satisfies a `[T: Eq]` BOUND now, agreeing with the bare `==` on the identical spelling (`fn
+generic_eq[T: Eq](a: T, b: T) -> bool: return a == b` fed two protocol-typed values, or `.eq()`
+directly) — matching Go 1.20+'s widened `comparable`, which likewise admits an interface type. Every
+OTHER protocol still correctly rejects a protocol-typed value that does not structurally provide it
+(`[T: Stringable]`/`[T: Hashable]`/… over `Sized_` all reject); `Eq` is the one protocol this applies
+to, because `Eq`-satisfaction is defined as exactly what `==` already accepts, and `==` already
+accepted a protocol-typed operand.
+
+**A generic body that compares its own type parameter must bound it by `Eq`, at the DEFINITION —
+matching both owning ancestors.** `fn f[T](a: T, b: T) -> bool: return a == b` rejects at `f`'s own
+declaration — `cannot compare T and T for equality — T is not bounded by Eq (add an `Eq` bound to T:
+`[T: Eq]`, or `where T: Eq` on a fn)` — the same shape rustc 1.97.0 produces (`error[E0369]`, *help:
+consider restricting type parameter `T` with trait `PartialEq`*) and Go 1.26 produces (`invalid
+operation: a == b (incomparable types in type set)`). (The message names both spellings because the
+same check also fires at a bare type ANNOTATION — `struct Reg[K: Hashable]: m: Map[K, int]` — where
+`where` is not grammar at all.) The same rule covers `in`/`contains`/`index_of`/`dedup`/`unique` over
+`List[T]` and a `T` reached as a map key / set element. A type parameter that is never compared pays
+no tax — the
+obligation is per-USE, not a blanket requirement on every `[T]`. `Comparable` already embeds `Eq`, so
+`[T: Comparable]` needs no separate `Eq` bound; `Hashable` does **not** embed `Eq` (Rust's `Hash` has
+no `Eq` supertrait either — `HashSet<T>`/`HashMap<K, V>` spell `Eq + Hash` explicitly), so a generic
+that builds/indexes a `Map`/`Set` keyed on its own type parameter needs `[T: Hashable + Eq]`
+(`docs/contributing/gaps.md` **W7-53**). And a type graph nested deeper than **10 000** links is REFUSED at a
+`[T: Eq]` bound or an `==` — tied by construction to the VM's own equality depth cap, so the checker
+never grants a compare the runtime can't itself perform. A growing (polymorphic-recursion) type graph
+is refused far shallower than that, in bounded work (a couple of consecutive re-entries that keep
+getting strictly larger) rather than by walking to the cap (`docs/contributing/gaps.md` **W7-55**).
+
+**Protocols** are Go-style structural interfaces: a block of body-less method signatures. A type
+satisfies a protocol by *having* the methods — there is no `implements` declaration. `Self` inside
+a signature refers to the conforming type.
+
+A built-in `List`/`Map`/`Set`/`str`/`bytes`/`bytearray` satisfies a USER-declared protocol the same
+structural way, out of its own method table: `protocol Sized: fn len(self) -> int` is satisfied by
+`[1,2,3]`, `{"a": 1}`, `{1, 2}`, `"abc"`, `b"ab"` and `bytearray(b"ab")` alike (`docs/contributing/gaps.md`
+**W8-32**). The three bare scalars (`int`/`float`/`bool`) have no methods, so they satisfy only an
+empty protocol. The concurrency/net handles (`Channel`, `Shared`, `RwShared`, `Atomic`, `Executor`,
+`Socket`, `Listener`, `Writer`, `Reader`) are excluded — they do not witness a user protocol.
+
+**Protocol parameter names** (TICKET-187). A protocol's parameter NAMES are part of its contract,
+for user and built-in protocols alike, at every arity (as Swift's argument labels are). A call
+through a protocol binds named arguments by the protocol's names, so a method conforms only when
+it uses the same names in the same positions:
+
+```chezzi
+protocol Rep:
+    fn replace(self, old: str, new: str) -> str
+
+struct Doc:
+    text: str
+    fn replace(self, new: str, old: str) -> str:   # before: accepted, and p.replace(old="a", new="b")
+        return self.text.replace(old, new)         #   swapped the two arguments
+# ERROR: type Doc does not satisfy Rep (method 'replace' parameter 1 is named 'new', but Rep declares 'old')
+
+struct Doc2:
+    text: str
+    fn replace(self, old: str, new: str) -> str:   # after: same names, conforms
+        return self.text.replace(old, new)
+```
+
+The built-in protocols take their names from `std/prelude.chz`: `compare`/`eq` and the operator
+methods (`add`/`sub`/`mul`/`div`/`mod`) name their operand `other`, `Index.index` names `k`,
+`IndexSet.set_index` names `k`, `v`, `Slice.slice` names `r`, and
+`Contains.contains` names `item`. So `fn compare(self, o: P) -> int` no longer makes `P`
+`Comparable`; write `fn compare(self, other: P) -> int`. A built-in type conforms through its native
+method's declared names (`str.replace(self, old, new)` satisfies `Rep`), though a direct call to a
+native method still takes no named arguments. The direct hooks follow the same names (TICKET-197):
+an `index`, `set_index`, `contains` or `slice` method that misnames a parameter does not make the
+type indexable, index-assignable, `in`-testable or sliceable, and the operator error says why —
+`cannot index into V (method 'index' parameter 1 is named 'i', but Index declares 'k')`, `cannot
+apply + to W and W (method 'add' parameter 1 is named 'o', but Add declares 'other')`. `==` is not
+affected: it dispatches a user `eq` by its shape, whatever the operand is called.
+
+`Self` is also usable in an **inherent** `struct`/`enum` method's signature and body
+(param type, return type, local annotation), where it names the enclosing type — `fn dup(self) ->
+Self` inside `struct P` returns a `P`, and for a generic `Box[T]` it carries the receiver's own type
+args. It resolves to the concrete enclosing type, so a `-> Self` method returning a different type is
+a type error. `Self` is meaningful only inside a method; naming it as a free-fn parameter, a struct
+field, or a top-level annotation is `unknown type 'Self'`.
+
+```chezzi
+protocol Comparable:                 # PREBUILT/reserved — its shape is file-backed in std/prelude.chz
+    Eq                               # embedded: ordered ⇒ equatable (Rust's `Ord: Eq`)
+    fn compare(self, other: Self) -> int
+
+struct Point:
+    x: int
+    y: int
+    fn compare(self, other: Point) -> int:   # ⇒ Point satisfies Comparable, structurally.
+        return (self.x + self.y) - (other.x + other.y)
+    fn eq(self, other: Point) -> bool:       #   `eq` is OPTIONAL here — a struct already satisfies
+        return (self.x + self.y) == (other.x + other.y)   # `Eq` structurally. Write one only to
+                                                          # OVERRIDE `==`, and keep the two agreeing.
+
+print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable
+```
+
+The prebuilt **`Comparable`** protocol (`compare(self, other: Self) -> int`) is the protocol wired to
+the **ordering** operators. For any `Comparable` value — including a bare `T: Comparable` —
+`< <= > >=` dispatch to `compare` (a negative/zero/positive result means less/equal/greater).
+`int`, `float`, and `str` satisfy `Comparable` intrinsically. So does a **tuple**, a **`List[T]`** and an
+**`T?`** whenever every element type is `Comparable`: they order lexicographically (first unequal
+element decides, a shorter prefix sorts first, `None < ?_` — Rust's order), so
+`print((1, 2) < (1, 3))  # true`, `[(2, "b"), (1, "z")].sort()` gives `[(1, "z"), (2, "b")]`, and `min`/`max`,
+`sort_by_key` with a tuple key and `std.cmp` all work. A tuple holding a non-`Comparable` element is still
+rejected. A **struct gets no default ordering** (W7-41): write its own `compare`. `Map`, `Set` and `T!E`
+stay unordered. Operators on a `NaN` element pair are all `false`; `sort`/`min`/`max` use the same total
+order as bare floats. (It is not the only operator-wired
+protocol: `Eq` owns `==`/`!=` below, and `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` own the arithmetic
+operators further down.)
+
+```chezzi
+print(Point(1, 1) < Point(5, 5))     # true  — `<` calls Point.compare
+```
+
+Equality (`==` / `!=`) is **not** routed through `compare` — it has its own protocol, **`Eq`**. (Routing
+`==` through `compare` was considered and rejected: a `compare` that ignores some fields would silently
+redefine equality, and `<`'s ordering answer is the wrong shape for it.)
+
+The prebuilt **`Eq`** protocol (`eq(self, other: Self) -> bool`) is the protocol wired to `==`/`!=`:
+a struct/enum that defines `eq` **owns its `==` / `!=`**, exactly as `compare` owns its `<`. A type that
+defines **no** `eq` keeps the structural (field-by-field) equality it always had.
+
+**`Eq` satisfaction is exactly "`==` works on it"**, and writing an `eq` is not what earns it — the
+language's structural `==` is an automatic derive, and since 2026-08-11 it tells the protocol system so
+(`docs/contributing/gaps.md` **W7-41**). So `where T: Eq` is writable over `int`/`float`/`bool`/`str`, `bytes`,
+tuples, `List`/`Map`/`Set`, `T?`/`T!E`, any struct or enum, a **function value**
+(a user closure/free fn, or a first-class universe builtin like `ord`/`chr`/`panic`/`print`), and a
+**protocol-typed (existential) value** — the same set `==` accepts. Go gives structs `==`
+automatically, Rust spells it `#[derive(PartialEq, Eq)]`, Python `@dataclass(eq=True)`; Chezzi's is
+implicit. A function value compares by IDENTITY, not structurally — two loads of the same
+top-level/nested `fn` def (or the same builtin) are equal, two calls to a factory minting a fresh
+nested `fn` are not, and two closures with equal captures are not — matching CPython's `f == g`
+exactly and Rust's fn-pointer `PartialEq` (`docs/contributing/gaps.md` **W7-54**, fixed 2026-08-12; Go is the one
+ancestor that differs, rejecting `f == g` outright). A named fn is one value: `P.mk == P.mk`,
+`E.A == E.A`, `PA.mk == P.mk`, `lib.Q.mk == Q.mk`, `T.get == T.get`, `math.sqrt == math.sqrt`,
+`json.decode[int] == json.decode[int]` and an
+`extern` fn are `true` read in any module, inside a spawned task, and after a `spawn:` capture, a
+`Channel` or an `Atomic.load` (TICKET-215, TICKET-226; Rust fn items and `decode::<i32>`, CPython
+`C.m == C.m`, `q.get() == math.sqrt`). A native, builtin or extern fn value spawns
+(`g := math.sqrt; spawn g(9.0)`) and submits (`ex.submit(time.now_ms)`) like any fn (TICKET-226; Go
+`go g(9.0)`, CPython `ex.submit(time.time)`). A protocol-typed value defers entirely to its
+concrete witness — see the deferred-to-runtime paragraph above (`docs/contributing/gaps.md` **W7-52**, fixed
+2026-08-12; matches Go 1.20+'s `comparable`, which likewise admits an interface type). The one thing
+that revokes the grant is an
+`eq` (its own, or one reached through an element / entry / tuple slot / field / payload)
+whose `where` bounds do not hold for the instantiation in hand — that is the `Box[Tag]`
+case above. **Still outside the grant, and filed:** a bare `T` with no bound (deliberate — a generic
+body is checked once with `T` abstract).
+
+```chezzi
+struct Ver:
+    maj: int
+    pre: str
+    fn compare(self, other: Ver) -> int:
+        return self.maj - other.maj
+    fn eq(self, other: Ver) -> bool:                 # `==` asks THIS, not the fields
+        return self.maj == other.maj
+
+print(Ver(1, "alpha") == Ver(1, "beta"))         # true  — `pre` differs, `eq` says equal
+print(Ver(1, "alpha") != Ver(1, "beta"))         # false — `!=` is the same dispatch, negated
+```
+
+For a struct/enum, `a.eq(b)` and `a == b` are **one** dispatch in both directions, so a `[T: Eq]` body
+may spell either. Dispatch is by the operands' **runtime type**: both sides must be the same
+struct/enum type or the comparison stays structural `false` without calling user code, and for an enum
+it is the *enum* that decides — one `eq` also answers `Shape.Circle == Shape.Square` (Rust `PartialEq` /
+Python `__eq__` compare across variants).
+
+`eq` is **not** a reserved name, so the operator dispatches only to the hook's exact signature,
+`fn eq(self, other: Self) -> bool`. A wrong arity, a concrete non-`Self` operand, or a non-`bool` return
+is rejected at the **declaration**, not left to answer wrongly at the operator:
+
+```chezzi
+struct A:
+    v: int
+    fn eq(self) -> bool:      # type error: 'eq' … must take exactly one operand
+        return true
+```
+
+The one alternative shape that stays legal is a **generic** operand — an ordinary method that merely
+shares the name (Rust allows an inherent `eq` beside `PartialEq`; Python namespaces the hook as
+`__eq__`). `==` leaves it alone and stays structural:
+
+```chezzi
+enum Opt[T]:
+    Has(T)
+    Empty
+    fn eq(self, x: T) -> bool:               # an ordinary method, NOT the Eq hook
+        return true
+
+print(Opt[int].Has(1).eq(7))                 # true  — the method still works
+print(Opt[int].Has(1) == Opt[int].Has(2))    # false — `==` stays structural
+```
+
+**Through a protocol bound, `.eq()` is the protocol's equality — never the same-named ordinary
+method.** A *concrete* receiver keeps calling the ordinary method (Rust's inherent-wins rule); a
+receiver whose type is a bound type parameter resolves to the protocol, exactly as Rust resolves
+`a.eq(b)` under `T: Eq` to `<T as PartialEq>::eq`. The three spellings therefore give three answers,
+and they are the three rustc gives:
+
+```chezzi
+struct Key:
+    n: int
+    fn eq[U](self, o: U) -> bool:            # an ordinary method, NOT the Eq hook
+        return true
+
+fn eqm[T: Eq](a: T, b: T) -> bool:
+    return a.eq(b)
+
+print(Key(1).eq(Key(2)))                     # true  — concrete receiver: the ordinary method
+print(Key(1) == Key(2))                      # false — `==` stays structural
+print(eqm(Key(1), Key(2)))                   # false — through the bound: the PROTOCOL's equality
+```
+
+A real `eq` **hook** is still dispatched through the bound, of course — that is what makes `Eq`
+user-overloadable. The rule is one sentence: through a bound, `.eq()` means whatever `==` means for
+that receiver, so the method spelling and the operator can never disagree (`docs/contributing/gaps.md` **W7-53**).
+
+A user `eq` reaches **every** equality site, not just the operator — `Map`/`Set` key lookup (`m[k]`,
+`has`, `get`, `remove`, `in`, `add`), `x in xs`, `list.contains`/`index_of`/`dedup`/`unique`, set
+algebra, and the recursive element/field/entry compares inside `==` on a container:
+
+```chezzi
+struct K:
+    a: int
+    b: str
+    fn hash(self) -> int: return self.a
+    fn eq(self, other: K) -> bool: return self.a == o.a
+
+x := K(1, "x")
+y := K(1, "y")
+print(x == y)          # true
+print(y in [x])        # true
+m: Map[K, int] = {}
+m[x] = 10
+print(m[y])            # 10
+print([x] == [y])      # true — the recursion reaches the element's `eq`
+```
+
+**Writing a correct `eq` is your job, and these are the limits — read them before you write one.**
+The first two are rules carried over from Python; the rest are ceilings Chezzi does not (and largely
+cannot) enforce.
+
+* A **container** short-circuits on identity first (`x is y or x == y`, CPython's
+  `PyObject_RichCompareBool`), so `[x] == [x]` is `true` even for an `eq` that answers `false` for
+  everything. The bare `==` **operator** has no such shortcut and always calls `eq`, so `x == x` for
+  that same type is `false`.
+* **`hash` and `eq` must agree — this is the implementor's contract, and it has a hard structural
+  limit.** A `Map`/`Set` probe can only ever scan the buckets of `hash(key)`, so an `eq` *coarser*
+  than its type's `hash` is **unreachable**, not merely wrong: two values that `eq` calls equal but
+  that hash differently will never meet. Rust and Python leave this to the implementor too; Chezzi
+  does not try to enforce it. **What to do:** key `hash` and `eq` on the **same fields** — `eq` may
+  read fewer fields than the struct has, but never fewer than `hash` does.
+* **Keep `eq` reflexive (`x.eq(x)` is `true`) or a value stops finding itself in a container.** A
+  `Map`/`Set` key is a **snapshot** (the value model, `§Keys are value types` below), so the probe
+  compares your value against a *copy*, not against the same object — the identity short-circuit
+  above cannot save you. An `eq` that answers `false` for everything makes `x in {x}` and `x in m`
+  both `false`:
+
+  ```chezzi
+  struct Never:
+      a: int
+      fn hash(self) -> int: return self.a
+      fn eq(self, other: Never) -> bool: return false     # never reflexive — a bug, not a feature
+
+  x := Never(1)
+  s: Set[Never] = {x}
+  print(x in s)       # false — the stored key is a COPY, so identity never fires
+  print([x] == [x])   # true  — same object, identity short-circuit fires
+  ```
+* **An `eq` that mutates the very container it is being probed against answers from the container it
+  LEFT behind — never a crash.** The probe re-reads its candidate list each step *and* re-validates
+  the matched position after each compare; if the entry moved, the whole probe restarts (CPython
+  `lookdict`'s `DKIX_KEY_CHANGED`). So `m.get(k)` inside such an `eq` returns `k`'s value in the
+  post-mutation map, not a shifted neighbour's and not an out-of-range panic. An `eq` that mutates
+  on *every* call makes the probe spin, exactly like an `eq` containing `while true`. Don't do it.
+* **`Atomic[T].cas` compares structurally and never calls a user `eq`** — it holds the value's lock
+  across the compare, and re-entering user code there would deadlock. Two layers keep that true:
+  the checker **rejects a payload type that REACHES a user `eq`** — its own, or one on any element,
+  entry, tuple slot, struct field or enum payload the structural compare would
+  recurse into (use `Shared[T]`, which has no `cas`, for such a type) — and the VM **switches the
+  `eq` hook off** for the duration of the compare, so the guarantee does not depend on that walk
+  being able to see through a protocol existential. A type parameter as the payload must carry the
+  sealed bound `StructuralEq` from `std.concurrency` (`fn mk[T: StructuralEq](v: T) -> Atomic[T]`),
+  so a payload built by substitution gets the same check at each call (TICKET-250). See
+  [`concurrency.md`](concurrency.md).
+* **A generic type's instantiation is ERASED at runtime, so `Any` can hand `eq` a foreign operand.**
+  `a: Any = Box(1)`, `b: Any = Box("x")`, `a == b` type-checks (the `Any` escape hatch from the
+  disjoint-type rule) and dispatches `Box`'s `eq`, whose body then faults on `int` vs `str`. It is a
+  normal recoverable fault, catchable with `recover:` — and it is what CPython does with the same
+  program (`TypeError` out of `__eq__`). There is no per-instantiation tag to dispatch on; keep the
+  static type if you want the compile-time answer.
+* **`match` never dispatches `eq`.** A literal pattern is `int`/`str`/`bool` only, and a struct/enum
+  arm matches by variant and *binds* fields rather than comparing them — so a user `eq` cannot change
+  which arm is taken.
+
+**`Comparable` embeds `Eq`** (mirroring Rust's `Ord: Eq`): a type ordered must also be equatable. It
+still does — but since a struct/enum satisfies `Eq` structurally, **`compare` alone is enough**:
+
+```chezzi
+struct Ver:
+    maj: int
+    fn compare(self, other: Ver) -> int:
+        return self.maj - other.maj
+    # no `eq` needed — Ver satisfies Comparable, and `==` stays structural
+```
+
+M23 shipped a rule that a type defining `compare` must define `eq` too; it was **dropped 2026-08-11**
+(`docs/contributing/gaps.md` **W7-41**) because measurement falsified its premise in both directions. A
+field-complete `compare` that agrees with structural `==` exactly was a **false reject**, while a
+`compare` reading a *subset* of the fields plus an `eq` reading a different subset — this file's own
+`Ver` example above — sailed through. So it never enforced coherence; it enforced *"you typed the word
+`eq`"*. Rust, the owning ancestor, permits manual `Ord` beside a derived `Eq` (a clippy lint, not an
+error). Keeping `compare` and `eq` agreeing remains the implementor's job — the checker cannot verify
+`eq(a, b) == (compare(a, b) == 0)` and does not pretend to. int/float/str keep satisfying `Comparable`
+intrinsically (the scalar grant short-circuits before the embed is flattened).
+
+`==` / `!=` between **provably-disjoint types is a compile error** — `1 == "a"`, `Box[int] ==
+Box[str]`, or two different structs can only ever answer `false`, which is always a bug in the source.
+This is a **deliberate divergence from Python** (which answers `False` at runtime): Chezzi is
+statically typed, so it follows mypy's `--strict-equality`, Go, and Rust here. The question asked is
+**"can these two ever be the same value?"** — *not* "is one assignable to the other", which is a
+stricter, different question (it forbids write-through aliasing, and `==` never writes). So
+everything the runtime can genuinely compare stays legal:
+
+* the runtime's cross-type pairs — a mixed `int`/`float` (`1 == 1.0`, and `<`/`<=`/`>`/`>=` between
+  them) compares EXACTLY (CPython's rule), never by coercing the int through f64, so an integer
+  above 2^53 never collapses onto a nearby float — and `bytes` vs `bytearray` (content-equal, Python
+  parity) — **at any depth**, so `[1.0] == [1]` and `{"k": 1.0} == {"k": 1}`
+  compile and answer `true`, exactly as in Python;
+* a **protocol existential against a type that conforms to it** (`sh: Shape` vs a `Sq`, an `Error` vs
+  your error struct, in either operand order);
+* **two different existentials** (`Shape` vs `Error`) — one concrete type can conform to both, so the
+  pair is inhabited;
+* an existential **nested inside a container, generic struct, or concurrency handle** — `List[Error]`
+  vs `List[MyErr]`, `Map[str, Error]` vs `Map[str, MyErr]`, `Box[Error]` vs `Box[MyErr]`,
+  `Error?` vs `MyErr?`, `(Error, int)` vs `(MyErr, int)`, `Shared[Error]` vs
+  `Shared[MyErr]`. (Note these same pairs are *not* mutually **assignable** — a mutable container's
+  type argument is invariant — but they can still hold equal values, which is all `==` asks.)
+* any comparison involving an **erased type parameter**, bare or nested at any depth (`a == 1` and
+  `xs == [1]` inside `fn f[T: Eq](a: T, xs: List[T])`; `a == b` inside
+  `fn cmp[T](a: Channel[T], b: Channel[int])`; a free `T` in a parameterized protocol's own arguments,
+  `Container[T]` vs a conforming `Bag[int]`). A `where T: <scalar>` bound is the exception: it *pins*
+  `T` to that scalar, so `fn f[T](a: T, b: int) where T: str` still rejects `a == b`. This is the
+  CO-INHABITANCE question — "can these ever be equal" — a separate axis from **whether `T` may be
+  compared at all**: `T` itself still needs an `Eq` bound wherever it is genuinely walked for equality
+  (above), so `fn f[T](a: T, xs: List[T]): return a == 1` rejects at ITS OWN declaration
+  (`T is not bounded by Eq`) even though `int` and `T` would be co-inhabitable once `T` is bound. A
+  HANDLE's own element type (`Channel[T]` vs `Channel[int]`) is the identity-compare exception — the
+  handle compares by identity, never by its element, so `cmp`'s `T` needs no `Eq` bound at all, and that
+  identity survives every crossing (spawn capture or argument, `Channel` send, `Shared`/`RwShared`/`Atomic`
+  store, `Executor` submit) — TICKET-177.
+
+A conforming existential is not a blanket pass: a **non**-conforming concrete stays an error at every
+depth (`sh: Shape` vs a `str`, `List[Shape]` vs `List[str]`, `Container[T]` vs an `int`), and neither
+is an erased parameter — a *handle* whose element types are disjoint is still disjoint
+(`Channel[int]` vs `Channel[str]`). When you *want* the dynamic answer on a
+genuinely disjoint pair, compare through the `Any` existential — widening **one** side is enough
+(`u: Any = a; u == b`), since `Any` is the top type and disjointness is then not provable, and the
+runtime's type-tag guard decides.
+Ordering is overloaded through `Comparable`; arithmetic is overloaded through the per-operator
+protocols **`Add`/`Sub`/`Mul`/`Div`/`Mod`** (binary, methods `add`/`sub`/`mul`/`div`/`mod(self,
+other: Self) -> Self`, powering `+`/`-`/`*`/`/`/`%`) and **`Neg`** (unary, method `neg(self) -> Self`,
+powering unary `-`). A struct/enum defining the matching method gets that operator on its values;
+`int`/`float` satisfy all six intrinsically. (C-style: `/` truncates and `%` is the int remainder, so
+`Div`/`Mod` are `Self -> Self` with no float-return surprise.)
+
+```chezzi
+struct Vec2:
+    x: int
+    y: int
+    fn add(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x, self.y + other.y)
+    fn div(self, other: Vec2) -> Vec2:
+        return Vec2(self.x / other.x, self.y / other.y)
+    fn neg(self) -> Vec2:
+        return Vec2(-self.x, -self.y)
+
+print((Vec2(1, 2) + Vec2(3, 4)).x)   # 4    — `+` calls Vec2.add
+print((Vec2(6, 8) / Vec2(2, 4)).y)   # 2    — `/` calls Vec2.div
+print((-Vec2(1, 2)).x)               # -1   — unary `-` calls Vec2.neg
+```
+
+**Protocol embedding (super-protocols).** A protocol body may, in addition to `fn` signatures, list
+**embed lines** — one-or-more protocol refs joined by `+` — to pull in those protocols' requirements.
+Embeds and `fn` sigs interleave in any order; a body of only embed lines is a *bundle*. A type
+satisfies the protocol iff it satisfies every embed (transitively) **and** has every own method, so a
+bound flattens at use sites (`[T: Arithmetic]` requires add/sub/mul/div). The builtin **`Arithmetic`**
+bundle is `Add + Sub + Mul + Div`. The builtin **`Num`** is `Arithmetic + Mod + Neg + Comparable`,
+satisfied by `int` and `float` only (sealed: a user type never satisfies it, even with all eight
+methods); a `T: Num` body gets `+ - * / %`, unary `-`, `< <= > >= == !=`, each yielding `T`, and
+`x + 1` on a `T` is refused (no int/float mix, Rust's rule). Collision rules: an own `fn` whose name matches an embedded-required
+method is an error; two embeds requiring the same method with the *same* signature dedup silently (a
+legal diamond — so `Arithmetic + Add` is fine), with *differing* signatures it is an error; a cyclic
+embed is an error.
+
+The embed set flattens at **every** use site, not only at a bound. Through a value annotated with the
+protocol (an *interface value*) and through a bounded type parameter alike: an embedded method is
+callable, `in` resolves an embedded `Contains`, `[]`/`[a..b]` an embedded `Index`/`IndexSet`/`Slice`,
+and unary `-` an embedded `Neg`. A protocol value also **satisfies the protocols it embeds**, so a
+`Person` (embedding `Named`) is accepted where a `Named` is wanted — Go's interface-to-interface
+assignment. Type arguments stay **invariant** throughout: a `Container[str]` value never satisfies
+`Container[int]`, embedded or not.
+
+**A witness method may not be generic.** A method that declares its own type params (`fn show[U](self)
+-> str`) cannot satisfy a protocol requirement: its signature is spelled in binders that exist in no
+scope the requirement can see, so matching them would compare two independently-scoped names by
+spelling and alpha-renaming would change whether the program compiles. Chezzi reports *method '…' is
+generic and cannot witness a protocol requirement*, for user types and builtins alike. Rust refuses
+the identical shape (`E0049: method has 1 type parameter but its trait declaration has 0`). Take the
+parameter on the protocol instead (`protocol Show[U]: fn show(self) -> U`), which is inferred from
+the witness.
+
+**Object safety — `Self` in a parameter position.** A protocol value erases which type it holds, so
+two values of one protocol need not be the same witness — `a + b` over `a: Vecish, b: Vecish` could
+hand a `W` to `V`'s `add`. A method whose signature **takes** `Self` is therefore not usable where
+two witnesses could meet: calling it on a value (`a.add(b)`) is rejected, the operator forms are
+rejected (every operator protocol's method is `(self, Self) -> Self`, so `+ - * / %` and `<` are all
+affected), and a protocol value may not be the **witness for a generic type parameter** whose bound
+needs such a method (`sum2[T: Vecish](a: T, b: T)` has two `T` slots). Bind the operands together
+with a generic parameter over a CONCRETE type and it all works:
+`fn plus[T: Vecish](a: T, b: T) -> T: return a + b` called with two `V`s.
+
+Everything else about the value is unaffected — it still passes to a parameter of its own protocol,
+still satisfies the protocols it embeds, and `Self` in the **return** is fine (it widens to the
+protocol), which is why `fn neg(self) -> Self` and unary `-` stay usable. Rust's object-safety rule
+is the same; Go bans `Self` from interfaces outright.
+
+An embed's type argument must name a real type; one naming a type that does not exist is rejected
+at the declaration rather than silently becoming a requirement that accepts anything. It may name
+the owner's type parameter anywhere, as the whole argument (`protocol Bag[T]: Contains[T]`) or
+nested (`Contains[List[T]]`, so a `Bag[int]` requires `Contains[List[int]]`).
+
+```chezzi
+protocol Arithmetic:        # builtin/reserved — shape file-backed in std/prelude.chz
+    Add + Sub + Mul + Div
+
+protocol VectorSpace:       # embeds two protocols and adds its own requirement
+    Arithmetic + Neg
+    fn dot(self, o: Self) -> int
+
+fn combine[T: Arithmetic](a: T, b: T) -> T:   # +, -, *, / all available on T
+    return (a + b) * (a - b) / b
+
+fn twice[T: Num](x: T) -> T:   # int or float, never a mix
+    return x + x
+
+protocol Named:
+    fn name(self) -> str
+
+protocol Person:            # embeds Named, adds its own requirement
+    Named
+    fn age(self) -> int
+
+fn only_named(n: Named) -> str:
+    return n.name()
+
+fn show(p: Person) -> str:       # an INTERFACE VALUE, not a bound
+    return p.name() + " " + only_named(p)   # embedded method; Person satisfies Named
+```
+
+Indexing and slicing are overloaded through the prebuilt **`Index[K, V]`** (read `obj[k]` via
+`index(self, key: K) -> V`), **`IndexSet[K, V]`** (mutable `obj[k] = v`, adds `set_index(self, key: K,
+val: V)`), and **`Slice[R]`** (`obj[r]` for a `Range` `r` via `slice(self, r: Range) -> R`; the parameter is named `r`, and the old three-parameter form `slice(self, start, end, step)` is removed) protocols.
+Built-in `list`/`map`/`str` satisfy them intrinsically (`str` is read-only — `Index`/`Slice` but not
+`IndexSet`); a struct defining the matching methods becomes indexable/sliceable. Because they are real
+protocols, a generic can be bounded by them — `K`/`V`/`R` are recovered at the call site like
+`Iterator[T]`'s element:
+
+`IndexSet[K, V]` **requires `Index[K, V]` too** (as Rust's `IndexMut: Index`). A **compound**
+`obj[k] += v` is `obj[k] = obj[k] OP v` (§3): it types `obj[k] OP v` from `index`'s return, then
+stores the result against `set_index`'s `val`, exactly as `=` does. Both must key on the same `K`. A **plain** `obj[k] = v` never reads, so an asymmetric pair (a safe-read
+`index -> V?`, a widening writer) stays legal there. `index` alone is legal (a read-only type);
+`set_index` alone is not index-assignable.
+
+```chezzi
+struct Ring:
+    data: List[int]
+    fn index(self, k: int) -> int:
+        return self.data[k % self.data.len()]
+    fn set_index(self, k: int, v: int):
+        self.data[k % self.data.len()] = v
+    fn slice(self, r: Range) -> List[int]:
+        return self.data[r]
+
+r := Ring([10, 20, 30])
+print(r[3])            # 10   — wraps; `index` dispatched
+r[1] = 99              # `set_index` dispatched
+print(r[0..2])         # [10, 99]   — `slice` dispatched
+
+fn first[C: Index[int, V], V](c: C) -> V:   # works over a list OR a Ring
+    return c[0]
+```
+
+**Membership (`in`)** is overloaded through the prebuilt **`Contains[Item]`** protocol (Python's
+`__contains__`): a struct/enum defining `contains(self, item: Item) -> bool` makes `x in that_value`
+dispatch to it, yielding `bool`. Built-in `list`/`set`/`str` test element/substring membership and
+`map` tests **key** membership intrinsically (unchanged); the item type must be compatible with `x`.
+
+```chezzi
+struct Bag:
+    items: List[int]
+    fn contains(self, item: int) -> bool:
+        return item in self.items
+
+b := Bag([1, 2, 3])
+print(2 in b)          # true   — `contains` dispatched
+print(9 in b)          # false
+```
+
+A type parameter may carry **multiple bounds** with `+`: `fn fma[T: Add + Mul](a: T, b: T, c: T)`
+requires `T` to satisfy both.
+
+A protocol may itself take **type parameters** — `protocol Container[T]:`. A bound then supplies
+concrete arguments, and a type satisfies it structurally with the parameters substituted:
+
+```chezzi
+protocol Container[T]:
+    fn get(self, i: int) -> T
+
+fn first[X: Container[int]](c: X) -> int:   # T pinned to int; c.get(0) is int
+    return c.get(0)
+```
+
+The number of args must match the protocol's arity (a bare protocol takes none). A parameterized
+protocol is also a first-class **value/annotation type** — `c: Container[int]` is a valid parameter,
+return, field, or reassignment slot (an *existential*: any type that satisfies `Container[int]` is
+accepted, and the protocol's own methods plus everything its embeds require are callable on it —
+except a method taking `Self`, which is bound-only; see object safety above). The concrete args are witnessed
+**statically at every store/pass boundary** (assigning a value into the slot checks conformance
+there) and then **erased at runtime** (methods dispatch by name, like every protocol existential). A
+method that returns the protocol's param **recovers** the carried arg — `c.get(0)` on a
+`Container[int]` yields `int`, not the bare `T`:
+
+```chezzi
+fn first(c: Container[int]) -> int:   # existential value slot
+    return c.get(0) + 1               # c.get(0) recovers to int
+```
+
+Value-position parameterized protocols are **strictly invariant**: `Container[int]`, `Container[str]`,
+and bare `Container` are three distinct, non-interchangeable types (exact-arg match — no
+`Iterator[int]`→`Iterable[int]` value-position subsumption). A **bare generic** protocol used as a
+value type stays an existential with unbound params, so a struct whose method returns a concrete type
+does **not** conform to it — supply the args (`Container[int]`) to use it as a value.
+
+> **A protocol crosses a module boundary like any other declaration.** Both `mod.Named` (qualified) and
+> `import Named from mod` (with or without an `as` rename) resolve, exactly as they already do for a
+> `struct`/`enum`/`type` alias. That includes a generic bound: `[T: mod.Named]`,
+> `where T: mod.Named`, `[T: mod.A + mod.B]`, `[S: mod.Container[int]]` and a protocol embed line
+> `mod.Named` name the same protocol as the bare import, and a static requirement dispatches through
+> the witness exactly as `[T: Named]` does. The last segment is the protocol and the rest is the module:
+> `[T: a.b.Named]` names module `a.b` by its full path, which needs an un-aliased `import a.b`.
+
+The prebuilt **`Iterable[T]`** and **`Iterator[T]`** are parameterized bounds with extra magic: they
+**recover** `T` from the iterand's element (by unifying it), rather than requiring it written out. `T`
+then flows into the body's loop variable and the return type. (User protocols take their args
+explicitly; only these two recover them.) Recovery unifies **structurally**, so `Iterable[(A, B)]`,
+`Iterable[A?]` and `Index[int, (A, B)]` recover every type param they mention, not just a bare
+`Iterable[T]`. The two differ in WHAT they accept — the same split as Rust's
+`IntoIterator` vs `Iterator`, or Go's `range` vs an iterator value:
+
+* `[S: Iterable[T], T]` — **anything you can iterate.** Built-in `list`/`set`/`map`/`str`/`bytes`/
+  `bytearray` (str → str, map → its (key, value) pairs, a Channel → each received value) intrinsically, plus a `.iter()` cursor, a generator's
+  `Iterator[T]`, and any struct with `next(self) -> T?`. Use this whenever the body just does
+  `for x in xs`. **This is the one you want by default.** (A struct with ONLY `iter` satisfies the
+  protocol but does not get `T` recovered — see the mechanics below.)
+* `[S: Iterator[T], T]` — **a cursor**: something that HOLDS a position, so the body may call
+  `s.next()` directly. A `.iter()` cursor, a generator, or a struct with `next`. A RAW collection does
+  NOT satisfy it (a fresh cursor per `next()` would hand back element 0 forever) — pass `xs.iter()`.
+
+```chezzi
+fn to_list[S: Iterable[T], T](xs: S) -> List[T]:
+    out: List[T] = []
+    for x in xs:            # x : T
+        out.push(x)
+    return out
+to_list("ab")              # ["a", "b"]   (T = str)
+```
+
+Mechanically: `Iterable[T]` promises only `.iter() -> Iterator[T]` (a fresh cursor), where
+`Iterator[T]` additionally promises `.next()`. Every `Iterator` IS `Iterable` (its `iter()` returns
+self), so a generator and a user `next`-struct satisfy `[S: Iterable[T]]` too; a struct with only
+`iter(self) -> Iterator[E]` (no `next`) satisfies it as well and is for-iterable via a one-time
+`.iter()` — though for THAT one the element recovery does not fire **in BOUND position**, so bound it
+with a concrete arg (`[S: Iterable[int]]`) or annotate the parameter `Iterable[int]` (the annotation IS
+the element type, so nothing has to be recovered). The cursor's type is the existing `Iterator[T]`
+existential — there is no new value type.
+
+**`iter` wins over `next`.** A struct or enum with both hooks is iterated through `iter` by every
+consumer: `for`, a comprehension, `List()`, `Set()`, `Map()`, a `[S: Iterable[T]]` bound and
+`.iter()` (Python: `for` calls `__iter__`). A `next` that does not satisfy `Iterator`'s
+requirement (extra parameters, a return that isn't `E?`, no `self`) is an **ordinary method**: it
+is not the hook, it never runs under `for`, and it does not stop a conforming `iter` beside it
+from making the type iterable.
+
+**The `Iterator[T]` bound has one element type.** In a `[S: Iterator[T], T]` body, `s.next()`
+runs `next` while `for q in s` and `List(s)` run `iter`. A type whose two hooks yield different
+element types therefore does not satisfy `Iterator`; it still satisfies `Iterable` through `iter`.
+The declaration decides, so a generic `Both[T]` gets one answer for every instantiation.
+
+```
+struct Both:
+    n: int
+    fn next(self) -> int?: return None
+    fn iter(self) -> Iterator[str]: return ["a", "b"].iter()
+
+for q in Both(2): print(q)                 # a, b: `iter` wins (before TICKET-250: `next`'s ints)
+fn first[S: Iterator[T], T](s: S) -> T?: return s.next()
+first(Both(2))
+# error: type Both does not satisfy Iterator ('next' yields int, 'iter' yields str); ...
+```
+
+**One rule for every hook.** A method is the hook an operator calls (`iter` / `next` for `for`,
+`str` for `print`, `index` / `slice` / `set_index` for `x[k]`, `contains` for `in`, `eq` for `==`,
+`hash`, `compare`, the arithmetic methods) exactly when it satisfies the builtin protocol's
+requirement: `self` first, the protocol's parameter names, its parameter and return types, no
+type parameters of its own. A struct and an enum get every hook the same way. A method with a
+hook's name that does not satisfy the requirement is an ordinary method: the operator behaves as
+if the type had no hook (default display for `print`, structural `==`, the usual "cannot iterate /
+index" error for the others), the bound `T: P` rejects the type, and a call by name
+(`Temp.str(21)`) still works. A hook may be written with `yield`; the operator then gets the
+generator. `self` is the receiver only as the first parameter of a method declared in a struct,
+enum or protocol body; any other parameter named `self` is an error.
+
+**Near-miss warning.** A method with a receiver and a hook's name that is not the hook warns
+(`'eq' on P is not the Eq hook (…); == will not call it`) where the operator would otherwise skip
+it silently: `==` (structural), `print` and interpolation (default display), a zero-field struct
+as a `Set` element or `Map` key (constant hash), and `for` on a type that has the other iteration
+hook. It stays silent where the operator rejects the type, because that use is already an error
+with the same reason, and it never fires on a static method. The generic-operand `eq` forms
+(`fn eq(self, x: T)`, `fn eq[U](self, o: U)`) are ordinary methods, so they warn too.
+
+`Iterable[T]` also works in **TYPE position**, not only as a bound: `fn f(xs: Iterable[int])` takes any
+iterable as a plain (non-generic) parameter, and the body may `for v in xs`, comprehend `[v for v in
+xs]`, or `List(xs)` it. `T` comes from the annotation. Like every other protocol existential it is
+strictly **invariant** in its args — a `List[int]` is an `Iterable[int]` and NOT an `Iterable[Any]`
+(read-only covariance is deliberately not part of the model; a bare `Iterable` with no arg is an
+existential with unbound params and is not iterable at all). `Iterator[T]` in type position is
+unchanged and still additionally allows `.next()`; an `Iterable[T]`-typed value does not (take a cursor
+with `xs.iter()` first).
+
+**Type aliases** name an existing type transparently — `type Name =
+<type>` makes `Name` interchangeable with the aliased type everywhere (structural, not a distinct
+nominal type); aliases may name scalars, collections, structs, or other aliases (cycles are
+rejected). An alias of a protocol may name a bound (`type N = Named` then `fn show[T: N]`),
+including one brought in with `import N from m`; an alias that applies type arguments (`type IntBag
+= Bag[int]`) may not, so write `T: Bag[int]`.
+
+```chezzi
+type UserId = int
+type Scores = Map[str, int]
+uid: UserId = 7        # UserId and int are the same type
+```
+
+An alias of an enum or struct also resolves in EXPRESSION and PATTERN position — a variant/struct
+constructor, a static method call, and a variant pattern all resolve through it — not just type
+position:
+
+```chezzi
+enum E:
+    A(int)
+    B
+struct P:
+    x: int
+    fn zero() -> P:
+        return P(0)
+type F = E
+type Q = P
+F.A(5)            # variant ctor
+match F.A(5):
+    F.A(n): print(n)   # variant pattern
+    F.B: print("b")
+Q(1)               # struct ctor
+Q.zero()           # static method
+```
+
+The same holds for an IMPORTED alias — `import F from m` (renamed with `as` too) or qualified
+`m.F` — and for a local alias whose body is `module.Type`. Each spelling resolves to the aliased
+type itself (same nominal identity, same defaults), and an alias never creates a runtime type value:
+
+```chezzi
+import F, Q from m           # m declares: type F = E, type Q = P
+import m
+type R = m.P                 # a local alias of a qualified type
+F.A(5)                       # m's E.A(5)
+m.F.B                        # qualified alias, nullary variant
+match m.F.A(1):
+    m.F.A(n): print(n)       # qualified alias in a pattern
+    F.B: print("b")
+Q(1) == R(1)                 # both construct m's P
+R.zero()                     # static method through the alias
+```
+
+An alias of a generic instantiation keeps its pinned arguments (`type IB = Box[int]`: `IB.of("x")`
+is a type error, and `IB[str](…)` is rejected — the alias already fixes its arguments). An alias of a
+scalar or a protocol stays a type spelling only: `type M = int` then `M(5)` is `unknown name 'M'` in
+every spelling.
+
+**Distinct types: a one-field struct.** `newtype` was removed in TICKET-216 and is an ordinary
+identifier now. A one-field `struct` with methods is the distinct-type idiom, as Rust's tuple struct
+`struct UserId(i64)` is. Operators and protocols come from the struct's own methods.
+
+```chezzi
+struct UserId:
+    id: int
+    fn is_admin(self) -> bool:
+        return self.id < 100
+
+struct Meters:
+    v: float
+    fn add(self, other: Meters) -> Meters:
+        return Meters(self.v + other.v)
+```
+
+The prebuilt **`Stringable`** protocol (`str(self) -> str`) customises how a value is rendered. A
+struct *or enum* that defines `str(self) -> str` overrides its default repr (`Name(field=value, …)`
+for a struct, `Variant(payload)` for an enum) everywhere it is printed: by `print`, by the `str()`
+builtin, and inside `{…}` string interpolation — including when nested in a list / tuple / map / set
+/ enum payload. Types without a `str` method keep the default repr. Like `Comparable`, `Stringable`
+is prebuilt and works as a generic bound (`fn show[T: Stringable](v: T)`).
+
+The scalar types **`int`/`float`/`bool`/`str` intrinsically satisfy `Stringable`** — all four
+stringify, so they flow into a `[T: Stringable]` generic with no method to define (mirroring the
+intrinsic scalar arms of `Comparable`/`Hashable`/`Add`). Inside the erased body a `v.str()` on such a
+scalar renders exactly as `str(v)` does. (Like the other intrinsic protocols, this is bound-only:
+a direct `(5).str()` on a concrete scalar is still a compile error — use the free `str(5)` builtin.)
+
+**Every intrinsic grant is callable, and equals its operator form.** The same holds for *all* the
+protocols a built-in satisfies intrinsically, not just `Stringable`: inside an erased `[T: P]` body you
+may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/
+`a.div(b)`/`a.mod(b)`/`a.neg()` on `int`/`float`, `a.compare(b)`, `x.hash()` on
+`int`/`str`/`bytes`/`bool`/a zero-field struct, and `c.index(k)`/`c.set_index(k, v)`/`c.slice(r)`
+on `list`/`map`/`str`/`bytes`/`bytearray`. Each is **defined as** the operator form — `a.add(b)` ≡
+`a + b` (same overflow / divide-by-zero fault), `c.index(k)` ≡ `c[k]` (negative indexing and the same
+out-of-bounds message), `c.slice(0..2)` ≡ `c[0..2]` (the argument is a `Range`),
+`x.hash()` is exactly the hash `x` gets as a map/set key. A type that defines the method itself always
+gets its own.
+
+**Through a protocol-typed VALUE (`x: Hashable = 5`) only the grants that take no `Self` argument are
+callable** — `neg()`, `str()`, `hash()`, `index(k)`. `add`/`sub`/`mul`/`div`/`mod`/`compare` all take a
+`Self` parameter, and a protocol value has erased which type it holds, so the checker rejects them:
+`method 'add' is not callable through the protocol value Add — ... Bind the receiver with a generic
+parameter instead: `[T: Add]``. Inside an erased `[T: P]` body every grant above is callable.
+
+Still bound-only, and with one documented exception (`docs/contributing/gaps.md` W6-3b):
+`Iterator`'s `next` on a *raw* collection faults (no cursor position — use `for`, or `.iter()` for a real
+cursor). `a.compare(b)` on a **NaN** operand never faults — it answers the same **total order** `sort()` /
+`.min()` / `.max()` use (`f64::total_cmp`, NaN to one end), while `<`/`<=`/`>`/`>=` stay IEEE (`false` for
+every NaN comparison): one shared order, one rule. `+0.0` and `-0.0` are EQUAL in that order (a stable sort keeps their input order and `[0.0, -0.0].min()` is `0.0`, like CPython).
+
+**Display-hook resolution.** `print`/`str()`/interpolation use your `str` method as the display hook
+**only when it conforms to `Stringable`** — a single `self` parameter and a **`str` return** (whether
+that return type is written explicitly, inferred from the body, or a `str` type-alias). `str` is
+otherwise a normal method you may define however you like: a static `str` (no `self`), a `str` with
+extra parameters, or one that returns something other than `str` (e.g. the receiving struct), simply
+**isn't** the display hook — those values print with the default repr, the method is **never called**
+by `print` (not even for its side effects), and a direct `obj.str(…)` or `Type.str(…)` call still
+works as written. The type checker decides this once; the runtime does not inspect the result.
+
+```chezzi
+struct Point:
+    x: int
+    y: int
+    fn str(self) -> str:
+        return "({self.x}, {self.y})"
+
+print(Point(1, 2))            # (1, 2)        — not Point(x=1, y=2)
+print("here: {Point(3, 4)}")  # here: (3, 4)
+print([Point(5, 6)])          # [(5, 6)]      — dispatches when nested too
+```
+
+**A nested `str` is quoted (`str` vs `repr`).** A string printed on its own is its bare characters,
+but a string rendered **inside** something else — a list/tuple/map/set element, a struct field, an
+enum payload — is quoted and escaped, exactly as in Python. Without it, values that differ print the
+same, and printed output is what most tests compare.
+
+```chezzi
+print("a, b")                 # a, b
+print(["a", "b"])             # ['a', 'b']       — two elements
+print(["a, b"])               # ['a, b']         — one element (was identical before)
+print([""])                   # ['']             — one empty element (printed as [] before)
+print({"k": "v"})             # {'k': 'v'}
+print(["it's", "a\nb"])       # ["it's", 'a\nb'] — CPython quote choice + escapes
+print(Point(1, 2))            # (1, 2)           — a `str` hook's output is NOT quoted
+```
+
+The quote is `'`, switching to `"` only when the string contains a `'` and no `"`. Escapes: `\\`,
+`\n`, `\t`, `\r`, the quote, and every **non-printable** character (`\xHH` / `\uXXXX` /
+`\UXXXXXXXX`, CPython's widths) — so a no-break space is distinguishable from a space and a
+zero-width space from `""`. Printable non-ASCII stays literal (`['é', '😀']`). The same rule applies
+inside a wrapper box: `print(Shared(["a"]))` is `Shared(['a'])`. A `str(self)` display hook's result
+is the object's own rendering, never a nested string, so it is never quoted.
+
+**A container that re-enters itself prints its back edge as `...`** (CPython's rule). While a
+list, map, set or default-repr struct is being rendered, meeting the same object again writes
+`[...]`, `{...}`, `Set(...)` or `...` for it instead of faulting. Only an object still being
+rendered counts, so a shared but acyclic child prints in full:
+
+```chezzi
+xs: List[Any] = [1]
+xs.push(xs)
+print(xs)                     # [1, [...]]
+m: Map[str, Any] = {}
+m["a"] = m
+print(m)                      # {'a': {...}}
+x: List[Any] = []
+print([x, x])                 # [[], []]       — shared, not cyclic
+```
+
+A `str(self)` hook is never guarded, and `==` / hashing on cyclic data still fault with
+`maximum structural depth` (`recover:` catches it). A deep ACYCLIC nest past 10 000 levels also
+still faults on print.
+
+(One deliberate deviation from CPython: a combining mark such as `U+0301` escapes here and prints
+literally in Python — Chezzi reads printability from Rust's Unicode tables, which also treat
+grapheme-extend characters as non-printable. Escaping is the unambiguous direction.)
+
+The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys and `set` elements:
+`int`/`str`/`bool` satisfy it intrinsically, and a struct satisfies it by defining `hash(self) ->
+int`. A tuple is `Hashable` exactly when every element type is (CPython's rule), so `{(1, 2): "a"}`
+and `{("a", true)}` work; a rejection names the offending element (`element List[int] is not
+Hashable`). `map`/`set` are real insertion-ordered hash tables, so **any `Hashable` type can be a key or
+element** — a struct key is hashed via its `hash()` and the probe confirmed by `==`, which is the
+struct's own `eq` when it defines one (§`Eq`, above) and structural equality otherwise.
+`float` is rejected (NaN footgun). Contract: two keys that `==` calls equal must return the same
+`hash()` (the implementor owns this, like Rust's `Hash`/`Eq` — and see the `Eq` section for why an
+`eq` coarser than its `hash` is structurally unreachable). `bytes` and a zero-field struct (no state
+to hash) also satisfy it intrinsically. In an erased `[T: Hashable]` body `x.hash()` returns exactly the
+hash the container uses, so the method and membership can never disagree; the numeric value itself is
+**unspecified** (a build-dependent 64-bit hash, possibly negative) — rely on consistency, not on a
+literal.
+
+**`Hashable` alone is not enough to build, index, OR MENTION a `Map`/`Set` keyed on `T` — you need
+`Hashable` AND `Eq`.** `Hashable` does **not** embed `Eq` (Rust's own `Hash` trait has no `Eq`
+supertrait either — `HashSet<T>`/`HashMap<K, V>` spell `impl<T: Eq + Hash>` explicitly, not one
+bound), so a `[T: Hashable]` generic that only *calls* `T.hash()` compiles fine, but the map/set key
+check runs on every `Map[T, _]`/`Set[T]` TYPE the generic's signature or body spells at all — not just
+one it *constructs or indexes*. A bare SIGNATURE mention is enough: `fn h[T: Hashable](xs: Set[T]) ->
+int: return xs.len()` rejects (measured — Go 1.26 agrees: `invalid map key type T (missing comparable
+constraint)`), with no `Set(...)`/`{...}`/`m[k]` anywhere in the body. Needs `[T: Hashable + Eq]` —
+the map/set key check runs the SAME `Eq`-bound obligation on a type parameter that `==` does
+(`docs/contributing/gaps.md` **W7-53**). A concrete key/element (`Set[Box[Tag]]`) was always checked this way; what
+changed is that the check now also reaches a free `T` inside a generic body/signature instead of
+skipping it as "not yet chosen".
+
+**Keys are value types (Go model).** A `struct`/`enum` key or element is **snapshotted
+(deep-copied) when it is stored**, so mutating your original value *after* the insert can never reach
+— and corrupt — the stored key. This applies to every insert path: `m[k] = v`, the `{k: v}` and
+`{a, b}` literals, `set.add`, `Map.update` / `Map.merge`, and the `Map(it)` / `Set(it)` constructors.
+**Map values are *not* copied** (mutating a stored value in place is intended); the transient lookup
+key in `m[k]` / `k in m` / `s.contains(k)` is not copied either. Scalar keys (`int`/`str`/`bool`/`bytes`)
+are already immutable value-copies, so they take no extra clone. The snapshot copies only the mutable
+aggregate structure (nested structs/enums/lists/maps/sets); an embedded by-reference sub-value (a
+closure, `Channel`, `Shared`, a live generator, …) stays shared by handle — those are identity-
+compared, so copying them would break lookup, and they have no mutable field that could corrupt the
+key anyway. One ceiling: a **self-referential (cyclic)** key — or one nested deeper than the
+structural-depth cap (`MAX_STRUCTURAL_DEPTH`, 10000) — is stored *by reference* (a value-copy of a
+cycle can't compare equal to the original, and a too-deep snapshot would alias its tail then miss on
+lookup / overflow the host stack), so mutating it after insert can still corrupt the collection —
+use shallow acyclic keys if you need the isolation.
+One more residual: a key handed back by **`keys()` / iterating a `map`/`set`** is the *stored* key
+by reference, not a fresh copy — mutating it in place (`for k in m.keys(): k.x = 9`) corrupts the
+collection exactly as mutating a pre-insert original used to. The snapshot protects against mutating
+*your* original after insert; it does not freeze a key you deliberately reach back into. Don't mutate
+keys you get from iteration.
+
+```chezzi
+struct Point:
+    x: int
+    y: int
+    fn hash(self) -> int:
+        return self.x * 31 + self.y
+
+label: Map[Point, str] = {}
+label[Point(1, 2)] = "here"      # struct key — hashed via Point.hash
+print(label[Point(1, 2)])        # here
+
+p := Point(1, 2)
+label[p] = "again"
+p.x = 9                          # mutating the original can't touch the stored key
+print(label[Point(1, 2)])        # still "again" — the stored key was snapshotted
+```
+
+**Generic structs** carry type parameters after the name; their fields and methods may use them.
+Type arguments are inferred at construction, or written explicitly in a type annotation. An expected
+type widens an argument-inferred type argument when every argument still fits it, so
+`b: Box[Named] = Box(A())` is a `Box[Named]`, while `Bag(zs)` with an existing `zs: List[A]` stays
+invariant and is rejected (widening it would silently retype the aliased value everyone else sees).
+
+```chezzi
+struct Pair[A, B]:
+    first: A
+    second: B
+    fn left(self) -> A:
+        return self.first
+
+struct Stack[T]:
+    items: List[T]
+    fn push(self, x: T):
+        self.items.push(x)
+
+p := Pair(42, "hi")              # inferred Pair[int, str]
+print(p.left())                  # 42  — left() returns A = int
+q: Pair[str, int] = Pair("k", 9) # explicit type arguments
+```
+
+A **method may introduce its own type parameters** in `[…]`, fresh and beyond the struct's own —
+inferred from the call arguments just like a free generic function (it may not reuse a struct
+parameter's name):
+
+```chezzi
+struct Box[T]:
+    v: T
+    fn map_to[U](self, f: fn(T) -> U) -> U:   # U is fresh; inferred from the closure
+        return f(self.v)
+
+b := Box(5)
+print(b.map_to(fn(x: int) -> str: "n{x}"))    # U = str  → "n5"
+```
+
+Generics are **type-erased**: the parameters exist only for the checker. At runtime a
+`Pair[int, str]` is an ordinary struct value — there is no monomorphization and no per-type code.
+
+## 8. Enums & pattern matching  (M3)
+
+```chezzi
+enum Shape:
+    Circle(int)         # variants may carry data
+    Square(int)
+    Point               # ...or not
+
+fn area(s: Shape) -> float:
+    match s:                          # match is exhaustive — compiler checks all variants
+        Shape.Circle(r): return 3.14 * float(r * r)
+        Shape.Square(n): return float(n * n)
+        Shape.Point:     return 0.0
+```
+
+An enum body takes one variant per line -- `enum E:` then `A B` is a parse error naming the token
+after the variant, as Rust's `enum E { A B }` is.
+
+Enums may be **generic**, carrying type parameters after the name exactly like generic structs; a
+variant's payload may reference them (including the enum's own type, for recursive shapes). Type
+arguments are inferred from the constructor's arguments, or written explicitly in a type annotation,
+and — like all generics — are **type-erased** (a `Tree[int]` and a `Tree[str]` share one runtime
+shape). Bounds (`[T: Comparable]`) and multiple type parameters (`Either[A, B]`) work too.
+
+```chezzi
+enum Tree[T]:
+    Leaf
+    Node(T, Tree[T], Tree[T])
+
+fn sum(t: Tree[int]) -> int:
+    match t:
+        Tree.Leaf:          return 0
+        Tree.Node(v, l, r): return sum(l) + v + sum(r)   # v is int — T substituted in the match
+```
+
+A **payload-carrying** variant's type args are inferred from the payload, but may be pinned
+explicitly at the **declaration site** — the type args go **on the TYPE**, not on the variant:
+`Tree[int].Node(1, Tree.Leaf, Tree.Leaf)`. This is the declaration-site rule (§7b): a generic
+declared on the type (`enum/struct [T]`) is pinned on the type (`Tree[int].Node`), and a
+generic declared on the member is pinned on the member. Multi-param enums use the comma form —
+`Pair[int, str].Both(1, "a")`. The same type-level turbofish supplies args
+the payload can't bind (a nullary variant: `Box[int].Empty`) and drives a generic **static** method
+(`Box[int].empty()`). (The old gliding form `Tree.Node[int](…)` — type args on the variant — is no
+longer accepted; the checker redirects you to `Tree[int].Node(…)`.)
+
+Enums may carry **methods** — `fn name(self, …)` blocks written **after all variants**, exactly like
+struct methods. The receiver `self` is the whole enum value (a method body typically `match self`).
+A generic enum's methods may use its type parameters (`fn get(self) -> T`). Methods are name-resolved
+on the value (`shape.area()`), satisfy structural protocols (so an enum can define `str(self)` for
+`Stringable`, `hash(self)` for `Hashable`, `add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare` for
+`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`, and pass into protocol-bound generics like
+`fn twice[T: Add](x: T)`), and overload the matching operators (`a + b`, `a / b`, `-a`, `a < b`) just
+as struct methods do. (No `derive` — write the method.)
+A `test fn` is **not** allowed inside an enum body (enum test suites aren't wired — it would silently
+never run); test suites are a struct-only feature.
+
+```chezzi
+enum Light:
+    Red
+    Yellow
+    Green
+    fn cost(self) -> int:           # method matching on self
+        match self:
+            Light.Red:    return 0
+            Light.Yellow: return 1
+            Light.Green:  return 2
+    fn next(self) -> Light:         # a method may return a new variant
+        match self:
+            Light.Red:    return Light.Green
+            Light.Yellow: return Light.Red
+            Light.Green:  return Light.Yellow
+
+print(Light.Green.cost())           # 2
+print(Light.Red.next().cost())      # 2
+```
+
+Variants are **scoped under their enum** and must be written **qualified** as `Enum.Variant`
+everywhere they're used: as a value (`Shape.Point`), a constructor (`Shape.Circle(2)`), and in a
+`match` arm (`Shape.Circle(r):`). A bare user-variant name is a compile error (the error names
+the enum so you can fix it). Because variants are per-enum, **two enums may share a variant name**
+(`Color.Red` and `Light.Red` are distinct values). A real binding named like the enum wins, so
+qualified access only resolves when the name on the left isn't a local/parameter. (The built-in
+`?x`/`!e`/`None` for `T!E` / `T?` stay **bare** — see below.)
+
+```chezzi
+p: Shape = Shape.Point          # qualified value
+c: Shape = Shape.Circle(2)      # qualified constructor
+match s:
+    Shape.Circle(r): r * r
+    Shape.Square(n): n * n
+    Shape.Point:     0
+```
+
+A `match` arm may also use the **module-qualified** spelling `module.Enum.Variant` — symmetric with
+module-qualified construction (`geo.Color.Red`). For an enum from a whole-module `import geo` (so its
+bare `Color` isn't in scope), you can match it directly without a named import:
+
+```chezzi
+import geo
+import geo as g                  # an `as` alias works as the binder too
+c := geo.Color.Red
+match c:
+    geo.Color.Red:      print("red")
+    geo.Color.Green:    print("green")
+match c:
+    g.Color.Red:        print("R")    # aliased binder
+    g.Color.Green:      print("G")
+match shp:
+    geo.Shape.Circle(r): r * r        # payload bindings work as usual
+```
+
+The module binder (`geo`/`g`) is the bound module name (last path segment or `as` alias), or the
+module's full path after an un-aliased import (`lib.geo.Color.Red` after `import lib.geo`). The checker
+validates that the module is bound and owns the named enum, then it's dropped — matching keys on the
+same `(enum, variant)` identity as the bare/named-import form, so output is byte-identical. (A
+plain `module.Variant` — dropping the enum name — is **not** accepted; the enum name is mandatory.)
+
+`match` also works on `T!E`/`T?` (they're enums under the hood):
+
+```chezzi
+match safe_div(10, 2):
+    ?v:  print("got {v}")
+    !e: print("failed: {e}")
+```
+
+A **string pattern** is decoded exactly like the same literal in an expression: `{{` and `}}` are
+literal braces (`"{{x}}"` matches the text `{x}`) and an all-digit hole is text (`"{4}"` matches
+`{4}`), while a real hole (`"{x}"`) is a **parse error**, since a pattern matches literals and never
+interpolates (CPython: `SyntaxError: patterns may only match literals`). Compare a value in a guard
+instead. A raw `r"{x}"` pattern keeps its braces verbatim.
+
+A scrutinee can also be an **int/str** (literal arms, always needing a `_` wildcard), a **bool**
+(exhaustive once unguarded `true` and `false` arms both appear, no `_` needed — an `_` after both then
+warns as unreachable), a **tuple**, or a **struct** (destructured positionally — see below). Patterns
+**nest**: a variant payload, tuple
+element, or struct field may itself be a binding, a literal, a wildcard, a tuple, a struct, or another
+variant — including a **nested nullary variant** like the `None` in `?None` (a refutable variant
+match, not a binding). A tuple match is exhaustive once its arms cover the cartesian product of the constituent
+domains, with no `_` needed; adding a variant to any constituent enum makes it non-exhaustive again.
+
+```chezzi
+match point:                  # tuple scrutinee
+    (0, 0):  "origin"
+    (0, y):  "on the y axis"
+    (x, y):  "at {x},{y}"     # an all-binding tuple arm is irrefutable (exhaustive)
+
+match maybe_pair:             # nested: a tuple inside ...
+    None:         print("none")
+    ?((a, b)): print(a + b)
+
+match nested:                 # nested nullary variant — the bare `None` MATCHES (not binds)
+    ?None:    "inner none"
+    ?(?v): "value {v}"
+    None:          "outer none"
+```
+
+A **struct** scrutinee destructures by **positional field binding**, mirroring an enum-variant pattern
+— the constructor name is the struct's own name, and each position binds the field in declaration
+order. A struct has exactly **one** constructor, so a lone all-binding `Point(x, y)` arm is
+**irrefutable** and closes the match with **no `_`** needed. Struct patterns **nest** (`Line(Point(x,
+y), _)`), instantiate generics (`Box(v)` on a `Box[int]` binds `v: int`), and admit refutable literal
+fields (`Point(0, y)` — which, like any refutable arm, needs a trailing `_` or a whole-value catch-all
+binding):
+
+```chezzi
+struct Point:
+    x: int
+    y: int
+
+match p:
+    Point(x, y): "at {x},{y}"       # single all-binding arm — exhaustive, no `_`
+
+match p:
+    Point(0, 0): "origin"
+    Point(0, y): "on the y axis"
+    rest:        "at {rest.x},{rest.y}"   # a bare name binds the WHOLE struct value (catch-all)
+```
+
+A bare non-variant name is the same whole-value catch-all on an enum, `T?`, `T!E` or
+**tuple** scrutinee (`rest:` binds the whole `E`, or the whole tuple: `match (1, 2): (0, y): ..;
+rest: print(rest)` prints `(1, 2)`). A **guarded** one (`x if c:`) closes nothing, and a bare
+**variant** name (`None`, or an unqualified user variant) is never a binding — it stays a variant
+lookup, qualified as `E.A` if it needs to match one.
+
+The constructor may be written **bare** (`Point(x, y)`, for a local or `from`-imported struct) or
+**module-qualified** (`geo.Point(x, y)` — the only spelling for a struct reached through a whole-module
+`import geo`, since the bare name isn't in scope; this mirrors qualified construction `geo.Point(3, 4)`).
+Only **user** structs destructure — a native/reserved struct handle (`Socket`, a `regex.Match`)
+does not. A wrong constructor name, a field-count mismatch (`Point(x)` on a two-field struct), a qualifier
+that is not a module (`E.Point`), and a duplicate constructor arm are all clean **checker** errors, never a
+runtime panic. (A struct unpacks in `match` only, by owner rule U9: `Point(x, y) := p` and a struct
+in a **fn param** are not part of the language. Outside `match` only tuples unpack; use a `match`.)
+A one-name group `(x)` is that name at `:=`, `for`, a comprehension and a wait arm.
+
+**Or-patterns** (`p1 | p2 | ...`) match when **any** alternative matches (first match wins). They
+work at the top of an arm and in sub-positions (`(1 | 2, x)`, `?(1 | 2)`). Every alternative must
+bind the **same** variables with unifiable types, so the body sees them regardless of which hit:
+
+```chezzi
+match c:
+    Color.Red | Color.Green | Color.Blue: "primary"   # a full enum or-pattern is exhaustive WITHOUT a `_`
+match shape:
+    Shape.Circle(a) | Shape.Square(a): a        # both alternatives bind `a` (same type)
+```
+
+A `bool` or-pattern `true | false` still does **not** close the bool domain — keep a `_` (one rule:
+the int/str/bool literal domains are always open).
+
+**Guards** (`pattern if cond:`) add a boolean test to an arm — it matches only when the pattern
+binds *and* the guard (which sees the pattern's bindings) is true; otherwise the next arm is tried.
+A guarded arm is never irrefutable, so it can't satisfy exhaustiveness on its own — keep a `_`.
+Likewise a variant arm whose payload contains a *refutable* sub-pattern (a literal, range, or nested
+variant — e.g. `?0`, `Pair(0, y)`) covers only part of that variant's domain, so it does **not**
+close the variant; only an unguarded arm whose payload is all wildcards/plain bindings does. (A guarded
+variant arm may therefore be followed by an unguarded fallback on the *same* variant — `E.A(n) if c`
+then `E.A(n)` — without a "duplicate arm" error.) An exact-duplicate **literal** arm (`1:` twice,
+`"x":` twice, `1 | 1`) is likewise a `duplicate match arm` error — dead code under first-match — with
+the same guard carve-out (`1 if c:` then `1:` is legal). (Range *subsumption* — a literal inside an
+earlier covering range — is not yet flagged.)
+
+**Unreachable arm.** An arm placed after an earlier *unguarded, irrefutable* arm is dead code — the
+earlier arm already matches every value the scrutinee can have. This is a non-fatal `Severity::Warning`
+(`unreachable match arm: an earlier arm already matches every value`), not an error: the exit code is
+unchanged. A *guarded* catch-all (`_ if c:`) does not trigger it, since its guard may fail at runtime,
+so arms after it stay live; range subsumption (`0..10:` then `5:`) is not yet flagged either.
+
+**Matching on an unannotated closure parameter.** An unannotated closure param is now *inferred* to a
+concrete type from its context (see "Closure-parameter inference" above), so `fn(x): match x: E.A: …;
+E.B: …` resolves `x: E` and is checked like any typed scrutinee — the call site is enforced
+(`g(5)` → error) and exhaustiveness is the ordinary enum/literal rule (cover all variants, or `_`; a
+literal match needs a `_`). A **structural** pattern (an enum variant, a tuple, or a variant/`?v`/
+`!e`/`?v`/`None` payload) over a value whose type genuinely *can't* be inferred — a residual
+`Unknown`, e.g. a tuple-element binding `a` in `match x: (a, b): match a: E.A: …` where `x` itself was
+only shape-pinned — is **rejected** (`cannot match a <tuple|variant> pattern on a value of un-inferable
+type; annotate it`): matching a shape/tag on an un-typed value would trap at runtime, and a trailing
+`_` cannot rescue it (the destructure runs first). Literal/range/`_`/binding patterns over an
+un-inferable value stay allowed (a value-compare or bind never traps); a heterogeneous literal match
+(`1` then `"b"`) is rejected once the first arm pins the scalar type. Annotate the parameter
+(`fn(x: (E, int)): …`) to make a structural match legal.
+
+```chezzi
+match n:
+    x if x < 0: "neg"
+    0:          "zero"
+    _:          "pos"         # required: guarded arms don't close the match
+```
+
+**Range patterns** (`start..end:`) match an **int** in the half-open range `start <= v < end`
+(int-only, refutable — still need a `_`):
+
+```chezzi
+match score:
+    0..60:  "F"
+    60..90: "B"
+    _:      "A"
+```
+
+The range must be non-empty: `start..end` with `start >= end` (`5..1`, `3..3`, `0..-5`) is a compile
+error `empty range pattern` (rustc E0579). It applies at every position: an arm, an or-alternative, a
+payload.
+
+Int literal and range patterns may be **negative** (`-3:`, `-10..-5:`; either bound independently,
+`-10..5`). This is int-only — there is **no float pattern**, so a negative (or positive)
+float like `-3.0:` / `3.0:` is a parse error, the same as today.
+
+```chezzi
+match temp:
+    -3:       "exactly minus three"
+    -10..-5:  "cold"
+    _:        "warm"
+```
+
+### Patterns compare the tag and bind inside it
+
+One rule decides compare-vs-bind: a pattern **compares** the outer tag and **binds** only inside it.
+
+| Pattern | Matches | Binds |
+|---|---|---|
+| `?v` | a present `T?`, a successful `T!E` | `v`, the payload |
+| `!e` | the error of a `T!E` | `e`, the error |
+| `None` | an absent `T?` | nothing |
+| `?(?v)`, `?None` | a nested `T??`, layer by layer | `v` |
+| `?(a, b)` | a present tuple payload | `a`, `b` |
+| `!IoErr(code)` | an error that is the struct `IoErr` | `code` |
+| `Color.Red`, `Shape.Circle(r)` | that enum variant | `r` |
+| `3`, `"a"`, `1..5`, `(x, 0)` | that literal, range or tuple shape | `x` |
+| `name` (a bare lowercase name) | anything: the default arm | the whole value |
+| `_` | anything: the default arm | nothing |
+
+`?v` + `None` covers a `T?`; `?v` + `!e` covers a `T!E`. A missing pattern is reported in this syntax
+(``pattern `?None` is not covered``, ``pattern `!_` is not covered``), and a repeated arm as
+`duplicate match arm '?_'`.
+
+A bare name is always a binder, never a comparison, so a **bare constant in a pattern is rejected**
+(it would silently bind and take the arm): `` `LIMIT` is a constant; to compare write `x if x == LIMIT`, to bind use a new name ``.
+A bare variant stays rejected unless it is imported (§12 "Variant import"): write `Color.Red`.
+
+```chezzi
+LIMIT: const int = 3
+match n:
+    x if x == LIMIT: print("at the limit")   # compare with a guard
+    other: print(other)                       # a new name binds the whole value
+```
+
+### `match` and `if` as expressions
+
+Both branch forms can also be used as **expressions** that produce a value — handy for
+initializing a variable without a pre-declared mutable:
+
+```chezzi
+# match-expression: multiline, exhaustive, each arm body is a single value-expression
+label := match shape:
+    Shape.Circle(r): "round"
+    Shape.Square(n): "boxy"
+    Shape.Point:     "dot"
+
+# if-expression: inline, ternary-style — `else` is REQUIRED
+sign := if n > 0: "pos" else: "neg"
+# chained: `elif` chains without parentheses (the final `else` stays mandatory)
+grade := if s >= 90: "A" elif s >= 80: "B" else: "F"
+# as a statement on one line: the same expression, its value discarded
+if n > 0: print("pos") else: print("neg")
+if s >= 90: print("A") elif s >= 80: print("B") else: print("F")
+```
+
+**A block expression is legal where a whole value starts** (TICKET-260, rule U8). A block
+expression is a multi-line `match` used as a value, or a `recover:` followed by an indented block. It
+may be the right side of `:=` and `=` (typed let and destructuring included), a `return` or `yield`
+value, a lambda body, an inline fn body (`fn g() -> int: match n:` + arms), a struct field default, a
+parameter default, a statement that starts its line, or the value of a match-expression arm (a nested
+`match`). Anywhere else it is an error with one message that names the fix: a call argument, a
+list, tuple or map element, `(E)`, an interpolation hole, the body of an inline `if c: E`, an
+operand (`1 + match n:`, `-match n:`, `x ?? match n:`), a branch of the one-line `if … else`, an
+`assert` or `defer` operand, and the value of a compound assignment (`x += match n:`). Bind it first:
+`v := match n: …`, then use `v`. The one-line forms are ordinary expressions and have no such limit:
+the one-line `if a: b else: c`, the inline `recover: expr`, a lambda, and a `match` arm that is an
+expression.
+
+Inside brackets a block expression is legal where a whole value starts there: a parameter default
+(`fn f(x: int = match n:` + arms + `)`) or a lambda body in a call (`f(fn(x): match x:` + arms +
+`)`). The block ends at a closing bracket of its own level, at the end of the file, or at a line
+indented no deeper than the line that opened it; a `,` does not end it. A map literal that breaks
+after `:` stays one line (`{"a":` + newline + `1}`).
+
+A block expression ends at its dedent. The next line is a new statement or a new arm, whatever
+its first token: `(c.bump())`, `[1, 2]`, `-1` or `?g()` after `x := match n:` and its arms is its
+own statement, and an arm `?_: v`, `(x, _): v` or `-1: v` after an arm whose value is a nested
+`match` is an arm of the outer match. A line that starts with a binary operator, `.`, `?.`, `|>`,
+`,` or an assignment operator there is a parse error on that line. Only an `else` guard may
+follow a block-valued binding (`x := match n:` + arms, then `else:`). Each match-expression arm
+ends its line (`1: 10 _: 20` on one line is an error). After a block inside an inline body
+(`if c: x := match n:` + arms) a dedented `else` belongs to the header (`if`, `elif`, a `wait`
+arm), never to the inline statement; it is an error after a `for`, `while` or match-arm header.
+
+**The one-line `if … else` statement is the if-expression** (TICKET-242). `if c: a() else: b()` on
+one line is not a third form: it is `if c: a() else: b()` the expression, used as a statement, and
+its value is discarded. So each branch is an **expression**, as in `x := if …`. A statement in a
+branch (`if c: return 1 else: return 2`, `if c: x = 1 else: x = 2`, `if c: break else: continue`,
+a bare `if c: return else: f()`) is a parse error in both forms; the statement form reports
+``a one-line `if`/`else` takes an expression in each branch; write a statement branch, or an `else:` guard, on its own indented line``.
+Write those with indented blocks. An `if c: a()` line followed by `else:` or `elif` on the NEXT
+line is the statement `if`, unchanged.
+
+Because the statement form discards its value, **its branches may have different types**:
+`if c: print(1) else: xs.len()` and `if c: 1 elif d: "a" else: [1]` type-check and run, and so does
+the parenthesized `(if c: print(1) else: 2)` on its own line. Each branch is checked as a discarded
+value of its own, so a `T?` or `T!E` branch still gets the discarded-value warning (one per
+branch, naming the callee). Wherever the value is USED the branches must still have one type, as
+the next paragraph says: `x := if …`, `_ := if …`, a call argument, a `return` value, an inline fn
+body (`fn f(c: bool): if c: a() else: b()` returns the value), a closure body, a match-expression
+arm, and an inline `recover: expr`.
+
+All arms (and both `if` branches) must agree on a type — there is NO numeric adaptation (rule D3, §3):
+an `int` branch beside a `float` branch is a type error (`x := if c: 1 else: 2.5` →
+`branches have incompatible types: int and float — write 1.0 (or float(x))`; the same for `match`),
+like the mixed list literal `[1, 2.5]`. Write `1.0`, or `float(a)` for a typed int. Branches
+that disagree with each other but are each assignable to a statically known expected type at the
+position — an annotated binding, a call argument, a declared return — take that expected type instead
+(`x: Sh = if true: Sq(2) else: Tr(9)`, where `Sh` is a protocol both `Sq` and `Tr` satisfy). With NO
+expected type the branches must still agree, so `x := if true: Sq(2) else: Tr(9)` stays `branches have
+incompatible types: Sq and Tr`. The expected type is matched with plain assignability, so it never
+licenses an int-to-float widen — `x: float = if c: 1 else: 2` is an error (write `1.0`). At a typed
+`T?`/`T!E` **slot** the branches may also MIX bare success values with already-wrapped ones
+(`x: int? = if n > 0: n else: None`); each bare branch wraps on its own (`?n`), the others are
+left alone, and the same declines named under **Success-coercion** below apply (a generic slot, a
+declared `int??`). This is a
+property of the if/match EXPRESSION and is distinct from multi-`return` inference (which still conflicts
+on `int`/`float` — annotate `-> float`). An **unannotated**
+`if`/`match`-expression never rewrites an error type (TICKET-239): two `T!E` branches join to that
+`T!E` (`x := if c: a() else: b()` over two `int!str` is `int!str`), and with no carrier beside them
+`x := if c: ?1 else: ?2` is an `int?`, as `?1` is on its own. An explicit annotation
+(`x: int!DbErr = …`) gives every branch that slot. The statement forms — `match s:` /
+`if c:` with indented blocks and `return`/assignments inside — are unchanged; loops and
+**multiline** function bodies are statement sequences (they return via explicit `return`). The one
+exception is the **inline-expr function body** (`fn a(): <expr>`, §5), whose single bare expression is
+an implicit return — exactly like a closure.
+
+## 9. Errors — `T!E` / `T?` + `?`  (M3)
+
+Errors are **values**, not exceptions. No hidden control flow.
+
+```chezzi
+fn safe_div(a: int, b: int) -> int!:        # int! == int!Error
+    if b == 0:
+        return !"divide by zero"             # a str IS an Error (see below)
+    return ?(a / b)
+
+fn calc() -> int!:
+    x := safe_div(10, 2)?     # '?' unwraps a success, or returns the error from THIS function
+    y := safe_div(x, 0)?      # on an error, calc() returns it immediately
+    return ?(x + y)
+```
+
+**Types and values (TICKET-227).** The carriers have short spellings, and a plain value wraps into
+the carrier its slot expects:
+
+| type | means | values |
+|---|---|---|
+| `T?` | `T` or absent (`T?`) | a plain `T`, `None`, `?x` |
+| `T!E` / `T!` | `T` or an error `E` (`T!E`; `T!` = `T!Error`) | a plain `T`, `!e`, `?x` |
+| `None` | returns nothing (an annotation only: `fn log(m: str) -> None`) | — |
+| `None!E` | nothing, or an error (also written `!E`) | `!e`; a bare `return` or falling off the end is success |
+| `T??` | nested optional (`T??`) | `None` is the OUTER absent, `?None` the inner one |
+
+```chezzi
+fn save(path: str) -> None!str:
+    if path == "":
+        return !"empty path"     # prefix `!` builds an error value; there is no `fail` keyword
+    write(path)                  # falling off the end returns None
+
+fn find(xs: List[int], k: int) -> int?:
+    for x in xs:
+        if x == k:
+            return x             # wraps: x
+    return None
+
+x: int? = 5                      # 5
+rs: List[int!str] = [1, !"disk", 3]   # [1, !disk, 3]
+```
+
+- **`!e` builds an error value.** Its operand must satisfy the `Error` protocol (`!5` is the error
+  `int does not satisfy Error`); the prefix applies to the whole postfix operand (`!wrap(e)`).
+  `return !e` returns an error. `!e` is an ordinary expression: it works at any typed slot.
+- **Implicit wrap at every typed slot.** Wherever the expected type is known — a typed binding, an
+  assignment target (`x = 5`, `s.f = 5`, `xs[i] = 5`, `x, y = 5, 0`), a call or method argument, a
+  struct field or variant payload, a list/map/tuple element, a `List[T](...)` / `Map[K, V](...)` /
+  `Shared[T](...)` element, a comprehension element, `return`, `yield`, an inline or closure body, a
+  parameter or field default — a plain `T` becomes `?v` at `T?` and `?v` at `T!E`. A closure literal
+  is a plain value like any other (`cb: (fn(int) -> int)? = fn(a): a + 1`), and a generic slot whose
+  type is written, by type arguments (`Box[int?](5)`, `opt[int?](5)`) or by the annotation
+  (`c: Box[int?] = Box(5)`), wraps like a non-generic one (TICKET-239). Each
+  branch of an `if`/`match` value at such a slot wraps on its own (`x: int? = if c: 5 else: None`).
+  With no written type, a value wraps only beside a written `None`; a `T!E` sibling types a bare
+  `!e`; a `T?` beside a plain `T` is an error that names the annotation (the join rule, §3).
+  Three rules: a carrier is never re-wrapped (`x: int?? = ?5` stays an error); there is no
+  int→float step (`fn f() -> float?: return 1` is an error); a slot that mentions an unpinned type
+  parameter (`-> T?`) does not wrap. An operator operand is not a slot (`x: int? = 1 + 2` wraps the
+  sum, `?3`), and neither is the return of a fn with no `->` annotation.
+- **`?x` builds a present/success value**, its carrier taken from the expected type: `?5` is
+  `?5` at `int?` and `?5` at `int!E`; `x: int?? = ?None` is `?None`.
+- **No expected type.** `y := ?5` is `int?` on its own line, in a fn and at top level; no later use
+  re-reads it (`take(y)` with `take(r: int!str)` is a mismatch: write `y: int!str = ?5`). Inside one
+  statement a `?x` still meets its sibling: `r == ?2` beside an `int!` compares as `int!`.
+  `w := !"disk"` has no success type, so it is the error
+  ``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``.
+- **A `None` needs its type on its own statement** (TICKET-238). `z := None` is an error on that
+  line: write `z: int? = None`. A literal `None` beside a value joins to that value's optional in a
+  list or map literal, an `if`/`match` expression, an inline body and an inline `recover: expr`:
+  `[None, 7]` is `List[int?]`. No message prints an open type: `a: int = None` reads
+  `cannot assign None to variable of type int`.
+- **Set elements and map keys** never wrap in effect: no carrier is `Hashable`.
+
+**`None!E`'s success value.** A fn that returns `None!E` (also written `!E`) has no payload: it
+succeeds by falling off the end or by a bare `return`. That value prints `None`, as Python prints
+its void value:
+
+```chezzi
+fn f() -> None!str:
+    return
+
+fn main():
+    print(f())      # None
+```
+
+**The `Error` type (Go-style).** `E` defaults to the built-in `Error` protocol — one method,
+`message(self) -> str`. `str` conforms to it intrinsically (its message is itself), so `!"…"`
+works everywhere with no wrapper. For a *structured* error, define a struct with `message` and
+name it explicitly with `T!E`:
+
+```chezzi
+protocol Error:                 # built-in; shown for reference
+    fn message(self) -> str
+
+struct DbErr:
+    code: int
+    fn message(self) -> str:
+        return "db error {self.code}"
+
+fn query() -> Row!DbErr:        # Row!DbErr
+    return !DbErr(503)
+
+match query():
+    ?row: use(row)
+    !e:  print(e.message())   # message() is declared by DbErr itself
+# `line()` / `col()` / `file()` are the bare `Error` existential's origin accessors (see `recover:`
+# below) — they are NOT available on a user error type like `DbErr`, which carries only what it
+# declares. Spell the sink `Row!` (i.e. `Row!Error`) to get them.
+```
+
+`T?` (shorthand `T?`) is the same shape for "maybe absent": `?v` / `None`, also usable with `?`.
+`?` must match the enclosing function's return **kind**: a `T!E`-`?` needs a `T!E`-returning fn (and its
+propagated error type must fit the function's error type), a `T?`-`?` needs a `T?`-returning fn. **A
+function must return `T!E`/`T?` to use `?`** — there is **no `fn main`/entrypoint exception**; a
+None-returning fn (named or nested) that uses `?` is a compile error (the propagated `!e`/`None` would be
+silently swallowed). Only **module top-level** code (outside any fn) accepts either kind — the runtime unwinds
+the unhandled `!e`/`None` at the program boundary and exits (rc=1). A manifest `module:function` entrypoint may
+therefore legitimately be `-> T!` and use `?`; if that entry fn returns `!e`/`None`, `chezzi run` surfaces it
+as `unhandled error: <msg>` (rc=1), just like an unhandled top-level `!e`. Mixing kinds — e.g. a `T!E`-`?`
+inside a `T?`-returning fn — is a compile error. The **`?.` operator below is this same `?`** when
+its operand is a `T!E`, so every rule in this paragraph applies to it verbatim.
+
+**Optional chaining `?.`** works on **both** carriers; the lowering is chosen by the operand's type:
+
+```chezzi
+name := user?.profile?.name ?? "anon"   # T?: None anywhere short-circuits, then ?? defaults
+n    := fetch()?.len()                  # T!E: propagate the error (`?`), then `.len()` the value
+```
+
+**On a `T?`** — `x?.field` / `x?.method(args)`: `None` short-circuits to `None`, `?v`
+applies the access to `v` and re-wraps, so the result is always a `T?` (a field that is itself
+`T?` is **not** flattened: `U??`). A **method that returns nothing** has nothing to re-wrap
+(TICKET-239): `c?.bump()` runs the call when `c` is present and has **no value**, like Swift's and
+Kotlin's `x?.m()`. It is legal wherever a plain call that returns nothing is legal (a statement, an
+inline fn or closure body, an `if` / `match` / `for` body) and gets no discarded-value warning; as a
+value (`x := c?.bump()`, `print(c?.bump())`) it is the usual `expression returns no value (None) and
+cannot be used as a value`.
+
+**On a `T!E`** — `x?.field` / `x?.method(args)` means **`?` then `.`**: propagate the `!e`
+out of the enclosing function, then apply the access to the unwrapped `T`. It is identical to the
+spaced spelling `x? .field` — same value, same bytecode, same diagnostics — and is therefore subject
+to the **same enclosing-function return-kind rule as `?`**: a `T!E`-`?.` needs a `T!E`-returning
+fn (module top-level accepts either kind). Every other rule `?` carries — how it behaves inside
+`defer:` and under `recover:`, and that it is rejected inside a `spawn:` block — applies to it
+unchanged, because it *is* a `?`. `f()?.len()` is Rust's
+own idiom and compiles here for the same reason. There is no longer a whitespace cliff: `f()?.len()`
+and `f()? .len()` are the same program.
+
+Because the `T!E` form is try-then-**dot**, not a chain of tries, it does **not** auto-try through
+a nested carrier: with `a: X?` and `a.b: Y!E`, `a?.b?.c` is an `(Y!E)?`
+followed by a field access on a `T!E` — an error, and correctly so.
+
+**Null-coalescing `??` takes a `T?` or a `T!E` (TICKET-039).** `a ?? b` yields `a`'s inner
+value if `?v`, else `b`; it is **right-associative** (`a ?? b ?? c` = `a ?? (b ?? c)`).
+On a `T!E`, the `!e` payload is **discarded** — exactly Rust's `unwrap_or` on its error carrier — never
+propagated: `?.` on a `T!E` still propagates with `?`, `??` discards. The discard does **not**
+warn: `??` is itself the acknowledgement, and the W8-2 discarded-carrier rule already excludes `?`,
+`??` and `?.` because they yield the unwrapped payload, not the carrier. Nothing is required of the
+error type `E` — Chezzi is GC'd and runs no destructor on the dropped value. The remaining
+diagnostic is on a non-carrier operand:
+
+```
+'??' applies to a `T?` or `T!E` value, found int
+```
+
+`f()?.len() ?? 0` on a `T!E` is still an error on the **`??`**: `f()?.len()` is already an `int`,
+not a carrier, regardless of the widening.
+
+Both operators require the two chars **adjacent** (`x?.f`, `a ?? b`); on a **non-carrier** operand
+`?.` is one error, `'?.' applies to a `T?` or `T!E` value, found int`.
+
+**Unhandled errors only exit the program at a `?` or a manifest entrypoint's return.** A top-level `?`
+that hits an `!e`/`None` terminates the program with `unhandled error: <detail>` and a non-zero exit
+code; so does a manifest `module:function` entrypoint whose entry fn *returns* `!e`/`None`. A **bare**
+top-level expression statement that evaluates to `!e`/`None` (e.g. `compute()` whose result is `!e`)
+does **not** exit — the value is discarded, same as inside a function. *Binding* the value handles it
+too (`r := compute()` keeps running; inspect `r`).
+
+**A discarded `T!E`/`T?` is silently swallowed at runtime, in every position** — closed as
+`docs/contributing/gaps.md` **W8-2**. There is no runtime check on a drop anywhere, so the value vanishes without a
+trace, and that is exactly where `chezzi check` **warns**, following Rust (which marks both carriers
+`#[must_use]` and warns on the drop):
+
+```chezzi
+fn g() -> int!Error: return !"E"
+g()                    # warning … the `int!` value returned by 'g' is discarded, and rc stays 0
+fn f():
+    g()                # warning … the `int!` value returned by 'g' is discarded, and rc stays 0
+f()
+```
+
+```
+warning (line 4, col 5): the `int!` value returned by 'g' is discarded — bind it (`r := g()`), or discard it explicitly (`_ := g()`)
+```
+
+A warning is **non-fatal**: the program still type-checks and the exit code is unchanged. The escapes
+are Rust's — *bind* the value (`r := g()`, then inspect it) or *discard it explicitly* (`_ := g()`),
+which puts the intent on the page. (The hint spells the call back only when it can be reproduced from
+the callee name alone — a plain **nullary** call like `g()`. A call **with arguments** (`takes(1, "a")`)
+and a **method call** (`xs.pop()`) both stay elided as `r := …`, because a spelled-back
+`r := takes()` would not compile; the message already names the callee, which is what points at the
+culprit.)
+
+**Which positions warn.** The warning fires on any statement-expression whose type is a carrier, in
+*every* position — a bare statement, nested in `if`/`for`/`while`/`match`/`parallel:`/`recover:`/
+`wait:`, inside a `spawn:` block, inside a `defer:` block, inside a function body — module top level
+included, since the runtime no longer checks a top-level drop.
+
+| statement position | runtime | warns |
+|---|---|---|
+| any statement position, including module top level | value discarded, rc unchanged | **yes** |
+| `defer g()` / `spawn g()` — the **call** forms, in any position | silently swallowed | no — *deliberate*, see below |
+| the drop happens on a value typed by a **type parameter** (`fn drop_it[T](x: T): x`) | silently swallowed | no — *a known limit*, see below |
+
+The warning fires wherever the statement's own type is a carrier, so it also skips the positions where
+a bare carrier expression isn't a drop at all: an inline-expr body (`fn f() -> T!: g()`, an implicit
+return), the trailing expression of a value-`match`/value-`if` (that expression
+*is* the block's value; the last statement of a `recover:` block is an ordinary statement), and `g()?` / `x ?? d` (which yield the unwrapped payload). `o()?.len()` *does*
+warn — optional chaining re-wraps, so the result is still a `T?`.
+
+**`defer` is deliberately excluded.** `defer f.close()` never warns even though `close` returns a
+`T!E`: `defer f.Close()` is Go's canonical unchecked idiom and the ancestor for the statement. Bind
+it inside a wrapper function if you do want the error. The **call form** of `spawn` (`spawn g()`) is
+excluded for the same reason — a spawned task's return value is discarded by construction. Both are
+real silent swallows; both stay silent on purpose. (The **block** forms — `defer:` / `spawn:` — do
+warn: their bodies are ordinary statements, not the fire-and-forget call.)
+
+**A carrier laundered through a type parameter escapes the rule.** The warning fires on the
+*statement's own type*, so a generic that swallows its argument is invisible to it:
+
+```chezzi
+fn g() -> int!Error: return !"E"
+fn drop_it[T](x: T):
+    x                  # type is `T`, not a carrier — NO warning
+drop_it(g())           # prints "after", rc=0; the error is gone
+print("after")
+```
+
+This matches Rust exactly — a `T` carries no `#[must_use]`, so `fn drop_it<T>(x: T) { x; }` is silent
+there too. It is a known limit of the rule, not a defect.
+
+### `recover:` — the panic-recovery boundary
+
+`T!E`/`?` handle *expected* errors. A **runtime fault** — index-out-of-bounds, divide-by-zero,
+integer overflow, a missing map key — is a *panic*: by default it terminates the program. A
+`recover:` block is a boundary that **catches any panic occurring transitively beneath it** (no need
+to pre-mark risky code) and yields a `!` (the error or nothing):
+
+```chezzi
+total := 0
+r := recover:
+    rows := parse(file)       # may panic deep inside
+    total = rows[0] / rows[1] # OOB / divide-by-zero is caught here
+match r:
+    ?_:  print(total)      # success: the block ran to its end
+    !e: print("recovered: {e.message()}")   # a fault becomes !message
+```
+
+**The inline form** `recover: expr` is an ordinary expression of type `T!`, legal in every
+expression position (TICKET-260): `print(recover: 1 / 0)`, `x := (recover: parse(s))`,
+`f(a, key=recover: g())`, `[recover: 1]`, `print(1 + recover: 1)`. Its body is ONE expression that
+extends to the right like a lambda body, so `recover: a + b` recovers `a + b`; wrap it in
+parentheses to end it earlier (`(recover: a) + b`). A statement is no body: write the block form
+(`recover:` then an indented line) for an assignment, an `assert` or a `return`.
+
+The block form has **no tail value** (TICKET-260, rule U8): its type is `!` (`None!`), the error or
+nothing, like a Rust function that returns `()` or an error. The last statement of the block is an ordinary statement:
+`x / 2` there is discarded. To take a value out of a block, assign inside it (`v := 0`, then
+`v = <value>` in the block) and read `v` after the boundary. Reading the block as a `T` is a type
+error, and the message names the rule: `` expected int!, found ! — this value has type `!`: a
+`recover:` block has no tail value; assign inside it (`v := 0`, then `v = <value>` in the block) ``.
+The inline form `recover: expr` keeps the value: its type is `T!`, and a body that provably
+diverges (`recover: panic(…)`) is bottom-typed.
+
+It behaves like a **try-block**: a `?` inside the block short-circuits to the boundary (the `!e`
+lands in `r`), so one `recover:` handles *both* panics and propagated `T!E` errors. Because `?`
+targets the boundary rather than the function, it is allowed even when the enclosing function does
+not return a `T!E`.
+
+```chezzi
+fn run() -> str:                       # not a `T!E`-returning function
+    n := 0
+    r := recover:
+        n = parse_int(input)? * 2      # an error here lands in `r`, not propagated out of run()
+    match r:
+        ?_:  return "got {n}"
+        !e: return "failed: {e.message()}"
+```
+
+Rules: `recover:` is a value (not a control-flow target) — `return`/`break`/`continue` that would
+escape it are rejected; a `?` on a `T?` inside it is rejected (its result is `T!E`-typed —
+use `match`). Reach for `recover:` at boundaries (a request, a REPL line, a plugin, a test), not as
+everyday error handling — `T!E`/`?` remain the tool for expected failures.
+
+**`panic(msg: str)` — raise a panic yourself.** The faults above (OOB, divide-by-zero, overflow) are
+raised by the runtime; `panic(msg)` raises the *same* recoverable fault from your own code. It
+**unwinds** — it does not return a value (it is **not** sugar for `return !e`, which already
+exists for *expected* errors). The nearest enclosing `recover:` catches it as `!e` with
+`e.message() == msg`; uncaught, it terminates the program with that message and a non-zero exit code,
+exactly like an integer overflow. `defer`s run as it unwinds, like any panic — and if one of those
+`defer`s **itself** panics while the unwind is in flight, the newer panic **replaces** the one in
+progress (the later panic wins; the original message is dropped, matching the last-writer semantics of a
+re-raise). Because `panic` never
+returns, it is *bottom-typed*: it type-checks in any position — as a statement, as the diverging tail
+of a branch (no explicit `return` needed), or in an expression (`x := if ok: v else: panic("no")`
+takes `v`'s type).
+
+```chezzi
+r := recover:
+    panic("boom")                 # raised here, caught at the boundary
+match r:
+    ?_:  print("ok")
+    !e: print("recovered: {e.message()}")   # → recovered: boom
+```
+
+**A fault caught by `recover:` carries its origin.** `e.line() -> int?`, `e.col() -> int?` and
+`e.file() -> str?` read where the fault was raised — the same coordinate an uncaught fault prints
+(`runtime error (file:line:col): message`). A user-constructed `!"..."` reached as a plain value
+(not via `recover:`) carries none of these — `line()`/`col()`/`file()` are all `None` on it, and so are
+they on any error still in flight through a `?` propagation, since only `recover:` (and a `defer`-fault
+boundary) stamps the origin. `panic(e.message())` **re-raises at the origin `e` carries**, not at the
+`panic` call's own line — a re-raise never moves the coordinate. A fault the runtime raises **inside
+a stdlib function** (a native operation such as `submit` on a shut-down `Executor`) is located at
+**your call into the stdlib**, like Rust's `#[track_caller]` — for a caught fault (`e.file()`/
+`line()`/`col()`) and for the uncaught headline alike; the trace keeps its frames. A stdlib
+`panic(...)` stays unstamped, so `line()`/`col()`/`file()` answer `None` for it rather than naming a
+`std/` file you never wrote.
+
+### `defer` — block-scoped cleanup  (M16)
+
+`defer <call>` schedules a call to run when the **enclosing lexical block** exits — on **every**
+path: fall-through, `break`/`continue`, normal return, a `?` short-circuit, or a panic. Deferred
+calls run **LIFO** (last registered, first run); an unwind crossing several blocks runs each block's
+defers inner-block-first. A `return`, `?`, `break` or `continue` that leaves a `parallel:` block runs
+that block's own defers, then cancels its children and waits for them to finish unwinding (their
+defers run), and only then runs any enclosing block's defers. The receiver and arguments are
+evaluated **at the `defer` statement** (Go semantics); only the call itself is delayed.
+
+Every indented block is a defer scope: the function body, a loop body, an `if`/`elif`/`else` branch,
+a `recover:` block, a statement-form `match` arm, and the module top level.
+
+A `defer` is never an inline body: `if c: defer f()` is a parse error (`a nested block must be
+indented, not written inline after ':'`). The inline body would be the defer's whole block, so `f`
+would run at once. Write the `defer` on its own indented line.
+
+```chezzi
+fn process(path: str) -> int!:
+    f := open(path)
+    defer f.close()           # runs however `process` exits
+    n := f.read_int()?        # if this short-circuits, f.close() still runs
+    return ?(n * 2)
+
+for path in paths:
+    f := open(path)
+    defer f.close()           # runs at the END of each iteration — no leak across the loop
+    use(f)
+```
+
+`defer` targets a **method call** or a call to a **first-class callable value** (a function or
+closure, or a name bound to one). The four **universe builtin functions** `print`, `ord`, `chr`, and
+`panic` are first-class values, so `defer print("done")` (etc.) works directly — and they can be
+bound and passed like any function (`f := ord; f("a")`, a HOF arg). **Type / container / runtime
+constructors** (`int`, `str`, `List`, `Map`, `Channel`, `Range`, …) and user struct/enum constructors
+are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`.
+That constructor rule reaches **every dotted spelling of a constructor**, since they all merely build
+a value and throw it away: a variant constructor (`defer E.A(3)`, `defer E[int].A(3)`,
+`defer lib.Col.Val(3)`), a module-qualified struct constructor (`defer lib.Pt(3)`), and a
+**native constructor reached through its std module** (`defer concurrency.Shared(0)` — likewise
+`RwShared`/`Atomic`/`AtomicInt`/`Executor`, aliased imports included). All are rejected by
+`chezzi check` with the same message as the bare `defer Shared(0)`. `time.timer` is a function, so
+`defer time.timer(10)` is legal. An ordinary
+**module function** is *not* a constructor and stays a legal target — and a **module name is a
+NAMESPACE, not a receiver value**, so `mod.f(x)` is a plain call in `spawn` position exactly as it is
+in `defer` position: `defer math.abs(-3)` and `spawn math.abs(-3)`, `defer lib.helper(3)` and
+`spawn lib.helper(3)`, aliased imports and witness-taking generics (`spawn lib.reset(c)`) included,
+all compile and run (Go accepts `go pkg.F(x)` and `defer pkg.F(x)` alike). Nothing module-shaped
+crosses the airlock — the call is replayed inside the task — so the spawn **sendability** rules are
+unchanged: a genuine non-sendable *receiver* (`spawn v.m()`, including a local that merely **shadows**
+a module name, and one **bound to** it — `m := math` then `spawn m.abs(-3)`) and a non-sendable
+*argument* are still rejected by `chezzi check`. The namespace rule is keyed on an **unbound module
+name**, the same clause the compiler lowers on, so `check` and `run` cannot disagree.
+A **static method** is *not* a constructor either and *is* an ordinary target, in every spelling
+that works as a call — `defer Holder.build(3)`, `defer Gen[int].build(3)`, `defer T.default()` inside
+a generic, `defer lib.Holder.build(3)`, and a `from`-imported head. Arguments are evaluated **eagerly at
+the statement**, like every other `defer`/`spawn` argument (and like Go's `defer pkg.F(x)`), and
+`defer` keeps its LIFO order. Both spawn too.
+Note: the **value form of `print`** (a bound `p := print`) is a **fixed one-argument call** using the
+defaults **`sep=" "`, `end="\n"`** — the variadic multi/zero-arg shapes AND the `sep=`/`end=` named
+arguments stay **direct-call-only** (`print(a, b, sep=",")`), because they need the specialized print
+opcode a bound value doesn't reach. The direct call keeps its full variadic surface. Because a
+deferred/spawned `print` runs its value form, passing `sep=`/`end=` there is a **type error**
+(`defer print(a, sep="-")` is rejected) rather than silently ignored. All four builtins
+are **sendable** — a value bound to one (`f := ord`) crosses the `spawn` airlock and runs in the
+spawned task, on both the serial and the OS-thread engine; likewise **`spawn print(...)` is accepted**
+directly, symmetric with `defer print(...)`. A **user binding shadows** one of these
+names in value position exactly like any other name: `fn f(ord: int): print(ord)` (a param),
+`for chr in xs:` (a loop var), or a top-level `chr := "…"` all read the *binding*, not the builtin —
+only an unbound name resolves to the first-class builtin (at top level a read or call above a
+same-named global's `:=` is the builtin, as in CPython; inside a fn, method or closure body the name is
+that global in every position and both source orders). `defer` composes with
+`recover:` — a defer inside a `recover:` block runs as that block unwinds, before the boundary binds
+its value. Top-level defers run LIFO when the program ends (or while unwinding an unhandled
+top-level error). `std.os.exit` is a hard halt and does **not** run deferred calls (matching Go's
+`os.Exit`).
+
+**Block form `defer:`** — to group several cleanup actions, give `defer` an indented block instead
+of a single call (mirrors `spawn`'s dual form). The body runs **top-to-bottom** at scope exit, but
+is **LIFO as a unit** relative to other `defer`s. Unlike the call form (which has no call-only
+restriction inside the block) the body is ordinary statements — built-ins are fine. The block runs
+in the **same task** and **captures its free variables by reference** (like any closure), so it sees
+their **latest** values when it runs at scope exit — `x := 1; defer: print(x); x = 99` prints `99` —
+and **reassigning** an enclosing local inside the block mutates the shared binding. (This differs from
+the call form `defer f(x)`, whose *arguments* are still evaluated eagerly at the `defer` point.) One
+rule remains: a `?` short-circuit inside the block is **discarded** (a cleanup body has no
+error-return contract, like a deferred call whose `!e` result is dropped). A **`return` inside a
+`defer:` block is a compile error** (`'return' is not allowed inside a defer block`) — the block is
+its own closure and Chezzi has no named return values, so it could never affect the enclosing
+function's result. This covers a `return` anywhere in the block, including inside an `if`/`for`/
+`match`/`wait:` arm in it; a `return` inside a nested `fn` *declared* in the block is fine (it
+returns from that `fn`).
+
+```chezzi
+fn handle(conn: Conn):
+    x := 1
+    defer:                        # both lines run at scope exit, top-to-bottom
+        log("closing")
+        conn.close()
+    defer:
+        log("x = {x}")            # prints "x = 2" — captured by reference, read at exit
+    x = 2
+```
+
+### Handling a `T?` / `T!E` value: `?`, `??`, `?.`, `else`, `match`
+
+| Form | Does | Leaves the fn? |
+|---|---|---|
+| `x := f()?` | unwraps; on `None` / an error returns it from THIS fn | on failure |
+| `x := f() ?? d` | unwraps; on `None` / an error takes `d` (the error is discarded) | never |
+| `f()?.name` | applies `.name` to the value; `None` stays `None`, an error propagates | on an error |
+| `x := f() else e: <block>` | unwraps; on failure runs the block, which must leave | on failure |
+| `match f(): ?v: … !e: …` | handles every outcome by pattern, and may produce a value | no |
+
+**`else` = handle and leave.** `v := f() else e: <block>` binds `v` on success. On failure the block
+runs with the error bound to `e` (`else _:` binds nothing, like `else:`), and it MUST leave: `return` (including `return !e`), `break`,
+`continue`, `panic(...)`, `os.exit(n)`, or an `if` / `match` whose every branch leaves. It never
+produces a value; a default comes from `??`, a computed value from `match`.
+
+```chezzi
+fn load(path: str) -> Config!str:
+    text := read(path) else e:
+        log("cannot read {path}: {e}")
+        return !e
+    port := text.to_int() else:        # `else:` — the `T?` form; it may also ignore an error
+        return !"not a number"
+    save(path) else e:                 # a `None!E` call: the statement form (or `_ := … else e:`)
+        return !e
+    return Config(port)
+```
+
+A destructuring binding takes the guard too. The error is the call's own: splitting a tuple cannot
+fail. For a `T?` the form is `else:`.
+
+```chezzi
+fn span(path: str) -> int!str:
+    lo, hi := bounds(path) else e:     # bounds() -> (int, int)!str
+        return !e
+    a, b := find(path) else:           # find() -> (int, int)?
+        return 0
+    return hi - lo + a + b
+```
+
+- A block that can fall through is `else block must leave (return, break, continue, panic)`.
+- The guard exists on a `:=` or typed binding and on a bare call. An assignment (`x = f() else e:`,
+  `a, b = …`, `self.f = …`, `xs[i] = …`, `x += …`) and `return f() else e:` are parse errors:
+  ``an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return` ``.
+  A value list (`a, b := 1, 2`) takes no guard either: a tuple literal cannot fail.
+- On the line of an inline `if` or `elif` body, a bare `else:` or `elif` after the body's one
+  statement belongs to the `if` (`if c: f() else: g()` is the if-expression above). `else e:`, with
+  a binder, stays a guard there: `if c: save(p) else e: return`. A bare-`else:` guard on that
+  statement needs the indented form; `if c: f() else: return` is
+  `` a one-line `if`/`else` takes an expression in each branch; … ``. An inline
+  `recover: expr` on the line takes ONE expression, so a same-line `else:` after it belongs to the
+  `if`: `if c: r := recover: f() else: panic("p")` is
+  `` a one-line `if`/`else` takes an expression in each branch; … ``. A guard on the `recover:`
+  value needs the indented form. A one-line
+  `elif` takes no `else:` or `elif` after its body:
+  ``an `elif` body ends its line; write the next `elif` or `else:` on its own line, and an `else:` guard in an indented body``.
+- `else e:` on a `T?` is an error (absent has no payload): `` `else e:` needs an error to bind, and int? has none; write `else:` ``.
+- On an `int?!E` value `else` handles the outer error, and `v` is the `int?`.
+- At module top level there is no `return`: leave with `panic`, `os.exit`, `break` / `continue` in a
+  loop, or use `?`. Inside a nested fn or a generator `return` leaves that fn.
+- A `spawn:` block and a `defer:` block reject it, as they reject `?`: a spawned task has no caller
+  to leave to, and a defer cannot leave.
+
+**How a carrier prints.** `print`, `str()`, interpolation, a container element, an `assert` message and
+a fault text show a carrier as the user writes it: a present or success value prints as its payload
+(`5`), an absent one as `None`, an error as `!` and the error (`!boom`; `!'boom'` inside a list), and a
+`None!E` success as `None`. A `?` is printed only in front of an absent payload, so a present `None`
+of an `int??` prints `?None` and stays distinct from `None`. The text does not show the wrap depth
+or the carrier kind (`5` at `int?` and at `int??` both print `5`); a test of those reads the value by
+`match`.
+
+## 9c. Testing — `assert`, `test fn`, `chezzi test`  (M20)
+
+Chezzi has a built-in test facility. Three pieces:
+
+**`assert`** — a statement that **faults with its source line** when its condition is false:
+
+```chezzi
+assert x == 1                       # bare form
+assert even_sum(10) == 20, "0..10"  # with a custom message
+```
+
+`cond` must be `bool`; the optional `msg` must be `str` (both checker-enforced) and is evaluated
+**only on failure** (a passing assert never runs it). A passing assert is a silent no-op; a failing
+one faults like any runtime error, carrying the line you can see in `chezzi run` and in the test
+report. The fault message depends on `cond`'s shape:
+
+- a **comparison** (`<`, `<=`, `>`, `>=`, `==`, `!=`) renders both operand **values** around the
+  operator: `assertion failed: 3 == 4`, or `assertion failed: <msg> (3 == 4)` when a `msg` is given.
+  The source text is not shown — only the values — and `in` is excluded (its right operand can be an
+  unbounded collection).
+- every other condition keeps `assertion failed: <msg>` when a `msg` is given, or just
+  `assertion failed` otherwise.
+
+`assert` works anywhere, not just in tests.
+
+**`test fn`** — a `test` modifier before `fn` marks a test. A free `test fn` is an **independent**
+test (no parameters, returns nothing); a `test fn name(self)` **method** turns its struct into a
+**suite**:
+
+```chezzi
+# math_test.chz — independent tests
+test fn parses_int():
+    assert to_int("42") == 42
+
+# a suite — a struct with test methods, optional lifecycle hooks, and a shared fixture
+struct DbTests:
+    db: Db = connect()              # built ONCE for the suite (a default field expr)
+    fn before_each(self): self.db.begin()
+    fn after_each(self): self.db.rollback()
+    fn after_all(self): self.db.close()
+
+    test fn empty(self):
+        assert self.db.count() == 0
+    test fn insert(self):
+        self.db.insert("x")
+        assert self.db.count() == 1
+```
+
+The four lifecycle hooks — `before_all`, `after_all`, `before_each`, `after_each` — are recognized by
+name and optional (omit any you don't need). Each, if present, must be `fn name(self)` returning
+nothing. The shared fixture is just a default-initialized field, mutated through `self`.
+
+**`chezzi test [path]`** — discovers and runs every `test fn` in `*_test.chz` files. `path` defaults to
+the current directory; a single `*_test.chz` file runs that file, a directory is walked recursively.
+Each test runs in isolation (one failure doesn't abort the rest); the report is
+`PASS/FAIL name (file:line:col) msg` plus a summary, and the exit code is non-zero if anything failed.
+A suite runs `before_all? → [before_each? → test → after_each? (always, even on failure)]* → after_all?`,
+constructing the suite instance once. Tests run on the **M:N OS-thread engine** (like `chezzi run`);
+`CHEZZI_THREADS` sizes its worker pool.
+
+The dedicated native suite lives in **`tests/chz/`** (`spec/` for language behavior, `stdlib/` for
+module behavior, `suites/` for lifecycle-hook suites) — kept separate from `examples/` (print-and-golden
+demos). It runs via the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.rs`, its own process),
+which runs the whole `tests/chz/` suite and asserts every test passes;
+`tests/chezzi_threads_cli.rs` then runs it again at `CHEZZI_THREADS=2`. A fault's *message*
+**can** be asserted in-language via `recover:` — `r := recover: <expr>` then
+`match r: !e: assert e.message().contains(...)` — so fault-path tests port here too; only
+compile-time checker diagnostics (`rejects`/`ok`) and engine internals (AST/bytecode/GC, scheduler
+timing) stay in Rust.
+
+## 9b. Program entry — there is no automatic `main`
+
+Chezzi is a scripting language: a program runs **top-to-bottom**. There is **no automatic entry
+point** in the language — `main` is an ordinary function. Run a file directly and only its top-level
+runs, so you call `main` yourself:
+
+```chezzi
+fn main():
+    print("hello")
+
+main()        # running this FILE directly needs the call; nothing runs main for you
+```
+
+For a **project**, `chezzi.toml`'s `[project] entrypoint` declares what a bare `chezzi run` executes.
+It is a dotted module path, optionally suffixed with **`:function`**:
+
+```toml
+[project]
+entrypoint = "src.main:main"   # run src/main.chz's top-level, then call its `main`
+# entrypoint = "src.main"      # (no :function) run src/main.chz's top-level only — call main yourself
+```
+
+With a `:function` suffix, a bare `chezzi run` runs the entry module's top-level and **then calls that
+function** — so the source needs no trailing call, and you can swap which function runs (e.g.
+`main` → `other_main`) by editing the manifest alone. The function part is ONE name (a second `:` or a
+`.` is a manifest error naming `chezzi.toml`). A named function the entry module never binds (no
+top-level `fn`, `let` or import of that name) is rejected by `chezzi check` and by bare `chezzi run`
+BEFORE any code runs, with an error naming `chezzi.toml`; a name that is bound to something that is not a
+function is a run-time error, not a silent no-op. Without the suffix, the module top-level runs and
+nothing is auto-called. Running an explicit file (`chezzi run src/main.chz`) is always top-level-only
+(scripting model) regardless of the manifest.
+
+**`chezzi init [dir]`** scaffolds a new project (`dir` defaults to the current directory, created if
+missing): a `chezzi.toml` manifest, `src/main.chz` (a `fn main():` — **no** trailing call, since the
+scaffolded `entrypoint = "src.main:main"` calls it), and an example `src/main_test.chz` with
+`test fn`s. **It never overwrites a file that is already there.** An existing `chezzi.toml` is a hard refusal
+(the directory is already a project — nothing is written, exit 1); an existing `src/main.chz` or
+`src/main_test.chz` is kept as-is, reported as `kept`, and only the missing files are written
+(exit 0) — the shape `cargo init` and `go mod init` have. The manifest is **both a root marker and
+a parsed manifest**: the toolchain reads its `[project]` keys (`name`/`version` metadata, and
+**`entrypoint`**, scaffolded active as `"src.main:main"`). It is a tiny fixed-schema reader
+(`[section]` headers, `key = "value"` string pairs, `#` comments); an empty `chezzi.toml` is a valid
+root marker with no entrypoint.
+
+> **Manifest mode forwards program arguments after a `--` terminator**, matching `cargo run -- --dir x`
+> (NOT `go run`, which forwards the `--` itself: measured `go run main.go -- a` → `[-- a]`):
+>
+> ```
+> $ chezzi run -- --dir logs   # entrypoint sees std.os.args() == ['--dir', 'logs']
+> ```
+>
+> `--` is consumed, not forwarded, and the same terminator works in the **file** form too
+> (`chezzi run src/main.chz -- --dir logs`) — there it strips the `--` from what was already forwarded
+> after the path. (Fixed `docs/contributing/gaps.md` **W8-10**.) Only the FIRST `--`, in terminator position (right
+> after `run`/its flags or the path), is consumed; a later `--` is the program's own and reaches
+> `std.os.args()` (`chezzi run f.chz a -- b` → `['a', '--', 'b']`, as `go run main.go a -- b`,
+> `python f.py a -- b` and `cargo run -- a -- b` forward it; `docs/contributing/gaps.md` **W14-20**).
+
+## 10. Strings & interpolation
+
+```chezzi
+name := "chezzi"
+age := 30
+print("hi {name}, age {age}")     # {expr} interpolates
+print("sum: {a + b}")             # any expression
+print("brace: {{not interpolated}}")   # '{{' / '}}' = literal braces
+```
+
+> **Interpolation is ALWAYS on, but a hole whose whole text is digits renders literally, so a regex
+> quantifier survives.** `"\\d{4}-\\d{2}"` is the pattern you typed: `{4}` and `{2}` are all-digit
+> holes, so they render as `{4}` and `{2}` rather than interpolating, matching CPython:
+>
+> ```chezzi
+> print("\\d{4}-\\d{2}")     # \d{4}-\d{2}  (python3: \d{4}-\d{2})
+> print(r"\d{4}-\d{2}")      # \d{4}-\d{2}
+> ```
+>
+> A raw string `r"…"` is still the recommended spelling for a regex or anything else with
+> backslashes, since it keeps *every* backslash literal too, not just the braces. Doubling the
+> brace (`"\\d{{4}}"`) works too but reads worse. (`docs/contributing/gaps.md` **W8-1**.)
+
+**Quote styles.** A string may be delimited by `"…"` or `'…'`; the two are fully interchangeable —
+same `str` type, same escapes, same interpolation. Inside a double-quoted string `'` is a literal
+char (and `\"` escapes the quote); inside a single-quoted string `"` is a literal char (and `\'`
+escapes the quote). `\'` and `\"` are both accepted in either style.
+
+**Triple-quoted strings.** `"""…"""` and `'''…'''` produce an ordinary `str` with the **same**
+escapes and interpolation as a regular string — the one difference is that a single (or double)
+unescaped quote inside is a literal char, so you can embed quotes without backslashes. (Regular
+strings already span literal newlines, so triple quotes are about quotes, not multi-line per se.)
+
+```chezzi
+print("""She said "hello" to {name}""")   # unescaped quotes + interpolation
+print('''it's a "quoted" word''')          # apostrophes and double-quotes, literal
+```
+
+**Raw strings — the verbatim opt-out (`r"…"`).** Interpolation is always on, so a literal brace in a
+normal string must be doubled (`"{{}}"`). The escape hatch is a **raw string**: prefix any quote form
+with `r`/`R` (`r"…"`, `r'…'`, triple `r"""…"""` / `r'''…'''`) and the contents are taken **verbatim** —
+**no escape processing** and **no interpolation**. So `\` is a literal backslash (great for regex
+`r"\d+\s"` and Windows paths `r"C:\tmp"`), and `{`/`}` are literal (`r"{}"` prints `{}`, `r"{x}"` stays
+`{x}`). The result is a plain `str`, identical downstream. The short form cannot contain its own
+closing quote (no escaping — use the other quote style or the triple form); the triple form embeds
+quotes verbatim, which is how you write JSON: `r"""{"k": [1,2]}"""`.
+
+```chezzi
+x := 5
+print(r"{}")                  # {}        ← literal braces, no doubling needed
+print(r"\d+\s")               # \d+\s     ← literal backslashes, no escapes
+print(r"{x}")                 # {x}       ← raw: NOT interpolated
+print("{x}")                  # 5         ← normal string still interpolates (raw is opt-in)
+print(r"""{"k": [1,2]}""")    # {"k": [1,2]}   ← triple raw embeds quotes + braces
+```
+
+**Escapes.** Backslash escapes resolve at lex time: `\n` `\t` `\r` `\\` `\"` `\'` `\0` and
+`\u{HEX}` (1-6 hex digits naming a Unicode scalar value, e.g. `\u{41}` → `A`, `\u{1F600}` → 😀).
+A surrogate (`D800`-`DFFF`), a value above `10FFFF`, an empty `\u{}`, a missing brace, a non-hex
+digit, or any other unknown escape is an error. A backslash escapes a *character* of the literal's
+text (`\"` → a quote), while `{{` / `}}` write a literal brace. An escape resolves **once**, in the
+text of the literal that holds it, and an escaped brace is text: `"\u{7B}x\u{7D}"` is `{x}`, never a
+hole. The text of a hole is code, and code has no escapes (next paragraph).
+
+```chezzi
+print("tab\tgap, quote \"x\", path C:\\tmp")
+print('single quotes work too: {name}, with \'apostrophe\' and \u{2728}')
+print("literal {{x}} vs value {x}")
+```
+
+**What goes inside `{…}`.** Any expression, with no second-class rules — a call in a hole takes
+**named arguments, defaults, and variadics** exactly like the same call written outside the string
+(holes are parsed with the rest of the module, before call arguments are normalized). The hole's text is
+**code, read once, as you wrote it**: the lexer finds each hole while it scans the literal, and lexes
+its code in place with the same rules as the code around it. Three rules follow:
+
+1. **A nested literal may use the enclosing quote**, as in CPython 3.12+: `"{d["k"]}"` is the value at
+   key `k`, and `"{"{x}"}"` nests an interpolated literal. A hole may nest up to **149** levels
+   (CPython 3.14's limit); the 150th is `too many nested interpolated strings`. A hole spends the
+   expression-depth budget of the expression around it, one level like a parenthesis.
+2. **There is no backslash in hole code.** `"{d[\"k\"]}"` and `"{x\t+ 1}"` are errors that name the fix
+   (write the quote directly). Escapes exist in a literal's own text and in a format spec's text, and
+   inside a nested literal, where they resolve once: `"{'\\n'.len()}"` is `2`.
+3. **The first `:` at hole depth** (outside every bracket and every nested literal) **starts the format
+   spec.** `{if c: 1 else: 2}`, `{fn(): 1}` and a bare `match` or `recover:` in a hole are errors that
+   say to wrap the expression in parentheses: `{(if c: 1 else: 2)}` works, and `{(if c: 1 else: 2):>5}`
+   carries a spec. `{x:=5}` is the spec `=5`, not a walrus.
+
+A hole is a bracket for layout, like `()`, `[]` and `{}`: a line break inside it is white space, so
+`{x +⏎ 1}`, `{x⏎ + 1}` and a method chain over three lines work in a `"""…"""` or a `"…"` literal alike.
+Whitespace padding around the code is insignificant. A `}` inside a nested string literal or inside
+`(`/`[`/`{` belongs to the expression rather than closing the hole. A `#` outside a nested string
+literal starts a comment that runs to the end of the line, as in CPython 3.12+ (W12-19). In a
+multi-line hole the comment ends at the line break, so `"""{x # note⏎}"""` is `x`; on one line it comments
+out the closing `}` and is a compile error pointing at the `#`. A `#` in a nested string (`{d['#']}`)
+or in the format spec (`{n:#x}`) is ordinary text.
+
+```chezzi
+fn greet(name: str, greeting: str = "hi") -> str:
+    return "{greeting}, {name}"
+
+print("{greet('ada')}")              # hi, ada          ← default applies inside a string
+print("{greet(greeting='yo', name='ada')}")   # yo, ada ← named args, any order
+```
+
+```chezzi
+print("{ {1, 2}.len() }")     # 2          ← set literal's brace is nested, and padding is fine
+print("{ {'a': 1}['a'] }")    # 1
+print("{d['a}}b']}")          # value at key `a}b` — the quoted brace does not close the fragment
+```
+
+Past the first `:` at hole depth the rest of the hole is the **format spec** — literal text, not an
+expression — so any character may be the fill (`"{x:'>5}"` → `''''7`, `"{x:(>5}"` → `((((7`). An
+escape in a spec resolves once (`"{x:\u{3E}4}"` pads like `{x:>4}`). The literal's own closing
+delimiter ends the spec too, so a fill that equals the literal's quote needs the other quote style.
+
+**Two deliberate differences from CPython.** Every Chezzi literal interpolates, a nested one
+included, so a literal brace inside it is doubled: `"{'}}'}"` is `}` where CPython writes
+`f"{'}'}"`, and a lone `}` in a nested literal is `unmatched '}'` (as it is at the top level). And a
+hole whose whole text is digits is text (`"a{4}b"` is `a{4}b`, CPython `a4b`), so a regex
+quantifier survives. An `extern "lib":` header takes a plain string only: `extern "lib{x}"` is
+`an extern library name cannot interpolate`.
+
+**Format specifiers.** An interpolation may carry a Python-style format spec after a `:` —
+`{expr:spec}`. The mini-language is a coherent subset:
+
+```
+{expr:[[fill]align][sign][z][#][0][width][grouping][.precision][type]}
+```
+
+```chezzi
+print("|{name:<10}|")     # left,  width 10            → "|chezzi    |"
+print("|{name:>10}|")     # right                      → "|    chezzi|"
+print("|{name:^10}|")     # center                     → "|  chezzi  |"
+print("|{name:*^10}|")    # center, '*' fill           → "|**chezzi**|"
+print("{42:06}")          # zero-pad to width 6        → "000042"
+print("{-7:06}")          # sign kept before zeros     → "-00007"
+print("{3.14159:.2f}")    # 2 decimals                 → "3.14"
+print("{0.1357:.1%}")     # percent: ×100, 1 decimal   → "13.6%"
+print("{255:x} {255:X}")  # hex (lower/upper)          → "ff FF"
+print("{255:b} {255:o}")  # binary / octal             → "11111111 377"
+print("{12345.678:.2e}")  # scientific (signed 2-digit exp) → "1.23e+04"
+print("{5:+d}")           # force a leading '+'         → "+5"
+print("{-0.0001:z.1f}")   # z: a rounded-to-zero float drops its '-' → "0.0" (CPython 3.11+;
+                          # rejected on an int type and a string, as in CPython)
+print("{greeting:.5}")    # string precision truncates → "hello"
+print("{1234567:,}")      # thousands grouping         → "1,234,567"
+print("{1234567:_}")      # underscore grouping        → "1_234_567"
+print("{255:#x}")         # alternate form: radix prefix → "0xff"
+print("{1234567.0:g}")    # general format              → "1.23457e+06"
+print("{42:=10}")         # sign-aware fill              → "        42"
+print("{42: d}")          # leading-space sign           → " 42"
+w := 6
+print("|{name:<{w}}|")    # width measured at runtime    → "|chezzi|" (w=6 → "|ab    |" for "ab")
+print("{3.14159:.{2}f}")  # runtime precision            → "3.14"
+```
+
+- **align**: `<` left, `>` right, `^` center, `=` sign-aware fill; an optional **fill** char may
+  precede it (default space). Numbers default to right-align, everything else to left. `=` pads
+  *between* the sign and the digits (`{-42:=10}` → `"-       42"`) rather than before the sign; it
+  is numeric-only and rejected on a string. With the `0` flag, or with `0` written as an explicit
+  fill, `=` pads with zeros and widens the grouped digit run exactly as the bare `0` flag does
+  (`{1000:=08,}` → `"0,001,000"`).
+- **sign**: `+` forces a leading `+` on non-negative numbers, a leading space (` `) leaves a space
+  in its place (`{42: d}` → `" 42"`), and `-` is the default (no-op). All three are numeric-only.
+- **`#` alternate form**: on `x`/`X`/`o`/`b` it prefixes the radix marker `0x`/`0X`/`0o`/`0b`
+  (`{255:#x}` → `"0xff"`); on a float it forces a decimal point even with no fractional digits
+  (`{0.5:#.0f}` → `"0."`), except on a non-finite value, where it is a no-op (`{x:#f}` on infinity
+  stays `"inf"`); it is a no-op on `d`; it is rejected on a string.
+- **`0`**: sets the fill to `'0'` unless an explicit fill was written, under EVERY align, and
+  defaults the align to `=` only when no align was written at all (the sign stays ahead of the
+  zeros under `=`). `{42:08}` and `{42:>08}` both give `"00000042"`; `{42:<08}` gives `"42000000"`;
+  `{42:^08}` gives `"00042000"`; `{-42:08}` gives `"-0000042"` against `{-42:>08}`'s `"00000-42"`;
+  and `{42:*>08}` gives `"******42"` because an explicit fill beats the flag.
+- **width**: minimum field width. **Capped at 4096** — a larger width (e.g. `{x:>9999999999}`) is a
+  parse error, *not* a multi-gigabyte allocation. The width may instead be a **nested `{expr}`
+  field** measured at runtime, as in CPython (`f"{s:<{w}}"`), Go (`%-*s`) and Rust (`{:<w$}`): with
+  `w := 6`, `"|{s:<{w}}|"` is `|ab    |`, `"|{s:>{w}}|"` is `|    ab|`, `"|{s:*^{w}}|"` is
+  `|**ab**|`, `"{42:0{w}}"` is `000042` and `"{s:<{w + 2}}"` is `ab      `. See the nested-field
+  rules below.
+- **grouping**: `,` or `_` separates every three digits of the integer part (`,` → `1,234,567`;
+  `_` → `1_234_567`); `_` also groups `x`/`X`/`b`/`o` output in fours (`{0xfffff:_x}` → `f_ffff`).
+  `,` is rejected with those four type chars, and both are rejected on a string. Combined with
+  zero-pad, the digit count widens so the field never starts with a separator (`{1000:08,}` →
+  `"0,001,000"`, nine chars for a width of eight — matching CPython).
+- **precision** `.N`: float decimals; on a **string** it **truncates** to N chars (Python parity);
+  also capped at 4096. `.N` may also be a nested field: with `p := 2`, `"{3.14159:.{p}f}"` is
+  `3.14`, `"{3.14159:{w}.{p}f}"` (`w := 6`) is `  3.14` and `"{'hello':.{p}}"` is `he`.
+- **nested width/precision field** `{expr}`: legal in **exactly two slots**, the width and the
+  precision (Go's `%*.*f` and Rust's `width$`/`.prec$` also allow a runtime value only there).
+  CPython also lets a nested field stand in for the fill, align or type (`f"{s:{w}<3}"` is `ab6`)
+  because it substitutes the field's text and re-parses the spec at runtime; Chezzi checks a spec's
+  shape at `check` time, so any other `{` in a spec is `format spec: a nested field is allowed only
+  as the width or the precision`. The field must be an **`int`**: a static `str`, `float` or `bool`
+  is a compile error (`format spec: a nested width field must be an int, found str`; CPython would
+  read `{s:<{2.5}}` as width 2 precision 5, Chezzi rejects it), and a value whose type is unknown
+  until run time faults with the same wording. A field cannot carry its own spec (`{w:3}`) and
+  cannot be empty (`{}`). **Evaluation order** is the value, then the width, then the precision
+  (`"{f():<{g()}}"` runs `f` first, as CPython does), and a name read only inside a nested field is
+  still captured by a closure. The **cap moves with the value**: a nested value over 4096 faults
+  BEFORE any buffer is sized (`format spec: width exceeds maximum 4096`, `format spec: precision
+  exceeds maximum 4096`) — CPython has no cap and tries to allocate the string, so this is a
+  deliberate improvement. A **negative** value faults too (`format spec: width must not be
+  negative, got -1`; CPython raises `ValueError` as well). Both faults are recoverable
+  (`recover:`).
+- **type**: `d` int · `f`/`F` fixed float (default precision 6, NEVER scientific — `{1e16:f}` gives
+  `"10000000000000000.000000"`) · `x`/`X` hex · `b` binary · `o` octal · `e`/`E` scientific
+  (default precision 6, exponent always signed and zero-padded to ≥2 digits, e.g. `1.234568e+05`) ·
+  `g`/`G` general format (fixed-point when the decimal exponent falls in `-4..precision`, scientific
+  otherwise; trailing zeros stripped unless `#`; default precision 6, minimum 1) ·
+  `%` percent (×100 then `%`). `inf`/`-inf`/`nan` print upper case (`INF`, `-INF`, `NAN`) under the upper-case type chars `E`/`F`/`G`, like CPython, and lower case under `e`/`f`/`g`/`%` (`NaN` stays the one documented casing divergence there). A float type char (`f`/`F`/`e`/`E`/`g`/`G`/`%`) promotes an int.
+
+A **bare** `{expr}` (or `{expr:}` with an empty spec) renders a whole float with a trailing `.0` —
+e.g. `5.0`. A `.N` precision with **no type char** is CPython's general format, not fixed-point:
+`{123.456:.3}` gives `"1.23e+02"` and `{100.0:.6}` gives `"100.0"`. It differs from `g` in two ways:
+the scientific crossover sits one exponent lower, and an integral fixed-point result keeps its
+trailing `.0`. An **unknown type char** or trailing junk in the spec is a **parse error**. A
+**type/value mismatch** (e.g. `{name:d}` on a string, `{x:.2f}` on a string, `{x:d}` on a float,
+`{x:.3d}` precision on an int, zero-pad on a non-number) is now **caught at compile time by `chezzi
+check`** whenever the value's static type is a **concrete scalar** (`int`/`float`/`str`/`bool`) — a
+provably-wrong spec/type pairing is a static error, in the spirit of Chezzi's statically-typed model
+(this is a **deliberate divergence from Python**, where such a mismatch is a runtime `ValueError`). A
+**concrete non-scalar** value is checked the same way, against the STRING rules (it renders via the
+runtime's text-form path): a `List`/`Map`/`Set`/tuple/`T?`/`T!E` (TICKET-124), and — since
+TICKET-142 — a struct, enum, `bytes`, a fn value, and every native struct (`Shared`, `Channel`,
+`AtomicInt`, `Writer`, …). `xs := [1]; "{xs:d}"`, `n: int? = None; "{n:+}"`, a struct `{p:d}` and an
+enum `{e:d}` are all compile errors naming the type; a width/fill spec (`{o:>12}` on an
+`float?`) still passes, exactly as it would on a `str`.
+The **runtime** validation stays as an identical backstop (same wording, single-sourced in
+`spec_valid_for_scalar`): it fires only for a value whose type the checker can't pin to a concrete
+type — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an `Unknown`, or a
+protocol existential — where the mismatch is only knowable at run time. A program that passes
+`check` never faults with `format spec:` on a concrete-typed hole. The spec is parsed once,
+one module (`src/fmtspec.rs`), so its output is byte-identical across runs. The lexer decides where the spec starts (above) — a `:` inside an index, string key, or
+slice (`{m["a:b"]}`, `{xs[1..2]}`) is *not* the spec separator. **Ternaries and other keyword colons:**
+a ternary in a hole is **parenthesized**, with or without a spec — `{(if b: 1 else: 2)}`,
+`{(if b: 1 else: 2):>5}`; the bare `{if b: a else: b}` is an error that says so.
+
+**Plain float formatting matches CPython `repr()`/`str()` exactly, with ONE exception: `NaN` casing.**
+Chezzi prints `NaN` where CPython prints `nan` (`inf`/`-inf` agree; the upper-case `E`/`F`/`G` type chars print `INF`/`-INF`/`NAN` like CPython). It is the single differing byte
+across the whole float surface, and it differs on **every** path — bare `print`, `str()`,
+interpolation, container element, `{x:.2f}`, `{x:>8}`. Test against `NaN`, or compare with
+`math.is_nan` instead of a string. (`docs/contributing/gaps.md` **W8-18**.) A bare float — `print(x)`,
+`str(x)`, or a `{x}` interpolation with no spec — uses **scientific notation when the decimal
+exponent is `< -4` or `>= 16`**, and fixed-point otherwise. So `1e16` prints `1e+16`, `1e15` prints
+`1000000000000000.0`, `0.00001` prints `1e-05`, `1.5e300` prints `1.5e+300`, and `-2.5e-8` prints
+`-2.5e-08`; whole floats inside the fixed range keep their trailing `.0` (`1.0`, `1000.0`). The
+mantissa is **shortest-round-trip-correct** (the fewest digits that parse back to the same `f64`) and
+the exponent always carries an explicit sign, zero-padded to ≥2 digits — byte-identical to Python's
+`repr`. When the two shortest candidates are *exactly* equidistant from the value, the tie breaks
+**to even** like CPython, not away from zero: `print(771.5462036132812)` is `771.5462036132812`, not
+`…813` (the exact value is `771.54620361328125`) — `docs/contributing/gaps.md` §W7-32. `json.stringify` routes through the same formatter, so a large float serializes as
+`1.5e+300` (valid JSON, round-trips through `json.parse`), not a 300-digit expansion.
+
+Core-type string methods (built in — no import needed):
+
+```chezzi
+s.len()          s.upper()        s.lower()
+s.trim()         s.strip()        s.split(",")
+s.starts_with("ab")  s.ends_with("yz")  s.contains("b")
+",".join(parts)  # join: separator.join(List[str])
+s.chars()        # → List[str] of 1-char strings; also `for c in s:` iterates them
+s.replace("a","b")  s.repeat(3)   s.reversed()     s.pad_left(4,"0")  s.pad_right(4," ")
+s.index_of("x")  s.count("x")     s.strip_prefix("p")  s.strip_suffix("s")
+s.split_lines()  # → List[str] split on a newline (LF, CRLF, or lone CR)
+s.to_int()       s.to_float()     # → int? / float? (a value / None — None on bad input)
+s.parse_int()    s.parse_float()  # → int!str / float!str (the value / !msg on bad input)
+"a" + "b"        # concatenation
+```
+
+The `ends_with`/`replace`/`repeat`/`pad_left`/`index_of`/`count`/`strip_prefix`/
+`strip_suffix`/`split_lines` methods forward to the matching `std.string` free fns (no import needed).
+
+A character is just a 1-char `str` (Python-style — there is no `char` type): index with `s[i]`,
+iterate with `for c in s:` or `s.chars()`, and bridge to codepoints with `ord`/`chr`.
+
+List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.contains(v)`
+`xs.index_of(v)` `xs.sum()` (numeric; empty `-> 0`, or `0.0` for a `List[float]`)
+`xs.sort()` (ascending, in place); `xs.concat(ys)→list` (new list) and
+`xs.extend(ys)` (append in place, → None); `xs.copy()→list` (new list, shallow); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
+`xs.sort_by(fn(a, b) -> int)` — a custom comparator (negative = `a` before `b`), stable, in place;
+and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str, or a struct
+or enum defining `compare`), stable, in place.
+
+> **Inference: signatures are written, bodies are inferred from the line they are on** (TICKET-238).
+> The type of a value is known on the statement that creates it. Inference never reads a later
+> statement: no later `push`, assignment, call or `return` fills in a type an earlier line left open.
+>
+> | You write | Verdict |
+> |---|---|
+> | `xs := []`, `m := {}`, `s := Set()`, `z := None`, `h := [None]`, `t := ([], 1)`, `c := Cell(None)`, `v := Box.new()`, `e := Bx.Empty`, `ys := id([])` | error on that line |
+> | `xs: List[int] = []`, `xs := List[int]()`, `z: int? = None`, `Box[int].new()`, `Bx[int].Empty`, `f([])` into a typed parameter, `return []` in a typed fn, a typed field or element slot | accepted: the same statement supplies the type |
+> | `xs := [1, 2]`, `[None, 7]` (`List[int?]`), `if c: None else: 7`, `z := ?5` (`int?`), lambdas, `id(5)` | accepted: same-line inference |
+> | `print(None)`, `print([])`, `[] == []`, `for x in []:`, `[].len()` | accepted: the open value is consumed, never stored |
+>
+> The error names the binding and both fixes:
+> ``cannot infer the element type of `xs`: write `xs: List[int] = ...` or `xs := List[int]()` ``.
+> (The type in the message is an example; write the one you mean.) The other heads are
+> ``cannot infer the key and value types of `m` ``, ``cannot infer the type of `z` from `None` ``,
+> ``cannot infer the success type of `r` `` (`r: int! = recover: ...`) and
+> ``cannot infer the type arguments of `c` ``. One error is reported per open binding: later uses
+> of a rejected binding report nothing more.
+>
+> The same rule covers three neighbours. A generic fn VALUE read without type arguments is an error
+> where it is bound (`g := ident`; write `g := ident[int]` or `g: fn(int) -> int = ident`). An
+> unannotated closure parameter typed by an open argument is an error naming the parameter
+> (`fold(xs, [], fn(acc, x): acc + [x])`; bind the result to a typed name, or pass `List[int]()`).
+> A free closure whose body is open keeps its own message
+> (`g := fn(): []` is `cannot infer return type of '<closure>'; add a -> annotation`).
+>
+> A collection's element type is fixed by its annotation, so a conflicting `push` is the ordinary
+> mismatch (`argument 1 of 'push': expected int, found str`). For a mixed or protocol collection,
+> annotate with the protocol: `shapes: List[Shape] = []`.
+
+Map methods: `m.get(k)→V?` `m.contains(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
+`m.items()→List[(K, V)]` (insertion order, so `Map(m.items()) == m`) `m.copy()→map` (shallow);
+`m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,
+→ None); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. A Map iterates its
+`(key, value)` pairs (`for k, v in m`, `[kv for kv in m]`, `List(m)`, `Iterable[(K, V)]`); the keys
+are `m.keys()`, and `k in m` tests a key (`Contains[K]`).
+
+Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
+set is `Set()`; `Set(list)` builds one from a list). Elements are any `Hashable` type (int/str/bool,
+a struct with `hash(self) -> int`, or a tuple of those).
+Methods: `s.add(x)` `s.remove(x)→bool` `s.contains(x)` (Map and Set spell membership `contains`) `s.len()` `s.union(t)` `s.intersection(t)`
+`s.difference(t)` `s.copy()→set` (shallow); iterate with `for x in s`. `==` is order-independent.
+
+## 11. Pipe operator `|>`
+
+Threads the left value as the first argument of the right call. Reads top-to-bottom for data flow.
+The right side must be a call; `a |> f(x)` desugars to `f(a, x)`.
+
+**Line continuation:** a line whose **first** token is `|>` continues the previous line, so a chain
+can be written one step per line with no parentheses. A **trailing** `|>` (a line *ending* in `|>`)
+is **not** a continuation — it is a parse error. Only the exact `|>` continues (`|`, `||`, `|=` do not).
+
+The **offside rule still binds**: the `|>` line must be indented **at least as deep** as the block it
+continues. A `|>` line *shallower* than the open block closes that block, and is then a parse error —
+it is never absorbed back into the body it sits outside of:
+
+```chezzi
+fn f() -> int:
+    r := 1
+    |> dbl()       # OK — same indent as `r := 1`, and deeper is fine too
+    return r
+|> dbl()           # error: unexpected '|>' — column 0 is outside f's body
+```
+
+```chezzi
+import std.iter
+
+total := [1, 2, 3, 4]
+    |> iter.filter(fn(x: int) -> bool: x % 2 == 0)   # → iter.filter([1,2,3,4], ...)
+    |> iter.map(fn(x: int) -> int: x * 10)
+    |> iter.sum()
+print(total)                                         # 60
+
+# equivalent without pipe:
+# iter.sum(iter.map(iter.filter([1,2,3,4], fn(x: int) -> bool: x % 2 == 0), fn(x: int) -> int: x * 10))
+```
+
+(The pipe's right side must be a free **call**, so a method like `xs.sum()` is not reachable from
+`|>` — that's why `std.iter` carries free-function forms.)
+
+Named arguments are not accepted on the right side of `|>` (`1 |> cnt(c=5)` is the error
+`named arguments are not supported on the right side of '|>'`); call it directly instead.
+
+## 11b. Concurrency — `spawn` / `parallel:`  (see [`concurrency.md`](concurrency.md))
+
+> **Implemented — shipped through Tier-D.** `chezzi run` defaults to the real OS-thread M:N scheduler
+> (`Channel`/`Shared`/`Executor`, netpoller-backed `std.net`); size its worker pool with
+> `--threads=N` / `CHEZZI_THREADS` (`0` = all cores). It is the only engine — the cooperative
+> `--serial` VM was removed 2026-08-16. Full
+> design in [`concurrency.md`](concurrency.md); phase history in
+> [`concurrency-tier-d.md`](../history/designs/concurrency-tier-d.md).
+
+```chezzi
+fn worker(id: int, prefix: str, out: Channel[str]):
+    out.send("{prefix}-{id}")
+
+fn main():
+    ch := Channel[str]()
+    label := "task"
+    parallel:                          # nursery — joins all children at the dedent
+        spawn worker(1, label, ch)     # form 1: a named call (Go's `go f(x)`); args COPIED in
+        spawn worker(2, label, ch)
+        spawn:                         # form 2: an anonymous indented block
+            out := heavy()
+            ch.send(out)
+    # reaching here ⇒ all children finished. No WaitGroup, no leaks.
+    for _ in 0..3:
+        print(ch.recv())               # results moved into main's heap
+
+main()
+```
+
+- **`parallel:` is a nursery** — all tasks spawned inside join at the dedent, then the parent
+  proceeds. `spawn` returns immediately (the parent continues) and the task **starts there**, running
+  beside the rest of the body — Go's `go f()`. The barrier guarantees *completion*, not start.
+- **Every function body (and the module top level) is an implicit nursery** (M-C) — a bare `spawn`
+  is legal anywhere and joins at the body's `return`/end (the module top level joins at program exit).
+  `return`, fall-through, and `?` are all join points (tasks run, *then* control leaves); `defer`s run
+  after the join. An explicit `parallel:` is an *inner* sub-nursery for an earlier join. A `spawn`
+  always binds to a nursery **in its own function** — a task can't outlive the function that spawned
+  it (the function-boundary rule).
+- **`return` inside a `spawn:` block is a compile error** (`'return' is not allowed inside a spawn
+  block`) — a spawned task runs on its own, so there is nothing for it to return to (Chezzi has no
+  named return values). Send the value on a `Channel`/`Shared` instead. The error names the block the
+  `return` is *lexically* in (a `spawn:` inside a `defer:` reports "spawn block", once), and covers a
+  `return` nested in an `if`/`for`/`match`/`wait:` arm inside the block. A `return` in a `parallel:`
+  body is fine (it runs in the parent frame), as is one inside a nested `fn` declared in a `spawn:`
+  block.
+- **`?` (and `?.`) inside a `spawn:` block is a compile error** for the same reason (`'?' is not
+  allowed inside a spawn block: a spawned task has no caller to propagate to`) — a `?` *is* a return,
+  and the nursery discards a task's `!e` by design, so the propagation would be silently swallowed.
+  This holds whatever the enclosing function returns, and whether or not the `spawn:` sits inside a
+  `recover:` or a `defer:` — those boundaries stop at the task. Send the error on a
+  `Channel`/`Shared`, or `match` it inside the task. Legal next door: a `?` in a `parallel:` body
+  (parent frame), one in a nested `fn`/closure *declared* inside the task (it has its own caller),
+  one in a `defer:`/`recover:` *inside* the task (same frame), and one in an argument to the call
+  form `spawn f(g()?)` (arguments evaluate in the parent, before the task starts).
+
+```chezzi
+fn fetch_all(urls: List[str]):
+    for u in urls:
+        spawn fetch(u)        # no `parallel:` needed — joins when fetch_all returns
+    print("dispatched")       # the tasks are already running (Go's `go f()`); they JOIN at
+                              # end-of-function, so print order against them is undefined
+```
+- **`Channel[T]`** — a mailbox (buffered FIFO): `ch.send(v)`, `ch.recv() -> T`,
+  `ch.try_recv() -> T?` (non-blocking poll — `?v`/`None`, never blocks or faults), `ch.len()`,
+  `ch.close()`, `ch.try_send(v) -> bool` (safe `send` — `false` if closed, never faults). After
+  `close()`: `send` faults, `recv` drains then faults, `try_send` returns `false`. Drain a channel to
+  completion with **`for v in ch:`** — it blocks per value and ends cleanly once closed-and-drained
+  (Go's `for v := range ch`). Values **move/copy** across the boundary; the sender may keep using the value it sent — the
+  crossing copies, so its later writes are simply not seen by the receiver.
+- **`Shared[T]`** (`import std.concurrency`) — the cross-task mutable box: `s.get()` / `s.set(v)`
+  / `s.update(fn(x): ...)`, synchronized and **sendable**. For an in-task mutable value to close over
+  or mutate through, use a plain one-field `struct` (a struct is a shared reference). The mutation
+  ladder is `value` (copied) → a mutable `struct`/collection (in-task) → `Shared[T]` (cross-task).
+  `Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Executor` are ordinary members of `std.concurrency`:
+  `import Shared from std.concurrency` binds the bare name (an alias works:
+  `import Shared as Box from std.concurrency`), and `import std.concurrency` gives
+  `concurrency.Shared[int]` / `concurrency.Shared(0)` (also `std.concurrency.Shared`, TICKET-175, and
+  `c.Shared(0)` after `import std.concurrency as c`). A whole-module import binds no bare name. The
+  qualified form works in every position (annotation, constructor call, `type S =
+  concurrency.Shared[int]`, method calls) and lowers to the same value. A module that declares its own
+  `Shared` has its own type of that name (see "Only keywords are reserved" below). `Channel` is global.
+  `net.Socket` / `net.Listener` and `std.ffi`'s `ptr` / `owned_str` / widths follow the same rule but
+  are **type-only**: a value comes from `net.connect`/`net.listen` or an FFI call, so `net.Socket(...)`
+  is rejected. `timer` is an ordinary `std.time` function: `time.timer(ms)`, or
+  `import timer from std.time`; `time.timer` in **type** position is `module 'time' has no type
+  'timer'`, as for `time.now`.
+- **`Atomic[T]`** — the cross-task **atomic** box (sibling of `Shared`, sendable handle, value-first
+  `Atomic(v)`; an optional `Atomic[T](v)` turbofish pins the element type and is checked against the
+  value): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
+  bool`, and on numeric `T` `a.add(x) -> T` / `a.sub(x) -> T` (return the new value; checked-overflow
+  like `+`/`-`). Each op is atomic across threads. Use it for counters/flags/CAS-loops; `Shared` for
+  arbitrary-transform updates. A generic function over the payload writes the sealed bound
+  `StructuralEq` (same import): `fn mk[T: StructuralEq](v: T) -> Atomic[T]`.
+- **`AtomicInt`** — the monomorphic **lock-free** int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
+  Go `atomic.Int64` style). `Atomic[T]`'s int-only sibling with no `[T]`, so it is a genuine lock-free
+  `AtomicI64` (not a `Mutex`). Same method surface, all int-typed, `add`/`sub` always available (int is
+  always numeric) and overflow-checked. Constructed `AtomicInt(v)` (one int arg). ~2.7× faster than
+  Mutex-backed `Atomic` on a contended int counter — reach for it for a hot cross-task counter/flag.
+- **`timer(ms) -> Channel[bool]`** (`std.time`) — a one-shot timeout channel: `time.timer(500).recv()`
+  blocks ~500ms then yields `true` (level-triggered — ready on any recv at/after the deadline). The
+  composable timeout primitive; it races against real channels inside a `wait:` — there is **no separate
+  `recv_timeout`** (a `wait` over a channel and a `timer` subsumes it). `timer` is an ordinary `std.time`
+  function (`time.timer(ms)` or `import timer from std.time`).
+- **`Socket` / `Listener`** (`std.net`) — the TCP handle TYPE names (from `connect`/`listen`), members
+  of `std.net` like any other (`net.Socket`, or `import Socket from std.net`). No builtin name is reserved: not a
+  scalar (`int`), a container (`List`), an FFI type (`int32`, `ptr`) or one of the 22 prebuilt
+  PROTOCOL names (`Any`/`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
+  `Neg`/`Arithmetic`/`Num`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`).
+  A prebuilt protocol is usable as a bound (`[T: Comparable]`); a module that declares its own
+  `protocol Comparable:` (or `struct int`) shadows the builtin there (see "Only keywords are reserved"
+  below). Their SHAPE (method sigs + embeds)
+  is file-backed in `std/prelude.chz` as plain `protocol` decls (phase 5c) — a drift-guarded mirror of
+  the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
+  with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs and the
+  built-in collections) and OPERATOR
+  BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[a..b]`→`Slice`) stay Rust-wired.
+  (All 21 are file-backed — the 20 above plus `Any` (the top type): `Any` is
+  `protocol Any:` + `pass` (empty), and
+  `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves to the same `Iterator[T]` value type the
+  Rust seed uses, so their shapes mirror cleanly like the rest.) `Convert[S]` (`fn convert(x: S) -> Self`,
+  a STATIC method — the extensible type-conversion protocol, Rust `From`) is **complete**:
+  bound-only (`[T: Convert[str]]`; a value annotation is rejected — a value can't invoke a static
+  ctor), structurally witnessed static-slot-aware, and callable through the bound
+  (`fn make[T: Convert[int]](seed: T, n: int) -> T: return T.convert(n)`) via M24's witness passing —
+  see §7a "Static protocol requirements".
+  `PathLike` (`fn as_path(self) -> bytes`, W7-8) is the **path INPUT** position of the whole std
+  filesystem surface: `str`/`bytes`/`bytearray` satisfy it intrinsically and `path.Path` structurally,
+  so `fs.exists("x")`, `fs.exists(b"x")` and `fs.exists(p)` all work with no annotation. It is what
+  lets a non-UTF-8 filename reach a syscall byte-exactly instead of through a `str` that cannot
+  represent it — see `docs/reference/stdlib.md` §`std.fs` / `path.Path`.
+
+  **Why these 21 are global, and why a NEW shared protocol should not be.** Twenty of them are
+  reachable from SYNTAX, so no import could ever be required for them: the operator protocols
+  (`Eq`→`==`, `Comparable`→`<`, `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`→the arithmetic operators,
+  `Arithmetic` the bundle over four of them), indexing (`Index`→`xs[i]`, `IndexSet`→`xs[i] = v`,
+  `Slice`→`xs[a..b]`), iteration (`Iterator`/`Iterable`→`for`), membership (`Contains`→`in`),
+  construction through a bound (`Convert`→`T.convert(...)`), rendering and keys (`Stringable`→
+  interpolation, `Hashable`→a map key), errors (`Error`→`!` and `recover:`), and `Any` (the top type).
+  A user cannot import their way to `==` or `in`, so each of those must resolve with no import in
+  every module.
+  **`PathLike` is the one exception, and it is global for HISTORICAL reasons rather than that one.**
+  No syntax reaches it — it is a shared library type that `std.path`, `std.fs`, `std.io` and `std.os`
+  all take in argument position, and before 2026-08-30 a protocol could not cross a module boundary
+  at all (TICKET-023) nor be declared by two modules (TICKET-027), so "global" was the only thing a
+  shared protocol could be. It stays where it is deliberately: an audit on 2026-08-30 priced the move
+  into `std.path` at 47 mentions across 8 files for no behavioural gain, which is not a trade worth
+  making while nothing collides.
+  **The rule for anything NEW:** a protocol that does not back syntax belongs in the module that owns
+  it, declared as an ordinary `protocol` and imported by its consumers (`import PathLike from
+  std.path`) — the same convention `CLAUDE.md` already applies to types, ctors and fns, and now
+  possible for protocols too. Adding a name to `RESERVED_PROTOCOLS` is a one-way ratchet: it also
+  changes `is_reserved_protocol`, which gates the export skip (TICKET-023), built-in protocol
+  satisfaction (TICKET-024) and the module-scoped keying short-circuit (TICKET-027) at once.
+- **`wait:` (select)** — race several channel `recv`s AND `send`s; the first ready arm wins (deterministic
+  source-order priority, not Go's random fairness). `wait:` then arms: recv `v := ch.recv():` (or
+  `result = ch.recv():` / `_ := ch.recv():` / a tuple target `a, (b, c) := ch.recv():` or
+  `a, (x.f, ys[0]) = ch.recv():`), **send** `ch.send(v):` (a bare `.send()`, binds nothing —
+  ready when the channel can accept the value: bounded-with-space / unbounded / closed→faults), an optional
+  non-blocking `else:` (must be last), and `timer` arms for timeouts. A closed+empty *recv*-arm is skipped;
+  a closed *send*-arm faults `"send on a closed channel"`; all-closed + no ready send + no `else` faults.
+  **Shipped**, including the multi-channel blocking park and a bounded send-arm that parks until a
+  receiver frees a slot. See
+  [`concurrency.md §6d`](concurrency.md), `examples/wait_select.chz`, and `examples/wait_send.chz`.
+- **`std.cancel` (cancellation token)** — `import std.cancel`; `cancel.manual()` / `cancel.timeout(ms)`
+  build a `Token` you thread down a call tree (sendable). Poll `tok.cancelled() -> bool` in CPU loops,
+  race `tok.done() -> Channel[bool]` in a `wait:` for IO loops, `tok.cancel()` from anywhere; also
+  `reason() -> str?` (`"cancelled"`/`"timeout"`/`None`), `deadline_at()`. **Tree-structured:**
+  `tok.derive() -> Token` (or `cancel.derive(parent)`) builds a child — cancelling/timing-out a parent
+  cancels every transitively-derived child (live link, tightest-deadline inheritance), while cancelling
+  a child never touches the parent. Cooperative (signals, doesn't forcibly interrupt — poll in CPU
+  loops). See [`concurrency.md §6e`](concurrency.md) and `examples/cancel_*.chz`.
+- **`Channel.trip()`** — flip a permanent level-trigger latch: the channel is then ready (`recv`/
+  `try_recv`/`wait` → `true`) for every receiver (the manual fan-out behind `std.cancel`'s `done()`).
+- **Sendability:** a captured local — AND every module global — crosses into a task as an **independent
+  per-task copy** (a module global is deep-copied at the spawn boundary just like a captured local; a
+  write to either inside a task is a runtime fault, D4/TICKET-169 — reassigning or in-place-mutating
+  a copy raises, it is not silently invisible to the parent). Sendable types
+  (scalars/str/containers+structs of sendable/`Channel`/`Atomic`/`AtomicInt`/`Shared`/`RwShared`/a `std.cancel`
+  `Token`/closures/**protocol existentials** — Task 2, Go `chan interface` parity) cross the airlock;
+  a native handle (or a witness carrying an FFI/native handle) does not. To share mutable state across tasks use a
+  `Shared`/`Atomic`/`Channel` (they cross by shared handle, so a task-side write IS visible to the parent).
+
+## 12. Imports & modules  (M4.5)
+
+```chezzi
+import std.io                    # use as  io.read(...)
+import std.io as fs              # module alias → fs.read(...)
+import read, write from std.io   # pull names in (no braces)
+import read as r from std.io     # named + alias
+import core.db.pool              # local module → <root>/core/db/pool.chz
+pool.get()                       # …by its last segment,
+core.db.pool.get()               # …or by its full path (un-aliased import only)
+import math from std             # a std module by name, like `import std.math` (Python `from os import path`)
+```
+
+### Variant import  (TICKET-229)
+
+`import V from Enum` makes an enum variant a bare name in the importing module (Rust's
+`use Enum::Variant`). The enum is one this file declares, or a name a from-import of this file binds.
+
+```chezzi
+enum Color:
+    Red
+    Green
+import Red, Green from Color     # variants become bare names here
+print(Red, Green)                # Red Green
+match Color.Red:
+    Red: print("r")              # a bare imported variant is a pattern head too
+    Green: print("g")
+import Green as G from Color     # an alias binds `G` to `Color.Green`
+import Red from Color            # error: 'Red' is already imported (one bind per name)
+```
+
+- **Not imported, not bare.** `print(Green)` without the import is `'Green' is a variant of enum
+  'Color'; write it qualified as 'Color.Green'`.
+- **A module wins.** `import Point from geo` is a module import whenever a module `geo` resolves;
+  it is a variant import only when none does. `import V from a.b` (a dotted path) is always a module.
+- **Collisions.** A variant import and a same-module `fn`, `struct`, `enum`, alias or protocol of
+  the same name, or a second import of the name, is `'V' is already imported` (Rust: E0255 / E0252).
+- **Shadowing.** A local binding of the same name shadows the variant. A top-level `Red := …` is
+  `'Red' is already imported` in either order (Rust E0530): a pattern `Red` and an expression `Red`
+  always mean the same variant.
+- **`T?` and `T!E` are prelude enums.** The prelude declares the two carrier enums and keeps
+  their names to itself. User code writes the types `T?` and `T!E`, the values `x`, `?x`, `!e`
+  and `None`, and the patterns `?v`, `!e` and `None`. The enums cannot be named, qualified or
+  type-applied, and an alias of one (`type F = int?`) is a type spelling, never a variant head.
+
+**Resolution:** walk up from the file for `chezzi.toml`; found → that's the project root, else the
+script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/c.chz`. No `./` relative imports.
+
+**`import` is TOP-LEVEL only.** An `import` inside a function body or any nested block is a **parse
+error** (`import must be a top-level declaration`) — like every top-level-only declaration (see §7). (It used to parse and
+check clean while being a complete no-op: the resolver only scans module-level statements, so a nested
+import never resolved, never bound, and never ran the module body.)
+
+**Only keywords are reserved.** Every other name — a builtin fn (`print`, `ord`), a builtin type
+(`int`, `List`), a std type (`int32`, `Match`) or a prebuilt protocol (`Comparable`) — is an
+ordinary name. A module-level declaration or import of it
+is legal and **shadows** the builtin inside that module, exactly as a local variable already does
+(`print := 5`); Go and Python do the same with their predeclared names:
+
+```chezzi
+struct List:                    # this module's List; the builtin List is not visible here
+    n: int
+l: List = List(3)
+fn ord(c: str) -> int:          # calls to ord() in this module reach this fn
+    return 7
+import std.math as int          # `int` is the module in this file: int.abs(-9)
+fn f[List](x: List) -> List:    # a type parameter shadows inside its fn
+    return x
+```
+
+Lookup tries the module's own declarations and imports first, then the builtins. Inside a module that
+declares `struct int`, `int` in a type position is that struct. The carriers behind `T?` and `T!E`
+have no user name: they are reached only through that syntax (`?x`, `!e`, `None`).
+
+**A keyword cannot be bound, by any form.** `None`, `true`, `false` and every other keyword are
+rejected by the parser wherever a name is declared — a `:=` or typed binding, a destructuring
+target, a parameter, a loop or comprehension variable, an `else` or `wait`-arm binder, a fn, type,
+field, variant or generic-parameter name, an import alias — with one message:
+
+```
+None := 5              # error: expected identifier, found reserved keyword 'None' (a keyword cannot be used as a name)
+for true in [1, 2]:    # error: expected identifier, found reserved keyword 'true' (a keyword cannot be used as a name)
+```
+
+So `None` always means the absent value (or, as a type, "returns nothing"), and an enum cannot
+declare a variant named `None`. Only keywords are protected this way. A local, a parameter or a loop
+variable **may** shadow a builtin function or type name, as in Python and Go: `print := 5`,
+`fn f(int: int)`, `for len in xs:` are legal, and a later call of the shadowed name reports
+`int is not callable`. (`self` is not a keyword either: `self := 5` in a method rebinds it for the
+rest of that body.)
+
+**The named-import form is `import X from M`, not Python's `from M import X`** — the module path comes
+*last*, so every import statement starts with the `import` keyword (`from` at statement start is a
+parse error: *unexpected 'from' in expression*). Semantics are Python's; only the word order differs — with one Go-style exception: importing the same
+module or name twice in one file is a type error (`'math' is already imported`), where Python silently
+accepts the duplicate. The one accepted re-bind is `import std.math` plus `import math from std`: both
+name one module, which binds `math` once and initializes once. (`import math from std` written twice is
+still the duplicate error.) A same-module top-level `fn`, `struct`, `enum`, `protocol` or
+`type` alias may not take a whole-module import's bound name either (`import lib as f` plus `fn f`,
+`import lib` plus `struct lib`, `import a.b` plus `enum b`), in either order: the same error, on the
+later of the two declarations, as Go's `f redeclared in this block`. The import and a `fn` would share
+one runtime slot, and a type head would have two meanings. A from-imported type (`import P from lib`)
+beside `fn P` is not a collision.
+
+**`import X from M` is a SNAPSHOT** (Python-identical): the value is copied into this module at import
+time. A later write to the module's own global (`M.bump()`) is **not** visible through the bare name —
+read `M.COUNT` for the live value. A **container** is the same heap object, so mutating *through* the
+binding works; **rebinding** it is rejected (consistent with the qualified form, where `st.COUNT = 5`
+already errors):
+
+```chezzi
+import COUNT, LST from lib.st
+LST.push(7)     # ok — same heap object as lib.st's LST
+COUNT = 99      # error: cannot assign to 'COUNT' imported from module 'lib.st' (a from-imported
+                #        global is a snapshot copy — call a mutator fn in that module, or use a
+                #        Shared). Writing through the module (`st.COUNT = 5`) is rejected too:
+                #        a module global is writable only from inside its own module.
+COUNT := 99     # ok — a fresh binding this module owns; `COUNT = 100` after it is fine too
+```
+
+**A module global that HOLDS a function is callable through the module** — `m.G()`, not just
+`g := m.G` then `g()` (CPython and Go both accept the direct call). A non-callable member says so:
+`module 'm' member 'N' is not callable (it has type int)`.
+
+```chezzi
+# l.chz
+import k
+BARE := k.one     # a global whose TYPE is a fn
+# main.chz
+import l
+print(l.BARE())   # ok — calls through the module member
+```
+
+**Types are module-scoped** (like functions — exported by default, no `pub`; visible elsewhere only
+via import, under the same bound last-segment name):
+
+```chezzi
+import core.geo
+p: geo.Point = geo.Point(1, 2)   # qualified construct + annotate
+c := geo.Color.Red               # qualified enum variant
+xs: List[geo.Point] = []         # qualified type inside a generic
+print(p)                         # Point(x=1, y=2)  — bare name, no `::`
+
+import Point from core.geo       # named import → bare use
+q := Point(3, 4)
+import Point as Pt from core.geo # rename (user types only; FFI widths can't be renamed)
+
+c0 := geo.Counter.zero()         # qualified type as a STATIC-method receiver
+col := geo.Color.first()         # enum static via the qualified type (variant still wins on a clash)
+```
+
+A **module-qualified generic fn** takes the member-level turbofish and honors the expected-type hint,
+so a type param that appears only in the return type is reachable through `M.f`:
+
+```chezzi
+import lib.geo                       # fn empty_list[T]() -> List[T]
+xs := geo.empty_list[int]()          # turbofish
+ys: List[str] = geo.empty_list()     # …or solved from the annotation
+```
+
+A **qualified type** may also be the receiver of a **static (associated) method** —
+`module.Type.static_method(args)` — symmetric with qualified construction (`module.Type(args)`) and the
+bare `Type.static_method()` form after a named import. As on a bare type, an enum **variant** name
+always wins over a static-method name on `module.Enum.x`.
+
+**A module is reachable by its bound name AND by its full path** (TICKET-175, a hybrid of Go and
+Python). After an un-aliased `import std.concurrency`, both readings work in every position
+(expression, annotation, constructor, static method, variant, `match` pattern, generic bound):
+
+```chezzi
+import std.concurrency
+a := concurrency.Shared(0)        # Go reading: the last segment is bound (unchanged)
+b := std.concurrency.Shared(0)    # Python reading: the full path of the same module
+```
+
+- **Longest imported prefix wins.** `a.b.c.X` splits at the longest prefix that is a module imported
+  un-aliased in this file: with `import a.b` and `import a.b.c`, it is module `a.b.c`, member `X`.
+- **No implicit children or parents.** `import pkg` never makes `pkg.deep.X` available, and
+  `import std.concurrency.collection` does not make `std.concurrency.X` available; each needs its own
+  `import`. A bare `import std` stays an error (`std` is a namespace, not a module): write
+  `import std.math`.
+- **`as` binds only the alias.** After `import pkg.deep as d`, `pkg.deep.X` is an error that names `d`.
+- **Shadowing.** A local, a parameter, a type parameter, or any module-level name (a global, `fn`,
+  type, or imported name) spelled like the path head hides the full path, as in Python.
+- **Same last segment.** `import a.math` plus `import b.math` is legal: `a.math.f()` and `b.math.f()`
+  both work, and a bare `math.f()` is an error (`'math' is ambiguous`) that suggests
+  `import a.math as am`.
+
+Two ceilings stay deliberate. A **struct pattern** stays two-level: after `import pkg.deep`, write
+`deep.Point(x)` (or `Point(x)` after `import Point from pkg.deep`); `pkg.deep.Point(x)` in a pattern
+is an error (`struct patterns use two-level paths`). And **`import X from <package>`** works only for `std`
+(`import math from std`); for a user package directory write `import pkg.deep` (or
+`import pkg.deep as deep`) instead of `import deep from pkg`.
+
+A bare type whose module was imported whole (`import geo`) but not named-imported is a **check-time
+error** (`unknown type 'Point'; import it from geo`). Two modules may declare the same type name —
+no collision; each is importable. Under the hood every user type has ONE canonical, always-qualified
+**identity key** (`<module-key>::Name`) used as the runtime tag + every layout lookup, while its **bare
+name** is what prints — so output stays byte-identical regardless of module and two colliding `Point`s
+both render `Point(...)` (the module is never shown). Reserved/native types (`T!E`/`T?`/`?v`/
+`?v`, `Iterator`, the std type surface on `import std.*`, FFI widths) stay global/bare always. An
+imported `type` alias is transparent (its body resolves in the defining module's scope, carrying any
+FFI-width license).
+
+## 12b. Dynamic C-ABI FFI — `extern "lib":`
+
+Call C functions in a shared library directly, with full static type-checking. An `extern "lib":`
+block (indentation, not braces — `{` is a map literal) lists body-less C signatures; each becomes a
+module-global callable, bound at module init by `dlopen` + `dlsym` and dispatched at runtime via
+`libffi`. A missing library or symbol fails at startup. An extern fn exports like any other top-level
+`fn` — `mod.name(...)` and `import name from mod` both resolve it, and the binding is a first-class
+value like any other module member.
+
+> **The library name is passed straight to `dlopen`, unless it is one of the two LOGICAL aliases
+> `libc` / `libm`.** Those two resolve to a per-platform candidate list tried in order (Linux:
+> `libc.so.6`/`libc.so`, `libm.so.6`/`libm.so`; macOS: `libSystem.B.dylib`/`libc.dylib` or
+> `libSystem.B.dylib`/`libm.dylib`; other unix: `libc.so`/`libm.so`), so `extern "libc":` and
+> `extern "libm":` work unmodified on both Linux and macOS. Every other library string still goes to
+> `dlopen` **verbatim and is PLATFORM-SPECIFIC** — there is no alias resolution for it, and picking a
+> portable name is the caller's job. The repo's FFI goldens now run on every platform where the
+> `libc`/`libm` aliases resolve, printing a `SKIP <name>: <reason>` line instead of compiling
+> themselves out where they don't (`docs/contributing/gaps.md` **W8-11**).
+
+```chezzi
+extern "libm":
+    fn cos(x: float) -> float
+    fn sqrt(x: float) -> float
+
+extern "libc":
+    fn strlen(s: str) -> int
+
+print(cos(0.0))        # 1.0
+print(sqrt(4.0))       # 2.0
+print(strlen("hello")) # 5
+```
+
+**Marshalling (v1 — scalars + fixed-width ints + opaque `ptr`):** `int` ↔ C `long` (for a fixed-width
+C `int32_t`/`uint32_t`/… use the dedicated `int8`..`uint64` names below — they bind the exact ABI width),
+`float` ↔ C `double`, `float32` ↔ C `float` (imported from `std.ffi`; the program sees a plain
+`float` — a param rounds to the nearest C `float`, `16777217.0` → `16777216.0`, `1e39` → `inf`, and a
+return widens exactly: `sqrtf(2.0)` is `1.4142135381698608`, like ctypes `c_float` and Go `float32(x)`),
+`bool` ↔ C `_Bool` (1 byte; a C function using the pre-C99 int-returning predicate idiom — e.g.
+`isdigit`, which returns an *arbitrary* nonzero `int` for true — must be bound `-> int` and tested
+`!= 0`, **not** `bool`), `str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi
+`str`; **return-only** `owned_str` also frees it, `str?` makes a `NULL` return `None` — see below), and
+`ptr` ↔ C `void*` (an **opaque handle** — see below). An `int` never widens into a
+C `double` param either (rule D3, §3): `cos(2)` is a type error naming `write 1.0`; write `cos(2.0)`.
+A non-numeric arg like a `str`/`bool` is rejected too. A no-return signature (`fn srand(seed: int)`) — or an explicit
+`-> None` — maps to C `void`; `None` is a **return-only** type (it is rejected as a parameter). A
+**`struct`** of those (nested structs included) marshals **by value** as a C struct (see below). The
+checker rejects any other non-marshallable param/return (list/map/set/tuple/enum/generic
+struct/struct-with-a-`str`-field/…) with a *not C-marshallable* error. Calls run inline, so a slow C call pins its worker.
+
+**Structs by value.** Name a Chezzi `struct` as an extern param and/or return type to pass/return a C
+struct **by value** (not by pointer). The struct's **field order + types define the C layout** — libffi
+computes size/alignment/offsets from the platform ABI (small-struct-in-registers vs by-hidden-pointer
+is handled for you), so it works as both a by-value param and a by-value return:
+
+```chezzi
+# div_t div(int numer, int denom) — returns a small POD struct BY VALUE.
+struct DivT:
+    quot: int32
+    rem: int32
+
+extern "libc":
+    fn div(numer: int32, denom: int32) -> DivT
+
+r := div(17, 5)
+print(r.quot)   # 3
+print(r.rem)    # 2
+```
+
+**Fields.** Every field is a **C scalar** (`int`/`float`/`bool`/`ptr`/the `int8`..`uint64` widths/
+`float32`) or another C-marshallable **struct**, nested to any depth — raylib's `Camera2D {Vector2
+offset, Vector2 target, float rotation, float zoom}` binds directly:
+
+```chezzi
+import float32 from std.ffi
+
+struct Vector2:
+    x: float32
+    y: float32
+
+struct Camera2D:
+    offset: Vector2
+    target: Vector2
+    rotation: float32
+    zoom: float32
+```
+
+A nested field sits at its parent's offset plus its own, both from libffi (never hand-rolled padding).
+A **recursive** struct (`struct Node: next: Node`, or `A`/`B` naming each other) has no by-value C
+layout and is rejected (*is recursively defined and cannot be C-marshallable*). A struct with a **`str`
+field**, at any depth, is rejected with an error naming the struct *and* the offending field (whether C
+may hold a `char*` into Chezzi memory is an ownership question, not yet designed); **generic
+structs** (`Pair[int]`) have no fixed C layout and are rejected. A **zero-field** struct (`struct Empty:
+pass`) is rejected too (*struct 'Empty' has no fields and cannot be C-marshallable*) — C has no empty
+struct and libffi cannot build a call interface for one. (A transparent `type P = Point` alias
+to a flat struct works exactly like the bare struct.) The struct may be declared **before or after** the
+`extern` block. A struct declared in another **module** may be
+named at the extern boundary either by **named import** (`import DivT from core.cdefs`, then bare `DivT`)
+or by the **module-qualified spelling** (`import core.cdefs`, then `cdefs.DivT` directly in the `extern`
+fn) — both lower to the same C type. A **`bool` field** marshals as a C `_Bool` (1 byte) — it matches a C struct field
+declared `_Bool` (or `char`), **not** a 4-byte `int`; for an *int*-width boolean field declared `int` in
+C, use `int8`/`uint8` (or `int32`) and test `!= 0`. String fields stay unsupported.
+
+**C variadic functions (`...`).** A bare `...` as the **last** extern param declares a C variadic
+function; each call's extra args are C varargs, typed by the checker from their static types:
+
+```chezzi
+import std.ffi
+
+extern "libc":
+    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int
+
+buf := ffi.alloc(64)
+defer ffi.free(buf)
+print(snprintf(buf, 64, "%s-%ld-%.2f", "x", 42, 3.14159))   # 9
+print(ffi.load_str(buf))                                    # x-42-3.14
+```
+
+Each vararg passes after C's default argument promotions:
+
+| Chezzi arg | C vararg | `printf` spec |
+|---|---|---|
+| `int` | `long` | `%ld` (not `%d`) |
+| `float` (incl. a `float32` result) | `double` | `%f` / `%g` |
+| `bool` | `int` (0/1) | `%d` |
+| `str` | `const char*` | `%s` |
+| `ptr` | `void*` | `%p` |
+
+A struct, closure, `str?`, list or any other value is rejected (*cannot be passed to a C variadic
+parameter*); too few fixed args is *expects at least N argument(s)*. The bare `...` is legal only in an
+`extern` fn, and only last; it is distinct from Chezzi's `...xs: T`, which an extern fn still rejects.
+A C variadic extern read as a function value (`f := printf`) has a fixed arity — its declared params.
+Calls go through libffi's `ffi_prep_cif_var`, so `double` varargs are ABI-correct (a fixed-arity
+signature leaves `%al` unset on x86-64).
+
+**Sync scalar callbacks (`fn(...)` extern params).** Pass a Chezzi closure to C as a C function
+pointer C calls *back* synchronously, during the extern call. Declare the param with the **existing**
+function-type spelling — `fn(scalars) -> scalar` (no new syntax) — restricted to C scalars
+(`int`/`float`/`bool`/`ptr`/`int8`..`uint64`; no `str`, struct, or nested callback). The callback's
+**return** may also be `None` (void, `fn(int) -> None`) — the `foreach`/`twalk`-style shape, matching
+Python `ctypes.CFUNCTYPE(None, ...)` — while every **param** must still be a C scalar:
+
+```chezzi
+extern "libapply.so":
+    # f is a sync scalar callback: C calls it back during apply(), on this thread.
+    fn apply(x: int, f: fn(int) -> int) -> int
+
+print(apply(10, fn(n: int) -> int: n * n))   # C runs f(10) -> 100, then returns 100 + 1 = 101
+```
+
+If the Chezzi callback faults (or panics), the error is **re-raised** as the extern call's own error
+(recoverable via `recover:`) — stronger than CPython `ctypes`, which swallows it to stderr and returns
+`0`. The callback runs identically on every run, and it fires on the calling thread
+under `--parallel` (no cross-thread hand-off). If C invokes the callback again after it has already
+faulted (e.g. `qsort` keeps comparing after its comparator faults), the **FIRST** fault is the one
+re-raised — later invocations run no Chezzi code and return a zeroed value instead. C's own loop still
+runs to completion regardless (Chezzi cannot unwind through C frames the way Go `cgo` does, so only
+the Chezzi side of it stops).
+
+**A callback C STORES is not supported — and says so, loudly.** The trampoline is only valid for the
+duration of the extern call that received it. If C keeps the pointer (`signal`, `atexit`, GLib/GTK,
+`pthread_cleanup_*`) and invokes it *later*, the process aborts with:
+
+```
+chezzi FFI: callback invoked after the extern call that received it returned; stored/cross-thread callbacks are not supported
+```
+
+on stderr, and dies on **SIGABRT** (shell status 134). This is a defined, diagnosable failure, not a
+crash: the trampoline is deliberately **leaked and poisoned** rather than freed, so it can never
+execute freed memory (it used to segfault — gaps.md W6-8). The abort path calls nothing but `write(2)`
+and `abort()` — both async-signal-safe, since the realistic caller is a C signal handler — so the
+program's own **buffered stdout is discarded**, exactly as on any other crash (CPython loses it on
+`abort` too). The diagnostic itself is never lost: it goes straight to fd 2 and is never queued. The
+check is a *runtime* one; the checker
+cannot reject it, because the identical `fn(int) -> int` param is correct for `qsort`, which invokes
+the callback *during* the call.
+
+A callback invoked on **any thread other than the one that made the extern call** — a library that
+spawns its own thread, a signal delivered elsewhere — aborts the same way, whether or not the call has
+returned:
+
+```
+chezzi FFI: callback invoked from a thread other than the one that made the extern call; stored/cross-thread callbacks are not supported
+```
+
+The price of that guarantee is a **leak**: every extern call that actually hands C a callback leaks its
+trampoline (~400 B, plus a W^X page pair from libffi's closure pool), so a callback-passing extern call
+in a hot loop grows both memory and mapping count. It degrades cleanly — when the pool can no longer
+grow, the call raises the ordinary recoverable error `cannot allocate a callback trampoline for
+argument N to 'f': the FFI closure pool is exhausted`, catchable with `recover:`.
+
+**C output does not go through the runtime's stdout — and the broken-pipe halt cannot see it.** A
+Chezzi `print` goes to the VM's sink, which is line-atomic across tasks, unbuffered, and raises a
+recoverable fault the moment the reader closes (`stdout closed (broken pipe)`). A C function writes the
+file descriptor itself, so **none of that applies to it**: its bytes sit in the C library's own buffer
+(block-buffered when stdout is a pipe, so they usually appear *last*, at exit), and a closed reader is
+invisible to the runtime — `chezzi run x.chz | head -1` on a loop of C writes runs forever instead of
+faulting. Rust sets SIGPIPE to `SIG_IGN` process-wide and the loaded C library inherits that
+disposition, so the signal a plain C program would die from never arrives either.
+
+```chezzi
+extern "libc":
+    fn puts(s: str) -> int
+
+print("chezzi-1")
+_ := puts("ffi-2")
+print("chezzi-3")
+_ := puts("ffi-4")
+# piped:  chezzi-1  chezzi-3  ffi-2  ffi-4   <- NOT source order; io.flush() does not change it
+```
+
+This is the same bargain as `ctypes` in Python and `cgo` in Go — both measured doing exactly this,
+ordering included — and the same "outside the runtime's guarantees" contract `std.ffi`'s pointers
+already carry. **Want the runtime's stdout? Return the string and `print` it.**
+
+**If you must write from C, the C function's own return value is your error channel — and you have to
+declare its exact width to see it.** The failure is real but the sign is not free: `puts` returns a C
+`int`, and a bare `int` marshals as C **`long`** (see the fixed-width section below), so its `-1`
+arrives as `4294967295` and every `< 0` guard silently never fires. Same call, same iteration, one
+character of difference in the declaration:
+
+| declared return | `puts`'s value once the reader is gone | `if r < 0` |
+|---|---|---|
+| `fn puts(s: str) -> int` | `4294967295` | **never fires** |
+| `fn puts(s: str) -> int32` | `-1` | fires, at the same write |
+
+```chezzi
+import std.io
+import int32 from std.ffi
+
+extern "libc":
+    fn puts(s: str) -> int32     # C `int` — NOT bare `int`, which is C `long`
+
+fn main():
+    i := 0
+    while i < 200000:
+        if puts("line") < 0:
+            io.eprint("stdout is gone, stopped at i={i}")   # the runtime will NOT fault for you
+            return
+        i = i + 1
+
+main()
+```
+
+Under `| head -1` that stops at `stopped at i=1638` — deterministic, because the C library reports the
+dead pipe when its 4 KiB buffer first reaches `write(2)`, not on the call that filled it. Declared
+`-> int` instead, the identical program runs to 200 000 and never notices.
+
+**Deferred FFI features (with design notes + the callback feasibility ladder in
+[`docs/design/ffi-and-packaging.md §1b`](../design/ffi-and-packaging.md)):** the **rest of callbacks** (#4 — *stored* /
+*cross-thread* callbacks a C library keeps and calls later or from its own thread — these **abort**
+loudly today, see above; harder than in Python because `--parallel` has no GIL to serialize the
+re-entry, plus they need a GC-rooting registry)
+and **pointer-deref builtins** (to deref a `void*` callback arg → unlocks `qsort`/`bsearch`). C
+**varargs** (#5) **shipped** — see *C variadic functions* above. `bool`
+now **is** C `_Bool` (1 byte) — no separate `bool8` type; the classic int-returning predicates
+(`isdigit`, …) bind `-> int` and test `!= 0`.
+
+**Opaque handles (`ptr`).** A C library built around a handle (`FILE*`, `sqlite3*`, a
+`create`/`use`/`destroy` context) returns a `void*` you hold and pass back. Declare it as `ptr` — an
+opaque type imported from `std.ffi` (using it, **including in an `extern` block**, requires
+`import std.ffi` or `import ptr from std.ffi`, just like the fixed-width integer types). A `ptr` is **untyped**
+(one `ptr` for every handle — Chezzi never distinguishes a `FILE*` from a `sqlite3*`, exactly like
+`ctypes`), holds no data Chezzi can read (zero-copy — the data stays behind the address), and is
+**never auto-freed**: call the library's own destroy yourself (forgetting **leaks**, like the `char*`
+limit). A `ptr` supports only `==`/`!=` against another `ptr` and being passed/returned — no methods,
+no fields, no arithmetic. NULL is allowed (a returned NULL is **not** a fault, unlike a `str` return —
+it is a legitimate "creation failed" signal). The NULL sentinel and a null test live in **`std.ffi`**:
+
+```chezzi
+import null, is_null from std.ffi
+
+extern "libc":
+    fn fopen(path: str, mode: str) -> ptr
+    fn fclose(f: ptr) -> int
+
+f := fopen("/dev/null", "r")
+if is_null(f):              # or: f == null()
+    print("open failed")
+else:
+    print(fclose(f))       # 0 — the FILE* handed straight back; zero-copy
+```
+
+A `ptr` prints as `<ptr null>` / `<ptr>` — never the raw address (it is non-deterministic across
+runs/engines, so printing it would be nondeterministic). A `ptr` is **sendable** (a plain
+address) — it crosses a `spawn`/channel airlock by value.
+
+`std.ffi` exports both **value members** — `null()` / `is_null(p)` (above) — and **nine width TYPE
+names** — the integers `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` and the C
+`float` width `float32` (which the program sees as `float`). The TYPE names
+are Chezzi's first **type imports**: like the value members they are brought in per-name with
+`import int32, uint32 from std.ffi`, and a module that does not import a width name cannot use it (see
+*Fixed-width integers* below). The opaque `ptr` type and the return-only `owned_str` are imported the
+same way (`import ptr from std.ffi`, or `ffi.ptr` after `import std.ffi`, an alias included) and
+likewise cannot be used (in an annotation OR an `extern` signature) without that import.
+
+**`str` returns — owned + nullable (return-only opt-ins).** A plain `str` return is **borrowed**: the
+`char*` is copied into a Chezzi string and never `free`d (a `malloc`'d return would **leak**), and a
+`NULL` is a recoverable **fault** (it would break the static non-null `str` guarantee). Two return-only
+forms (no grammar change — both are legal only inside an `extern` return slot; `owned_str` is a
+`std.ffi` member, `import owned_str from std.ffi`) opt into the other behaviours:
+
+- **`owned_str`** — the C function transfers ownership of a `malloc`'d `char*` (e.g. `strdup`). Chezzi
+  copies it into a `str` **and then frees** the buffer with libc `free`, so it does **not** leak. To
+  your program it is a plain `str`. A `NULL` still faults (use `owned_str?` for nullable).
+- **`str?`** (sugar for `str?`) — the C function legitimately returns `NULL` (e.g. `getenv` of an
+  unset variable). `NULL` becomes `None`, a non-null pointer becomes `?str` (still borrowed, not
+  freed). This is the only way to make a `NULL` `char*` return non-fatal.
+- **`owned_str?`** composes both: nullable **and** freed (`NULL` → `None` and frees nothing).
+
+Both are **return-only** — an `owned_str`/`str?` *parameter* is rejected as *not C-marshallable*.
+`owned_str` is additionally legal **only inside an `extern` signature**: a bare non-extern annotation
+(`fn f(x: owned_str)`) is rejected (*'owned_str' is a return-only extern marshalling type and cannot be
+used as a general type annotation*) rather than silently collapsing to `str`.
+
+```chezzi
+extern "libc":
+    fn strdup(s: str) -> owned_str   # owned malloc'd char* — copied AND freed (no leak)
+    fn getenv(name: str) -> str?     # nullable — NULL → None instead of a fault
+
+print(strdup("hi"))                  # hi   (the C buffer is freed after the copy)
+match getenv("HOME"):
+    ?v: print(v)
+    None: print("unset")
+```
+
+**Every `char*` return is UTF-8-validated.** A Chezzi `str` is UTF-8, so a non-UTF-8 buffer — a
+latin-1 payload, or a `strchr`-style pointer landing mid-codepoint — is a clean **fault** naming the
+offending byte offset, on `str`, `owned_str`, `str?` and `owned_str?` alike (an `owned_str` buffer is
+still freed before the fault propagates, so there is no leak). It is never a silently mangled string
+with U+FFFD in place of the bad bytes. Read raw/binary bytes with `std.ffi`'s `load_uint8_at` instead.
+This matches `Socket.read`, which likewise refuses a binary payload rather than lossily decoding it.
+
+`free` is resolved once (via `dlsym("free")` on the loaded library, which finds libc `free`); a custom
+user-named deallocator is **not** supported. **Caveat (C trust boundary):** `owned_str` asserts the
+returned buffer is genuinely `malloc`'d — declaring a **static / string-literal** return `owned_str`
+frees memory you don't own and corrupts the heap, exactly like a non-NUL-terminated return over-reads.
+
+**Fixed-width integers (`int8`..`uint64`) — bidirectional, imported from `std.ffi`.** Bare `int` marshals
+as C `long`; to bind a C function taking or returning a **fixed-width** integer, declare it with one of
+eight marshalling type names. These are **not global builtins** (like `ptr` and `owned_str`): a module that
+names a width type imports it from `std.ffi` like any module member — Chezzi's first **type imports**, with the
+same `import <name>, … from std.ffi` form as the `null`/`is_null` value members:
+
+```chezzi
+import int32, uint32 from std.ffi   # bring the width TYPE names into this module
+```
+
+A module that uses a width name without importing it gets *unknown type 'int32'; import it from std.ffi
+(`import int32 from std.ffi`)*. Importing a non-existent width name errors like any bad import (*module
+'std.ffi' has no member 'int99'*). An alias marshals as the width it names: after
+`import int8 as Byte from std.ffi`, `fn f(b: Byte)` passes a C `int8_t`. You also can't redefine a
+width name as a user alias in a module that imports it (`type int32 = …` beside `import int32 from
+std.ffi` is two declarations of one name; without the import, `type int32 = str` is an ordinary alias). The import is per-module: a struct's int32 field
+declared (and resolved) in module A is usable from module B with **no** import in B, but a bare `int32`
+*written in B's own source* needs B's own import. To your program each
+width name is a plain **`int`** (`float32`: a plain **`float`**) — the width/signedness is a
+marshalling distinction at the C boundary. Unlike `owned_str`, these are **bidirectional** (valid as both
+param and return):
+
+| name | C type | libffi type | as a parameter | as a return |
+|------|--------|-------------|----------------|-------------|
+| `int8`   | `int8_t`   | `sint8`  | must fit -128..127          | sign-extend i8 → i64  |
+| `int16`  | `int16_t`  | `sint16` | must fit -32768..32767      | sign-extend i16 → i64 |
+| `int32`  | `int32_t`  | `sint32` | must fit i32                | sign-extend i32 → i64 |
+| `int64`  | `int64_t`  | `sint64` | any int                     | i64 (no change)       |
+| `uint8`  | `uint8_t`  | `uint8`  | must fit 0..255             | zero-extend u8 → i64  |
+| `uint16` | `uint16_t` | `uint16` | must fit 0..65535           | zero-extend u16 → i64 |
+| `uint32` | `uint32_t` | `uint32` | must fit 0..4294967295      | zero-extend u32 → i64 |
+| `uint64` | `uint64_t` | `uint64` | any int (its bit pattern)   | reinterpret u64 → i64 |
+
+**Rule 1 — a width type describes the C boundary only (TICKET-262).** A width type may be written in
+exactly two places: a parameter or return type of a fn inside an `extern` block (a fn type written
+there for a callback included), and a struct field's own type (a struct can describe a C struct layout,
+`DivT` above). Everywhere else it is a compile error that names the rule and the fix:
+``'int8' describes the C boundary only: write it in an extern fn signature or a struct field, and use
+`int` here``. To the program a width is a plain `int` / `float`, so write `int` / `float` for a local or
+global annotation, a parameter or return type of a normal fn, method or lambda, a type argument
+(`List[int8]`, `int8?`, a tuple element, a `Map` key or value, a generic argument) and a type alias
+body (`type Len = int32` is rejected at its declaration).
+
+| Position | `int8` written there |
+|----------|----------------------|
+| extern fn param / return, a callback type inside one | allowed |
+| struct field's own type | allowed |
+| local / global annotation (`x: int8 = 5`) | error (rule 1) |
+| param / return of a normal fn, method, lambda (`fn f(a: int8)`) | error (rule 1) |
+| type argument (`List[int8]`, `int8?`, `(int8, int)`, `Map[str, int8]`) | error (rule 1) |
+| type alias body (`type W = int8`) | error (rule 1) |
+
+**Rule 2 — every store into a width slot is range-checked (TICKET-218, TICKET-262).** The slots are an
+extern param, a struct field (constructor, field store, `json.decode`), an `ffi.store_<w>` store and a
+callback's return. Go and Rust reject the same programs (`cannot use 300 (untyped int constant) as int8
+value … (overflows)`, `literal out of range for i8`). Chezzi faults; it never wraps silently. CPython
+ctypes wraps: `ctypes.c_int8(300).value` is `44`.
+
+- A **constant** — a literal or a constant expression (`1 << 8`, `127 | (127 + 1)`, `3e38 + 3e38`) —
+  is **untyped** until it meets a slot (Go's model, TICKET-225), and outside the slot's range it is a
+  **compile error** at an extern argument, a struct constructor, a struct field store, a struct field
+  default and an `ffi.store_<w>` argument:
+  `constant 300 does not fit int8 (-128..127)`, `constant 256 does not fit int8 (-128..127)` for
+  `1 << 8`. A non-constant int (`[300].len()`, a call returning `int`) is not checked at compile time.
+- A **runtime value** that does not fit is a recoverable fault, catchable by `recover:`, with one text
+  at every store: `value 300 does not fit int8 (-128..127)`. The struct constructor (`S(big())`), the
+  field store (`s.q = big()`) and the compound store (`s.q += 300`, which lowers to `s.q = s.q + 300`)
+  fault; `json.decode[S]` returns a failed result with the same text.
+- **`uint64`**: a constant must be `0..INT64_MAX`; at run time any int passes as its bit pattern, and a
+  value above `INT64_MAX` read back from C arrives negative (`UINT64_MAX` reads as `-1`).
+- **`float32`**: a finite value outside the f32 range is a compile error as a constant and a fault at run
+  time; NaN and inf pass through, as C allows.
+- A value read back from C is in range by construction; returns are not checked.
+
+**Explicit wrap — `ffi.cast_<w>(v)`.** Go's `int8(v)` / Rust's `v as i8`: `ffi.cast_int8(300) == 44`,
+`ffi.cast_uint32(-1) == 4294967295`, `ffi.cast_float32(1e39)` is `inf`. There is no silent path.
+`std.ffi` also declares the range constants `INT8_MIN`/`INT8_MAX` … `INT64_MIN`/`INT64_MAX`,
+`UINT8_MAX` … `UINT32_MAX`, `UINT64_MAX` (`-1`, the bit pattern) and `FLT_MAX`.
+
+**A width is a plain `int`/`float` to the program.** A struct field `q: int8` reads as an `int`:
+arithmetic on it yields a plain `int`, and it is usable wherever `int` is. A compound operand meets no
+slot by itself: `s.q += 300` is `s.q = s.q + 300`, and the store into the field is the checked step
+(TICKET-258).
+
+A **return sign-extends** (signed) or **zero-extends** (unsigned) the C value back to i64: `int32`
+returning `-1` is `-1`, `uint32` returning `0xFFFFFFFF` is `4294967295` (stays positive).
+
+```chezzi
+import int32, uint32, int8, cast_int8 from std.ffi
+extern "libc":
+    fn atoi(s: str) -> int32      # parse to a C int; -1 sign-extends back to i64 -1
+    fn htonl(x: uint32) -> uint32 # unsigned in+out; a high-bit result stays positive
+    fn abs(x: int8) -> int8       # signed round-trip
+
+print(atoi("-1"))             # -1
+print(htonl(128))             # 2147483648   (0x80000000, zero-extended → positive)
+print(abs(cast_int8(255)))    # 1            (255 wraps to -1, then abs); `abs(255)` is a compile error
+```
+
+**Declared in `std/ffi.chz`.** Every type name `std.ffi` exports is a `native type` decl in that file
+(`native type ptr`, `native type int8 = int` … `native type float32 = float`); the C type of each width
+lives in `cffi::width_ctype`. `native type` is std-only, like `native struct`. A std file's module
+constants are ordinary `NAME: const T = value` lets (`std/math.chz`'s `pi`, `std/ffi.chz`'s
+`INT8_MAX`): the checker harvests each as a const member, and running the module binds its value.
+
+**Limits:** No C-spelling aliases (`c_int`/`c_short`/…) yet — their width is platform-dependent (LP64
+vs LLP64); deferred to a future task. See `examples/ffi_int.chz`.
+
+An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
+it inside `if`/`for`/`fn` is a parse error. An extern fn named after a builtin (`print`, `int`,
+`Channel`) shadows it in its module, like a `fn`. It is a value, so it obeys the same rule as a `fn`
+(§Declaring one name twice at module level): beside a `struct`, `enum` or alias of its name it is the
+value and a call reaches it, and an enum variant is scoped under its enum (`Tree.Leaf`), so a variant
+name is free.
+
+**Known v1 limits (see `docs/reference/spec.md` for detail):**
+- **C `int` width:** bare Chezzi `int` (i64) marshals as C **`long`** — 64-bit on supported **LP64 unix**
+  targets. For a **fixed-width** C integer (`int32_t`/`uint32_t`/…) use the dedicated `int8`..`uint64`
+  marshalling names (bidirectional, truncate-on-param / sign-or-zero-extend-on-return — see above).
+  Non-unix (LLP64, where C `long` is 32-bit) is **unsupported**: the checker rejects `extern` there.
+- **`char*` ownership:** a plain `str` return is **borrowed** (copied, never `free`d — a `malloc`'d
+  return leaks). Declare it **`owned_str`** to transfer ownership: Chezzi copies then frees it with libc
+  `free` (no leak). Only libc `free` is supported — a custom/user-named deallocator is **deferred**.
+- **a str argument's C buffer is retained for as long as the program runs** whenever the extern call
+  could hand a pointer back into it — a `ptr` return that aliases the argument (`strchr`), or any `ptr`
+  parameter that may be a C out-param (`strtol`'s `endptr`). Retention is keyed by the argument's text,
+  so calling the same string in a loop retains **one** buffer, not one per call. A C function that
+  **writes** through a `str` parameter (`strtok`) must instead be given an `ffi.alloc`'d `ptr` — a
+  retained buffer is restored to its original bytes on the next lookup, but Chezzi `str` values are
+  immutable and the C-level mutation is otherwise silently lost on reuse.
+- **No `--parallel` serialization:** extern calls are **not** serialized; calling a **non-reentrant** C
+  function (`strtok`, `gmtime`/`localtime`, `setlocale`, static-buffer APIs) from multiple workers
+  **races at the C level**. Use thread-safe/reentrant C only under `--parallel`.
+
+- **Untyped + un-freed handles:** a `ptr` is one opaque type for every C handle (no `FILE*` vs
+  `sqlite3*` checking — passing the wrong handle is C-level UB, the author's assertion) and is **never
+  auto-freed** (call the library's own destroy; forgetting **leaks**). The `ptr` is opaque *as a value*
+  (cannot be forged from an int), but its **memory is readable/writable** via `std.ffi`
+  `load_*`/`store_*` (every C scalar width + `load_str`, which UTF-8-validates like an extern `str`
+  return, each with an `_at(p, off)` byte-offset form) —
+  for struct fields, return buffers, and C output-params. You can also **make your own C-laid-out
+  buffer** via `std.ffi` `alloc(nbytes)`/`alloc_zeroed(nbytes)` (libc `malloc`/`calloc` → a raw `ptr`)
+  and release it with `free(p)` (**manually freed** — `defer ffi.free(p)`; never auto-freed). Unsafe
+  like `ctypes`: a bad pointer segfaults; double-free / use-after-free / out-of-bounds is UB; only the
+  NULL base pointer is guarded (recoverable error). See `stdlib.md §std.ffi`.
+
+**Deferred (v1 limits):** *stored / cross-thread* callbacks (sync scalar callbacks **shipped** — see
+above; a stored one **aborts** with a named message on SIGABRT rather than segfaulting), a **GC-tracked auto-freed owned-buffer type** + bulk-copy helpers + `realloc` (the
+manual `ffi.alloc`/`alloc_zeroed`/`free` layer **shipped** — see above), the rich Rust `Box<dyn Any>`
+userdata handle (for compiled-in Rust libraries), a **custom user-named deallocator** (only libc `free`
+backs `owned_str`), and — within structs-by-value — **`str`/`owned_str` fields** (nested structs and
+C varargs **shipped**, TICKET-217).
+(Opaque C `void*` handles — `ptr` — **shipped**, with `load_*`/`store_*` memory deref + the
+`ffi.alloc`/`alloc_zeroed`/`free` C-buffer layer, so `qsort`/`bsearch` of a Chezzi list now fully works;
+nullable `str?`
+returns and `char*` ownership transfer via `owned_str` — **shipped**; **flat-scalar structs by value** —
+**shipped**; **sync scalar callbacks** (`fn(scalars) -> scalar` extern params) — **shipped**, see above.)
+
+## 12c. `native fn` / `native ctor` — universe-builtin signatures in Chezzi (prelude/std-only)
+
+The **internal** analog of `extern "lib":`. Where `extern` binds a C function, a `native` decl declares
+the **signature** of a built-in whose body is implemented natively (in the engine), name-keyed. This is
+how the **universe builtins** are declared: their signatures live in **`std/prelude.chz`** (always linked
+into every program, like `std/prelude.chz`), not hidden in the compiler.
+
+```chezzi
+native fn ord(c: str) -> int      # first-class universe FUNCTION
+native fn panic(msg: str)         # no `-> ret` → native-controlled/never
+native ctor int(x) -> int         # non-first-class scalar CONSTRUCTOR; `x` unannotated → dynamic
+native ctor bytearray(x) -> bytearray
+```
+
+- **`native fn`** declares a **first-class** function intrinsic (bindable/passable — `f := ord`).
+  **`native ctor`** declares a **non-first-class** constructor (like `int`/`str`; a value-position use
+  `f := int` is a type error, uniform with `f := List`).
+- **Bodyless**, NEWLINE-terminated (like an `extern` sig). The engine binds the implementation by name;
+  a `native` decl compiles to **no** code and is never a callable user function.
+- **Dynamic-param convention** (scoped to `native` decls only — Chezzi user code stays statically typed,
+  there is **no** user-facing `any`/`never`): an **unannotated** param means "accepts anything"; a decl
+  with **no `-> ret`** means native-controlled/never (how `panic`'s divergent return is spelled).
+- **Prelude/std-only:** a `native fn`/`native ctor` in an ordinary user `.chz` is a **checker error**
+  (*native fn/ctor declarations are only allowed in standard-library modules*) — a footgun guard, so a
+  user can't bind a name to a nonexistent intrinsic. Top-level only (nesting is a parse error).
+
+The universe builtins `print`, `ord`, `chr`, `panic` (fns) and `int`, `float`, `str`, `bytes`,
+`bytearray` (ctors) are declared this way in `std/prelude.chz`. `print` is now expressible as the
+variadic decl `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None` (its lowering
+still uses the specialized print opcodes — the decl is the checker-only signature authority), retiring
+the last engine-synthetic signature. The `List`/`Map`/`Set` container ctors remain built-in
+for now (their type-arg-driven generic identity is not a flat signature).
+
+## 12d. `native struct` — native-type signatures in Chezzi (prelude/std-only)
+
+The **type-level** analog of `native fn`/`native ctor`. A body-less `native struct Name:`
+declares a native (Rust-backed) type's **checker signature** — its field layout — in Chezzi; the runtime
+layout + method dispatch stay **native** (name-keyed). Like `native fn`, it is **prelude/std-only** and
+**top-level only**.
+
+```chezzi
+# std/regex.chz — a file-backed, import-gated native module (phase 4b)
+native struct Match:              # regex.Match's SIGNATURE (fields-only)
+    text: str
+    start: int
+    end: int
+    groups: List[str]
+
+native fn find(pat: str, s: str) -> Match?!   # a native MODULE MEMBER
+```
+
+- A `native struct` body may declare **fields** and/or bodyless **`native fn` methods** (phase 4c-net):
+  a `native fn` inside the body is an **instance method** and — like a user-struct method — declares a
+  leading bare `self` as its first parameter (`native fn read(self, n: int) -> str!`); it is
+  harvested into the type's method table (harvest **strips** the `self` receiver, so the recorded sig is
+  the call-arg shape) and checked via the normal method-resolution path (this is how `std.net`'s
+  `Socket`/`Listener` declare `read`/`write`/`accept`/`close`). A `native fn` inside the body **without**
+  a leading `self` is a parse error (`native instance method must declare 'self' as its first parameter`)
+  — the self-less form is **reserved** for a future native *static* method (not yet supported); a
+  module-level (free) `native fn` conversely may **not** take `self`. A **plain** `fn` method WITH a body
+  IS now allowed (phase 4c-followup): it is **compiled** to bytecode (like an enum/struct method — no
+  `StructDef`/`tid`) and dispatched via `Program::native_methods`, so a native struct may **mix** bodyless
+  Rust-backed `native fn` sigs with pure-Chezzi bodied methods on one handle (first user: `std.io`'s
+  `Reader.lines()`, a generator over `read_line()`). Such bodied methods **are type-checked** (the body is
+run through the normal fn-body pass, so an ill-typed body is rejected). The same mix is allowed at a native
+module's **top level** — a `std/*.chz` file may declare bodyless `native fn`s and ordinary bodied `fn`s side
+by side (first user: `std.math`'s `divmod`, a pure-Chezzi `(q, r)` helper next to native `gcd`/`lcm`): the
+bodied fn is harvested as a real member (callable qualified or via `import NAME from PATH`), its body is
+type-checked, and it is bound at runtime by running the module toplevel, so Rust-backed and Chezzi-backed
+members coexist in one namespace. A native file is still a real `.chz`, so it may itself `import` other
+modules and use them from a bodied fn (e.g. `import std.string`). A `test` method or a field `= default` inside the body
+  is still a parse error. **Asymmetry (deliberate, for now):** a **`native enum`** (`T?`/`T!E`)
+  still rejects a bodied method (`native enum methods are not supported`) — extending bodied methods to
+  native enums is a symmetric follow-up, not yet wired (no native enum needs one today).
+- A `native struct` may be **generic** (`native struct Shared[T]:`, phase 4c-concurrency): its method
+  sigs may reference the type params (`native fn get(self) -> T`, `native fn set(self, v: T) -> None`), and each
+  call site **substitutes** the value's element type (`Shared[int].set` expects `int`) — the same subst
+  the generic-struct machinery uses. This is how `std.concurrency` declares `Shared[T]`/`RwShared[T]`/
+  `Atomic[T]` (and non-generic `Executor`). A method whose sig a plain harvested decl can't express (a
+  return recovered from a closure argument's return type, `RwShared.read`; a discard-return `submit`) is
+  declared with an **unannotated** closure param and re-typed post-harvest (checker-side metadata).
+- A `native struct` maps its method table **ADDITIVELY onto an EXISTING reserved type** — it never mints
+  a fresh nominal `Ty::Struct`. Besides the import-gated opaque handles above, the always-linked universe
+  prelude (`std/prelude.chz`, phase 5a-containers) declares `native struct List[T]` / `Map[K: Hashable, V]`
+  / `Set[T: Hashable]`: their method sigs (`push`/`pop`/`get`/`keys`/`union`/…) are harvested onto the
+  RESERVED `Ty::List`/`Ty::Map`/`Ty::Set`, but the **literal syntax** (`[…]`/`{k:v}`/`{1,2}`) and the
+  **turbofish ctor** (`List[int]()`) stay compiler-wired (their type-arg-driven element identity is not a
+  flat sig). The higher-order `map`/`filter`/`fold`/`sort_by`/`sort_by_key` are **also file-backed**: a
+  native method may declare its **own** generic param after the name (`native fn map[U](self, f: fn(T) -> U)
+  -> List[U]`, `fold[U]`, `sort_by_key[K: Comparable]`), and the generic solver **recovers a
+  return-position type param from an (even unannotated) closure argument's body** via a *closure-return
+  loop-back* — this bidirectional inference is general (not map-special), so `Box(3).apply(fn(x): x + 1)`
+  on a user `fn apply[U](self, f: fn(T) -> U) -> U` recovers `U = int` too. (`sort` IS file-backed as
+  `native fn sort(self) -> None where T: Comparable`; `sum` is `native fn sum(self) -> T where T: Add` but
+  keeps a residual numeric check-gate — its true requirement is Monoid, so `where T: Add` alone is too
+  broad.) A type param may carry a bound
+  (`Map[K: Hashable, V]`), letting the internal `Map[K, V]`/`Set[T]` return types resolve at harvest.
+- **Prelude/std-only:** a `native struct` (or `native fn`) in an ordinary user `.chz` is a **checker
+  error** (*native struct declarations are only allowed in standard-library modules*); nesting is a
+  parse error.
+- **Native members of any file-backed std module** (phase 4b/4d/4c): `native fn`/`native struct` are no
+  longer limited to the always-linked universe prelude (`std/prelude.chz`). A **normally-imported** file-backed
+  std module (`std/regex.chz`, phase-4d `std/math.chz` / `std/io.chz` / `std/os.chz` / `std/rand.chz`
+  / `std/fs.chz`, and phase-4c `std/net.chz` / `std/concurrency.chz`) declares its native type + functions
+  **in-module**; the checker
+  harvests them as the module's **signature source** (the type's field layout + the fns' signatures),
+  while the runtime **values** stay bound natively (name-keyed via `native_members`). This is the
+  import-gated **native-module-member** mechanism: `regex.Match`/`regex.find` (or `math.sqrt`) are reached
+  like any module member (`import std.regex` gives `regex.Match` and `regex.find(...)`;
+  `import Match from std.regex` binds the bare `Match`), the runtime + bytecode are unchanged, and it is **both-engine
+  byte-identical**. It retired the earlier file-less companion-stub shortcut, and in phase 4d the
+  hand-built per-module Rust signatures for the five pure-function modules (no Rust-side module sig remains). (Checker-side metadata a
+  `native fn` decl can't express — `math.abs`/`sign`'s numeric
+  polymorphism, and hover docs — is re-attached post-harvest.)
+
+## 12e. `native enum` — reserved builtin-enum variant shape in Chezzi (prelude/std-only)
+
+The **enum** analog of `native struct` (phase 5b). A body-less `native enum Name[T…]:` declares a
+**reserved** builtin enum's **variant shape** (variant names + payload types) in Chezzi. Like
+`native struct` it is **prelude/std-only** and **top-level only**, and it maps **ADDITIVELY onto an
+EXISTING reserved type** — it never mints a fresh nominal `Ty::Enum`. The only native enums are the two
+most deeply-wired builtins, declared in the always-linked universe prelude (`std/prelude.chz`):
+
+```chezzi
+native enum Carrier[T]:    # the shape of a declaration; the prelude's two are the enums
+    Present(T)             # behind `T?` (a value / None) and `T!E` (a value / an error)
+    Absent
+```
+
+- The body is its **variants** (an identifier with an optional `(typeList)` payload — reusing the
+  ordinary `enum` variant grammar), optionally followed by bodyless **`native fn` methods** with a
+  leading bare `self` (harvested into the enum's method table like native-struct methods; variants must
+  precede methods, a self-less or plain-`fn` method is a parse error). The two carrier enums carry **no**
+  methods. Generics use the same `[T…]` params as an ordinary enum (a param may carry a bound).
+- **SHAPE-only, not the wiring.** The variant shape is file-backed as a **drift-guarded MIRROR**; the
+  `?` operator, exhaustive `match`, top-level error propagation, and `?x`/`!e`/`None`
+  **construction** all stay **Rust-wired** (the identity stays the checker's two carrier types via
+  `resolve_type`; the variant set is synthesized inline from that `Ty` shape). The checker harvests the
+  decl and asserts its variant set byte-matches the inline shape, so the `.chz` source-of-truth can
+  never silently drift from the Rust wiring. The error carrier is declared in its two-slot form; the surface `T!` → `E = Error`-protocol default is injected by
+  `resolve_type`, not encoded in the variant.
+- **Prelude/std-only:** a `native enum` in an ordinary user `.chz` is a **checker error** (*native enum
+  declarations are only allowed in standard-library modules*); nesting is a parse error.
+
+## 13. Standard library (v1)
+
+> **The complete library reference — every global builtin, type method, runtime type, and `std.*`
+> module with signatures — lives in [`stdlib.md`](stdlib.md).** This section is a short orientation.
+
+Always available (no import): `print`, `Range`, `int()`/`float()`/`str()`,
+`ord(s)→int` (codepoint of a **1-character** `s`; longer or empty faults, like Python), `chr(n)→str`
+(codepoint → 1-char string), `Set()`/`Set(list)`,
+`panic(msg)` (raise a recoverable fault; see `recover:`), plus methods on the core types
+(`list`/`map`/`set`/`str`/`bytes`/`bytearray`).
+
+Modules are `import std.X` then `X.func(...)`. Importable:
+`std.io`, `std.math`, `std.string`, `std.cmp`, `std.os`, `std.json`, `std.process`, `std.fs`,
+`std.time`, `std.regex`, `std.request`, `std.net`, `std.ffi`, `std.iter`, `std.cancel`.
+
+A few cross-cutting notes (full detail in `stdlib.md`):
+
+- `min`/`max`/`clamp` live in **`std.cmp`** as generic `[T: Comparable]` functions (int/float/str and
+  any struct/enum with a `compare` method — `Comparable` embeds `Eq`, and a struct/enum satisfies `Eq`
+  structurally, so no `eq` is required); `list.sort()` is likewise Comparable.
+- **`std.json`** parses/stringifies a dynamic `Json` enum, and `json.decode[T](s) -> T!`
+  deserializes straight into a known shape. A JSON *literal in source* needs a raw string
+  (`r"""{"k": 1}"""`) or doubled braces — a bare `{…}` in a normal string is interpolation.
+- **`std.os.exit(code)`** is a hard, uncatchable exit (does not run `defer`s). **`std.process.cmd`**
+  runs a shell line — never interpolate untrusted input.
+- `Match` (`std.regex`), `Response` (`std.request`), and `ProcResult` (`std.process`) are **module-owned**
+  struct types, not reserved program-global names. Reading their fields off a returned value
+  (`regex.find(…).text`, `request.get(…).status`, `process.run(…).code`) needs **no import**; naming or
+  constructing the type (`m: Match` / `Match(…)`) requires importing the owning module (`import std.regex`
+  exposes `Match` bare and as `regex.Match(…)`; or `import Match from std.regex`). The names are free for
+  user types **only when the owning module is not imported** — a user `struct Response` without `import
+  std.request` is their own type. But importing the type **and** declaring a same-named `struct` in the
+  same module is two declarations of one name, rejected at check (`type 'Response' is already defined`)
+  — never accept-then-trap: the user layout would shadow the native shape and fault at runtime on a field mismatch. (This applies
+  to `Match`/`Response`/`ProcResult` and every import-gated std struct.) A merely-similar name (`struct
+  ResponseBox`) stays legal.
+
+---
+
+## Full example
+
+```chezzi
+import sqrt from std.math
+
+struct Point:
+    x: int
+    y: int
+
+    fn dist(self) -> float:
+        return sqrt(float(self.x*self.x + self.y*self.y))
+
+fn safe_div(a: int, b: int) -> int!:
+    if b == 0:
+        return !"divide by zero"
+    return ?(a / b)
+
+fn main():
+    p := Point(3, 4)
+    print("dist: {p.dist()}")
+
+    total := 0
+    for i in 0..10:
+        if i % 2 == 0:
+            total += i
+    print("even sum: {total}")
+
+    match safe_div(10, 2):
+        ?v:  print("div: {v}")
+        !e: print("err: {e}")
+
+main()   # no automatic entry point — call it yourself
+```

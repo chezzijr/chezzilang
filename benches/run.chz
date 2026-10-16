@@ -7,7 +7,7 @@
 #   cargo run -- run benches/run.chz
 #
 # Requires `hyperfine` and `python3` on PATH. Add --export-markdown to capture a table
-# for docs/benchmarks.md (see the per-bench call below).
+# for docs/contributing/benchmarks.md (see the per-bench call below).
 
 import std.process
 

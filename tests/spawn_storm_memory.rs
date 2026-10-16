@@ -30,7 +30,7 @@ parallel:
 print(\"done\")
 ";
 
-/// The bound. Measured in `docs/benchmarks.md` (TICKET-213): one snapshot shared by every task
+/// The bound. Measured in `docs/contributing/benchmarks.md` (TICKET-213): one snapshot shared by every task
 /// stays under a tenth of this; one snapshot per task is several times over it.
 const MAX_RSS_KB: i64 = 300 * 1024;
 

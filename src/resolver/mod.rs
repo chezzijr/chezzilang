@@ -4,7 +4,7 @@
 //! and VM consume the same [`ModuleGraph`] so they agree on what gets loaded and in what
 //! order.
 //!
-//! Resolution rules (see `docs/spec.md` §"Imports & module resolution"):
+//! Resolution rules (see `docs/reference/spec.md` §"Imports & module resolution"):
 //!   1. Take the entry `.chz`. Walk *up* for `chezzi.toml` → that dir is the project root.
 //!      None found → the entry's own dir is root. (Kills Python's run-relative import footgun.)
 //!   2. `std.*` is reserved → its SOURCE comes from [`std_source`]: `$CHEZZI_STD` (dev override,
@@ -71,7 +71,7 @@ pub struct LoadedModule {
     pub ast: Module,
     /// The module's [`Span::file`] id (`1..n`, never 0), stamped into every span this module's
     /// source lexed to. Distinct per module — that is what makes the checker→compiler side-table
-    /// keys injective across the graph (`docs/gaps.md` W7-49). Kept here so a diagnostic can map a
+    /// keys injective across the graph (`docs/contributing/gaps.md` W7-49). Kept here so a diagnostic can map a
     /// span's `file` back to a module label.
     pub file: u32,
     pub imports: Vec<ResolvedImport>,
@@ -604,7 +604,7 @@ impl Builder {
     /// the same pair. Every `ResolveError` raised while resolving an import (cannot-find-module,
     /// cycle, too-deep, reserved-namespace, std-miss) is anchored at `import_span`, whose `file` is
     /// always this module's — the on-stack top, never the not-yet-pushed target — so this is the ONE
-    /// path a caller in that position ever needs (`docs/gaps.md` W8-15/W8-17a).
+    /// path a caller in that position ever needs (`docs/contributing/gaps.md` W8-15/W8-17a).
     fn importer_path(&self) -> Option<PathBuf> {
         self.on_stack.last().map(|(id, _)| id.0.clone())
     }
@@ -933,7 +933,7 @@ impl Builder {
     /// This is the ONE production lex seam for the module graph, and therefore where each module's
     /// [`Span::file`] id is assigned: `1..n`, never 0 (0 is reserved for synthesized / standalone
     /// single-file lexes). That id is what keeps the checker→compiler side tables injective across
-    /// modules — see the [`Span`] doc and `docs/gaps.md` W7-49.
+    /// modules — see the [`Span`] doc and `docs/contributing/gaps.md` W7-49.
     fn parse(
         &self,
         source: &str,

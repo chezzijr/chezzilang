@@ -574,7 +574,7 @@ impl Vm {
                         // `run_until`, so nothing else would run the task's `defer`s — a cancel
                         // delivered mid-sleep would silently skip every registered cleanup, while the
                         // same cancel arriving 50 ms earlier (the entry checkpoint, which faults inside
-                        // the VM) runs them. `docs/concurrency.md`: "a cancelled task then unwinds
+                        // the VM) runs them. `docs/reference/concurrency.md`: "a cancelled task then unwinds
                         // through its `defer`s… 'does my cleanup run?' no longer depends on scheduler
                         // timing". Same shape as `run_until`'s `cancel_bypass` funnel — including
                         // re-stamping the hard-halt markers a mid-unwind `defer` fault would strip, so

@@ -709,7 +709,7 @@ impl Vm {
     /// Render a value that is NESTED inside something else — a list/tuple/map/set element, a struct
     /// field, an enum payload. Identical to [`Self::stringify_into`] except that a `str` renders as
     /// its Python `repr` (quoted + escaped) instead of its bare characters, so `["a", "b"]` and
-    /// `["a, b"]` no longer print the same text and `[""]` no longer prints `[]` (`docs/gaps.md`
+    /// `["a, b"]` no longer print the same text and `[""]` no longer prints `[]` (`docs/contributing/gaps.md`
     /// §W7-25). CPython's `str` vs `repr` split, same rule.
     ///
     /// NOT used for a `str(self)` display hook's RESULT: that string is the object's own rendering,

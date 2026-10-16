@@ -22,7 +22,7 @@ impl Vm {
         // real runaway trips on whichever heap runs it. It does NOT make the trip point precisely
         // predictable for a *near-boundary* concurrent test — each M:N worker's heap is measured alone
         // (not the whole run's aggregate), so a task's near-cap allocation trips independent of any
-        // sibling's. That per-heap accounting is inherent and documented (`docs/future.md §3b`); a
+        // sibling's. That per-heap accounting is inherent and documented (`docs/design/roadmap.md §3b`); a
         // cross-worker aggregate would need non-deterministic global RSS. `0` when the cap is off, so
         // the common path is untouched.
         worker.set_max_heap(self.heap.mem_cap());
@@ -970,7 +970,7 @@ impl Vm {
         // must be rolled back on that branch (`try_wire_speculative`).
         // TICKET-119: skip the attempt entirely when an EARLIER depth-tripped attempt already proved,
         // by an exact replay argument, that a walk from `h` at this depth or deeper trips no later —
-        // see `docs/concurrency.md`'s depth-guard paragraph and `WireMemo::doomed`.
+        // see `docs/reference/concurrency.md`'s depth-guard paragraph and `WireMemo::doomed`.
         if !memo.doomed(h, depth)
             && let Some(w) = self.try_wire_speculative(v, depth, memo, |w| !w.has_handle())
         {

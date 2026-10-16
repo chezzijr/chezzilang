@@ -1,5 +1,5 @@
 #![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
-//! Unattended seeded-scheduler fuzzer (TICKET-167, `docs/future.md` §2b). Runs `tests/chz` and the
+//! Unattended seeded-scheduler fuzzer (TICKET-167, `docs/design/roadmap.md` §2b). Runs `tests/chz` and the
 //! concurrency-flavored `examples/*.chz` under a seed range at one or more worker counts and flags
 //! a hang, a panic, a changed exit code, or (where schedule-independent) a changed stdout.
 //!
@@ -175,7 +175,7 @@ fn main() {
     if let Some(f) = &args.filter {
         targets.retain(|t| t.path.to_string_lossy().contains(f.as_str()));
     }
-    // A default (no `--program`) sweep skips targets already tracked in `docs/gaps.md`
+    // A default (no `--program`) sweep skips targets already tracked in `docs/contributing/gaps.md`
     // (`KNOWN_TARGETS`), so a routine clean-tree run does not keep re-reporting the same explained
     // divergence as a NEW finding every time. `--program` names one explicitly (e.g. to dig into a
     // filed row), so it is never skipped that way.
@@ -223,7 +223,7 @@ fn main() {
     let findings = Mutex::new(0usize);
     let unstable = Mutex::new(std::collections::HashSet::new());
     // A harness error (the binary could not even be spawned) is fatal, never "no finding" — see
-    // `docs/gaps.md` W7-34 / `src/difftest/run.rs`. Set once, checked by every worker so the run
+    // `docs/contributing/gaps.md` W7-34 / `src/difftest/run.rs`. Set once, checked by every worker so the run
     // stops pulling new jobs instead of grinding through the rest of the range reporting nothing
     // wrong. `Mutex<Option<_>>`, not an early `exit()` from inside a worker thread: an in-thread
     // exit would skip the `done:` line and any findings already confirmed, the same reason

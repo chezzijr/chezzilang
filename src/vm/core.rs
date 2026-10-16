@@ -1334,7 +1334,7 @@ pub struct ExecutorCore {
     /// The cancel-flag chain of the job that CREATED this executor (`Vm::scope_ancestors()` captured at
     /// `Op::NewExecutor`), empty for an executor created by `main` or by a `parallel:`/`spawn` fiber.
     /// Every job dispatched from this core inherits it as its `cancel_outer`, so an outer
-    /// `shutdown_now()` reaches a nested executor's jobs (W7-39, `docs/concurrency.md` §Executor).
+    /// `shutdown_now()` reaches a nested executor's jobs (W7-39, `docs/reference/concurrency.md` §Executor).
     ///
     /// **Keyed on the CREATOR, never on the submitter.** An `Executor` value crosses the airlock by
     /// `Arc`, so `submit` can be reached from a job of an entirely unrelated executor; keying on the
@@ -1585,7 +1585,7 @@ pub fn drain_pending_cores(
 /// walk used to recurse straight into a nested core's lock while holding it. With a CYCLIC core graph
 /// two workers marking concurrently then took the same two locks in opposite orders — a textbook ABBA
 /// deadlock: every thread parked in `futex_do_wait` at 0% CPU, no deadlock report, unkillable by
-/// `--timeout`. Measured on the fixture in `docs/benchmarks.md` (a `Channel` whose queued struct
+/// `--timeout`. Measured on the fixture in `docs/contributing/benchmarks.md` (a `Channel` whose queued struct
 /// reaches back to it): ~20% of runs at `CHEZZI_THREADS>=2`, 0% at `=1`, 0% with the cycle removed,
 /// 0% with allocation (hence GC) removed.
 pub fn collect_gcrefs_structural(
@@ -2242,7 +2242,7 @@ mod tests {
     }
 
     /// W6-1 sibling — the drop-flush must walk a NESTED `buffered(buffered(file))` chain, not just a
-    /// one-level `Buffered{inner=File}`. `docs/stdlib.md` promises a **file**-backed buffered writer's
+    /// one-level `Buffered{inner=File}`. `docs/reference/stdlib.md` promises a **file**-backed buffered writer's
     /// tail is recovered on drop, and a transitively file-backed chain is file-backed. Rust-only:
     /// `assert` can't observe drop timing (the Chezzi suite covers the explicit `flush`/`close` path).
     #[test]

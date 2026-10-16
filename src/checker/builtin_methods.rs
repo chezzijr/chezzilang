@@ -201,7 +201,7 @@ pub(super) fn mutates_receiver(recv: &Ty, method: &str) -> bool {
 /// (`ord`/`chr`/`panic`/`int`/`float`/`str`/`bytes`/`bytearray`) are NOT here — their sigs now come
 /// from `std/prelude.chz` via [`Checker::builtin_sig`]. Unlike the `infer_named_call` arms — whose
 /// result is arg-dependent (overloads, variadics, named params, type-arg-driven element types) — this
-/// returns ONE canonical positional shape per name, mirrored by hand from `docs/stdlib.md §1`.
+/// returns ONE canonical positional shape per name, mirrored by hand from `docs/reference/stdlib.md §1`.
 /// Polymorphic-input slots use `Ty::Unknown` (renders `?`); the precise concrete RETURN is the hover
 /// payload.
 pub(super) fn builtin_container_sig(name: &str) -> Option<FnSig> {
@@ -230,7 +230,7 @@ pub(super) fn builtin_container_sig(name: &str) -> Option<FnSig> {
 }
 
 /// Editor hover (Tier C): a concise one-line "how to use" blurb for a BUILTIN/STDLIB type or ctor
-/// name, paraphrased from `docs/stdlib.md §1–3`. For a type that owns a method table, a
+/// name, paraphrased from `docs/reference/stdlib.md §1–3`. For a type that owns a method table, a
 /// `\nmethods: a, b, c` line is appended from the authored `*_METHODS` slice (drift-guarded by
 /// `builtin_method_slices_all_resolve`, so every advertised method provably exists). Returns `None`
 /// for any non-builtin name (a user type's own docstring already flows via `name_docs`). Built only

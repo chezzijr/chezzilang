@@ -1,5 +1,5 @@
 #![allow(clippy::wildcard_enum_match_arm)]
-//! TICKET-167 -- the seeded-scheduler oracle (`docs/future.md` §2b) does not exist yet. There is no
+//! TICKET-167 -- the seeded-scheduler oracle (`docs/design/roadmap.md` §2b) does not exist yet. There is no
 //! `CHEZZI_SCHED_SEED` env var anywhere in `src/` (confirmed by grep), so it is silently ignored: a
 //! failing run gives no way to know, let alone replay, the schedule that produced the failure. Per
 //! the ticket's part 1 requirement ("A failing run prints its seed, and rerunning with that seed
@@ -110,7 +110,7 @@ fn a_passing_run_under_sched_seed_changes_no_output() {
 /// rendezvous and on a bounded channel, a body `wait:`, and a `send` inside a native callback. This
 /// test goes red when a gated thread picks or draws from the seeded RNG without the runner permit,
 /// when an in-place channel wait stops listing its slot (`Vm::gated_register`), or when a channel
-/// wake bypasses `ChannelCore::wake_all`. `docs/gaps.md` **W15-10** lists the waits that are NOT
+/// wake bypasses `ChannelCore::wake_all`. `docs/contributing/gaps.md` **W15-10** lists the waits that are NOT
 /// byte-for-byte yet; their fixtures are in `tests/sched_seed/open/`, which no test reads. A `recv`
 /// and a `wait:` inside a native callback are there since TICKET-206: 80 of 80 on an idle box, a
 /// measured rate under 40 hogs. Both Executor fixtures (`executor_join.chz`,
@@ -229,7 +229,7 @@ fn different_seeds_drive_different_schedules_at_one_worker() {
 const SMOKE_SEEDS: std::ops::RangeInclusive<u64> = 1..=64;
 
 /// The two-leaf nested-nursery deadlock always faults at `CHEZZI_THREADS=1`, for every smoke
-/// seed. This asserts a FAULT, not an output order, so the `docs/gaps.md` W15-10 residual replay
+/// seed. This asserts a FAULT, not an output order, so the `docs/contributing/gaps.md` W15-10 residual replay
 /// races do not affect it (there is no top-level `parallel:` racing a drainer here -- the whole
 /// program is one fiber tree under the eager nursery). Used by step 4 to prove the gate goes red on
 /// a reverted fix: the mutant must hang instead of faulting, so the seed's assertion catches it.

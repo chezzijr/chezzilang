@@ -1,4 +1,4 @@
-# Ancestor reference for docs/gaps.md W8-7 / W8-8 — the CPython equivalent of
+# Ancestor reference for docs/contributing/gaps.md W8-7 / W8-8 — the CPython equivalent of
 # examples/primes_parallel.chz: 4 CPU-bound tasks on a ThreadPoolExecutor, identical
 # trial-division workload, identical ranges. N (max_workers) comes from argv.
 #

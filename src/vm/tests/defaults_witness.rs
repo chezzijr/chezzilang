@@ -915,7 +915,7 @@ fn a_default_naming_an_import_the_caller_cannot_see_now_compiles_and_resolves_in
     }
 }
 
-/// **`f := g; f()` — the shape the deleted `docs/future.md` §3d existed for, and the one no call-site rewrite can
+/// **`f := g; f()` — the shape the deleted `docs/design/roadmap.md` §3d existed for, and the one no call-site rewrite can
 /// reach.** `desugar` never rewrites a call through a first-class function VALUE (a local `Ident`
 /// callee resolves to no signature), so the omitted default cannot be filled by the caller; the
 /// CALLEE fills it, from its own prologue, in its own module. Measured on `0104d57b`:

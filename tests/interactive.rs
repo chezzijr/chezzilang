@@ -1183,7 +1183,7 @@ fn show_output_reports_failure_on_unwritable_stdout() {
     );
 }
 
-/// `io.read_all()` on non-UTF-8 stdin faults with the exact message `docs/stdlib.md`'s fault-contract
+/// `io.read_all()` on non-UTF-8 stdin faults with the exact message `docs/reference/stdlib.md`'s fault-contract
 /// table quotes, and the fault is RECOVERABLE (`recover:` catches it, rc stays 0).
 ///
 /// This lives here, not in `tests/chz/stdlib/fault_contracts_test.chz` where the rest of that table's
@@ -1220,7 +1220,7 @@ fn read_all_faults_recoverably_on_non_utf8_stdin() {
     assert_eq!(
         stdout.trim(),
         "err: stdin: stream is not valid UTF-8",
-        "message must match docs/stdlib.md's fault-contract row byte-for-byte; got: {stdout}"
+        "message must match docs/reference/stdlib.md's fault-contract row byte-for-byte; got: {stdout}"
     );
     assert!(
         out.status.success(),

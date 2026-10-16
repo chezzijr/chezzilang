@@ -3,11 +3,11 @@
 //! 18 / 25 / 16, each locally correct when written. TICKET-011 established that all three must
 //! agree; nothing enforced it, because a stale number fails no assertion. This is that assertion.
 //!
-//! The table in `docs/gaps.md` is the source of truth: one `| **W<wave>-n** |` row per OPEN row (a
+//! The table in `docs/contributing/gaps.md` is the source of truth: one `| **W<wave>-n** |` row per OPEN row (a
 //! closed row is struck as `| ~~**W<wave>-n**~~ |` and stops matching, and a closed row now lives in
-//! `docs/gaps-archive.md`). The filter was `| **W8-` until 2026-09-20, when the ledger split left it
+//! `docs/history/bug-hunts/gaps-archive.md`). The filter was `| **W8-` until 2026-09-20, when the ledger split left it
 //! holding open rows from W8 through W14; a wave-scoped filter would have counted 2 of 11. The two prose counters —
-//! `docs/gaps.md`'s section header and `docs/status-and-roadmap.md`'s ledger paragraph (moved there from `CLAUDE.md`) — must equal it.
+//! `docs/contributing/gaps.md`'s section header and `docs/status-and-roadmap.md`'s ledger paragraph (moved there from `CLAUDE.md`) — must equal it.
 
 use std::fs;
 
@@ -37,12 +37,12 @@ fn claimed(text: &str, path: &str) -> usize {
 
 #[test]
 fn open_row_counters_agree_with_the_gaps_table() {
-    let gaps = read("docs/gaps.md");
+    let gaps = read("docs/contributing/gaps.md");
     let rows = gaps.lines().filter(|l| l.starts_with("| **W")).count();
     assert_eq!(
-        claimed(&gaps, "docs/gaps.md"),
+        claimed(&gaps, "docs/contributing/gaps.md"),
         rows,
-        "docs/gaps.md's section header disagrees with its own table ({rows} unstruck `| **W8-n** |` rows)"
+        "docs/contributing/gaps.md's section header disagrees with its own table ({rows} unstruck `| **W8-n** |` rows)"
     );
     assert_eq!(
         claimed(
@@ -50,8 +50,8 @@ fn open_row_counters_agree_with_the_gaps_table() {
             "docs/status-and-roadmap.md"
         ),
         rows,
-        "docs/status-and-roadmap.md's ledger count disagrees with docs/gaps.md's table ({rows} unstruck rows) — \
-         re-derive it with: grep -c '^| \\*\\*W' docs/gaps.md"
+        "docs/status-and-roadmap.md's ledger count disagrees with docs/contributing/gaps.md's table ({rows} unstruck rows) — \
+         re-derive it with: grep -c '^| \\*\\*W' docs/contributing/gaps.md"
     );
 }
 
@@ -61,7 +61,7 @@ fn open_row_counters_agree_with_the_gaps_table() {
 /// correctness when every source counts the same stale row.
 #[test]
 fn a_row_that_says_closed_is_struck() {
-    let gaps = read("docs/gaps.md");
+    let gaps = read("docs/contributing/gaps.md");
     let stale: Vec<&str> = gaps
         .lines()
         .filter(|l| l.starts_with("| **W"))
@@ -74,17 +74,19 @@ fn a_row_that_says_closed_is_struck() {
     );
 }
 
-/// `docs/concurrency.md`'s deadlock-vs-Go's-`fatal error` bullet must say the Chezzi verdict is FATAL
+/// `docs/reference/concurrency.md`'s deadlock-vs-Go's-`fatal error` bullet must say the Chezzi verdict is FATAL
 /// (TICKET-135, D1): a top-level `recover:` around a `parallel:` deadlock aborts at rc=1 like Go's
 /// `fatal error`. The bullet must name `recover` and state the verdict is fatal, next to the Go
 /// comparison.
 #[test]
 fn concurrency_doc_deadlock_bullet_states_the_verdict_is_fatal() {
-    let doc = read("docs/concurrency.md");
+    let doc = read("docs/reference/concurrency.md");
     let start = doc
         .find("**`recv` on an empty channel BLOCKS**")
         .unwrap_or_else(|| {
-            panic!("docs/concurrency.md: no `recv on an empty channel BLOCKS` bullet found")
+            panic!(
+                "docs/reference/concurrency.md: no `recv on an empty channel BLOCKS` bullet found"
+            )
         });
     let rest = &doc[start..];
     let end = rest[1..]
@@ -94,11 +96,11 @@ fn concurrency_doc_deadlock_bullet_states_the_verdict_is_fatal() {
     let bullet = &rest[..end];
     assert!(
         bullet.contains("recover"),
-        "docs/concurrency.md's deadlock-vs-Go bullet must mention `recover`: {bullet}"
+        "docs/reference/concurrency.md's deadlock-vs-Go bullet must mention `recover`: {bullet}"
     );
     assert!(
         bullet.contains("FATAL"),
-        "docs/concurrency.md's deadlock-vs-Go bullet must state the Chezzi verdict is FATAL: {bullet}"
+        "docs/reference/concurrency.md's deadlock-vs-Go bullet must state the Chezzi verdict is FATAL: {bullet}"
     );
 }
 
@@ -107,11 +109,13 @@ fn concurrency_doc_deadlock_bullet_states_the_verdict_is_fatal() {
 /// discarding lowering).
 #[test]
 fn w8_19_option_result_sub_item_is_declined() {
-    let gaps = read("docs/gaps.md");
+    let gaps = read("docs/contributing/gaps.md");
     let row = gaps
         .lines()
         .find(|l| l.starts_with("| **W8-19** |"))
-        .unwrap_or_else(|| panic!("docs/gaps.md: no unstruck `| **W8-19** |` row found"));
+        .unwrap_or_else(|| {
+            panic!("docs/contributing/gaps.md: no unstruck `| **W8-19** |` row found")
+        });
     assert!(
         row.contains("DECLINED"),
         "W8-19 row must record the Option/Result methods sub-item as DECLINED"

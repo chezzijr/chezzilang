@@ -1,7 +1,7 @@
 # tests/chz/stdlib/task_fault_test.chz — TICKET-045.
 #
 # A faulted job's `Task.get()` must return the job's own error as `!e`, not a deadlock, and `Task.done()`
-# must become true once the job has finished (faulted or not). See docs/gaps.md / TICKET-045.
+# must become true once the job has finished (faulted or not). See docs/contributing/gaps.md / TICKET-045.
 #
 # Reference — CPython `concurrent.futures.ThreadPoolExecutor` (the owning ancestor for the Executor
 # family), measured: `shutdown()` does not raise; `future.result()` re-raises the job's own exception (Chezzi returns it as `!e`);

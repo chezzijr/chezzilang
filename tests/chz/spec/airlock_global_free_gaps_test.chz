@@ -6,7 +6,7 @@
 # receiver never sees. Since the write never lands, the receiver's closures still read the
 # pre-spawn value — D2's isolation still holds, now enforced at the write instead of by a silent
 # drop. Go and CPython read one live global (100 / 2); the divergence is the deliberate "module
-# globals isolate per task, and a task may not write one" rule (docs/concurrency.md).
+# globals isolate per task, and a task may not write one" rule (docs/reference/concurrency.md).
 import std.concurrency
 
 n: int = 1

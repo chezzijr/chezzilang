@@ -17,10 +17,10 @@ fn main():
 **Core language implemented through M24 (still evolving; M19 perf in progress); concurrency shipped through Tier-D.** Currently in
 **M19** (a perf track — optimization-focused).
 - [`PROGRESS.md`](PROGRESS.md) — live milestone tracker (single source of truth for "what's next")
-- [`docs/spec.md`](docs/spec.md) — full language design
-- [`docs/syntax.md`](docs/syntax.md) — syntax cheat-sheet (every construct, by example)
-- [`docs/concurrency.md`](docs/concurrency.md) — concurrency design (`spawn` / `parallel:` / channels)
-- [`docs/lessons.md`](docs/lessons.md) — hard-won engineering rules (what green gates cannot see, checker/airlock/test traps) — read before contributing
+- [`docs/reference/spec.md`](docs/reference/spec.md) — full language design
+- [`docs/reference/syntax.md`](docs/reference/syntax.md) — syntax cheat-sheet (every construct, by example)
+- [`docs/reference/concurrency.md`](docs/reference/concurrency.md) — concurrency design (`spawn` / `parallel:` / channels)
+- [`docs/contributing/lessons.md`](docs/contributing/lessons.md) — hard-won engineering rules (what green gates cannot see, checker/airlock/test traps) — read before contributing
 
 ## Design at a glance
 
@@ -47,4 +47,4 @@ exhaustive `match` → closures/HOF → modules → iterators → `defer`/`recov
 Tiers A–D** (`spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N
 scheduler + netpoller + `std.net`). **M19** (perf track) is in progress.
 
-Live status + full milestone history: [`PROGRESS.md`](PROGRESS.md). Design: [`docs/spec.md`](docs/spec.md).
+Live status + full milestone history: [`PROGRESS.md`](PROGRESS.md). Design: [`docs/reference/spec.md`](docs/reference/spec.md).

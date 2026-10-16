@@ -224,7 +224,7 @@ fn fuzz_range_cfg(cfg: &Config, corpus: &[Vec<u8>], start: u64, end: u64) {
     // A sweep where every input timed out checked NOTHING, and a green tick is indistinguishable
     // from one that really fed 2000 inputs to the front-end. A hard "zero checks" floor is
     // certain; deliberately not a "too many timeouts" threshold, which is a heuristic that would
-    // have to guess (`docs/gaps.md` W7-12, W7-38). Also closes the empty-range hole:
+    // have to guess (`docs/contributing/gaps.md` W7-12, W7-38). Also closes the empty-range hole:
     // `fuzz_range_cfg(.., 5, 5)` now fails instead of passing over nothing.
     assert!(
         checked > 0,
@@ -245,7 +245,7 @@ fn fuzz_no_panics_seeds_0_2000() {
 /// This is `fuzz_range_cfg`'s own consumer of `Outcome::HarnessError` — the CI gate's abort
 /// path — pinned directly: a `chezzi_bin` that does not exist must panic with a message naming
 /// the problem, not silently score the range as "0 findings". Mirrors
-/// `tests/difftest.rs::fuzz_range_aborts_on_harness_error` (`docs/gaps.md` W7-34/W7-35).
+/// `tests/difftest.rs::fuzz_range_aborts_on_harness_error` (`docs/contributing/gaps.md` W7-34/W7-35).
 /// The gate must refuse to pass over ZERO checked inputs (W7-38) — mirrors
 /// `tests/difftest.rs::fuzz_range_refuses_to_pass_over_zero_comparisons`. A 1 ms timeout no real
 /// `chezzi check` can beat forces every seed to `Timeout`.

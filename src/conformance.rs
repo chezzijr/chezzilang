@@ -1,13 +1,13 @@
 //! Grammar conformance harness (test-only).
 //!
-//! Treats `docs/grammar.bnf` as the canonical grammar and proves the hand-written parser agrees
+//! Treats `docs/reference/grammar.bnf` as the canonical grammar and proves the hand-written parser agrees
 //! with it. The grammar is *executed* with the `bnf` crate (an Earley parser, dev-dependency) and
 //! differential-tested against `parser::parse` on the corpus under `tests/corpus/`.
 //!
 //! The grammar is written over the lexer's token stream: terminals are token *classes*
 //! (`WALRUS`, `IDENT`, `NEWLINE`, …). `bnf` matches terminals character-by-character with no
 //! whitespace tokenization, so we feed it one unique private-use char per token and substitute the
-//! same char for each terminal name in the grammar — keeping `docs/grammar.bnf` human-readable
+//! same char for each terminal name in the grammar — keeping `docs/reference/grammar.bnf` human-readable
 //! while the engine sees an unambiguous symbol stream.
 
 use crate::lexer::{Token, tokenize};
@@ -245,12 +245,12 @@ fn symbol_chars() -> BTreeMap<String, char> {
 
 /// Parse the grammar, substituting terminal names for their chars, and build an Earley parser.
 fn engine_grammar(chars: &BTreeMap<String, char>) -> bnf::Grammar {
-    let mut text = normalize_grammar(&read("docs/grammar.bnf"));
+    let mut text = normalize_grammar(&read("docs/reference/grammar.bnf"));
     for (name, ch) in chars {
         text = text.replace(&format!("\"{name}\""), &format!("\"{ch}\""));
     }
     text.parse::<bnf::Grammar>()
-        .unwrap_or_else(|e| panic!("docs/grammar.bnf is not valid BNF: {e}"))
+        .unwrap_or_else(|e| panic!("docs/reference/grammar.bnf is not valid BNF: {e}"))
 }
 
 /// Encode a source string as the engine's symbol stream (one char per token). `None` if it doesn't
@@ -317,7 +317,7 @@ fn grammar_is_valid_bnf() {
 #[test]
 fn terminals_match_token_enum() {
     let classes = token_classes_from_source();
-    let terminals = grammar_terminals(&normalize_grammar(&read("docs/grammar.bnf")));
+    let terminals = grammar_terminals(&normalize_grammar(&read("docs/reference/grammar.bnf")));
 
     let unknown: Vec<_> = terminals.difference(&classes).collect();
     assert!(
@@ -456,7 +456,7 @@ fn parser_rules_match_fns() {
     .into_iter()
     .collect();
 
-    let rules = grammar_rule_names(&normalize_grammar(&read("docs/grammar.bnf")));
+    let rules = grammar_rule_names(&normalize_grammar(&read("docs/reference/grammar.bnf")));
     let src = read_parser_sources();
     let fns: BTreeSet<String> = src
         .match_indices("fn parse_")
@@ -492,7 +492,7 @@ fn parser_rules_match_fns() {
 /// Every `# rule:` annotation names a real grammar rule, and the headline constructs are covered.
 #[test]
 fn corpus_covers_the_grammar() {
-    let rules = grammar_rule_names(&normalize_grammar(&read("docs/grammar.bnf")));
+    let rules = grammar_rule_names(&normalize_grammar(&read("docs/reference/grammar.bnf")));
     let mut covered = BTreeSet::new();
     for case in load_corpus("accept") {
         for r in case.rules {
@@ -595,7 +595,7 @@ enum Sym {
     N(String),
 }
 
-/// `docs/grammar.bnf` as data: nonterminal -> its alternatives, read from the normalized text.
+/// `docs/reference/grammar.bnf` as data: nonterminal -> its alternatives, read from the normalized text.
 fn parse_rules(grammar: &str) -> BTreeMap<String, Vec<Vec<Sym>>> {
     let mut rules = BTreeMap::new();
     for line in grammar.lines() {
@@ -735,7 +735,7 @@ fn frames(
     framed
 }
 
-/// Where `docs/grammar.bnf` derives a sentence the hand parser refuses: `(nonterminal whose
+/// Where `docs/reference/grammar.bnf` derives a sentence the hand parser refuses: `(nonterminal whose
 /// alternative the sentence enumerates, fragment of the parser's message, reason)`. Only a context
 /// rule the BNF cannot state stays here; a real divergence is a bug to fix, not an entry. Every
 /// entry must still be hit, so a fixed divergence forces its entry out.
@@ -787,7 +787,7 @@ const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
 /// each one, and so must the hand parser, except where [`GRAMMAR_LOOSER`] says why not.
 #[test]
 fn grammar_alternatives_parse() {
-    let rules = parse_rules(&normalize_grammar(&read("docs/grammar.bnf")));
+    let rules = parse_rules(&normalize_grammar(&read("docs/reference/grammar.bnf")));
     let min = min_sentences(&rules);
     let chars = symbol_chars();
     let engine_grammar = engine_grammar(&chars);

@@ -11,7 +11,7 @@
 //! - `is_null(p: ptr) -> bool` — `true` iff `p` is the NULL pointer.
 //!
 //! A `ptr` is opaque, untyped, and never auto-freed: call the library's own destroy
-//! (e.g. `fclose`) explicitly. See `docs/spec.md` §Level-3 FFI.
+//! (e.g. `fclose`) explicitly. See `docs/reference/spec.md` §Level-3 FFI.
 
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 

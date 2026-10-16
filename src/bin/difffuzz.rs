@@ -21,7 +21,7 @@
 //! later environment failure (the abort is still printed, and the `done:` line says how many
 //! seeds actually ran). An EMPTY range (`--seeds 5..5`) is a usage error (`2`), not a clean pass:
 //! zero comparisons is exactly the "0 findings" false negative this whole contract exists to
-//! prevent (`docs/gaps.md` W7-38).
+//! prevent (`docs/contributing/gaps.md` W7-38).
 
 #[path = "../difftest/mod.rs"]
 mod difftest;
@@ -102,10 +102,10 @@ fn main() {
     // Outcome histogram, keyed by `difftest::kind_label`. Without it `done: 20 seeds, 0 finding(s)`
     // is byte-identical whether every seed was actually compared or every seed timed out and
     // NOTHING was ever compared — `HarnessError` closes "the child never started", not "the
-    // children started and nothing was compared" (`docs/gaps.md` W7-34). `BTreeMap` so the order
+    // children started and nothing was compared" (`docs/contributing/gaps.md` W7-34). `BTreeMap` so the order
     // is stable run to run. Deliberately NO abort threshold / "too many timeouts" heuristic: a
     // verdict that cannot be certain must DECLINE rather than emit a confident wrong one (this
-    // project's standing rule — `docs/gaps.md` W7-12, the `parked-is-not-stuck` family), and a
+    // project's standing rule — `docs/contributing/gaps.md` W7-12, the `parked-is-not-stuck` family), and a
     // wrong "your oracle is broken" abort would teach distrust of every future one. Make the run
     // LEGIBLE and let the human read the histogram.
     let mut hist: std::collections::BTreeMap<&'static str, usize> =

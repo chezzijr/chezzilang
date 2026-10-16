@@ -8,7 +8,7 @@
 enum Json:
     Null
     Bool(bool)
-    # An integer-shaped numeral stays an integer end-to-end (docs/gaps.md W8-35): Chezzi has no
+    # An integer-shaped numeral stays an integer end-to-end (docs/contributing/gaps.md W8-35): Chezzi has no
     # bignum, so this covers the i64 window; a numeral outside it falls back to `Num`.
     Int(int)
     # A fractional or exponent-form numeral, or an integer numeral outside the i64 window.
@@ -24,7 +24,7 @@ enum Json:
 # a plain `struct`, and this module declares both), so this is the seam instead of a native member.
 native fn _to_json(x: Any) -> Json
 
-# The `dumps`-shaped inverse of `decode[T]` (docs/gaps.md W8-20): `encode(x)` walks a struct/list/
+# The `dumps`-shaped inverse of `decode[T]` (docs/contributing/gaps.md W8-20): `encode(x)` walks a struct/list/
 # map/scalar value into `Json` and serializes it in one call, so `decode[T](encode(x))` gives back
 # `x`. An int encodes as `Json.Int` and never passes through f64 (the W8-35 split this ticket also
 # fixes). A non-encodable value (a `T!E`, a non-`T?` enum, a function, …) faults recoverably;
@@ -128,7 +128,7 @@ struct Parser:
         run := self.pos
         while true:
             if self.pos >= self.len:
-                # The OPENING quote: CPython's json.loads and docs/gaps.md M24-7 both point an
+                # The OPENING quote: CPython's json.loads and docs/contributing/gaps.md M24-7 both point an
                 # unterminated delimiter at its opener.
                 return !self.at_pos("unterminated string", open_quote)
             c := self.src[self.pos]
@@ -379,7 +379,7 @@ fn num_str(f: float) -> str:
 
 # Serialize a `Json` tree to a JSON document. `Arr`/`Obj` recurse structurally, so a tree built
 # directly (no `parse` involved — `j = Json.Arr([j])` in a loop) can nest past the VM's `maximum
-# call depth` guard just like `parse` can (`docs/gaps.md` W8-5). Unlike `parse`, `stringify` has no
+# call depth` guard just like `parse` can (`docs/contributing/gaps.md` W8-5). Unlike `parse`, `stringify` has no
 # `T!E` to put an error in and CPython's `json.dumps` also raises `RecursionError` here — so this
 # stays a fault, just a LEGIBLE one naming the cause instead of an opaque VM message pointing at a
 # `std/json.chz` line the caller never opened. Same limit as `parse`, counted the same way

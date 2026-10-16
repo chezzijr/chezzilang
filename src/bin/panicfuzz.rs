@@ -19,13 +19,13 @@
 //! deliberately distinct from `1` so a caller can tell "the oracle broke" from "the oracle
 //! worked and found bugs" — printing "N seeds, 0 finding(s)" with exit 0 over a harness that
 //! never ran a single program would be a false negative dressed up as a clean pass
-//! (`docs/gaps.md` W7-35, mirroring `difffuzz`'s W7-34 contract).
+//! (`docs/contributing/gaps.md` W7-35, mirroring `difffuzz`'s W7-34 contract).
 //! **Findings win over the abort**: if the harness breaks mid-range AFTER a real crash was already
 //! found, the exit code is `1`, not `2` — a real finding must never be masked by a later
 //! environment failure (the abort is still printed, and the `done:` line says how many seeds
 //! actually ran). An EMPTY range (`--seeds 5..5`) is a usage error (`2`), not a clean pass: zero
 //! inputs checked is exactly the "0 findings" false negative this contract exists to prevent
-//! (`docs/gaps.md` W7-38).
+//! (`docs/contributing/gaps.md` W7-38).
 //!
 //! NOTE: a *release* sibling `chezzi` is built with overflow-checks OFF, so arithmetic-overflow
 //! wraps silently and is invisible here. For a full overflow sweep, build with
@@ -120,10 +120,10 @@ fn main() {
     // Outcome histogram, keyed by `panicfuzz::kind_label`. Without it `done: 20 seeds, 0
     // finding(s)` is byte-identical whether every input was actually checked or every input timed
     // out and NOTHING was ever checked — `HarnessError` closes "the child never started", not "the
-    // children started and nothing was checked" (`docs/gaps.md` W7-34). `BTreeMap` so the order is
+    // children started and nothing was checked" (`docs/contributing/gaps.md` W7-34). `BTreeMap` so the order is
     // stable run to run. Deliberately NO abort threshold / "too many timeouts" heuristic: a verdict
     // that cannot be certain must DECLINE rather than emit a confident wrong one (this project's
-    // standing rule — `docs/gaps.md` W7-12, the `parked-is-not-stuck` family), and a wrong "your
+    // standing rule — `docs/contributing/gaps.md` W7-12, the `parked-is-not-stuck` family), and a wrong "your
     // oracle is broken" abort would teach distrust of every future one. Make the run LEGIBLE and
     // let the human read the histogram.
     let mut hist: std::collections::BTreeMap<&'static str, usize> =

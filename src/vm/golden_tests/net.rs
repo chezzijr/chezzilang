@@ -307,7 +307,7 @@ main()
 /// looped on `wait_fd_ready` until readiness/cancel/terminate. Once B1 routed a mid-codepoint read
 /// back into that wait, `read(8, 200)` against a peer that sends the lead byte and STALLS blocked
 /// indefinitely: the demoted op is accounted `inflight`, which VETOES the deadlock predicate, so it
-/// hung with no fault and no `Err("timeout")` — while `docs/stdlib.md` promised the deadline bounds
+/// hung with no fault and no `Err("timeout")` — while `docs/reference/stdlib.md` promised the deadline bounds
 /// the whole call. The deadline is now threaded into the demote loop.
 #[test]
 fn net_read_timeout_bounds_the_in_callback_demote_path() {

@@ -381,7 +381,7 @@ pub(super) struct WireMemo {
     pub(super) doom_pending: Vec<(GcRef, u32, usize)>,
     /// TICKET-119 — the LATEST depth-tripped attempt's records: node -> (enter stamp, depth). While a
     /// record is valid, an attempt rooted at that node at `depth >= d0` replays the recorded walk
-    /// exactly and trips no later, so `to_snap_depth` skips it. See `docs/concurrency.md`'s
+    /// exactly and trips no later, so `to_snap_depth` skips it. See `docs/reference/concurrency.md`'s
     /// depth-guard paragraph and `WireMemo::doomed`.
     pub(super) doom: super::fxhash::FxHashMap<GcRef, (u32, usize)>,
     /// TICKET-119 — every node/cell that attempt minted -> its id there, which is its enter stamp.
@@ -407,7 +407,7 @@ impl WireMemo {
     /// that a walk from `h` at `depth` or deeper trips no later than it did: a `doom` record exists
     /// for `h`, `depth` is at or below the recorded depth's cap-ward direction (`depth >= d0`), and
     /// nothing has invalidated the record since (`enter > doom_invalid_upto`). `to_snap_depth` skips
-    /// the speculative attempt when this is true. See `docs/concurrency.md`'s depth-guard paragraph.
+    /// the speculative attempt when this is true. See `docs/reference/concurrency.md`'s depth-guard paragraph.
     pub(super) fn doomed(&self, h: GcRef, depth: usize) -> bool {
         self.doom.get(&h).is_some_and(|&(enter, d0)| {
             depth >= d0 && self.doom_invalid_upto.is_none_or(|u| enter > u)

@@ -147,7 +147,7 @@ fn w8_37_fault_verdict_drops_stack_frames() {
     //   runtime error (g.chz:4:12): index 9 out of bounds (len 1)
     //     at boom (called at g.chz:5:5)
     // `chezzi test` must show the same frame line for a faulting `test fn` — it currently
-    // drops it (docs/gaps.md W8-37).
+    // drops it (docs/contributing/gaps.md W8-37).
     let d = TmpDir::new();
     let f = d.write(
             "f37_test.chz",
@@ -1953,7 +1953,7 @@ fn a_netpoller_aborted_task_still_runs_its_defers() {
 /// wall-clock cap outright and the run continued for as long as the job did.
 ///
 /// **`process.run` is the point, not a detail.** It is documented as having no cancellation
-/// checkpoint until it returns (`docs/stdlib.md` §std.process), so nothing but the joiner's own
+/// checkpoint until it returns (`docs/reference/stdlib.md` §std.process), so nothing but the joiner's own
 /// rung can end this. A `time.sleep_ms` job already aborted pre-fix through its OWN checkpoint
 /// (`W7-16`), and a `Channel`-blocked job already faulted through the verdict — so neither shape
 /// would have failed before this change, and neither is a test of it.
@@ -2047,7 +2047,7 @@ fn a_finished_jobs_output_survives_a_timeout_bail() {
 /// `drain_live_executors` never revisits it — the bail is the last chance to ask.
 ///
 /// The first `process.run` is deliberately uninterruptible (it has no checkpoint, so it runs to
-/// completion either way — that ceiling is `docs/stdlib.md`'s, not this rung's); the assertion is
+/// completion either way — that ceiling is `docs/reference/stdlib.md`'s, not this rung's); the assertion is
 /// about the SECOND one, which must never start.
 #[test]
 fn a_bailed_join_stops_its_jobs_from_starting_new_work() {
@@ -2301,7 +2301,7 @@ fn over_memory_concurrent_under_cap_passes_on_both_engines() {
     // The cap's guaranteed envelope on the low side: a CONCURRENT test whose tasks each stay well
     // under a generous cap must PASS — no false trip. (The near-boundary aggregate
     // case, where per-fiber allocation sums over the cap, is the documented per-heap divergence and
-    // is deliberately NOT asserted here — see `docs/future.md §3b`.)
+    // is deliberately NOT asserted here — see `docs/design/roadmap.md §3b`.)
     let d = TmpDir::new();
     let f = d.write(
         "concpass_test.chz",

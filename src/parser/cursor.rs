@@ -746,7 +746,7 @@ impl Parser {
         )))
     }
 
-    /// A member of a `struct`/`enum`/native body must end its logical line: `docs/grammar.bnf`'s
+    /// A member of a `struct`/`enum`/native body must end its logical line: `docs/reference/grammar.bnf`'s
     /// `<field>`, `<variant>` and `<nativeMethodDecl>` all end in `"NEWLINE"`. A block-valued field
     /// default ends with its block ([`Self::ended_at_block`]), with no NEWLINE of its own.
     pub(super) fn expect_member_end(&self, what: &str, name: &str) -> PResult<()> {

@@ -1,4 +1,4 @@
-# D4 (owner decision, 2026-09-22, docs/decision-d4-airlock.md) — a spawned task's write to a
+# D4 (owner decision, 2026-09-22, docs/design/adr-d4-airlock.md) — a spawned task's write to a
 # captured local, a module global, or any other object the airlock COPIED into its heap is a
 # runtime FAULT, never a silent lost write. A plain captured local sent into a `spawn` task is
 # snapshot-copied into an INDEPENDENT per-task cell (the airlock deep-copies it), so `x = x + 1`

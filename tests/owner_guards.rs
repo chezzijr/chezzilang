@@ -1,4 +1,4 @@
-//! One owner per fact (`docs/owners.md`, CLAUDE.md "Derive, don't mirror"). Each rule names a
+//! One owner per fact (`docs/contributing/owners.md`, CLAUDE.md "Derive, don't mirror"). Each rule names a
 //! spelling that decides a fact and the one file allowed to hold it. The scan reads production code
 //! only: comments, string literals and `#[cfg(test)] mod NAME { .. }` blocks are removed first, and
 //! test files (a `tests/` directory, `*tests.rs`, `test_support.rs`) are skipped. A second copy of a

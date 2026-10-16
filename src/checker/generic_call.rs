@@ -465,7 +465,7 @@ impl Checker {
         // fails, the method could not conform for ANY instantiation and its own message is the true
         // one. Measured, the structural test alone is too wide — a wrong ARITY or a wrong PARAM
         // type leaves the param un-inferred too, and there "add a result annotation" is advice that
-        // does not work (`docs/gaps.md` W8-43's neighbour table).
+        // does not work (`docs/contributing/gaps.md` W8-43's neighbour table).
         let probed = self.probe_uninferable_dependent_result_params(sig, &mut subst_map);
         let before = self.errors.len();
         self.enforce_bounds(&sig.type_params, &sig.type_params, &subst_map, span);

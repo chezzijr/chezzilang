@@ -369,7 +369,7 @@ fn idxspec_list_out_of_bounds_message_exact() {
         "xs := [1, 2, 3]\nxs[5] = 0\n",
         Err("index 5 out of bounds (len 3)"),
     );
-    // Negative indexing counts from the end (Python parity, docs/syntax.md); -1 on a 3-element
+    // Negative indexing counts from the end (Python parity, docs/reference/syntax.md); -1 on a 3-element
     // list is IN range (the last element), not a fault — verified against CPython.
     idx_parity("xs := [1, 2, 3]\nprint(xs[-1])\n", Ok("3\n"));
 }

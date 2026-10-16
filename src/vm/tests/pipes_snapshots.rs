@@ -46,7 +46,7 @@ fn iter_sum_delegates_and_empty_is_zero() {
     assert_eq!(pout, "6\n0\n", "M:N");
 }
 
-/// The verbatim docs/syntax.md §11 pipe example must run and print 60.
+/// The verbatim docs/reference/syntax.md §11 pipe example must run and print 60.
 #[test]
 fn docs_syntax_pipe_example_runs_on_both_engines() {
     let src = "\
@@ -1065,7 +1065,7 @@ fn cross_module_witness_defer_target_runs_both_engines() {
 }
 
 /// Proves `CHEZZI_THREADS` actually reaches [`worker_count`] in THIS test process, rather than being
-/// silently ignored — the second-schedule differential gate (`docs/bug-discovery.md` Tier 2,
+/// silently ignored — the second-schedule differential gate (`docs/contributing/bug-discovery.md` Tier 2,
 /// `CHEZZI_THREADS=2 cargo test`) is worthless if the knob does nothing: a dropped env read would
 /// make the "second" run byte-identical to the default one and nobody would notice. Locked against
 /// `over_memory_trips_on_an_all_native_task_body` (the one test that transiently forces a count) so

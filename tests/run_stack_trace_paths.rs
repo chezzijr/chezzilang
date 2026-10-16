@@ -1,4 +1,4 @@
-//! CLI-level tests for the runtime stack trace naming its file (`docs/gaps.md` W8-14): the headline
+//! CLI-level tests for the runtime stack trace naming its file (`docs/contributing/gaps.md` W8-14): the headline
 //! `runtime error (…)` coordinate and every `at FUNC (called at …)` frame render `path:line:col`
 //! instead of the bare `line N, col M` that used to leave a std-module fault looking like it lived in
 //! the user's own file. Drives the real `env!("CARGO_BIN_EXE_chezzi")` binary (mirrors

@@ -831,7 +831,7 @@ impl Gen {
                 if self.feat.floats && self.rng.chance(0.3) {
                     // Mixed int↔float comparison, same mechanism and same 0.3 chance as the
                     // mixed-arithmetic arm in `gen_float` — `a < b` / `a == 3.0` both measured
-                    // against CPython before landing (docs/gaps.md W7-37).
+                    // against CPython before landing (docs/contributing/gaps.md W7-37).
                     let (l, r) = if self.rng.chance(0.3) {
                         self.gen_int_float_pair(depth + 1)
                     } else {
@@ -972,7 +972,7 @@ impl Gen {
     /// `Div` landed too: `BinOp::Div` is in the op list below, **with no non-zero-divisor
     /// discipline** — that inverts `gen_int`'s rule (int `/` FAULTS on zero, so `gen_int` must
     /// guarantee a non-zero divisor) because float `/` is total IEEE-754
-    /// (`docs/spec.md:472`): a zero divisor is `inf`/`-inf`/`NaN`, never a fault, so it is a
+    /// (`docs/reference/spec.md:472`): a zero divisor is `inf`/`-inf`/`NaN`, never a fault, so it is a
     /// legitimate value whose result this widening exists to exercise, not a case to dodge. The
     /// `_chz_fdiv` shim in `emit_python.rs` absorbs CPython's `ZeroDivisionError` divergence
     /// (deliberate — Chezzi follows Rust/Go here, not Python; confirmed by the project owner
@@ -990,7 +990,7 @@ impl Gen {
     /// the same way. Precision is exact: `gen_int` bounds every int by `MAX_BOUND` (see its doc
     /// comment — well under `2^53`), so every int this generator can produce converts to `f64`
     /// exactly and both languages agree bit-for-bit; raising `MAX_BOUND` past `2^53` would turn
-    /// this into a real precision divergence. `docs/gaps.md` W7-37 is now fully closed — this was
+    /// this into a real precision divergence. `docs/contributing/gaps.md` W7-37 is now fully closed — this was
     /// its last deferred item.
     ///
     /// **`Mod` landed too** — the last unreached float operator: `BinOp::Mod` is in the op list
@@ -1034,7 +1034,7 @@ impl Gen {
             return e;
         }
         // `Div`/`Mod`'s divisor is UNRESTRICTED — no non-zero guard, unlike `gen_int`'s Div/Mod
-        // arm. Both are total IEEE-754 (`docs/spec.md:472`): `x/0.0` is `inf`/`-inf`/`NaN` and
+        // arm. Both are total IEEE-754 (`docs/reference/spec.md:472`): `x/0.0` is `inf`/`-inf`/`NaN` and
         // `x%0.0` is `NaN`, never a fault, so a zero divisor is a legitimate value this widening
         // should reach, not one to avoid — do not add a guard here by analogy with the int arm
         // above.

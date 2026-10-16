@@ -10,13 +10,13 @@
 //! excused "Rust `{}` vs CPython `repr` pick different scientific-notation crossovers" — and that
 //! specific divergence does not occur. `vm::format_float` → `fmtspec::repr_float` implements
 //! CPython's crossover RULE directly (scientific when the decimal exponent is `< -4` or `>= 16`),
-//! and the two agree byte-for-byte at every boundary (measured table in `docs/gaps.md` §W7-31).
+//! and the two agree byte-for-byte at every boundary (measured table in `docs/contributing/gaps.md` §W7-31).
 //! The entry was a pure masking device; deleted rather than gated.
 //!
 //! Scope that claim carefully — it is about the CROSSOVER, not about float formatting in general.
 //! Chezzi's shortest-repr DIGITS came from Rust's formatter, which breaks an exact half-way tie
 //! away from zero where CPython breaks it to even; that was a real divergence, tracked separately
-//! as `docs/gaps.md` §W7-32 and **FIXED there 2026-08-07** (`fmtspec::repr_float` now re-renders an
+//! as `docs/contributing/gaps.md` §W7-32 and **FIXED there 2026-08-07** (`fmtspec::repr_float` now re-renders an
 //! odd-last-digit shortest repr half-to-even and keeps it if it round-trips). It was never
 //! allow-list material — it was a bug, and this oracle SHOULD have reported it. Note also that
 //! `vm/golden_tests.rs::python_float_repr_str_parity` is a golden pinned to a hardcoded literal,

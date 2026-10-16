@@ -3,7 +3,7 @@
 //! Two interlocking techniques:
 //!   - **recursive descent** for statements / declarations (one `parse_*` fn per form), and
 //!   - a **Pratt** (precedence-climbing) parser for expressions, following the binding powers
-//!     in `docs/syntax.md` §4.
+//!     in `docs/reference/syntax.md` §4.
 //!
 //! Layout tokens (`Newline`/`Indent`/`Dedent`) from the indentation-aware lexer drive block
 //! structure: a block opens after a `:` as either an indented `Newline Indent … Dedent` group or
@@ -128,7 +128,7 @@ pub fn parse(tokens: Vec<Tok>) -> PResult<Module> {
 
 /// Parse a token stream into a `Module`, and return the tokens as the parser left them: the lexer's
 /// tokens plus the layout a block expression inside brackets asked for ([`crate::lexer::open_layout`]).
-/// The conformance test encodes that vector, which is the stream `docs/grammar.bnf` describes.
+/// The conformance test encodes that vector, which is the stream `docs/reference/grammar.bnf` describes.
 pub fn parse_with_tokens(tokens: Vec<Tok>) -> (PResult<Module>, Vec<Tok>) {
     let mut p = Parser::new(tokens);
     let module = p.parse_module();

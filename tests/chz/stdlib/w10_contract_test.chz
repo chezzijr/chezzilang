@@ -1,6 +1,6 @@
 # tests/chz/stdlib/w10_contract_test.chz — TICKET-069 repro (bug-hunt wave 10, W10-23/24/25/26/18/21).
 #
-# Six independent stdlib contract violations, each judged against its RUN ancestor. See docs/gaps.md
+# Six independent stdlib contract violations, each judged against its RUN ancestor. See docs/contributing/gaps.md
 # W10-23 (cmp tie rules), W10-24 (fs.mkdir("")), W10-25 (csv.format not injective), W10-26
 # (path.with_ext doesn't normalize), W10-18 (1-tuple render), W10-21 (int() rejects underscores).
 # Run: `cargo run -- test tests/chz/`.

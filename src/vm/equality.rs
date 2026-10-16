@@ -319,7 +319,7 @@ impl Vm {
     /// `#[inline(never)]` is MEASURED, not decoration: inlining the six container-arm closures back
     /// into `values_equal_guarded` bloats it enough to cost the neighbouring codegen **+3.3% on the
     /// `struct` bench** — a bench with no `==` in it at all. Keeping the walks out of line puts every
-    /// bench back to flat (`docs/benchmarks.md`).
+    /// bench back to flat (`docs/contributing/benchmarks.md`).
     #[inline(never)]
     pub(super) fn with_elem_roots<T>(
         &mut self,

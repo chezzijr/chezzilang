@@ -1490,7 +1490,7 @@ fn a_try_in_a_carve_out_default_is_still_rejected_at_the_declaration() {
 
 /// A `Self`-typed parameter with a non-literal default must keep type-checking. W7-51 made these
 /// shapes keep the INLINE clone, because a provider is a free top-level `fn` and `Self` is not
-/// spellable in one (`docs/syntax.md`: naming `Self` as a free-fn parameter is `unknown type
+/// spellable in one (`docs/reference/syntax.md`: naming `Self` as a free-fn parameter is `unknown type
 /// 'Self'`); between `e2d9bd4e` and `dfdc7a1b` they stopped compiling altogether — `type error
 /// (line 3, col 36): unknown type 'Self'` — where `b1307258` ran them (`6`, `6`, `2`), and no test
 /// in the tree paired `Self` with a default, which is why that shipped green.

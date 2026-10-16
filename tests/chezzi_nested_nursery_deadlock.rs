@@ -2,7 +2,7 @@
 //! body blocks on a channel op is falsely `deadlock`-faulted even though a live sibling can still
 //! unblock it, and a task that RECOVERS a genuine inner-nursery `deadlock` poisons the enclosing
 //! nursery's bookkeeping so a later live rendezvous is also falsely reported as `deadlock`.
-//! T=2/4/default: both programs complete cleanly (`docs/gaps.md` W12-1 / W12-4).
+//! T=2/4/default: both programs complete cleanly (`docs/contributing/gaps.md` W12-1 / W12-4).
 //! TICKET-135 (D1): a deadlock verdict is now FATAL, so no program can RECOVER an inner deadlock and
 //! keep running. The recovered shapes below abort with `deadlock` at every worker count.
 

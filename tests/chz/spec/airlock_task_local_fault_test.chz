@@ -314,7 +314,7 @@ test fn a_handle_holding_global_struct_field_write_in_a_task_faults():
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
-# Memo-order pin (docs/concurrency.md ceiling 1): a tuple (f, xs), f capturing xs, sent in ONE
+# Memo-order pin (docs/reference/concurrency.md ceiling 1): a tuple (f, xs), f capturing xs, sent in ONE
 # crossing over a Channel — the closure is visited FIRST, so both f()'s push and the direct write
 # to the tuple's own xs element fault. The mirror order (xs, f) is the known under-fault, pinned
 # silent in airlock_task_local_silent_test.chz.

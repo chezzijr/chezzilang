@@ -219,7 +219,7 @@ pub enum StmtKind {
     /// value first, bind it (per the arm's target pattern), and run that arm's body. Source-order
     /// poll (deterministic, not Go-random); a closed+empty arm is skipped; `else_block` (optional,
     /// last) is the non-blocking fallback. Recv-only — unbounded channels never block a `send`. See
-    /// `docs/concurrency.md §6d`.
+    /// `docs/reference/concurrency.md §6d`.
     Wait {
         arms: Vec<WaitArm>,
         else_block: Option<Block>,
@@ -1169,7 +1169,7 @@ pub enum ExprKind {
     /// An interpolated string literal, split into literal/expression [`Chunk`]s. **Produced by the
     /// parser** from the holes the lexer found, so every fragment is an ordinary AST child from
     /// the start: `desugar` normalizes call arguments inside a fragment like anywhere else
-    /// (`docs/gaps.md` §W7-24), and no later walker re-parses text.
+    /// (`docs/contributing/gaps.md` §W7-24), and no later walker re-parses text.
     Interp(Vec<Chunk>),
     /// `b"..."` — a byte-string literal: the resolved raw bytes. No interpolation (unlike `Str`).
     Bytes(Vec<u8>),
@@ -1197,7 +1197,7 @@ pub enum ExprKind {
     /// pack and the user's own inner literal sharing one span-keyed table slot. Two packs in one pipe
     /// chain aliased the same way.
     ///
-    /// The repo's rule for this failure class (`docs/gaps.md` M24-6, W7-49, W7-43) is **make the
+    /// The repo's rule for this failure class (`docs/contributing/gaps.md` M24-6, W7-49, W7-43) is **make the
     /// coordinate real, never re-anchor a span** — re-spanning the pack only moves the collision. The
     /// callee's key span is that real coordinate: it is a distinct source token per link in both a
     /// postfix and a pipe chain, and it is derived by the SAME `checker::witness_key_span`
@@ -1765,7 +1765,7 @@ pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
 /// A parser-assigned identity for one AST node that carries a checker->compiler fact (TICKET-180).
 ///
 /// A `Span` is not an identity: a spliced default, a re-lexed fragment and a chained postfix link
-/// share spans (`docs/lessons.md`, span-keyed aliasing). Every `Expr`, `Pattern::Variant` and
+/// share spans (`docs/contributing/lessons.md`, span-keyed aliasing). Every `Expr`, `Pattern::Variant` and
 /// `Pattern::Ident` gets a fresh id from the parser or from desugar; side tables key on the raw
 /// `u32`. EQUALITY-NEUTRAL, like `Import`'s spans: parser tests compare whole trees, so two parses
 /// of the same text must still compare equal.

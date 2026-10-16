@@ -1,4 +1,4 @@
-//! W13-26 (`docs/gaps.md`): a channel wake broadcast every PEER sched's idle workers.
+//! W13-26 (`docs/contributing/gaps.md`): a channel wake broadcast every PEER sched's idle workers.
 //! `MnSched::wake_run_wide` (`src/vm/mod.rs`) calls `wake_key` on every other live sched once per
 //! channel wake, and `wake_key` used to call `notify_waiters()` even when its bucket drain requeued
 //! NO fiber. The pin runs a ping-pong inside an `Executor` job: a job's VM has no `mn`, so its

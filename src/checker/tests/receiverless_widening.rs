@@ -110,7 +110,7 @@ fn a_dotted_static_method_is_a_spawn_or_defer_target_ok() {
     }
 }
 
-/// **TICKET-008 / docs/gaps.md W8-16 — a struct failing a protocol reports differently through a
+/// **TICKET-008 / docs/contributing/gaps.md W8-16 — a struct failing a protocol reports differently through a
 /// value slot than through a generic bound.** Same program, same unmet requirement (`Dog` has no
 /// `name` method against `Named`): the generic-bound call names the missing method
 /// (`does not satisfy Named (missing method 'name')`), the value-slot argument call names only the
@@ -318,7 +318,7 @@ fn enum_variant_miss_carets_the_variant_name_ticket_021() {
 // TICKET-024 -- W8-32: `satisfies_args_d`'s final match falls to `_ => Err(...)` for any `Ty`
 // that is not Struct/Enum/Param/Protocol, so a built-in `List[int]` can never satisfy a
 // USER protocol even though the checker's own method table (`self.list_methods` / equivalent)
-// already answers `len()` for it on a direct call. Reproduces docs/gaps.md W8-32 verbatim.
+// already answers `len()` for it on a direct call. Reproduces docs/contributing/gaps.md W8-32 verbatim.
 #[test]
 fn builtin_list_satisfies_user_protocol_with_matching_method_ticket_024() {
     let src = "protocol Sized:\n    fn len(self) -> int\n\nfn total(x: Sized) -> int:\n    return x.len()\n\nfn main():\n    print(total([1,2,3]))\n";
@@ -798,7 +798,7 @@ fn ticket_066_qualified_turbofish_unknown_variant_names_the_enum() {
 // test `named_arg_before_variadic_is_not_missing` (src/desugar/mod.rs) — the false rejection is
 // raised by desugar, before the checker ever sees the call.
 
-// TICKET-066 W10-20: docs/syntax.md:1503 and docs/spec.md:314 claim `fn(): nil` is a no-op closure.
+// TICKET-066 W10-20: docs/reference/syntax.md:1503 and docs/reference/spec.md:314 claim `fn(): nil` is a no-op closure.
 // There is NO working spelling of an empty closure today: the documented one fails with "unknown
 // name 'nil'" (there is no value-level `nil`), and the natural alternative `fn(): pass` fails too
 // ("unexpected 'pass' in expression" -- a single-line closure body must be an expression). This
@@ -1196,7 +1196,7 @@ fn w12_7_protocol_key_neighbours_accept_and_reject() {
 
 /// W12-8 (TICKET-106): `[S: Iterable[(A, B)], A, B]` fails to recover `A`/`B` from a
 /// `List[(int, str)]` argument, even though the bare `[S: Iterable[T], T]` shape recovers `T`
-/// fine. `docs/syntax.md` §7b promises `Iterable[T]` recovers `T` by unifying against the
+/// fine. `docs/reference/syntax.md` §7b promises `Iterable[T]` recovers `T` by unifying against the
 /// iterand's element type; a tuple element must unify the same way, mirroring Rust's
 /// `I: IntoIterator<Item = (A, B)>` inference.
 #[test]

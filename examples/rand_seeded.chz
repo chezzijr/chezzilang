@@ -2,7 +2,7 @@
 # scalar fns STRICTLY SEQUENTIALLY in one main() so the output is deterministic — the shared
 # process-global RNG yields one
 # byte-identical stream for any sequential draw sequence. (CONCURRENT draws would interleave; that
-# is a documented limit, not a bug — see docs/stdlib.md §std.rand.)
+# is a documented limit, not a bug — see docs/reference/stdlib.md §std.rand.)
 
 import std.rand
 

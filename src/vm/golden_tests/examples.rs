@@ -610,7 +610,7 @@ fn test_lazy_imap_ifilter_compose() {
 /// would interleave on that global under the test harness's parallel runner and diverge. Drawn
 /// sequentially within one test body, each program's `rand.seed()`-then-draw stream is
 /// deterministic and byte-identical against `.expected`.
-/// (This is the same concurrent-draw limit documented in docs/stdlib.md §std.rand — the goldens
+/// (This is the same concurrent-draw limit documented in docs/reference/stdlib.md §std.rand — the goldens
 /// avoid it by serializing.)
 ///
 /// - `rand_seeded`: all four scalar fns (seed/int/float/bool), seeded → deterministic values.

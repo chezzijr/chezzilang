@@ -11,7 +11,7 @@
 #
 # Chezzi used to answer the third `true` — the compiler is type-blind, so `a.eq(b)` lowered to a
 # by-name `Op::CallMethod` that the VM resolved against the receiver's own methods. A silent wrong
-# answer — parity-blind. See `docs/gaps.md` W7-53.
+# answer — parity-blind. See `docs/contributing/gaps.md` W7-53.
 #
 # Every struct here defines an `eq` that DISAGREES with structural equality, so each assertion can
 # only pass if dispatch went the right way.
@@ -50,7 +50,7 @@ test fn through_an_eq_bound_the_protocol_wins():
     assert ne_via_bound(Key(1), Key(2)) == true
 
 test fn the_bound_and_the_operator_agree_on_a_non_hook_receiver():
-    # The property `docs/syntax.md` states: through a bound, the method spelling and the operator
+    # The property `docs/reference/syntax.md` states: through a bound, the method spelling and the operator
     # are one dispatch. Checked pairwise so a future divergence fails here first.
     ls := [1, 1, 2, 7]
     rs := [1, 2, 2, 3]

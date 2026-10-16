@@ -607,7 +607,7 @@ fn wildcard_match(pat: &[u8], name: &[u8]) -> bool {
 /// W7-8 — every path-taking member is `_`-prefixed and takes RAW `bytes`. It is the INTERNAL byte
 /// seam: the PUBLIC name (`fs.exists`) is a bodied pure-Chezzi wrapper in `std/fs.chz` that takes a
 /// `PathLike`, calls `p.as_path()`, and re-wraps a returned path into `path.Path`. The `_` is
-/// convention only (there is no privacy mechanism) — documented once in docs/stdlib.md, not per name.
+/// convention only (there is no privacy mechanism) — documented once in docs/reference/stdlib.md, not per name.
 pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("_list_dir", list_dir, Kind::Blocking),
     ("_exists", exists, Kind::Blocking),

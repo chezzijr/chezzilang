@@ -16,7 +16,7 @@
 # wake order is O-then-I, but the buffered Decision-F flush is per-nursery-join.
 #
 # NOTE: `--parallel` is an accepted no-op alias — M:N is the only engine, so plain `run` succeeds too.
-# See docs/concurrency-tier-d.md "Open / deferred".
+# See docs/history/designs/concurrency-tier-d.md "Open / deferred".
 fn inner(a: Channel[int], b: Channel[int]):
     spawn:
         a.send(1)

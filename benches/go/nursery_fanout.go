@@ -1,4 +1,4 @@
-// Ancestor reference for docs/gaps.md W8-7 / W8-8 — the Go equivalent of
+// Ancestor reference for docs/contributing/gaps.md W8-7 / W8-8 — the Go equivalent of
 // examples/primes_parallel.chz: 4 CPU-bound tasks in one WaitGroup, identical trial-division
 // workload, identical ranges. Sweep GOMAXPROCS to compare against chezzi's --threads.
 package main

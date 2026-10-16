@@ -7,7 +7,7 @@
 //! own full-size pool, matching how a real program actually runs.
 //!
 //! **Reference: CPython 3.14.6.** The `Executor` here dispatches each `submit` EAGERLY to a worker
-//! (docs/gaps.md N-family; also `gc_tests::eager_executor_self_capturing_closure_survives_gc_stress_parallel`),
+//! (docs/contributing/gaps.md N-family; also `gc_tests::eager_executor_self_capturing_closure_survives_gc_stress_parallel`),
 //! so by the time the `stop` job's `shutdown_now()` runs, jobs A and C have typically already
 //! started and cannot be cancelled — only jobs not yet dispatched are discarded. `ThreadPoolExecutor`
 //! behaves the same way (`submit` hands off to a worker immediately if one is free); the direct

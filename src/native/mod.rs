@@ -10,7 +10,7 @@
 //! the VM's "allocate only at instruction boundaries" GC invariant holds by construction.
 //!
 //! This is the CPython-built-in-C-module model (compiled-in bindings), **not** dynamic `cdylib`/
-//! C-ABI loading — that (Level-3) stays deferred per `docs/spec.md`.
+//! C-ABI loading — that (Level-3) stays deferred per `docs/reference/spec.md`.
 
 // Dynamic C-ABI FFI is unix-only: it builds on `dlopen`/libffi, and `int` marshals as C `long`
 // (64-bit on every supported LP64 unix target; on a non-unix LLP64 target like Windows x64 C `long`
@@ -245,7 +245,7 @@ impl HostConfig {
             // `vars_os`, not `vars`: `std::env::vars()` PANICS on a non-UTF-8 key or value, so one
             // hostile variable anywhere in the environment aborted startup with rc=101 — even for a
             // program that never touches `std.os`. Decoding is LOSSY (invalid bytes → U+FFFD, so two
-            // raw keys can collide, last wins); documented in docs/stdlib.md under std.os.
+            // raw keys can collide, last wins); documented in docs/reference/stdlib.md under std.os.
             // Collection ORDER is irrelevant here — `os.environ` sorts by key before lowering.
             env: std::sync::Arc::new(std::sync::Mutex::new(
                 std::env::vars_os()
@@ -307,7 +307,7 @@ pub enum NativeRet {
     /// **not** fault (unlike a `str` return), since NULL is a legitimate "creation failed" signal for
     /// handle APIs. Each engine lowers this to its own opaque pointer value (`Obj::Ptr`/`Value::Ptr`).
     /// Untyped (no `FILE*` vs `sqlite3*` distinction) and never auto-freed — the author calls the
-    /// library's own destroy (e.g. `fclose`); see `docs/spec.md` §Level-3 FFI limits.
+    /// library's own destroy (e.g. `fclose`); see `docs/reference/spec.md` §Level-3 FFI limits.
     Ptr(usize),
 }
 

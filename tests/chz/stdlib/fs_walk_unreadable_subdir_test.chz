@@ -1,4 +1,4 @@
-# tests/chz/stdlib/fs_walk_unreadable_subdir_test.chz — TICKET-011 / docs/gaps.md W8-39.
+# tests/chz/stdlib/fs_walk_unreadable_subdir_test.chz — TICKET-011 / docs/contributing/gaps.md W8-39.
 #
 # `fs.walk` over a readable root containing a mode-000 subdirectory returns an `!e` that names the
 # ROOT, not the subdirectory that actually failed to read. Run: `cargo run -- test tests/chz/`.

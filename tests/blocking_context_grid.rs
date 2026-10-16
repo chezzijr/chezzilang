@@ -448,7 +448,7 @@ fn ops() -> Vec<Op> {
 }
 
 /// The expected outcome of `op` in `ctx` with `sat`: `out`, unless a documented table cell
-/// (`docs/concurrency.md` "Blocking-context table") says otherwise.
+/// (`docs/reference/concurrency.md` "Blocking-context table") says otherwise.
 fn expect(op: &Op, ctx: &Ctx, sat: Sat, out: &'static str) -> Expect {
     // TICKET-185: a full send (or a `wait:` send arm) in a Demote context blocks on its offer, as
     // Go blocks — the old v1 `Refuse` cell is gone, so it takes the generic rule below.

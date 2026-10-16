@@ -12,7 +12,7 @@
 # inner→outer chain inner / mid / top / main, then `done`. Unlike the genuinely-contended cross-channel
 # case (2+ live receivers racing ONE channel across scopes), this never contends, so the order is fixed
 # and stable across worker counts. (The contended case is concurrent-divergent by design — see
-# docs/cross-nursery-flat-scheduler.md.)
+# docs/history/designs/cross-nursery-flat-scheduler.md.)
 fn inner():
     parallel:
         spawn:

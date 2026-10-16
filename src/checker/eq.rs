@@ -211,7 +211,7 @@ thread_local! {
 /// `checker-superset-of-compiler` hole — an over-budget compare was already a recoverable runtime
 /// fault, never a soundness break — but the correspondence is looser than a reader might infer.
 ///
-/// **`docs/gaps.md` W7-55 is closed by this.**
+/// **`docs/contributing/gaps.md` W7-55 is closed by this.**
 pub(super) const EQ_BOUNDS_MAX_NODES: usize = 50_000;
 
 /// The marker every budget refusal carries, so [`Checker::eq_where_unsatisfied`] can tell "the bound
@@ -786,7 +786,7 @@ impl Checker {
             // where `where T: Eq` is grammar, AND from a decl-site type annotation
             // (`struct Reg[K: Hashable]: m: Map[K, int]`, via `key_ty_reject` → `resolve_type`'s
             // `Map`/`Set` arms) where `where` does not exist at all (`<whereClause>` is `fn`/`native
-            // fn`-only, `docs/grammar.bnf`) — `struct Reg[K: Hashable] where K: Eq:` is a PARSE
+            // fn`-only, `docs/reference/grammar.bnf`) — `struct Reg[K: Hashable] where K: Eq:` is a PARSE
             // error. So the message must name both spellings rather than assume a fn body.
             // TICKET-053: the where-only mode declines here too. An unbounded `T` reached through an
             // erasure gate — `fn wrap[T](x: Box[T]) -> Tagged` — is never compared unless `Box`'s own

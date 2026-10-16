@@ -1,4 +1,4 @@
-# TICKET-189 -- the crossing-policy grid (D4, docs/decision-d4-airlock.md): "can the parent observe
+# TICKET-189 -- the crossing-policy grid (D4, docs/design/adr-d4-airlock.md): "can the parent observe
 # this operand after the join?" is decided ONCE per bound slot by the checker and read by every
 # non-generator crossing route.
 #

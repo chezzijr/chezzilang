@@ -4,7 +4,7 @@
 //!
 //! Rows are the positions: one per `ValueSite` variant (the parser's own list, so a new variant fails
 //! to compile in `site_row` until it has a template) plus one per other grammar rule whose right side
-//! holds an `<expr>` or a `<value>` (`every_expr_rule_has_a_row` reads `docs/grammar.bnf`). Columns
+//! holds an `<expr>` or a `<value>` (`every_expr_rule_has_a_row` reads `docs/reference/grammar.bnf`). Columns
 //! are the five forms. Each cell writes one program, runs `chezzi check` on it and, when the cell is
 //! an accepted program in a typed row, `chezzi run`.
 //!
@@ -392,8 +392,11 @@ fn a_recover_block_prints_none_and_has_no_tail_value() {
 /// Every grammar rule whose right side holds an `<expr>` or a `<value>` has a row.
 #[test]
 fn every_expr_rule_has_a_row() {
-    let text =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/grammar.bnf")).unwrap();
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/reference/grammar.bnf"
+    ))
+    .unwrap();
     let mut rules: Vec<(String, String)> = Vec::new();
     for line in text.lines() {
         if line.starts_with('#') || line.trim().is_empty() {

@@ -1,4 +1,4 @@
-//! W8-7 — the sys-time gate. `docs/gaps.md` row W8-7: the DEFAULT worker count (all cores) was the
+//! W8-7 — the sys-time gate. `docs/contributing/gaps.md` row W8-7: the DEFAULT worker count (all cores) was the
 //! SLOWEST setting, because every reduction-budget preemption (`MnSched::yield_fiber`, `src/vm/mod.rs`)
 //! broadcast `cv.notify_all()`. On a CPU-bound `parallel:` scope with more cores than tasks, each
 //! broadcast wakes every idle worker into an O(W) `try_steal` probe that finds nothing and re-parks —

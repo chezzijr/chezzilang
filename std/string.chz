@@ -27,7 +27,7 @@ fn reverse(s: str) -> str:
 # `width` at or below `s.len()` returns `s` unchanged. A multi-char `fill` is a repeating cycle
 # truncated to fit ("a", 4, "xy" -> "xyxa"). An empty `fill` can never reach `width`, so it faults
 # `pad_left: fill must not be empty`. A `width` too large to allocate faults `string pad capacity
-# overflow` — recoverable via `recover:`, like every other fault in docs/stdlib.md's fault table.
+# overflow` — recoverable via `recover:`, like every other fault in docs/reference/stdlib.md's fault table.
 #
 # Delegates to the native `s.pad_left(...)` receiver method — the free-function form exists so it can
 # sit on the right of a pipe (`s |> string.pad_left(8, " ")`), not to reimplement it. This used to be

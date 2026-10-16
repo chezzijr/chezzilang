@@ -344,7 +344,7 @@ impl Vm {
     /// `kind` is the native's [`crate::native::Kind`], carried from its registry entry on the
     /// `Obj::Native` value — it decides EVERYTHING this fn branches on (intercept / offload / timed
     /// wait / inline). Nothing here compares a native's name to a string literal: that scatter is what
-    /// `docs/future.md` §3c removed, because a new blocking native that forgot to join the old
+    /// `docs/design/roadmap.md` §3c removed, because a new blocking native that forgot to join the old
     /// `is_blocking` list failed silently.
     pub(super) fn invoke_native(
         &mut self,
@@ -534,7 +534,7 @@ impl Vm {
             self.block_exit(reg);
         }
         // TICKET-188 — a native that held its host thread has no checkpoint until it returns
-        // (`docs/stdlib.md` "Blocking calls cannot be interrupted"), so the halt is delivered AT the
+        // (`docs/reference/stdlib.md` "Blocking calls cannot be interrupted"), so the halt is delivered AT the
         // return, as the offload resume delivers it: the value that completed with it is dropped.
         if in_place {
             self.resume_halts(span)?;

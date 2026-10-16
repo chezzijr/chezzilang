@@ -4,7 +4,7 @@
 # To the program, `owned_str` is just a `str`; `str?` is an `str?`. Both are return-only. `owned_str`
 # is a std.ffi member, so the program imports it.
 
-# `libc` is a LOGICAL library name the loader resolves per host (docs/syntax.md §12b).
+# `libc` is a LOGICAL library name the loader resolves per host (docs/reference/syntax.md §12b).
 
 import owned_str from std.ffi
 

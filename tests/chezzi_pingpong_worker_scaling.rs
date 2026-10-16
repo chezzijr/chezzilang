@@ -1,4 +1,4 @@
-//! W13-25 (`docs/gaps.md`): a flat two-task ping-pong (`Channel[int](0)` unbuffered send/recv,
+//! W13-25 (`docs/contributing/gaps.md`): a flat two-task ping-pong (`Channel[int](0)` unbuffered send/recv,
 //! `parallel: spawn / spawn`) gets SLOWER as the worker pool grows, where the Go twin
 //! (`sync.WaitGroup`, two unbuffered channels) stays flat from `GOMAXPROCS=2` to 28. Same idle-worker
 //! family as W8-7, but W8-7's fix (dropping `notify_all` on preemption) did not close this one: the

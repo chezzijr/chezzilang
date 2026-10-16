@@ -357,7 +357,7 @@ impl Vm {
     /// TICKET-194 — THE re-entry bracket: raises `native_reentry` around `f`, with no cancellation
     /// checkpoint. A native that calls user code ONCE (an operator or protocol hook, a generator
     /// resume, `update`/`read`/`write`) enters it here: that call does not wait, so it is not a
-    /// cancellation point (owner decision 1, `docs/root-causes-w18.md`). The callee's own back-edges
+    /// cancellation point (owner decision 1, `docs/history/bug-hunts/w18.md`). The callee's own back-edges
     /// and waits still cut it. A run-wide halt still lands at the hook's frame push
     /// ([`Vm::call_halt`], TICKET-224).
     pub(super) fn reentered<T>(
@@ -934,7 +934,7 @@ impl Vm {
     /// high-water check, so a real runaway (unbounded growth) aborts on whichever heap runs it. A
     /// CONCURRENT test near the boundary can still slip through — each M:N worker isolates its own
     /// heap, so per-fiber allocations that only sum over the cap may not trip — a documented per-heap
-    /// limit, see `docs/future.md §3b`.
+    /// limit, see `docs/design/roadmap.md §3b`.
     pub fn set_max_heap(&mut self, cap: usize) {
         self.heap.set_mem_cap(cap);
     }

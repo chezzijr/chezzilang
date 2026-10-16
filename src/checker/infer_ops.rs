@@ -923,7 +923,7 @@ impl Checker {
                 }
                 Ty::Bool
             }
-            // **B2** (`docs/gaps.md`) — `==`/`!=` yields `bool`, but the operands must be able to be
+            // **B2** (`docs/contributing/gaps.md`) — `==`/`!=` yields `bool`, but the operands must be able to be
             // equal. Only a **provably disjoint** pair (`1 == "a"`, `Box[int] == Box[str]`) is
             // rejected: that is always a bug in user code — Python answers `False` at runtime, but
             // Chezzi is statically typed, so — like mypy `--strict-equality`, Go, and Rust — it is a

@@ -1,5 +1,5 @@
 //! Task 5 (continued) — the second-worker-count differential gate for `tests/chz`
-//! (`docs/bug-discovery.md` Tier 2; `--serial` is gone, so "run the suite at two worker counts" is
+//! (`docs/contributing/bug-discovery.md` Tier 2; `--serial` is gone, so "run the suite at two worker counts" is
 //! the standing differential in its place, over the M:N engine's only remaining knob:
 //! `CHEZZI_THREADS`).
 //!
@@ -12,14 +12,14 @@
 //! for the rest of the run. Measured (task-5b brief): whole-process `CHEZZI_THREADS=2 cargo test`
 //! under `RUST_TEST_THREADS=4` starved 4 concurrently-running tests contending for 2 pool workers (8
 //! failures/hangs — exactly the tests then annotated "needs ≥2 free pool threads", pool risk G3,
-//! `docs/gaps.md` W7-12r; TICKET-052 closed that residual, and those annotations are retired).
+//! `docs/contributing/gaps.md` W7-12r; TICKET-052 closed that residual, and those annotations are retired).
 //! `RUST_TEST_THREADS=1` took >54 minutes without finishing. A subprocess
 //! gets its own process, so its own freshly-sized pool — same reason `executor_reentrant_shutdown.rs`
 //! / `executor_results_not_retained.rs` already run the built binary instead of calling in-process.
 //!
 //! **This differential is over the ~550 Chezzi behavioural tests in `tests/chz`, not the ~4150 Rust
 //! lib tests** — the lib suite has no such gate (measured above: starves, or is impractically slow at
-//! `RUST_TEST_THREADS=1`). It is NOT `docs/future.md` §2b's Go-paired-programs differential and NOT a
+//! `RUST_TEST_THREADS=1`). It is NOT `docs/design/roadmap.md` §2b's Go-paired-programs differential and NOT a
 //! seeded/interleaving M:N mode; both remain unbuilt and separately planned.
 //!
 //! **`chezzi test` did not honor `CHEZZI_THREADS` at all before this task** — only `cmd_run` read it;
@@ -53,7 +53,7 @@ const SERIALIZATION_RUNS: usize = 3;
 /// Bound for a shape that must stay two-wide (not one-wide) at `CHEZZI_THREADS=2` and at the
 /// default (all-cores) count: a top-level `parallel:` body burning CPU alongside one spawned
 /// sibling. This pins ONLY that shape — it does NOT claim the N-runner contract holds at T>=2 in
-/// general. `docs/gaps.md` W15-9 is the open counter-example: a body that blocks once then burns
+/// general. `docs/contributing/gaps.md` W15-9 is the open counter-example: a body that blocks once then burns
 /// runs n+1 runners once T>=2 helpers are involved.
 #[cfg(unix)]
 const MAX_CORES_FOR_TWO_RUNNERS: f64 = 2.40;
@@ -386,7 +386,7 @@ fn threads_one_serializes_a_top_level_body_that_burns_after_a_blocking_recv() {
 
 /// W15-2 (TICKET-168) — the triage shape must stay TWO-wide, not one-wide, once there are >= 2
 /// workers: at `CHEZZI_THREADS=2` and at the default (all-cores) count, the body-gate must be a
-/// no-op (`worker_count() != 1`). Pins ONLY this shape; `docs/gaps.md` W15-9 is the open
+/// no-op (`worker_count() != 1`). Pins ONLY this shape; `docs/contributing/gaps.md` W15-9 is the open
 /// counter-example at T>=2 for a body that blocks then burns.
 #[cfg(unix)]
 #[test]
@@ -1473,7 +1473,7 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_thread_one_sampled() {
 /// victims, matching Go's all-goroutines-parked rule. TICKET-125's own cross-sched deferral
 /// (`defer_to_provable_peer`) had cut the false-fault rate (~3/5 -> ~1/20 at T=4 on `d2a`) without
 /// reaching 0 and was reverted; TICKET-129 measured 0 false faults of 60 runs per worker count on
-/// `d2a`/`d2d`/`g3` (debug binary) before closing `docs/gaps.md`'s W13-5 row.
+/// `d2a`/`d2d`/`g3` (debug binary) before closing `docs/contributing/gaps.md`'s W13-5 row.
 #[test]
 fn w13_5_d2a_cousin_join_is_fatal_at_every_worker_count() {
     assert_at_every_worker_count(
@@ -1980,7 +1980,7 @@ fn nested_verdict_edge_table_matches_go_at_every_worker_count() {
     }
 }
 
-/// TICKET-132 (`nat_anc.chz`, `docs/gaps.md` W13-6 residual): `leaf`'s inline `native_reentry > 0`
+/// TICKET-132 (`nat_anc.chz`, `docs/contributing/gaps.md` W13-6 residual): `leaf`'s inline `native_reentry > 0`
 /// join loop pops its own ancestor `outer` off the global queue, then `outer`'s escaped `parallel:`
 /// aborts its nursery INLINE on a family holding `inner` beneath it (measured via `nat_noesc.chz`,
 /// `outer`'s escape removed: the map join alone never hangs, 36/36 `done`). At `CHEZZI_THREADS=1`
@@ -2040,7 +2040,7 @@ fn nat_anc_nursery_join_under_native_reentry_hangs_at_thread_one() {
     );
 }
 
-/// TICKET-132 (`esc_anc.chz`, `docs/gaps.md` W13-6 residual): a body that escapes its nursery (a
+/// TICKET-132 (`esc_anc.chz`, `docs/contributing/gaps.md` W13-6 residual): a body that escapes its nursery (a
 /// `return` out of a nested `parallel:`) runs `abort_fiber_owned_nursery`, which also runs the
 /// scheduler loop INLINE on the owner's own OS worker. Same cycle as `nat_anc.chz`: 12/12 runs hang
 /// past a 15 s deadline at `CHEZZI_THREADS=1` (measured 2026-09-17).

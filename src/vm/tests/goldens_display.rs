@@ -250,7 +250,7 @@ fn pad_left_codepoints_not_bytes() {
 
 /// A huge `width` routes through the same capacity guard as `repeat`: a recoverable fault, not an
 /// OOM/abort. (Native only — the `std.string` free fn cannot probe the allocator; that is a documented
-/// divergence, docs/stdlib.md.)
+/// divergence, docs/reference/stdlib.md.)
 #[test]
 fn pad_left_huge_width_is_recoverable_fault() {
     for src in [
@@ -2153,7 +2153,7 @@ fn interpolation_multiline_reports_the_fragments_real_line() {
     // 6 — and that is what gets reported, column included. This used to report the opening line
     // (4) and a column that kept counting from the literal's start, because `raw` is post-escape
     // and a `\n` escape was indistinguishable from a real newline. The lexer now carries a
-    // content-index → source-position map, so the two ARE distinguishable (`docs/gaps.md` M24-6).
+    // content-index → source-position map, so the two ARE distinguishable (`docs/contributing/gaps.md` M24-6).
     //   line 6:  result = {10 / b}
     //   cols:    1234567890
     // `result = ` is 9 chars, `{` is col 10, so the `10` starts at col 11.

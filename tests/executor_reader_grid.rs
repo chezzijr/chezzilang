@@ -323,7 +323,7 @@ enum Class {
     Settle,
     /// A real deadlock: nonzero exit, stderr names a deadlock.
     Deadlock,
-    /// `docs/gaps.md` W22-1: a real deadlock the verdict does not report. A hang or a deadlock
+    /// `docs/contributing/gaps.md` W22-1: a real deadlock the verdict does not report. A hang or a deadlock
     /// fault, never a settle.
     Declines,
     /// The job's own fault ends the run; no deadlock is reported.

@@ -7,7 +7,7 @@
 # `Shared.read` did not exist before TICKET-246; its rows are in `benches/box/shared_read.chz`.
 #
 # Run: chezzi run benches/box/update_read.chz     (release binary; one line per cell:
-#      `name|n|callers|us per call`). See docs/benchmarks.md "TICKET-246".
+#      `name|n|callers|us per call`). See docs/contributing/benchmarks.md "TICKET-246".
 
 import std.concurrency
 import std.time

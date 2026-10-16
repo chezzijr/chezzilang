@@ -211,7 +211,7 @@ fn parallel_body_still_allows_return() {
 
 #[test]
 fn defer_block_q_still_allowed() {
-    // `?` inside a `defer:` block short-circuits the block and is discarded (docs/syntax.md) — an
+    // `?` inside a `defer:` block short-circuits the block and is discarded (docs/reference/syntax.md) — an
     // expression, not a statement: the escaping-flow guard never sees it.
     entry_ok(
         "fn g() -> int!:\n    return ?2\nfn f() -> int!:\n    defer:\n        v := g()?\n        print(v)\n    return ?1\nprint(f())\n",
@@ -1004,7 +1004,7 @@ fn method_neighbors_still_ok() {
 
 // ---------------------------------------------------------------------------
 // `index` / `set_index` V-coherence. `x OP= v` is EXACTLY `x = x OP v`
-// (docs/syntax.md, compound assignment), so a compound index-assign's LHS is
+// (docs/reference/syntax.md, compound assignment), so a compound index-assign's LHS is
 // typed from `index`'s RETURN. The direct index-assign path used to take it
 // from `set_index`'s `val` param instead, so an incoherent pair
 // (`index -> str` / `set_index(_, val: int)`) type-checked, then faulted with

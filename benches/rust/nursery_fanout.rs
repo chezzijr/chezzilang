@@ -1,4 +1,4 @@
-// Ancestor reference for docs/gaps.md W8-7 / W8-8 — the Rust equivalent of
+// Ancestor reference for docs/contributing/gaps.md W8-7 / W8-8 — the Rust equivalent of
 // examples/primes_parallel.chz: 4 CPU-bound tasks over a fixed N-thread fan-out, identical
 // trial-division workload, identical ranges. N comes from argv so the sweep matches --threads.
 use std::sync::mpsc;

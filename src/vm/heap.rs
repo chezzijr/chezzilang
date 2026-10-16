@@ -303,7 +303,7 @@ pub enum Obj {
     /// `kind` is the member's [`crate::native::Kind`], copied off its registry entry when the module
     /// binds (`vm/exec.rs`). It travels with the value so `Vm::invoke_native` knows how to RUN this
     /// native (inline / dirty-pool offload / timed wait / engine-intercepted) without comparing its
-    /// name to a string — `docs/future.md` §3c.
+    /// name to a string — `docs/design/roadmap.md` §3c.
     Native {
         name: Box<str>,
         func: crate::native::NativeFn,
@@ -733,7 +733,7 @@ pub struct Heap {
     ///
     /// Why here and not at each growth site: `push`/`insert`/`add`/`extend`/the map index-store/… is
     /// an open N-way set, and charging some arms of it is the mistake this repo has already been
-    /// bitten by twice (`docs/gaps.md` W7-22). `get_mut` is the SOLE `&mut Obj` door (verified: no
+    /// bitten by twice (`docs/contributing/gaps.md` W7-22). `get_mut` is the SOLE `&mut Obj` door (verified: no
     /// `.obj.as_mut()` or `slots[..]` access exists outside this file), so a charge here cannot be
     /// forgotten by a new container method — the same forget-proof argument that put the wire charge
     /// in `Vm::to_wire_crossable`.

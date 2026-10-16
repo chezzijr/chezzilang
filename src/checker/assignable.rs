@@ -262,7 +262,7 @@ impl Checker {
             // CEILING, deliberate: two protocols with contradictory method signatures (`fn f() -> int`
             // vs `fn f() -> str`) are inhabited by NOTHING, yet this accepts the pair. Tightening it
             // means intersecting two method tables; the rationale for not doing so lives in
-            // `docs/gaps.md` §B2 — read it there before narrowing this arm.
+            // `docs/contributing/gaps.md` §B2 — read it there before narrowing this arm.
             (Protocol(..), Protocol(..)) => true,
             (Protocol(p, pargs), a) | (a, Protocol(p, pargs)) => {
                 // ERASURE, one constructor in: a free `T` in the protocol's args (`Container[T]`) or

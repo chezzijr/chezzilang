@@ -356,7 +356,7 @@ pub(crate) fn is_firstclass_builtin_fn(name: &str) -> bool {
 /// `Checker::assert_native_protocol_shape_matches` (which iterates this to prove each name's
 /// `std/prelude.chz` mirror byte-matches its seed). Previously three hand-maintained copies that
 /// nothing forced to agree: `PathLike` sat in the first two and was missing from the third for months,
-/// so its shape was the one that could silently drift (`docs/gaps.md` §L4b). Adding a protocol now
+/// so its shape was the one that could silently drift (`docs/contributing/gaps.md` §L4b). Adding a protocol now
 /// means adding it HERE and seeding it; omit either and the debug guard fails.
 pub(crate) const RESERVED_PROTOCOLS: &[&str] = &[
     "Any",

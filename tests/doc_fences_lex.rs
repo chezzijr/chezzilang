@@ -5,7 +5,7 @@
 //! fences are fragments (a bare `struct` body, a lone expression), so a check-based guard would
 //! fail on correct docs. `tokenize` stops at the first error in a fence, so one fence reports at
 //! most one failure per run — a fence that goes green after one fix may still hold a second bad
-//! line. Guards `docs/gaps.md` W8-41: four lines used `;` as a statement separator, which is not
+//! line. Guards `docs/contributing/gaps.md` W8-41: four lines used `;` as a statement separator, which is not
 //! a token in Chezzi.
 
 use std::fs;
@@ -33,9 +33,18 @@ fn doc_paths() -> Vec<String> {
 fn doc_paths_covers_the_bundled_topics() {
     let paths = doc_paths();
     assert!(!paths.is_empty(), "doc_paths() derived an empty list");
-    assert!(paths.contains(&"docs/spec.md".to_string()), "{paths:?}");
-    assert!(paths.contains(&"docs/syntax.md".to_string()), "{paths:?}");
-    assert!(paths.contains(&"docs/stdlib.md".to_string()), "{paths:?}");
+    assert!(
+        paths.contains(&"docs/reference/spec.md".to_string()),
+        "{paths:?}"
+    );
+    assert!(
+        paths.contains(&"docs/reference/syntax.md".to_string()),
+        "{paths:?}"
+    );
+    assert!(
+        paths.contains(&"docs/reference/stdlib.md".to_string()),
+        "{paths:?}"
+    );
 }
 
 fn chezzi_fences(path: &str) -> Vec<(usize, String)> {

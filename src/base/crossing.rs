@@ -1,4 +1,4 @@
-//! The airlock's crossing policy (D4, `docs/decision-d4-airlock.md`): can the parent still reach an
+//! The airlock's crossing policy (D4, `docs/design/adr-d4-airlock.md`): can the parent still reach an
 //! object after it crosses into another task? The checker decides it ONCE per crossing value, as a
 //! shape over the value graph ([`Fresh`], built by `Checker::fresh_shape`, TICKET-240). The
 //! compiler only stores that shape; the runtime only walks it (`Vm::unmark_fresh`). A route whose

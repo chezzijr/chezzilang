@@ -469,7 +469,7 @@ pub fn set_worker_count(n: usize) {
 /// `worker_count()` first: [`worker_count`] forces it (as its own first statement, same as before)
 /// for plain readers, and — this is what closes the hazard below — [`set_worker_count`] ALSO forces
 /// it, before its own store, for every WRITER. That is what turns `CHEZZI_THREADS=2 cargo test` into
-/// a real second-schedule differential over the whole suite (`docs/bug-discovery.md` Tier 2): every
+/// a real second-schedule differential over the whole suite (`docs/contributing/bug-discovery.md` Tier 2): every
 /// test that ever reaches `worker_count()` gets the override, not just the ones that happen to run
 /// late.
 ///
@@ -1464,7 +1464,7 @@ pub struct Vm {
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its
-/// worker so a queued sibling runs (BEAM's default is 4000; tunable — see `docs/concurrency-tier-d.md`
+/// worker so a queued sibling runs (BEAM's default is 4000; tunable — see `docs/history/designs/concurrency-tier-d.md`
 /// §"Open / deferred"). Large enough that the per-op decrement is negligible, small enough that a
 /// CPU-bound fiber relinquishes its worker promptly.
 const CONTEXT_REDS: u32 = 4000;

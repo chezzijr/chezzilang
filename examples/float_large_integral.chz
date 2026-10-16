@@ -1,6 +1,6 @@
 # examples/float_large_integral.chz — golden for shortest-round-trip float formatting.
 # Large integral-valued floats must print the SHORTEST decimal that round-trips
-# (docs/syntax.md contract), not the exact fixed-point expansion of the binary value.
+# (docs/reference/syntax.md contract), not the exact fixed-point expansion of the binary value.
 
 fn main():
     # --- bare interpolation → engine format_float ---

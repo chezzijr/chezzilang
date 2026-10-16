@@ -103,7 +103,7 @@ test fn arith_method_faults_match_operator_faults():
     assert msg_of(rm, "neg_m") == msg_of(ro, "unary -")
     assert msg_of(rm, "neg_m") == "integer overflow in negation"
 
-# ---- MIN % -1 is representable (0), unlike MIN / -1 — Task 2 fix, docs/gaps.md:1950 ----
+# ---- MIN % -1 is representable (0), unlike MIN / -1 — Task 2 fix, docs/contributing/gaps.md:1950 ----
 #
 # `i64::MIN % -1` mathematically IS `0`; Rust's `checked_rem` returns `None` there only to dodge the
 # x86 `IDIV` hardware trap, not because the answer overflows. `MIN / -1` is a REAL overflow (the true
@@ -146,7 +146,7 @@ test fn min_mod_zero_and_min_div_neg_one_still_fault():
         !e: assert e.message() == "integer overflow in Div"
 
 test fn ordinary_mod_sign_unaffected():
-    # pinned against measured Go 1.26 / this project's documented policy (docs/spec.md's integer
+    # pinned against measured Go 1.26 / this project's documented policy (docs/reference/spec.md's integer
     # overflow policy note): `%` follows the DIVIDEND's sign (Rust/C/Go), NOT Python's floored `%`
     # (which follows the divisor — measured -7 % 3 == 2, 7 % -3 == -2 in Python on this box). This task
     # must never move the sign.

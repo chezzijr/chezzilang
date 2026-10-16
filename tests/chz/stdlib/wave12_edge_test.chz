@@ -1,4 +1,4 @@
-# tests/chz/stdlib/wave12_edge_test.chz — bug-hunt wave 12 edge fixes (docs/gaps.md W12-18a,
+# tests/chz/stdlib/wave12_edge_test.chz — bug-hunt wave 12 edge fixes (docs/contributing/gaps.md W12-18a,
 # W12-19, W12-20a/b/c/d). Each `test fn` pins one repro from TICKET-110. Run: `cargo run -- test
 # tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 

@@ -416,7 +416,7 @@ impl Vm {
     /// A task now starts at its `spawn`, so on the M:N engine there are no unstarted tasks to count,
     /// and any residual count would be racy — a task injected into the run queue may or may not have
     /// been picked up before the escape. A confident wrong number on stdout is worse than no line
-    /// (`docs/gaps.md` W7-12: an uncertain verdict must decline). trio and `asyncio.TaskGroup` print
+    /// (`docs/contributing/gaps.md` W7-12: an uncertain verdict must decline). trio and `asyncio.TaskGroup` print
     /// nothing here either. The eager path never reported, so this also removes a pre-existing
     /// eager-vs-lazy observable split rather than creating one.
     ///
@@ -577,7 +577,7 @@ impl Vm {
         }
         // D2b: run the tasks as lightweight M:N fibers on the OS-thread pool (park-on-`recv`). This is
         // the only engine — the cooperative scheduler that used to live here was deleted with
-        // `--serial` (`docs/future.md` §2b).
+        // `--serial` (`docs/design/roadmap.md` §2b).
         self.run_mn_nursery(tasks, nursery_span)
     }
 
@@ -618,7 +618,7 @@ impl Vm {
         // global sched + farms helpers; a NESTED nursery (`self.mn.is_some()`) REUSES it (register a
         // scope, enlist into the same global run queue, run its inline owner scope-scoped). Because the
         // inline owner drains the GLOBAL queue, it naturally runs cross-nursery siblings — the case-A
-        // fix (`docs/cross-nursery-flat-scheduler.md`). Nested owners farm NO helpers (they run inline
+        // fix (`docs/history/designs/cross-nursery-flat-scheduler.md`). Nested owners farm NO helpers (they run inline
         // on the worker thread that called them).
         //
         // A THIRD case: `self.mn.is_none()` (no nested sched installed — the body runs `mn == None`) yet a

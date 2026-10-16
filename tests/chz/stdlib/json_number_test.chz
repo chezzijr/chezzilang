@@ -1,5 +1,5 @@
 # tests/chz/stdlib/json_number_test.chz — std.json's Json.Int/Num split, located parse errors and
-# json.encode (docs/gaps.md W8-35, W8-36, W8-20; TICKET-013). Run: `cargo run -- test tests/chz/`.
+# json.encode (docs/contributing/gaps.md W8-35, W8-36, W8-20; TICKET-013). Run: `cargo run -- test tests/chz/`.
 
 import std.json
 import std.math

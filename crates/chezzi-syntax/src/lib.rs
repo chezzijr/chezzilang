@@ -2,7 +2,7 @@
 //! `chezzi-syntax`: the Chezzi syntax layer (lexer, AST, parser, format specs, slices) as its own
 //! crate, so a change in the checker, compiler or VM never recompiles it. The sources live in the
 //! main tree (`src/lexer/`, `src/ast/`, `src/parser/`, `src/fmtspec.rs`, `src/printable.rs`,
-//! `src/slice.rs`) and are included by path, so every `src/` path in `docs/owners.md` stays valid. The
+//! `src/slice.rs`) and are included by path, so every `src/` path in `docs/contributing/owners.md` stays valid. The
 //! `chezzi` crate re-exports each module at its old path.
 
 #[path = "../../../src/ast/mod.rs"]

@@ -28,7 +28,7 @@ to also assert *serial VM == M:N VM* (byte-identical); the cooperative `--serial
 - **`chz_suite_passes`** (`tests/chz_suite.rs`) runs this entire suite and asserts every test passes.
 - **`chezzi_threads_cli`** (`tests/chezzi_threads_cli.rs`) runs it again at `CHEZZI_THREADS=2` — a
   *second schedule*, which is what replaced the cross-engine oracle as the accidental-divergence
-  detector (`docs/bug-discovery.md` Tier 2).
+  detector (`docs/contributing/bug-discovery.md` Tier 2).
 
 Both live in `tests/`, not the lib unit suite: `vm::pool` is one process-wide `OnceLock`, so a test
 that needs uncontended pool workers must have its own process. So `cargo test` — not just

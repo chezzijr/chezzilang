@@ -149,7 +149,7 @@ pub(crate) fn record_call_table_entry<K, V>(
             format!(
                 "internal: two different {what} decisions were recorded for one source position, so \
                  the backend cannot tell the two sites apart. This is a compiler bug — please report \
-                 it with the source (docs/gaps.md W7-49). One trigger has a workaround: if a call here \
+                 it with the source (docs/contributing/gaps.md W7-49). One trigger has a workaround: if a call here \
                  omits an argument that has a DEFAULT, the default is cloned into each caller's \
                  scope, and a caller-side local that shadows the definer's global makes two splices of \
                  it resolve differently — renaming that local avoids it"

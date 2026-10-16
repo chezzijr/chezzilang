@@ -3,7 +3,7 @@
 Annotated `.chz` files that serve as both **executable documentation** of the grammar and the
 inputs for the conformance harness in `src/conformance.rs` (run via `cargo test conformance`).
 
-The harness executes the canonical grammar (`docs/grammar.bnf`) with the `bnf` crate and asserts
+The harness executes the canonical grammar (`docs/reference/grammar.bnf`) with the `bnf` crate and asserts
 its accept/reject decision matches the hand-written parser (`src/parser/mod.rs`) on every file here.
 
 ## Layout

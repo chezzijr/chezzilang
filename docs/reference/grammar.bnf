@@ -1,0 +1,836 @@
+# Chezzi grammar — canonical reference (M2)
+#
+# This is the single source of truth for Chezzi's syntax. It is NOT decorative:
+# `cargo test conformance` executes it (via the `bnf` crate, a dev-dependency) and
+# differential-tests its accept/reject decisions against the hand-written parser in
+# `src/parser/mod.rs` on the corpus under `tests/corpus/`. If the code and this file
+# disagree, the test fails.
+#
+# IMPORTANT — this grammar is written over the LEXER'S TOKEN STREAM, not raw source text.
+# Every terminal (e.g. WALRUS, IDENT, NEWLINE) is a `Token` class emitted by the lexer
+# (`src/lexer/mod.rs`). That is what makes indentation expressible: INDENT / DEDENT / NEWLINE
+# are ordinary terminals the lexer produces. Terminal *values* (the 5 in INT, the name in
+# IDENT) are abstracted away — the grammar cares only about token class.
+#
+# Notation: pure BNF. `<x>` nonterminal, "TOK" terminal (a token class), `::=`, `|`.
+# No `*`/`?` — repetition is written with right-recursion, optionals as explicit alternatives.
+# The expression rules form a precedence cascade (loosest first) mirroring `infix_op`'s binding
+# powers in the parser (see docs/reference/syntax.md §4); the hand parser realizes the same precedence via
+# Pratt binding powers rather than literal cascade recursion.
+#
+# Terminals = exactly the `Token` enum variants, one class each. PIPE ("|>") drives the pipe
+# operator (see <pipeExpr>, M6).
+#
+# Because terminals are token classes (not source forms), several lexical spellings collapse to
+# one terminal and need NO production here: FLOAT covers scientific notation (`1e3`, `1.5e-9`,
+# `6.022e23` — any exponent makes the literal a float); STR covers both `"…"` and `'…'` quoting
+# and all string escapes including `\u{HEX}` unicode. The exact lexical grammar lives in
+# `src/lexer/mod.rs` + `docs/reference/syntax.md §2/§10`.
+
+# ===== top level =====
+# A file is zero or more statements then EOF. The lexer always emits a trailing NEWLINE before
+# EOF when the last line had content, and one DEDENT per still-open block; blank/comment-only
+# lines emit no tokens, so no stray NEWLINEs appear between statements.
+# A module-level statement is an <item> or a <stmt>. An <item> is a TOP-LEVEL-ONLY declaration:
+# the checker, compiler and resolver harvest declarations from module-level statements alone, so
+# an item in a block would parse and then do nothing. A <block> holds <stmts>, which never reach
+# <item>, so an item keyword in any block is a parse error ("struct must be a top-level
+# declaration"). `fn` is the one declaration legal in both positions (a nested fn is a first-class
+# local function), so <fnDecl> stays in <compoundStmt> and <topLevelStmt> reaches it via <stmt>.
+<module>        ::= "EOF" | <topLevelStmts> "EOF"
+<topLevelStmts> ::= <topLevelStmt> | <topLevelStmt> <topLevelStmts>
+<topLevelStmt>  ::= <item> | <stmt>
+<item>          ::= <testFnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <typeAliasDecl> | <importStmt> | <externDecl> | <nativeDecl> | <nativeStructDecl> | <nativeEnumDecl> | <nativeTypeDecl>
+<stmts>         ::= <stmt> | <stmt> <stmts>
+
+<stmt>         ::= <simpleStmt> | <compoundStmt>
+<compoundStmt> ::= <fnDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
+
+# Line-oriented statements each consume their terminating NEWLINE.
+<simpleStmt> ::= <letStmt> | <plainStmt> | <exprStmt>
+<plainStmt>  ::= <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <passStmt> | <assertStmt> | <spawnCallStmt>
+
+# ===== simple statements =====
+# The third form is a destructuring binding: `a, (b, c) := expr` binds a tuple's elements
+# positionally (U9: one unpacking grammar at `:=`, `for`, a comprehension clause and a wait arm).
+# A nested target takes parentheses and `_` skips a slot; the whole target takes none. Only tuples
+# unpack outside `match`. Only `:=` introduces destructuring binds (`a, b = …` is multi-target
+# *re*assignment — see below). A value list (`x := 1, 2`, `a, b := 1, 2`) is the tuple written
+# without parentheses; the checker owns the arity.
+# An optional `CONST` before the typed-let's <type> is the `const T` immutable-binding modifier
+# (`PI: const int = 3`) — the checker rejects any later reassignment of the name. `CONST` is rejected
+# on a <param> type and on a destructuring (<bindList>) let.
+# The `else` guard (design D4) follows the whole value, a line or a block value: its block runs
+# when the value is absent or an error, and must leave (`return`, `break`, `continue`, `panic`).
+<letStmt>  ::= <plainLet> | <letLhs> <expr> <elseGuard> | <letLhs> <blockValue> <elseGuard>
+# A let with no guard ends as every simple statement does (<value>). A value list
+# (`x := 1, 2`, `a, b := 1, 2`) takes no guard and no block value.
+<plainLet> ::= <letLhs> <value>
+             | <letLhs> <exprList> "COMMA" <expr> "NEWLINE"
+# On a destructuring (<bindList>) the guard takes the call's own error (`a, b := f() else e:`):
+# splitting a tuple cannot fail.
+<letLhs>   ::= "IDENT" "WALRUS"
+             | "IDENT" "COLON" <type> <typeAssign>
+             | "IDENT" "COLON" "CONST" <type> <typeAssign>
+             | <bindList> "WALRUS"
+             | <groupedName> "WALRUS"
+# The `=` after a type. `T!= v` lexes `!=` as ONE token and means `T! = v`: the type takes the `!`.
+<typeAssign> ::= "ASSIGN" | "NOTEQ"
+# `else:` handles an absent `T?` (or ignores an error); `else e:` binds the error of a `T!E`.
+<elseGuard> ::= "ELSE" <block> | <errGuard>
+# The guard with a binder. On the line of an inline `if` / `elif` it is the only guard (<ifBlock>).
+<errGuard>  ::= "ELSE" "IDENT" <block>
+# A binding target: two or more comma-separated elements, each a name (`_` skips a slot) or a
+# parenthesized nested target. Used at `:=`, `for`, a comprehension clause and a wait arm.
+# A one-name group `(x)` is that name, as a sole target and as an element. A multi-name target
+# takes no outer parentheses (`(a, b) := t`, `for (a, b) in xs` are errors, owner rule U9).
+<bindList>  ::= <bindElem> "COMMA" <bindElems>
+<bindElems> ::= <bindElem> | <bindElem> "COMMA" <bindElems>
+<bindElem>  ::= "IDENT" | "LPAREN" <bindElem> "RPAREN" | "LPAREN" <bindElem> "COMMA" <bindElems> "RPAREN"
+<groupedName> ::= "LPAREN" "IDENT" "RPAREN" | "LPAREN" <groupedName> "RPAREN"
+
+# Assignment target is restricted to a name / field / index (the parser's lvalue guard):
+# an lvalue is a bare IDENT, or any postfix expression that *ends* in `.field` or `[index]`
+# (so `f().x` and `xs[0]` are lvalues, but `f()` and `1` are not). Compound forms `OP=` desugar to
+# `lvalue = lvalue OP expr`. The last two alts are multi-target (tuple) assignment, `=` only:
+# either a same-arity value list (`a, b = b, a`) or a single tuple-valued RHS (`a, b = f()`).
+# Only `=` takes a block value (`x = match n: ...`); a compound assignment takes an expression.
+<assignStmt> ::= <lvalue> "ASSIGN" <value>
+               | <lvalue> "ASSIGN" <exprList> "COMMA" <expr> "NEWLINE"
+               | <lvalue> "PLUSEQ" <expr> "NEWLINE"
+               | <lvalue> "MINUSEQ" <expr> "NEWLINE"
+               | <lvalue> "STAREQ" <expr> "NEWLINE"
+               | <lvalue> "SLASHEQ" <expr> "NEWLINE"
+               | <lvalue> "PERCENTEQ" <expr> "NEWLINE"
+               | <lvalue> "AMPEQ" <expr> "NEWLINE"
+               | <lvalue> "PIPEEQ" <expr> "NEWLINE"
+               | <lvalue> "CARETEQ" <expr> "NEWLINE"
+               | <lvalue> "SHLEQ" <expr> "NEWLINE"
+               | <lvalue> "SHREQ" <expr> "NEWLINE"
+               | <lvalueList> "ASSIGN" <exprList> "COMMA" <expr> "NEWLINE"
+               | <lvalueList> "ASSIGN" <value>
+# A multi-target list nests like a binding target: an element is an lvalue or a parenthesized list.
+<lvalueList> ::= <lvalueElem> "COMMA" <lvalueElem> | <lvalueElem> "COMMA" <lvalueList>
+<lvalueElem> ::= <lvalue> | "LPAREN" <lvalueElem> "RPAREN" | "LPAREN" <lvalueList> "RPAREN"
+<lvalue> ::= "IDENT"
+           | <postfix> "DOT" "IDENT"
+           | <postfix> "LBRACKET" <expr> "RBRACKET"
+
+# A "RETURN" is legal only inside a fn, method or closure body; at module level the checker reports 'return' outside a function (TICKET-186; CPython's SyntaxError).
+<returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <value> | "RETURN" <exprList> "COMMA" <expr> "NEWLINE"
+
+# `yield <expr>` (generators) — always carries a value. Legal only inside a generator
+# function (one that uses `yield`; the `-> Iterator[T]` return type is required).
+# Checker-enforced, not grammar. Suspends the generator.
+<yieldStmt> ::= "YIELD" <value> | "YIELD" <exprList> "COMMA" <expr> "NEWLINE"
+
+# `defer <call>` (form 1) — the call-only restriction is enforced by the checker
+# (context-sensitive), not the grammar. `defer:` (form 2) takes an indented block whose body runs
+# top-to-bottom at scope exit. BOTH forms are compound, so neither is legal as an inline body:
+# `defer` is block-scoped, and an inline body would be the defer's whole block (`if c: defer f()`
+# would run `f` at once).
+<deferStmt> ::= "DEFER" <expr> "NEWLINE" | "DEFER" <block>
+
+# `break` / `continue` are bare line-oriented statements; "inside a loop" is enforced by the
+# checker (context-sensitive), not the grammar.
+<breakStmt>    ::= "BREAK" "NEWLINE"
+<continueStmt> ::= "CONTINUE" "NEWLINE"
+# `pass` is a no-op statement (an empty fn/method/control-flow body; an alternative to a bare `return`).
+# As the SOLE line of a `struct`/`protocol` body it is instead an empty-body marker (see <structDecl> /
+# <protocolDecl>); in an `enum` body it is a parse error (an enum needs at least one variant).
+<passStmt>     ::= "PASS" "NEWLINE"
+
+# An un-aliased `import a.b` binds `b` AND the full path `a.b` (TICKET-175); `import a.b as c` binds
+# only `c`. `import math from std` names std's module `math` (Python's `from os import path`).
+# In `import V from X`, a one-segment `X` may name an ENUM of this file (declared or from-imported)
+# when no module `X` resolves: the names are then its variants, bound bare (TICKET-229). The
+# grammar is the same; the loader decides which one it is.
+<importStmt> ::= "IMPORT" <dottedPath> "NEWLINE"
+               | "IMPORT" <dottedPath> "AS" "IDENT" "NEWLINE"
+               | "IMPORT" <importNames> "FROM" <dottedPath> "NEWLINE"
+<importNames> ::= <importName> | <importName> "COMMA" <importNames>
+# `None` is a keyword, not a name: `import None from m` is rejected.
+<importName>  ::= "IDENT" | "IDENT" "AS" "IDENT"
+<dottedPath>  ::= "IDENT" | "IDENT" "DOT" <dottedPath>
+
+# `assert <cond>` faults with its source span when `cond` is false; the optional second operand is
+# a custom str message. `cond` must be bool and `msg` (if given) str — enforced by the checker.
+<assertStmt> ::= "ASSERT" <expr> "NEWLINE" | "ASSERT" <expr> "COMMA" <expr> "NEWLINE"
+
+# The second form is the `else` guard on a discarded value: `save(p) else e: return !e`.
+# The guard exists on a let and on a bare call only: <assignStmt> and <returnStmt> take none
+# ("an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return`").
+# A statement that starts its line is a whole value, so it may be a `recover:` block or a lambda with a
+# block body; both end at their DEDENT. A multi-line `match` at the start of a line is <matchStmt>.
+<exprStmt> ::= <expr> "NEWLINE" | <expr> <elseGuard> | <recoverBlock> | <recoverBlock> <elseGuard> | <blockLambda>
+
+# ===== blocks =====
+# Indented block: ':' NEWLINE INDENT stmts DEDENT. Inline block: ':' followed by ONE simple
+# statement on the same line (its NEWLINE terminates the line). Inline bodies exclude compound
+# statements, so `if a: if b: x` cannot parse inline — a trailing `else` would be ambiguous.
+# An inline body is exactly ONE <inlineStmt>, which is <simpleStmt> without a guard after a block
+# value: a block expression ends at its DEDENT, and a dedented `else` there belongs to the header
+# that starts the line, not to the inline statement. `fn name`, `parallel:`, `wait:`, `spawn:` and both
+# `defer` forms need an indented line. A closure literal (`fn(x): x`) and `spawn f()` are simple.
+# A `<fnDecl>` inline body may still be an `<ifExpr>` (via `<exprStmt>`): `fn f(n): if n > 0: 1 else: 2`;
+# `else` is required there, so it is an expression, not a nested statement block.
+# An inline body that starts with `if` is the one-line `if … else` expression statement (the <ifExpr>
+# in an <exprStmt>); one that starts with a multi-line `match` or a `recover:` block is a block value,
+# legal only as the body of an inline `fn` (<fnBlock>).
+<block> ::= "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
+          | "COLON" <inlineStmt>
+<inlineStmt> ::= <plainLet> | <letLhs> <expr> <elseGuard> | <plainStmt> | <expr> "NEWLINE" | <expr> <elseGuard> | <blockLambda>
+# The body of a `fn` declaration: a block, or a block value written after the `:` of an inline body
+# (`fn g() -> int: match n:` and its arms on the next lines). An inline fn body starts a whole value.
+<fnBlock> ::= <block> | "COLON" <blockValue>
+
+# ===== declarations =====
+# An omitted "ARROW" <type> means "returns nothing" for a block body, and "the type of the one
+# expression" for an inline expression body. Param types remain required.
+# A MULTILINE body is a sequence of STATEMENTS: its return type comes from the body's `return`s
+# (None when no value is returned), and a DECLARED non-void "ARROW" <type> whose multiline body can
+# fall off the end without a value `return` is rejected (add a `return`).
+# The INLINE-expr body (`<block> ::= COLON <simpleStmt>` where the simpleStmt is a bare exprStmt)
+# IMPLICITLY RETURNS that expression — exactly like a closure `fn(x): expr`. So `fn a(): 10` infers
+# `-> int`, and `fn a() -> int: 10` is valid (the expr is the implicit return, so the fall-off check
+# does not fire). An inline NON-expr statement (`fn a(): x = 5`, `fn a(): return e`) is not an
+# implicit return. A declaration with no "ARROW" infers its type and is exempt from the fall-off check.
+# A function may carry generic type parameters after its name: `fn max[T: Comparable](…)`. The
+# optional bound names a protocol the instantiating type must structurally satisfy. A generic fn may
+# ALSO carry a `where T: Bound, …` clause after the return type (an alternative spelling of the same
+# bounds, merged into the matching type parameter by the checker) — see <whereClause>.
+<fnDecl> ::= "FN" "IDENT" "LPAREN" "RPAREN" <fnBlock>
+           | "FN" "IDENT" "LPAREN" <params> "RPAREN" <fnBlock>
+           | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> <fnBlock>
+           | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> <fnBlock>
+           | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" <fnBlock>
+           | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" <fnBlock>
+           | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <fnBlock>
+           | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <fnBlock>
+           | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" <whereClause> <fnBlock>
+           | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" <whereClause> <fnBlock>
+           | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <whereClause> <fnBlock>
+           | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> <fnBlock>
+
+# A `where T: Bound, U: Add + Mul, …` clause: a comma-separated list of `IDENT : bound (+ bound)*`
+# entries, reusing <boundList>. A bound is required: `where T:` and `where T, U: Eq` are rejected
+# ("a `where` entry needs a bound (`where T: Proto`)"). Attaches after a fn/native-fn
+# signature; the checker merges each entry's bounds into the matching declared type parameter.
+# A bound name is normally a protocol; a SCALAR TYPE name (`int`/`float`/`bool`/`str`/`bytes`/
+# `bytearray`/`None`) is instead an EQUALITY constraint — `T` must be exactly that scalar (it takes no
+# type args). Used by `Channel[T].trip()`'s `where T: bool`.
+<whereClause> ::= "WHERE" <whereList>
+<whereList>   ::= <whereEntry> | <whereEntry> "COMMA" <whereList>
+<whereEntry>  ::= "IDENT" "COLON" <boundList>
+# A `test` modifier before `fn` marks a test (`chezzi test` discovers it). A free `test fn` is an
+# independent test (no params, returns nothing); a `test fn name(self)` in a struct is a suite test.
+# The no-params/only-self + returns-nothing shape is enforced by the checker, not the grammar.
+<testFnDecl> ::= "TEST" <fnDecl>
+
+# A parameter may carry a default value (`x: int = expr`). Free `fn` declarations and struct methods
+# accept it; closures and protocol signatures reject it. The default may be any expression that does
+# not reference another parameter (a desugar-pass rule). A NON-LITERAL default is compiled once, as a
+# hidden zero-arg fn in the module that DECLARES it, and evaluated in that module's scope on every
+# omitting call — including when the calling module cannot name the definer, which the call site
+# reaches by a direct call-time reference rather than an import. The desugar-pass rules that follow
+# are `?` may not propagate out of it, and a default that needs its own value is a cycle error.
+# These are rules the permissive grammar does not model.
+# An optional trailing comma before the closing `)` is permitted (`fn g(a, b,)`).
+<params> ::= <param> | <param> "COMMA" | <param> "COMMA" <params>
+# A leading `...` marks a VARIADIC param (`fn f(...xs: T)`) — it collects surplus trailing positional
+# args into a `List[T]`; everything after it is keyword-only. Parser-level rules the permissive grammar
+# does not model: at most one variadic, it must carry an element type, it may not carry a default, and
+# it is legal only where defaults are (free fns / methods / native decls — not closures / extern).
+<param>  ::= "IDENT" | "IDENT" "COLON" <type>
+           | "IDENT" "ASSIGN" <valueExpr> | "IDENT" "COLON" <type> <typeAssign> <valueExpr>
+           | "DOTDOTDOT" "IDENT" "COLON" <type>
+
+# Generic type parameters on a fn/struct declaration: `[T]`, `[T: Comparable]`, `[A, B]`, or a
+# parameterized bound `[S: Iterator[T]]` (only `Iterator`/`Iterable` give their type args meaning).
+<typeParams>    ::= "LBRACKET" <typeParamList> "RBRACKET"
+<typeParamList> ::= <typeParam> | <typeParam> "COMMA" <typeParamList>
+<typeParam>     ::= "IDENT" | "IDENT" "COLON" <boundList>
+<boundList>     ::= <bound> | <bound> "PLUS" <boundList>
+# A bound name is bare or a module-qualified dotted path (`m.Factory`, TICKET-173). The last segment
+# is the protocol; the rest is the module: its bound name (`m`), or the full path (`pkg.deep.Factory`)
+# of a module imported un-aliased in this file (TICKET-175).
+<bound>         ::= <dottedPath> | <dottedPath> "LBRACKET" <typeList> "RBRACKET"
+
+<structDecl>    ::= "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <structBody> "DEDENT"
+                  | "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <structBody> "DEDENT"
+# The body is either one-or-more members OR a SOLE `pass` line = an empty struct (zero fields, zero
+# methods; the ctor `S()` takes no args). Encoding `pass` as a whole-body alternative (not folded into
+# <structMember>) is what makes `pass`+member and `pass pass` both parse errors, matching the parser.
+<structBody>    ::= <structMembers> | "PASS" "NEWLINE"
+<structMembers> ::= <structMember> | <structMember> <structMembers>
+<structMember>  ::= <field> | <fnDecl> | <testFnDecl>
+# A field may carry a default (`port: int = 8080`), used to fill omitted args in a constructor call.
+# It is any expression, not only a constant literal, and it obeys the same defining-module rules as a
+# parameter default (see <params> above). The "no required field after a default" rule is
+# parser-level.
+<field>         ::= "IDENT" "COLON" <type> "NEWLINE"
+                  | "IDENT" "COLON" <type> <typeAssign> <value>
+
+# A protocol is a Go-style structural interface: a block of body lines, each EITHER a body-less method
+# signature OR an embed line (M22). An embed line is one-or-more protocol refs joined by `+`
+# (`Add + Sub`, `Iterator[T]`) — it pulls in those (super-)protocols' requirements. Embeds and `fn`
+# sigs interleave in any order; a body of only embed lines is a bundle (`Arithmetic: Add + Sub + Mul +
+# Div`). A type satisfies the protocol by satisfying every embed (transitively) AND every own method.
+# It may carry type parameters (`protocol Container[T]:`); a bound supplies concrete args
+# (`[X: Container[int]]`). An embed ref reuses <boundList>/<bound>.
+<protocolDecl> ::= "PROTOCOL" "IDENT" "COLON" "NEWLINE" "INDENT" <protoBody> "DEDENT"
+                 | "PROTOCOL" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <protoBody> "DEDENT"
+# A SOLE `pass` line = an empty protocol (zero methods, zero embeds): an accept-all TOP type
+# (structural ⇒ every type satisfies it, like the reserved `Any`). As with <structBody>, `pass` is a
+# whole-body alternative so `pass`+member and `pass pass` are parse errors, matching the parser.
+<protoBody>    ::= <protoLines> | "PASS" "NEWLINE"
+<protoLines>   ::= <protoLine> | <protoLine> <protoLines>
+<protoLine>    ::= <fnSig> | <embedLine>
+<embedLine>    ::= <boundList> "NEWLINE"
+<fnSig>        ::= "FN" "IDENT" "LPAREN" "RPAREN" "NEWLINE"
+                 | "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
+                 | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
+                 | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+
+# A dynamic C-ABI FFI block: a body-less list of C function signatures bound to a shared library
+# (`extern "libc":` — the string is a literal; `libc`/`libm` are logical aliases the loader resolves
+# per platform, any other string is a verbatim dlopen name). Each `fn` becomes a module-global
+# callable dispatched via dlopen+libffi. The production itself is unchanged.
+# v1 marshals scalars (int/float/bool/str→char*), fixed-width ints (int8..uint64), opaque `ptr`
+# (↔ void*), C `float` (`float32`), and a struct by value (a `struct` <type> named in an extern sig,
+# nested to any depth) — all are ordinary <type> forms recognized only inside an extern sig.
+<externDecl> ::= "EXTERN" "STR" "COLON" "NEWLINE" "INDENT" <externFns> "DEDENT"
+              | "EXTERN" "RAWSTR" "COLON" "NEWLINE" "INDENT" <externFns> "DEDENT"
+<externFns>  ::= <externFn> | <externFn> <externFns>
+<externFn>   ::= "FN" "IDENT" "LPAREN" "RPAREN" "NEWLINE"
+              | "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
+              | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
+              | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+              | "FN" "IDENT" "LPAREN" <cVarParams> "RPAREN" "NEWLINE"
+              | "FN" "IDENT" "LPAREN" <cVarParams> "RPAREN" "ARROW" <type> "NEWLINE"
+# C varargs (`fn printf(fmt: str, ...) -> int`): a bare `...` as the LAST extern param. Each call's
+# surplus args are C variadic args. Legal only in an extern fn; the parser rejects it elsewhere.
+<cVarParams> ::= "DOTDOTDOT" | <param> "COMMA" <cVarParams>
+
+# `native fn`/`native ctor` — a body-less universe-builtin SIGNATURE, PRELUDE/STD-ONLY (the checker
+# rejects it in a user module) and TOP-LEVEL-only. The body is bound natively (name-keyed dispatch);
+# the front-end reads only the signature. `native fn` is a first-class function intrinsic; `native
+# ctor` a non-first-class scalar/type constructor. `ctor` is a plain IDENT (not a keyword). An
+# UNANNOTATED param = dynamic ("accepts anything"); a missing `-> ret` = native-controlled/never.
+# The universe builtins ord/chr/panic/int/float/str/bytes/bytearray are declared this way in
+# std/prelude.chz. (`ctor` shows as IDENT below; the checker enforces the exact spelling.)
+<nativeDecl>  ::= "NATIVE" <nativeHead> "IDENT" "LPAREN" "RPAREN" "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" "RPAREN" "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+               | "NATIVE" <nativeHead> "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+<nativeHead>  ::= "FN" | "IDENT"
+
+# `native struct` — the TYPE-level analog of `native fn`/`native ctor` (phase 4a). A body-less
+# `native struct NAME[T…]:` declares a native type's checker SIGNATURE (its field layout + method
+# table) in Chezzi; the runtime layout + method dispatch stay native (name-keyed). PRELUDE/STD-ONLY
+# (the checker rejects it in a user module) and TOP-LEVEL-only. The body is a sequence of members, each
+# a field (`IDENT COLON <type>`, no `= default` — a native layout carries no default) OR a bodyless
+# `native fn` INSTANCE method (phase 4c). A `native fn` method MUST declare a leading bare `self` as
+# its first parameter (mirroring a user-struct method; harvest strips it) — a self-less body `native
+# fn` is a parse error (the form is reserved for a future native static method). A plain `fn`/`test`
+# method (with a body) is a parse error. A method sig may reference the struct's type params
+# (`native fn get(self) -> T`), e.g. `std/concurrency.chz`'s `Shared[T]`. A `native struct` maps
+# ADDITIVELY onto an EXISTING reserved type (its method table only, never a fresh nominal struct): the
+# import-gated opaque handles (`Shared`/`Socket`/…) AND the always-in-scope UNIVERSE containers
+# (`std/prelude.chz`'s `List[T]`/`Map[K: Hashable + Eq, V]`/`Set[T: Hashable + Eq]`, phase 5a) keep
+# resolving to `Ty::List`/`Ty::Map`/`Ty::Set`/etc — literal syntax + turbofish ctor stay compiler-wired.
+# A type param may carry a MULTI-bound (`Map[K: Hashable + Eq, V]`, `<boundList>`) via `<typeParams>`.
+<nativeStructDecl> ::= "NATIVE" "STRUCT" "IDENT" "COLON" "NEWLINE" "INDENT" <nativeStructMembers> "DEDENT"
+                     | "NATIVE" "STRUCT" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <nativeStructMembers> "DEDENT"
+<nativeStructMembers> ::= <nativeStructMember> | <nativeStructMember> <nativeStructMembers>
+<nativeStructMember> ::= <nativeFieldDecl> | <nativeMethodDecl>
+<nativeFieldDecl>  ::= "IDENT" "COLON" <type> "NEWLINE"
+# A native instance method: `<params>` must begin with the bare receiver `self` (checker/parser rule,
+# not expressible in the grammar); harvest drops it so the recorded sig is the call-arg shape.
+# A native method may declare its OWN generic params after the name (`native fn map[U](self, …)`);
+# these are the method's own `[U]`, distinct from the enclosing native struct's `[T]`, and the harvest
+# routes the sig through the generic-method inference path (e.g. `List.map`/`fold`/`sort_by_key`).
+<nativeMethodDecl> ::= "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+                     | "NATIVE" "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> "NEWLINE"
+
+# `native enum` — the ENUM analog of `native struct` (phase 5b). A body-less `native enum NAME[T…]:`
+# declares a RESERVED builtin enum's variant SHAPE (variant names + payload types) in Chezzi; it maps
+# ADDITIVELY onto an EXISTING reserved type (`Ty::Option`/`Ty::Result`), never a fresh nominal enum, and
+# the `?` operator / exhaustive `match` / top-level error propagation / `?x`/`!e`/`None`
+# construction all stay Rust-wired (the decl is a drift-guarded shape MIRROR). PRELUDE/STD-ONLY (the
+# checker rejects it in a user module) and TOP-LEVEL-only. The body is its variants (`<variant>` — an
+# IDENT with an optional `(typeList)` payload), optionally followed by body-less `native fn` methods
+# (variants must precede methods, mirroring `<enumDecl>`); a plain `fn`/`test` method is a parse error.
+# A `native fn` method MUST declare a leading bare `self` as its first parameter (harvest strips it) — a
+# self-less body `native fn` is a parse error. The only native enums are `std/prelude.chz`'s `Option[T]`
+# (`Some(T)`/`None`) and `Result[T, E]` (`Ok(T)`/`Err(E)`). A type param may carry a bound via
+# `<typeParams>`.
+<nativeEnumDecl> ::= "NATIVE" "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <nativeEnumMembers> "DEDENT"
+                   | "NATIVE" "ENUM" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <nativeEnumMembers> "DEDENT"
+<nativeEnumMembers> ::= <nativeVariants> | <nativeVariants> <nativeEnumMethods>
+<nativeVariants> ::= <nativeVariant> | <nativeVariant> <nativeVariants>
+<nativeVariant> ::= <variant> | "NONEKW" "NEWLINE"
+<nativeEnumMethods> ::= <nativeMethodDecl> | <nativeMethodDecl> <nativeEnumMethods>
+
+# A `native type` decl (TICKET-218) — a bodyless type export of a std module. PRELUDE/STD-ONLY (the
+# checker rejects it in a user module) and TOP-LEVEL-only. With no `= <type>` it is an opaque handle
+# (`std/ffi.chz`'s `ptr`); `= int` / `= float` declares a C width the program sees as that scalar
+# (`int8`..`uint64`, `float32`). The checker rejects any other underlying type.
+<nativeTypeDecl> ::= "NATIVE" "TYPE" "IDENT" "NEWLINE"
+                   | "NATIVE" "TYPE" "IDENT" "ASSIGN" <type> "NEWLINE"
+
+# An enum body is its variants, optionally followed by methods (`fn` only — unlike a struct, an enum
+# may NOT carry `test fn`: enum test suites aren't wired, so the parser rejects them).
+# Methods must come AFTER all variants (the parser rejects a variant after a method).
+<enumDecl> ::= "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <enumMembers> "DEDENT"
+            | "ENUM" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <enumMembers> "DEDENT"
+<enumMembers> ::= <variants> | <variants> <enumMethods>
+<enumMethods> ::= <enumMethod> | <enumMethod> <enumMethods>
+<enumMethod>  ::= <fnDecl>
+<variants> ::= <variant> | <variant> <variants>
+<variant>  ::= "IDENT" "NEWLINE"
+             | "IDENT" "LPAREN" <typeList> "RPAREN" "NEWLINE"
+
+# A transparent type alias: `type Name = <type>`. `Name` is interchangeable with the aliased type.
+<typeAliasDecl> ::= "TYPE" "IDENT" "ASSIGN" <type> "NEWLINE"
+
+# ===== control flow =====
+<ifStmt> ::= "IF" <expr> <ifBlock>
+           | "IF" <expr> <ifBlock> <elseChain>
+# The body of an `if` / `elif`. On the line of an inline body a bare `else:` or `elif` after its
+# one statement belongs to the `if`, so that statement takes no bare-`else:` guard (<ifLineStmt>
+# is <inlineStmt> without it); `else e:` stays a guard (<errGuard>). After a block value the
+# statement takes no guard at all: a dedented `else` belongs to the `if`. A nested block on the line
+# (a `recover:` body, a guard body) is a <block> and keeps its own `else:` guard. `if c: a() else:
+# b()` on one line is not an <ifStmt>: it is the <ifExpr> in an <exprStmt>, value discarded, and
+# each branch is an expression. A one-line `elif` body ends its line.
+<ifBlock> ::= "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
+            | "COLON" <ifLineStmt>
+<ifLineStmt> ::= <plainLet> | <letLhs> <expr> <errGuard> | <plainStmt> | <expr> "NEWLINE" | <expr> <errGuard> | <blockLambda>
+# zero+ `elif` branches, optionally a final `else`; at least one clause here.
+<elseChain> ::= <elseIf> | <elseFinal> | <elseIf> <elseChain>
+<elseIf>    ::= "ELIF" <expr> <ifBlock>
+<elseFinal> ::= "ELSE" <block>
+
+<forStmt>   ::= "FOR" "IDENT" "IN" <expr> <block>
+            | "FOR" <bindList> "IN" <expr> <block>
+            | "FOR" <groupedName> "IN" <expr> <block>
+<whileStmt> ::= "WHILE" <expr> <block>
+
+# Concurrency (C1): a `parallel:` nursery and the two `spawn` forms. `parallel:` and the block form
+# of `spawn` are block-ending (no trailing NEWLINE), hence compound. The call form of `spawn` is a
+# simple statement (it consumes its NEWLINE), so it is legal as an inline body: `if c: spawn f()`.
+# The call-only restriction on the call form's expression and the "spawn only inside a parallel:"
+# rule are enforced by the parser/checker, not the grammar.
+<parallelStmt> ::= "PARALLEL" <block>
+<spawnStmt>    ::= "SPAWN" <block>
+<spawnCallStmt> ::= "SPAWN" <expr> "NEWLINE"
+
+# Concurrency (C6d): `wait:` — Chezzi's `select`, racing channel `recv`s AND `send`s. A recv-arm is
+# `<target> (":=" | "=") <chanExpr> ".recv()" <block>`; a SEND-arm is a bare `<chanExpr> ".send(" v ")"
+# <block>` (no `:=`/`=`); the optional `else:` arm is the non-blocking fallback. The grammar accepts any
+# bare `<expr> <block>` for a send-arm — the "send RHS must be `chan.send(value)`" rule (and the recv
+# rules "RHS is a bare `.recv()`", "`:=` LHS is a name / `=` LHS is an lvalue", "`else` is last",
+# "≥1 arm") are enforced by the parser/checker, not the grammar (like `spawn`'s call-only restriction).
+# Selection is deterministic SOURCE ORDER (first ready arm wins) — Chezzi's one principled divergence
+# from Go's random `select` fairness, required for serial == M:N parity.
+<waitStmt> ::= "WAIT" "COLON" "NEWLINE" "INDENT" <waitArms> "DEDENT"
+<waitArms> ::= <waitArm> | <waitArm> <waitArms>
+<waitArm>  ::= <expr> "WALRUS" <expr> <block>
+             | <bindList> "WALRUS" <expr> <block>
+             | <groupedName> "WALRUS" <expr> <block>
+             | <expr> "ASSIGN" <expr> <block>
+             | <expr> <block>
+             | "ELSE" <block>
+
+<matchStmt> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <arms> "DEDENT"
+<arms>      ::= <arm> | <arm> <arms>
+# An arm may carry an optional `if <expr>` guard: the arm matches only if the pattern binds AND the
+# guard (a bool, evaluated with the pattern's bindings in scope) is true.
+<arm>       ::= <pattern> <block>
+                | <pattern> "IF" <expr> <block>
+# A top-level arm pattern: one-or-more primaries joined by "|" (BITOR) — an or-pattern matches if
+# ANY alternative matches (first match wins). A single primary parses unchanged. Every alternative
+# must bind the same variables (checker-enforced). A primary: a bare "IDENT" is a BINDING (or, for the
+# carrier pattern head, a variant); a QUALIFIED "IDENT" "DOT" "IDENT" names a user variant
+# (nullary, or with "LPAREN" a payload-carrying one); "(" … ")" a tuple pattern; an int/str/bool
+# literal; or a half-open integer range "INT" ".." "INT" (matches `start <= v < end`) or an inclusive
+# one "INT" "..=" "INT" (matches `start <= v <= end`). Sub-patterns
+# nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>. The SAME
+# `"IDENT" "LPAREN" <subpatterns> "RPAREN"` primary ALSO destructures a USER STRUCT positionally when
+# the scrutinee is that struct type (L2 — `Point(x, y)` binds the fields in declaration order). A
+# module-qualified struct pattern `geo.Point(x, y)` (the whole-module-import spelling) reuses the same
+# `"IDENT" "DOT" "IDENT" "LPAREN" …` production as a qualified variant; the productions already admit
+# both, so only the disambiguation is checker-side (module-qualified struct vs `Enum.Variant`).
+<pattern>     ::= <patternPrimary>
+                | <patternPrimary> "BITOR" <pattern>
+# A leading "IDENT" "DOT" "IDENT" is a QUALIFIED variant `Enum.Variant`. User variants are scoped
+# under their enum (two enums may share a variant name) and MUST be written qualified; the checker
+# rejects a bare user-variant name. Resolution keys on the `(enum, variant)` pair. (Built-in
+# The carrier patterns `?v` / `!e` / `None` are <carrierPattern>.) An OPTIONAL leading module qualifier
+# `module.Enum.Variant` ("IDENT" "DOT" "IDENT" "DOT" "IDENT") mirrors module-qualified construction
+# (`geo.Color.Red`): the module binder is the bound module name (last path segment or `as` alias),
+# validated by the checker (module bound, owns the enum) then dropped — runtime keys on the same
+# `(enum, variant)` identity as the bare/from-import form. With four or more segments
+# (`pkg.deep.Color.Red`) the last two are the enum and the variant, and the rest is the full path of
+# a module imported un-aliased in this file (TICKET-175).
+<patternPrimary> ::= "IDENT"
+                | "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT"
+                | "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath>
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
+                | <tuplePattern>
+                | <carrierPattern>
+                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
+                | "INT" "DOTDOT" "INT"
+                | "INT" "DOTDOTEQ" "INT"
+# A leading "MINUS" makes the int literal / range bound negative (int-only — there is no float
+# pattern, so a "MINUS" before a float is a parse error, exactly like a bare float). Either range
+# bound may independently be negative (`-10..-5`, `-10..5`); the grammar also accepts an empty
+# range such as `0..-5`, which the checker rejects.
+                | "MINUS" "INT"
+                | "MINUS" "INT" "DOTDOT" "MINUS" "INT"
+                | "MINUS" "INT" "DOTDOT" "INT"
+                | "INT" "DOTDOT" "MINUS" "INT"
+                | "MINUS" "INT" "DOTDOTEQ" "MINUS" "INT"
+                | "MINUS" "INT" "DOTDOTEQ" "INT"
+                | "INT" "DOTDOTEQ" "MINUS" "INT"
+# A sub-pattern (nested position) is itself an or-alternation of primaries. A bare "IDENT" here is a
+# binding name OR — when it names a nullary variant of the matched type — a refutable variant match
+# (checker-promoted; e.g. the `Red` in `?Red`). Same surface grammar either way. The `None` in
+# `?None` is the keyword "NONEKW", never a binding: the parser builds the variant pattern itself.
+<subpattern>  ::= <subpatternPrimary>
+                | <subpatternPrimary> "BITOR" <subpattern>
+<subpatternPrimary> ::= "IDENT"
+                | "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT"
+                | "IDENT" "DOT" "IDENT" "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "LPAREN" <subpatterns> "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath>
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" "RPAREN"
+                | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
+                | <tuplePattern>
+                | <carrierPattern>
+                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
+                | "INT" "DOTDOT" "INT"
+<subpatterns> ::= <subpattern> | <subpattern> "COMMA" <subpatterns>
+<tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN"
+# A carrier pattern compares the outer tag and binds inside it: `?v` is a present `T?` or a
+# successful `T!E`, `!e` is the error of a `T!E`. The operand is one sub-pattern primary, so an
+# or-alternation or a tuple payload takes parentheses (`?(a | b)`, `?(a, b)`); `??v` is `?(?v)`.
+<carrierPattern> ::= "QUESTION" <subpatternPrimary>
+                | "BANG" <subpatternPrimary>
+                | "QUESTIONQUESTION" <subpatternPrimary>
+
+# ===== types =====
+# Postfix sugar on a base type: `T?` = an optional T, `T!` = T or an `Error`, `T!E` = T or an E
+# (stacks left-to-right). A parenthesized type is grouping when it has one element (`(T)` ⇒ `T`)
+# and a tuple type when it has two or more (`(T1, T2, …)`).
+# A `IDENT.IDENT` (optionally with `[typeList]`) is a MODULE-QUALIFIED type (`geo.Point`,
+# `geo.Box[int]`): the first ident is a bound module name (the same name `geo.func()` uses), the
+# second is a type in that module. Types are module-scoped — a type declared in one module is
+# reachable elsewhere only via import (qualified `m.Type` or bare after `import Type from m`). A
+# longer path (`pkg.deep.Point`) names the module by its full path: the last segment is the type,
+# and the rest must be a module imported un-aliased in this file (`import pkg.deep`, TICKET-175).
+<type>     ::= "IDENT" | "NONEKW" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
+             | "IDENT" "DOT" <dottedPath> | "IDENT" "DOT" <dottedPath> "LBRACKET" <typeList> "RBRACKET"
+             | "FN" "LPAREN" "RPAREN" "ARROW" <type>
+             | "FN" "LPAREN" <fnParamList> "RPAREN" "ARROW" <type>
+             | "LPAREN" <typeList> "RPAREN"
+             | <type> "QUESTION" | <type> "QUESTIONQUESTION" | <type> "BANG" | <type> "BANG" <type>
+             # Prefix `!E` is `None!E`, a bare `!` is `None!`: a fallible call with no value.
+             | "BANG" | "BANG" <type>
+<typeList> ::= <type> | <type> "COMMA" <typeList>
+# A `fn(...)` TYPE parameter may carry an OPTIONAL Swift-style LABEL (`IDENT ":"`) before its type
+# (`fn(name: str, greeting: str) -> None`), enabling keyword arguments through a function VALUE
+# (`g := greet; g(name="Bob")`). Labels are SURFACE-ONLY: `fn(str)->None` and `fn(name:str)->None` are
+# the same type (mutually assignable). A bare param (no label) is still valid.
+<fnParamList> ::= <fnParam> | <fnParam> "COMMA" <fnParamList>
+<fnParam>     ::= <type> | "IDENT" "COLON" <type>
+
+# One bracket after a postfix head (TICKET-222): `head[X…]` is ONE node carrying every reading that
+# parses — the type list by the real type grammar (`Map[str, int]`, `(int, str)`, `fn(int) -> int`,
+# `lib.Bx[int]`, `int?`; only on an IDENT or non-tuple field head) and the subscript by the
+# expression grammar. The parser never chooses: the checker picks a type application when the head
+# names a generic item or a type (`idt[(int, str)]`, `Pair[int, str].Both(5)`, `Bx[int].make`),
+# else the index (`xs[i]`, `K := 1; fs[K](10)`). A type-only bracket on a value is rejected (`a
+# subscript takes an expression, found the type '…'`, or `… one index, found N`).
+<bracket> ::= <typeList> | <subscript>
+# A type list needs a name head: on any other head (`1[T, U]`, `(1, 2)[int, str]`) the bracket is
+# a <subscript> only ("a type list in brackets needs a name before the '['").
+<typeHead> ::= "IDENT" | <postfix> "DOT" "IDENT"
+
+# ===== expressions (precedence cascade, loosest -> tightest) =====
+<expr>     ::= <pipeExpr>
+# pipe `|>` (M6) is the loosest operator: it threads its left value as the first argument of the
+# call on its right, so the right side must end in a call. Left-associative. (The hand parser
+# desugars `a |> f(x)` to `f(a, x)` at parse time.)
+# LAYOUT CONTINUATION (lexer, not grammar): a line whose first token is `|>` CONTINUES the previous
+# logical line — the lexer emits no NEWLINE/INDENT/DEDENT for it, so a multi-line chain
+# (`xs\n    |> f()\n    |> g()`) reaches the parser as the single token stream `xs |> f() |> g()`
+# and needs no production of its own. A TRAILING `|>` (line ending in `|>`) is NOT a continuation:
+# it stays a parse error. Only the exact two-char `|>` continues (`|`, `||`, `|=` do not).
+# The offside rule still binds: the `|>` line must be indented at least as deep as the currently
+# open block. A SHALLOWER `|>` line dedents out of that block (and is then a parse error) — it is
+# never absorbed into the body it sits outside of.
+<pipeExpr> ::= <orExpr> | <pipeExpr> "PIPE" <pipeCall>
+<pipeCall> ::= <postfix> "LPAREN" "RPAREN" | <postfix> "LPAREN" <exprList> "RPAREN"
+<orExpr>   ::= <andExpr> | <orExpr> "OR" <andExpr>
+<andExpr>  ::= <notExpr> | <andExpr> "AND" <notExpr>
+# `not` (gap): sits between `and` and the comparisons, matching Python — `not x in xs` is
+# `not (x in xs)`, and `1 + not y` is a parse error (`not` no longer reaches into the unary tier).
+<notExpr>  ::= <cmpExpr> | "NOT" <notExpr>
+# TICKET-077: all seven comparisons (`==`/`!=`/`in`/`<`/`<=`/`>`/`>=`) share ONE precedence level —
+# this production is left-recursive over that shared level, same as any other. What the BNF cannot
+# express: they CHAIN, Python-style. `a < b == c` means `a < b and b == c`, with `b` evaluated
+# exactly once and the chain short-circuiting at the first false link; `(a < b) == c` (parenthesized)
+# stays two ordinary comparisons instead. See `docs/reference/syntax.md` §4 for the semantic rule.
+<cmpExpr>  ::= <rangeExpr> | <cmpExpr> <cmpOp> <rangeExpr>
+<cmpOp>    ::= "EQEQ" | "NOTEQ" | "IN" | "LT" | "LTEQ" | "GT" | "GTEQ"
+# Bitwise / shift cascade (gap #13), Python's relative order: `|` looser than `^` looser than `&`
+# looser than the shifts, which sit just above addition. Int-only on int operands; `| & ^` ALSO do set
+# algebra (union/intersection/symmetric-difference) on two `Set[T]` (gap #3). `<< >>` stay int-only.
+# (Type-directed by the checker; same tokens, no grammar change.)
+<bitOrExpr> ::= <bitXorExpr> | <bitOrExpr> "BITOR" <bitXorExpr>
+<bitXorExpr>::= <bitAndExpr> | <bitXorExpr> "CARET" <bitAndExpr>
+<bitAndExpr>::= <shiftExpr>  | <bitAndExpr> "AMP" <shiftExpr>
+<shiftExpr> ::= <addExpr>  | <shiftExpr> "SHL" <addExpr> | <shiftExpr> "SHR" <addExpr>
+# TICKET-253: a range is a VALUE of the prelude struct `Range`. `..` and `..=` bind below `|` and
+# above the comparisons and `in` (`x in 0..3`, `0..3 == 0..3`, `0..1 << 2` is `0..(1 << 2)`), and do
+# not chain. Either bound may be omitted (`..b`, `a..`, `..`); `..=` needs an end. A bound is ended by
+# a token that cannot start an expression (the parser's `token_ends_range`); the BNF recognizes the
+# open forms without that lookahead. The literal has no step: `Range(a, b, step)` builds one.
+<rangeExpr>::= <bitOrExpr>
+             | <bitOrExpr> "DOTDOT" <bitOrExpr>
+             | <bitOrExpr> "DOTDOTEQ" <bitOrExpr>
+             | <bitOrExpr> "DOTDOT"
+             | "DOTDOT" <bitOrExpr>
+             | "DOTDOTEQ" <bitOrExpr>
+             | "DOTDOT"
+<addExpr>  ::= <mulExpr> | <addExpr> "PLUS" <mulExpr> | <addExpr> "MINUS" <mulExpr>
+<mulExpr>  ::= <coalesceExpr>
+             | <mulExpr> "STAR" <coalesceExpr> | <mulExpr> "SLASH" <coalesceExpr> | <mulExpr> "PERCENT" <coalesceExpr>
+# null-coalescing `??` (gap): binds tighter than every binary operator and looser than unary `-`
+# and the postfix chain. RIGHT-associative (`a ?? b ?? c` = `a ?? (b ?? c)`) — modeled by
+# right-recursion. `??` takes a `T?` OR a `T!E` (TICKET-039); it SURVIVES desugar and the
+# CHECKER picks `lower_carrier_option` or `lower_carrier_result_coalesce` from the operand's type
+# (the `T!E` form discards the error, like Rust's `unwrap_or`).
+<coalesceExpr> ::= <unary> | <unary> "QUESTIONQUESTION" <coalesceExpr>
+<unary>    ::= <postfix> | "MINUS" <unary> | "BANG" <unary> | "QUESTION" <unary> | "QUESTIONQUESTION" <unary>
+
+# postfix chain: calls, field access, indexing, the `?` try operator, explicit call-site type
+# arguments `name[Type, …](args)` (JSON's `json.decode[Type](arg)` is one of these: an ordinary
+# member call the checker resolves, TICKET-187 — the grammar has no decode form of its own). The
+# `[types](` form is parsed speculatively — when the callee is a bare IDENT, OR a `DOT IDENT` field
+# over ANY receiver (`recv.method[Type](args)` on any postfix receiver, not just a bare ident — the
+# broadened steal), and the `[types](` shape is present; otherwise `LBRACKET … RBRACKET` is plain
+# indexing. Uniform rule: `recv.name[X](args)` always parses as a method turbofish on any receiver;
+# index-then-call of a fn-valued field therefore requires parens — `(recv.field[k])(args)`.
+#
+# DECLARATION-SITE TURBOFISH (the whole rule: explicit type args go at the site the generic is
+# DECLARED). For a generic TYPE (enum variant ctor or static method) they go ON THE TYPE, uniformly:
+#   `Type[T, …].Variant(args)` / `Type[T, …].Variant`   — enum-variant constructor / nullary value
+#   `Type[T, …].method(args)`                            — generic static (associated) method
+# The OLD gliding form `Enum.Variant[T](args)` (type args on the VARIANT) is REMOVED — the checker
+# emits a redirect to the type-side form. STATIC (associated) calls and the type-side turbofish reuse
+# the existing postfix shapes, reinterpreted by the checker/compiler when the head is a known
+# struct/enum TYPE name; the type-argument head is the one `<bracket>` production:
+#   `Type.method(args)`        — `<postfix> "DOT" "IDENT" "LPAREN" <argList>? "RPAREN"` where the
+#                                 leading IDENT is a known struct/enum and `method` is a static method
+#                                 (its first param is not `self` — the "no self ⇒ static" rule). For
+#                                 an enum a same-named VARIANT wins (so variant/static names are
+#                                 disjoint, enforced at decl time). The leading IDENT may also be an
+#                                 in-scope TYPE PARAMETER whose bound carries a static requirement
+#                                 (`T.default()` inside `fn reset[T: Default](…)`, M24) — SAME
+#                                 production, no new syntax: the checker reinterprets the head and the
+#                                 compiler emits `CallStaticDyn`, which reads the concrete type from
+#                                 the fn's hidden trailing witness parameter. A type parameter
+#                                 SHADOWS a same-named declaration for its whole body in EVERY
+#                                 position — this production, `Type[targ].member` below, the bare
+#                                 `Type(args)` constructor, `Type.Variant`, a same-named function
+#                                 call, and the annotation position (Go's rule; Chezzi has one
+#                                 namespace). Only the static call can then be lowered; the others
+#                                 reject, because a type parameter is erased.
+#   `Type[T, …].member(args)?` — parses as `<postfix> "LBRACKET" <bracket> "RBRACKET" "DOT" "IDENT"
+#                                 ("LPAREN" <argList>? "RPAREN")?`; the bracket keeps its type
+#                                 reading (real parsed types, one or more) beside its index reading,
+#                                 and the checker reads the types because the head names a type.
+#                                 VARIANT-first, else static.
+# The method-level form `Type.method[T](...)` is a MEMBER-level turbofish and is accepted: it pins the
+# member's OWN type args (`Box.make[str]("hi")`), per the declaration-site rule — a type argument is
+# written where its parameter is declared. It composes with the type-level form
+# (`Box[int].make[str](x)`). See `docs/reference/syntax.md` §7a.
+<postfix> ::= <primary>
+            | <postfix> "LPAREN" "RPAREN"
+            | <postfix> "LPAREN" <argList> "RPAREN"
+            | <postfix> "DOT" "IDENT"
+            | <postfix> "DOT" "INT"                         # tuple element: `t.0` (literal index, read-only —
+                                                            # NOT in <lvalue>, and `t[0]` is a type error)
+            # one bracket: a type application (`pair[str, int]`, `idt[fn(int) -> int]`, a type-level
+            # head) or a subscript (an index, or a slice by a `Range` value); its `.member` and
+            # `(args)` attach above.
+            | <postfix> "LBRACKET" <subscript> "RBRACKET"
+            | <typeHead> "LBRACKET" <bracket> "RBRACKET"
+            | <typeHead> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
+            | <typeHead> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
+            # member-side declaration-site turbofish — a method's OWN type args (`xs.map[str](f)`,
+            # `s.first[int, str](1, "x")`). The receiver is ANY postfix expression: a bare ident, a call
+            # result (`W(1).cast[str]("a")`), a field (`h.w.cast[str](x)`), or an index (`xs[0].cast[U](x)`).
+            # The parser steals the type list + arg list whenever the receiver is a member access and the
+            # `[ <typeList> ] (` shape is present (SPECULATIVE: a non-type-then-call subscript such as
+            # `obj.items[0]` or the numeric `arr[0].h[0](x)` backtracks and keeps its plain index meaning).
+            # UNIFORM RULE: `recv.name[X](args)` always parses as a method turbofish on ANY receiver, so
+            # index-then-call of a fn-VALUED field needs parens — `(recv.name[k])(args)` — on any receiver
+            # (this matches the bare-ident receiver, which already required parens). The COMBINED form
+            # `Box[int].make[str](x)` (enclosing-type args from PART 1 + this method `[str]`) likewise
+            # parses through these productions (the receiver `Box[int]` is itself a postfix) and the
+            # CHECKER threads both arg sets; a method turbofish on a generic VARIANT ctor is an error.
+            | <postfix> "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
+            | <postfix> "DOT" "IDENT" "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
+            | <postfix> "QUESTION"
+            # optional chaining `?.` (gap): field, tuple-element, or method call through a CARRIER.
+            # Parsed identically for either carrier — the node survives desugar and the CHECKER picks
+            # the lowering by the operand's TYPE: a `T?` lowers to a `match` (short-circuit +
+            # re-wrap), a `T!E` lowers to `?` then `.` (identical to the spaced `x? .name`).
+            | <postfix> "QUESTIONDOT" "IDENT"
+            | <postfix> "QUESTIONDOT" "INT"
+            | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" "RPAREN"
+            | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" <argList> "RPAREN"
+
+# The inside of a subscript `[ … ]`: one expression. A `Range` value in it (`xs[a..b]`, `xs[2..]`,
+# `xs[..]`, `xs[Range(0, 10, 2)]`) is a slice; any other value is an index or a map key. The colon
+# slice `xs[a:b]`, `xs[a:b:c]` and `xs[::-1]` is removed: the parser reports it as an error that
+# names the replacement (see parser::parse_subscript).
+<subscript> ::= <expr>
+
+# A parenthesized expression is grouping when it holds one expr (`(e)`); a comma makes it a tuple
+# — `(e,)` is a 1-element tuple and `(e1, e2, …)` an N-tuple. The empty `()` is not valid.
+# Collection literals and the parenthesised forms accept ONE optional trailing comma before the
+# closer (`[1, 2,]`, `{1, 2,}`, `{a: 1,}`, `(1, 2,)`). A `(e)` is grouping; a lone `(e,)` (comma
+# then `)`) is a 1-element tuple. Comprehension forms take no trailing comma.
+#
+# A "STR" token is the whole string literal (the lexer has already stripped quotes + resolved
+# backslash escapes). Its `{expr}` / `{expr:spec}` holes — including the Python-style format
+# mini-language after a `:` (see syntax.md §10, implemented in src/fmtspec.rs) — are found by the
+# LEXER while it scans the literal: the hole's code is lexed in place, one bracket deep, with no
+# escape processing, and the first `:` at hole depth starts the spec. The token carries the hole's
+# tokens, the parser parses them as one `<expr>`, so they need NO production here.
+# A "BYTES" token is a whole `b"..."` / `b'...'` byte-string literal (the lexer stripped the `b`
+# prefix + quotes and resolved escapes, incl. `\xHH`; no `\u`, no interpolation — see syntax.md).
+# A "RAWSTR" token is a whole `r"..."` / `r'...'` (or triple `r"""..."""` / `r'''...'''`) raw-string
+# literal: VERBATIM contents (the lexer stripped the `r` prefix + quotes only). Unlike STR there is
+# NO escape processing (`\n` is backslash-n, `\` is a literal backslash) and NO `{expr}` interpolation
+# (braces are literal) — so the lexer never looks for a hole in it. Its type is plain `str`.
+# The short form cannot contain its closing quote; the triple form embeds lone quotes (e.g. JSON).
+<primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW" | "IDENT"
+            | "LPAREN" <expr> "RPAREN"
+            | "RECOVER" "COLON" <expr>
+            | "LPAREN" <expr> "COMMA" "RPAREN"
+            | "LPAREN" <expr> "COMMA" <exprList> "RPAREN"
+            | "LPAREN" <expr> "COMMA" <exprList> "COMMA" "RPAREN"
+            | "LBRACKET" "RBRACKET"
+            | "LBRACKET" <exprList> "RBRACKET"
+            | "LBRACKET" <exprList> "COMMA" "RBRACKET"
+            | "LBRACKET" <expr> <compClauses> "RBRACKET"
+            | "LBRACE" "RBRACE"
+            | "LBRACE" <mapEntries> "RBRACE"
+            | "LBRACE" <mapEntries> "COMMA" "RBRACE"
+            | "LBRACE" <exprList> "RBRACE"
+            | "LBRACE" <exprList> "COMMA" "RBRACE"
+            | "LBRACE" <expr> <compClauses> "RBRACE"
+            | "LBRACE" <mapEntry> <compClauses> "RBRACE"
+            | <closure>
+            | <ifExpr>
+
+# Brace literals: `{}` is the empty map; `{k: v, …}` (entries with COLON) is a map; `{a, b, …}`
+# (bare exprs, no COLON) is a set. The empty set is `Set()`, since `{}` is taken by the map.
+<mapEntries> ::= <mapEntry> | <mapEntry> "COMMA" <mapEntries>
+<mapEntry>   ::= <expr> "COLON" <expr>
+
+# Comprehensions: `[elem for x in it]` (list), `{elem for x in it}` (set), `{k: v for x in it}`
+# (map). One or more `for` clauses (nested/cartesian iteration, first clause outermost — later
+# clauses see earlier clauses' bindings); each clause binds one name (or a tuple target, `for k, (a, b) in m`)
+# and may be followed by zero or more `if` guards (an `if` may follow any clause, even a chain).
+<compClauses> ::= <compClause> | <compClause> <compClauses>
+<compClause>  ::= "FOR" "IDENT" "IN" <expr>
+                | "FOR" "IDENT" "IN" <expr> <compGuards>
+                | "FOR" <bindList> "IN" <expr>
+                | "FOR" <bindList> "IN" <expr> <compGuards>
+                | "FOR" <groupedName> "IN" <expr>
+                | "FOR" <groupedName> "IN" <expr> <compGuards>
+<compGuards>  ::= "IF" <expr> | "IF" <expr> <compGuards>
+
+# Expression-position `match`/`if` (value-producing, distinct from the statement forms above).
+# `matchExpr` arms are value-expressions (not blocks); it is multiline + exhaustive. A simple
+# statement whose value is a `matchExpr` is terminated by the arm block's DEDENT, not a trailing
+# NEWLINE (<value>), so it is not a <primary>. `ifExpr` is inline and requires `else`; the tail may
+# chain `elif` (right-associative), so the final `else:` stays mandatory at the end of the chain.
+<matchExpr> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <exprArms> "DEDENT"
+<exprArms>  ::= <exprArm> | <exprArm> <exprArms>
+<exprArm>   ::= <pattern> "COLON" <value>
+                | <pattern> "IF" <expr> "COLON" <value>
+<ifExpr>    ::= "IF" <expr> "COLON" <expr> <ifExprTail>
+<ifExprTail> ::= "ELSE" "COLON" <expr> | "ELIF" <expr> "COLON" <expr> <ifExprTail>
+# Panic-recovery boundary, block form: runs an indented block and yields `!` (no tail value; the
+# error is a caught runtime fault). Like <matchExpr> it is a whole value (<blockValue>), not a
+# <primary>. The inline form `recover: <expr>` (type `T!`) is a <primary>.
+# A WHOLE VALUE ends a statement: an expression and its NEWLINE, or a block expression, which ends at
+# its DEDENT (the lexer emits no NEWLINE after that DEDENT). A block expression (`match` with arms, or
+# `recover:` with an indented body) is legal only where a whole value starts (TICKET-260, rule U8):
+# the right side of `:=` and `=`, `return`, `yield`, a lambda body, an inline fn body, a field default,
+# a parameter default and a match-expression arm value. It is never an operand, an argument, an
+# element, a parenthesized value, an interpolation hole or an inline `if` body. `x := match n: ...`
+# and `fn g() -> int: match n: ...` are values; `1 + match n: ...` and `f(match n: ...)` are errors.
+<value>       ::= <expr> "NEWLINE" | <blockValue> | <blockLambda>
+# The value at a parameter default or a lambda body: inside brackets nothing ends it with a NEWLINE.
+<valueExpr>   ::= <expr> | <blockValue>
+# A block expression as a whole value; also the head of an `else` guard on a let.
+<blockValue>   ::= <matchExpr> | <recoverBlock>
+<recoverBlock> ::= "RECOVER" "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
+# A lambda whose body is a block value, as a whole value (`f := fn(x): match x: ...`). Inside
+# brackets it is an ordinary <closure>.
+<blockLambda>  ::= <closureHead> <blockValue> | <closureHead> <blockLambda>
+
+<closure> ::= <closureHead> <closureBody>
+<closureHead> ::= "FN" "LPAREN" "RPAREN" "COLON"
+                | "FN" "LPAREN" <params> "RPAREN" "COLON"
+                | "FN" "LPAREN" "RPAREN" "ARROW" <type> "COLON"
+                | "FN" "LPAREN" <params> "RPAREN" "ARROW" <type> "COLON"
+
+# `PASS` is the no-op closure body (`fn(): pass`) — legal ONLY here, never in statement position
+# inside the closure's own body (which is a single expression, not a block).
+<closureBody> ::= <valueExpr> | "PASS"
+
+<exprList> ::= <expr> | <expr> "COMMA" <exprList>
+
+# A call argument list: zero or more positional args, then zero or more named args (`name = expr`).
+# Positional must precede named — `f(y=2, 1)` is rejected by both the grammar and the parser. Used
+# only for ordinary calls; pipe (`|>`) and explicit-type-arg calls take positional <exprList> only.
+# An optional trailing comma is permitted after the final argument (`f(1, 2,)`, `f(x=1,)`).
+<argList>       ::= <posArgList>
+                  | <namedArgList>
+                  | <posArgList> "COMMA" <namedArgList>
+                  | <posArgList> "COMMA"
+                  | <namedArgList> "COMMA"
+                  | <posArgList> "COMMA" <namedArgList> "COMMA"
+<posArgList>    ::= <arg> | <arg> "COMMA" <posArgList>
+<arg>           ::= <expr>
+<namedArgList>  ::= <namedArg> | <namedArg> "COMMA" <namedArgList>
+<namedArg>      ::= "IDENT" "ASSIGN" <arg>

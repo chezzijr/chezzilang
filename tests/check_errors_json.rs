@@ -146,7 +146,7 @@ fn annotated_let_reports_one_diagnostic_per_mistake() {
 }
 
 /// A LEX error carries a real COLUMN through the resolver seam, in JSON and in plain text alike
-/// (`docs/gaps.md` M24-7). The seam used to hardcode `col: 1`, so the LSP squiggle and the JSON
+/// (`docs/contributing/gaps.md` M24-7). The seam used to hardcode `col: 1`, so the LSP squiggle and the JSON
 /// both landed on the start of the line rather than on the offending character.
 #[test]
 fn lex_error_carries_a_real_column() {
@@ -188,7 +188,7 @@ fn lex_error_carries_a_real_column() {
 /// overflow (SIGABRT, exit code None). The `MAX_AST_DEPTH` parser cap + the dedicated front-end
 /// stack turn that into either a clean parse diagnostic (over the cap) or a normal run (under it) —
 /// NEVER a signal kill. Drives the real binary end-to-end (a parser unit test cannot observe the
-/// process abort). See docs/bug-discovery.md (post-parse walker depth axis).
+/// process abort). See docs/contributing/bug-discovery.md (post-parse walker depth axis).
 #[test]
 fn deep_chains_never_signal_crash_the_host() {
     let t = TmpDir::new();
@@ -490,7 +490,7 @@ fn composed_interp_depth_is_bounded_globally() {
     // non-literal default is now a provider, never spliced), so this does not assert a refusal.
     // What it asserts is the line that must never be crossed: it may be
     // accepted, it may be refused, it must NEVER signal-crash the host. See
-    // `desugar::Walker::walk_expr`'s residual note and `docs/gaps.md` W7-50.
+    // `desugar::Walker::walk_expr`'s residual note and `docs/contributing/gaps.md` W7-50.
     let f = 15_990;
     let splice = t.write(
         "interp_default_splice.chz",
@@ -705,7 +705,7 @@ fn errors_json_emits_one_document_on_one_stream() {
     }
 }
 
-/// **W8-15/W8-17(a) — cross-module.** The exact repro from `docs/gaps.md`: a two-module graph where
+/// **W8-15/W8-17(a) — cross-module.** The exact repro from `docs/contributing/gaps.md`: a two-module graph where
 /// the entry only *imports* the module with the actual type error. Before this fix, `line`/`col` were
 /// `core/badmod.chz`'s coordinates with no `file` key at all — a consumer had no way to know that, so
 /// an LSP would underline `app.chz:1:10` (the `import` line) in the WRONG file. `file` must name the

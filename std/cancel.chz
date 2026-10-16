@@ -5,7 +5,7 @@
 # Written entirely in Chezzi over existing primitives: `Shared[bool]` (the manual-cancel bit),
 # `monotonic()` (the deadline, checked AT POLL TIME so it is deterministic on every engine — no
 # background canceller task), and a level-triggered channel for `done()` (`timer(ms)` for a timeout,
-# a `trip()`-able `Channel[bool]` for manual cancel). See docs/concurrency.md §6e.
+# a `trip()`-able `Channel[bool]` for manual cancel). See docs/reference/concurrency.md §6e.
 #
 # Cooperative contract: a token SIGNALS cancellation; it cannot forcibly interrupt. A CPU loop must
 # poll `cancelled()`; an IO loop must `wait:` on `done()`. A self-polling timeout loop stops on time;
@@ -34,7 +34,7 @@
 # `cancelled()` walks O(depth) ancestors and a token encodes O(depth) across the airlock — see §6e
 # for both measured numbers. NOTE the walk is not the whole cost: measured end to end `cancelled()`
 # is QUADRATIC in depth (0.53 µs at depth 0, 178 µs at 100, 2360 µs at 400 — 2026-09-03, release),
-# because the rooted chain is also re-walked by the GC mark pass. `docs/benchmarks.md:1859` records
+# because the rooted chain is also re-walked by the GC mark pass. `docs/contributing/benchmarks.md:1859` records
 # that and its cause; do not quote a per-ancestor constant measured at depth <= 5.
 #
 # The link is LIVE — a parent flip is observed by an already-derived child, including one that crossed
@@ -42,7 +42,7 @@
 # `Shared` flag, which cross as live cores (exactly like the flat token's `flag`). Deadlines inherit
 # TIGHTEST-WINS: a child clamps to the soonest absolute deadline of itself and its ancestors, and
 # `derive()` materialises it into the child's OWN `deadline`, so a timeout needs no cascade at all.
-# See docs/concurrency.md §6e.
+# See docs/reference/concurrency.md §6e.
 import std.time
 # Depend on std.concurrency explicitly (phase 4c-concurrency): the `Shared` name is usable license-free
 # in a stdlib module, but this import makes the file-backed native module a graph DEPENDENCY, so it is

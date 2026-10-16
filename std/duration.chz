@@ -9,7 +9,7 @@
 # `to_string` emits Go's `time.Duration.String()` decimal-seconds shape: "1h30m0s", "1.5s", "250ms",
 # "0s", "-1.5s". `parse` is its inverse and also accepts the looser forms Go accepts ("1h30m", ".5s",
 # "0.25s", unordered/summed units). Round-trips exactly because the source is integer ms (fractions are
-# at most 3 decimals, exact). See docs/stdlib.md §5 for the full contract.
+# at most 3 decimals, exact). See docs/reference/stdlib.md §5 for the full contract.
 
 import std.string as s
 import std.time as time

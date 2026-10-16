@@ -41,7 +41,7 @@ native fn home_dir() -> str?
 # OS bytes, so decoding it would leave a path-returning API through which a U+FFFD path — one that
 # names nothing — is still constructible. `.str()` for display, `.decode()` for an exact `str`.
 # (`home_dir()` stays `str?`: it reads the HostConfig env map, which is a DELIBERATELY lossy
-# surface — see the argv/env decoding rule in docs/stdlib.md.)
+# surface — see the argv/env decoding rule in docs/reference/stdlib.md.)
 native fn _temp_dir() -> bytes
 
 fn temp_dir() -> path.Path:

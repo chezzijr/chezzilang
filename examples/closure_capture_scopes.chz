@@ -1,6 +1,6 @@
 # Closure capture across scopes: capture is UNIFORMLY BY REFERENCE — a closure shares the closest
 # binding of a captured name and sees later writes to it. A function local and a module global both
-# behave the same way here. See docs/syntax.md for the full rule.
+# behave the same way here. See docs/reference/syntax.md for the full rule.
 
 g := 10                          # module global
 

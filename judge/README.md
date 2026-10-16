@@ -1,7 +1,7 @@
 # `judge/` — DSA known-answer bug-finding harness
 
 A third bug-discovery oracle for Chezzi (alongside the panic-fuzzer and the CPython differential —
-see [`docs/bug-discovery.md`](../docs/bug-discovery.md)). It runs hand-written competitive-programming
+see [`docs/contributing/bug-discovery.md`](../docs/contributing/bug-discovery.md)). It runs hand-written competitive-programming
 solutions against **known-correct answers**, so it catches *shared wrongness* that both co-developed
 engines agree on — bugs the differential generator can't reach because it stays in a safe-by-
 construction subset (no overflow, no recursion). The harness itself is written in Chezzi (dogfood).

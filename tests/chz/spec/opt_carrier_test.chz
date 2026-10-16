@@ -9,7 +9,7 @@
 # EVERY case here is an EQUIVALENCE assertion: the `?.` spelling and the `? .` spelling produce the
 # same value. The `? .` half was green before the change, which is exactly what makes the widening
 # testable — a widened acceptance is structurally untested by the suite that passed before it, so
-# the spaced spelling is the oracle (see `docs/gaps.md` W7-43, project memory
+# the spaced spelling is the oracle (see `docs/contributing/gaps.md` W7-43, project memory
 # "a widening is untested by its own suite").
 #
 # a `T?` value semantics for `?.` are UNCHANGED (`?v`/`None` short-circuit, no flattening) — re-pinned

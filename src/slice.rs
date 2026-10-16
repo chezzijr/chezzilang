@@ -131,7 +131,7 @@ pub fn bytearray_repr(bytes: &[u8]) -> String {
 /// something else — a list/tuple/map/set element, a struct field, an enum payload. Top-level
 /// `str(s)` / `print(s)` stay the bare characters, exactly like CPython's `str` vs `repr` split.
 /// Without it, `["a", "b"]` and `["a, b"]` both printed `[a, b]` and `[""]` printed `[]` — different
-/// values with identical output (`docs/gaps.md` §W7-25).
+/// values with identical output (`docs/contributing/gaps.md` §W7-25).
 ///
 /// Quote choice follows CPython: `'` normally, switching to `"` only when the string contains a `'`
 /// and no `"`. Escapes `\\`, `\n`, `\t`, `\r`, the chosen quote, ASCII control characters (`\xHH`),
@@ -144,7 +144,7 @@ pub fn bytearray_repr(bytes: &[u8]) -> String {
 /// matching CPython. **The residual divergence runs the other way:** 4764 codepoints that CPython
 /// escapes as unassigned (`Cn`) print literally here, because rustc's Unicode tables are newer than
 /// the CPython build this was measured against — a Unicode-version skew, not a design choice
-/// (`docs/gaps.md` §W7-25).
+/// (`docs/contributing/gaps.md` §W7-25).
 pub fn str_repr(s: &str) -> String {
     use std::fmt::Write;
     let quote = repr_quote(s.contains('\''), s.contains('"'));

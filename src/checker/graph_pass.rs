@@ -552,7 +552,7 @@ pub(super) fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
 }
 
 /// Editor hover (Tier C): concise one-line `(module, [(fn, doc)])` blurbs for native stdlib module
-/// functions, paraphrased from `docs/stdlib.md §4`. Applied to `FnSig.doc` in `native_module_sig`
+/// functions, paraphrased from `docs/reference/stdlib.md §4`. Applied to `FnSig.doc` in `native_module_sig`
 /// and surfaced verbatim at the `module.fn` hover site. Drift-guarded by `module_fn_docs_all_resolve`
 /// (every listed fn must exist). Coverage is `std.math` / `std.io` / `std.os` for v1; other native
 /// modules are a follow-up (noted in PROGRESS.md) — their fns simply hover doc-less, as before.

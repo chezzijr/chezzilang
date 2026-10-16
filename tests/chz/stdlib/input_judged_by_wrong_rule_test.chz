@@ -1,5 +1,5 @@
 # tests/chz/stdlib/input_judged_by_wrong_rule_test.chz — four std modules judge input by the wrong
-# rule (docs/gaps.md W8-9, W8-38, W8-12, W8-33).
+# rule (docs/contributing/gaps.md W8-9, W8-38, W8-12, W8-33).
 #
 # (a) `duration.parse` bounds by DIGIT COUNT not value: a 12-digit hour count overflows i64 ms but is
 # accepted, while a 13-digit ms count that fits i64 comfortably is rejected.

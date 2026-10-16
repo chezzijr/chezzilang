@@ -218,7 +218,7 @@ pub(super) enum JoinCover {
 /// runtime — and with no parked sibling it hung anyway (the predicate declines, and the joiner's own
 /// `take_runnable` then does the same untimed `cv.wait`). The change therefore narrows to: one
 /// wrong-verdict case becomes a hang. Per this repo's standing rule that a heuristic verdict must
-/// DECLINE rather than emit a confident wrong answer (`docs/gaps.md` W7-12, the `parked-is-not-stuck`
+/// DECLINE rather than emit a confident wrong answer (`docs/contributing/gaps.md` W7-12, the `parked-is-not-stuck`
 /// line of cases), that is the better of two bad outcomes, not a regression to undo. The real fix is
 /// not a joiner loop — it is deciding what the scheduler should do when a worker thread panics at
 /// all, which every `catch_unwind` in this file swallows today and which is a design question wider

@@ -1154,7 +1154,7 @@ fn token_ends_range(t: &Token) -> bool {
     )
 }
 
-/// Map a token to its infix operator and (left, right) binding powers, per `docs/syntax.md` §4.
+/// Map a token to its infix operator and (left, right) binding powers, per `docs/reference/syntax.md` §4.
 /// All operators are left-associative (`right = left + 1`). `None` means "not an infix operator".
 fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
     use BinaryOp::*;

@@ -14,7 +14,7 @@ impl Checker {
     }
 
     /// The value-slot twin of the generic-bound conformance sentence (`satisfies_args`'s `Err`
-    /// string) — TICKET-008 / `docs/gaps.md` W8-16. Called only from an already-failing
+    /// string) — TICKET-008 / `docs/contributing/gaps.md` W8-16. Called only from an already-failing
     /// `assignable` branch, so it cannot change what the checker accepts: it only appends WHY a
     /// value slot rejected a type, when that type was rejected because it fails a protocol.
     /// Empty when `expected` is not a protocol, and empty when `actual` DOES satisfy the
@@ -478,7 +478,7 @@ impl Checker {
         // `(1,2) == (1,2)`, `Some(1) == Some(1)`, `P(1) == P(2)` for a plain struct — every one of
         // them works, while `where T: Eq` used to reject all of them because the grant was the four
         // scalars and nothing else. That is what made `where T: Eq` unwritable and got the first
-        // W7-41 fix reverted (`docs/gaps.md` W7-41). **Rust owns this** — `Vec<i32>`, `(i32,i32)`,
+        // W7-41 fix reverted (`docs/contributing/gaps.md` W7-41). **Rust owns this** — `Vec<i32>`, `(i32,i32)`,
         // `Option<i32>`, `Vec<u8>` and `#[derive(PartialEq, Eq)] struct P` all satisfy `Eq` and all
         // compile under `struct Boxy<T: Eq>` (measured, rustc 1.97.0); only a type with no
         // `PartialEq` at all is `E0277`.

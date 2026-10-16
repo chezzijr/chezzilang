@@ -1,4 +1,4 @@
-# TICKET-146 (docs/gaps.md W14-23): a tuple, `List[T]` and `T?` are Comparable when every
+# TICKET-146 (docs/contributing/gaps.md W14-23): a tuple, `List[T]` and `T?` are Comparable when every
 # element is, lexicographically (Rust's order: `None < ?_`). CPython sorts a list of tuples.
 import std.cmp
 

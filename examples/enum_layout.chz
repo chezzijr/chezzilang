@@ -145,7 +145,7 @@ fn main():
     print(sh)
     nat := [5].pop()              # native int? == ?5
     # `nat == sh` spelled directly is a COMPILE error (`int?` and `Shadow` are provably
-    # disjoint — docs/gaps.md B2), which is the identity enforced one phase earlier. Through the
+    # disjoint — docs/contributing/gaps.md B2), which is the identity enforced one phase earlier. Through the
     # `Any` existential the runtime still answers it: distinct enum types are never equal.
     lhs: Any = nat
     rhs: Any = sh

@@ -24,7 +24,7 @@ pub struct Capture {
     /// WHICH signal (`None` when the child exited normally). `code` alone cannot tell a SIGSEGV —
     /// a real front-end bug — from a SIGKILL, which under this project's mandated
     /// `systemd-run … MemoryMax=6G` scope is the cgroup OOM-killer and implicates nothing
-    /// (CLAUDE.md: "exit 137 = OOM, not a test failure"). See `docs/gaps.md` W7-38; mirrors
+    /// (CLAUDE.md: "exit 137 = OOM, not a test failure"). See `docs/contributing/gaps.md` W7-38; mirrors
     /// `difftest::run::Capture::signal`.
     pub signal: Option<i32>,
 }
@@ -47,7 +47,7 @@ pub enum Outcome {
     /// treat it as FATAL, not silently skip it: a panic-fuzz sweep that never started a child has
     /// proven nothing about the front-end's crash-safety, and reporting that as "0 findings" is a
     /// false negative dressed up as a clean pass. Mirrors `difftest::run::Outcome::HarnessError`
-    /// (`docs/gaps.md` W7-34/W7-35).
+    /// (`docs/contributing/gaps.md` W7-34/W7-35).
     HarnessError(String),
 }
 
@@ -76,7 +76,7 @@ impl Config {
 /// Write the raw candidate bytes to a temp `.chz` file, run `chezzi check <file>` under the
 /// timeout, clean up, and classify. A real timeout is `Outcome::Timeout` (a non-finding); a
 /// harness that could not even start the child (bad staging, spawn failure) is fatal —
-/// `Outcome::HarnessError` — never collapsed into `Timeout` (`docs/gaps.md` W7-35).
+/// `Outcome::HarnessError` — never collapsed into `Timeout` (`docs/contributing/gaps.md` W7-35).
 pub fn run_input(cfg: &Config, input: &[u8]) -> Outcome {
     let dir = std::env::temp_dir().join("chezzi-panicfuzz");
     let _ = std::fs::create_dir_all(&dir);
@@ -121,7 +121,7 @@ pub fn classify(cap: Capture) -> Outcome {
     // OOM-killer / `kill -9`) or SIGTERM comes from OUTSIDE and implicates nothing about the
     // front-end, so it is the fatal-but-not-a-finding `HarnessError`: this input proved nothing.
     // An unrecognized signal DECLINES the same way rather than emitting a confident "chezzi
-    // crashed" (`docs/gaps.md` W7-12, W7-38).
+    // crashed" (`docs/contributing/gaps.md` W7-12, W7-38).
     if let Some(sig) = cap.signal
         && !is_crash_signal(sig)
     {
@@ -288,7 +288,7 @@ fn run_one(cmd: &mut Command, timeout: Duration) -> Result<Capture, RunErr> {
 mod tests {
     use super::*;
 
-    /// `panicfuzz`'s identical twin to `difftest::run`'s F1 bug (`docs/gaps.md` W7-34/W7-35): a
+    /// `panicfuzz`'s identical twin to `difftest::run`'s F1 bug (`docs/contributing/gaps.md` W7-34/W7-35): a
     /// missing `chezzi` binary must produce `Outcome::HarnessError` naming the real problem, not
     /// `Outcome::Timeout` — a crash-detector sweep against a `chezzi_bin` that cannot spawn must
     /// not report a clean pass over zero executed programs.

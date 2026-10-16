@@ -50,7 +50,7 @@ pub mod test_runner;
 /// tests.
 pub mod editor;
 
-// The grammar-conformance suite (executes `docs/grammar.bnf`, differential-tests vs the parser). It is
+// The grammar-conformance suite (executes `docs/reference/grammar.bnf`, differential-tests vs the parser). It is
 // `#[cfg(test)]`-only and its `crate::lexer`/`crate::parser` refs resolve against this lib, so it lives
 // here in the crate of record — running once via the lib test target (`cargo test conformance`).
 #[cfg(test)]
