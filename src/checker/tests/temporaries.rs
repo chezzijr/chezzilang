@@ -454,7 +454,7 @@ const T254_SHAPES: &[T254Shape] = &[
         decls: "import std.concurrency\n",
         params: "g: Shared[List[int]]",
         args: "g",
-        root: "g := Shared([1, 2])\n",
+        root: "import Shared from std.concurrency\ng := Shared([1, 2])\n",
         show: "g.get()",
         rows: &[t254_row(
             "box_read",

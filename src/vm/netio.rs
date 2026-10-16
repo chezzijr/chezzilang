@@ -407,20 +407,18 @@ impl Vm {
         )))))
     }
 
-    /// `timer(ms)` — pop the `ms` int, push a fresh `Channel[bool]` stamped with `now + ms`. Delivery is
-    /// handled at `recv` time (in the receiver's scheduler), NOT here, so a timer made at the top level
-    /// can be `recv`'d inside a `--parallel` child. `#[inline(never)]` so the `Instant`/`Duration` math
-    /// stays out of `step`'s (recursion-path) stack frame.
+    /// `std.time.timer(ms)` (`Kind::InterceptTimer`): a fresh `Channel[bool]` stamped with `now + ms`.
+    /// Delivery is handled at `recv` time (in the receiver's scheduler), NOT here, so a timer made at
+    /// the top level can be `recv`'d inside a `--parallel` child. `#[inline(never)]` so the
+    /// `Instant`/`Duration` math stays out of `step`'s (recursion-path) stack frame.
     #[inline(never)]
-    pub(super) fn new_timer(&mut self, span: Span) -> Result<Value, RuntimeError> {
-        let v = self.pop();
-        let ms = if let Some(ms) = self.int_val(v) {
-            ms.max(0) as u64
-        } else {
-            return Err(self.err(
-                format!("timer(ms) expects int, got {}", self.type_name(v)),
-                span,
-            ));
+    pub(super) fn new_timer(&mut self, args: &[Value], span: Span) -> Result<Value, RuntimeError> {
+        let ms = match args {
+            [v] if let Some(ms) = self.int_val(*v) => ms.max(0) as u64,
+            _ => {
+                let got = args.first().map_or("nothing", |v| self.type_name(*v));
+                return Err(self.err(format!("timer(ms) expects int, got {got}"), span));
+            }
         };
         // Saturate a pathological `ms` to a far-future deadline rather than panic on `Instant` overflow
         // (mirrors the `sleep_ms` offload path).

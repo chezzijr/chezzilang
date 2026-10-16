@@ -15,7 +15,7 @@ mod hang_deadline;
 
 #[test]
 fn job_nursery_child_blocked_on_recv_does_not_pin_the_pool_thread_at_t1() {
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         a := Channel[int](0)\n\
         fn j1():\n    \
             parallel:\n        \
@@ -90,7 +90,7 @@ fn job_nursery_child_blocked_on_recv_does_not_pin_the_pool_thread_at_t1() {
 /// Five runs at `CHEZZI_THREADS=1`: the joiner-yield bracket must let the queued sibling job start.
 #[test]
 fn two_jobs_with_nested_nurseries_feeding_each_other_complete_at_t1() {
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         a := Channel[int](0)\n\
         b := Channel[int](0)\n\
         fn j1():\n    \
@@ -143,7 +143,7 @@ fn two_jobs_with_nested_nurseries_feeding_each_other_complete_at_t1() {
 /// `CHEZZI_THREADS=1`.
 #[test]
 fn a_job_that_submits_back_from_depth_three_completes_at_t1() {
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         fn main():\n    \
             ex := Executor()\n    \
             out := Channel[int](0)\n    \
@@ -192,7 +192,7 @@ fn a_job_that_submits_back_from_depth_three_completes_at_t1() {
 /// joiner branch in `MnSched::take_runnable` must let the queued feeder jobs start too.
 #[test]
 fn two_nursery_jobs_and_their_feeders_complete_at_two_workers() {
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         a := Channel[int](0)\n\
         b := Channel[int](0)\n\
         fn j1():\n    \

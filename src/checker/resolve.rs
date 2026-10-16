@@ -15,31 +15,6 @@
 use super::setup::{HeadBinding, TypeHeadKind};
 use super::*;
 
-/// The builtin constructors and fns a bare call names (`infer_named_call`'s builtin arms).
-pub(super) const BUILTIN_CALLEES: &[&str] = &[
-    "print",
-    "panic",
-    "range",
-    "int",
-    "float",
-    "bool",
-    "str",
-    "ord",
-    "chr",
-    "List",
-    "Set",
-    "Map",
-    "bytearray",
-    "bytes",
-    "Channel",
-    "Shared",
-    "RwShared",
-    "Atomic",
-    "timer",
-    "Executor",
-    "AtomicInt",
-];
-
 /// Where a path is read. It changes one rule of [`Checker::classify_path`] only: a struct's raw
 /// constructor inside its same-named fn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -197,8 +172,8 @@ impl Checker {
         if let Some(key) = ctor {
             return Some(Resolution::StructCtor(key));
         }
-        if n == "print" || is_firstclass_builtin_fn(n) || BUILTIN_CALLEES.contains(&n) {
-            return Some(Resolution::Builtin(n.to_string()));
+        if let Some(b) = self.builtin_callee(n) {
+            return Some(Resolution::Builtin(b));
         }
         // A value call through a module-level binding outside the scope stack (an imported value).
         Some(Resolution::Global {
@@ -284,13 +259,15 @@ impl Checker {
             && let Some(mid) = self.imported_modules.get(m)
             && let Some(sig) = self.module_sigs.get(mid)
         {
-            if self.qualified_builtin_ty(name, &[]).is_none()
+            if !sig.builtins.contains(name)
                 && sig.struct_defs.contains_key(name)
                 && !sig.member(name).is_some_and(MemberSig::holds_fn)
             {
                 return Some(Resolution::StructCtor(self.type_key(mid, name)));
             }
-            if sig.types.contains(name) && Self::qualified_native_ctor(name) {
+            if sig.builtins.contains(name)
+                && BuiltinType::from_name(name).is_some_and(BuiltinType::has_opcode_ctor)
+            {
                 return Some(Resolution::Builtin(name.to_string()));
             }
         }

@@ -531,7 +531,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         ),
         r(
             RecvKind::Channel,
-            "import std.concurrency\nfn mkc() -> Channel[int]:\n    c := Channel[int](1)\n    c.close()\n    return c\n",
+            "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nfn mkc() -> Channel[int]:\n    c := Channel[int](1)\n    c.close()\n    return c\n",
             "mkc()",
             "-",
             "-",
@@ -542,7 +542,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         ),
         r(
             RecvKind::Shared,
-            "import std.concurrency\n",
+            "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\n",
             "Shared(1)",
             "-",
             "-",
@@ -553,7 +553,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         ),
         r(
             RecvKind::RwShared,
-            "import std.concurrency\n",
+            "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\n",
             "RwShared(1)",
             "-",
             "-",
@@ -564,7 +564,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         ),
         r(
             RecvKind::Atomic,
-            "import std.concurrency\n",
+            "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\n",
             "Atomic(1)",
             "-",
             "-",
@@ -1138,7 +1138,7 @@ fn cmp_int_f64_is_exact_at_the_i64_and_2_53_boundaries() {
 /// re-entry is the length-1 wait-for cycle, so it faults; only a genuine hang would time out.
 #[test]
 fn ticket_016_shared_update_nested_in_update_faults() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 s := Shared(10)
 fn bump(v: int) -> int:
     s.update(fn(w: int) -> int: w + 1)
@@ -1170,7 +1170,7 @@ print(s.get())
 /// write-back.
 #[test]
 fn ticket_016_shared_update_nested_set_silently_lost() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 s := Shared(10)
 fn bump(v: int) -> int:
     s.set(99)
@@ -1194,7 +1194,7 @@ print(s.get())
 #[test]
 fn ticket_016_cross_task_set_racing_update_is_not_lost() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 import std.time
 s := Shared(0)
 fn slow(x: int) -> int:
@@ -1222,7 +1222,7 @@ print(\"s = {s.get()}\")
 #[test]
 fn ticket_016_cross_box_update_cycle_faults() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 import std.time
 a := Shared(1)
 b := Shared(2)
@@ -1265,7 +1265,7 @@ print(\"done\")
 #[test]
 fn ticket_063_guard_waiter_behind_a_recv_faults_deadlock() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 s := Shared(0)
 ch := Channel[int]()
 parallel:
@@ -1303,7 +1303,7 @@ print(\"never\")
 #[test]
 fn ticket_063_guard_waiter_in_the_nursery_body_faults_deadlock() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 s := Shared(0)
 ch := Channel[int]()
 parallel:
@@ -1338,7 +1338,7 @@ print(\"never\")
 #[test]
 fn ticket_063_guard_waiter_is_not_faulted_while_a_sibling_can_feed_the_holder() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 import std.time
 s := Shared(0)
 ch := Channel[int]()
@@ -1370,7 +1370,7 @@ print(\"s = {s.get()}\")
 #[test]
 fn ticket_016_cross_box_update_without_cycle_still_runs() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 a := Shared(1)
 b := Shared(2)
 c := Shared(3)
@@ -1403,7 +1403,7 @@ print(\"done\")
 #[test]
 fn ticket_016_get_inside_update_still_reads_pre_guard_value() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 s := Shared(10)
 fn peek(v: int) -> int:
     print(s.get())
@@ -1430,7 +1430,7 @@ print(s.get())
 #[test]
 fn ticket_246_rwshared_get_inside_its_own_write_faults() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 s := RwShared(10)
 fn peek(v: int) -> int:
     print(s.get())
@@ -1461,7 +1461,7 @@ print(s.read(bump), s.get())
 #[test]
 fn ticket_016_rwshared_write_inside_read_still_persists() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 r := RwShared(5)
 fn peek(v: int) -> int:
     r.write(fn(y: int) -> int: y + 100)
@@ -1481,7 +1481,7 @@ print(r.read(fn(v: int) -> int: v))
 #[test]
 fn ticket_016_closure_over_module_global_crossing_into_spawn() {
     let src = "\
-import std.concurrency
+import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 n := 1
 f := fn(x: int) -> int: x * n
 n = 100
@@ -1505,7 +1505,7 @@ parallel:
 #[test]
 fn ticket_016_spawned_task_own_write_visible_to_module_closure_it_calls() {
     let src = "\
-import std.concurrency
+import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 n := 1
 f := fn(x: int) -> int: x * n
 parallel:
@@ -1531,7 +1531,7 @@ parallel:
 #[test]
 fn ticket_016_closure_over_module_global_written_by_closure_stays_late() {
     let src = "\
-import std.concurrency
+import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 n := 1
 ch := Channel[fn(int) -> int]()
 fn outer() -> fn(int) -> int:
@@ -1564,7 +1564,7 @@ print(g(3))
 #[test]
 fn ticket_016_closure_over_module_global_read_by_nested_closure() {
     let src = "\
-import std.concurrency
+import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 n := 1
 ch := Channel[fn(int) -> int]()
 parallel:
@@ -1596,7 +1596,7 @@ print(g(3))
 #[test]
 fn ticket_016_closure_over_module_global_loses_value_at_airlock() {
     let src = "\
-import std.concurrency
+import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 
 n := 1
 ch := Channel[fn(int) -> int]()
@@ -1625,7 +1625,7 @@ print(f(3))
 #[test]
 fn ticket_016_closure_over_local_in_fn_crosses_airlock_correctly() {
     let src = "\
-import std.concurrency
+import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 
 fn main():
     n := 1
@@ -1934,7 +1934,7 @@ main()
 /// so the count is that plus two per lookup: 8001. A scan would be 4 000 000.
 #[test]
 fn rwshared_map_get_key_is_not_linear() {
-    let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := ConcurrentMap(concurrency.RwShared(m))\n    s := 0\n    i = 0\n    while i < n:\n        match box.get(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
+    let src = "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := ConcurrentMap(concurrency.RwShared(m))\n    s := 0\n    i = 0\n    while i < n:\n        match box.get(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n");
     assert!(
@@ -1950,7 +1950,7 @@ fn rwshared_map_get_key_is_not_linear() {
 /// so 4000 writes rebuild 8000 nodes (plus the final `get`). A re-encode would be millions.
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
-    let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(concurrency.RwShared(m))\n    i := 0\n    while i < n:\n        box.set(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
+    let src = "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(concurrency.RwShared(m))\n    i := 0\n    while i < n:\n        box.set(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n2000\n");
     assert!(

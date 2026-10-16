@@ -1047,7 +1047,7 @@ fn golden_timer_selective_import_three_engine() {
 /// async-delivery path + the deadlock veto + the park/wake on the timer channel's key.
 #[test]
 fn parallel_timer_wakes_blocked_recv() {
-    let src = "fn waiter(t: Channel[bool]):\n    print(t.recv())\n\
+    let src = "import timer from std.time\nfn waiter(t: Channel[bool]):\n    print(t.recv())\n\
                    fn main():\n    parallel:\n        spawn waiter(timer(20))\nmain()\n";
     assert_eq!(run_capture(src).expect("parallel"), "true\n");
 }

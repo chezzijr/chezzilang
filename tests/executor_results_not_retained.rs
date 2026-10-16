@@ -39,7 +39,7 @@ fn executor_results_are_not_retained() {
     // 300 jobs. Nothing reads those 300 MB, so nothing may hold them.
     let path = write_test_file(
         "ret_test.chz",
-        "import std.concurrency\n\ntest fn execret():\n    parts: List[str] = []\n    \
+        "import Executor from std.concurrency\n\ntest fn execret():\n    parts: List[str] = []\n    \
          for i in 0..100000:\n        parts.push(\"0123456789\")\n    \
          blob := \"\".join(parts)\n    ex := Executor()\n    for i in 0..300:\n        \
          ex.submit(fn() -> str: blob)\n    ex.shutdown()\n    assert true\n",

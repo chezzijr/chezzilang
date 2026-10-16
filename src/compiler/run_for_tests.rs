@@ -1,7 +1,6 @@
 //! compiler: compile and run a program for the front end's own tests. The VM is a dev-dependency of
 //! this crate; it runs the `Program` through `vm::run_built`, the same entry the CLI driver uses.
 
-use crate::base::op::CompileError;
 use crate::native::HostConfig;
 use crate::vm::{RunError, on_vm_stack, run_built, to_str_output};
 
@@ -10,13 +9,7 @@ pub(crate) fn run_capture(src: &str) -> Result<String, RunError> {
     let src = src.to_string();
     let (out, _err, result, _code) = to_str_output(on_vm_stack(move || {
         run_built(
-            || {
-                let front = |message: String, span| CompileError { message, span };
-                let tokens = crate::lexer::tokenize(&src)
-                    .map_err(|e| front(e.to_string(), crate::lexer::Span::RUNTIME))?;
-                let module = crate::parser::parse(tokens).map_err(|e| front(e.message, e.span))?;
-                super::compile_module_standalone(&module)
-            },
+            || super::compile_source(&src),
             HostConfig::default(),
             None,
             false,

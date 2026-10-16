@@ -937,14 +937,9 @@ fn index_and_slice_on_a_protocol_existential() {
     );
 }
 
-/// Drift guard (editor hover): EVERY reserved callable builtin must have a `builtin_sig` entry, so a
-/// future builtin added to `BUILTIN_CALLABLES` can't silently lose hover. The set is exactly the
-/// CALLABLE reserved names — the free functions (`print`/`panic`/`range`/`int`/`float`/`str`/`ord`/
-/// `chr`) and the container/runtime constructors (`List`/`Set`/`Map`/`bytes`/`bytearray`/`Channel`/
-/// `Shared`/`RwShared`/`Atomic`/`timer`/`Executor`); none is a pure type marker, so each one is
-/// callable and must have a display signature. (`Ok`/`Err`/`Some` are deliberately NOT reserved — a
-/// user may shadow them — so they're out of scope and keep hovering `None` for v1.) `is_reserved_name`
-/// is the single source: `builtin_sig` is keyed off the same names.
+/// Drift guard (editor hover): EVERY builtin callable must have a `builtin_sig` entry, so a future
+/// builtin can't silently lose hover. The set is derived (`builtin_callables`): the `PRELUDE` rows
+/// and the builtin types with an opcode constructor (`Channel`, `Shared`, `Executor`, …).
 #[test]
 fn builtin_callables_all_have_builtin_sig() {
     // `builtin_sig` is now a Checker METHOD (phase 3a): the nine migrated universe builtins source
@@ -953,7 +948,7 @@ fn builtin_callables_all_have_builtin_sig() {
     // hard-coded, so they resolve without the seed too.
     let mut c = Checker::new();
     c.seed_native_prelude_sigs();
-    for name in BUILTIN_CALLABLES {
+    for name in builtin_callables() {
         assert!(
             c.builtin_sig(name).is_some(),
             "reserved callable builtin '{name}' has no builtin_sig entry → it would lose editor hover"
@@ -1028,7 +1023,7 @@ fn prelude_table_is_single_source_of_truth() {
 
     // (2) `is_firstclass_builtin_fn` is the table's `.first_class` view — over the WHOLE reserved
     //     callable universe, so a table row (or its absence) is the one truth for first-classness.
-    for name in BUILTIN_CALLABLES {
+    for name in builtin_callables() {
         assert_eq!(
             is_firstclass_builtin_fn(name),
             prelude_fn(name).is_some_and(|p| p.first_class),

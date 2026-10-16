@@ -731,7 +731,7 @@ main()";
 #[test]
 fn airlock_rwshared_store_dag_alias_is_one_object() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 fn main():
     inner := [1]
     outer := [inner, inner]

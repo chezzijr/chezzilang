@@ -1159,53 +1159,6 @@ impl Vm {
             Import::Variants { .. } => {}
             Import::From { names, .. } => {
                 for (member, alias) in names {
-                    // `std.concurrency`'s four exported ctor/TYPE names (`Shared`/`RwShared`/`Atomic`/
-                    // `Executor`) likewise carry NO runtime value: they are checker-resolved type
-                    // imports, and the ctor is resolved by the compiler's name→opcode dispatch (not a
-                    // bound module member). Skip them here — the file-less native module has no such
-                    // global by design. (Without this, `import Shared from std.concurrency` faults.)
-                    if self.module_name(target_obj) == "std.concurrency"
-                        && matches!(
-                            member.as_str(),
-                            "Shared"
-                                | "RwShared"
-                                | "Atomic"
-                                | "AtomicInt"
-                                | "Executor"
-                                | "StructuralEq"
-                        )
-                    {
-                        continue;
-                    }
-                    // `std.time`'s `timer` is an opcode-backed builtin with NO runtime module-member
-                    // value (the call lowers via the compiler's name→opcode dispatch). Skip it — std.time
-                    // is a REAL native module, so this MUST be `timer`-specific, not a blanket std.time
-                    // skip (now/monotonic/sleep_ms/format DO bind normally). Without this, `import timer
-                    // from std.time` faults `module 'std.time' has no member 'timer'`.
-                    if self.module_name(target_obj) == "std.time" && member == "timer" {
-                        continue;
-                    }
-                    // `std.net`'s `Socket`/`Listener` are TYPE-only imports with NO runtime module-member
-                    // value: a `Socket` value comes from `connect`/`listen` and the type resolves directly
-                    // to `Ty::Socket`. Skip them — the native module has no such global by design;
-                    // without this, `import Socket from std.net` faults.
-                    if self.module_name(target_obj) == "std.net"
-                        && matches!(member.as_str(), "Socket" | "Listener")
-                    {
-                        continue;
-                    }
-                    // R2 — `std.io`'s `Writer` is a TYPE-only import with NO runtime module-member value
-                    // (a `Writer` value comes from `create`/`append`/`stdout`/…; the type resolves
-                    // directly to `Ty::Writer`). Skip it — the module has no such global. Its openers
-                    // (`create`/`append`/`stdout`/`stderr`/`buffered`) DO bind normally (real MEMBERS
-                    // values). Without this, `import Writer from std.io` faults.
-                    // R2b — same for `std.io`'s `Reader` TYPE (a value comes from `open`; the type
-                    // resolves directly to `Ty::Reader`). Without this, `import Reader from std.io` faults.
-                    if self.module_name(target_obj) == "std.io"
-                        && (member == "Writer" || member == "Reader")
-                    {
-                        continue;
-                    }
                     // Bind the member's runtime value if the target module exports one (a fn/value).
                     // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
                     // resolves through the program-global type tables by name — so a member with no

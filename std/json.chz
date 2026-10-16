@@ -17,7 +17,7 @@ enum Json:
     Arr(List[Json])
     Obj(Map[str, Json])
 
-# Opcode-backed runtime seam for `encode`, exactly like `std.time.timer` — the compiler lowers this
+# Opcode-backed runtime seam for `encode` — the compiler lowers this
 # bare call to `Op::JsonToValue` at its one call site below. Module-private: the module-export pass
 # has no `StmtKind::Native` arm, so `json._to_json` is unreachable from user code. `std.json`
 # deliberately stays a NON-native module (`harvest_native_module` has no pass for a plain `enum` or

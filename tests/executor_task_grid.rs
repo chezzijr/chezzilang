@@ -180,7 +180,7 @@ const PARTIES: [Party; 7] = [
 ];
 
 const PRELUDE: &str = "import std.time
-import std.concurrency
+import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 import std.os
 import std.io
 import submit_task from std.concurrency.task
@@ -487,7 +487,8 @@ fn a_job_fault_is_delivered_by_its_handle_or_ends_the_run() {
 /// The two-`defer` exit programs: `tail` (the first `defer` to run) sends the handshake and then
 /// sorts, so the job's exit is published while that `defer` runs. At one worker the job cannot run
 /// while `main` sorts, so the exit is published after `main` ends; only the status is asserted there.
-const TWO_DEFER_HEAD: &str = "import std.concurrency
+const TWO_DEFER_HEAD: &str =
+    "import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 import std.os
 hs := Channel[int](1)
 xs: List[int] = []
@@ -614,7 +615,7 @@ fn one_runner_at_one_worker_for_every_party() {
 #[test]
 fn executor_limit_shutdown_now_ends_held_jobs() {
     let src = "import std.time
-import std.concurrency
+import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 fn job():
     time.sleep_ms(300)
     print(\"ran\")
@@ -640,7 +641,7 @@ print(\"done\")
 #[test]
 fn executor_limit_shutdown_now_never_starts_a_held_job() {
     let src = "import std.time
-import std.concurrency
+import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 fn slow():
     time.sleep_ms(300)
     print(\"slow ran\")
@@ -666,7 +667,7 @@ print(\"done\")
 
 #[test]
 fn executor_limit_below_one_faults() {
-    let src = "import std.concurrency
+    let src = "import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 ex := Executor(0)
 ";
     let mut misses = Vec::new();
@@ -683,7 +684,7 @@ ex := Executor(0)
 /// `ThreadPoolExecutor(1)` hangs on this shape; the deadlock reap drops the held job and reports.
 #[test]
 fn executor_limit_deadlock_on_a_held_job_faults() {
-    let src = "import std.concurrency
+    let src = "import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 ch := Channel[int](0)
 fn waiter():
     print(\"got\", ch.recv())
@@ -712,7 +713,7 @@ print(\"after\")
 #[test]
 fn executor_limit_caps_running_jobs() {
     let src = "import std.time
-import std.concurrency
+import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 cur := AtomicInt(0)
 over := AtomicInt(0)
 two := AtomicInt(0)
@@ -745,7 +746,7 @@ print(\"over={over.load()} two={two.load()}\")
 #[test]
 fn a_test_run_reports_a_top_level_job_fault() {
     let src = "import std.time
-import std.concurrency
+import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 fn slowbad():
     time.sleep_ms(200)
     xs := [1]
@@ -809,7 +810,7 @@ fn the_grid_holds_inside_a_test_fn() {
 #[test]
 fn a_cut_joiner_leaves_inside_the_bound_and_the_job_survives() {
     const HEAD: &str = "import std.time
-import std.concurrency
+import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 ex := Executor()
 started := Channel[int](1)
 done := Channel[int](1)
@@ -860,7 +861,7 @@ print(\"job done\")
         }
     }
     let timeout = "import std.time
-import std.concurrency
+import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 ex := Executor()
 fn job():
     time.sleep_ms(3000)
@@ -884,7 +885,7 @@ test fn cell():
 #[test]
 fn a_fire_and_forget_fault_cuts_main_in_every_state() {
     const HEAD: &str = "import std.time
-import std.concurrency
+import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 import std.io
 fn bad():
     time.sleep_ms(100)
@@ -947,7 +948,7 @@ fn a_test_run_reports_a_job_fault_that_lands_past_a_passing_test() {
     for d in [0, 300] {
         let src = format!(
             "import std.time
-import std.concurrency
+import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 fn bad():
     time.sleep_ms({d})
     panic(\"boom\")

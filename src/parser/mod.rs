@@ -154,46 +154,6 @@ pub fn parse_with_docs(
 /// Parses one `<item>`: the parser [`Parser::item_keyword`] pairs with an item keyword.
 type ItemParser = fn(&mut Parser) -> PResult<StmtKind>;
 
-/// TICKET-228 (D6) — the long carrier spellings removed from the surface: (name, the prelude enum
-/// that owns it, the message a bare use gets, the near-miss hint of a TYPE name). The enums stay
-/// inside the compiler; [`Parser::reject_removed_name`] is the one place a bare use is rejected.
-pub const REMOVED_NAMES: [(&str, &str, &str, Option<&str>); 5] = [
-    (
-        "Option",
-        "Option",
-        "`Option` is removed; write `T?` for the type and `None` for the absent value",
-        Some("an optional type is written `T?`"),
-    ),
-    (
-        "Result",
-        "Result",
-        "`Result[T, E]` is removed; write `T!E` (`None!E` when there is no value)",
-        Some("a fallible type is written `T!E`"),
-    ),
-    (
-        "Some",
-        "Option",
-        "`Some(x)` is removed; write `x` or `?x` (pattern `?v`)",
-        None,
-    ),
-    (
-        "Ok",
-        "Result",
-        "`Ok(x)` is removed; write `x` or `?x` (pattern `?v`); for `Ok()` fall off the end or write a bare `return`",
-        None,
-    ),
-    (
-        "Err",
-        "Result",
-        "`Err(e)` is removed; write `!e` (pattern `!e`)",
-        None,
-    ),
-];
-
-/// TICKET-253 -- the message of a call to the removed builtin `range`. `range` stays a reserved
-/// name only so that this message is reachable; nothing builds on it.
-pub const REMOVED_RANGE: &str = "`range()` is removed; write `0..n`, `a..b` or `Range(a, b, step)`; for a list write `List(0..n)`";
-
 /// TICKET-241 -- the one text for an `else` guard written where none exists (an assignment, a
 /// compound assignment, `return`). [`Parser::reject_else_guard`] is its only user.
 const ELSE_GUARD_PLACE: &str =

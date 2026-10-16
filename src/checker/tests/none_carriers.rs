@@ -479,17 +479,13 @@ fn none_type_position_grid() {
     rejects("x: None? = 5\n", "'None?' is not a type");
 }
 
-/// TICKET-228 — an unknown return type reports once, with the `None` hint for `nil`.
+/// TICKET-228 — an unknown return type reports once.
 #[test]
 fn unknown_return_type_reports_once() {
     let errs = check_src("fn f() -> nil:\n    return\n");
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert!(errs[0].message.contains("unknown type 'nil'"), "{errs:?}");
-    assert_eq!(
-        errs[0].help.as_deref(),
-        Some("did you mean 'None'?"),
-        "{errs:?}"
-    );
+    assert_eq!(errs[0].help, None, "{errs:?}");
     // A genuine near miss keeps the suggester's own help.
     let errs = check_src("fn f() -> Eror:\n    return\n");
     assert_eq!(errs.len(), 1, "{errs:?}");
@@ -1032,8 +1028,8 @@ fn variant_pattern_on_a_non_enum_scrutinee_is_rejected() {
     );
 }
 
-/// TICKET-228 (D6) — no near-miss help offers a removed name. A near miss of a removed TYPE name
-/// names the replacement; a near miss of a removed value name gets no help.
+/// TICKET-228 (D6) — no near-miss help offers a name the language does not have: a near miss of
+/// `Option` or `Result` gets no help.
 #[test]
 fn near_miss_offers_no_removed_spelling() {
     let help_of = |src: &str, msg: &str| -> Option<String> {
@@ -1042,15 +1038,14 @@ fn near_miss_offers_no_removed_spelling() {
         assert!(errs[0].message.contains(msg), "{src}: {errs:?}");
         errs[0].help.clone()
     };
-    let opt = Some("an optional type is written `T?`".to_string());
-    assert_eq!(help_of("x: option = 1\n", "unknown type 'option'"), opt);
-    assert_eq!(help_of("x: Optoin = 1\n", "unknown type 'Optoin'"), opt);
+    assert_eq!(help_of("x: option = 1\n", "unknown type 'option'"), None);
+    assert_eq!(help_of("x: Optoin = 1\n", "unknown type 'Optoin'"), None);
     assert_eq!(
         help_of(
             "fn f(x: Resul) -> int:\n    return 1\n",
             "unknown type 'Resul'"
         ),
-        Some("a fallible type is written `T!E`".to_string())
+        None
     );
     assert_eq!(
         help_of("x: Eror = 3\n", "unknown type 'Eror'"),

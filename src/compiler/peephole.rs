@@ -136,7 +136,6 @@ fn bin_kind(op: &Op) -> Option<BinKind> {
         | Op::NewRwShared
         | Op::NewAtomic
         | Op::NewAtomicInt
-        | Op::NewTimer
         | Op::NewExecutor
         | Op::NewExecutorN => return None,
     })
@@ -260,7 +259,6 @@ fn jump_target(op: &Op) -> Option<usize> {
         | Op::NewRwShared
         | Op::NewAtomic
         | Op::NewAtomicInt
-        | Op::NewTimer
         | Op::NewExecutor
         | Op::NewExecutorN => None,
     }
@@ -383,7 +381,6 @@ fn jump_target_mut(op: &mut Op) -> Option<&mut usize> {
         | Op::NewRwShared
         | Op::NewAtomic
         | Op::NewAtomicInt
-        | Op::NewTimer
         | Op::NewExecutor
         | Op::NewExecutorN => None,
     }
@@ -517,7 +514,6 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
             | Op::NewRwShared
             | Op::NewAtomic
             | Op::NewAtomicInt
-            | Op::NewTimer
             | Op::NewExecutor
             | Op::NewExecutorN => None,
         };

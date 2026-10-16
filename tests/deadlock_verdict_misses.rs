@@ -203,7 +203,7 @@ fn module_top_level_defer_that_can_never_complete_faults_deadlock() {
 fn executor_job_and_main_nested_nursery_trees_fault_deadlock() {
     // h1 (W14-10): fixed by TICKET-135's D1; pinned here at every worker count.
     let src = [
-        "import std.concurrency",
+        "import std.concurrency\nimport Executor from std.concurrency",
         "fn job(never: Channel[int]):",
         "    parallel:",
         "        spawn:",
@@ -241,7 +241,7 @@ fn an_exit_from_a_job_outranks_a_main_defer_that_can_never_complete() {
     // The `ready.send` inside the `defer` (a handshake, DEC-050) releases the job only once `main`
     // is in the defer drain, so `os.exit(3)` always lands while `deferring > 0`. Go twin: exit 3.
     let src = [
-        "import std.concurrency",
+        "import std.concurrency\nimport Executor from std.concurrency",
         "import std.os",
         "fn quit(ready: Channel[int]):",
         "    ready.recv()",
@@ -292,7 +292,7 @@ fn assert_live_defer_completes(name: &str, src: &[&str], expect_out: &str) {
 #[test]
 fn main_defer_that_a_live_job_will_feed_still_completes() {
     let src = [
-        "import std.concurrency",
+        "import std.concurrency\nimport Executor from std.concurrency",
         "fn feed(go: Channel[int], c: Channel[int]):",
         "    go.recv()",
         "    c.send(42)",
@@ -315,7 +315,7 @@ fn main_defer_that_a_live_job_will_feed_still_completes() {
 #[test]
 fn module_top_level_defer_that_a_live_job_will_feed_still_completes() {
     let src = [
-        "import std.concurrency",
+        "import std.concurrency\nimport Executor from std.concurrency",
         "fn feed(go: Channel[int], c: Channel[int]):",
         "    go.recv()",
         "    c.send(42)",

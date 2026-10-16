@@ -262,14 +262,13 @@ line joining; every pattern form; numeric literal edges; all 143 code blocks of 
 | Finding | Detail |
 |---|---|
 | a user type named like a builtin function is accepted and its constructor is dead | `struct print: x: int` checks clean; `print(1)` still prints. `enum chr: A` then `chr(65)` prints `A`. But `print := 3` shadows, `fn print` is rejected, `struct range` is rejected. Order today: variable > builtin > user type (`src/checker/mod.rs:208` against `:386`, `resolve.rs:172`) |
-| whole-module import differs for std and user modules | `import std.collections` puts `Deque` in bare scope and a local `struct Deque` is "already defined"; `import lib.geo` does not put `Point` in scope and a local `struct Point` coexists |
+| ~~whole-module import differs for std and user modules~~ | FIXED 2026-10-16: an import binds only the names it lists, for a std module too (`tests/module_member_grid.rs`) |
 | divergence is decided by name | `panic` and `os.exit` are bottom-typed; a user `fn die(msg: str): panic(msg)` is not, so its caller "can fall off the end". No `never` type |
 | `Error.line()`, `.col()`, `.file()` | exist only on the bare `Error` existential |
 
 Builtins the language itself cannot express: `int()`/`float()`/`bool()` (an untyped parameter, overloaded
-by argument type); `bytes()`/`bytearray()` (overloaded by type and arity); `range` (the first positional
-changes meaning with arity); `List()`/`Set()`/`Map()` (an internal union, not `Iterable[T]`); `Channel`,
-`Shared`, `RwShared`, `Atomic`, `Executor`, `timer` (dedicated opcodes and type variants); `json.decode[T]`;
+by argument type); `bytes()`/`bytearray()` (overloaded by type and arity); `List()`/`Set()`/`Map()` (an internal union, not `Iterable[T]`); `Channel`,
+`Shared`, `RwShared`, `Atomic`, `Executor` (dedicated opcodes and type variants); `json.decode[T]`;
 the signatures of `Shared.read` and `Executor.submit` (attached in Rust).
 
 ## Owner design decisions (2026-10-12)

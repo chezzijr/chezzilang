@@ -41,58 +41,26 @@ pub fn run_program_bytes(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
         .expect("VM thread panicked")
 }
 
+/// Compile a test program through the module graph, as `chezzi run` does; a front-end error is
+/// the run's error.
+#[cfg(test)]
+fn test_program(src: &str) -> Result<Program, RuntimeError> {
+    crate::compiler::compile_source(src).map_err(|e| RuntimeError {
+        message: e.message,
+        span: e.span,
+        is_assert: false,
+        is_over_memory: false,
+        is_timed_out: false,
+        is_deadlock: false,
+        is_panic: false,
+    })
+}
+
 #[cfg(test)]
 pub(super) fn run_program_inner(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
-    let tokens = match lexer::tokenize(src) {
-        Ok(t) => t,
-        Err(e) => {
-            return (
-                Vec::new(),
-                Err(RuntimeError {
-                    message: e.to_string(),
-                    span: Span::RUNTIME,
-                    is_assert: false,
-                    is_over_memory: false,
-                    is_timed_out: false,
-                    is_deadlock: false,
-                    is_panic: false,
-                }),
-            );
-        }
-    };
-    let module = match parser::parse(tokens) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                Vec::new(),
-                Err(RuntimeError {
-                    message: e.message,
-                    span: e.span,
-                    is_assert: false,
-                    is_over_memory: false,
-                    is_timed_out: false,
-                    is_deadlock: false,
-                    is_panic: false,
-                }),
-            );
-        }
-    };
-    let program = match crate::compiler::compile_module_standalone(&module) {
+    let program = match test_program(src) {
         Ok(p) => p,
-        Err(e) => {
-            return (
-                Vec::new(),
-                Err(RuntimeError {
-                    message: e.message,
-                    span: e.span,
-                    is_assert: false,
-                    is_over_memory: false,
-                    is_timed_out: false,
-                    is_deadlock: false,
-                    is_panic: false,
-                }),
-            );
-        }
+        Err(e) => return (Vec::new(), Err(e)),
     };
     let mut vm = Vm::new(Arc::new(program));
     let result = vm.run();
@@ -265,56 +233,9 @@ pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, u
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
-            let tokens = match lexer::tokenize(&src) {
-                Ok(t) => t,
-                Err(e) => {
-                    return (
-                        Err(RuntimeError {
-                            message: e.to_string(),
-                            span: Span::RUNTIME,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                            is_deadlock: false,
-                            is_panic: false,
-                        }),
-                        0,
-                    );
-                }
-            };
-            let module = match parser::parse(tokens) {
-                Ok(m) => m,
-                Err(e) => {
-                    return (
-                        Err(RuntimeError {
-                            message: e.message,
-                            span: e.span,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                            is_deadlock: false,
-                            is_panic: false,
-                        }),
-                        0,
-                    );
-                }
-            };
-            let program = match crate::compiler::compile_module_standalone(&module) {
+            let program = match test_program(&src) {
                 Ok(p) => p,
-                Err(e) => {
-                    return (
-                        Err(RuntimeError {
-                            message: e.message,
-                            span: e.span,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                            is_deadlock: false,
-                            is_panic: false,
-                        }),
-                        0,
-                    );
-                }
+                Err(e) => return (Err(e), 0),
             };
             let mut vm = Vm::new(Arc::new(program));
             vm.gc_stress = stress;
@@ -338,34 +259,7 @@ pub fn run_capture_on_stack(src: &str, stack_bytes: usize) -> Result<String, Run
     std::thread::Builder::new()
         .stack_size(stack_bytes)
         .spawn(move || {
-            let tokens = lexer::tokenize(&src).map_err(|e| RuntimeError {
-                message: e.to_string(),
-                span: Span::RUNTIME,
-                is_assert: false,
-                is_over_memory: false,
-                is_timed_out: false,
-                is_deadlock: false,
-                is_panic: false,
-            })?;
-            let module = parser::parse(tokens).map_err(|e| RuntimeError {
-                message: e.message,
-                span: e.span,
-                is_assert: false,
-                is_over_memory: false,
-                is_timed_out: false,
-                is_deadlock: false,
-                is_panic: false,
-            })?;
-            let program =
-                crate::compiler::compile_module_standalone(&module).map_err(|e| RuntimeError {
-                    message: e.message,
-                    span: e.span,
-                    is_assert: false,
-                    is_over_memory: false,
-                    is_timed_out: false,
-                    is_deadlock: false,
-                    is_panic: false,
-                })?;
+            let program = test_program(&src)?;
             let mut vm = Vm::new(Arc::new(program));
             let result = vm.run();
             vm.finish_run(result).map(|()| captured(vm.out))
@@ -394,56 +288,9 @@ pub fn run_capture_nursery_len(src: &str) -> (Result<String, RuntimeError>, usiz
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
-            let tokens = match lexer::tokenize(&src) {
-                Ok(t) => t,
-                Err(e) => {
-                    return (
-                        Err(RuntimeError {
-                            message: e.to_string(),
-                            span: Span::RUNTIME,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                            is_deadlock: false,
-                            is_panic: false,
-                        }),
-                        0,
-                    );
-                }
-            };
-            let module = match parser::parse(tokens) {
-                Ok(m) => m,
-                Err(e) => {
-                    return (
-                        Err(RuntimeError {
-                            message: e.message,
-                            span: e.span,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                            is_deadlock: false,
-                            is_panic: false,
-                        }),
-                        0,
-                    );
-                }
-            };
-            let program = match crate::compiler::compile_module_standalone(&module) {
+            let program = match test_program(&src) {
                 Ok(p) => p,
-                Err(e) => {
-                    return (
-                        Err(RuntimeError {
-                            message: e.message,
-                            span: e.span,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                            is_deadlock: false,
-                            is_panic: false,
-                        }),
-                        0,
-                    );
-                }
+                Err(e) => return (Err(e), 0),
             };
             let mut vm = Vm::new(Arc::new(program));
             let result = vm.run();

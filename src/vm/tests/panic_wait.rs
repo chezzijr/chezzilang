@@ -117,7 +117,7 @@ fn golden_rwshared_concurrent_matches_expected() {
 /// handle crosses as a SHARED `Arc` core (not a deep-copy), so both reach the one box.
 #[test]
 fn rwshared_mutation_from_spawn_is_observed_by_parent() {
-    let src = "fn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n    print(r.get())\nmain()\n";
+    let src = "import RwShared from std.concurrency\nfn bump(r: RwShared[int]):\n    r.write(fn(x): x + 1)\nfn main():\n    r := RwShared(0)\n    parallel:\n        spawn bump(r)\n    print(r.get())\nmain()\n";
     assert_eq!(run_capture(src).expect("vm run"), "1\n");
     assert_eq!(run_capture(src).expect("parallel run"), "1\n");
     assert_eq!(run_capture(src).expect("interp"), "1\n");
@@ -183,7 +183,7 @@ fn vm_wait_assign_arm_mutates_outer_lvalue() {
 
 #[test]
 fn vm_wait_timer_arm_fires() {
-    let src = "fn main():\n    t := timer(1)\n    wait:\n        _ := t.recv(): print(\"tick\")\nmain()\n";
+    let src = "import timer from std.time\nfn main():\n    t := timer(1)\n    wait:\n        _ := t.recv(): print(\"tick\")\nmain()\n";
     assert_eq!(run(src), "tick\n");
 }
 
@@ -338,7 +338,7 @@ fn vm_wait_sibling_send_vetoes_deadlock_parallel() {
 /// no golden).
 #[test]
 fn vm_wait_timer_loses_to_midwindow_send_parallel() {
-    let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn producer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.send(7)\nfn main():\n    ch := Channel[int]()\n    t := timer(2000)\n    parallel:\n        spawn consumer(ch, t)\n        spawn producer(ch)\nmain()\n";
+    let src = "import timer from std.time\nfn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn producer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.send(7)\nfn main():\n    ch := Channel[int]()\n    t := timer(2000)\n    parallel:\n        spawn consumer(ch, t)\n        spawn producer(ch)\nmain()\n";
     for _ in 0..20 {
         assert_eq!(
             run_capture(src).expect("mid-window send must win the channel arm"),
@@ -354,7 +354,7 @@ fn vm_wait_timer_loses_to_midwindow_send_parallel() {
 /// hang; the `inflight` veto keeps the deadlock predicate quiet while the lone fiber waits.
 #[test]
 fn vm_wait_short_timer_fires_when_no_send_parallel() {
-    let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn main():\n    ch := Channel[int]()\n    t := timer(5)\n    parallel:\n        spawn consumer(ch, t)\nmain()\n";
+    let src = "import timer from std.time\nfn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn main():\n    ch := Channel[int]()\n    t := timer(5)\n    parallel:\n        spawn consumer(ch, t)\nmain()\n";
     assert_eq!(
         run_capture(src).expect("short timer must fire its arm, not hang"),
         "timeout\n"
@@ -368,7 +368,7 @@ fn vm_wait_short_timer_fires_when_no_send_parallel() {
 /// untested; it also guards the arm-once `timer_armed` CAS latch against ever wedging the wake.
 #[test]
 fn vm_wait_timer_arm_survives_channel_close_repark_parallel() {
-    let src = "fn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn closer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.close()\nfn main():\n    ch := Channel[int]()\n    t := timer(40)\n    parallel:\n        spawn consumer(ch, t)\n        spawn closer(ch)\nmain()\n";
+    let src = "import timer from std.time\nfn consumer(ch: Channel[int], t: Channel[bool]):\n    wait:\n        v := ch.recv(): print(\"got {v}\")\n        _ := t.recv(): print(\"timeout\")\nfn closer(ch: Channel[int]):\n    d := timer(5)\n    _ := d.recv()\n    ch.close()\nfn main():\n    ch := Channel[int]()\n    t := timer(40)\n    parallel:\n        spawn consumer(ch, t)\n        spawn closer(ch)\nmain()\n";
     for _ in 0..20 {
         assert_eq!(
             run_capture(src).expect("timer arm must fire after a mid-window close; no hang"),
@@ -667,7 +667,7 @@ fn parallel_many_spawns_cheap_and_correct() {
         // closure, so the replay count stays a property of `spawn`. A box closure reads a scalar
         // global through the box's slot door, which replays no module.
         let mut src = format!(
-            "step: int = 1\nfn bump(s: Shared[int]):\n    k := {step}\n    s.update(fn(x): x + k)\nfn main():\n    s := Shared(0)\n    parallel:\n"
+            "import Shared from std.concurrency\nstep: int = 1\nfn bump(s: Shared[int]):\n    k := {step}\n    s.update(fn(x): x + k)\nfn main():\n    s := Shared(0)\n    parallel:\n"
         );
         for _ in 0..n {
             src.push_str("        spawn bump(s)\n");
@@ -746,8 +746,7 @@ fn str_method_dispatch_does_not_clone_the_receiver() {
 /// `--parallel` drain reconstructs and runs the closure on the pool.
 #[test]
 fn executor_submitted_closure_captures_by_value() {
-    let src =
-        "fn main():\n    n := 7\n    ex := Executor()\n    ex.submit(fn(): print(n))\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn main():\n    n := 7\n    ex := Executor()\n    ex.submit(fn(): print(n))\nmain()\n";
     assert_eq!(run_capture(src).expect("vm run"), "7\n");
     assert_eq!(run_capture(src).expect("parallel run"), "7\n");
 }
@@ -763,7 +762,7 @@ fn executor_submitted_closure_captures_by_value() {
 /// so a plain run isolates identically to M:N — both print `[1]` here (not `[1, 2]`).
 #[test]
 fn executor_cooperative_submit_isolates_captures_by_value() {
-    let src = "fn main():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): print(xs))\n    xs.push(2)\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): print(xs))\n    xs.push(2)\nmain()\n";
     assert_eq!(
         run_capture(src).expect("vm run"),
         "[1]\n",
@@ -781,7 +780,7 @@ fn executor_cooperative_submit_isolates_captures_by_value() {
 /// inner tasks, all bumping one `Shared` → `4`, deterministic.
 #[test]
 fn parallel_nested_nursery_on_pool() {
-    let src = "fn inner(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
+    let src = "import Shared from std.concurrency\nfn inner(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
                    fn outer(s: Shared[int]):\n    parallel:\n        spawn inner(s)\n        spawn inner(s)\n\
                    fn main():\n    s := Shared(0)\n    parallel:\n        spawn outer(s)\n        spawn outer(s)\n    print(s.get())\nmain()\n";
     assert_eq!(run_capture(src).expect("parallel run"), "4\n");
@@ -798,7 +797,7 @@ fn parallel_nested_nursery_on_pool() {
 /// (the failure mode of the whole eager milestone), so assert on a bounded `recv_timeout`.
 #[test]
 fn executor_faulting_job_does_not_hang_shutdown() {
-    let src = "import std.concurrency\n\
+    let src = "import Executor from std.concurrency\n\
                ex := Executor()\n\
                ex.submit(fn(): panic(\"boom\"))\n\
                r: None!Error = recover: ex.shutdown()\n\
@@ -836,7 +835,7 @@ fn parallel_output_flushes_in_task_order() {
 /// deadlock without cancellation.
 #[test]
 fn parallel_pool_task_fault_propagates() {
-    let src = "fn ok_task(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
+    let src = "import Shared from std.concurrency\nfn ok_task(s: Shared[int]):\n    s.update(fn(x): x + 1)\n\
                    fn boom():\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    s := Shared(0)\n    parallel:\n        spawn ok_task(s)\n        spawn boom()\n    print(\"unreached\")\nmain()\n";
     let err = run_capture(src).expect_err("expected the pool task fault to propagate");

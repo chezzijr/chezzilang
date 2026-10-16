@@ -75,6 +75,14 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// The registered placeholder for `timer`, a [`Kind::InterceptTimer`] member the engine runs itself
+/// (`Vm::new_timer`); it never executes.
+fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    Err(HostError {
+        message: "std.time.timer is run by the engine and must not run as a native".into(),
+    })
+}
+
 /// Callable members. `(name, fn, kind)`.
 pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("now", now, Kind::Inline),
@@ -82,6 +90,7 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("monotonic", monotonic, Kind::Inline),
     ("sleep_ms", sleep_ms, Kind::TimedWait),
     ("format", format, Kind::Inline),
+    ("timer", intercepted, Kind::InterceptTimer),
 ];
 
 #[cfg(test)]

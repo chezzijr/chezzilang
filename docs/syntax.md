@@ -1852,7 +1852,7 @@ print(xs[..2])         # [10, 99]      — open start (defaults to 0)
 print(xs[..])          # full copy
 print(xs[0..=2])       # [10, 99, 30]  — inclusive end
 print(xs[Range(0, 4, 2)])   # [10, 30]  — a step goes through the constructor
-print(xs.reversed())   # [0, 30, 99, 10]  — a NEW list; `xs[::-1]` is removed
+print(xs.reversed())   # [0, 30, 99, 10]  — a NEW list
 print(xs[-2..])        # [30, 0]       — negative bounds count from the end
 ```
 
@@ -1864,8 +1864,7 @@ inclusive end adds one AFTER step 2 (for a negative step it subtracts one); (4) 
 the sequence; (5) a start at or past the end gives an empty result. So with `xs = [10, 20, 30]`:
 `xs[-2..]` is `[20, 30]`, `xs[0..=-1]` is `[10, 20, 30]`, `xs[2..1]` and `xs[-1..0]` are `[]`, `xs[1..99]`
 is `[20, 30]`. A plain index stays strict: `xs[-4]` faults. A `step` of `0` cannot be built
-(`Range() step cannot be zero`). The colon slice `xs[a:b]` / `xs[a:b:c]` / `xs[::-1]` is REMOVED; the
-parser's error names the replacement. A subscript by a `Range` is a slice, or — on a `Map[Range, V]` —
+(`Range() step cannot be zero`). A subscript by a `Range` is a slice, or — on a `Map[Range, V]` —
 a key lookup. A type takes a range as a slice or as a key, not both: a type that declares both a range `slice` and an `index` whose key accepts a `Range` is the declaration error `a type takes a range as a slice or as a key, not both`, and a `Map` has no `slice`, so `m[0..3]` stays a key lookup. The checker decides once and the compiler emits that choice.
 `xs[a..b] = v` is the check error `cannot assign to a slice`.
 
@@ -1880,7 +1879,7 @@ types opt in — see `Index`/`IndexSet`/`Slice` in §7b. A user `Slice` impl is 
 standard result.
 
 `reversed()` returns a NEW value on `List`, `str`, `bytes` and `bytearray`; `reverse()` changes in place
-and exists on `List` and `bytearray` only. `str.reverse()` is removed.
+and exists on `List` and `bytearray` only.
 
 ## 6c. Comprehensions  (M16)
 
@@ -2022,9 +2021,8 @@ p := Path("/a/b")                  # calls the fn, not the field ctor
 The fn wins wherever it is in scope: bare in the declaring module, `import Path from m` then
 `Path(args)`, and `m.Path(args)`. Inside the fn's own body the bare name is the one place the raw
 field constructor is still reachable — without that escape, a normalizing ctor like the one above
-would recurse forever. A **whole-module** `import std.x` licenses the module's type names bare but
-never its functions, so the bare spelling there still calls the field ctor (`import std.path` then
-`Path(b"...")` builds raw). A **nested** fn may still not be named after a same-module struct ctor
+would recurse forever. A **whole-module** `import std.x` binds no bare name, so `path.Path(args)` calls
+the fn too. A **nested** fn may still not be named after a same-module struct ctor
 (see the v1 limits above) — only a **module-level** fn can win, because it is hoisted into a global
 slot the backend can dispatch through.
 
@@ -4084,8 +4082,9 @@ That constructor rule reaches **every dotted spelling of a constructor**, since 
 a value and throw it away: a variant constructor (`defer E.A(3)`, `defer E[int].A(3)`,
 `defer lib.Col.Val(3)`), a module-qualified struct constructor (`defer lib.Pt(3)`), and a
 **native constructor reached through its std module** (`defer concurrency.Shared(0)` — likewise
-`RwShared`/`Atomic`/`AtomicInt`/`Executor` — and `defer time.timer(10)`, aliased imports included).
-All are rejected by `chezzi check` with the same message as the bare `defer Shared(0)`. An ordinary
+`RwShared`/`Atomic`/`AtomicInt`/`Executor`, aliased imports included). All are rejected by
+`chezzi check` with the same message as the bare `defer Shared(0)`. `time.timer` is a function, so
+`defer time.timer(10)` is legal. An ordinary
 **module function** is *not* a constructor and stays a legal target — and a **module name is a
 NAMESPACE, not a receiver value**, so `mod.f(x)` is a plain call in `spawn` position exactly as it is
 in `defer` position: `defer math.abs(-3)` and `spawn math.abs(-3)`, `defer lib.helper(3)` and
@@ -4669,7 +4668,7 @@ are `m.keys()`, and `k in m` tests a key (`Contains[K]`).
 Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
 set is `Set()`; `Set(list)` builds one from a list). Elements are any `Hashable` type (int/str/bool,
 a struct with `hash(self) -> int`, or a tuple of those).
-Methods: `s.add(x)` `s.remove(x)→bool` `s.contains(x)` (Map and Set spell membership `contains`; `has` is removed) `s.len()` `s.union(t)` `s.intersection(t)`
+Methods: `s.add(x)` `s.remove(x)→bool` `s.contains(x)` (Map and Set spell membership `contains`) `s.len()` `s.union(t)` `s.intersection(t)`
 `s.difference(t)` `s.copy()→set` (shallow); iterate with `for x in s`. `==` is order-independent.
 
 ## 11. Pipe operator `|>`
@@ -4785,25 +4784,19 @@ fn fetch_all(urls: List[str]):
   / `s.update(fn(x): ...)`, synchronized and **sendable**. For an in-task mutable value to close over
   or mutate through, use a plain one-field `struct` (a struct is a shared reference). The mutation
   ladder is `value` (copied) → a mutable `struct`/collection (in-task) → `Shared[T]` (cross-task).
-  `Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Executor` require `import std.concurrency` (whole-module
-  licenses all; `import Shared from std.concurrency` per-name) — they are NOT global builtins. Like every
-  builtin name they are not reserved: a module that declares its own `Shared` shadows the builtin there
-  (see "Only keywords are reserved" below). `Channel` stays global; `timer` now requires `import std.time`.
-  These import-gated native types are **also reachable by the qualified / aliased module-member path**,
-  exactly like a `.chz` module type (`geo.Point`) or `regex.Match`: after `import std.concurrency` you
-  may write `concurrency.Shared[int]` / `concurrency.Shared(0)`, and `import std.concurrency as c` gives
-  `c.Shared[int]` / `c.Shared(0)`. The qualified form works in every position — annotation, constructor
-  call, `type S = concurrency.Shared[int]`, and method calls —
-  and lowers to the same value as the bare name. (The full path `std.concurrency.Shared` works too
-  after an un-aliased `import std.concurrency`, like every Chezzi module.) The qualified path still requires the `import`
-  (qualified access to a non-imported module is an `unknown module` error), so the gate is unchanged.
-  `net.Socket` / `net.Listener` (`import std.net`) and the FFI width types / `ptr` (`import std.ffi`,
-  usable as `ffi.int32` incl. inside an `extern` signature) resolve the same qualified way but are
-  **type-only** — they have no from-nothing constructor (a value comes from `net.connect`/`net.listen`
-  or an FFI call), so `net.Socket(...)` is rejected. `time.timer(ms)` works as a qualified call;
-  `time.timer` in **type** position is rejected (it is a function, not a type). The bare-after-import
-  spelling remains fully supported; the qualified path is **additive** (the bare-name licensing may be
-  deprecated in a later milestone, but is not going away in this change).
+  `Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Executor` are ordinary members of `std.concurrency`:
+  `import Shared from std.concurrency` binds the bare name (an alias works:
+  `import Shared as Box from std.concurrency`), and `import std.concurrency` gives
+  `concurrency.Shared[int]` / `concurrency.Shared(0)` (also `std.concurrency.Shared`, TICKET-175, and
+  `c.Shared(0)` after `import std.concurrency as c`). A whole-module import binds no bare name. The
+  qualified form works in every position (annotation, constructor call, `type S =
+  concurrency.Shared[int]`, method calls) and lowers to the same value. A module that declares its own
+  `Shared` has its own type of that name (see "Only keywords are reserved" below). `Channel` is global.
+  `net.Socket` / `net.Listener` and `std.ffi`'s `ptr` / `owned_str` / widths follow the same rule but
+  are **type-only**: a value comes from `net.connect`/`net.listen` or an FFI call, so `net.Socket(...)`
+  is rejected. `timer` is an ordinary `std.time` function: `time.timer(ms)`, or
+  `import timer from std.time`; `time.timer` in **type** position is `module 'time' has no type
+  'timer'`, as for `time.now`.
 - **`Atomic[T]`** — the cross-task **atomic** box (sibling of `Shared`, sendable handle, value-first
   `Atomic(v)`; an optional `Atomic[T](v)` turbofish pins the element type and is checked against the
   value): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
@@ -4816,14 +4809,13 @@ fn fetch_all(urls: List[str]):
   `AtomicI64` (not a `Mutex`). Same method surface, all int-typed, `add`/`sub` always available (int is
   always numeric) and overflow-checked. Constructed `AtomicInt(v)` (one int arg). ~2.7× faster than
   Mutex-backed `Atomic` on a contended int counter — reach for it for a hot cross-task counter/flag.
-- **`timer(ms) -> Channel[bool]`** (`import std.time`) — a one-shot timeout channel: `timer(500).recv()`
+- **`timer(ms) -> Channel[bool]`** (`std.time`) — a one-shot timeout channel: `time.timer(500).recv()`
   blocks ~500ms then yields `true` (level-triggered — ready on any recv at/after the deadline). The
   composable timeout primitive; it races against real channels inside a `wait:` — there is **no separate
-  `recv_timeout`** (a `wait` over a channel and a `timer` subsumes it). `timer` requires `import std.time`
-  (whole-module, or `import timer from std.time`) — it is NOT a global builtin.
-- **`Socket` / `Listener`** (`import std.net`) — the TCP handle TYPE names (from `connect`/`listen`).
-  Like `Shared`/`Executor`/`timer`, a bare annotation requires `import std.net` (whole-module, or
-  `import Socket from std.net`) — they are NOT global builtins. No builtin name is reserved: not a
+  `recv_timeout`** (a `wait` over a channel and a `timer` subsumes it). `timer` is an ordinary `std.time`
+  function (`time.timer(ms)` or `import timer from std.time`).
+- **`Socket` / `Listener`** (`std.net`) — the TCP handle TYPE names (from `connect`/`listen`), members
+  of `std.net` like any other (`net.Socket`, or `import Socket from std.net`). No builtin name is reserved: not a
   scalar (`int`), a container (`List`), an FFI type (`int32`, `ptr`) or one of the 22 prebuilt
   PROTOCOL names (`Any`/`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
   `Neg`/`Arithmetic`/`Num`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`).
@@ -4954,8 +4946,8 @@ check clean while being a complete no-op: the resolver only scans module-level s
 import never resolved, never bound, and never ran the module body.)
 
 **Only keywords are reserved.** Every other name — a builtin fn (`print`, `ord`), a builtin type
-(`int`, `List`), a std type (`int32`, `Match`), a prebuilt protocol (`Comparable`) or a removed
-spelling (the old carrier names, `range`) — is an ordinary name. A module-level declaration or import of it
+(`int`, `List`), a std type (`int32`, `Match`) or a prebuilt protocol (`Comparable`) — is an
+ordinary name. A module-level declaration or import of it
 is legal and **shadows** the builtin inside that module, exactly as a local variable already does
 (`print := 5`); Go and Python do the same with their predeclared names:
 
@@ -4971,10 +4963,8 @@ fn f[List](x: List) -> List:    # a type parameter shadows inside its fn
 ```
 
 Lookup tries the module's own declarations and imports first, then the builtins. Inside a module that
-declares `struct int`, `int` in a type position is that struct. A removed spelling that nothing
-declares is an unknown name with the message that names its replacement
-(`` `range()` is removed; write `0..n` ``): the carriers behind `T?` and `T!E` are reached only
-through that syntax (`?x`, `!e`, `None`).
+declares `struct int`, `int` in a type position is that struct. The carriers behind `T?` and `T!E`
+have no user name: they are reached only through that syntax (`?x`, `!e`, `None`).
 
 **A keyword cannot be bound, by any form.** `None`, `true`, `false` and every other keyword are
 rejected by the parser wherever a name is declared — a `:=` or typed binding, a destructuring
@@ -5397,15 +5387,15 @@ names** — the integers `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32
 `float` width `float32` (which the program sees as `float`). The TYPE names
 are Chezzi's first **type imports**: like the value members they are brought in per-name with
 `import int32, uint32 from std.ffi`, and a module that does not import a width name cannot use it (see
-*Fixed-width integers* below). The opaque `ptr` type is imported the same way — whole-module
-`import std.ffi` or per-name `import ptr from std.ffi` — and likewise cannot be used (in an annotation
-OR an `extern` signature) without that import.
+*Fixed-width integers* below). The opaque `ptr` type and the return-only `owned_str` are imported the
+same way (`import ptr from std.ffi`, or `ffi.ptr` after `import std.ffi`, an alias included) and
+likewise cannot be used (in an annotation OR an `extern` signature) without that import.
 
 **`str` returns — owned + nullable (return-only opt-ins).** A plain `str` return is **borrowed**: the
 `char*` is copied into a Chezzi string and never `free`d (a `malloc`'d return would **leak**), and a
 `NULL` is a recoverable **fault** (it would break the static non-null `str` guarantee). Two return-only
-forms (no `import`, no grammar change — both are recognized only inside an `extern` return slot, like
-`ptr`) opt into the other behaviours:
+forms (no grammar change — both are legal only inside an `extern` return slot; `owned_str` is a
+`std.ffi` member, `import owned_str from std.ffi`) opt into the other behaviours:
 
 - **`owned_str`** — the C function transfers ownership of a `malloc`'d `char*` (e.g. `strdup`). Chezzi
   copies it into a `str` **and then frees** the buffer with libc `free`, so it does **not** leak. To
@@ -5445,21 +5435,18 @@ frees memory you don't own and corrupts the heap, exactly like a non-NUL-termina
 
 **Fixed-width integers (`int8`..`uint64`) — bidirectional, imported from `std.ffi`.** Bare `int` marshals
 as C `long`; to bind a C function taking or returning a **fixed-width** integer, declare it with one of
-eight marshalling type names. These are **not global builtins** (like `ptr`, and unlike `owned_str`, which
-is neither global nor importable — legal only inside an `extern` signature): a module that
-names a width type must **import it per-name from `std.ffi`** — Chezzi's first **type imports**, with the
+eight marshalling type names. These are **not global builtins** (like `ptr` and `owned_str`): a module that
+names a width type imports it from `std.ffi` like any module member — Chezzi's first **type imports**, with the
 same `import <name>, … from std.ffi` form as the `null`/`is_null` value members:
 
 ```chezzi
 import int32, uint32 from std.ffi   # bring the width TYPE names into this module
 ```
 
-A module that uses a width name without importing it gets *unknown type 'int32' (import it from std.ffi:
-`import int32 from std.ffi`)*. Importing a non-existent width name errors like any bad import (*module
-'std.ffi' has no member 'int99'*). A width type **cannot be renamed on import** — `import int32 as W from
-std.ffi` is rejected (the backend marshaller keys off the literal name `int32`), as is a wrong-width
-trap (`import int8 as int32`). A redundant **identical** self-rename (`import int32 as int32`) is harmless
-and accepted — it just imports `int32`. You also can't redefine a
+A module that uses a width name without importing it gets *unknown type 'int32'; import it from std.ffi
+(`import int32 from std.ffi`)*. Importing a non-existent width name errors like any bad import (*module
+'std.ffi' has no member 'int99'*). An alias marshals as the width it names: after
+`import int8 as Byte from std.ffi`, `fn f(b: Byte)` passes a C `int8_t`. You also can't redefine a
 width name as a user alias in a module that imports it (`type int32 = …` beside `import int32 from
 std.ffi` is two declarations of one name; without the import, `type int32 = str` is an ordinary alias). The import is per-module: a struct's int32 field
 declared (and resolved) in module A is usable from module B with **no** import in B, but a bare `int32`
@@ -5713,8 +5700,8 @@ modules and use them from a bodied fn (e.g. `import std.string`). A `test` metho
   harvests them as the module's **signature source** (the type's field layout + the fns' signatures),
   while the runtime **values** stay bound natively (name-keyed via `native_members`). This is the
   import-gated **native-module-member** mechanism: `regex.Match`/`regex.find` (or `math.sqrt`) are reached
-  exactly as before (`import std.regex` / `import Match from std.regex` licenses the bare `Match`;
-  `regex.find(...)` qualified), the runtime + bytecode are unchanged, and it is **both-engine
+  like any module member (`import std.regex` gives `regex.Match` and `regex.find(...)`;
+  `import Match from std.regex` binds the bare `Match`), the runtime + bytecode are unchanged, and it is **both-engine
   byte-identical**. It retired the earlier file-less companion-stub shortcut, and in phase 4d the
   hand-built per-module Rust signatures for the five pure-function modules (no Rust-side module sig remains). (Checker-side metadata a
   `native fn` decl can't express — `math.abs`/`sign`'s numeric

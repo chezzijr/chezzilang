@@ -848,37 +848,6 @@ fn timer_arg_must_be_int() {
 }
 
 #[test]
-fn timer_requires_import() {
-    // Bare `timer(ms)` with NO `import std.time` is an unknown-function error carrying the import hint.
-    let errs = check_entry("fn main():\n    t := timer(50)\n    print(t.recv())\nmain()\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("unknown function 'timer'")
-                && e.message.contains("import std.time")),
-        "expected unknown-function + import hint, got: {errs:?}"
-    );
-}
-
-#[test]
-fn timer_whole_module_import_ok() {
-    // A whole-module `import std.time` licenses the bare `timer(ms)` builtin.
-    entry_ok(
-        "import timer from std.time\nfn main():\n    t := timer(50)\n    print(t.recv())\nmain()\n",
-    );
-}
-
-#[test]
-fn timer_from_import_licenses_and_rejects_rename() {
-    // A selective `import timer from std.time` licenses the bare `timer(ms)` call...
-    entry_ok("import timer from std.time\nfn main():\n    print(timer(50).recv())\nmain()\n");
-    // ...but the opcode-backed `timer` cannot be renamed on import (the runtime skip keys on the name).
-    entry_rejects(
-        "import timer as t2 from std.time\nfn main():\n    print(1)\nmain()\n",
-        "cannot be renamed",
-    );
-}
-
-#[test]
 fn import_alias_nil_from_accepted() {
     // BOUNDARY: `nil` is an ordinary name (TICKET-231), so it is a legal alias target.
     let t = TmpDir::new();
@@ -956,7 +925,7 @@ fn executor_defer_shutdown_ok() {
 #[test]
 fn executor_type_arg_rejected() {
     rejects(
-        "fn main():\n    ex := Executor[int]()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor[int]()\nmain()\n",
         "takes no type arguments",
     );
 }
@@ -978,72 +947,6 @@ fn executor_is_sendable() {
 }
 
 // ----- Task 4: the four runtime concurrency ctors require `import std.concurrency` -----
-
-#[test]
-fn concurrency_types_require_import() {
-    // Value-position ctor use without the import is an unknown-name error with the import hint.
-    for (src, name) in [
-        (
-            "fn main():\n    s := Shared(0)\n    print(s.get())\nmain()\n",
-            "Shared",
-        ),
-        (
-            "fn main():\n    r := RwShared(0)\n    print(r.get())\nmain()\n",
-            "RwShared",
-        ),
-        (
-            "fn main():\n    a := Atomic(0)\n    print(a.load())\nmain()\n",
-            "Atomic",
-        ),
-        (
-            "fn main():\n    ex := Executor()\n    ex.shutdown()\nmain()\n",
-            "Executor",
-        ),
-    ] {
-        let errs = check_entry(src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains(&format!("unknown type '{name}'"))
-                    && e.message.contains("import std.concurrency")),
-            "expected unknown-type+import hint for {name}, got: {errs:?}"
-        );
-    }
-    // Type-position annotation use without the import is also an unknown-type error with the hint.
-    for (src, name) in [
-        ("fn f(s: Shared[int]):\n    print(s.get())\n", "Shared"),
-        ("fn f(r: RwShared[int]):\n    print(r.get())\n", "RwShared"),
-        ("fn f(a: Atomic[int]):\n    print(a.load())\n", "Atomic"),
-        ("fn f(ex: Executor):\n    ex.shutdown()\n", "Executor"),
-    ] {
-        let errs = check_entry(src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains(&format!("unknown type '{name}'"))
-                    && e.message.contains("import std.concurrency")),
-            "expected unknown-type+import hint (annotation) for {name}, got: {errs:?}"
-        );
-    }
-}
-
-#[test]
-fn bare_concurrency_type_without_import_hints_import() {
-    // A BARE (no type-arg) `Shared`/`RwShared`/`Atomic` annotation without the import must give the
-    // SAME unknown-type+import-hint error the parameterized `Shared[T]` form gives — not a bare
-    // hint-less "unknown type" (the catch-all regression).
-    for (src, name) in [
-        ("fn f(s: Shared):\n    print(1)\n", "Shared"),
-        ("fn f(r: RwShared):\n    print(1)\n", "RwShared"),
-        ("fn f(a: Atomic):\n    print(1)\n", "Atomic"),
-    ] {
-        let errs = check_entry(src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains(&format!("unknown type '{name}'"))
-                    && e.message.contains("import std.concurrency")),
-            "expected unknown-type+import hint for bare {name}, got: {errs:?}"
-        );
-    }
-}
 
 #[test]
 fn bare_concurrency_type_with_import_needs_type_arg() {
@@ -1079,6 +982,17 @@ fn bare_concurrency_type_with_import_needs_type_arg() {
 }
 
 #[test]
+fn atomic_int_arg_must_be_int() {
+    entry_ok(
+        "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(0)\n    a.add(1)\n    print(a.load())\nmain()\n",
+    );
+    entry_rejects(
+        "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(3.5)\n    print(a.load())\nmain()\n",
+        "expected int",
+    );
+}
+
+#[test]
 fn reserved_typeparam_fix_does_not_overreject() {
     // BOUNDARY (must-NOT-over-reject): the reserved-type-param guard checks param NAMES only. A
     // normal `[T]`, multi-param `[K, V]`, a word param, a free generic fn, and a protocol-BOUNDED
@@ -1092,8 +1006,8 @@ fn reserved_typeparam_fix_does_not_overreject() {
 }
 
 #[test]
-fn concurrency_whole_module_import_ok() {
-    // A whole-module `import std.concurrency` licenses all four (value + annotation positions).
+fn concurrency_from_import_ok() {
+    // A from-import binds each named type, in value and annotation positions.
     entry_ok(
         "import Atomic, Executor, RwShared, Shared from std.concurrency\nfn main():\n    s := Shared(0)\n    r := RwShared(0)\n    a := Atomic(0)\n    ex := Executor()\n    print(s.get())\nmain()\n",
     );
@@ -1102,96 +1016,7 @@ fn concurrency_whole_module_import_ok() {
     );
 }
 
-#[test]
-fn concurrency_from_import_licenses_named() {
-    // A selective `import Shared from std.concurrency` licenses the named member.
-    entry_ok(
-        "import Shared from std.concurrency\nfn main():\n    print(Shared(0).get())\nmain()\n",
-    );
-    // But NOT the others it didn't import.
-    let errs =
-        check_entry("import Shared from std.concurrency\nfn main():\n    a := Atomic(0)\nmain()\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("unknown type 'Atomic'")),
-        "from-importing Shared must not license Atomic, got: {errs:?}"
-    );
-}
-
-#[test]
-fn concurrency_partial_import_collection_does_not_license() {
-    // `import std.concurrency.collection` (len-3, the real file) must NOT license the four bare
-    // ctors — only the whole-module `import std.concurrency` (len-2) does.
-    let errs = check_entry(
-        "import std.concurrency.collection\nfn main():\n    s := Shared(0)\n    print(s.get())\nmain()\n",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("unknown type 'Shared'")),
-        "importing the collection submodule must not license bare Shared, got: {errs:?}"
-    );
-}
-
-#[test]
-fn atomic_int_bare_unlicensed_errors() {
-    // AtomicInt is import-gated: a bare `AtomicInt(0)` WITHOUT `import std.concurrency` must emit the
-    // std.concurrency import hint (the reserved-name hole check's static half). Both the ctor call and
-    // a bare type annotation must gate.
-    let errs = check_entry("fn main():\n    a := AtomicInt(0)\n    print(a.load())\nmain()\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("unknown type 'AtomicInt'")
-                && e.message.contains("import std.concurrency")),
-        "bare AtomicInt ctor (no import) must emit the std.concurrency import hint, got: {errs:?}"
-    );
-    let errs = check_entry("fn f(a: AtomicInt):\n    print(1)\nfn main():\n    print(1)\nmain()\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("unknown type 'AtomicInt'")
-                && e.message.contains("import std.concurrency")),
-        "bare AtomicInt annotation (no import) must emit the std.concurrency import hint, got: {errs:?}"
-    );
-    // Licensed: `import std.concurrency` makes it resolve cleanly.
-    let errs = check_entry(
-        "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(0)\n    a.add(1)\n    print(a.load())\nmain()\n",
-    );
-    assert!(
-        errs.is_empty(),
-        "licensed AtomicInt must check clean, got: {errs:?}"
-    );
-    // A non-int arg is rejected.
-    let errs = check_entry(
-        "import AtomicInt from std.concurrency\nfn main():\n    a := AtomicInt(3.5)\n    print(a.load())\nmain()\n",
-    );
-    assert!(!errs.is_empty(), "AtomicInt(3.5) must be a type error");
-}
-
 // ----- namespace name-leak: builtin TYPE names reserved at declaration -----
-
-#[test]
-fn bare_net_type_without_import_hints_import() {
-    // HOLE B — bare `Socket` / `Listener` annotations require `import std.net` (mirrors the
-    // Executor/Shared/ptr gates). Without the import, the use must emit the import hint, not resolve
-    // unconditionally to Ty::Socket/Ty::Listener.
-    for (src, name) in [
-        (
-            "fn f(s: Socket):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
-            "Socket",
-        ),
-        (
-            "fn f(l: Listener):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
-            "Listener",
-        ),
-    ] {
-        let errs = check_entry(src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains(&format!("unknown type '{name}'"))
-                    && e.message.contains("import std.net")),
-            "bare {name} without import must hint import std.net, got: {errs:?}"
-        );
-    }
-}
 
 #[test]
 fn net_type_with_import_ok() {
@@ -1221,31 +1046,6 @@ fn net_handle_bare_construction_rejected_after_import() {
             "bare {name}() construction must be rejected after import std.net, got no errors"
         );
     }
-}
-
-#[test]
-fn net_type_from_import_partial_does_not_license_other() {
-    // `import Socket from std.net` licenses Socket but NOT Listener.
-    let errs = check_entry(
-        "import Socket from std.net\nfn f(l: Listener):\n    print(1)\nfn main():\n    print(1)\nmain()\n",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("unknown type 'Listener'")),
-        "from-importing Socket must not license Listener, got: {errs:?}"
-    );
-}
-
-#[test]
-fn net_type_rename_rejected() {
-    // A net type carries no runtime value (the runtime resolves Ty::Socket directly), so renaming it
-    // on import would bind nothing usable — reject the rename (mirrors the concurrency/timer gate).
-    let errs = check_entry("import Socket as S from std.net\nfn main():\n    print(1)\nmain()\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("Socket") && e.message.contains("cannot be renamed")),
-        "renaming a net type on import must be rejected, got: {errs:?}"
-    );
 }
 
 // ----- C5 refinement #1: a non-sendable value merely *read* inside a `spawn:` block -----

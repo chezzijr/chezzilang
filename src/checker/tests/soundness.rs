@@ -299,7 +299,7 @@ const SPAWN_Q: &str = "'?' is not allowed inside a spawn block";
 fn q_inside_a_spawn_block_is_rejected_whatever_the_enclosing_fn_returns() {
     let prog = |ret: &str, tail: &str| {
         format!(
-            "import std.concurrency\nfn g() -> int!str:\n    return !\"x\"\nfn main() -> {ret}:\n    spawn:\n        v := g()?\n        print(v)\n    {tail}\nprint(main())\n"
+            "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\nfn g() -> int!str:\n    return !\"x\"\nfn main() -> {ret}:\n    spawn:\n        v := g()?\n        print(v)\n    {tail}\nprint(main())\n"
         )
     };
     // Enclosing `-> Result` — pre-fix `ok: no type errors` (the swallow).

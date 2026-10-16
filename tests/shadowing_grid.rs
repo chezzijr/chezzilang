@@ -164,7 +164,7 @@ const CELLS: &[(&str, &str, &str)] = &[
     // Type parameters named after builtin types.
     (
         "tparam-Shared",
-        "fn f[Shared](x: Shared) -> Shared:\n    return x\nprint(f(\"s\"))\n",
+        "import Shared from std.concurrency\nfn f[Shared](x: Shared) -> Shared:\n    return x\nprint(f(\"s\"))\n",
         "s\n",
     ),
     // Syntax and operators mean the BUILTIN, whatever the module declares: the user's `Eq`,
@@ -229,32 +229,6 @@ fn a_module_declaration_shadows_the_builtin_of_its_name() {
 fn a_keyword_is_still_reserved() {
     let (ok, got) = run("kw", "fn if() -> int:\n    return 1\n");
     assert!(!ok, "a keyword must not name a fn: {got}");
-}
-
-/// A removed spelling no declaration rebinds is an unknown name, with the message that names its
-/// replacement.
-#[test]
-fn a_removed_spelling_names_its_replacement() {
-    for (tag, src, needle) in [
-        ("some", "x := Some(3)\nprint(x)\n", "`Some(x)` is removed"),
-        ("range", "print(range(3))\n", "`range()` is removed"),
-        (
-            "result",
-            "x: Result[int, str] = ?1\nprint(x)\n",
-            "`Result[T, E]` is removed",
-        ),
-        (
-            "some-pattern",
-            "fn f(o: int?):\n    match o:\n        Some(v): print(v)\n        None: print(0)\nf(1)\n",
-            "`Some(x)` is removed",
-        ),
-    ] {
-        let (ok, got) = run(tag, src);
-        assert!(
-            !ok && got.contains(needle),
-            "{tag}: want {needle:?}, got {got:?}"
-        );
-    }
 }
 
 #[test]

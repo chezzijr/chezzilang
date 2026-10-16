@@ -91,7 +91,7 @@ fn assert_clean_run(out: &std::process::Output, want_stdout: &str) {
 /// cancelled by `shutdown_now()` too, not just a depth-one child.
 #[test]
 fn shutdown_now_cancels_a_depth_two_nursery_child() {
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         import std.time\n\
         never := Channel[int](0)\n\
         fn job():\n    \
@@ -116,7 +116,7 @@ fn shutdown_now_cancels_a_depth_two_nursery_child() {
 /// W13-8 — the same cancellation, synchronised by a channel handshake instead of a sleep (DEC-050).
 #[test]
 fn shutdown_now_cancels_a_nursery_child_synchronised_by_a_handshake() {
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         never := Channel[int](0)\n\
         ready := Channel[int](1)\n\
         fn job():\n    \
@@ -142,7 +142,7 @@ fn shutdown_now_cancels_a_nursery_child_synchronised_by_a_handshake() {
 /// never fire in the absence of a tripped cancel flag.
 #[test]
 fn a_job_nursery_deadlock_with_no_shutdown_still_faults() {
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         import std.time\n\
         never := Channel[int](0)\n\
         fn job():\n    \
@@ -181,7 +181,7 @@ fn a_job_nursery_deadlock_with_no_shutdown_still_faults() {
 /// divergence this test pins today's outcome for, not endorses.
 #[test]
 fn shutdown_now_ends_a_nursery_child_whose_defer_blocks_forever() {
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         never := Channel[int](0)\n\
         stuck := Channel[int](0)\n\
         ready := Channel[int](1)\n\
@@ -213,7 +213,7 @@ fn shutdown_now_ends_a_nursery_child_whose_defer_blocks_forever() {
 /// (a rare miss would show as an occasional hang past the deadline, not a wrong answer).
 #[test]
 fn shutdown_now_races_a_parked_nursery_child_at_one_worker() {
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         fn job(never: Channel[int], ready: Channel[int]):\n    \
             parallel:\n        \
                 spawn:\n            \

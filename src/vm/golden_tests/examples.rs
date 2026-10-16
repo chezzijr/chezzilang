@@ -100,7 +100,7 @@ fn cancel_child_inherits_tightest_deadline() {
 /// the already-flipped flag.
 #[test]
 fn cancel_token_sendable_with_parent() {
-    let src = "import std.cancel\n\nfn watch(c: cancel.Token, seen: Shared[bool]):\n    if c.cancelled():\n        seen.set(true)\n\nfn main():\n    p := cancel.manual()\n    c := p.derive()\n    seen := Shared(false)\n    p.cancel()\n    parallel:\n        spawn watch(c, seen)\n    print(\"observed cancel: {seen.get()}\")\n\nmain()\n";
+    let src = "import Shared from std.concurrency\nimport std.cancel\n\nfn watch(c: cancel.Token, seen: Shared[bool]):\n    if c.cancelled():\n        seen.set(true)\n\nfn main():\n    p := cancel.manual()\n    c := p.derive()\n    seen := Shared(false)\n    p.cancel()\n    parallel:\n        spawn watch(c, seen)\n    print(\"observed cancel: {seen.get()}\")\n\nmain()\n";
     let out = run_cancel_src("cancel_token_sendable_parent", src);
     assert_eq!(out, "observed cancel: true\n");
 }

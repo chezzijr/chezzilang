@@ -301,8 +301,8 @@ fn hover_native_type_import_shows_doc() {
 
 #[test]
 fn hover_timer_import_shows_func_doc() {
-    // `timer` is a reserved FUNCTION (`timer(ms) -> Channel[bool]`); its import-line token
-    // (`import timer from std.time`, `timer` at line0 col7) shows a function-style hover.
+    // `timer` is an ordinary std.time FUNCTION (`timer(ms) -> Channel[bool]`); its import-line token
+    // (`import timer from std.time`, `timer` at line0 col7) shows its decl's doc.
     let src = "import timer from std.time\nfn main():\n    t := timer(10)\n    print(1)\n";
     let h = hov(src, 0, 7).expect("hover on timer import token");
     assert!(
@@ -1318,6 +1318,10 @@ fn hover_and_diagnostics_name_no_removed_spelling() {
     }
     let ds = diag("x: option = 1\n");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    assert!(ds[0].message.contains("`T?`"), "{}", ds[0].message);
+    assert!(
+        ds[0].message.contains("unknown type 'option'"),
+        "{}",
+        ds[0].message
+    );
     clean(&ds[0].message);
 }

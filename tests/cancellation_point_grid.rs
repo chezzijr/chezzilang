@@ -250,7 +250,9 @@ fn run_src(c: &Cell) -> String {
         "bad := 0\nfor _ in 0..{rounds}:\n    if not round():\n        bad += 1\nprint(\"bad={{bad}}\")\n"
     );
     if let Some(r) = c.round {
-        return format!("import std.concurrency\n\n{r}\n{main}");
+        return format!(
+            "import std.concurrency\nimport AtomicInt, Executor, RwShared, Shared from std.concurrency\n\n{r}\n{main}"
+        );
     }
     let (driver, extra) = match c.halt {
         Halt::ShutdownNow => (
@@ -286,7 +288,7 @@ fn run_src(c: &Cell) -> String {
     }
     body += &format!("return {}\n", c.done);
     format!(
-        "import std.concurrency\nimport ConcurrentMap, ConcurrentList, ConcurrentSet from std.concurrency.collection\n\n{DECLS}\n{}\n{extra}\nfn round() -> bool:\n{}\n{main}",
+        "import std.concurrency\nimport AtomicInt, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap, ConcurrentList, ConcurrentSet from std.concurrency.collection\n\n{DECLS}\n{}\n{extra}\nfn round() -> bool:\n{}\n{main}",
         act_fn(c),
         indent(&body, 4)
     )
@@ -305,7 +307,7 @@ fn timeout_src(c: &Cell) -> String {
     }
     body += &format!("    act(7, {ARGS})\n");
     format!(
-        "import std.concurrency\nimport ConcurrentMap, ConcurrentList, ConcurrentSet from std.concurrency.collection\nimport std.time\n\n{DECLS}\n{}\ntest fn cell():\n{}",
+        "import std.concurrency\nimport AtomicInt, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap, ConcurrentList, ConcurrentSet from std.concurrency.collection\nimport std.time\n\n{DECLS}\n{}\ntest fn cell():\n{}",
         act_fn(c),
         indent(&body, 4)
     )

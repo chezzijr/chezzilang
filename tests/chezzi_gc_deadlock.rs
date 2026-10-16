@@ -38,7 +38,7 @@ fn gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph() {
     let path = dir.join("cyclic_cores.chz");
     std::fs::write(
         &path,
-        "import std.concurrency\n\
+        "import Shared from std.concurrency\n\
          \n\
          struct Link:\n    \
              flag: Shared[bool]\n    \
@@ -151,7 +151,7 @@ fn max_heap_byte_walk_does_not_deadlock_on_a_cyclic_core_graph() {
     let path = dir.join("cyclic_cores_test.chz");
     std::fs::write(
         &path,
-        "import std.concurrency\n\
+        "import Shared from std.concurrency\n\
          \n\
          struct Link:\n    \
              flag: Shared[bool]\n    \

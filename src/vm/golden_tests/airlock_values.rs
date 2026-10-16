@@ -684,7 +684,7 @@ main()";
 /// job now crosses by value and drives (was the executor reach-gate fault).
 #[test]
 fn generator_module_global_via_executor_crosses_both() {
-    let src = "\
+    let src = "import Executor from std.concurrency\n\
 fn gen() -> Iterator[int]:
     yield 1
     yield 2
@@ -1702,7 +1702,7 @@ main()
 /// cancelled, never unwound.
 #[test]
 fn parity_defer_runs_on_parked_sibling_when_sibling_faults() {
-    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+    let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";

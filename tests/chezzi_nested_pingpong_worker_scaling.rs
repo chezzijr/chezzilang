@@ -100,7 +100,7 @@ fn a_ping_pong_in_an_executor_job_does_not_wake_the_main_scheds_idle_workers() {
         &path,
         format!(
             "\
-import std.concurrency\n\n\
+import Executor from std.concurrency\n\n\
 fn pp():\n    \
     ping := Channel[int](0)\n    \
     pong := Channel[int](0)\n    \
@@ -158,7 +158,8 @@ main()\n",
     let bound = 2 * ROUND_TRIPS;
     assert!(
         switches_low <= bound,
-        "a ping-pong inside an `Executor` job must not wake the idle workers of main's peer sched \
+        "import Executor from std.concurrency
+a ping-pong inside an `Executor` job must not wake the idle workers of main's peer sched \
          once per message (W13-26): voluntary context switches at {LOW_WORKERS} workers = \
          {switches_low}; must be <= 2 x {ROUND_TRIPS} round trips = {bound}. `MnSched::wake_key` must \
          notify only when its bucket drain requeued a fiber; the unconditional `notify_waiters` \
@@ -166,7 +167,8 @@ main()\n",
     );
     assert!(
         switches_high <= bound,
-        "a ping-pong inside an `Executor` job must not wake the idle workers of main's peer sched \
+        "import Executor from std.concurrency
+a ping-pong inside an `Executor` job must not wake the idle workers of main's peer sched \
          once per message (W13-26): voluntary context switches at {HIGH_WORKERS} workers = \
          {switches_high}; must be <= 2 x {ROUND_TRIPS} round trips = {bound}. `MnSched::wake_key` \
          must notify only when its bucket drain requeued a fiber; the unconditional `notify_waiters` \

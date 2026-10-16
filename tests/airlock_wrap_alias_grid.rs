@@ -131,7 +131,9 @@ fn program(
     };
     let leak = body.replace("@[", open).replace("]@", close);
     let in_callee = leak.replace("buf", "b");
-    let mut src = format!("import std.concurrency\n{rdecl}{fdecl}struct H:\n    o: List[{y}]\n");
+    let mut src = format!(
+        "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\n{rdecl}{fdecl}struct H:\n    o: List[{y}]\n"
+    );
     let int_gen = format!("fn gen(h: H) -> Iterator[int]:\n    buf := {init}\n");
     let (ity, tail) = match route {
         "yield" => {

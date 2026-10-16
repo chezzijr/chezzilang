@@ -351,7 +351,6 @@ impl FnComp {
             | other @ Op::NewRwShared
             | other @ Op::NewAtomic
             | other @ Op::NewAtomicInt
-            | other @ Op::NewTimer
             | other @ Op::NewExecutor
             | other @ Op::NewExecutorN => panic!("patch_jump_to on non-jump op: {other:?}"),
         }
@@ -497,7 +496,6 @@ impl FnComp {
             | other @ Op::NewRwShared
             | other @ Op::NewAtomic
             | other @ Op::NewAtomicInt
-            | other @ Op::NewTimer
             | other @ Op::NewExecutor
             | other @ Op::NewExecutorN => panic!("patch_jump on non-jump op: {other:?}"),
         }

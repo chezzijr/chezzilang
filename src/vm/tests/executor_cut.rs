@@ -350,11 +350,12 @@ fn a_finished_executor_job_no_longer_vetoes_a_parked_nursery_task() {
 /// of the rule.
 #[test]
 fn sequential_executor_round_trips_reuse_their_runner() {
-    let vm = ran_standalone(
-        "ex := Executor()\nch := Channel[int](0)\nn := 0\nfor i in 0..200:\n    ex.submit(fn(): ch.send(1))\n    n = n + ch.recv()\n",
+    let vm = ran_program(
+        "import Executor from std.concurrency\nex := Executor()\nch := Channel[int](0)\nn := 0\nfor i in 0..200:\n    ex.submit(fn(): ch.send(1))\n    n = n + ch.recv()\n",
     );
-    let Obj::Module(m) = vm.heap.get(vm.module_objs[0]) else {
-        panic!("module_objs[0] is the entry module");
+    let entry = *vm.module_objs.last().expect("the entry module");
+    let Obj::Module(m) = vm.heap.get(entry) else {
+        panic!("the last module is the entry module");
     };
     let core = m
         .slots

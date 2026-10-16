@@ -154,7 +154,7 @@ fn parallel_recv_blocked_sibling_aborts_on_sibling_fault() {
 /// was cancelled before completing; without the back-edge cancel check it would print `99`.
 #[test]
 fn parallel_cpu_sibling_aborts_on_sibling_fault() {
-    let src = "fn looper(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    i := 0\n    while i < 1000000000:\n        i = i + 1\n    s.set(99)\n\
+    let src = "import Shared from std.concurrency\nfn looper(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    i := 0\n    while i < 1000000000:\n        i = i + 1\n    s.set(99)\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn looper(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
     let out = run_capture(src).expect("the fault is recovered, so the program completes");
@@ -185,7 +185,7 @@ fn parallel_cpu_sibling_aborts_on_sibling_fault() {
 /// the REGRESSION guard for it: a failure here means the veto is gone, not that the token is flaky.
 #[test]
 fn parallel_defer_runs_on_cancelled_sibling() {
-    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+    let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                    fn consumer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                    fn boom(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        go := Channel[int]()\n        parallel:\n            spawn consumer(ch, go, s)\n            spawn boom(go)\n        0\n    print(s.get())\nmain()\n";
@@ -202,7 +202,7 @@ fn parallel_defer_runs_on_cancelled_sibling() {
 /// HANGS the nursery here instead of failing an assert.
 #[test]
 fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
-    let src = "fn spinner(go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    i := 0\n    while true:\n        i = i + 1\n\
+    let src = "import Shared from std.concurrency\nfn spinner(go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    i := 0\n    while true:\n        i = i + 1\n\
                    fn cleanup(s: Shared[int]):\n    s.set(42)\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn spinner(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
@@ -239,7 +239,7 @@ fn parallel_spinning_sibling_does_not_hang_the_nursery_under_cancel() {
 /// this bug.
 #[test]
 fn parallel_defer_runs_when_enlisted_nursery_escapes() {
-    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+    let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                    fn task(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                    fn gate(go: Channel[int]):\n    go.recv()\n\
                    fn outer(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    parallel:\n        spawn task(ch, go, s)\n        parallel:\n            spawn gate(go)\n        return\n\
@@ -283,7 +283,7 @@ fn panic_fault_trips_the_scope_cancel() {
 /// cancel unwinds through `unwind_deferred`. (Without the fix this prints `0`.)
 #[test]
 fn parallel_defer_runs_on_back_edge_cancel() {
-    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+    let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                    fn worker(go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    i := 0\n    while i < 1000000000:\n        i = i + 1\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn worker(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
@@ -301,7 +301,7 @@ fn parallel_defer_runs_on_back_edge_cancel() {
 /// unwinds past the recover instead, so the sentinel stays at the pre-loop `1`. (Buggy: `99`.)
 #[test]
 fn parallel_recover_inside_worker_does_not_catch_cancel() {
-    let src = "fn victim(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    r := recover:\n        i := 0\n        while i < 1000000000:\n            i = i + 1\n        0\n    s.set(99)\n\
+    let src = "import Shared from std.concurrency\nfn victim(go: Channel[int], s: Shared[int]):\n    s.set(1)\n    go.send(0)\n    r := recover:\n        i := 0\n        while i < 1000000000:\n            i = i + 1\n        0\n    s.set(99)\n\
                    fn trigger(go: Channel[int]):\n    go.recv()\n    xs := [1]\n    print(xs[9])\n\
                    fn main():\n    go := Channel[int]()\n    s := Shared(0)\n    r := recover:\n        parallel:\n            spawn victim(go, s)\n            spawn trigger(go)\n        0\n    print(s.get())\nmain()\n";
     let out = run_capture(src).expect("the trigger fault is recovered, so the program completes");
@@ -331,7 +331,7 @@ fn golden_channel_chz_matches_expected_and_interp() {
 fn parallel_atomic_add_is_exact() {
     let n = 300;
     let src = format!(
-        "fn work(a: Atomic[int]):\n    a.add(1)\n\
+        "import Atomic from std.concurrency\nfn work(a: Atomic[int]):\n    a.add(1)\n\
              fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn work(a)\n    print(a.load())\nmain()\n"
     );
     assert_eq!(run_capture(&src).expect("parallel"), format!("{n}\n"));
@@ -344,7 +344,7 @@ fn parallel_atomic_add_is_exact() {
 fn parallel_atomic_cas_increment_is_exact() {
     let n = 200;
     let src = format!(
-        "fn bump(a: Atomic[int]):\n    while true:\n        cur := a.load()\n        if a.cas(cur, cur + 1):\n            break\n\
+        "import Atomic from std.concurrency\nfn bump(a: Atomic[int]):\n    while true:\n        cur := a.load()\n        if a.cas(cur, cur + 1):\n            break\n\
              fn main():\n    a := Atomic(0)\n    parallel:\n        for _ in 0..{n}:\n            spawn bump(a)\n    print(a.load())\nmain()\n"
     );
     assert_eq!(run_capture(&src).expect("parallel"), format!("{n}\n"));
@@ -354,7 +354,7 @@ fn parallel_atomic_cas_increment_is_exact() {
 /// numeric-`T` arm for floats, not just ints).
 #[test]
 fn atomic_float_ops_two_engine_parity() {
-    let src = "fn main():\n    a := Atomic(1.5)\n    print(a.add(2.0))\n    print(a.sub(0.5))\n    print(a.exchange(9.0))\n    print(a.cas(9.0, 4.0))\n    print(a.load())\nmain()\n";
+    let src = "import Atomic from std.concurrency\nfn main():\n    a := Atomic(1.5)\n    print(a.add(2.0))\n    print(a.sub(0.5))\n    print(a.exchange(9.0))\n    print(a.cas(9.0, 4.0))\n    print(a.load())\nmain()\n";
     // Hand-derived from `add`/`sub` returning the NEW value and `exchange` returning the OLD value
     // (the same contract `examples/atomic.chz`/`.expected` already pins): 1.5+2.0=3.5; 3.5-0.5=3.0;
     // exchange(9.0) returns the pre-swap 3.0 and sets 9.0; cas(9.0, 4.0) matches (holds 9.0) -> true,
@@ -367,7 +367,7 @@ fn atomic_float_ops_two_engine_parity() {
 /// — the most distinctive Atomic code path. Both engines must agree.
 #[test]
 fn atomic_cas_on_list_two_engine_parity() {
-    let src = "fn main():\n    a := Atomic([1, 2])\n    print(a.cas([1, 2], [9]))\n    print(a.load())\n    print(a.cas([1, 2], [0]))\n    print(a.load())\nmain()\n";
+    let src = "import Atomic from std.concurrency\nfn main():\n    a := Atomic([1, 2])\n    print(a.cas([1, 2], [9]))\n    print(a.load())\n    print(a.cas([1, 2], [0]))\n    print(a.load())\nmain()\n";
     // Hand-derived: current [1, 2] == expected [1, 2] (values_equal) -> cas #1 succeeds, swaps to
     // [9]; cas #2 compares the NEW current [9] against expected [1, 2] -> no match -> false, no
     // swap, so `load()` still reads [9] both times.
@@ -377,7 +377,7 @@ fn atomic_cas_on_list_two_engine_parity() {
 /// `timer(0)` (and any already-elapsed deadline) delivers `true` immediately, on every engine.
 #[test]
 fn timer_zero_delivers_immediately() {
-    let src = "fn main():\n    print(timer(0).recv())\nmain()\n";
+    let src = "import timer from std.time\nfn main():\n    print(timer(0).recv())\nmain()\n";
     let out = run_capture(src).expect("vm");
     assert_eq!(out, "true\n");
     assert_eq!(run_capture(src).expect("parallel"), "true\n");
@@ -732,7 +732,7 @@ fn golden_parallel_cross_nursery_nested_send_to_outer_recv_matches_expected() {
 /// off to silence the false positive. 30s watchdog.
 #[test]
 fn parallel_cross_nursery_nested_no_send_still_deadlocks() {
-    let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    print(\"grandchild ran\")\n        spawn:\n            v := ready.recv()\n            print(\"receiver got {v}\")\nmain()\n";
+    let src = "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    print(\"grandchild ran\")\n        spawn:\n            v := ready.recv()\n            print(\"receiver got {v}\")\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));
@@ -759,7 +759,7 @@ fn parallel_cross_nursery_nested_no_send_still_deadlocks() {
 /// error winning. Serial oracle reports the same real fault. 30s watchdog.
 #[test]
 fn parallel_cross_nursery_nested_real_fault_reports_real_error() {
-    let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    xs := [1]\n                    ready.send(xs[9])\n        spawn:\n            v := ready.recv()\n            print(\"receiver got {v}\")\nmain()\n";
+    let src = "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    xs := [1]\n                    ready.send(xs[9])\n        spawn:\n            v := ready.recv()\n            print(\"receiver got {v}\")\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));
@@ -788,7 +788,7 @@ fn parallel_cross_nursery_nested_real_fault_reports_real_error() {
 /// bare accept-either-outcome test); now it must deterministically succeed. 30s watchdog.
 #[test]
 fn parallel_cross_nursery_parent_to_child_send_wakes_the_deeper_receiver() {
-    let src = "import std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    v := ready.recv()\n                    print(\"got {v}\")\n        spawn:\n            ready.send(1)\nmain()\n";
+    let src = "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\nfn main():\n    ready := Channel[int]()\n    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    v := ready.recv()\n                    print(\"got {v}\")\n        spawn:\n            ready.send(1)\nmain()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));
@@ -1026,7 +1026,7 @@ fn oversubscribed_runners_keep_their_permit_across_slices() {
         .unwrap_or_else(|e| e.into_inner());
     crate::vm::set_worker_count(2);
     let src = "
-import std.concurrency
+import Executor from std.concurrency
 fn burn():
     i := 0
     while i < 200000:
@@ -1063,7 +1063,7 @@ print(\"done\")
 fn fibers_many_producers_one_consumer() {
     let n = 200;
     let src = format!(
-        "fn produce(ch: Channel[int]):\n    ch.send(1)\n\
+        "import Shared from std.concurrency\nfn produce(ch: Channel[int]):\n    ch.send(1)\n\
              fn consume(ch: Channel[int], k: int, s: Shared[int]):\n    total := 0\n    for _ in 0..k:\n        total += ch.recv()\n    s.set(total)\n\
              fn main():\n    ch := Channel[int]()\n    s := Shared(0)\n    parallel:\n        spawn consume(ch, {n}, s)\n        for _ in 0..{n}:\n            spawn produce(ch)\n    print(s.get())\nmain()\n"
     );
@@ -1081,7 +1081,7 @@ fn fibers_many_producers_one_consumer() {
 /// turn, so this worked; the ready-set must preserve it.)
 #[test]
 fn fibers_cross_level_wakeup() {
-    let src = "fn consumer(ch: Channel[int], s: Shared[int]):\n    s.set(ch.recv())\n\
+    let src = "import Shared from std.concurrency\nfn consumer(ch: Channel[int], s: Shared[int]):\n    s.set(ch.recv())\n\
                    fn inner_sender(ch: Channel[int]):\n    ch.send(42)\n\
                    fn middle(ch: Channel[int]):\n    parallel:\n        spawn inner_sender(ch)\n\
                    fn main():\n    ch := Channel[int]()\n    s := Shared(0)\n    parallel:\n        spawn consumer(ch, s)\n        spawn middle(ch)\n    print(s.get())\nmain()\n";
@@ -1184,27 +1184,27 @@ fn channel_try_recv_in_parallel_does_not_suspend() {
 
 #[test]
 fn shared_get_set_round_trip() {
-    let src = "fn main():\n    s := Shared(1)\n    print(s.get())\n    s.set(42)\n    print(s.get())\nmain()\n";
+    let src = "import Shared from std.concurrency\nfn main():\n    s := Shared(1)\n    print(s.get())\n    s.set(42)\n    print(s.get())\nmain()\n";
     assert_eq!(run(src), "1\n42\n");
 }
 
 #[test]
 fn shared_update_read_modify_write() {
-    let src = "fn main():\n    s := Shared(10)\n    s.update(fn(x): x * 2)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n";
+    let src = "import Shared from std.concurrency\nfn main():\n    s := Shared(10)\n    s.update(fn(x): x * 2)\n    s.update(fn(x): x + 1)\n    print(s.get())\nmain()\n";
     assert_eq!(run(src), "21\n");
 }
 
 #[test]
 fn shared_get_does_not_alias_box() {
     // `get` copies out: mutating the returned list must not change what the box holds.
-    let src = "fn main():\n    s := Shared([1, 2])\n    xs := s.get()\n    xs.push(3)\n    print(s.get())\nmain()\n";
+    let src = "import Shared from std.concurrency\nfn main():\n    s := Shared([1, 2])\n    xs := s.get()\n    xs.push(3)\n    print(s.get())\nmain()\n";
     assert_eq!(run(src), "[1, 2]\n");
 }
 
 #[test]
 fn vm_rwshared_get_set_read_write_roundtrip() {
     // `get`/`set` (write-lock replace) + `read` (R-poly snapshot) + `write` (write-locked RMW).
-    let src = "fn main():\n    r := RwShared(10)\n    print(r.get())\n    r.set(20)\n    print(r.read(fn(x): x + 1))\n    r.write(fn(x): x * 2)\n    print(r.get())\nmain()\n";
+    let src = "import RwShared from std.concurrency\nfn main():\n    r := RwShared(10)\n    print(r.get())\n    r.set(20)\n    print(r.read(fn(x): x + 1))\n    r.write(fn(x): x * 2)\n    print(r.get())\nmain()\n";
     assert_eq!(run(src), "10\n21\n40\n");
     // Byte-identical on the interpreter (the frozen oracle).
 }
@@ -1212,20 +1212,20 @@ fn vm_rwshared_get_set_read_write_roundtrip() {
 #[test]
 fn vm_rwshared_read_returns_closure_result_no_writeback() {
     // `read` returns the closure's value and does NOT write back (the box is unchanged).
-    let src = "fn main():\n    r := RwShared(5)\n    print(r.read(fn(x): str(x * 3)))\n    print(r.get())\nmain()\n";
+    let src = "import RwShared from std.concurrency\nfn main():\n    r := RwShared(5)\n    print(r.read(fn(x): str(x * 3)))\n    print(r.get())\nmain()\n";
     assert_eq!(run(src), "15\n5\n");
 }
 
 #[test]
 fn vm_rwshared_get_does_not_alias_box() {
     // `get`/`read` copy out: mutating the returned list must not change what the box holds.
-    let src = "fn main():\n    r := RwShared([1, 2])\n    xs := r.get()\n    xs.push(3)\n    print(r.get())\nmain()\n";
+    let src = "import RwShared from std.concurrency\nfn main():\n    r := RwShared([1, 2])\n    xs := r.get()\n    xs.push(3)\n    print(r.get())\nmain()\n";
     assert_eq!(run(src), "[1, 2]\n");
 }
 
 #[test]
 fn executor_submit_runs_fifo_at_shutdown() {
-    let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\n    ex.shutdown()\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\n    ex.shutdown()\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n");
     // M:N drains the two Executor tasks on the pool, so `1`/`2` can print in either order (`0` is
     // the parent's, always first). Same multiset — cooperative FIFO order pinned above.
@@ -1234,7 +1234,7 @@ fn executor_submit_runs_fifo_at_shutdown() {
 
 #[test]
 fn executor_submit_after_shutdown_errors() {
-    let src = "fn main():\n    ex := Executor()\n    ex.shutdown()\n    ex.submit(fn(): print(1))\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.shutdown()\n    ex.submit(fn(): print(1))\nmain()\n";
     let err = run_err(src);
     assert!(err.contains("shut-down Executor"), "got: {err}");
     // Parity: same fault message on the interpreter.

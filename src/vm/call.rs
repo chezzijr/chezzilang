@@ -363,6 +363,7 @@ impl Vm {
             }
             Kind::InterceptIo => return self.io_native(name, args, span),
             Kind::InterceptAirlock => return self.airlock_native(name, args, span),
+            Kind::InterceptTimer => return self.new_timer(&args, span),
             Kind::Inline | Kind::Blocking | Kind::TimedWait | Kind::HostWait => {}
         }
         // D5 — under the M:N engine, a blocking native call (`read_file` / `sleep_ms` / `fs.*`) is
@@ -428,7 +429,8 @@ impl Vm {
                 | Kind::InterceptIo
                 | Kind::InterceptNet
                 | Kind::HostWait
-                | Kind::InterceptAirlock => Some(OffloadReq {
+                | Kind::InterceptAirlock
+                | Kind::InterceptTimer => Some(OffloadReq {
                     func,
                     args: nargs,
                     span,

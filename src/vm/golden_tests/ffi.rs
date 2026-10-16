@@ -10,7 +10,7 @@ fn a_c_fn_that_writes_through_a_str_arg_does_not_poison_the_retained_buffer() {
     // immutable, so a later call marshalling the SAME literal must see the ORIGINAL bytes, not
     // the mutated ones -- `retained_lookup` restores the buffer on a mismatch.
     let src = [
-        "import std.ffi",
+        "import std.ffi\nimport ptr from std.ffi",
         "extern \"libc\":",
         "    fn strtok(s: str, d: str) -> ptr",
         "    fn strlen(s: str) -> int",
@@ -39,7 +39,7 @@ fn faulting_callback_is_invoked_only_once_per_extern_call() {
     // re-entering the engine on every subsequent C-side callback invocation, so `count` is the
     // number of comparisons `qsort` performs (15 for this 10-element input), not 1.
     let src = [
-        "import std.ffi",
+        "import std.ffi\nimport ptr from std.ffi",
         "extern \"libc\":",
         "    fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)",
         "count := 0",
@@ -95,7 +95,7 @@ fn first_callback_fault_is_the_one_reraised() {
     // clobber the first fault with the last one. Each invocation here raises a DIFFERENT index
     // error (`count` grows every call), so the re-raised message pins down which invocation won.
     let src = [
-        "import std.ffi",
+        "import std.ffi\nimport ptr from std.ffi",
         "extern \"libc\":",
         "    fn qsort(base: ptr, n: int, size: int, cmp: fn(ptr, ptr) -> int)",
         "count := 0",
@@ -129,7 +129,7 @@ fn ptr_returned_into_a_str_arg_survives_a_later_extern_call() {
     // returned it, but subsequent extern calls too (each of which allocates + frees its own
     // marshalled `str` args, potentially reusing the freed slot).
     let src = [
-        "import std.ffi",
+        "import std.ffi\nimport ptr from std.ffi",
         "import int32 from std.ffi",
         "extern \"libc\":",
         "    fn strchr(s: str, c: int32) -> ptr",
@@ -156,7 +156,7 @@ fn interior_ptr_written_into_a_ptr_out_param_survives_the_call() {
     // TICKET-060: a `ptr` PARAM may be a C out-param the callee writes an interior pointer into
     // (strtol's endptr) -- that pointer must remain valid after the call returns too.
     let src = [
-        "import std.ffi",
+        "import std.ffi\nimport ptr from std.ffi",
         "import int32 from std.ffi",
         "extern \"libc\":",
         "    fn strtol(s: str, endptr: ptr, base: int32) -> int",
@@ -255,7 +255,7 @@ fn ffi_deref_load_two_engine_parity() {
     // is the whole test.)
     let so = build_callback_so();
     let src = format!(
-        "import std.ffi\n\
+        "import std.ffi\nimport ptr from std.ffi\n\
 extern \"{}\":\n    fn mkrec() -> ffi.ptr\n\n\
 p := mkrec()\n\
 print(ffi.load_int32_at(p, 0))\n\
@@ -276,7 +276,7 @@ fn ffi_deref_store_then_load_two_engine_parity() {
     // (mkrec returns the SAME static each call, so a store is observable on the next load.)
     let so = build_callback_so();
     let src = format!(
-        "import std.ffi\n\
+        "import std.ffi\nimport ptr from std.ffi\n\
 extern \"{}\":\n    fn mkrec() -> ffi.ptr\n\n\
 p := mkrec()\n\
 ffi.store_int32_at(p, 0, 99)\n\
@@ -302,7 +302,7 @@ fn ffi_deref_three_engine_parity() {
     // now, so one run compared against the known-correct output is the whole test.)
     let so = build_callback_so();
     let src = format!(
-        "import std.ffi\n\
+        "import std.ffi\nimport ptr from std.ffi\n\
 extern \"{}\":\n    fn mkrec() -> ffi.ptr\n\n\
 p := mkrec()\n\
 print(ffi.load_int32_at(p, 0))\n",
@@ -324,7 +324,7 @@ print(ffi.load_int32_at(p, 0))\n",
 #[cfg(target_os = "linux")]
 fn ffi_alloc_fill_read_two_engine_parity() {
     let src = concat!(
-        "import std.ffi\n",
+        "import std.ffi\nimport ptr from std.ffi\n",
         "data := [10, 20, 30, 40]\n",
         "p := ffi.alloc(data.len() * 8)\n",
         "for i in 0..data.len():\n",
@@ -345,7 +345,7 @@ fn ffi_alloc_fill_read_two_engine_parity() {
 #[cfg(target_os = "linux")]
 fn ffi_alloc_zeroed_two_engine_parity() {
     let src = concat!(
-        "import std.ffi\n",
+        "import std.ffi\nimport ptr from std.ffi\n",
         "p := ffi.alloc_zeroed(32)\n",
         "for i in 0..4:\n",
         "    print(ffi.load_int64_at(p, i * 8))\n",

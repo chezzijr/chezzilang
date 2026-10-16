@@ -911,7 +911,7 @@ fn is_int(c: &Option<Box<Expr>>, n: i64) -> bool {
 /// TICKET-253 -- a subscript is one `Index` whose index is an expression; `xs[a..b]` holds a
 /// `Range` value, and the colon spelling is a parse error that names its replacement.
 #[test]
-fn subscript_holds_one_expression_and_the_colon_slice_is_removed() {
+fn subscript_holds_one_expression() {
     match let_value("y := xs[2]\n").kind {
         ExprKind::Index { index, .. } => {
             assert!(matches!(index.unwrap().kind, ExprKind::Int(2)));
@@ -942,16 +942,16 @@ fn subscript_holds_one_expression_and_the_colon_slice_is_removed() {
             "{src:?}"
         );
     }
-    for (src, want) in [
-        ("y := xs[1:3]\n", "write `xs[a..b]`"),
-        ("y := xs[1:]\n", "write `xs[a..b]`"),
-        ("y := xs[:]\n", "write `xs[a..b]`"),
-        ("y := xs[1:5:2]\n", "write `xs[Range(a, b, c)]`"),
-        ("y := xs[::2]\n", "write `xs[Range(a, b, c)]`"),
-        ("y := xs[::-1]\n", "write `xs.reversed()`"),
+    // A `:` in a subscript is no syntax: an ordinary parse error.
+    for src in [
+        "y := xs[1:3]\n",
+        "y := xs[1:]\n",
+        "y := xs[:]\n",
+        "y := xs[1:5:2]\n",
+        "y := xs[::-1]\n",
     ] {
         let e = parse_err(src);
-        assert!(e.message.contains(want), "{src:?}: {}", e.message);
+        assert!(!e.message.contains("removed"), "{src:?}: {}", e.message);
     }
     // A bound is any expression the range operator takes.
     let ExprKind::Index { index, .. } = let_value("y := xs[i + 1..n - 1]\n").kind else {

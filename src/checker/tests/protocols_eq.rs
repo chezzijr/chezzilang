@@ -1928,12 +1928,14 @@ fn comparable_types_equality_still_ok() {
 fn atomic_payload_with_eq_rejected() {
     let decl = "import std.concurrency\nstruct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return true\n";
     entry_rejects(
-        &format!("{decl}fn main():\n    a := Atomic(P(1))\n    print(a.load().x)\nmain()\n"),
+        &format!(
+            "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic(P(1))\n    print(a.load().x)\nmain()\n"
+        ),
         "Atomic[P] payload",
     );
     entry_rejects(
         &format!(
-            "{decl}fn hold(a: Atomic[P]):\n    print(a.load().x)\nfn main():\n    pass\nmain()\n"
+            "import Atomic from std.concurrency\n{decl}fn hold(a: Atomic[P]):\n    print(a.load().x)\nfn main():\n    pass\nmain()\n"
         ),
         "Atomic[P] payload",
     );
@@ -1956,20 +1958,20 @@ fn atomic_cas_on_fn_payload_rejected() {
     let needle = "cas cannot compare a payload that holds a function value";
     entry_rejects(
         &format!(
-            "{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    print(a.cas(a.load(), one))\nmain()\n"
+            "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    print(a.cas(a.load(), one))\nmain()\n"
         ),
         needle,
     );
     entry_rejects(
         &format!(
-            "{decl}fn main():\n    a := Atomic(H(1, one))\n    print(a.cas(a.load(), H(2, one)))\nmain()\n"
+            "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic(H(1, one))\n    print(a.cas(a.load(), H(2, one)))\nmain()\n"
         ),
         needle,
     );
     // The fn nested in a container/option is the same payload.
     entry_rejects(
         &format!(
-            "{decl}fn main():\n    a := Atomic([one])\n    print(a.cas(a.load(), [one]))\nmain()\n"
+            "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic([one])\n    print(a.cas(a.load(), [one]))\nmain()\n"
         ),
         needle,
     );
@@ -1982,14 +1984,14 @@ fn atomic_cas_on_fn_payload_rejected() {
     );
     // MUST STILL PASS: a fn payload with only `store`/`load`/`exchange`, and a builtin fn with `cas`.
     entry_ok(&format!(
-        "{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    a.store(one)\n    f := a.exchange(one)\n    print(f() + a.load()())\nmain()\n"
+        "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    a.store(one)\n    f := a.exchange(one)\n    print(f() + a.load()())\nmain()\n"
     ));
     entry_ok(
         "import Atomic from std.concurrency\nfn main():\n    a := Atomic(ord)\n    print(a.cas(a.load(), ord))\nmain()\n",
     );
     // A payload with no fn in it keeps `cas`.
     entry_ok(&format!(
-        "{decl}struct Q:\n    x: int\nfn main():\n    a := Atomic(Q(1))\n    print(a.cas(a.load(), Q(2)))\nmain()\n"
+        "import Atomic from std.concurrency\n{decl}struct Q:\n    x: int\nfn main():\n    a := Atomic(Q(1))\n    print(a.cas(a.load(), Q(2)))\nmain()\n"
     ));
 }
 
@@ -2012,7 +2014,9 @@ fn atomic_payload_reaching_a_nested_eq_rejected() {
         ("E.Has(P(1))", "Atomic[E]"),
     ] {
         entry_rejects(
-            &format!("{decl}fn main():\n    a := Atomic({payload})\n    print(a.load())\nmain()\n"),
+            &format!(
+                "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic({payload})\n    print(a.load())\nmain()\n"
+            ),
             rendered,
         );
     }

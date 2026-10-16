@@ -279,7 +279,7 @@ fn expect(w: Wrapper, i: Inner, d: usize) -> &'static str {
     if runs { "runs" } else { "faults" }
 }
 
-const PRELUDE: &str = "import std.concurrency
+const PRELUDE: &str = "import std.concurrency\nimport Executor from std.concurrency
 import submit_task from std.concurrency.task
 struct N:
     kids: List[List[int]]

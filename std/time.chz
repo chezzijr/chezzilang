@@ -7,14 +7,8 @@
 #
 # Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/time.rs`,
 # dispatched via `native_members("std.time")`). The backends compile NOTHING for a `native fn` — the
-# front-end reads ONLY the signature.
-#
-# NOTE — `timer(ms)` is declared below as a SIGNATURE source, but it is NOT an ordinary native member.
-# It is bare-callable (`timer(50)`, not `time.timer(50)`) and lowers to `Op::NewTimer` via the compiler's
-# name→opcode dispatch — it carries NO runtime value. So harvest routes its sig to the checker's
-# `time_timer_sig` field (NOT `sig.functions`, which the From-import arm would bind as a normal callable);
-# the import-license stays in `sig.types` (`native_module_sig("std.time")`). It also stays a reserved,
-# non-renamable name. now/now_ms/monotonic/sleep_ms/format, by contrast, are ordinary qualified members.
+# front-end reads ONLY the signature. `timer` is an ordinary member too: the engine builds its
+# channel (`Kind::InterceptTimer`).
 
 native fn now() -> int
 native fn now_ms() -> int

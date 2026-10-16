@@ -329,27 +329,16 @@ CPython's `bytes(ba)`) — that is how a built-up buffer reaches the binary APIs
 
 These types come from the language/runtime; see [`concurrency.md`](concurrency.md) for the full model.
 
-> **`import std.concurrency` required for `Shared` / `RwShared` / `Atomic` / `AtomicInt` / `Executor`.** These
-> are NOT global builtins — a module must `import std.concurrency` (whole-module licenses all of them) or
-> `import Shared from std.concurrency` (per-name) before it can use them; bare use otherwise is an
-> `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They are not
-> reserved: only keywords are, so a module that declares its own `struct Shared` shadows the builtin there. `Channel` stays global
-> (no import needed). `timer(ms)` now requires **`import std.time`** (whole-module, or `import timer from
-> std.time`) — bare use otherwise is an `unknown function 'timer' (import it from std.time: \`import
-> std.time\`)` error.
->
-> **Qualified / aliased path (additive).** Every import-gated native type above is **also** reachable
-> by the module-member path, exactly like a `.chz` module type or `regex.Match`: after
-> `import std.concurrency`, `concurrency.Shared[int]` / `concurrency.Shared(0)` resolve and construct;
-> `import std.concurrency as c` gives `c.Shared(0)`. It works in every position — annotation, ctor call,
-> `type S = concurrency.Shared[int]`, method call — and lowers
-> to the same value as the bare name. Likewise `net.Socket` / `net.Listener` (`import std.net`) and the
-> FFI widths / `ptr` (`import std.ffi`, e.g. `ffi.int32`, valid inside an `extern` signature), except
-> those are **type-only**: `net.Socket(...)` is rejected (no from-nothing ctor). `time.timer(ms)` is a
-> qualified call; `time.timer` in **type** position is rejected (it is a function). The full path
-> (`std.concurrency.Shared`) works too after an un-aliased `import std.concurrency` (TICKET-175). The qualified form still requires the `import`
-> (qualified access to a non-imported module is an `unknown module` error), so the import gate is
-> unchanged; the bare-after-import spelling stays fully supported.
+> **`Shared` / `RwShared` / `Atomic` / `AtomicInt` / `Executor` are members of `std.concurrency`.** A
+> program names them like any module member: `import Shared from std.concurrency` (or `import Shared as
+> Box from std.concurrency`) binds the bare name, and `import std.concurrency` gives
+> `concurrency.Shared(0)` / `concurrency.Shared[int]`. A whole-module import binds no bare name. Without
+> an import, `Shared(0)` is `unknown type 'Shared'; import it from std.concurrency (`import Shared from
+> std.concurrency`)`. `Channel` is global (no import). `timer(ms)` is an ordinary `std.time` function
+> (`time.timer(ms)` or `import timer from std.time`). `net.Socket` / `net.Listener` and `std.ffi`'s
+> `ptr`, `owned_str` and widths follow the same rule; they are type-only (`net.Socket(...)` is rejected:
+> a value comes from a module function). A module that declares its own `struct Shared` has its own
+> type of that name.
 
 ### `Channel[T]` — FIFO mailbox
 Three shapes: `Channel[T]()` is an **unbounded** FIFO (`send` never blocks); `Channel[T](0)` is a
@@ -1036,9 +1025,8 @@ list) + `remove_file`/`remove_dir` in Chezzi if you need it.
 `now() -> int` (Unix epoch seconds, UTC) · `now_ms() -> int` (Unix epoch **milliseconds**, UTC; a wall
 clock that can step backwards and is never clamped — never subtract a `monotonic()` reading from it) · `monotonic() -> float` (seconds, immune to clock changes) ·
 `sleep_ms(ms: int) -> None` · `format(epoch: int) -> str` (`"YYYY-MM-DD HH:MM:SS"`, UTC).
-Also licenses the opcode-backed `timer(ms) -> Channel[bool]` builtin (one-shot timeout channel; see
-[§3](#3-runtime-types-concurrency--iteration) and `concurrency.md §6c`): `import std.time` (whole-module)
-or `import timer from std.time` (per-name; `timer` cannot be renamed on import).
+`timer(ms) -> Channel[bool]` (one-shot timeout channel; see `concurrency.md §6c`): `time.timer(ms)`, or
+`import timer from std.time` (an alias works, and `f := time.timer` is a function value).
 Both `sleep_ms` and a `timer(ms)` `recv` are **continuous cancellation checkpoints**: the deadline is
 the runtime's own, so a scope cancel or an `Executor.shutdown_now()` ends the wait within ~5 ms instead
 of after it, and the task still runs its `defer`s. `chezzi test --timeout` rides the same checkpoint and
@@ -1272,14 +1260,11 @@ pointer handle `ptr` plus nine width names: the eight fixed-width integers `int8
 import float32 from std.ffi
 ```
 
-None of these are global builtins — a module that uses `ptr` or a width
-type must import it from `std.ffi`. A width type is legal only in an **`extern` signature or a struct
-field's own type** (TICKET-262); `ptr` has no such limit. The two spellings
-are **not interchangeable for the width names**: whole-module `import std.ffi` licenses the bare `ptr`
-and the qualified `ffi.int32` form, but a bare `int32` needs the per-name `import int32 from std.ffi`
-(measured: `import std.ffi` then `fn abs(n: int32)` is *unknown type 'int32'*, while `ffi.int32` and a
-bare `ptr` both work). (FFI type names cannot be renamed on import — the backends key off the literal
-surface name.)
+None of these are global builtins: a module that uses `ptr`, `owned_str` or a width type imports it
+from `std.ffi` (`import int32 from std.ffi`, or `ffi.int32` after `import std.ffi`), like any module
+member. An alias marshals as the type it names (`import int8 as Byte from std.ffi`). A width type is
+legal only in an **`extern` signature or a struct field's own type** (TICKET-262); `owned_str` only as
+an extern return; `ptr` has no such limit.
 (Sync scalar **callbacks** need no `std.ffi` surface — a callback extern param is just a function-typed
 param spelled `fn(scalars) -> scalar`; see the FFI section of `syntax.md`.)
 
@@ -1756,9 +1741,9 @@ existing data use the field constructor over a box: `ConcurrentList(RwShared(xs)
 `ConcurrentMap(RwShared({}))`; `c.inner` is the box, so `c.inner.get()`, `c.inner.set(v)` and
 `c.inner.write(f)` still replace or copy the whole value. With an empty literal and no annotation,
 `K`/`V` are open and the binding is an error on that line (``cannot infer the type arguments of `m` ``);
-prefer `new()`. Note a use-site `RwShared({})` means user code also needs **`import std.concurrency`**
-in addition to `import std.concurrency.collection` (the latter, a len-3 submodule, does **not** license
-the bare `RwShared` ctor — only the whole-module `import std.concurrency` does).
+prefer `new()`. Note a use-site `RwShared({})` means user code also imports `RwShared` from
+`std.concurrency` (`import RwShared from std.concurrency`); `import std.concurrency.collection` binds
+only that submodule.
 
 **Reentrancy:** like raw `RwShared`, a `write` closure that re-enters the **same** box's update guard
 FAULTS (TICKET-016 / W8-3), instead of hanging or silently losing the inner write. Every collection

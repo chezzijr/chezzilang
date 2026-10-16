@@ -745,13 +745,7 @@ impl Checker {
                     }
                     continue;
                 }
-                // The one protocol whose bare name an import licenses (TICKET-250): give the hint
-                // the `Atomic` arm of `resolve_type` gives.
-                let hint = if b.name == "StructuralEq" {
-                    " (import it from std.concurrency: `import std.concurrency`)"
-                } else {
-                    ""
-                };
+                let hint = self.import_hint(&b.name);
                 self.error(
                     span,
                     format!("unknown protocol '{}' in bound on '{param}'{hint}", b.name),

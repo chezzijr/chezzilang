@@ -1,18 +1,18 @@
 # std.concurrency — the cross-task box + executor primitives, declared in Chezzi (phase 4c-concurrency).
 #
-# FILE-BACKED, IMPORT-GATED native module (like std/net.chz). Its native TYPES (`Shared`/`RwShared`/
-# `Atomic`/`Executor`) are in scope ONLY after `import std.concurrency` (bare `Shared`/`RwShared`/
-# `Atomic`/`Executor`) or an `import … from std.concurrency`. The resolver loads this real file (keeping
+# FILE-BACKED native module (like std/net.chz). Its native TYPES (`Shared`/`RwShared`/`Atomic`/
+# `AtomicInt`/`Executor`) are ordinary members: `concurrency.Shared` after `import std.concurrency`, or
+# `import Shared from std.concurrency` (an alias works). The resolver loads this real file (keeping
 # the `native` marker), and the checker harvests the `native struct` declarations below as the module's
 # SIGNATURE source — retiring the hand-built `native_module_sig` concurrency arm AND the bespoke
 # `shared_method_sig`/`rwshared_method_sig`/`atomic_method_sig`/`executor_method_sig` method arms (their
 # sigs now come from the `native fn` methods below, harvested into each type's method table — the
 # phase-4c native-method-binding capability, EXTENDED here to GENERIC native structs).
 #
-# Every declaration is BODY-LESS: `Shared`/`RwShared`/`Atomic`/`Executor` stay the RESERVED opaque VM
-# handles `Ty::Shared`/`Ty::RwShared`/`Ty::Atomic`/`Ty::Executor` (NOT nominal structs — no field
-# layout), and the ctors STILL lower to `Op::NewShared`/`NewRwShared`/`NewAtomic`/`NewExecutor` by NAME
-# via the compiler's name→opcode dispatch (NOT off-heap host natives). The method calls stay VM-
+# Every declaration is BODY-LESS: `Shared`/`RwShared`/`Atomic`/`Executor` stay the opaque VM handles
+# `Ty::Shared`/`Ty::RwShared`/`Ty::Atomic`/`Ty::Executor` (NOT nominal structs — no field layout), and a
+# ctor call (bare, aliased or qualified) resolves to `Resolution::Builtin` and lowers to
+# `Op::NewShared`/`NewRwShared`/`NewAtomic`/`NewExecutor` (NOT off-heap host natives). The method calls stay VM-
 # intercepted at runtime by name. The backends compile NOTHING for a `native fn`/`native struct` — the
 # front-end reads ONLY the signature.
 #

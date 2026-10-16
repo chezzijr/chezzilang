@@ -345,7 +345,7 @@ fn mnsched_yield_fiber_reachable_by_other_worker_without_wake() {
 /// accounting bug, a deadlock-predicate false positive — into a loud failure rather than a wedge).
 #[test]
 fn d4_worksteal_cpu_and_channel_stress() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 fn producer(ch: Channel[int], lo: int, hi: int):
     acc := 0
     i := lo
@@ -394,7 +394,7 @@ main()
 /// near zero), then 300 producers wake them — the exact sleep→`send_wake`→wake path D4e changed.
 #[test]
 fn d4e_pingpong_no_lost_wakeup_stress() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 fn producer(ch: Channel[int], lo: int, hi: int):
     acc := 0
     i := lo
@@ -452,7 +452,7 @@ main()
 fn d4e_wake_parked_workers_from_true_sleep() {
     let n = 200usize;
     let src = format!(
-        "\
+        "import Shared from std.concurrency\n\
 fn slow_producer(ch: Channel[int], n: int):
     acc := 0
     i := 0
@@ -615,7 +615,7 @@ main()
 /// place; output unchanged). The sum proves all three callbacks ran past their sleep. Watchdog 30 s.
 #[test]
 fn d5_owe3_path_c_sleep_in_callback_correct() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 import std.time
 
 fn nap(x: int) -> int:
@@ -673,7 +673,7 @@ fn d5_owe3_path_c_socket_read_in_callback_demotes() {
 import std.net
 import std.time
 
-fn read_reply(s: Socket) -> str!:
+fn read_reply(s: net.Socket) -> str!:
     line := s.read(64)?
     return ?line
 
@@ -690,7 +690,7 @@ fn client(addr: str):
         ?line: print(line)
         !e: print(\"ERR:\" + e.message())
 
-fn server(listener: Listener) -> int!:
+fn server(listener: net.Listener) -> int!:
     conn := listener.accept()?
     time.sleep_ms(50)
     conn.write(\"hello\")?
@@ -751,20 +751,20 @@ fn d5_owe3_path_c_accept_in_callback_demotes() {
 import std.net
 import std.time
 
-fn accept_one(l: Listener) -> int!:
+fn accept_one(l: net.Listener) -> int!:
     conn := l.accept()?
     conn.read(64)?
     conn.close()
     return ?1
 
-fn do_server(listener: Listener) -> int!:
+fn do_server(listener: net.Listener) -> int!:
     ls := [listener]
     got := ls.map(accept_one)
     n := got[0]?
     listener.close()
     return ?n
 
-fn server(listener: Listener):
+fn server(listener: net.Listener):
     match do_server(listener):
         ?n: print(n)
         !e: print(\"ERR:\" + e.message())
@@ -826,7 +826,7 @@ fn d5_blocking_fs_calls_offload_and_resume_correctly() {
     let path_str = path.to_str().expect("utf8 temp path").to_string();
     let n = 64usize;
     let src = format!(
-        "\
+        "import Shared from std.concurrency\n\
 import std.fs
 
 fn checker(sink: Shared[int], path: str):
@@ -877,7 +877,7 @@ fn d5_blocking_native_in_callback_runs_inline() {
     std::fs::write(&path, b"x").expect("write temp file");
     let path_str = path.to_str().expect("utf8 temp path").to_string();
     let src = format!(
-        "\
+        "import Shared from std.concurrency\n\
 import std.fs
 
 fn dbl(x: int) -> int:
@@ -934,7 +934,7 @@ main()
 /// the closure. 30 s watchdog so a park/wake regression hangs loud instead of hanging the suite.
 #[test]
 fn d5_owe3_recv_in_iter_map_callback_parks() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 import std.iter
 import std.time
 
@@ -1036,7 +1036,7 @@ main()
 /// so the `recv` never blocks and the test would flake-pass even with Path C broken).
 #[test]
 fn d5_owe3_path_c_recv_in_native_map_callback_demotes() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 import std.time
 
 fn use_map(ch: Channel[int], out: Shared[int]):
@@ -1388,7 +1388,7 @@ fn w8_7_demoted_fiber_yield_after_demote_does_not_strand_replacement() {
 
     let src = "\
 import std.time
-import std.concurrency
+import Shared from std.concurrency
 
 fn use_map(ch: Channel[int], out: Shared[int]):
     xs := [0]
@@ -1449,7 +1449,7 @@ main()
 /// demote/resume hang fails loud. `66` = 1 + 65 (the second-arm value).
 #[test]
 fn vm_wait_in_native_callback_demotes_under_parallel() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 import std.time
 
 fn pick(a: Channel[int], b: Channel[int], x: int) -> int:
@@ -1507,7 +1507,7 @@ main()
 /// handling and behaved inconsistently / could mishandle the timer arm. 30s watchdog.
 #[test]
 fn vm_wait_timer_loses_to_send_in_native_callback_parallel() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 import std.time
 
 fn pick(a: Channel[int], t: Channel[bool], x: int) -> int:
@@ -1526,7 +1526,7 @@ fn fill(a: Channel[int]):
 
 fn main():
     a := Channel[int]()
-    t := timer(2000)
+    t := time.timer(2000)
     out := Shared(0)
     parallel:
         spawn use_map(a, t, out)
@@ -1675,7 +1675,7 @@ main()
 fn d5_owe1_blocking_process_cmd_offloads_and_resumes_correctly() {
     let n = 64usize;
     let src = format!(
-        "\
+        "import Shared from std.concurrency\n\
 import std.process
 
 fn checker(sink: Shared[int]):

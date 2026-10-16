@@ -268,7 +268,7 @@ const CELLS: &[Cell] = &[
     },
 ];
 
-const PRELUDE: &str = "import std.concurrency
+const PRELUDE: &str = "import std.concurrency\nimport AtomicInt, RwShared from std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet, ConcurrentCounter from std.concurrency.collection
 
 fn sorted_list(xs: List[int]) -> List[int]:

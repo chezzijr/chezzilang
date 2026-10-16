@@ -70,7 +70,8 @@ fn executor_consumer_then_producer_completes_at_one_worker() {
     let (status, stdout, _) = run(src, Some("1"), 15);
     let status = status.unwrap_or_else(|| {
         panic!(
-            "an Executor consumer submitted before its producer must not hang the whole program \
+            "import Executor from std.concurrency
+an Executor consumer submitted before its producer must not hang the whole program \
              at CHEZZI_THREADS=1: killed after 15s timeout instead of exiting"
         )
     });

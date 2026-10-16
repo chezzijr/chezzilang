@@ -127,12 +127,11 @@ fn pmap_both(tag: &str, src: &str) -> String {
     out
 }
 
-/// Compile + run a single-module program, returning the populated parent `Vm` (its `module_objs[0]`
-/// holds the top-level globals). Mirrors the live load path so a worker reconstructs a real graph.
-fn ran_standalone(src: &str) -> Vm {
-    let tokens = lexer::tokenize(src).expect("tokenize");
-    let module = parser::parse(tokens).expect("parse");
-    let program = crate::compiler::compile_module_standalone(&module).expect("compile");
+/// Compile + run a program through the module graph, returning the populated parent `Vm` (its last
+/// `module_objs` entry holds the entry's top-level globals). Mirrors the live load path so a worker
+/// reconstructs a real graph.
+fn ran_program(src: &str) -> Vm {
+    let program = crate::compiler::compile_source(src).expect("compile");
     let mut vm = Vm::new(Arc::new(program));
     vm.run().expect("run");
     vm

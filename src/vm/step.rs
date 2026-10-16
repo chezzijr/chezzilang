@@ -943,8 +943,8 @@ impl Vm {
                 let h = self.heap.alloc(Obj::RwShared(core));
                 self.push(Value::obj(h));
             }
-            // `NewAtomic`/`NewTimer` delegate to `#[inline(never)]` helpers so their locals (the timer's
-            // `Instant`/`Duration` math) do NOT inflate `step`'s stack frame — `step` is on the per-op
+            // `NewAtomic`/`NewAtomicInt` delegate to `#[inline(never)]` helpers so their locals do NOT
+            // inflate `step`'s stack frame — `step` is on the per-op
             // recursion path, so a fatter frame here multiplies across a deep call chain (debug builds
             // don't reuse match-arm stack slots) and can overflow the host stack before the
             // `MAX_CALL_DEPTH` guard fires. Keep these cold constructors out of line.
@@ -954,10 +954,6 @@ impl Vm {
             }
             Op::NewAtomicInt => {
                 let v = self.new_atomic_int(span)?;
-                self.push(v);
-            }
-            Op::NewTimer => {
-                let v = self.new_timer(span)?;
                 self.push(v);
             }
             Op::NewExecutor => {

@@ -1433,8 +1433,8 @@ missing struct field) instead of a silent behaviour loss.
 | **A. Collapse the scatter** — add `native::kind(name) -> Kind` beside `is_blocking`; `call.rs` matches on `Kind::TimedWait` | ~4 files, ~40 lines | 4 files → 1. Still a name match, so still silently forgettable | safe any time |
 | **B. Property on the entry** (above) | **192 entries across 12 tables** (`ffi` 59, `math` 35, `io` 20, `fs` 17, `encoding` 13, `os` 12, `crypto` 10, `request` 8, `process`/`regex` 5, `rand`/`time` 4) + ~10 tuple-destructuring consumers (`native/mod.rs:824,851,873,890,976,1012,1055`; `ffi.rs` tests) | the compile-error guarantee | **before the JIT freeze** — a table-shape change wants that boundary, and it is a pure refactor best done outside a bug-hunt |
 
-**Deliberately NOT in scope.** `timer(ms)` is an **opcode** (`vm/op.rs:462`), not a native, so it never
-joins this table — its handling stays where it is either way. Do not grow this into a trait-object or
+**Deliberately NOT in scope.** `timer(ms)` was then an **opcode**, not a native, so it never joined
+this table (since 2026-10-16 it is an ordinary `std.time` member, `Kind::InterceptTimer`). Do not grow this into a trait-object or
 plugin registry: it is two properties and one special-cased name, and a `kind` field is the whole fix.
 
 **Adjacent, same family, already filed:** `gaps.md` **W7-5e** — `Vm::stdout_writes` is a *third*

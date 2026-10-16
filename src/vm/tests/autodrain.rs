@@ -17,7 +17,7 @@ fn golden_executor_autodrain_matches_expected_and_interp() {
 
 #[test]
 fn executor_autodrain_runs_unshut_at_exit() {
-    let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n");
     // M:N drains the two jobs on the pool, racing `1`/`2`; same multiset (`0` is the parent's).
     assert_same_lines(&run(src), &run_capture(src).expect("M:N run"));
@@ -25,7 +25,7 @@ fn executor_autodrain_runs_unshut_at_exit() {
 
 #[test]
 fn executor_autodrain_not_redrained_after_explicit_shutdown() {
-    let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.shutdown()\n    print(0)\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.shutdown()\n    print(0)\nmain()\n";
     assert_eq!(run(src), "1\n0\n");
 }
 
@@ -33,7 +33,7 @@ fn executor_autodrain_not_redrained_after_explicit_shutdown() {
 fn executor_autodrain_survives_gc_stress() {
     // The VM executor registry roots un-shut work so it isn't collected before the exit drain.
     // Under collect-before-every-instruction, the drained closures must still be reachable.
-    let src = "fn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn j(n: int):\n    print(n)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j(1))\n    ex.submit(fn(): j(2))\n    print(0)\nmain()\n";
     let normal = run(src);
     assert_eq!(
         run_capture_stress(src),
@@ -48,7 +48,7 @@ fn a_fire_and_forget_fault_ends_the_run_past_recover() {
     // goroutine panic). It replaces the W7-5 run-all contract, where `shutdown()` raised the
     // lowest-index fault and a `recover:` around it caught it: the fault reaches `main` as a
     // run-wide halt no `recover:` catches, so `done` never prints.
-    let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
     let (out, res) = run_program(src);
     let err = res.expect_err("the job's fault ends the run");
     assert!(

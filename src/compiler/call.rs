@@ -53,12 +53,6 @@ impl Compiler {
             fc.emit(Op::NewAtomicInt, span);
             return Ok(());
         }
-        // `timer(ms)` → a fresh one-shot timeout channel (checker validated 1 int arg).
-        if name == "timer" {
-            self.compile_args(fc, args)?;
-            fc.emit(Op::NewTimer, span);
-            return Ok(());
-        }
         // C5: `Executor()` → a fresh work queue; `Executor(n)` → one capped at `n` running jobs
         // (checker validated zero arguments or one `int`).
         if name == "Executor" {

@@ -1,7 +1,7 @@
-//! TICKET-228 (D6) — `Option`, `Result`, `Some`, `Ok` and `Err` are no longer user syntax.
-//! Every bare use that no declaration of the name binds is rejected with a message that names the
-//! replacement (only keywords are reserved, so a user module may declare, import or export these
-//! names: `tests/shadowing_grid.rs`, and an import of one is an ordinary import); a member position
+//! TICKET-228 (D6) — `Option`, `Result`, `Some`, `Ok` and `Err` are not user syntax. A bare use
+//! that no declaration of the name binds is an ordinary unknown name, reported exactly as any
+//! other unknown name (only keywords are reserved, so a user module may declare, import or export
+//! these names: `tests/shadowing_grid.rs`, and an import of one is an ordinary import); a member position
 //! (`Shadow.Some`, `s.Ok`) stays legal and RUNS; the prelude, which declares the two enums, still
 //! parses for every reader; and no user-visible channel prints one of the five words.
 
@@ -69,14 +69,7 @@ fn chz_files() -> Vec<PathBuf> {
 }
 
 #[test]
-fn each_removed_name_is_rejected_with_its_replacement() {
-    let names = [
-        ("Option", "`Option` is removed; write `T?`"),
-        ("Result", "`Result[T, E]` is removed; write `T!E`"),
-        ("Some", "`Some(x)` is removed; write `x` or `?x`"),
-        ("Ok", "`Ok(x)` is removed; write `x` or `?x`"),
-        ("Err", "`Err(e)` is removed; write `!e`"),
-    ];
+fn each_name_is_an_ordinary_unknown_name() {
     let positions = [
         ("type", "fn f(x: NAME) -> None:\n    pass\n"),
         ("expression", "x := NAME(1)\nprint(x)\n"),
@@ -86,18 +79,25 @@ fn each_removed_name_is_rejected_with_its_replacement() {
         ),
         ("hole", "print(\"{NAME(1)}\")\n"),
     ];
+    // The expected report is derived: the same program with a name nothing declares (`Zork`). The
+    // first line (the error and its position) is the report; the caret and a near-miss suggestion
+    // follow the name's spelling.
     let mut red = Vec::new();
-    for (name, want) in names {
+    for name in REMOVED {
         for (pos, tpl) in positions {
             let dir = scratch(&format!("{name}-{pos}"), &tpl.replace("NAME", name));
+            let control = scratch(&format!("{name}-{pos}-zork"), &tpl.replace("NAME", "Zork"));
             for cmd in ["check", "run"] {
                 let out = chezzi(&[cmd, "main.chz"], &dir);
-                let t = text(&out);
-                if out.status.success() || !t.contains(want) {
+                let first = |s: String| s.lines().next().unwrap_or("").to_string();
+                let want = first(text(&chezzi(&[cmd, "main.chz"], &control)).replace("Zork", name));
+                let t = first(text(&out));
+                if out.status.success() || t != want {
                     red.push(format!("{name}/{pos}/{cmd}: want {want:?}, got {t:?}"));
                 }
             }
             let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&control);
         }
     }
     assert!(

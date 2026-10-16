@@ -61,43 +61,23 @@ impl Checker {
                 }
             }
         }
-        // Build the reverse index name → declaring module label(s), in graph (deps-first) order, so a
-        // bare unimported-type error can hint "import it from <module>". A non-entry module is labelled
-        // by its dotted/file name; the entry module is excluded (its types are local, never imported).
+        // Build the reverse index name → declaring USER module label(s), in graph (deps-first)
+        // order, so a bare unimported type can hint "import it from <module>". The entry module is
+        // excluded (its types are local, never imported). A std module's types come from
+        // `std_type_owners`, whether or not this program loads the module.
         for lm in &graph.modules {
-            if lm.native.is_some() || lm.id == graph.entry {
+            if lm.id == graph.entry || lm.is_std() {
                 continue;
             }
             let label = lm.label();
             for s in &lm.ast.stmts {
-                if let StmtKind::Struct { name, .. }
-                | StmtKind::Enum { name, .. }
-                | StmtKind::TypeAlias { name, .. } = &s.kind
-                {
-                    if lm.is_std() && is_std_internal_name(name) {
-                        continue;
-                    }
+                if let Some(name) = declared_type_name(&s.kind) {
                     c.types_by_name
-                        .entry(name.clone())
+                        .entry(name.to_string())
                         .or_default()
                         .push(label.clone());
                 }
             }
-        }
-        // The synthetic native-module structs are module-owned too: register their owning module so a
-        // bare unimported `m: Match` errors with the "import it from std.regex" hint (the native-module
-        // loop above skips them — they have no AST). Pushed after the AST loop so a same-named user
-        // struct (declared in some module) is still hinted first.
-        for (tn, owner) in [
-            ("Match", "std.regex"),
-            ("Response", "std.request"),
-            ("ProcResult", "std.process"),
-            ("FileInfo", "std.fs"),
-        ] {
-            c.types_by_name
-                .entry(tn.to_string())
-                .or_default()
-                .push(owner.to_string());
         }
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of.insert(lm.id.clone(), idx);
@@ -107,14 +87,10 @@ impl Checker {
             c.graph_module_idx = idx;
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
-                // A native std module is always stdlib. The file-backed harvest resolves its own decls'
-                // types — including std.net's RESERVED `Socket`/`Listener` return types (`connect ->
-                // Result[Socket]`, `accept -> Result[Socket]`), whose `resolve_type` reserved arm is
-                // gated on `net_licensed` → `current_module_is_stdlib`. The native branch never runs
-                // `begin_module` (which sets this for AST modules), so set it here or the harvest would
-                // error `unknown type 'Socket'`. Additive-safe: every native module IS std, and the
-                // other file-backed modules resolve their non-reserved types via the transient
-                // `struct_names` arm regardless of this flag.
+                // A native std module is always stdlib. The native branch never runs `begin_module`
+                // (which sets this for AST modules), so set it here. Its own builtin types
+                // (std.net's `Socket` in `connect -> Socket!`) resolve through `bind_own_builtins`
+                // below.
                 c.current_module_is_stdlib = true;
                 // FILE-BACKED native modules harvest their whole SIGNATURE (fns, native structs,
                 // `native type` exports, std.time's `timer` license) from the real `std/<M>.chz` AST
@@ -138,6 +114,14 @@ impl Checker {
                         c.bind_import(imp);
                     }
                 }
+                // The module's own sigs name the builtin types it owns (`std/ffi.chz`'s `ptr`).
+                if lm.imports.is_empty() {
+                    c.builtin_binds.clear();
+                }
+                c.bind_own_builtins(name);
+                sig.builtins = super::builtin_type::module_builtins(name)
+                    .into_iter()
+                    .collect();
                 if crate::native::is_file_backed_native(name) {
                     c.harvest_native_module(&lm.ast, &mut sig);
                 }
@@ -444,6 +428,72 @@ impl Checker {
 /// (phase 4d) keeps hover/const byte-identical. The synthetic struct LAYOUTS (Match/Response/
 /// ProcResult) + request's optional-tail fns are NOT here either — they are file-backed (4b/4f) and
 /// harvested from the parsed `.chz` by `harvest_native_module`.
+/// The type or protocol name a top-level declaration declares, if any.
+pub(super) fn declared_type_name(kind: &StmtKind) -> Option<&str> {
+    match kind {
+        StmtKind::Struct { name, .. }
+        | StmtKind::Enum { name, .. }
+        | StmtKind::TypeAlias { name, .. }
+        | StmtKind::Protocol { name, .. }
+        | StmtKind::NativeStruct { name, .. }
+        | StmtKind::NativeEnum { name, .. }
+        | StmtKind::NativeType { name, .. } => Some(name),
+        StmtKind::Let { .. }
+        | StmtKind::Assign { .. }
+        | StmtKind::Fn(_)
+        | StmtKind::If { .. }
+        | StmtKind::For { .. }
+        | StmtKind::While { .. }
+        | StmtKind::Match { .. }
+        | StmtKind::Return(_)
+        | StmtKind::Yield(_)
+        | StmtKind::Defer(_)
+        | StmtKind::Parallel { .. }
+        | StmtKind::Spawn(_)
+        | StmtKind::Wait { .. }
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Pass
+        | StmtKind::Import(_)
+        | StmtKind::Extern { .. }
+        | StmtKind::Native(_)
+        | StmtKind::Assert { .. }
+        | StmtKind::Expr(_) => None,
+    }
+}
+
+/// Every public type and protocol name a std module declares → its modules (`std.regex` for
+/// `Match`), read once from the embedded std sources. The prelude is left out: its types are in
+/// scope everywhere.
+pub(super) fn std_type_owners() -> &'static HashMap<String, Vec<String>> {
+    static OWNERS: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
+    OWNERS.get_or_init(|| {
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        for (rel, src) in crate::native::std_embed::STD_FILES {
+            if *rel == "prelude.chz" {
+                continue;
+            }
+            let module = format!("std.{}", rel.trim_end_matches(".chz").replace('/', "."));
+            let Ok(tokens) = crate::lexer::tokenize(src) else {
+                continue;
+            };
+            let Ok(ast) = crate::parser::parse(tokens) else {
+                continue;
+            };
+            for s in &ast.stmts {
+                if let Some(name) = declared_type_name(&s.kind)
+                    && !is_std_internal_name(name)
+                {
+                    out.entry(name.to_string())
+                        .or_default()
+                        .push(module.clone());
+                }
+            }
+        }
+        out
+    })
+}
+
 pub(super) fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
     if let Some((_, docs)) = MODULE_FN_DOCS.iter().find(|(m, _)| *m == name) {
         for (fname, doc) in *docs {
@@ -584,5 +634,12 @@ pub(super) const MODULE_FN_DOCS: &[(&str, &[(&str, &str)])] = &[
                 "halt the program with an exit code (does NOT run defers)",
             ),
         ],
+    ),
+    (
+        "std.time",
+        &[(
+            "timer",
+            "one-shot timeout channel — timer(ms) delivers `true` once after ms milliseconds",
+        )],
     ),
 ];

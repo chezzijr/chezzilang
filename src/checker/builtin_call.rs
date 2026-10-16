@@ -557,21 +557,11 @@ impl Checker {
                 // `Shared(v)` — a fresh cross-task box initialised with `v`. The element type is
                 // inferred from the value (value-first, unlike `Channel[T]()`); an OPTIONAL `[T]`
                 // turbofish pins it and is checked against the value's type (`Shared[str](0)` rejects).
-                // NOT a global builtin: requires `import std.concurrency` (the arg is still inferred on
-                // the unlicensed path so a nested error surfaces; the name STAYS reserved). Same for
-                // RwShared/Atomic/Executor below.
+                // A program reaches it through an import of std.concurrency, like every ctor here
+                // but `Channel`.
                 let inferred = self.one_arg_hinted("Shared", args, span, single_targ(targs));
                 let elem = self.concurrency_turbofish_elem("Shared", targs, inferred, span);
-                if self.concurrency_licensed("Shared") {
-                    Some(Ty::shared(elem))
-                } else {
-                    self.error(
-                        span,
-                        "unknown type 'Shared' (import it from std.concurrency: `import std.concurrency`)"
-                            .to_string(),
-                    );
-                    Some(Ty::Unknown)
-                }
+                Some(Ty::shared(elem))
             }
             "RwShared" => {
                 // `RwShared(v)` — a fresh cross-task read-write box initialised with `v`. The element
@@ -579,16 +569,7 @@ impl Checker {
                 // turbofish pins it and is checked against the value's type.
                 let inferred = self.one_arg_hinted("RwShared", args, span, single_targ(targs));
                 let elem = self.concurrency_turbofish_elem("RwShared", targs, inferred, span);
-                if self.concurrency_licensed("RwShared") {
-                    Some(Ty::rwshared(elem))
-                } else {
-                    self.error(
-                        span,
-                        "unknown type 'RwShared' (import it from std.concurrency: `import std.concurrency`)"
-                            .to_string(),
-                    );
-                    Some(Ty::Unknown)
-                }
+                Some(Ty::rwshared(elem))
             }
             "Atomic" => {
                 // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
@@ -596,82 +577,24 @@ impl Checker {
                 // the value's type.
                 let inferred = self.one_arg_hinted("Atomic", args, span, single_targ(targs));
                 let elem = self.concurrency_turbofish_elem("Atomic", targs, inferred, span);
-                if self.concurrency_licensed("Atomic") {
-                    // INSIDE the licensing branch: an unavailable type must not first get advice
-                    // about its payload (the `unknown type 'Atomic'` error is the only useful one).
-                    self.conformance_obligation(Obligation::AtomicPayload {
-                        elem: elem.clone(),
-                        span,
-                    });
-                    Some(Ty::atomic(elem))
-                } else {
-                    self.error(
-                        span,
-                        "unknown type 'Atomic' (import it from std.concurrency: `import std.concurrency`)"
-                            .to_string(),
-                    );
-                    Some(Ty::Unknown)
-                }
-            }
-            "timer" => {
-                // `timer(ms)` — a one-shot timeout channel: a `Channel[bool]` that delivers `true`
-                // once, `ms` milliseconds after creation. The composable timeout primitive (recv it in
-                // a `wait` arm). Takes an int; a `[T]` type arg is rejected upstream. NOT a global
-                // builtin: requires `import std.time` (the arg is still checked on the unlicensed path
-                // so a nested error surfaces; the name STAYS reserved). Returns `Channel[bool]` even on
-                // the unlicensed path so a chained `.recv()` doesn't emit a confusing secondary error.
-                // The arg/return types are single-sourced from the `native fn timer` decl in
-                // `std/time.chz` (harvested to `time_timer_sig`); the fallback reproduces that exact shape
-                // for the no-graph / unimported path where std.time was never harvested.
-                let (params, ret) = self
-                    .time_timer_sig
-                    .as_ref()
-                    .map(|s| (s.params.clone(), s.ret.clone()))
-                    .unwrap_or_else(|| (vec![Ty::Int], Ty::channel(Ty::Bool)));
-                self.check_args("timer", &params, args, span);
-                if self.time_licensed("timer") {
-                    Some(ret)
-                } else {
-                    self.error(
-                        span,
-                        "unknown function 'timer' (import it from std.time: `import std.time`)"
-                            .to_string(),
-                    );
-                    Some(ret)
-                }
+                self.conformance_obligation(Obligation::AtomicPayload {
+                    elem: elem.clone(),
+                    span,
+                });
+                Some(Ty::atomic(elem))
             }
             "Executor" => {
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
-                // Non-generic; zero arguments, or one `int` cap on the jobs running at once; a `[T]` type arg is rejected upstream. NOT a global
-                // builtin: requires `import std.concurrency` (the name STAYS reserved).
+                // Non-generic; zero arguments, or one `int` cap on the jobs running at once; a `[T]`
+                // type arg is rejected upstream.
                 self.check_args_range("Executor", &[Ty::Int], 0, args, span);
-                if self.concurrency_licensed("Executor") {
-                    Some(Ty::Executor)
-                } else {
-                    self.error(
-                        span,
-                        "unknown type 'Executor' (import it from std.concurrency: `import std.concurrency`)"
-                            .to_string(),
-                    );
-                    Some(Ty::Unknown)
-                }
+                Some(Ty::Executor)
             }
             "AtomicInt" => {
                 // `AtomicInt(v)` — a fresh lock-free int atomic. Monomorphic (no `[T]`); the single arg
-                // must be an int. NOT a global builtin: requires `import std.concurrency` (the name
-                // STAYS reserved). The arg is checked even on the unlicensed path so a nested error
-                // surfaces.
+                // must be an int.
                 self.check_args("AtomicInt", &[Ty::Int], args, span);
-                if self.concurrency_licensed("AtomicInt") {
-                    Some(Ty::AtomicInt)
-                } else {
-                    self.error(
-                        span,
-                        "unknown type 'AtomicInt' (import it from std.concurrency: `import std.concurrency`)"
-                            .to_string(),
-                    );
-                    Some(Ty::Unknown)
-                }
+                Some(Ty::AtomicInt)
             }
             _ => None,
         }

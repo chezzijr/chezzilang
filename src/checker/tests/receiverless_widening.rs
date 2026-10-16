@@ -49,7 +49,7 @@ fn a_qualified_native_constructor_is_not_a_spawn_or_defer_target_rejected() {
         ("import std.concurrency", "concurrency.AtomicInt(0)"),
         ("import std.concurrency", "concurrency.Executor()"),
         ("import std.concurrency as cc", "cc.Shared(0)"),
-        ("import std.time", "time.timer(10)"),
+        ("import Shared as S from std.concurrency", "S(0)"),
     ] {
         entry_rejects(
             &format!("{import}\nfn main():\n    defer {target}\nmain()\n"),
@@ -68,6 +68,10 @@ fn a_qualified_native_constructor_is_not_a_spawn_or_defer_target_rejected() {
 #[test]
 fn a_native_module_function_is_a_defer_target_ok() {
     entry_ok("import std.math\nfn main():\n    defer math.abs(-3)\n    print(\"done\")\nmain()\n");
+    // `time.timer` is an ordinary std.time function too.
+    entry_ok(
+        "import std.time\nfn main():\n    defer time.timer(10)\n    print(\"done\")\nmain()\n",
+    );
     // …and a LOCAL that merely SHADOWS a std module's bound name is a RECEIVER, not a module: this
     // `time.timer(10)` is an ordinary method call and must stay one. (The arm's `head_is_value` test
     // guard — a scope-blind name test would reject this with a factually false message.)
@@ -156,7 +160,7 @@ fn protocol_note_reaches_every_value_slot() {
         );
     }
     let src = format!("import Shared from std.concurrency\n{prelude}sh := Shared[Named](d)\n");
-    rejects(
+    entry_rejects(
         &src,
         "type Dog does not satisfy Named (missing method 'name')",
     );

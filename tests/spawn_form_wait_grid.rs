@@ -197,7 +197,9 @@ fn spawn_lines(op: &WaitOp, form: Form, pad: &str) -> String {
 }
 
 fn program(op: &WaitOp, form: Form, outcome: Outcome) -> String {
-    let mut s = String::from("import std.time\nimport std.concurrency\nimport std.net\n");
+    let mut s = String::from(
+        "import std.time\nimport std.concurrency\nimport Executor, RwShared, Shared from std.concurrency\nimport std.net\n",
+    );
     s += "fn slow(x: int) -> int:\n    time.sleep_ms(30)\n    return x + 1\n";
     s += "fn boom():\n    time.sleep_ms(30)\n    panic(\"boom\")\n";
     s += &format!("fn w({}):\n    {}\n", op.param, op.call);

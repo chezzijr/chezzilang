@@ -3,6 +3,16 @@
 
 use super::*;
 
+/// The C type of a module-owned builtin type, by its own name (`ptr`, `owned_str`, a width), or
+/// `None` for a builtin type with no C form. The bare and the qualified spellings both read it.
+fn builtin_ctype(name: &str) -> Option<CType> {
+    match name {
+        "ptr" => Some(CType::Ptr),
+        "owned_str" => Some(CType::OwnedStr),
+        w => crate::native::cffi::width_ctype(w),
+    }
+}
+
 impl Checker {
     /// Read-only type resolution (no error emission), for contexts that only hold `&self`. Returns
     /// `Ty::Unknown` for anything it can't resolve, which callers treat permissively.
@@ -21,12 +31,17 @@ impl Checker {
         match t {
             Type::Nil(_) => Ty::Nil,
             Type::Named { name: n, .. } => match n.as_str() {
-                s if let Some(t) = BuiltinType::from_name(s).and_then(BuiltinType::plain_ty) => t,
+                s if let Some(t) = self.builtin_type_named(s).and_then(BuiltinType::plain_ty) => t,
                 _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
-                // An FFI width name resolves to plain `int` (`float` for `float32`); the width is a
+                // A bound FFI width resolves to plain `int` (`float` for `float32`); the width is a
                 // marshalling detail. So an exported alias body `type Len = int32` captures
                 // `Ty::Int`, and `type Real = float32` captures `Ty::Float`.
-                _ if crate::native::ffi::is_width(n) => super::sig::ffi_width_ty(n),
+                _ if let Some(w) = self
+                    .bound_builtin(n)
+                    .filter(|w| crate::native::ffi::is_width(w)) =>
+                {
+                    super::sig::ffi_width_ty(w)
+                }
                 // A bare alias name resolves to its (recursively-resolved) body.
                 _ if self.aliases.contains_key(n) => {
                     let body = self.aliases[n].clone();
@@ -41,7 +56,7 @@ impl Checker {
                 _ => Ty::Unknown,
             },
             Type::Generic(n, args, ..) => match n.as_str() {
-                s if let Some(b) = BuiltinType::from_name(s)
+                s if let Some(b) = self.builtin_type_named(s)
                     && let Some(t) = b.applied_ty(
                         args.iter()
                             .map(|a| self.resolve_ty_ro_d(a, depth + 1))
@@ -120,7 +135,7 @@ impl Checker {
         // A RESERVED native type (Shared/RwShared/Atomic/Executor/Socket/Listener) has a harvested
         // `sig.struct_defs` METHOD-table entry but is NOT nominal — skip it here so it resolves to the
         // reserved builtin `Ty` via the `sig.types` branch below (mirrors `resolve_type`'s guard).
-        if sig.struct_defs.contains_key(name) && self.qualified_builtin_ty(name, &[]).is_none() {
+        if sig.struct_defs.contains_key(name) && !sig.builtins.contains(name) {
             Ty::Struct(self.type_key(mid, name), args.to_vec())
         } else if sig.enum_defs.contains_key(name) {
             Ty::enum_ty(self.type_key(mid, name), args.to_vec())
@@ -130,11 +145,10 @@ impl Checker {
             // Permissive mirror of `resolve_type`'s qualified protocol arm: no arity error and no
             // static-ctor gate — the mutable resolver owns both diagnostics.
             Ty::Protocol(self.type_key(mid, name), args.to_vec())
-        } else if sig.types.contains(name) {
-            // Mirror `resolve_type`'s qualified builtin branch on the READ-ONLY export path (so an
-            // EXPORTED `type S = concurrency.Shared[int]` resolved
-            //  via `resolve_ty_ro_d` carries the right builtin `Ty`). Permissive: no errors,
-            // and a non-type `sig.types` name (`timer`) returns `Ty::Unknown`.
+        } else if sig.builtins.contains(name) {
+            // `resolve_type`'s qualified builtin branch on the READ-ONLY export path (so an
+            // EXPORTED `type S = concurrency.Shared[int]` resolved via `resolve_ty_ro_d` carries the
+            // right builtin `Ty`). Permissive: no errors.
             self.qualified_builtin_ty(name, args).unwrap_or(Ty::Unknown)
         } else {
             Ty::Unknown
@@ -164,13 +178,13 @@ impl Checker {
         }
         match t {
             Type::Named { name: n, .. } => match n.as_str() {
+                // A module-owned C type this module bound (`ptr`, `owned_str`, a width), under any
+                // alias. An import binds before a builtin of its name.
+                _ if let Some(c) = self.bound_builtin(n) => builtin_ctype(c),
                 "int" => Some(CType::Int),
                 "float" => Some(CType::Float),
                 "bool" => Some(CType::Bool),
                 "str" => Some(CType::Str),
-                "ptr" => Some(CType::Ptr),
-                "owned_str" => Some(CType::OwnedStr),
-                _ if crate::native::ffi::is_width(n) => crate::native::cffi::width_ctype(n),
                 // A LOCAL transparent alias: recurse on its body in THIS module's scope.
                 _ if self.aliases.contains_key(n) => {
                     let body = self.aliases[n].clone();
@@ -243,14 +257,8 @@ impl Checker {
                 // resulting CType, never re-derives from a module prefix), so it marshals identically
                 // to the bare width. Gated on `sig.types` membership — only `std.ffi`'s sig carries
                 // these reserved names — so this fires solely for genuine FFI types.
-                if sig.types.contains(name) {
-                    let c = match name.as_str() {
-                        "ptr" => Some(CType::Ptr),
-                        _ => crate::native::cffi::width_ctype(name),
-                    };
-                    if c.is_some() {
-                        return c;
-                    }
+                if sig.builtins.contains(name) {
+                    return builtin_ctype(name);
                 }
                 if sig.struct_defs.contains_key(name) {
                     // CROSS-MODULE: read the qualified struct's CType from the cache VERBATIM (computed

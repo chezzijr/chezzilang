@@ -13,7 +13,7 @@ fn read_timeout_returns_err() {
 import std.net
 import std.time
 
-fn server(listener: Listener) -> int!:
+fn server(listener: net.Listener) -> int!:
     conn := listener.accept()?
     time.sleep_ms(400)
     conn.close()
@@ -62,7 +62,7 @@ fn net_read_reassembles_split_codepoint_over_parallel() {
     let src = "\
 import std.net
 
-fn serve(server: Listener) -> int!:
+fn serve(server: net.Listener) -> int!:
     conn := server.accept()?
     conn.write(\"héllo\")?
     conn.close()
@@ -327,7 +327,7 @@ fn net_read_timeout_bounds_the_in_callback_demote_path() {
         "\
 import std.net
 
-fn grab(s: Socket) -> str:
+fn grab(s: net.Socket) -> str:
     match s.read(8, 200):
         ?v: return \"GOT:\" + v
         !e: return \"ERR:\" + e.message()
@@ -564,7 +564,7 @@ fn net_read_zero_with_pending_carry_returns_empty_not_spin() {
     let src = "\
 import std.net
 
-fn serve(server: Listener) -> int!:
+fn serve(server: net.Listener) -> int!:
     conn := server.accept()?
     conn.write(\"héllo\")?
     conn.close()
@@ -620,9 +620,9 @@ main()
 fn net_read_shared_socket_two_fibers_decode_in_wire_order() {
     let src = "\
 import std.net
-import std.concurrency
+import Shared from std.concurrency
 
-fn serve(server: Listener) -> int!:
+fn serve(server: net.Listener) -> int!:
     conn := server.accept()?
     i := 0
     while i < 300:
@@ -632,7 +632,7 @@ fn serve(server: Listener) -> int!:
     server.close()
     return ?0
 
-fn drain(sock: Socket, seen: Shared[int], bad: Shared[int]) -> int!:
+fn drain(sock: net.Socket, seen: Shared[int], bad: Shared[int]) -> int!:
     while seen.get() < 300 and bad.get() == 0:
         match sock.read(3, 0):
             ?s:
@@ -764,7 +764,7 @@ fn net_write_timeout_when_buffer_full() {
 import std.net
 import std.time
 
-fn server(listener: Listener) -> int!:
+fn server(listener: net.Listener) -> int!:
     _ := listener.accept()?
     time.sleep_ms(3000)
     listener.close()
@@ -882,7 +882,7 @@ fn accept_timeout_returns_err() {
     let src = "\
 import std.net
 
-fn server(listener: Listener):
+fn server(listener: net.Listener):
     match listener.accept(100):
         ?_: print(\"ACCEPTED\")
         !e: print(\"ERR:\" + e.message())
@@ -923,7 +923,7 @@ fn read_without_timeout_still_parks_forever() {
 import std.net
 import std.time
 
-fn server(listener: Listener) -> int!:
+fn server(listener: net.Listener) -> int!:
     conn := listener.accept()?
     time.sleep_ms(300)
     conn.write(\"late\")?

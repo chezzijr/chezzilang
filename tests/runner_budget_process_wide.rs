@@ -59,7 +59,8 @@ fn assert_cores_at_most(name: &str, program: &str, threads: &str, bound: f64) {
 fn two_executors_share_one_runner_budget_at_t2() {
     assert_cores_at_most(
         "two_executors",
-        r#"fn main():
+        r#"import Executor from std.concurrency
+fn main():
     a := Executor()
     b := Executor()
     for i in 0..4:
@@ -80,7 +81,8 @@ main()
 fn executor_and_parallel_share_one_runner_budget_at_t2() {
     assert_cores_at_most(
         "exec_and_parallel",
-        r#"fn main():
+        r#"import Executor from std.concurrency
+fn main():
     ex := Executor()
     for i in 0..4:
         ex.submit(fn(): burn(3000000))
@@ -101,7 +103,8 @@ main()
 fn executor_and_busy_main_share_one_runner_budget_at_t2() {
     assert_cores_at_most(
         "exec_busy_main",
-        r#"fn main():
+        r#"import Executor from std.concurrency
+fn main():
     ex := Executor()
     for i in 0..4:
         ex.submit(fn(): burn(3000000))

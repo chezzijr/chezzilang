@@ -1208,7 +1208,7 @@ fn errors_json_prints_carrier_sugar() {
     assert!(!stdout.contains("Option["), "stdout={stdout}");
 }
 
-/// TICKET-228 (D6) — the near-miss help of a removed type name names the replacement, in the
+/// TICKET-228 (D6) — a near miss of `Option` names no type the language does not have, in the
 /// machine channel too.
 #[test]
 fn near_miss_help_names_no_removed_spelling() {
@@ -1220,7 +1220,7 @@ fn near_miss_help_names_no_removed_spelling() {
         .expect("run chezzi check --errors=json");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("\"help\":\"an optional type is written `T?`\""),
+        stdout.contains("unknown type 'option'") && !stdout.contains("Option"),
         "got: {stdout}"
     );
 }

@@ -124,9 +124,7 @@ impl Checker {
                         } else {
                             let mut widths = Vec::new();
                             Self::collect_width_names(body, &mut widths);
-                            widths
-                                .into_iter()
-                                .find(|w| !self.imported_ffi_types.contains(w))
+                            widths.into_iter().find(|w| self.bound_builtin(w).is_none())
                         };
                         sig.type_aliases.insert(
                             name.clone(),
@@ -501,7 +499,8 @@ impl Checker {
         if name == "Self" && self.current_self_ty.is_some() {
             return Some(TypeRead::SelfType);
         }
-        is_builtin_type_name(name).then(|| TypeRead::Builtin(name.to_string()))
+        (BuiltinType::global(name).is_some() || self.bound_builtin(name).is_some())
+            .then(|| TypeRead::Builtin(name.to_string()))
     }
     /// U10: the `module.Name` half of [`Checker::bare_type_read`]: a type the whole-module import
     /// declares, else an exported alias of any body.
@@ -517,8 +516,9 @@ impl Checker {
         if sig.type_aliases.contains_key(name) {
             return Some(TypeRead::Alias(format!("{module}.{name}")));
         }
-        // A `native type` export (`std.ffi`'s `ptr` and widths) is in `sig.types` only.
-        (sig.types.contains(name) && is_builtin_type_name(name))
+        // A builtin type the module owns (`std.ffi`'s `ptr` and widths).
+        sig.builtins
+            .contains(name)
             .then(|| TypeRead::Builtin(format!("{module}.{name}")))
     }
     /// The `module.Name` half of [`Checker::type_head`]: a type the whole-module import `module`
@@ -546,8 +546,7 @@ impl Checker {
             spelled,
             pinned: None,
             // The same test the import loop uses to skip a handle.
-            native_handle: kind == TypeHeadKind::Struct
-                && self.qualified_builtin_ty(name, &[]).is_some(),
+            native_handle: kind == TypeHeadKind::Struct && sig.builtins.contains(name),
         })
     }
     /// The type `value` has with no expected type, read as a pinning use, or `None` when it errs

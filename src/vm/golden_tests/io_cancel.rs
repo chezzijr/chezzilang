@@ -13,7 +13,7 @@ use super::*;
 /// task's buffer is flushed at its task slot; the since-removed serial engine printed live).
 #[test]
 fn parity_probe_defer_runs_when_cancelled_before_its_defer_line() {
-    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+    let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                fn consumer(ch: Channel[int], s: Shared[int]):\n    print(\"consumer started\")\n    defer cleanup(s)\n    ch.recv()\n\
                fn boom():\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn consumer(ch, s)\n            spawn boom()\n        0\n    print(s.get())\nmain()\n";
@@ -64,7 +64,7 @@ fn parity_os_exit_inside_a_cancelled_tasks_defer() {
 /// the cancel tripped, so the task runs and its `defer` runs too.
 #[test]
 fn parity_probe_faulter_spawned_first_still_runs_the_siblings_defer() {
-    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+    let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                fn talker(ch: Channel[int], s: Shared[int]):\n    print(\"hi\")\n    defer cleanup(s)\n    ch.recv()\n\
                fn boom():\n    xs := [1]\n    print(xs[9])\n\
                fn main():\n    s := Shared(0)\n    r := recover:\n        ch := Channel[int]()\n        parallel:\n            spawn boom()\n            spawn talker(ch, s)\n        0\n    print(s.get())\nmain()\n";
@@ -130,7 +130,7 @@ fn parity_native_hof_loop_is_cancellable() {
 /// so the program aborts and the `print(s.get())` after it never runs.
 #[test]
 fn nested_deadlock_is_fatal_through_an_outer_recover() {
-    let src = "fn cleanup(s: Shared[int]):\n    s.set(42)\n\
+    let src = "import Shared from std.concurrency\nfn cleanup(s: Shared[int]):\n    s.set(42)\n\
                fn a(ch: Channel[int], go: Channel[int], s: Shared[int]):\n    defer cleanup(s)\n    go.send(0)\n    ch.recv()\n\
                fn dead(d: Channel[int]):\n    d.recv()\n\
                fn b(go: Channel[int]):\n    go.recv()\n    d := Channel[int]()\n    parallel:\n        spawn dead(d)\n\
@@ -564,24 +564,6 @@ fn writer_program_type_checks_clean() {
     );
 }
 
-/// R2 — the bare `Writer` annotation is IMPORT-GATED: a program that names `Writer` WITHOUT importing
-/// std.io is rejected at check time with the `import std.io` hint (mirrors Socket/Listener gating).
-#[test]
-fn writer_annotation_requires_import() {
-    let src = "fn tag(w: Writer) -> Writer:\n    return w\nfn main():\n    print(\"hi\")\nmain()\n";
-    let t = TmpDir::new();
-    let entry = t.write("main.chz", src);
-    let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    match crate::checker::check_graph(&graph) {
-        Ok(()) => panic!("bare `Writer` without `import std.io` must be rejected"),
-        Err(errs) => assert!(
-            errs.iter().any(|e| e.message.contains("import std.io")
-                || e.message.contains("unknown type 'Writer'")),
-            "want an import-std.io hint, got: {errs:?}"
-        ),
-    }
-}
-
 // ===== R2b — std.io Reader / file-handle type (line/chunk streaming file INPUT) =====
 
 /// R2b — `open(path)` opens a read-only handle; `read_line()` streams the file line-by-line
@@ -784,24 +766,6 @@ fn reader_program_type_checks_clean() {
         r.is_ok(),
         "a well-typed Reader program must check clean, got: {r:?}"
     );
-}
-
-/// R2b — the bare `Reader` annotation is IMPORT-GATED: naming `Reader` WITHOUT importing std.io is
-/// rejected at check time with the `import std.io` hint (mirrors Writer gating).
-#[test]
-fn reader_annotation_requires_import() {
-    let src = "fn tag(r: Reader) -> Reader:\n    return r\nfn main():\n    print(\"hi\")\nmain()\n";
-    let t = TmpDir::new();
-    let entry = t.write("main.chz", src);
-    let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    match crate::checker::check_graph(&graph) {
-        Ok(()) => panic!("bare `Reader` without `import std.io` must be rejected"),
-        Err(errs) => assert!(
-            errs.iter().any(|e| e.message.contains("import std.io")
-                || e.message.contains("unknown type 'Reader'")),
-            "want an import-std.io hint, got: {errs:?}"
-        ),
-    }
 }
 
 /// B3 — a fn-LOCAL aggregate mutated inside a spawn: task deep-copies per task (the airlock), so the
@@ -1024,7 +988,7 @@ fn channel_park_keeps_module_snapshot_parity() {
     // TICKET-169 (D4 layer C): `g = g + 1` now faults (the task's own module-global copy), so the
     // task's snapshot stays `0` across the park — the parent's read was always going to be `0`.
     let src = "\
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 g := 0
 fn main():
     ch := Channel[int]()
@@ -1107,7 +1071,7 @@ fn spawn_task_first_global_access_is_write_parity() {
 #[test]
 fn task_snapshot_pins_at_its_own_spawn_parity() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 g: int = 1
 fn main():
     a := Shared(0)
@@ -1131,7 +1095,7 @@ main()
 #[test]
 fn two_spawns_one_nursery_pin_at_their_own_spawn_parity() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 g: int = 1
 fn main():
     a := Shared(0)
@@ -1155,7 +1119,7 @@ main()
 #[test]
 fn bare_spawn_implicit_nursery_pins_per_spawn_parity() {
     let src = "\
-import std.concurrency
+import AtomicInt from std.concurrency
 tot := AtomicInt(0)
 spawn: tot.add(1)
 n: int = 42
@@ -1171,7 +1135,7 @@ spawn: print(\"n = {n} len = {q.len()} sum = {n + 1}\")
 #[test]
 fn bare_spawn_in_a_function_body_pins_per_spawn_parity() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 g: int = 1
 fn main() -> Shared[int]:
     seen := Shared(0)
@@ -1317,7 +1281,7 @@ fn generic_fn_over_native_handles_run_parity() {
 /// sent-to and recv'd-from after `Channel[T]→Channel[int]` substitution.
 #[test]
 fn generic_wrapper_struct_channel_run_parity() {
-    let src = "import std.concurrency\n\
+    let src = "import std.concurrency\nimport Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\n\
                struct Box[T]:\n\
                \x20   ch: Channel[T]\n\
                b := Box(Channel[int]())\n\

@@ -134,7 +134,7 @@ fn pk(out: Channel[int], ...rest: List[int]):\n    rest.push([9])\n    out.send(
 struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs.push(3)\n        out.send(xs.len())\n";
     let graph = |cell: &str| {
         format!(
-            "import std.concurrency\nimport g1lib as lib\nfn main():\n    xs := [1]\n    out := Channel[int](8)\n    parallel:\n        {cell}\n    print(xs)\nmain()\n"
+            "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\nimport g1lib as lib\nfn main():\n    xs := [1]\n    out := Channel[int](8)\n    parallel:\n        {cell}\n    print(xs)\nmain()\n"
         )
     };
     // (cell, graph program?, expected: None = ok, Some(needle) = rejected)
@@ -283,7 +283,7 @@ fn module_export_grid() {
     let konst = |x: &str| format!("cannot re-declare const binding '{x}'");
     let par = |i: &str, c: &str| {
         format!(
-            "import std.concurrency\n{i}\nfn main():\n    xs := [1]\n    out := Channel[int](8)\n    parallel:\n        {c}\n    print(xs)\nmain()\n"
+            "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\n{i}\nfn main():\n    xs := [1]\n    out := Channel[int](8)\n    parallel:\n        {c}\n    print(xs)\nmain()\n"
         )
     };
     let (amb_f, amb_s, konst_y, konst_pi) = (amb("f"), amb("S"), konst("Y"), konst("pi"));

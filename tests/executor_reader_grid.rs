@@ -228,7 +228,7 @@ fn prog(reader: Reader, wait: Wait, end: End, cutter: Cutter, rounds: usize) -> 
         "fn reader_defer({SIG}, out: Channel[int]):\n    defer:\n        out.send(await_j({ARGS}))\n"
     ));
     s.push_str(
-        "fn stopper(inner: Executor, started: Channel[int], ms: int):\n    _ := started.recv()\n    time.sleep_ms(ms)\n    inner.shutdown_now()\n",
+        "import Executor from std.concurrency\nfn stopper(inner: Executor, started: Channel[int], ms: int):\n    _ := started.recv()\n    time.sleep_ms(ms)\n    inner.shutdown_now()\n",
     );
 
     // One round. The lines land inside `for rn in 0..rounds:`.

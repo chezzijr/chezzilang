@@ -480,7 +480,6 @@ impl Vm {
                 | other @ Op::NewRwShared
                 | other @ Op::NewAtomic
                 | other @ Op::NewAtomicInt
-                | other @ Op::NewTimer
                 | other @ Op::NewExecutor
                 | other @ Op::NewExecutorN => self.step(other, span),
             };

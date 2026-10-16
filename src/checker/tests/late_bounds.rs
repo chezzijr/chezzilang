@@ -276,7 +276,7 @@ fn every_crossing_closure_method_reports_a_captured_write() {
         let tail = if param.is_empty() { "" } else { "x + " };
         let program = |pre: &str, f: &str| {
             format!(
-                "import std.concurrency\nfn keep(xs: List[int]) -> int:\n    xs.push(1)\n    return 1\nfn main():\n    seen: List[int] = []\n    {setup}\n{pre}    {}\n    print(seen)\nmain()\n",
+                "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\nfn keep(xs: List[int]) -> int:\n    xs.push(1)\n    return 1\nfn main():\n    seen: List[int] = []\n    {setup}\n{pre}    {}\n    print(seen)\nmain()\n",
                 call.replace("{F}", f)
             )
         };
@@ -641,7 +641,7 @@ fn an_atomic_payload_parameter_must_carry_structural_eq() {
     const MK: &str = "(v: T) -> Atomic[T]:\n    return Atomic(v)\n";
     const HOOKED: &str =
         "struct P:\n    n: int\n    fn eq(self, other: P) -> bool:\n        return true\n";
-    const UNKNOWN: &str = "unknown protocol 'StructuralEq' in bound on 'T' (import it from std.concurrency: `import std.concurrency`)";
+    const UNKNOWN: &str = "unknown protocol 'StructuralEq' in bound on 'T'; import it from std.concurrency (`import StructuralEq from std.concurrency`)";
     // The unbounded parameter is refused, in a signature and in a struct field.
     entry_rejects(
         &format!("import Atomic from std.concurrency\nfn mk[T]{MK}"),

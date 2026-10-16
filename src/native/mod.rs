@@ -571,6 +571,10 @@ pub enum Kind {
     /// `Route::CopyRead`, which a `NativeRet` cannot carry, so the engine runs it
     /// (`Vm::airlock_native`) and the registered `concurrency::intercepted` placeholder never executes.
     InterceptAirlock,
+    /// `std.time.timer`. It returns a heap `Channel[bool]` whose delivery the scheduler owns, which a
+    /// `NativeRet` cannot carry, so the engine runs it (`Vm::new_timer`) and the registered
+    /// `time::intercepted` placeholder never executes.
+    InterceptTimer,
 }
 
 impl Kind {
@@ -589,7 +593,8 @@ impl Kind {
             | Kind::HostWait
             | Kind::InterceptIo
             | Kind::InterceptNet
-            | Kind::InterceptAirlock => false,
+            | Kind::InterceptAirlock
+            | Kind::InterceptTimer => false,
         }
     }
 
@@ -607,7 +612,8 @@ impl Kind {
             | Kind::TimedWait
             | Kind::InterceptIo
             | Kind::InterceptNet
-            | Kind::InterceptAirlock => false,
+            | Kind::InterceptAirlock
+            | Kind::InterceptTimer => false,
         }
     }
 }
@@ -1130,6 +1136,7 @@ mod tests {
         // TICKET-151: a stdin read waits on the host but must NOT reach the offload gate.
         assert!(!Kind::HostWait.blocks());
         assert!(!Kind::InterceptAirlock.blocks());
+        assert!(!Kind::InterceptTimer.blocks());
     }
 
     /// TICKET-151: the two kinds the engine runs on the worker thread while they wait on the host
@@ -1143,6 +1150,7 @@ mod tests {
         assert!(!Kind::InterceptIo.holds_host_thread());
         assert!(!Kind::InterceptNet.holds_host_thread());
         assert!(!Kind::InterceptAirlock.holds_host_thread());
+        assert!(!Kind::InterceptTimer.holds_host_thread());
     }
 
     /// D5 — every member of `std.fs` (filesystem syscalls), `std.request` (HTTP via `ureq`) and
@@ -1230,6 +1238,7 @@ mod tests {
                 ("monotonic", Kind::Inline),
                 ("sleep_ms", Kind::TimedWait),
                 ("format", Kind::Inline),
+                ("timer", Kind::InterceptTimer),
             ]
         );
         // …and no OTHER module smuggles one in: the engine's timed-wait paths (offload timer, callback
@@ -1298,6 +1307,7 @@ mod tests {
                     Kind::InterceptAirlock => {
                         assert_eq!(*module, "std.concurrency", "{module}.{name}")
                     }
+                    Kind::InterceptTimer => assert_eq!(*module, "std.time", "{module}.{name}"),
                     _ => {}
                 }
             }

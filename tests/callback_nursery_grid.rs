@@ -154,7 +154,8 @@ const KINDS: [Kind; 7] = [
 
 const CALLERS: [usize; 3] = [1, 3, 8];
 
-const PRELUDE: &str = "import std.concurrency
+const PRELUDE: &str =
+    "import std.concurrency\nimport AtomicInt, Executor, RwShared, Shared from std.concurrency
 import std.time
 fn one(c: AtomicInt):
     c.add(1)
@@ -238,7 +239,8 @@ fn grid_every_op_in_every_callback_from_every_caller_shape() {
     );
 }
 
-const NEST: &str = "import std.concurrency
+const NEST: &str =
+    "import std.concurrency\nimport AtomicInt, Executor, RwShared, Shared from std.concurrency
 fn one(c: AtomicInt):
     c.add(1)
 fn body(x: int) -> int:
@@ -341,7 +343,8 @@ main()
 ";
 
 /// A genuine deadlock: the child writes the box its parent holds across the join.
-const CHILD_WRITES_HELD_BOX: &str = "import std.concurrency
+const CHILD_WRITES_HELD_BOX: &str =
+    "import std.concurrency\nimport AtomicInt, Executor, RwShared, Shared from std.concurrency
 fn child(r: RwShared[int]):
     r.write(fn(y: int) -> int: y + 1)
 fn hold(x: int, r: RwShared[int]) -> int:

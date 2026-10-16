@@ -193,7 +193,7 @@ impl Checker {
         // constructor like `Point(1)` whose module wasn't `from`-imported. Hint how to import it.
         // An IMPORTED scalar alias (`import Count from m; Count(3)`) is already imported, so the
         // hint would be false; it falls through to the plain "unknown name", like a local one.
-        if self.types_by_name.contains_key(name) && !self.imported_alias_tys.contains_key(name) {
+        if !self.import_hint(name).is_empty() && !self.imported_alias_tys.contains_key(name) {
             self.error(span, self.unknown_type_msg(name));
             return Ty::Unknown;
         }
@@ -222,10 +222,6 @@ impl Checker {
                 span,
                 "cannot use '_' as a value — '_' is the blank identifier; `_ := e` and `_ = e` discard e",
             );
-            return Ty::Unknown;
-        }
-        if let Some(msg) = suggest::removed_name_message(name) {
-            self.error(span, msg);
             return Ty::Unknown;
         }
         let names = self.in_scope_names();

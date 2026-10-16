@@ -234,10 +234,10 @@ fn rows() -> Vec<Row> {
     ]
 }
 
-const PROGRAM: &str = "import std.concurrency
+const PROGRAM: &str = "import std.concurrency\nimport Executor, Shared from std.concurrency
 import std.time
 import std.io
-import std.net
+import std.net\nimport Socket from std.net
 import std.request
 ch := Channel[int](0)
 fc := Channel[int](1)

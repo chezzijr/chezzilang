@@ -167,12 +167,7 @@ impl Checker {
             struct_ctypes: HashMap::new(),
             types_by_name: HashMap::new(),
             imported_values: HashMap::new(),
-            imported_ffi_types: std::collections::HashSet::new(),
-            imported_concurrency: std::collections::HashSet::new(),
-            imported_time: std::collections::HashSet::new(),
-            imported_net: std::collections::HashSet::new(),
-            imported_io: std::collections::HashSet::new(),
-            imported_builtin_types: std::collections::HashSet::new(),
+            builtin_binds: HashMap::new(),
             implicit_import_names: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
@@ -183,7 +178,6 @@ impl Checker {
             io_writer_seed: None,
             io_reader_seed: None,
             concurrency_seeds: HashMap::new(),
-            time_timer_sig: None,
             container_seeds: HashMap::new(),
             carrier_seeds: CarrierSeeds::default(),
             imported_variants: HashMap::new(),
@@ -433,10 +427,9 @@ impl Checker {
 
     /// Bind a from-imported struct name into every namespace a colliding fn import must ALSO reach
     /// (TICKET-029) — a colliding from-import binds both, so this is called from both the struct
-    /// branch and the fn branch of the `Import::From` loop. Registers the layout, makes the name
-    /// bare-visible as a TYPE (`struct_names`/`bare_types`), and — for a Builtin-origin std struct —
-    /// reserves the bind name against a same-named user `struct` decl (`imported_builtin_types`),
-    /// else a user layout could silently overwrite a native shape.
+    /// branch and the fn branch of the `Import::From` loop. Registers the layout and makes the name
+    /// bare-visible as a TYPE (`struct_names`/`bare_types`). A same-named declaration in this module
+    /// is "already defined" through `import_binds`.
     ///
     /// `implicit` is true for the import no one wrote (`Span::NOWHERE`): the bind name joins
     /// `implicit_import_names`, the one fact a same-named `fn` collides with.
@@ -458,9 +451,6 @@ impl Checker {
         self.structs.insert(key.to_string(), info.clone());
         self.struct_names.insert(bind.to_string());
         self.bare_types.insert(bind.to_string(), key.to_string());
-        if info.origin == StructOrigin::Builtin {
-            self.imported_builtin_types.insert(bind.to_string());
-        }
     }
 
     /// The module-scoped runtime key for a type `name` declared in module `mid` (bare unless a genuine
@@ -505,14 +495,6 @@ impl Checker {
         }
         if let Some(alias) = self.protocol_alias_key(name) {
             return alias;
-        }
-        // TICKET-250 -- `std.concurrency`'s `StructuralEq`, licensed like `Atomic`. Last, so a
-        // module's own `protocol StructuralEq` or alias wins.
-        if name == "StructuralEq"
-            && self.concurrency_licensed(name)
-            && self.owning_protocol_def(STRUCTURAL_EQ_KEY).is_some()
-        {
-            return STRUCTURAL_EQ_KEY.to_string();
         }
         key
     }

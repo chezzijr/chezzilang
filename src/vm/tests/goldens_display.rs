@@ -667,7 +667,7 @@ main()
 ";
     assert_mc_parity(chan_src, "ok: done\n");
     let shared_src = "\
-import std.concurrency
+import Shared from std.concurrency
 struct Node:
     val: int
     next: List[Node]
@@ -778,7 +778,7 @@ main()
 #[test]
 fn rwshared_view_of_a_container_cycling_element_does_not_abort_the_host() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 struct Node:
     val: int
@@ -813,7 +813,7 @@ main()
 #[test]
 fn rwshared_cyclic_view_round_trips_under_gc_stress() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 struct Node:
     val: int
@@ -851,7 +851,7 @@ main()
 #[test]
 fn rwshared_view_over_shared_bindings_is_not_quadratic() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 fn main():
     n := 0
@@ -874,7 +874,8 @@ main()
     let want = 3001..=4 * 3001;
     assert!(
         want.contains(&nodes),
-        "RwShared.for_each over 3001 sibling-binding closures rebuilt {nodes} wire nodes (want {want:?}) — the view is materializing \
+        "import RwShared from std.concurrency
+RwShared.for_each over 3001 sibling-binding closures rebuilt {nodes} wire nodes (want {want:?}) — the view is materializing \
          the whole container per element again"
     );
 }
@@ -886,7 +887,7 @@ main()
 #[test]
 fn rwshared_for_each_over_a_dag_alias_is_not_quadratic() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 fn main():
     inner := [1]
@@ -906,7 +907,8 @@ main()
     let want = 3001..=4 * 3001;
     assert!(
         want.contains(&nodes),
-        "RwShared.for_each over 3001 aliases of one list rebuilt {nodes} wire nodes (want {want:?}) -- the view is materializing \
+        "import RwShared from std.concurrency
+RwShared.for_each over 3001 aliases of one list rebuilt {nodes} wire nodes (want {want:?}) -- the view is materializing \
          the whole container per element again"
     );
 }
@@ -918,7 +920,7 @@ main()
 #[test]
 fn rwshared_at_over_an_aliased_store_stays_under_its_ceiling() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 fn main():
     inner := List(0..5000)
@@ -939,7 +941,8 @@ main()
     let want = 5 * 5000..=5 * 60000;
     assert!(
         want.contains(&nodes),
-        "5 RwShared.at(1) calls over an aliased store rebuilt {nodes} wire nodes (want {want:?}) -- the whole-root fallback is running per \
+        "import RwShared from std.concurrency
+5 RwShared.at(1) calls over an aliased store rebuilt {nodes} wire nodes (want {want:?}) -- the whole-root fallback is running per \
          element instead of per call"
     );
 }

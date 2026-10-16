@@ -1095,6 +1095,7 @@ fn generator_in_list_arg_to_spawn_crosses_by_value() {
 #[test]
 fn generator_into_shared_crosses_by_value() {
     let src = concat!(
+        "import Shared from std.concurrency\n",
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
         "fn main():\n",
@@ -1110,6 +1111,7 @@ fn generator_into_shared_crosses_by_value() {
 #[test]
 fn generator_into_atomic_crosses_by_value() {
     let src = concat!(
+        "import Atomic from std.concurrency\n",
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
         "fn main():\n",
@@ -1126,6 +1128,7 @@ fn generator_into_atomic_crosses_by_value() {
 #[test]
 fn generator_captured_in_executor_submit_crosses_by_value() {
     let src = concat!(
+        "import Executor from std.concurrency\n",
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
         "fn main():\n",
@@ -1143,6 +1146,7 @@ fn generator_captured_in_executor_submit_crosses_by_value() {
 #[test]
 fn generator_returned_from_executor_task_crosses_by_value() {
     let src = concat!(
+        "import Executor from std.concurrency\n",
         "fn gen() -> Iterator[int]:\n",
         "    yield 1\n",
         "fn make() -> Iterator[int]:\n",

@@ -903,7 +903,7 @@ fn executor_autodrain_skipped_on_os_exit() {
     // submitted-but-un-shut executor's work must NOT run. Driven through the file path since it
     // imports std.os.
     let out = golden_entry(
-        "import std.os\nfn j():\n    print(\"RAN\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    print(\"before exit\")\n    os.exit(0)\nmain()\n",
+        "import Executor from std.concurrency\nimport std.os\nfn j():\n    print(\"RAN\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    print(\"before exit\")\n    os.exit(0)\nmain()\n",
     );
     assert_eq!(out, "before exit\n");
 }
@@ -919,7 +919,7 @@ fn executor_submit_generator_capturing_closure_crosses_by_value() {
     // F3 path C: a submitted closure captures a LIVE local generator (`it`, Pending). The by-value
     // airlock (`to_wire`) serializes it and the submitted task drives its own copy. WAS: this
     // faulted the generator crossing; NOW: it runs, byte-identical.
-    let src = "\
+    let src = "import Executor from std.concurrency\n\
 fn gen() -> Iterator[int]:
     yield 1
 fn main():
@@ -943,7 +943,7 @@ fn executor_submit_mutating_closure_isolated_parity() {
     // is marked as a copy, so `box.push(1)` inside the job now faults instead of mutating it — the
     // parent's `box` was always going to read `1` (its own, untouched list) either way.
     let out = golden_entry(
-        "fn bump_box(b):\n    recover: b.push(1)\nfn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): bump_box(box))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
+        "import Executor from std.concurrency\nfn bump_box(b):\n    recover: b.push(1)\nfn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): bump_box(box))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
     );
     assert_eq!(out, "1\n");
 }
@@ -959,7 +959,7 @@ fn executor_submit_module_global_inplace_mutation_isolates_parity() {
     // `xs.push(99)` now faults instead of mutating it — the parent's read was always going to see
     // its own (unaffected) `3` regardless.
     let out = golden_entry(
-        "xs := [1, 2, 3]\nfn bump_xs():\n    recover: xs.push(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump_xs())\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
+        "import Executor from std.concurrency\nxs := [1, 2, 3]\nfn bump_xs():\n    recover: xs.push(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump_xs())\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
     );
     assert_eq!(out, "3\n");
 }
@@ -974,7 +974,7 @@ fn executor_submit_module_global_callee_reassign_isolates_parity() {
     // `count = count + 1` now faults instead of reassigning it — the parent's read was always
     // going to see its own frozen `0` regardless.
     let out = golden_entry(
-        "count := 0\nfn bump():\n    recover:\n        count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
+        "import Executor from std.concurrency\ncount := 0\nfn bump():\n    recover:\n        count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
     );
     assert_eq!(out, "0\n");
 }
@@ -996,7 +996,7 @@ fn executor_submit_sendable_closure_runs_parity() {
     // deep-copied), so a value sent from inside the submitted job is visible to the parent's `recv`.
     // Must stay `7` — the by-value collapse must not over-isolate a shared handle.
     let out = golden_entry(
-        "fn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(7))\n    ex.shutdown()\n    print(ch.recv())\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ch := Channel[int]()\n    ex := Executor()\n    ex.submit(fn(): ch.send(7))\n    ex.shutdown()\n    print(ch.recv())\nmain()\n",
     );
     assert_eq!(out, "7\n");
 }

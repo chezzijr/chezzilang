@@ -157,6 +157,7 @@ impl Kind {
 
 const HEAD: &str = r#"import std.time
 import std.concurrency
+import Executor from std.concurrency
 import std.concurrency.task
 started := Channel[int](1)
 gate := Channel[int](1)

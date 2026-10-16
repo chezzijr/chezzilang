@@ -612,7 +612,8 @@ fn dead_stdout_under_an_executor(threads: Option<usize>, writes: usize, handle: 
     for m in markers.iter().filter(|_| handle) {
         assert!(
             t.0.join(m).exists(),
-            "a dead stdout stopped sibling Executor work at {m} ({cfg}) — a broken pipe is an \
+            "import Executor from std.concurrency
+a dead stdout stopped sibling Executor work at {m} ({cfg}) — a broken pipe is an \
              ordinary fault in the job that printed, and must not reach a job that never did"
         );
     }

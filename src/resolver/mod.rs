@@ -188,8 +188,8 @@ pub fn module_global_binds(
         if let StmtKind::Fn(decl) = &stmt.kind {
             out.push((decl.name.clone(), GlobalSource::Fn));
         }
-        // W7-8 — only names the runtime injects (`native_members`): an OPCODE-backed decl
-        // (`std.time.timer`) gets no slot, and a `native ctor` is not first-class.
+        // W7-8 — only names the runtime injects (`native_members`): a `native ctor` is not
+        // first-class.
         if let Some(nat) = native
             && let StmtKind::Native(d) = &stmt.kind
             && d.kind == crate::ast::NativeKind::Fn
@@ -1620,17 +1620,6 @@ mod tests {
                     .any(|s| matches!(&s.kind, crate::ast::StmtKind::Native(d) if d.name == a_fn)),
                 "{label} AST must carry the `native fn {a_fn}` decl"
             );
-            // std.time's file DECLARES `timer` as a native fn (signature source). It stays opcode-backed
-            // — harvest routes its sig to `time_timer_sig` (not `sig.functions`) so it keeps its
-            // bare-callable / `Op::NewTimer` / reserved semantics; the license lives in sig.types.
-            if label == "std.time" {
-                assert!(
-                    m.ast.stmts.iter().any(
-                        |s| matches!(&s.kind, crate::ast::StmtKind::Native(d) if d.name == "timer")
-                    ),
-                    "std.time.chz must declare `native fn timer` (signature source; harvested to time_timer_sig)"
-                );
-            }
         }
     }
 

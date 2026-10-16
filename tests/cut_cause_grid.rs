@@ -111,7 +111,7 @@ fn run_with(
 }
 
 const PRELUDE: &str = "import std.time
-import std.concurrency
+import std.concurrency\nimport Executor from std.concurrency
 import std.os
 import std.process
 stuck := Channel[int](0)

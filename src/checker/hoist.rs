@@ -15,14 +15,14 @@ impl Checker {
                     // Cross-kind name clash: a struct and an enum can't share a name (they'd both
                     // register, the enum silently shadowed, and — sharing a `Name[args]` Display —
                     // produce nonsense like "cannot assign Foo[int] to … Foo[int]"). Same-kind dups
-                    // are caught later in the resolve pass.
-                    if self.enum_names.contains(name) {
+                    // are caught later in the resolve pass. A name an import binds is taken too.
+                    if self.enum_names.contains(name) || self.import_binds.contains_key(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
                     self.struct_names.insert(name.clone());
                 }
                 StmtKind::Enum { name, .. } => {
-                    if self.struct_names.contains(name) {
+                    if self.struct_names.contains(name) || self.import_binds.contains_key(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
                     self.enum_names.insert(name.clone());
@@ -43,6 +43,7 @@ impl Checker {
                     if self.aliases.contains_key(name)
                         || self.struct_names.contains(name)
                         || self.enum_names.contains(name)
+                        || self.import_binds.contains_key(name)
                     {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     } else {
@@ -275,25 +276,15 @@ impl Checker {
                     ..
                 } => {
                     // Only keywords are reserved: a struct named after a builtin type shadows it in
-                    // this module.
-                    // `imported_builtin_types`: a name THIS module imported as a Builtin-origin std
-                    // struct (Match/Response/ProcResult, …) is a first-class Rust-bridged
-                    // module-exported type — NOT reserved (a bare unimported `struct Match` is legal;
-                    // the name isn't in the set without the import event). Importing it, then declaring
-                    // a same-named `struct`, is an ordinary import-name collision — the same "already
-                    // defined" error the enum/typealias siblings emit (they collide via
-                    // `struct_names`). It stays a hard reject (declaring it would overwrite the native
-                    // seed yet the runtime still constructs/returns the native shape → runtime field
-                    // trap); only the message is corrected from "reserved" to "already defined".
+                    // this module. A name an import binds is "already defined" in `collect_names`.
                     //
                     // A pre-seeded synthetic stdlib struct (`Match`/`Response`/`ProcResult`, always
                     // present in `self.structs` under its bare key tagged `StructOrigin::Builtin` for
                     // import-free field access) is NOT a real prior definition — a user `struct
                     // Response` shadows it (the hoist insert below overwrites the seed with the user's
-                    // `User`-origin layout). Only a genuine User-origin entry, OR an active
-                    // import-license on this name, is "already defined".
-                    let already_defined = self.imported_builtin_types.contains(name)
-                        || self
+                    // `User`-origin layout). Only a genuine User-origin entry is "already defined".
+                    let already_defined = !self.import_binds.contains_key(name)
+                        && self
                             .structs
                             .get(&self.bare_key(name))
                             .is_some_and(|i| i.origin != StructOrigin::Builtin);
@@ -632,10 +623,8 @@ impl Checker {
                         // bare-name resolution does not consult — the call read `unknown name`.
                         // Register the sig as an ordinary module function so both paths agree.
                         // Skipped for a `native ctor` (not first-class), for a universe builtin (its
-                        // dispatch is the `PRELUDE` table's, not a module function's), and for
-                        // `timer` (opcode-backed, bare-callable only — same carve-out the harvest makes).
+                        // dispatch is the `PRELUDE` table's, not a module function's).
                         if decl.kind == crate::ast::NativeKind::Fn
-                            && decl.name != "timer"
                             && crate::checker::prelude_fn(&decl.name).is_none()
                         {
                             let fsig = self.harvest_native_fn_sig(decl, false);
@@ -698,7 +687,7 @@ impl Checker {
                                 "a native type's underlying type must be int or float".to_string(),
                             );
                         }
-                        self.imported_ffi_types.insert(name.clone());
+                        self.builtin_binds.insert(name.clone(), name.clone());
                     }
                 }
                 StmtKind::Let { .. }
@@ -1113,7 +1102,7 @@ impl Checker {
     pub(super) fn is_return_only_extern_type_seen(&self, t: &Type, seen: &mut Vec<String>) -> bool {
         match t {
             Type::Named { name: n, .. } => {
-                if n == "owned_str" {
+                if self.bound_builtin(n) == Some("owned_str") {
                     return true;
                 }
                 if seen.iter().any(|s| s == n) {
@@ -1128,15 +1117,15 @@ impl Checker {
             // `str?` / `owned_str?` parse to `Option[inner]`; the inner may itself be an alias.
             Type::Generic(n, args, ..) if crate::ast::unprivate(n) == "Option" => {
                 args.first().is_some_and(|inner| {
-                    matches!(inner, Type::Named { name: s, .. } if s == "str" || s == "owned_str")
+                    matches!(inner, Type::Named { name: s, .. }
+                        if s == "str" || self.bound_builtin(s) == Some("owned_str"))
                         || self.is_return_only_extern_type_seen(inner, seen)
                 })
             }
-            Type::Qualified { .. }
-            | Type::Generic(..)
-            | Type::Func { .. }
-            | Type::Tuple(_)
-            | Type::Nil(_) => false,
+            Type::Qualified { module, name, .. } => {
+                name == "owned_str" && self.module_owns_builtin(module, name)
+            }
+            Type::Generic(..) | Type::Func { .. } | Type::Tuple(_) | Type::Nil(_) => false,
         }
     }
 

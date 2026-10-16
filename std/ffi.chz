@@ -25,6 +25,7 @@
 
 # --- the exported types ---
 native type ptr                 # opaque C pointer handle; no Chezzi underlying value
+native type owned_str           # an extern return only: a C string the caller frees; Chezzi sees str
 native type int8 = int          # C int8_t; Chezzi sees int
 native type int16 = int         # C int16_t; Chezzi sees int
 native type int32 = int         # C int32_t; Chezzi sees int

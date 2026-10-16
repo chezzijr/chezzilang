@@ -6,7 +6,7 @@ use std::process::Command;
 
 const SRC: &str = "import std.time
 import std.os
-import std.concurrency
+import Executor from std.concurrency
 fn fib(n: int) -> int:
     if n < 2:
         return n

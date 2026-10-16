@@ -126,6 +126,7 @@ impl Checker {
                 let resolved = match n.as_str() {
                     s if !user_first
                         && !self.type_params.contains_key(s)
+                        && self.bound_builtin(s).is_none()
                         && let Some(t) = Self::scalar_bound_ty(s) =>
                     {
                         t
@@ -150,37 +151,26 @@ impl Checker {
                     "Self" if self.current_self_ty.is_some() => {
                         self.current_self_ty.clone().unwrap()
                     }
-                    // U10: every bare builtin type name resolves through `BuiltinType`, gated by
-                    // `builtin_gate` (import licence, extern-only `owned_str`). A type parameter or
+                    // U10: a bare builtin type name resolves through `BuiltinType`: a global one, or
+                    // a module-owned one this module bound (`builtin_type_named`). A type parameter or
                     // `Self` above shadows these.
                     s if !user_first
-                        && let Some(b) = BuiltinType::from_name(s)
+                        && let Some(b) = self.builtin_type_named(s)
                         && let Some(t) = b.plain_ty() =>
                     {
                         self.builtin_gate(b, t, span)
                     }
-                    // A BARE (no type-arg) `Shared`/`RwShared`/`Atomic` annotation: either unlicensed
-                    // (the import hint the `Shared[T]` arm emits) or licensed but missing its type
+                    // A bare generic box (`Shared`, `RwShared`, `Atomic`) written without its type
                     // argument.
                     s if !user_first
                         && let Some(
-                            b @ (BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic),
-                        ) = BuiltinType::from_name(s) =>
+                            BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic,
+                        ) = self.builtin_type_named(s) =>
                     {
-                        let n = b.name();
-                        if self.concurrency_licensed(n) {
-                            self.error(
-                                span,
-                                format!("type '{n}' expects 1 type argument(s), got 0"),
-                            );
-                        } else {
-                            self.error(
-                                span,
-                                format!(
-                                    "unknown type '{n}' (import it from std.concurrency: `import std.concurrency`)"
-                                ),
-                            );
-                        }
+                        self.error(
+                            span,
+                            format!("type '{n}' expects 1 type argument(s), got 0"),
+                        );
                         Ty::Unknown
                     }
                     // A transparent type alias resolves to its underlying type (recursively). The
@@ -208,38 +198,27 @@ impl Checker {
                         let ty = self.imported_alias_tys[n].clone();
                         self.reject_static_protocol_value(ty, span)
                     }
-                    // Fixed-width C-ABI integer marshalling type names (`int8`..`uint64`) — Chezzi's first
-                    // type imports. Each resolves to `Ty::Width` (`ffi_width_ty`), a slot tag whose value
-                    // is a plain `int`/`float`; the backends recover the C width via `ctype_of`, and they're
-                    // BIDIRECTIONAL (valid as both param and return). But they are NOT global builtins: a
-                    // width name resolves only in a module that imported it per-name from `std.ffi`
-                    // (`import int32 from std.ffi` → `imported_ffi_types`). Otherwise it's an unknown type
-                    // with an FFI-specific hint (matches the qualified-variant "write it qualified" style).
-                    _ if !user_first && crate::native::ffi::is_width(n) => {
-                        // Accept the width name if THIS module imported it, OR if we reached it by
-                        // expanding a LICENSED transparent alias body — one whose defining module
-                        // imported the width (`ffi_alias_ok`). A `type Len = int32` is a deliberate
-                        // opt-in that stays valid wherever the alias is used, including cross-module
-                        // (the alias is program-global but the per-module import set is not). A bare
-                        // width name in ordinary code still needs the import — and crucially an alias
-                        // whose module never imported the width does NOT launder it (the closed gate
-                        // hole): only a licensed alias indirection bypasses the per-module requirement.
-                        if self.ffi_type_licensed(n)
-                            || self
-                                .alias_resolving
-                                .last()
-                                .is_some_and(|a| self.ffi_alias_ok.contains(a))
-                        {
-                            self.width_at(n, span, pos)
-                        } else {
-                            self.error(
-                            span,
-                            format!(
-                                "unknown type '{n}' (import it from std.ffi: `import {n} from std.ffi`)"
-                            ),
-                        );
-                            Ty::Unknown
-                        }
+                    // A C width (`int8`..`uint64`, `float32`) this module bound: `Ty::Width`
+                    // (`ffi_width_ty`), a slot tag whose value is a plain `int`/`float`; the backends
+                    // recover the C width from the checker's `resolve_ctype`.
+                    _ if !user_first
+                        && let Some(w) = self
+                            .bound_builtin(n)
+                            .filter(|w| crate::native::ffi::is_width(w))
+                            .map(str::to_string) =>
+                    {
+                        self.width_at(&w, span, pos)
+                    }
+                    // A width reached by expanding an alias body whose defining module bound it
+                    // (`ffi_alias_ok`): the alias stays valid wherever it is used.
+                    _ if !user_first
+                        && crate::native::ffi::is_width(n)
+                        && self
+                            .alias_resolving
+                            .last()
+                            .is_some_and(|a| self.ffi_alias_ok.contains(a)) =>
+                    {
+                        self.width_at(n, span, pos)
                     }
                     _ if self.struct_names.contains(n) => {
                         // The layout is keyed by the runtime key (bare unless disambiguated); the written
@@ -303,13 +282,7 @@ impl Checker {
                             .iter()
                             .any(|e| e.span == at && e.message == attributed)
                         {
-                            // `nil` was the old spelling of `None`; too far for the suggester.
-                            let help = if n == "nil" {
-                                Some("did you mean 'None'?".to_string())
-                            } else {
-                                suggest::did_you_mean(n, &self.type_names())
-                                    .or_else(|| suggest::removed_type_hint(n))
-                            };
+                            let help = suggest::did_you_mean(n, &self.type_names());
                             self.error_help(at, msg, help);
                         }
                         Ty::Unknown
@@ -376,7 +349,7 @@ impl Checker {
                 let builtin = if self.declares_type_here(n) {
                     None
                 } else {
-                    BuiltinType::from_name(n)
+                    self.builtin_type_named(n)
                 };
                 let resolved = match (builtin, args.as_slice()) {
                     (Some(BuiltinType::List), [inner]) => Ty::list(self.resolve_type(inner, span)),
@@ -402,57 +375,21 @@ impl Checker {
                     }
                     // `Shared[T]` (C3): the cross-task mutable box. Unlike a `Channel`, its element type
                     // isn't gated on sendability — the value lives in one owner and is copied in/out
-                    // through `get`/`set`; the *handle* is what crosses (always sendable). NOT a global
-                    // builtin: requires `import std.concurrency` (the inner type is still resolved on the
-                    // unlicensed path so a nested error surfaces; the name STAYS reserved). Same for the
-                    // RwShared/Atomic siblings below.
+                    // through `get`/`set`; the *handle* is what crosses (always sendable). The same for
+                    // the `RwShared`/`Atomic` siblings below.
                     (Some(BuiltinType::Shared), [inner]) => {
-                        let elem = self.resolve_type(inner, span);
-                        if self.concurrency_licensed("Shared") {
-                            Ty::shared(elem)
-                        } else {
-                            self.error(
-                            span,
-                            "unknown type 'Shared' (import it from std.concurrency: `import std.concurrency`)"
-                                .to_string(),
-                        );
-                            Ty::Unknown
-                        }
+                        Ty::shared(self.resolve_type(inner, span))
                     }
-                    // `RwShared[T]` (type annotation): the cross-task read-write box. Like `Shared`, its
-                    // element type isn't gated on sendability — the handle is what crosses.
                     (Some(BuiltinType::RwShared), [inner]) => {
-                        let elem = self.resolve_type(inner, span);
-                        if self.concurrency_licensed("RwShared") {
-                            Ty::rwshared(elem)
-                        } else {
-                            self.error(
-                            span,
-                            "unknown type 'RwShared' (import it from std.concurrency: `import std.concurrency`)"
-                                .to_string(),
-                        );
-                            Ty::Unknown
-                        }
+                        Ty::rwshared(self.resolve_type(inner, span))
                     }
-                    // `Atomic[T]` (type annotation): the cross-task atomic box. Like `Shared`, its element
-                    // type isn't gated on sendability — the handle is what crosses.
                     (Some(BuiltinType::Atomic), [inner]) => {
                         let elem = self.resolve_type(inner, span);
-                        if self.concurrency_licensed("Atomic") {
-                            // INSIDE the licensing branch — see the ctor site in `expr.rs`.
-                            self.conformance_obligation(Obligation::AtomicPayload {
-                                elem: elem.clone(),
-                                span,
-                            });
-                            Ty::atomic(elem)
-                        } else {
-                            self.error(
+                        self.conformance_obligation(Obligation::AtomicPayload {
+                            elem: elem.clone(),
                             span,
-                            "unknown type 'Atomic' (import it from std.concurrency: `import std.concurrency`)"
-                                .to_string(),
-                        );
-                            Ty::Unknown
-                        }
+                        });
+                        Ty::atomic(elem)
                     }
                     (Some(BuiltinType::Map), [k, v]) => {
                         let key = self.resolve_type(k, span);
@@ -581,10 +518,7 @@ impl Checker {
                         }
                     }
                     _ => {
-                        match super::suggest::removed_name_message(n) {
-                            Some(msg) => self.error(span, msg),
-                            None => self.error(span, format!("unknown generic type '{n}'")),
-                        }
+                        self.error(span, format!("unknown generic type '{n}'"));
                         Ty::Unknown
                     }
                 };
@@ -636,7 +570,7 @@ impl Checker {
                 // (matching the bare-after-import path); otherwise it would mint a divergent
                 // `Ty::Struct("Shared", …)` that fails to unify with a `Shared(v)` ctor's `Ty::shared`.
                 if let Some(info) = sig.struct_defs.get(name)
-                    && self.qualified_builtin_ty(name, &[]).is_none()
+                    && !sig.builtins.contains(name)
                 {
                     if info.type_params.len() != resolved.len() {
                         self.error(
@@ -692,23 +626,11 @@ impl Checker {
                     } else {
                         Ty::Protocol(self.type_key(&mid, name), resolved)
                     }
-                } else if sig.types.contains(name) {
-                    // An opaque/native builtin TYPE reached by qualified path (`concurrency.Shared[int]`,
-                    // `net.Socket`, `ffi.int32`/`ffi.ptr`). These names live ONLY in their owning std
-                    // module's `sig.types` (reserved — no user module can export them), so this branch
-                    // fires solely for native builtins; user struct/enum/alias names were already
-                    // consumed by the def-map arms above. The arm required the module be imported (the
-                    // `imported_modules.get` above), so the import gate is unchanged: a non-imported
-                    // module still hit the `unknown module` error before reaching here. ADDITIVE — the
-                    // bare-after-import path (`imported_concurrency`/`_net`/`_ffi_types`) is untouched.
-                    if name == "timer" {
-                        self.error(
-                            span,
-                            "'timer' is a function, not a type — call it: `time.timer(ms)`"
-                                .to_string(),
-                        );
-                        Ty::Unknown
-                    } else if let Some(ty) = self.qualified_builtin_ty(name, &resolved) {
+                } else if sig.builtins.contains(name) {
+                    // A module-owned builtin type reached by qualified path (`concurrency.Shared[int]`,
+                    // `net.Socket`, `ffi.int32`, `ffi.ptr`): the same type the bare name bound by an
+                    // import denotes.
+                    if let Some(ty) = self.qualified_builtin_ty(name, &resolved) {
                         let expected = Self::qualified_builtin_arity(name);
                         if resolved.len() != expected {
                             self.error(
@@ -719,10 +641,21 @@ impl Checker {
                                 ),
                             );
                         }
-                        if crate::native::ffi::is_width(name) {
-                            self.width_at(name, span, pos)
-                        } else {
-                            ty
+                        match BuiltinType::from_name(name) {
+                            _ if crate::native::ffi::is_width(name) => {
+                                self.width_at(name, span, pos)
+                            }
+                            Some(BuiltinType::Atomic) => {
+                                if let Ty::Atomic(elem) = &ty {
+                                    self.conformance_obligation(Obligation::AtomicPayload {
+                                        elem: (**elem).clone(),
+                                        span,
+                                    });
+                                }
+                                ty
+                            }
+                            Some(b) => self.builtin_gate(b, ty, span),
+                            None => ty,
                         }
                     } else {
                         self.error(span, format!("module '{module}' has no type '{name}'"));

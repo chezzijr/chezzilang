@@ -635,67 +635,24 @@ impl Parser {
 
     /// Parse the inside of a subscript `[ ... ]` (the `[` already consumed) and the closing `]`,
     /// producing an `Index` whose index is one expression: an int, a key, or a `Range` (`xs[a..b]`
-    /// is a subscript by a range value; the checker decides whether it slices). A `:` inside the
-    /// brackets is the removed colon slice and names its replacement (TICKET-253).
+    /// is a subscript by a range value; the checker decides whether it slices).
     fn parse_subscript(&mut self, obj: Expr, span: Span) -> PResult<Expr> {
-        // A component is present iff the next token is not `:` or `]`.
-        let component = |p: &mut Self| -> PResult<Option<Box<Expr>>> {
-            if p.check(&Token::Colon) || p.check(&Token::RBracket) {
-                Ok(None)
-            } else {
-                Ok(Some(Box::new(p.parse_expr()?)))
-            }
-        };
-        let start = component(self)?;
-        // No colon → plain index. `xs[]` (empty) is rejected as a missing index.
-        if !self.check(&Token::Colon) {
-            self.expect(&Token::RBracket)?;
-            let index = start.ok_or_else(|| ParseError {
+        // `xs[]` (empty) is rejected as a missing index.
+        if self.check(&Token::RBracket) {
+            return Err(ParseError {
                 message: "expected an index expression".to_string(),
-                span,
-            })?;
-            return Ok(Expr {
-                id: crate::ast::NodeId::fresh(),
-                kind: ExprKind::Index {
-                    obj: Box::new(obj),
-                    index: Some(index),
-                    types: Vec::new(),
-                },
                 span,
             });
         }
-        // TICKET-253: the colon slice is removed. Read the rest of the old form only to name its
-        // replacement: `xs[a:b]` is `xs[a..b]`, `xs[a:b:c]` is `xs[Range(a, b, c)]` and `xs[::-1]` is
-        // `xs.reversed()`.
-        self.advance(); // first ':'
-        let end = component(self)?;
-        let step = if self.check(&Token::Colon) {
-            self.advance(); // second ':'
-            component(self)?
-        } else {
-            None
-        };
-        let is_minus_one = |st: &Expr| {
-            if let ExprKind::Unary {
-                op: UnaryOp::Neg,
-                expr,
-            } = &st.kind
-            {
-                return matches!(expr.kind, ExprKind::Int(1));
-            }
-            matches!(st.kind, ExprKind::Int(-1))
-        };
-        let is_reverse =
-            start.is_none() && end.is_none() && step.as_deref().is_some_and(is_minus_one);
-        let message = if is_reverse {
-            "the slice `xs[::-1]` is removed; write `xs.reversed()`"
-        } else if step.is_some() {
-            "the slice `xs[a:b:c]` is removed; write `xs[Range(a, b, c)]` (use `None` for an omitted bound)"
-        } else {
-            "the slice `xs[a:b]` is removed; write `xs[a..b]` (also `xs[a..]`, `xs[..b]`, `xs[..]`)"
-        };
-        Err(ParseError {
-            message: message.to_string(),
+        let index = Box::new(self.parse_expr()?);
+        self.expect(&Token::RBracket)?;
+        Ok(Expr {
+            id: crate::ast::NodeId::fresh(),
+            kind: ExprKind::Index {
+                obj: Box::new(obj),
+                index: Some(index),
+                types: Vec::new(),
+            },
             span,
         })
     }

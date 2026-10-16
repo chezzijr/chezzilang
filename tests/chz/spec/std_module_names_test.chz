@@ -1,0 +1,61 @@
+# A std module member is an ordinary module member: a whole-module `import std.M` binds `M`, and a
+# bare name needs `import Name from std.M` (Python: `import re` gives `re.Match`, never `Match`).
+# The whole import grid is `tests/module_member_grid.rs`; these run the programs it names.
+
+import std.regex
+import std.time
+import Shared as Box, AtomicInt from std.concurrency
+import timer as after from std.time
+import std.ffi
+import owned_str, int32 as I32, owned_str as Owned from std.ffi
+
+# A whole-module import binds no bare `Match`, so this is a type of this module.
+struct Match:
+    x: int
+
+fn text_of(m: regex.Match) -> str:
+    return m.text
+
+fn first_run(pat: str, s: str) -> str!Error:
+    match regex.find(pat, s)?:
+        ?m: return text_of(m)
+        None: return ""
+
+test fn a_local_match_is_its_own_type_beside_regex_match():
+    m := Match(5)
+    assert m.x == 5
+    match first_run("a+", "baaa"):
+        ?t: assert t == "aaa"
+        !e: assert false
+
+test fn an_aliased_box_constructs_and_annotates():
+    b: Box[int] = Box(1)
+    b.update(fn(v): v + 1)
+    assert b.get() == 2
+    n := AtomicInt(3)
+    assert n.load() == 3
+
+test fn timer_is_an_ordinary_function():
+    f := time.timer
+    assert f(1).recv()
+    assert after(1).recv()
+    assert time.timer(1).recv()
+
+# An FFI type marshals as the type it names under every spelling: imported, aliased, qualified.
+extern "libc":
+    fn strdup(s: str) -> owned_str
+    fn abs(x: I32) -> I32
+
+extern "libc":
+    fn strndup(s: str, n: int) -> Owned
+    fn labs(x: ffi.int64) -> ffi.int64
+
+extern "libc":
+    fn realpath(p: str, out: ffi.ptr) -> ffi.owned_str
+
+test fn an_ffi_type_marshals_under_every_spelling():
+    assert strdup("hi") == "hi"
+    assert abs(-3) == 3
+    assert strndup("hello", 2) == "he"
+    assert labs(-5) == 5
+    assert realpath("/", ffi.null()) == "/"

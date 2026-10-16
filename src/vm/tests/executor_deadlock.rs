@@ -13,7 +13,7 @@ use super::*;
 /// either outcome would encode a race as a guarantee.
 #[test]
 fn executor_shutdown_now_is_cooperative_not_preemptive() {
-    let src = "fn j():\n    print(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    ex.shutdown_now()\n    print(0)\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn j():\n    print(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    ex.shutdown_now()\n    print(0)\nmain()\n";
     let mn = run_capture(src).expect("mn run");
     assert!(
         mn == "0\n" || mn == "99\n0\n",
@@ -46,6 +46,7 @@ fn executor_shutdown_now_is_cooperative_not_preemptive() {
 fn executor_job_blocking_recv_waits_for_a_later_send() {
     // Eager-only: the job reaches its blocking `recv` before the value is sent.
     let handshake = r#"
+import Atomic, Executor from std.concurrency
 ch := Channel[int](1)
 ready := Atomic(0)
 fn worker():
@@ -62,6 +63,7 @@ print("done")
 "#;
     // Engine-agnostic: whenever the job reaches the `recv`, the value is there or it waits for it.
     let plain = r#"
+import Executor from std.concurrency
 ch := Channel[int](1)
 ex := Executor()
 ex.submit(fn(): print("job got {ch.recv()}"))
@@ -104,6 +106,7 @@ print("done")
 #[test]
 fn executor_job_blocked_during_shutdown_faults_both_engines() {
     let src = r#"
+import Executor from std.concurrency
 ch := Channel[int](1)
 ex := Executor()
 ex.submit(fn(): print("job got {ch.recv()}"))
@@ -147,6 +150,7 @@ ch.send(42)
 #[test]
 fn two_blocked_jobs_in_one_executor_fault_instead_of_hanging() {
     let src = r#"
+import Executor from std.concurrency
 ch := Channel[int](1)
 ex := Executor()
 ex.submit(fn(): print("j1 {ch.recv()}"))
@@ -185,6 +189,7 @@ ex.shutdown()
 #[test]
 fn two_executors_deadlocking_each_other_fault() {
     let src = r#"
+import Executor from std.concurrency
 c1 := Channel[int](1)
 c2 := Channel[int](1)
 x := Executor()
@@ -212,11 +217,11 @@ y.shutdown()
 }
 
 /// TICKET-208 — a deadlocked job is reported at its OWN blocking op, with the text the in-place
-/// path raises for that op: line 3 (the `recv`), not line 2 (the `Executor()`), and never the
+/// path raises for that op: line 4 (the `recv`), not line 3 (the `Executor()`), and never the
 /// nursery text. Watchdogged like its neighbours.
 #[test]
 fn a_deadlocked_job_is_reported_at_its_own_recv_not_at_the_executor() {
-    let src = "ch := Channel[int](1)\nex := Executor()\nex.submit(fn(): print(ch.recv()))\nex.shutdown()\n";
+    let src = "import Executor from std.concurrency\nch := Channel[int](1)\nex := Executor()\nex.submit(fn(): print(ch.recv()))\nex.shutdown()\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));
@@ -231,7 +236,7 @@ fn a_deadlocked_job_is_reported_at_its_own_recv_not_at_the_executor() {
         err.message
     );
     assert_eq!(
-        err.span.line, 3,
+        err.span.line, 4,
         "the report must name the job's `recv`, got {:?}",
         err.span
     );
@@ -254,6 +259,7 @@ fn a_deadlocked_job_is_reported_at_its_own_recv_not_at_the_executor() {
 #[test]
 fn blocked_job_with_no_shutdown_faults_at_the_exit_drain() {
     let src = r#"
+import Executor from std.concurrency
 ch := Channel[int](1)
 ex := Executor()
 ex.submit(fn(): print("job got {ch.recv()}"))
@@ -296,6 +302,7 @@ ex.submit(fn(): print("job got {ch.recv()}"))
 #[test]
 fn main_recv_completes_when_an_eager_job_sends() {
     let src = r#"
+import Executor from std.concurrency
 ch := Channel[int](1)
 ex := Executor()
 ex.submit(fn(): ch.send(42))
@@ -368,6 +375,7 @@ wait:
 #[test]
 fn a_drained_shutdown_is_not_mistaken_for_a_blocked_joiner() {
     let src = r#"
+import Executor from std.concurrency
 c := Channel[int](1)
 exA := Executor()
 exA.submit(fn(): print("got {c.recv()}"))
@@ -417,8 +425,8 @@ exA.shutdown()
 #[test]
 fn executor_job_keeps_waiting_when_shutdown_runs_beside_a_live_producer() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import timer from std.time
 ch: Channel[int] = Channel[int](1)
 ex := Executor()
 ex.submit(fn(): print(\"job got {ch.recv()}\"))
@@ -466,8 +474,8 @@ print(\"end\")
 #[test]
 fn executor_job_keeps_waiting_while_another_executor_still_owes_work() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import timer from std.time
 ch: Channel[int] = Channel[int](1)
 fn consumer():
     print(\"got {ch.recv()}\")
@@ -522,7 +530,7 @@ print(\"end\")
 #[test]
 fn executor_bounded_pipeline_is_not_mistaken_for_a_deadlock() {
     let src = "
-import std.concurrency
+import Executor from std.concurrency
 a: Channel[int] = Channel[int](1)
 fn prod():
     for i in 0..50:
@@ -581,8 +589,8 @@ ex.shutdown()
 #[test]
 fn executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 ch := Channel[int]()
 fn feeder():
     time.sleep_ms(50)
@@ -635,8 +643,8 @@ print(\"after nursery\")
 #[test]
 fn an_executor_jobs_send_wakes_a_task_parked_on_another_scheds_channel() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 ch := Channel[int]()
 fn feeder():
     time.sleep_ms(50)
@@ -694,8 +702,8 @@ parallel:
 #[test]
 fn a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 ch := Channel[int]()
 fn bail():
     time.sleep_ms(50)
@@ -756,7 +764,7 @@ parallel:
 #[test]
 fn a_stuck_executor_job_beside_a_stuck_nursery_faults_instead_of_hanging() {
     let src = "
-import std.concurrency
+import Executor from std.concurrency
 ch := Channel[int]()
 other := Channel[int]()
 fn blocked():
@@ -825,7 +833,7 @@ fn a_cap1_pipeline_across_a_job_and_a_nursery_is_not_mistaken_for_a_deadlock() {
     let cases = [
         // The JOB produces, the nursery task consumes.
         "
-import std.concurrency
+import Executor from std.concurrency
 data := Channel[int](1)
 done := Channel[int](1)
 fn producer():
@@ -847,7 +855,7 @@ ex.shutdown()
         // …and the reverse: the nursery task produces, the job consumes and answers, so BOTH
         // directions of the cap-1 handshake cross the job/nursery boundary.
         "
-import std.concurrency
+import Executor from std.concurrency
 req := Channel[int](1)
 resp := Channel[int](1)
 fn server():
@@ -907,7 +915,7 @@ ex.shutdown()
 #[test]
 fn two_stuck_nurseries_with_no_polling_party_still_fault() {
     let src = "
-import std.concurrency
+import Executor from std.concurrency
 ch := Channel[int]()
 ch2 := Channel[int]()
 fn innerjob():
@@ -962,8 +970,8 @@ print(\"after nursery\")
 #[test]
 fn a_nursery_judge_re_asks_the_verdict_when_a_party_registers_later() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 ch := Channel[int]()
 fn innerjob():
     print(ch.recv())
@@ -1049,7 +1057,7 @@ print(\"done\")
 #[test]
 fn a_cycle_of_executor_joins_faults_instead_of_hanging() {
     let src = "
-import std.concurrency
+import Executor from std.concurrency
 ex := Executor()
 started := Channel[int]()
 go := Channel[int]()
@@ -1133,7 +1141,7 @@ fn a_self_shut_executor_still_has_its_slots_reduced_at_program_exit() {
 
     let out = run_capture(
         "
-import std.concurrency
+import Executor from std.concurrency
 ex := Executor()
 done := Channel[int]()
 fn closer():
@@ -1158,7 +1166,7 @@ print(\"end\")
     // The same hand-off carries FAULTS: a swallowed one exits 0 on a program that failed.
     let (_out, res) = run_program(
         "
-import std.concurrency
+import Executor from std.concurrency
 ex := Executor()
 done := Channel[int]()
 fn closer():
@@ -1199,9 +1207,9 @@ done.recv()
 #[test]
 fn shutdown_now_cancels_a_job_parked_in_a_nested_executor_join() {
     let src = "
-import std.concurrency
+import Executor, Shared from std.concurrency
 import std.process
-import std.time
+import std.time\nimport timer from std.time
 run_started: Channel[int] = Channel[int](1)
 joining: Channel[int] = Channel[int](1)
 sleep_over: Shared[bool] = Shared[bool](false)
@@ -1306,7 +1314,7 @@ print(\"main done\")
 #[test]
 fn eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout() {
     let src = "
-import std.concurrency
+import Executor from std.concurrency
 a: Channel[int] = Channel[int](1)
 fn prod():
     for i in 0..200:
@@ -1409,8 +1417,8 @@ ex.shutdown()
 #[test]
 fn eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 ch: Channel[int] = Channel[int](1)
 ready: Channel[bool] = Channel[bool](1)
 fn blocker():
@@ -1494,7 +1502,7 @@ fn an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout() {
     // finds its value already queued, and the block branch is never reached — measured: the vacuous
     // version passed even with the wait stubbed back to a blind sleep.
     let src = "
-import std.concurrency
+import Executor from std.concurrency
 data: Channel[int] = Channel[int](1)
 other: Channel[int] = Channel[int](1)
 gate: Channel[bool] = Channel[bool](1)
@@ -1569,8 +1577,8 @@ print(s)
 #[test]
 fn an_eager_wait_with_a_closed_arm_still_takes_the_live_arm() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 done: Channel[bool] = Channel[bool](1)
 work: Channel[int] = Channel[int](1)
 out: Channel[int] = Channel[int](1)
@@ -1630,8 +1638,8 @@ print(out.recv())
 #[test]
 fn a_blocked_eager_send_still_completes_when_a_recv_frees_its_slot_before_the_close() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 ch: Channel[int] = Channel[int](1)
 fn blocker():
     ch.send(1)
@@ -1704,8 +1712,8 @@ ex.shutdown()
 #[test]
 fn an_eager_wait_timer_arm_loses_to_a_sibling_value() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 work: Channel[int] = Channel[int](1)
 gate: Channel[bool] = Channel[bool](1)
 fn prod():
@@ -1754,8 +1762,8 @@ ex.shutdown()
 #[test]
 fn a_top_level_wait_timer_arm_loses_to_an_eager_job() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 work: Channel[int] = Channel[int](1)
 gate: Channel[bool] = Channel[bool](1)
 fn prod():
@@ -1807,8 +1815,8 @@ ex.shutdown()
 #[test]
 fn a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 work: Channel[int] = Channel[int](1)
 gate: Channel[bool] = Channel[bool](1)
 t: Channel[bool] = time.timer(3000)
@@ -1865,8 +1873,8 @@ ex.shutdown()
 #[test]
 fn a_timer_armed_eager_wait_is_cancellable_by_shutdown_now() {
     let src = "
-import std.concurrency
-import std.time
+import Executor from std.concurrency
+import std.time\nimport timer from std.time
 work: Channel[int] = Channel[int](1)
 ready: Channel[int] = Channel[int](1)
 fn cons():
@@ -1921,7 +1929,7 @@ print(\"main done\")
 #[test]
 fn a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault() {
     let src = "
-import std.time
+import std.time\nimport timer from std.time
 gate: Channel[int] = Channel[int](1)
 fn napper():
     defer print(\"cleanup ran\")
@@ -1990,6 +1998,7 @@ main()
 #[test]
 fn executor_created_inside_a_task_is_joined_at_exit_both_engines() {
     let src = r#"
+import Executor from std.concurrency
 parallel:
     spawn:
         inner := Executor()
@@ -2032,6 +2041,7 @@ print("main done")
 #[test]
 fn executor_created_by_a_joined_job_is_also_joined_both_engines() {
     let src = r#"
+import Executor from std.concurrency
 fn makes_another():
     inner := Executor()
     inner.submit(fn(): print("job created BY a job"))
@@ -2085,7 +2095,9 @@ print("main done")
 #[test]
 fn nested_executor_job_is_cancelled_by_an_outer_shutdown_now_mn() {
     let src = r#"
+import Executor from std.concurrency
 import std.time
+import timer from std.time
 started: Channel[int] = Channel[int](1)
 fn nap():
     time.sleep_ms(8000)
@@ -2142,7 +2154,9 @@ print("done")
 #[test]
 fn a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn() {
     let src = r#"
+import Executor from std.concurrency
 import std.time
+import timer from std.time
 started: Channel[int] = Channel[int](1)
 fn work():
     time.sleep_ms(300)
@@ -2209,6 +2223,7 @@ fn submit_to_an_executor_whose_creating_job_was_cancelled_faults_mn() {
     let src = r#"
 import Executor from std.concurrency
 import std.time
+import timer from std.time
 fn work():
     time.sleep_ms(10)
     print("inner job ran")
@@ -2250,6 +2265,7 @@ fn submit_to_a_nested_executor_after_a_graceful_outer_shutdown_runs_mn() {
     let src = r#"
 import Executor from std.concurrency
 import std.time
+import timer from std.time
 fn work():
     time.sleep_ms(10)
     print("inner job ran")
@@ -2283,7 +2299,9 @@ print("main done")
 #[test]
 fn submit_to_mains_own_executor_after_an_unrelated_shutdown_now_runs_mn() {
     let src = r#"
+import Executor from std.concurrency
 import std.time
+import timer from std.time
 fn work():
     time.sleep_ms(10)
     print("mine ran")

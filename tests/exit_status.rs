@@ -525,7 +525,8 @@ fn eager_job_os_exit_kills_a_cpu_spinning_nursery_task() {
     let entry = t.write(
         "main.chz",
         &format!(
-            r#"{BAIL}
+            r#"import Executor from std.concurrency
+{BAIL}
 fn spinner():
     i := 0
     total := 0
@@ -555,7 +556,8 @@ fn eager_job_os_exit_kills_a_recv_parked_nursery_task() {
     let entry = t.write(
         "main.chz",
         &format!(
-            r#"{BAIL}
+            r#"import Executor from std.concurrency
+{BAIL}
 ch := Channel[int]()
 
 fn parked():
@@ -592,7 +594,8 @@ fn eager_job_os_exit_kills_a_sleeping_nursery_task() {
     let entry = t.write(
         "main.chz",
         &format!(
-            r#"{BAIL}
+            r#"import Executor from std.concurrency
+{BAIL}
 fn slowchild():
     time.sleep_ms(3000)
     print("slow child finished")
@@ -618,7 +621,8 @@ fn eager_job_os_exit_kills_a_cpu_spinning_main() {
     let entry = t.write(
         "main.chz",
         &format!(
-            r#"{BAIL}
+            r#"import Executor from std.concurrency
+{BAIL}
 ex := Executor()
 ex.submit(bail)
 i := 0
@@ -645,7 +649,8 @@ fn eager_job_os_exit_kills_a_cpu_spinning_sibling_job() {
     let entry = t.write(
         "main.chz",
         &format!(
-            r#"{BAIL}
+            r#"import Executor from std.concurrency
+{BAIL}
 fn spinjob():
     i := 0
     total := 0
@@ -675,7 +680,8 @@ fn eager_job_os_exit_kills_an_in_callback_sleep() {
     let entry = t.write(
         "main.chz",
         &format!(
-            r#"{BAIL}
+            r#"import Executor from std.concurrency
+{BAIL}
 fn slow(x: int) -> int:
     time.sleep_ms(3000)
     return x
@@ -714,7 +720,8 @@ fn eager_job_os_exit_kills_a_main_inside_a_native_hof() {
     let entry = t.write(
         "main.chz",
         &format!(
-            r#"{BAIL}
+            r#"import Executor from std.concurrency
+{BAIL}
 fn double(x: int) -> int:
     return x * 2 + 1
 
@@ -801,7 +808,8 @@ fn an_exit_runs_no_defer_of_a_cancelled_sibling() {
     let entry = t.write(
         "main.chz",
         &format!(
-            r#"{BAIL}
+            r#"import Executor from std.concurrency
+{BAIL}
 fn double(x: int) -> int:
     return x * 2
 
@@ -937,6 +945,7 @@ fn the_defer_suppression_does_not_rescue_a_spinning_flagless_party() {
         (
             "spinning main",
             r#"
+import Executor from std.concurrency
 ex := Executor()
 ex.submit(bail)
 i := 0
@@ -950,6 +959,7 @@ print("main finished {total}")
         (
             "spinning eager job",
             r#"
+import Executor from std.concurrency
 fn spinjob():
     i := 0
     total := 0

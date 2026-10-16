@@ -836,7 +836,7 @@ fn d4_rule3_declines() {
 #[test]
 fn a_module_global_written_in_a_task_warns_where_a_received_closure_reads_the_receivers_copy() {
     rejects(
-        "import std.concurrency\ng: List[int] = [1]\nfn main():\n    c := Channel[fn() -> str](1)\n    parallel:\n        spawn:\n            g.push(2)\n            c.send(fn() -> str: \"{g}\")\n    f := c.recv()\n    print(\"{f()} {g}\")\nmain()\n",
+        "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\ng: List[int] = [1]\nfn main():\n    c := Channel[fn() -> str](1)\n    parallel:\n        spawn:\n            g.push(2)\n            c.send(fn() -> str: \"{g}\")\n    f := c.recv()\n    print(\"{f()} {g}\")\nmain()\n",
         "'g' is this task's copy",
     );
 }

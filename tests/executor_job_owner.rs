@@ -8,6 +8,7 @@ use std::process::Command;
 const PROG: &str = r#"import std.os
 import std.time
 import std.concurrency
+import Executor from std.concurrency
 import std.concurrency.task
 fn job(i: int) -> int:
     if i == 1:
@@ -183,6 +184,7 @@ const HEADER: &str = r#"import std.os
 import std.io
 import std.time
 import std.concurrency
+import Executor from std.concurrency
 import std.concurrency.task
 gate := Channel[int](0)
 g := concurrency.Shared[int](0)
@@ -556,6 +558,7 @@ fn job_owner_grid() {
 
 const DHELD: &str = r#"import std.time
 import std.concurrency
+import Executor from std.concurrency
 import std.concurrency.task
 fn blocker() -> int:
     time.sleep_ms(300)
@@ -582,6 +585,7 @@ main()
 
 const DRUN: &str = r#"import std.time
 import std.concurrency
+import Executor from std.concurrency
 import std.concurrency.task
 fn target() -> int:
     time.sleep_ms(300)
@@ -620,6 +624,7 @@ fn defer_reader_settles_after_a_job_fault() {
 
 /// `~/.cache/hunt6/chan/p/td2.chz` cut to 50 rounds (CHAN3).
 const TD2: &str = r#"import std.concurrency
+import Executor from std.concurrency
 import std.concurrency.task
 fn main():
     flips := concurrency.AtomicInt(0)

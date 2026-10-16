@@ -225,7 +225,7 @@ fn sp() -> Span {
 /// the worker's `home` is a reconstruction of the parent module's globals, not a fresh-empty one.
 #[test]
 fn worker_reads_module_global() {
-    let mut vm = ran_standalone("answer := 42\nfn get_answer() -> int:\n    return answer\n");
+    let mut vm = ran_program("answer := 42\nfn get_answer() -> int:\n    return answer\n");
     let task = PendingCall::Call {
         callee: entry_global(&vm, "get_answer"),
         args: Vec::new(),
@@ -242,7 +242,7 @@ fn worker_reads_last_of_many_globals() {
     // M19 Phase 2b: three globals defined before the fn, and the task reads the LAST one. A
     // slot scramble between the parent's compiled slots and the worker's faulted-in slots would
     // surface here as the wrong global's value (e.g. reading `a` or `b` instead of `c`).
-    let mut vm = ran_standalone("a := 1\nb := 2\nc := 99\nfn get_c() -> int:\n    return c\n");
+    let mut vm = ran_program("a := 1\nb := 2\nc := 99\nfn get_c() -> int:\n    return c\n");
     let task = PendingCall::Call {
         callee: entry_global(&vm, "get_c"),
         args: Vec::new(),
@@ -304,7 +304,7 @@ fn globals_compile_to_stable_slots() {
 /// reconstructed `home` globals (the sibling `Func` is re-allocated over the worker's home).
 #[test]
 fn worker_calls_sibling_free_fn() {
-    let mut vm = ran_standalone(
+    let mut vm = ran_program(
         "fn helper() -> int:\n    return 7\nfn task() -> int:\n    return helper() + 1\n",
     );
     let task = PendingCall::Call {
@@ -392,7 +392,7 @@ fn worker_method_on_struct() {
 /// smuggled `GcRef` would read a wrong/out-of-range worker slot. `bump(20) == 21`.
 #[test]
 fn worker_calls_through_global_fn_container() {
-    let mut vm = ran_standalone(
+    let mut vm = ran_program(
         "fn bump(n: int) -> int:\n    return n + 1\nhandlers := [bump]\nfn task() -> int:\n    return handlers[0](20)\n",
     );
     let task = PendingCall::Call {
@@ -411,7 +411,7 @@ fn worker_calls_through_global_fn_container() {
 /// must still round-trip — the reconstructed globals stay rooted via `module_objs`.
 #[test]
 fn worker_reconstruction_survives_gc_stress() {
-    let mut vm = ran_standalone(
+    let mut vm = ran_program(
         "data := [1, 2, 3]\nfn total() -> int:\n    s := 0\n    for x in data:\n        s += x\n    return s\n",
     );
     vm.gc_stress = true;

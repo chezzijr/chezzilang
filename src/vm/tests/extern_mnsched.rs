@@ -375,7 +375,7 @@ fn extern_qualified_width_alias_mixed_chain_collision_runs() {
 /// infinite hang) and stands as the regression guard if preemption ever regresses.
 #[test]
 fn d3_preemption_prevents_cpu_hog_starvation() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 fn hog(s: Shared[int], k: int):
     while s.get() < k:
         continue
@@ -1822,7 +1822,7 @@ fn mnsched_cancel_drain_requeues_parked() {
 /// producers run and wake them, and the sum completes.
 #[test]
 fn mn_many_blocked_consumers_complete_without_starving() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 fn producer(ch: Channel[int], i: int):
     ch.send(i)
 fn consumer(ch: Channel[int], acc: Shared[int]):
@@ -1847,7 +1847,7 @@ main()
 /// sends and resumes via the rewound-ip `recv` replay.
 #[test]
 fn mn_thousand_fiber_pipeline_completes() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 fn producer(ch: Channel[int], i: int):
     ch.send(i)
 fn consumer(ch: Channel[int], acc: Shared[int]):

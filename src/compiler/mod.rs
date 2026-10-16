@@ -169,6 +169,26 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
 }
 
 /// Compile a single in-memory module (test helper — no imports, treated as the entry).
+/// Compile a program given as source text through the module graph, as `chezzi run` does: its
+/// imports resolve against the checkout's `std` (test helper).
+#[cfg(any(test, feature = "test-api"))]
+pub fn compile_source(src: &str) -> Result<Program, CompileError> {
+    // The entry's directory does not exist and is the root, so only `std` imports resolve: no file
+    // another run left behind, and no `chezzi.toml` above it, can reach the program.
+    let root = std::env::temp_dir().join(format!("chezzi-test-entry-{}", std::process::id()));
+    let entry = root.join("main.chz");
+    let graph = crate::resolver::build_graph_with_entry_source_and_root(
+        &entry,
+        Some(src.to_string()),
+        Some(root),
+    )
+    .map_err(|e| CompileError {
+        message: e.message,
+        span: e.span,
+    })?;
+    compile_graph(&graph)
+}
+
 #[cfg(any(test, feature = "test-api"))]
 pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileError> {
     // Mirror the file-backed path: normalize named/default call arguments before compiling.
@@ -680,10 +700,14 @@ impl Compiler {
                     self.module_types[idx].insert(sname.to_string());
                     self.program.type_names.insert(sname.to_string());
                 }
-                // TICKET-218 — a `native type` export (std.ffi's `ptr`/`int8`..) carries no runtime
-                // value; register its name so `Vm::bind_import` skips it like any known type name.
+                // A native module's types (`native type ptr`, `native struct Shared`, `protocol
+                // StructuralEq`) carry no runtime value; register each name so `Vm::bind_import` skips
+                // it like any known type name.
                 for s in &lm.ast.stmts {
-                    if let StmtKind::NativeType { name, .. } = &s.kind {
+                    if let StmtKind::NativeType { name, .. }
+                    | StmtKind::NativeStruct { name, .. }
+                    | StmtKind::Protocol { name, .. } = &s.kind
+                    {
                         self.program.type_names.insert(name.clone());
                     }
                 }

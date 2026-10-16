@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const SRC: &str = "import std.concurrency
+const SRC: &str = "import AtomicInt, RwShared from std.concurrency
 fn one(c: AtomicInt):
     c.add(1)
 fn body(x: int) -> int:

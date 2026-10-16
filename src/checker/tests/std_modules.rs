@@ -1214,11 +1214,9 @@ fn import_plus_same_name_struct_decl_rejected() {
             "expected `{name}` already-defined error, got: {errs:?}"
         );
     }
-    // whole-module form
-    entry_rejects(
-        "import std.regex\nstruct Match:\n    x: int\nfn main():\n    print(1)\nmain()\n",
-        "already defined",
-    );
+    // A whole-module import binds no bare name, so a local `struct Match` is its own type beside
+    // `regex.Match` (`tests/chz/spec/std_module_names_test.chz` runs both).
+    entry_ok("import std.regex\nstruct Match:\n    x: int\nfn main():\n    print(1)\nmain()\n");
 }
 
 // BOUNDARY: a similar-but-distinct user struct name stays legal even with the import present —
@@ -1288,19 +1286,15 @@ fn regex_harvest_immune_to_sibling_generic_match() {
 
 // ===== Phase 4e — std.encoding / std.crypto / std.uuid / std.time file-backed native modules =====
 
-/// PROVENANCE (TICKET-218) — no native module has a Rust-side sig: std.time's `timer` license comes
-/// from the harvest's `timer` branch, and std.ffi's type exports from `std/ffi.chz`'s `native type`
-/// decls.
+/// PROVENANCE (TICKET-218) — no native module has a Rust-side sig: std.time's `timer` is an
+/// ordinary member harvested from its `native fn` decl, and std.ffi's type exports come from
+/// `std/ffi.chz`'s `native type` decls.
 #[test]
 fn enc_crypto_uuid_time_sig_from_file_not_native_module_sig() {
     let time = native_module_sig_via_graph("time");
     assert!(
-        time.types.contains("timer"),
-        "std.time must keep `timer` in its type-license set (opcode-backed builtin)"
-    );
-    assert!(
-        time.certain_fn("timer").is_none(),
-        "timer is not a module member"
+        time.certain_fn("timer").is_some() && !time.types.contains("timer"),
+        "timer is an ordinary std.time function"
     );
     let ffi = native_module_sig_via_graph("ffi");
     for tn in crate::native::ffi::declared_types()
@@ -1656,11 +1650,12 @@ fn time_fn_sigs_exact() {
         ("monotonic", vec![], Ty::Float),
         ("sleep_ms", vec![Ty::Int], Ty::Nil),
         ("format", vec![Ty::Int], Ty::Str),
+        ("timer", vec![Ty::Int], Ty::channel(Ty::Bool)),
     ];
     assert_eq!(
         sig.fns().count(),
         expected.len(),
-        "std.time must export exactly the 5 native fns (timer is NOT a native fn)"
+        "std.time must export exactly its 6 native fns"
     );
     for (name, params, ret) in &expected {
         let fs = sig
@@ -1669,23 +1664,6 @@ fn time_fn_sigs_exact() {
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
     }
-    // `timer` stays licensed via sig.types (opcode-backed, NOT a native fn value).
-    assert!(
-        sig.types.contains("timer"),
-        "std.time module sig must still license `timer`"
-    );
-    assert!(
-        sig.member("timer").is_none(),
-        "`timer` must NOT be a native fn (it has no runtime member value)"
-    );
-}
-
-/// The `timer` opcode-license survives the arm reduction — both the whole-module `import std.time` and
-/// the selective `import timer from std.time` forms still license the bare `timer(ms)` call.
-#[test]
-fn import_timer_from_std_time_still_licensed_both_forms() {
-    entry_ok("import timer from std.time\nfn main():\n    print(timer(20).recv())\nmain()\n");
-    entry_ok("import timer from std.time\nfn main():\n    print(timer(20).recv())\nmain()\n");
 }
 
 /// A `native fn` decl in a USER (non-stdlib) .chz file is still a clear error — the file-backed std

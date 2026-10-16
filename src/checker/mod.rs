@@ -20,7 +20,7 @@ use crate::resolver::ModuleGraph;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-pub(crate) use builtin_type::{BuiltinType, is_builtin_type_name};
+pub(crate) use builtin_type::BuiltinType;
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,
@@ -329,37 +329,21 @@ fn describe_extern_type(t: &Type) -> String {
     }
 }
 
-/// Every builtin callable name: the free functions, `print`, `panic` and the runtime constructors.
-/// Each is called (none is a pure type marker), so each must have a [`builtin_sig`] entry for
-/// editor hover (`builtin_callables_all_have_builtin_sig`). None of them is reserved: only keywords
-/// are, and a user declaration of one shadows it in its module.
+/// Every builtin callable name: the `PRELUDE` rows and the builtin types with an opcode
+/// constructor (`Channel`, `Shared`, …). Derived from those two owners (test helper).
 #[cfg(test)]
-const BUILTIN_CALLABLES: &[&str] = &[
-    // builtin functions
-    "int",
-    "float",
-    "bool",
-    "str",
-    "ord",
-    "chr",
-    "Set",
-    "List",
-    "Map",
-    "bytes",
-    "bytearray",
-    // the special print op
-    "print",
-    // the diverging panic(msg) op (raises a recoverable RuntimeError; bottom-typed)
-    "panic",
-    // runtime constructors the backends special-case before a plain call
-    "Channel",
-    "Shared",
-    "RwShared",
-    "Atomic",
-    "AtomicInt",
-    "timer",
-    "Executor",
-];
+fn builtin_callables() -> Vec<&'static str> {
+    PRELUDE
+        .iter()
+        .map(|p| p.name)
+        .chain(
+            BuiltinType::ALL
+                .into_iter()
+                .filter(|b| b.has_opcode_ctor())
+                .map(BuiltinType::name),
+        )
+        .collect()
+}
 
 /// The kind of intrinsic a universe builtin lowers to on a DIRECT call. `Print` → the dedicated
 /// `Op::CallPrint`/`Op::CallPrintSep` opcodes (variadic + `sep=`/`end=`); `Builtin` →
@@ -813,6 +797,10 @@ struct ModuleSig {
     /// from the defining module's `GlobalBinding`. Every importer path reads this and nothing else.
     members: HashMap<String, MemberSig>,
     types: std::collections::HashSet<String>,
+    /// The builtin types this module owns (`builtin_type::module_builtins`: `std.ffi`'s `ptr` and
+    /// widths, `std.concurrency`'s `Shared`, …). A qualified `m.X` names a builtin type only when `X`
+    /// is here; another module's own `struct ptr` is that module's struct.
+    builtins: std::collections::HashSet<String>,
     /// Resolved struct definitions this module declares (module-scoped types — D? feature). An
     /// importer injects these into its own per-module `structs`/`struct_names` so a `from`-imported
     /// or qualified-access struct resolves with the right field layout.
@@ -1397,54 +1385,12 @@ struct Checker {
     /// the qualified form (`st.COUNT = 5`). Mutating THROUGH the binding (`LST.push(7)`) is untouched:
     /// a container is the same heap object. Per-module: cleared in `begin_module`.
     imported_values: HashMap<String, String>,
-    /// Fixed-width C-ABI integer TYPE names (`int8`..`uint64`) imported into the *current* module from
-    /// `std.ffi` (`import int32 from std.ffi`). These are NOT callable values — they only gate
-    /// `resolve_type`, which maps a width name to `Ty::Int` iff it's in this set (else an unknown-type
-    /// error). Per-module: cleared in `begin_module` so module B can't use a name module A imported.
-    imported_ffi_types: std::collections::HashSet<String>,
-    /// The four runtime concurrency ctor/TYPE names (`Shared`/`RwShared`/`Atomic`/`Executor`) imported
-    /// into the *current* module from `std.concurrency` (whole-module `import std.concurrency` licenses
-    /// all four; selective `import Shared from std.concurrency` licenses just the named ones). Like
-    /// `imported_ffi_types`, these are NOT callable values — they only gate `resolve_type` /
-    /// `infer_named_call`, which accept the bare name iff it's in this set (else an unknown-type error
-    /// with the `import std.concurrency` hint). Per-module: cleared in `begin_module`. std/* modules
-    /// are EXEMPT (they may use the four bare) via `current_module_is_stdlib`.
-    imported_concurrency: std::collections::HashSet<String>,
-    /// The opcode-backed `timer` builtin licensed into the *current* module from `std.time` (whole-
-    /// module `import std.time` OR selective `import timer from std.time`). Like `imported_concurrency`,
-    /// this is NOT a callable value — it only gates `infer_named_call`, which accepts the bare
-    /// `timer(ms)` call iff `"timer"` is in this set (else an unknown-function error with the
-    /// `import std.time` hint). Per-module: cleared in `begin_module`. std/* modules are EXEMPT (they
-    /// may call `timer` bare) via `current_module_is_stdlib`.
-    imported_time: std::collections::HashSet<String>,
-    /// The std.net TCP handle TYPE names (`Socket`/`Listener`) licensed into the *current* module from
-    /// `std.net` (whole-module `import std.net` licenses both; selective `import Socket from std.net`
-    /// licenses just the named ones). Like `imported_concurrency`, these are NOT callable values — they
-    /// only gate `resolve_type`, which accepts the bare `Socket`/`Listener` annotation iff it's in this
-    /// set (else an unknown-type error with the `import std.net` hint; the ctors are `connect`/`listen`,
-    /// already real native fns). Per-module: cleared in `begin_module`. std/* modules are EXEMPT (they
-    /// may use the two bare) via `current_module_is_stdlib`.
-    imported_net: std::collections::HashSet<String>,
-    /// R2 — the std.io `Writer` handle TYPE name licensed into the *current* module from `std.io`
-    /// (whole-module `import std.io` or selective `import Writer from std.io`). Like `imported_net`, not
-    /// a callable value — it only gates `resolve_type`, which accepts the bare `Writer` annotation iff
-    /// it's in this set (else an unknown-type error with the `import std.io` hint; values come from
-    /// `create`/`append`/`stdout`/`stderr`/`buffered`, already real native fns). Per-module: cleared in
-    /// `begin_module`. std/* modules are EXEMPT (may use `Writer` bare) via `current_module_is_stdlib`.
-    imported_io: std::collections::HashSet<String>, // R2/R2b — licenses BOTH `Writer` and `Reader`
-    /// The bare type names that an `import` licensed into the *current* module as a
-    /// `StructOrigin::Builtin` struct layout (the std struct-modeled natives — `Ref`/`Match`/
-    /// `Response`/`ProcResult` and every other import-gated std struct like `Token`/`Heap`/`Deque`).
-    /// Populated at the two struct-import insert sites (whole-module `import std.regex` and selective
-    /// `import Match from std.regex`), keyed on `info.origin == StructOrigin::Builtin`. A same-named
-    /// user `struct X` decl IN A MODULE THAT IMPORTED `X` is then rejected as `reserved (builtin)` —
-    /// closing the soundness hole where the user layout overwrote the Builtin seed yet the runtime
-    /// still returned/constructed the native shape (a check-clean program that trapped at runtime).
-    /// NOT reusable from `self.structs` membership: `Match`/`Response`/`ProcResult` are seeded with
-    /// Builtin origin GLOBALLY even without any import, and THAT seeded-but-not-imported state is the
-    /// legal bare-decl case — only the import EVENT licenses the name, so it's tracked separately.
+    /// The module-owned builtin types (`builtin_type::builtin_owner`: `Shared`, `Socket`, `ptr`,
+    /// `int32`, …) a bare name denotes in the *current* module: bind name → the member's own name.
+    /// An import fills it like any other import (`import Shared as S from std.concurrency` binds
+    /// `S`), and a std module binds the builtins it owns. A name outside it is not a builtin here.
     /// Per-module: cleared in `begin_module`.
-    imported_builtin_types: std::collections::HashSet<String>,
+    builtin_binds: HashMap<String, String>,
     /// Names bound by the import no one wrote (`Range`, from `Span::NOWHERE`). A same-module `fn`
     /// of such a name would sit beside the struct constructor. Per-module: cleared in
     /// `begin_module`.
@@ -1529,7 +1475,7 @@ struct Checker {
     /// for field access; only the METHOD table is re-seeded (bare, into `self.structs["Socket"]` /
     /// `["Listener"]`) by [`seed_stdlib_structs`] so `socket.read(...)` / `listener.accept(...)` resolve
     /// via the normal method path in every module. Bare-name annotation stays import-gated by
-    /// `imported_net` + `resolve_type`'s reserved arm — the seed adds NO bare licensing. `None` until
+    /// `builtin_binds` + `resolve_type`'s builtin arm — the seed adds NO bare licensing. `None` until
     /// std.net is harvested (and on the single-module `check` path, which has no graph).
     net_socket_seed: Option<StructInfo>,
     net_listener_seed: Option<StructInfo>,
@@ -1538,7 +1484,7 @@ struct Checker {
     /// `net_socket_seed`, `Writer` resolves to the RESERVED `Ty::Writer` (opaque VM handle) — only the
     /// METHOD table is re-seeded (bare, into `self.structs["Writer"]`) by `seed_stdlib_structs` so
     /// `w.write(...)` / `w.close(...)` resolve via the normal method path in every module. Bare-name
-    /// annotation stays import-gated by `imported_io` + `resolve_type`'s reserved arm. `None` until
+    /// annotation is bound by an import (`builtin_binds`). `None` until
     /// std.io is harvested.
     io_writer_seed: Option<StructInfo>,
     /// R2b — the harvested `StructInfo` (method table) for std.io's reserved `Reader` handle — a
@@ -1555,17 +1501,8 @@ struct Checker {
     /// (bare, into `self.structs[name]`) by [`seed_stdlib_structs`] so `s.set(...)` / `a.cas(...)`
     /// resolve via the normal method path in every module, with each generic method sig's `Ty::Param`
     /// substituted with the value's element type at the call site. Bare-name annotation stays
-    /// import-gated by `imported_concurrency` + `resolve_type`'s reserved arm. Empty until harvested.
+    /// import-gated by `builtin_binds` + `resolve_type`'s builtin arm. Empty until harvested.
     concurrency_seeds: HashMap<String, StructInfo>,
-    /// The harvested `FnSig` for `std.time`'s `timer(ms) -> Channel[bool]`, captured from the
-    /// file-backed `std/time.chz` harvest. `timer` is a BARE-CALLABLE opcode builtin (lowers to
-    /// `Op::NewTimer`, carries no runtime value), so — unlike now/monotonic/sleep_ms/format — its sig is
-    /// routed HERE by `harvest_native_module` rather than into `sig.members` (which the From-import arm
-    /// would bind as a normal callable, breaking bare-callability). The bare `timer(...)` expr arm reads
-    /// its arg/return types from this field; the import-license stays in `sig.types`. `None` until
-    /// std.time is harvested (and on the lone single-module `check` path with no graph — the arm falls
-    /// back to the built-in `[int] -> Channel[bool]` shape).
-    time_timer_sig: Option<FnSig>,
     /// Phase 5a-containers — the harvested `StructInfo` (method table) for each of the three RESERVED
     /// UNIVERSE container types (`List`/`Map`/`Set`), keyed by bare name, captured from the always-linked
     /// `std/prelude.chz`'s `native struct` decls the first time the prelude module is checked in the graph

@@ -5,7 +5,8 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const SRC: &str = "import std.concurrency
+const SRC: &str =
+    "import std.concurrency\nimport Atomic, AtomicInt, RwShared, Shared from std.concurrency
 fn inc(n: int) -> int:
     return n + 1
 fn main():
@@ -118,7 +119,8 @@ const GRID_CEILING: Duration = if cfg!(debug_assertions) {
 fn grid_src(init: &str, body: &str, fin: &str, tasks: usize) -> String {
     let per = 12000 / tasks;
     [
-        "import std.concurrency".to_string(),
+        "import std.concurrency\nimport Atomic, AtomicInt, RwShared, Shared from std.concurrency"
+            .to_string(),
         "import ConcurrentMap from std.concurrency.collection".to_string(),
         "fn inc(n: int) -> int:".to_string(),
         "    return n + 1".to_string(),
@@ -167,7 +169,8 @@ fn contended_guard_ops_grid_is_fast_at_every_worker_count() {
 /// Seeded mode forces a `slice_end_in_place` inside about 25% of the update closures; a waiter whose
 /// first guard wait held its width permit then sat out the full 5 ms stage 1. Base debug at T=1:
 /// 9.24-9.76 s (0.04 s unseeded).
-const TWO_BOX_SRC: &str = "import std.concurrency
+const TWO_BOX_SRC: &str =
+    "import std.concurrency\nimport Atomic, AtomicInt, RwShared, Shared from std.concurrency
 a := Shared[int](0)
 b := Shared[int](0)
 parallel:

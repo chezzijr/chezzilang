@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 #[path = "support/hang_deadline.rs"]
 mod hang_deadline;
 
-const NET_PRELUDE: &str = "import std.time\nimport std.net\nimport std.concurrency\nfn lis() -> net.Listener:\n    match net.listen(\"127.0.0.1:0\"):\n        ?l: return l\n        !e: panic(\"{e}\")\n";
+const NET_PRELUDE: &str = "import std.time\nimport std.net\nimport std.concurrency\nimport Executor, Shared from std.concurrency\nfn lis() -> net.Listener:\n    match net.listen(\"127.0.0.1:0\"):\n        ?l: return l\n        !e: panic(\"{e}\")\n";
 
 #[test]
 fn shutdown_now_reaches_a_job_nursery_fiber_parked_in_accept() {
@@ -94,7 +94,7 @@ enum Owner {
 const GRID_PRELUDE: &str = "import std.time
 import std.net
 import std.os
-import std.concurrency
+import std.concurrency\nimport Executor, Shared from std.concurrency
 fn must[T](r: T!) -> T:
     match r:
         ?v: return v
@@ -372,7 +372,7 @@ fn cancel_grid_every_source_park_owner_and_thread_count() {
 /// The prelude of every ranking cell: `bad` faults at once, `slowbad` 300 ms later.
 const RANK_PRELUDE: &str = "import std.time
 import std.os
-import std.concurrency
+import std.concurrency\nimport Executor, Shared from std.concurrency
 fn bad():
     xs := [1]
     print(xs[3])

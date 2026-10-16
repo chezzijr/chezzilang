@@ -5,7 +5,6 @@ use super::expr::NativeHandleMethod;
 use super::expr::RWSHARED_VIEWS;
 use super::expr::RWSHARED_WALKS;
 use super::expr::callable_slots;
-use super::expr::removed_method_note;
 use super::*;
 
 impl Checker {
@@ -634,12 +633,7 @@ impl Checker {
                 }
                 self.infer_all(args);
                 let names = self.method_names("str");
-                // A removed method names its replacement (TICKET-253: one `reversed` name for every
-                // container that reverses into a new value).
-                let message = match removed_method_note("str", method) {
-                    Some(text) => format!("type str has no method '{method}': {text}"),
-                    None => format!("type str has no method '{method}'"),
-                };
+                let message = format!("type str has no method '{method}'");
                 self.error_help(name_span, message, suggest::did_you_mean(method, &names));
                 Ty::Unknown
             }
@@ -814,10 +808,7 @@ impl Checker {
                 }
                 self.infer_all(args);
                 let names = self.method_names("Map");
-                let message = match removed_method_note("Map", method) {
-                    Some(text) => format!("type {obj_ty} has no method '{method}': {text}"),
-                    None => format!("type {obj_ty} has no method '{method}'"),
-                };
+                let message = format!("type {obj_ty} has no method '{method}'");
                 self.error_help(name_span, message, suggest::did_you_mean(method, &names));
                 Ty::Unknown
             }
@@ -834,10 +825,7 @@ impl Checker {
                 }
                 self.infer_all(args);
                 let names = self.method_names("Set");
-                let message = match removed_method_note("Set", method) {
-                    Some(text) => format!("type {obj_ty} has no method '{method}': {text}"),
-                    None => format!("type {obj_ty} has no method '{method}'"),
-                };
+                let message = format!("type {obj_ty} has no method '{method}'");
                 self.error_help(name_span, message, suggest::did_you_mean(method, &names));
                 Ty::Unknown
             }

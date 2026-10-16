@@ -6,33 +6,6 @@ use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
-/// Methods that were removed or renamed: (receiver type, method, what to write instead).
-const REMOVED_METHODS: &[(&str, &str, &str)] = &[
-    (
-        "str",
-        "reverse",
-        "`str.reverse()` is removed; write `s.reversed()`",
-    ),
-    (
-        "Map",
-        "has",
-        "`Map.has()` is renamed; write `m.contains(k)`",
-    ),
-    (
-        "Set",
-        "has",
-        "`Set.has()` is renamed; write `s.contains(v)`",
-    ),
-];
-
-/// The note a removed or renamed method's miss carries, keyed by receiver type name.
-pub(super) fn removed_method_note(recv: &str, method: &str) -> Option<&'static str> {
-    REMOVED_METHODS
-        .iter()
-        .find(|(r, m, _)| *r == recv && *m == method)
-        .map(|(_, _, text)| *text)
-}
-
 /// Result of resolving a bodied/native method on one of the reserved native handles
 /// (`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`). The shared
 /// `resolve_native_handle_method` helper folds the byte-identical lookup + hover + generic branch;
@@ -503,7 +476,7 @@ impl Checker {
             }
             Some(_) => {
                 // A type-only native name (Socket/Listener/FFI width/ptr) — no from-nothing ctor.
-                // Gated on `qualified_builtin_ty` so this fires ONLY for genuine native types; a
+                // Gated on the module's own `builtins` so this fires ONLY for genuine native types; a
                 // (non-builtin) user `sig.types` name — e.g. an exported type alias used as a bogus
                 // `mod.Alias(x)` ctor — falls through to `infer_method_call` (its original error),
                 // not this native-specific message.
@@ -513,8 +486,7 @@ impl Checker {
                         .imported_modules
                         .get(mname)
                         .and_then(|mid| self.module_sigs.get(mid))
-                        .is_some_and(|sig| sig.types.contains(name))
-                    && self.qualified_builtin_ty(name, &[]).is_some()
+                        .is_some_and(|sig| sig.builtins.contains(name))
                 {
                     self.infer_all(args);
                     self.error(

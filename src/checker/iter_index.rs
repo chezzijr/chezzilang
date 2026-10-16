@@ -841,28 +841,27 @@ impl Checker {
         // A reserved native handle (`net.Socket`) has a `struct_defs` entry for its method table but
         // no constructor; `infer_call` skips it the same way, so its own diagnostic stays single.
         if let ExprKind::Ident(mname) = &obj.kind
-            && self.qualified_builtin_ty(name, &[]).is_none()
+            && !self.module_owns_builtin(mname, name)
             && self
                 .qualified_type_head(mname, name)
                 .is_some_and(|th| th.pinned.is_none() && matches!(th.kind, TypeHeadKind::Struct))
         {
             return true;
         }
-        // `concurrency.Shared(…)` / `time.timer(…)` — a qualified NATIVE constructor, the same
-        // concept as the bare `Shared(0)` the `Ident` arm already refuses. Mirrors `infer_call`'s
-        // native-ctor arm (`expr.rs`), sharing `qualified_native_ctor` so the two can't drift: the
-        // head is the MODULE and the member a reserved ctor name living only in the owning std
-        // module's `sig.types`. Without this the compiler lowers it to a module-MEMBER load — a
+        // `concurrency.Shared(…)` — a qualified opcode constructor, the same concept as the bare
+        // `Shared(0)` the `Ident` arm already refuses. `BuiltinType::has_opcode_ctor` is the one set
+        // both this and `qualified_ctor` read: the head is the MODULE and the member a builtin type
+        // its owning std module lists in `sig.builtins`. Without this the compiler lowers it to a module-MEMBER load — a
         // reserved ctor is not a module member — so `chezzi check` passed a program only
         // `chezzi run` refused ("module 'std.concurrency' has no member 'Shared'"). Type-only
         // native names (`net.Socket`) are excluded: `infer_call` gives them their own, better
         // message ("has no constructor"), and doubling it would say less.
         if let ExprKind::Ident(mname) = &obj.kind
             && !self.head_is_value(mname)
-            && Self::qualified_native_ctor(name)
+            && BuiltinType::from_name(name).is_some_and(BuiltinType::has_opcode_ctor)
             && let Some(mid) = self.imported_modules.get(mname)
             && let Some(sig) = self.module_sigs.get(mid)
-            && sig.types.contains(name)
+            && sig.builtins.contains(name)
         {
             return true;
         }

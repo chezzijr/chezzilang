@@ -308,7 +308,6 @@ impl Vm {
                     | Op::NewRwShared
                     | Op::NewAtomic
                     | Op::NewAtomicInt
-                    | Op::NewTimer
                     | Op::NewExecutor
                     | Op::NewExecutorN => unreachable!(),
                 },
@@ -460,7 +459,6 @@ impl Vm {
                 | Op::NewRwShared
                 | Op::NewAtomic
                 | Op::NewAtomicInt
-                | Op::NewTimer
                 | Op::NewExecutor
                 | Op::NewExecutorN => unreachable!(),
             }),
@@ -583,7 +581,6 @@ impl Vm {
                     | Op::NewRwShared
                     | Op::NewAtomic
                     | Op::NewAtomicInt
-                    | Op::NewTimer
                     | Op::NewExecutor
                     | Op::NewExecutorN => unreachable!(),
                 };
@@ -723,7 +720,6 @@ impl Vm {
             | Op::NewRwShared
             | Op::NewAtomic
             | Op::NewAtomicInt
-            | Op::NewTimer
             | Op::NewExecutor
             | Op::NewExecutorN => unreachable!(),
         };

@@ -185,24 +185,6 @@ fn builtin_operator_and_bound_agree_grid() {
     );
 }
 
-/// TICKET-257 (owner decision U16) — membership has one name, `contains`. `has` on a Map or a Set is
-/// a migration error that names the replacement.
-#[test]
-fn map_and_set_has_is_a_migration_error_naming_contains() {
-    for src in [
-        "m := {1: 2}\nb := m.has(1)\n",
-        "s := {1, 2}\nb := s.has(1)\n",
-    ] {
-        let errs = check_src(src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains("write") && e.message.contains("contains(")),
-            "expected a migration error naming contains, got: {errs:?}"
-        );
-    }
-    ok("m := {1: 2}\nb := m.contains(1)\ns := {1, 2}\nc := s.contains(1)\n");
-}
-
 /// TICKET-257 — `+` and `-` on builtin types ask `Add` and `Sub`. What the grant must NOT allow:
 /// mixed element types, a set `+`, a str `-`, str + bytes.
 #[test]
@@ -260,6 +242,14 @@ fn bytes_order_and_handles_compare_through_protocols() {
 /// `BuiltinType::ALL` and `std.ffi`'s declared types, not from a hand list.
 #[test]
 fn type_name_is_never_a_value_grid() {
+    // Each module-owned builtin type is in scope through an import of its owner.
+    let owned: String = ["std.concurrency", "std.ffi", "std.io", "std.net"]
+        .iter()
+        .map(|m| {
+            let names = crate::checker::builtin_type::module_builtins(m).join(", ");
+            format!("import {names} from {m}\n")
+        })
+        .collect();
     const PRELUDE: &str = "import am
 import std.ffi
 struct P:
@@ -297,8 +287,12 @@ enum F:
         "m := {1: T}\n",
         "g := fn(e): T\n",
     ];
-    let run =
-        |body: &str| check_files(&[("am.chz", LIB), ("main.chz", &format!("{PRELUDE}{body}"))]);
+    let run = |body: &str| {
+        check_files(&[
+            ("am.chz", LIB),
+            ("main.chz", &format!("{owned}{PRELUDE}{body}")),
+        ])
+    };
     let is_type_error = |errs: &[CheckError]| {
         errs.iter()
             .any(|e| e.message.contains("is a type, not a value"))
@@ -373,36 +367,34 @@ enum F:
     // Every builtin type still resolves as an annotation: the value rule must not touch a type position.
     for b in BuiltinType::ALL {
         let n = b.name();
-        let src = match b {
+        let annotation = match b {
             BuiltinType::Int
             | BuiltinType::Float
             | BuiltinType::Bool
             | BuiltinType::Str
             | BuiltinType::Bytes
             | BuiltinType::ByteArray
-            | BuiltinType::Range => format!("fn f(x: {n}):\n    pass\n"),
-            BuiltinType::Iterator | BuiltinType::List | BuiltinType::Set | BuiltinType::Channel => {
-                format!("fn f(x: {n}[int]):\n    pass\n")
-            }
+            | BuiltinType::Range
+            | BuiltinType::Socket
+            | BuiltinType::Listener
+            | BuiltinType::Writer
+            | BuiltinType::Reader
+            | BuiltinType::Ptr
+            | BuiltinType::AtomicInt
+            | BuiltinType::Executor => format!("fn f(x: {n}):\n    pass\n"),
+            BuiltinType::Iterator
+            | BuiltinType::List
+            | BuiltinType::Set
+            | BuiltinType::Channel
+            | BuiltinType::Shared
+            | BuiltinType::RwShared
+            | BuiltinType::Atomic => format!("fn f(x: {n}[int]):\n    pass\n"),
             BuiltinType::Map => "fn f(x: Map[int, int]):\n    pass\n".to_string(),
-            BuiltinType::Socket | BuiltinType::Listener => {
-                format!("import std.net\nfn f(x: {n}):\n    pass\n")
-            }
-            BuiltinType::Writer | BuiltinType::Reader => {
-                format!("import std.io\nfn f(x: {n}):\n    pass\n")
-            }
-            BuiltinType::Ptr => format!("import std.ffi\nfn f(x: {n}):\n    pass\n"),
             BuiltinType::OwnedStr => {
-                "import std.ffi\nextern \"libc\":\n    fn getenv(name: str) -> owned_str\n"
-                    .to_string()
-            }
-            BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic => {
-                format!("import std.concurrency\nfn f(x: {n}[int]):\n    pass\n")
-            }
-            BuiltinType::AtomicInt | BuiltinType::Executor => {
-                format!("import std.concurrency\nfn f(x: {n}):\n    pass\n")
+                "extern \"libc\":\n    fn getenv(name: str) -> owned_str\n".to_string()
             }
         };
+        let src = format!("{owned}{annotation}");
         let errs = check_files(&[("main.chz", &src)]);
         if !errs.is_empty() {
             missed.push(format!("annotation {n}: {errs:?}"));

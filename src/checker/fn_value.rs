@@ -2,7 +2,7 @@
 //! Split out of `src/checker/pattern.rs`. `super::*` is the parent module.
 
 use super::infer_access::json_decode_sig;
-use super::resolve::{BUILTIN_CALLEES, PathPos};
+use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind, TypeRead};
 use super::*;
 
@@ -755,7 +755,14 @@ impl Checker {
                 }
             }
             TypeRead::Variant(s) => ctor(s),
-            TypeRead::Builtin(n) if BUILTIN_CALLEES.contains(&n.as_str()) => ctor(n),
+            TypeRead::Builtin(n)
+                if self.builtin_callee(n).is_some()
+                    || n.rsplit_once('.').is_some_and(|(_, m)| {
+                        BuiltinType::from_name(m).is_some_and(BuiltinType::has_opcode_ctor)
+                    }) =>
+            {
+                ctor(n)
+            }
             TypeRead::Alias(s) | TypeRead::Builtin(s) => {
                 format!("'{s}' is a type, not a value")
             }

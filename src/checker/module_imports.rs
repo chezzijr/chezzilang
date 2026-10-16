@@ -154,12 +154,10 @@ impl Checker {
         self.imported_alias_tys.clear();
         self.imported_alias_ctypes.clear();
         self.imported_values.clear();
-        self.imported_ffi_types.clear();
-        self.imported_concurrency.clear();
-        self.imported_time.clear();
-        self.imported_net.clear();
-        self.imported_io.clear(); // R2/R2b — Writer + Reader licensing
-        self.imported_builtin_types.clear();
+        self.builtin_binds.clear();
+        if let Some(m) = label.as_deref() {
+            self.bind_own_builtins(m);
+        }
         self.implicit_import_names.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
         // must be imported). Clear the per-module type tables so a prior module's types don't leak.
@@ -413,138 +411,16 @@ impl Checker {
         &mut self,
         bind: &String,
         member: &String,
-        alias: &Option<String>,
         sig: &ModuleSig,
         imp: &ResolvedImport,
         path: &[String],
         name_span: &Span,
     ) {
-        // A type name imported from a module. For `std.ffi`'s exported FFI marshalling
-        // TYPE names — the fixed-width integers (`int32`) AND the opaque `ptr` handle —
-        // this is a special case: record it into the per-module `imported_ffi_types`
-        // set so `resolve_type` accepts the bare name in THIS module (it's a type, not
-        // a callable value). Only `std.ffi` lists these in `sig.types`, so the check is
-        // already scoped to it.
-        if member == "timer" {
-            // A selective `import timer from std.time` licenses the opcode-backed
-            // `timer(ms)` builtin in THIS module. `timer` is a reserved name, so ONLY
-            // `std.time`'s `sig.types` can carry it (no user module can export a member
-            // named `timer`) — matching the member name alone is unambiguous. Like the
-            // concurrency ctors, `timer` carries no runtime value (it lowers via
-            // name→opcode), so an alias would bind nothing usable AND the runtime
-            // `bind_import` skip keys on the original member name — reject the rename.
-            if alias.as_ref().is_some_and(|a| a != member) {
-                self.error(
-                    imp.span,
-                    "timer cannot be renamed on import — \
-                     write `import timer from std.time`"
-                        .to_string(),
-                );
-            } else {
-                self.imported_time.insert(member.clone());
-                // Editor hover: `timer` is a reserved FUNCTION (`timer(ms) ->
-                // Channel[bool]`), not a type — record a function-style import-line
-                // hover (probe-gated no-op off the probe).
-                if self.hover_probe.is_some() {
-                    let fty = Ty::Func {
-                        params: vec![Ty::Int],
-                        ret: Box::new(Ty::channel(Ty::Bool)),
-                        labels: crate::checker::FnLabels::default(),
-                    };
-                    self.hover_record_at(
-                        *name_span,
-                        &fty,
-                        HoverKind::Func,
-                        Some(
-                            "one-shot timeout channel — timer(ms) delivers `true` \
-                             once after ms milliseconds (import std.time)"
-                                .to_string(),
-                        ),
-                    );
-                }
-            }
-        } else if matches!(
-            member.as_str(),
-            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor" | "StructuralEq"
-        ) {
-            // A selective `import Shared from std.concurrency` licenses just the named
-            // ctor/TYPE in THIS module (mirrors the per-name FFI width imports). Like
-            // the FFI types these carry no runtime value (ctor lowers via name→opcode),
-            // so an alias would bind nothing usable AND the runtime `bind_import` skip
-            // keys on the original member name — reject the rename to keep it honest.
-            if alias.as_ref().is_some_and(|a| a != member) {
-                self.error(
-                    imp.span,
-                    format!(
-                        "concurrency type '{member}' cannot be renamed on import — \
-                         write `import {member} from std.concurrency`"
-                    ),
-                );
-            } else {
-                self.imported_concurrency.insert(member.clone());
-                self.record_native_type_import_hover(member, *name_span, path);
-            }
-        } else if crate::native::ffi::is_declared_type(member) {
-            // An FFI marshalling type CANNOT be RENAMED on import: the backends'
-            // `ctype_of` keys off the literal surface name (`int32`/`ptr`), so an alias
-            // would resolve to a type the marshaller can't lower. Reject `import int32
-            // as W` / `import ptr as P` (name unusable) and `import int8 as int32`
-            // (silently the wrong width). A redundant identical self-rename (`import
-            // ptr as ptr`) is harmless — the as-name equals the member, no wrong-type
-            // risk — so it falls through to the normal no-op import of `ptr`.
-            if alias.as_ref().is_some_and(|a| a != member) {
-                self.error(
-                    imp.span,
-                    format!(
-                        "FFI type '{member}' cannot be renamed on import — \
-                         write `import {member} from std.ffi`"
-                    ),
-                );
-            } else {
-                self.imported_ffi_types.insert(member.clone());
-                self.record_native_type_import_hover(member, *name_span, path);
-            }
-        } else if matches!(member.as_str(), "Socket" | "Listener") {
-            // A selective `import Socket from std.net` licenses just the named TCP
-            // handle TYPE in THIS module (mirrors the per-name concurrency imports).
-            // Like those, a net handle carries no runtime value (the type resolves
-            // directly to `Ty::Socket`; a value comes from `connect`/`listen`) AND the
-            // runtime `bind_import` skip keys on the original member name — so an alias
-            // would bind nothing usable: reject the rename. Only `std.net`'s `sig.types`
-            // carries these names (they're reserved, so no user module can export them).
-            if alias.as_ref().is_some_and(|a| a != member) {
-                self.error(
-                    imp.span,
-                    format!(
-                        "net type '{member}' cannot be renamed on import — \
-                         write `import {member} from std.net`"
-                    ),
-                );
-            } else {
-                self.imported_net.insert(member.clone());
-                self.record_native_type_import_hover(member, *name_span, path);
-            }
-        } else if (member == "Writer" || member == "Reader")
-            && path == ["std".to_string(), "io".to_string()]
-        {
-            // R2/R2b — a selective `import Writer from std.io` / `import Reader from
-            // std.io` licenses just that TYPE in THIS module. Like the net handles, it
-            // carries no runtime value (the type resolves directly to `Ty::Writer`/
-            // `Ty::Reader`; a value comes from `create`/`open`/…) AND the runtime
-            // `bind_import` skip keys on the original member name — so an alias would
-            // bind nothing usable: reject the rename.
-            if alias.as_ref().is_some_and(|a| a != member) {
-                self.error(
-                    imp.span,
-                    format!(
-                        "io type '{member}' cannot be renamed on import — \
-                         write `import {member} from std.io`"
-                    ),
-                );
-            } else {
-                self.imported_io.insert(member.clone());
-                self.record_native_type_import_hover(member, *name_span, path);
-            }
+        // A module-owned builtin type (`Shared`, `Socket`, `ptr`, `int32`, …) imported from its
+        // owning module: bind it under the bind name, an alias included.
+        if super::builtin_type::builtin_owner(member) == Some(path.join(".").as_str()) {
+            self.builtin_binds.insert(bind.clone(), member.clone());
+            self.record_native_type_import_hover(member, *name_span, path);
         } else if let Some(info) = sig.struct_defs.get(member) {
             // A user struct imported by name: inject its resolved shape under the
             // DECLARING module's runtime key (so it unifies with that module's
@@ -705,14 +581,8 @@ impl Checker {
                 // `enum_names`) stays cleared; `infer_field`/`infer_method_call` consult `self.structs`/
                 // `self.enums` for the layout, which is what these provide. A same-named layout already
                 // present (a local decl or another import) is NOT overwritten (first/local wins; the
-                // compiler disambiguates any genuine runtime collision).
-                //
-                // EXCEPTION — a STDLIB module (`import std.ref`/`std.iter`/…) ALSO exposes its types
-                // BARE (`struct_names`/`enum_names`), like the reserved/native surface (`Ref`/`Result`).
-                // The `ref T` syntax lowers to a bare `Ref[T]` annotation that has no module prefix, so
-                // `Ref` must resolve bare wherever `std.ref` is imported. This keeps the std type
-                // surface globally usable on import, as before, without leaking USER module types.
-                let is_std = path.first().map(String::as_str) == Some("std");
+                // compiler disambiguates any genuine runtime collision). A std module is no
+                // different: `import std.regex` gives `regex.Match`, never a bare `Match`.
                 if let Some(sig) = self.module_sigs.get(&imp.target).cloned() {
                     for (sname, info) in &sig.struct_defs {
                         // A RESERVED native handle (std.net's `Socket`/`Listener`) has a `sig.struct_defs`
@@ -722,26 +592,15 @@ impl Checker {
                         // `seed_stdlib_structs`). Skip it entirely here so a whole-module `import std.net`
                         // does NOT make bare `Socket(...)` a constructor or `Socket` a nominal-struct
                         // annotation (both must stay gated by the reserved arm / rejected as a ctor).
-                        if self.qualified_builtin_ty(sname, &[]).is_some() {
+                        if sig.builtins.contains(sname) {
                             continue;
                         }
                         // Register the LAYOUT under the DECLARING module's runtime key (bare unless a
                         // genuine cross-module clash). Register BOTH colliding layouts (no first-wins),
                         // so a value of either — whose `Ty` carries the matching key — resolves its
-                        // own fields/methods. A std module ALSO exposes its types bare.
+                        // own fields/methods.
                         let key = self.type_key(&imp.target, sname);
                         self.structs.insert(key.clone(), info.clone());
-                        if is_std {
-                            self.struct_names.insert(sname.clone());
-                            self.bare_types.entry(sname.clone()).or_insert(key);
-                            // A Builtin-origin std struct (Match/Response/ProcResult, Token/Heap/
-                            // …) licensed bare by THIS import: record the name so a same-named user
-                            // `struct` decl below is a clean `reserved (builtin)` error, not an
-                            // accept-then-trap (the user layout would shadow the native shape).
-                            if info.origin == StructOrigin::Builtin {
-                                self.imported_builtin_types.insert(sname.clone());
-                            }
-                        }
                     }
                     for (ename, edef) in &sig.enum_defs {
                         let key = self.type_key(&imp.target, ename);
@@ -749,20 +608,10 @@ impl Checker {
                         self.enum_type_params
                             .insert(key.clone(), edef.type_params.clone());
                         self.enum_methods.insert(key.clone(), edef.methods.clone());
-                        if is_std {
-                            self.enum_names.insert(ename.clone());
-                            self.bare_types.entry(ename.clone()).or_insert(key.clone());
-                        }
                         for (vname, vinfo) in edef.variant_names.iter().zip(&edef.variants) {
                             let mut vi = vinfo.clone();
                             vi.enum_name = key.clone();
                             self.variants.insert((key.clone(), vname.clone()), vi);
-                            if is_std {
-                                self.variant_owners
-                                    .entry(vname.clone())
-                                    .or_default()
-                                    .push(ename.clone());
-                            }
                         }
                     }
                     // A `module.Alias` needs its target's shape too — the target may live in a
@@ -770,55 +619,6 @@ impl Checker {
                     for asig in sig.type_aliases.values() {
                         self.hydrate_alias_target(&asig.body);
                     }
-                }
-                // A whole-module `import std.ffi` licenses the bare opaque `ptr` type (extern blocks
-                // use it pervasively, so whole-module licensing is the ergonomic default — UNLIKE the
-                // width types int8..uint64, which stay per-name-only). Keyed on the EXACT path, NOT
-                // `is_std`, so `import std.ref`/`std.iter`/… do NOT license `ptr`.
-                if path.as_slice() == ["std".to_string(), "ffi".to_string()] {
-                    for d in crate::native::ffi::declared_types() {
-                        if crate::native::ffi::is_opaque_type(&d.name) {
-                            self.imported_ffi_types.insert(d.name.clone());
-                        }
-                    }
-                }
-                // A whole-module `import std.concurrency` licenses ALL FOUR runtime concurrency ctor/
-                // TYPE names (the ergonomic default). Keyed on the EXACT len-2 path, so the real file
-                // submodule `import std.concurrency.collection` (len-3) does NOT license them.
-                if path.as_slice() == ["std".to_string(), "concurrency".to_string()] {
-                    for tn in [
-                        "Shared",
-                        "RwShared",
-                        "Atomic",
-                        "AtomicInt",
-                        "Executor",
-                        "StructuralEq",
-                    ] {
-                        self.imported_concurrency.insert(tn.to_string());
-                    }
-                }
-                // A whole-module `import std.time` licenses the opcode-backed `timer(ms)` builtin.
-                // Keyed on the EXACT len-2 path. std.time is a REAL native module, so `Import::Plain`
-                // already binds the module object (and its now/monotonic/sleep_ms/format members); we
-                // only ADD the `timer` licensing insert here.
-                if path.as_slice() == ["std".to_string(), "time".to_string()] {
-                    self.imported_time.insert("timer".to_string());
-                }
-                // A whole-module `import std.net` licenses BOTH bare TCP handle TYPE names. Keyed on
-                // the EXACT len-2 path. std.net is a REAL native module, so `Import::Plain` already
-                // binds the module object (connect/listen members); we only ADD the type licensing.
-                if path.as_slice() == ["std".to_string(), "net".to_string()] {
-                    for tn in ["Socket", "Listener"] {
-                        self.imported_net.insert(tn.to_string());
-                    }
-                }
-                // R2 — a whole-module `import std.io` licenses the bare `Writer` TYPE name. Keyed on the
-                // EXACT len-2 path. std.io is a REAL native module (its fns bind via `Import::Plain`); we
-                // only ADD the type licensing.
-                if path.as_slice() == ["std".to_string(), "io".to_string()] {
-                    self.imported_io.insert("Writer".to_string());
-                    // R2b — a whole-module `import std.io` also licenses the bare `Reader` TYPE name.
-                    self.imported_io.insert("Reader".to_string());
                 }
             }
             // The resolver never resolves a variant import; `bind_variant_imports` binds it.
@@ -890,7 +690,7 @@ impl Checker {
                     // TICKET-187: the value namespace and the type namespace bind independently, so
                     // a fn twin of a struct, alias, enum or protocol leaves the type usable.
                     if sig.types.contains(member) {
-                        self.bind_imported_type(bind, member, alias, &sig, imp, path, name_span);
+                        self.bind_imported_type(bind, member, &sig, imp, path, name_span);
                     }
                 }
             }

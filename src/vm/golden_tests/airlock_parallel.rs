@@ -207,7 +207,7 @@ fn airlock_arriving_closure_does_not_clobber_the_receivers_in_place_push() {
     // (TICKET-137) no crossing installs anything. Go 1.26.6 and CPython 3.14.7 both print length
     // `2` (measured 2026-09-04, `/tmp/t051p/xspush.chz`).
     let src = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 xs := [1]
 ch := Channel[fn() -> int](1)
@@ -557,7 +557,7 @@ fn airlock_closure_over_a_global_main_mutated_through_a_local_alias_reads_the_re
     // was spawned before the push and owns `[1]`; the received closure reads that. CPython 3.14.7
     // prints `[1, 2]` (one live global); the divergence is the deliberate per-task rule.
     let src = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 g := [1]
 
@@ -625,7 +625,7 @@ fn airlock_alias_write_does_not_reach_a_grandchild_senders_closure() {
     // its own copy, but the closure is RUN by `main`, whose copy is `[1]`. CPython 3.14.7 prints
     // `[1, 2]` (one live global); the divergence is the deliberate per-task rule.
     let src = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 g := [1]
 c := Channel[fn() -> str](1)
@@ -660,7 +660,7 @@ fn airlock_closure_over_an_aliased_element_reads_the_receivers_global_copy() {
     // `inner` (a CAPTURE, so it crosses as the sender's `[1, 2]`) and `gl[0]` (a GLOBAL, read from
     // the receiver's copy: `[1]`). CPython 3.14.7 prints `[1, 2] [1, 2]` (one live global).
     let src = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 gl := [[1]]
 
@@ -691,7 +691,7 @@ fn airlock_unchanged_aliased_global_does_not_clobber_the_receivers_push() {
     // so the comparator must not read the receiver's own in-place push as a sender-side change —
     // a cross-global `Backref` or a renumbered id must not read as "changed" (DEC-051).
     let src = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 inner := [1]
 xs := [inner, inner]
@@ -729,7 +729,7 @@ fn airlock_closure_over_a_captured_alias_pushed_by_the_receiver_faults() {
     // observed it. TICKET-169 (D4 layer C, Decisions item 3): `work`'s capture of `inner` crossed
     // the airlock with the closure and is marked as a copy, so the push now FAULTS instead.
     let src = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 gl := [[1]]
 
@@ -765,7 +765,7 @@ fn airlock_task_local_alias_of_a_global_is_one_object() {
     // global's own object, so a push through the alias is visible through the global too. CPython
     // 3.14.7 prints `[1, 2] [1, 2]` and `[[1, 2]] [[1, 2]]` (measured 2026-09-10).
     let src = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 gl := [[1]]
 
@@ -793,7 +793,7 @@ main()
     );
 
     let src2 = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 gl := [[1]]
 
@@ -827,7 +827,7 @@ fn airlock_adopted_alias_keeps_a_later_globals_backref_into_its_old_subtree() {
     // `[] [[]] [1]` (measured 2026-09-11). The two sibling sends race, so the program prints
     // whichever message is not "first" rather than the second one received.
     let src = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 gl := [[[1]]]
 y := gl[0][0]
@@ -862,7 +862,7 @@ fn airlock_adoption_is_scoped_to_the_snapshot_replay() {
     // resolve to an adopted capture node instead of the freshly-received list. CPython 3.14.7
     // prints `[[7, 5]] [1, 2] [1, 2]` (measured 2026-09-11).
     let src = r#"
-import std.concurrency
+import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
 gl := [[1]]
 

@@ -12,119 +12,83 @@ impl Checker {
     /// (un-imported) module: a type is private to its declaring module and must be imported. Picks
     /// the first declaring module in graph (deps-first) order.
     pub(super) fn unknown_type_msg(&self, n: &str) -> String {
-        if let Some(msg) = super::suggest::removed_name_message(n) {
-            return msg.to_string();
-        }
-        if let Some(mods) = self.types_by_name.get(n)
-            && let Some(m) = mods.first()
-        {
-            format!("unknown type '{n}'; import it from {m} (`import {n} from {m}`)")
-        } else {
-            format!("unknown type '{n}'")
-        }
+        format!("unknown type '{n}'{}", self.import_hint(n))
     }
 
-    /// True iff the bare runtime concurrency ctor/TYPE name `n` (`Shared`/`RwShared`/`Atomic`/
-    /// `Executor`) is usable in the current module: either this module imported it from
-    /// `std.concurrency`, or we're inside a privileged stdlib module (std/* may use the four bare —
-    /// `std/cancel.chz`, `std/concurrency/collection.chz`). The four ALSO stay reserved names (can't be
-    /// shadowed by a user `struct`); this gate is the SEPARATE "must import to USE" requirement.
-    pub(super) fn concurrency_licensed(&self, n: &str) -> bool {
-        self.imported_concurrency.contains(n) || self.current_module_is_stdlib
-    }
-
-    /// True iff the opcode-backed `timer` builtin name `n` is usable in the current module: either this
-    /// module imported it from `std.time` (whole-module or per-name), or we're inside a privileged
-    /// stdlib module (std/* may call `timer` bare — e.g. `std/cancel.chz`). `timer` ALSO stays a
-    /// reserved name (can't be shadowed by a user `struct`/`fn`); this gate is the SEPARATE "must import
-    /// to USE" requirement.
-    pub(super) fn time_licensed(&self, n: &str) -> bool {
-        self.imported_time.contains(n) || self.current_module_is_stdlib
-    }
-
-    /// True iff the std.net TCP handle TYPE name `n` (`Socket`/`Listener`) is usable in the current
-    /// module: either this module imported it from `std.net` (whole-module or per-name), or we're
-    /// inside a privileged stdlib module (std/* may use the two bare). The two ALSO stay reserved names
-    /// (can't be shadowed by a user `struct`); this gate is the SEPARATE "must import to USE" requirement.
-    pub(super) fn net_licensed(&self, n: &str) -> bool {
-        self.imported_net.contains(n) || self.current_module_is_stdlib
-    }
-
-    /// R2 — true iff the std.io `Writer` TYPE name is usable in the current module: either this module
-    /// imported it from `std.io` (whole-module `import std.io` or `import Writer from std.io`), or we're
-    /// inside a privileged stdlib module. `Writer` ALSO stays a reserved name (can't be shadowed by a
-    /// user `struct`); this gate is the SEPARATE "must import to USE" requirement. Mirrors `net_licensed`.
-    pub(super) fn io_licensed(&self, n: &str) -> bool {
-        self.imported_io.contains(n) || self.current_module_is_stdlib
-    }
-
-    /// True iff the std.ffi type-license NAME `n` (the opaque `ptr` handle or a fixed-width `int8..
-    /// uint64`) is usable in the current module: either this module imported it from `std.ffi`
-    /// (whole-module or per-name), or we're inside a privileged stdlib module (std/* may use them bare
-    /// — e.g. `std/ffi.chz` itself, whose bodyless `native fn` sigs are written in terms of `ptr`).
-    /// These ALSO stay reserved names; this gate is the SEPARATE "must import to USE" requirement,
-    /// mirroring `concurrency_licensed`/`net_licensed`/`time_licensed`. NOTE: during the native-module
-    /// harvest (`harvest_native_module`) `current_module_is_stdlib` is UNRELIABLE (harvest runs without
-    /// `begin_module`), so that path relies on the transient `imported_ffi_types` license instead.
-    pub(super) fn ffi_type_licensed(&self, n: &str) -> bool {
-        self.imported_ffi_types.contains(n) || self.current_module_is_stdlib
-    }
-
-    /// U10: the import licence of a bare builtin type name that resolved to `t`. A name outside its
-    /// std module is `unknown type` with the import hint; `owned_str` resolves only in an extern
-    /// signature (a return-only marshalling type).
-    pub(super) fn builtin_gate(&mut self, b: BuiltinType, t: Ty, span: Span) -> Ty {
-        let n = b.name();
-        let (licensed, module) = match b {
-            BuiltinType::Int
-            | BuiltinType::Float
-            | BuiltinType::Bool
-            | BuiltinType::Str
-            | BuiltinType::Bytes
-            | BuiltinType::ByteArray
-            | BuiltinType::Iterator
-            | BuiltinType::List
-            | BuiltinType::Set
-            | BuiltinType::Map
-            | BuiltinType::Channel
-            | BuiltinType::Range => return t,
-            BuiltinType::OwnedStr => {
-                if self.in_extern_sig {
-                    return t;
-                }
-                self.error(
-                    span,
-                    "'owned_str' is a return-only extern marshalling type and cannot be used as a \
-                     general type annotation"
-                        .to_string(),
-                );
-                return Ty::Unknown;
-            }
-            BuiltinType::Ptr => (
-                self.ffi_type_licensed(n)
-                    || self
-                        .alias_resolving
-                        .last()
-                        .is_some_and(|a| self.ffi_alias_ok.contains(a)),
-                "std.ffi",
-            ),
-            BuiltinType::Shared
-            | BuiltinType::RwShared
-            | BuiltinType::Atomic
-            | BuiltinType::AtomicInt
-            | BuiltinType::Executor => (self.concurrency_licensed(n), "std.concurrency"),
-            BuiltinType::Socket | BuiltinType::Listener => (self.net_licensed(n), "std.net"),
-            BuiltinType::Writer | BuiltinType::Reader => (self.io_licensed(n), "std.io"),
+    /// The import hint for a bare type or protocol name some module declares (`; import it from
+    /// std.regex (`import Match from std.regex`)`), or nothing.
+    pub(super) fn import_hint(&self, n: &str) -> String {
+        let user = self.types_by_name.get(n).and_then(|mods| mods.first());
+        let std = || {
+            super::graph_pass::std_type_owners()
+                .get(n)
+                .and_then(|m| m.first())
         };
-        if licensed {
-            t
-        } else {
-            self.error(
-                span,
-                format!("unknown type '{n}' (import it from {module}: `import {module}`)"),
-            );
-            Ty::Unknown
+        match user.or_else(std) {
+            Some(m) => format!("; import it from {m} (`import {n} from {m}`)"),
+            None => String::new(),
         }
+    }
+
+    /// Binds the module-owned builtin types `module` owns under their own names: a module sees
+    /// its own declarations (`std/ffi.chz`'s sigs name `ptr`).
+    pub(super) fn bind_own_builtins(&mut self, module: &str) {
+        for n in super::builtin_type::module_builtins(module) {
+            self.builtin_binds.insert(n.clone(), n);
+        }
+    }
+
+    /// The module-owned builtin type a bare name denotes in this module (the member's own name),
+    /// or `None`: an import or the owning module bound it, under that name or an alias.
+    pub(super) fn bound_builtin(&self, n: &str) -> Option<&str> {
+        self.builtin_binds.get(n).map(String::as_str)
+    }
+
+    /// The builtin a bare callee `n` names, by the builtin's own name: a builtin type with an opcode
+    /// constructor this module sees (`Channel`, or a bound `Shared`: `S` after
+    /// `import Shared as S from std.concurrency`), else a prelude function or constructor. An
+    /// import binds before a builtin of its name, as a declaration does.
+    pub(super) fn builtin_callee(&self, n: &str) -> Option<String> {
+        if let Some(b) = self.builtin_type_named(n)
+            && b.has_opcode_ctor()
+        {
+            return Some(b.name().to_string());
+        }
+        (self.bound_builtin(n).is_none() && prelude_fn(n).is_some()).then(|| n.to_string())
+    }
+
+    /// Whether `module.name` (through a whole-module import) names a builtin type `module` owns.
+    pub(super) fn module_owns_builtin(&self, module: &str, name: &str) -> bool {
+        !self.head_is_value(module)
+            && self
+                .imported_modules
+                .get(module)
+                .and_then(|mid| self.module_sigs.get(mid))
+                .is_some_and(|sig| sig.builtins.contains(name))
+    }
+
+    /// The builtin type a bare type name denotes here: a module-owned one this module bound (an
+    /// import binds before a builtin of its name), else a global builtin.
+    pub(super) fn builtin_type_named(&self, n: &str) -> Option<BuiltinType> {
+        match self.bound_builtin(n) {
+            Some(own) => BuiltinType::from_name(own),
+            None => BuiltinType::global(n),
+        }
+    }
+
+    /// U10: `owned_str` resolves only in an extern signature (a return-only marshalling type);
+    /// every other builtin type resolves as it is.
+    pub(super) fn builtin_gate(&mut self, b: BuiltinType, t: Ty, span: Span) -> Ty {
+        if b != BuiltinType::OwnedStr || self.in_extern_sig {
+            return t;
+        }
+        self.error(
+            span,
+            "'owned_str' is a return-only extern marshalling type and cannot be used as a \
+             general type annotation"
+                .to_string(),
+        );
+        Ty::Unknown
     }
 
     /// Map an opaque/native builtin TYPE name (one that lives ONLY in its owning std module's
@@ -151,8 +115,9 @@ impl Checker {
             | BuiltinType::Listener
             | BuiltinType::Writer
             | BuiltinType::Reader
-            | BuiltinType::Ptr => b.plain_ty(),
-            // Global builtins and `owned_str`: no std module exports them by qualified path.
+            | BuiltinType::Ptr
+            | BuiltinType::OwnedStr => b.plain_ty(),
+            // Global builtins: no std module exports them by qualified path.
             BuiltinType::Int
             | BuiltinType::Float
             | BuiltinType::Bool
@@ -164,22 +129,8 @@ impl Checker {
             | BuiltinType::Set
             | BuiltinType::Map
             | BuiltinType::Channel
-            | BuiltinType::Range
-            | BuiltinType::OwnedStr => None,
+            | BuiltinType::Range => None,
         }
-    }
-
-    /// Does this reserved native `sig.types` NAME have a from-nothing CONSTRUCTOR reachable by
-    /// qualified path (`concurrency.Shared(0)`, `time.timer(100)`)? The rest of `sig.types`
-    /// (`Socket`/`Listener`/`Writer`/`Reader`, the FFI widths, `ptr`) is type-only — a value comes
-    /// from a module function. Single source for the two rules that must agree on the set:
-    /// `infer_call`'s qualified-native-ctor arm, and `dotted_ctor_target`'s refusal of a
-    /// constructor in `defer`/`spawn` statement position.
-    pub(super) fn qualified_native_ctor(name: &str) -> bool {
-        matches!(
-            name,
-            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor" | "timer"
-        )
     }
 
     /// Expected type-argument arity for a builtin TYPE reached by qualified path (the generic

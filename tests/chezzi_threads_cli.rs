@@ -157,7 +157,7 @@ fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
     let path = dir.join("two_cpu_jobs_test.chz");
     std::fs::write(
         &path,
-        "import std.concurrency\n\n\
+        "import Executor from std.concurrency\n\n\
          fn burn(n: int) -> int:\n    \
          x := 0\n    \
          i := 0\n    \
@@ -486,7 +486,7 @@ const BODY_BP_HOF: &str = "fn burn(n: int) -> int:
         x = x + i * i - i
         i += 1
     return x
-import std.concurrency
+import AtomicInt from std.concurrency
 fn main():
     flag := AtomicInt(0)
     parallel:
@@ -575,7 +575,7 @@ fn main():
 main()
 ";
 
-const BODY_BP_SHARED: &str = "import std.concurrency
+const BODY_BP_SHARED: &str = "import Shared from std.concurrency
 fn burn(n: int) -> int:
     x := 0
     i := 0
@@ -607,7 +607,7 @@ const BODY_BP_SLEEP: &str = "fn burn(n: int) -> int:
         i += 1
     return x
 import std.time
-import std.concurrency
+import AtomicInt from std.concurrency
 fn main():
     flag := AtomicInt(0)
     parallel:
@@ -626,7 +626,7 @@ const BODY_BP_SPIN: &str = "fn burn(n: int) -> int:
         x = x + i * i - i
         i += 1
     return x
-import std.concurrency
+import AtomicInt from std.concurrency
 fn main():
     flag := AtomicInt(0)
     parallel:
@@ -828,7 +828,7 @@ fn threads_one_serializes_a_cpu_bound_nursery_inside_an_executor_job() {
     let dir = std::env::temp_dir().join(format!("chz-w13-7-burn-job-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
 
-    let program = "import std.concurrency\n\
+    let program = "import Executor from std.concurrency\n\
         fn burn(n: int) -> int:\n    \
             x := 0\n    \
             for i in 0..n:\n        \
@@ -1653,7 +1653,7 @@ main()
 /// fiber is an owner blocked at a nested join (the nested `spawn` has no statement after its own
 /// `parallel:`, so it waits at ITS join rather than on a channel op). Must complete and exit 0; hangs
 /// instead at `CHEZZI_THREADS=2`/default.
-const EXECUTOR_JOB_OWNER_BLOCKED_AT_NESTED_JOIN: &str = "import std.concurrency
+const EXECUTOR_JOB_OWNER_BLOCKED_AT_NESTED_JOIN: &str = "import Executor from std.concurrency
 
 fn job():
     never := Channel[int](0)
@@ -1792,7 +1792,8 @@ fn exec_join_owner_blocked_at_nested_join_is_fatal_at_every_worker_count() {
 
 /// b4a (TICKET-125) / TICKET-135 (D1): an Executor job recovers a nested deadlock; the abort surfaces
 /// at `shutdown()`, at every worker count.
-const B4A_EXECUTOR_JOB_RECOVERS_NESTED_DEADLOCK: &str = "import std.concurrency\nfn job():
+const B4A_EXECUTOR_JOB_RECOVERS_NESTED_DEADLOCK: &str =
+    "import Executor from std.concurrency\nfn job():
     never := Channel[int](0)
     r := recover:
         parallel:
@@ -1827,7 +1828,7 @@ fn b4a_executor_job_recovered_nested_deadlock_is_fatal_at_every_worker_count() {
 
 /// e10 (TICKET-125): an Executor job's genuine nested deadlock still faults, at every worker count.
 const E10_EXECUTOR_JOB_NESTED_DEADLOCK_FAULTS: &str =
-    "import std.concurrency\nnever := Channel[int](0)
+    "import Executor from std.concurrency\nnever := Channel[int](0)
 fn job():
     parallel:
         spawn:
@@ -1855,7 +1856,7 @@ fn e10_executor_job_nested_deadlock_faults_at_every_worker_count() {
 
 /// e11 (TICKET-125): an Executor job's LIVE nested rendezvous still reaches `main`, at every worker count.
 const E11_EXECUTOR_JOB_NESTED_DEADLOCK_REACHES_MAIN: &str =
-    "import std.concurrency\nnever := Channel[int](0)
+    "import Executor from std.concurrency\nnever := Channel[int](0)
 out := Channel[int](0)
 fn job():
     parallel:

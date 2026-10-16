@@ -118,6 +118,7 @@ fn fiber_owned_nursery_scope_id_is_stable_under_child_fault_at_threads_4() {
 }
 
 const TWO_DEEP_CHILD_FAULT: &str = r#"import std.concurrency
+import AtomicInt, Executor from std.concurrency
 fn core(c: Channel[int], started: Channel[int]):
     parallel:
         spawn:
@@ -199,7 +200,9 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
         "c := Channel[int](0)\nstarted := Channel[int](1)\n_r := recover: outer(c, started)"
             .to_string()
     };
-    let mut src = String::from("import std.concurrency\nimport std.os\n");
+    let mut src = String::from(
+        "import std.concurrency\nimport AtomicInt, Executor from std.concurrency\nimport std.os\n",
+    );
     src += "fn core(c: Channel[int], started: Channel[int]):\n    parallel:\n        spawn:\n";
     src += "            while true:\n                c.send(1)\n        spawn:\n";
     src += &indent(second, 12);
@@ -280,7 +283,9 @@ fn h2_program(place: &str, cap: &str) -> String {
         "unb" => "Channel[int]()",
         _ => unreachable!(),
     };
-    let mut src = String::from("import std.concurrency\nfn main():\n");
+    let mut src = String::from(
+        "import std.concurrency\nimport AtomicInt, Executor from std.concurrency\nfn main():\n",
+    );
     src += &format!("    c := {chan}\n    stop := AtomicInt(0)\n");
     src += &indent(&body, 4);
     src += "    print(\"done\")\nmain()\n";

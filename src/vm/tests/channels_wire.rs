@@ -753,6 +753,7 @@ parallel:
         (
             "exec_closed",
             "
+import Executor from std.concurrency
 ex := Executor()
 ex.submit(fn(): fan())
 ex.shutdown()
@@ -761,6 +762,7 @@ ex.shutdown()
         (
             "exec_open",
             "
+import Executor from std.concurrency
 done := Channel[int](1)
 ex := Executor()
 ex.submit(fn(): fan_send(done))
@@ -771,6 +773,7 @@ ex.shutdown()
         (
             "two_executors",
             "
+import Executor from std.concurrency
 a := Executor()
 b := Executor()
 for _ in 0..4:
@@ -783,6 +786,7 @@ b.shutdown()
         (
             "exec_and_parallel",
             "
+import Executor from std.concurrency
 ex := Executor()
 for _ in 0..4:
     ex.submit(fn(): burn())
@@ -795,6 +799,7 @@ ex.shutdown()
         (
             "exec_busy_main",
             "
+import Executor from std.concurrency
 ex := Executor()
 for _ in 0..4:
     ex.submit(fn(): burn())

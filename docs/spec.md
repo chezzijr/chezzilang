@@ -853,15 +853,14 @@ struct Meters:
 >     limit was *"scalars only: int ↔ long, no fixed-width int type"*). To bind a C function taking or
 >     returning a fixed-width integer (`int32_t`, `uint32_t`, …), declare the parameter/return with one
 >     of the **fixed-width marshalling type names** — `int8`, `int16`, `int32`, `int64`, `uint8`,
->     `uint16`, `uint32`, `uint64`. Like `ptr` (and unlike `owned_str`, which is neither global nor
->     importable — it is licensed **only inside an `extern` signature**; a bare non-extern annotation is
->     rejected *'owned_str' is a return-only extern marshalling type and cannot be used as a general type
->     annotation*), these are
->     **not global**: each is a **type imported per-name from `std.ffi`** — Chezzi's first type imports — with the same
+>     `uint16`, `uint32`, `uint64`. Like `ptr` and `owned_str` (legal only as an extern return; a non-extern
+>     annotation is rejected *'owned_str' is a return-only extern marshalling type and cannot be used as
+>     a general type annotation*), these are
+>     **not global**: each is a **type imported from `std.ffi`** — Chezzi's first type imports — with the same
 >     `import int32, uint32 from std.ffi` form as the `null`/`is_null` value members (`std.ffi` exports
 >     both callable members and these TYPE names; the declaring list is `std/ffi.chz`'s `native type` decls,
 >     no grammar change). A module that names a width type without importing it gets *unknown type
->     'int32' (import it from std.ffi …)*; a bogus name (`import int99 from std.ffi`) errors like any bad
+>     'int32'; import it from std.ffi …*; a bogus name (`import int99 from std.ffi`) errors like any bad
 >     import. The import is **per-module**: a struct's int32 field resolved in module A is usable from
 >     module B with no import in B, but a bare `int32` written in B's own source needs B's own import. To
 >     the program each is a plain `int` (`Ty::Int`); the

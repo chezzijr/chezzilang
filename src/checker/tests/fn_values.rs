@@ -853,10 +853,10 @@ fn qualified_native_type_annotation_resolves() {
         "fn f(s: concurrency.Shared[int]):\n    print(\"x\")\n",
         "unknown module 'concurrency'",
     );
-    // NEGATIVE: timer is a FUNCTION, not a type — reject in type position.
+    // NEGATIVE: timer is a FUNCTION, not a type — reject in type position, as for `time.now`.
     entry_rejects(
         "import std.time\nfn f(x: time.timer):\n    print(\"x\")\n",
-        "'timer' is a function, not a type",
+        "module 'time' has no type 'timer'",
     );
     // NEGATIVE: wrong arity on a qualified generic box.
     entry_rejects(
@@ -1958,7 +1958,7 @@ fn undetermined_generic_fn_value_rejected_in_argument_position() {
     ] {
         entry_rejects(
             &format!(
-                "import std.concurrency\n{ARGPOS_HEAD}fn bump[T](n: int) -> int:\n    return n + 1\nfn acc[T](a: int, b: int) -> int:\n    return a + b\nfn sink[T](n: int):\n    print(n)\nfn main():\n    {call}\nmain()\n"
+                "import RwShared, Shared from std.concurrency\n{ARGPOS_HEAD}fn bump[T](n: int) -> int:\n    return n + 1\nfn acc[T](a: int, b: int) -> int:\n    return a + b\nfn sink[T](n: int):\n    print(n)\nfn main():\n    {call}\nmain()\n"
             ),
             "is generic and T is not determined here",
         );

@@ -82,7 +82,7 @@ impl Checker {
         // the normal method path (the `Ty::Socket`/`Ty::Listener` method arms look the table up here).
         // NO `struct_names`/`bare_types` licensing is added: `Socket`/`Listener`
         // resolve to the RESERVED `Ty::Socket`/`Ty::Listener` (opaque handles, not nominal structs) via
-        // `resolve_type`'s reserved arm, which stays import-gated by `imported_net`. The method table is
+        // `resolve_type`'s reserved arm, which stays bound by an import (`builtin_binds`). The method table is
         // reached only from a value whose `Ty` is already `Ty::Socket`/`Ty::Listener`, so a bare
         // unimported annotation still errors while a licensed `socket.read(...)` still resolves.
         if let Some(info) = self.net_socket_seed.clone() {
@@ -95,7 +95,7 @@ impl Checker {
         // so `w.write(...)`/`w.close(...)` resolve via the normal method path (the `Ty::Writer` method
         // arm looks the table up here). Like `Socket`/`Listener` — NO `struct_names`/`bare_types`
         // licensing: `Writer` resolves to the RESERVED `Ty::Writer` (opaque handle) via `resolve_type`'s
-        // reserved arm, import-gated by `imported_io`. The method table is reached only from a value
+        // reserved arm, bound by an import (`builtin_binds`). The method table is reached only from a value
         // whose `Ty` is already `Ty::Writer`, so a bare unimported annotation still errors.
         if let Some(info) = self.io_writer_seed.clone() {
             self.structs.insert("Writer".into(), info);
@@ -113,7 +113,7 @@ impl Checker {
         // the sig's `Ty::Param`). Like `Socket`/`Listener` above — and UNLIKE `Ref` — NO
         // `struct_names`/`bare_types` licensing is added: the four resolve to the RESERVED
         // `Ty::Shared`/`Ty::RwShared`/`Ty::Atomic`/`Ty::Executor` via `resolve_type`'s reserved arm,
-        // which stays import-gated by `imported_concurrency`. The method table is reached only from a
+        // which stays bound by an import (`builtin_binds`). The method table is reached only from a
         // value whose `Ty` is already one of those, so a bare unimported annotation still errors.
         for (name, info) in &self.concurrency_seeds {
             self.structs.insert(name.clone(), info.clone());
@@ -141,8 +141,7 @@ impl Checker {
     ///
     /// Two passes so a `native fn`'s return type can reference the module's own `native struct` (regex's
     /// `find -> Result[Option[Match]]`): pass 1 harvests every `native struct` (into `sig.struct_defs`/
-    /// `sig.types`, origin FORCED [`StructOrigin::Builtin`] — load-bearing for `imported_builtin_types`
-    /// → the VM's pure-type `bind_import` skip) and TRANSIENTLY inserts each name into
+    /// `sig.types`, origin FORCED [`StructOrigin::Builtin`]) and TRANSIENTLY inserts each name into
     /// `self.struct_names` (so pass 2's `resolve_type` sees the bare type) AND transiently installs THIS
     /// module's harvested layout into `self.structs` (save+restore). The latter is load-bearing: this arm
     /// runs OUTSIDE `begin_module`, so `self.structs` is LEFTOVER from the previously-checked module — a
@@ -237,19 +236,11 @@ impl Checker {
             }
         }
         // PASS 1a — `native type` exports (TICKET-218; std.ffi's `ptr` and C widths). Each declared
-        // name joins `sig.types` (so `import int32 from std.ffi` validates) and is licensed
-        // TRANSIENTLY: the file's own `native fn null() -> ptr` resolves `ptr` via `resolve_type`,
-        // whose `ptr`/width arms require the name in `self.imported_ffi_types`, and this harvest runs
-        // WITHOUT `begin_module`. Only the NEWLY-inserted names are removed after PASS 2, the analog
-        // of the `struct_names` transient above, so a later module still rejects a bare unimported
-        // `ptr`.
-        let mut ffi_type_transient: Vec<String> = Vec::new();
+        // name joins `sig.types`, so `import int32 from std.ffi` validates. The file's own sigs
+        // (`native fn null() -> ptr`) resolve the name through the module's own builtin binds.
         for s in &ast.stmts {
             if let StmtKind::NativeType { name, .. } = &s.kind {
                 sig.types.insert(name.clone());
-                if self.imported_ffi_types.insert(name.clone()) {
-                    ffi_type_transient.push(name.clone());
-                }
             }
         }
         // PASS 1c — protocol exports (TICKET-250; std.concurrency's `StructuralEq`). The protocol is
@@ -335,17 +326,7 @@ impl Checker {
         for s in &ast.stmts {
             if let StmtKind::Native(decl) = &s.kind {
                 let fsig = self.harvest_native_fn_sig(decl, false);
-                // `timer` is an opcode-backed BARE-callable builtin (lowers to `Op::NewTimer`, no runtime
-                // value): keep it OUT of `sig.members` (else the From-import arm binds it as a normal
-                // callable, breaking bare-callability). Stash its sig for the bare `timer(...)` expr arm
-                // and license the import through `sig.types`. `timer` is a reserved name declared in
-                // exactly one `.chz`, so this name match is unambiguous and self-scoping.
-                if decl.name == "timer" {
-                    sig.types.insert("timer".to_string());
-                    self.time_timer_sig = Some(fsig);
-                } else {
-                    sig.insert_fn(decl.name.clone(), fsig);
-                }
+                sig.insert_fn(decl.name.clone(), fsig);
             }
         }
         // PASS 2b — module-level BODIED fns (the hybrid native+Chezzi module form). A `native` std
@@ -396,11 +377,6 @@ impl Checker {
         // Preserve import-gating: drop the transient bare-name visibility.
         for name in transient {
             self.struct_names.remove(&name);
-        }
-        // Drop the transient FFI type-license (phase 4c) — restore exactly the names this harvest
-        // inserted, so `ptr`/`int8..uint64` do NOT leak a license into a later unrelated module.
-        for name in ffi_type_transient {
-            self.imported_ffi_types.remove(&name);
         }
         // Restore `self.bare_types` to its pre-harvest state (paired with the layout restore below).
         for (name, prev) in saved_bare {

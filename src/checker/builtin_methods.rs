@@ -222,8 +222,6 @@ pub(super) fn builtin_container_sig(name: &str) -> Option<FnSig> {
         "RwShared" => (vec![Ty::Unknown], Ty::rwshared(Ty::Unknown)),
         "Atomic" => (vec![Ty::Unknown], Ty::atomic(Ty::Unknown)),
         "AtomicInt" => (vec![Ty::Int], Ty::AtomicInt),
-        // `timer(ms) -> Channel[bool]` (one-shot timeout channel).
-        "timer" => (vec![Ty::Int], Ty::channel(Ty::Bool)),
         // `Executor()` — zero-arg work queue.
         "Executor" => (vec![], Ty::Executor),
         _ => return None,

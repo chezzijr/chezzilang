@@ -133,25 +133,11 @@ fn extern_ptr_param_and_return_ok() {
     );
 }
 
-#[test]
-fn ptr_annotation_requires_ffi_import() {
-    // The opaque `ptr` type is NOT a global builtin: a bare `ptr` annotation without `import std.ffi`
-    // is an unknown type, with an FFI-specific hint. (Consistent with the width types int8..uint64.)
-    rejects(
-        "extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n",
-        "unknown type 'ptr'",
-    );
-    rejects(
-        "extern \"libc.so.6\":\n    fn tmpfile() -> ptr\n",
-        "import std.ffi",
-    );
-}
-
-/// Phase 4c leak-guard — harvesting std/ffi.chz transiently licenses `ptr`/`int8..uint64` into
-/// `imported_ffi_types` (so `native fn null() -> ptr` resolves without `begin_module`). That transient
-/// MUST be restored, or the license leaks into a sibling module that never imported std.ffi. A
-/// per-name import (`import ptr from std.ffi`) must still license bare `ptr`, and a sibling that does
-/// NOT import it must still reject bare `ptr` — even in the SAME graph where another module harvested it.
+/// Phase 4c leak-guard — harvesting std/ffi.chz binds its own `ptr`/`int8..uint64` (so
+/// `native fn null() -> ptr` resolves). That binding must not leak into a sibling module that never
+/// imported std.ffi: a per-name import (`import ptr from std.ffi`) binds bare `ptr`, and a sibling
+/// that does NOT import it still rejects bare `ptr`, even in the SAME graph where another module
+/// harvested it.
 #[test]
 fn ffi_ptr_license_does_not_leak_past_harvest() {
     // Per-name imports of the type-license names license the bare annotations.
@@ -186,25 +172,11 @@ fn ffi_ptr_license_does_not_leak_past_harvest() {
 }
 
 #[test]
-fn ptr_whole_module_import_ok() {
-    // A whole-module `import std.ffi` licenses bare `ptr` in BOTH extern signatures and annotations.
-    entry_ok(
-        "import ptr from std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
-    );
-}
-
-#[test]
 fn ptr_selective_from_import_ok() {
     // `from std.ffi import ptr` (selective) also licenses bare `ptr`.
     entry_ok(
         "import ptr from std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n    fn fclose(f: ptr) -> int\n\nh: ptr = tmpfile()\nprint(fclose(h))\n",
     );
-}
-
-#[test]
-fn ptr_rename_on_import_rejected() {
-    // `ptr` CANNOT be renamed on import — the backends key off the literal surface name.
-    entry_rejects("import ptr as P from std.ffi\n", "cannot be renamed");
 }
 
 #[test]
@@ -297,16 +269,16 @@ fn extern_str_optional_param_rejected() {
 fn extern_owned_str_return_marshallable() {
     // `owned_str` is a RETURN-ONLY marshalling type that resolves to a plain `str` for the program
     // (the ownership/free is a runtime-only distinction). `strdup(str) -> owned_str` checks clean.
-    ok(
-        "extern \"libc.so.6\":\n    fn strdup(s: str) -> owned_str\n\ns: str = strdup(\"hi\")\nprint(s)\n",
+    entry_ok(
+        "import owned_str from std.ffi\nextern \"libc.so.6\":\n    fn strdup(s: str) -> owned_str\n\ns: str = strdup(\"hi\")\nprint(s)\n",
     );
 }
 
 #[test]
 fn extern_owned_str_param_rejected() {
     // `owned_str` is RETURN-ONLY — there is no owned-in (ownership transfer into C is unsupported).
-    rejects(
-        "extern \"libc.so.6\":\n    fn f(s: owned_str) -> int\n",
+    entry_rejects(
+        "import owned_str from std.ffi\nextern \"libc.so.6\":\n    fn f(s: owned_str) -> int\n",
         "not C-marshallable",
     );
 }
@@ -316,8 +288,8 @@ fn extern_owned_str_param_via_alias_rejected() {
     // A transparent alias to `owned_str` must be rejected as a PARAM too — the surface guard has to
     // resolve alias chains, because the backends' `ctype_of` does and would otherwise emit
     // `CType::OwnedStr` for a param (a return-only CType), which the param loop cannot lower.
-    rejects(
-        "type O = owned_str\nextern \"libc.so.6\":\n    fn f(s: O) -> int\n",
+    entry_rejects(
+        "import owned_str from std.ffi\ntype O = owned_str\nextern \"libc.so.6\":\n    fn f(s: O) -> int\n",
         "not C-marshallable",
     );
 }
@@ -577,7 +549,7 @@ fn bare_owned_str_outside_extern_rejected() {
     // OUTSIDE an extern signature it silently collapsed to `str` with no import (its sibling `ptr`
     // correctly errors). Now rejected with a return-only hint.
     let errs = check_entry(
-        "fn f(x: owned_str) -> owned_str:\n    return x\nfn main():\n    print(f(\"hi\"))\nmain()\n",
+        "import owned_str from std.ffi\nfn f(x: owned_str) -> owned_str:\n    return x\nfn main():\n    print(f(\"hi\"))\nmain()\n",
     );
     assert!(
         errs.iter()
@@ -587,12 +559,12 @@ fn bare_owned_str_outside_extern_rejected() {
 }
 
 #[test]
-fn extern_owned_str_return_still_ok_no_import() {
-    // FIX B boundary on the graph path: an extern `owned_str` RETURN still type-checks with NO
-    // import (the context flag licenses it only inside the extern signature). Locks 7186 on the
-    // real CLI (build_graph + check_graph) path, not just the single-module `ok()` helper.
+fn extern_owned_str_return_ok_in_a_fn_body_program() {
+    // FIX B boundary on the graph path: an imported `owned_str` RETURN type-checks (the context flag
+    // allows it only inside the extern signature). Locks 7186 on the real CLI (build_graph +
+    // check_graph) path.
     entry_ok(
-        "extern \"libc.so.6\":\n    fn strdup(s: str) -> owned_str\n\nfn main():\n    s: str = strdup(\"hi\")\n    print(s)\nmain()\n",
+        "import owned_str from std.ffi\nextern \"libc.so.6\":\n    fn strdup(s: str) -> owned_str\n\nfn main():\n    s: str = strdup(\"hi\")\n    print(s)\nmain()\n",
     );
 }
 
@@ -857,7 +829,7 @@ mod resolve_extern_ctype {
         // Plain scalars resolve directly; a missing return annotation is void (`None`).
         let s = entry_sig(&[(
             "main.chz",
-            "extern \"libc.so.6\":\n    fn f(a: int, b: float, c: bool, s: str, p: ptr)\n",
+            "import ptr from std.ffi\nextern \"libc.so.6\":\n    fn f(a: int, b: float, c: bool, s: str, p: ptr)\n",
         )]);
         assert_eq!(
             s.params,
@@ -877,16 +849,27 @@ mod resolve_extern_ctype {
         // `owned_str` → OwnedStr; `str?` → OptStr; `owned_str?` → OptOwnedStr (return-only forms).
         let s = entry_sig(&[(
             "main.chz",
-            "extern \"libc.so.6\":\n    fn f() -> owned_str\n",
+            "import owned_str from std.ffi\nextern \"libc.so.6\":\n    fn f() -> owned_str\n",
         )]);
         assert_eq!(s.ret, Some(CType::OwnedStr));
         let s2 = entry_sig(&[("main.chz", "extern \"libc.so.6\":\n    fn f() -> str?\n")]);
         assert_eq!(s2.ret, Some(CType::OptStr));
         let s3 = entry_sig(&[(
             "main.chz",
-            "extern \"libc.so.6\":\n    fn f() -> owned_str?\n",
+            "import owned_str from std.ffi\nextern \"libc.so.6\":\n    fn f() -> owned_str?\n",
         )]);
         assert_eq!(s3.ret, Some(CType::OptOwnedStr));
+    }
+
+    #[test]
+    fn an_aliased_import_keeps_its_c_type() {
+        // An FFI type imported under another name marshals as the type it names.
+        let s = entry_sig(&[(
+            "main.chz",
+            "import int8 as Byte, ptr as Handle, owned_str as Owned from std.ffi\nextern \"libc.so.6\":\n    fn f(a: Byte, p: Handle) -> Owned\n",
+        )]);
+        assert_eq!(s.params, vec![Some(CType::Int8), Some(CType::Ptr)]);
+        assert_eq!(s.ret, Some(CType::OwnedStr));
     }
 }
 
@@ -905,8 +888,8 @@ fn extern_cyclic_option_alias_param_no_overflow() {
 #[test]
 fn extern_owned_nullable_str_return_marshallable() {
     // `owned_str?` composes owned + nullable: program sees `Option[str]`, runtime frees + nulls.
-    ok(
-        "extern \"lib\":\n    fn g(s: str) -> owned_str?\n\nmatch g(\"x\"):\n    ?v: print(v)\n    None: print(\"none\")\n",
+    entry_ok(
+        "import owned_str from std.ffi\nextern \"lib\":\n    fn g(s: str) -> owned_str?\n\nmatch g(\"x\"):\n    ?v: print(v)\n    None: print(\"none\")\n",
     );
 }
 
@@ -1115,21 +1098,6 @@ fn width_name_without_import_rejected() {
     // UNKNOWN type. (Failing-then-green: before gating, resolve_type mapped int32 -> Ty::Int
     // unconditionally so this compiled clean.) `check_src` is a lone module with no imports possible.
     rejects("x: int32 = 5\nprint(x)\n", "unknown type 'int32'");
-}
-
-#[test]
-fn ffi_type_import_cannot_be_renamed() {
-    // An FFI width type cannot be aliased on import: the backends' `ctype_of` keys off the literal
-    // surface name, so a renamed import would resolve to a type the marshaller can't lower. Reject
-    // both `import int32 as W` (name unusable) and `import int8 as int32` (silently wrong width).
-    entry_rejects(
-        "import int32 as W from std.ffi\nfn main():\n    x: W = 5\n    print(x)\n",
-        "cannot be renamed on import",
-    );
-    entry_rejects(
-        "import int8 as int32 from std.ffi\nfn main():\n    x: int32 = 5\n    print(x)\n",
-        "cannot be renamed on import",
-    );
 }
 
 #[test]
@@ -1397,11 +1365,11 @@ fn extern_named_after_unimported_native_struct_ok() {
 
 #[test]
 fn extern_named_after_imported_native_struct_rejected() {
-    // …and the import DOES license the bare ctor name (`struct_names.insert` on the is_std arm), so
-    // the collision still fires there. This pins that the `struct_names` predicate did not widen the
+    // …and the import DOES bind the bare ctor name (`struct_names`), so the collision still fires
+    // there. This pins that the `struct_names` predicate did not widen the
     // hole open.
     entry_rejects(
-        "import std.regex\n\nextern \"libc.so.6\":\n    fn Match(x: int) -> int\n",
+        "import Match from std.regex\n\nextern \"libc.so.6\":\n    fn Match(x: int) -> int\n",
         "already names a struct or variant",
     );
 }

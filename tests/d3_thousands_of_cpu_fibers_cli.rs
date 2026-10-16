@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 #[test]
 fn d3_thousands_of_cpu_fibers_all_complete() {
     let program = "\
-import std.concurrency
+import Shared from std.concurrency
 
 fn work(s: Shared[int]):
     i := 0

@@ -655,24 +655,6 @@ fn a_zero_step_faults_at_construction() {
     assert!(ok && text.contains("Range() step cannot be zero"), "{text}");
 }
 
-#[test]
-fn the_old_spellings_name_the_new_one() {
-    let cases = [
-        ("for i in range(3):\n    print(i)\n", "write `0..n`"),
-        ("xs := [1, 2, 3]\nprint(xs[0:2])\n", "write `xs[a..b]`"),
-        (
-            "xs := [1, 2, 3]\nprint(xs[::-1])\n",
-            "write `xs.reversed()`",
-        ),
-        ("print(\"abc\".reverse())\n", "write `s.reversed()`"),
-    ];
-    for (i, (src, want)) in cases.iter().enumerate() {
-        let f = write(&format!("old_{i}.chz"), src);
-        let (ok, text) = chezzi(&["run"], &f, None);
-        assert!(!ok && text.contains(want), "{src}: {text}");
-    }
-}
-
 /// (range source, model) rows of the slice table: the eight cells of owner answer B and the eleven
 /// rows measured on `range_indices`.
 fn slice_rows() -> Vec<(&'static str, Model)> {
@@ -709,7 +691,7 @@ fn every_slice_row_selects_the_same_elements_in_all_six_sliceable_types() {
     let src_head = "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\n\n\
         struct Box:\n    items: List[int]\n\n    fn slice(self, r: Range) -> List[int]:\n        return self.items[r]\n\n";
     let mut body = String::from(
-        "fn main():\n    xs := [10, 20, 30]\n    cl := ConcurrentList(RwShared([10, 20, 30]))\n    bx := Box([10, 20, 30])\n",
+        "import RwShared from std.concurrency\nfn main():\n    xs := [10, 20, 30]\n    cl := ConcurrentList(RwShared([10, 20, 30]))\n    bx := Box([10, 20, 30])\n",
     );
     let mut want = String::new();
     for (src, model) in slice_rows() {

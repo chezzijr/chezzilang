@@ -460,7 +460,7 @@ fn over_memory_counts_offheap_wire_payload() {
     // this test used to park is 1.2 MB and no longer near the cap. Three boxes of ~3.6 MB each
     // are: no single heap exceeds the cap (`one` below PASSes), only the caller's walk over
     // the three box heaps does.
-    const BOXES: &str = "import std.concurrency\n\n\
+    const BOXES: &str = "import Shared from std.concurrency\n\n\
              fn keep(acc: List[List[int]], xs: List[int]) -> List[List[int]]:\n    \
              acc.push(xs)\n    return acc\n\n\
              fn fill(n: int) -> List[Shared[List[List[int]]]]:\n    \
@@ -505,7 +505,7 @@ fn over_memory_counts_offheap_wire_payload() {
         let report = run_tests_capped(&d.write("rw_test.chz", &src), CAP);
         assert!(
             report.text.contains(want),
-            "{n} RwShared box(es): want {want}; report:\n{}",
+            "import RwShared from std.concurrency\n{n} RwShared box(es): want {want}; report:\n{}",
             report.text
         );
     }
@@ -555,7 +555,7 @@ fn over_memory_counts_an_executor_result_backlog() {
     // nothing to trigger a GC on; see the W7-26r sampling residual on the gaps.md row).
     let ex = d.write(
         "ex_test.chz",
-        "import std.concurrency\n\ntest fn execres():\n    parts: List[str] = []\n    \
+        "import Executor from std.concurrency\n\ntest fn execres():\n    parts: List[str] = []\n    \
              for i in 0..10000:\n        parts.push(\"0123456789\")\n    \
              blob := \"\".join(parts)\n    ex := Executor()\n    for i in 0..300:\n        \
              ex.submit(fn(): print(blob))\n    ex.shutdown()\n    assert true\n",
@@ -624,7 +624,7 @@ fn over_memory_trips_while_the_parent_is_blocked_in_a_join() {
     let ex = d.write(
         "join_test.chz",
         &format!(
-            "import std.concurrency\n\n{noisy}test fn exjoin():\n    ex := Executor()\n    \
+            "import Executor from std.concurrency\n\n{noisy}test fn exjoin():\n    ex := Executor()\n    \
                  for i in 0..300:\n        ex.submit(noisy)\n    ex.shutdown()\n    assert true\n"
         ),
     );
@@ -693,7 +693,7 @@ fn over_memory_counts_jobs_queued_but_not_started() {
     // the submit loop — hence a body that spins past it.
     let prog = |blob_len: usize, body: &str| {
         format!(
-            "import std.concurrency\nimport std.time\n\ntest fn queued():\n    \
+            "import Executor from std.concurrency\nimport std.time\n\ntest fn queued():\n    \
                  parts: List[str] = []\n    \
                  for i in 0..{blob_len}:\n        parts.push(\"0123456789\")\n    \
                  blob := \"\".join(parts)\n    deadline := time.monotonic() + 1.0\n    \
@@ -763,7 +763,7 @@ fn over_memory_counts_jobs_queued_but_not_started() {
     let d3 = TmpDir::new();
     let shared = d3.write(
         "shared_test.chz",
-        "import std.concurrency\nimport std.time\n\ntest fn queued():\n    \
+        "import Executor, Shared from std.concurrency\nimport std.time\n\ntest fn queued():\n    \
              parts: List[str] = []\n    for i in 0..100000:\n        \
              parts.push(\"0123456789\")\n    box := Shared(\"\".join(parts))\n    \
              deadline := time.monotonic() + 1.0\n    \
@@ -786,7 +786,7 @@ fn over_memory_counts_jobs_queued_but_not_started() {
     let d4 = TmpDir::new();
     let selfcap = d4.write(
         "selfcap_test.chz",
-        "import std.concurrency\n\ntest fn queued():\n    ex := Executor()\n    \
+        "import Executor from std.concurrency\n\ntest fn queued():\n    ex := Executor()\n    \
              fn job() -> int:\n        mine := ex\n        return 1\n    \
              ex.submit(job)\n    ex.shutdown()\n    assert true\n",
     );
@@ -809,7 +809,7 @@ fn over_memory_counts_a_nested_core_backlog() {
     let d = TmpDir::new();
     let nested = d.write(
         "nested_test.chz",
-        "import std.concurrency\n\nfn make() -> Shared[Channel[str]]:\n    \
+        "import Shared from std.concurrency\n\nfn make() -> Shared[Channel[str]]:\n    \
              ch := Channel[str](100000)\n    return Shared(ch)\n\n\
              test fn nested():\n    s := make()\n    parts: List[str] = []\n    \
              for i in 0..100000:\n        parts.push(\"0123456789\")\n    \
@@ -839,7 +839,7 @@ fn over_memory_counts_a_nested_core_backlog() {
     let report = run_tests_capped(&d.write("nested_test.chz", &src), CAP);
     assert!(
         report.text.contains("OVER-MEMORY nested"),
-        "a backlog behind a core nested in a RwShared must trip the cap; report:\n{}",
+        "import RwShared from std.concurrency\na backlog behind a core nested in a RwShared must trip the cap; report:\n{}",
         report.text
     );
 }
@@ -1269,7 +1269,7 @@ fn under_cap_still_passes_with_many_handles_to_one_core() {
     // ~1 MB parked off-heap, 50 live reconstructed handles to that ONE core, 8 MB cap.
     let f = d.write(
             "alias_test.chz",
-            "import std.concurrency\n\ntest fn alias():\n    xs: List[int] = []\n    \
+            "import Shared from std.concurrency\n\ntest fn alias():\n    xs: List[int] = []\n    \
              for i in 0..20000:\n        xs.push(i)\n    s := Shared(xs)\n    \
              ch := Channel[Shared[List[int]]](100)\n    for i in 0..50:\n        ch.send(s)\n    \
              hs: List[Shared[List[int]]] = []\n    for i in 0..50:\n        hs.push(ch.recv())\n    \
@@ -1488,7 +1488,7 @@ fn timeout_reaches_a_job_blocked_on_a_channel_and_on_wait() {
         assert!(!report.passed, "{name} report:\n{}", report.text);
         assert!(
             report.text.contains("TIMED-OUT t"),
-            "{name}: --timeout must reach a job blocked in an eager Executor; report:\n{}",
+            "import Executor from std.concurrency\n{name}: --timeout must reach a job blocked in an eager Executor; report:\n{}",
             report.text
         );
         assert!(
@@ -1837,7 +1837,7 @@ fn timeout_aborts_a_netpoller_parked_test() {
         (
             "netaccept_test.chz",
             "import std.net\n\
-                 fn serve(server: Listener):\n    \
+                 fn serve(server: net.Listener):\n    \
                      _ := server.accept()\n\
                  test fn t():\n    \
                      match net.listen(\"127.0.0.1:0\"):\n        \
@@ -1905,7 +1905,7 @@ fn a_netpoller_aborted_task_still_runs_its_defers() {
     let f = d.write(
         "netdefer_test.chz",
         "import std.net\n\
-             fn serve(server: Listener):\n    \
+             fn serve(server: net.Listener):\n    \
                  match server.accept():\n        \
                      ?conn:\n            \
                          defer:\n                \
@@ -1966,7 +1966,7 @@ fn timeout_aborts_a_joiner_whose_job_has_no_checkpoint() {
     let d = TmpDir::new();
     let f = d.write(
         "joinnocp_test.chz",
-        "import std.concurrency\n\
+        "import Executor from std.concurrency\n\
              import std.process\n\
              fn uninterruptible():\n    \
                  r := recover: process.run(\"sleep 2\")\n\
@@ -2007,7 +2007,7 @@ fn a_finished_jobs_output_survives_a_timeout_bail() {
     let d = TmpDir::new();
     let f = d.write(
         "bailflush_test.chz",
-        "import std.concurrency\n\
+        "import Executor from std.concurrency\n\
              import std.process\n\
              import std.time\n\
              fn quick():\n    \
@@ -2056,7 +2056,7 @@ fn a_bailed_join_stops_its_jobs_from_starting_new_work() {
     let f = d.write(
         "bailcancel_test.chz",
         &format!(
-            "import std.concurrency\n\
+            "import Executor from std.concurrency\n\
                  import std.process\n\
                  fn two_blocking():\n    \
                      r1 := recover: process.run(\"sleep 1\")\n    \
@@ -2100,7 +2100,7 @@ fn a_slow_but_healthy_job_at_the_exit_drain_is_untouched() {
     let d = TmpDir::new();
     let f = d.write(
         "slowdrain_test.chz",
-        "import std.concurrency\n\
+        "import Executor from std.concurrency\n\
              import std.time\n\
              fn slow():\n    \
                  time.sleep_ms(800)\n    \
@@ -2193,7 +2193,7 @@ fn a_socket_timeout_is_still_catchable_under_a_generous_timeout() {
     let f = d.write(
         "netcatch_test.chz",
         "import std.net\n\
-             fn serve(server: Listener, out: Channel[str]):\n    \
+             fn serve(server: net.Listener, out: Channel[str]):\n    \
                  match server.accept(150):\n        \
                      ?conn: out.send(\"UNEXPECTED CONNECTION\")\n        \
                      !e: out.send(\"ERR:\" + e.message())\n\

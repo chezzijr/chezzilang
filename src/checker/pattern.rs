@@ -1546,14 +1546,11 @@ impl Checker {
             None => {
                 // A bare variant name in a pattern must be imported (`import V from Enum`, or the
                 // prelude's four) or written qualified.
-                if !self.imported_variants.contains_key(name) {
-                    if self.variant_owners.contains_key(name) {
-                        let hint = self.qualify_hint(name);
-                        self.error(span, hint);
-                    } else if let Some(msg) = super::suggest::removed_name_message(name) {
-                        // `Some(v)` / `Ok(v)` / `Err(e)`: removed spellings of `?v` / `!e`.
-                        self.error(span, msg);
-                    }
+                if !self.imported_variants.contains_key(name)
+                    && self.variant_owners.contains_key(name)
+                {
+                    let hint = self.qualify_hint(name);
+                    self.error(span, hint);
                 }
             }
         }

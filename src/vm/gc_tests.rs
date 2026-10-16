@@ -294,7 +294,7 @@ main()";
 #[test]
 fn rwshared_struct_eq_survives_gc_stress() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 struct K:
     n: int
@@ -600,7 +600,7 @@ main()";
 /// into nested cores.
 #[test]
 fn nested_core_contents_survive_gc_stress() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 fn stash(s: Shared[Channel[str]]):
     ch := s.get()
     ch.send(\"hello\")
@@ -624,7 +624,7 @@ main()";
 /// nested user-fn call; the boxed list's elements stay reachable through collections).
 #[test]
 fn shared_box_survives_gc_stress() {
-    let src = "\
+    let src = "import Shared from std.concurrency\n\
 fn appended(xs: List[str], v: str) -> List[str]:
     xs.push(v)
     return xs
@@ -675,7 +675,7 @@ main()";
 /// Watchdogged: the regression is a HANG, which would otherwise stall the whole test binary.
 #[test]
 fn eager_executor_self_capturing_closure_survives_gc_stress_parallel() {
-    let src = "\
+    let src = "import Executor from std.concurrency\n\
 fn main():
     ch := Channel[str]()
     ex := Executor()
@@ -698,7 +698,7 @@ main()";
 
 #[test]
 fn executor_tasks_survive_gc_stress() {
-    let src = "\
+    let src = "import Executor from std.concurrency\n\
 fn work(tag: str, out: Channel[str]):
     out.send(\"{tag}!\")
 fn main():
@@ -794,7 +794,7 @@ main()";
 #[test]
 fn rwshared_probe_struct_key_rooted_across_hash() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 import ConcurrentMap, ConcurrentSet from std.concurrency.collection
 struct P:
     x: int
@@ -830,7 +830,7 @@ main()";
 #[test]
 fn gc_stress_values_parked_in_cores() {
     let src = "\
-import std.concurrency
+import Atomic, Executor, RwShared, Shared from std.concurrency
 
 struct Bag:
     xs: List[str]
@@ -1017,7 +1017,7 @@ main()";
 #[test]
 fn shared_state_survives_collections_inside_its_closure() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 struct Acc:
     log: List[str]
     n: int
@@ -1056,7 +1056,7 @@ main()";
 #[test]
 fn rwshared_state_and_reader_copies_survive_collections() {
     let src = "\
-import std.concurrency
+import RwShared from std.concurrency
 # The std-internal primitives are called directly: this harness compiles one module.
 struct Acc:
     log: List[str]
@@ -1115,7 +1115,7 @@ main()";
 #[test]
 fn box_slot_door_cache_is_rooted_across_collections() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 KS: str = \"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\"
 fn probe(x: int) -> int:
     n := KS.len()
@@ -1138,7 +1138,7 @@ main()";
 #[test]
 fn nested_shared_calls_survive_collections_at_every_depth() {
     let src = "\
-import std.concurrency
+import Shared from std.concurrency
 G: List[str] = [str(1), str(2)]
 fn main():
     a: Shared[List[str]] = Shared([str(0)])

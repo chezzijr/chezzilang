@@ -654,14 +654,11 @@ determinism.
 
 ## 6. `Shared[T]` — the cross-task mutable box
 
-> **`import std.concurrency`.** `Shared`, `RwShared`, `Atomic`, `AtomicInt`, and `Executor` are **not**
-> global builtins — a module must `import std.concurrency` (whole-module licenses all of them) or
-> `import Shared from std.concurrency` (per-name) before using them; bare use is an
-> `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They also
-> stay **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` stays global;
-> `timer(ms)` now requires **`import std.time`** (whole-module, or `import timer from std.time`) — see
-> §6c. (`std.concurrency` is a file-less native module that exists only to license these four names;
-> the constructors are lowered by the compiler, so there is zero runtime cost to the import.)
+> **Members of `std.concurrency`.** `Shared`, `RwShared`, `Atomic`, `AtomicInt` and `Executor` are
+> ordinary members of `std.concurrency`: `import Shared from std.concurrency` (an alias works) binds the
+> bare name, and `import std.concurrency` gives `concurrency.Shared(0)`. A whole-module import binds no
+> bare name. `Channel` is global; `timer(ms)` is an ordinary `std.time` function (§6c). The constructors
+> lower to dedicated opcodes, so the import costs nothing at run time.
 
 Captured locals **cross into a task as copies** ([§7](#7-sendability)) — same-task capture is by
 reference, but the task boundary deep-copies — so a task can't mutate the parent's state. When
@@ -861,11 +858,11 @@ is `Atomic(v)` on a `v: T` inside a generic body. Write `fn mk[T: StructuralEq](
 each call then checks its own `T`, and `mk(K(1))` for a `K` with the `eq` hook reports
 `type K does not satisfy StructuralEq (it has the 'eq' hook)`. Before this rule a payload built by
 substitution passed the check, and `==` answered `true` where `cas` answered `false`.
-`StructuralEq` is declared in `std/concurrency.chz` and import-gated like `Atomic`:
-`import std.concurrency` licenses it, and so does `import Atomic, StructuralEq from std.concurrency`.
-`import Atomic from std.concurrency` alone does not; the bound then reports `unknown protocol
-'StructuralEq' in bound on 'T' (import it from std.concurrency: `import std.concurrency`)`. A
-module's own `protocol StructuralEq` wins over the imported name. No type can implement the bound:
+`StructuralEq` is declared in `std/concurrency.chz` and imported like any member:
+`import Atomic, StructuralEq from std.concurrency`, or `concurrency.StructuralEq` after
+`import std.concurrency`. Without it the bound reports `unknown protocol 'StructuralEq' in bound on
+'T'; import it from std.concurrency (`import StructuralEq from std.concurrency`)`. A module's own
+`protocol StructuralEq` is its own protocol. No type can implement the bound:
 the checker answers it from the payload's shape. Because no checker walk can see through a protocol existential payload, the VM ALSO switches the
 `eq` hook off for the compare — the no-user-code-under-the-lock property is enforced, not assumed. **`cas` on a payload that holds a `fn` value is rejected too**
 (TICKET-144, W14-24; `Atomic[fn() -> int]`, a struct field or `List` element of `fn` type): every `load()` returns a fresh copy of the closure and
@@ -884,7 +881,7 @@ vs `Shared`: reach for `Atomic` when a lock-free-style counter/flag/CAS-loop is 
 `AtomicInt` is `Atomic[T]`'s monomorphic-int sibling. Because it is statically `int` (no `[T]`, nothing to
 widen), it is backed by a genuine lock-free `std::sync::atomic::AtomicI64` — no `Mutex`, no runtime
 type-sniffing — exactly like Rust's `AtomicI64`, Java's `AtomicInteger`, or Go's `atomic.Int64` (each also
-distinct from the generic reference cell). Same import gate and reserved name as `Atomic`; constructed
+distinct from the generic reference cell). A `std.concurrency` member like `Atomic`; constructed
 `AtomicInt(v)` with one int arg. The method surface is identical to `Atomic`'s but all int-typed, and
 `add`/`sub` are **always** available (int is always numeric — no residual numeric gate):
 
@@ -1066,10 +1063,8 @@ elapsed. It is the **composable timeout primitive**: instead of a bespoke timeou
 timeout is just another channel you can receive from — and, once `wait` lands (§6d), race against real
 channels.
 
-`timer` requires **`import std.time`** (whole-module, or `import timer from std.time`) — it is NOT a
-global builtin (it stays a reserved name: no user `struct timer`/`fn timer`). `timer` is opcode-backed,
-so the import is checker-only licensing with zero runtime cost; bare use without the import is an
-`unknown function 'timer' (import it from std.time: \`import std.time\`)` error.
+`timer` is an ordinary `std.time` function: `time.timer(ms)` after `import std.time`, or
+`import timer from std.time` (an alias works, and `f := time.timer` is a function value).
 
 ```chezzi
 import timer from std.time
