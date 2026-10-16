@@ -1053,7 +1053,7 @@ fn a_decl_site_default_binder_is_alpha_renameable() {
 /// binder_blind` is the free-fn half.
 ///
 /// Measured before this fix: both `Holder[int](1)` (turbofish-pinned) and `Holder(1)` (unpinned) are
-/// rejected identically with *Holder() expects 2 argument(s), got 1*.
+/// rejected identically with *'Holder' expects 2 argument(s), got 1*.
 ///
 /// Uses `ok_desugared`, not `ok`: `ok`/`check_src` runs `lexer` + `parser` + `check` and SKIPS
 /// desugar, which production always runs (`resolver::build_graph`). This defect's ctor half lives in
@@ -1076,7 +1076,7 @@ fn w8_47_free_fn_default_arity_is_binder_blind() {
 /// W8-47's free-fn fix reads `sig.min_params`, computed by `ast::min_callable_params`. That fn
 /// returns `params.len()` (the FULL arity, no shrink) whenever the sig carries witness params, so a
 /// witness-taking callee keeps its exact arity refusal even though its trailing default is
-/// callee-filled. Pin: `conv() expects 2 argument(s), got 1` must still fire here.
+/// callee-filled. Pin: `'conv' expects 2 argument(s), got 1` must still fire here.
 ///
 /// Goes red if step 2's gate is widened to ignore `sig.min_params`, or if
 /// `min_callable_params`'s `has_witness_params` early return is deleted.
@@ -1084,18 +1084,18 @@ fn w8_47_free_fn_default_arity_is_binder_blind() {
 fn w8_47_a_witness_taking_callee_keeps_its_full_arity() {
     rejects_desugared(
         "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(7)\nfn conv[T: Default](a: int, b: List[T] = List()) -> T:\n    return T.default()\nfn f[T: Default](x: T) -> T:\n    return conv(1)\n",
-        "conv() expects 2 argument(s), got 1",
+        "'conv' expects 2 argument(s), got 1",
     );
 }
 
 /// W8-47 -- an UNPINNED generic ctor default is still refused: `Checker::bind_call` has no type
 /// arguments to forward, so it leaves the `Dflt::GenericProvider` slot unfilled and the field stays
-/// required. Measured before this fix: `Holder() expects 2 argument(s), got 1`. The wording matches
+/// required. Measured before this fix: `'Holder' expects 2 argument(s), got 1`. The wording matches
 /// Rust's `error[E0282]: type annotations needed for Holder<_>` on the same shape.
 ///
 /// Goes red if step 11's `call_targs.len() != *tps` guard is dropped (the splice would happen,
 /// giving `cannot infer type parameter T for 'mkl'` instead) or if step 14's message is dropped
-/// (the error would stay `Holder() expects 2 argument(s), got 1`).
+/// (the error would stay `'Holder' expects 2 argument(s), got 1`).
 #[test]
 fn w8_47_an_unpinned_generic_ctor_default_is_still_refused() {
     let src = "struct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\nstruct Holder[T]:\n    n: int\n    items: List[G[T]] = mkl()\nfn main():\n    h := Holder(1)\n    print(h.n)\nmain()\n";
@@ -1113,7 +1113,7 @@ fn w8_47_an_unpinned_generic_ctor_default_is_still_refused() {
 #[test]
 fn w8_47_a_bounded_struct_type_param_keeps_the_callee_filled_refusal() {
     let src = "protocol Show:\n    fn show(self) -> str\nstruct G[T]:\n    v: T\nfn mkl[T]() -> List[G[T]]:\n    xs: List[G[T]] = []\n    return xs\nstruct Holder[T: Show]:\n    n: int\n    items: List[G[T]] = mkl()\nfn main():\n    h := Holder[int](1)\n    print(h.n)\nmain()\n";
-    rejects_desugared(src, "Holder() expects 2 argument(s), got 1");
+    rejects_desugared(src, "'Holder' expects 2 argument(s), got 1");
 }
 
 /// W8-47's `?` widening: giving a generic struct field a provider means the provider BODY is now

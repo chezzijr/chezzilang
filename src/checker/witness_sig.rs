@@ -445,7 +445,7 @@ impl Checker {
     ///   refuses the WITNESS-taking shape is `ast::min_callable_params`, which returns
     ///   `sig.params.len()` (not the shrunk count) whenever the sig carries witness params or is
     ///   variadic: `fn conv[T: Default](a: int, b: List[T] = List())` called as `conv(1)` inside a
-    ///   witness-taking caller stays `conv() expects 2 argument(s), got 1`.
+    ///   witness-taking caller stays `'conv' expects 2 argument(s), got 1`.
     ///
     /// A change to either — splicing moved after the hoist, or `min_callable_params`'s witness-params
     /// early return deleted — re-opens the hole silently. The defaulted-parameter case in

@@ -271,7 +271,7 @@ fn carrier_enum_grid() {
         "C16 arity",
         "print(Som(1, 2))\n",
         None,
-        Rejects("Som() expects 1 argument(s), got 2"),
+        Rejects("'Som' expects 1 argument(s), got 2"),
     );
     twin(
         c,

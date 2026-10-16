@@ -522,7 +522,7 @@ impl Checker {
         if args.len() != n {
             self.error(
                 span,
-                format!("{name}() expects {n} argument(s), got {}", args.len()),
+                format!("'{name}' expects {n} argument(s), got {}", args.len()),
             );
         }
     }
