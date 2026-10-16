@@ -1138,8 +1138,8 @@ fn type_name_not_firstclass_value() {
 
 #[test]
 fn container_ctor_not_firstclass_value() {
-    // Phase 2b: folding the four container ctors (range/List/Map/Set) into the native-prelude table as
-    // `Intrinsic::Ctor` rows (`first_class: false`) must NOT make them first-class values — a
+    // The container ctors (List/Map/Set) are `Builtin` ids with `first_class() == false`, so they
+    // are NOT first-class values — a
     // value-position use stays REJECTED, on the same fall-through path as the scalar ctors (`f := int`)
     // and user struct ctors (`f := Point`). The `first_class == false` gate keeps them off the
     // `LoadBuiltin`/`Ty::BuiltinFn` arm.
@@ -1160,8 +1160,8 @@ fn container_ctor_not_firstclass_value() {
 
 #[test]
 fn scalar_ctor_not_firstclass_value() {
-    // Phase 2a: folding the five scalar-conversion ctors (int/float/str/bytes/bytearray) into the
-    // native-prelude table as `Intrinsic::Ctor` rows must NOT make them first-class values — a
+    // The scalar-conversion ctors (int/float/str/bytes/bytearray) are `Builtin` ids with
+    // `first_class() == false`, so they are NOT first-class values — a
     // value-position use (`f := int`) stays REJECTED, on the same fall-through path as `f := List`
     // (the `first_class == false` gate keeps them off the `LoadBuiltin`/`Ty::BuiltinFn` arm).
     rejects("fn w():\n    f := int\n", "int");

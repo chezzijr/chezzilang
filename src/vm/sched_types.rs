@@ -458,8 +458,8 @@ pub(super) enum SnapValue {
         kind: crate::native::Kind,
     },
     /// A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) — SENDABLE (pure code). Carries
-    /// only the name; replayed as a fresh `Obj::Builtin`.
-    Builtin(Box<str>),
+    /// only the id; replayed as a fresh `Obj::Builtin`.
+    Builtin(crate::base::builtin::Builtin),
     /// TICKET-183 — an uninitialized let slot (its let had not run at the spawn); replays to
     /// `Value::uninit(line)`, so the task's read faults like the parent's would.
     Uninit(u32),

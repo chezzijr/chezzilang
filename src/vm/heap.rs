@@ -309,12 +309,11 @@ pub enum Obj {
         func: crate::native::NativeFn,
         kind: crate::native::Kind,
     },
-    /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`), carried by name.
+    /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`), carried by id.
     /// Produced by `Op::LoadBuiltin` when the name is used in value position; calling it (via
-    /// `invoke_value`) routes back into the same builtin logic direct calls use. A GC LEAF (holds
-    /// only a name `Box<str>`, no `GcRef`s), like `Native`. SENDABLE (pure code) — crosses the airlock
-    /// by cloning the name. The interp twin is `Value::Builtin`.
-    Builtin(Box<str>),
+    /// `invoke_value`) routes back into the same builtin logic direct calls use. A GC LEAF (no
+    /// `GcRef`s), like `Native`. SENDABLE (pure code) — crosses the airlock by copying the id.
+    Builtin(crate::base::builtin::Builtin),
     /// A dynamic C-ABI FFI function (`extern "lib":`). Wraps the `dlopen`'d library + resolved
     /// symbol + marshalling signature behind an `Arc` (so it is `Send` for `--parallel` and shared
     /// by the M:N snapshot path without re-`dlopen`). Holds no `GcRef`s, so it has no GC children.

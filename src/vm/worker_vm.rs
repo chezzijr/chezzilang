@@ -1027,9 +1027,9 @@ impl Vm {
                 }
             },
             Obj::Native { name, func, kind } => SnapValue::Native { name, func, kind },
-            // A first-class builtin fn is pure code — SENDABLE. Carry the name; the worker re-allocs
+            // A first-class builtin fn is pure code — SENDABLE. Carry the id; the worker re-allocs
             // a fresh `Obj::Builtin` on replay (like `Native`, but with no fn pointer to share).
-            Obj::Builtin(name) => SnapValue::Builtin(name),
+            Obj::Builtin(b) => SnapValue::Builtin(b),
             // A Cffi shares its `Arc` to the worker (which shares the parent address space): the
             // worker re-allocs `Obj::Cffi` from the SAME Arc — no re-dlopen, no symbol re-resolution.
             Obj::Cffi(c) => SnapValue::Cffi(Arc::clone(&c)),
@@ -1434,10 +1434,8 @@ impl Vm {
                     }
                 })
             }
-            // The heap's one `Obj::Builtin` for this name ([`Vm::fn_value`], TICKET-226).
-            SnapValue::Builtin(name) => {
-                self.fn_value(FnKey::Builtin(name.clone()), || Obj::Builtin(name.clone()))
-            }
+            // The heap's one `Obj::Builtin` for this id ([`Vm::fn_value`], TICKET-226).
+            SnapValue::Builtin(b) => self.fn_value(FnKey::Builtin(*b), || Obj::Builtin(*b)),
             SnapValue::Uninit(line) => Value::uninit(*line),
             // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
             SnapValue::Cffi(c) => self.fn_value(FnKey::Cffi(Arc::as_ptr(c) as usize), || {

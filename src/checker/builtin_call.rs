@@ -5,22 +5,20 @@ use super::expr::single_targ;
 use super::*;
 
 impl Checker {
-    /// A call of the builtin `name` (the rule table answered `Resolution::Builtin`). The
-    /// `range`/`List`/`Set`/`Map` arms are the ctor-RETURN-TYPE / generic-inference source for the
-    /// container ctors (arity/overload check, element-type inference) — NOT a flat `FnSig`, so it
-    /// stays HERE. Their `CallBuiltin` DISPATCH is table-sourced (the `Intrinsic::Ctor` PRELUDE
-    /// rows); `builtin_container_sig` supplies only the flat display/placeholder sig. See
-    /// `Intrinsic`. `None` for a first-class builtin fn with no arm here: the value call types it.
+    /// A call of builtin `b` (the rule table answered `Resolution::Builtin`). The
+    /// `List`/`Set`/`Map` arms are the ctor-RETURN-TYPE / generic-inference source for the
+    /// container ctors (arity/overload check, element-type inference), which no flat `FnSig`
+    /// states; `builtin_container_sig` supplies only the flat display/placeholder sig.
     pub(super) fn infer_builtin_call(
         &mut self,
-        name: &str,
+        b: Builtin,
         args: &[Expr],
         targs: &[Ty],
         span: Span,
         hint: Option<&Ty>,
     ) -> Option<Ty> {
-        match name {
-            "print" => {
+        match b {
+            Builtin::Print => {
                 for a in args {
                     self.infer_value(a);
                 }
@@ -31,7 +29,7 @@ impl Checker {
             // It never returns, so it is bottom-typed (`Ty::Unknown`): in value position it absorbs
             // into the other branch's concrete type via `unify_branch`, and in tail position
             // `flow::stmt` (via `call_diverges` on this Resolution) treats it as a divergence.
-            "panic" => {
+            Builtin::Panic => {
                 self.check_arity("panic", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
@@ -74,7 +72,7 @@ impl Checker {
                 }
                 Some(Ty::Unknown)
             }
-            "int" => {
+            Builtin::Int => {
                 self.check_arity("int", 1, args, span);
                 if let Some(a) = args.first() {
                     let aty = self.infer_value(a);
@@ -83,7 +81,7 @@ impl Checker {
                 self.infer_all(args.get(1..).unwrap_or(&[]));
                 Some(Ty::Int)
             }
-            "float" => {
+            Builtin::Float => {
                 self.check_arity("float", 1, args, span);
                 if let Some(a) = args.first() {
                     let aty = self.infer_value(a);
@@ -92,7 +90,7 @@ impl Checker {
                 self.infer_all(args.get(1..).unwrap_or(&[]));
                 Some(Ty::Float)
             }
-            "bool" => {
+            Builtin::Bool => {
                 self.check_arity("bool", 1, args, span);
                 // `bool(x)` is a total truthiness cast over the scalars (int/float/bool/str) —
                 // like `str`, it accepts any SCALAR. But an AGGREGATE arg
@@ -104,13 +102,13 @@ impl Checker {
                 self.infer_all(args.get(1..).unwrap_or(&[]));
                 Some(Ty::Bool)
             }
-            "str" => {
+            Builtin::Str => {
                 self.check_arity("str", 1, args, span);
                 // `str` is the Stringable display cast (accepts anything).
                 self.infer_all(args);
                 Some(Ty::Str)
             }
-            "ord" => {
+            Builtin::Ord => {
                 self.check_arity("ord", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
@@ -153,7 +151,7 @@ impl Checker {
                 }
                 Some(Ty::Int)
             }
-            "chr" => {
+            Builtin::Chr => {
                 self.check_arity("chr", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
@@ -201,7 +199,7 @@ impl Checker {
             // `[0, 1, 2]` and `List(5..)` runs until memory ends, as `List(g())` does for an endless
             // generator (TICKET-253). The argument is REQUIRED: an empty list is the `[]` literal
             // (zero args can't infer T).
-            "List" => {
+            Builtin::List => {
                 // `List[T]()` — explicit element type (turbofish), bare `List()` — empty list whose
                 // element type comes from the expected type on its own statement (mirrors `Set()`), and
                 // `List(it)` builds from any for-iterable. With a turbofish AND an iterable, the
@@ -261,7 +259,7 @@ impl Checker {
                     }
                 }
             }
-            "Set" => {
+            Builtin::Set => {
                 // `Set()`/`Set[T]()` → empty set (element from the turbofish, else from the expected
                 // type on its own statement, like `{}` for maps); `Set(it)` → a set from ANY iterable VALUE
                 // (broadened from list-only), deduped. The element type flows through `iter_elem`;
@@ -329,7 +327,7 @@ impl Checker {
             // a STATIC error here (not a runtime surprise). K must be Hashable. Last-wins on duplicate
             // keys (like the `{k: v}` literal). The argument is REQUIRED: an empty map is the `{}`
             // literal. (Free-call `map(it)` is a distinct namespace from the `xs.map(f)` list HOF.)
-            "Map" => {
+            Builtin::Map => {
                 // `Map[K, V]()` → typed empty map (turbofish); bare `Map()` → empty map typed by the
                 // expected type on its own statement (mirrors the `{}` literal and `Set()`); `Map(it)` →
                 // a map from an iterable of EXACTLY 2-tuples. With a turbofish AND an iterable, the
@@ -453,7 +451,7 @@ impl Checker {
             // `bytearray()` (empty), `bytearray(N)` (N zero bytes), `bytearray(b)` (from a `bytes`,
             // mutable copy), `bytearray([ints])` (from a `list[int]`, each 0–255 validated at runtime),
             // and `bytearray(ba)` (copy). Always infers `bytearray`.
-            "bytearray" => {
+            Builtin::ByteArray => {
                 match args.len() {
                     0 => {}
                     1 => match self.infer_value(&args[0]) {
@@ -471,7 +469,7 @@ impl Checker {
             // `bytes(...)` — the conversion bridge to the IMMUTABLE form (also constructor-only; the
             // `b"..."` literal is the other way to make a `bytes`). `bytes(ba)` snapshots a `bytearray`,
             // `bytes(b)` copies a `bytes`, `bytes([ints])` builds from a `list[int]`. Infers `bytes`.
-            "bytes" => {
+            Builtin::Bytes => {
                 match args.len() {
                     1 => match self.infer_value(&args[0]) {
                         Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
@@ -520,7 +518,7 @@ impl Checker {
                 }
                 Some(Ty::Bytes)
             }
-            "Channel" => {
+            Builtin::Channel => {
                 // `Channel[T]()` — an unbounded mailbox; `Channel[T](cap)` — a bounded FIFO whose
                 // `send` blocks when `cap` messages are queued. The element type comes from the explicit
                 // type argument (it can't be inferred), and must be sendable. The optional capacity is a
@@ -553,7 +551,7 @@ impl Checker {
                 }
                 Some(Ty::channel(elem))
             }
-            "Shared" => {
+            Builtin::Shared => {
                 // `Shared(v)` — a fresh cross-task box initialised with `v`. The element type is
                 // inferred from the value (value-first, unlike `Channel[T]()`); an OPTIONAL `[T]`
                 // turbofish pins it and is checked against the value's type (`Shared[str](0)` rejects).
@@ -563,7 +561,7 @@ impl Checker {
                 let elem = self.concurrency_turbofish_elem("Shared", targs, inferred, span);
                 Some(Ty::shared(elem))
             }
-            "RwShared" => {
+            Builtin::RwShared => {
                 // `RwShared(v)` — a fresh cross-task read-write box initialised with `v`. The element
                 // type is inferred from the value (value-first, like `Shared`); an OPTIONAL `[T]`
                 // turbofish pins it and is checked against the value's type.
@@ -571,7 +569,7 @@ impl Checker {
                 let elem = self.concurrency_turbofish_elem("RwShared", targs, inferred, span);
                 Some(Ty::rwshared(elem))
             }
-            "Atomic" => {
+            Builtin::Atomic => {
                 // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
                 // `Shared`; an OPTIONAL `[T]` turbofish pins the element type and is checked against
                 // the value's type.
@@ -583,20 +581,19 @@ impl Checker {
                 });
                 Some(Ty::atomic(elem))
             }
-            "Executor" => {
+            Builtin::Executor => {
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
                 // Non-generic; zero arguments, or one `int` cap on the jobs running at once; a `[T]`
                 // type arg is rejected upstream.
                 self.check_args_range("Executor", &[Ty::Int], 0, args, span);
                 Some(Ty::Executor)
             }
-            "AtomicInt" => {
+            Builtin::AtomicInt => {
                 // `AtomicInt(v)` — a fresh lock-free int atomic. Monomorphic (no `[T]`); the single arg
                 // must be an int.
                 self.check_args("AtomicInt", &[Ty::Int], args, span);
                 Some(Ty::AtomicInt)
             }
-            _ => None,
         }
     }
 }

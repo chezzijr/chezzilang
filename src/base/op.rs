@@ -136,11 +136,11 @@ pub enum Op {
         cmp: Option<AssertCmp>,
     },
 
-    /// Push a first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`) by name —
+    /// Push a first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`) by id —
     /// allocates an `Obj::Builtin` and pushes its handle. Emitted only for a VALUE-position use of
     /// the name (`f := ord`, HOF arg, bare `defer print(...)`); direct calls stay on the specialized
     /// `CallPrint`/`CallBuiltin` opcodes (intercepted in `compile_call` before the value fallthrough).
-    LoadBuiltin(String),
+    LoadBuiltin(crate::base::builtin::Builtin),
 
     // ----- variables -----
     GetLocal(usize),
@@ -274,7 +274,7 @@ pub enum Op {
         method: String,
         argc: usize,
     },
-    CallBuiltin(String, usize),
+    CallBuiltin(crate::base::builtin::Builtin, usize),
     CallPrint(usize),
     /// `print(..., sep=, end=)` — stack `[arg0, …, argN-1, sep, end]`: the positional args, then the
     /// `sep` and `end` strings (user exprs or their `" "` / `"\n"` defaults), pushed last. Pops

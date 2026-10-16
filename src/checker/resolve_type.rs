@@ -339,8 +339,8 @@ impl Checker {
             Type::Generic(n, args, head_span) => {
                 // TYPE-IDENTITY source for the generic container ctors: the `List`/`Map`/`Set` arms
                 // below turn `List[int]` into `Ty::List(Int)` etc. — NOT expressible as a flat `FnSig`,
-                // so it stays HERE. Their `CallBuiltin` DISPATCH + name-set is table-sourced (the
-                // `Intrinsic::Ctor` PRELUDE rows); `builtin_container_sig` = flat display/placeholder.
+                // so it stays HERE. Their `CallBuiltin` dispatch is the `Builtin` id table
+                // (`base/builtin.rs`); `builtin_container_sig` = flat display/placeholder.
                 // `T?` / `T!E` spell the carrier privately (`$Option`): it is the prelude's carrier.
                 let carrier_key = (crate::ast::unprivate(n) != n)
                     .then(|| crate::ast::unprivate(n).to_string())

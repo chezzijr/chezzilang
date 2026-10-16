@@ -81,7 +81,7 @@ fn non_closure_proto_has_no_capture_names() {
 
 /// Native-prelude phase 1 — BYTE-IDENTICAL LOWERING PIN. Direct calls of the four first-class
 /// universe fns must lower to their specialized opcodes regardless of whether the intrinsic is
-/// selected by an ad-hoc match arm (old) or the synthetic `PRELUDE` table (new). This is the
+/// selected by an ad-hoc match arm or by the `Builtin` id table. This is the
 /// characterization lock the refactor must not move: `print(x)`→`CallPrint(1)`,
 /// `print(x, sep=…)`→`CallPrintSep{argc:1}`, `ord("a")`/`panic("m")`→`CallBuiltin(name, 1)`.
 fn all_ops(prog: &crate::base::op::Program) -> Vec<Op> {
@@ -133,36 +133,36 @@ fn direct_builtin_calls_lower_to_specialized_opcodes() {
     let ops = all_ops(&compile("ord(\"a\")\n"));
     assert!(
         ops.iter()
-            .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n == "ord")),
+            .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n.name() == "ord")),
         "ord(c) must lower to CallBuiltin(\"ord\", 1); got {ops:?}"
     );
 
     let ops = all_ops(&compile("panic(\"m\")\n"));
     assert!(
         ops.iter()
-            .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n == "panic")),
+            .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n.name() == "panic")),
         "panic(m) must lower to CallBuiltin(\"panic\", 1); got {ops:?}"
     );
 
-    // Phase 2a — the scalar-conversion CTORS must STILL lower to the name-keyed CallBuiltin,
-    // byte-identical to their old `is_builtin` fall-through (now table-driven via `Intrinsic::Ctor`).
+    // Phase 2a — the scalar-conversion CTORS must STILL lower to CallBuiltin,
+    // byte-identical to their old `is_builtin` fall-through (now `Lowering::Call`).
     for name in ["int", "float", "bool", "str", "bytes", "bytearray"] {
         let ops = all_ops(&compile(&format!("{name}(\"5\")\n")));
         assert!(
             ops.iter()
-                .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n == name)),
+                .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n.name() == name)),
             "{name}(x) must lower to CallBuiltin(\"{name}\", 1); got {ops:?}"
         );
     }
 
     // Phase 2b — the GENERIC / reserved-type container CTORS must STILL lower to the name-keyed
-    // CallBuiltin, byte-identical to their old hard-coded `is_builtin` arm (now table-driven via
-    // `Intrinsic::Ctor`). `range(5)`/`List()`/`Map()`/`Set()` each lower to `CallBuiltin(name, 1)`.
+    // CallBuiltin, byte-identical to their old hard-coded `is_builtin` arm (now `Lowering::Call`).
+    // `List()`/`Map()`/`Set()` each lower to `CallBuiltin(id, 1)`.
     for name in ["List", "Map", "Set"] {
         let ops = all_ops(&compile(&format!("{name}([])\n")));
         assert!(
             ops.iter()
-                .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n == name)),
+                .any(|o| matches!(o, Op::CallBuiltin(n, 1) if n.name() == name)),
             "{name}([]) must lower to CallBuiltin(\"{name}\", 1); got {ops:?}"
         );
     }
@@ -171,7 +171,7 @@ fn direct_builtin_calls_lower_to_specialized_opcodes() {
     let ops = all_ops(&compile("List[int]()\n"));
     assert!(
         ops.iter()
-            .any(|o| matches!(o, Op::CallBuiltin(n, 0) if n == "List")),
+            .any(|o| matches!(o, Op::CallBuiltin(n, 0) if n.name() == "List")),
         "List[int]() must lower to CallBuiltin(\"List\", 0); got {ops:?}"
     );
 }

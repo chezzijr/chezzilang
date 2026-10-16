@@ -338,10 +338,8 @@ impl Vm {
             WireValue::Reader(core) => Value::obj(self.heap.alloc(Obj::Reader(core))),
             // Rebuild a fresh `Obj::Ptr` from the raw address carried by value (heap-independent).
             WireValue::Ptr(a) => Value::obj(self.heap.alloc(Obj::Ptr(a))),
-            // The heap's one `Obj::Builtin` for this name ([`Vm::fn_value`], TICKET-226).
-            WireValue::Builtin(name) => {
-                self.fn_value(FnKey::Builtin(name.clone()), || Obj::Builtin(name))
-            }
+            // The heap's one `Obj::Builtin` for this id ([`Vm::fn_value`], TICKET-226).
+            WireValue::Builtin(b) => self.fn_value(FnKey::Builtin(b), || Obj::Builtin(b)),
             // The heap's one `Obj::Native` for this fn ([`Vm::fn_value`], TICKET-215), from the name +
             // fn pointer carried by value (pure code) — same as the `SnapValue::Native` rebuild.
             WireValue::Native { name, func, kind } => {

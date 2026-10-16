@@ -146,16 +146,14 @@ impl Checker {
         // `Ty::BuiltinFn` here rather than the harvested variadic sig from `builtin_sig` — this is the
         // design-sanctioned split (the call authority is the variadic prelude decl; the value form is
         // fixed).
-        if let Resolution::Builtin(b) = &res
-            && b == "print"
-        {
+        if let Resolution::Builtin(Builtin::Print) = &res {
             return Ty::BuiltinFn {
                 params: vec![Ty::Unknown],
                 ret: Box::new(Ty::Nil),
             };
         }
         if let Resolution::Builtin(b) = &res
-            && is_firstclass_builtin_fn(b)
+            && b.first_class()
             && let Some(sig) = self.builtin_sig(name)
         {
             return Ty::BuiltinFn {

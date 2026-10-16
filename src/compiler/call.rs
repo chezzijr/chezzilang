@@ -13,101 +13,83 @@ impl Compiler {
     fn compile_builtin_call(
         &mut self,
         fc: &mut FnComp,
-        name: &String,
+        b: Builtin,
         args: &[Expr],
         named: &[(String, Expr)],
         span: Span,
     ) -> Result<(), CompileError> {
-        // Concurrency C4: `Channel[T]()` → a fresh mailbox; `Shared(v)` → a fresh box over the
-        // deep-copied init value. The checker validated arity (Channel: 0 args, Shared: 1).
-        if name == "Channel" {
-            // `Channel[T](cap)` — compile the optional capacity expr so it sits on the operand
-            // stack for `NewChannel(true)` to pop. `Channel[T]()` → `NewChannel(false)` (unbounded).
-            let has_cap = !args.is_empty();
-            if has_cap {
-                self.compile_expr(fc, &args[0])?;
-            }
-            fc.emit(Op::NewChannel(has_cap), span);
-            return Ok(());
-        }
-        if name == "Shared" {
-            self.compile_args(fc, args)?;
-            fc.emit(Op::NewShared, span);
-            return Ok(());
-        }
-        // `RwShared(v)` → a fresh read-write box over the deep-copied init value (checker: 1 arg).
-        if name == "RwShared" {
-            self.compile_args(fc, args)?;
-            fc.emit(Op::NewRwShared, span);
-            return Ok(());
-        }
-        // `Atomic(v)` → a fresh atomic box over the deep-copied init value (checker validated 1 arg).
-        if name == "Atomic" {
-            self.compile_args(fc, args)?;
-            fc.emit(Op::NewAtomic, span);
-            return Ok(());
-        }
-        // `AtomicInt(v)` → a fresh lock-free int atomic (checker validated 1 int arg).
-        if name == "AtomicInt" {
-            self.compile_args(fc, args)?;
-            fc.emit(Op::NewAtomicInt, span);
-            return Ok(());
-        }
-        // C5: `Executor()` → a fresh work queue; `Executor(n)` → one capped at `n` running jobs
-        // (checker validated zero arguments or one `int`).
-        if name == "Executor" {
-            if args.is_empty() {
-                fc.emit(Op::NewExecutor, span);
-                return Ok(());
-            }
-            self.compile_args(fc, args)?;
-            fc.emit(Op::NewExecutorN, span);
-            return Ok(());
-        }
-        // Native-prelude direct-call dispatch (single source of truth): a table row lowers by its
-        // `intrinsic`. `Print` → the dedicated `CallPrint`/`CallPrintSep` opcodes; `Builtin`
-        // (ord/chr/panic) and `Ctor` → `CallBuiltin` — the phase-2a scalar conversions
-        // (int/float/str/bytes/bytearray) AND the phase-2b GENERIC / reserved-type container ctors
-        // (range/List/Map/Set). This is byte-identical to the old `if name == "print"` +
-        // `is_builtin` arms; type-args are type-erased before the compiler, so `List[int]()`
-        // resolves to `Ident("List")` → the SAME `CallBuiltin`.
-        if let Some(p) = crate::checker::prelude_fn(name) {
-            self.compile_args(fc, args)?;
-            match p.intrinsic {
-                crate::checker::Intrinsic::Print => {
-                    if named.is_empty() {
-                        // Plain `print(...)`: byte-identical (space-join, trailing newline).
-                        fc.emit(Op::CallPrint(args.len()), span);
-                    } else {
-                        // `print(..., sep=, end=)`: push `sep` then `end` (each the user expr or
-                        // its default str), then a dedicated op joins+terminates. Eval order:
-                        // positional args, then sep, then end.
-                        let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
-                        let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
-                        match sep {
-                            Some(e) => self.compile_expr(fc, e)?,
-                            None => fc.emit(Op::ConstStr(" ".to_string()), span),
-                        }
-                        match end {
-                            Some(e) => self.compile_expr(fc, e)?,
-                            None => fc.emit(Op::ConstStr("\n".to_string()), span),
-                        }
-                        fc.emit(Op::CallPrintSep { argc: args.len() }, span);
+        match b {
+            // `print(...)`: space-joined, newline-terminated. With `sep=`/`end=`, push `sep` then
+            // `end` (each the user expr or its default str) after the positional args.
+            Builtin::Print => {
+                self.compile_args(fc, args)?;
+                if named.is_empty() {
+                    fc.emit(Op::CallPrint(args.len()), span);
+                } else {
+                    let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
+                    let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
+                    match sep {
+                        Some(e) => self.compile_expr(fc, e)?,
+                        None => fc.emit(Op::ConstStr(" ".to_string()), span),
                     }
-                }
-                // `Builtin` (ord/chr/panic) and `Ctor` (int/float/str/bytes/bytearray, phase 2a)
-                // both lower to the name-keyed `CallBuiltin` — byte-identical to the old
-                // `is_builtin` fall-through the scalar ctors took before the table folded them in.
-                crate::checker::Intrinsic::Builtin | crate::checker::Intrinsic::Ctor => {
-                    fc.emit(Op::CallBuiltin(name.clone(), args.len()), span);
+                    match end {
+                        Some(e) => self.compile_expr(fc, e)?,
+                        None => fc.emit(Op::ConstStr("\n".to_string()), span),
+                    }
+                    fc.emit(Op::CallPrintSep { argc: args.len() }, span);
                 }
             }
-            return Ok(());
+            Builtin::Ord
+            | Builtin::Chr
+            | Builtin::Panic
+            | Builtin::Int
+            | Builtin::Float
+            | Builtin::Bool
+            | Builtin::Str
+            | Builtin::Bytes
+            | Builtin::ByteArray
+            | Builtin::List
+            | Builtin::Map
+            | Builtin::Set => {
+                self.compile_args(fc, args)?;
+                fc.emit(Op::CallBuiltin(b, args.len()), span);
+            }
+            // `Channel[T](cap)` pops the optional capacity; `Channel[T]()` is unbounded.
+            Builtin::Channel => {
+                self.compile_args(fc, args)?;
+                fc.emit(Op::NewChannel(!args.is_empty()), span);
+            }
+            // The boxes copy their init value in (the checker validated one argument).
+            Builtin::Shared => {
+                self.compile_args(fc, args)?;
+                fc.emit(Op::NewShared, span);
+            }
+            Builtin::RwShared => {
+                self.compile_args(fc, args)?;
+                fc.emit(Op::NewRwShared, span);
+            }
+            Builtin::Atomic => {
+                self.compile_args(fc, args)?;
+                fc.emit(Op::NewAtomic, span);
+            }
+            Builtin::AtomicInt => {
+                self.compile_args(fc, args)?;
+                fc.emit(Op::NewAtomicInt, span);
+            }
+            // `Executor()` is uncapped; `Executor(n)` caps the running jobs at `n`.
+            Builtin::Executor => {
+                self.compile_args(fc, args)?;
+                fc.emit(
+                    if args.is_empty() {
+                        Op::NewExecutor
+                    } else {
+                        Op::NewExecutorN
+                    },
+                    span,
+                );
+            }
         }
-        Err(CompileError {
-            message: format!("internal: no lowering for the builtin call '{name}'"),
-            span,
-        })
+        Ok(())
     }
 
     /// `fs[k](10)`: when the checker chose the bracket's index reading (`Resolution::IndexCall`),
@@ -248,7 +230,7 @@ impl Compiler {
                     return Ok(());
                 }
                 Resolution::Builtin(b) => {
-                    return self.compile_builtin_call(fc, &b, args, named, span);
+                    return self.compile_builtin_call(fc, b, args, named, span);
                 }
                 Resolution::Member | Resolution::ModuleMember { .. } | Resolution::Fn { .. } => {}
                 other @ Resolution::Local
@@ -358,8 +340,8 @@ impl Compiler {
         }
         if let ExprKind::Ident(_) = &callee.kind {
             match self.resolution(callee)?.clone() {
-                Resolution::Builtin(name) => {
-                    return self.compile_builtin_call(fc, &name, args, named, span);
+                Resolution::Builtin(b) => {
+                    return self.compile_builtin_call(fc, b, args, named, span);
                 }
                 Resolution::StructCtor(key) => {
                     let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;

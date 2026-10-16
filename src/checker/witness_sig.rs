@@ -48,13 +48,13 @@ impl Checker {
     /// constructor this module sees (`Channel`, or a bound `Shared`: `S` after
     /// `import Shared as S from std.concurrency`), else a prelude function or constructor. An
     /// import binds before a builtin of its name, as a declaration does.
-    pub(super) fn builtin_callee(&self, n: &str) -> Option<String> {
+    pub(super) fn builtin_callee(&self, n: &str) -> Option<Builtin> {
         if let Some(b) = self.builtin_type_named(n)
             && b.has_opcode_ctor()
         {
-            return Some(b.name().to_string());
+            return Builtin::from_name(b.name());
         }
-        (self.bound_builtin(n).is_none() && prelude_fn(n).is_some()).then(|| n.to_string())
+        prelude_fn(n).filter(|_| self.bound_builtin(n).is_none())
     }
 
     /// Whether `module.name` (through a whole-module import) names a builtin type `module` owns.

@@ -15,6 +15,7 @@ use crate::ast::{
     AssignOp, BinaryOp, Block, Chunk, DeferTarget, Expr, ExprKind, FnDecl, Import, LitPattern,
     MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, WaitArmKind,
 };
+use crate::base::builtin::Builtin;
 use crate::base::module_id::ResolvedImport;
 use crate::base::op::{
     AssertCmp, CapEntry, CapSrc, CffiDef, CompileError, LIFECYCLE_HOOKS, ModuleProto, NO_IC, Op,

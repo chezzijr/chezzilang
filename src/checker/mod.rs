@@ -20,6 +20,7 @@ use crate::resolver::ModuleGraph;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+pub(crate) use crate::base::builtin::{Builtin, Lowering};
 pub(crate) use builtin_type::BuiltinType;
 pub use ty::Ty;
 pub use ty::{
@@ -329,162 +330,24 @@ fn describe_extern_type(t: &Type) -> String {
     }
 }
 
-/// Every builtin callable name: the `PRELUDE` rows and the builtin types with an opcode
-/// constructor (`Channel`, `Shared`, …). Derived from those two owners (test helper).
+/// Every builtin callable name, from [`Builtin::ALL`] (test helper).
 #[cfg(test)]
 fn builtin_callables() -> Vec<&'static str> {
-    PRELUDE
-        .iter()
-        .map(|p| p.name)
-        .chain(
-            BuiltinType::ALL
-                .into_iter()
-                .filter(|b| b.has_opcode_ctor())
-                .map(BuiltinType::name),
-        )
-        .collect()
+    Builtin::ALL.into_iter().map(Builtin::name).collect()
 }
 
-/// The kind of intrinsic a universe builtin lowers to on a DIRECT call. `Print` → the dedicated
-/// `Op::CallPrint`/`Op::CallPrintSep` opcodes (variadic + `sep=`/`end=`); `Builtin` →
-/// `Op::CallBuiltin(name, argc)` dispatched by name in the VM's `do_builtin`; `Ctor` → likewise
-/// `Op::CallBuiltin` — the phase-2a scalar-conversion constructors (int/float/str/bytes/bytearray) AND
-/// the phase-2b GENERIC / reserved-type container constructors (range/List/Map/Set). The
-/// `Print`/`Builtin` kinds back FIRST-CLASS fn values; `Ctor` rows are NON-first-class (types are not
-/// first-class values — uniform with user struct ctors), so a `Ctor` row never emits a
-/// `LoadBuiltin`/`Ty::BuiltinFn`. This table is the single source of truth for the `is_builtin` /
-/// `CallBuiltin` DISPATCH + name-set; a container ctor's generic TYPE-IDENTITY (`List[int]` →
-/// `Ty::List(Int)`, the Map hashable-key check, range arity) is NOT a flat `FnSig` and stays in
-/// `resolve_type`/`infer_named_call` (dispatch here, identity there). Metadata only — runtime dispatch
-/// stays name-keyed and unchanged (the `NativeFn` host seam only accepts int/str/map args, which is
-/// exactly why `print` needs its own `Value::Builtin`/opcode path).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Intrinsic {
-    Print,
-    Builtin,
-    Ctor,
+/// A prelude builtin: a fn or a scalar / container ctor (every [`Builtin`] but the ones with an
+/// allocation opcode, which `builtin_callee` reaches through their `BuiltinType`). The SIGNATURES
+/// of the first-class fns and scalar ctors are the `native fn` / `native ctor` decls of
+/// `std/prelude.chz` (`Checker::builtin_sig`); a container ctor's generic type identity stays in
+/// `resolve_type` / `infer_builtin_call`.
+pub(crate) fn prelude_fn(name: &str) -> Option<Builtin> {
+    Builtin::from_name(name).filter(|b| b.lowering() != Lowering::Opcode)
 }
 
-/// One row of the (now HOLLOW) native-prelude METADATA table. Phase 3a split the concern: this table
-/// keeps only the name → intrinsic → first_class METADATA — the single source of truth read by
-/// `prelude_fn` / `is_firstclass_builtin_fn`, which need only intrinsic/first_class, never a `FnSig`. The SIGNATURES of
-/// the eight migrated builtins moved OUT to the always-linked `std/prelude.chz` `native fn`/`native
-/// ctor` decls (harvested into [`Checker::native_prelude_sigs`], read by [`Checker::builtin_sig`]).
-/// `print` is now file-backed too — a variadic `native fn print(...args: Any, sep, end)` decl in
-/// `std/prelude.chz` (no synthetic Rust signature remains); only its fixed 1-arg VALUE form
-/// (`p := print`) is still synthesized in `infer_ident`, since the specialized `CallPrint` opcodes
-/// are unreachable through a bound value. The two halves are reconciled by
-/// `prelude_table_is_single_source_of_truth` so the `.chz` decls stay authoritative.
-pub(crate) struct PreludeFn {
-    pub(crate) name: &'static str,
-    pub(crate) intrinsic: Intrinsic,
-    pub(crate) first_class: bool,
-}
-
-/// The native prelude (phase 1). The four universe FUNCTIONS that are FIRST-CLASS values (bindable,
-/// passable, `defer`-able as a bare call) — unlike type/container/runtime constructors
-/// (`int`/`List`/`Channel`/…) and user struct/enum ctors, which stay non-first-class and must be
-/// wrapped in a function. First-class fns carry a dedicated runtime value
-/// (`Value::Builtin`/`Obj::Builtin`); direct calls still lower to their specialized opcodes, only
-/// value-position uses take the first-class path. The SCALAR-CONVERSION constructors
-/// (`int`/`float`/`str`/`bytes`/`bytearray`) landed in phase 2a as `Intrinsic::Ctor` rows —
-/// `first_class: false` (types are not first-class values), so they source their `CallBuiltin`
-/// dispatch metadata from this table but never emit a `LoadBuiltin`/`Ty::BuiltinFn`. Phase 3a moved
-/// their SIGNATURES (and `ord`/`chr`/`panic`'s) to `std/prelude.chz` `native` decls; this table now
-/// carries only metadata (name/intrinsic/first_class). Phase 2b folded the GENERIC / reserved-type
-/// container ctors (`range`/`List`/`Map`/`Set`) in as `Intrinsic::Ctor` rows too — so their
-/// `is_builtin`/`CallBuiltin` DISPATCH + name-set flow through THIS one table — but they are NOT
-/// `.chz`-declared (they are generic; native ctor generic-decl support is a later, maybe-never
-/// concern), and their generic TYPE-IDENTITY stays in `resolve_type`/`infer_named_call`
-/// (`builtin_container_sig` supplies only a flat display/placeholder sig). See PROGRESS.md
-/// "native-prelude table".
-pub(crate) const PRELUDE: &[PreludeFn] = &[
-    PreludeFn {
-        name: "print",
-        intrinsic: Intrinsic::Print,
-        first_class: true,
-    },
-    PreludeFn {
-        name: "ord",
-        intrinsic: Intrinsic::Builtin,
-        first_class: true,
-    },
-    PreludeFn {
-        name: "chr",
-        intrinsic: Intrinsic::Builtin,
-        first_class: true,
-    },
-    PreludeFn {
-        name: "panic",
-        intrinsic: Intrinsic::Builtin,
-        first_class: true,
-    },
-    // Phase 2a — the scalar-conversion CTORS (int/float/bool/str/bytes/bytearray). `first_class:
-    // false` (ALWAYS, for every Ctor row):
-    // a value-position use (`f := int`) stays rejected, uniform with `f := Point` / `f := List`.
-    PreludeFn {
-        name: "int",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
-    PreludeFn {
-        name: "float",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
-    PreludeFn {
-        name: "bool",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
-    PreludeFn {
-        name: "str",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
-    PreludeFn {
-        name: "bytes",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
-    PreludeFn {
-        name: "bytearray",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
-    // Phase 2b — the four GENERIC / reserved-type container CTORS. `first_class: false` (uniform with
-    // every Ctor row): `f := List` / `f := range` stay checker errors. The table is the DISPATCH
-    // single-source (`is_builtin`/`CallBuiltin`) + name-set; their generic TYPE-IDENTITY — turning
-    // `List[int]` into `Ty::List(Int)`, the Map hashable-key check, the range-arity/overload typing —
-    // is NOT a flat `FnSig` and stays in `resolve_type` (generic arms) + `infer_named_call` (ctor
-    // return typing); `builtin_container_sig` supplies only the FLAT DISPLAY/PLACEHOLDER sig used for
-    // hover/value-position. `range` is a Ctor row but NON-generic (`name_is_generic` false), so
-    // `range[int]()` still errors in `infer_named_call` — table membership is orthogonal to genericity.
-    PreludeFn {
-        name: "List",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
-    PreludeFn {
-        name: "Map",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
-    PreludeFn {
-        name: "Set",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
-];
-
-/// Look up a native-prelude row by name (linear scan over the table's rows).
-pub(crate) fn prelude_fn(name: &str) -> Option<&'static PreludeFn> {
-    PRELUDE.iter().find(|p| p.name == name)
-}
-
-/// True if `name` is a first-class universe builtin fn — the table's `.first_class` view.
+/// True if `name` is a first-class universe builtin fn.
 pub(crate) fn is_firstclass_builtin_fn(name: &str) -> bool {
-    prelude_fn(name).is_some_and(|p| p.first_class)
+    prelude_fn(name).is_some_and(Builtin::first_class)
 }
 
 /// THE declaration of the reserved (prebuilt) protocol set — one list, three consumers:

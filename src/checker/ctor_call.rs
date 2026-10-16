@@ -452,7 +452,7 @@ impl Checker {
     /// a name test: a user fn, method, local or parameter named `exit`/`panic` returns normally.
     pub(super) fn resolution_diverges(&self, r: &Resolution) -> bool {
         match r {
-            Resolution::Builtin(n) => n == "panic",
+            Resolution::Builtin(b) => *b == Builtin::Panic,
             Resolution::Fn { module, name } | Resolution::ModuleMember { module, name } => self
                 .module_idx_of
                 .iter()

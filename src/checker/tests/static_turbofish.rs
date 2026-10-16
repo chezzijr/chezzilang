@@ -959,207 +959,81 @@ fn builtin_callables_all_have_builtin_sig() {
     assert!(c.builtin_sig("totally_not_a_builtin").is_none());
 }
 
-/// Native-prelude phase 1 — DRIFT GUARD (the real payoff of this track). The synthetic `PRELUDE`
-/// table is the SINGLE SOURCE OF TRUTH for the four first-class universe FUNCTIONS
-/// (`print`/`ord`/`chr`/`panic`). This test locks every phase that used to hard-code these names to
-/// the table, so a future edit to one phase that silently diverges from the table (the whack-a-mole
-/// bug class this track kills) fails here instead of shipping a silent runtime skew.
+/// Native-prelude DRIFT GUARD: [`Builtin`] is the one table of the builtins a bare name reaches.
+/// The checker's views (`prelude_fn`, `is_firstclass_builtin_fn`, `builtin_sig`) and the
+/// `std/prelude.chz` `native` decls must agree with it.
 #[test]
 fn prelude_table_is_single_source_of_truth() {
     use std::collections::BTreeSet;
 
-    // (1) Phase 2a: the table now holds two families — the four FIRST-CLASS universe pure fns AND the
-    //     NON-first-class scalar-conversion CTORS (`Intrinsic::Ctor`). The container/reserved-type
-    //     ctors (List/Map/Set/range) are GENERIC / carry reserved-type identity → phase 2b, still OUT.
-    let firstclass: BTreeSet<&str> = PRELUDE
-        .iter()
-        .filter(|p| p.first_class)
-        .map(|p| p.name)
+    // (1) The first-class builtins are the four universe fns.
+    let firstclass: BTreeSet<&str> = Builtin::ALL
+        .into_iter()
+        .filter(|b| b.first_class())
+        .map(Builtin::name)
         .collect();
-    assert_eq!(
-        firstclass,
-        BTreeSet::from(["print", "ord", "chr", "panic"]),
-        "the first-class PRELUDE rows must be exactly the four universe fns"
-    );
-    // Phase 2b folded the three GENERIC / reserved-type container ctors (List/Map/Set) into the
-    // table as `Intrinsic::Ctor` rows for DISPATCH single-source; their generic TYPE-IDENTITY still
-    // lives in `resolve_type`/`infer_named_call` (not expressible as a flat `FnSig`).
-    let ctors: BTreeSet<&str> = PRELUDE
-        .iter()
-        .filter(|p| p.intrinsic == Intrinsic::Ctor)
-        .map(|p| p.name)
-        .collect();
-    assert_eq!(
-        ctors,
-        BTreeSet::from([
-            "int",
-            "float",
-            "bool",
-            "str",
-            "bytes",
-            "bytearray",
-            "List",
-            "Map",
-            "Set",
-        ]),
-        "the Ctor PRELUDE rows must be the six scalar-conversion ctors plus the three container ctors"
-    );
-    // The four container/reserved-type ctors are now IN the table (phase 2b), each a NON-first-class
-    // `Intrinsic::Ctor` row (dispatch single-source; generic identity stays in resolve_type).
-    for c in ["List", "Map", "Set"] {
-        let p = prelude_fn(c).unwrap_or_else(|| {
-            panic!("'{c}' must be a PRELUDE row (container ctor folded in, 2b)")
-        });
-        assert_eq!(
-            p.intrinsic,
-            Intrinsic::Ctor,
-            "'{c}' must be an Intrinsic::Ctor row"
-        );
-        assert!(
-            !p.first_class,
-            "container ctor '{c}' must be non-first-class"
-        );
-    }
-
-    // (2) `is_firstclass_builtin_fn` is the table's `.first_class` view — over the WHOLE reserved
-    //     callable universe, so a table row (or its absence) is the one truth for first-classness.
+    assert_eq!(firstclass, BTreeSet::from(["print", "ord", "chr", "panic"]));
     for name in builtin_callables() {
         assert_eq!(
             is_firstclass_builtin_fn(name),
-            prelude_fn(name).is_some_and(|p| p.first_class),
-            "'{name}': is_firstclass_builtin_fn must equal PRELUDE .first_class"
+            prelude_fn(name).is_some_and(Builtin::first_class),
+            "'{name}': is_firstclass_builtin_fn must be the table's first_class view"
         );
     }
-    // A container ctor name (no first-class row) is not first-class.
     assert!(!is_firstclass_builtin_fn("List"));
-    // A scalar-ctor name IS now in the table but is NON-first-class (types are not first-class values).
-    assert!(prelude_fn("int").is_some());
-    assert!(!is_firstclass_builtin_fn("int"));
+    assert!(prelude_fn("int").is_some() && !is_firstclass_builtin_fn("int"));
+    // A builtin with an allocation opcode is reached through its `BuiltinType`, never the prelude.
+    assert!(prelude_fn("Channel").is_none());
 
-    // (3) Every table row has a checker `builtin_sig` (drives editor hover + value-position typing).
-    //     `first_class` is true IFF the row lowers to a first-class runtime value — Print|Builtin — and
-    //     is NEVER true for a Ctor (the hard invariant: no scalar ctor is first-class). `builtin_sig`
-    //     is now a Checker METHOD sourcing the nine migrated sigs from std/prelude.chz (seeded here).
+    // (2) Every prelude builtin has a checker `builtin_sig` (editor hover, value-position typing).
     let mut chk = Checker::new();
     chk.seed_native_prelude_sigs();
-    for p in PRELUDE {
+    let prelude: Vec<Builtin> = Builtin::ALL
+        .into_iter()
+        .filter(|b| b.lowering() != Lowering::Opcode)
+        .collect();
+    for b in &prelude {
         assert!(
-            chk.builtin_sig(p.name).is_some(),
-            "PRELUDE row '{}' has no builtin_sig",
-            p.name
-        );
-        let expect_fc = matches!(p.intrinsic, Intrinsic::Print | Intrinsic::Builtin);
-        assert_eq!(
-            p.first_class, expect_fc,
-            "'{}': first_class must be true iff intrinsic is Print|Builtin",
-            p.name
+            chk.builtin_sig(b.name()).is_some(),
+            "'{}' has no builtin_sig",
+            b.name()
         );
     }
-    // Explicit invariant: NO `Intrinsic::Ctor` row is first-class (guards against a ctor accidentally
-    // leaking a `LoadBuiltin`/`Ty::BuiltinFn` and becoming a first-class value).
-    for p in PRELUDE {
-        if p.intrinsic == Intrinsic::Ctor {
-            assert!(
-                !p.first_class,
-                "Ctor row '{}' must be non-first-class",
-                p.name
-            );
-        }
-    }
 
-    // (4) was the `compiler::is_builtin` cross-check. TICKET-180 deleted that dead dispatch arm: the
-    //     compiler lowers a `Resolution::Builtin` head through `prelude_fn(..).intrinsic` alone.
-
-    // (5) PHASE 3a — the nine migrated universe builtins are now DECLARED in std/prelude.chz. Build a
-    //     real graph (which always-links std.prelude), read the prelude module's `native` decls, and
-    //     cross-check: the parsed native-decl NAME SET equals the nine migrated names; `native fn` ⇒
-    //     Builtin & first_class, `native ctor` ⇒ Ctor & !first_class (matching the hollow Rust table);
-    //     the union {parsed 9} ∪ {print} equals the whole first-class-or-ctor prelude surface; and each
-    //     parsed FnSig equals its HISTORICAL hand-built shape (behavior-preserving migration).
+    // (3) The `std/prelude.chz` native decls: a `native fn` is first-class, a `native ctor` is not,
+    //     and the decls are every prelude builtin but the three generic container ctors (a native
+    //     decl cannot state their generic identity).
     let t = TmpDir::new();
     let entry = t.write("main.chz", "print(\"hi\")\n");
     let graph =
         crate::resolver::build_graph(&entry).expect("resolve should always-link std.prelude");
-    let prelude = graph
+    let prelude_mod = graph
         .modules
         .iter()
         .find(|m| m.dotted == ["std", "prelude"])
         .expect("std.prelude must be always-linked into the graph");
-    let mut parsed: Vec<(String, crate::ast::NativeKind)> = Vec::new();
-    for s in &prelude.ast.stmts {
+    let mut parsed_names: BTreeSet<&str> = BTreeSet::new();
+    for s in &prelude_mod.ast.stmts {
         if let StmtKind::Native(d) = &s.kind {
-            parsed.push((d.name.clone(), d.kind));
+            let b =
+                prelude_fn(&d.name).unwrap_or_else(|| panic!("'{}' is no prelude builtin", d.name));
+            let fc = matches!(d.kind, crate::ast::NativeKind::Fn);
+            assert_eq!(
+                b.first_class(),
+                fc,
+                "'{}': native fn <=> first_class",
+                d.name
+            );
+            parsed_names.insert(b.name());
         }
     }
-    let parsed_names: BTreeSet<&str> = parsed.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(
-        parsed_names,
-        BTreeSet::from([
-            "print", // ported to a variadic `native fn print(...args: Any, sep, end)` decl
-            "ord",
-            "chr",
-            "panic",
-            "int",
-            "float",
-            "bool",
-            "str",
-            "bytes",
-            "bytearray"
-        ]),
-        "std/prelude.chz native decls must be the nine migrated universe builtins plus ported `print`"
-    );
-    // Metadata agreement: the parsed decl KIND must match the hollow Rust table's intrinsic/first_class.
-    for (name, kind) in &parsed {
-        let p = prelude_fn(name).unwrap_or_else(|| panic!("'{name}' missing from PRELUDE table"));
-        match kind {
-            crate::ast::NativeKind::Fn => {
-                // `print` is a first-class native fn whose intrinsic is the specialized `Print`
-                // (it lowers to `CallPrint`/`CallPrintSep`, not the generic `Builtin` dispatch); every
-                // other native fn (`ord`/`chr`/`panic`) is `Builtin`.
-                let want = if *name == "print" {
-                    Intrinsic::Print
-                } else {
-                    Intrinsic::Builtin
-                };
-                assert_eq!(p.intrinsic, want, "'{name}': native fn intrinsic");
-                assert!(p.first_class, "'{name}': native fn ⇒ first_class");
-            }
-            crate::ast::NativeKind::Ctor => {
-                assert_eq!(p.intrinsic, Intrinsic::Ctor, "'{name}': native ctor ⇒ Ctor");
-                assert!(!p.first_class, "'{name}': native ctor ⇒ !first_class");
-            }
-        }
-    }
-    // The `.chz`-DECLARED surface = {parsed 9} ∪ {print, synthetic}. Phase 2b folded the four GENERIC
-    // container ctors into the table for DISPATCH single-source, but they are deliberately NOT `.chz`
-    // decls (they are generic — native ctor generic-decl support is a later, maybe-never concern), so
-    // they are the exact set by which the TABLE surface exceeds the `.chz`-declared surface. Asserting
-    // that split pins the design: table-sourced dispatch ⊋ native-declared, differing by exactly the
-    // four container ctors, and each is a NON-first-class Ctor row that is NOT parsed from `.chz`.
-    const CONTAINER_CTORS: [&str; 3] = ["List", "Map", "Set"];
-    let mut whole: BTreeSet<&str> = parsed_names.clone();
-    whole.insert("print");
-    let table_surface: BTreeSet<&str> = PRELUDE.iter().map(|p| p.name).collect();
-    let mut table_minus_containers = table_surface.clone();
-    for c in CONTAINER_CTORS {
-        table_minus_containers.remove(c);
-    }
-    assert_eq!(
-        whole, table_minus_containers,
-        "the PRELUDE table MINUS the three container ctors must equal the nine std/prelude.chz decls plus synthetic `print`"
-    );
-    for c in CONTAINER_CTORS {
-        let p = prelude_fn(c).unwrap_or_else(|| panic!("'{c}' must be a PRELUDE row (2b)"));
-        assert_eq!(p.intrinsic, Intrinsic::Ctor, "'{c}' must be a Ctor row");
-        assert!(
-            !p.first_class,
-            "container ctor '{c}' must be non-first-class"
-        );
-        assert!(
-            !parsed_names.contains(c),
-            "container ctor '{c}' is table-sourced for DISPATCH, deliberately NOT a std/prelude.chz native decl (generic)"
-        );
-    }
+    let want: BTreeSet<&str> = prelude
+        .iter()
+        .map(|b| b.name())
+        .filter(|n| !["List", "Map", "Set"].contains(n))
+        .collect();
+    assert_eq!(parsed_names, want);
+
     // Each parsed FnSig must equal its HISTORICAL hand-built shape (byte-identical migration). Read the
     // sigs through a prelude-seeded checker (same path production uses).
     let mut sc = Checker::new();

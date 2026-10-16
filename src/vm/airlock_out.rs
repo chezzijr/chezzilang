@@ -629,7 +629,7 @@ impl WalkSrc<'_> {
                 // builtins are name-compared, so that is observationally identical. Works the same way
                 // on this airlock-cross path and on the separate module-snapshot replay path
                 // (`SnapValue::Builtin`).
-                Obj::Builtin(name) => WireValue::Builtin(name.clone()),
+                Obj::Builtin(b) => WireValue::Builtin(*b),
                 // B3.3: a closure crosses the airlock BY VALUE — its `proto` (shared via `Arc<Program>`),
                 // its captures wired recursively in slot order (paired with the proto's `capture_names`),
                 // and its `home` as an index into `module_objs` — never a heap-local `GcRef`. Mirrors the

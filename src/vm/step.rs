@@ -339,10 +339,9 @@ impl Vm {
                 };
                 self.do_static_call(&key, method, *argc, span)?
             }
-            Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
-            Op::LoadBuiltin(name) => {
-                let name: Box<str> = name.as_str().into();
-                let v = self.fn_value(FnKey::Builtin(name.clone()), || Obj::Builtin(name));
+            Op::CallBuiltin(b, argc) => self.do_builtin(*b, *argc, span)?,
+            Op::LoadBuiltin(b) => {
+                let v = self.fn_value(FnKey::Builtin(*b), || Obj::Builtin(*b));
                 self.push(v);
             }
             Op::CallPrint(argc) => self.do_print(*argc, span)?,

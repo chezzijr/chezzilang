@@ -183,7 +183,7 @@ impl Vm {
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
                 Obj::Module(m) => Ok(format!("<module {}>", m.name)),
                 Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
-                Obj::Builtin(name) => Ok(format!("<builtin fn {name}>")),
+                Obj::Builtin(b) => Ok(format!("<builtin fn {}>", b.name())),
                 Obj::Cffi(c) => Ok(format!("<extern fn {}>", c.name())),
                 // A raw address is non-deterministic (differs per run), so never render it — a
                 // printed pointer's value would not be reproducible. Only null vs live (a
@@ -530,7 +530,7 @@ impl Vm {
                 }
             }
             // A wired first-class builtin fn renders like its heap counterpart (`<builtin fn name>`).
-            WireValue::Builtin(name) => format!("<builtin fn {name}>"),
+            WireValue::Builtin(b) => format!("<builtin fn {}>", b.name()),
             // A wired native/FFI fn renders like its heap counterpart (`Obj::Native`/`Obj::Cffi`).
             WireValue::Native { name, .. } => format!("<native fn {name}>"),
             WireValue::Cffi(c) => format!("<extern fn {}>", c.name()),
@@ -885,8 +885,8 @@ impl Vm {
             Obj::Native { name, .. } => {
                 let _ = write!(out, "<native fn {name}>");
             }
-            Obj::Builtin(name) => {
-                let _ = write!(out, "<builtin fn {name}>");
+            Obj::Builtin(b) => {
+                let _ = write!(out, "<builtin fn {}>", b.name());
             }
             Obj::Cffi(c) => {
                 let _ = write!(out, "<extern fn {}>", c.name());

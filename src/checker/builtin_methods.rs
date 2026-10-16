@@ -196,7 +196,7 @@ pub(super) fn mutates_receiver(recv: &Ty, method: &str) -> bool {
 /// no longer here — it is now the file-backed variadic `native fn print(...)` decl, so its sig flows
 /// through `builtin_sig` BEFORE this fallback.) This is the FLAT sig the container ctors keep here BECAUSE their real generic
 /// type-identity (`List[int]` → `Ty::List(Int)`, …) is NOT a flat `FnSig` and lives in
-/// `resolve_type`/`infer_named_call`; the `Intrinsic::Ctor` PRELUDE rows carry only their DISPATCH.
+/// `resolve_type`/`infer_named_call`; their `Builtin` ids carry only their dispatch.
 /// The eight MIGRATED universe builtins
 /// (`ord`/`chr`/`panic`/`int`/`float`/`str`/`bytes`/`bytearray`) are NOT here — their sigs now come
 /// from `std/prelude.chz` via [`Checker::builtin_sig`]. Unlike the `infer_named_call` arms — whose

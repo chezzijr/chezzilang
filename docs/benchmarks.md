@@ -4101,3 +4101,43 @@ The count gate is `range_free_graph_checks_no_prelude_fn_bodies` and
 `program_without_a_range_compiles_no_prelude_fn_protos` (`src/compiler/mod.rs`): protos compiled and
 fn bodies checked for a program with no range value. Each prelude fn proto is one parse, check and
 compile per run, so the count tracks the cost without a clock.
+
+## Builtin dispatch by id (2026-10-16)
+
+`Op::CallBuiltin`, `Op::LoadBuiltin`, `Obj::Builtin` and the other builtin carriers hold a
+`Builtin` id (`base/builtin.rs`) instead of a name `String`; the VM's `do_builtin` and
+`invoke_value` match the id. Release binaries, base `f4314b17` vs the change, interleaved runs of
+`chezzi run` as a process, ms (`hyperfine` is not installed; a Python timer, 11-15 runs per binary).
+
+| program | base median (min) | id median (min) |
+|---|---|---|
+| builtin loop (below) | 1800 (1768) | 1716 (1683) |
+| `benches/chz/fib.chz` | 497 (484) | 534 (521) |
+| base `f4314b17` + one unrelated `#[inline(never)]`, `fib.chz` | 516 (484) | |
+
+The builtin loop is 5% faster. `fib.chz` calls no builtin in its hot path, and an unrelated one-line
+attribute on the base moves its median 4%, so `fib` is sensitive to code layout; part of its 7% is
+layout, and no profiler was available to split the rest. `loop`, `primes`, `list`, `map`, `struct`,
+`closure`, `poly_method` and `enum` move between -0.7% and +1.4% (min of 7 interleaved runs).
+
+The builtin loop:
+
+```chezzi
+fn main():
+    total := 0
+    i := 0
+    while i < 2000000:
+        c := chr(97 + i % 26)
+        total += ord(c) + int(str(i % 10)) + int(float(i % 7))
+        if bool(i % 3):
+            total += 1
+        i += 1
+    xs := List[int]()
+    o := ord
+    j := 0
+    while j < 1000000:
+        xs.push(o("a"))
+        j += 1
+    print(total + xs.len())
+main()
+```

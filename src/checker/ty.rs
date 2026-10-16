@@ -1368,9 +1368,9 @@ pub enum Resolution {
     /// A module-level `fn`: the DECLARING module and the DECLARED name (an
     /// `import reset as again from m` binding records `reset`). Lowers to a load + `Op::Call`.
     Fn { module: usize, name: String },
-    /// A builtin fn or ctor (`print`, `ord`, `Channel`, `timer`, `Ok`): the opcode the compiler
-    /// emits is chosen by this name (`NewChannel`, `CallBuiltin`, `NewEnum`, ...).
-    Builtin(String),
+    /// A builtin fn or ctor (`print`, `ord`, `Channel`): the opcode the compiler
+    /// emits is chosen by this id (`CallPrint`, `CallBuiltin`, `NewChannel`, ...).
+    Builtin(crate::base::builtin::Builtin),
     /// A struct ctor, by runtime key (`Op::NewStruct`).
     StructCtor(String),
     /// A desugar-synthesized default provider the module cannot name (`Op::MakeFuncIn`).

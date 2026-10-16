@@ -5,7 +5,7 @@
 use super::*;
 
 /// Native-prelude phase 2b — the GENERIC / reserved-type container CTORS (range/List/Map/Set) are
-/// now sourced from the synthetic PRELUDE table (`Intrinsic::Ctor`) for their `CallBuiltin`
+/// dispatched by their `Builtin` id (`Lowering::Call`) for their `CallBuiltin`
 /// DISPATCH, exactly as 2a did for the scalar ctors. Their generic type-identity resolution is
 /// untouched, so every construction + generic-inference path must stay byte-identical
 /// against a literal golden: range overloads, empty/turbofished containers, dedup, iteration.

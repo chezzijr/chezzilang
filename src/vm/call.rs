@@ -2,6 +2,7 @@
 // Calls: value/native/method/static dispatch, builtins, defer/return.
 
 use super::*;
+use crate::base::builtin::Builtin;
 
 /// Why `coerce_json` stopped: a decode mismatch (the `Err` of the decode's `Result`), or a fault
 /// raised by a field default it ran, which propagates as a runtime fault (TICKET-198).
@@ -204,8 +205,8 @@ impl Vm {
             // value-form defaults (space-join + trailing '\n'; sep=/end= are direct-call-only
             // via `CallPrintSep`). `panic` returns `Err` (mirrors `do_builtin`'s panic arm) so
             // defers still unwind. `ord`/`chr` reuse `builtin_ord`/`builtin_chr` directly.
-            Callee::Builtin(name) => match name.as_ref() {
-                "print" => {
+            Callee::Builtin(b) => match b {
+                Builtin::Print => {
                     // ROOT the args on the operand stack while stringifying. `args` was
                     // `split_off` the stack (do_call slow path), so it is NOT a GC root; a
                     // `Stringable` `str` method runs user code that can `collect()` at a
@@ -231,20 +232,27 @@ impl Vm {
                         None => Ok(Value::nil()),
                     }
                 }
-                "ord" => self.builtin_ord(&args, span),
-                "chr" => self.builtin_chr(&args, span),
-                "panic" => {
-                    let message = match args.first().copied() {
-                        Some(v) => match v.as_obj().map(|h| self.heap.get(h)) {
-                            Some(Obj::Str(s)) => s.to_string(),
-                            _ => self.type_name(v).to_string(),
-                        },
-                        None => String::new(),
-                    };
-                    let sp = self.panic_origin(args.first().copied(), span);
-                    Err(self.err(message, sp).raised_by_panic())
+                Builtin::Ord => self.builtin_ord(&args, span),
+                Builtin::Chr => self.builtin_chr(&args, span),
+                Builtin::Panic => Err(self.builtin_panic(&args, span)),
+                // Only a first-class builtin is a value (`Builtin::first_class`).
+                Builtin::Int
+                | Builtin::Float
+                | Builtin::Bool
+                | Builtin::Str
+                | Builtin::Bytes
+                | Builtin::ByteArray
+                | Builtin::List
+                | Builtin::Map
+                | Builtin::Set
+                | Builtin::Channel
+                | Builtin::Shared
+                | Builtin::RwShared
+                | Builtin::Atomic
+                | Builtin::AtomicInt
+                | Builtin::Executor => {
+                    unreachable!("non-first-class builtin {} reached invoke_value", b.name())
                 }
-                _ => unreachable!("non-first-class builtin {name} reached invoke_value"),
             },
             Callee::Cffi(cffi) => {
                 // Arity is checker-guaranteed, but guard defensively (a hand-built program
@@ -297,7 +305,7 @@ impl Vm {
                 name: name.clone(),
                 kind: *kind,
             }),
-            Obj::Builtin(name) => Some(Callee::Builtin(name.clone())),
+            Obj::Builtin(b) => Some(Callee::Builtin(*b)),
             Obj::Cffi(c) => Some(Callee::Cffi(std::sync::Arc::clone(c))),
             Obj::Str(_)
             | Obj::Bytes(_)

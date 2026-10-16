@@ -266,9 +266,10 @@ impl Checker {
                 return Some(Resolution::StructCtor(self.type_key(mid, name)));
             }
             if sig.builtins.contains(name)
-                && BuiltinType::from_name(name).is_some_and(BuiltinType::has_opcode_ctor)
+                && let Some(b) =
+                    Builtin::from_name(name).filter(|b| b.lowering() == Lowering::Opcode)
             {
-                return Some(Resolution::Builtin(name.to_string()));
+                return Some(Resolution::Builtin(b));
             }
         }
         if let Some(Ty::Struct(key, _)) = self.qualified_alias_ty(m, name)

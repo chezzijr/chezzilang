@@ -124,7 +124,7 @@ impl Compiler {
                 )),
                 Span::RUNTIME,
             );
-            fc.emit(Op::CallBuiltin("panic".to_string(), 1), Span::RUNTIME);
+            fc.emit(Op::CallBuiltin(Builtin::Panic, 1), Span::RUNTIME);
         }
         // Fall off the end → return Nil (do_return joins the implicit nursery); a `None!E` fn
         // returns `Ok(nil)` (TICKET-227).

@@ -1253,7 +1253,7 @@ fn callable_classifies_every_fn_kind() {
             func: nop,
             kind: crate::native::Kind::Inline,
         },
-        Obj::Builtin("ord".into()),
+        Obj::Builtin(crate::base::builtin::Builtin::Ord),
     ];
     for o in fns {
         let v = Value::obj(vm.heap.alloc(o));

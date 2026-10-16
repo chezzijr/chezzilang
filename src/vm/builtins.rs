@@ -2,6 +2,7 @@
 //! Split out of `src/vm/stmt.rs`. `super::*` is the parent module.
 
 use super::*;
+use crate::base::builtin::Builtin;
 use crate::base::hooks::Hook;
 
 impl Vm {
@@ -72,44 +73,52 @@ impl Vm {
             .unwrap_or(span)
     }
 
+    /// The error `panic(msg)` raises: the SAME recoverable `RuntimeError` (`self.err`) the runtime
+    /// uses for overflow/OOB/decode, so it unwinds (running `defer`s) to the nearest `recover:` as
+    /// `Err(e)` with `e.message() == msg`, else aborts. The checker guarantees a single `str` arg;
+    /// a non-str falls back to the value's type name. Shared by the direct call and the value call.
+    pub(super) fn builtin_panic(&mut self, args: &[Value], span: Span) -> RuntimeError {
+        let message = match args.first().copied() {
+            Some(v) => match v.as_obj().map(|h| self.heap.get(h)) {
+                Some(Obj::Str(s)) => s.to_string(),
+                _ => self.type_name(v).to_string(),
+            },
+            None => String::new(),
+        };
+        let sp = self.panic_origin(args.first().copied(), span);
+        self.err(message, sp).raised_by_panic()
+    }
+
     pub(super) fn do_builtin(
         &mut self,
-        name: &str,
+        b: Builtin,
         argc: usize,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.split_off(at);
-        // `panic(msg)` raises the SAME recoverable `RuntimeError` (`self.err`) the runtime uses for
-        // overflow/OOB/decode, instead of pushing a value — it unwinds (running `defer`s) to the
-        // nearest `recover:` as `Err(e)` with `e.message() == msg`, else aborts. Early-return before
-        // the value-returning match so nothing is pushed on the (unwinding) path. The checker
-        // guarantees a single `str` arg; fall back to the value's type name for a non-str (matches
-        // the interp's defensive guard, keeping messages byte-identical across engines).
-        if name == "panic" {
-            let message = match args.first().copied() {
-                Some(v) => match v.as_obj().map(|h| self.heap.get(h)) {
-                    Some(Obj::Str(s)) => s.to_string(),
-                    _ => self.type_name(v).to_string(),
-                },
-                None => String::new(),
-            };
-            let sp = self.panic_origin(args.first().copied(), span);
-            return Err(self.err(message, sp).raised_by_panic());
-        }
-        let result = match name {
-            "int" => self.builtin_int(&args, span)?,
-            "float" => self.builtin_float(&args, span)?,
-            "bool" => self.builtin_bool(&args, span)?,
-            "str" => self.builtin_str(&args, span)?,
-            "ord" => self.builtin_ord(&args, span)?,
-            "chr" => self.builtin_chr(&args, span)?,
-            "Set" => self.builtin_set(&args, span)?,
-            "List" => self.builtin_list(&args, span)?,
-            "Map" => self.builtin_map(&args, span)?,
-            "bytearray" => self.builtin_bytearray(&args, span)?,
-            "bytes" => self.builtin_bytes(&args, span)?,
-            _ => unreachable!("unknown builtin {name}"),
+        let result = match b {
+            // Unwinds instead of pushing a value.
+            Builtin::Panic => return Err(self.builtin_panic(&args, span)),
+            Builtin::Int => self.builtin_int(&args, span)?,
+            Builtin::Float => self.builtin_float(&args, span)?,
+            Builtin::Bool => self.builtin_bool(&args, span)?,
+            Builtin::Str => self.builtin_str(&args, span)?,
+            Builtin::Ord => self.builtin_ord(&args, span)?,
+            Builtin::Chr => self.builtin_chr(&args, span)?,
+            Builtin::Set => self.builtin_set(&args, span)?,
+            Builtin::List => self.builtin_list(&args, span)?,
+            Builtin::Map => self.builtin_map(&args, span)?,
+            Builtin::ByteArray => self.builtin_bytearray(&args, span)?,
+            Builtin::Bytes => self.builtin_bytes(&args, span)?,
+            // `Lowering::Print` and `Lowering::Opcode` builtins have opcodes of their own.
+            Builtin::Print
+            | Builtin::Channel
+            | Builtin::Shared
+            | Builtin::RwShared
+            | Builtin::Atomic
+            | Builtin::AtomicInt
+            | Builtin::Executor => unreachable!("{} has its own opcode", b.name()),
         };
         self.push(result);
         Ok(())

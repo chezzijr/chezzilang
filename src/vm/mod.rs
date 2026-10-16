@@ -907,7 +907,7 @@ pub(crate) enum FnKey {
     Proto(ProtoId),
     Native(Box<str>, usize),
     Cffi(usize),
-    Builtin(Box<str>),
+    Builtin(crate::base::builtin::Builtin),
 }
 
 /// TICKET-226 — how a callable value runs: [`Vm::callable`]'s answer, read by call, `lower_task`,
@@ -927,7 +927,7 @@ pub(crate) enum Callee {
         name: Box<str>,
         kind: crate::native::Kind,
     },
-    Builtin(Box<str>),
+    Builtin(crate::base::builtin::Builtin),
     Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
 }
 

@@ -360,7 +360,10 @@ fn worker_calls_imported_fn() {
 #[test]
 fn start_task_refuses_a_callee_that_enters_no_frame() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let callee = Value::obj(vm.heap.alloc(Obj::Builtin("print".into())));
+    let callee = Value::obj(
+        vm.heap
+            .alloc(Obj::Builtin(crate::base::builtin::Builtin::Print)),
+    );
     let r = vm.start_task(PendingCall::Call {
         callee,
         args: Vec::new(),

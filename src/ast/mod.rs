@@ -353,7 +353,7 @@ pub struct ExternFn {
 }
 
 /// Whether a [`NativeDecl`] is a first-class universe FUNCTION (`native fn`) or a non-first-class
-/// scalar/type CONSTRUCTOR (`native ctor`). Mirrors the checker's `Intrinsic::{Builtin, Ctor}` split:
+/// scalar/type CONSTRUCTOR (`native ctor`). It agrees with `Builtin::first_class` (`base/builtin.rs`):
 /// `Fn` ⇒ first-class (value-position use emits `LoadBuiltin`/`Ty::BuiltinFn`); `Ctor` ⇒ never
 /// first-class (uniform with a user struct ctor / `List` — value-position use is a checker error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

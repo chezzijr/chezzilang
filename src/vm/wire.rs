@@ -316,12 +316,12 @@ pub enum WireValue {
     /// fast path too.
     Ptr(usize),
     /// A first-class UNIVERSE builtin fn (`print`/`ord`/`chr`/`panic`) crossing the airlock **by
-    /// value** — it is pure code identified only by name (no `GcRef`, no captured heap state), so
-    /// `from_wire` allocates a fresh `Obj::Builtin` with the same name on the other side, meaningful
+    /// value** — it is pure code identified only by its id (no `GcRef`, no captured heap state), so
+    /// `from_wire` allocates a fresh `Obj::Builtin` with the same id on the other side, meaningful
     /// in any worker. Unlike a `Func`/`Closure` (a `Handle` into this heap), it genuinely crosses an
     /// OS-thread boundary — cross-safe (`has_handle` leaves it `false` via the `_` arm), so a builtin
     /// captured into a spawned task works correctly on the M:N engine.
-    Builtin(Box<str>),
+    Builtin(crate::base::builtin::Builtin),
     /// A native fn (`Obj::Native`, e.g. `math.sqrt`) carried across the airlock **by value** — it is
     /// pure code: a `fn` pointer (`Copy`, so heap-independent — the same code address is valid in any
     /// worker of this process) plus its name, no `GcRef` and no captured heap state. Like

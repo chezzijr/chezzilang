@@ -182,8 +182,7 @@ impl Checker {
         let res = self.resolve_path(callee, PathPos::Callee);
         // `print(..., sep=, end=)`: its only named arguments are `sep` and `end`, typed `str`.
         if !named.is_empty()
-            && let Some(Resolution::Builtin(b)) = &res
-            && b == "print"
+            && let Some(Resolution::Builtin(Builtin::Print)) = &res
         {
             self.consume_named();
             let mut seen: Vec<&str> = Vec::new();
@@ -428,10 +427,10 @@ impl Checker {
             // aliased `c.Shared(0)`, `time.timer(100)`): the same inference and license check the
             // bare name takes.
             Some(Resolution::Builtin(b)) => {
-                if self.reject_item_targs(&b, args, targs, span) {
+                if self.reject_item_targs(b.name(), args, targs, span) {
                     return Ty::Unknown;
                 }
-                self.infer_builtin_call(&b, args, targs, span, expected)
+                self.infer_builtin_call(b, args, targs, span, expected)
                     .unwrap_or(Ty::Unknown)
             }
             // `T.member(args)` where `T` is an in-scope generic TYPE PARAMETER and `member` is no
@@ -704,7 +703,7 @@ impl Checker {
             return Some(Ty::Unknown);
         }
         match r {
-            Resolution::Builtin(b) => self.infer_builtin_call(b, args, targs, span, expected),
+            Resolution::Builtin(b) => self.infer_builtin_call(*b, args, targs, span, expected),
             Resolution::StructCtor(key) => {
                 Some(self.infer_struct_ctor_call(name, key, args, targs, span, expected))
             }

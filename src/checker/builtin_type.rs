@@ -1,7 +1,7 @@
 //! U10 (TICKET-259): THE builtin type names. Each is a type, never a value, and each is reserved at
 //! declaration. The annotation resolvers key their builtin arms on `BuiltinType`, never on a name string.
 
-use super::Ty;
+use super::{Builtin, Lowering, Ty};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BuiltinType {
@@ -213,32 +213,8 @@ impl BuiltinType {
 
     /// Whether a call of the type's name constructs one through a dedicated opcode (`Channel[T]()`,
     /// `Shared(v)`, `Executor()`). The other builtin types have no constructor, or a prelude one.
-    pub(crate) const fn has_opcode_ctor(self) -> bool {
-        match self {
-            BuiltinType::Channel
-            | BuiltinType::Shared
-            | BuiltinType::RwShared
-            | BuiltinType::Atomic
-            | BuiltinType::AtomicInt
-            | BuiltinType::Executor => true,
-            BuiltinType::Int
-            | BuiltinType::Float
-            | BuiltinType::Bool
-            | BuiltinType::Str
-            | BuiltinType::Bytes
-            | BuiltinType::ByteArray
-            | BuiltinType::Iterator
-            | BuiltinType::List
-            | BuiltinType::Set
-            | BuiltinType::Map
-            | BuiltinType::Range
-            | BuiltinType::Socket
-            | BuiltinType::Listener
-            | BuiltinType::Writer
-            | BuiltinType::Reader
-            | BuiltinType::Ptr
-            | BuiltinType::OwnedStr => false,
-        }
+    pub(crate) fn has_opcode_ctor(self) -> bool {
+        Builtin::from_name(self.name()).is_some_and(|b| b.lowering() == Lowering::Opcode)
     }
 
     /// The global builtin type named `name` (one with no owning module).

@@ -555,9 +555,9 @@ impl Checker {
                     // `native fn`/`native ctor` is PRELUDE/STD-ONLY (a user program can't bind a name to
                     // a nonexistent intrinsic — a footgun). Reject it in a non-stdlib module; register
                     // its signature into `native_prelude_sigs` (the single source of truth for the eight
-                    // migrated universe builtins) in a stdlib module. The name/first-classness metadata
-                    // still lives in the hollow Rust `PRELUDE` table (read by the backends, which have no
-                    // graph); this only moves the FnSig into the `.chz` decl (drift-guarded).
+                    // migrated universe builtins) in a stdlib module. The id, lowering and first-classness
+                    // live in the `Builtin` table (`base/builtin.rs`, read by the backends, which have
+                    // no graph); this only moves the FnSig into the `.chz` decl (drift-guarded).
                     if !self.current_module_is_stdlib {
                         self.error(
                             decl.span,
@@ -573,7 +573,7 @@ impl Checker {
                         // bare-name resolution does not consult — the call read `unknown name`.
                         // Register the sig as an ordinary module function so both paths agree.
                         // Skipped for a `native ctor` (not first-class), for a universe builtin (its
-                        // dispatch is the `PRELUDE` table's, not a module function's).
+                        // dispatch is its `Builtin` id's, not a module function's).
                         if decl.kind == crate::ast::NativeKind::Fn
                             && crate::checker::prelude_fn(&decl.name).is_none()
                         {
