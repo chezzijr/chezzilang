@@ -2641,6 +2641,51 @@ fn print_fn_value_keeps_variadic_shape() {
     entry_ok("fn main():\n    f := print\n    f(1)\n    f(1, 2)\n");
 }
 
+// TICKET-264: every `print` path joins with the declaration's own `sep` and `end`. The input
+// `p(1, 2)` prints `12` if the value arm reads no default, and `print(sep="x")` prints nothing if the
+// direct path drops the `end` default.
+#[test]
+fn print_joins_with_the_declared_defaults_on_every_path() {
+    assert_eq!(
+        run_out(
+            "fn main():\n    p := print\n    p(1, 2)\n    p()\n    p(\"a\", \"b\", \"c\")\n    print(1, 2, sep=\"-\", end=\"!\\n\")\n    print(sep=\"x\")\n    print(\"a\", end=\"\")\n    print(\"b\")\n    defer print(7, 8, sep=\"+\")\n    xs := [print]\n    xs[0](3, 4)\nmain()\n"
+        ),
+        "1 2\n\na b c\n1-2!\n\nab\n3 4\n7+8\n"
+    );
+}
+
+// TICKET-264: `print`'s keyword arguments bind through its declaration slots, so a repeated or an
+// unknown name is a call error. A direct call with `sep="a", sep="b"` is accepted if the print arm
+// binds on its own.
+#[test]
+fn print_keywords_bind_through_the_declaration() {
+    entry_rejects(
+        "print(1, sep=\"a\", sep=\"b\")\n",
+        "duplicate named argument 'sep'",
+    );
+    entry_rejects(
+        "print(\"a\", foo=1)\n",
+        "unknown named argument 'foo' (its parameters are: sep, end)",
+    );
+    entry_rejects("print(1, end=2)\n", "expected str, found int");
+    entry_ok("print(1, 2, end=\"\", sep=\"-\")\n");
+}
+
+// TICKET-264: an `Any` pack hands no hint to its items. `p(ident)` is accepted if the pack hints
+// `Any` (it pins `T := Any`); `p(if true: 1 else: "a")` is accepted if the hint joins the branches.
+// A mixed pack `p(1, "a", true)` still checks, since every item satisfies `Any`.
+#[test]
+fn an_any_variadic_pack_gives_its_items_no_hint() {
+    let decl = "fn ident[T](x: T) -> T:\n    return x\nfn p(...xs: Any):\n    print(xs.len())\n";
+    entry_rejects(&format!("{decl}p(ident)\n"), "T is not determined here");
+    entry_rejects(
+        &format!("{decl}p(if true: 1 else: \"a\")\n"),
+        "branches have incompatible types",
+    );
+    entry_ok(&format!("{decl}p(1, \"a\", true)\n"));
+    entry_ok(&format!("{decl}p(ident[int])\n"));
+}
+
 // TICKET-264: a call through a fn value names the binding, not `'closure'`.
 #[test]
 fn fn_value_arity_error_names_the_binding() {

@@ -178,12 +178,12 @@ fn print_sep_end_str_ok() {
 
 #[test]
 fn print_sep_non_str_rejected() {
-    rejects_desugared("print(\"a\", sep=1)\n", "print() sep/end must be str");
+    rejects_desugared("print(\"a\", sep=1)\n", "expected str, found int");
 }
 
 #[test]
 fn print_end_non_str_rejected() {
-    rejects_desugared("print(\"a\", end=1)\n", "print() sep/end must be str");
+    rejects_desugared("print(\"a\", end=1)\n", "expected str, found int");
 }
 
 // ===== test fn =====

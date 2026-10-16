@@ -824,7 +824,7 @@ fn t187_cells() -> Vec<Cell> {
         cells.push(cell(
             &format!("t187/print/{stmt}/builtin"),
             &format!("fn main():\n    {stmt} print(1, sep=\"-\")\nmain()\n"),
-            Expect::Rejects("only supported on a direct print"),
+            prints("1"),
         ));
     }
     cells

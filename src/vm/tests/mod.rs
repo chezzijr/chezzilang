@@ -51,6 +51,9 @@ pub(crate) fn empty_program() -> Program {
         protos: vec![],
         structs: Default::default(),
         range_key: "Range".to_string(),
+        // What the compiler reads from the `native fn print` declaration in `std/prelude.chz`
+        // (`print_defaults_come_from_the_prelude_declaration` compares the two).
+        print_defaults: [" ".to_string(), "\n".to_string()],
         enum_methods: Default::default(),
         enum_home: Default::default(),
         providers: Default::default(),

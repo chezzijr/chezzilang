@@ -472,12 +472,11 @@ fn hover_generic_fn_callee() {
 
 #[test]
 fn hover_builtin_callee_print() {
-    // `print` is now the file-backed variadic decl `native fn print(...args: Any, sep, end)`, so
-    // hover reflects that harvested signature: the collapsed variadic slot `List[Any]` plus the
-    // keyword-only `sep`/`end` (both `str`), returning `nil`. (More informative than the old
-    // synthetic `fn(?) -> nil`.)
+    // `print` is the file-backed variadic decl `native fn print(...args: Any, sep, end)`, so hover
+    // shows its fn type: the variadic `...Any` (keyword-only `sep`/`end` are not part of the fn
+    // type), returning `None`.
     let h = hov("print(\"hi\")\n", 0, 0).expect("hover on builtin print callee");
-    assert_eq!(h.display, "fn(List[Any], str, str) -> None");
+    assert_eq!(h.display, "fn(...Any) -> None");
     assert_eq!(h.kind, crate::checker::HoverKind::Func);
 }
 

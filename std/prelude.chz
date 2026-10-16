@@ -15,10 +15,10 @@
 #                  with `f := Point` / `f := List`).
 #
 # print: variadic display fn — `...args: Any` (the `Any` top type accepts every value); the
-# keyword-only `sep`/`end` follow the variadic. Its lowering stays on the specialized
-# `CallPrint`/`CallPrintSep` opcodes (a direct `print(...)` call), so this decl is the checker-only
-# SIGNATURE authority (retired the last synthetic Rust sig). The VALUE form (`p := print`) is a fixed
-# 1-arg function (the specialized opcodes are unreachable through a bound value). range + List/Map/Set:
+# keyword-only `sep`/`end` follow the variadic. This decl is the one authority: the checker binds
+# every `print` call (direct or through a value) from its slots, the compiler reads its `sep`/`end`
+# defaults into `Program.print_defaults`, and the VM joins with them. The VALUE form (`p := print`)
+# is `fn(...Any) -> None`, as a call through it packs like the direct call. range + List/Map/Set:
 # phase 2b (still hard-coded).
 
 native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None

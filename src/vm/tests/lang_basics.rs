@@ -4,6 +4,14 @@
 
 use super::*;
 
+// TICKET-264: the compiler fills `Program.print_defaults` from the prelude's `native fn print`. The
+// hand-built fixture program (`empty_program`) copies the pair, and this test fails if they differ.
+#[test]
+fn print_defaults_come_from_the_prelude_declaration() {
+    let program = crate::compiler::compile_source("print(1)").expect("compile");
+    assert_eq!(program.print_defaults, empty_program().print_defaults);
+}
+
 // ----- arithmetic -----
 
 #[test]

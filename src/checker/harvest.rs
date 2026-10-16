@@ -458,8 +458,9 @@ impl Checker {
         // inference path (`infer_generic_method`), not the fixed-arity path (empty for the common case).
         sig.type_params = own_tps;
         sig.variadic = variadic;
-        // TICKET-187: names serve protocol conformance only; `slots` stays `None`, so a direct
-        // native call still takes no named arguments (DEC-182).
+        // A native takes no named arguments (DEC-182) unless a parameter follows its variadic one
+        // (`print(...args, sep, end)`): then `slots` carries the keyword-only names and defaults.
+        sig.slots = crate::desugar::native_param_slots(decl, skip);
         sig.labels = decl
             .params
             .iter()

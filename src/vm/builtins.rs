@@ -6,50 +6,31 @@ use crate::base::builtin::Builtin;
 use crate::base::hooks::Hook;
 
 impl Vm {
-    pub(super) fn do_print(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
+    /// `print` joins the `argc` args on the stack top with `sep` and appends `end`: the one print
+    /// routine. The args stay rooted on the operand stack across `stringify`, which can run user
+    /// code (a `Stringable` `str` method) and GC; its pushes sit above `at + argc`, so these indices
+    /// stay valid across the loop. Pushes `nil`.
+    pub(super) fn do_print_sep(
+        &mut self,
+        argc: usize,
+        sep: &str,
+        end: &str,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
-        // Keep the args rooted on the operand stack while stringifying — a `Stringable` `str` method
-        // runs user code that can GC. `stringify` pushes/pops above `at + argc`, so these indices
-        // stay valid across the loop.
         let mut parts = Vec::with_capacity(argc);
         for i in 0..argc {
             let v = self.stack[at + i];
             parts.push(self.stringify(v, span, 0)?);
         }
         self.stack.truncate(at);
-        // ONE write (body + newline joined): in stream mode that is ONE locked write → a `print` is
+        // ONE write (body + end joined): in stream mode that is ONE locked write, so a `print` is
         // line-atomic across tasks. Byte-identical in buffered mode.
-        let mut line = parts.join(" ");
-        line.push('\n');
+        let mut line = parts.join(sep);
+        line.push_str(end);
         self.emit_out(&line);
         if let Some(halt) = self.stream_halt(span) {
-            return Err(halt); // stdout died (closed reader / unwritable) — halt like `os.exit`
-        }
-        self.push(Value::nil());
-        Ok(())
-    }
-
-    /// `print(args…, sep=, end=)`. Stack layout on entry: `[args… , sep, end]`. Pops `end` then
-    /// `sep` (both `str`, copied out so they're no longer GC roots), stringifies the `argc` user
-    /// args (kept rooted on the stack across `stringify`, which can run user code + GC), joins with
-    /// `sep` and appends `end`.
-    pub(super) fn do_print_sep(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
-        let end = self.pop();
-        let sep = self.pop();
-        let end = self.val_str(end).unwrap_or_default();
-        let sep = self.val_str(sep).unwrap_or_default();
-        let at = self.stack.len() - argc;
-        let mut parts = Vec::with_capacity(argc);
-        for i in 0..argc {
-            let v = self.stack[at + i];
-            parts.push(self.stringify(v, span, 0)?);
-        }
-        self.stack.truncate(at);
-        let mut line = parts.join(&sep);
-        line.push_str(&end);
-        self.emit_out(&line);
-        if let Some(halt) = self.stream_halt(span) {
-            return Err(halt);
+            return Err(halt); // stdout died (closed reader / unwritable): halt like `os.exit`
         }
         self.push(Value::nil());
         Ok(())

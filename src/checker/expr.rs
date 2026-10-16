@@ -180,33 +180,6 @@ impl Checker {
         // What the callee names: ONE answer from the rule table (`resolve.rs`). Every arm below takes
         // its branch from it and none re-decides what the path is.
         let res = self.resolve_path(callee, PathPos::Callee);
-        // `print(..., sep=, end=)`: its only named arguments are `sep` and `end`, typed `str`.
-        if !named.is_empty()
-            && let Some(Resolution::Builtin(Builtin::Print)) = &res
-        {
-            self.consume_named();
-            let mut seen: Vec<&str> = Vec::new();
-            for (k, _) in named {
-                if !matches!(k.as_str(), "sep" | "end") || seen.contains(&k.as_str()) {
-                    self.error(
-                        span,
-                        "print() only accepts the named arguments 'sep' and 'end'".to_string(),
-                    );
-                    break;
-                }
-                seen.push(k);
-            }
-            for a in args {
-                self.infer_value(a);
-            }
-            for (_, v) in named {
-                let t = self.infer_value(v);
-                if t != Ty::Str && !t.is_unknown() {
-                    self.error(v.span, format!("print() sep/end must be str, found {t}"));
-                }
-            }
-            return Ty::Nil;
-        }
         // An **out-of-closure default provider** call. `desugar` lowers every omitted non-literal
         // default to a call on the hidden zero-arg provider `fn` its defining module declares. When
         // the definer IS in this module's transitive import closure a synthetic `from` import binds
@@ -690,13 +663,15 @@ impl Checker {
             };
             self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
         }
-        // A builtin takes no named arguments; a user fn of the same name (it shadows the builtin)
-        // does: the callee's resolution decides.
+        // A builtin takes named arguments only through the keyword-only slots of its prelude
+        // declaration (`print`'s `sep`/`end`); a user fn of the same name (it shadows the builtin)
+        // takes its own: the callee's resolution decides.
         if !named.is_empty()
-            && matches!(
-                self.classify_path(callee, super::resolve::PathPos::Callee),
-                Some(Resolution::Builtin(_))
-            )
+            && let Some(Resolution::Builtin(b)) =
+                self.classify_path(callee, super::resolve::PathPos::Callee)
+            && self
+                .builtin_sig(b.name())
+                .is_none_or(|sig| sig.slots.is_none())
         {
             self.refuse_named(name, named, span);
         }

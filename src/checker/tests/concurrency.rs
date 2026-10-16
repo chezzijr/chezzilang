@@ -333,20 +333,6 @@ fn spawn_firstclass_builtin_accepted_like_defer() {
 }
 
 #[test]
-fn defer_spawn_builtin_named_args_rejected() {
-    // sep=/end= are direct-call-only (the specialized print opcode); a deferred/spawned print runs
-    // its value form and can't carry them, so they are rejected rather than silently dropped.
-    rejects(
-        "fn w():\n    defer print(\"a\", sep=\"-\")\n",
-        "named arguments (sep=/end=) are only supported on a direct print(...) call, not a deferred one",
-    );
-    rejects(
-        "fn main():\n    parallel:\n        spawn print(\"a\", end=\"!\")\nmain()\n",
-        "named arguments (sep=/end=) are only supported on a direct print(...) call, not a spawned one",
-    );
-}
-
-#[test]
 fn spawn_bad_arg_reports_one_error() {
     // The sendability gate must not double-report a type error already raised by inferring the call.
     let errs = check_src(

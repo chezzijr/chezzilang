@@ -1097,19 +1097,6 @@ fn print_value_not_usable_as_bool_condition() {
 }
 
 #[test]
-fn print_value_form_is_fixed_arity() {
-    // The VALUE form of `print` (`p := print`) is a fixed 1-arg function, NOT variadic — the
-    // `sep=`/`end=` named args AND the variadic 0/many-arg shapes stay DIRECT-CALL-ONLY (they need
-    // the specialized `CallPrintSep`/`CallPrint` opcodes, unreachable through a bound value). The
-    // dedicated `Ty::BuiltinFn` carries `print`'s canonical 1-arg signature, so the direct call
-    // `print(a, b)` still works but `p("a", "b")` / `p()` on a bound value do not.
-    ok("fn w():\n    p := print\n    p(\"a\")\n");
-    ok("fn w():\n    print(\"a\", \"b\", \"c\")\n"); // direct call stays variadic
-    rejects("fn w():\n    p := print\n    p()\n", "argument");
-    rejects("fn w():\n    p := print\n    p(\"a\", \"b\")\n", "argument");
-}
-
-#[test]
 fn top_level_read_above_a_global_is_the_builtin() {
     // CPython `x = chr` above `chr = 'z'` binds the builtin; the compiler reads the checker's
     // `Builtin` record, so the old VM `nil`-slot reason is gone.

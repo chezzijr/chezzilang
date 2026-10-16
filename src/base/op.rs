@@ -718,6 +718,9 @@ pub struct Program {
     /// The runtime key of the prelude's `Range` struct (TICKET-253): what a slice site reads a
     /// `Range` value by. Module 0 of a graph is the prelude.
     pub range_key: String,
+    /// `print`'s `sep` and `end` defaults, read from the prelude's `native fn print` declaration (the
+    /// one owner): what `Op::CallPrint` and a `print` fn value without those args join with.
+    pub print_defaults: [String; 2],
     /// Enum methods, keyed by the enum's module-scoped runtime key → (method name → its proto). The
     /// enum analogue of `StructDef::methods` (enums are type-erased — no `StructDef`/`tid`). Looked up
     /// by `do_method_call` (via `variants_by_id[id].enum_name`) and the arith/compare overload paths.

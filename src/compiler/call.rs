@@ -3,10 +3,46 @@
 //! Split out of `src/compiler/mod.rs`. `super::*` is the parent module.
 
 use super::*;
-use crate::ast::{Chunk, Expr, ExprKind, Span};
+use crate::ast::{Chunk, Expr, ExprKind, Span, Stmt, StmtKind};
 use crate::base::op::{CapEntry, Op, ProtoId};
 use crate::checker::Resolution;
 use std::collections::HashSet;
+
+/// `print`'s `sep` and `end` defaults, read from the prelude's `native fn print(...args, sep, end)`:
+/// the declaration owns them, and this is the one place the compiler reads them (the VM's
+/// `Program.print_defaults`). `stmts` is the prelude module's statements.
+pub(super) fn prelude_print_defaults(stmts: &[Stmt]) -> Result<[String; 2], CompileError> {
+    let internal = || CompileError {
+        message: "internal: the prelude declares no `native fn print(...args, sep: str = .., end: \
+                  str = ..)` with literal defaults"
+            .to_string(),
+        span: Span::RUNTIME,
+    };
+    let mut decl = None;
+    for s in stmts {
+        if let StmtKind::Native(d) = &s.kind
+            && Builtin::from_name(&d.name) == Some(Builtin::Print)
+        {
+            decl = Some(d);
+        }
+    }
+    let decl = decl.ok_or_else(internal)?;
+    let lit = |p: Option<&crate::ast::Param>| -> Option<String> {
+        if let Some(Expr {
+            kind: ExprKind::Str(s),
+            ..
+        }) = p?.default.as_ref()
+        {
+            Some(s.clone())
+        } else {
+            None
+        }
+    };
+    let mut keyword_only = decl.params.iter().skip_while(|p| !p.is_variadic).skip(1);
+    let sep = lit(keyword_only.next()).ok_or_else(internal)?;
+    let end = lit(keyword_only.next()).ok_or_else(internal)?;
+    Ok([sep, end])
+}
 
 impl Compiler {
     /// The opcode for a call whose head the checker resolved to [`Resolution::Builtin`].
@@ -14,29 +50,66 @@ impl Compiler {
         &mut self,
         fc: &mut FnComp,
         b: Builtin,
+        call_id: crate::ast::NodeId,
         args: &[Expr],
         named: &[(String, Expr)],
         span: Span,
     ) -> Result<(), CompileError> {
         match b {
-            // `print(...)`: space-joined, newline-terminated. With `sep=`/`end=`, push `sep` then
-            // `end` (each the user expr or its default str) after the positional args.
+            // `print(...)` lowers from its call plan `[Pack, sep, end]` (the prelude declaration's
+            // slots): push each packed arg, then, when `sep` or `end` is written, push both (the
+            // user expr or the declaration's default). With neither written the VM joins with the
+            // declaration's defaults (`Program.print_defaults`).
             Builtin::Print => {
-                self.compile_args(fc, args)?;
-                if named.is_empty() {
-                    fc.emit(Op::CallPrint(args.len()), span);
+                let plan = self
+                    .call_plans
+                    .get(&(self.current_module_idx, call_id.0))
+                    .cloned();
+                let Some(plan) = plan else {
+                    return Err(CompileError {
+                        message: "internal: no call plan recorded for print".to_string(),
+                        span,
+                    });
+                };
+                let pick = |ci: usize| -> &Expr {
+                    if ci < args.len() {
+                        &args[ci]
+                    } else {
+                        &named[ci - args.len()].1
+                    }
+                };
+                let [crate::checker::ArgFill::Pack(cis), sep, end] = &plan[..] else {
+                    return Err(CompileError {
+                        message: "internal: print call plan is not [pack, sep, end]".to_string(),
+                        span,
+                    });
+                };
+                for &ci in cis {
+                    self.compile_expr(fc, pick(ci))?;
+                }
+                let tail = [sep, end];
+                if tail
+                    .iter()
+                    .all(|f| !matches!(f, crate::checker::ArgFill::Arg(_)))
+                {
+                    fc.emit(Op::CallPrint(cis.len()), span);
                 } else {
-                    let sep = named.iter().find(|(k, _)| k == "sep").map(|(_, v)| v);
-                    let end = named.iter().find(|(k, _)| k == "end").map(|(_, v)| v);
-                    match sep {
-                        Some(e) => self.compile_expr(fc, e)?,
-                        None => fc.emit(Op::ConstStr(" ".to_string()), span),
+                    for fill in tail {
+                        match fill {
+                            crate::checker::ArgFill::Arg(ci) => self.compile_expr(fc, pick(*ci))?,
+                            crate::checker::ArgFill::Provider(_)
+                            | crate::checker::ArgFill::Inline { .. } => {
+                                self.compile_default_fill(fc, fill, span)?
+                            }
+                            crate::checker::ArgFill::Pack(_) => {
+                                return Err(CompileError {
+                                    message: "internal: print tail slot is a pack".to_string(),
+                                    span,
+                                });
+                            }
+                        }
                     }
-                    match end {
-                        Some(e) => self.compile_expr(fc, e)?,
-                        None => fc.emit(Op::ConstStr("\n".to_string()), span),
-                    }
-                    fc.emit(Op::CallPrintSep { argc: args.len() }, span);
+                    fc.emit(Op::CallPrintSep { argc: cis.len() }, span);
                 }
             }
             Builtin::Ord
@@ -230,7 +303,7 @@ impl Compiler {
                     return Ok(());
                 }
                 Resolution::Builtin(b) => {
-                    return self.compile_builtin_call(fc, b, args, named, span);
+                    return self.compile_builtin_call(fc, b, call_id, args, named, span);
                 }
                 Resolution::Member | Resolution::ModuleMember { .. } | Resolution::Fn { .. } => {}
                 other @ Resolution::Local
@@ -341,7 +414,7 @@ impl Compiler {
         if let ExprKind::Ident(_) = &callee.kind {
             match self.resolution(callee)?.clone() {
                 Resolution::Builtin(b) => {
-                    return self.compile_builtin_call(fc, b, args, named, span);
+                    return self.compile_builtin_call(fc, b, call_id, args, named, span);
                 }
                 Resolution::StructCtor(key) => {
                     let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;

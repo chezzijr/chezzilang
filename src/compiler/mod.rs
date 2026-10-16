@@ -163,6 +163,9 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
     c.program.range_key = crate::resolver::range_key(graph);
+    // Module 0 of a graph is the prelude.
+    let prelude = graph.modules.first().map(|lm| &lm.ast.stmts[..]);
+    c.program.print_defaults = call::prelude_print_defaults(prelude.unwrap_or_default())?;
     c.program.rebuild_struct_names(&c.field_widths);
     c.build_hooks();
     c.build_provider_table()?;
@@ -197,14 +200,15 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // TICKET-253: every module sees the prelude's `Range` struct; a standalone module has no graph,
     // so it carries the declaration itself (unless it declares one).
     let is_range = |s: &Stmt| matches!(&s.kind, StmtKind::Struct { name, .. } if name == "Range");
-    if !module.stmts.iter().any(is_range)
-        && let Ok(src) = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
-        && let Ok(toks) = crate::lexer::tokenize(&src)
-        && let Ok(prelude) = crate::parser::parse(toks)
-    {
-        module
-            .stmts
-            .extend(prelude.stmts.into_iter().filter(is_range));
+    let prelude = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
+        .ok()
+        .and_then(|src| crate::lexer::tokenize(&src).ok())
+        .and_then(|toks| crate::parser::parse(toks).ok())
+        .map(|m| m.stmts)
+        .unwrap_or_default();
+    let print_defaults = call::prelude_print_defaults(&prelude)?;
+    if !module.stmts.iter().any(is_range) {
+        module.stmts.extend(prelude.into_iter().filter(is_range));
     }
     crate::desugar::run_standalone(&mut module).map_err(|e| CompileError {
         message: e.message,
@@ -270,6 +274,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.program.method_ic_sites = c.method_ic_next;
     c.program.range_key =
         crate::resolver::range_key(&crate::checker::standalone_graph(&module.stmts));
+    c.program.print_defaults = print_defaults;
     c.program.rebuild_struct_names(&c.field_widths);
     c.build_provider_table()?;
     c.build_hooks();
@@ -558,6 +563,7 @@ impl Compiler {
             protos: Vec::new(),
             structs: HashMap::new(),
             range_key: "Range".to_string(),
+            print_defaults: [String::new(), String::new()],
             enum_methods: HashMap::new(),
             enum_home: HashMap::new(),
             providers: Vec::new(),

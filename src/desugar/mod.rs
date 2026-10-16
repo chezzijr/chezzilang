@@ -275,10 +275,54 @@ pub(crate) struct SlotSpec {
     pub is_variadic: bool,
 }
 
-/// The [`SlotSpec`]s of `decl`'s explicit parameters (a leading `self` is dropped). `owner` is the
-/// name [`synthesize_providers`] passed for the same declaration (`f`, or `S.m` for a method),
-/// `self_ty` is [`self_ty_for`]'s answer for the host, and `host_tps` are the host's type
-/// parameter names (empty for a free fn).
+/// Which slots of a signature carry a name a call can bind by keyword.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SlotNames {
+    /// Every parameter (a declared fn).
+    All,
+    /// Only the parameters after the variadic one; an earlier slot is positional-only, as in CPython
+    /// (a native fn: `print(...args, sep, end)` takes `sep` and `end` by keyword).
+    KeywordOnly,
+}
+
+/// The one slot builder: a [`SlotSpec`] per parameter of `params`, each default classified by
+/// [`dflt_for`]. `owner` is the name [`synthesize_providers`] passed for the same declaration (`f`,
+/// or `S.m` for a method), `self_ty` is [`self_ty_for`]'s answer for the host and `tps` are the
+/// type parameter names in scope.
+pub(crate) fn slots_of(
+    params: &[crate::ast::Param],
+    file: u32,
+    owner: &str,
+    self_ty: Option<&str>,
+    tps: &[String],
+    names: SlotNames,
+) -> Vec<SlotSpec> {
+    let mut after_variadic = false;
+    params
+        .iter()
+        .map(|p| {
+            let named = names == SlotNames::All || after_variadic;
+            after_variadic |= p.is_variadic;
+            SlotSpec {
+                name: named.then(|| p.name.clone()),
+                default: p.default.as_ref().map(|d| {
+                    dflt_for(
+                        d,
+                        p.ty.as_ref(),
+                        tps,
+                        self_ty,
+                        provider_name(file, Slot::Param, owner, &p.name),
+                        None,
+                    )
+                }),
+                is_variadic: p.is_variadic,
+            }
+        })
+        .collect()
+}
+
+/// The [`SlotSpec`]s of `decl`'s explicit parameters (a leading `self` is dropped). `host_tps` are
+/// the host's type parameter names (empty for a free fn).
 pub(crate) fn param_slots(
     decl: &crate::ast::FnDecl,
     file: u32,
@@ -286,26 +330,45 @@ pub(crate) fn param_slots(
     self_ty: Option<&str>,
     host_tps: &[String],
 ) -> Vec<SlotSpec> {
-    let tps = tp_names(decl, host_tps);
     let skip = usize::from(decl.takes_self());
-    decl.params
-        .iter()
-        .skip(skip)
-        .map(|p| SlotSpec {
-            name: Some(p.name.clone()),
-            default: p.default.as_ref().map(|d| {
-                dflt_for(
-                    d,
-                    p.ty.as_ref(),
-                    &tps,
-                    self_ty,
-                    provider_name(file, Slot::Param, owner, &p.name),
-                    None,
-                )
-            }),
-            is_variadic: p.is_variadic,
-        })
-        .collect()
+    slots_of(
+        &decl.params[skip..],
+        file,
+        owner,
+        self_ty,
+        &tp_names(decl, host_tps),
+        SlotNames::All,
+    )
+}
+
+/// The [`SlotSpec`]s of a `native fn` that has parameters after its variadic one (`print`), or
+/// `None` when it has none: a native takes no named arguments otherwise (DEC-182). Every std native
+/// default is a literal, so [`dflt_for`] answers [`Dflt::Inline`]; no provider is synthesized for a
+/// native.
+pub(crate) fn native_param_slots(
+    decl: &crate::ast::NativeDecl,
+    skip: usize,
+) -> Option<Vec<SlotSpec>> {
+    let params = &decl.params[skip..];
+    let v = params.iter().position(|p| p.is_variadic)?;
+    (v + 1 < params.len()).then(|| {
+        let slots = slots_of(
+            params,
+            decl.span.file,
+            &decl.name,
+            None,
+            &[],
+            SlotNames::KeywordOnly,
+        );
+        debug_assert!(
+            slots
+                .iter()
+                .all(|s| !matches!(s.default, Some(Dflt::Provider { .. }))),
+            "a native default must be an inline literal: {}",
+            decl.name
+        );
+        slots
+    })
 }
 
 /// The [`SlotSpec`]s of struct `owner`'s fields, as [`synthesize_providers`] classifies them.

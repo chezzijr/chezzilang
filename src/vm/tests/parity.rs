@@ -1237,10 +1237,8 @@ fn builtin_value_equality_both_engines() {
 }
 
 /// Bug 3: all four first-class builtins are SENDABLE — a builtin bound to a local and CAPTURED
-/// into a spawned task crosses the airlock (the `SnapValue::Builtin` path) and runs. Typing them
-/// as the dedicated `Ty::BuiltinFn` (sendable), not a plain `Ty::Func` (conservatively
-/// non-sendable), removes the asymmetry where only `print` (once typed `Unknown`) could cross.
-/// Byte-identical on the VM and the M:N engine.
+/// into a spawned task crosses the airlock (the `SnapValue::Builtin` path) and runs. Byte-identical
+/// on the VM and the M:N engine.
 #[test]
 fn builtin_value_sendable_across_airlock_both_engines() {
     let src = "import std.concurrency\nfn main():\n    f := ord\n    p := print\n    parallel:\n        spawn:\n            p(f(\"a\"))\nmain()\n";

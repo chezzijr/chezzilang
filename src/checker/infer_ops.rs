@@ -139,17 +139,12 @@ impl Checker {
         // scope 0 before any body (TICKET-183, TICKET-180). At top level a name whose `:=` is below
         // the read is the builtin, as in CPython; the compiler loads it from the checker's `Builtin`
         // record, never from the not-yet-initialized slot.
-        // `print`'s VALUE form is a FIXED 1-arg function, NOT its variadic call signature: the
-        // variadic + `sep=`/`end=` shapes need the specialized `CallPrint`/`CallPrintSep` opcodes,
-        // which are unreachable through a bound value (`p := print`). So force the canonical 1-arg
-        // `Ty::BuiltinFn` here rather than the harvested variadic sig from `builtin_sig` — this is the
-        // design-sanctioned split (the call authority is the variadic prelude decl; the value form is
-        // fixed).
-        if let Resolution::Builtin(Builtin::Print) = &res {
-            return Ty::BuiltinFn {
-                params: vec![Ty::Unknown],
-                ret: Box::new(Ty::Nil),
-            };
+        // `print` is an ordinary fn value: its prelude declaration is the one signature, so `p := print`
+        // is `fn(...Any) -> None` and a call through it binds like the direct call.
+        if let Resolution::Builtin(Builtin::Print) = &res
+            && let Some(sig) = self.builtin_sig(name)
+        {
+            return fn_value_ty(&sig);
         }
         if let Resolution::Builtin(b) = &res
             && b.first_class()
@@ -227,7 +222,11 @@ impl Checker {
         Ty::Unknown
     }
 
-    pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>) -> Ty {
+    /// `pack`: the literal is a variadic call's synthesized pack. An `Any` element type (an EMPTY
+    /// protocol) hands no hint to an item: it pins no type parameter and joins no branch, so
+    /// `print(id)` stays undetermined and `print(if c: 1 else: "a")` stays a branch mismatch, as
+    /// before `print` was an ordinary variadic. Every item is still checked against `Any`.
+    pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>, pack: bool) -> Ty {
         let sib = match expected {
             Some(Ty::List(e)) if !e.is_unknown() => None,
             _ => self
@@ -263,11 +262,15 @@ impl Checker {
             Some(Ty::List(e)) if !e.is_unknown() => Some((**e).clone()),
             _ => None,
         };
+        let hint_items = !(pack
+            && elem_expected
+                .as_ref()
+                .is_some_and(|e| self.is_empty_protocol(e)));
         let tys: Vec<Ty> = items
             .iter()
             .map(|it| match &elem_expected {
-                Some(e) => self.infer_value_in(it, e),
-                None => self.infer_value(it),
+                Some(e) if hint_items => self.infer_value_in(it, e),
+                Some(_) | None => self.infer_value(it),
             })
             .collect();
 

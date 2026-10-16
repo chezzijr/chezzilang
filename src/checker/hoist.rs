@@ -890,14 +890,23 @@ impl Checker {
     /// The parsed `std/prelude.chz`, for the test-only paths that check a program with no prelude
     /// module in a graph; `seed_native_prelude_sigs` is their one seed.
     /// Same source chain as the resolver ($CHEZZI_STD → embedded) — no reader bypasses it.
+    /// Parsed once per process, so every checker of one process reads the same node ids (a call
+    /// plan's `Inline` fill of a prelude default, such as `print`'s `sep`, names one node).
     #[cfg(any(test, feature = "test-api"))]
     fn parse_prelude_source() -> Option<crate::ast::Module> {
-        let src = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()]).ok()?;
-        let toks = crate::lexer::tokenize(&src).ok()?;
-        let mut module = crate::parser::parse(toks).ok()?;
-        // A std file never probes the project root (as `Resolver::parse` classifies it).
-        crate::ast::classify_variant_imports(&mut module, &|_| false);
-        Some(module)
+        static PRELUDE: std::sync::OnceLock<Option<crate::ast::Module>> =
+            std::sync::OnceLock::new();
+        PRELUDE
+            .get_or_init(|| {
+                let src = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
+                    .ok()?;
+                let toks = crate::lexer::tokenize(&src).ok()?;
+                let mut module = crate::parser::parse(toks).ok()?;
+                // A std file never probes the project root (as `Resolver::parse` classifies it).
+                crate::ast::classify_variant_imports(&mut module, &|_| false);
+                Some(module)
+            })
+            .clone()
     }
 
     /// Populate [`Checker::native_prelude_sigs`] from the always-linked `std/prelude.chz` on the

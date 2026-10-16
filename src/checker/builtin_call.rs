@@ -18,10 +18,15 @@ impl Checker {
         hint: Option<&Ty>,
     ) -> Option<Ty> {
         match b {
+            // `print` binds like every declared fn: the prelude decl's slots pack the surplus into
+            // its variadic slot and fill `sep`/`end`, and the bound args check against its params.
             Builtin::Print => {
-                for a in args {
-                    self.infer_value(a);
-                }
+                let sig = self.builtin_sig("print")?;
+                let Some(bound) = self.bind_call(sig.slots.as_deref(), "print", args, 0, span)
+                else {
+                    return Some(Ty::Nil);
+                };
+                self.check_args_range("print", &sig.params, sig.min_params, &bound, span);
                 Some(Ty::Nil)
             }
             // `panic(msg)` raises the same recoverable `RuntimeError` the runtime uses for overflow/

@@ -201,36 +201,34 @@ impl Vm {
                 self.invoke_native(func, &name, kind, args, span)
             }
             // A first-class universe builtin fn value (`print`/`ord`/`chr`/`panic`) — route
-            // back into the SAME logic direct calls use. `print` replicates `do_print`'s
-            // value-form defaults (space-join + trailing '\n'; sep=/end= are direct-call-only
-            // via `CallPrintSep`). `panic` returns `Err` (mirrors `do_builtin`'s panic arm) so
-            // defers still unwind. `ord`/`chr` reuse `builtin_ord`/`builtin_chr` directly.
+            // back into the SAME logic direct calls use. `panic` returns `Err` (mirrors
+            // `do_builtin`'s panic arm) so defers still unwind. `ord`/`chr` reuse
+            // `builtin_ord`/`builtin_chr` directly.
             Callee::Builtin(b) => match b {
+                // `print`'s declared slots are `(...args, sep, end)`, so the value takes
+                // `(List, sep?, end?)`; an absent `sep`/`end` is the declaration's default.
                 Builtin::Print => {
-                    // ROOT the args on the operand stack while stringifying. `args` was
+                    let program = Arc::clone(&self.program);
+                    let text = |vm: &Self, i: usize, default: &String| {
+                        args.get(i)
+                            .and_then(|v| vm.val_str(*v))
+                            .unwrap_or_else(|| default.clone())
+                    };
+                    let sep = text(self, 1, &program.print_defaults[0]);
+                    let end = text(self, 2, &program.print_defaults[1]);
+                    let items: Vec<Value> = args
+                        .first()
+                        .and_then(|v| v.as_obj())
+                        .and_then(|h| self.heap.get(h).as_list().cloned())
+                        .unwrap_or_default();
+                    // ROOT the items on the operand stack while they stringify. `args` was
                     // `split_off` the stack (do_call slow path), so it is NOT a GC root; a
-                    // `Stringable` `str` method runs user code that can `collect()` at a
-                    // safepoint and would sweep the LATER (still-unrendered) args — a
-                    // use-after-free. `do_print` guards this exact hazard by keeping the args
-                    // on the operand stack across the whole stringify loop; mirror it here:
-                    // push them back, render from the rooted slots, then truncate.
-                    let at = self.stack.len();
-                    for v in &args {
+                    // `Stringable` `str` method runs user code that can `collect()` at a safepoint.
+                    for v in &items {
                         self.push(*v);
                     }
-                    let mut parts = Vec::with_capacity(args.len());
-                    for i in 0..args.len() {
-                        let v = self.stack[at + i];
-                        parts.push(self.stringify(v, span, 0)?);
-                    }
-                    self.stack.truncate(at);
-                    let mut line = parts.join(" ");
-                    line.push('\n');
-                    self.emit_out(&line);
-                    match self.stream_halt(span) {
-                        Some(halt) => Err(halt), // stdout died — halt like `os.exit`
-                        None => Ok(Value::nil()),
-                    }
+                    self.do_print_sep(items.len(), &sep, &end, span)?;
+                    Ok(self.pop())
                 }
                 Builtin::Ord => self.builtin_ord(&args, span),
                 Builtin::Chr => self.builtin_chr(&args, span),

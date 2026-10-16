@@ -344,8 +344,21 @@ impl Vm {
                 let v = self.fn_value(FnKey::Builtin(*b), || Obj::Builtin(*b));
                 self.push(v);
             }
-            Op::CallPrint(argc) => self.do_print(*argc, span)?,
-            Op::CallPrintSep { argc } => self.do_print_sep(*argc, span)?,
+            Op::CallPrint(argc) => {
+                // The `Arc` clone ends the borrow of `self` the defaults would hold.
+                let program = Arc::clone(&self.program);
+                let [sep, end] = &program.print_defaults;
+                self.do_print_sep(*argc, sep, end, span)?
+            }
+            // Stack on entry: `[args…, sep, end]`. Both are copied out as `str`, so they are no
+            // longer GC roots while the args stringify.
+            Op::CallPrintSep { argc } => {
+                let end = self.pop();
+                let sep = self.pop();
+                let end = self.val_str(end).unwrap_or_default();
+                let sep = self.val_str(sep).unwrap_or_default();
+                self.do_print_sep(*argc, &sep, &end, span)?
+            }
             Op::Return => self.do_return(false)?,
             Op::DeferCall(argc) => self.do_defer(None, *argc, span),
             Op::DeferMethod(name, argc) => self.do_defer(Some(name.clone()), *argc, span),
