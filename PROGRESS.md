@@ -73,23 +73,28 @@ Details of each step are in [`docs/history/progress/2026-10.md`](docs/history/pr
 
 ## What is next
 
-1. **Fact 10.** Derive the builtin method set of each type from the harvested prelude table (about 17
-   hover constants and `builtin_container_sig`). Make the VM dispatch a builtin method by an id, not by
-   name.
-2. **Fact 11.** One `WireValue` visitor for `wire_summary`, `collect_core_gcrefs` and the
-   `to_snap`/`to_wire` budget.
-3. **Open defects carried from the names work** (not ledger rows yet):
-   - An imported alias `Count` read in a body before `Count := …` faults with `'None' is not callable`.
-     The local twin reports `'P' is read before its initialization at line 6`.
-   - `enum E` + `E := 5` hides `E.A`: an expression reads the value, not the type. `struct E` +
-     `E := 5` breaks `E(1)` the same way, and `type E = int` + `E := 5` is accepted. **Owner decision
-     2026-10-16:** a type name (`struct`, `enum`, `type`) and a value name (`:=`, `fn`, import) never
-     share a name in one module, as Go does and as Rust does for a callable type (`struct E(i32);` +
-     `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
-   - `f := print; f(1, 2)` says `'closure' expects 1 argument(s)`, while a user variadic keeps its
-     shape as a value (`h := g; h(1, 2, 3)`). A call through any fn value names it `'closure'`, not the
-     binding.
-4. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+Each group below is one fact decided in two or more places (grouped 2026-10-16).
+
+1. **In the pipeline (filed 2026-10-16):**
+   - TICKET-263, group A, names: one owner for "which names hold a slot" (owners.md row 44; fixes
+     `'None' is not callable` for an imported alias read before `Count := …`); one name per module
+     (the owner decision below); a recursive local lambda (`unknown name 'fact'`); a divergent fn.
+   - TICKET-264, group B, callables: `f := print; f(1, 2)` (`'closure' expects 1 argument(s)`), the
+     `'closure'` name in every fn-value call message, the "fewest args" owner (row 21).
+   - TICKET-265, group C, builtin types and protocols: fact 10 (row 70), rows 59, 62, 94, protocols
+     to `std.ops`/`std.cmp`/`std.iter`, `Hashable` embeds `Eq` and is opt-in, `T?` derives nothing,
+     `Deque`/`Heap`/`Counter` `Iterable`, the collection convention table, the U5 sibling gaps.
+2. **Group D, fact 11.** One `WireValue` visitor for `wire_summary`, `collect_core_gcrefs` and the
+   `to_snap`/`to_wire` budget (row 93).
+3. **Group E.** Overflow fault labels in `consteval`, `vm/arith.rs` and `vm/shared_methods.rs` (row 61).
+4. **Group F, syntax.** Row 25 (waits on G5); top-level `return`; the empty enum; `g()?` in `defer:`
+   and `defer` in a generator (U11); a line break inside a hole (U8); the 1-tuple (U9); CRLF (U14);
+   the exponential `.map[int](f)` chain (U17); `oo(x)??` (S2-3). Statuses in
+   `docs/contributing/special-cases.md`.
+5. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
+   name (`:=`, `fn`, import) never share a name in one module, as Go does and as Rust does for a
+   callable type (`struct E(i32);` + `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
+6. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 
