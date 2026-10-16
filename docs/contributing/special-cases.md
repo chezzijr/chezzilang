@@ -38,7 +38,8 @@ Size of that shape at audit time:
 ## Unifying rules
 
 Each rule removes a cluster of special cases. "Decision" says whether the owner must choose language
-behaviour before a ticket can be written. Status as of 2026-10-16.
+behaviour before a ticket can be written. Status as of 2026-10-16. A "re-run 2026-10-16" note names the findings that were run again on that
+day's binary.
 
 | # | Rule | Removes | Status | Decision needed |
 |---|---|---|---|---|
@@ -46,19 +47,19 @@ behaviour before a ticket can be written. Status as of 2026-10-16.
 | U2 | A hook is the method that satisfies the builtin protocol; a declared type with methods is one kind (struct and enum alike) | Family D of wave 23, enum half-hooks, `List(s)` for a bounded parameter | TICKET-250 (done) | no |
 | U3 | A receiver is the first parameter of a method and nothing else | the `self` universal cast (P0) | TICKET-250 (note added) | no (owner: `self` is the special word) |
 | U4 | An un-hinted `?x` is a carrier from creation; a wrapper holds its operand | Families B and C of wave 23 | TICKET-248, TICKET-247 (landed) | no |
-| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed) | decided, see below |
+| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed); re-run 2026-10-16: still open `"ab" * 3`, `false < true`, `bytes(2)`, enum `.copy()`, `match 1.5:`, `{1, 2}.map(f)` | decided, see below |
 | U6 | One iteration source: `for`, comprehensions, `List()`/`Set()`/`Map()`, destructuring and `Iterable` ask one function | range, channel, Set of tuples, std containers, `std.iter` | TICKET-253 (ranges), TICKET-257 (channels) | decided, see below |
 | U7 | A range is a value | every "a range is only valid as" site, `range()`, slice spelling | TICKET-253, TICKET-254 (landed) | decided, see below |
-| U8 | A block expression is an expression wherever layout exists, and layout exists inside brackets and interpolation holes | `match`/`recover:` rejected inside brackets, parameter default against field default, inline fn body against lambda body, line breaks in a hole | not filed | decided, see below |
-| U9 | One pattern grammar at every binding site; a bare tuple is a tuple wherever an expression list ends a statement | destructuring differences, `return a, b`, 1-tuple types | TICKET-257 (map pairs only) | decided, see below |
+| U8 | A block expression is an expression wherever layout exists, and layout exists inside brackets and interpolation holes | `match`/`recover:` rejected inside brackets, parameter default against field default, inline fn body against lambda body, line breaks in a hole | TICKET-260 (landed); re-run 2026-10-16: still open a line break inside a hole | decided, see below |
+| U9 | One pattern grammar at every binding site; a bare tuple is a tuple wherever an expression list ends a statement | destructuring differences, `return a, b`, 1-tuple types | TICKET-257 (map pairs only); re-run 2026-10-16: bare tuples fixed, 1-tuple still open | decided, see below |
 | U10 | A function is a function: one parameter-list grammar and one "is a value" rule for every callable | defaults/variadics/generics by function kind, constructors and builtins as values | TICKET-259 ("a type name is never a value") | decided, see below |
-| U11 | A boundary block (`spawn:`, `defer:`, `recover:`, generator body) states once what may cross it | six separate checks, three message families, `?` silently dropped in `defer:` | not filed | small |
+| U11 | A boundary block (`spawn:`, `defer:`, `recover:`, generator body) states once what may cross it | six separate checks, three message families, `?` silently dropped in `defer:` | not filed; re-run 2026-10-16: all three still open | small |
 | U12 | The string / hole seam has one owner: the hole scanner sees what was written, not what escapes produced | escapes live as syntax, nested literals unescaped twice | TICKET-252 (landed) | no |
-| U13 | One name-resolution rule and one reserved set | user type named like a builtin, std import against user import, "unknown name 'str'" | not filed (wave 16 "Names" family); the import half is fixed | small |
+| U13 | One name-resolution rule and one reserved set | user type named like a builtin, std import against user import, "unknown name 'str'" | `ea2ecda3`, `b19dab23`, `8c90e406` (a declaration shadows a builtin; one reserved set; one binding per name); re-run 2026-10-16: still open a divergent fn (`panic` inside) is not bottom-typed | small |
 | U14 | A physical line has one definition | CRLF blank line, CRLF in strings, tab on a blank line | not filed | no |
 | U15 | Derive rules are stated once | hashable derivation, compound assignment in place, `for a, b in map` by static type | TICKET-258 (compound assignment) | decided, see below |
 | U16 | Collection method conventions | `contains` against `has`, `remove` return shapes, miss behaviour | TICKET-257 (`contains`) | partly decided, see below |
-| U17 | `head[X]` has one reading, decided once | exponential check on `.m[T](../..)` chains, `t.0[i](5)` | not filed | no |
+| U17 | `head[X]` has one reading, decided once | exponential check on `.m[T](../..)` chains, `t.0[i](5)` | `t.0[i](5)` fixed (fact 4); re-run 2026-10-16: the chain is still exponential (12 links 0.1 s, 16 links 1.2 s, 20 links 17 s) | no |
 | U18 | Syntax-tree walkers are exhaustive (no wildcard arm) | generator ban bypass through `assert` | TICKET-251 (the lint) | no |
 
 ## Owner design decisions (2026-10-12)

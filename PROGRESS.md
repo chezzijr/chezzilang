@@ -81,14 +81,18 @@ Details of each step are in [`docs/history/progress/2026-10.md`](docs/history/pr
 3. **Open defects carried from the names work** (not ledger rows yet):
    - An imported alias `Count` read in a body before `Count := …` faults with `'None' is not callable`.
      The local twin reports `'P' is read before its initialization at line 6`.
-   - `enum E` + `E := 5` hides `E.A`: an expression reads the value, not the type.
-   - A wrong-arity call through a `print` value says `'closure' expects 1 argument(s)` with an empty
-     snippet.
+   - `enum E` + `E := 5` hides `E.A`: an expression reads the value, not the type. `struct E` +
+     `E := 5` breaks `E(1)` the same way, and `type E = int` + `E := 5` is accepted. **Owner decision
+     2026-10-16:** a type name (`struct`, `enum`, `type`) and a value name (`:=`, `fn`, import) never
+     share a name in one module, as Go does and as Rust does for a callable type (`struct E(i32);` +
+     `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
+   - `f := print; f(1, 2)` says `'closure' expects 1 argument(s)`, while a user variadic keeps its
+     shape as a value (`h := g; h(1, 2, 3)`). A call through any fn value names it `'closure'`, not the
+     binding.
 4. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 
-- `for _ in xs: print(_)`.
 - Does `Hashable` imply `Eq`?
 - The bound of the JSON timing test.
 - `Iterable` for `Deque`, `Heap` and `Counter`.
