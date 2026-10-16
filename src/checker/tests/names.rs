@@ -2067,3 +2067,41 @@ fn a_type_import_beside_a_fn_holds_no_slot() {
         "'xs' is this task's copy",
     );
 }
+
+/// A type name and a value name never share a module name (Go: `E redeclared in this block`;
+/// Rust: E0428 for a callable type). Each cell is a type binder x a value binder.
+#[test]
+fn a_type_name_and_a_value_name_never_share_a_module_name() {
+    let cells = [
+        "struct E:\n    a: int\n    fn make() -> E:\n        return E(1)\nE := 5\nprint(E.make().a)\n",
+        "enum E:\n    A\nE := 5\nprint(E.A)\n",
+        "type E = int\nE := 5\n",
+        "enum E:\n    A\nfn E() -> int:\n    return 1\n",
+    ];
+    for src in cells {
+        rejects(src, "'E' is already defined");
+    }
+}
+
+/// A type-only import and a later value of its name bind the name twice.
+#[test]
+fn a_type_import_and_a_later_value_bind_the_name_twice() {
+    files_reject(
+        &[
+            ("lib2.chz", "type Count = int\n"),
+            (
+                "main.chz",
+                "import Count from lib2\nfn g() -> int:\n    return Count(3)\nprint(g())\nCount := fn(n: int) -> int: n * 10\n",
+            ),
+        ],
+        "'Count' is already defined",
+    );
+}
+
+/// A local lambda reaches its own binding, as the top-level one does.
+#[test]
+fn a_recursive_local_lambda_sees_its_own_binding() {
+    ok(
+        "fn m():\n    fact := fn(n: int) -> int: if n == 0: 1 else: n * fact(n - 1)\n    print(fact(3))\nm()\n",
+    );
+}
