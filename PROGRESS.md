@@ -105,10 +105,6 @@ None open on 2026-10-16.
 
 ### Owner decisions not yet implemented
 
-- **`T?` derives nothing from `T`** (2026-10-16): no `Hashable`, no ordering, no methods of `T`. Today
-  `a < b` on two `int?` is accepted; it becomes an error. Rust derives `Hash` and `Ord` for
-  `Option<T>` and Python accepts `{None: 1}`; the owner chose one rule for all three. A user who wants
-  them declares an enum with its own methods.
 - **Collection methods** (U16, 2026-10-16): one convention table, with Rust's shapes: Set
   `insert`/`remove` return `bool`, Map `insert`/`remove` return `V?`, List `remove(i)` returns `T` and
   faults on a bad index; the concurrent collections follow the same rows. A protocol only where
@@ -117,12 +113,6 @@ None open on 2026-10-16.
 - **Top-level `return` is an error** (TICKET-178, 2026-10-16). Today `print(1)` / `return` /
   `print(2)` at module level prints `1` and exits 0. CPython: `SyntaxError: 'return' outside
   function`; Go and Rust have no top-level statements.
-- **Protocols move to modules, grouped by job** (2026-10-16). `Any` and `Error` stay global (Go keeps
-  `any` and `error`). `std.ops`: the operator protocols, `Index`, `IndexSet`, `Slice`, `Contains`;
-  `std.cmp`: `Eq`, `Comparable`, `Hashable`; `std.iter`: `Iterator`, `Iterable`; the rest to the module
-  that owns the job. Satisfaction stays structural, so only a bound (`[T: Add]`) needs the import.
-- **`Hashable` embeds `Eq`** (2026-10-16), as `Comparable` does: `[T: Hashable]` replaces
-  `[T: Hashable + Eq]`. No `PartialEq`: `float` keeps `==` and stays out of `Hashable`.
 - **`Hashable` is opt-in for user types** (2026-10-16). No `struct` or `enum` is `Hashable` on its own
   (the zero-field struct loses it); a user type becomes a key by defining `fn hash` and `fn eq`, as
   Rust requires a derive. Tuples of `Hashable` stay `Hashable` (Rust, Python).
