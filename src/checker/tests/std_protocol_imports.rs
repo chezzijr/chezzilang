@@ -127,9 +127,10 @@ fn hashable_bound_licenses_eq() {
         "Set element type must implement Hashable",
     );
     // Must still fail: `hash` alone does not make `Box[Tag]` a key when its `eq` needs `compare`.
+    // The message names the `Eq` half, which is the half that fails.
     rejects(
         "import Comparable from std.cmp\nstruct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    fn hash(self) -> int:\n        return 0\n    fn eq(self, other: Box[T]) -> bool where T: Comparable:\n        return self.val.compare(other.val) == 0\nprint(Set([Box(Tag(1))]).len())\n",
-        "Set element type must implement Hashable",
+        "Set element type Box[Tag]'s `eq` requires Tag: Comparable",
     );
 }
 

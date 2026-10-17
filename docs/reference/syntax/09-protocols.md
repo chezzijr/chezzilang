@@ -267,8 +267,8 @@ annotation (`struct Reg[K: Hashable]: m: Map[K, int]`).
 
 - It covers `in`/`contains`/`index_of`/`dedup`/`unique` over `List[T]` and a `T` used as a map key or
   set element. A type parameter that is never compared needs no bound.
-- `Comparable` embeds `Eq`. `Hashable` does not (as Rust's `Hash`), so a generic keyed on `T` needs
-  `[T: Hashable + Eq]`.
+- `Comparable` and `Hashable` embed `Eq`. A generic keyed on `T` writes `[T: Hashable]`;
+  `[T: Hashable + Eq]` still checks.
 - A type graph nested deeper than **10 000** links is refused at a `[T: Eq]` bound or an `==` (the
   VM's equality depth cap). A growing (polymorphic-recursion) type graph is refused much earlier.
 

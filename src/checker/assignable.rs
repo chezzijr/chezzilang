@@ -15,57 +15,44 @@ impl Checker {
     /// when it carries the identical reason, so one bad annotation prints once. The prefixes differ
     /// only in capitalization, so the comparison is on the bare reason, never the message.
     ///
-    /// **Two obligations, not one (W7-45).** `Hashable` — the scalars `int`/`str`/`bool`
+    /// **One question (W7-45, TICKET-265).** `Hashable` — the scalars `int`/`str`/`bool`
     /// intrinsically, a tuple whose every element is `Hashable` (TICKET-161), or a struct/enum
-    /// defining `hash(self) -> int`; `float` is refused
-    /// (NaN/equality footgun). AND `Eq`: a probe compares candidates with `values_equal` on a hash
-    /// COLLISION, so a key whose `eq` carries `where` bounds this instantiation does not satisfy
-    /// check-cleaned and then faulted — and worse, only *sometimes*, since with distinct hashes no
-    /// `eq` runs and the program printed a silent wrong answer at rc=0. `Hashable` does not embed
-    /// `Eq` (`embeds: Vec::new()`), so it has to be asked separately.
+    /// defining `hash(self) -> int`; `float` is refused (NaN/equality footgun). `Hashable` EMBEDS
+    /// `Eq` (owner decision 2, as `Comparable` does), so the one `satisfies` call also asks the
+    /// half a probe needs: a probe compares candidates with `values_equal` on a hash COLLISION, so
+    /// a key whose `eq` carries `where` bounds this instantiation does not satisfy check-cleaned
+    /// and then faulted, and only *sometimes*, since with distinct hashes no `eq` runs and the
+    /// program printed a silent wrong answer at rc=0.
     ///
-    /// **The second conjunct calls [`Self::eq_bounds_unsatisfied`] directly rather than
-    /// `self.satisfies(t, "Eq")`, even though the two now agree on every verdict** (a fixed C1,
-    /// W7-53 follow-up review: `satisfies(_, "Eq")` used to WRONGLY refuse a type whose only `eq` is
-    /// the NON-hook ordinary-method escape hatch — see [`Self::eq_sig_is_hook`] — which made
-    /// `key_ty_reject`'s comment below claim this conjunct had "no collateral" from the
-    /// `[K: Hashable + Eq]` fallback; that claim was FALSE at the time W7-53 shipped, since
-    /// `Counter[Key]`/`ConcurrentMap[Key, V]`/`memoize1` over such a `Key` all newly rejected a
-    /// working program, and it is fixed by this same follow-up). Calling `eq_bounds_unsatisfied`
-    /// directly (rather than through `satisfies`) is kept anyway, for two reasons that have nothing
-    /// to do with that bug: it is the one function all FOUR W7-53 gates (`==`, `in`, the `List`
-    /// builtins, this one) already share, so their wording stays consistent; and it is the one that
-    /// carries the cycle-guard/budget machinery `Self::enter_eq_obligation` needs for a recursive
-    /// generic (`struct D { x: List[C[D]] }`) — `satisfies`'s structural fallback for a HOOK `eq`
-    /// checks that method's OWN `where` bounds through a separate, simpler loop
-    /// (`satisfies_methods`'s `where_bounds` walk) that was never exercised against that guard.
+    /// **The failure message names the half that failed.** When `Hashable` fails because the `Eq`
+    /// embed fails, [`Self::eq_bounds_unsatisfied`] supplies the reason, not the `Hashable` text,
+    /// which would blame a type that has a `hash`. It is the one function all FOUR W7-53 gates
+    /// (`==`, `in`, the `List` builtins, this one) share, so their wording stays consistent. Here
+    /// it is a message source, never a second verdict: with the embed, a `Hashable` type is `Eq`.
+    /// Measured at the TICKET-265 embed: the `Holder`-shaped non-hook `eq` (`struct Holder[T]: v: T;
+    /// fn hash(self) -> int: return 1; fn eq[U](self, o: U) -> bool: return true`, then
+    /// `Set([Holder(1)])`) prints the same before and after the embed.
     ///
-    /// **`Hashable` stays `embeds: Vec::new()` — the `[K: Hashable + Eq]` fallback the W7-53 brief
-    /// pre-approved, kept over embedding `Eq` into `Hashable` (mirroring `Comparable`'s embed).**
-    /// Embedding was re-measured as an ALTERNATIVE to fixing the `satisfies(_, "Eq")` bug above
-    /// (rather than fixing it): it does not substitute for that fix — a non-hook-`eq` `Holder`
-    /// that needed no `Eq` at all before (`Hashable` alone) newly breaks under the embed, `struct
-    /// Holder[T]: v: T; fn hash(self) -> int: return 1; fn eq[U](self, o: U) -> bool: return true`
-    /// then `Set([Holder(1)])` — because `Hashable`'s embed makes `self.satisfies(t, "Hashable")`
-    /// two lines up transitively demand `Eq`, which the STILL-buggy `satisfies` refuses. `[K:
-    /// Hashable + Eq]` is also the more faithful mirror of the ancestor either way (Rust's `Hash`
-    /// has no `Eq` supertrait; `HashSet<T>` spells `impl<T: Eq + Hash>`, not one bound).
-    ///
-    /// (`Channel`/`Func` are NOT the reason — they never reach this conjunct, because the `Hashable`
-    /// gate refuses them first, and a struct merely *holding* a `Channel` satisfies `Eq` fine.)
+    /// (`Channel`/`Func` are NOT the reason — the `Hashable` gate refuses them first, and a struct
+    /// merely *holding* a `Channel` satisfies `Eq` fine.)
     ///
     /// Every map-key and set-element position that is SPELLED funnels through here (literal,
     /// comprehension, `Set(list)` construction, annotation, `m[k]` read and write,
     /// and thereby every `Map`/`Set`/`RwShared` method).
     ///
-    /// **W7-53.** NOT erased any more: a free `Ty::Param` reaching the second conjunct
-    /// (`eq_bounds_unsatisfied`, not `_erased`) is judged directly, so `fn mk[T: Hashable](x: T) ->
-    /// Set[T]` that builds `Set[T]` in its own body — never spelling the element type — is now
+    /// **W7-53.** NOT erased any more: a free `Ty::Param` is judged directly, so `fn mk[T](x: T) ->
+    /// Set[T]` that builds `Set[T]` in its own body — never spelling the element type — is
     /// caught at ITS OWN definition instead of handing back a `Set[Cond[Tag]]` no gate ever saw
-    /// (measured, was check-clean; W7-53's third instance). The `Eq` conjunct stays second because a
-    /// non-`Hashable` type must keep reporting the `Hashable` text.
+    /// (measured, was check-clean; W7-53's third instance). An unbounded `T` reports the `Hashable`
+    /// text, because the `Hashable` bound brings the `Eq` half.
     pub(super) fn key_ty_reject(&self, t: &Ty) -> Option<String> {
         if self.satisfies(t, "Hashable").is_err() {
+            // A type parameter has no `Eq` half of its own: its advice is the `Hashable` bound.
+            if !matches!(t, Ty::Param(_))
+                && let Some(why) = self.eq_bounds_unsatisfied(t)
+            {
+                return Some(why);
+            }
             let mut msg = format!(
                 "must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found {t}"
             );
@@ -75,7 +62,7 @@ impl Checker {
             msg.push_str(&self.hook_name_note(t, "Hashable", "hash"));
             return Some(msg);
         }
-        self.eq_bounds_unsatisfied(t)
+        None
     }
 
     /// TICKET-161 — the first element of tuple type `ty`, depth-first, that is not `Hashable`, so a

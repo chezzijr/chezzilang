@@ -7,8 +7,8 @@
 # with one real, extensible implementation.
 
 # The comparison protocols. A bound needs `import Eq, Comparable, Hashable from std.cmp`; the
-# operators `==` and `<` and a `Map` key need no import. `Comparable` embeds `Eq` (a type that orders
-# also compares equal).
+# operators `==` and `<` and a `Map` key need no import. `Comparable` and `Hashable` embed `Eq` (a type
+# that orders, or hashes, also compares equal).
 protocol Eq:
     fn eq(self, other: Self) -> bool
 
@@ -17,6 +17,7 @@ protocol Comparable:
     fn compare(self, other: Self) -> int
 
 protocol Hashable:
+    Eq
     fn hash(self) -> int
 
 # The larger of `a` and `b`. On a tie (neither is smaller) returns the first argument, `a`

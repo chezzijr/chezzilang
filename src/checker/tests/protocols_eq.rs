@@ -816,7 +816,7 @@ struct Box[T]:
         &format!(
             "import Hashable from std.cmp\n{TAG_BOX}fn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\nprint(f([Box(Tag(1)), Box(Tag(2))]))\n"
         ),
-        "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
+        "type Box[Tag] does not satisfy Eq",
     );
 
     // ---- ok() neighbours derived from the same premise ----
@@ -856,9 +856,9 @@ struct Box[T]:
 ///
 /// **Rust owns this seam and spells it in the bound:** `impl<T: Eq + Hash> HashSet<T>` /
 /// `impl<K: Eq + Hash, V> HashMap<K, V>` — `Hash` alone is never enough. Chezzi's `Hashable`
-/// protocol does not embed `Eq` (`embeds: Vec::new()`), so the key check has to ask both.
+/// protocol embeds `Eq` (owner decision 2, TICKET-265), so the one `Hashable` question asks both.
 ///
-/// One line in `key_ty_reject` is the whole fix, because EVERY map-key and set-element position in
+/// `key_ty_reject` is the one site, because EVERY map-key and set-element position in
 /// the checker funnels through it. This test is the verification of that claim rather than an
 /// assumption about it: the literal, the comprehension, `Set(list)` construction (a site distinct
 /// from the `Set([…])` literal form), the annotation, `m[k]` read and write, and each container
@@ -902,6 +902,8 @@ b := Box(Tag(2))
         "m: Map[Box[Tag], int] = {}\nprint(m.len())\n",   // Map annotation
         "s: Set[Box[Tag]] = Set([])\ns2 := s.union(s)\n", // set algebra
         "struct W:\n    s: Set[Box[Tag]]\nprint(W(Set([a])).s.len())\n", // a struct FIELD's type
+        "print(Set([(a, 1)]).len())\n",                   // a tuple key holding the bad element
+        "print({(1, a): 1}.len())\n",                     // a tuple map key holding the bad element
     ] {
         let errs = check_entry(&format!("{COND}{tail}"));
         assert!(
@@ -945,10 +947,9 @@ b := Box(Tag(2))
     // An empty literal's element/key type is still `Unknown` — must not cascade.
     entry_ok(&format!("{COND}print(Set([]).len())\nprint({{}}.len())\n"));
     // NOT ERASED any more (W7-53): a free `T` reaching a spelled `Set[T]`/`Map[T, _]` position inside
-    // a generic body is judged directly, so `[T: Hashable]` alone no longer accepts a body that itself
-    // builds/indexes the container — `Hashable` does not imply `Eq` (measured: embedding it broke the
-    // `Holder`-shaped ordinary-`eq`-method escape hatch, `key_ty_reject`'s doc), so the DECLARATION
-    // must spell both, exactly as Rust's own `HashSet<T>`/`HashMap<K, V>` require `Eq + Hash`.
+    // a generic body is judged directly. `Hashable` embeds `Eq` (owner decision 2, TICKET-265;
+    // measured: the `Holder`-shaped ordinary-`eq`-method escape hatch still checks and runs), so
+    // `[T: Hashable]` alone licenses the body, and `[T: Hashable + Eq]` still checks.
     entry_ok(
         "import Eq, Hashable from std.cmp\nfn h[T: Hashable + Eq](xs: Set[T]) -> int:\n    return xs.len()\nfn k[T: Hashable + Eq](m: Map[T, int]) -> int:\n    return m.len()\nfn s2[T: Hashable + Eq](x: T) -> int:\n    s := Set([x])\n    s.add(x)\n    m := {x: 1}\n    return s.len() + m.len()\nprint(h(Set([1])) + k({1: 2}) + s2(1))\n",
     );
@@ -956,12 +957,14 @@ b := Box(Tag(2))
         "fn h[T](xs: Set[T]) -> int:\n    return xs.len()\n",
         "Set element type must implement Hashable",
     );
-    // W7-53's third measured instance: `[T: Hashable]` alone, with a `Set(xs)` construction inside
-    // the body, is now rejected at ITS OWN definition (`s2`'s `Set([x])`/`{x: 1}` above are the
-    // `+ Eq` fix; this is the same body with the bound removed).
+    // W7-53's third measured instance: a `Set(xs)` construction inside a body whose `T` has no
+    // `Hashable` bound is rejected at ITS OWN definition. `[T: Hashable]` alone now checks.
     rejects(
-        "import Hashable from std.cmp\nfn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\n",
-        "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
+        "fn f[T](xs: List[T]) -> int:\n    return Set(xs).len()\n",
+        "Set element type must implement Hashable",
+    );
+    entry_ok(
+        "import Hashable from std.cmp\nfn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\nprint(f([1, 1]))\n",
     );
 }
 

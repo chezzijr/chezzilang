@@ -3,7 +3,7 @@
 
 import Add from std.ops
 import Iterator from std.iter
-import Eq from std.cmp
+import Eq, Hashable from std.cmp
 
 fn twice[T: Add](x: T) -> T:
     return x + x
@@ -16,6 +16,17 @@ fn count(n: int) -> Iterator[int]:
 
 fn same[T: Eq](a: T, b: T) -> bool:
     return a == b
+
+fn key_same[T: Hashable](a: T, b: T) -> bool:
+    return a == b
+
+fn distinct[T: Hashable](xs: List[T]) -> int:
+    return Set(xs).len()
+
+test fn a_hashable_bound_licenses_eq_and_set():
+    assert key_same("a", "a")
+    assert not key_same(1, 2)
+    assert distinct([1, 1, 2]) == 2
 
 test fn an_add_bound_runs_on_int_and_str():
     assert twice(2) == 4
