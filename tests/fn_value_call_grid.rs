@@ -702,3 +702,92 @@ fn fn_value_pinned_red_belongs_to_the_families() {
     }
     // A family whose fix landed has no pinned cell left; the list ends empty.
 }
+
+/// The keyword-only parameters after a pack are part of a fn type: two fn values join, in either
+/// order and in every container, only when those parameters match. The error shows them.
+#[test]
+fn keyword_only_params_are_part_of_the_fn_type() {
+    const DECLS: &str = "fn g(...xs: int, sep: str) -> str:
+    return sep
+fn k(...xs: int) -> str:
+    return \"k\"
+fn h(...xs: int, sep: str) -> str:
+    return \"h\" + sep
+fn d(...xs: int, sep: str = \"-\") -> str:
+    return sep
+";
+    const DIFFER: &str = "fn(...int, str) -> str";
+    let rows: [(&str, &str, Expect); 12] = [
+        (
+            "map-gk",
+            "m := {\"g\": g, \"k\": k}\nprint(m.len())",
+            Expect::Rejects(DIFFER),
+        ),
+        (
+            "map-kg",
+            "m := {\"k\": k, \"g\": g}\nprint(m.len())",
+            Expect::Rejects(DIFFER),
+        ),
+        (
+            "list-gk",
+            "fs := [g, k]\nprint(fs.len())",
+            Expect::Rejects(DIFFER),
+        ),
+        (
+            "list-kg",
+            "fs := [k, g]\nprint(fs.len())",
+            Expect::Rejects(DIFFER),
+        ),
+        (
+            "let-g-k",
+            "f := g\nf = k\nprint(1)",
+            Expect::Rejects(DIFFER),
+        ),
+        (
+            "let-k-g",
+            "f := k\nf = g\nprint(1)",
+            Expect::Rejects(DIFFER),
+        ),
+        // A defaulted keyword-only param flows into a slot that requires it, as a defaulted
+        // positional one does; the reverse requires more than the slot promises.
+        (
+            "required-slot-takes-defaulted",
+            "fs := [g, d]\nprint(fs.len())",
+            Expect::Prints("2".to_string()),
+        ),
+        (
+            "defaulted-slot-refuses-required",
+            "fs := [d, g]\nprint(fs.len())",
+            Expect::Rejects("fn(...int, str = …) -> str"),
+        ),
+        (
+            "plain-slot-takes-defaulted",
+            "f: fn(...int) -> str = d\nprint(f(1))",
+            Expect::Prints("-".to_string()),
+        ),
+        (
+            "plain-slot-refuses-required",
+            "f: fn(...int) -> str = g\nprint(1)",
+            Expect::Rejects("requires 2 argument(s)"),
+        ),
+        (
+            "same-kw",
+            "fs := [g, h]\nprint(fs.len())",
+            Expect::Prints("2".to_string()),
+        ),
+        (
+            "same-none",
+            "fs := [k, k]\nprint(fs[1](1, 2))",
+            Expect::Prints("k".to_string()),
+        ),
+    ];
+    let cells: Vec<Cell> = rows
+        .into_iter()
+        .map(|(name, body, expect)| Cell {
+            name: name.to_string(),
+            files: vec![("main.chz".to_string(), format!("{DECLS}{body}\n"))],
+            expect,
+        })
+        .collect();
+    run_grid("fn-kw", &cells, &[]);
+}

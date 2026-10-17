@@ -1034,9 +1034,13 @@ pub(super) fn seed_from_hint(hint: Option<&Ty>, shape: &Ty, sub: &mut HashMap<St
 /// Does an expected type fix any type param of a generic call or fn value (owner rule
 /// 2026-10-17)? A protocol hint never does: `Any` is an ordinary empty protocol, and every type
 /// satisfies it, so `T := Any` from the hint would let any argument through
-/// (`y: Any = un(?5, 1.5)`). `Unknown` fixes nothing either. A concrete hint that holds a
-/// protocol still fixes its params (`g: Bag[Named] = Bag([A()])`, DEC-124).
+/// (`y: Any = un(?5, 1.5)`). A nullable protocol (`Any?`) is the same protocol hint, and
+/// `Unknown` fixes nothing either. A concrete hint that holds a protocol still fixes its params
+/// (`g: Bag[Named] = Bag([A()])`, DEC-124).
 pub(super) fn hint_fixes(t: &Ty) -> bool {
+    if let Ty::Option(inner) = t {
+        return hint_fixes(inner);
+    }
     !matches!(t, Ty::Unknown | Ty::Protocol(..))
 }
 
@@ -1162,7 +1166,7 @@ pub(super) fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
             ds.iter().zip(as_).for_each(|(d, a)| unify(d, a, map));
         }
         // Labels are surface-only: unify on params + ret only, ignoring labels (`..`). The actual
-        // side may be a builtin fn value (`xs.map(ord)`): `fn_parts` reads both function variants.
+        // side may be any fn value (`xs.map(ord)`); `fn_parts` reads its params, ret and variadic.
         (
             Ty::Func {
                 params: dp,

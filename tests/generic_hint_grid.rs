@@ -35,6 +35,8 @@ fn oa(v: Any) -> str:
     return \"a:{v}\"
 fn os(v: Stringable) -> str:
     return \"s:{v}\"
+fn oo(v: Any?) -> str:
+    return \"o:{v}\"
 fn oi(v: int) -> int:
     return v
 fn oc(v: Counter) -> int:
@@ -45,12 +47,18 @@ fn ol(v: List[int]) -> int:
     return v.len()
 ";
 
-/// The four protocol positions; `X` is the generic expression.
-const PROTOCOL_POSITIONS: [(&str, &str); 4] = [
+/// The protocol positions; `X` is the generic expression. A nullable protocol (`Any?`,
+/// `Stringable?`) is a protocol position too.
+const PROTOCOL_POSITIONS: [(&str, &str); 6] = [
     ("print-pack", "print(X)"),
     ("any-param", "print(oa(X))"),
     ("stringable-param", "print(os(X))"),
     ("any-let", "y: Any = X\n    print(y)"),
+    ("nullable-any-param", "print(oo(X))"),
+    (
+        "nullable-stringable-let",
+        "y: Stringable? = X\n    print(y)",
+    ),
 ];
 
 /// The answer of one expression in a protocol position, the `X` prefix of the printed text
@@ -166,6 +174,7 @@ fn generic_hint_grid() {
             let prefix = match pos {
                 "any-param" => "a:",
                 "stringable-param" => "s:",
+                "nullable-any-param" => "o:",
                 _ => "",
             };
             cells.push(cell(

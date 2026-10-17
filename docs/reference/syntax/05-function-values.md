@@ -57,7 +57,7 @@ bind by the wrong function's labels.
 (`fn(int, ...str) -> R` with a fixed param first), and `fn(T, ...) -> R` the type of a C variadic
 (`extern`). The variadic part sits last. `fn(int, ...str) -> R` and `fn(int, List[str]) -> R` are
 different types, and a call through any value of a variadic type packs its surplus positionals as a
-direct call does. `print` is a `fn(...Any) -> None`, so a `fn(Any) -> None` slot does not accept it.
+direct call does. `print` is a `fn(...Any, str = …, str = …) -> None` (its defaulted `sep` and `end` let it fit a `fn(...Any) -> None` slot), so a `fn(Any) -> None` slot does not accept it.
 Go rejects the same shape: `cannot use fmt.Println (value of type func(a ...any) (n int, err error))
 as func(any) value in argument to ap`.
 

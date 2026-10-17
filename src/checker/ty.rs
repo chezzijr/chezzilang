@@ -282,6 +282,20 @@ impl FnLabels {
         let all = params + self.kw.len();
         self.min.unwrap_or(all).min(all)
     }
+
+    /// May a value whose keyword-only parameters are `actual` sit in a slot whose keyword-only
+    /// parameters are `self`? Each slot parameter must be the value's parameter at the same place,
+    /// with the invariance of `params`. The value may take more: a call through the slot never names
+    /// them, and the fewest-args check (`min_or`) refuses a value whose extra one is required. So
+    /// `print` fits `fn(...Any) -> None`, and `fn k(...xs: int)` does not fit `fn(...int, str) -> str`.
+    pub fn kw_fits(&self, actual: &FnLabels) -> bool {
+        self.kw.len() <= actual.kw.len()
+            && self
+                .kw
+                .iter()
+                .zip(&actual.kw)
+                .all(|(a, b)| param_invariant(a, b))
+    }
 }
 
 // `Eq`/`Hash` added for W7-55: the `EQ_BOUNDS_IN_PROGRESS` cycle guard in `checker::proto` needs an
@@ -859,6 +873,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         ) => {
             p1.len() == p2.len()
                 && v1 == v2
+                && l1.kw_fits(l2)
                 && l2.min_or(p2.len()) <= l1.min_or(p1.len())
                 && p1.iter().zip(p2).all(|(a, b)| param_invariant(a, b))
                 && compatible(r1, r2)
@@ -1173,6 +1188,13 @@ impl Ty {
                 }
                 if *variadic == crate::ast::Variadic::C {
                     write!(f, "{}...", if params.is_empty() { "" } else { ", " })?;
+                }
+                // The keyword-only parameters after a pack are part of the type (`kw_fits`).
+                for (i, k) in labels.kw.iter().enumerate() {
+                    write!(f, ", {}", Named(k, names))?;
+                    if params.len() + i >= min {
+                        write!(f, " = …")?;
+                    }
                 }
                 write!(f, ") -> {}", Named(ret, names))
             }

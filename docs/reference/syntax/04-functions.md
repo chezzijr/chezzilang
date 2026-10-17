@@ -365,9 +365,14 @@ labeled("dash: ", 4, 5, 6, sep="-")    # keyword-only `sep`
   `fn(str, List[int]) -> str` is a different type (Go's `func(string, ...int) string` rule).
 - Every value path packs surplus positionals like a direct call: a binding, a list slot, a
   parameter, a HOF argument, `defer` and `spawn` (`fs := [sum_all]; fs[0](1, 2, 3)`).
-- A keyword-only param is not part of the fn type. A call through a value that is not a certain
-  binding (next chapter) omits it, and the callee fills its default. A required keyword-only param
-  makes such a call an error: `missing required keyword argument 'k'`.
+- A keyword-only param is part of the fn type, and the type prints it: `fn g(...xs: int, sep: str)`
+  has the type `fn(...int, str) -> str`. A slot may hold a value that takes more keyword-only params
+  only when the extra ones have defaults, as for positional defaults: `print` fits
+  `fn(...Any) -> None`, `[g, d]` over `fn d(...xs: int, sep: str = "-")` checks, and `[g, k]` or
+  `[k, g]` over `fn k(...xs: int)` reports `list elements differ` in either order.
+- A call through a value that is not a certain binding (next chapter) omits the keyword-only params,
+  and the callee fills their defaults. A required one makes such a call an error:
+  `missing required keyword argument 'k'`.
 
 ### `Any` (the top type)
 

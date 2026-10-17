@@ -30,8 +30,8 @@ generic fn value: an argument, `print`'s pack, an annotated binding and a `retur
    `oa(pick(5, 1.5))` over `fn oa(v: Any)` all report `argument to 'pick' has type float, expected int`.
 2. An expected type fills only a `T` that the arguments leave open, and only with a concrete type:
    `ys: List[int] = tag([])` checks, and `oc(empty())` over `fn oc(v: Counter)` fills `T := Counter`.
-   A protocol (`Any`, `Stringable`, any other) never fills `T`, because `Any` is an ordinary empty
-   protocol. So `print(ident)`, `oa(ident)`, `print(Holder.build())` and `oa(empty())` report
+   A protocol (`Any`, `Stringable`, any other) never fills `T`, nullable or not (`Any?`), because
+   `Any` is an ordinary empty protocol. So `print(ident)`, `oa(ident)`, `print(Holder.build())` and `oa(empty())` report
    `T is not determined here`, as Go reports `cannot infer T`. A concrete type that holds a protocol
    still fills its params: `g: Bag[Named] = Bag([A()])` gives `T := Named`.
 3. Inside an open `T`, a closure param takes `T` from the arguments: `print(apply(1, fn(a): a + 1))`

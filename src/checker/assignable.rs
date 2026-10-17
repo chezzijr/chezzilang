@@ -218,6 +218,7 @@ impl Checker {
             ) => {
                 p1.len() == p2.len()
                     && v1 == v2
+                    && l1.kw_fits(l2)
                     && l2.min_or(p2.len()) <= l1.min_or(p1.len())
                     && p1.iter().zip(p2).all(|(a, b)| param_invariant(a, b))
                     && self.assignable(r1, r2)
