@@ -448,12 +448,12 @@ fn neighbour_cells(out: &mut Vec<Cell>) {
     ));
     out.push(main_only(
         "bound_viol",
-        "fn add2[A: Add, B](a: A, b: B) -> A:\n    return a + a\np := add2[bool, int]",
+        "import Add from std.ops\nfn add2[A: Add, B](a: A, b: B) -> A:\n    return a + a\np := add2[bool, int]",
         Expect::Rejects("type bool does not satisfy Add"),
     ));
     // A conditional method read as a value keeps its receiver `where` bound (Rust E0599 on
     // `Bx::<P>::total`), in every position that pins the head.
-    let wbx = "struct Bx[T]:\n    v: T\n    fn total(self, o: Bx[T]) -> T where T: Add:\n        return self.v + o.v\nstruct P:\n    n: int\n";
+    let wbx = "import Add from std.ops\nstruct Bx[T]:\n    v: T\n    fn total(self, o: Bx[T]) -> T where T: Add:\n        return self.v + o.v\nstruct P:\n    n: int\n";
     let ap2 = "fn ap2[X](f: fn(Bx[P], X) -> P, x: X) -> int:\n    return 0\n";
     for (name, tail) in [
         ("where_let", "f := Bx[P].total".to_string()),

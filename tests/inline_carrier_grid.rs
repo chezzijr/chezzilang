@@ -56,7 +56,7 @@ fn consumers() -> Vec<Consumer> {
     vec![
         consumer(
             "num",
-            &["fn double[T: Num](x: T) -> T:\n    return x + x\n"],
+            &["import Num from std.ops\nfn double[T: Num](x: T) -> T:\n    return x + x\n"],
             "5",
             "int",
             "print(double({S}))",
@@ -76,6 +76,7 @@ fn consumers() -> Vec<Consumer> {
         consumer(
             "comparable",
             &[
+                "import Comparable from std.cmp\n",
                 NC,
                 "fn mx[T: Comparable](a: T, b: T) -> T:\n    return if a < b: b else: a\n",
             ],
@@ -86,7 +87,9 @@ fn consumers() -> Vec<Consumer> {
         ),
         consumer(
             "hashable-eq",
-            &["fn hs[T: Hashable + Eq](a: T) -> Set[T]:\n    return {a}\n"],
+            &[
+                "import Eq, Hashable from std.cmp\nfn hs[T: Hashable + Eq](a: T) -> Set[T]:\n    return {a}\n",
+            ],
             "1",
             "int",
             "print(hs({S}))",
@@ -95,7 +98,7 @@ fn consumers() -> Vec<Consumer> {
         consumer(
             "iterator",
             &[
-                "fn total[I: Iterator[int]](it: I) -> int:\n    s := 0\n    for v in it:\n        s += v\n    return s\n",
+                "import Iterator from std.iter\nfn total[I: Iterator[int]](it: I) -> int:\n    s := 0\n    for v in it:\n        s += v\n    return s\n",
             ],
             "[1, 2].iter()",
             "Iterator[int]",
@@ -104,7 +107,11 @@ fn consumers() -> Vec<Consumer> {
         ),
         consumer(
             "struct-bound",
-            &[NC, "struct Ord[T: Comparable]:\n    v: T\n"],
+            &[
+                "import Comparable from std.cmp\n",
+                NC,
+                "struct Ord[T: Comparable]:\n    v: T\n",
+            ],
             "NC(1)",
             "NC",
             "w := Ord({S})\nprint(w)",
@@ -113,7 +120,7 @@ fn consumers() -> Vec<Consumer> {
         consumer(
             "where-method",
             &[
-                "struct Bx[T]:\n    v: T\n    fn dbl(self) -> T where T: Num:\n        return self.v + self.v\n",
+                "import Num from std.ops\nstruct Bx[T]:\n    v: T\n    fn dbl(self) -> T where T: Num:\n        return self.v + self.v\n",
             ],
             "5",
             "int",

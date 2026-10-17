@@ -101,7 +101,7 @@ native struct List[T]:
     # TICKET-160 — shallow: a new container holding the same element handles (Python list/dict/set.copy()).
     native fn copy(self) -> List[T]
 
-native struct Map[K: Hashable + Eq, V]:
+native struct Map[K: Hashable, V]:
     native fn len(self) -> int
     native fn contains(self, k: K) -> bool
     native fn get(self, k: K) -> Option[V]
@@ -114,7 +114,7 @@ native struct Map[K: Hashable + Eq, V]:
     native fn items(self) -> List[(K, V)]
     native fn copy(self) -> Map[K, V]
 
-native struct Set[T: Hashable + Eq]:
+native struct Set[T: Hashable]:
     native fn len(self) -> int
     native fn contains(self, v: T) -> bool
     native fn add(self, v: T) -> None

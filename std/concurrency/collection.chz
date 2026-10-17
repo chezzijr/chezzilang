@@ -34,8 +34,8 @@
 import std.concurrency
 
 # ============================================================================
-# ConcurrentMap[K, V] — a thread-safe map over `RwShared[Map[K, V]]` (K must be Hashable + Eq, W7-53:
-# a Map key needs both).
+# ConcurrentMap[K, V] — a thread-safe map over `RwShared[Map[K, V]]` (K must be Hashable;
+# Hashable embeds Eq).
 # ============================================================================
 #
 # CONCURRENCY: the map is a LIVE map in the box's private heap (TICKET-246). get/contains/len are
@@ -47,7 +47,7 @@ import std.concurrency
 # WALKS (for_each_entry, fold_entries; for_each, fold below): a walk copies the collection once
 # (`inner.get()`) and loops over the copy. So it visits exactly the entries present when it
 # starts, each once, whatever `f` or another task removes or adds meanwhile.
-struct ConcurrentMap[K: Hashable + Eq, V]:
+struct ConcurrentMap[K: Hashable, V]:
     inner: concurrency.RwShared[Map[K, V]]
 
     # An empty map: `ConcurrentMap[str, int].new()`, or `m: ConcurrentMap[str, int] = ConcurrentMap.new()`.
@@ -146,13 +146,13 @@ struct ConcurrentList[E]:
         return self.inner.read(fn(xs): xs)
 
 # ============================================================================
-# ConcurrentSet[E] — a thread-safe set over `RwShared[Set[E]]` (TICKET-243; E Hashable + Eq).
+# ConcurrentSet[E] — a thread-safe set over `RwShared[Set[E]]` (TICKET-243; E Hashable).
 # ============================================================================
 #
 # CONCURRENCY: contains/len are CONCURRENT READS (an O(1) expected probe of the set's hash
 # index); for_each/fold copy the set once and walk the copy, as `ConcurrentList` does. add/remove
 # take the box's ONE update guard and change the set in place; neither copies it.
-struct ConcurrentSet[E: Hashable + Eq]:
+struct ConcurrentSet[E: Hashable]:
     inner: concurrency.RwShared[Set[E]]
 
     # An empty set: `ConcurrentSet[int].new()`.
@@ -192,14 +192,14 @@ struct ConcurrentSet[E: Hashable + Eq]:
         return self.inner.read(fn(s): s)
 
 # ============================================================================
-# ConcurrentCounter[K] — a thread-safe frequency table over `RwShared[Map[K, int]]` (K Hashable + Eq,
-# same W7-53 reason).
+# ConcurrentCounter[K] — a thread-safe frequency table over `RwShared[Map[K, int]]` (K Hashable;
+# Hashable embeds Eq).
 # ============================================================================
 #
 # CONCURRENCY: count/total are CONCURRENT READS; increment/add take the EXCLUSIVE WRITE lock and do
 # their read-modify-write inside ONE closure, so N tasks each incrementing the same key produce an
 # EXACT final count (no lost updates). This is the classic race-free concurrent counter.
-struct ConcurrentCounter[K: Hashable + Eq]:
+struct ConcurrentCounter[K: Hashable]:
     inner: concurrency.RwShared[Map[K, int]]
 
     # An empty counter: `ConcurrentCounter[str].new()`.
@@ -223,18 +223,18 @@ struct ConcurrentCounter[K: Hashable + Eq]:
         return self.inner.read(fn(m): _sum(m))
 
 # Read-modify-write `key` += `n` in ONE pass (called inside the exclusive write closure).
-fn _inc[K: Hashable + Eq](m: Map[K, int], key: K, n: int) -> Map[K, int]:
+fn _inc[K: Hashable](m: Map[K, int], key: K, n: int) -> Map[K, int]:
     match m.get(key):
         ?c: m[key] = c + n
         None: m[key] = n
     return m
 
-fn _count[K: Hashable + Eq](m: Map[K, int], key: K) -> int:
+fn _count[K: Hashable](m: Map[K, int], key: K) -> int:
     match m.get(key):
         ?c: return c
         None: return 0
 
-fn _sum[K: Hashable + Eq](m: Map[K, int]) -> int:
+fn _sum[K: Hashable](m: Map[K, int]) -> int:
     s := 0
     for k in m.keys():
         s = s + m[k]

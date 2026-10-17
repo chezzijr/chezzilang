@@ -347,7 +347,18 @@ enum E:
 
 fn program(site: Site, shape: Shape, source: Source) -> String {
     let (value, ty) = shape.value();
-    let mut out = String::from(DECLS);
+    let import = match source {
+        Source::Generator | Source::IterHook => "import Iterator from std.iter\n",
+        Source::ParamBound | Source::IterableAnn => "import Iterable from std.iter\n",
+        Source::Tuple
+        | Source::ListOf
+        | Source::SetOf
+        | Source::Map
+        | Source::Channel
+        | Source::NextHook => "",
+    };
+    let mut out = String::from(import);
+    out.push_str(DECLS);
     let mut main_lines: Vec<String> = Vec::new();
     match source {
         Source::Tuple => {
@@ -594,7 +605,7 @@ fn bare_tuple_ends_a_statement() {
             ),
             cell(
                 "yield",
-                "fn g() -> Iterator[(int, int)]:\n    yield 1, 2\nfn main():\n    for p in g():\n        print(p)",
+                "import Iterator from std.iter\nfn g() -> Iterator[(int, int)]:\n    yield 1, 2\nfn main():\n    for p in g():\n        print(p)",
                 "(1, 2)",
             ),
             cell(

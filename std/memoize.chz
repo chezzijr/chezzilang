@@ -14,8 +14,8 @@
 # faults too. Two tasks missing one key at the same moment may both
 # run `f`; CPython's `functools.cache` does the same.
 #
-# ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable + Eq`,
-# W7-53: a Map key needs both). A
+# ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable`;
+# Hashable embeds Eq, so it is a Map key). A
 # general N-arg cache would key a `Map[(A, B), V]` on the argument tuple: a tuple of Hashable args
 # is a valid key (TICKET-161), so an N-arg wrapper can be written that way. Until then, curry / pack
 # args into a struct-with-`hash` and memoize the single-arg wrapper.
@@ -24,7 +24,7 @@ import std.concurrency
 
 # Cache lookup-or-compute, split out because a closure body is a single expression: the returned
 # wrapper delegates here so it can do the `T?` match + compute + store.
-fn _memo_get[K: Hashable + Eq, V](shared: concurrency.RwShared[Map[K, V]], own: Map[K, V], f: fn(K) -> V, k: K) -> V:
+fn _memo_get[K: Hashable, V](shared: concurrency.RwShared[Map[K, V]], own: Map[K, V], f: fn(K) -> V, k: K) -> V:
     match own.get(k):
         ?v:
             return v
@@ -43,7 +43,7 @@ fn _memo_get[K: Hashable + Eq, V](shared: concurrency.RwShared[Map[K, V]], own: 
 # cache once and reads it back once, because `_memo_fill` returns the caller's own object and marking
 # that would mark what the task owns; a key that never equals itself is not found by the read-back,
 # and the fill's own value is returned unmarked (no recursion: `f` runs once per call, as on base).
-fn _memo_copy_read[K: Hashable + Eq, V](shared: concurrency.RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
+fn _memo_copy_read[K: Hashable, V](shared: concurrency.RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
     match shared._get_key(k):
         ?x:
             return concurrency.task_copy_of(x)
@@ -56,14 +56,14 @@ fn _memo_copy_read[K: Hashable + Eq, V](shared: concurrency.RwShared[Map[K, V]],
         None:
             return v
 
-fn _memo_fill[K: Hashable + Eq, V](shared: concurrency.RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
+fn _memo_fill[K: Hashable, V](shared: concurrency.RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
     v := f(k)
     shared._set_key(k, v)
     return v
 
 # Wrap `f` so each distinct argument is computed once and cached. Returns a fn with the same
 # signature as `f`.
-fn memoize1[K: Hashable + Eq, V](f: fn(K) -> V) -> fn(K) -> V:
+fn memoize1[K: Hashable, V](f: fn(K) -> V) -> fn(K) -> V:
     shared: concurrency.RwShared[Map[K, V]] = concurrency.RwShared({})
     own: Map[K, V] = {}
     return fn(k: K) -> V: _memo_get(shared, own, f, k)

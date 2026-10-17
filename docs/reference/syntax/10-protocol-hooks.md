@@ -179,7 +179,7 @@ The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys an
   build-dependent 64-bit value, possibly negative).
 
 **`Hashable` embeds `Eq`, so `[T: Hashable]` is enough for a `Map`/`Set` keyed on `T`.** A
-`[T: Hashable]` body may write `a == b`, `Set(xs)` or `{x: 1}`; `[T: Hashable + Eq]` still checks and
+`[T: Hashable]` body may write `a == b`, `Set(xs)` or `{x: 1}`; a redundant `+ Eq` still checks and
 says the same. The key check runs on every `Map[T, _]`/`Set[T]` type the signature or body spells,
 even a bare mention, and a bound-free `fn h[T](xs: Set[T])` is rejected. A type whose `eq` cannot
 hold for the instantiation (`Box[Tag]` with `eq ... where T: Comparable`) is not `Hashable`, so it

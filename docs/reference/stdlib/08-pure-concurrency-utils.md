@@ -46,7 +46,7 @@ atomic snapshot.
 | `.fold(init, f)` | `(R, fn(R, E) -> R) -> R` | Reduces in order; `R` is inferred from `init`. |
 | `.snapshot()` | `() -> List[E]` | **concurrent read** returning a **copy** of the whole list. |
 
-**`ConcurrentMap[K: Hashable + Eq, V]`**: thread-safe map over `RwShared[Map[K, V]]`. No method copies
+**`ConcurrentMap[K: Hashable, V]`**: thread-safe map over `RwShared[Map[K, V]]`. No method copies
 the whole map except `snapshot`. `get`/`contains`/`len`/`snapshot` are **concurrent reads**;
 `set`/`remove`/`get_or_insert` are single-entry writers under the box's **one update guard**. Lookups
 and inserts are O(1) expected (the stored map keeps the heap map's hash index). `remove` is O(n), as
@@ -64,7 +64,7 @@ and inserts are O(1) expected (the stored map keeps the heap map's hash index). 
 | `.fold_entries(init, f)` | `(R, fn(R, K, V) -> R) -> R` | Reduces the entries; `R` is inferred from `init`. |
 | `.snapshot()` | `() -> Map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
 
-**`ConcurrentSet[E: Hashable + Eq]`**: thread-safe set over `RwShared[Set[E]]`.
+**`ConcurrentSet[E: Hashable]`**: thread-safe set over `RwShared[Set[E]]`.
 
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
@@ -79,7 +79,7 @@ and inserts are O(1) expected (the stored map keeps the heap map's hash index). 
 A writer called from a user `hash`/`eq` that re-enters the same box faults like `write` does: each
 writer takes the update guard that `set`/`write` take.
 
-**`ConcurrentCounter[K: Hashable + Eq]`**: thread-safe frequency table over `RwShared[Map[K, int]]`.
+**`ConcurrentCounter[K: Hashable]`**: thread-safe frequency table over `RwShared[Map[K, int]]`.
 `count`/`total` are **concurrent reads**; `increment`/`add` take the **exclusive write lock** and do
 their read-modify-write inside **one** closure, so N tasks that each increment the same key produce an
 **exact** final count (no lost updates).
@@ -171,7 +171,7 @@ ascending; otherwise the results are undefined.
 
 ### `std.memoize` — result caching (`functools.cache`)
 `memoize1(f: fn(K) -> V) -> fn(K) -> V` wraps `f` so each distinct argument is computed once and the
-result cached (`K: Hashable + Eq`, as a map key needs both).
+result cached (`K: Hashable`; `Hashable` embeds `Eq`, so it is a map key).
 
 - The cache is an `RwShared[Map[K, V]]`, so the wrapper works from any task: a call in a spawned task or
   an Executor job reads and fills the same cache as its creator, as CPython `functools.cache` does from

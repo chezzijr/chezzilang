@@ -24,6 +24,10 @@ struct Hook {
     /// The slot's type when it is not `proto`: `Iterator[T]` in type position is the cursor
     /// itself, so a `next` owner is held in an `Iterable[T]` slot.
     slot_proto: Option<&'static str>,
+    /// The import line that licenses `proto` in a bound or a slot.
+    import: &'static str,
+    /// The import line that licenses `slot_proto`.
+    slot_import: Option<&'static str>,
     /// One method text per entry of `SHAPES`.
     shapes: [String; 6],
     op: &'static str,
@@ -41,6 +45,8 @@ fn arith(name: &'static str, proto: &'static str, sym: &str) -> Hook {
         name,
         proto,
         slot_proto: None,
+        import: leak(format!("import {proto} from std.ops\n")),
+        slot_import: None,
         shapes: [
             m(&format!("{name}(self, other: Self) -> Self"), "return self"),
             m(
@@ -74,6 +80,8 @@ fn hooks() -> Vec<Hook> {
             name: "iter",
             proto: "Iterable[int]",
             slot_proto: None,
+            import: "import Iterable from std.iter\n",
+            slot_import: None,
             shapes: [
                 m("iter(self) -> Iterator[int]", "return [1, 2].iter()"),
                 m("iter(self) -> Iterator[int]", "yield 1\n        yield 2"),
@@ -91,6 +99,8 @@ fn hooks() -> Vec<Hook> {
             name: "next",
             proto: "Iterator[int]",
             slot_proto: Some("Iterable[int]"),
+            import: "import Iterator from std.iter\n",
+            slot_import: Some("import Iterable from std.iter\n"),
             shapes: [
                 m("next(self) -> int?", "return None"),
                 m("next(self) -> Iterator[int]", "yield 1"),
@@ -108,6 +118,8 @@ fn hooks() -> Vec<Hook> {
             name: "index",
             proto: "Index[int, int]",
             slot_proto: None,
+            import: "import Index from std.ops\n",
+            slot_import: None,
             shapes: [
                 m("index(self, k: int) -> int", "return k * 2"),
                 m("index(self, k: int) -> Iterator[int]", "yield k"),
@@ -125,6 +137,8 @@ fn hooks() -> Vec<Hook> {
             name: "slice",
             proto: "Slice[int]",
             slot_proto: None,
+            import: "import Slice from std.ops\n",
+            slot_import: None,
             shapes: [
                 m("slice(self, r: Range) -> int", "return 7"),
                 m("slice(self, r: Range) -> Iterator[int]", "yield 7"),
@@ -142,6 +156,8 @@ fn hooks() -> Vec<Hook> {
             name: "set_index",
             proto: "IndexSet[int, int]",
             slot_proto: None,
+            import: "import IndexSet from std.ops\n",
+            slot_import: None,
             shapes: [
                 idx.clone() + &m("set_index(self, k: int, v: int)", "self.n = v"),
                 idx.clone()
@@ -171,6 +187,8 @@ fn hooks() -> Vec<Hook> {
             name: "str",
             proto: "Stringable",
             slot_proto: None,
+            import: "import Stringable from std.string\n",
+            slot_import: None,
             shapes: [
                 m("str(self) -> str", "return \"HOOK\""),
                 m("str(self) -> Iterator[str]", "yield \"G\""),
@@ -188,6 +206,8 @@ fn hooks() -> Vec<Hook> {
             name: "eq",
             proto: "Eq",
             slot_proto: None,
+            import: "import Eq from std.cmp\n",
+            slot_import: None,
             shapes: [
                 m(
                     "eq(self, other: Self) -> bool",
@@ -208,6 +228,8 @@ fn hooks() -> Vec<Hook> {
             name: "hash",
             proto: "Hashable",
             slot_proto: None,
+            import: "import Hashable from std.cmp\n",
+            slot_import: None,
             shapes: [
                 m("hash(self) -> int", "return 1") + &eq,
                 m("hash(self) -> Iterator[int]", "yield 1") + &eq,
@@ -225,6 +247,8 @@ fn hooks() -> Vec<Hook> {
             name: "compare",
             proto: "Comparable",
             slot_proto: None,
+            import: "import Comparable from std.cmp\n",
+            slot_import: None,
             shapes: [
                 m("compare(self, other: Self) -> int", "return 0 - 1"),
                 m("compare(self, other: Self) -> Iterator[int]", "yield 1"),
@@ -252,6 +276,8 @@ fn hooks() -> Vec<Hook> {
             name: "neg",
             proto: "Neg",
             slot_proto: None,
+            import: "import Neg from std.ops\n",
+            slot_import: None,
             shapes: [
                 m("neg(self) -> Self", "return self"),
                 m("neg(self) -> Iterator[int]", "yield 1"),
@@ -269,6 +295,8 @@ fn hooks() -> Vec<Hook> {
             name: "contains",
             proto: "Contains[int]",
             slot_proto: None,
+            import: "import Contains from std.ops\n",
+            slot_import: None,
             shapes: [
                 m("contains(self, item: int) -> bool", "return item == 1"),
                 m("contains(self, item: int) -> Iterator[bool]", "yield true"),
@@ -340,7 +368,7 @@ struct Outcome {
 
 fn chezzi(sub: &str, name: &str, src: &str, threads: Option<&str>) -> Outcome {
     let path = dir().join(format!("{name}.chz"));
-    std::fs::write(&path, grid_cell::with_std_imports(src)).expect("write the cell");
+    std::fs::write(&path, src).expect("write the cell");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg(sub).arg(&path);
     match threads {
@@ -387,29 +415,49 @@ fn run(name: &str, src: &str, bad: &mut Vec<String>) -> Outcome {
     first
 }
 
+const ITERATOR_IMPORT: &str = "import Iterator from std.iter\n";
+
+/// The import lines of a program that spells `texts`: `import` licenses the hook's protocol, and
+/// `Iterator` is added when a text spells the generator type.
+fn import_lines(import: &str, texts: &[&str]) -> String {
+    let iterator = !import.contains("Iterator") && texts.iter().any(|t| t.contains("Iterator["));
+    format!("{import}{}", if iterator { ITERATOR_IMPORT } else { "" })
+}
+
 /// The uses of one owner: operator, bound `T: P`, protocol-typed slot, `v.m(..)` in a bounded
-/// body, `v.m(..)` through a slot.
+/// body, `v.m(..)` through a slot. Each program starts with the imports it spells.
 fn uses(hook: &Hook, proto: &str, decl: &str) -> [(&'static str, String); 5] {
     let slot_ty = hook.slot_proto.unwrap_or(proto);
+    let slot_import = hook.slot_import.unwrap_or(hook.import);
+    let bound_head = import_lines(hook.import, &[decl, proto]);
+    let slot_head = import_lines(slot_import, &[decl, slot_ty]);
     [
         (
             "bbody",
-            format!("{decl}fn bb[C: {proto}](v: C):\n    {}\nbb(x)\n", hook.call),
+            format!(
+                "{bound_head}{decl}fn bb[C: {proto}](v: C):\n    {}\nbb(x)\n",
+                hook.call
+            ),
         ),
         (
             "sbody",
-            format!("{decl}fn sb(v: {slot_ty}):\n    {}\nsb(x)\n", hook.call),
+            format!(
+                "{slot_head}{decl}fn sb(v: {slot_ty}):\n    {}\nsb(x)\n",
+                hook.call
+            ),
         ),
-        ("op", format!("{decl}{}", hook.op)),
+        (
+            "op",
+            format!("{}{decl}{}", import_lines("", &[decl]), hook.op),
+        ),
         (
             "bound",
-            format!("{decl}fn b[C: {proto}](c: C):\n    print(\"bound ok\")\nb(x)\n"),
+            format!("{bound_head}{decl}fn b[C: {proto}](c: C):\n    print(\"bound ok\")\nb(x)\n"),
         ),
         (
             "slot",
             format!(
-                "{decl}fn s(v: {}):\n    {}\ns(x)\n",
-                hook.slot_proto.unwrap_or(proto),
+                "{slot_head}{decl}fn s(v: {slot_ty}):\n    {}\ns(x)\n",
                 hook.slot
             ),
         ),
@@ -483,7 +531,7 @@ fn cell_failures(kind: &str, hook: &Hook, si: usize) -> Vec<String> {
     // The intrinsic spelling is an ordinary method call, whatever the shape.
     let intr = run(
         &format!("{kind}_{}_{shape}_intr", hook.name),
-        &format!("{decl}{}", hook.intr),
+        &format!("{}{decl}{}", import_lines("", &[&decl]), hook.intr),
         &mut bad,
     );
     let intr_ok = match shape {
@@ -516,32 +564,44 @@ fn iter_run_failures() -> Vec<String> {
             "fn g(s: Iterable[{elem}]) -> List[{elem}]:\n    return List(s.iter())\nfn b[S: Iterable[{elem}]](s: S) -> List[{elem}]:\n    return List(s.iter())\nprint(g(c))\nprint(b(c))\n"
         )
     };
+    let iterable = "import Iterable from std.iter\n";
+    let both_imports = "import Iterator, Iterable from std.iter\n";
     for (kind, head, mk) in [
         ("struct", "struct C:\n    n: int\n", "c := C(2)\n"),
         ("enum", "enum C:\n    A(int)\n", "c := C.A(2)\n"),
     ] {
-        for (row, methods, body, want) in [
-            ("next", next.clone(), through("int"), Some("[]\n[]\nEND\n")),
+        for (row, imports, methods, body, want) in [
+            (
+                "next",
+                iterable,
+                next.clone(),
+                through("int"),
+                Some("[]\n[]\nEND\n"),
+            ),
             (
                 "next_static_iter",
+                iterable,
                 next.clone() + &static_iter,
                 through("int"),
                 Some("[]\n[]\nEND\n"),
             ),
             (
                 "static_next",
+                iterable,
                 m("next(a: int) -> int?", "return None"),
                 through("int"),
                 None,
             ),
             (
                 "next_str_iter",
+                both_imports,
                 next.clone() + &str_iter,
                 through("str"),
                 Some("['a', 'b']\n['a', 'b']\nEND\n"),
             ),
             (
                 "concrete_both",
+                ITERATOR_IMPORT,
                 next.clone() + &str_iter,
                 "print(List(c.iter()))\n".to_string(),
                 Some("['a', 'b']\nEND\n"),
@@ -549,7 +609,7 @@ fn iter_run_failures() -> Vec<String> {
         ] {
             let got = run(
                 &format!("iter_{kind}_{row}"),
-                &format!("{head}{methods}{mk}{body}"),
+                &format!("{imports}{head}{methods}{mk}{body}"),
                 &mut bad,
             );
             match want {
@@ -565,7 +625,7 @@ fn iter_run_failures() -> Vec<String> {
             }
         }
     }
-    let slot = "fn g(s: Iterable[int]) -> List[int]:\n    return List(s.iter())\nprint(g([1, 2]))\nprint(g(Set([3])))\n";
+    let slot = "import Iterable from std.iter\nfn g(s: Iterable[int]) -> List[int]:\n    return List(s.iter())\nprint(g([1, 2]))\nprint(g(Set([3])))\n";
     let got = run("iter_slot_builtin", slot, &mut bad);
     if got.stdout != "[1, 2]\n[3]\nEND\n" {
         bad.push(format!(
@@ -591,21 +651,24 @@ fn iter_call_failures() -> Vec<String> {
         ("struct", "struct C:\n    n: int\n", "c := C(2)\n"),
         ("enum", "enum C:\n    A(int)\n", "c := C.A(2)\n"),
     ] {
-        for (row, methods, body, needle) in [
+        for (row, imports, methods, body, needle) in [
             (
                 "next_only",
+                "",
                 &next,
                 "it := c.iter()\nprint(it)\n",
                 "has no method 'iter'",
             ),
             (
                 "static_next",
+                "",
                 &static_next,
                 "it := c.iter()\nprint(it)\n",
                 "has no method 'iter'",
             ),
             (
                 "both",
+                ITERATOR_IMPORT,
                 &both,
                 "n: int? = c.iter().next()\nprint(n)\n",
                 "cannot assign str? to variable of type int?",
@@ -613,7 +676,7 @@ fn iter_call_failures() -> Vec<String> {
         ] {
             let (ok, text) = check(
                 &format!("conc_{kind}_{row}"),
-                &format!("{head}{methods}{mk}{body}"),
+                &format!("{imports}{head}{methods}{mk}{body}"),
             );
             if ok || !text.contains(needle) {
                 bad.push(format!(
@@ -622,7 +685,7 @@ fn iter_call_failures() -> Vec<String> {
             }
         }
     }
-    let slot = "fn g(s: Iterable[int]) -> List[int]:\n    return List(s.iter())\nprint(g([1, 2]))\nprint(g(Set([3])))\n";
+    let slot = "import Iterable from std.iter\nfn g(s: Iterable[int]) -> List[int]:\n    return List(s.iter())\nprint(g([1, 2]))\nprint(g(Set([3])))\n";
     let (ok, text) = check("slot_builtin", slot);
     if !ok {
         bad.push(format!("s.iter() on an Iterable[int] slot: {text}"));
@@ -647,7 +710,7 @@ fn eq_failures() -> Vec<String> {
         // A conditional method is the hook for every instantiation the checker admits.
         (
             "conditional_hooks",
-            "struct Box[T]:\n    v: T\n    fn compare(self, other: Box[T]) -> int where T: Comparable:\n        return self.v.compare(other.v)\n    fn eq(self, other: Box[T]) -> bool where T: Eq:\n        print(\"eq hook\")\n        return self.v == other.v\nprint(Box(1) < Box(2))\nprint(Box(1) == Box(1))\n"
+            "import Comparable, Eq from std.cmp\nstruct Box[T]:\n    v: T\n    fn compare(self, other: Box[T]) -> int where T: Comparable:\n        return self.v.compare(other.v)\n    fn eq(self, other: Box[T]) -> bool where T: Eq:\n        print(\"eq hook\")\n        return self.v == other.v\nprint(Box(1) < Box(2))\nprint(Box(1) == Box(1))\n"
                 .to_string(),
             "true\neq hook\ntrue\nEND\n",
         ),
@@ -698,9 +761,16 @@ fn eq_failures() -> Vec<String> {
 fn conditional_failures() -> Vec<String> {
     let mut bad = Vec::new();
     let unsatisfied = |src: &str| {
+        // `N` goes after the program's leading import lines.
+        let imports_len: usize = src
+            .lines()
+            .take_while(|l| l.starts_with("import "))
+            .map(|l| l.len() + 1)
+            .sum();
+        let (imports, rest) = src.split_at(imports_len);
         format!(
-            "struct N:\n    w: int\n{}",
-            src.replace("X(1)", "X(N(1))")
+            "{imports}struct N:\n    w: int\n{}",
+            rest.replace("X(1)", "X(N(1))")
                 .replace("X(2)", "X(N(2))")
                 .replace("X.A(1)", "X.A(N(1))")
                 .replace("X.A(2)", "X.A(N(2))")
@@ -726,6 +796,16 @@ fn conditional_failures() -> Vec<String> {
                 .into_iter()
                 .zip(uses(hook, hook.proto, &plain))
             {
+                // The conditional program spells `where T: Comparable`; the `op` use imports nothing.
+                let imports_comparable = src
+                    .lines()
+                    .any(|l| l.starts_with("import ") && l.contains("Comparable"));
+                let cmp = if imports_comparable {
+                    ""
+                } else {
+                    "import Comparable from std.cmp\n"
+                };
+                let src = format!("{cmp}{src}");
                 let tag = format!("{kind}_{}_where_{u}", hook.name);
                 let got = run(&format!("{tag}_sat"), &src, &mut bad);
                 let want = run(&format!("{tag}_plain"), &src_plain, &mut bad);
@@ -765,25 +845,32 @@ fn conditional_failures() -> Vec<String> {
         ("struct", "struct X[T]:\n    n: T\n", "X"),
         ("enum", "enum X[T]:\n    A(T)\n", "X.A"),
     ] {
-        for (consumer, tail) in [
-            ("for", "for q in x:\n    print(q)\n"),
-            ("list", "print(List(x))\n"),
-            ("comp", "print([q for q in x])\n"),
+        let plain_imports = "import Comparable from std.cmp\nimport Iterator from std.iter\n";
+        let iterable_imports =
+            "import Comparable from std.cmp\nimport Iterator, Iterable from std.iter\n";
+        for (consumer, imports, tail) in [
+            ("for", plain_imports, "for q in x:\n    print(q)\n"),
+            ("list", plain_imports, "print(List(x))\n"),
+            ("comp", plain_imports, "print([q for q in x])\n"),
             (
                 "bbody",
+                iterable_imports,
                 "fn w[S: Iterable[str]](s: S):\n    print(List(s.iter()))\nw(x)\n",
             ),
             (
                 "bbody_int",
+                iterable_imports,
                 "fn w[S: Iterable[int]](s: S):\n    print(List(s.iter()))\nw(x)\n",
             ),
             (
                 "iterator_bound",
+                plain_imports,
                 "fn w[S: Iterator[int]](s: S):\n    for q in s:\n        print(q)\nw(x)\n",
             ),
         ] {
             let tag = format!("where_both_{kind}_{consumer}");
-            let unsat = format!("struct N:\n    w: int\n{head}{both}x := {mk}(N(1))\n{tail}");
+            let unsat =
+                format!("{imports}struct N:\n    w: int\n{head}{both}x := {mk}(N(1))\n{tail}");
             let (clean, text) = check(&format!("{tag}_unsat"), &unsat);
             if clean {
                 bad.push(format!(
@@ -794,7 +881,7 @@ fn conditional_failures() -> Vec<String> {
             {
                 bad.push(format!("{tag}: the error does not name the bound: {text}"));
             }
-            let sat = format!("{head}{both}x := {mk}(1)\n{tail}");
+            let sat = format!("{imports}{head}{both}x := {mk}(1)\n{tail}");
             let got = run(&format!("{tag}_sat"), &sat, &mut bad);
             // The two rows that ask for `int` elements are check errors: `iter` yields `str`.
             let int_row = matches!(consumer, "bbody_int" | "iterator_bound");
@@ -813,10 +900,10 @@ fn conditional_failures() -> Vec<String> {
     }
     // A zero-field struct with a conditional `hash`: the constant-hash grant applies only when
     // the declaration has no `hash` hook, so an unsatisfied instantiation is not `Hashable`.
-    let z = "struct Z[T]:\n    fn hash(self) -> int where T: Comparable:\n        print(\"hash ran\")\n        return 7\n";
+    let z = "import Comparable from std.cmp\nstruct Z[T]:\n    fn hash(self) -> int where T: Comparable:\n        print(\"hash ran\")\n        return 7\n";
     let (clean, text) = check(
         "where_zero_field_unsat",
-        &format!("struct N:\n    w: int\n{z}s: Set[Z[N]] = Set()\ns.add(Z[N]())\n"),
+        &format!("{z}struct N:\n    w: int\ns: Set[Z[N]] = Set()\ns.add(Z[N]())\n"),
     );
     if clean || !text.contains("N: Comparable") {
         bad.push(format!(
@@ -1062,7 +1149,7 @@ fn iterator_bound_failures() -> Vec<String> {
                     for (u, f) in uses {
                         let which = if same { "same" } else { "other" };
                         let tag = format!("itb_{kind}_{which}_{elem}_{bound}_{u}");
-                        let src = format!("{head}{next}{iter}{f}");
+                        let src = format!("{ITERATOR_IMPORT}{head}{next}{iter}{f}");
                         let (clean, text) = check(&tag, &src);
                         let got = run(&tag, &src, &mut bad);
                         // The two hooks disagree at the DECLARATION -> the one error that names
@@ -1100,31 +1187,35 @@ fn iterator_bound_failures() -> Vec<String> {
     // The review's named programs. `Both`: `next` yields `int`, `iter` yields `str`.
     let both = "struct Both:\n    n: int\n    fn next(self) -> int?:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return ?self.n\n    fn iter(self) -> Iterator[str]:\n        return [\"a\", \"b\"].iter()\n";
     let one_error = "does not satisfy Iterator ('next' yields int, 'iter' yields str)";
-    for (name, tail, want) in [
+    for (name, imports, tail, want) in [
         // `iter` wins for `for` and `List()`, and the type still satisfies `Iterable[str]`.
         (
             "N0",
+            "import Iterator, Iterable from std.iter\n",
             "for q in Both(2):\n    print(q)\nprint(List(Both(2)))\nfn g[S: Iterable[T], T](s: S) -> List[T]:\n    return List(s)\nprint(g(Both(2)))\n",
             Ok("a\nb\n['a', 'b']\n['a', 'b']\nEND\n"),
         ),
         (
             "N1",
+            ITERATOR_IMPORT,
             "fn first[S: Iterator[T], T](s: S) -> T?:\n    return s.next()\nr := first(Both(2))\nmatch r:\n    ?v: print(v + \"!\")\n    None: print(\"none\")\n",
             Err(one_error),
         ),
         (
             "N2",
+            ITERATOR_IMPORT,
             "fn w[S: Iterator[int]](s: S) -> int?:\n    return s.next()\nprint(w(Both(2)))\n",
             Err(one_error),
         ),
         (
             "N3",
+            ITERATOR_IMPORT,
             "fn w[S: Iterator[str]](s: S):\n    for q in s:\n        print(q + \"!\")\nw(Both(2))\n",
             Err(one_error),
         ),
     ] {
         let tag = format!("itb_named_{name}");
-        let src = format!("{both}{tail}");
+        let src = format!("{imports}{both}{tail}");
         let (clean, text) = check(&tag, &src);
         let got = run(&tag, &src, &mut bad);
         let wrong = match want {
@@ -1209,7 +1300,7 @@ fn operator_and_bound_agree_in_every_cell() {
 fn every_iterand_source_feeds_every_consumer() {
     const E: &str = "(int, int)";
     let decls = format!(
-        "struct Bag:\n    xs: List[{E}]\n    fn iter(self) -> Iterator[{E}]:\n        return self.xs.iter()\nstruct Cur:\n    i: int\n    fn next(self) -> {E}?:\n        if self.i >= 2:\n            return None\n        self.i += 1\n        return (self.i, self.i * 10)\nfn drain[S: Iterable[T], T](s: S) -> List[T]:\n    return [q for q in s]\n"
+        "import Iterator, Iterable from std.iter\nstruct Bag:\n    xs: List[{E}]\n    fn iter(self) -> Iterator[{E}]:\n        return self.xs.iter()\nstruct Cur:\n    i: int\n    fn next(self) -> {E}?:\n        if self.i >= 2:\n            return None\n        self.i += 1\n        return (self.i, self.i * 10)\nfn drain[S: Iterable[T], T](s: S) -> List[T]:\n    return [q for q in s]\n"
     );
     const BAG: &str = "Bag([(1, 10), (2, 20)])";
     // (source, wrapper header or "" for a top-level use, the value the consumer iterates)
@@ -1296,10 +1387,11 @@ fn a_warning_fires_exactly_where_the_operator_skips_the_method() {
                     continue;
                 };
                 cells += 1;
-                let src = format!("{}{}", owner(kind, &hook.shapes[si]), hook.op);
+                let decl = owner(kind, &hook.shapes[si]);
+                let src = format!("{}{decl}{}", import_lines("", &[&decl]), hook.op);
                 let tag = format!("warn_{kind}_{}_{shape}", hook.name);
                 let path = dir().join(format!("{tag}.chz"));
-                std::fs::write(&path, grid_cell::with_std_imports(&src)).expect("write the cell");
+                std::fs::write(&path, &src).expect("write the cell");
                 let checked = Command::new(env!("CARGO_BIN_EXE_chezzi"))
                     .arg("check")
                     .arg("--errors=json")

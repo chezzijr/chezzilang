@@ -834,7 +834,7 @@ struct Box[T]:
     // on every type parameter.
     ok("fn f[T](a: T) -> T:\n    return a\nprint(f(1))\n");
     // A partially-generic type, `Map[T, Box[Tag]]`: `T` is bounded (deferred to its OWN declared
-    // bound, cheap — `Map`'s own key bound is `Hashable + Eq`, W7-53), so only the CONCRETE half
+    // bound, cheap — `Map`'s own key bound is `Hashable`, which embeds `Eq`, W7-53), so only the CONCRETE half
     // (`Box[Tag]`, which has no declared `eq` and is structurally sound — `Tag` is a plain `int`
     // field) is actually walked structurally.
     ok(
