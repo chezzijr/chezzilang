@@ -75,5 +75,5 @@ fn a_std_protocol_bound_needs_its_import() {
             expect: Expect::Prints("1".to_string()),
         });
     }
-    grid_cell::run_grid("std-protocol-import", &cells);
+    grid_cell::run_grid("std-protocol-import", &cells, &[]);
 }
