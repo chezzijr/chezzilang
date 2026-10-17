@@ -98,6 +98,7 @@ pub fn standalone_graph(stmts: &[Stmt]) -> ModuleGraph {
     ModuleGraph {
         entry: id.clone(),
         range_used: true,
+        skipped_fns: std::collections::HashMap::new(),
         modules: vec![crate::resolver::LoadedModule {
             id,
             dotted: Vec::new(),

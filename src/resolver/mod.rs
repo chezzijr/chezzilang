@@ -118,7 +118,16 @@ pub struct ModuleGraph {
     /// is not a counting-loop iterand, or when the entry IS the prelude. When false, the checker and the
     /// compiler skip the bodies of the prelude `Range` methods.
     pub range_used: bool,
+    /// TICKET-265 — per file id, the top-level fns of a std module that the program does not reach
+    /// ([`unreached_std_fns`]). The checker and the compiler skip their bodies.
+    pub skipped_fns: HashMap<u32, HashSet<String>>,
 }
+
+/// TICKET-265 — the std module whose `parse` fn `json.decode[T]` calls by name.
+pub const JSON_MODULE: &[&str] = &["std", "json"];
+/// TICKET-265 — the fn of [`JSON_MODULE`] that the compiler calls for `json.decode[T]`. The program
+/// never spells it, so the reach set roots it.
+pub const JSON_DECODE_PARSE: &str = "parse";
 
 /// The runtime key of the `Range` struct `a..b` builds: the `Range` that graph module 0 declares.
 /// Module 0 is the prelude (the resolver visits it first), and a std type keeps its bare name. The
@@ -136,6 +145,129 @@ impl ModuleGraph {
     pub fn skips_range_methods(&self, lm: &LoadedModule) -> bool {
         !self.range_used && lm.dotted == ["std", "prelude"]
     }
+
+    /// TICKET-265 — true when the checker and the compiler skip the body of top-level fn `name` of `lm`.
+    pub fn skips_fn_body(&self, lm: &LoadedModule, name: &str) -> bool {
+        self.skipped_fns
+            .get(&lm.file)
+            .is_some_and(|names| names.contains(name))
+    }
+}
+
+/// TICKET-265 — one module's identifier words: `text` holds them back to back, `at` the line and
+/// byte range of each.
+#[derive(Default)]
+struct Words {
+    text: String,
+    at: Vec<(u32, std::ops::Range<usize>)>,
+}
+
+/// TICKET-265 — the top-level fns of each file-backed std module (the entry excepted) that no
+/// reached code names, keyed by file id. `words` holds each module's identifiers with their lines.
+///
+/// 1. A word belongs to the top-level statement of its module that starts last at or before its line.
+/// 2. The roots are every word of a module that is not gated, and the words of a gated module's
+///    statements that are not top-level fns. [`JSON_DECODE_PARSE`] is a root of [`JSON_MODULE`].
+/// 3. A word reached in module `m` reaches the gated fn of that name in `m` and in each module `m`
+///    imports. The words of a reached fn are then reached in its own module.
+///
+/// A word is any identifier, so a field, a method or a local of the same name also reaches a fn:
+/// the set can keep a fn the program never calls, and never skips one it calls.
+fn unreached_std_fns(
+    modules: &[LoadedModule],
+    entry: &ModuleId,
+    words: &HashMap<u32, Words>,
+) -> HashMap<u32, HashSet<String>> {
+    let index: HashMap<&ModuleId, usize> = modules
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (&m.id, i))
+        .collect();
+    let scope: Vec<Vec<usize>> = modules
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let mut s = vec![i];
+            s.extend(
+                m.imports
+                    .iter()
+                    .filter_map(|imp| index.get(&imp.target).copied()),
+            );
+            s
+        })
+        .collect();
+    let gated = |m: &LoadedModule| m.native.is_none() && m.is_std() && m.id != *entry;
+    // Per gated module: the start line of each top-level statement, with the fn it declares.
+    let starts: Vec<Vec<(u32, Option<&str>)>> = modules
+        .iter()
+        .map(|m| {
+            if !gated(m) {
+                return Vec::new();
+            }
+            m.ast
+                .stmts
+                .iter()
+                .map(|s| {
+                    let name = if let StmtKind::Fn(decl) = &s.kind {
+                        Some(decl.name.as_str())
+                    } else {
+                        None
+                    };
+                    (s.span.line, name)
+                })
+                .collect()
+        })
+        .collect();
+    let names: HashSet<&str> = starts.iter().flatten().filter_map(|(_, n)| *n).collect();
+    // Per module: each gated fn not reached yet, with the words of its statement that name one.
+    let mut fns: Vec<HashMap<&str, Vec<&str>>> = starts
+        .iter()
+        .map(|s| {
+            s.iter()
+                .filter_map(|(_, n)| n.map(|n| (n, Vec::new())))
+                .collect()
+        })
+        .collect();
+    let mut queue: Vec<(usize, &str)> = Vec::new();
+    for (i, m) in modules.iter().enumerate() {
+        // A word reaches only a gated fn of a module in scope.
+        if scope[i].iter().all(|&s| fns[s].is_empty()) {
+            continue;
+        }
+        if let Some(ws) = words.get(&m.file) {
+            for (line, range) in &ws.at {
+                let w = &ws.text[range.clone()];
+                if !names.contains(w) {
+                    continue;
+                }
+                let at = starts[i].partition_point(|(l, _)| l <= line);
+                match at.checked_sub(1).and_then(|k| starts[i][k].1) {
+                    Some(name) => fns[i].entry(name).or_default().push(w),
+                    None => queue.push((i, w)),
+                }
+            }
+        }
+        if gated(m) && m.dotted == JSON_MODULE {
+            queue.push((i, JSON_DECODE_PARSE));
+        }
+    }
+    let mut seen: Vec<HashSet<&str>> = vec![HashSet::new(); modules.len()];
+    while let Some((i, w)) = queue.pop() {
+        if !seen[i].insert(w) {
+            continue;
+        }
+        for &s in &scope[i] {
+            if let Some(body) = fns[s].remove(w) {
+                queue.extend(body.into_iter().map(|b| (s, b)));
+            }
+        }
+    }
+    modules
+        .iter()
+        .zip(fns)
+        .filter(|(_, f)| !f.is_empty())
+        .map(|(m, f)| (m.file, f.into_keys().map(str::to_string).collect()))
+        .collect()
 }
 
 /// What gives a module global its slot (see [`module_global_binds`]).
@@ -510,6 +642,7 @@ fn build_graph_impl(
         max_depth: MAX_IMPORT_DEPTH,
         file_seq: std::cell::Cell::new(0),
         range_named: std::cell::Cell::new(false),
+        words: std::cell::RefCell::new(HashMap::new()),
     };
     // ALWAYS-LINK std.prelude: the eight universe builtins' SIGNATURES (`ord`/`chr`/`panic`/`int`/
     // `float`/`str`/`bytes`/`bytearray`, phase 3a) are declared here as `native fn`/`native ctor` decls
@@ -527,10 +660,12 @@ fn build_graph_impl(
     b.visit(&prelude_id, &prelude_path, Span::RUNTIME)?;
     b.visit(&entry_id, &[], Span::RUNTIME)?;
     let range_used = b.range_named.get() || entry_id == prelude_id;
+    let skipped_fns = unreached_std_fns(&b.order, &entry_id, &b.words.take());
     let mut graph = ModuleGraph {
         entry: entry_id,
         modules: b.order,
         range_used,
+        skipped_fns,
     };
     // ENTRY-LAST BACKSTOP: every positional-entry consumer (compiler `entry_idx = modules.len()-1`,
     // the VM's `entry_home() = modules.last()`) derives the entry as the FINAL module, so the
@@ -590,6 +725,9 @@ struct Builder {
     file_seq: std::cell::Cell<u32>,
     /// TICKET-255 — a non-prelude module's source holds the text [`RANGE_STRUCT`]. Feeds [`ModuleGraph::range_used`].
     range_named: std::cell::Cell<bool>,
+    /// TICKET-265 — each parsed module's identifier words with their lines ([`lexer::ident_words`]),
+    /// keyed by file id. Feeds [`ModuleGraph::skipped_fns`].
+    words: std::cell::RefCell<HashMap<u32, Words>>,
     /// If set, `(entry_id, source)` — the entry module reads from this string instead of disk.
     entry_override: Option<(ModuleId, String)>,
     /// Import-chain depth backstop (see [`MAX_IMPORT_DEPTH`]). Fielded so tests can inject a tiny
@@ -967,6 +1105,13 @@ impl Builder {
                 // `parse` itself does not.
                 path: None,
             })?;
+        let mut words = Words::default();
+        lexer::ident_words(&tokens, &mut |line, w| {
+            let start = words.text.len();
+            words.text.push_str(w);
+            words.at.push((line, start..words.text.len()));
+        });
+        self.words.borrow_mut().insert(file, words);
         let mut ast = parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
             // `e.message`, NOT `e.to_string()`: same reason as the lex arm above — `ParseError`'s own
             // `Display` carries its own `parse error (line N, col M): ` prefix, and the position is
@@ -1742,6 +1887,7 @@ mod tests {
             max_depth,
             file_seq: std::cell::Cell::new(0),
             range_named: std::cell::Cell::new(false),
+            words: std::cell::RefCell::new(HashMap::new()),
         }
     }
 

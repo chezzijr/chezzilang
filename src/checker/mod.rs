@@ -1347,6 +1347,9 @@ struct Checker {
     /// TICKET-255 — set per module by `run_graph_pass` from [`ModuleGraph::skips_range_methods`]: the
     /// prelude `Range` method bodies are not checked, because the graph builds no `Range` value.
     skip_range_bodies: bool,
+    /// TICKET-265 — set per module by `run_graph_pass` from [`ModuleGraph::skipped_fns`]: the top-level
+    /// fns of a std module that the program does not reach. Their bodies are not checked.
+    skip_fn_bodies: HashSet<String>,
     /// Module-scoped types: `(declaring module id, bare type name) → runtime key`. Bare in the
     /// no-collision case; `<dotted>::Name` on a genuine cross-module clash. Built once in
     /// [`check_graph`] with the IDENTICAL graph-order, first-declarer-wins-bare rule as the compiler's
@@ -1422,6 +1425,10 @@ struct Checker {
     /// TICKET-253 — `index_value` entries of this pass; read by [`check_counting_index_values`].
     #[cfg(any(test, feature = "test-api"))]
     index_value_checks: usize,
+    /// TICKET-265 — top-level fns `infer_fn_writers` scanned in this pass; read by
+    /// [`check_graph_counting_writer_scans`].
+    #[cfg(any(test, feature = "test-api"))]
+    writer_scans: usize,
 }
 
 /// TICKET-165 — one constant segment of a projected lvalue chain (`xs[i].f` -> `[Dynamic,

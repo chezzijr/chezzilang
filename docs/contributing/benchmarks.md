@@ -128,6 +128,22 @@ std import (release, `print(1)` after the import): `std.ops` 10.7 ms, `std.cmp` 
 `std.string` 15.6, against 8.1 with none. A protocol name used to cost nothing; it now costs that
 import, because a program must import the module that declares a protocol (owner decision 1). The
 checker loop for `std.ops` takes 0.6 ms; the rest of the import cost is outside it and is open.
+
+Std import rows after the reach set (TICKET-265: a file-backed std module checks, desugars and
+compiles only the top-level fns the program reaches, `resolver::unreached_std_fns`). Release,
+`hyperfine -N -w 5 -r 50`, mean (median), load average 3.1, 2026-10-17:
+
+| Program | main `25e8912d` (owner) | branch |
+|---|---|---|
+| `print(1)` | 8.0 ms | 8214 us (8086) |
+| `import max from std.cmp` | 8.9 ms | 8793 us (8799) |
+| `import enumerate from std.iter` | 14.1 ms | 11116 us (11080) |
+| `import is_empty from std.string` | 14.9 ms | 10292 us (10189) |
+| `import Add from std.ops` | 10.7 ms | 10727 us (10571) |
+
+The target is each row within 1 ms of `print(1)`; `std.cmp` meets it, the other three do not. For
+`std.string` the per-phase timers put the rest at: lex 270 us, parse 370 us, checker 380 us over two
+passes (hoist and signatures of every fn), compile 120 us, reach and desugar 120 us.
 `operator_and_bound_agree_in_every_cell` in `tests/hook_conformance_grid.rs` imports a std module in
 each cell: 284 s on the branch, 189 s on main (load about 3.5 on the box).
 

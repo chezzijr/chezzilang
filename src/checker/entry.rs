@@ -45,6 +45,17 @@ pub fn check_graph_counting_fn_bodies(graph: &ModuleGraph) -> usize {
     })
 }
 
+/// TICKET-265 — the number of top-level fns one checker pass over `graph` scans for writes
+/// (`Checker::writer_scans`).
+#[cfg(any(test, feature = "test-api"))]
+pub fn check_graph_counting_writer_scans(graph: &ModuleGraph) -> usize {
+    crate::on_frontend_stack_scoped(move || {
+        let mut c = Checker::new();
+        c.run_graph_pass(graph, false);
+        c.writer_scans
+    })
+}
+
 /// [`check`], plus the number of `index_value` entries the pass made (TICKET-253;
 /// `Checker::index_value_checks`): one per subscript when each index is typed once.
 #[cfg(any(test, feature = "test-api"))]
@@ -252,6 +263,7 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
     let graph = ModuleGraph {
         entry: id.clone(),
         range_used: true,
+        skipped_fns: std::collections::HashMap::new(),
         modules: vec![crate::resolver::LoadedModule {
             id,
             dotted: Vec::new(),

@@ -384,7 +384,11 @@ impl Checker {
     /// resolving a subscript link to `Element` or `Slice` ([`Self::resolve_link`]).
     pub(super) fn pretype_place_subscripts(&mut self, stmts: &[Stmt]) {
         let mut any = false;
-        for s in stmts.iter().filter(|s| Self::holds_subscript_write(s)) {
+        let held: Vec<&Stmt> = stmts
+            .iter()
+            .filter(|s| !self.skips_body(s) && Self::holds_subscript_write(s))
+            .collect();
+        for s in held {
             any = true;
             let mark = self.diag_mark();
             let saved = std::mem::replace(&mut self.resolving_returns, true);

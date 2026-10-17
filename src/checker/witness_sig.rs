@@ -20,10 +20,11 @@ impl Checker {
     pub(super) fn import_hint(&self, n: &str) -> String {
         let user = self.types_by_name.get(n).and_then(|mods| mods.first());
         // A protocol first: `std_protocol_owner` reads no more than the protocol table, which the
-        // checker has loaded already, where `std_type_owners` parses every std file.
+        // checker has loaded already, where `std_type_owners` parses every std file. A global
+        // protocol needs no import, so it gets no hint.
         let std_module = user
             .map(String::as_str)
-            .or_else(|| super::graph_pass::std_protocol_owner(n))
+            .or_else(|| super::graph_pass::std_protocol_owner(n).filter(|_| !is_global_protocol(n)))
             .or_else(|| {
                 super::graph_pass::std_type_owners()
                     .get(n)

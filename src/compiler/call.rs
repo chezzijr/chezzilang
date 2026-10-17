@@ -239,7 +239,7 @@ impl Compiler {
             let ic = self.next_method_ic();
             fc.emit(
                 Op::CallMethod {
-                    name: "parse".to_string(),
+                    name: crate::resolver::JSON_DECODE_PARSE.to_string(),
                     argc: 1,
                     ic,
                 },
@@ -779,7 +779,7 @@ impl Compiler {
         let Some(parse) = self.program.modules[json_idx]
             .global_slots
             .iter()
-            .position(|n| n == "parse")
+            .position(|n| n == crate::resolver::JSON_DECODE_PARSE)
         else {
             return Err(CompileError {
                 message: "internal: std.json has no parse slot".into(),

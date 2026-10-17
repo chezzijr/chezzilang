@@ -143,6 +143,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // only its `test fn`s / suites are recorded for `chezzi test` discovery.
     let entry_idx = graph.modules.len().saturating_sub(1);
     for (idx, lm) in graph.modules.iter().enumerate() {
+        c.skip_fns = graph.skipped_fns.get(&lm.file).cloned().unwrap_or_default();
         let toplevel = c.compile_module(idx, &lm.ast, &lm.imports, idx == entry_idx, lm.native)?;
         let global_slots = std::mem::take(&mut c.global_slots);
         let let_lines = std::mem::take(&mut c.global_let_lines);
@@ -303,6 +304,9 @@ struct Compiler {
     /// TICKET-255 — the graph recorded no `Range` value ([`ModuleGraph::range_used`] is false): the prelude
     /// `Range` methods are not compiled, and [`Compiler::emit_new_struct`] stops a build that emits one.
     range_free: bool,
+    /// TICKET-265 — set per module from [`ModuleGraph::skipped_fns`]: the top-level fns of a std module
+    /// that the program does not reach. They get no proto and their global slot stays unset.
+    skip_fns: HashSet<String>,
     /// TICKET-250 — the checker's verdict per declared type, and the call sites it typed through a
     /// reserved protocol requirement. Consumed verbatim; the compiler decides no hook.
     hook_table: crate::checker::HookTable,
@@ -641,6 +645,7 @@ impl Compiler {
         Compiler {
             program,
             range_free: false,
+            skip_fns: HashSet::new(),
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
             field_widths: crate::checker::FieldWidthTable::new(),
@@ -1100,7 +1105,9 @@ impl Compiler {
         // `is_boxed_slot` never fires for them — only genuine frame locals (loop vars, block-lets) box.
         fc.boxed_names = captured_names_of_body(&module.stmts, &[]);
         for stmt in &module.stmts {
-            if let StmtKind::Fn(decl) = &stmt.kind {
+            if let StmtKind::Fn(decl) = &stmt.kind
+                && !self.skip_fns.contains(&decl.name)
+            {
                 // M24: a module-level generic fn whose bound carries a static protocol requirement
                 // gets hidden trailing witness params — the checker's `fns` table is the ONLY source.
                 self.pending_witnesses = self

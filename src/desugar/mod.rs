@@ -432,6 +432,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             fn_depth: 0,
             builds_range: false,
             counting_iterand: false,
+            skipped_fns: graph.skipped_fns.get(&graph.modules[mi].file),
         };
         let ast: &mut Module = &mut graph.modules[mi].ast;
         walker.walk_block(&mut ast.stmts)?;
@@ -465,6 +466,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         fn_depth: 0,
         builds_range: false,
         counting_iterand: false,
+        skipped_fns: None,
     };
     walker.walk_block(&mut module.stmts)?;
     Ok(())
@@ -927,6 +929,9 @@ struct Walker<'a> {
     /// Set by the `For` arm just before it walks its iterand: that iterand is a counting loop
     /// ([`crate::ast::counting_range`]), so the `Range` arm must not record a use.
     counting_iterand: bool,
+    /// TICKET-265 — this module's entry in [`ModuleGraph::skipped_fns`]. The checker and the compiler
+    /// skip those bodies, so a range literal inside one records no `Range` use.
+    skipped_fns: Option<&'a HashSet<String>>,
 }
 
 /// TICKET-109 / W12-12 — how deep `fn` declarations may nest. A top-level `fn`, a `test fn` or a
@@ -1077,7 +1082,13 @@ impl Walker<'_> {
                 for p in &decl.params {
                     self.bind(&p.name);
                 }
+                let skipped = self.fn_depth == 1
+                    && self.skipped_fns.is_some_and(|s| s.contains(&decl.name));
+                let builds_range = self.builds_range;
                 self.walk_block(&mut decl.body)?;
+                if skipped {
+                    self.builds_range = builds_range;
+                }
                 self.pop_scope();
                 self.fn_depth -= 1;
             }
@@ -1910,6 +1921,7 @@ mod tests {
         let mut graph = ModuleGraph {
             entry: id.clone(),
             range_used: true,
+            skipped_fns: std::collections::HashMap::new(),
             modules: vec![LoadedModule {
                 id,
                 dotted: vec![],
@@ -1929,6 +1941,7 @@ mod tests {
         let mut graph = ModuleGraph {
             entry: id.clone(),
             range_used: true,
+            skipped_fns: std::collections::HashMap::new(),
             modules: vec![LoadedModule {
                 id,
                 dotted: vec![],

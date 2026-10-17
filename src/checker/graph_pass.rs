@@ -4,6 +4,16 @@
 use super::*;
 
 impl Checker {
+    /// TICKET-265 — `stmt` is a top-level fn of this module that the program does not reach
+    /// ([`ModuleGraph::skips_fn_body`]): no pass reads its body.
+    pub(super) fn skips_body(&self, stmt: &Stmt) -> bool {
+        if let StmtKind::Fn(decl) = &stmt.kind {
+            self.skip_fn_bodies.contains(&decl.name)
+        } else {
+            false
+        }
+    }
+
     /// The shared deps-first module-checking pass behind both [`check_graph`] and
     /// [`resolve_extern_signatures`]. When `harvest_externs` is set, gathers every struct's AST field
     /// types up front and stamps each module's graph index so the extern loop records resolved C
@@ -17,7 +27,7 @@ impl Checker {
         // Every file's index is known before any body is checked.
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of_file.insert(lm.file, idx);
-            if lm.dotted == ["std", "json"] {
+            if lm.dotted == crate::resolver::JSON_MODULE {
                 c.json_module = Some(lm.id.clone());
             }
         }
@@ -82,6 +92,7 @@ impl Checker {
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of.insert(lm.id.clone(), idx);
             c.skip_range_bodies = graph.skips_range_methods(lm);
+            c.skip_fn_bodies = graph.skipped_fns.get(&lm.file).cloned().unwrap_or_default();
             // Keys every checker->compiler table this module's bodies record, the bodied fns of a native
             // std module included (they are checked below, before the AST-module branch sets it).
             c.graph_module_idx = idx;

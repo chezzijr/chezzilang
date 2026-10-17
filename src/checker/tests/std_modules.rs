@@ -1799,3 +1799,23 @@ fn set_union_arg_must_be_set() {
 fn set_not_indexable() {
     rejects("s := {1, 2}\nx := s[0]\n", "cannot index into Set");
 }
+
+/// TICKET-265 — a global protocol (declared in the prelude) needs no import, so it gets no import
+/// hint; a std protocol of another module keeps its hint.
+#[test]
+fn a_global_protocol_gets_no_import_hint() {
+    let c = Checker::new();
+    let globals: Vec<&str> = crate::checker::graph_pass::std_protocol_decls()
+        .iter()
+        .map(|p| p.name.as_str())
+        .filter(|n| crate::checker::is_global_protocol(n))
+        .collect();
+    assert_eq!(globals, ["Any", "Error"]);
+    for name in globals {
+        assert_eq!(c.import_hint(name), "", "{name}");
+    }
+    assert_eq!(
+        c.import_hint("Iterable"),
+        "; import it from std.iter (`import Iterable from std.iter`)"
+    );
+}

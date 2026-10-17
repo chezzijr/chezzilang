@@ -296,6 +296,9 @@ impl Checker {
                 }
                 // Top-level fn: checked against its hoisted global sig.
                 // `.get` (not index) is panic-safe even when a redeclaration left a different sig.
+                if self.skips_body(stmt) {
+                    return;
+                }
                 if let Some(sig) = self.functions.get(&decl.name).cloned() {
                     self.check_fn_body(decl, None, sig);
                 }

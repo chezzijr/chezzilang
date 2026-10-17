@@ -181,6 +181,7 @@ impl Checker {
             imported_variants: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
             skip_range_bodies: false,
+            skip_fn_bodies: HashSet::new(),
             type_keys: HashMap::new(),
             current_module_id: None,
             bare_types: HashMap::new(),
@@ -199,6 +200,8 @@ impl Checker {
             fn_body_checks: 0,
             #[cfg(any(test, feature = "test-api"))]
             index_value_checks: 0,
+            #[cfg(any(test, feature = "test-api"))]
+            writer_scans: 0,
             memo_verify: std::env::var_os("CHEZZI_MEMO_VERIFY").is_some(),
             memo_verifying: false,
         };

@@ -101,6 +101,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Shared/RwShared box heap | `vm/boxctx.rs` | |
 | Range value at run time | `as_range` (`vm/range.rs`) | |
 | Runtime key of the `Range` struct `a..b` builds | `range_key` (`resolver/mod.rs`) | read by the checker's `range_ty` and `Program::range_key` |
+| The std fns a program does not reach (TICKET-265) | `unreached_std_fns` → `ModuleGraph::skipped_fns` (`resolver/mod.rs`) | read by desugar's range gate, the checker's `skips_body` (`checker/graph_pass.rs`) and the compiler's top-level loop; `JSON_DECODE_PARSE` is the one fn the compiler calls by name |
 | How a native fn runs | `Kind` (`native/mod.rs`) | the third element of each `MEMBERS` row |
 
 ## Tests

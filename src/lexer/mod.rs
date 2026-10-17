@@ -2154,6 +2154,32 @@ pub fn tokenize_statement(source: &str, first_line: usize) -> Result<Vec<Tok>, L
     }
 }
 
+/// TICKET-265 — call `each` with the line and the text of each identifier of `toks`, in token
+/// order. The tokens of a string hole and of a spec field count; a keyword, a comment and string
+/// text do not. The module graph reads it to find the std fns a program names.
+pub fn ident_words(toks: &[Tok], each: &mut impl FnMut(u32, &str)) {
+    for tok in toks {
+        if let Token::Ident(word) = &tok.kind {
+            each(tok.span.line, word);
+        } else if let Token::Str(lit) = &tok.kind {
+            for part in &lit.parts {
+                match part {
+                    StrPart::Text(_) => {}
+                    StrPart::Hole(hole) => {
+                        ident_words(&hole.tokens, each);
+                        for spec in hole.spec.iter().flatten() {
+                            match spec {
+                                SpecPart::Text(_) => {}
+                                SpecPart::Field(field) => ident_words(field, each),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The length in source chars of the plain `str` literal that starts `rest_of_line` (a `"` or `'`
 /// is its first char), delimiters included, or `None` when the lexer cannot close it within
 /// `rest_of_line`. The one answer to "where does this literal end": a caret width and an LSP token

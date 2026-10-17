@@ -1613,6 +1613,7 @@ impl Checker {
     pub(super) fn infer_fn_writers(&mut self, stmts: &[Stmt]) {
         let scans: HashMap<String, Scan> = stmts
             .iter()
+            .filter(|stmt| !self.skips_body(stmt))
             .filter_map(|stmt| {
                 if let StmtKind::Fn(decl) = &stmt.kind {
                     Some((decl.name.clone(), scan(decl)))
@@ -1621,6 +1622,10 @@ impl Checker {
                 }
             })
             .collect();
+        #[cfg(any(test, feature = "test-api"))]
+        {
+            self.writer_scans += scans.len();
+        }
         let summaries = self.infer_scan_writes(&scans, &HashMap::new(), true);
         for (name, mut summary) in summaries {
             // The summary leaves this module (an importer reads it), so each subscript link is

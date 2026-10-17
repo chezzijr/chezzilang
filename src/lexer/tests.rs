@@ -1984,3 +1984,26 @@ fn tokenize_statement_ends_at_eof_with_no_trailing_newline() {
     assert_eq!(toks.last().unwrap().kind, Token::Eof);
     assert!(toks.iter().any(|t| t.kind == Token::Ident("f".into())));
 }
+
+/// TICKET-265 — `ident_words` lists each identifier with its line, the ones inside a string hole
+/// and a spec field included. A keyword, a comment and plain string text are not words.
+#[test]
+fn ident_words_reads_holes_and_skips_comments_and_text() {
+    let src = "x := f(1) # g\ns := \"h {k(y)} {z:{w}}\"\nif true:\n    return\n";
+    let toks = tokenize(src).unwrap();
+    let mut words = Vec::new();
+    ident_words(&toks, &mut |l, w| words.push((l, w.to_string())));
+    let got: Vec<(u32, &str)> = words.iter().map(|(l, w)| (*l, w.as_str())).collect();
+    assert_eq!(
+        got,
+        [
+            (1, "x"),
+            (1, "f"),
+            (2, "s"),
+            (2, "k"),
+            (2, "y"),
+            (2, "z"),
+            (2, "w")
+        ]
+    );
+}
