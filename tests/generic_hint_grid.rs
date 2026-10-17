@@ -9,7 +9,8 @@ mod grid_cell;
 
 use grid_cell::{Cell, Expect, run_grid};
 
-const DECLS: &str = "protocol Default:
+const DECLS: &str = "import Stringable from std.string
+protocol Default:
     fn default() -> Self
 struct Counter:
     n: int
