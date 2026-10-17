@@ -253,7 +253,7 @@ impl Checker {
                     // second declaration of the name is reported by `GlobalBinding::clashes`.
                     // The struct's type parameters are in scope across its field and method
                     // signatures (so `first: A` and `fn push(self, x: T)` resolve `A`/`T`).
-                    let saved = self.enter_type_params(type_params);
+                    let saved = self.declare_type_params(type_params, s.span);
                     // A repeated field name adds a dead-but-still-positionally-required ctor slot
                     // (ctor is positional over the field Vec; field lookup is first-wins) — reject it.
                     self.report_dup_names(
@@ -358,10 +358,7 @@ impl Checker {
                     let key = self.bare_key(name);
                     // The enum's type parameters are in scope across its variant payloads (so a
                     // `Node(T, Tree[T])` resolves `T`). Validate each bound names a known protocol.
-                    let saved = self.enter_type_params(type_params);
-                    for tp in type_params {
-                        self.check_bounds(&tp.bounds, &tp.name, s.span);
-                    }
+                    let saved = self.declare_type_params(type_params, s.span);
                     let mut names = Vec::new();
                     for v in variants {
                         // Variants are scoped under their enum, so two *different* enums may share a

@@ -593,9 +593,7 @@ impl Checker {
             }
             self.type_params.insert(tp.name.clone(), rtp.bounds);
         }
-        for tp in type_params {
-            self.check_bounds(&tp.bounds, &tp.name, span);
-        }
+        self.check_param_bounds(type_params, span);
         let sigs = self.protocol_method_sigs(methods, span);
         self.type_params = saved; // restore
         self.protocols.insert(
@@ -669,10 +667,8 @@ impl Checker {
         // Each embed must name a real protocol.
         for emb in embeds {
             if self.user_protocol_shape(&emb.name).is_none() {
-                self.error(
-                    span,
-                    format!("unknown protocol '{}' embedded in '{name}'", emb.name),
-                );
+                let msg = self.unknown_protocol_msg(&emb.name, &format!("embedded in '{name}'"));
+                self.error(span, msg);
             }
         }
         let own: Vec<String> = type_params.iter().map(|tp| tp.name.clone()).collect();

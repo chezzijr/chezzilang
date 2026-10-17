@@ -2,6 +2,8 @@
 # `contains(self, item) -> bool` method makes `x in that_value` dispatch to it, yielding `bool`.
 # Built-in list/set/map/str `in` is unchanged; this adds user structs/enums.
 
+import Eq from std.cmp
+
 # A struct membership test over its own field.
 struct Bag:
     items: List[int]

@@ -233,15 +233,10 @@ impl Checker {
                 ),
             }
         }
-        let saved = self.enter_type_params(&merged);
-        for tp in &merged {
-            self.check_bounds(&tp.bounds, &tp.name, span);
-        }
+        let saved = self.declare_type_params(&merged, span);
         // Validate a conditional method's receiver-bound protocol names too (the enclosing type's
-        // param is already in scope via the hoist's `enter_type_params`).
-        for tp in &receiver_bounds {
-            self.check_bounds(&tp.bounds, &tp.name, span);
-        }
+        // param is already in scope via the hoist's `declare_type_params`).
+        self.check_param_bounds(&receiver_bounds, span);
         let receiver = self.receiver_or_report(&decl.params, owner, span);
         let params: Vec<Ty> = decl
             .params

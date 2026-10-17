@@ -7,6 +7,8 @@
 # This is exactly how Rust's `std::iter::Map` / `Take` work — hand-written structs over a protocol,
 # not a coroutine. `Iterator[T]` is what lets these be written generically over any inner iterator.
 
+import Iterator from std.iter
+
 # An INFINITE source: 0, 1, 2, 3, ...
 struct Count:
     n: int

@@ -669,6 +669,39 @@ impl Checker {
         saved
     }
 
+    /// [`Self::enter_type_params`] at a DECLARATION (a fn signature, a struct, an enum): it also
+    /// reports each bad bound, once, since the declaration is visited once. A body re-entry uses
+    /// `enter_type_params`.
+    pub(super) fn declare_type_params(
+        &mut self,
+        tps: &[TypeParam],
+        span: Span,
+    ) -> HashMap<String, Vec<TyBound>> {
+        let saved = self.enter_type_params(tps);
+        self.check_param_bounds(tps, span);
+        saved
+    }
+
+    /// Report the bad bounds of each declared type parameter (see [`Self::check_bounds`]).
+    pub(super) fn check_param_bounds(&mut self, tps: &[TypeParam], span: Span) {
+        for tp in tps {
+            self.check_bounds(&tp.bounds, &tp.name, span);
+        }
+    }
+
+    /// The message for a protocol name that does not resolve, at `site` (`in bound on 'T'`,
+    /// `embedded in 'P'`). A std protocol the module did not bind reads like any other unimported
+    /// name, and the import hint names its module.
+    pub(super) fn unknown_protocol_msg(&self, name: &str, site: &str) -> String {
+        let hint = self.import_hint(name);
+        let what = if is_std_protocol(name) {
+            "name"
+        } else {
+            "protocol"
+        };
+        format!("unknown {what} '{name}' {site}{hint}")
+    }
+
     /// [`Self::enter_type_params`] for an already-resolved list (a stored signature's).
     pub(super) fn enter_ty_params(&mut self, tps: &[TyParam]) -> HashMap<String, Vec<TyBound>> {
         let saved = self.type_params.clone();
@@ -745,17 +778,8 @@ impl Checker {
                     }
                     continue;
                 }
-                let hint = self.import_hint(&b.name);
-                // A std protocol the module did not bind reads like any other unimported name.
-                let what = if is_std_protocol(&b.name) {
-                    "name"
-                } else {
-                    "protocol"
-                };
-                self.error(
-                    span,
-                    format!("unknown {what} '{}' in bound on '{param}'{hint}", b.name),
-                );
+                let msg = self.unknown_protocol_msg(&b.name, &format!("in bound on '{param}'"));
+                self.error(span, msg);
                 continue;
             };
             if b.args.len() != arity {

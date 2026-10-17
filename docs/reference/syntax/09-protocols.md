@@ -90,9 +90,10 @@ print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable
 `< <= > >=` dispatch to `compare` for any `Comparable` value, including a bare `T: Comparable`
 (negative/zero/positive means less/equal/greater).
 
-- `int`, `float` and `str` are `Comparable`. So are a tuple, a `List[T]` and a `T?` when every element
-  type is: they order lexicographically (the first unequal element decides, a shorter prefix sorts
-  first, `None < ?_`, Rust's order). `print((1, 2) < (1, 3))  # true`;
+- `int`, `float` and `str` are `Comparable`. So are a tuple and a `List[T]` when every element type
+  is: they order lexicographically (the first unequal element decides, a shorter prefix sorts
+  first). A `T?` derives no ordering: `a < b` on two `int?` is `cannot compare`, and `xs.sort()` on a
+  `List[int?]` is `type int? does not satisfy Comparable`. `print((1, 2) < (1, 3))  # true`;
   `[(2, "b"), (1, "z")].sort()` gives `[(1, "z"), (2, "b")]`; `min`/`max`, `sort_by_key` with a tuple
   key and `std.cmp` work. A tuple with a non-`Comparable` element is rejected.
 - A struct has no default ordering: write `compare`. `Map`, `Set` and `T!E` are unordered.

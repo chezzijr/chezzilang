@@ -1,7 +1,8 @@
-//! TICKET-265: a bound that names a std protocol needs `import <Name> from <module>`. One cell
-//! pair per `protocol` declaration in `std/*.chz` (the declarations are the one list): the
-//! program without the import must be rejected, the program with it must run. `std/prelude.chz`
-//! declares the two global protocols (`Any`, `Error`); they need no import and have no cell.
+//! TICKET-265: a program that names a std protocol needs `import <Name> from <module>`. One cell
+//! pair per `protocol` declaration in `std/*.chz` (the declarations are the one list) and per site
+//! in `SITES`: the program without the import must be rejected with the import hint, the program
+//! with it must run. `std/prelude.chz` declares the two global protocols (`Any`, `Error`); they
+//! need no import and have no cell.
 
 use std::path::Path;
 
@@ -44,8 +45,48 @@ fn std_protocols() -> Vec<(String, usize, String)> {
     found
 }
 
+/// Every place a program names a protocol, `{b}` standing for the protocol and its type args, with
+/// the text its error names the place by. A missing site here is a site the import rule can skip.
+const SITES: [(&str, &str, &str); 7] = [
+    (
+        "fn bound",
+        "fn f[T: {b}](x: T) -> int:\n    return 0\n",
+        "in bound on 'T'",
+    ),
+    (
+        "where clause",
+        "fn f[T](x: T) -> int where T: {b}:\n    return 0\n",
+        "in bound on 'T'",
+    ),
+    (
+        "method bound",
+        "struct S:\n    v: int\n    fn m[T: {b}](self, x: T) -> int:\n        return 0\n",
+        "in bound on 'T'",
+    ),
+    (
+        "struct bound",
+        "struct S[T: {b}]:\n    v: T\n",
+        "in bound on 'T'",
+    ),
+    (
+        "enum bound",
+        "enum E[T: {b}]:\n    A(T)\n",
+        "in bound on 'T'",
+    ),
+    (
+        "protocol bound",
+        "protocol Q[T: {b}]:\n    fn q(self) -> int\n",
+        "in bound on 'T'",
+    ),
+    (
+        "protocol embed",
+        "protocol Q:\n    {b}\n    fn q(self) -> int\n",
+        "embedded in 'Q'",
+    ),
+];
+
 #[test]
-fn a_std_protocol_bound_needs_its_import() {
+fn a_std_protocol_needs_its_import_at_every_site() {
     let protocols = std_protocols();
     assert!(
         protocols.len() >= 20,
@@ -59,21 +100,26 @@ fn a_std_protocol_bound_needs_its_import() {
         } else {
             format!("[{}]", vec!["int"; *params].join(", "))
         };
-        let body = format!("fn f[T: {name}{args}](x: T) -> int:\n    return 0\nprint(1)\n");
-        let unknown: &'static str = Box::leak(format!("unknown name '{name}'").into_boxed_str());
-        cells.push(Cell {
-            name: format!("{name} without import"),
-            files: vec![("main.chz".to_string(), body.clone())],
-            expect: Expect::Rejects(unknown),
-        });
-        cells.push(Cell {
-            name: format!("{name} from {module}"),
-            files: vec![(
-                "main.chz".to_string(),
-                format!("import {name} from {module}\n{body}"),
-            )],
-            expect: Expect::Prints("1".to_string()),
-        });
+        let b = format!("{name}{args}");
+        for (site, decl, place) in SITES {
+            let body = format!("{}print(1)\n", decl.replace("{b}", &b));
+            let unknown: &'static str = Box::leak(
+                format!("unknown name '{name}' {place}; import it from {module}").into_boxed_str(),
+            );
+            cells.push(Cell {
+                name: format!("{name} {site} without import"),
+                files: vec![("main.chz".to_string(), body.clone())],
+                expect: Expect::Rejects(unknown),
+            });
+            cells.push(Cell {
+                name: format!("{name} {site} from {module}"),
+                files: vec![(
+                    "main.chz".to_string(),
+                    format!("import {name} from {module}\n{body}"),
+                )],
+                expect: Expect::Prints("1".to_string()),
+            });
+        }
     }
     grid_cell::run_grid("std-protocol-import", &cells, &[]);
 }
