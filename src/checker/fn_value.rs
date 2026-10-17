@@ -116,10 +116,9 @@ impl Checker {
         // inferred return, and the real pass re-checks the same `return id` against a
         // `Some(Unknown)` hint — turning a reject into a silent ACCEPT (measured: `g := get();
         // g(1)` printed `1`, check-clean).
-        let hint = match &self.expected_hint {
-            Some(Ty::Unknown) | None => None,
-            Some(h) => Some(h.clone()),
-        };
+        // A protocol hint (`print(ident)`, `oa(ident)` over `fn oa(v: Any)`) fixes nothing either
+        // (`hint_fixes`, owner rule 2026-10-17), so the read reports as with no hint.
+        let hint = self.expected_hint.clone().filter(hint_fixes);
         let verdict = match &hint {
             Some(h) => {
                 pin_generic_fn_value(&type_params, &declared, h, &|n| self.rigid_param(n, &[]))

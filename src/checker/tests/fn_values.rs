@@ -1801,14 +1801,14 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
     ok(
         "fn ident[T](x: T) -> T:\n    return x\n\nfn run(x: int, f: fn(int) -> int = ident) -> int:\n    return f(x)\n\nfn main():\n    print(run(5))\n",
     );
-    // The message must still stay TRUE in a position with no binding to annotate at all (a bare
-    // expression statement): it may not claim "nothing determines T" or tell the user to annotate
-    // a binding. (`print(ident)` pins `T := Any` from print's `...args: Any`, as any `Any` argument does.)
-    let joined = check_src("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    ident\n")
-        .iter()
-        .map(|e| e.message.clone())
-        .collect::<Vec<_>>()
-        .join(" | ");
+    // The message must still stay TRUE in a position with no binding to annotate at all (`print`):
+    // it may not claim "nothing determines T" or tell the user to annotate a binding.
+    let joined =
+        check_src("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident)\n")
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ");
     assert!(
         joined.contains("T is not determined here")
             && !joined.contains("nothing here determines")
@@ -2681,10 +2681,13 @@ fn print_keywords_bind_through_the_declaration() {
     entry_ok("print(1, 2, end=\"\", sep=\"-\")\n");
 }
 
-// TICKET-264: a mixed `Any` pack `p(1, "a", true)` checks, since every item satisfies `Any`.
+// TICKET-264: a mixed `Any` pack `p(1, "a", true)` checks, since every item satisfies `Any`. An
+// `Any` item hint never fills a generic fn value's `T` (owner rule 2026-10-17), so `p(ident)`
+// rejects.
 #[test]
 fn an_any_variadic_pack_takes_mixed_items() {
     let decl = "fn ident[T](x: T) -> T:\n    return x\nfn p(...xs: Any):\n    print(xs.len())\n";
+    entry_rejects(&format!("{decl}p(ident)\n"), "T is not determined here");
     entry_ok(&format!("{decl}p(1, \"a\", true)\n"));
     entry_ok(&format!("{decl}p(ident[int])\n"));
 }
@@ -2861,12 +2864,13 @@ fn a_variadic_any_pack_joins_branches_through_a_binding() {
     );
 }
 
-// TICKET-264 review: an `Any` pack item pins a generic fn value's `T`, as an `Any` argument does
-// (base `1`).
+// TICKET-264: an `Any` pack item does not pin a generic fn value's `T`, as an `Any` argument does
+// not (owner rule 2026-10-17: a protocol hint never fills `T`; Go: cannot infer T).
 #[test]
-fn a_variadic_any_pack_pins_a_generic_fn_value() {
-    ok(
+fn a_variadic_any_pack_does_not_pin_a_generic_fn_value() {
+    entry_rejects(
         "fn id[T](x: T) -> T:\n    return x\nfn va(...xs: Any) -> int:\n    return xs.len()\nprint(va(id))\n",
+        "T is not determined here",
     );
 }
 

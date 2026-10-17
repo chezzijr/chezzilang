@@ -205,7 +205,7 @@ impl Checker {
                 } else {
                     h.slot_payload()
                 };
-                unify(ret, h, &mut owned);
+                seed_from_hint(Some(h), ret, &mut owned);
             }
         }
         (owned, seed)
@@ -352,8 +352,7 @@ impl Checker {
         if explicit || !ty_fully_concrete(h) || self.assignable(h, &subst(shape, sub)) {
             return;
         }
-        let mut want: HashMap<String, Ty> = HashMap::new();
-        unify(shape, h, &mut want);
+        let want = hint_bindings(shape, h);
         let mut cand = sub.clone();
         let mut changed = false;
         for tp in tps {

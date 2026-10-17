@@ -567,8 +567,7 @@ pub(super) fn pin_generic_fn_value(
         .map(|(old, new)| (old.clone(), Ty::Param(new.clone())))
         .collect();
     let renamed = subst(declared, &ren_map);
-    let mut map: HashMap<String, Ty> = HashMap::new();
-    unify(&renamed, want, &mut map);
+    let map = hint_bindings(&renamed, want);
     if !type_params
         .iter()
         .all(|tp| map.contains_key(&new_name(&tp.name)))
@@ -1026,8 +1025,32 @@ pub(super) fn param_shape(tps: &[TyParam]) -> Vec<Ty> {
 /// unbound (the genuine deadlock, e.g. `Heap([], fn(x, y): x < y)` annotated `Heap[int]`).
 pub(super) fn seed_from_hint(hint: Option<&Ty>, shape: &Ty, sub: &mut HashMap<String, Ty>) {
     if let Some(e) = hint {
-        unify(shape, e, sub);
+        for (n, t) in hint_bindings(shape, e) {
+            unify(&Ty::Param(n), &t, sub);
+        }
     }
+}
+
+/// Does an expected type fix any type param of a generic call or fn value (owner rule
+/// 2026-10-17)? A protocol hint never does: `Any` is an ordinary empty protocol, and every type
+/// satisfies it, so `T := Any` from the hint would let any argument through
+/// (`y: Any = un(?5, 1.5)`). `Unknown` fixes nothing either. A concrete hint that holds a
+/// protocol still fixes its params (`g: Bag[Named] = Bag([A()])`, DEC-124).
+pub(super) fn hint_fixes(t: &Ty) -> bool {
+    !matches!(t, Ty::Unknown | Ty::Protocol(..))
+}
+
+/// THE reading of an expected type by generic inference: the type params `unify(shape, hint)`
+/// binds, or none when [`hint_fixes`] refuses the hint. Every hint site reads it: the
+/// pre-argument slot seed, [`seed_from_hint`], the hint widening and the generic fn-value pin.
+/// The arguments alone then decide `T` under a protocol hint (`print(apply(1, fn(a): a + 1))`
+/// binds `T := int`).
+pub(super) fn hint_bindings(shape: &Ty, hint: &Ty) -> HashMap<String, Ty> {
+    let mut map = HashMap::new();
+    if hint_fixes(hint) {
+        unify(shape, hint, &mut map);
+    }
+    map
 }
 
 /// Return-mask a closure's actual `Func` type for pass-1 unification: replace its return with

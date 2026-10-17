@@ -56,6 +56,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Type lattice | `Ty` (`checker/ty.rs`) | |
 | Type variables, solving | `solve` (`checker/tyvar.rs`) | |
 | Is a fn value fully pinned | `pin_generic_fn_value` (`checker/ty_util.rs`) | |
+| Which type params an expected type fills (a protocol hint fills none) | `hint_bindings`, `hint_fixes` (`checker/ty_util.rs`) | read by `slot_seed` and `widen_targs_from_hint` (`checker/targs.rs`), `seed_from_hint` and `pin_generic_fn_value` (`checker/ty_util.rs`), `generic_fn_value_ty` (`checker/fn_value.rs`). `tests/generic_hint_grid.rs` runs every cell |
 | Is `a` assignable to `b` | `assignable` (`checker/assignable.rs`) | |
 | Does a type satisfy a protocol | `satisfies` (`checker/satisfies.rs`) | |
 | Does the run time dispatch a hook | `declares_hook` (`checker/hooks.rs`) | |

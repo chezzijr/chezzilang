@@ -1344,7 +1344,7 @@ fn witness_undetermined_member_names_the_member_turbofish() {
         "{FWD_HEAD}struct Holder:\n    k: int\n    fn make[T: Default](self) -> T:\n        return T.default()\n"
     );
     entry_rejects(
-        &format!("{head}fn main():\n    x := Holder(1).make()\nmain()\n"),
+        &format!("{head}fn main():\n    print(Holder(1).make())\nmain()\n"),
         "ON THE METHOD (`<receiver>.make[SomeType](...)`)",
     );
     // …and that spelling is accepted.
@@ -1354,7 +1354,7 @@ fn witness_undetermined_member_names_the_member_turbofish() {
     // a FREE fn keeps the (working) name-turbofish + annotated-result advice.
     entry_rejects(
         &format!(
-            "{FWD_HEAD}fn empty[T: Default]() -> T:\n    return T.default()\nfn main():\n    x := empty()\nmain()\n"
+            "{FWD_HEAD}fn empty[T: Default]() -> T:\n    return T.default()\nfn main():\n    print(empty())\nmain()\n"
         ),
         "pin it with a type argument (`empty[SomeType](...)`) or an annotated result",
     );
@@ -1372,7 +1372,7 @@ fn witness_undetermined_names_a_working_spelling_at_every_callee_form() {
         "{FWD_HEAD}struct Holder:\n    k: int\n    fn build[T: Default]() -> T:\n        return T.default()\n"
     );
     entry_rejects(
-        &format!("{head}fn main():\n    x := Holder.build()\nmain()\n"),
+        &format!("{head}fn main():\n    print(Holder.build())\nmain()\n"),
         "pin it with a type argument (`Holder.build[SomeType](...)`)",
     );
     entry_ok(&format!(
@@ -1388,7 +1388,7 @@ fn witness_undetermined_names_a_working_spelling_at_every_callee_form() {
             lib,
             (
                 "main.chz",
-                "import lib\nfn main():\n    x := lib.empty()\nmain()\n",
+                "import lib\nfn main():\n    print(lib.empty())\nmain()\n",
             ),
         ],
         "pin it with a type argument (`lib.empty[SomeType](...)`)",
@@ -1413,7 +1413,7 @@ fn witness_undetermined_names_a_working_spelling_at_every_callee_form() {
             hlib,
             (
                 "main.chz",
-                "import lib\nfn main():\n    x := lib.Holder.build()\nmain()\n",
+                "import lib\nfn main():\n    print(lib.Holder.build())\nmain()\n",
             ),
         ],
         "pin it with a type argument (`lib.Holder.build[SomeType](...)`)",
@@ -1431,7 +1431,7 @@ fn witness_undetermined_names_a_working_spelling_at_every_callee_form() {
             hlib,
             (
                 "main.chz",
-                "import lib as L\nfn main():\n    x := L.Holder.build()\nmain()\n",
+                "import lib as L\nfn main():\n    print(L.Holder.build())\nmain()\n",
             ),
         ],
         "pin it with a type argument (`L.Holder.build[SomeType](...)`)",
