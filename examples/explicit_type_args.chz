@@ -3,6 +3,7 @@
 # struct constructors, and enum-variant constructors. Type-erased: the pinned form runs identically
 # to the inferred form (the two columns below match).
 
+import Comparable from std.cmp
 fn id[T](x: T) -> T:
     return x
 

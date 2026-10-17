@@ -464,8 +464,8 @@ fn hover_struct_ctor_callee() {
 #[test]
 fn hover_generic_fn_callee() {
     // A generic fn callee reports its DECLARED signature with the type parameters intact.
-    let src = "fn combine[T: Arithmetic](a: T, b: T) -> T:\n    return a + b\ncombine(1, 2)\n";
-    let h = hov(src, 2, 0).expect("hover on generic-fn callee");
+    let src = "import Arithmetic from std.ops\nfn combine[T: Arithmetic](a: T, b: T) -> T:\n    return a + b\ncombine(1, 2)\n";
+    let h = hov(src, 3, 0).expect("hover on generic-fn callee");
     assert_eq!(h.display, "fn(T, T) -> T");
     assert_eq!(h.kind, crate::checker::HoverKind::Func);
 }

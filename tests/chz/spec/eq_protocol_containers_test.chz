@@ -12,6 +12,7 @@
 # ever scan the buckets of `hash(key)`, so an `eq` COARSER than its type's `hash` is unreachable,
 # not merely wrong — exactly as in Rust and Python. Every type here keeps `hash` and `eq` agreeing.
 
+import Comparable from std.cmp
 fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
         ?_: assert false, where_ + " must fault"

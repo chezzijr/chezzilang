@@ -68,7 +68,7 @@ fn t187_protocol_one_param_name_mismatch_rejected() {
 #[test]
 fn t187_prelude_protocol_name_mismatch_rejected() {
     rejects_desugared(
-        "struct P:\n    x: int\n    fn compare(self, o: P) -> int:\n        return self.x - o.x\nfn lo[T: Comparable](a: T, b: T) -> T:\n    return a\nprint(lo(P(1), P(2)).x)\n",
+        "import Comparable from std.cmp\nstruct P:\n    x: int\n    fn compare(self, o: P) -> int:\n        return self.x - o.x\nfn lo[T: Comparable](a: T, b: T) -> T:\n    return a\nprint(lo(P(1), P(2)).x)\n",
         "declares 'other'",
     );
 }
@@ -1165,7 +1165,7 @@ fn native_math_abs_is_a_num_generic_value() {
 /// TICKET-214 grid: native module fns (math.abs, math.sign, json.decode) x position x type arg, plus Num satisfaction and the operators a T: Num body gets.
 #[test]
 fn native_fn_and_num_protocol_grid() {
-    let num_struct = "struct S:\n    v: int\n    fn add(self, other: S) -> S:\n        return S(self.v + other.v)\n    fn sub(self, other: S) -> S:\n        return S(self.v - other.v)\n    fn mul(self, other: S) -> S:\n        return S(self.v * other.v)\n    fn div(self, other: S) -> S:\n        return S(self.v / other.v)\n    fn mod(self, other: S) -> S:\n        return S(self.v % other.v)\n    fn neg(self) -> S:\n        return S(-self.v)\n    fn compare(self, other: S) -> int:\n        return self.v - other.v\n    fn eq(self, other: S) -> bool:\n        return self.v == other.v\nfn twice[T: Num](x: T) -> T:\n    return x + x\nprint(twice(S(2)).v)";
+    let num_struct = "import Num from std.ops\nstruct S:\n    v: int\n    fn add(self, other: S) -> S:\n        return S(self.v + other.v)\n    fn sub(self, other: S) -> S:\n        return S(self.v - other.v)\n    fn mul(self, other: S) -> S:\n        return S(self.v * other.v)\n    fn div(self, other: S) -> S:\n        return S(self.v / other.v)\n    fn mod(self, other: S) -> S:\n        return S(self.v % other.v)\n    fn neg(self) -> S:\n        return S(-self.v)\n    fn compare(self, other: S) -> int:\n        return self.v - other.v\n    fn eq(self, other: S) -> bool:\n        return self.v == other.v\nfn twice[T: Num](x: T) -> T:\n    return x + x\nprint(twice(S(2)).v)";
     let cells: &[(&str, &str, Option<&str>)] = &[
         ("call_int", "print(math.abs(-3), math.sign(-3))", None),
         ("call_float", "print(math.abs(-2.5), math.sign(-2.5))", None),
@@ -1223,7 +1223,7 @@ fn native_fn_and_num_protocol_grid() {
         ),
         (
             "caller_param",
-            "fn app[U: Num](x: U) -> U:\n    f: fn(U) -> U = math.abs\n    return f(x)\nprint(app(-4), app(-1.5))",
+            "import Num from std.ops\nfn app[U: Num](x: U) -> U:\n    f: fn(U) -> U = math.abs\n    return f(x)\nprint(app(-4), app(-1.5))",
             None,
         ),
         (
@@ -1253,17 +1253,17 @@ fn native_fn_and_num_protocol_grid() {
         ),
         (
             "num_int",
-            "fn twice[T: Num](x: T) -> T:\n    return x + x\nprint(twice(2), twice(2.5))",
+            "import Num from std.ops\nfn twice[T: Num](x: T) -> T:\n    return x + x\nprint(twice(2), twice(2.5))",
             None,
         ),
         (
             "num_str",
-            "fn twice[T: Num](x: T) -> T:\n    return x + x\nprint(twice(\"a\"))",
+            "import Num from std.ops\nfn twice[T: Num](x: T) -> T:\n    return x + x\nprint(twice(\"a\"))",
             Some("type str does not satisfy Num"),
         ),
         (
             "num_bool",
-            "fn twice[T: Num](x: T) -> T:\n    return x\nprint(twice(true))",
+            "import Num from std.ops\nfn twice[T: Num](x: T) -> T:\n    return x\nprint(twice(true))",
             Some("type bool does not satisfy Num"),
         ),
         (
@@ -1273,33 +1273,37 @@ fn native_fn_and_num_protocol_grid() {
         ),
         (
             "num_ops",
-            "fn ops[T: Num](a: T, b: T) -> T:\n    print(a + b, a - b, a * b, a / b, a % b, -a, a < b, a <= b, a > b, a >= b, a == b, a != b)\n    return a\nops(7, 2)\nops(7.5, 2.0)",
+            "import Num from std.ops\nfn ops[T: Num](a: T, b: T) -> T:\n    print(a + b, a - b, a * b, a / b, a % b, -a, a < b, a <= b, a > b, a >= b, a == b, a != b)\n    return a\nops(7, 2)\nops(7.5, 2.0)",
             None,
         ),
         (
             "num_mix",
-            "fn both[T: Num](a: T, b: T) -> T:\n    return a\nprint(both(7, 2.0))",
+            "import Num from std.ops\nfn both[T: Num](a: T, b: T) -> T:\n    return a\nprint(both(7, 2.0))",
             Some("argument to 'both' has type float, expected int"),
         ),
         (
             "num_lit",
-            "fn inc[T: Num](x: T) -> T:\n    return x + 1",
+            "import Num from std.ops\nfn inc[T: Num](x: T) -> T:\n    return x + 1",
             Some("cannot apply + to T and int"),
         ),
         (
             "num_not",
-            "fn f[T: Num](x: T) -> bool:\n    return not x",
+            "import Num from std.ops\nfn f[T: Num](x: T) -> bool:\n    return not x",
             Some("'not' expects bool, found T"),
         ),
         (
             "unsealed_param",
-            "fn f[T: Arithmetic + Mod + Neg + Comparable](x: T) -> T:\n    return math.abs(x)",
+            "import Arithmetic, Mod, Neg from std.ops\nimport Comparable from std.cmp\nfn f[T: Arithmetic + Mod + Neg + Comparable](x: T) -> T:\n    return math.abs(x)",
             Some("type T does not satisfy Num"),
         ),
-        ("num_value", "x: Num = 2.5\nprint(x)", None),
+        (
+            "num_value",
+            "import Num from std.ops\nx: Num = 2.5\nprint(x)",
+            None,
+        ),
         (
             "num_value_abs",
-            "x: Num = 2.5\nprint(math.abs(x))",
+            "import Num from std.ops\nx: Num = 2.5\nprint(math.abs(x))",
             Some("cannot use the protocol value Num as type parameter"),
         ),
         (
@@ -1771,7 +1775,7 @@ fn generic_value_later_use_grid() {
         }
     }
     // A bounded generic read is rejected at its binding like any other.
-    let lt = "struct P:\n    x: int\nfn lt[T: Comparable](a: T, b: T) -> bool:\n    return a < b\n";
+    let lt = "import Comparable from std.cmp\nstruct P:\n    x: int\nfn lt[T: Comparable](a: T, b: T) -> bool:\n    return a < b\n";
     let errs = check_src(&format!(
         "{lt}fn main():\n    f := lt\n    print(f(P(1), P(2)))\n"
     ));

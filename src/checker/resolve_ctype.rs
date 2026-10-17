@@ -50,9 +50,10 @@ impl Checker {
                 _ if self.imported_alias_tys.contains_key(n) => self.imported_alias_tys[n].clone(),
                 _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
                 _ if self.enum_names.contains(n) => Ty::enum_ty(self.bare_key(n), Vec::new()),
-                _ if self.protocol_shape(&self.user_protocol_key(n)).is_some() => {
-                    Ty::Protocol(self.user_protocol_key(n), Vec::new())
-                }
+                _ if self.user_protocol_shape(n).is_some() => Ty::Protocol(
+                    self.user_protocol_key(n).unwrap_or_else(|| n.to_string()),
+                    Vec::new(),
+                ),
                 _ => Ty::Unknown,
             },
             Type::Generic(n, args, ..) => match n.as_str() {
@@ -87,8 +88,8 @@ impl Checker {
                 // A parameterized protocol used as a value type (`Container[int]`). Mint the carried
                 // args so the read-only resolver no longer silent-accepts it as `Unknown` (which would
                 // erase the witness). Mirrors the mutable `resolve_type` protocol arm.
-                _ if self.protocol_shape(&self.user_protocol_key(n)).is_some() => Ty::Protocol(
-                    self.user_protocol_key(n),
+                _ if self.user_protocol_shape(n).is_some() => Ty::Protocol(
+                    self.user_protocol_key(n).unwrap_or_else(|| n.to_string()),
                     args.iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
                         .collect(),
@@ -143,7 +144,7 @@ impl Checker {
             Ty::enum_ty(self.type_key(mid, name), args.to_vec())
         } else if let Some(asig) = sig.type_aliases.get(name) {
             asig.body.clone()
-        } else if sig.protocol_defs.contains_key(name) {
+        } else if sig.protocol_defs.contains_key(name) && !sig.builtins.contains(name) {
             // Permissive mirror of `resolve_type`'s qualified protocol arm: no arity error and no
             // static-ctor gate — the mutable resolver owns both diagnostics.
             Ty::Protocol(self.type_key(mid, name), args.to_vec())

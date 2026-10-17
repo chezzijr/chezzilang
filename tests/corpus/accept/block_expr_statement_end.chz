@@ -1,4 +1,5 @@
 # rule: value, yieldStmt, returnStmt, assignStmt
+import Iterator from std.iter
 n := 1
 x := 0
 x = match n:

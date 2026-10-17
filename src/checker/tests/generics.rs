@@ -19,7 +19,7 @@ struct Point:
 #[test]
 fn generic_max_over_int_ok() {
     ok(
-        "fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nm := max(3, 7)\n",
+        "import Comparable from std.cmp\nfn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nm := max(3, 7)\n",
     );
 }
 
@@ -30,14 +30,14 @@ fn generic_max_over_int_ok() {
 #[test]
 fn generic_max_over_float_and_str_ok_after_eq_embed() {
     ok(
-        "fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nf := max(1.5, 2.5)\ns := max(\"a\", \"b\")\n",
+        "import Comparable from std.cmp\nfn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nf := max(1.5, 2.5)\ns := max(\"a\", \"b\")\n",
     );
 }
 
 #[test]
 fn generic_max_over_comparable_struct_ok() {
     let src = format!(
-        "{POINT}fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\np := max(Point(1, 2), Point(3, 0))\n"
+        "import Comparable from std.cmp\n{POINT}fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\np := max(Point(1, 2), Point(3, 0))\n"
     );
     ok(&src);
 }
@@ -46,7 +46,7 @@ fn generic_max_over_comparable_struct_ok() {
 fn generic_max_result_type_is_substituted() {
     // The result of max(3,7) is int, so a str-typed binding must be rejected.
     rejects(
-        "fn max[T: Comparable](a: T, b: T) -> T:\n    return a\nx: str = max(3, 7)\n",
+        "import Comparable from std.cmp\nfn max[T: Comparable](a: T, b: T) -> T:\n    return a\nx: str = max(3, 7)\n",
         "cannot assign int",
     );
 }
@@ -63,6 +63,7 @@ fn ordering_on_unbounded_type_param_rejected() {
 fn calling_comparable_generic_on_non_comparable_struct_rejected() {
     // Plain (no `compare`/`eq` method) ⇒ does not satisfy Comparable (via its `Eq` embed).
     let src = "\
+import Comparable from std.cmp
 struct Plain:
     n: int
 fn max[T: Comparable](a: T, b: T) -> T:
@@ -78,7 +79,7 @@ p := max(Plain(1), Plain(2))
 #[test]
 fn generic_call_with_mismatched_type_args_rejected() {
     rejects(
-        "fn max[T: Comparable](a: T, b: T) -> T:\n    return a\nx := max(3, \"a\")\n",
+        "import Comparable from std.cmp\nfn max[T: Comparable](a: T, b: T) -> T:\n    return a\nx := max(3, \"a\")\n",
         "expected int",
     );
 }
@@ -1207,7 +1208,8 @@ fn unbounded_generic_passthrough_ok() {
 
 // ===== explicit call-site type arguments (`max[int](…)`) =====
 
-const MAX_FN: &str = "fn max[T: Comparable](a: T, b: T) -> T:\n    return a\n";
+const MAX_FN: &str =
+    "import Comparable from std.cmp\nfn max[T: Comparable](a: T, b: T) -> T:\n    return a\n";
 
 #[test]
 fn explicit_type_args_fn_ok() {
@@ -1306,7 +1308,9 @@ fn ordering_on_non_comparable_struct_rejected() {
 
 #[test]
 fn calling_protocol_method_on_type_param_ok() {
-    ok("fn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\n");
+    ok(
+        "import Comparable from std.cmp\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\n",
+    );
 }
 
 #[test]
@@ -1388,6 +1392,7 @@ fn channel_trip_gated_to_bool() {
 #[test]
 fn stringable_struct_satisfies_ok() {
     let src = "\
+import Stringable from std.string
 struct Point:
     x: int
     y: int
@@ -1406,6 +1411,7 @@ fn stringable_wrong_signature_is_invisible_to_the_bound() {
     // is graded like one with no `str`; TICKET-257, pinned by `hook_conformance_grid`). The run
     // prints the default display, never the int.
     let src = "\
+import Stringable from std.string
 struct Bad:
     n: int
     fn str(self) -> int:
@@ -1423,6 +1429,7 @@ fn stringable_bare_struct_and_non_hook_str_accepted() {
     // NO `str` method satisfies `Stringable`, and so does one whose `str` is not the hook (a method
     // that is not the hook is invisible to `print`; `hook_conformance_grid` pins the same).
     let bare = "\
+import Stringable from std.string
 struct Bare:
     a: int
 fn show[T: Stringable](v: T) -> str:
@@ -1431,6 +1438,7 @@ x := show(Bare(1))
 ";
     ok(bare);
     let wrong = "\
+import Stringable from std.string
 struct Bad:
     a: int
     fn str(self) -> int:
@@ -1447,7 +1455,9 @@ fn stringable_scalar_satisfies_ok() {
     // int/float/bool/str intrinsically satisfy Stringable (sole method `str(self) -> str`),
     // mirroring the Comparable/Hashable/Add intrinsic scalar arms.
     for lit in ["show(5)", "show(3.14)", "show(true)", "show(\"hi\")"] {
-        let src = format!("fn show[T: Stringable](v: T) -> str:\n    return v.str()\ns := {lit}\n");
+        let src = format!(
+            "import Stringable from std.string\nfn show[T: Stringable](v: T) -> str:\n    return v.str()\ns := {lit}\n"
+        );
         ok(&src);
     }
 }
@@ -1624,6 +1634,7 @@ fn annotation_and_ctor_each_report_their_own_hashable_error() {
 #[test]
 fn hashable_struct_satisfies_ok() {
     let src = "\
+import Hashable from std.cmp
 struct Id:
     n: int
     fn hash(self) -> int:
@@ -1639,13 +1650,14 @@ x := keyed(Id(7))
 fn hashable_intrinsic_for_scalars_ok() {
     // int/str/bool satisfy Hashable intrinsically, so a `[T: Hashable]` bound accepts them.
     ok(
-        "fn keyed[T: Hashable](v: T) -> T:\n    return v\na := keyed(3)\nb := keyed(\"x\")\nc := keyed(true)\n",
+        "import Hashable from std.cmp\nfn keyed[T: Hashable](v: T) -> T:\n    return v\na := keyed(3)\nb := keyed(\"x\")\nc := keyed(true)\n",
     );
 }
 
 #[test]
 fn hashable_missing_method_rejected() {
     let src = "\
+import Hashable from std.cmp
 struct Bare:
     a: int
 fn keyed[T: Hashable](v: T) -> T:
@@ -1695,7 +1707,7 @@ fn tuple_key_rejection_names_a_float_element() {
 #[test]
 fn tuple_key_hashable_bound_rejects_an_unhashable_element() {
     rejects(
-        "fn f[T: Hashable](x: T) -> int:\n    return x.hash()\nprint(f((1, [2])))\n",
+        "import Hashable from std.cmp\nfn f[T: Hashable](x: T) -> int:\n    return x.hash()\nprint(f((1, [2])))\n",
         "element List[int] is not Hashable",
     );
 }
@@ -1709,7 +1721,9 @@ fn tuple_key_of_hashable_elements_checks_ok() {
     ok("s := Set([(1, 2)])\n");
     ok("m := {(i, i): i for i in 0..3}\n");
     ok("struct Z:\n    pass\nm := {(1, Z()): \"a\"}\n");
-    ok("fn f[T: Hashable](x: T) -> int:\n    return x.hash()\nprint(f((1, 2)))\n");
+    ok(
+        "import Hashable from std.cmp\nfn f[T: Hashable](x: T) -> int:\n    return x.hash()\nprint(f((1, 2)))\n",
+    );
 }
 
 // ----- numeric operator protocols + multi-bound (M10-G3) -----
@@ -1743,7 +1757,7 @@ fn struct_without_sub_rejects_minus() {
 #[test]
 fn multi_bound_add_mul_ok() {
     ok(&format!(
-        "{VEC2}fn fma[T: Add + Mul](a: T, b: T, c: T) -> T:\n    return a + b * c\nv := fma(Vec2(1,2), Vec2(3,4), Vec2(5,6))\nn := fma(2, 3, 4)\n"
+        "import Add, Mul from std.ops\n{VEC2}fn fma[T: Add + Mul](a: T, b: T, c: T) -> T:\n    return a + b * c\nv := fma(Vec2(1,2), Vec2(3,4), Vec2(5,6))\nn := fma(2, 3, 4)\n"
     ));
 }
 
@@ -1751,6 +1765,7 @@ fn multi_bound_add_mul_ok() {
 fn multi_bound_missing_one_protocol_rejected() {
     // Point has add but no mul ⇒ fails the `Mul` half of `T: Add + Mul`.
     let src = "\
+import Add, Mul from std.ops
 struct PointA:
     x: int
     fn add(self, other: PointA) -> PointA:
@@ -1772,6 +1787,7 @@ fn generic_struct_add_satisfies_and_overloads() {
     // generic must both accept `Box[int]`. Previously rejected ("cannot apply + ..." / "does not
     // satisfy Add (method 'add' has the wrong signature)") because `T` was never bound to `int`.
     let src = "\
+import Add from std.ops
 struct Box[T]:
     v: T
     fn add(self, other: Box[T]) -> Box[T]:
@@ -1788,6 +1804,7 @@ b := twice(Box(7)).v
 fn generic_struct_neg_and_compare() {
     // Unary `neg`/`-` and `compare`/`<`/Comparable over a generic struct.
     let src = "\
+import Comparable from std.cmp
 struct Box[T]:
     v: T
     fn neg(self) -> Box[T]:
@@ -1811,6 +1828,7 @@ c := smallest(Box(1), Box(2)).v
 fn generic_enum_add_satisfies() {
     // Generic-enum analogue: `enum Numeral[T]` with `add` overloads `+` and satisfies `Add`.
     let src = "\
+import Add from std.ops
 enum Numeral[T]:
     Val(T)
     fn add(self, other: Numeral[T]) -> Numeral[T]:
@@ -1842,6 +1860,7 @@ fn generic_struct_wrong_add_sig_rejected() {
     // BOUNDARY / soundness: a generic struct whose `add` has a genuinely WRONG signature
     // (`o: int -> int`, not `Box[T] -> Box[T]`) must STILL be rejected — no type laundering.
     let src = "\
+import Add from std.ops
 struct Box[T]:
     v: T
     fn add(self, o: int) -> int:

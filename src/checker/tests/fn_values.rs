@@ -328,7 +328,7 @@ fn free_fn_hof_returnonly_boundaries() {
     ));
     // p12 — protocol-bounded return-only `[U: Add]`: recover U=int AND re-enforce the `Add` bound.
     entry_ok(
-        "fn mapadd[U: Add](x: int, f: fn(int) -> U) -> U:\n    return f(x)\nfn main():\n    y := mapadd(5, fn(x): x * 2)\n    print(y + 1)\n",
+        "import Add from std.ops\nfn mapadd[U: Add](x: int, f: fn(int) -> U) -> U:\n    return f(x)\nfn main():\n    y := mapadd(5, fn(x): x * 2)\n    print(y + 1)\n",
     );
     // p2 — sibling value arg pins A (=int), which flows into the closure PARAM; B is return-only.
     entry_ok(
@@ -451,7 +451,7 @@ fn rwshared_read_len_ok() {
 
 // Phase 1c — generic struct constructor: a `fn`-typed field's closure arg is
 // re-inferred against the SUBSTITUTED field type, so its param binds concretely.
-const MAPPED_DEFS: &str = "struct Mapped[I: Iterator[T], T, U]:\n    inner: I\n    f: fn(T) -> U\n    fn next(self) -> U?:\n        match self.inner.next():\n            ?x:\n                return ?self.f(x)\n            None:\n                return None\n";
+const MAPPED_DEFS: &str = "import Iterator from std.iter\nstruct Mapped[I: Iterator[T], T, U]:\n    inner: I\n    f: fn(T) -> U\n    fn next(self) -> U?:\n        match self.inner.next():\n            ?x:\n                return ?self.f(x)\n            None:\n                return None\n";
 
 #[test]
 fn closure_param_inferred_in_generic_struct_ctor_ok() {
@@ -1675,7 +1675,7 @@ fn generic_fn_value_unsatisfiable_rejected() {
 #[test]
 fn generic_fn_value_turbofish_bound_violation_rejected() {
     rejects(
-        "fn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h := addone[bool]\n    print(h(true))\n",
+        "import Add from std.ops\nfn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h := addone[bool]\n    print(h(true))\n",
         "Add",
     );
 }
@@ -1683,7 +1683,7 @@ fn generic_fn_value_turbofish_bound_violation_rejected() {
 #[test]
 fn generic_fn_value_annot_bound_violation_rejected() {
     rejects(
-        "fn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h: fn(bool) -> bool = addone\n",
+        "import Add from std.ops\nfn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h: fn(bool) -> bool = addone\n",
         "Add",
     );
 }
@@ -1858,7 +1858,7 @@ fn uninstantiated_generic_fn_value_as_a_generic_ctor_arg_rejected() {
         "fn conv[T](x: T) -> str:\n    return str(x)\n\nfn main():\n    xs := [1, 2, 3].map(conv)\n    s: str = xs[0]\n    print(s)\n",
     );
     ok(
-        "fn add[T: Add](a: T, b: T) -> T:\n    return a + b\n\nfn main():\n    n: int = [1, 2, 3].fold(0, add)\n    print(n)\n",
+        "import Add from std.ops\nfn add[T: Add](a: T, b: T) -> T:\n    return a + b\n\nfn main():\n    n: int = [1, 2, 3].fold(0, add)\n    print(n)\n",
     );
 }
 
@@ -2119,10 +2119,10 @@ fn a_generic_fn_argument_pinned_by_anything_stays_ok() {
     // `Fold([]int{}, 0, add)` returns `0`. Killing the pin here reported the pre-rule wording
     // ("argument to 'fold' has type fn(T, T) -> T") that this whole rule exists to replace.
     ok(&format!(
-        "{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print([].fold(0, add))\n    print([].fold(\"\", pick))\n"
+        "import Add from std.ops\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print([].fold(0, add))\n    print([].fold(\"\", pick))\n"
     ));
     entry_ok(&format!(
-        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    s: ConcurrentList[int] = ConcurrentList(concurrency.RwShared([]))\n    print(s.fold(0, add))\nmain()\n"
+        "import Add from std.ops\nimport std.concurrency\nimport ConcurrentList from std.concurrency.collection\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    s: ConcurrentList[int] = ConcurrentList(concurrency.RwShared([]))\n    print(s.fold(0, add))\nmain()\n"
     ));
 }
 
@@ -2336,7 +2336,7 @@ fn generic_fn_value_into_builtin_fold_ok() {
     // .fold(0, add): the accumulator U is pinned by `init`=int FIRST, then add's own T=int is pinned
     // from the resulting fn(int, int) -> int slot; the bound [T: Add] is enforced under the pin.
     ok(
-        "fn add[T: Add](a: T, b: T) -> T:\n    return a + b\n\nfn main():\n    n: int = [1, 2, 3].fold(0, add)\n    print(n)\n",
+        "import Add from std.ops\nfn add[T: Add](a: T, b: T) -> T:\n    return a + b\n\nfn main():\n    n: int = [1, 2, 3].fold(0, add)\n    print(n)\n",
     );
 }
 
@@ -2364,7 +2364,7 @@ fn generic_fn_value_into_map_bound_violation_rejected() {
     // A [T: Comparable]-bounded fn pinned to a non-Comparable element type must reject via
     // enforce_bounds under the pin (the helper mirrors Scope A's bound enforcement).
     rejects(
-        "struct Tag:\n    n: int\n\nfn cmp[T: Comparable](x: T) -> T:\n    return x\n\nfn main():\n    xs := [Tag(1), Tag(2)].map(cmp)\n    print(xs)\n",
+        "import Comparable from std.cmp\nstruct Tag:\n    n: int\n\nfn cmp[T: Comparable](x: T) -> T:\n    return x\n\nfn main():\n    xs := [Tag(1), Tag(2)].map(cmp)\n    print(xs)\n",
         "does not satisfy Comparable (missing method 'compare')",
     );
 }
@@ -2516,17 +2516,25 @@ fn param_protocol_nesting_accepts_and_wrong_rejects() {
 /// its element type instead of taking a `List[PathLike]`.
 #[test]
 fn pathlike_is_satisfied_by_the_three_byte_spellings() {
-    ok("fn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(\"a\").len())\n");
-    ok("fn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(b\"a\").len())\n");
-    ok("fn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(bytearray(b\"a\")).len())\n");
-    ok("fn f[T: PathLike](p: T) -> bytes:\n    return p.as_path()\nprint(f(\"a\").len())\n");
+    ok(
+        "import PathLike from std.path\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(\"a\").len())\n",
+    );
+    ok(
+        "import PathLike from std.path\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(b\"a\").len())\n",
+    );
+    ok(
+        "import PathLike from std.path\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(bytearray(b\"a\")).len())\n",
+    );
+    ok(
+        "import PathLike from std.path\nfn f[T: PathLike](p: T) -> bytes:\n    return p.as_path()\nprint(f(\"a\").len())\n",
+    );
     // A struct with its OWN `as_path(self) -> bytes` conforms structurally (this is `path.Path`).
     ok(
-        "struct P:\n    raw: bytes\n    fn as_path(self) -> bytes:\n        return self.raw\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(P(b\"a\")).len())\n",
+        "import PathLike from std.path\nstruct P:\n    raw: bytes\n    fn as_path(self) -> bytes:\n        return self.raw\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(P(b\"a\")).len())\n",
     );
     // ...and a type WITHOUT one still does not.
     rejects(
-        "struct Q:\n    n: int\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(Q(1)).len())\n",
+        "import PathLike from std.path\nstruct Q:\n    n: int\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(Q(1)).len())\n",
         "PathLike",
     );
 }
@@ -2550,19 +2558,19 @@ fn pathlike_grant_does_not_widen_container_invariance() {
         "expected Map[str, Any], found Map[str, int]",
     );
     entry_rejects(
-        "fn f(xs: Iterable[Any]):\n    print(xs)\nfn main():\n    ns: List[int] = [1]\n    f(ns)\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[Any]):\n    print(xs)\nfn main():\n    ns: List[int] = [1]\n    f(ns)\nmain()\n",
         "Iterable[Any]",
     );
     // The grant does NOT reach a container element either: `List[str]` is not `List[PathLike]`. This
     // is precisely why `path.join` is `[T](List[T]) where T: PathLike` — a `List[PathLike]` parameter
     // would be callable with a list LITERAL and with no variable at all (W7-8 review).
     entry_rejects(
-        "fn f(xs: List[PathLike]):\n    print(xs.len())\nfn main():\n    ss: List[str] = [\"a\"]\n    f(ss)\nmain()\n",
+        "import PathLike from std.path\nfn f(xs: List[PathLike]):\n    print(xs.len())\nfn main():\n    ss: List[str] = [\"a\"]\n    f(ss)\nmain()\n",
         "expected List[PathLike], found List[str]",
     );
     // ...and the generic-bound spelling that replaced it DOES accept that same variable.
     entry_ok(
-        "fn f[T](xs: List[T]) -> int where T: PathLike:\n    return xs[0].as_path().len()\nfn main():\n    ss: List[str] = [\"ab\"]\n    print(f(ss))\nmain()\n",
+        "import PathLike from std.path\nfn f[T](xs: List[T]) -> int where T: PathLike:\n    return xs[0].as_path().len()\nfn main():\n    ss: List[str] = [\"ab\"]\n    print(f(ss))\nmain()\n",
     );
 }
 

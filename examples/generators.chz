@@ -3,6 +3,7 @@
 # (`chezzi run`) — generators hold live VM frame state.
 
 # Free-function generator.
+import Iterator from std.iter
 fn count_up(n: int) -> Iterator[int]:
     i := 0
     while i < n:

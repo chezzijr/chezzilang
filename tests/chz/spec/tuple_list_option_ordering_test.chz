@@ -1,6 +1,7 @@
 # TICKET-146 (docs/contributing/gaps.md W14-23): a tuple and `List[T]` are Comparable when every
 # element is, lexicographically. `T?` orders nothing (TICKET-265, owner decision 4). CPython sorts a
 # list of tuples.
+import Comparable from std.cmp
 import std.cmp
 
 struct P:

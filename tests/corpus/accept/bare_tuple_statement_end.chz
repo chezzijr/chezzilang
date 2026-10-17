@@ -1,4 +1,5 @@
 # rule: plainLet, assignStmt, returnStmt, yieldStmt
+import Iterator from std.iter
 x := 1, 2
 y: (int, int) = 3, 4
 x = 5, 6

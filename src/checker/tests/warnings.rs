@@ -699,7 +699,7 @@ fn d4_rule1_silent_set_stays_clean() {
         "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            xs := [7]\n            xs.push(2)\n    print(xs[0])\nf()\n",
         "fn f():\n    xs := [1]\n    xs.push(2)\n    n := 0\n    n = 9\n    print(xs.len() + n)\nf()\n",
         "fn g(n: int):\n    print(n)\nfn f():\n    xs := [1, 2]\n    parallel:\n        spawn g(xs.pop() ?? 0)\nf()\n",
-        "fn put[C: IndexSet[int, int]](c: C):\n    parallel:\n        spawn:\n            c[0] = 5\nput([1])\n",
+        "import IndexSet from std.ops\nfn put[C: IndexSet[int, int]](c: C):\n    parallel:\n        spawn:\n            c[0] = 5\nput([1])\n",
         "struct Grid:\n    data: List[List[int]]\n    fn index(self, k: int) -> List[int]:\n        return self.data[k]\nfn f():\n    g := Grid([[1, 2]])\n    parallel:\n        spawn:\n            g[0][1] = 5\nf()\n",
     ] {
         no_warn(src);
@@ -767,7 +767,7 @@ fn d4_user_method_write_inference_declines() {
         "protocol P:\n    fn bump(self)\nfn f(p: P):\n    parallel:\n        spawn:\n            p.bump()\n",
         "protocol P:\n    fn bump(self)\nfn f[T: P](v: T):\n    parallel:\n        spawn:\n            v.bump()\n",
         "struct C:\n    xs: List[int]\n    fn later(self):\n        f := fn(): self.xs.push(1)\n        f()\nfn run():\n    c := C([1])\n    parallel:\n        spawn:\n            c.later()\nrun()\n",
-        "fn f(it: Iterator[int]):\n    parallel:\n        spawn:\n            print(it.next())\n",
+        "import Iterator from std.iter\nfn f(it: Iterator[int]):\n    parallel:\n        spawn:\n            print(it.next())\n",
     ] {
         no_warn(src);
     }

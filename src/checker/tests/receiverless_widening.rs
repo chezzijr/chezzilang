@@ -141,7 +141,7 @@ fn protocol_note_reaches_every_value_slot() {
         "h := Holder(Dog(2))\nh.n = d\n",
         "fn f(x: Dog) -> Named: return x\n",
         "fn f2(x: Dog) -> Named: x\n",
-        "fn g() -> Iterator[Named]:\n    yield d\n",
+        "import Iterator from std.iter\nfn g() -> Iterator[Named]:\n    yield d\n",
         "xs := List[Named]([d])\n",
         "ys: List[Named] = []\nys.push(d)\n",
         "fn k(n: Named = d) -> str: return n.name()\n",
@@ -545,7 +545,7 @@ fn binary_op_hint_reaches_both_operands_in_every_hinted_position() {
     }
 
     // operator column: set operators on Set[H[T]]
-    const SET_PRELUDE: &str = "struct H[T: Eq]:\n    v: T\n    fn hash(self) -> int:\n        return 1\nfn mks[T: Eq]() -> Set[H[T]]:\n    return mks[T]()\n";
+    const SET_PRELUDE: &str = "import Eq from std.cmp\nstruct H[T: Eq]:\n    v: T\n    fn hash(self) -> int:\n        return 1\nfn mks[T: Eq]() -> Set[H[T]]:\n    return mks[T]()\n";
     for op in ["|", "&", "^", "-"] {
         ok(&format!(
             "{SET_PRELUDE}fn use[Z: Eq]():\n    a: Set[H[Z]] = mks() {op} mks()\n    print(1)\nuse[int]()\n"
@@ -1175,7 +1175,7 @@ fn w12_7_protocol_key_neighbours_accept_and_reject() {
     ok(&format!(
         "{prelude}xs: List[Keyed] = [A(1)]\nprint(A(1) in xs)\n"
     ));
-    ok("h: Map[Hashable, int] = {}\nh[1] = 1\nprint(h[1])\n");
+    ok("import Hashable from std.cmp\nh: Map[Hashable, int] = {}\nh[1] = 1\nprint(h[1])\n");
     rejects(
         &format!("{prelude}print(m[B(1)])\n"),
         "map key must be Keyed, found B",
@@ -1202,7 +1202,7 @@ fn w12_7_protocol_key_neighbours_accept_and_reject() {
 #[test]
 fn w12_8_iterable_tuple_bound_recovers_element_type_params() {
     ok(
-        "fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out: List[A] = []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts([(1, \"a\"), (2, \"b\")])\nprint(r)\n",
+        "import Iterable from std.iter\nfn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out: List[A] = []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts([(1, \"a\"), (2, \"b\")])\nprint(r)\n",
     );
 }
 
@@ -1212,17 +1212,19 @@ fn w12_8_iterable_tuple_bound_recovers_element_type_params() {
 #[test]
 fn w12_8_structured_bound_arg_recovery_neighbours() {
     ok(
-        "fn f1[S: Iterable[A?], A](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f1([?1, None]))\n",
+        "import Iterable from std.iter\nfn f1[S: Iterable[A?], A](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f1([?1, None]))\n",
     );
     ok(
-        "fn f2[S: Iterator[List[A]], A](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f2([[1], [2]].iter()))\n",
+        "import Iterator from std.iter\nfn f2[S: Iterator[List[A]], A](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f2([[1], [2]].iter()))\n",
     );
-    ok("fn f3[C: Index[int, (A, B)], A, B](c: C) -> int:\n    return 1\nprint(f3([(1, \"a\")]))\n");
     ok(
-        "fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out: List[A] = []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts[List[(int, str)], int, str]([(1, \"a\")])\nprint(r)\n",
+        "import Index from std.ops\nfn f3[C: Index[int, (A, B)], A, B](c: C) -> int:\n    return 1\nprint(f3([(1, \"a\")]))\n",
+    );
+    ok(
+        "import Iterable from std.iter\nfn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out: List[A] = []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts[List[(int, str)], int, str]([(1, \"a\")])\nprint(r)\n",
     );
     rejects(
-        "fn f4[S: Iterable[(A, B)], A, B](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f4([1, 2]))\n",
+        "import Iterable from std.iter\nfn f4[S: Iterable[(A, B)], A, B](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f4([1, 2]))\n",
         "iterator element type int does not match the declared element type (A, B)",
     );
 }
@@ -1291,7 +1293,7 @@ fn w12_9_expected_type_widen_declines_unsound_neighbours() {
 #[test]
 fn d3_w12_15_generic_call_rejects_mixed_int_float_constants() {
     rejects(
-        "fn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\nprint(mx(1, 2.5))\n",
+        "import Comparable from std.cmp\nfn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\nprint(mx(1, 2.5))\n",
         "write 1.0",
     );
 }
@@ -1301,8 +1303,7 @@ fn d3_w12_15_generic_call_rejects_mixed_int_float_constants() {
 /// TYPED int (not a bare constant) beside a float.
 #[test]
 fn d3_w12_15_mixed_constant_widen_neighbours() {
-    let prelude =
-        "fn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n";
+    let prelude = "import Comparable from std.cmp\nfn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n";
     rejects(&format!("{prelude}print(mx(2.5, 1))\n"), "write 1.0");
     rejects(
         &format!("{prelude}x := 2.5\nprint(mx(1, x))\n"),
@@ -1333,7 +1334,7 @@ fn d3_w12_15_mixed_constant_widen_neighbours() {
 #[test]
 fn w12_15_bare_type_param_default_stays_rejected() {
     rejects(
-        "fn md[T: Comparable](a: T, b: T = 1) -> T:\n    if a > b:\n        return a\n    return b\nprint(md(3))\n",
+        "import Comparable from std.cmp\nfn md[T: Comparable](a: T, b: T = 1) -> T:\n    if a > b:\n        return a\n    return b\nprint(md(3))\n",
         "default value for parameter 'b': expected T, found int",
     );
 }
@@ -2123,7 +2124,7 @@ fn format_spec_on_container_width_still_accepted() {
     ok("fn show[T](v: T) -> str:\n    return \"{v:.2f}\"\n\nfn main():\n    print(show(1.5))\n");
 }
 
-const GENERIC_CTOR_WIDEN_PRELUDE: &str = "struct Pair[T]:\n    a: T\n    b: T\n\nstruct Box[T]:\n    v: T\n\nenum E[T]:\n    V(T, T)\n\nfn id[T](x: T) -> T:\n    return x\n\nfn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n\n";
+const GENERIC_CTOR_WIDEN_PRELUDE: &str = "import Comparable from std.cmp\nstruct Pair[T]:\n    a: T\n    b: T\n\nstruct Box[T]:\n    v: T\n\nenum E[T]:\n    V(T, T)\n\nfn id[T](x: T) -> T:\n    return x\n\nfn mx[T: Comparable](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n\n";
 
 #[test]
 fn d3_generic_ctor_numeric_widen_neighbours_rejected() {
@@ -2213,7 +2214,7 @@ fn int_never_widens_at_every_sink() {
         "fn main():\n    m: Map[str, float] = {\"a\": 1}\n    print(m)\n".into(),
         "enum E:\n    V(float)\n\nfn main():\n    print(E.V(1))\n".into(),
         "fn main():\n    o: float? = None\n    x: float = o ?? 1\n    print(x)\n".into(),
-        "fn gen() -> Iterator[float]:\n    yield 1\n".into(),
+        "import Iterator from std.iter\nfn gen() -> Iterator[float]:\n    yield 1\n".into(),
         "fn main():\n    l: List[float] = [i for i in 0..3]\n    print(l)\n".into(),
         "fn g(a: float = 3) -> float: a\n".into(),
         "struct S:\n    a: float = 3\n".into(),
@@ -2673,8 +2674,10 @@ fn comparable_tuple_list_option_ok() {
     rejects("a: int? = None\nprint(a < ?0)\n", "cannot compare");
     ok("xs := [(1, \"a\")]\nxs.sort()\n");
     ok("xs := [(1, 2)]\nprint(xs.min())\n");
-    ok("fn f[T: Comparable](a: T):\n    pass\nf((1, \"a\"))\n");
-    ok("fn g[T: Comparable](xs: List[T], ys: List[T]) -> bool:\n    return xs < ys\n");
+    ok("import Comparable from std.cmp\nfn f[T: Comparable](a: T):\n    pass\nf((1, \"a\"))\n");
+    ok(
+        "import Comparable from std.cmp\nfn g[T: Comparable](xs: List[T], ys: List[T]) -> bool:\n    return xs < ys\n",
+    );
 }
 
 /// TICKET-146: the grant is exactly "every element type is Comparable" — a non-orderable element
@@ -2712,7 +2715,8 @@ fn comparable_tuple_list_option_non_comparable_element_rejected() {
 /// either: `lt(A(1), B("x"))` would hand a `B` to `A.compare`. Base rejects the bare `a < b` too.
 #[test]
 fn comparable_tuple_list_option_protocol_value_element_rejected() {
-    let ord2 = "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\n";
+    let ord2 =
+        "import Comparable from std.cmp\nprotocol Ord2:\n    Comparable\n    fn tag(self) -> str\n";
     rejects(
         &format!("{ord2}fn lt(a: Ord2, b: Ord2) -> bool:\n    return (a, 0) < (b, 0)\n"),
         "cannot compare",

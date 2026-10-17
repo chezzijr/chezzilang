@@ -109,7 +109,7 @@ struct Cell {
     round: Option<&'static str>,
 }
 
-const DECLS: &str = "struct PA:
+const DECLS: &str = "import Iterator from std.iter\nstruct PA:
     x: int
     fn add(self, other: Self) -> Self:
         return PA(self.x + other.x)

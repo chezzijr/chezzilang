@@ -6,6 +6,7 @@
 # generic fn, plus the `+`/`<` operator overloads dispatching to its methods.
 
 # --- plain enum: a method matching on self, and one returning a new variant ---
+import Add from std.ops
 enum Light:
     Red
     Yellow

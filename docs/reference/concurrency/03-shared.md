@@ -211,7 +211,7 @@ each call then checks its own `T`, and `mk(K(1))` for a `K` with the `eq` hook r
 `type K does not satisfy StructuralEq (it has the 'eq' hook)`. `StructuralEq` is declared in
 `std/concurrency.chz` and imported like any member: `import Atomic, StructuralEq from std.concurrency`,
 or `concurrency.StructuralEq` after `import std.concurrency`. Without it the bound reports
-``unknown protocol 'StructuralEq' in bound on 'T'; import it from std.concurrency (`import StructuralEq from std.concurrency`)``.
+``unknown name 'StructuralEq' in bound on 'T'; import it from std.concurrency (`import StructuralEq from std.concurrency`)``.
 A module's own `protocol StructuralEq` is its own protocol. No type can implement the bound: the
 checker answers it from the payload's shape. No checker walk can see through a protocol existential
 payload, so the VM also switches the `eq` hook off for the compare.

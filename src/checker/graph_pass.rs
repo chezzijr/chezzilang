@@ -281,6 +281,13 @@ impl Checker {
             // the SAME module index the backends derive — mirrors the extern-sig keying.
             c.graph_module_idx = idx;
             let mut sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
+            // The builtin types this std module owns (`std.iter`'s `Iterator`): a qualified
+            // `iter.Iterator[int]` resolves to the builtin type, as the bare name does.
+            if lm.is_std() {
+                sig.builtins = super::builtin_type::module_builtins(&lm.label())
+                    .into_iter()
+                    .collect();
+            }
             // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set`/`Channel`
             // native-struct METHOD tables so `seed_stdlib_structs` can re-seed them (bare, method-table
             // only) into `self.structs` for every subsequent module, letting `xs.push(...)`/`m.get(...)`/
@@ -514,7 +521,7 @@ pub(super) fn std_protocol_decls() -> &'static [StdProtocol] {
 
 /// The std module that declares the protocol `name` (`std.prelude` for `Any` and `Error`), or `None`
 /// when no std file declares it.
-pub(super) fn std_protocol_owner(name: &str) -> Option<&'static str> {
+pub fn std_protocol_owner(name: &str) -> Option<&'static str> {
     std_protocol_decls()
         .iter()
         .find(|p| p.name == name)

@@ -10,6 +10,7 @@
 # `get`/`set`/`read`/`write` (TICKET-243), and the wrapper is the single-entry write path.
 
 
+import Eq, Hashable from std.cmp
 import std.concurrency
 import ConcurrentMap from std.concurrency.collection
 import memoize1 from std.memoize

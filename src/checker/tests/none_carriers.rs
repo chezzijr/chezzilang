@@ -390,7 +390,10 @@ fn none_type_position_grid() {
         ("List", "fn f(x: List[None]):\n    print(1)\n"),
         ("Map value", "x: Map[str, None] = {}\n"),
         ("Channel", "fn f(c: Channel[None]):\n    print(1)\n"),
-        ("Iterator", "fn f(c: Iterator[None]):\n    print(1)\n"),
+        (
+            "Iterator",
+            "import Iterator from std.iter\nfn f(c: Iterator[None]):\n    print(1)\n",
+        ),
         ("tuple element", "fn f(x: (int, None)):\n    print(1)\n"),
         (
             "fn-type parameter",
@@ -685,7 +688,7 @@ fn named_fn_return_grid() {
         GEN,
     );
     runs(
-        "fn count(n: int) -> Iterator[int]:\n    yield n\nfor x in count(4):\n    print(x)\n",
+        "import Iterator from std.iter\nfn count(n: int) -> Iterator[int]:\n    yield n\nfor x in count(4):\n    print(x)\n",
         "4\n",
     );
     // ---- lambdas: unchanged, and typed by the same `inline_body_ty` ----

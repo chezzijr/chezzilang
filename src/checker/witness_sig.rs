@@ -30,6 +30,16 @@ impl Checker {
         }
     }
 
+    /// The import hint for a std protocol `name` the module does not see, else nothing. A
+    /// diagnostic that suggests a bound `[T: name]` appends it.
+    pub(super) fn bound_hint(&self, name: &str) -> String {
+        if self.user_protocol_key(name).is_none() {
+            self.import_hint(name)
+        } else {
+            String::new()
+        }
+    }
+
     /// Binds the module-owned builtin types `module` owns under their own names: a module sees
     /// its own declarations (`std/ffi.chz`'s sigs name `ptr`).
     pub(super) fn bind_own_builtins(&mut self, module: &str) {
@@ -72,7 +82,12 @@ impl Checker {
     pub(super) fn builtin_type_named(&self, n: &str) -> Option<BuiltinType> {
         match self.bound_builtin(n) {
             Some(own) => BuiltinType::from_name(own),
-            None => BuiltinType::global(n),
+            // A std module sees a builtin type its own protocol declares (`Iterator`) as it sees
+            // every std protocol, with no import. Any other module-owned type still needs one.
+            None => BuiltinType::global(n).or_else(|| {
+                BuiltinType::from_name(n)
+                    .filter(|b| self.current_module_is_stdlib && is_std_protocol(b.name()))
+            }),
         }
     }
 
@@ -109,6 +124,7 @@ impl Checker {
             BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic => {
                 b.applied_ty(vec![one()])
             }
+            BuiltinType::Iterator => Some(Ty::Struct("Iterator".to_string(), vec![one()])),
             BuiltinType::AtomicInt
             | BuiltinType::Executor
             | BuiltinType::Socket
@@ -124,7 +140,6 @@ impl Checker {
             | BuiltinType::Str
             | BuiltinType::Bytes
             | BuiltinType::ByteArray
-            | BuiltinType::Iterator
             | BuiltinType::List
             | BuiltinType::Set
             | BuiltinType::Map
@@ -137,7 +152,7 @@ impl Checker {
     /// concurrency boxes take exactly one; every other in-scope native type is non-generic).
     pub(super) fn qualified_builtin_arity(name: &str) -> usize {
         match name {
-            "Shared" | "RwShared" | "Atomic" => 1,
+            "Shared" | "RwShared" | "Atomic" | "Iterator" => 1,
             _ => 0,
         }
     }

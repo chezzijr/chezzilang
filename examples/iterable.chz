@@ -8,6 +8,7 @@
 # `Iterator` also has `next`, so every `Iterator` IS `Iterable` (its `iter()` returns self).
 
 # The classic lazy adapters (see iter_adapters.chz) — bounded over ANY inner `Iterator[T]`.
+import Iterable, Iterator from std.iter
 struct Take[I: Iterator[T], T]:
     inner: I
     left: int

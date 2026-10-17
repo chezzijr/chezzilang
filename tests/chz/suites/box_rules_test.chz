@@ -3,6 +3,7 @@
 # spawned task. Each rule here is RUN; `tests/box_private_heap_grid.rs` runs this file at
 # CHEZZI_THREADS 1, 2 and default, on the debug binary.
 
+import Iterator from std.iter
 import AtomicInt, Executor, RwShared, Shared from std.concurrency
 import std.net
 import std.time

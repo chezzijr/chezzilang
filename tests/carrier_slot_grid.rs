@@ -284,7 +284,7 @@ const SLOTS: &[Slot] = &[
     },
     Slot {
         name: "yield",
-        decls: "fn g() -> Iterator[{C}]:\n    yield {v}\n",
+        decls: "import Iterator from std.iter\nfn g() -> Iterator[{C}]:\n    yield {v}\n",
         body: "for y in g():\n    show(y)",
         reject: "expected yield type",
         tail: true,

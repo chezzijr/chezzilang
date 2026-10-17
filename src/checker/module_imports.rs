@@ -204,11 +204,16 @@ impl Checker {
                 | StmtKind::Enum { name, .. }
                 | StmtKind::TypeAlias { name, .. }
                 | StmtKind::Protocol { name, .. } = &s.kind
-                    && !(matches!(s.kind, StmtKind::Protocol { .. })
-                        && is_std_protocol(name)
-                        && self.current_module_is_stdlib)
                 {
-                    let key = self.type_key(mid, name);
+                    // A std protocol keeps its bare name as its key, in its declaring module too.
+                    let key = if matches!(s.kind, StmtKind::Protocol { .. })
+                        && is_std_protocol(name)
+                        && self.current_module_is_stdlib
+                    {
+                        name.clone()
+                    } else {
+                        self.type_key(mid, name)
+                    };
                     self.bare_types.insert(name.clone(), key);
                 }
             }

@@ -4,6 +4,7 @@
 # TICKET-169 (D4 layer C) supersedes the write half: the sending task's `g.push(2)`/`w.push(2)` below
 # now FAULTS instead of silently writing a copy the receiver never sees, so the receiver's read stays
 # unchanged for the same reason as before (D2), now enforced at the write.
+import Iterator from std.iter
 import std.concurrency
 import std.time
 

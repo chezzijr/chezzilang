@@ -11,6 +11,7 @@
 #
 # Deterministic golden — byte-identical at every worker count, no time-dependent behavior.
 
+import Convert from std.convert
 protocol Default:
     fn default() -> Self
 

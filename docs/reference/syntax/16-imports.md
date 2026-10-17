@@ -58,6 +58,9 @@ with one Go-style exception: importing the same module or name twice in one file
 
 - `import std.math` plus `import math from std` is accepted: both name one module, bound once and
   initialized once. `import math from std` twice is the duplicate error.
+- A std protocol is a member of its std module: `import Add from std.ops`, `import Eq, Hashable from
+  std.cmp`, `import Iterator from std.iter` (the table is in [Protocols](09-protocols.md)). A bound
+  `[T: Add]` without the import is `unknown name 'Add'`. `Any` and `Error` need none.
 - A same-module top-level `fn`, `struct`, `enum`, `protocol` or `type` alias may not take a whole-module
   import's bound name (`import lib as f` plus `fn f`, `import lib` plus `struct lib`, `import a.b` plus
   `enum b`), in either order: the same error on the later declaration (Go: `f redeclared in this

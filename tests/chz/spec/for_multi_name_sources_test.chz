@@ -2,6 +2,7 @@
 # a List[(A, B)]. Reference: CPython 3.14.7 binds the slots positionally for a generator, an iterator
 # and any iterable of tuples (`for a, b in pairs(): print(a, b)` prints `1 x` then `2 y`).
 
+import Iterable, Iterator from std.iter
 fn pairs() -> Iterator[(int, str)]:
     yield (1, "x")
     yield (2, "y")

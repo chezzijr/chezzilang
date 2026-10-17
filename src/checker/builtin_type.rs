@@ -186,7 +186,7 @@ impl BuiltinType {
     /// The std module that owns this type, or `None` for a global builtin (in scope with no
     /// import). A module-owned type is an ordinary member of its module: a program names it through
     /// an import (`import Shared from std.concurrency`, `concurrency.Shared`), under any alias.
-    pub(crate) const fn owner(self) -> Option<&'static str> {
+    pub(crate) fn owner(self) -> Option<&'static str> {
         match self {
             BuiltinType::Int
             | BuiltinType::Float
@@ -194,12 +194,12 @@ impl BuiltinType {
             | BuiltinType::Str
             | BuiltinType::Bytes
             | BuiltinType::ByteArray
-            | BuiltinType::Iterator
             | BuiltinType::List
             | BuiltinType::Set
             | BuiltinType::Map
             | BuiltinType::Channel
             | BuiltinType::Range => None,
+            BuiltinType::Iterator => super::graph_pass::std_protocol_owner(self.name()),
             BuiltinType::Socket | BuiltinType::Listener => Some("std.net"),
             BuiltinType::Writer | BuiltinType::Reader => Some("std.io"),
             BuiltinType::Ptr | BuiltinType::OwnedStr => Some("std.ffi"),

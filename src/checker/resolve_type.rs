@@ -249,7 +249,7 @@ impl Checker {
                     // A protocol name used as a value type (existential), e.g. `Error`. BUT a protocol
                     // with a STATIC method requirement (`Convert`-style static ctor) is witnessable only
                     // by a static method — a VALUE can't invoke it — so it is BOUND-ONLY, rejected here.
-                    _ if self.protocol_shape(&self.user_protocol_key(n)).is_some() => {
+                    _ if self.user_protocol_shape(n).is_some() => {
                         if self.protocol_has_static_method(n) {
                             self.error(
                                 span,
@@ -259,7 +259,10 @@ impl Checker {
                             );
                             Ty::Unknown
                         } else {
-                            Ty::Protocol(self.user_protocol_key(n), Vec::new())
+                            Ty::Protocol(
+                                self.user_protocol_key(n).unwrap_or_else(|| n.to_string()),
+                                Vec::new(),
+                            )
                         }
                     }
                     _ => {
@@ -471,11 +474,11 @@ impl Checker {
                     // existential. Conformance is witnessed at every store/pass boundary (via
                     // `assignable` → `satisfies_args`); the args are then erased at runtime. Mirrors
                     // the struct/enum parameterized arms above.
-                    _ if self.protocol_shape(&self.user_protocol_key(n)).is_some() => {
+                    _ if self.user_protocol_shape(n).is_some() => {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
                         let nparams = self
-                            .protocol_shape(&self.user_protocol_key(n))
+                            .user_protocol_shape(n)
                             .map_or(0, |p| p.type_params.len());
                         if nparams != resolved.len() {
                             self.error(
@@ -497,7 +500,10 @@ impl Checker {
                             );
                             Ty::Unknown
                         } else {
-                            Ty::Protocol(self.user_protocol_key(n), resolved)
+                            Ty::Protocol(
+                                self.user_protocol_key(n).unwrap_or_else(|| n.to_string()),
+                                resolved,
+                            )
                         }
                     }
                     _ if self.bare_type_head(n).is_some_and(|th| th.pinned.is_some()) => {
@@ -521,7 +527,10 @@ impl Checker {
                         }
                     }
                     _ => {
-                        self.error(span, format!("unknown generic type '{n}'"));
+                        self.error(
+                            span,
+                            format!("unknown generic type '{n}'{}", self.import_hint(n)),
+                        );
                         Ty::Unknown
                     }
                 };
@@ -603,7 +612,10 @@ impl Checker {
                     // a static-ctor protocol out of value position (`import a; c: a.Foo`).
                     let body = asig.body.clone();
                     self.reject_static_protocol_value(body, span)
-                } else if let Some(pdef) = sig.protocol_defs.get(name) {
+                } else if let Some(pdef) = sig.protocol_defs.get(name)
+                    && !sig.builtins.contains(name)
+                {
+                    // A protocol that is also a builtin value type (`Iterator`) takes the builtin arm.
                     // Mirrors the bare generic-protocol arm: arity is checked only when args are
                     // WRITTEN, so a bare `shapes.Container` stays legal as an unbound existential —
                     // exactly like the bare `Container` spelling — while `shapes.Container[int, str]`

@@ -11,6 +11,24 @@ its own methods: `protocol Sized: fn len(self) -> int` is satisfied by `[1,2,3]`
 satisfy only an empty protocol. The handles (`Channel`, `Shared`, `RwShared`, `Atomic`, `Executor`,
 `Socket`, `Listener`, `Writer`, `Reader`) do not witness a user protocol.
 
+**Where the std protocols live.** Each std protocol is declared in a std module. A bound or a value
+type names it after an import (`import Add from std.ops`). Without the import the name is
+`unknown name 'Add'`. An operator, a hook or a `for` loop needs no import: `a + b` and
+`for x in xs` work with no protocol name in the program. `Any` and `Error` stay global.
+
+| Module | Protocols |
+|---|---|
+| `std.ops` | `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`, `Arithmetic`, `Num`, `Index`, `IndexSet`, `Slice`, `Contains` |
+| `std.cmp` | `Eq`, `Comparable`, `Hashable` |
+| `std.iter` | `Iterator`, `Iterable` |
+| `std.string` | `Stringable` |
+| `std.path` | `PathLike` |
+| `std.convert` | `Convert` |
+
+`Iterator[T]` as a value type (a generator's return type) needs `import Iterator from std.iter`, or
+the qualified `iter.Iterator[T]` after `import std.iter as iter`. The `protocol` declarations in
+`std/*.chz` are the only source of these shapes. The examples below omit the import lines.
+
 **Protocol parameter names.** Parameter names are part of a protocol's contract (as Swift's argument
 labels), for user and built-in protocols. A call through a protocol binds named arguments by the
 protocol's names, so a method conforms only with the same names in the same positions:

@@ -1,6 +1,7 @@
 # TICKET-179 -- edges of the fresh spawn operand rule (D4). A fresh operand crosses with every
 # object the call site built unmarked (TICKET-240); a NAMED child, at any depth, stays a task copy.
 
+import Iterator from std.iter
 fn t179e_outcome(res: !) -> str:
     match res:
         ?_: return "ok"

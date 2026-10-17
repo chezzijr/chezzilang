@@ -609,7 +609,9 @@ impl Checker {
                 embeds: embeds
                     .iter()
                     .map(|b| TyBound {
-                        name: self.user_protocol_key(&b.name),
+                        name: self
+                            .user_protocol_key(&b.name)
+                            .unwrap_or_else(|| b.name.clone()),
                         args: Vec::new(),
                     })
                     .collect(),
@@ -666,10 +668,7 @@ impl Checker {
         }
         // Each embed must name a real protocol.
         for emb in embeds {
-            if self
-                .protocol_shape(&self.user_protocol_key(&emb.name))
-                .is_none()
-            {
+            if self.user_protocol_shape(&emb.name).is_none() {
                 self.error(
                     span,
                     format!("unknown protocol '{}' embedded in '{name}'", emb.name),

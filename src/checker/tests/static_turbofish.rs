@@ -559,12 +559,14 @@ fn empty_struct_with_valid_hash_ok() {
 #[test]
 fn div_mod_neg_bound_flows() {
     ok(
-        "fn d[T: Div](a: T, b: T) -> T:\n    return a / b\nfn main():\n    print(d(7, 2))\nmain()\n",
+        "import Div from std.ops\nfn d[T: Div](a: T, b: T) -> T:\n    return a / b\nfn main():\n    print(d(7, 2))\nmain()\n",
     );
     ok(
-        "fn m[T: Mod](a: T, b: T) -> T:\n    return a % b\nfn main():\n    print(m(7, 2))\nmain()\n",
+        "import Mod from std.ops\nfn m[T: Mod](a: T, b: T) -> T:\n    return a % b\nfn main():\n    print(m(7, 2))\nmain()\n",
     );
-    ok("fn n[T: Neg](a: T) -> T:\n    return -a\nfn main():\n    print(n(5))\nmain()\n");
+    ok(
+        "import Neg from std.ops\nfn n[T: Neg](a: T) -> T:\n    return -a\nfn main():\n    print(n(5))\nmain()\n",
+    );
 }
 
 /// `[T: Arithmetic]` accepts a struct with all four ops and uses them in the body; rejects a struct
@@ -573,10 +575,10 @@ fn div_mod_neg_bound_flows() {
 fn arithmetic_bundle_accepts_and_rejects() {
     let prelude = "struct V:\n    n: int\n    fn add(self, other: V) -> V:\n        return V(self.n + other.n)\n    fn sub(self, other: V) -> V:\n        return V(self.n - other.n)\n    fn mul(self, other: V) -> V:\n        return V(self.n * other.n)\n    fn div(self, other: V) -> V:\n        return V(self.n / other.n)\n";
     ok(&format!(
-        "{prelude}fn calc[T: Arithmetic](a: T, b: T) -> T:\n    return a + b - a * b\nfn main():\n    print(calc(V(6), V(2)).n)\nmain()\n"
+        "import Arithmetic from std.ops\n{prelude}fn calc[T: Arithmetic](a: T, b: T) -> T:\n    return a + b - a * b\nfn main():\n    print(calc(V(6), V(2)).n)\nmain()\n"
     ));
     // A struct lacking div fails an Arithmetic bound, mentioning div.
-    let no_div = "struct W:\n    n: int\n    fn add(self, other: W) -> W:\n        return W(self.n + other.n)\n    fn sub(self, other: W) -> W:\n        return W(self.n - other.n)\n    fn mul(self, other: W) -> W:\n        return W(self.n * other.n)\nfn calc[T: Arithmetic](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(calc(W(1), W(2)).n)\nmain()\n";
+    let no_div = "import Arithmetic from std.ops\nstruct W:\n    n: int\n    fn add(self, other: W) -> W:\n        return W(self.n + other.n)\n    fn sub(self, other: W) -> W:\n        return W(self.n - other.n)\n    fn mul(self, other: W) -> W:\n        return W(self.n * other.n)\nfn calc[T: Arithmetic](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(calc(W(1), W(2)).n)\nmain()\n";
     rejects(no_div, "div");
 }
 
@@ -584,7 +586,7 @@ fn arithmetic_bundle_accepts_and_rejects() {
 #[test]
 fn arithmetic_body_uses_ops() {
     ok(
-        "fn f[T: Arithmetic](a: T, b: T) -> T:\n    return ((a + b) - (a * b)) / a\nfn main():\n    print(f(8, 2))\nmain()\n",
+        "import Arithmetic from std.ops\nfn f[T: Arithmetic](a: T, b: T) -> T:\n    return ((a + b) - (a * b)) / a\nfn main():\n    print(f(8, 2))\nmain()\n",
     );
 }
 
@@ -592,21 +594,21 @@ fn arithmetic_body_uses_ops() {
 #[test]
 fn user_protocol_embeds_arithmetic_and_own_methods() {
     ok(
-        "protocol Field:\n    Arithmetic\n    fn zero(self) -> Self\nstruct V:\n    n: int\n    fn add(self, other: V) -> V:\n        return V(self.n + other.n)\n    fn sub(self, other: V) -> V:\n        return V(self.n - other.n)\n    fn mul(self, other: V) -> V:\n        return V(self.n * other.n)\n    fn div(self, other: V) -> V:\n        return V(self.n / other.n)\n    fn zero(self) -> V:\n        return V(0)\nfn g[T: Field](a: T, b: T) -> T:\n    return a / b\nfn main():\n    print(g(V(9), V(3)).n)\nmain()\n",
+        "import Arithmetic from std.ops\nprotocol Field:\n    Arithmetic\n    fn zero(self) -> Self\nstruct V:\n    n: int\n    fn add(self, other: V) -> V:\n        return V(self.n + other.n)\n    fn sub(self, other: V) -> V:\n        return V(self.n - other.n)\n    fn mul(self, other: V) -> V:\n        return V(self.n * other.n)\n    fn div(self, other: V) -> V:\n        return V(self.n / other.n)\n    fn zero(self) -> V:\n        return V(0)\nfn g[T: Field](a: T, b: T) -> T:\n    return a / b\nfn main():\n    print(g(V(9), V(3)).n)\nmain()\n",
     );
 }
 
 /// Diamond dedup: embedding Arithmetic AND Add (both supply the same `add` sig) is legal.
 #[test]
 fn embed_diamond_dedup_ok() {
-    ok("protocol P:\n    Arithmetic + Add\n");
+    ok("import Add, Arithmetic from std.ops\nprotocol P:\n    Arithmetic + Add\n");
 }
 
 /// An own `fn` colliding with an embedded-required method name is a declare-time error.
 #[test]
 fn own_fn_vs_embed_collision_errors() {
     rejects(
-        "protocol P:\n    Add\n    fn add(self, other: Self) -> Self\n",
+        "import Add from std.ops\nprotocol P:\n    Add\n    fn add(self, other: Self) -> Self\n",
         "conflicts with embedded",
     );
 }
@@ -691,7 +693,7 @@ fn protocol_value_arg_invariance_survives_embed_widening() {
 #[test]
 fn ordering_through_embedded_comparable_bound() {
     ok(
-        "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn compare(self, other: N) -> int:\n        return self.v - other.v\n    fn eq(self, other: N) -> bool:\n        return self.v == other.v\n    fn tag(self) -> str:\n        return \"n\"\nfn lt[T: Ord2](a: T, b: T) -> bool:\n    return a < b\nfn main():\n    print(lt(N(1), N(2)))\nmain()\n",
+        "import Comparable from std.cmp\nprotocol Ord2:\n    Comparable\n    fn tag(self) -> str\nstruct N:\n    v: int\n    fn compare(self, other: N) -> int:\n        return self.v - other.v\n    fn eq(self, other: N) -> bool:\n        return self.v == other.v\n    fn tag(self) -> str:\n        return \"n\"\nfn lt[T: Ord2](a: T, b: T) -> bool:\n    return a < b\nfn main():\n    print(lt(N(1), N(2)))\nmain()\n",
     );
 }
 
@@ -699,7 +701,7 @@ fn ordering_through_embedded_comparable_bound() {
 #[test]
 fn membership_through_embedded_contains_bound() {
     ok(
-        "protocol Bag:\n    Contains[int]\n    fn tag(self) -> str\nstruct B:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return item in self.xs\n    fn tag(self) -> str:\n        return \"b\"\nfn has[T: Bag](b: T, x: int) -> bool:\n    return x in b\nfn main():\n    print(has(B([1, 2]), 2))\nmain()\n",
+        "import Contains from std.ops\nprotocol Bag:\n    Contains[int]\n    fn tag(self) -> str\nstruct B:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return item in self.xs\n    fn tag(self) -> str:\n        return \"b\"\nfn has[T: Bag](b: T, x: int) -> bool:\n    return x in b\nfn main():\n    print(has(B([1, 2]), 2))\nmain()\n",
     );
 }
 
@@ -708,15 +710,17 @@ fn membership_through_embedded_contains_bound() {
 /// item type passes — this is the test that fails if the flatten skips `Bound.args`.
 #[test]
 fn parameterized_embed_substitutes_its_arg_into_the_item_type() {
-    ok("protocol Bag[T]:\n    Contains[T]\nfn has(b: Bag[int]) -> bool:\n    return 3 in b\n");
+    ok(
+        "import Contains from std.ops\nprotocol Bag[T]:\n    Contains[T]\nfn has(b: Bag[int]) -> bool:\n    return 3 in b\n",
+    );
     rejects(
-        "protocol Bag[T]:\n    Contains[T]\nfn has(b: Bag[int]) -> bool:\n    return \"x\" in b\n",
+        "import Contains from std.ops\nprotocol Bag[T]:\n    Contains[T]\nfn has(b: Bag[int]) -> bool:\n    return \"x\" in b\n",
         "cannot test membership of str in Bag[int]",
     );
     // …and the same through a bound, where the ambient scope is the caller's params, not the
     // protocol's — the seam that made the arg resolve to the wrong `T` entirely.
     rejects(
-        "protocol Bag[T]:\n    Contains[T]\nfn has[C: Bag[int]](b: C) -> bool:\n    return \"x\" in b\n",
+        "import Contains from std.ops\nprotocol Bag[T]:\n    Contains[T]\nfn has[C: Bag[int]](b: C) -> bool:\n    return \"x\" in b\n",
         "cannot test membership of str in C",
     );
 }
@@ -741,17 +745,17 @@ fn operator_rejected_on_a_protocol_existential_pair() {
     );
     // The builtin operator protocol used directly as the annotation is the same case…
     rejects(
-        "struct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\nfn plus(a: Add, b: Add) -> Add:\n    return a + b\n",
+        "import Add from std.ops\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\nfn plus(a: Add, b: Add) -> Add:\n    return a + b\n",
         "cannot apply + to Add and Add",
     );
     // …and so is reaching it through an EMBED.
     rejects(
-        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a + b\n",
+        "import Add from std.ops\nprotocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus(a: Vecish, b: Vecish) -> Vecish:\n    return a + b\n",
         "cannot apply + to Vecish and Vecish",
     );
     // `<` through an embedded `Comparable` is the same shape (`compare(self, o: Self)`).
     rejects(
-        "protocol Ord2:\n    Comparable\n    fn tag(self) -> str\nfn lt(a: Ord2, b: Ord2) -> bool:\n    return a < b\n",
+        "import Comparable from std.cmp\nprotocol Ord2:\n    Comparable\n    fn tag(self) -> str\nfn lt(a: Ord2, b: Ord2) -> bool:\n    return a < b\n",
         "cannot compare Ord2 and Ord2",
     );
 }
@@ -761,7 +765,7 @@ fn operator_rejected_on_a_protocol_existential_pair() {
 #[test]
 fn the_generic_bound_spelling_of_an_operator_over_a_protocol_is_accepted() {
     ok(
-        "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus[T: Vecish](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(plus(V(1), V(2)).tag())\nmain()\n",
+        "import Add from std.ops\nprotocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\nfn plus[T: Vecish](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print(plus(V(1), V(2)).tag())\nmain()\n",
     );
 }
 
@@ -781,11 +785,11 @@ fn self_typed_method_rejected_on_a_protocol_existential() {
 /// protocol's OWN or arrives through an EMBED, and whichever protocol the bound names.
 #[test]
 fn a_self_parameterized_protocol_value_cannot_witness_a_type_param() {
-    let v = "protocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\n";
+    let v = "import Add from std.ops\nprotocol Vecish:\n    Add\n    fn tag(self) -> str\nstruct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn tag(self) -> str:\n        return \"v\"\n";
     // `Self` via an EMBED — the spelling an own-methods-only guard misses.
     rejects(
         &format!(
-            "{v}fn sum2[T: Add](a: T, b: T) -> T:\n    return a + b\nfn f(a: Vecish, b: Vecish) -> Vecish:\n    return sum2(a, b)\n"
+            "import Add from std.ops\n{v}fn sum2[T: Add](a: T, b: T) -> T:\n    return a + b\nfn f(a: Vecish, b: Vecish) -> Vecish:\n    return sum2(a, b)\n"
         ),
         "cannot use the protocol value Vecish as type parameter 'T'",
     );
@@ -878,10 +882,10 @@ fn a_branching_embed_graph_terminates() {
 #[test]
 fn an_unknown_type_in_an_embed_arg_is_rejected() {
     rejects(
-        "protocol Bag:\n    Contains[T]\nstruct B:\n    n: int\n    fn contains(self, item: int) -> bool:\n        return item + self.n > 0\nfn has(b: Bag) -> bool:\n    return \"oops\" in b\n",
+        "import Contains from std.ops\nprotocol Bag:\n    Contains[T]\nstruct B:\n    n: int\n    fn contains(self, item: int) -> bool:\n        return item + self.n > 0\nfn has(b: Bag) -> bool:\n    return \"oops\" in b\n",
         "unknown type 'T' in the type argument",
     );
-    ok("protocol Bag:\n    Contains[int]\n");
+    ok("import Contains from std.ops\nprotocol Bag:\n    Contains[int]\n");
 }
 
 /// An operator and its method spelling must agree. `Self` in an operator method's RETURN widens to
@@ -904,10 +908,10 @@ fn self_returning_operator_method_widens_through_the_operator_spelling() {
 #[test]
 fn a_type_param_nested_in_an_embed_arg_is_substituted() {
     ok(
-        "protocol Bag[T]:\n    Contains[List[T]]\nfn has(b: Bag[int]) -> bool:\n    return [1] in b\n",
+        "import Contains from std.ops\nprotocol Bag[T]:\n    Contains[List[T]]\nfn has(b: Bag[int]) -> bool:\n    return [1] in b\n",
     );
     rejects(
-        "protocol Bag[T]:\n    Contains[List[T]]\nfn has(b: Bag[int]) -> bool:\n    return [\"x\"] in b\n",
+        "import Contains from std.ops\nprotocol Bag[T]:\n    Contains[List[T]]\nfn has(b: Bag[int]) -> bool:\n    return [\"x\"] in b\n",
         "cannot test membership of List[str]",
     );
 }
@@ -925,14 +929,14 @@ fn unary_neg_on_a_protocol_existential() {
 #[test]
 fn index_and_slice_on_a_protocol_existential() {
     ok(
-        "struct S:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nfn read(o: Index[int, int]) -> int:\n    return o[0]\nfn main():\n    print(read(S([7])))\nmain()\n",
+        "import Index from std.ops\nstruct S:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nfn read(o: Index[int, int]) -> int:\n    return o[0]\nfn main():\n    print(read(S([7])))\nmain()\n",
     );
     ok(
-        "struct S:\n    xs: List[int]\n    fn slice(self, r: Range) -> List[int]:\n        return self.xs\nfn cut(o: Slice[List[int]]) -> List[int]:\n    return o[0..1]\nfn main():\n    print(cut(S([7])))\nmain()\n",
+        "import Slice from std.ops\nstruct S:\n    xs: List[int]\n    fn slice(self, r: Range) -> List[int]:\n        return self.xs\nfn cut(o: Slice[List[int]]) -> List[int]:\n    return o[0..1]\nfn main():\n    print(cut(S([7])))\nmain()\n",
     );
     // The key type still has to match.
     rejects(
-        "struct S:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nfn read(o: Index[int, int]) -> int:\n    return o[\"a\"]\n",
+        "import Index from std.ops\nstruct S:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nfn read(o: Index[int, int]) -> int:\n    return o[\"a\"]\n",
         "index must be int, found str",
     );
 }
@@ -1278,7 +1282,7 @@ fn ffi_width_constant_grid() {
         "fn setg() -> None:\n    G = {k}\nG: {w} = 0\n",
         "fn r() -> {w}:\n    return {k}\n",
         "fn r() -> {w}: {k}\n",
-        "fn gen() -> Iterator[{w}]:\n    yield {k}\n",
+        "import Iterator from std.iter\nfn gen() -> Iterator[{w}]:\n    yield {k}\n",
         "c := fn() -> {w}: {k}\n",
         "c := fn(x: {w}) -> int: 0\nc({k})\n",
         "l: List[{w}] = [{k}]\n",

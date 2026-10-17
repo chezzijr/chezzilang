@@ -698,7 +698,7 @@ impl Checker {
         let mut seen_iterator = false;
         for b in bounds {
             let Some(arity) = self
-                .protocol_shape(&self.user_protocol_key(&b.name))
+                .user_protocol_shape(&b.name)
                 .map(|p| p.type_params.len())
             else {
                 // A module-qualified bound (TICKET-173) that misses: an unimported module reuses the
@@ -718,9 +718,7 @@ impl Checker {
                 // a bound: there is no substitution seam to carry `int` into `T`'s bound. Diagnose
                 // this shape by name rather than falling through to the generic "unknown protocol".
                 if let Some(Type::Generic(head, ..)) = self.aliases.get(&b.name).cloned()
-                    && self
-                        .protocol_shape(&self.user_protocol_key(&head))
-                        .is_some()
+                    && self.user_protocol_shape(&head).is_some()
                 {
                     self.error(
                         span,
@@ -748,9 +746,15 @@ impl Checker {
                     continue;
                 }
                 let hint = self.import_hint(&b.name);
+                // A std protocol the module did not bind reads like any other unimported name.
+                let what = if is_std_protocol(&b.name) {
+                    "name"
+                } else {
+                    "protocol"
+                };
                 self.error(
                     span,
-                    format!("unknown protocol '{}' in bound on '{param}'{hint}", b.name),
+                    format!("unknown {what} '{}' in bound on '{param}'{hint}", b.name),
                 );
                 continue;
             };
@@ -766,7 +770,7 @@ impl Checker {
                 };
                 self.error(span, msg);
             }
-            if b.name == "Iterator" {
+            if self.user_protocol_key(&b.name).as_deref() == Some("Iterator") {
                 if seen_iterator {
                     self.error(span, format!("'{param}' has more than one Iterator bound"));
                 }

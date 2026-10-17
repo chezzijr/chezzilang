@@ -8,6 +8,7 @@
 # TICKET-100: a DATA DAG alias (`pair := [xs, xs]`) now crosses as ONE object too, same as a cell —
 # both a data alias and a cell alias mean the same source object stays one object per crossing.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+import Iterator from std.iter
 import std.concurrency
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
 

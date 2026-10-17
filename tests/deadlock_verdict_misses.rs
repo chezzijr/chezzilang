@@ -76,6 +76,7 @@ fn for_over_channel_in_generator_driven_from_a_task_prints_the_value() {
     let (out, err, code) = run(
         "q3.chz",
         &[
+            "import Iterator from std.iter",
             "fn gen(c: Channel[int]) -> Iterator[int]:",
             "    for v in c:",
             "        yield v",

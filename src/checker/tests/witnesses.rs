@@ -31,7 +31,7 @@ fn witness_static_call_accepted_shapes_ok() {
     );
     // the RESERVED `Convert[S]` protocol — the slice-3 close-out this milestone re-opened
     entry_ok(
-        "struct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn make[T: Convert[int]](seed: T, n: int) -> T:\n    return T.convert(n)\nfn main():\n    print(make(Port(0), 41).v)\nmain()\n",
+        "import Convert from std.convert\nstruct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn make[T: Convert[int]](seed: T, n: int) -> T:\n    return T.convert(n)\nfn main():\n    print(make(Port(0), 41).v)\nmain()\n",
     );
     // no value argument at all: `T` pinned by a turbofish…
     entry_ok(&format!(
@@ -408,7 +408,7 @@ fn witness_only_charged_when_the_body_uses_it_ok() {
     ]);
     // The same for the RESERVED `Convert[S]` bound with a body that never converts.
     entry_ok(
-        "struct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn wrap[T: Convert[int]](seed: T, n: int) -> T:\n    return seed\nfn main():\n    g := wrap[Port]\n    print(wrap(Port(1), 2).v)\nmain()\n",
+        "import Convert from std.convert\nstruct Port:\n    v: int\n    fn convert(x: int) -> Port:\n        return Port(x + 1)\nfn wrap[T: Convert[int]](seed: T, n: int) -> T:\n    return seed\nfn main():\n    g := wrap[Port]\n    print(wrap(Port(1), 2).v)\nmain()\n",
     );
 }
 
@@ -428,7 +428,7 @@ fn witness_type_param_unpinned_at_call_site_rejected() {
 #[test]
 fn witness_bound_without_that_static_method_rejected() {
     entry_rejects(
-        "fn bad[T: Comparable](x: T) -> int:\n    y := T.empty()\n    return 1\nfn main():\n    print(bad(1))\nmain()\n",
+        "import Comparable from std.cmp\nfn bad[T: Comparable](x: T) -> int:\n    y := T.empty()\n    return 1\nfn main():\n    print(bad(1))\nmain()\n",
         "no bound on 'T' declares a static method 'empty'",
     );
 }
@@ -440,7 +440,7 @@ fn non_witness_generics_unaffected_by_hidden_param_ok() {
     // A NON-static bound (`Comparable` requires `fn compare(self, ..)`) takes no witness: still
     // callable, still passable as a function VALUE, arity unchanged.
     entry_ok(
-        "fn biggest[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nfn apply2(f: fn(int, int) -> int, a: int, b: int) -> int:\n    return f(a, b)\nfn main():\n    print(biggest(3, 7))\n    g := biggest[int]\n    print(apply2(biggest, 4, 1))\nmain()\n",
+        "import Comparable from std.cmp\nfn biggest[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nfn apply2(f: fn(int, int) -> int, a: int, b: int) -> int:\n    return f(a, b)\nfn main():\n    print(biggest(3, 7))\n    g := biggest[int]\n    print(apply2(biggest, 4, 1))\nmain()\n",
     );
     // An UNBOUNDED generic fn is untouched.
     entry_ok(

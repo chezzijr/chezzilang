@@ -457,15 +457,35 @@ impl Checker {
             .unwrap_or_else(|| name.to_string())
     }
 
-    /// The key of a protocol name the USER wrote (a bound, an annotation, an embed): a module's own
-    /// protocol shadows a builtin of the same name (only keywords are reserved). Every other reader
-    /// asks [`Checker::protocol_key`], which gives the builtin.
-    pub(super) fn user_protocol_key(&self, name: &str) -> String {
-        if is_std_protocol(name) && self.bare_types.contains_key(name) {
-            self.bare_key(name)
-        } else {
-            self.protocol_key(name)
+    /// The key of a protocol name the USER wrote (a bound, an annotation, an embed), or `None` when
+    /// the name is not visible in this module. A std protocol is visible when the module binds it
+    /// (`import Add from std.ops`, `import Add as A from std.ops`, `ops.Add` after `import std.ops`),
+    /// when it is global (`Any`, `Error`), or when the module is a std module. A module's own
+    /// protocol shadows a std one of the same name (only keywords are reserved). Every other reader
+    /// asks [`Checker::protocol_key`], which gives the std protocol with no import.
+    pub(super) fn user_protocol_key(&self, name: &str) -> Option<String> {
+        if let Some(key) = self.qualified_protocol_key(name) {
+            return Some(key);
         }
+        if is_std_protocol(name) {
+            if let Some(key) = self.bare_types.get(name) {
+                return Some(key.clone());
+            }
+            if let Some(bound) = self.bound_builtin(name)
+                && is_std_protocol(bound)
+            {
+                return Some(bound.to_string());
+            }
+            return (is_global_protocol(name) || self.current_module_is_stdlib)
+                .then(|| name.to_string());
+        }
+        Some(self.protocol_key(name))
+    }
+
+    /// The shape of the protocol the user-written `name` reaches in this module, if any.
+    pub(super) fn user_protocol_shape(&self, name: &str) -> Option<&ProtocolInfo> {
+        self.user_protocol_key(name)
+            .and_then(|key| self.protocol_shape(&key))
     }
 
     /// The runtime key for a protocol name: unchanged (bare) for a std protocol (`is_std_protocol`),
@@ -714,27 +734,21 @@ impl Checker {
             .keys()
             .chain(self.types_by_name.keys())
             .chain(self.type_params.keys())
+            .chain(self.builtin_binds.keys())
             .cloned()
             .chain(
-                [
-                    "int",
-                    "float",
-                    "bool",
-                    "str",
-                    "bytes",
-                    "bytearray",
-                    crate::lexer::NONE,
-                    "tuple",
-                    "List",
-                    "Map",
-                    "Set",
-                    "Iterator",
-                    "Channel",
-                    "Error",
-                ]
-                .iter()
-                .map(|s| s.to_string()),
+                BuiltinType::ALL
+                    .into_iter()
+                    .filter(|b| b.owner().is_none())
+                    .map(|b| b.name().to_string()),
             )
+            .chain(
+                graph_pass::std_protocol_decls()
+                    .iter()
+                    .filter(|p| p.module == "std.prelude")
+                    .map(|p| p.name.clone()),
+            )
+            .chain([crate::lexer::NONE.to_string(), "tuple".to_string()])
             .collect();
         names.sort();
         names.dedup();

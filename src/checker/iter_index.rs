@@ -489,7 +489,9 @@ impl Checker {
     /// declaration's); a use site never calls this on a stored bound.
     pub(super) fn resolve_bound(&mut self, b: &Bound, span: Span) -> TyBound {
         TyBound {
-            name: self.user_protocol_key(&b.name),
+            name: self
+                .user_protocol_key(&b.name)
+                .unwrap_or_else(|| b.name.clone()),
             args: b.args.iter().map(|a| self.resolve_type(a, span)).collect(),
         }
     }

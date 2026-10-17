@@ -2,6 +2,7 @@
 # argument, a `merge` result, a generator's own frame-local list) is not a write the parent could
 # observe, so it must not fault. Go/Python run each of these.
 
+import Iterator from std.iter
 fn t179_work(acc: List[int], out: Channel[str]):
     res_v := 0
     res := recover:

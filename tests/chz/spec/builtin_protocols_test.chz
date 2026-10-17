@@ -1,5 +1,8 @@
 # tests/chz/spec/builtin_protocols_test.chz — builtin types satisfy the protocol of every operator
 # they accept (TICKET-257, owner rule U5): the operator form and the bound form agree.
+import Stringable from std.string
+import Comparable, Eq from std.cmp
+import Add, BitOr, Contains, Sub from std.ops
 import std.concurrency
 
 fn has_i[C: Contains[int]](c: C, e: int) -> bool:

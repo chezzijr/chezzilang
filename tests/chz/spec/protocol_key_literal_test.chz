@@ -1,6 +1,7 @@
 # W12-7 (TICKET-106): a protocol-typed Map/Set key must accept any literal that satisfies the
 # protocol, at RUN time (not just check time) — mirroring the already-accepted spelling that binds
 # the value to a local `Keyed` variable first.
+import Hashable from std.cmp
 protocol Keyed:
     fn hash(self) -> int
 

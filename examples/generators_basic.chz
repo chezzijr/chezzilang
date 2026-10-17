@@ -1,3 +1,4 @@
+import Iterator from std.iter
 fn count() -> Iterator[int]:
     yield 1
     yield 2

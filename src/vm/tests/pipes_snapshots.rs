@@ -621,7 +621,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         // check error (`has no method 'iter'`). So this one row is probed through a bound.
         if method == "iter" && kind == RecvKind::Struct {
             return Some(format!(
-                "{}fn via[S: Iterable[int]](s: S) -> Iterator[int]:\n    return s.iter()\na := {}\nb := {}\nres := via(a)\n",
+                "import Iterable, Iterator from std.iter\n{}fn via[S: Iterable[int]](s: S) -> Iterator[int]:\n    return s.iter()\na := {}\nb := {}\nres := via(a)\n",
                 rv.prelude, rv.lit, rv.lit
             ));
         }
@@ -651,15 +651,20 @@ fn intrinsic_grants_all_have_vm_arms() {
             "Contains" => format!("Contains[{}]", item_of(kind).1),
             _ => protocol.to_string(),
         };
+        // A std protocol other than the prelude's `Any` and `Error` binds only through an import.
+        let import = match crate::checker::std_protocol_owner(protocol) {
+            Some("std.prelude") | None => String::new(),
+            Some(owner) => format!("import {protocol} from {owner}\n"),
+        };
         format!(
-            "{}fn probe[T: {bound}](a: T):\n    pass\nprobe({})\n",
+            "{import}{}fn probe[T: {bound}](a: T):\n    pass\nprobe({})\n",
             rv.prelude, rv.lit
         )
     };
     let type_errors = |src: &str| -> Vec<String> {
         // A probe that imports a native std module (`Shared`, `RwShared`, `Atomic`) resolves only
         // through `build_graph`, the wire the CLI uses; a single-module check cannot see the type.
-        if src.contains("import std.") {
+        if src.contains("import ") {
             static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let dir =

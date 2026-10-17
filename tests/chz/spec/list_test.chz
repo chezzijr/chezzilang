@@ -8,6 +8,7 @@
 # Fault-path cases (empty min()/max(), OOB remove_at, non-positive chunk(), overflow sum) stay in
 # Rust — `assert` cannot catch a runtime fault's message, so they have no in-language equivalent.
 
+import Add from std.ops
 import std.time
 
 # ---- first / last / reversed (non-mutating) ----

@@ -137,12 +137,7 @@ impl Checker {
                     }
                 }
                 StmtKind::Protocol { name, .. } => {
-                    // A std protocol is never exported from its own declaring module: `seed_std_protocols`
-                    // is the live source for its shape, so exporting it here would put a second,
-                    // sig-borne copy into `sig.types`.
-                    if !(is_std_protocol(name) && self.current_module_is_stdlib)
-                        && let Some(info) = self.protocol_shape(name).cloned()
-                    {
+                    if let Some(info) = self.protocol_shape(name).cloned() {
                         let doc = self.name_docs.get(name).cloned();
                         Self::export_protocol(&mut sig, name, info, doc);
                     }
@@ -464,13 +459,17 @@ impl Checker {
             TypeHeadKind::Struct
         } else if self.enum_names.contains(name) {
             TypeHeadKind::Enum
-        } else if self.protocols.contains_key(&self.user_protocol_key(name)) {
+        } else if self
+            .user_protocol_key(name)
+            .is_some_and(|key| self.protocols.contains_key(&key))
+        {
             TypeHeadKind::Protocol
         } else {
             return alias_type_head(name, name.to_string(), self.alias_body_ty(name)?);
         };
         let key = if kind == TypeHeadKind::Protocol {
             self.user_protocol_key(name)
+                .unwrap_or_else(|| name.to_string())
         } else {
             self.bare_key(name)
         };

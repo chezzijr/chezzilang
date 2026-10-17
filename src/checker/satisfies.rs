@@ -625,7 +625,8 @@ impl Checker {
                 Err(format!(
                     "type {ty} does not satisfy Iterator — `next` needs a cursor that holds a \
                      position. Iterate it with `for`, take a cursor with `.iter()`, or bound the \
-                     parameter `[S: Iterable[T], T]`"
+                     parameter `[S: Iterable[T], T]`{}",
+                    self.bound_hint("Iterable")
                 ))
             } else {
                 // NOT iterable at all (`int`, a plain struct): `for`/`.iter()`/`Iterable` are all dead

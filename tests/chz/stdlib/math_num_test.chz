@@ -1,4 +1,5 @@
 # tests/chz/stdlib/math_num_test.chz — math.abs/math.sign are [T: Num] generics (TICKET-214).
+import Num from std.ops
 import std.math
 
 fn twice[T: Num](x: T) -> T:

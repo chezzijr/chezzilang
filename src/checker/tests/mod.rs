@@ -42,6 +42,14 @@ fn graph_check(src: &str) -> Option<Vec<CheckError>> {
     })
 }
 
+/// [`graph_check`] for diagnostics: the result and the warnings, `None` when the resolver rejects.
+fn graph_diags(src: &str) -> Option<(Result<(), Vec<CheckError>>, Vec<CheckError>)> {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).ok()?;
+    Some(check_graph_diags(&graph, None))
+}
+
 /// TICKET-228 (D6) — a diagnostic names a carrier by its type (`int?`, `int!str`) or its pattern
 /// (`?_`, `!_`), never by a long name the user cannot write. When no word of `src` is one of the
 /// five removed names, no `message` or `help` may hold one. No allow-list: fix the message.
@@ -71,9 +79,47 @@ fn ok(src: &str) {
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
 }
 
+/// TICKET-265 — a std protocol other than the prelude's binds only through an import. A `rejects*`
+/// helper panics when an error says `unknown name '<Protocol>'` (or `unknown type`, `unknown generic
+/// type`, `unknown protocol`) for such a protocol: the program forgot its import, so a needle that
+/// matches some other error proves nothing. A needle that itself says `unknown` pins that error.
+fn assert_no_missing_std_import(src: &str, errs: &[CheckError], needle: &str) {
+    if needle.contains("unknown") {
+        return;
+    }
+    const HEADS: [&str; 4] = [
+        "unknown name '",
+        "unknown type '",
+        "unknown generic type '",
+        "unknown protocol '",
+    ];
+    for e in errs {
+        // A module error carries the prefix `in module 'm': `.
+        let msg = match e.message.strip_prefix("in module '") {
+            Some(rest) => rest.split_once("': ").map_or(rest, |(_, m)| m),
+            None => e.message.as_str(),
+        };
+        let Some(name) = HEADS
+            .iter()
+            .find_map(|h| msg.strip_prefix(h))
+            .and_then(|rest| rest.split('\'').next())
+        else {
+            continue;
+        };
+        let owned_by_import =
+            graph_pass::std_protocol_owner(name).is_some_and(|m| m != "std.prelude");
+        assert!(
+            !owned_by_import,
+            "program names std protocol '{name}' without an import: {}\nsource:\n{src}",
+            e.message
+        );
+    }
+}
+
 /// Assert the source produces at least one error whose message contains `needle`.
 fn rejects(src: &str, needle: &str) {
     let errs = check_src(src);
+    assert_no_missing_std_import(src, &errs, needle);
     assert!(
         errs.iter().any(|e| e.message.contains(needle)),
         "expected an error containing {needle:?}, got: {errs:?}"
@@ -117,6 +163,7 @@ fn parse_rejects(src: &str, needle: &str) {
 /// Like `rejects`, plus asserting the SAME error's `help` contains `help_needle`.
 fn rejects_help(src: &str, msg_needle: &str, help_needle: &str) {
     let errs = check_src(src);
+    assert_no_missing_std_import(src, &errs, msg_needle);
     assert!(
         errs.iter().any(|e| e.message.contains(msg_needle)
             && e.help.as_deref().is_some_and(|h| h.contains(help_needle))),
@@ -126,6 +173,7 @@ fn rejects_help(src: &str, msg_needle: &str, help_needle: &str) {
 
 fn rejects_help_at(src: &str, msg_needle: &str, help_needle: &str, line: u32) {
     let errs = check_src(src);
+    assert_no_missing_std_import(src, &errs, msg_needle);
     assert!(
         errs.iter().any(|e| e.message.contains(msg_needle)
             && e.help.as_deref().is_some_and(|h| h.contains(help_needle))
@@ -138,7 +186,13 @@ fn rejects_help_at(src: &str, msg_needle: &str, help_needle: &str, line: u32) {
 fn warn_src(src: &str) -> (Vec<CheckError>, Vec<CheckError>) {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
     let module = parser::parse(tokens).expect("parse should succeed");
-    let (res, warns) = check_diags(&module);
+    // Same routing as `check_src`: an `import` binds a std protocol only through the module graph.
+    let imports = module
+        .stmts
+        .iter()
+        .any(|s| matches!(s.kind, crate::ast::StmtKind::Import(_)));
+    let graphed = imports.then(|| graph_diags(src)).flatten();
+    let (res, warns) = graphed.unwrap_or_else(|| check_diags(&module));
     let errs = res.err().unwrap_or_default();
     assert_no_removed_spelling(src, &errs);
     assert_no_removed_spelling(src, &warns);
@@ -172,6 +226,7 @@ fn entry_ok(src: &str) {
 
 fn entry_rejects(src: &str, needle: &str) {
     let errs = check_entry(src);
+    assert_no_missing_std_import(src, &errs, needle);
     assert!(
         errs.iter().any(|e| e.message.contains(needle)),
         "expected an error containing {needle:?}, got: {errs:?}"
@@ -211,6 +266,7 @@ fn ok_desugared(src: &str) {
 /// Assert the desugared source produces an error containing `needle`.
 fn rejects_desugared(src: &str, needle: &str) {
     let errs = check_desugared(src);
+    assert_no_missing_std_import(src, &errs, needle);
     assert!(
         errs.iter().any(|e| e.message.contains(needle)),
         "expected an error containing {needle:?}, got: {errs:?}"
@@ -223,6 +279,16 @@ fn rejects_desugared(src: &str, needle: &str) {
 fn check_desugared(src: &str) -> Vec<CheckError> {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
     let mut module = parser::parse(tokens).expect("parse should succeed");
+    // An `import` binds a std protocol only through the module graph, which desugars too.
+    if module
+        .stmts
+        .iter()
+        .any(|s| matches!(s.kind, crate::ast::StmtKind::Import(_)))
+    {
+        let errs = check_entry(src);
+        assert_no_removed_spelling(src, &errs);
+        return errs;
+    }
     crate::desugar::run_standalone(&mut module).expect("desugar should succeed");
     let errs = match check(&module) {
         Ok(()) => Vec::new(),
@@ -269,6 +335,7 @@ fn check_files(files: &[(&str, &str)]) -> Vec<CheckError> {
 /// `rejects`, but through `check_entry` (the program imports a native std module).
 fn rejects_entry(src: &str, needle: &str) {
     let errs = check_entry(src);
+    assert_no_missing_std_import(src, &errs, needle);
     assert!(
         errs.iter().any(|e| e.message.contains(needle)),
         "expected an error containing {needle:?}, got: {errs:?}"
@@ -579,6 +646,7 @@ mod soundness;
 mod statements;
 mod static_turbofish;
 mod std_modules;
+mod std_protocol_imports;
 mod temporaries;
 mod unify_rules;
 mod unused_bindings;

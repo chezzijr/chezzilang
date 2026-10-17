@@ -7,6 +7,8 @@
 # `for`; builtin indexing/slicing (Index/Slice); a user IndexSet struct via `[]` get + set.
 
 # --- A 4-operator + Comparable + Stringable struct ---------------------------------------------------
+import Comparable from std.cmp
+import Arithmetic from std.ops
 struct Vec2:
     x: int
     y: int

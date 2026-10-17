@@ -4,6 +4,7 @@
 # like an ordinary method on every engine.
 
 # A generic box whose `top()` is conditional on `T: Comparable`.
+import Comparable from std.cmp
 struct Box[T]:
     val: T
     fn top(self) -> T where T: Comparable:

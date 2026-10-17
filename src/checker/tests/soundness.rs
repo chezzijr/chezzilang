@@ -875,6 +875,7 @@ fn conditional_method_value_enforces_its_receiver_where_bound() {
     // TICKET-204 review: a method value read through its type keeps the receiver `where` bound the
     // call form enforces (Rust rejects `Bx::<P>::total`, E0599). Each position must reject.
     const S: &str = "\
+import Add from std.ops
 struct Bx[T]:
     v: T
     fn total(self, o: Bx[T]) -> T where T: Add:
@@ -1147,10 +1148,10 @@ fn range_in_value_position_is_a_value() {
         "fn main():\n    xs := [0..3, 5..6]\n    m := {\"a\": 0..3}\n    print(xs)\n    print(m)\nmain()\n",
     );
     entry_ok(
-        "fn total(xs: Iterable[int]) -> int:\n    s := 0\n    for x in xs:\n        s = s + x\n    return s\nfn main():\n    print(total(0..4))\nmain()\n",
+        "import Iterable from std.iter\nfn total(xs: Iterable[int]) -> int:\n    s := 0\n    for x in xs:\n        s = s + x\n    return s\nfn main():\n    print(total(0..4))\nmain()\n",
     );
     entry_ok(
-        "fn first_or[S: Iterable[int]](xs: S, d: int) -> int:\n    for x in xs:\n        return x\n    return d\nfn main():\n    print(first_or(0..3, 9))\nmain()\n",
+        "import Iterable from std.iter\nfn first_or[S: Iterable[int]](xs: S, d: int) -> int:\n    for x in xs:\n        return x\n    return d\nfn main():\n    print(first_or(0..3, 9))\nmain()\n",
     );
     // What a `Range` is not.
     entry_rejects(
@@ -1300,10 +1301,10 @@ fn contains_generic_struct_substitutes_item() {
     // `Box[T]`'s own `contains` body compares `x == self.v`, both `T` — W7-53 requires `T: Eq` at
     // the struct's OWN declaration, same as a generic fn.
     ok(
-        "struct Box[T: Eq]:\n    v: T\n    fn contains(self, item: T) -> bool:\n        return item == self.v\nfn main():\n    print(2 in Box[int](5))\nmain()\n",
+        "import Eq from std.cmp\nstruct Box[T: Eq]:\n    v: T\n    fn contains(self, item: T) -> bool:\n        return item == self.v\nfn main():\n    print(2 in Box[int](5))\nmain()\n",
     );
     rejects(
-        "struct Box[T: Eq]:\n    v: T\n    fn contains(self, item: T) -> bool:\n        return item == self.v\nfn main():\n    print(\"s\" in Box[int](5))\nmain()\n",
+        "import Eq from std.cmp\nstruct Box[T: Eq]:\n    v: T\n    fn contains(self, item: T) -> bool:\n        return item == self.v\nfn main():\n    print(\"s\" in Box[int](5))\nmain()\n",
         "membership",
     );
 }
@@ -1314,10 +1315,10 @@ fn contains_generic_struct_substitutes_item() {
 #[test]
 fn contains_through_bound_ok_and_item_mismatch_rejects() {
     ok(
-        "struct Bag:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, n: int) -> bool:\n    return n in c\nfn main():\n    print(has(Bag([1]), 1))\nmain()\n",
+        "import Contains from std.ops\nstruct Bag:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, n: int) -> bool:\n    return n in c\nfn main():\n    print(has(Bag([1]), 1))\nmain()\n",
     );
     rejects(
-        "struct Bag:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, s: str) -> bool:\n    return s in c\nfn main():\n    print(has(Bag([1]), \"x\"))\nmain()\n",
+        "import Contains from std.ops\nstruct Bag:\n    xs: List[int]\n    fn contains(self, item: int) -> bool:\n        return false\nfn has[C: Contains[int]](c: C, s: str) -> bool:\n    return s in c\nfn main():\n    print(has(Bag([1]), \"x\"))\nmain()\n",
         "membership",
     );
 }
@@ -1885,13 +1886,19 @@ fn same_module_duplicate_protocol_is_still_an_error() {
     );
 }
 
-/// TICKET-027 ceiling pin: a reserved protocol bound needs no import in ANY module -- the 21
-/// std protocols are never keyed.
+/// TICKET-027 ceiling pin: two modules that each import a std protocol share it -- the std
+/// protocols are never keyed (TICKET-265: each module needs its own import).
 #[test]
-fn reserved_protocol_bound_needs_no_import_in_any_module() {
+fn std_protocol_import_in_two_modules_names_one_protocol() {
     files_ok(&[
-        ("a.chz", "fn pick[T: Eq](x: T, y: T) -> T:\n    return x\n"),
-        ("b.chz", "fn pick[T: Eq](x: T, y: T) -> T:\n    return x\n"),
+        (
+            "a.chz",
+            "import Eq from std.cmp\nfn pick[T: Eq](x: T, y: T) -> T:\n    return x\n",
+        ),
+        (
+            "b.chz",
+            "import Eq from std.cmp\nfn pick[T: Eq](x: T, y: T) -> T:\n    return x\n",
+        ),
         ("main.chz", "import a\nimport b\nprint(1)\n"),
     ]);
 }
@@ -1903,7 +1910,10 @@ fn reserved_protocol_bound_needs_no_import_in_any_module() {
 fn qualified_embed_static_requirement_stays_bound_only() {
     files_reject(
         &[
-            ("shapes.chz", "protocol MakeInt:\n    Convert[int]\n"),
+            (
+                "shapes.chz",
+                "import Convert from std.convert\nprotocol MakeInt:\n    Convert[int]\n",
+            ),
             (
                 "main.chz",
                 "import shapes\nfn f(m: shapes.MakeInt) -> int:\n    return 1\n",

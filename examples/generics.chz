@@ -7,6 +7,7 @@
 # methods satisfies it too. A `T: Comparable` bound lets a generic use `<`/`>`
 # (which dispatch to `compare`) and call `.compare()` on its values.
 
+import Comparable from std.cmp
 struct Point:
     x: int
     y: int

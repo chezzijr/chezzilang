@@ -9,11 +9,12 @@ use super::*;
 fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String, Option<bool>)> {
     let head = format!("{}a := {}\n", s.prelude, s.lit);
     let bin = |p: &str, op: &str, ret: &str| {
+        let owner = crate::checker::graph_pass::std_protocol_owner(p).expect("a std protocol");
         (
             protocol.to_string(),
             format!("{head}r := a {op} a\n"),
             format!(
-                "{}fn f[T: {p}](x: T, y: T) -> {ret}:\n    return x {op} y\na := {}\nf(a, a)\n",
+                "import {p} from {owner}\n{}fn f[T: {p}](x: T, y: T) -> {ret}:\n    return x {op} y\na := {}\nf(a, a)\n",
                 s.prelude, s.lit
             ),
             None,
@@ -43,21 +44,21 @@ fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String,
         "Neg" => vec![one(
             "Neg",
             "r := -a",
-            "fn f[T: Neg](x: T) -> T:\n    return -x\n",
+            "import Neg from std.ops\nfn f[T: Neg](x: T) -> T:\n    return -x\n",
             "f(a)",
             None,
         )],
         "Stringable" => vec![one(
             "Stringable",
             "r := str(a)",
-            "fn f[T: Stringable](x: T) -> str:\n    return x.str()\n",
+            "import Stringable from std.string\nfn f[T: Stringable](x: T) -> str:\n    return x.str()\n",
             "f(a)",
             None,
         )],
         "Hashable" => vec![one(
             "Hashable",
             "r := {a: 1}",
-            "fn f[T: Hashable](x: T):\n    pass\n",
+            "import Hashable from std.cmp\nfn f[T: Hashable](x: T):\n    pass\n",
             "f(a)",
             None,
         )],
@@ -74,7 +75,7 @@ fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String,
                     &format!("Contains[{ty}] {lit}"),
                     &format!("r := {lit} in a"),
                     &format!(
-                        "fn f[C: Contains[{ty}]](c: C, e: {ty}) -> bool:\n    return e in c\n"
+                        "import Contains from std.ops\nfn f[C: Contains[{ty}]](c: C, e: {ty}) -> bool:\n    return e in c\n"
                     ),
                     &format!("f(a, {lit})"),
                     Some(want),
@@ -87,7 +88,9 @@ fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String,
             vec![one(
                 protocol,
                 &format!("for v in a:\n    e: {e} = v"),
-                &format!("fn f[C: {protocol}[{e}]](c: C):\n    for v in c:\n        e: {e} = v\n"),
+                &format!(
+                    "import {protocol} from std.iter\nfn f[C: {protocol}[{e}]](c: C):\n    for v in c:\n        e: {e} = v\n"
+                ),
                 "f(a)",
                 if protocol == "Iterable" {
                     Some(s.elem.is_some())
@@ -101,7 +104,9 @@ fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String,
             vec![one(
                 "Index",
                 &format!("k: {kt} = {key}\nr := a[k]"),
-                &format!("fn f[C: Index[{kt}, {vt}]](c: C, k: {kt}) -> {vt}:\n    return c[k]\n"),
+                &format!(
+                    "import Index from std.ops\nfn f[C: Index[{kt}, {vt}]](c: C, k: {kt}) -> {vt}:\n    return c[k]\n"
+                ),
                 &format!("f(a, {key})"),
                 Some(s.index.is_some()),
             )]
@@ -112,7 +117,9 @@ fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String,
             vec![one(
                 "IndexSet",
                 &format!("a[{key}] = {val}"),
-                &format!("fn f[C: IndexSet[{kt}, {vt}]](c: C, k: {kt}, v: {vt}):\n    c[k] = v\n"),
+                &format!(
+                    "import IndexSet from std.ops\nfn f[C: IndexSet[{kt}, {vt}]](c: C, k: {kt}, v: {vt}):\n    c[k] = v\n"
+                ),
                 &format!("f(a, {key}, {val})"),
                 Some(s.set_val.is_some()),
             )]
@@ -122,7 +129,9 @@ fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String,
             vec![one(
                 "Slice",
                 "r := a[0..1]",
-                &format!("fn f[C: Slice[{r}]](c: C) -> {r}:\n    return c[0..1]\n"),
+                &format!(
+                    "import Slice from std.ops\nfn f[C: Slice[{r}]](c: C) -> {r}:\n    return c[0..1]\n"
+                ),
                 "f(a)",
                 Some(s.slice.is_some()),
             )]
@@ -212,10 +221,10 @@ fn bit_operator_protocols_accept_and_reject_boundaries() {
     rejects("x := \"a\" & \"b\"\n", "bitwise operator &");
     rejects("x := {1} << {2}\n", "bitwise operator <<");
     ok(
-        "fn orr[T: BitOr](a: T, b: T) -> T:\n    return a | b\nx := orr({1}, {2})\ny := orr(1, 2)\n",
+        "import BitOr from std.ops\nfn orr[T: BitOr](a: T, b: T) -> T:\n    return a | b\nx := orr({1}, {2})\ny := orr(1, 2)\n",
     );
     rejects(
-        "fn orr[T: BitOr](a: T, b: T) -> T:\n    return a | b\nx := orr(1.5, 2.5)\n",
+        "import BitOr from std.ops\nfn orr[T: BitOr](a: T, b: T) -> T:\n    return a | b\nx := orr(1.5, 2.5)\n",
         "BitOr",
     );
 }
@@ -227,13 +236,13 @@ fn bytes_order_and_handles_compare_through_protocols() {
         "a := b\"a\" < b\"b\"\nb := bytearray(b\"a\") < bytearray(b\"b\")\nc := b\"a\" < bytearray(b\"b\")\n",
     );
     ok(
-        "fn lt[T: Comparable](a: T, b: T) -> bool:\n    return a < b\nx := lt(b\"a\", b\"b\")\ny := lt(bytearray(b\"a\"), bytearray(b\"b\"))\n",
+        "import Comparable from std.cmp\nfn lt[T: Comparable](a: T, b: T) -> bool:\n    return a < b\nx := lt(b\"a\", b\"b\")\ny := lt(bytearray(b\"a\"), bytearray(b\"b\"))\n",
     );
     rejects("x := b\"a\" < \"b\"\n", "cannot compare");
     rejects("x := b\"a\" < 1\n", "cannot compare");
     rejects("x := \"a\" < b\"b\"\n", "cannot compare");
     entry_ok(
-        "import std.concurrency\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nch := Channel[int](1)\nx := same(ch, ch)\n",
+        "import Eq from std.cmp\nimport std.concurrency\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nch := Channel[int](1)\nx := same(ch, ch)\n",
     );
 }
 
@@ -243,13 +252,19 @@ fn bytes_order_and_handles_compare_through_protocols() {
 #[test]
 fn type_name_is_never_a_value_grid() {
     // Each module-owned builtin type is in scope through an import of its owner.
-    let owned: String = ["std.concurrency", "std.ffi", "std.io", "std.net"]
-        .iter()
-        .map(|m| {
-            let names = crate::checker::builtin_type::module_builtins(m).join(", ");
-            format!("import {names} from {m}\n")
-        })
-        .collect();
+    let owned: String = [
+        "std.concurrency",
+        "std.ffi",
+        "std.io",
+        "std.iter",
+        "std.net",
+    ]
+    .iter()
+    .map(|m| {
+        let names = crate::checker::builtin_type::module_builtins(m).join(", ");
+        format!("import {names} from {m}\n")
+    })
+    .collect();
     const PRELUDE: &str = "import am
 import std.ffi
 struct P:

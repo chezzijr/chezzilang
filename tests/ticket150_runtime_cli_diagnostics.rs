@@ -43,13 +43,13 @@ fn generator_fault_names_the_faulting_resume_site() {
     let d = TmpDir::new();
     std::fs::write(
         d.0.join("gf3.chz"),
-        "fn gen() -> Iterator[int]:\n    yield 1\n    yield 2\n    xs := [1]\n    yield xs[5]\nfn main():\n    g := gen()\n    a := g.next()\n    b := g.next()\n    print(a, b)\n    c := g.next()\n    print(c)\nmain()\n",
+        "import Iterator from std.iter\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\n    xs := [1]\n    yield xs[5]\nfn main():\n    g := gen()\n    a := g.next()\n    b := g.next()\n    print(a, b)\n    c := g.next()\n    print(c)\nmain()\n",
     )
     .unwrap();
     let out = text(&chezzi(&d, &["run", "gf3.chz"]));
     assert!(
-        out.contains("called at gf3.chz:11:10"),
-        "trace should name the faulting resume (line 11); got:\n{out}"
+        out.contains("called at gf3.chz:12:10"),
+        "trace should name the faulting resume (line 12); got:\n{out}"
     );
 }
 

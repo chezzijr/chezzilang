@@ -5,7 +5,8 @@
 use super::*;
 use crate::base::op::Op;
 
-const MAIN: &str = r#"import h
+const MAIN: &str = r#"import Iterator from std.iter
+import h
 struct P:
     x: int
     fn bump(self):
@@ -157,7 +158,8 @@ b := g1(xs)
 c := count([1])
 "#;
 
-const H: &str = r#"HG: List[List[int]] = []
+const H: &str = r#"import Iterator from std.iter
+HG: List[List[int]] = []
 fn hcount(xs: List[int]) -> int:
     return xs.len()
 fn hkeep(xs: List[int]):
@@ -254,7 +256,8 @@ fn generator_slot_privacy_grid() {
     );
 }
 
-const DEEP: &str = r#"struct N:
+const DEEP: &str = r#"import Iterator from std.iter
+struct N:
     kids: List[List[int]]
 struct Key:
     id: int

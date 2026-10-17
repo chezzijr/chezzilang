@@ -2,6 +2,7 @@
 # surface `RwShared[List/Map/Set]` had before TICKET-243). They walk the stored heap-independent wire
 # container under the read guard and rebuild ONE element at a time (O(1) memory).
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+import Iterator from std.iter
 import std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 

@@ -794,7 +794,8 @@ impl Checker {
             // gate existed).
             Ty::Param(_) if strict => self.satisfies(ty, "Eq").err().map(|_| {
                 format!(
-                    "{ty} is not bounded by Eq (add an `Eq` bound to {ty}: `[{ty}: Eq]`, or `where {ty}: Eq` on a fn)"
+                    "{ty} is not bounded by Eq (add an `Eq` bound to {ty}: `[{ty}: Eq]`, or `where {ty}: Eq` on a fn){}",
+                    self.bound_hint("Eq")
                 )
             }),
             // Scalars, the identity handles, `Func`, `Module` — nothing a user `eq` can hide behind,

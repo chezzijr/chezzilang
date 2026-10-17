@@ -1,0 +1,35 @@
+# TICKET-265: a std protocol lives in its std module. A bound `[T: Add]` and the value type
+# `Iterator[int]` run once their import names them; an operator needs no import.
+
+import Add from std.ops
+import Iterator from std.iter
+import Eq from std.cmp
+
+fn twice[T: Add](x: T) -> T:
+    return x + x
+
+fn count(n: int) -> Iterator[int]:
+    i := 0
+    while i < n:
+        yield i
+        i += 1
+
+fn same[T: Eq](a: T, b: T) -> bool:
+    return a == b
+
+test fn an_add_bound_runs_on_int_and_str():
+    assert twice(2) == 4
+    assert twice("ab") == "abab"
+
+test fn a_generator_declared_with_iterator_runs():
+    assert [x for x in count(3)] == [0, 1, 2]
+
+test fn operators_need_no_import():
+    xs := [1, 2, 3]
+    assert xs[1] == 2
+    assert 2 in xs
+    assert 1 < 2
+
+test fn an_eq_bound_runs():
+    assert same(1, 1)
+    assert not same("a", "b")

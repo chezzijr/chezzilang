@@ -15,6 +15,7 @@
 # Either way `T` is inferred by unifying the iterand's element type into the bound's arg — so it flows
 # out into return types (`-> T`, `-> List[T]`) and into the loop variable inside the body.
 
+import Iterable from std.iter
 fn first_or[S: Iterable[T], T](xs: S, default: T) -> T:
     for x in xs:
         return x

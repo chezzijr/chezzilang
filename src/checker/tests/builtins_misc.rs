@@ -10,7 +10,7 @@ use super::*;
 fn generator_basic_ok() {
     // A generator declares `-> Iterator[T]`, yields T, and its result drives a `for` (x: int).
     ok(
-        "fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n\nfn use() -> int:\n    s := 0\n    for x in count():\n        s = s + x\n    return s\n",
+        "import Iterator from std.iter\nfn count() -> Iterator[int]:\n    yield 1\n    yield 2\n\nfn use() -> int:\n    s := 0\n    for x in count():\n        s = s + x\n    return s\n",
     );
 }
 
@@ -18,7 +18,7 @@ fn generator_basic_ok() {
 fn generator_for_binds_element_type() {
     // `for x in count()` must bind `x: int`, so using it as a str is a type error.
     rejects(
-        "fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    for x in count():\n        print(x + \"a\")\n",
+        "import Iterator from std.iter\nfn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    for x in count():\n        print(x + \"a\")\n",
         "",
     );
 }
@@ -26,7 +26,7 @@ fn generator_for_binds_element_type() {
 #[test]
 fn generator_yield_type_mismatch_rejected() {
     rejects(
-        "fn g() -> Iterator[int]:\n    yield \"nope\"\n",
+        "import Iterator from std.iter\nfn g() -> Iterator[int]:\n    yield \"nope\"\n",
         "expected yield type int",
     );
 }
@@ -53,7 +53,7 @@ fn generator_inferred_element_recovered_not_unknown() {
     // The inferred element is the CONCRETE first-yield type (int), NOT a permissive `Unknown`:
     // `x + "a"` (int + str) must be rejected — proves inference pins a real type.
     rejects(
-        "fn count() -> Iterator[int]:\n    yield 1\nfn use():\n    for x in count():\n        print(x + \"a\")\n",
+        "import Iterator from std.iter\nfn count() -> Iterator[int]:\n    yield 1\nfn use():\n    for x in count():\n        print(x + \"a\")\n",
         "",
     );
 }
@@ -70,9 +70,9 @@ fn generator_inferred_struct_method_no_annotation() {
 #[test]
 fn generator_explicit_annotation_still_works() {
     // The explicit `-> Iterator[T]` path is untouched: annotation still validates yields against T.
-    ok("fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n");
+    ok("import Iterator from std.iter\nfn count() -> Iterator[int]:\n    yield 1\n    yield 2\n");
     rejects(
-        "fn count() -> Iterator[int]:\n    yield \"x\"\n",
+        "import Iterator from std.iter\nfn count() -> Iterator[int]:\n    yield \"x\"\n",
         "expected yield type int",
     );
 }
@@ -80,7 +80,7 @@ fn generator_explicit_annotation_still_works() {
 #[test]
 fn generator_return_value_rejected() {
     rejects(
-        "fn g() -> Iterator[int]:\n    yield 1\n    return 5\n",
+        "import Iterator from std.iter\nfn g() -> Iterator[int]:\n    yield 1\n    return 5\n",
         "cannot `return` a value",
     );
 }
@@ -89,14 +89,14 @@ fn generator_return_value_rejected() {
 fn generator_explicit_next_ok() {
     // A generator result is an `Iterator[int]`; `.next()` returns `Option[int]`, drivable explicitly.
     ok(
-        "fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    match g.next():\n        ?v: print(v)\n        None: print(-1)\n",
+        "import Iterator from std.iter\nfn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    match g.next():\n        ?v: print(v)\n        None: print(-1)\n",
     );
 }
 
 #[test]
 fn iterator_value_unknown_method_rejected() {
     rejects(
-        "fn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    g.bogus()\n",
+        "import Iterator from std.iter\nfn count() -> Iterator[int]:\n    yield 1\n\nfn use():\n    g := count()\n    g.bogus()\n",
         "has no method 'bogus'",
     );
 }
@@ -112,7 +112,7 @@ fn yield_outside_generator_rejected() {
 #[test]
 fn generator_defer_rejected() {
     rejects(
-        "fn g() -> Iterator[int]:\n    defer print(0)\n    yield 1\n",
+        "import Iterator from std.iter\nfn g() -> Iterator[int]:\n    defer print(0)\n    yield 1\n",
         "`defer` is not supported inside a generator",
     );
 }
@@ -120,7 +120,7 @@ fn generator_defer_rejected() {
 #[test]
 fn generator_spawn_rejected() {
     rejects(
-        "fn g() -> Iterator[int]:\n    parallel:\n        spawn print(0)\n    yield 1\n",
+        "import Iterator from std.iter\nfn g() -> Iterator[int]:\n    parallel:\n        spawn print(0)\n    yield 1\n",
         "`parallel:` is not supported inside a generator",
     );
 }
@@ -129,14 +129,16 @@ fn generator_spawn_rejected() {
 fn generator_yield_only_in_recover_ok() {
     // A generator whose only `yield` lives in a `recover:` block is valid (detected as a generator,
     // so `yield` is legal there) — guards the parser/checker recover-descent fix.
-    ok("fn g() -> Iterator[int]:\n    x := recover:\n        yield 1\n        1\n    print(x)\n");
+    ok(
+        "import Iterator from std.iter\nfn g() -> Iterator[int]:\n    x := recover:\n        yield 1\n        1\n    print(x)\n",
+    );
 }
 
 #[test]
 fn generator_defer_in_recover_rejected() {
     // The `defer` ban must not be bypassable by nesting inside a `recover:` block.
     rejects(
-        "fn cleanup():\n    print(\"c\")\nfn g() -> Iterator[int]:\n    yield 0\n    x := recover:\n        defer cleanup()\n        1\n    print(x)\n",
+        "import Iterator from std.iter\nfn cleanup():\n    print(\"c\")\nfn g() -> Iterator[int]:\n    yield 0\n    x := recover:\n        defer cleanup()\n        1\n    print(x)\n",
         "`defer` is not supported inside a generator",
     );
 }
@@ -144,7 +146,9 @@ fn generator_defer_in_recover_rejected() {
 #[test]
 fn generator_bare_return_ok() {
     // A bare `return` inside a generator stops it early — legal.
-    ok("fn g() -> Iterator[int]:\n    yield 1\n    return\n    yield 2\n");
+    ok(
+        "import Iterator from std.iter\nfn g() -> Iterator[int]:\n    yield 1\n    return\n    yield 2\n",
+    );
 }
 
 // ===== assert =====
@@ -580,7 +584,7 @@ fn iter_method_on_collections_types_as_iterator() {
 fn iter_cursor_drives_existing_adapters() {
     // The headline win: a list cursor composes into a struct adapter bounded `[I: Iterator[T]]`.
     ok(
-        "struct Take[I: Iterator[T], T]:\n    inner: I\n    left: int\n    fn next(self) -> T?:\n        if self.left <= 0:\n            return None\n        self.left = self.left - 1\n        return self.inner.next()\nfn main():\n    t := Take([10, 20, 30].iter(), 2)\n    for v in t:\n        print(v)\nmain()\n",
+        "import Iterator from std.iter\nstruct Take[I: Iterator[T], T]:\n    inner: I\n    left: int\n    fn next(self) -> T?:\n        if self.left <= 0:\n            return None\n        self.left = self.left - 1\n        return self.inner.next()\nfn main():\n    t := Take([10, 20, 30].iter(), 2)\n    for v in t:\n        print(v)\nmain()\n",
     );
 }
 
@@ -588,7 +592,7 @@ fn iter_cursor_drives_existing_adapters() {
 fn iterable_bound_accepts_list_and_generator() {
     // `[S: Iterable[int]]` accepts a List[int] AND a generator (Iterator[int]).
     ok(
-        "fn count[S: Iterable[int]](s: S) -> int:\n    n := 0\n    for x in s.iter():\n        n = n + 1\n    return n\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn main():\n    print(count([1, 2, 3]))\n    print(count(gen()))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nfn count[S: Iterable[int]](s: S) -> int:\n    n := 0\n    for x in s.iter():\n        n = n + 1\n    return n\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn main():\n    print(count([1, 2, 3]))\n    print(count(gen()))\nmain()\n",
     );
 }
 
@@ -596,7 +600,7 @@ fn iterable_bound_accepts_list_and_generator() {
 fn iter_idempotent_on_generator_and_cursor() {
     // Every Iterator IS Iterable: iter() returns self, idempotently.
     ok(
-        "fn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    it := gen().iter()\n    print(it.next())\nmain()\n",
+        "import Iterator from std.iter\nfn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    it := gen().iter()\n    print(it.next())\nmain()\n",
     );
     ok("fn main():\n    it := [1, 2, 3].iter().iter()\n    print(it.next())\nmain()\n");
 }
@@ -605,7 +609,7 @@ fn iter_idempotent_on_generator_and_cursor() {
 fn iterable_struct_with_only_iter() {
     // A user struct with iter(self) -> Iterator[E] (but no next) satisfies Iterable and is for-iterable.
     ok(
-        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn main():\n    w := Wrap([1, 2, 3])\n    for x in w:\n        print(x)\nmain()\n",
+        "import Iterator from std.iter\nstruct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn main():\n    w := Wrap([1, 2, 3])\n    for x in w:\n        print(x)\nmain()\n",
     );
 }
 
@@ -619,7 +623,7 @@ fn iterator_bound_forwards_into_iterable_bound() {
     // Every Iterator IS Iterable: an `[S: Iterator[T]]` value must satisfy an `[U: Iterable[T]]`
     // bound it is forwarded into (the cross-protocol relationship the spec promises).
     ok(
-        "fn use_iterable[U: Iterable[int]](xs: U) -> int:\n    n := 0\n    for x in xs.iter():\n        n = n + 1\n    return n\nfn pass_through[S: Iterator[int]](xs: S) -> int:\n    return use_iterable(xs)\nfn main():\n    print(pass_through([1, 2, 3].iter()))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nfn use_iterable[U: Iterable[int]](xs: U) -> int:\n    n := 0\n    for x in xs.iter():\n        n = n + 1\n    return n\nfn pass_through[S: Iterator[int]](xs: S) -> int:\n    return use_iterable(xs)\nfn main():\n    print(pass_through([1, 2, 3].iter()))\nmain()\n",
     );
 }
 
@@ -632,47 +636,47 @@ fn iterator_bound_forwards_into_iterable_bound() {
 fn iterable_in_type_position_is_for_iterable() {
     // List
     ok(
-        "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
     );
     // Set
     ok(
-        "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f({1, 2, 3})))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f({1, 2, 3})))\nmain()\n",
     );
     // A Map iterates its `(key, value)` pairs (owner U9), so a Map[str,int] is an
     // Iterable[(str, int)] and no longer an Iterable[str] (`m.keys()` is).
     ok(
-        "fn f(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
     );
     rejects(
-        "fn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
         "does not satisfy Iterable",
     );
     ok(
-        "fn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(str(f({\"a\": 1}.keys())))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(str(f({\"a\": 1}.keys())))\nmain()\n",
     );
     // str iterates to str
     ok(
-        "fn f(xs: Iterable[str]) -> int:\n    n := 0\n    for v in xs:\n        n += v.len()\n    return n\nfn main():\n    print(str(f(\"abc\")))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[str]) -> int:\n    n := 0\n    for v in xs:\n        n += v.len()\n    return n\nfn main():\n    print(str(f(\"abc\")))\nmain()\n",
     );
     // a cursor
     ok(
-        "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2].iter())))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2].iter())))\nmain()\n",
     );
     // a generator result
     ok(
-        "fn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(gen())))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(gen())))\nmain()\n",
     );
     // a comprehension over an `Iterable[T]` param, and `List(xs)` — the other `iter_elem` consumers.
     ok(
-        "fn f(xs: Iterable[int]) -> int:\n    ys := [v * 2 for v in xs]\n    return ys[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    ys := [v * 2 for v in xs]\n    return ys[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
     );
     ok(
-        "fn f(xs: Iterable[int]) -> int:\n    return List(xs)[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    return List(xs)[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
     );
     // The pre-fix workaround (`xs.iter()` first) must keep working identically — it now takes the
     // `iter_elem` fast path instead of the Protocol method arm; both yield `Iterator[int]`.
     ok(
-        "fn f(xs: Iterable[int]) -> int?:\n    return xs.iter().next()\nfn main():\n    print(f([1, 2]))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int?:\n    return xs.iter().next()\nfn main():\n    print(f([1, 2]))\nmain()\n",
     );
 }
 
@@ -681,23 +685,23 @@ fn iterable_in_type_position_is_for_iterable() {
 fn iterable_type_position_rejects_bad_shapes() {
     // (a) a BARE `Iterable` is an existential with unbound params — not iterable (the arity guard).
     rejects(
-        "fn f(xs: Iterable) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
         "cannot iterate over Iterable",
     );
     // (b) the two-variable `for i, v in` form: an existential carries no key/index, so the element
     // (`int`) is not a tuple — see `two_var_for_over_iterable_annotation_names_the_type`.
     rejects(
-        "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for i, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for i, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
         "tuple pattern cannot match a value of type int",
     );
     // (c) W6-3b: `Iterable` is NOT `Iterator` — an `Iterable[T]` value still cannot call `.next()`.
     rejects(
-        "fn f(xs: Iterable[int]) -> int?:\n    return xs.next()\nfn main():\n    print(f([1, 2]))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int?:\n    return xs.next()\nfn main():\n    print(f([1, 2]))\nmain()\n",
         "next",
     );
     // (d) and it still cannot satisfy an `[S: Iterator[T]]` bound.
     rejects(
-        "fn g[S: Iterator[int]](xs: S) -> int?:\n    return xs.next()\nfn f(xs: Iterable[int]) -> int?:\n    return g(xs)\nfn main():\n    print(f([1, 2]))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nfn g[S: Iterator[int]](xs: S) -> int?:\n    return xs.next()\nfn f(xs: Iterable[int]) -> int?:\n    return g(xs)\nfn main():\n    print(f([1, 2]))\nmain()\n",
         "Iterator",
     );
 }
@@ -709,7 +713,7 @@ fn iterable_type_position_rejects_bad_shapes() {
 fn container_invariance_stays_rejected_for_iterable() {
     // List[int] -> Iterable[Any]
     entry_rejects(
-        "fn f(xs: Iterable[Any]) -> int:\n    return 0\nfn main():\n    ys: List[int] = [1, 2]\n    print(f(ys))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[Any]) -> int:\n    return 0\nfn main():\n    ys: List[int] = [1, 2]\n    print(f(ys))\nmain()\n",
         "expected Iterable[Any], found List[int]",
     );
     // List[Sq] -> List[Shape] (a struct that DOES satisfy the protocol)
@@ -719,12 +723,12 @@ fn container_invariance_stays_rejected_for_iterable() {
     );
     // Iterable[int] -> Iterable[Any] (the NEW neighbour: protocol args stay invariant)
     entry_rejects(
-        "fn wide(xs: Iterable[Any]) -> int:\n    return 0\nfn f(xs: Iterable[int]) -> int:\n    return wide(xs)\nfn main():\n    print(f([1, 2]))\nmain()\n",
+        "import Iterable from std.iter\nfn wide(xs: Iterable[Any]) -> int:\n    return 0\nfn f(xs: Iterable[int]) -> int:\n    return wide(xs)\nfn main():\n    print(f([1, 2]))\nmain()\n",
         "expected Iterable[Any], found Iterable[int]",
     );
     // Iterable[int] -> Iterable[str] (plain mismatch)
     entry_rejects(
-        "fn other(xs: Iterable[str]) -> int:\n    return 0\nfn f(xs: Iterable[int]) -> int:\n    return other(xs)\nfn main():\n    print(f([1, 2]))\nmain()\n",
+        "import Iterable from std.iter\nfn other(xs: Iterable[str]) -> int:\n    return 0\nfn f(xs: Iterable[int]) -> int:\n    return other(xs)\nfn main():\n    print(f([1, 2]))\nmain()\n",
         "expected Iterable[str], found Iterable[int]",
     );
 }
@@ -745,15 +749,15 @@ fn value_level_widening_still_ok() {
 #[test]
 fn iterable_annotated_param_forwards_into_iterable_bound() {
     ok(
-        "fn g[S: Iterable[T], T](xs: S) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn f(xs: Iterable[int]) -> int:\n    return g(xs)\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+        "import Iterable from std.iter\nfn g[S: Iterable[T], T](xs: S) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn f(xs: Iterable[int]) -> int:\n    return g(xs)\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
     );
     // the recovered `T` is usable as `int`…
     ok(
-        "fn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, 1)\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+        "import Iterable from std.iter\nfn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, 1)\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
     );
     // …and a wrong-element neighbour still rejects.
     rejects(
-        "fn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, \"a\")\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
+        "import Iterable from std.iter\nfn g[S: Iterable[T], T](xs: S, d: T) -> int:\n    return 1\nfn f(xs: Iterable[int]) -> int:\n    return g(xs, \"a\")\nfn main():\n    print(str(f([1, 2, 3])))\nmain()\n",
         "does not match the declared element type",
     );
 }
@@ -762,10 +766,10 @@ fn iterable_annotated_param_forwards_into_iterable_bound() {
 #[test]
 fn documented_iterable_bound_forms_unchanged() {
     ok(
-        "fn first_or[S: Iterable[T], T](xs: S, default: T) -> T:\n    for v in xs:\n        return v\n    return default\nfn main():\n    print(str(first_or([1, 2], 0)))\nmain()\n",
+        "import Iterable from std.iter\nfn first_or[S: Iterable[T], T](xs: S, default: T) -> T:\n    for v in xs:\n        return v\n    return default\nfn main():\n    print(str(first_or([1, 2], 0)))\nmain()\n",
     );
     ok(
-        "fn f[C: Iterable[int]](xs: C) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn f[C: Iterable[int]](xs: C) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
     );
 }
 
@@ -778,15 +782,15 @@ fn documented_iterable_bound_forms_unchanged() {
 fn iter_only_struct_bound_recovers_its_element() {
     // BOUND position: `T` is recovered from the `iter` hook.
     ok(
-        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn to_list[S: Iterable[T], T](xs: S) -> List[T]:\n    out: List[T] = []\n    for x in xs:\n        out.push(x)\n    return out\nfn main():\n    print(to_list(Wrap([1, 2])))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn to_list[S: Iterable[T], T](xs: S) -> List[T]:\n    out: List[T] = []\n    for x in xs:\n        out.push(x)\n    return out\nfn main():\n    print(to_list(Wrap([1, 2])))\nmain()\n",
     );
     // …and the concrete-arg workaround the docs prescribe still works.
     ok(
-        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn count[S: Iterable[int]](xs: S) -> int:\n    n := 0\n    for x in xs:\n        n += x\n    return n\nfn main():\n    print(str(count(Wrap([1, 2]))))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn count[S: Iterable[int]](xs: S) -> int:\n    n := 0\n    for x in xs:\n        n += x\n    return n\nfn main():\n    print(str(count(Wrap([1, 2]))))\nmain()\n",
     );
     // ANNOTATION position: works (the edge decision).
     ok(
-        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(Wrap([1, 2]))))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(Wrap([1, 2]))))\nmain()\n",
     );
 }
 
@@ -796,23 +800,23 @@ fn iter_only_struct_bound_recovers_its_element() {
 #[test]
 fn a_nonconforming_next_is_an_ordinary_method() {
     // (a) extra param on `next` + a conforming `iter`: `next` is an ordinary method, `iter` is the hook.
-    let odd = "struct Odd:\n    xs: List[int]\n    n: int\n    fn next(self, k: int) -> int?:\n        self.n += 1\n        if self.n > 3:\n            return None\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\n";
+    let odd = "import Iterator from std.iter\nstruct Odd:\n    xs: List[int]\n    n: int\n    fn next(self, k: int) -> int?:\n        self.n += 1\n        if self.n > 3:\n            return None\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\n";
     ok(&format!(
-        "{odd}fn viaList(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(viaList(Odd([9, 9], 0))))\nmain()\n"
+        "import Iterable from std.iter\n{odd}fn viaList(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(viaList(Odd([9, 9], 0))))\nmain()\n"
     ));
     ok(&format!(
         "{odd}fn main():\n    for v in Odd([9, 9], 0):\n        print(str(v))\nmain()\n"
     ));
     ok(&format!(
-        "{odd}fn count[S: Iterable[int]](xs: S) -> int:\n    return 0\nfn main():\n    print(str(count(Odd([9, 9], 0))))\nmain()\n"
+        "import Iterable from std.iter\n{odd}fn count[S: Iterable[int]](xs: S) -> int:\n    return 0\nfn main():\n    print(str(count(Odd([9, 9], 0))))\nmain()\n"
     ));
     // (b) a non-`Option` return on `next` is the same class.
     ok(
-        "struct Bad:\n    xs: List[int]\n    fn next(self) -> int:\n        return 1\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(f(Bad([1, 2]))))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Bad:\n    xs: List[int]\n    fn next(self) -> int:\n        return 1\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(f(Bad([1, 2]))))\nmain()\n",
     );
     // (c) a conforming `next` alongside `iter`: `iter` is the hook `for` drives.
     ok(
-        "struct Both:\n    n: int\n    xs: List[int]\n    fn next(self) -> int?:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(Both(3, [9]))))\nmain()\n",
+        "import Iterable, Iterator from std.iter\nstruct Both:\n    n: int\n    xs: List[int]\n    fn next(self) -> int?:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(Both(3, [9]))))\nmain()\n",
     );
 }
 
@@ -823,15 +827,15 @@ fn a_nonconforming_next_is_an_ordinary_method() {
 fn two_var_for_over_iterable_annotation_names_the_type() {
     // A TUPLE element destructures (TICKET-113), so this is accepted now; a non-tuple element names its own type in the one tuple message.
     ok(
-        "fn pairs(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(pairs([(\"a\", 1)])))\nmain()\n",
+        "import Iterable from std.iter\nfn pairs(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(pairs([(\"a\", 1)])))\nmain()\n",
     );
     rejects(
-        "fn kv(xs: Iterable[str]) -> int:\n    n := 0\n    for i, v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(kv([\"a\"])))\nmain()\n",
+        "import Iterable from std.iter\nfn kv(xs: Iterable[str]) -> int:\n    n := 0\n    for i, v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(kv([\"a\"])))\nmain()\n",
         "tuple pattern cannot match a value of type str",
     );
     // the same for an `[S: Iterable[T]]` BOUND — the other spelling of the same existential.
     rejects(
-        "fn g[S: Iterable[int]](xs: S) -> int:\n    for i, v in xs:\n        return v\n    return 0\nfn main():\n    print(str(g([1, 2])))\nmain()\n",
+        "import Iterable from std.iter\nfn g[S: Iterable[int]](xs: S) -> int:\n    for i, v in xs:\n        return v\n    return 0\nfn main():\n    print(str(g([1, 2])))\nmain()\n",
         "tuple pattern cannot match a value of type int",
     );
     // a struct iterator is one more iterable: its element (`int`) is not a tuple.
@@ -856,7 +860,7 @@ fn for_multi_name_over_struct_next_tuple_destructures() {
 /// pinned by the last case of `for_multi_name_rejects_non_tuple_and_wrong_arity`.
 #[test]
 fn for_multi_name_over_every_tuple_source_checks() {
-    let pairs = "fn pairs() -> Iterator[(int, str)]:\n    yield (1, \"x\")\n    yield (2, \"y\")\n";
+    let pairs = "import Iterator from std.iter\nfn pairs() -> Iterator[(int, str)]:\n    yield (1, \"x\")\n    yield (2, \"y\")\n";
     // (a) a generator
     ok(&format!(
         "{pairs}fn main():\n    for a, b in pairs():\n        print(a + 1, b.len())\nmain()\n"
@@ -865,19 +869,19 @@ fn for_multi_name_over_every_tuple_source_checks() {
     ok("fn main():\n    for a, b in [(1, \"x\")].iter():\n        print(a + 1, b.len())\nmain()\n");
     // (c) an `Iterable[(str, int)]` annotation
     ok(
-        "fn total(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(total([(\"a\", 1)]))\nmain()\n",
+        "import Iterable from std.iter\nfn total(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(total([(\"a\", 1)]))\nmain()\n",
     );
     // (d) an `[S: Iterable[(str, int)]]` bound
     ok(
-        "fn total[S: Iterable[(str, int)]](xs: S) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(total([(\"a\", 1)]))\nmain()\n",
+        "import Iterable from std.iter\nfn total[S: Iterable[(str, int)]](xs: S) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(total([(\"a\", 1)]))\nmain()\n",
     );
     // (e) arity 3 from a generator
     ok(
-        "fn trip() -> Iterator[(int, str, float)]:\n    yield (1, \"x\", 2.5)\nfn main():\n    for a, b, c in trip():\n        print(a + 1, b.len(), c * 2.0)\nmain()\n",
+        "import Iterator from std.iter\nfn trip() -> Iterator[(int, str, float)]:\n    yield (1, \"x\", 2.5)\nfn main():\n    for a, b, c in trip():\n        print(a + 1, b.len(), c * 2.0)\nmain()\n",
     );
     // (f) a pure-`Iterable` struct (`iter`, no `next`)
     ok(
-        "struct Wrap:\n    xs: List[(int, str)]\n    fn iter(self) -> Iterator[(int, str)]:\n        return self.xs.iter()\nfn main():\n    for a, b in Wrap([(1, \"x\")]):\n        print(a + 1, b.len())\nmain()\n",
+        "import Iterator from std.iter\nstruct Wrap:\n    xs: List[(int, str)]\n    fn iter(self) -> Iterator[(int, str)]:\n        return self.xs.iter()\nfn main():\n    for a, b in Wrap([(1, \"x\")]):\n        print(a + 1, b.len())\nmain()\n",
     );
     // (g) a `Channel[(int, str)]`
     ok(
@@ -895,7 +899,7 @@ fn for_multi_name_over_every_tuple_source_checks() {
 #[test]
 fn for_multi_name_rejects_non_tuple_and_wrong_arity() {
     rejects(
-        "fn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    for a, b in gen():\n        print(a)\nmain()\n",
+        "import Iterator from std.iter\nfn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    for a, b in gen():\n        print(a)\nmain()\n",
         "tuple pattern cannot match a value of type int",
     );
     rejects(
@@ -911,7 +915,7 @@ fn for_multi_name_rejects_non_tuple_and_wrong_arity() {
         "tuple pattern cannot match a value of type int",
     );
     rejects(
-        "fn trip() -> Iterator[(int, str, float)]:\n    yield (1, \"x\", 2.5)\nfn main():\n    for a, b in trip():\n        print(a)\nmain()\n",
+        "import Iterator from std.iter\nfn trip() -> Iterator[(int, str, float)]:\n    yield (1, \"x\", 2.5)\nfn main():\n    for a, b in trip():\n        print(a)\nmain()\n",
         "tuple pattern has 2 element(s), but the value has 3",
     );
     rejects(
@@ -919,7 +923,7 @@ fn for_multi_name_rejects_non_tuple_and_wrong_arity() {
         "tuple pattern has 3 element(s), but the value has 2",
     );
     rejects(
-        "fn f(xs: Iterable[(str, int)]) -> int:\n    for a, b, c in xs:\n        return 0\n    return 1\nfn main():\n    print(f([(\"a\", 1)]))\nmain()\n",
+        "import Iterable from std.iter\nfn f(xs: Iterable[(str, int)]) -> int:\n    for a, b, c in xs:\n        return 0\n    return 1\nfn main():\n    print(f([(\"a\", 1)]))\nmain()\n",
         "tuple pattern has 3 element(s), but the value has 2",
     );
     rejects(
@@ -927,7 +931,7 @@ fn for_multi_name_rejects_non_tuple_and_wrong_arity() {
         "tuple pattern has 3 element(s), but the value has 2",
     );
     rejects(
-        "fn pairs() -> Iterator[(int, str)]:\n    yield (1, \"x\")\nfn main():\n    for a, b in pairs():\n        s: str = a\n        print(s)\nmain()\n",
+        "import Iterator from std.iter\nfn pairs() -> Iterator[(int, str)]:\n    yield (1, \"x\")\nfn main():\n    for a, b in pairs():\n        s: str = a\n        print(s)\nmain()\n",
         "cannot assign int to variable of type str",
     );
 }
@@ -1243,7 +1247,7 @@ fn enum_str_satisfies_stringable_ok() {
 #[test]
 fn enum_add_bound_into_generic_fn_ok() {
     ok(
-        "enum Money:\n    Cents(int)\n    fn add(self, other: Money) -> Money:\n        match self:\n            Money.Cents(a):\n                match other:\n                    Money.Cents(b): return Money.Cents(a + b)\nfn twice[T: Add](x: T) -> T:\n    return x + x\nfn main():\n    m := twice(Money.Cents(3))\n    print(m.add(m) == Money.Cents(12))\nmain()\n",
+        "import Add from std.ops\nenum Money:\n    Cents(int)\n    fn add(self, other: Money) -> Money:\n        match self:\n            Money.Cents(a):\n                match other:\n                    Money.Cents(b): return Money.Cents(a + b)\nfn twice[T: Add](x: T) -> T:\n    return x + x\nfn main():\n    m := twice(Money.Cents(3))\n    print(m.add(m) == Money.Cents(12))\nmain()\n",
     );
 }
 

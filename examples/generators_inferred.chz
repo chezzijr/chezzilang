@@ -1,6 +1,7 @@
 # Generators declare their element type: `-> Iterator[T]` is written, never inferred from a
 # `yield`. Every `yield` must be assignable to that element type.
 
+import Iterator from std.iter
 fn count_to(n: int) -> Iterator[int]:
     i := 0
     while i < n:

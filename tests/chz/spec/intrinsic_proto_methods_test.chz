@@ -8,6 +8,10 @@
 
 # ---- erased generic bodies (the shape under test) ----
 
+import Stringable from std.string
+import Iterable, Iterator from std.iter
+import Comparable, Eq, Hashable from std.cmp
+import Add, Div, Index, IndexSet, Mod, Mul, Neg, Slice, Sub from std.ops
 fn total[T: Add](xs: List[T], zero: T) -> T:
     acc := zero
     for x in xs:

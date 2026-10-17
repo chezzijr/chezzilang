@@ -6,6 +6,7 @@
 # The whole grid (hook x shape x owner x use) is `tests/hook_conformance_grid.rs`; these are the
 # programs the bug-hunt wave filed, one `test fn` each, judged against CPython's output.
 
+import Iterable, Iterator from std.iter
 import Atomic, StructuralEq from std.concurrency
 
 # ---- D1: a hook written with `yield` ----

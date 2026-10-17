@@ -1,5 +1,6 @@
 # tests/chz/spec/airlock_generator_route_test.chz — TICKET-190: a started generator with a private
 # frame crosses every route the same way. CPython runs the same generator in a pool thread.
+import Iterator from std.iter
 import std.concurrency
 import std.time as time
 import submit_task from std.concurrency.task

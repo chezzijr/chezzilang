@@ -10,6 +10,72 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Each std protocol a cell program names, with the std module that owns it (TICKET-265: a
+/// bound `[T: Add]` or a slot `Iterator[int]` needs the import).
+const STD_PROTOCOLS: [(&str, &[&str]); 5] = [
+    (
+        "std.ops",
+        &[
+            "Add",
+            "Sub",
+            "Mul",
+            "Div",
+            "Mod",
+            "Neg",
+            "BitAnd",
+            "BitOr",
+            "BitXor",
+            "Shl",
+            "Shr",
+            "Arithmetic",
+            "Num",
+            "Index",
+            "IndexSet",
+            "Slice",
+            "Contains",
+        ],
+    ),
+    ("std.cmp", &["Eq", "Comparable", "Hashable"]),
+    ("std.iter", &["Iterator", "Iterable"]),
+    ("std.string", &["Stringable"]),
+    ("std.path", &["PathLike"]),
+];
+
+fn names_word(src: &str, word: &str) -> bool {
+    src.match_indices(word).any(|(i, _)| {
+        let before = src[..i].chars().next_back();
+        let after = src[i + word.len()..].chars().next();
+        let is_word =
+            |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
+        !is_word(before) && !is_word(after)
+    })
+}
+
+/// `src` with an `import` line for every std protocol it names and does not import or declare.
+pub fn with_std_imports(src: &str) -> String {
+    let mut head = String::new();
+    for (module, names) in STD_PROTOCOLS {
+        let needed: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| names_word(src, n))
+            .filter(|n| {
+                !src.contains(&format!("protocol {n}"))
+                    && !src.contains(&format!("struct {n}"))
+                    && !src.contains(&format!("enum {n}"))
+            })
+            .filter(|n| {
+                !src.lines()
+                    .any(|l| l.starts_with("import ") && names_word(l, n))
+            })
+            .collect();
+        if !needed.is_empty() {
+            head.push_str(&format!("import {} from {module}\n", needed.join(", ")));
+        }
+    }
+    format!("{head}{src}")
+}
+
 #[derive(Clone)]
 pub enum Expect {
     Prints(String),
@@ -49,6 +115,11 @@ pub fn run_program(dir: &Path, files: &[(String, String)]) -> Out {
     for (rel, src) in files {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let src = if rel.ends_with(".chz") {
+            with_std_imports(src)
+        } else {
+            src.clone()
+        };
         std::fs::write(&path, src).unwrap();
     }
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))

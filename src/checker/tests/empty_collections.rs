@@ -636,6 +636,7 @@ fn extern_fn_reachable_via_from_import() {
 #[test]
 fn eq_walk_sees_fields_through_every_import_form() {
     const LIB: &str = "\
+import Comparable from std.cmp
 struct Tag:
     n: int
 struct Box[T]:
@@ -658,19 +659,19 @@ fn carry(n: int) -> Carrier:
     for (label, main) in [
         (
             "named-fn import (struct field)",
-            "import make from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(make(1), make(2)))\n",
+            "import Eq from std.cmp\nimport make from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(make(1), make(2)))\n",
         ),
         (
             "whole-module import (struct field) — the control",
-            "import lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(lib.make(1), lib.make(2)))\n",
+            "import Eq from std.cmp\nimport lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(lib.make(1), lib.make(2)))\n",
         ),
         (
             "named-fn import (enum payload)",
-            "import carry from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(carry(1), carry(2)))\n",
+            "import Eq from std.cmp\nimport carry from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(carry(1), carry(2)))\n",
         ),
         (
             "whole-module import (enum payload) — the control",
-            "import lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(lib.carry(1), lib.carry(2)))\n",
+            "import Eq from std.cmp\nimport lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(lib.carry(1), lib.carry(2)))\n",
         ),
     ] {
         let errs = check_files(&[("lib.chz", LIB), ("main.chz", main)]);
@@ -686,7 +687,7 @@ fn carry(n: int) -> Carrier:
         ("lib.chz", OK_LIB),
         (
             "main.chz",
-            "import mk from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(mk(1), mk(2)))\n",
+            "import Eq from std.cmp\nimport mk from lib\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nprint(needs(mk(1), mk(2)))\n",
         ),
     ]);
 }
@@ -705,6 +706,7 @@ fn carry(n: int) -> Carrier:
 #[test]
 fn the_eq_cycle_guard_keys_on_identity_not_display_name() {
     const A: &str = "\
+import Comparable from std.cmp
 struct Tag:
     n: int
 struct Bad[T]:
@@ -720,10 +722,10 @@ fn mk_a(n: int) -> H:
 ";
     let b = |name: &str| {
         format!(
-            "import a\nstruct C[T]:\n    v: T\n    fn eq(self, other: Self) -> bool where T: Eq:\n        return self.v == other.v\nstruct {name}:\n    v: C[a.H]\nfn mk_b(n: int) -> {name}:\n    return {name}(C(a.mk_a(n)))\n"
+            "import Eq from std.cmp\nimport a\nstruct C[T]:\n    v: T\n    fn eq(self, other: Self) -> bool where T: Eq:\n        return self.v == other.v\nstruct {name}:\n    v: C[a.H]\nfn mk_b(n: int) -> {name}:\n    return {name}(C(a.mk_a(n)))\n"
         )
     };
-    const MAIN: &str = "import b\nfn needs[U: Eq](x: U, y: U) -> bool:\n    return x == y\nprint(needs(b.mk_b(1), b.mk_b(2)))\n";
+    const MAIN: &str = "import Eq from std.cmp\nimport b\nfn needs[U: Eq](x: U, y: U) -> bool:\n    return x == y\nprint(needs(b.mk_b(1), b.mk_b(2)))\n";
     // THE COLLISION: `b.H` shares a display name with `a.H`, which it reaches.
     files_reject(
         &[("a.chz", A), ("b.chz", &b("H")), ("main.chz", MAIN)],
@@ -737,7 +739,7 @@ fn mk_a(n: int) -> H:
     // CONTROL 2 — the same shape in ONE module with distinct names. Also always rejected.
     entry_rejects(
         &format!(
-            "{A}struct C[T]:\n    v: T\n    fn eq(self, other: Self) -> bool where T: Eq:\n        return self.v == other.v\nstruct H2:\n    v: C[H]\nfn needs[U: Eq](x: U, y: U) -> bool:\n    return x == y\nfn use_it(p: H2, q: H2) -> bool:\n    return needs(p, q)\n"
+            "import Eq from std.cmp\n{A}struct C[T]:\n    v: T\n    fn eq(self, other: Self) -> bool where T: Eq:\n        return self.v == other.v\nstruct H2:\n    v: C[H]\nfn needs[U: Eq](x: U, y: U) -> bool:\n    return x == y\nfn use_it(p: H2, q: H2) -> bool:\n    return needs(p, q)\n"
         ),
         "type H2 does not satisfy Eq (C[H]'s `eq` requires H: Eq)",
     );

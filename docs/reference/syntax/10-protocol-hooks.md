@@ -174,10 +174,13 @@ The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys an
 - In a `[T: Hashable]` body `x.hash()` is the hash the container uses. The number is unspecified (a
   build-dependent 64-bit value, possibly negative).
 
-**`Hashable` alone is not enough for a `Map`/`Set` keyed on `T`: you need `[T: Hashable + Eq]`.** The
-key check runs on every `Map[T, _]`/`Set[T]` type the signature or body spells, even a bare mention:
-`fn h[T: Hashable](xs: Set[T]) -> int: return xs.len()` is rejected (Go: `invalid map key type T
-(missing comparable constraint)`). A `[T: Hashable]` generic that only calls `x.hash()` compiles.
+**`Hashable` embeds `Eq`, so `[T: Hashable]` is enough for a `Map`/`Set` keyed on `T`.** A
+`[T: Hashable]` body may write `a == b`, `Set(xs)` or `{x: 1}`; `[T: Hashable + Eq]` still checks and
+says the same. The key check runs on every `Map[T, _]`/`Set[T]` type the signature or body spells,
+even a bare mention, and a bound-free `fn h[T](xs: Set[T])` is rejected. A type whose `eq` cannot
+hold for the instantiation (`Box[Tag]` with `eq ... where T: Comparable`) is not `Hashable`, so it
+is no key. This is Go's `comparable` and Python's `__hash__` plus `__eq__` pairing; Rust spells it
+`Eq + Hash`.
 
 **Keys are value types (Go model).** A `struct`/`enum` key or element is deep-copied when stored, so
 mutating your original after the insert cannot corrupt the stored key.

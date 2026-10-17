@@ -10,6 +10,8 @@
 # separately by the `ok()`/`rejects()` tests in `src/checker/tests.rs` (the M22 embed block).
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
+import Comparable from std.cmp
+import Add, Contains from std.ops
 protocol Named:
     fn name(self) -> str
 

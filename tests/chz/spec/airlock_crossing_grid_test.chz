@@ -2,6 +2,7 @@
 # expected outcome derived from one question: can the parent observe this value after the join?
 # "ok" = the write runs; "fault" = D4's runtime fault. The compile-error cells of the same grid live
 # in the Rust test `checker::tests::airlock_crossing_grid_compile_cells`.
+import Iterator from std.iter
 import Shared from std.concurrency
 
 struct T179G:

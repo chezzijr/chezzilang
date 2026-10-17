@@ -132,7 +132,7 @@ fn program(
     let leak = body.replace("@[", open).replace("]@", close);
     let in_callee = leak.replace("buf", "b");
     let mut src = format!(
-        "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\n{rdecl}{fdecl}struct H:\n    o: List[{y}]\n"
+        "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\nimport Iterator from std.iter\n{rdecl}{fdecl}struct H:\n    o: List[{y}]\n"
     );
     let int_gen = format!("fn gen(h: H) -> Iterator[int]:\n    buf := {init}\n");
     let (ity, tail) = match route {
@@ -270,7 +270,7 @@ const FRESH_OPERATORS: [(&str, &str, &str, &str); 9] = [
 fn fresh_operator_operands_keep_the_slot_writable() {
     for (i, (e, y, init, write)) in FRESH_OPERATORS.into_iter().enumerate() {
         let src = format!(
-            "fn gen() -> Iterator[{y}]:\n    buf := {init}\n    yield {e}\n    {write}\n    print(\"task wrote\")\n    yield {e}\nfn resume(it: Iterator[{y}]):\n    _ := it.next()\nfn main():\n    it := gen()\n    seen := it.next()\n    parallel:\n        spawn resume(it)\n    print(\"parent sees\", seen)\nmain()\n"
+            "import Iterator from std.iter\nfn gen() -> Iterator[{y}]:\n    buf := {init}\n    yield {e}\n    {write}\n    print(\"task wrote\")\n    yield {e}\nfn resume(it: Iterator[{y}]):\n    _ := it.next()\nfn main():\n    it := gen()\n    seen := it.next()\n    parallel:\n        spawn resume(it)\n    print(\"parent sees\", seen)\nmain()\n"
         );
         for t in THREADS {
             let (code, out, err) = run(&format!("c{i}"), &src, t);

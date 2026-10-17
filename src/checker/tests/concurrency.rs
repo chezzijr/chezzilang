@@ -988,7 +988,9 @@ fn reserved_typeparam_fix_does_not_overreject() {
     entry_ok("struct Pair[K, V]:\n    k: K\n    v: V\n");
     entry_ok("struct Box[Item]:\n    v: Item\n");
     entry_ok("fn id[T](x: T) -> T:\n    return x\n");
-    entry_ok("fn pick[T: Comparable](a: T, b: T) -> T:\n    return a\n");
+    entry_ok(
+        "import Comparable from std.cmp\nfn pick[T: Comparable](a: T, b: T) -> T:\n    return a\n",
+    );
 }
 
 #[test]

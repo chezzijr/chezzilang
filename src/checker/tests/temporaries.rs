@@ -738,11 +738,11 @@ fn range_subscript_ambiguity_grid() {
                     T254Use::Literal => "print(x[1..3])\n".to_string(),
                     T254Use::Variable => "r := 1..3\nprint(x[r])\n".to_string(),
                     T254Use::SliceBound => {
-                        "fn f[C: Slice[R], R](c: C) -> R:\n    return c[1..2]\nprint(f(x))\n"
+                        "import Slice from std.ops\nfn f[C: Slice[R], R](c: C) -> R:\n    return c[1..2]\nprint(f(x))\n"
                             .to_string()
                     }
                     T254Use::IndexBound => {
-                        "fn f[C: Index[Range, V], V](c: C) -> V:\n    return c[1..2]\nprint(f(x))\n"
+                        "import Index from std.ops\nfn f[C: Index[Range, V], V](c: C) -> V:\n    return c[1..2]\nprint(f(x))\n"
                             .to_string()
                     }
                 };
@@ -995,7 +995,7 @@ fn builtin_list_satisfies_contains_bound_like_the_in_operator() {
     // U5: `2 in [1, 2]` type-checks, so `List[int]` must satisfy `Contains[int]`.
     ok("fn main():\n    print(2 in [1, 2])\n");
     ok(
-        "fn has[C: Contains[int]](c: C) -> bool:\n    return 2 in c\n\nfn main():\n    print(has([1, 2]))\n",
+        "import Contains from std.ops\nfn has[C: Contains[int]](c: C) -> bool:\n    return 2 in c\n\nfn main():\n    print(has([1, 2]))\n",
     );
 }
 
@@ -1016,7 +1016,7 @@ fn type_param_needle_is_rejected_for_a_concrete_container() {
         "cannot test membership",
     );
     ok(
-        "fn k[T: Eq](xs: List[T], x: T) -> bool:\n    return x in xs\n\nfn main():\n    print(k([1], 1))\n",
+        "import Eq from std.cmp\nfn k[T: Eq](xs: List[T], x: T) -> bool:\n    return x in xs\n\nfn main():\n    print(k([1], 1))\n",
     );
     // A Set or Map probe hashes the needle: it must satisfy `Hashable`. Both programs faulted at run time.
     rejects(
@@ -1024,7 +1024,7 @@ fn type_param_needle_is_rejected_for_a_concrete_container() {
         "cannot test membership",
     );
     rejects(
-        "fn h[T: Hashable](s: Set[T], x: List[int]) -> bool:\n    return x in s\n\nfn main():\n    print(h({\"a\"}, [1]))\n",
+        "import Hashable from std.cmp\nfn h[T: Hashable](s: Set[T], x: List[int]) -> bool:\n    return x in s\n\nfn main():\n    print(h({\"a\"}, [1]))\n",
         "cannot test membership",
     );
     rejects(
@@ -1032,10 +1032,10 @@ fn type_param_needle_is_rejected_for_a_concrete_container() {
         "cannot test membership",
     );
     ok(
-        "fn f[T: Hashable + Eq](s: Set[(T, int)], x: (T, int)) -> bool:\n    return x in s\n\nfn main():\n    print(f({(1, 2)}, (1, 2)))\n",
+        "import Eq, Hashable from std.cmp\nfn f[T: Hashable + Eq](s: Set[(T, int)], x: (T, int)) -> bool:\n    return x in s\n\nfn main():\n    print(f({(1, 2)}, (1, 2)))\n",
     );
     ok(
-        "fn g[T: Hashable + Eq](s: List[(T, int)], x: (T, int)) -> bool:\n    return x in s\n\nfn main():\n    print(g([(1, 2)], (1, 2)))\n",
+        "import Eq, Hashable from std.cmp\nfn g[T: Hashable + Eq](s: List[(T, int)], x: (T, int)) -> bool:\n    return x in s\n\nfn main():\n    print(g([(1, 2)], (1, 2)))\n",
     );
     ok(
         "fn k(s: List[(int, int)], x: (int, int)) -> bool:\n    return x in s\n\nfn main():\n    print(k([(1, 2)], (1, 2)))\n",

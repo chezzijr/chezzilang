@@ -3,6 +3,7 @@
 # default `Name(field=value, …)` repr. `Stringable` is a built-in protocol (like `Comparable`), so
 # it works as a generic bound.
 
+import Stringable from std.string
 struct Point:
     x: int
     y: int

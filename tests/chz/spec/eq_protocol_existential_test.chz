@@ -34,6 +34,7 @@
 # `checker::tests::protocol_typed_value_rejects_comparable_on_the_real_reason` (Rust-side, since
 # these are compile-time REJECTIONS, not runtime behavior this suite pins).
 
+import Comparable, Eq from std.cmp
 protocol Sized_:
     fn size(self) -> int
 

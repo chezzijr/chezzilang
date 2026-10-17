@@ -78,8 +78,8 @@ Full sink list: `syntax.md` §3.
   the airlock by deep copy, and each widening site checks the concrete witness's own sendability. A
   witness that cannot serialize (one that holds a `Module` handle) is rejected at the **runtime
   airlock**.
-- **Map/set keys.** Any CONCRETE `Hashable` type is a valid map/set key. A generic `[T: Hashable]` that
-  builds, indexes, or mentions a `Map[T, _]`/`Set[T]` needs `[T: Hashable + Eq]`.
+- **Map/set keys.** Any CONCRETE `Hashable` type is a valid map/set key. `Hashable` embeds `Eq`, so a
+  generic `[T: Hashable]` may build, index, or mention a `Map[T, _]`/`Set[T]` and compare `T`.
 - **Enum methods.** `fn name(self, …)` blocks after an enum's variants work like struct methods:
   generic-enum type params are in scope, an enum can define `str`/`hash`/`add`/`compare` to satisfy
   `Stringable`/`Hashable`/`Add`/`Comparable` (`compare` alone is enough for `Comparable`, because an

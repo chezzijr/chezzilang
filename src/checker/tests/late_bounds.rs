@@ -336,14 +336,14 @@ fn every_crossing_closure_method_reports_a_captured_write() {
 
 #[test]
 fn inline_optional_never_satisfies_a_bound_through_its_payload() {
-    let num = "fn double[T: Num](x: T) -> T:\n    return x + x\n";
+    let num = "import Num from std.ops\nfn double[T: Num](x: T) -> T:\n    return x + x\n";
     let loc = "protocol Located:\n    fn line(self) -> int\nstruct Tok:\n    n: int\n    fn line(self) -> int:\n        return self.n\nfn where_is[T: Located](x: T) -> int:\n    return x.line()\n";
     let cells: Vec<(&str, String)> = vec![
         ("num", format!("{num}print(double(?5))\n")),
         ("user-protocol", format!("{loc}n: int = where_is(?Tok(7))\n")),
         (
             "comparable",
-            "fn mx[T: Comparable](a: T, b: T) -> T:\n    return if a < b: b else: a\nstruct NC:\n    n: int\nprint(mx(?NC(1), ?NC(2)))\n".to_string(),
+            "import Comparable from std.cmp\nfn mx[T: Comparable](a: T, b: T) -> T:\n    return if a < b: b else: a\nstruct NC:\n    n: int\nprint(mx(?NC(1), ?NC(2)))\n".to_string(),
         ),
     ];
     let mut missed = Vec::new();
@@ -394,7 +394,9 @@ fn static_method_is_not_a_hook_for_the_operator() {
     ];
     let mut accepted = Vec::new();
     for (hook, method, use_site) in cells {
-        let src = format!("struct C:\n    n: int\n    {method}\nc := C(1)\n{use_site}\n");
+        let src = format!(
+            "import Iterator from std.iter\nstruct C:\n    n: int\n    {method}\nc := C(1)\n{use_site}\n"
+        );
         if check_src(&src).is_empty() {
             accepted.push(hook);
         }
@@ -443,7 +445,7 @@ fn a_near_miss_hook_warns_only_where_the_operator_silently_skips_it() {
         "'hash' on Z is not the Hashable hook",
     );
     warns(
-        "struct C:\n    n: int\n    fn next(self) -> int?:\n        return None\n    fn iter(self, k: int) -> Iterator[int]:\n        return [k].iter()\nc := C(1)\nprint(c.n)\n",
+        "import Iterator from std.iter\nstruct C:\n    n: int\n    fn next(self) -> int?:\n        return None\n    fn iter(self, k: int) -> Iterator[int]:\n        return [k].iter()\nc := C(1)\nprint(c.n)\n",
         "'iter' on C is not the Iterable hook",
     );
     for m in [
@@ -492,7 +494,7 @@ fn a_type_may_ask_conformance_of_a_type_declared_later() {
     );
     // A bounded type parameter keeps its bound when the obligation runs late.
     ok(
-        "struct Reg[K: Hashable + Eq]:\n    m: Map[K, int]\nr: Reg[int] = Reg({})\nprint(r.m.len())\n",
+        "import Eq, Hashable from std.cmp\nstruct Reg[K: Hashable + Eq]:\n    m: Map[K, int]\nr: Reg[int] = Reg({})\nprint(r.m.len())\n",
     );
 }
 
@@ -641,7 +643,7 @@ fn an_atomic_payload_parameter_must_carry_structural_eq() {
     const MK: &str = "(v: T) -> Atomic[T]:\n    return Atomic(v)\n";
     const HOOKED: &str =
         "struct P:\n    n: int\n    fn eq(self, other: P) -> bool:\n        return true\n";
-    const UNKNOWN: &str = "unknown protocol 'StructuralEq' in bound on 'T'; import it from std.concurrency (`import StructuralEq from std.concurrency`)";
+    const UNKNOWN: &str = "unknown name 'StructuralEq' in bound on 'T'; import it from std.concurrency (`import StructuralEq from std.concurrency`)";
     // The unbounded parameter is refused, in a signature and in a struct field.
     entry_rejects(
         &format!("import Atomic from std.concurrency\nfn mk[T]{MK}"),
@@ -658,7 +660,9 @@ fn an_atomic_payload_parameter_must_carry_structural_eq() {
     );
     // Another bound does not stand in for it.
     entry_rejects(
-        &format!("import Atomic from std.concurrency\nfn mk[T: Hashable]{MK}"),
+        &format!(
+            "import Hashable from std.cmp\nimport Atomic from std.concurrency\nfn mk[T: Hashable]{MK}"
+        ),
         "must carry the bound StructuralEq",
     );
     // The bound checks under both import forms and as a `where` clause.
@@ -718,7 +722,9 @@ fn an_atomic_payload_parameter_must_carry_structural_eq() {
 
 #[test]
 fn range_is_a_value_bound_to_a_name_and_passed_as_iterable() {
-    ok("fn total(r: Iterable[int]) -> int:\n    return 0\nr := 0..3\nx := total(0..3)\n");
+    ok(
+        "import Iterable from std.iter\nfn total(r: Iterable[int]) -> int:\n    return 0\nr := 0..3\nx := total(0..3)\n",
+    );
 }
 
 #[test]

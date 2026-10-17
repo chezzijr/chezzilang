@@ -1,5 +1,6 @@
 # examples/for_tuple.chz — tuple-destructuring `for` (gap) + std.iter enumerate/zip.
 
+import Iterator from std.iter
 import std.iter
 
 # Destructure a list of pairs directly.

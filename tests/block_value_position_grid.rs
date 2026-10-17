@@ -105,7 +105,7 @@ fn site_row(site: ValueSite) -> Row {
             &["yieldStmt"],
             true,
             4,
-            "fn g() -> Iterator[Any]:\n    yield {F}\nfor v in g():\n    print(v)\n",
+            "import Iterator from std.iter\nfn g() -> Iterator[Any]:\n    yield {F}\nfor v in g():\n    print(v)\n",
         ),
         ValueSite::Lambda => value(&["closureBody"], true, 0, "f := fn(): {F}\nprint(f())\n"),
         ValueSite::FnBody => value(&[], true, 0, "fn g() -> Any: {F}\nprint(g())\n"),

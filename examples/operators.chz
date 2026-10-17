@@ -3,6 +3,7 @@
 # the prebuilt `Add`/`Sub`/`Mul`/`Div`/`Mod` protocols (powering `+`/`-`/`*`/`/`/`%`); `neg(self) ->
 # Self` satisfies `Neg` (unary `-`). See examples/arithmetic_protocol.chz for div/mod/neg + embedding.
 
+import Add, Mul from std.ops
 struct Vec2:
     x: int
     y: int

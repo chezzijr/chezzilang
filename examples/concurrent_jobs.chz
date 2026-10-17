@@ -23,6 +23,7 @@
 # Run:  chezzi run                  examples/concurrent_jobs.chz
 #       CHEZZI_THREADS=2 chezzi run examples/concurrent_jobs.chz   (second worker count — must match byte-for-byte)
 
+import Iterator from std.iter
 import std.concurrency
 import std.concurrency.collection
 import std.cancel

@@ -4,6 +4,7 @@
 # the receiving type's own param (`T -> int` from `Box[int]`) is threaded into the
 # protocol-method signature comparison, not just `Self`.
 
+import Add from std.ops
 struct Box[T]:
     v: T
     fn add(self, other: Box[T]) -> Box[T]:

@@ -5,6 +5,7 @@
 # The CPU `burn` only makes the drainer likely to reach its `recv` first; the test passes under
 # any interleaving once fixed (no sleep: DEC-050).
 
+import Iterator from std.iter
 fn gen_over(c: Channel[int]) -> Iterator[int]:
     for v in c:
         yield v

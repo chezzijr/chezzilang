@@ -21,6 +21,7 @@
 # `(1).eq(1)` / `[1].eq([1])` are (and stay) `has no method 'eq'` too. `an_erased_eq_bound_can_call_
 # eq_on_every_granted_receiver` in `eq_protocol_test.chz` pins the same shape for the other kinds.
 
+import Eq from std.cmp
 fn g(x: int) -> int:
     return x
 

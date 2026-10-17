@@ -79,9 +79,11 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    - TICKET-263, group A, names: one owner for "which names hold a slot" (owners.md row 44; fixes
      `'None' is not callable` for an imported alias read before `Count := …`); one name per module
      (the owner decision below); a recursive local lambda (`unknown name 'fact'`); a divergent fn.
-   - TICKET-265, group C, builtin types and protocols: fact 10 (row 70), rows 59, 62, 94, protocols
-     to `std.ops`/`std.cmp`/`std.iter`, `Hashable` embeds `Eq` and is opt-in, `T?` derives nothing,
-     `Deque`/`Heap`/`Counter` `Iterable`, the collection convention table, the U5 sibling gaps.
+   - TICKET-265, group C, builtin types and protocols. Part 1 is done (2026-10-17): the std
+     protocols live in `std.ops`/`std.cmp`/`std.iter`/`std.string`/`std.path`/`std.convert` and a bound
+     needs the import, `Hashable` embeds `Eq`, `T?` derives no ordering. Part 2 is open: fact 10
+     (row 70), rows 62, 94, `Hashable` opt-in, `Deque`/`Heap`/`Counter` `Iterable`, the collection
+     convention table, the U5 sibling gaps.
 2. **Group D, fact 11.** One `WireValue` visitor for `wire_summary`, `collect_core_gcrefs` and the
    `to_snap`/`to_wire` budget (row 93).
 3. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): `resolve_ty_ro_d` and

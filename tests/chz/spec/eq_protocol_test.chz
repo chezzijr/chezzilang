@@ -10,6 +10,7 @@
 # `dedup`/`unique`, and the recursive container arms) lives in `eq_protocol_containers_test.chz`.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
+import Comparable, Eq from std.cmp
 fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
         ?_: assert false, where_ + " must fault"

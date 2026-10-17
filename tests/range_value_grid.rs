@@ -469,7 +469,7 @@ impl Pos {
 
 fn common(x: &str) -> String {
     format!(
-        "struct Holder:\n    r: Range\n\nfn lo() -> int:\n    return 2\n\nfn hi() -> int:\n    return 5\n\n\
+        "import Iterable from std.iter\nstruct Holder:\n    r: Range\n\nfn lo() -> int:\n    return 2\n\nfn hi() -> int:\n    return 5\n\n\
          fn mk() -> Range:\n    return {x}\n\nfn dflt(r: Range = {x}) -> Range:\n    return r\n\n\
          fn ident(r: Range) -> Range:\n    return r\n\n\
          fn head_sum[S: Iterable[int]](xs: S) -> int:\n    n := 0\n    t := 0\n    for i in xs:\n        t += i\n        n += 1\n        if n == 4:\n            break\n    return t\n\n\
@@ -730,7 +730,7 @@ fn a_plain_index_stays_strict_and_a_range_key_stays_a_key() {
 fn a_struct_with_slice_or_index_agrees_between_check_and_run() {
     // One decider: the checker picks `slice` or `index` for a `Range` subscript, the compiler emits what it picked.
     // A type with ONE of the two hooks is legal; a type with both is the declaration error below.
-    let src = "struct Sl:\n    n: int\n\n    fn slice(self, r: Range) -> List[int]:\n        return [1, 2]\n\n\
+    let src = "import Index, Slice from std.ops\nstruct Sl:\n    n: int\n\n    fn slice(self, r: Range) -> List[int]:\n        return [1, 2]\n\n\
         struct Ix:\n    n: int\n\n    fn index(self, k: Range) -> str:\n        return \"idx\"\n\n\
         fn via_slice[T: Slice[List[int]]](x: T) -> List[int]:\n    return x[0..1]\n\n\
         fn via_index[T: Index[Range, str]](x: T) -> str:\n    return x[0..1]\n\n\

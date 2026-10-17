@@ -13,7 +13,7 @@ use super::*;
 fn scalars_satisfy_eq_intrinsically() {
     for lit in ["1", "1.5", "\"a\"", "true"] {
         ok(&format!(
-            "fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same({lit}, {lit}))\n"
+            "import Eq from std.cmp\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same({lit}, {lit}))\n"
         ));
     }
 }
@@ -28,7 +28,7 @@ fn scalars_satisfy_eq_intrinsically() {
 /// operator, and this is the shape a user writes on a conditional `fn eq(…) where T: Eq`.
 #[test]
 fn eq_is_satisfied_by_every_type_whose_equality_is_structural() {
-    let same = "fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\n";
+    let same = "import Eq from std.cmp\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\n";
     for (prelude, lit) in [
         ("", "[1]"),
         ("", "(1, 2)"),
@@ -60,7 +60,7 @@ fn eq_is_satisfied_by_every_type_whose_equality_is_structural() {
     }
     // A generic from the real stdlib, reached through a normal import.
     entry_ok(
-        "import std.collections\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nd := collections.Deque[int]([], [])\nprint(same(d, d))\n",
+        "import Eq from std.cmp\nimport std.collections\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nd := collections.Deque[int]([], [])\nprint(same(d, d))\n",
     );
 }
 
@@ -72,6 +72,7 @@ fn eq_is_satisfied_by_every_type_whose_equality_is_structural() {
 fn eq_conformance_does_not_depend_on_the_callers_scope() {
     entry_ok(
         "\
+import Eq from std.cmp
 struct Wrap[T]:
     v: T
 fn same[U: Eq](a: U, b: U) -> bool:
@@ -99,12 +100,12 @@ fn the_builtin_cursor_satisfies_eq_by_identity() {
     // runtime arm (`x.eq(y)` is `x == y`), which `intrinsic_grants_all_have_vm_arms` runs.
     for recv in ["[1, 2].iter()", "gen()"] {
         entry_ok(&format!(
-            "fn gen() -> Iterator[int]:\n    yield 1\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm({recv}, {recv}))\n"
+            "import Eq from std.cmp\nimport Iterator from std.iter\nfn gen() -> Iterator[int]:\n    yield 1\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm({recv}, {recv}))\n"
         ));
     }
     // A USER struct with `next` is a genuine `Obj::Struct` at runtime and keeps the grant.
     entry_ok(
-        "struct Cur:\n    fn next(self) -> int?:\n        return None\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm(Cur(), Cur()))\n",
+        "import Eq from std.cmp\nstruct Cur:\n    fn next(self) -> int?:\n        return None\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm(Cur(), Cur()))\n",
     );
 }
 
@@ -115,12 +116,12 @@ fn the_builtin_cursor_satisfies_eq_by_identity() {
 #[test]
 fn unbounded_type_param_does_not_satisfy_eq() {
     rejects(
-        "fn g[U: Eq](a: U, b: U) -> bool:\n    return a.eq(b)\nfn f[T](a: List[T], b: List[T]) -> bool:\n    return g(a, b)\n",
+        "import Eq from std.cmp\nfn g[U: Eq](a: U, b: U) -> bool:\n    return a.eq(b)\nfn f[T](a: List[T], b: List[T]) -> bool:\n    return g(a, b)\n",
         "does not satisfy Eq",
     );
     // …and a param that DOES declare the bound still forwards (the arm is not simply disabled).
     ok(
-        "fn g[U: Eq](a: U, b: U) -> bool:\n    return a.eq(b)\nfn f[T: Eq](a: T, b: T) -> bool:\n    return g(a, b)\n",
+        "import Eq from std.cmp\nfn g[U: Eq](a: U, b: U) -> bool:\n    return a.eq(b)\nfn f[T: Eq](a: T, b: T) -> bool:\n    return g(a, b)\n",
     );
 }
 
@@ -137,11 +138,11 @@ fn function_value_satisfies_eq_by_identity() {
     const G: &str = "fn g(x: int) -> int:\n    return x\n";
     // the method spelling now agrees with the operator
     ok(&format!(
-        "{G}fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(g, g))\n"
+        "import Eq from std.cmp\n{G}fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(g, g))\n"
     ));
     // …and the bound is satisfiable spelled over the operator too (D1's own shape)
     ok(&format!(
-        "{G}fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(g, g))\n"
+        "import Eq from std.cmp\n{G}fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(g, g))\n"
     ));
 }
 
@@ -150,8 +151,12 @@ fn function_value_satisfies_eq_by_identity() {
 /// cover it.
 #[test]
 fn builtin_function_value_satisfies_eq_by_identity() {
-    ok("fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(ord, ord))\n");
-    ok("fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(ord, ord))\n");
+    ok(
+        "import Eq from std.cmp\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(ord, ord))\n",
+    );
+    ok(
+        "import Eq from std.cmp\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(ord, ord))\n",
+    );
 }
 
 /// **W7-52 — a protocol-typed (existential) value satisfies `Eq` too, so `==`, `.eq()` and a
@@ -182,14 +187,15 @@ fn mkp() -> Sized_:
 fn protocol_typed_value_satisfies_eq() {
     // The bound itself, both spellings.
     ok(&format!(
-        "{SIZED_PRELUDE}fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(mkp(), mkp()))\n"
+        "import Eq from std.cmp\n{SIZED_PRELUDE}fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(mkp(), mkp()))\n"
     ));
     ok(&format!(
-        "{SIZED_PRELUDE}fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(mkp(), mkp()))\n"
+        "import Eq from std.cmp\n{SIZED_PRELUDE}fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(mkp(), mkp()))\n"
     ));
     // The Critical's own repro: two DIFFERENT protocol-typed locals through a generic `[T: Eq]` fn,
     // matching what the bare `==` already answered before this fix.
     ok("\
+import Eq from std.cmp
 protocol Sized_:
     fn size(self) -> int
 struct Tag:
@@ -211,13 +217,23 @@ print(generic_eq(a, b))
 /// every other protocol along with it.
 #[test]
 fn protocol_typed_value_does_not_satisfy_other_protocols() {
-    for (bound, needle) in [
-        ("Hashable", "does not satisfy Hashable"),
-        ("Iterable[int]", "does not satisfy Iterable"),
-        ("Add", "does not satisfy Add"),
+    for (import, bound, needle) in [
+        (
+            "Hashable from std.cmp",
+            "Hashable",
+            "does not satisfy Hashable",
+        ),
+        (
+            "Iterable from std.iter",
+            "Iterable[int]",
+            "does not satisfy Iterable",
+        ),
+        ("Add from std.ops", "Add", "does not satisfy Add"),
     ] {
         rejects(
-            &format!("{SIZED_PRELUDE}fn probe[T: {bound}](a: T):\n    pass\nprobe(mkp())\n"),
+            &format!(
+                "import {import}\n{SIZED_PRELUDE}fn probe[T: {bound}](a: T):\n    pass\nprobe(mkp())\n"
+            ),
             needle,
         );
     }
@@ -232,12 +248,14 @@ fn protocol_typed_value_does_not_satisfy_other_protocols() {
 #[test]
 fn protocol_typed_value_rejects_comparable_on_the_real_reason() {
     rejects(
-        &format!("{SIZED_PRELUDE}fn probe[T: Comparable](a: T):\n    pass\nprobe(mkp())\n"),
+        &format!(
+            "import Comparable from std.cmp\n{SIZED_PRELUDE}fn probe[T: Comparable](a: T):\n    pass\nprobe(mkp())\n"
+        ),
         "does not satisfy Comparable",
     );
     // …and NOT the pre-fix message, which named the embed instead of the missing method.
     let errs = check_src(&format!(
-        "{SIZED_PRELUDE}fn probe[T: Comparable](a: T):\n    pass\nprobe(mkp())\n"
+        "import Comparable from std.cmp\n{SIZED_PRELUDE}fn probe[T: Comparable](a: T):\n    pass\nprobe(mkp())\n"
     ));
     assert!(
         !errs
@@ -281,6 +299,7 @@ fn eq_operator_enforces_the_receivers_eq_where_bounds() {
     // that fixture, with a docstring quoting a fault its own program never produced. This one was
     // verified to fault on the pre-change binary before the assertion was written.
     const COND: &str = "\
+import Comparable from std.cmp
 struct Tag:
     n: int
 struct Box[T]:
@@ -387,12 +406,13 @@ b := Box(Tag(2))
     // A hook-shaped `eq` whose `where` names its OWN `[U]`: the receiver's type arg must not be
     // substituted into `U`, so the bound is not this rule's business.
     entry_ok(
-        "struct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    fn eq[U](self, other: Self) -> bool where U: Comparable:\n        return true\nprint(Box(Tag(1)) == Box(Tag(2)))\n",
+        "import Comparable from std.cmp\nstruct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    fn eq[U](self, other: Self) -> bool where U: Comparable:\n        return true\nprint(Box(Tag(1)) == Box(Tag(2)))\n",
     );
     // `where T: Eq` over the six structurally-equatable-or-Eq-granted payloads the 2026-08-10 revert
     // was caught by. They are green only because Task 1 landed `Eq`-satisfaction-is-what-`==`-accepts
     // first. Plus a function value — all measured `true` today.
     const EQB: &str = "\
+import Eq from std.cmp
 struct P:
     n: int
 struct Box[T]:
@@ -467,6 +487,7 @@ fn ho() -> int?:
 #[test]
 fn eq_where_bound_is_unenforced_through_a_protocol_slot() {
     const SRC: &str = "\
+import Comparable from std.cmp
 protocol Tagged:
     fn tag(self) -> int
 struct Tag:
@@ -497,6 +518,7 @@ b: Tagged = Box(Tag(2))
 #[test]
 fn protocol_erasure_eq_where_bound_boundaries() {
     const SRC: &str = "\
+import Comparable from std.cmp
 protocol Tagged:
     fn tag(self) -> int
 struct Tag:
@@ -553,6 +575,7 @@ struct Box[T]:
     );
     // Result error slot: same erasure arm via `Ty::Protocol(\"Error\")`.
     const ERR_SRC: &str = "\
+import Comparable from std.cmp
 struct Tag:
     n: int
 struct MyErr[T]:
@@ -576,6 +599,7 @@ struct MyErr[T]:
     // REJECTION in the Rust suite, so these are compile-time rows here instead, over that file's own
     // `Sized_`/`Tag`/`Box[T]` fixture.
     const SIZED_SRC: &str = "\
+import Comparable from std.cmp
 protocol Sized_:
     fn size(self) -> int
 struct Tag:
@@ -605,7 +629,7 @@ struct Box[T]:
     // was: `a_generic_eq_bound_faults_on_an_unsatisfied_witness_same_as_the_operator`.
     entry_rejects(
         &format!(
-            "{SIZED_SRC}fn generic_eq[T: Eq](a: T, b: T) -> bool:\n    return a == b\nx: Sized_ = Box(Tag(1), \"x\")\ny: Sized_ = Box(Tag(2), \"y\")\ngeneric_eq(x, y)\n"
+            "import Eq from std.cmp\n{SIZED_SRC}fn generic_eq[T: Eq](a: T, b: T) -> bool:\n    return a == b\nx: Sized_ = Box(Tag(1), \"x\")\ny: Sized_ = Box(Tag(2), \"y\")\ngeneric_eq(x, y)\n"
         ),
         "Tag: Comparable",
     );
@@ -631,6 +655,7 @@ struct Box[T]:
 #[test]
 fn list_equality_builtins_enforce_the_element_eq_where_bounds() {
     const COND: &str = "\
+import Comparable from std.cmp
 struct Tag:
     n: int
 struct Box[T]:
@@ -760,6 +785,7 @@ b := Box(Tag(2))
 #[test]
 fn a_generic_body_that_compares_must_bound_its_type_param_by_eq() {
     const TAG_BOX: &str = "\
+import Comparable from std.cmp
 struct Tag:
     n: int
 struct Box[T]:
@@ -783,12 +809,12 @@ struct Box[T]:
         ),
         "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
-    // Instance 3 — `[T: Hashable]` alone, `Set(xs)` construction inside the body: `Hashable` does
-    // NOT imply `Eq` (measured: embedding it broke the `Holder`-shaped ordinary-`eq`-method escape
-    // hatch — see `key_ty_reject`'s doc), so the map/set-key gate demands both bounds explicitly.
+    // Instance 3 — `[T: Hashable]` alone, `Set(xs)` construction inside the body: `Hashable` embeds
+    // `Eq` (owner decision 2, TICKET-265), so the body checks; the call fails because `Box[Tag]`'s `eq`
+    // cannot hold, so `Box[Tag]` is no `Hashable` (see `hashable_bound_licenses_eq`).
     rejects(
         &format!(
-            "{TAG_BOX}fn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\nprint(f([Box(Tag(1)), Box(Tag(2))]))\n"
+            "import Hashable from std.cmp\n{TAG_BOX}fn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\nprint(f([Box(Tag(1)), Box(Tag(2))]))\n"
         ),
         "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
@@ -796,10 +822,14 @@ struct Box[T]:
     // ---- ok() neighbours derived from the same premise ----
 
     // `[T: Eq]` — the direct fix.
-    ok("fn f[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(f(1, 2))\n");
+    ok(
+        "import Eq from std.cmp\nfn f[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(f(1, 2))\n",
+    );
     // `[T: Comparable]` — already works: `Comparable` embeds `Eq` (`std/prelude.chz`), untouched by
     // this change.
-    ok("fn f[T: Comparable](a: T, b: T) -> bool:\n    return a == b\nprint(f(1, 2))\n");
+    ok(
+        "import Comparable from std.cmp\nfn f[T: Comparable](a: T, b: T) -> bool:\n    return a == b\nprint(f(1, 2))\n",
+    );
     // A generic fn that takes `T` but never compares it — the bound obligation is per-USE, not a tax
     // on every type parameter.
     ok("fn f[T](a: T) -> T:\n    return a\nprint(f(1))\n");
@@ -808,7 +838,7 @@ struct Box[T]:
     // (`Box[Tag]`, which has no declared `eq` and is structurally sound — `Tag` is a plain `int`
     // field) is actually walked structurally.
     ok(
-        "struct Tag:\n    n: int\nstruct Box[T]:\n    val: T\nfn same_map[T: Hashable + Eq](a: Map[T, Box[Tag]], b: Map[T, Box[Tag]]) -> bool:\n    return a == b\n",
+        "import Eq, Hashable from std.cmp\nstruct Tag:\n    n: int\nstruct Box[T]:\n    val: T\nfn same_map[T: Hashable + Eq](a: Map[T, Box[Tag]], b: Map[T, Box[Tag]]) -> bool:\n    return a == b\n",
     );
     // A generic fn whose `T` is never bare-compared, only reached via a declared conditional `eq`
     // whose `where` bound IS satisfied by `T`'s own declared bound (`Comparable`, not `Eq` — the
@@ -836,6 +866,7 @@ struct Box[T]:
 #[test]
 fn a_map_key_or_set_element_must_be_eq_not_merely_hashable() {
     const COND: &str = "\
+import Comparable from std.cmp
 struct Tag:
     n: int
 struct Box[T]:
@@ -919,7 +950,7 @@ b := Box(Tag(2))
     // `Holder`-shaped ordinary-`eq`-method escape hatch, `key_ty_reject`'s doc), so the DECLARATION
     // must spell both, exactly as Rust's own `HashSet<T>`/`HashMap<K, V>` require `Eq + Hash`.
     entry_ok(
-        "fn h[T: Hashable + Eq](xs: Set[T]) -> int:\n    return xs.len()\nfn k[T: Hashable + Eq](m: Map[T, int]) -> int:\n    return m.len()\nfn s2[T: Hashable + Eq](x: T) -> int:\n    s := Set([x])\n    s.add(x)\n    m := {x: 1}\n    return s.len() + m.len()\nprint(h(Set([1])) + k({1: 2}) + s2(1))\n",
+        "import Eq, Hashable from std.cmp\nfn h[T: Hashable + Eq](xs: Set[T]) -> int:\n    return xs.len()\nfn k[T: Hashable + Eq](m: Map[T, int]) -> int:\n    return m.len()\nfn s2[T: Hashable + Eq](x: T) -> int:\n    s := Set([x])\n    s.add(x)\n    m := {x: 1}\n    return s.len() + m.len()\nprint(h(Set([1])) + k({1: 2}) + s2(1))\n",
     );
     rejects(
         "fn h[T](xs: Set[T]) -> int:\n    return xs.len()\n",
@@ -929,7 +960,7 @@ b := Box(Tag(2))
     // the body, is now rejected at ITS OWN definition (`s2`'s `Set([x])`/`{x: 1}` above are the
     // `+ Eq` fix; this is the same body with the bound removed).
     rejects(
-        "fn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\n",
+        "import Hashable from std.cmp\nfn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\n",
         "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
 }
@@ -941,6 +972,7 @@ b := Box(Tag(2))
 #[test]
 fn eq_is_refused_when_the_walk_reaches_an_unsatisfied_conditional_eq() {
     const COND: &str = "\
+import Comparable, Eq from std.cmp
 struct Tag:
     n: int
 struct Box[T]:
@@ -978,7 +1010,7 @@ fn same[T: Eq](a: T, b: T) -> bool:
     // IT, so `Wrap[Tag]` was granted and `Tag.compare` faulted at runtime.
     entry_rejects(
         &format!(
-            "{COND}struct Wrap[Z]:\n    v: Box[Z]\nfn trick[Z: Comparable](z: Z, a: Wrap[Tag], b: Wrap[Tag]) -> bool:\n    return same(a, b)\nprint(trick(1, Wrap(Box(Tag(1))), Wrap(Box(Tag(2)))))\n"
+            "import Comparable from std.cmp\n{COND}struct Wrap[Z]:\n    v: Box[Z]\nfn trick[Z: Comparable](z: Z, a: Wrap[Tag], b: Wrap[Tag]) -> bool:\n    return same(a, b)\nprint(trick(1, Wrap(Box(Tag(1))), Wrap(Box(Tag(2)))))\n"
         ),
         "type Wrap[Tag] does not satisfy Eq",
     );
@@ -1002,6 +1034,7 @@ fn same[T: Eq](a: T, b: T) -> bool:
 #[test]
 fn conditional_eq_bound_recursion_terminates() {
     const CYCLE: &str = "\
+import Eq from std.cmp
 struct C[T]:
     v: T
     fn eq(self, other: Self) -> bool where T: Eq:
@@ -1026,6 +1059,7 @@ fn use_it(a: D, b: D) -> bool:
     // this is not a regression — it is the fail-closed answer agreeing with the ancestor.
     entry_rejects(
         "\
+import Eq from std.cmp
 struct N[T]:
     v: T
     next: N[List[T]]?
@@ -1047,6 +1081,7 @@ fn use_it(a: N[int], b: N[int]) -> bool:
 fn a_different_instantiation_of_an_in_progress_type_is_still_walked() {
     entry_rejects(
         "\
+import Comparable, Eq from std.cmp
 struct Tag:
     n: int
 struct Bad[T]:
@@ -1074,10 +1109,12 @@ fn use_it(a: R[int], b: R[int]) -> bool:
 #[test]
 fn a_nested_cursor_does_not_poison_its_container() {
     entry_ok(
-        "fn eqm[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(eqm([[1, 2].iter()], [[1, 2].iter()]))\n",
+        "import Eq from std.cmp\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(eqm([[1, 2].iter()], [[1, 2].iter()]))\n",
     );
     entry_ok(
         "\
+import Eq from std.cmp
+import Iterator from std.iter
 struct HasIt:
     it: Iterator[int]
 fn eqm[T: Eq](a: T, b: T) -> bool:
@@ -1088,7 +1125,7 @@ fn use_it(a: HasIt, b: HasIt) -> bool:
     );
     // The cursor ITSELF satisfies `Eq` by identity (TICKET-257).
     entry_ok(
-        "fn eqm[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(eqm([1, 2].iter(), [1, 2].iter()))\n",
+        "import Eq from std.cmp\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(eqm([1, 2].iter(), [1, 2].iter()))\n",
     );
 }
 
@@ -1110,7 +1147,7 @@ fn a_long_chain_of_conditional_eq_types_is_decided_not_waved_through() {
     let chain = |n: usize, sound: bool| {
         let innermost = if sound { "Box[int]" } else { "Box[Tag]" };
         let mut s = String::from(
-            "struct Tag:\n    n: int\n\
+            "import Comparable, Eq from std.cmp\nstruct Tag:\n    n: int\n\
              struct Box[T]:\n    val: T\n    \
              fn compare(self, other: Self) -> int where T: Comparable:\n        return 0\n    \
              fn eq(self, other: Self) -> bool where T: Comparable:\n        return self.compare(other) == 0\n\
@@ -1192,6 +1229,7 @@ fn the_budget_refusal_elides_a_runaway_type_name() {
     // whether or not elision fires. Kept as a cheap regression tripwire, not as elision coverage.
     let msg = budget_msg(
         "\
+import Eq from std.cmp
 struct N[T]:
     v: T
     next: N[List[T]]?
@@ -1212,7 +1250,7 @@ fn use_it(a: N[int], b: N[int]) -> bool:
     // this refusal's, and is out of scope here.)
     let deep = (0..40).fold("int".to_string(), |acc, _| format!("List[{acc}]"));
     let msg = budget_msg(&format!(
-        "struct N[T]:\n    v: T\n    next: N[List[T]]?\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nfn use_it(a: N[{deep}], b: N[{deep}]) -> bool:\n    return same(a, b)\n"
+        "import Eq from std.cmp\nstruct N[T]:\n    v: T\n    next: N[List[T]]?\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nfn use_it(a: N[{deep}], b: N[{deep}]) -> bool:\n    return same(a, b)\n"
     ));
     let clause = msg
         .rfind(" (")
@@ -1245,14 +1283,15 @@ fn a_shared_field_type_graph_is_walked_once_per_type() {
         ));
     }
     src.push_str(
-        "fn needs[U: Eq](p: U, q: U) -> bool:\n    return p == q\nfn use_it(p: B24, q: B24) -> bool:\n    return needs(p, q)\n",
+        "import Eq from std.cmp\nfn needs[U: Eq](p: U, q: U) -> bool:\n    return p == q\nfn use_it(p: B24, q: B24) -> bool:\n    return needs(p, q)\n",
     );
     let (errs, entries) = eq_obligations_for(&src);
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
     let want = 24..=8 * 24;
     assert!(
         want.contains(&entries),
-        "the shared-field walk is exponential again: B24 entered {entries} Eq obligations (want \
+        "import Eq from std.cmp
+the shared-field walk is exponential again: B24 entered {entries} Eq obligations (want \
          {want:?}; path-guard-only: 33554431)"
     );
 }
@@ -1278,14 +1317,15 @@ fn a_cyclic_shared_field_type_graph_is_also_walked_once_per_type() {
     }
     src.push_str("struct Root:\n    a: L22\n    b: L22\n");
     src.push_str(
-        "fn needs[U: Eq](p: U, q: U) -> bool:\n    return p == q\nfn use_it(p: Root, q: Root) -> bool:\n    return needs(p, q)\n",
+        "import Eq from std.cmp\nfn needs[U: Eq](p: U, q: U) -> bool:\n    return p == q\nfn use_it(p: Root, q: Root) -> bool:\n    return needs(p, q)\n",
     );
     let (errs, entries) = eq_obligations_for(&src);
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
     let want = 22..=8 * 22;
     assert!(
         want.contains(&entries),
-        "the CYCLIC shared-field walk is exponential again: entered {entries} Eq obligations (want \
+        "import Eq from std.cmp
+the CYCLIC shared-field walk is exponential again: entered {entries} Eq obligations (want \
          {want:?}; assumption-poisoned memo: 16777215)"
     );
 }
@@ -1308,7 +1348,7 @@ fn the_budget_refusal_names_the_type_the_walk_started_from() {
         ));
     }
     src.push_str(&format!(
-        "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S{N}[Map[int, int]], b: S{N}[Map[int, int]]) -> bool:\n    return needs(a, b)\n"
+        "import Eq from std.cmp\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S{N}[Map[int, int]], b: S{N}[Map[int, int]]) -> bool:\n    return needs(a, b)\n"
     ));
     let errs = check_entry(&src);
     let msg = errs
@@ -1336,7 +1376,7 @@ fn a_deep_but_finite_chain_stays_within_the_eq_budget() {
         src.push_str(&format!("struct S{i}:\n    v: S{}\n", i - 1));
     }
     src.push_str(
-        "fn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S140, b: S140) -> bool:\n    return needs(a, b)\n",
+        "import Eq from std.cmp\nfn needs[U: Eq](a: U, b: U) -> bool:\n    return a == b\nfn use_it(a: S140, b: S140) -> bool:\n    return needs(a, b)\n",
     );
     entry_ok(&src);
 }
@@ -1398,6 +1438,7 @@ fn runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused() {
 fn a_self_nested_generic_instantiation_shrinking_inward_is_accepted() {
     entry_ok(
         "\
+import Eq from std.cmp
 struct Pair[T]:
     v: T
 fn needs[U: Eq](a: U, b: U) -> bool:
@@ -1411,6 +1452,7 @@ fn use_it(a: Pair[Pair[int]], b: Pair[Pair[int]]) -> bool:
     // without ever asking which direction the difference runs.
     entry_ok(
         "\
+import Eq from std.cmp
 struct Pair[T]:
     v: T
 fn needs[U: Eq](a: U, b: U) -> bool:
@@ -1430,6 +1472,7 @@ fn use_it(a: Pair[Pair[Pair[int]]], b: Pair[Pair[Pair[int]]]) -> bool:
 fn polymorphic_recursion_is_refused_in_bounded_time_by_growth_detection() {
     let (errs, entries) = eq_obligations_for(
         "\
+import Eq from std.cmp
 struct N[T]:
     v: T
     next: N[List[T]]?
@@ -1467,6 +1510,7 @@ fn use_it(a: N[int], b: N[int]) -> bool:
 fn a_growing_re_entry_through_a_constant_type_argument_is_accepted() {
     entry_ok(
         "\
+import Eq from std.cmp
 struct Wrapper[T]:
     v: T
     ints: Wrapper[List[int]]?
@@ -1478,6 +1522,7 @@ fn use_it(a: Wrapper[int], b: Wrapper[int]) -> bool:
     );
     entry_ok(
         "\
+import Eq from std.cmp
 struct Wrapper[T]:
     v: T
     ints: Wrapper[List[int]]?
@@ -1516,6 +1561,7 @@ fn polymorphic_recursion_through_a_func_type_argument_is_refused_in_bounded_time
     );
     let (errs, entries) = eq_obligations_for(
         "\
+import Eq from std.cmp
 struct N[T]:
     v: T
     next: N[fn(T) -> int]?
@@ -1562,6 +1608,7 @@ fn use_it(a: N[int], b: N[int]) -> bool:
 fn a_memoized_eq_result_never_escapes_its_coinductive_assumption() {
     let errs = check_entry(
         "\
+import Comparable, Eq from std.cmp
 struct Tag:
     n: int
 struct Bad[T]:
@@ -1606,10 +1653,10 @@ fn q2(x: M, y: M) -> bool:
 #[test]
 fn struct_with_eq_satisfies_eq() {
     entry_ok(
-        "struct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
+        "import Eq from std.cmp\nstruct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
     );
     entry_ok(
-        "struct Q:\n    x: int\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Q(1), Q(2)))\n",
+        "import Eq from std.cmp\nstruct Q:\n    x: int\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Q(1), Q(2)))\n",
     );
     // The ORDINARY-METHOD escape hatch (`fn eq(self, x: T)`, a generic operand — not the hook, and
     // `==` leaves it structural) MUST now be granted `Eq` (C1, W7-53 follow-up review): before this,
@@ -1621,7 +1668,7 @@ fn struct_with_eq_satisfies_eq() {
     // `Eq`. `a.eq(b)` dispatches by NAME to the escape-hatch method regardless (unchanged), so the
     // call itself still runs; only the BOUND obligation is what changed.
     entry_ok(
-        "enum Opt2[T]:\n    Some(T)\n    Nothing\n    fn eq(self, x: T) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Opt2[int].Some(1), Opt2[int].Some(2)))\n",
+        "import Eq from std.cmp\nenum Opt2[T]:\n    Some(T)\n    Nothing\n    fn eq(self, x: T) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Opt2[int].Some(1), Opt2[int].Some(2)))\n",
     );
     // …but the grant above must NOT skip the escape hatch's own `where` bounds — C1' (the mirror of
     // C1, found by re-review). The first cut of the C1 fix short-circuited `eq_where_unsatisfied`
@@ -1640,7 +1687,7 @@ fn struct_with_eq_satisfies_eq() {
     // routes through `eq_sig_is_hook`: a METHOD type param (`[U]`) and the OWNER's type param (`T`).
     let escape_hatch_with_a_bound = |operand: &str, method_params: &str| {
         format!(
-            "struct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    \
+            "import Comparable, Eq from std.cmp\nstruct Tag:\n    n: int\nstruct Box[T]:\n    val: T\n    \
              fn eq{method_params}(self, o: {operand}) -> bool where T: Comparable:\n        \
              return self.val.compare(self.val) == 0\n\
              fn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\n\
@@ -1658,7 +1705,7 @@ fn struct_with_eq_satisfies_eq() {
     // The premise-derived `ok()` neighbour: the SAME shapes over a payload that DOES satisfy the
     // bound must still be accepted, or the rule above is an over-reject rather than a proof.
     entry_ok(
-        "struct Box[T]:\n    val: T\n    fn eq[U](self, o: U) -> bool where T: Comparable:\n        return self.val.compare(self.val) == 0\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm(Box(1), Box(2)))\n",
+        "import Comparable, Eq from std.cmp\nstruct Box[T]:\n    val: T\n    fn eq[U](self, o: U) -> bool where T: Comparable:\n        return self.val.compare(self.val) == 0\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm(Box(1), Box(2)))\n",
     );
 }
 
@@ -1668,11 +1715,11 @@ fn struct_with_eq_satisfies_eq() {
 #[test]
 fn eq_wrong_return_type_is_an_ordinary_method() {
     entry_ok(
-        "struct P:\n    x: int\n    fn eq(self, other: P) -> int:\n        return 0\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
+        "import Eq from std.cmp\nstruct P:\n    x: int\n    fn eq(self, other: P) -> int:\n        return 0\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
     );
     // The arity half: a one-parameter `eq` is the same class.
     entry_ok(
-        "struct P:\n    x: int\n    fn eq(self) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
+        "import Eq from std.cmp\nstruct P:\n    x: int\n    fn eq(self) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
     );
 }
 
@@ -1845,7 +1892,9 @@ fn comparable_types_equality_still_ok() {
     // A generic body comparing two values of its own type param must bound it by Eq (W7-53) — rustc/Go
     // both reject the unbounded form at its OWN definition; see
     // `a_generic_body_that_compares_must_bound_its_type_param_by_eq`.
-    entry_ok("fn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(1, 2))\n");
+    entry_ok(
+        "import Eq from std.cmp\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(same(1, 2))\n",
+    );
     // ----- the shapes `compatible` alone CANNOT see (it is registry-blind), i.e. everything that
     // is NOT provably disjoint because one side is a SUPERTYPE of the other or is erased. Each of
     // these ran and printed `true` before B2 landed; all five regressed on the first cut.
@@ -1864,7 +1913,7 @@ fn comparable_types_equality_still_ok() {
     // mismatched shape (that axis is unaffected by W7-53), but the WALK now requires `T: Eq`, same as
     // every other free-param comparison — so this needs the bound where it once needed none.
     entry_ok(
-        "fn f[T: Eq](a: T) -> bool:\n    return a == 1\nfn main():\n    print(f(1))\nmain()\n",
+        "import Eq from std.cmp\nfn f[T: Eq](a: T) -> bool:\n    return a == 1\nfn main():\n    print(f(1))\nmain()\n",
     );
     // (5) a NESTED existential — the recursion `compatible` cannot do.
     entry_ok(
@@ -1887,7 +1936,7 @@ fn comparable_types_equality_still_ok() {
     // (8) same as (4), one level down (`List[T]`): the co-inhabitance erasure is unaffected, the
     // walk still needs `T: Eq`.
     entry_ok(
-        "fn f[T: Eq](a: List[T]) -> bool:\n    return a == [1]\nfn main():\n    print(f([1]))\nmain()\n",
+        "import Eq from std.cmp\nfn f[T: Eq](a: List[T]) -> bool:\n    return a == [1]\nfn main():\n    print(f([1]))\nmain()\n",
     );
     // (9) the runtime's own CROSS-TYPE equality arms compose through the recursion, because they
     // are arms of `may_be_equal` rather than a top-level special case: `[1.0] == [1]` and
@@ -1915,7 +1964,7 @@ fn comparable_types_equality_still_ok() {
     // no bound. `flip`'s `a: Bag[T]` is a CONCRETE struct with a bare `T` FIELD that the walk reaches
     // directly, so (W7-53) it needs `T: Eq`.
     entry_ok(
-        "protocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag[T]:\n    item: T\n    fn get(self, i: int) -> T:\n        return self.item\nfn cmp[T](a: Container[T], b: Bag[int]) -> bool:\n    return a == b\nfn flip[T: Eq](a: Bag[T], b: Container[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "import Eq from std.cmp\nprotocol Container[T]:\n    fn get(self, i: int) -> T\nstruct Bag[T]:\n    item: T\n    fn get(self, i: int) -> T:\n        return self.item\nfn cmp[T](a: Container[T], b: Bag[int]) -> bool:\n    return a == b\nfn flip[T: Eq](a: Bag[T], b: Container[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
     );
 }
 
@@ -2166,6 +2215,7 @@ fn method_type_param_result_type_substituted() {
 #[test]
 fn method_type_param_bound_satisfied_ok() {
     let src = "\
+import Comparable from std.cmp
 struct Box[T]:
     v: T
     fn biggest[U: Comparable](self, a: U, b: U) -> U:
@@ -2182,6 +2232,7 @@ r: int = b.biggest(3, 7)
 fn method_type_param_bound_enforced() {
     // U: Comparable, but Plain isn't Comparable — the method bound must be enforced at the call.
     let src = "\
+import Comparable from std.cmp
 struct Plain:
     n: int
 struct Box[T]:
@@ -2389,6 +2440,7 @@ fn bounded_type_param_forwards_to_bounded_call_ok() {
     // Review #1: a `T: Comparable` value must satisfy Comparable when forwarded to another
     // `[U: Comparable]` call (generic composition).
     let src = "\
+import Comparable from std.cmp
 fn max[T: Comparable](a: T, b: T) -> T:
     if a < b:
         return b
@@ -2404,6 +2456,7 @@ print(pick(3, 7))
 fn generic_struct_bound_enforced_at_construction() {
     // Review C1: a struct type-param bound must be enforced, not just on generic fns.
     let src = "\
+import Comparable from std.cmp
 struct Plain:
     n: int
 struct Box[T: Comparable]:
@@ -2419,6 +2472,7 @@ b := Box(Plain(1))
 #[test]
 fn generic_struct_bound_enforced_on_explicit_type_arg() {
     let src = "\
+import Comparable from std.cmp
 struct Plain:
     n: int
 struct Box[T: Comparable]:
@@ -2434,6 +2488,7 @@ b: Box[Plain] = Box(Plain(1))
 #[test]
 fn generic_struct_bound_satisfied_ok() {
     let src = "\
+import Comparable from std.cmp
 struct Box[T: Comparable]:
     a: T
 b := Box(5)
@@ -2568,6 +2623,7 @@ fn len(l: LinkedList[int]) -> int:
 #[test]
 fn generic_enum_bound_enforced_at_construction() {
     let src = "\
+import Comparable from std.cmp
 struct Plain:
     n: int
 enum Box[T: Comparable]:
@@ -2584,6 +2640,7 @@ b := Box.Has(Plain(1))
 #[test]
 fn generic_enum_bound_satisfied_ok() {
     let src = "\
+import Comparable from std.cmp
 enum Box[T: Comparable]:
     Empty
     Has(T)
@@ -2670,6 +2727,7 @@ print(Ver(1) < Ver(2))
 #[test]
 fn comparable_bound_on_a_compare_only_struct_is_allowed() {
     ok("\
+import Comparable from std.cmp
 struct Ver:
     maj: int
     fn compare(self, other: Ver) -> int:
@@ -2682,6 +2740,7 @@ print(mx(Ver(1), Ver(2)))
 ");
     // …and transitively through a user protocol that EMBEDS `Comparable`.
     ok("\
+import Comparable from std.cmp
 protocol Ord2:
     Comparable
     fn tag(self) -> str
@@ -2712,6 +2771,7 @@ fn comparable_bound_hint_does_not_over_fire() {
     // (1) No comparator at all — the missing half is `compare`, and it is named, bare.
     bare(
         "\
+import Comparable from std.cmp
 struct Ver:
     maj: int
 fn mx[T: Comparable](a: T, b: T) -> T:
@@ -2723,6 +2783,7 @@ print(mx(Ver(1), Ver(2)))
     // (2) A bare `T: Eq` bound over a struct whose `==` is the structural derive is SATISFIED (D1) —
     // this used to be the "not the ratchet, keep it bare" control and is now simply legal code.
     ok("\
+import Eq from std.cmp
 struct Ver:
     maj: int
     fn compare(self, other: Ver) -> int:
@@ -2780,6 +2841,7 @@ fn sort_with_args_rejected() {
 fn user_fn_where_bound_enforced_at_call_site() {
     // `where T: Comparable` merges into the `[T]` param's bounds; a non-Comparable arg is rejected.
     let src = "\
+import Comparable from std.cmp
 struct Q:
     n: int
 fn needs_cmp[T](x: T) where T: Comparable:
@@ -2795,7 +2857,9 @@ needs_cmp(q)
 
 #[test]
 fn user_fn_where_bound_accepts_comparable_arg() {
-    ok("fn needs_cmp[T](x: T) where T: Comparable:\n    y := x\nneeds_cmp(5)\n");
+    ok(
+        "import Comparable from std.cmp\nfn needs_cmp[T](x: T) where T: Comparable:\n    y := x\nneeds_cmp(5)\n",
+    );
 }
 
 #[test]
@@ -2803,14 +2867,14 @@ fn user_fn_where_bound_used_inside_body() {
     // A `where`-bounded param may use the bounded operation in the body (`<` needs Comparable) —
     // proves the merge feeds the in-scope bound set, not just call-site enforcement.
     ok(
-        "fn pick[T](a: T, b: T) -> T where T: Comparable:\n    if a < b:\n        return b\n    return a\nx := pick(1, 2)\n",
+        "import Comparable from std.cmp\nfn pick[T](a: T, b: T) -> T where T: Comparable:\n    if a < b:\n        return b\n    return a\nx := pick(1, 2)\n",
     );
 }
 
 #[test]
 fn user_fn_where_names_unknown_param_rejected() {
     rejects(
-        "fn bad[T]() where Q: Comparable:\n    y := 1\n",
+        "import Comparable from std.cmp\nfn bad[T]() where Q: Comparable:\n    y := 1\n",
         "unknown type parameter 'Q' in where-clause",
     );
 }
@@ -2820,6 +2884,7 @@ fn user_fn_where_bound_duplicating_decl_bound_reports_once() {
     // A bound named in BOTH `[T: Comparable]` and `where T: Comparable` must be deduped on merge —
     // a failing call emits the diagnostic exactly ONCE, not once per duplicated bound.
     let src = "\
+import Comparable from std.cmp
 fn f[T: Comparable](x: T) -> int where T: Comparable:
     return 1
 f(true)
@@ -2838,6 +2903,7 @@ fn conditional_method_where_receiver_param_accepted() {
     // A method may `where`-bound the ENCLOSING struct's own type param `T` (not the method's own
     // `[U]`). This is ACCEPTED (no "unknown type parameter") — it is a conditional method.
     ok("\
+import Comparable from std.cmp
 struct Box[T]:
     val: T
     fn top(self) -> T where T: Comparable:
@@ -2851,6 +2917,7 @@ x := b.top()
 fn conditional_method_accepts_comparable_receiver() {
     // int satisfies Comparable → the conditional method is callable.
     ok("\
+import Comparable from std.cmp
 struct Box[T]:
     val: T
     fn top(self) -> T where T: Comparable:
@@ -2866,6 +2933,7 @@ fn conditional_method_rejects_non_comparable_receiver() {
     // at the CALL site with the standard bound-satisfaction diagnostic.
     rejects(
         "\
+import Comparable from std.cmp
 struct Q:
     n: int
 struct Box[T]:
@@ -2889,6 +2957,7 @@ fn conditional_method_operator_dispatch_enforces_receiver_bound() {
     let prog = |val: &str, op: &str| {
         format!(
             "\
+import Comparable, Eq from std.cmp
 struct Q:
     n: int
 struct Box[T]:
@@ -2922,6 +2991,7 @@ fn conditional_method_as_generic_bound_arg_enforces() {
     let prog = |val: &str| {
         format!(
             "\
+import Comparable from std.cmp
 struct Q:
     n: int
 struct Box[T]:
@@ -2945,6 +3015,7 @@ fn conditional_method_enum_where_receiver_param() {
     // Enum receiver-param conditional method: accept on a Comparable payload, reject on a
     // non-Comparable one.
     ok("\
+import Comparable from std.cmp
 enum Opt[T]:
     Some(T)
     Nothing
@@ -2955,6 +3026,7 @@ x := o.peek()
 ");
     rejects(
         "\
+import Comparable from std.cmp
 struct Q:
     n: int
 enum Opt[T]:
@@ -2975,6 +3047,7 @@ fn conditional_method_own_u_param_where_still_merges() {
     // method's generic-param bounds and enforces via the generic-method path (unchanged by the
     // receiver-bound diversion).
     ok("\
+import Comparable from std.cmp
 struct Box[T]:
     val: T
     fn cmp[U](self, other: U) -> int where U: Comparable:
@@ -2984,6 +3057,7 @@ x := b.cmp(3)
 ");
     rejects(
         "\
+import Comparable from std.cmp
 struct Q:
     n: int
 struct Box[T]:
@@ -3003,6 +3077,7 @@ fn conditional_method_pinned_receiver_arg_ok() {
     // field annotation), the conditional method is callable — the defer path does not over-reject a
     // resolved-but-late arg.
     ok("\
+import Comparable from std.cmp
 struct Box[T]:
     val: List[T]
     fn top(self) -> List[T] where T: Comparable:
@@ -3018,6 +3093,7 @@ fn conditional_static_method_rejects_non_comparable() {
     // cannot tell a static from an instance method. It MUST be enforced on the static-dispatch path
     // (`infer_static_call`), else a conditional factory silently accepts a non-satisfying type arg.
     ok("\
+import Comparable from std.cmp
 struct Box[T]:
     val: T
     fn of(x: T) -> Box[T] where T: Comparable:
@@ -3026,6 +3102,7 @@ b := Box.of(5)
 ");
     rejects(
         "\
+import Comparable from std.cmp
 struct Q:
     n: int
 struct Box[T]:
@@ -3042,6 +3119,7 @@ b := Box.of(Q(1))
 fn conditional_static_enum_method_rejects_non_comparable() {
     // Mirror for an enum static factory reached as `Enum.method(...)`.
     ok("\
+import Comparable from std.cmp
 enum Opt[T]:
     Some(T)
     Nothing
@@ -3051,6 +3129,7 @@ o := Opt.build(5)
 ");
     rejects(
         "\
+import Comparable from std.cmp
 struct Q:
     n: int
 enum Opt[T]:
@@ -3070,6 +3149,7 @@ fn conditional_static_method_on_value_single_diagnostic() {
     // ONLY the static-method diagnostic — NOT also a spurious "does not satisfy" from the receiver
     // bound (the enforcement must fire AFTER the `is_static` rejection, not before).
     let src = "\
+import Comparable from std.cmp
 struct Q:
     n: int
 struct Box[T]:
@@ -3104,6 +3184,7 @@ fn conditional_method_body_uses_receiver_bound() {
     // T and T` because the receiver bound was recorded on `sig.where_bounds` (call-site only) and
     // never merged into the in-scope enclosing param `T`.
     ok("\
+import Comparable from std.cmp
 struct Box[T]:
     val: T
     fn max2(self, other: T) -> T where T: Comparable:
@@ -3120,6 +3201,7 @@ fn conditional_enum_method_body_uses_receiver_bound() {
     // BUG-2 mirror for an enum conditional method (check_fn_body is shared across struct/enum, so
     // the single fix covers both).
     ok("\
+import Comparable from std.cmp
 enum Wrap[T]:
     V(T)
     fn bigger(self, a: T, b: T) -> T where T: Comparable:
@@ -3140,6 +3222,7 @@ fn conditional_static_method_redundant_decl_bound_reports_once() {
     // ONCE. Fixed by deduping the receiver-bound against the enclosing param's declared bounds in
     // `fn_sig`.
     let src = "\
+import Comparable from std.cmp
 struct Q:
     n: int
 struct Box[T: Comparable]:
@@ -3247,12 +3330,16 @@ fn optional_order_cells(p: &str) -> Vec<(String, &'static str, String)> {
         (
             "Comparable bound",
             none,
-            format!("fn f[T: Comparable](x: T):\n    pass\nfn t(a: {p}?):\n    f(a)\n"),
+            format!(
+                "import Comparable from std.cmp\nfn f[T: Comparable](x: T):\n    pass\nfn t(a: {p}?):\n    f(a)\n"
+            ),
         ),
         (
             "Num bound",
             none,
-            format!("fn f[T: Num](x: T):\n    pass\nfn t(a: {p}?):\n    f(a)\n"),
+            format!(
+                "import Num from std.ops\nfn f[T: Num](x: T):\n    pass\nfn t(a: {p}?):\n    f(a)\n"
+            ),
         ),
         (
             "tuple",

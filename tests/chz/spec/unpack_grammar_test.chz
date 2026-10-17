@@ -4,6 +4,7 @@
 # same program (`for a, (b, c) in [(1, (2, 3))]` -> `1 2 3`, `x = 1, 2` -> `(1, 2)`, ...).
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
+import Iterator from std.iter
 fn divmod(a: int, b: int) -> (int, int):
     return a / b, a % b
 

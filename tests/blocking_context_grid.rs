@@ -175,7 +175,7 @@ struct Cell {
 
 const DEADLOCK: &str = "deadlock";
 
-const PROGRAM: &str = "import std.concurrency\nimport Executor, Shared from std.concurrency
+const PROGRAM: &str = "import std.concurrency\nimport Iterator from std.iter\nimport Executor, Shared from std.concurrency
 import std.time
 import std.io
 import std.net

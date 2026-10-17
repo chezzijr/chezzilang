@@ -11,6 +11,7 @@
 # TICKET-111 (docs/contributing/gaps.md W12-5) — a task-local alias of a global is the SAME object as the
 # task's copy of the global (adoption), not a second copy. That still holds; a write through
 # either the alias or the global now faults identically (both denote the one copied object).
+import Iterator from std.iter
 import std.concurrency
 
 fn d4_push2(xs: List[int]):

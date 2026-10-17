@@ -156,7 +156,7 @@ fn else_guard_grid() {
         // ---- generator: `return` ends it.
         prints(
             "generator",
-            "fn gen() -> Iterator[int]:\n    for i in [1, 2, 0, 4]:\n        v := r(i) else e:\n            return\n        yield v\nfor x in gen():\n    print(x)",
+            "import Iterator from std.iter\nfn gen() -> Iterator[int]:\n    for i in [1, 2, 0, 4]:\n        v := r(i) else e:\n            return\n        yield v\nfor x in gen():\n    print(x)",
             "1\n2",
         ),
         // ---- spawn and defer blocks: rejected.

@@ -1,5 +1,6 @@
 # Method-level type parameters: a method may introduce its own fresh `[U]`
 # beyond the struct's own `[T]`. `U` is inferred from the call arguments.
+import Comparable from std.cmp
 struct Box[T]:
     v: T
     fn map_to[U](self, f: fn(T) -> U) -> U:

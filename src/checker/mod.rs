@@ -22,6 +22,7 @@ use std::fmt;
 
 pub(crate) use crate::base::builtin::{Builtin, Lowering};
 pub(crate) use builtin_type::BuiltinType;
+pub use graph_pass::std_protocol_owner;
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,
@@ -356,6 +357,12 @@ pub(crate) fn is_firstclass_builtin_fn(name: &str) -> bool {
 /// is a per-DECLARATION hoist/setup check or a name resolution, off any hot path.
 fn is_std_protocol(name: &str) -> bool {
     graph_pass::std_protocol_owner(name).is_some()
+}
+
+/// True when the std protocol `name` is global: declared in the prelude (`Any`, `Error`), so every
+/// module sees it with no import.
+fn is_global_protocol(name: &str) -> bool {
+    graph_pass::std_protocol_owner(name) == Some("std.prelude")
 }
 
 /// True if the native fn `module_id.member` diverges (never returns), like `panic`. Used to

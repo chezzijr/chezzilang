@@ -3,6 +3,7 @@
 # builtin `Arithmetic` (= Add + Sub + Mul + Div) and a user `VectorSpace` protocol (which EMBEDS
 # `Arithmetic + Neg` plus its own `dot`) drive bounded generics over both structs and ints.
 
+import Arithmetic, Neg from std.ops
 struct Vec2:
     x: int
     y: int

@@ -7,6 +7,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/grid_cell.rs"]
+mod grid_cell;
+
 fn m(sig: &str, body: &str) -> String {
     format!("    fn {sig}:\n        {body}\n")
 }
@@ -337,7 +340,7 @@ struct Outcome {
 
 fn chezzi(sub: &str, name: &str, src: &str, threads: Option<&str>) -> Outcome {
     let path = dir().join(format!("{name}.chz"));
-    std::fs::write(&path, src).expect("write the cell");
+    std::fs::write(&path, grid_cell::with_std_imports(src)).expect("write the cell");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg(sub).arg(&path);
     match threads {
@@ -1296,7 +1299,7 @@ fn a_warning_fires_exactly_where_the_operator_skips_the_method() {
                 let src = format!("{}{}", owner(kind, &hook.shapes[si]), hook.op);
                 let tag = format!("warn_{kind}_{}_{shape}", hook.name);
                 let path = dir().join(format!("{tag}.chz"));
-                std::fs::write(&path, &src).expect("write the cell");
+                std::fs::write(&path, grid_cell::with_std_imports(&src)).expect("write the cell");
                 let checked = Command::new(env!("CARGO_BIN_EXE_chezzi"))
                     .arg("check")
                     .arg("--errors=json")

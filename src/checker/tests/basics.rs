@@ -784,7 +784,7 @@ fn inferred_compare_generic_bound_rejected() {
     // A generic bound `[T: Comparable]` over a struct whose `compare` infers bool must reject at
     // check, not fault later.
     entry_rejects(
-        "struct P:\n    x: int\n    fn compare(self, other: P) -> bool:\n        return self.x < other.x\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nfn main():\n    print(cmp(P(1), P(2)))\nmain()\n",
+        "import Comparable from std.cmp\nstruct P:\n    x: int\n    fn compare(self, other: P) -> bool:\n        return self.x < other.x\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nfn main():\n    print(cmp(P(1), P(2)))\nmain()\n",
         "Comparable",
     );
 }

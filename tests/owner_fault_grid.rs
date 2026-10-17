@@ -234,7 +234,7 @@ fn rows() -> Vec<Row> {
     ]
 }
 
-const PROGRAM: &str = "import std.concurrency\nimport Executor, Shared from std.concurrency
+const PROGRAM: &str = "import Iterator from std.iter\nimport std.concurrency\nimport Executor, Shared from std.concurrency
 import std.time
 import std.io
 import std.net\nimport Socket from std.net

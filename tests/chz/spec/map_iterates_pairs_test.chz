@@ -1,6 +1,7 @@
 # tests/chz/spec/map_iterates_pairs_test.chz — a Map iterates (key, value) pairs and satisfies
 # Iterable[(K, V)] (TICKET-257, owner U9). Keys are m.keys(); membership stays the key.
 
+import Iterable from std.iter
 fn pairs(xs: Iterable[(str, int)]) -> int:
     t := 0
     for k, v in xs:
