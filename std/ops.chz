@@ -1,0 +1,68 @@
+# std.ops -- the operator and container protocols; a bound needs an import, an operator does not.
+#
+# `[T: Add]` needs `import Add from std.ops`. The operator `+` needs no import: it lowers to the
+# `add` hook whether or not the name `Add` is bound. These `protocol` declarations are the one source
+# of each shape (`Checker::seed_std_protocols`). Conformance stays checker-wired: `satisfies` grants
+# `int` and `float` the arithmetic protocols intrinsically, and a user struct satisfies one
+# structurally through its methods.
+
+protocol Add:
+    fn add(self, other: Self) -> Self
+
+protocol Sub:
+    fn sub(self, other: Self) -> Self
+
+protocol Mul:
+    fn mul(self, other: Self) -> Self
+
+protocol Div:
+    fn div(self, other: Self) -> Self
+
+protocol Mod:
+    fn mod(self, other: Self) -> Self
+
+protocol Neg:
+    fn neg(self) -> Self
+
+protocol BitAnd:
+    fn bitand(self, other: Self) -> Self
+
+protocol BitOr:
+    fn bitor(self, other: Self) -> Self
+
+protocol BitXor:
+    fn bitxor(self, other: Self) -> Self
+
+protocol Shl:
+    fn shl(self, other: Self) -> Self
+
+protocol Shr:
+    fn shr(self, other: Self) -> Self
+
+protocol Arithmetic:
+    Add + Sub + Mul + Div
+
+# `Num` -- int and float only (sealed in satisfies_args_d); the operators a [T: Num] body may use.
+protocol Num:
+    Arithmetic + Mod + Neg + Comparable
+
+protocol Index[K, V]:
+    fn index(self, k: K) -> V
+
+# `IndexSet` embeds no protocol but has TWO methods in ORDER (index before set_index).
+protocol IndexSet[K, V]:
+    fn index(self, k: K) -> V
+    fn set_index(self, k: K, v: V) -> None
+
+# Slicing: `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[..]` and `xs[Range(a, b, step)]` hand the `Range` value
+# to `slice`; a built-in container resolves it with the same rules (a negative bound counts from the
+# end, an inclusive end adds one after that, both bounds clamp). `R` is the slice result type,
+# recovered at call sites.
+protocol Slice[R]:
+    fn slice(self, r: Range) -> R
+
+# `Contains[Item]` -- the membership protocol (Python `__contains__`): `x in obj` dispatches to
+# `contains(self, item) -> bool`. Built-in list/set/map/str test membership intrinsically; a user
+# struct/enum satisfies it structurally. `Item` (the element type) is recovered at the `in` site.
+protocol Contains[Item]:
+    fn contains(self, item: Item) -> bool

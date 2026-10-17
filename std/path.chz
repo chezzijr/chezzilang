@@ -17,6 +17,15 @@
 # dirname/split/ext/splitext) and Go `path.Clean` for `normalize` (the one fully-specified lexical
 # algorithm). Each function's contract is documented inline and in docs/reference/stdlib/ §5.
 
+# `PathLike` (W7-8) -- the INPUT position of every path-taking std fn (Python `os.PathLike`, Rust
+# `AsRef<Path>`): `as_path(self) -> bytes` hands back the RAW OS bytes, so a non-UTF-8 filename never
+# round-trips through the validated-UTF-8 `str`. `str`/`bytes`/`bytearray` conform INTRINSICALLY (grant
+# rows in `INTRINSIC_PROTO_METHODS`); `path.Path` -- what `fs`/`os` hand BACK -- conforms structurally
+# through its own `as_path`. Deliberately distinct from a byte-DATA `as_bytes` so a type satisfying
+# both has no method ambiguity. A bound needs `import PathLike from std.path`.
+protocol PathLike:
+    fn as_path(self) -> bytes
+
 # `Path` (W7-8) — the OUTPUT position of the filesystem surface: what `fs.list_dir`/`walk`/`glob`/
 # `canonicalize` and `os.getcwd()` hand back. An ORDINARY Chezzi struct over the RAW OS bytes, so a
 # non-UTF-8 filename survives a round-trip that a validated-UTF-8 `str` would destroy (`fs.exists` on

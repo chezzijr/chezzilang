@@ -27,6 +27,7 @@ pub const STD_FILES: &[(&str, &str)] = &[
     ("cmp.chz", include_str!("../../std/cmp.chz")),
     ("collections.chz", include_str!("../../std/collections.chz")),
     ("concurrency.chz", include_str!("../../std/concurrency.chz")),
+    ("convert.chz", include_str!("../../std/convert.chz")),
     (
         "concurrency/collection.chz",
         include_str!("../../std/concurrency/collection.chz"),
@@ -54,6 +55,7 @@ pub const STD_FILES: &[(&str, &str)] = &[
     ("math.chz", include_str!("../../std/math.chz")),
     ("memoize.chz", include_str!("../../std/memoize.chz")),
     ("net.chz", include_str!("../../std/net.chz")),
+    ("ops.chz", include_str!("../../std/ops.chz")),
     ("os.chz", include_str!("../../std/os.chz")),
     ("path.chz", include_str!("../../std/path.chz")),
     ("prelude.chz", include_str!("../../std/prelude.chz")),

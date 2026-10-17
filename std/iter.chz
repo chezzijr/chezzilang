@@ -13,6 +13,21 @@
 
 import std.rand
 
+# `Iterator[Elem]` -- `next` yields the element, or `None` when the cursor is spent. The value type
+# `Iterator[T]` (a generator's type) and a bound `[T: Iterator[int]]` both need
+# `import Iterator from std.iter`; a `for` loop over a generator needs no import.
+protocol Iterator[Elem]:
+    fn next(self) -> Option[Elem]
+
+# `Iterable[Elem]` -- "can produce a fresh cursor": its `iter(self) -> Iterator[Elem]` returns the
+# reserved `Iterator[T]` value type (`Ty::Struct("Iterator",[Elem])`). Conformance stays checker-wired
+# (`satisfies_args`: built-in collections and any `Iterator[T]` intrinsically, since every Iterator IS
+# Iterable via `iter() == self`; plus a user struct with a structural `iter`). The reverse is NOT
+# true: `Iterator` needs a real cursor and a raw collection does not satisfy it. The bound's `[Elem]`
+# recovers the element type at call sites (`infer_method_call`'s `Iterable.iter` case).
+protocol Iterable[Elem]:
+    fn iter(self) -> Iterator[Elem]
+
 # Pair each element with its 0-based index: `[a, b]` → `[(0, a), (1, b)]`.
 fn enumerate[T](xs: List[T]) -> List[(int, T)]:
     out: List[(int, T)] = []

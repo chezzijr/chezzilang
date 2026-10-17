@@ -255,140 +255,20 @@ native enum Result[T, E]:
 import Some, None from Option
 import Ok, Err from Result
 
-# The builtin/reserved STRUCTURAL PROTOCOLS' shape (phase 5c-protocols). These 22 are UNIVERSE protocols
-# (always in scope, usable as a generic bound — `[T: Comparable]` / `[T: Arithmetic]` — but never
-# redeclarable by a user program: `is_reserved_protocol` rejects a user `protocol Comparable:`). Only the
-# SHAPE (method sigs + `+`-joined embeds) is file-backed here, as an ADDITIVE, DRIFT-GUARDED MIRROR: the
-# live runtime source stays the Rust `prebuilt_protocols` seed (installed at `Checker::new`, BEFORE any
-# module), and the checker asserts (`assert_native_protocol_shape_matches`, debug-only) that the parsed
-# shape BYTE-MATCHES the seed so the two can't silently drift. Everything that DECIDES conformance +
-# operator binding stays RUST-WIRED and is untouched: `satisfies` (int/float satisfy Add/Comparable/Neg
-# INTRINSICALLY with no method; a user struct satisfies structurally via its methods), `iter_elem`
-# (Iterator conformance), operator lowering (`+`→add, `<`→compare, `for`→Iterator, `[]`→Index,
-# `[:]`→Slice, `?`/interpolation/Map-keys), and `check_bounds`. The reserved-protocol hoist is
-# VALIDATE-AND-NO-OP in a stdlib module (never inserted into the protocol table), so these decls register
-# no user symbol — they are shape documentation the drift guard pins to the Rust seed.
-#
-# All 22 reserved protocols are mirrored here, including `Iterable` — its `iter(self) -> Iterator[Elem]`
-# return type resolves via `resolve_type`'s dedicated `Iterator[T]` value arm to the same
-# `Ty::Struct("Iterator",[Elem])` the seed uses, so the shape ports cleanly like every other one.
+# The two GLOBAL protocols, in scope in every module with no import (Go keeps `any` and `error` global
+# the same way). Every other std protocol is declared in the `std.*` module that owns its topic
+# (`std.ops`, `std.cmp`, `std.iter`, `std.string`, `std.path`, `std.convert`) and a bound on it needs an
+# import. These `protocol` declarations are the only source of each shape: `Checker::seed_std_protocols`
+# harvests them. Conformance and operator lowering stay checker-wired (`satisfies`, `iter_elem`,
+# `check_bounds`).
 
-# `Any` — the accept-all TOP type: an EMPTY structural protocol (zero methods, zero embeds), so every
-# type satisfies it. Written with the `pass` empty-body marker. A user empty protocol behaves
-# identically. Users cannot redeclare `Any` (`is_reserved_protocol`); this prelude mirror is exempt via
-# the always-injected-stub / validate-and-no-op stdlib hoist path.
+# `Any` -- the accept-all TOP type: an EMPTY structural protocol (zero methods, zero embeds), so every
+# type satisfies it. Written with the `pass` empty-body marker.
 protocol Any:
     pass
 
-protocol Comparable:
-    Eq
-    fn compare(self, other: Self) -> int
-
-protocol Eq:
-    fn eq(self, other: Self) -> bool
-
-protocol Stringable:
-    fn str(self) -> str
-
 protocol Error:
     fn message(self) -> str
-
-protocol Hashable:
-    fn hash(self) -> int
-
-protocol Add:
-    fn add(self, other: Self) -> Self
-
-protocol Sub:
-    fn sub(self, other: Self) -> Self
-
-protocol Mul:
-    fn mul(self, other: Self) -> Self
-
-protocol Div:
-    fn div(self, other: Self) -> Self
-
-protocol Mod:
-    fn mod(self, other: Self) -> Self
-
-protocol Neg:
-    fn neg(self) -> Self
-
-protocol BitAnd:
-    fn bitand(self, other: Self) -> Self
-
-protocol BitOr:
-    fn bitor(self, other: Self) -> Self
-
-protocol BitXor:
-    fn bitxor(self, other: Self) -> Self
-
-protocol Shl:
-    fn shl(self, other: Self) -> Self
-
-protocol Shr:
-    fn shr(self, other: Self) -> Self
-
-protocol Arithmetic:
-    Add + Sub + Mul + Div
-
-# `Num` — int and float only (sealed in satisfies_args_d); the operators a [T: Num] body may use.
-protocol Num:
-    Arithmetic + Mod + Neg + Comparable
-
-# `Iterator[Elem]` — `next` yields the element, or `None` when the cursor is spent.
-protocol Iterator[Elem]:
-    fn next(self) -> Option[Elem]
-
-# `Iterable[Elem]` — "can produce a fresh cursor" — its `iter(self) -> Iterator[Elem]` returns the
-# reserved `Iterator[T]` value type (`Ty::Struct("Iterator",[Elem])`), which `resolve_type` accepts
-# in return position (the dedicated `Iterator[T]` value arm), so the SHAPE ports cleanly. Conformance
-# stays special-cased (`satisfies_args`: built-in collections + any `Iterator[T]` intrinsically — every
-# Iterator IS Iterable via `iter() == self` — plus a user struct with a structural `iter`; the reverse is
-# NOT true, `Iterator` needs a real cursor and a raw collection does not satisfy it — W6-3b), and the
-# bound's `[Elem]` recovers the element type at call sites (`infer_method_call`'s `Iterable.iter` case).
-protocol Iterable[Elem]:
-    fn iter(self) -> Iterator[Elem]
-
-protocol Index[K, V]:
-    fn index(self, k: K) -> V
-
-# `IndexSet` embeds no protocol but has TWO methods in ORDER (index before set_index — `methods` is an
-# ordered Vec, and the drift guard pins the order).
-protocol IndexSet[K, V]:
-    fn index(self, k: K) -> V
-    fn set_index(self, k: K, v: V) -> None
-
-# Slicing: `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[..]` and `xs[Range(a, b, step)]` hand the `Range` value
-# to `slice`; a built-in container resolves it with the same rules (a negative bound counts from the
-# end, an inclusive end adds one after that, both bounds clamp). `R` is the slice result type,
-# recovered at call sites.
-protocol Slice[R]:
-    fn slice(self, r: Range) -> R
-
-# `Convert[S]` — the extensible type-conversion protocol (Rust `From`, target-keyed). Its sole method
-# `convert(x: S) -> Self` is STATIC (first param is `x`, NOT `self`), so it is called `Target.convert(src)`
-# and produces a fresh `Self`. `S` (the source type) is the one arity param, so the bound reads
-# `[T: Convert[str]]`. Slice 1 (this): the protocol is declared + reserved + bound-parseable only —
-# structural witnessing (a concrete type SATISFYING it) is slice 2, and `T.convert(..)` through a bound is
-# slice 3. The shape mirrors the Rust seed in `prebuilt_protocols` (`is_static`, `[S]`).
-protocol Convert[S]:
-    fn convert(x: S) -> Self
-
-# `Contains[Item]` — the membership protocol (Python `__contains__`, L5): `x in obj` dispatches to
-# `contains(self, item) -> bool`. Built-in list/set/map/str test membership intrinsically; a user
-# struct/enum satisfies it structurally. `Item` (the element type) is recovered at the `in` site.
-protocol Contains[Item]:
-    fn contains(self, item: Item) -> bool
-
-# `PathLike` (W7-8) — the INPUT position of every path-taking std fn (Python `os.PathLike`, Rust
-# `AsRef<Path>`): `as_path(self) -> bytes` hands back the RAW OS bytes, so a non-UTF-8 filename never
-# round-trips through the validated-UTF-8 `str`. `str`/`bytes`/`bytearray` conform INTRINSICALLY (grant
-# rows in `INTRINSIC_PROTO_METHODS`); `path.Path` — what `fs`/`os` hand BACK — conforms structurally
-# through its own `as_path`. Deliberately distinct from a byte-DATA `as_bytes` so a type satisfying
-# both has no method ambiguity.
-protocol PathLike:
-    fn as_path(self) -> bytes
 
 # `Range` — a range of ints as a VALUE (TICKET-253). `a..b`, `a..=b`, `..b`, `a..` and `..` build one; so
 # does `Range(a, b)` / `Range(a, b, step)` (the constructor is the only place for a step; a negative step

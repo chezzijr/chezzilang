@@ -1,0 +1,7 @@
+# std.convert -- the Convert protocol (Rust From).
+#
+# `convert(x: S) -> Self` is STATIC (the first param is `x`, not `self`), so it is called
+# `Target.convert(src)` and produces a fresh `Self`. `S`, the source type, is the one arity param, so
+# the bound reads `[T: Convert[str]]`. The bound needs `import Convert from std.convert`.
+protocol Convert[S]:
+    fn convert(x: S) -> Self
