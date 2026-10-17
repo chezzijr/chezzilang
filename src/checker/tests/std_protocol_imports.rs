@@ -295,3 +295,23 @@ fn protocol_stmts_follow_the_lexer_block_extent() {
         .collect();
     assert_eq!(shape, [("A".to_string(), 3, 2), ("B".to_string(), 1, 11)]);
 }
+
+/// A signature error in a struct or enum method points into that method's line, not at the type's
+/// header line.
+#[test]
+fn a_method_signature_error_points_at_the_method() {
+    for (owner, head) in [
+        ("struct", "struct S:\n    v: int\n"),
+        ("enum", "enum E:\n    A\n"),
+    ] {
+        for (what, sig) in [
+            ("bound", "fn m[T: Hashable](self, x: T) -> int"),
+            ("param type", "fn m(self, x: Nope) -> int"),
+        ] {
+            let src = format!("{head}    {sig}:\n        return 0\nprint(1)\n");
+            let errs = check_src(&src);
+            assert_eq!(errs.len(), 1, "{owner} {what}: {errs:?}");
+            assert_eq!(errs[0].span.line, 3, "{owner} {what}: {}", errs[0].message);
+        }
+    }
+}

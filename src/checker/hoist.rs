@@ -310,7 +310,7 @@ impl Checker {
                     let saved_self = self.current_self_ty.replace(self_ty.clone());
                     let methods = methods
                         .iter()
-                        .map(|m| (m.name.clone(), self.fn_sig(m, s.span, Some(&self_ty))))
+                        .map(|m| (m.name.clone(), self.fn_sig(m, m.name_span, Some(&self_ty))))
                         .collect();
                     self.current_self_ty = saved_self;
                     self.exit_type_params(saved);
@@ -407,7 +407,7 @@ impl Checker {
                     let saved_self = self.current_self_ty.replace(self_ty.clone());
                     let method_sigs: HashMap<String, FnSig> = methods
                         .iter()
-                        .map(|m| (m.name.clone(), self.fn_sig(m, s.span, Some(&self_ty))))
+                        .map(|m| (m.name.clone(), self.fn_sig(m, m.name_span, Some(&self_ty))))
                         .collect();
                     self.current_self_ty = saved_self;
                     // Variant names and STATIC-method names must be DISJOINT: `Enum.name` always

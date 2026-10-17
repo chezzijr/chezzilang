@@ -7,9 +7,12 @@
 #
 # The ceiling only discriminates on an OPTIMIZED build: one `burn(1500000)` takes ~0.2 s on the
 # release binary and ~1.8-2.1 s on the debug binary `cargo test` runs this suite with, where even the
-# outer-closed shape takes ~7.9 s. `optimized_build()` times one solo burn and each test returns
+# outer-closed shape takes ~7.9 s. `can_fan_out()` times one solo burn and each test returns
 # early (passes without asserting) when that is 1000 ms or more, so the debug gates stay green and
 # the release run (`chezzi test` on the release binary, the ticket's declared command) asserts.
+# The fan-out also needs two workers: at `CHEZZI_THREADS=1` the 8 children run one after another
+# (~1.7 s on release). `chezzi test` gives a program an empty env, so `can_fan_out()` reads the worker
+# count from the run itself: two burns in a nursery take about one burn's time only on two workers.
 import std.concurrency
 import std.time
 
@@ -21,10 +24,18 @@ fn burn(n: int) -> int:
         i += 1
     return x
 
-fn optimized_build() -> bool:
+fn can_fan_out() -> bool:
     t0 := time.monotonic()
     burn(1500000)
-    return (time.monotonic() - t0) * 1000.0 < 1000.0
+    solo := (time.monotonic() - t0) * 1000.0
+    if solo >= 1000.0:
+        return false
+    t1 := time.monotonic()
+    parallel:
+        spawn: burn(1500000)
+        spawn: burn(1500000)
+    pair := (time.monotonic() - t1) * 1000.0
+    return pair < solo * 1.5
 
 fn fan_open() -> int:
     ch := Channel[int](0)
@@ -45,7 +56,7 @@ fn fan_open() -> int:
     return got
 
 test fn nested_nursery_fans_out_while_outer_body_is_open():
-    if not optimized_build():
+    if not can_fan_out():
         return
     t0 := time.monotonic()
     got := fan_open()
@@ -73,7 +84,7 @@ fn fan_flat() -> int:
     return got
 
 test fn flat_nursery_fans_out_while_body_is_blocked():
-    if not optimized_build():
+    if not can_fan_out():
         return
     t0 := time.monotonic()
     got := fan_flat()

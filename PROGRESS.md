@@ -75,7 +75,7 @@ Details of each step are in [`docs/history/progress/2026-10.md`](docs/history/pr
 
 Each group below is one fact decided in two or more places (grouped 2026-10-16).
 
-1. **In the pipeline (filed 2026-10-16):**
+1. **In the pipeline (filed 2026-10-16; TICKET-263 resumed at triage 2026-10-18):**
    - TICKET-263, group A, names: one owner for "which names hold a slot" (owners.md row 44; fixes
      `'None' is not callable` for an imported alias read before `Count := …`); one name per module
      (the owner decision below); a recursive local lambda (`unknown name 'fact'`); a divergent fn.
@@ -99,7 +99,15 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
 6. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
    name (`:=`, `fn`, import) never share a name in one module, as Go does and as Rust does for a
    callable type (`struct E(i32);` + `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
-7. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+7. **Std modules compiled at build time** (owner decision 2026-10-18, option 1; no ticket yet). A
+   std import costs ~3.4 ms per run: `chezzi run` of `print(1)` takes 8.3 ms, and 11.7 ms after
+   `import Iterator from std.iter` (release, `hyperfine -N -r 40`). Each run parses, checks and compiles
+   the embedded std source again. CPython pays ~0 ms for `itertools` (C code in the binary) and loads
+   saved bytecode for a pure-Python module (`.pyc`; frozen modules in 3.11+). Fix: run the front end on
+   each `std/*.chz` at `cargo build` time and embed the result in the binary; `std/*.chz` stays the one
+   source. Open for its plan: the reach set (`resolver::unreached_std_fns`) and the program-wide slot
+   and type keys depend on the importing program.
+8. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 
