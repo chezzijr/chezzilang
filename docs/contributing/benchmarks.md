@@ -119,13 +119,17 @@ differ. Compare ratios, not absolutes, across records.
 row above is `hyperfine`'s figure for an empty file.
 
 Std protocol table (TICKET-265), `print(1)`, release, mean of 100 runs, three rounds interleaved with
-a build of main `25e8912d` on the same box: main 8597 / 7774 / 8115 us, branch 8238 / 8122 / 8317 us.
+a build of main `25e8912d` on the same box: main 8110 / 7840 / 7990 us, branch 7990 / 7870 / 7650 us.
 Before the fix the branch took 19-22 ms: `std_decls` parsed all 225 KB of `std/*.chz` (11.3 ms) on
-every start to find 28 `protocol` declarations. `std_protocol_decls` now parses only those blocks;
-`std_type_owners` parses every file on the first import-hint diagnostic. Debug `print(1)`: 22.3 ms on
-both. Cost of a std import (release, `print(1)` after the import): `std.ops` 10.7 ms, `std.cmp` 9.3,
-`std.iter` 14.4, `std.string` 15.6, against 8.1 with none; the module is parsed, checked and compiled
-whole. A protocol name used to cost nothing; it now costs that import.
+every start to find 28 `protocol` declarations. `std_protocol_decls` now lexes and parses only those
+blocks (`lexer::tokenize_statement` ends each at its block close); `std_type_owners` parses every file
+on the first import-hint diagnostic. Debug `print(1)`: 23.6 ms on the branch, 22 ms on main. Cost of a
+std import (release, `print(1)` after the import): `std.ops` 10.7 ms, `std.cmp` 9.3, `std.iter` 14.4,
+`std.string` 15.6, against 8.1 with none. A protocol name used to cost nothing; it now costs that
+import, because a program must import the module that declares a protocol (owner decision 1). The
+checker loop for `std.ops` takes 0.6 ms; the rest of the import cost is outside it and is open.
+`operator_and_bound_agree_in_every_cell` in `tests/hook_conformance_grid.rs` imports a std module in
+each cell: 284 s on the branch, 189 s on main (load about 3.5 on the box).
 
 ### Peak memory vs Go
 

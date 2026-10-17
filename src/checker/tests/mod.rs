@@ -42,8 +42,11 @@ fn graph_check(src: &str) -> Option<Vec<CheckError>> {
     })
 }
 
+/// The result and the warnings of one graph check.
+type GraphDiags = (Result<(), Vec<CheckError>>, Vec<CheckError>);
+
 /// [`graph_check`] for diagnostics: the result and the warnings, `None` when the resolver rejects.
-fn graph_diags(src: &str) -> Option<(Result<(), Vec<CheckError>>, Vec<CheckError>)> {
+fn graph_diags(src: &str) -> Option<GraphDiags> {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let graph = crate::resolver::build_graph(&entry).ok()?;

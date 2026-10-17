@@ -2107,6 +2107,53 @@ pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
     Lexer::new(source).tokenize()
 }
 
+/// The tokens of the ONE top-level statement that begins at the first character of `source`, then
+/// an `Eof`. Line numbers count from `first_line`, so a span is the span the whole file would give.
+/// The statement ends where the layout says so: after the `Dedent` that closes its indented block,
+/// or after its `Newline` when no block follows. The lexer reads no further than the first token
+/// of the next statement, so a caller that wants one declaration of a long file does not lex the
+/// rest of it.
+pub fn tokenize_statement(source: &str, first_line: usize) -> Result<Vec<Tok>, LexError> {
+    let mut lexer = Lexer::new(source);
+    lexer.line = first_line;
+    let mut tokens: Vec<Tok> = Vec::new();
+    let mut depth = 0usize;
+    let mut after_newline = false;
+    loop {
+        let tok = lexer.next_token()?;
+        let ends_here = after_newline && !matches!(tok.kind, Token::Indent);
+        let closes_block = matches!(tok.kind, Token::Dedent) && depth == 1;
+        let at_eof = matches!(tok.kind, Token::Eof);
+        if ends_here || at_eof {
+            let span = tok.span;
+            tokens.push(Tok {
+                kind: Token::Eof,
+                span,
+                indent: None,
+            });
+            return Ok(tokens);
+        }
+        after_newline = false;
+        if matches!(tok.kind, Token::Indent) {
+            depth += 1;
+        } else if matches!(tok.kind, Token::Dedent) {
+            depth = depth.saturating_sub(1);
+        } else if matches!(tok.kind, Token::Newline) && depth == 0 {
+            after_newline = true;
+        }
+        let span = tok.span;
+        tokens.push(tok);
+        if closes_block {
+            tokens.push(Tok {
+                kind: Token::Eof,
+                span,
+                indent: None,
+            });
+            return Ok(tokens);
+        }
+    }
+}
+
 /// The length in source chars of the plain `str` literal that starts `rest_of_line` (a `"` or `'`
 /// is its first char), delimiters included, or `None` when the lexer cannot close it within
 /// `rest_of_line`. The one answer to "where does this literal end": a caret width and an LSP token

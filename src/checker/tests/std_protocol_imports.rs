@@ -257,8 +257,8 @@ fn operators_need_no_import() {
     );
 }
 
-/// `std_protocol_decls` finds the `protocol` declarations without parsing the rest of each std file
-/// (startup cost). It must equal what a full parse of every `STD_FILES` entry finds, spans included.
+/// `std_protocol_decls` parses only the `protocol` slices of each std file (startup cost). It must
+/// equal what a full parse of every `STD_FILES` entry finds, spans included.
 #[test]
 fn std_protocol_decls_equal_a_full_parse() {
     let mut full: Vec<(String, String, crate::ast::Stmt)> = Vec::new();
@@ -279,20 +279,19 @@ fn std_protocol_decls_equal_a_full_parse() {
     assert_eq!(found, full);
 }
 
-/// The protocol scanner ends a declaration at the first non-blank column-0 line, keeps a blank line
-/// inside one, and ignores a `protocol` word that is not at column 0.
+/// A protocol block ends where the lexer ends it: a column-0 comment line and a blank line stay
+/// inside it, a dedent ends it, and a `protocol` word inside a string is not a declaration.
 #[test]
-fn protocol_scanner_keeps_blank_lines_and_stops_at_column_zero() {
-    let src = "# c\nprotocol A:\n    fn a(self)\n\n    fn b(self)\nfn f():\n    pass\n    s = \"protocol Z:\"\nprotocol B:\n    fn c(self)";
-    let got = graph_pass::protocol_stmts(src);
-    let shape: Vec<(String, usize, usize)> = got
+fn protocol_stmts_follow_the_lexer_block_extent() {
+    let src = "# c\nprotocol A:\n    fn a(self)\n# note\n    fn b(self)\n\n    fn c(self)\nfn f():\n    pass\n    s = \"protocol Z:\"\nprotocol B:\n    fn d(self)\n";
+    let shape: Vec<(String, usize, usize)> = graph_pass::protocol_stmts(src)
         .iter()
-        .map(|s| match &s.kind {
-            StmtKind::Protocol { name, methods, .. } => {
-                (name.clone(), methods.len(), s.span.line as usize)
-            }
-            _ => panic!("protocol_stmts returned a non-protocol statement"),
+        .filter_map(|s| {
+            let StmtKind::Protocol { name, methods, .. } = &s.kind else {
+                return None;
+            };
+            Some((name.clone(), methods.len(), s.span.line as usize))
         })
         .collect();
-    assert_eq!(shape, [("A".to_string(), 2, 2), ("B".to_string(), 1, 9)]);
+    assert_eq!(shape, [("A".to_string(), 3, 2), ("B".to_string(), 1, 11)]);
 }

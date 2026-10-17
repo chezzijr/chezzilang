@@ -465,35 +465,26 @@ fn std_module_of(rel: &str) -> String {
 }
 
 /// Every `protocol` declaration of one std source, in file order, found WITHOUT parsing the rest of
-/// the file: the protocol table is read on every program start, and parsing all of `std/*.chz` for
-/// it cost 11 ms of a 19 ms `print(1)`. A declaration is a column-0 `protocol` line plus the blank
-/// and indented lines under it. Each is parsed behind as many newlines as precede it, so its spans
-/// are the file's. `std_protocol_decls_equal_a_full_parse` holds this to a full parse.
+/// the file: the protocol table is read on every program start, and lexing all of `std/*.chz` for
+/// it costs 5 ms in a release build and 10 ms in a debug build. A column-0 `protocol ` line only
+/// says where to start. `crate::lexer::tokenize_statement` decides where the statement ends, so
+/// the extent of a block is the lexer's, comments and strings included. Its spans are the file's.
+/// `std_protocol_decls_equal_a_full_parse` holds this to a full parse.
 pub(super) fn protocol_stmts(src: &str) -> Vec<crate::ast::Stmt> {
-    let lines: Vec<&str> = src.lines().collect();
     let mut stmts = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if !lines[i].starts_with("protocol ") {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        i += 1;
-        while i < lines.len() && (lines[i].trim().is_empty() || lines[i].starts_with([' ', '\t'])) {
-            i += 1;
-        }
-        let chunk = format!("{}{}\n", "\n".repeat(start), lines[start..i].join("\n"));
-        let parsed = crate::lexer::tokenize(&chunk)
-            .ok()
-            .and_then(|tokens| crate::parser::parse(tokens).ok());
-        if let Some(ast) = parsed {
+    let mut offset = 0;
+    for (index, line) in src.split_inclusive('\n').enumerate() {
+        if line.starts_with("protocol ")
+            && let Ok(tokens) = crate::lexer::tokenize_statement(&src[offset..], index + 1)
+            && let Ok(ast) = crate::parser::parse(tokens)
+        {
             stmts.extend(
                 ast.stmts
                     .into_iter()
                     .filter(|s| matches!(s.kind, StmtKind::Protocol { .. })),
             );
         }
+        offset += line.len();
     }
     stmts
 }
