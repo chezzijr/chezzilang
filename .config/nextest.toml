@@ -17,6 +17,13 @@ timing = { max-threads = 4 }
 filter = 'binary(chezzi_threads_cli) | binary(blocking_context_grid) | binary(channel_handoff_grid) | binary(examples_golden) | binary(native_callback_stdin_read_frees_width) | binary(mn_pool_ignores_cpu_quota_hangs) | binary(sched_seed_cli) | binary(chezzi_nested_nursery_deadlock) | binary(deadlock_verdict_misses) | binary(chz_suite)'
 test-group = 'timing'
 
+# TICKET-265: each cell of this grid runs its own `chezzi` process, and each cell now pays one std
+# import (`import Add from std.ops` and siblings), so the test outgrew the default 300 s cap.
+# Measured alone, debug: main 189 s, branch 265 s. Cap 480 s.
+[[profile.default.overrides]]
+filter = 'binary(hook_conformance_grid) & test(operator_and_bound_agree_in_every_cell)'
+slow-timeout = { period = "60s", terminate-after = 8 }
+
 # Known flakes tracked in docs/contributing/gaps.md, retried so they do not fail the verifying gate on load alone.
 # The T=1 seeded replay test left this list with TICKET-205: it is byte-for-byte now, so a red run is
 # a regression. A retry that then
