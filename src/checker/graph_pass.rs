@@ -501,21 +501,18 @@ pub(super) fn protocol_stmts(src: &str) -> Vec<crate::ast::Stmt> {
 }
 
 /// Every public type name a std module declares → its modules (`std.regex` for `Match`), read once
-/// from the embedded std sources on the first diagnostic that needs an import hint, never at
+/// from the shared std parse (`resolver::std_module_ast`) on the first diagnostic that needs an import hint, never at
 /// startup. The prelude is left out: its types are in scope everywhere. A protocol is left out
 /// too: `std_protocol_owner` answers for it.
 pub(super) fn std_type_owners() -> &'static HashMap<String, Vec<String>> {
     static OWNERS: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
     OWNERS.get_or_init(|| {
         let mut type_owners: HashMap<String, Vec<String>> = HashMap::new();
-        for (rel, src) in crate::native::std_embed::STD_FILES {
+        for (rel, _) in crate::native::std_embed::STD_FILES {
             if *rel == "prelude.chz" {
                 continue;
             }
-            let Ok(tokens) = crate::lexer::tokenize(src) else {
-                continue;
-            };
-            let Ok(ast) = crate::parser::parse(tokens) else {
+            let Some(ast) = crate::resolver::std_module_ast(rel) else {
                 continue;
             };
             for s in &ast.stmts {

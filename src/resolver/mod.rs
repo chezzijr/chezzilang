@@ -69,7 +69,7 @@ pub struct LoadedModule {
     /// Dotted path (`["core","db"]`); empty for the entry module.
     pub dotted: Vec<String>,
     pub ast: Module,
-    /// The module's [`Span::file`] id (`1..n`, never 0), stamped into every span this module's
+    /// The module's [`Span::file`] id (never 0; a std file has a fixed id, see `STD_FILE_IDS`), stamped into every span this module's
     /// source lexed to. Distinct per module — that is what makes the checker→compiler side-table
     /// keys injective across the graph (`docs/contributing/gaps.md` W7-49). Kept here so a diagnostic can map a
     /// span's `file` back to a module label.
@@ -156,7 +156,7 @@ impl ModuleGraph {
 
 /// TICKET-265 — one module's identifier words: `text` holds them back to back, `at` the line and
 /// byte range of each.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Words {
     text: String,
     at: Vec<(u32, std::ops::Range<usize>)>,
@@ -640,7 +640,7 @@ fn build_graph_impl(
         order: Vec::new(),
         entry_override,
         max_depth: MAX_IMPORT_DEPTH,
-        file_seq: std::cell::Cell::new(0),
+        file_seq: std::cell::Cell::new(STD_FILE_IDS),
         range_named: std::cell::Cell::new(false),
         words: std::cell::RefCell::new(HashMap::new()),
     };
@@ -1078,58 +1078,27 @@ impl Builder {
         dotted: &[String],
         std_file: bool,
     ) -> Result<(Module, u32), ResolveError> {
+        // An embedded std module is lexed and parsed once per process: every graph that loads it
+        // takes a copy of the shared parse, under the file id the shared parse was stamped with.
+        if std_file && let Some(shared) = shared_std_parse(dotted, source) {
+            if shared.range_named {
+                self.range_named.set(true);
+            }
+            self.words
+                .borrow_mut()
+                .insert(shared.file, shared.words.clone());
+            return Ok((shared.module.clone(), shared.file));
+        }
         // `Cell`, not `&mut self`: `parse` is called from `&self` contexts.
         let file = self.file_seq.get() + 1;
         self.file_seq.set(file);
         if dotted != ["std", "prelude"] && source.contains(RANGE_STRUCT) {
             self.range_named.set(true);
         }
-        // Capture the doc-comment side-channel alongside the tokens, so the AST the checker/hover
-        // sees carries each declaration's doc. The token stream is identical to `tokenize` — docs are
-        // purely informational (LSP hover) and runtime-inert — so every other resolver behavior is
-        // unchanged. This is the single graph seam that threads docs in.
-        let (tokens, comments) =
-            lexer::tokenize_with_comments(source, file).map_err(|e| ResolveError {
-                // `e.message`, NOT `e.to_string()`: the position is already carried on the `span`
-                // below and re-rendered by the caller, so `LexError`'s own `(line, col)` prefix
-                // stutters it — `resolve error (line 1, col 8): … lex error (line 1, col 8): …`.
-                message: prefix(dotted, format!("lex error: {}", e.message)),
-                span: Span {
-                    // `as u32`: 1-based source counters — cannot approach u32::MAX.
-                    line: e.line as u32,
-                    col: e.col as u32,
-                    file,
-                },
-                module: opt_label(dotted),
-                // Filled in by the caller (`visit`/`visit_native_file`), which has `id` in scope —
-                // `parse` itself does not.
-                path: None,
-            })?;
-        let mut words = Words::default();
-        lexer::ident_words(&tokens, &mut |line, w| {
-            let start = words.text.len();
-            words.text.push_str(w);
-            words.at.push((line, start..words.text.len()));
-        });
-        self.words.borrow_mut().insert(file, words);
-        let mut ast = parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
-            // `e.message`, NOT `e.to_string()`: same reason as the lex arm above — `ParseError`'s own
-            // `Display` carries its own `parse error (line N, col M): ` prefix, and the position is
-            // already on `span` below, re-rendered by the caller. Using `e.to_string()` here stuttered
-            // it: `resolve error (line 1, col 4): parse error (line 1, col 4): expected identifier,
-            // found '('`.
-            message: prefix(dotted, e.message),
-            span: e.span,
-            module: opt_label(dotted),
-            path: None,
+        let (ast, words) = lex_and_parse(source, dotted, file, &|x: &str| {
+            !std_file && module_file(&[x.to_string()], &self.project_root, &self.std_root).exists()
         })?;
-        let std_root = &self.std_root;
-        let project_root = &self.project_root;
-        // A std file never probes the project root: a user `Option.chz` must not turn the
-        // prelude's carrier import into a module import.
-        crate::ast::classify_variant_imports(&mut ast, &|x: &str| {
-            !std_file && module_file(&[x.to_string()], project_root, std_root).exists()
-        });
+        self.words.borrow_mut().insert(file, words);
         Ok((ast, file))
     }
 
@@ -1170,6 +1139,151 @@ impl Builder {
             })
             .collect()
     }
+}
+
+/// Lex and parse one module's source into its AST and identifier words. `is_project_module` says
+/// whether a variant-import name is really a module of the project (see
+/// `ast::classify_variant_imports`). The ONE lex-and-parse of the module graph: the per-graph path
+/// and the shared std parse both run it.
+fn lex_and_parse(
+    source: &str,
+    dotted: &[String],
+    file: u32,
+    is_project_module: &dyn Fn(&str) -> bool,
+) -> Result<(Module, Words), ResolveError> {
+    // Capture the doc-comment side-channel alongside the tokens, so the AST the checker/hover
+    // sees carries each declaration's doc. The token stream is identical to `tokenize` — docs are
+    // purely informational (LSP hover) and runtime-inert — so every other resolver behavior is
+    // unchanged. This is the single graph seam that threads docs in.
+    let (tokens, comments) =
+        lexer::tokenize_with_comments(source, file).map_err(|e| ResolveError {
+            // `e.message`, NOT `e.to_string()`: the position is already carried on the `span`
+            // below and re-rendered by the caller, so `LexError`'s own `(line, col)` prefix
+            // stutters it — `resolve error (line 1, col 8): … lex error (line 1, col 8): …`.
+            message: prefix(dotted, format!("lex error: {}", e.message)),
+            span: Span {
+                // `as u32`: 1-based source counters — cannot approach u32::MAX.
+                line: e.line as u32,
+                col: e.col as u32,
+                file,
+            },
+            module: opt_label(dotted),
+            // Filled in by the caller (`visit`/`visit_native_file`), which has `id` in scope —
+            // `lex_and_parse` itself does not.
+            path: None,
+        })?;
+    let mut words = Words::default();
+    lexer::ident_words(&tokens, &mut |line, w| {
+        let start = words.text.len();
+        words.text.push_str(w);
+        words.at.push((line, start..words.text.len()));
+    });
+    let mut ast = parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
+        // `e.message`, NOT `e.to_string()`: same reason as the lex arm above — `ParseError`'s own
+        // `Display` carries its own `parse error (line N, col M): ` prefix, and the position is
+        // already on `span` below, re-rendered by the caller. Using `e.to_string()` here stuttered
+        // it: `resolve error (line 1, col 4): parse error (line 1, col 4): expected identifier,
+        // found '('`.
+        message: prefix(dotted, e.message),
+        span: e.span,
+        module: opt_label(dotted),
+        path: None,
+    })?;
+    crate::ast::classify_variant_imports(&mut ast, is_project_module);
+    Ok((ast, words))
+}
+
+/// TICKET-265 — one embedded std module, lexed and parsed once per process.
+struct SharedStdParse {
+    module: Module,
+    words: Words,
+    /// Whether the source names [`RANGE_STRUCT`] (always false for the prelude).
+    range_named: bool,
+    file: u32,
+}
+
+/// The shared parse of one embedded std file, and how many times this process parsed it.
+struct StdSlot {
+    parsed: std::sync::OnceLock<Option<SharedStdParse>>,
+    parses: std::sync::atomic::AtomicU32,
+}
+
+fn std_slots() -> &'static [StdSlot] {
+    static SLOTS: std::sync::OnceLock<Vec<StdSlot>> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| {
+        std_embed::STD_FILES
+            .iter()
+            .map(|_| StdSlot {
+                parsed: std::sync::OnceLock::new(),
+                parses: std::sync::atomic::AtomicU32::new(0),
+            })
+            .collect()
+    })
+}
+
+/// The span file ids `1..=STD_FILES.len()` belong to the embedded std files, by position in
+/// `STD_FILES`: a std module has the same id in every graph, so one parse serves them all. A module
+/// parsed per graph takes the ids above them ([`Builder::file_seq`] starts here).
+const STD_FILE_IDS: u32 = std_embed::STD_FILES.len() as u32;
+
+/// The shared parse of std module `dotted`, when `source` is the embedded text of that module.
+/// `None` for a non-std path, for text that differs from the embedded copy (`$CHEZZI_STD`, a live
+/// buffer) and for a file that does not parse: the caller then parses `source` itself, so a lex or
+/// parse error reaches the user as before.
+fn shared_std_parse(dotted: &[String], source: &str) -> Option<&'static SharedStdParse> {
+    if dotted.first().map(String::as_str) != Some("std") {
+        return None;
+    }
+    let rel = format!("{}.chz", dotted[1..].join("/"));
+    let index = std_embed::STD_FILES.iter().position(|(k, _)| *k == rel)?;
+    let embedded = std_embed::STD_FILES[index].1;
+    if embedded != source {
+        return None;
+    }
+    shared_std_parse_at(index, dotted)
+}
+
+fn shared_std_parse_at(index: usize, dotted: &[String]) -> Option<&'static SharedStdParse> {
+    let slot = &std_slots()[index];
+    slot.parsed
+        .get_or_init(|| {
+            slot.parses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let source = std_embed::STD_FILES[index].1;
+            let file = index as u32 + 1;
+            // A std file never probes the project root: a user `Option.chz` must not turn the
+            // prelude's carrier import into a module import.
+            let (module, words) = lex_and_parse(source, dotted, file, &|_: &str| false).ok()?;
+            Some(SharedStdParse {
+                module,
+                words,
+                range_named: dotted != ["std", "prelude"] && source.contains(RANGE_STRUCT),
+                file,
+            })
+        })
+        .as_ref()
+}
+
+/// The AST of the embedded std file `rel` (`"ops.chz"`), from the shared parse. The spans carry the
+/// file's own id. `None` when `rel` is not embedded or does not parse.
+pub fn std_module_ast(rel: &str) -> Option<&'static Module> {
+    let index = std_embed::STD_FILES.iter().position(|(k, _)| *k == rel)?;
+    let dotted: Vec<String> = std::iter::once("std".to_string())
+        .chain(rel.trim_end_matches(".chz").split('/').map(str::to_string))
+        .collect();
+    shared_std_parse_at(index, &dotted).map(|p| &p.module)
+}
+
+/// How many times this process lexed and parsed the embedded std file `rel`.
+#[cfg(test)]
+fn std_parse_count(rel: &str) -> u32 {
+    let index = std_embed::STD_FILES
+        .iter()
+        .position(|(k, _)| *k == rel)
+        .expect("an embedded std file");
+    std_slots()[index]
+        .parses
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A stable, distinct id for a native (virtual) std module — a sentinel path that can never collide
@@ -1885,7 +1999,7 @@ mod tests {
             order: Vec::new(),
             entry_override: None,
             max_depth,
-            file_seq: std::cell::Cell::new(0),
+            file_seq: std::cell::Cell::new(STD_FILE_IDS),
             range_named: std::cell::Cell::new(false),
             words: std::cell::RefCell::new(HashMap::new()),
         }
@@ -1944,6 +2058,41 @@ mod tests {
         assert!(
             err.module.is_some(),
             "depth error should carry the target dotted label"
+        );
+    }
+
+    // TICKET-265 — a std module is lexed and parsed once per process and every graph shares the
+    // result, so its `Span::file` id cannot depend on the graph: two graphs that load `std.cmp`
+    // in a different order give it the same id and the same AST.
+    #[test]
+    fn a_std_module_has_one_file_id_and_one_parse_across_graphs() {
+        let t = TmpDir::new();
+        let first = t.write(
+            "first.chz",
+            "import Eq from std.cmp\nfn f[T: Eq](a: T) -> T:\n    return a\n",
+        );
+        let second = t.write(
+            "second.chz",
+            "import std.string\nimport std.cmp\nimport Eq from std.cmp\nfn g[T: Eq](a: T) -> T:\n    return a\n",
+        );
+        let cmp_of = |entry: &Path| {
+            let g = build_graph(entry).expect("graph should build");
+            g.modules
+                .into_iter()
+                .find(|m| m.dotted == ["std", "cmp"])
+                .expect("std.cmp is in the graph")
+        };
+        let (a, b) = (cmp_of(&first), cmp_of(&second));
+        assert_eq!(a.file, b.file, "std.cmp changed file id between graphs");
+        assert_eq!(
+            format!("{:?}", a.ast),
+            format!("{:?}", b.ast),
+            "std.cmp parsed to different ASTs"
+        );
+        assert_eq!(
+            std_parse_count("cmp.chz"),
+            1,
+            "std.cmp was lexed and parsed more than once in one process"
         );
     }
 
