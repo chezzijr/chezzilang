@@ -9,7 +9,14 @@ or given explicitly: `id[int](42)`, and the struct form `Pair[int, str](1, "one"
 **enum** the args go on the type, not the variant: `Box[int].Full(9)` (§8). Explicit args pin the
 type; inference fills the rest.
 
+A bound names a std protocol, so the program imports it from the std module that declares it
+(`import Comparable from std.cmp`; `Any` and `Error` are global). An operator needs no import: `a < b`
+works on a type with a `compare` method whether or not the program names `Comparable`. The table of
+protocols and modules is in [Protocols](09-protocols.md); the import rule is in [Imports](16-imports.md).
+
 ```chezzi
+import Comparable from std.cmp
+
 fn first[T](a: T, b: T) -> T:        # unbounded: works for any type
     return a
 
@@ -48,6 +55,9 @@ into the `[T]` parameter. A `where` entry needs a bound: `where T:` and `where T
 ``a `where` entry needs a bound (`where T: Proto`)``:
 
 ```chezzi
+import Comparable from std.cmp
+import Add, Mul from std.ops
+
 fn max[T](a: T, b: T) -> T where T: Comparable:   # same as `fn max[T: Comparable](a, b)`
     if a < b:
         return b
@@ -67,6 +77,8 @@ callable only when the receiver's type argument satisfies the bound (Rust's
 checker-only; it compiles to nothing.
 
 ```chezzi
+import Comparable from std.cmp
+
 struct Box[T]:
     val: T
     fn top(self) -> T where T: Comparable:   # conditional on the RECEIVER's own T
@@ -103,6 +115,9 @@ operator's hook is the hook for every instantiation. An operator on an instantia
 bound is a compile error that names the bound, even where the type has another way to satisfy it:
 
 ```
+import Comparable from std.cmp
+import Iterator from std.iter
+
 struct Box[T]:
     v: T
     fn next(self) -> int?: return None
@@ -139,6 +154,8 @@ Write the signature for every instantiation (`other: Self`, `-> int`) and put a 
 is the hook of `==`/`!=`:
 
 ```
+import Comparable from std.cmp
+
 Box[Tag] == Box[Tag]  →  type error: cannot compare Box[Tag] and Box[Tag] for equality
                          — Box[Tag]'s `eq` requires Tag: Comparable
 ```
@@ -153,6 +170,8 @@ message naming the site (*contains() compares List[Box[Tag]] elements for equali
 `List`/`T?`/`T!E` element, a return):
 
 ```
+import Comparable from std.cmp
+
 protocol Tagged: fn tag(self) -> int
 struct Box[T]:
     v: T

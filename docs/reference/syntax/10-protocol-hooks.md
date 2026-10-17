@@ -13,6 +13,8 @@ the return type. Recovery unifies structurally, so `Iterable[(A, B)]`, `Iterable
   `.iter()` cursor, a generator, or a struct with `next`. A raw collection does not satisfy it; pass `xs.iter()`.
 
 ```chezzi
+import Iterable from std.iter
+
 fn to_list[S: Iterable[T], T](xs: S) -> List[T]:
     out: List[T] = []
     for x in xs:            # x : T
@@ -39,6 +41,8 @@ not satisfy `Iterator` (it still satisfies `Iterable`). A generic `Both[T]` gets
 instantiation.
 
 ```
+import Iterator from std.iter
+
 struct Both:
     n: int
     fn next(self) -> int?: return None

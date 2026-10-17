@@ -98,6 +98,8 @@ match Email.parse("a@b"):
 (a static method is called `Type.method(...)`, never `Type(...)`):
 
 ```chezzi
+import PathLike from std.path
+
 struct Path:
     raw: bytes
 
@@ -191,6 +193,8 @@ that only *has* such a bound (`fn tagged[T: Spawnable](x: T) -> str: return x.ta
 - the reserved `Convert[S]` protocol, whose witness is a static `convert(x: S) -> Self`:
 
 ```chezzi
+import Convert from std.convert
+
 fn make[T: Convert[int]](seed: T, n: int) -> T:
     return T.convert(n)
 ```

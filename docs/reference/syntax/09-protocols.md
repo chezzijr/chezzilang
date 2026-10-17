@@ -70,7 +70,8 @@ top-level annotation) it is `unknown type 'Self'`.
 ### Ordering: `Comparable`
 
 ```chezzi
-protocol Comparable:                 # std protocol — its shape is declared in std/cmp.chz
+protocol Comparable:                 # std protocol — this is its declaration in std/cmp.chz, where
+                                     # `Eq` needs no import; a program imports it from std.cmp
     Eq                               # embedded: ordered ⇒ equatable (Rust's `Ord: Eq`)
     fn compare(self, other: Self) -> int
 
@@ -184,6 +185,8 @@ print(Opt[int].Has(1) == Opt[int].Has(2))    # false — `==` stays structural
 `a.eq(b)` under `T: Eq`:
 
 ```chezzi
+import Eq from std.cmp
+
 struct Key:
     n: int
     fn eq[U](self, o: U) -> bool:            # an ordinary method, NOT the Eq hook
@@ -343,8 +346,7 @@ embed (transitively) and has every own method.
   (`protocol Bag[T]: Contains[T]`) or nested (`Contains[List[T]]`).
 
 ```chezzi
-protocol Arithmetic:        # builtin/reserved — shape file-backed in std/prelude.chz
-    Add + Sub + Mul + Div
+import Arithmetic, Neg, Num from std.ops   # Arithmetic embeds Add + Sub + Mul + Div (std/ops.chz)
 
 protocol VectorSpace:       # embeds two protocols and adds its own requirement
     Arithmetic + Neg
@@ -404,6 +406,8 @@ are recovered at the call site.
 - `index` alone is a read-only type; `set_index` alone is not index-assignable.
 
 ```chezzi
+import Index from std.ops
+
 struct Ring:
     data: List[int]
     fn index(self, k: int) -> int:

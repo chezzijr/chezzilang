@@ -103,6 +103,8 @@ for x in Counter(0, 5):    # x binds the element type (int); a next() yielding a
 also works as a plain parameter type:
 
 ```chezzi
+import Iterable from std.iter
+
 fn first_or[S: Iterable[T], T](xs: S, default: T) -> T:
     for x in xs:           # x is typed `T`
         return x
@@ -137,6 +139,8 @@ the value itself when its type has `next` and no `iter`. A user struct with only
 `iter(self) -> Iterator[E]` is for-iterable too (one `.iter()` call drives it).
 
 ```chezzi
+import Iterable from std.iter
+
 fn total[S: Iterable[int]](src: S) -> int:
     sum := 0
     for x in src.iter():
@@ -160,6 +164,8 @@ at each `yield` and resumes on the next `.next()`. The `-> Iterator[T]` annotati
 every `yield` must be assignable to `T`.
 
 ```chezzi
+import Iterator from std.iter
+
 fn count_up(n: int) -> Iterator[int]:
     i := 0
     while i < n:
