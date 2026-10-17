@@ -27,8 +27,42 @@ fn spelled(name: &str, arity: usize) -> String {
     }
 }
 
-/// Every std protocol, one bound per cell: without its import the bound is `unknown name`, with
-/// the import from its owning module the bound checks. `Any` and `Error` check with no import.
+/// The five positions the import gate changes, as `(label, program naming the protocol as X)`: a
+/// bound, a where clause, an annotation, an alias body and an embed. `user_protocol_key` serves all.
+fn positions(x: &str) -> [(&'static str, String); 5] {
+    [
+        ("p1 bound", format!("fn f[T: {x}](v: T):\n    pass\n")),
+        (
+            "p2 where clause",
+            format!("fn f[T](v: T) -> int where T: {x}:\n    return 0\n"),
+        ),
+        (
+            "p3 annotation",
+            format!("fn g(v: {x}) -> int:\n    return 0\n"),
+        ),
+        (
+            "p4 alias body",
+            format!("type Al = {x}\nfn g(v: Al) -> int:\n    return 0\n"),
+        ),
+        (
+            "p5 embed",
+            format!("protocol P:\n    {x}\n    fn m(self) -> int\n"),
+        ),
+    ]
+}
+
+/// The messages of `src` that say a name is unknown.
+fn unknown_errors(src: &str) -> Vec<String> {
+    check_src(src)
+        .into_iter()
+        .map(|e| e.message)
+        .filter(|m| m.contains("unknown"))
+        .collect()
+}
+
+/// Every std protocol x every position x {no import, from-import, aliased import, qualified}: with
+/// no import the name is unknown; each import form makes it known. `Any` and `Error` (global) are
+/// known with no import. The cells come from the `protocol` declarations in `std/*.chz`.
 #[test]
 fn std_protocol_import_grid() {
     let protocols = std_protocols();
@@ -37,21 +71,81 @@ fn std_protocol_import_grid() {
         "the grid reads {} protocols from std/*.chz",
         protocols.len()
     );
+    let mut red: Vec<String> = Vec::new();
     for (name, module, arity) in protocols {
-        let bound = spelled(&name, arity);
-        let body = format!("fn f[T: {bound}](x: T) -> int:\n    return 1\nprint(1)\n");
-        if module == "std.prelude" {
-            ok(&body);
-            continue;
+        let last = module.rsplit('.').next().unwrap_or(&module).to_string();
+        let plain = positions(&spelled(&name, arity));
+        let aliased = positions(&spelled("Alias", arity));
+        let qualified = positions(&spelled(&format!("{last}.{name}"), arity));
+        for (i, (label, body)) in plain.iter().enumerate() {
+            let got = unknown_errors(body);
+            if module == "std.prelude" {
+                if !got.is_empty() {
+                    red.push(format!("{label} {name}: global, got {got:?}"));
+                }
+                continue;
+            }
+            // (i) no import: the name is reported, and a bound also names the import.
+            let errs = check_src(body);
+            if !errs
+                .iter()
+                .any(|e| e.message.contains(&format!("'{name}'")))
+            {
+                red.push(format!("{label} {name}: no import checked, got {errs:?}"));
+            }
+            let want = format!("unknown name '{name}'");
+            let hint = format!("import {name} from {module}");
+            if i == 0
+                && !errs
+                    .iter()
+                    .any(|e| e.message.contains(&want) && e.message.contains(&hint))
+            {
+                red.push(format!(
+                    "{label} {name}: want `{want}` and `{hint}`, got {errs:?}"
+                ));
+            }
+            // (ii) from-import, (iii) aliased import, (iv) qualified spelling after `import module`.
+            let cells = [
+                (
+                    "from-import",
+                    format!("import {name} from {module}\n{body}"),
+                ),
+                (
+                    "aliased import",
+                    format!("import {name} as Alias from {module}\n{}", aliased[i].1),
+                ),
+                ("qualified", format!("import {module}\n{}", qualified[i].1)),
+            ];
+            for (how, src) in cells {
+                let got = unknown_errors(&src);
+                if !got.is_empty() {
+                    red.push(format!("{label} {name} {how}: {got:?}"));
+                }
+            }
         }
-        let errs = check_src(&body);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains(&format!("unknown name '{name}'"))),
-            "'{name}' without an import: expected `unknown name '{name}'`, got {errs:?}"
-        );
-        ok(&format!("import {name} from {module}\n{body}"));
     }
+    assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
+}
+
+/// One import binding licenses both meanings of `Iterator` (the value type and the bound), under
+/// the imported name or an alias. Two bounds through different spellings are one `Iterator`
+/// bound twice. An aliased non-`Iterator` protocol resolves through the same binding.
+#[test]
+fn iterator_alias_licenses_the_bound() {
+    ok(
+        "import Iterator as It from std.iter\nfn f[S: It[int]](s: S):\n    pass\nfn gen() -> It[int]:\n    yield 1\nprint(1)\n",
+    );
+    rejects(
+        "import std.iter\nimport Iterator as It from std.iter\nfn f[S: It[int] + iter.Iterator[int]](s: S):\n    pass\n",
+        "'S' has more than one Iterator bound",
+    );
+    rejects(
+        "import Iterator from std.iter\nimport Iterator as It from std.iter\nfn f[S: It[int] + Iterator[int]](s: S):\n    pass\n",
+        "'S' has more than one Iterator bound",
+    );
+    ok(
+        "import Add as A from std.ops\nfn f[T: A](a: T, b: T) -> T:\n    return a + b\nprint(f(1, 2))\n",
+    );
 }
 
 /// Importing a protocol from a module that does not declare it is an error, in every cell.
@@ -91,6 +185,24 @@ fn qualified_iterator_is_the_generator_type() {
     );
     ok(
         "import std.iter\n\nfn count(n: int) -> iter.Iterator[int]:\n    i := 0\n    while i < n:\n        yield i\n        i += 1\n\nprint([x for x in count(3)])\n",
+    );
+}
+
+/// The arity of a builtin type reached by qualified path comes from the type itself: a wrong count
+/// is reported for `iter.Iterator` as it is for `concurrency.Shared`.
+#[test]
+fn qualified_builtin_type_arity_is_checked() {
+    rejects(
+        "import std.iter\nfn f(x: iter.Iterator[int, int]) -> int:\n    return 0\n",
+        "type 'iter.Iterator' expects 1 type argument(s), got 2",
+    );
+    rejects(
+        "import std.concurrency\nfn f(x: concurrency.Shared[int, int]) -> int:\n    return 0\n",
+        "type 'concurrency.Shared' expects 1 type argument(s), got 2",
+    );
+    rejects(
+        "import std.net\nfn f(x: net.Socket[int]) -> int:\n    return 0\n",
+        "type 'net.Socket' expects 0 type argument(s), got 1",
     );
 }
 

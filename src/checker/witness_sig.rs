@@ -121,10 +121,10 @@ impl Checker {
             return crate::native::ffi::is_width(name).then(|| ffi_width_ty(name));
         };
         match b {
-            BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic => {
-                b.applied_ty(vec![one()])
-            }
-            BuiltinType::Iterator => Some(Ty::Struct("Iterator".to_string(), vec![one()])),
+            BuiltinType::Shared
+            | BuiltinType::RwShared
+            | BuiltinType::Atomic
+            | BuiltinType::Iterator => b.applied_ty(vec![one()]),
             BuiltinType::AtomicInt
             | BuiltinType::Executor
             | BuiltinType::Socket
@@ -145,15 +145,6 @@ impl Checker {
             | BuiltinType::Map
             | BuiltinType::Channel
             | BuiltinType::Range => None,
-        }
-    }
-
-    /// Expected type-argument arity for a builtin TYPE reached by qualified path (the generic
-    /// concurrency boxes take exactly one; every other in-scope native type is non-generic).
-    pub(super) fn qualified_builtin_arity(name: &str) -> usize {
-        match name {
-            "Shared" | "RwShared" | "Atomic" | "Iterator" => 1,
-            _ => 0,
         }
     }
 

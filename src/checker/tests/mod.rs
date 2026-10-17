@@ -106,8 +106,7 @@ fn assert_no_missing_std_import(src: &str, errs: &[CheckError], needle: &str) {
         else {
             continue;
         };
-        let owned_by_import =
-            graph_pass::std_protocol_owner(name).is_some_and(|m| m != "std.prelude");
+        let owned_by_import = is_std_protocol(name) && !is_global_protocol(name);
         assert!(
             !owned_by_import,
             "program names std protocol '{name}' without an import: {}\nsource:\n{src}",

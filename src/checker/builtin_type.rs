@@ -180,6 +180,14 @@ impl BuiltinType {
             | BuiltinType::Executor => None,
         }
     }
+
+    /// The number of type arguments the name takes, read from [`BuiltinType::applied_ty`]: the
+    /// smallest count it accepts, `0` for a name that takes none.
+    pub(crate) fn arity(self) -> usize {
+        (1..=2)
+            .find(|&n| self.applied_ty(vec![Ty::Unknown; n]).is_some())
+            .unwrap_or(0)
+    }
 }
 
 impl BuiltinType {

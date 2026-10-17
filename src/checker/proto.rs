@@ -908,8 +908,8 @@ impl Checker {
 }
 
 /// TICKET-187 — a protocol method's parameter labels, parallel to its `params` (`None` for the
-/// `self` receiver). The one builder for user protocols (`hoist_protocol`) and the reserved ones
-/// declared in `std/prelude.chz` (`harvest_protocol_shape`).
+/// `self` receiver). The one builder for user protocols (`hoist_protocol`) and the std ones
+/// declared in `std/*.chz` (`harvest_protocol_stmt`).
 pub(super) fn protocol_labels(params: &[crate::ast::Param]) -> Vec<Option<String>> {
     params
         .iter()

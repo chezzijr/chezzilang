@@ -467,14 +467,16 @@ impl Checker {
         if let Some(key) = self.qualified_protocol_key(name) {
             return Some(key);
         }
+        // `import Iterator as It from std.iter` binds the builtin type, not a protocol name: the
+        // binding's member is the key, whatever the module spells it as.
+        if let Some(bound) = self.bound_builtin(name)
+            && is_std_protocol(bound)
+        {
+            return Some(bound.to_string());
+        }
         if is_std_protocol(name) {
             if let Some(key) = self.bare_types.get(name) {
                 return Some(key.clone());
-            }
-            if let Some(bound) = self.bound_builtin(name)
-                && is_std_protocol(bound)
-            {
-                return Some(bound.to_string());
             }
             return (is_global_protocol(name) || self.current_module_is_stdlib)
                 .then(|| name.to_string());
@@ -745,7 +747,7 @@ impl Checker {
             .chain(
                 graph_pass::std_protocol_decls()
                     .iter()
-                    .filter(|p| p.module == "std.prelude")
+                    .filter(|p| is_global_protocol(&p.name))
                     .map(|p| p.name.clone()),
             )
             .chain([crate::lexer::NONE.to_string(), "tuple".to_string()])

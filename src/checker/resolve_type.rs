@@ -646,7 +646,7 @@ impl Checker {
                     // `net.Socket`, `ffi.int32`, `ffi.ptr`): the same type the bare name bound by an
                     // import denotes.
                     if let Some(ty) = self.qualified_builtin_ty(name, &resolved) {
-                        let expected = Self::qualified_builtin_arity(name);
+                        let expected = BuiltinType::from_name(name).map_or(0, BuiltinType::arity);
                         if resolved.len() != expected {
                             self.error(
                                 span,
