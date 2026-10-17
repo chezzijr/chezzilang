@@ -305,9 +305,8 @@ for path in paths:
 - A static method is a legal target in every call spelling: `defer Holder.build(3)`,
   `defer Gen[int].build(3)`, `defer T.default()` in a generic, `defer lib.Holder.build(3)`, a
   `from`-imported head. Arguments are evaluated at the statement; LIFO order holds. All of these spawn too.
-- The **value form of `print`** (`p := print`) is a fixed one-argument call with `sep=" "`,
-  `end="\n"`. Several arguments and `sep=`/`end=` are direct-call-only, so `defer print(a, sep="-")`
-  is a type error. `spawn print(...)` is accepted.
+- `defer print(a, b, sep="-")` and `spawn print(...)` take every argument and keyword a direct
+  `print` call takes.
 - The four builtins are sendable: a value bound to one (`f := ord`) crosses a `spawn` and runs in the task.
 - A user binding shadows these names in value position (`fn f(ord: int): print(ord)`,
   `for chr in xs:`, a top-level `chr := "…"`). At top level a read above a same-named global's `:=` is

@@ -168,15 +168,14 @@ Function kinds:
 | Feature | top fn | nested fn | method | lambda | protocol signature | struct ctor | enum variant ctor | native method |
 |---|---|---|---|---|---|---|---|---|
 | defaults | ok | ok | ok | no | no | ok | no | n/a |
-| variadic | ok | ok | ok | no | no | no | no | `print` only |
+| variadic | ok | ok | ok | no | no | no | no | `print` only; ok as a value |
 | named arguments at the call | ok | ok | ok | ok | ok | ok | no | no |
 | own generic parameters | ok | no | ok | no | no | on the type | on the type | ok |
 | statement body, `yield` | ok | ok | ok | no | — | — | — | — |
 | self-recursion | ok | ok | ok | only when the binding is global | — | — | — | — |
 | redefinition | error | allowed, last wins | — | — | — | — | — | — |
 
-`p := print` becomes a fixed one-argument function (`p(1, 2)` is an error), while a user variadic keeps
-its shape as a value. (Constructors and type names as values: U10, TICKET-259.)
+(Constructors and type names as values: U10, TICKET-259.)
 
 Destructuring by binding site:
 

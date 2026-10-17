@@ -79,8 +79,6 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    - TICKET-263, group A, names: one owner for "which names hold a slot" (owners.md row 44; fixes
      `'None' is not callable` for an imported alias read before `Count := …`); one name per module
      (the owner decision below); a recursive local lambda (`unknown name 'fact'`); a divergent fn.
-   - TICKET-264, group B, callables: `f := print; f(1, 2)` (`'closure' expects 1 argument(s)`), the
-     `'closure'` name in every fn-value call message, the "fewest args" owner (row 21).
    - TICKET-265, group C, builtin types and protocols: fact 10 (row 70), rows 59, 62, 94, protocols
      to `std.ops`/`std.cmp`/`std.iter`, `Hashable` embeds `Eq` and is opt-in, `T?` derives nothing,
      `Deque`/`Heap`/`Counter` `Iterable`, the collection convention table, the U5 sibling gaps.

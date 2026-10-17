@@ -361,9 +361,13 @@ labeled("dash: ", 4, 5, 6, sep="-")    # keyword-only `sep`
 
 - Allowed on free functions, methods and `native fn` decls; not on closures or `extern` (C)
   functions (see [`ffi-and-packaging.md`](../../design/ffi-and-packaging.md) §5).
-- Through a binding certain to hold that one fn (next chapter), a variadic fn packs and fills
-  defaults like a direct call (`g := sum_all; g(1, 2, 3)`). Any other value takes the `List[T]` slot
-  (`fs := [sum_all]; fs[0]([1, 2, 3])`).
+- A variadic is part of the fn type: `fn labeled` above has the type `fn(str, ...int) -> str`, and
+  `fn(str, List[int]) -> str` is a different type (Go's `func(string, ...int) string` rule).
+- Every value path packs surplus positionals like a direct call: a binding, a list slot, a
+  parameter, a HOF argument, `defer` and `spawn` (`fs := [sum_all]; fs[0](1, 2, 3)`).
+- A keyword-only param is not part of the fn type. A call through a value that is not a certain
+  binding (next chapter) omits it, and the callee fills its default. A required keyword-only param
+  makes such a call an error: `missing required keyword argument 'k'`.
 
 ### `Any` (the top type)
 

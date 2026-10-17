@@ -39,7 +39,10 @@ bind by the wrong function's labels.
 - A default that names a type parameter is filled by the callee, so a value call may omit it only at
   the end: `h := f[int]; h(1, c=9)` over `fn f[T](a: T, b: List[T] = List[T](), c: int = 3)` is
   refused. Call the function by name for that shape.
-- A built-in function value (`p := ord`) takes no keyword arguments.
+- A certain binding takes named arguments only through its declaration's slots. A builtin takes
+  exactly its keyword-only params by name (`p := print; p(1, 2, sep="-")`); `p := ord; p(c="a")`
+  and `f := math.sqrt; f(x=4.0)` report `'p' takes no named arguments` and `'f' takes no named
+  arguments`, as the direct calls do.
 - A keyword call through a fn-typed struct field or a tuple slot (`h.f(x=4)`, `t.0(x=4)`) is refused:
   member-call syntax resolves as a method first. Bind it first (`g := h.f` then `g(x=4)`).
 - A binding typed from `fn a(x: int = 1)` may be called with no argument, so a function that requires
@@ -49,6 +52,18 @@ bind by the wrong function's labels.
   position (`defer d(name="Zoe")`). The checker rewrites the call to a positional one.
 - Diagnostics print an omittable parameter as `int = …`: `[a, b]` over those two functions reports
   `fn(int = …) -> int vs fn(int) -> int`.
+
+**A variadic is part of the fn type (Go's rule).** `fn(...T) -> R` is the type of a Chezzi variadic
+(`fn(int, ...str) -> R` with a fixed param first), and `fn(T, ...) -> R` the type of a C variadic
+(`extern`). The variadic part sits last. `fn(int, ...str) -> R` and `fn(int, List[str]) -> R` are
+different types, and a call through any value of a variadic type packs its surplus positionals as a
+direct call does. `print` is a `fn(...Any) -> None`, so a `fn(Any) -> None` slot does not accept it.
+Go rejects the same shape: `cannot use fmt.Println (value of type func(a ...any) (n int, err error))
+as func(any) value in argument to ap`.
+
+**An arity error names the callee as written:** `'h'` for a binding, `'k'` for a parameter,
+`'closure'` for a callee with no name (`fs[0](1)`, `mk()(1)`). The message is the direct call's
+message: `'h' expects 2 argument(s), got 1`.
 
 **Parameter types are invariant.** `h: fn(Any) -> Dog = idd` over `fn idd(d: Dog) -> Dog` is a type
 error, and so is `h: fn(int) -> str = wide` over `fn wide(a: Any) -> str` (Go and Rust agree). The

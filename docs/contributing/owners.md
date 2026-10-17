@@ -18,7 +18,11 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Where a block expression may start (value site) | `parse_value` (`parser/expr.rs`), `open_value` (`parser/expr.rs`) | U8 |
 
 | Constant value of an expression | `eval` (`ast/consteval.rs`) | overflow lint, width check, const |
-| Fewest args a decl may be entered with | `min_callable_params` (`ast/mod.rs`) | one owner; the native-sig builder is `harvest_native_fn_sig` (`checker/harvest.rs`) |
+| Fewest args a decl may be entered with | `min_callable_params` (`ast/mod.rs`) | one owner: the checker's `FnSig.min_params`, the compiler's `Proto::min_arity` and the natives read it |
+| Value type of a named fn or builtin | `fn_value_ty` (`checker/mod.rs`) | one builder for every `FnSig` value and hover type; a builtin value is a `Ty::Func`, and the variadic flag is part of the type (TICKET-264) |
+| Native decl signature and slots | `harvest_native_fn_sig` (`checker/harvest.rs`) | prelude natives included; `register_native_decl` calls it |
+| Call slots of a param list | `slots_of` (`desugar/mod.rs`) | `param_slots` (user decls) and `native_param_slots` (natives, positional-only before the variadic) call it |
+| print's separator and terminator | the `native fn print` declaration (`std/prelude.chz`), read by `prelude_print_defaults` (`compiler/call.rs`) | `Program.print_defaults` carries them to `Op::CallPrint` and the VM value arm |
 | Is this name the blank `_` | `is_blank_name` (`ast/mod.rs`) | the parser encodes a blank at every binding site (`Pattern::Wildcard`, an `else _:` binder as no binder); `tests/owner_guards.rs` rejects a `== "_"` anywhere else |
 | Valid assignment target | `is_place` (`ast/mod.rs`) | the parser admits only places; the non-place arms of `check_assign` (`checker/assign.rs`), `compile_assign` (`compiler/assign.rs`) and `emit_assign_value_first` (`compiler/stmt.rs`) are `internal:` errors, never a second decision |
 | May `head[X]` be a type application | `is_named_head` (`ast/mod.rs`) | all three parser sites read it; the checker still probes the receiver twice per chained link (`checker/expr.rs`, U17's remaining half) |
@@ -104,6 +108,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Unit-test fixture temp directory | `TmpDir` (`test_support.rs`) | one counter, so two live fixtures never share a path; each crate's tests include the file; `main.rs` and `tests/` keep their own |
 | C callback fixture library | `build_callback_so` (`test_support.rs`) | the native FFI tests and the VM FFI goldens (`vm/golden_tests/ffi.rs`) |
 | VM production sources for a source-text rule | `vm_sources` (`vm/tests/mod.rs`) | |
+| Generated-program grid runner | the fn `run_grid` in `tests/support/grid_cell.rs` | 15 grid files under `tests/` include that file: 14 call `run_grid`, `tests/open_binding_grid.rs` calls `run_cell`; a cell expects a stdout, a rejection fragment or a twin program run at test time |
 
 ## File map
 

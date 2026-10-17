@@ -117,7 +117,10 @@ print(ffi.load_str(buf))                                    # x-42-3.14
   least N argument(s)*.
 - The bare `...` is legal only last in an `extern` fn. It differs from Chezzi's `...xs: T`, which an
   extern fn rejects.
-- A C variadic read as a value (`f := printf`) takes only its declared params.
+- A C variadic read as a value keeps its varargs: `f := snprintf; f(buf, 64, "%s-%ld", "x", 42)`
+  passes the varargs as the direct call does. Its type is `fn(ptr, int, str, ...) -> int`.
+- A variadic fn type (`fn(ptr, ...) -> int`, `fn(...int) -> int`) is not a C callback type: an
+  extern param of that type is *not C-marshallable*.
 - Calls use `ffi_prep_cif_var`, so `double` varargs are ABI-correct.
 
 ### Callbacks
