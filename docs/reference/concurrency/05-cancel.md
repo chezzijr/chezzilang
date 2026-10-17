@@ -64,7 +64,7 @@ fn serve(tok: Token, io: Channel[str]):
   Measured on a 500-deep chain at `CHEZZI_THREADS=4`: without the link 387 of 501 tokens stayed
   permanently uncancelled; with it, 0 of 501.
 - **Ordering.** Marking a descendant sets its cancel bit **before** it trips its `done()`, so a task
-  woken by any node's `done()` always reads `cancelled() == true` (Go's `ctx.Done()`/`ctx.Err()`
+  woken by any node's `done()` always reads `cancelled() == true` (Go's `ctx.Done()`
   contract).
 - **Retention.** A `cancel()` **drains** the registries it walks, so a cancelled subtree releases its
   child handles. An **uncancelled** long-lived parent retains them — there is no token-drop hook, so
@@ -82,7 +82,7 @@ Cost of the `parent` link:
 
 At larger depth `cancelled()` is quadratic: 0.53 µs at depth 0, 178 µs at 100, 2360 µs at 400
 (release). The ancestor walk is O(depth), and the GC mark pass re-walks the rooted chain. Go's
-`ctx.Err()` is flat O(1) at every depth. See [`benchmarks.md`](../../contributing/benchmarks.md).
+`ctx.Done()` check is flat O(1) at every depth. See [`benchmarks.md`](../../contributing/benchmarks.md).
 
 **Deterministic deadline.** A timeout's deadline is checked via `monotonic()` *at poll time* — no
 background canceller task — so a self-polling timeout loop stops on time identically across runs.

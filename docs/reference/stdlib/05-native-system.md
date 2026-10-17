@@ -103,7 +103,7 @@ itself: the join unwinds within ~5 ms, and the child process it waited on runs t
 A running child is [uninterruptible while in flight](04-native-core.md#blocking-calls-cannot-be-interrupted):
 nothing in the language kills it. Bound it with `timeout N …` in the command line itself.
 
-| Function | Result |
+| Function | Returns |
 |---|---|
 | `cmd(line: str) -> str!` | Run `sh -c <line>` and capture stdout; `!stderr` on non-zero exit (on failure stdout is discarded; use `run` for the full result). |
 | `run(line: str) -> ProcResult!` | Run `sh -c <line>` and return `struct ProcResult { stdout: str, stderr: str, code: int }`. A non-zero exit is a normal `?ProcResult` with `code != 0` (both streams kept); **only a spawn failure** (no such program, permission denied) is `!e`. A signal-killed process reports `code = -1`. |
