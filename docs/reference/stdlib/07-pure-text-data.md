@@ -216,7 +216,7 @@ error on that line. (There is no `deque()` factory: a no-argument generic factor
 | `.len()` / `.is_empty()` | `() -> int` / `-> bool` | **O(1)**. |
 
 **`Counter[T: Hashable]`**: a frequency table over `Map[T, int]` (`T` must be `Hashable`,
-like any map key; `Hashable` alone does not imply `Eq`). Construct directly:
+like any map key; `Hashable` embeds `Eq`). Construct directly:
 **`c: Counter[str] = Counter({})`** or **`Counter[str]({})`**; an untyped `c := Counter({})` is an
 error on that line. (No `counter()` factory, for the same reason as `Deque`.)
 
