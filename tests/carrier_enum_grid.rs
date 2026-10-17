@@ -598,5 +598,5 @@ fn carrier_enum_grid() {
         Rejects("pattern `Opt1.Som(Opt1.Non)` is not covered"),
     );
 
-    run_grid("carrier-enum", &cells);
+    run_grid("carrier-enum", &cells, &[]);
 }

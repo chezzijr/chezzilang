@@ -195,7 +195,7 @@ fn carrier_pattern_grid() {
             "Red",
         ),
     ];
-    run_grid("carrier-pattern", &cells);
+    run_grid("carrier-pattern", &cells, &[]);
 }
 
 /// A `?v` arm over an un-inferable scrutinee is a structural test on an unknown shape.
@@ -209,7 +209,7 @@ fn carrier_pattern_on_uninferable_scrutinee_is_rejected() {
             "cannot match a variant pattern on a value of un-inferable type; annotate it",
         ),
     }];
-    run_grid("carrier-pattern-unknown", &cells);
+    run_grid("carrier-pattern-unknown", &cells, &[]);
 }
 
 /// A carrier or variant pattern on an `int` scrutinee is a checker error on `chezzi run` too: the

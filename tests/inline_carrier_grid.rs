@@ -470,5 +470,5 @@ fn extra_cells() -> Vec<Cell> {
 fn inline_carrier_grid() {
     let mut cells: Vec<Cell> = consumers().iter().flat_map(source_cells).collect();
     cells.extend(extra_cells());
-    run_grid("inline-carrier", &cells);
+    run_grid("inline-carrier", &cells, &[]);
 }

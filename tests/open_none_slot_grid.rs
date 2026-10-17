@@ -4228,5 +4228,5 @@ fn open_none_slot_grid() {
     ] {
         cells_of(rows, &mut cells);
     }
-    run_grid("open_none_slot", &cells);
+    run_grid("open_none_slot", &cells, &[]);
 }

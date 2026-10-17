@@ -336,7 +336,7 @@ fn form_by_position_grid() {
         &format!("n := 1\nif f: y := match n:\n{arms}\nelse:\n    print(\"else\")"),
         "=else",
     ));
-    run_grid("inline-if-form", &cells);
+    run_grid("inline-if-form", &cells, &[]);
 }
 
 /// Row 5: `recover: <expr>` is an ordinary expression in every position; its body is one expression.
@@ -393,7 +393,7 @@ fn recover_inline_grid() {
         .iter()
         .map(|(body, v)| cell(body, &lib, body, v))
         .collect();
-    run_grid("inline-if-recover", &cells);
+    run_grid("inline-if-recover", &cells, &[]);
 }
 
 /// Whose `else` is it: the `if` line, a nested block on it, a later line, a bare `return`.
@@ -494,7 +494,7 @@ fn else_owner_grid() {
             cell(body, LIB, &program, v)
         })
         .collect();
-    run_grid("inline-if-else-owner", &cells);
+    run_grid("inline-if-else-owner", &cells, &[]);
 }
 
 /// A one-line `if … else` statement discards its value, so its branches need not join; every
@@ -633,5 +633,5 @@ fn mixed_branch_types_grid() {
         .iter()
         .map(|(name, body, v)| cell(name, FNS, body, v))
         .collect();
-    run_grid("inline-if-mixed", &cells);
+    run_grid("inline-if-mixed", &cells, &[]);
 }

@@ -97,5 +97,5 @@ fn carrier_display_grid() {
             Expect::Rejects("assertion failed: !'boom' == 5"),
         ),
     ];
-    run_grid("carrier-display", &cells);
+    run_grid("carrier-display", &cells, &[]);
 }

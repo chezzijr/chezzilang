@@ -313,7 +313,7 @@ fn expected_type_slot_grid() {
         }
     }
     assert_eq!(cells.len(), 19 * 11 * 2);
-    run_grid("expected-type-slot", &cells);
+    run_grid("expected-type-slot", &cells, &[]);
 }
 
 // ===== grid II: construct x pair =====
@@ -546,7 +546,7 @@ fn join_grid() {
             }
         }
     }
-    run_grid("expected-type-join", &cells);
+    run_grid("expected-type-join", &cells, &[]);
 }
 
 // ===== grid III: `x?.m()` where `m` returns nothing =====
@@ -599,7 +599,7 @@ fn void_chain_grid() {
             Expect::Rejects("expression returns no value"),
         ));
     }
-    run_grid("expected-type-void-chain", &cells);
+    run_grid("expected-type-void-chain", &cells, &[]);
 }
 
 // ===== grid IV: return shape x annotation x sibling argument form =====
@@ -996,5 +996,5 @@ fn sibling_form_grid() {
         }
     }
     assert_eq!(cells.len(), 17 * 11);
-    run_grid("expected-type-sibling", &cells);
+    run_grid("expected-type-sibling", &cells, &[]);
 }

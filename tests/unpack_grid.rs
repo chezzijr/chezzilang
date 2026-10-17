@@ -490,7 +490,7 @@ fn unpack_grid() {
             }
         }
     }
-    run_grid("unpack", &cells);
+    run_grid("unpack", &cells, &[]);
 }
 
 /// The shape a `match` arm pattern is, naming every `Pattern` variant: a new variant breaks this
@@ -670,5 +670,6 @@ fn bare_tuple_ends_a_statement() {
                 expect: Expect::Rejects("expected end of line, found 'else'"),
             },
         ],
+        &[],
     );
 }

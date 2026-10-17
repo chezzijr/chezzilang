@@ -1204,12 +1204,12 @@ fn cells() -> Vec<Cell> {
 
 #[test]
 fn turbofish_value_grid() {
-    run_grid("turbofish-value", &cells());
+    run_grid("turbofish-value", &cells(), &[]);
 }
 
 #[test]
 fn type_arg_bracket_grid() {
     let mut out = Vec::new();
     bracket_grid_cells(&mut out);
-    run_grid("type-arg-bracket", &out);
+    run_grid("type-arg-bracket", &out, &[]);
 }

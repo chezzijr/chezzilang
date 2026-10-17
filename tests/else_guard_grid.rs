@@ -213,7 +213,7 @@ fn else_guard_grid() {
             "`else` needs a `T?` or `T!E` value, found int",
         ),
     ];
-    run_grid("else-guard", &cells);
+    run_grid("else-guard", &cells, &[]);
 }
 
 /// The tuple carriers of the destructuring rows, appended to [`LIB`].
@@ -407,5 +407,5 @@ fn else_guard_binding_form_grid() {
         }
     }
     assert_eq!(cells.len(), 39);
-    run_grid("else-guard-binding-form", &cells);
+    run_grid("else-guard-binding-form", &cells, &[]);
 }

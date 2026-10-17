@@ -9,12 +9,11 @@
 //! native fn, struct ctor), plus an extern C variadic. The builtin rows come from
 //! `Builtin::ALL` filtered by `first_class()`, through the exhaustive `builtin_input`.
 
+#[path = "support/grid_cell.rs"]
+mod grid_cell;
+
 use chezzi::base::builtin::Builtin;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use grid_cell::{Cell, Expect, Twin, run_grid};
 
 const FN_VALUE_KW: &str = "keyword arguments through a function value need a binding";
 const BOUND_METHOD: &str = "a bound method is not a value";
@@ -413,20 +412,6 @@ impl CallPath {
     }
 }
 
-enum Expect {
-    /// Same exit status, stdout and first error line as the direct program.
-    Twin(Vec<(String, String)>),
-    Rejects(&'static str),
-}
-
-struct Cell {
-    name: String,
-    files: Vec<(String, String)>,
-    expect: Expect,
-    path_name: String,
-    written: String,
-}
-
 fn program(c: &Callee, lib: Option<&str>, module_extra: &str, body: &str) -> Vec<(String, String)> {
     let mut main = String::new();
     main.push_str(&c.imports);
@@ -587,8 +572,6 @@ fn cells() -> Vec<Cell> {
                     name,
                     files,
                     expect,
-                    path_name: path.name(&c.written),
-                    written: c.written.clone(),
                 });
             }
         }
@@ -604,6 +587,13 @@ fn expectation(
     args: &str,
     direct: &dyn Fn(&str) -> Vec<(String, String)>,
 ) -> Expect {
+    let twin = |files| {
+        Expect::Twin(Twin {
+            files,
+            written: c.written.clone(),
+            path_name: path.name(&c.written),
+        })
+    };
     if path != CallPath::Direct
         && let Some(frag) = c.no_value
     {
@@ -633,7 +623,7 @@ fn expectation(
         CallPath::HofMap => {
             let one_param = !c.ty.contains("...") && !c.ty.contains(',');
             return if one_param {
-                Expect::Twin(program(
+                twin(program(
                     c,
                     None,
                     "",
@@ -653,158 +643,7 @@ fn expectation(
         | CallPath::Defer
         | CallPath::Spawn => {}
     }
-    Expect::Twin(direct(args))
-}
-
-struct Out {
-    ok: bool,
-    stdout: String,
-    first_err: String,
-    stderr: String,
-}
-
-fn run_program(root: &Path, idx: usize, files: &[(String, String)]) -> Out {
-    let dir: PathBuf = root.join(format!("c{idx}"));
-    for (rel, src) in files {
-        let path = dir.join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, src).unwrap();
-    }
-    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-        .arg("run")
-        .arg("main.chz")
-        .current_dir(&dir)
-        .output()
-        .expect("spawn chezzi");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Out {
-        ok: out.status.success(),
-        stdout: String::from_utf8_lossy(&out.stdout).trim_end().to_string(),
-        first_err: strip_loc(stderr.lines().next().unwrap_or("")),
-        stderr: stderr.to_string(),
-    }
-}
-
-/// An arity error reads one of three ways: `missing required argument 'a'` (a call plan miss, no
-/// callee name), `'k' expects 2 argument(s), got 0` and `'k' expects 1–2 argument(s), got 0` (an
-/// annotated fn type carries no defaults, E2). Every form is one arity rejection; the callee name
-/// is checked wherever the message carries one. Any other line compares as written.
-fn canon(line: &str, path_name: &str) -> String {
-    if line.contains(" expects ") && line.contains(" argument(s), got ") {
-        let named = format!("'{path_name}' expects ");
-        if !line.contains(&named) {
-            return format!("ARITY with the wrong callee name (want {path_name:?}): {line}");
-        }
-        return "ARITY".to_string();
-    }
-    if line.contains("missing required argument") {
-        return "ARITY".to_string();
-    }
-    line.to_string()
-}
-
-/// Drop a `(file:line:col)` location from an error line.
-fn strip_loc(line: &str) -> String {
-    let mut s = line.to_string();
-    while let Some(open) = s.find(" (") {
-        let Some(close) = s[open..].find(')') else {
-            break;
-        };
-        let inner = &s[open + 2..open + close];
-        let tail: Vec<&str> = inner.rsplitn(3, ':').collect();
-        if tail.len() == 3
-            && tail[0].chars().all(|c| c.is_ascii_digit())
-            && tail[1].chars().all(|c| c.is_ascii_digit())
-        {
-            s.replace_range(open..open + close + 1, "");
-        } else {
-            break;
-        }
-    }
-    s
-}
-
-fn run_all(root: &Path, base: usize, programs: &[&Vec<(String, String)>]) -> Vec<Out> {
-    let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<(usize, Out)>> = Mutex::new(Vec::new());
-    std::thread::scope(|s| {
-        for _ in 0..4 {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::SeqCst);
-                    if i >= programs.len() {
-                        break;
-                    }
-                    let o = run_program(root, base + i, programs[i]);
-                    results.lock().unwrap().push((i, o));
-                }
-            });
-        }
-    });
-    let mut r = results.into_inner().unwrap();
-    r.sort_by_key(|(i, _)| *i);
-    r.into_iter().map(|(_, o)| o).collect()
-}
-
-fn key(files: &[(String, String)]) -> String {
-    files
-        .iter()
-        .map(|(n, s)| format!("{n}\n{s}"))
-        .collect::<Vec<_>>()
-        .join("\n--\n")
-}
-
-fn grid_fails(root: &Path, cells: &[Cell]) -> Vec<(String, String)> {
-    let mut twin_ix: HashMap<String, usize> = HashMap::new();
-    let mut twins: Vec<&Vec<(String, String)>> = Vec::new();
-    for c in cells {
-        if let Expect::Twin(f) = &c.expect {
-            twin_ix.entry(key(f)).or_insert_with(|| {
-                twins.push(f);
-                twins.len() - 1
-            });
-        }
-    }
-    let twin_out = run_all(root, 0, &twins);
-    let programs: Vec<&Vec<(String, String)>> = cells.iter().map(|c| &c.files).collect();
-    let outs = run_all(root, twins.len(), &programs);
-    let mut fails = Vec::new();
-    for (c, got) in cells.iter().zip(&outs) {
-        let verdict = match &c.expect {
-            Expect::Rejects(frag) => {
-                if !got.ok && got.stderr.contains(frag) {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "want rejects {frag:?}; got ok={} stdout {:?} err {:?}",
-                        got.ok, got.stdout, got.first_err
-                    ))
-                }
-            }
-            Expect::Twin(f) => {
-                let t = &twin_out[twin_ix[&key(f)]];
-                let want_err = t
-                    .first_err
-                    .replace(&format!("'{}'", c.written), &format!("'{}'", c.path_name));
-                let (want_err, got_err) = (
-                    canon(&want_err, &c.path_name),
-                    canon(&got.first_err, &c.path_name),
-                );
-                if t.ok == got.ok && t.stdout == got.stdout && want_err == got_err {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "twin ok={} stdout {:?} err {:?}; got ok={} stdout {:?} err {:?}",
-                        t.ok, t.stdout, want_err, got.ok, got.stdout, got.first_err
-                    ))
-                }
-            }
-        };
-        if let Err(e) = verdict {
-            fails.push((c.name.clone(), e));
-        }
-    }
-    fails
+    twin(direct(args))
 }
 
 #[test]
@@ -817,34 +656,7 @@ fn builtin_input_covers_exactly_the_first_class_builtins() {
 
 #[test]
 fn fn_value_call_grid() {
-    let root = std::env::temp_dir().join(format!("chezzi-fn-value-grid-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let cells = cells();
-    let fails = grid_fails(&root, &cells);
-    let _ = std::fs::remove_dir_all(&root);
-    let mut bad = Vec::new();
-    for (name, why) in &fails {
-        if !FN_VALUE_PINNED_RED.contains(&name.as_str()) {
-            bad.push(format!("{name}: {why}"));
-        }
-    }
-    for p in FN_VALUE_PINNED_RED {
-        if !fails.iter().any(|(n, _)| n == p) {
-            bad.push(format!("{p}: green; remove it from FN_VALUE_PINNED_RED"));
-        }
-    }
-    if std::env::var("GRID_DUMP").is_ok() {
-        for (n, w) in &fails {
-            eprintln!("RED {n} :: {w}");
-        }
-    }
-    assert!(
-        bad.is_empty(),
-        "{} of {} fn-value cells failed:\n{}",
-        bad.len(),
-        cells.len(),
-        bad.join("\n")
-    );
+    run_grid("fn-value", &cells(), FN_VALUE_PINNED_RED);
 }
 
 /// The family of a red cell, from the measurements on the unfixed binary. A cell name is

@@ -459,10 +459,7 @@ fn shadow_cells(out: &mut Vec<Cell>) {
         ),
     ];
     for (n, b, e) in cases {
-        let e = match e {
-            Expect::Prints(s) => Expect::Prints(s.clone()),
-            Expect::Rejects(f) => Expect::Rejects(f),
-        };
+        let e = e.clone();
         out.push(cell(format!("k5/{n}"), &format!("{AB}{b}"), e));
     }
 }
@@ -616,10 +613,7 @@ fn param_cells(out: &mut Vec<Cell>) {
         ),
     ];
     for (n, b, e) in cases {
-        let e = match e {
-            Expect::Prints(s) => Expect::Prints(s.clone()),
-            Expect::Rejects(f) => Expect::Rejects(f),
-        };
+        let e = e.clone();
         out.push(bare(&format!("param/{n}"), &format!("{G}{b}"), e));
     }
 }
@@ -633,7 +627,7 @@ fn path_call_grid() {
     shadow_cells(&mut cells);
     hint_cells(&mut cells);
     param_cells(&mut cells);
-    run_grid("path-call", &cells);
+    run_grid("path-call", &cells, &[]);
 }
 
 const GLIB: &str = "fn g[T](x: T) -> T:
@@ -707,5 +701,5 @@ type BX = Bx[int]
             });
         }
     }
-    run_grid("paren-turbofish-call", &cells);
+    run_grid("paren-turbofish-call", &cells, &[]);
 }

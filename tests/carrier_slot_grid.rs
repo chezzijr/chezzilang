@@ -627,5 +627,5 @@ fn carrier_slot_grid() {
     wait_recv_assign_cells(&mut cells);
     hashable_cells(&mut cells);
     extra_cells(&mut cells);
-    run_grid("carrier-slot", &cells);
+    run_grid("carrier-slot", &cells, &[]);
 }
