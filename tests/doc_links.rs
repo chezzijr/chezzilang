@@ -155,15 +155,14 @@ fn every_relative_link_resolves() {
                 ));
                 continue;
             }
-            if let Some(anchor) = anchor {
-                if resolved.extension().is_some_and(|x| x == "md")
-                    && !anchors(&read(&resolved)).contains(anchor)
-                {
-                    broken.push(format!(
-                        "{}: {target} (no heading #{anchor})",
-                        doc.display()
-                    ));
-                }
+            if let Some(anchor) = anchor
+                && resolved.extension().is_some_and(|x| x == "md")
+                && !anchors(&read(&resolved)).contains(anchor)
+            {
+                broken.push(format!(
+                    "{}: {target} (no heading #{anchor})",
+                    doc.display()
+                ));
             }
         }
     }
