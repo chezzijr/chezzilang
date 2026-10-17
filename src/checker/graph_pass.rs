@@ -459,20 +459,57 @@ pub(super) struct StdProtocol {
     pub stmt: crate::ast::Stmt,
 }
 
-/// What the embedded std sources declare, parsed once: the module of every public type and protocol
-/// name, and every `protocol` declaration in file order.
-pub(super) struct StdDecls {
-    type_owners: HashMap<String, Vec<String>>,
-    protocols: Vec<StdProtocol>,
+/// The std module of an embedded file: `std.ops` for `ops.chz`.
+fn std_module_of(rel: &str) -> String {
+    format!("std.{}", rel.trim_end_matches(".chz").replace('/', "."))
 }
 
-fn std_decls() -> &'static StdDecls {
-    static DECLS: std::sync::OnceLock<StdDecls> = std::sync::OnceLock::new();
-    DECLS.get_or_init(|| {
+/// Every `protocol` declaration of one std source, in file order, found WITHOUT parsing the rest of
+/// the file: the protocol table is read on every program start, and parsing all of `std/*.chz` for
+/// it cost 11 ms of a 19 ms `print(1)`. A declaration is a column-0 `protocol` line plus the blank
+/// and indented lines under it. Each is parsed behind as many newlines as precede it, so its spans
+/// are the file's. `std_protocol_decls_equal_a_full_parse` holds this to a full parse.
+pub(super) fn protocol_stmts(src: &str) -> Vec<crate::ast::Stmt> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut stmts = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].starts_with("protocol ") {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        while i < lines.len() && (lines[i].trim().is_empty() || lines[i].starts_with([' ', '\t'])) {
+            i += 1;
+        }
+        let chunk = format!("{}{}\n", "\n".repeat(start), lines[start..i].join("\n"));
+        let parsed = crate::lexer::tokenize(&chunk)
+            .ok()
+            .and_then(|tokens| crate::parser::parse(tokens).ok());
+        if let Some(ast) = parsed {
+            stmts.extend(
+                ast.stmts
+                    .into_iter()
+                    .filter(|s| matches!(s.kind, StmtKind::Protocol { .. })),
+            );
+        }
+    }
+    stmts
+}
+
+/// Every public type name a std module declares → its modules (`std.regex` for `Match`), read once
+/// from the embedded std sources on the first diagnostic that needs an import hint, never at
+/// startup. The prelude is left out: its types are in scope everywhere. A protocol is left out
+/// too: `std_protocol_owner` answers for it.
+pub(super) fn std_type_owners() -> &'static HashMap<String, Vec<String>> {
+    static OWNERS: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
+    OWNERS.get_or_init(|| {
         let mut type_owners: HashMap<String, Vec<String>> = HashMap::new();
-        let mut protocols: Vec<StdProtocol> = Vec::new();
         for (rel, src) in crate::native::std_embed::STD_FILES {
-            let module = format!("std.{}", rel.trim_end_matches(".chz").replace('/', "."));
+            if *rel == "prelude.chz" {
+                continue;
+            }
             let Ok(tokens) = crate::lexer::tokenize(src) else {
                 continue;
             };
@@ -480,43 +517,43 @@ fn std_decls() -> &'static StdDecls {
                 continue;
             };
             for s in &ast.stmts {
-                if let StmtKind::Protocol { name, .. } = &s.kind {
-                    protocols.push(StdProtocol {
-                        name: name.clone(),
-                        module: module.clone(),
-                        stmt: s.clone(),
-                    });
+                if let StmtKind::Protocol { .. } = &s.kind {
+                    continue;
                 }
-                // The prelude's types are in scope everywhere, so it owns no type name.
-                if *rel != "prelude.chz"
-                    && let Some(name) = declared_type_name(&s.kind)
+                if let Some(name) = declared_type_name(&s.kind)
                     && !is_std_internal_name(name)
                 {
                     type_owners
                         .entry(name.to_string())
                         .or_default()
-                        .push(module.clone());
+                        .push(std_module_of(rel));
                 }
             }
         }
-        StdDecls {
-            type_owners,
-            protocols,
-        }
+        type_owners
     })
-}
-
-/// Every public type and protocol name a std module declares → its modules (`std.regex` for
-/// `Match`), read once from the embedded std sources. The prelude is left out: its types are in
-/// scope everywhere.
-pub(super) fn std_type_owners() -> &'static HashMap<String, Vec<String>> {
-    &std_decls().type_owners
 }
 
 /// Every `protocol` declaration in the embedded std sources, in file order: the one source of which
 /// protocols exist, their shapes and the module that owns each.
 pub(super) fn std_protocol_decls() -> &'static [StdProtocol] {
-    &std_decls().protocols
+    static PROTOCOLS: std::sync::OnceLock<Vec<StdProtocol>> = std::sync::OnceLock::new();
+    PROTOCOLS.get_or_init(|| {
+        let mut protocols = Vec::new();
+        for (rel, src) in crate::native::std_embed::STD_FILES {
+            let module = std_module_of(rel);
+            for stmt in protocol_stmts(src) {
+                if let StmtKind::Protocol { name, .. } = &stmt.kind {
+                    protocols.push(StdProtocol {
+                        name: name.clone(),
+                        module: module.clone(),
+                        stmt,
+                    });
+                }
+            }
+        }
+        protocols
+    })
 }
 
 /// The std module that declares the protocol `name` (`std.prelude` for `Any` and `Error`), or `None`

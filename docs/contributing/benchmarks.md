@@ -118,6 +118,15 @@ differ. Compare ratios, not absolutes, across records.
 300 interleaved runs, median: **6504 us** (p10..p90 5929..7423), 2026-10-14 (TICKET-255). The `empty`
 row above is `hyperfine`'s figure for an empty file.
 
+Std protocol table (TICKET-265), `print(1)`, release, mean of 100 runs, three rounds interleaved with
+a build of main `25e8912d` on the same box: main 8597 / 7774 / 8115 us, branch 8238 / 8122 / 8317 us.
+Before the fix the branch took 19-22 ms: `std_decls` parsed all 225 KB of `std/*.chz` (11.3 ms) on
+every start to find 28 `protocol` declarations. `std_protocol_decls` now parses only those blocks;
+`std_type_owners` parses every file on the first import-hint diagnostic. Debug `print(1)`: 22.3 ms on
+both. Cost of a std import (release, `print(1)` after the import): `std.ops` 10.7 ms, `std.cmp` 9.3,
+`std.iter` 14.4, `std.string` 15.6, against 8.1 with none; the module is parsed, checked and compiled
+whole. A protocol name used to cost nothing; it now costs that import.
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers

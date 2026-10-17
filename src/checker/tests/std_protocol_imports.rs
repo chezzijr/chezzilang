@@ -256,3 +256,43 @@ fn operators_need_no_import() {
         "struct P:\n    n: int\n    fn add(self, other: P) -> P:\n        return P(self.n + other.n)\n    fn str(self) -> str:\n        return \"P\"\nprint(P(1) + P(2))\n",
     );
 }
+
+/// `std_protocol_decls` finds the `protocol` declarations without parsing the rest of each std file
+/// (startup cost). It must equal what a full parse of every `STD_FILES` entry finds, spans included.
+#[test]
+fn std_protocol_decls_equal_a_full_parse() {
+    let mut full: Vec<(String, String, crate::ast::Stmt)> = Vec::new();
+    for (rel, src) in crate::native::std_embed::STD_FILES {
+        let module = format!("std.{}", rel.trim_end_matches(".chz").replace('/', "."));
+        let ast = crate::parser::parse(crate::lexer::tokenize(src).expect("std lexes"))
+            .expect("std parses");
+        for s in &ast.stmts {
+            if let StmtKind::Protocol { name, .. } = &s.kind {
+                full.push((name.clone(), module.clone(), s.clone()));
+            }
+        }
+    }
+    let found: Vec<_> = graph_pass::std_protocol_decls()
+        .iter()
+        .map(|p| (p.name.clone(), p.module.clone(), p.stmt.clone()))
+        .collect();
+    assert_eq!(found, full);
+}
+
+/// The protocol scanner ends a declaration at the first non-blank column-0 line, keeps a blank line
+/// inside one, and ignores a `protocol` word that is not at column 0.
+#[test]
+fn protocol_scanner_keeps_blank_lines_and_stops_at_column_zero() {
+    let src = "# c\nprotocol A:\n    fn a(self)\n\n    fn b(self)\nfn f():\n    pass\n    s = \"protocol Z:\"\nprotocol B:\n    fn c(self)";
+    let got = graph_pass::protocol_stmts(src);
+    let shape: Vec<(String, usize, usize)> = got
+        .iter()
+        .map(|s| match &s.kind {
+            StmtKind::Protocol { name, methods, .. } => {
+                (name.clone(), methods.len(), s.span.line as usize)
+            }
+            _ => panic!("protocol_stmts returned a non-protocol statement"),
+        })
+        .collect();
+    assert_eq!(shape, [("A".to_string(), 2, 2), ("B".to_string(), 1, 9)]);
+}
