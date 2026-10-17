@@ -1347,9 +1347,9 @@ struct Checker {
     /// TICKET-255 — set per module by `run_graph_pass` from [`ModuleGraph::skips_range_methods`]: the
     /// prelude `Range` method bodies are not checked, because the graph builds no `Range` value.
     skip_range_bodies: bool,
-    /// TICKET-265 — set per module by `run_graph_pass` from [`ModuleGraph::skipped_fns`]: the top-level
+    /// TICKET-265 — set per module by `run_graph_pass` from [`ModuleGraph::fn_skips`]: the top-level
     /// fns of a std module that the program does not reach. Their bodies are not checked.
-    skip_fn_bodies: HashSet<String>,
+    skip_fn_bodies: crate::resolver::SkippedFns,
     /// Module-scoped types: `(declaring module id, bare type name) → runtime key`. Bare in the
     /// no-collision case; `<dotted>::Name` on a genuine cross-module clash. Built once in
     /// [`check_graph`] with the IDENTICAL graph-order, first-declarer-wins-bare rule as the compiler's

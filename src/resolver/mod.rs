@@ -119,8 +119,22 @@ pub struct ModuleGraph {
     /// compiler skip the bodies of the prelude `Range` methods.
     pub range_used: bool,
     /// TICKET-265 — per file id, the top-level fns of a std module that the program does not reach
-    /// ([`unreached_std_fns`]). The checker and the compiler skip their bodies.
-    pub skipped_fns: HashMap<u32, HashSet<String>>,
+    /// ([`unreached_std_fns`]). Desugar, the checker and the compiler skip their bodies; each reads
+    /// its module's entry through [`ModuleGraph::fn_skips`].
+    pub skipped_fns: HashMap<u32, SkippedFns>,
+}
+
+/// TICKET-265 — the top-level fns of one std module that the program does not reach. The one owner
+/// of the test "desugar, the checker and the compiler skip the body of this top-level fn":
+/// [`SkippedFns::skips`]. A reader takes its module's set from [`ModuleGraph::fn_skips`].
+#[derive(Debug, Clone, Default)]
+pub struct SkippedFns(HashSet<String>);
+
+impl SkippedFns {
+    /// True when the body of top-level fn `name` is skipped.
+    pub fn skips(&self, name: &str) -> bool {
+        self.0.contains(name)
+    }
 }
 
 /// TICKET-265 — the std module whose `parse` fn `json.decode[T]` calls by name.
@@ -146,11 +160,18 @@ impl ModuleGraph {
         !self.range_used && lm.dotted == ["std", "prelude"]
     }
 
-    /// TICKET-265 — true when the checker and the compiler skip the body of top-level fn `name` of `lm`.
+    /// TICKET-265 — the top-level fns of `lm` whose bodies are skipped; empty for a module the reach
+    /// set does not gate.
+    pub fn fn_skips(&self, lm: &LoadedModule) -> SkippedFns {
+        self.skipped_fns.get(&lm.file).cloned().unwrap_or_default()
+    }
+
+    /// TICKET-265 — true when desugar, the checker and the compiler skip the body of top-level fn
+    /// `name` of `lm`.
     pub fn skips_fn_body(&self, lm: &LoadedModule, name: &str) -> bool {
         self.skipped_fns
             .get(&lm.file)
-            .is_some_and(|names| names.contains(name))
+            .is_some_and(|s| s.skips(name))
     }
 }
 
@@ -177,7 +198,7 @@ fn unreached_std_fns(
     modules: &[LoadedModule],
     entry: &ModuleId,
     words: &HashMap<u32, Words>,
-) -> HashMap<u32, HashSet<String>> {
+) -> HashMap<u32, SkippedFns> {
     let index: HashMap<&ModuleId, usize> = modules
         .iter()
         .enumerate()
@@ -266,7 +287,10 @@ fn unreached_std_fns(
         .iter()
         .zip(fns)
         .filter(|(_, f)| !f.is_empty())
-        .map(|(m, f)| (m.file, f.into_keys().map(str::to_string).collect()))
+        .map(|(m, f)| {
+            let names = f.into_keys().map(str::to_string).collect();
+            (m.file, SkippedFns(names))
+        })
         .collect()
 }
 

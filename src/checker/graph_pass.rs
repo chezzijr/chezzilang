@@ -8,7 +8,7 @@ impl Checker {
     /// ([`ModuleGraph::skips_fn_body`]): no pass reads its body.
     pub(super) fn skips_body(&self, stmt: &Stmt) -> bool {
         if let StmtKind::Fn(decl) = &stmt.kind {
-            self.skip_fn_bodies.contains(&decl.name)
+            self.skip_fn_bodies.skips(&decl.name)
         } else {
             false
         }
@@ -92,7 +92,7 @@ impl Checker {
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of.insert(lm.id.clone(), idx);
             c.skip_range_bodies = graph.skips_range_methods(lm);
-            c.skip_fn_bodies = graph.skipped_fns.get(&lm.file).cloned().unwrap_or_default();
+            c.skip_fn_bodies = graph.fn_skips(lm);
             // Keys every checker->compiler table this module's bodies record, the bodied fns of a native
             // std module included (they are checked below, before the AST-module branch sets it).
             c.graph_module_idx = idx;

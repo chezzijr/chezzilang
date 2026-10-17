@@ -432,7 +432,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             fn_depth: 0,
             builds_range: false,
             counting_iterand: false,
-            skipped_fns: graph.skipped_fns.get(&graph.modules[mi].file),
+            skipped_fns: graph.fn_skips(&graph.modules[mi]),
         };
         let ast: &mut Module = &mut graph.modules[mi].ast;
         walker.walk_block(&mut ast.stmts)?;
@@ -466,7 +466,7 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         fn_depth: 0,
         builds_range: false,
         counting_iterand: false,
-        skipped_fns: None,
+        skipped_fns: crate::resolver::SkippedFns::default(),
     };
     walker.walk_block(&mut module.stmts)?;
     Ok(())
@@ -929,9 +929,9 @@ struct Walker<'a> {
     /// Set by the `For` arm just before it walks its iterand: that iterand is a counting loop
     /// ([`crate::ast::counting_range`]), so the `Range` arm must not record a use.
     counting_iterand: bool,
-    /// TICKET-265 — this module's entry in [`ModuleGraph::skipped_fns`]. The checker and the compiler
-    /// skip those bodies, so a range literal inside one records no `Range` use.
-    skipped_fns: Option<&'a HashSet<String>>,
+    /// TICKET-265 — this module's [`ModuleGraph::fn_skips`]. The checker and the compiler skip those
+    /// bodies, so a range literal inside one records no `Range` use.
+    skipped_fns: crate::resolver::SkippedFns,
 }
 
 /// TICKET-109 / W12-12 — how deep `fn` declarations may nest. A top-level `fn`, a `test fn` or a
@@ -1083,7 +1083,7 @@ impl Walker<'_> {
                     self.bind(&p.name);
                 }
                 let skipped = self.fn_depth == 1
-                    && self.skipped_fns.is_some_and(|s| s.contains(&decl.name));
+                    && self.skipped_fns.skips(&decl.name);
                 let builds_range = self.builds_range;
                 self.walk_block(&mut decl.body)?;
                 if skipped {

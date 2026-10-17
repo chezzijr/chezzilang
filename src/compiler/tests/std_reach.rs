@@ -118,29 +118,68 @@ const ROWS: &[Row] = &[
         kept: &["parse"],
         skipped: &["is_null"],
     },
+    // a fn used as a value, never called by name
+    Row {
+        src: "import max from std.cmp\nf := max[int]\nprint(f(3, 4))\n",
+        module: &["std", "cmp"],
+        kept: &["max"],
+        skipped: &["min", "clamp"],
+    },
+    // reached only from a method body: `Duration.to_string` calls `_fmt_pos`
+    Row {
+        src: "import std.duration as d\nprint(d.millis(1500).to_string())\n",
+        module: &["std", "duration"],
+        kept: &["millis", "_fmt_pos"],
+        skipped: &["parse", "since"],
+    },
+    // a file-backed native module is not gated: `run_outcome`, called only from the method
+    // `Executor.submit_result`, is kept
+    Row {
+        src: "import std.concurrency\nex := concurrency.Executor()\nprint(ex.submit_result(fn() -> int: 1).recv())\nex.shutdown()\n",
+        module: &["std", "concurrency"],
+        kept: &["run_outcome"],
+        skipped: &[],
+    },
+    // reached only from a closure: the fn `memoize1` returns calls `_memo_get`
+    Row {
+        src: "import std.memoize\nprint(memoize.memoize1(fn(k: int) -> int: k)(2))\n",
+        module: &["std", "memoize"],
+        kept: &["memoize1", "_memo_get"],
+        skipped: &[],
+    },
+    // the same import with no call: the closure's callee stays unreached
+    Row {
+        src: "import std.memoize\nprint(1)\n",
+        module: &["std", "memoize"],
+        kept: &[],
+        skipped: &["memoize1", "_memo_get"],
+    },
 ];
 
 #[test]
 fn std_fn_reach_grid() {
+    let mut red = Vec::new();
     for row in ROWS {
         let graph = graph_of(row.src);
         let lm = module(&graph, row.module);
         let kept = kept_fns(&graph, lm);
         for name in row.kept {
-            assert!(
-                kept.iter().any(|k| k == name),
-                "{:?}: {name} skipped; kept {kept:?}",
-                row.src
-            );
+            if !kept.iter().any(|k| k == name) {
+                red.push(format!("{:?}: {name} skipped; kept {kept:?}", row.src));
+            }
         }
         for name in row.skipped {
-            assert!(
-                !kept.iter().any(|k| k == name),
-                "{:?}: {name} kept; kept {kept:?}",
-                row.src
-            );
+            if kept.iter().any(|k| k == name) {
+                red.push(format!("{:?}: {name} kept; kept {kept:?}", row.src));
+            }
         }
     }
+    assert!(
+        red.is_empty(),
+        "{} red cells:\n{}",
+        red.len(),
+        red.join("\n")
+    );
 }
 
 #[test]

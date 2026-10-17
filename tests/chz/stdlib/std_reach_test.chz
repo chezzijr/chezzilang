@@ -1,0 +1,19 @@
+# TICKET-265 -- a std import compiles only the std fns the program reaches; each reached fn runs.
+import max from std.cmp
+import std.memoize
+import std.duration as d
+
+# a std fn used as a value, never called by name
+test fn a_std_fn_value_runs():
+    f := max[int]
+    assert f(3, 4) == 4
+    g: fn(int, int) -> int = max
+    assert g(3, 4) == 4
+
+# `_memo_get` is reached only from the closure `memoize1` returns
+test fn a_std_fn_reached_from_a_closure_runs():
+    assert memoize.memoize1(fn(k: int) -> int: k)(2) == 2
+
+# `_fmt_pos` is reached only from the method `Duration.to_string`
+test fn a_std_fn_reached_from_a_method_runs():
+    assert d.millis(1500).to_string() == "1.5s"

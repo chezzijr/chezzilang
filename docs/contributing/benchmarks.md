@@ -147,6 +147,13 @@ passes (hoist and signatures of every fn), compile 120 us, reach and desugar 120
 `operator_and_bound_agree_in_every_cell` in `tests/hook_conformance_grid.rs` imports a std module in
 each cell: 284 s on the branch, 189 s on main (load about 3.5 on the box).
 
+Std parse cache (TICKET-265, `resolver::shared_std_parse`): a process lexes and parses each embedded
+std module once and copies the AST into each later graph. Debug, one process, first load (fill) vs a
+later load (clone): `string.chz` 3.65 vs 0.19 ms, `iter.chz` 3.24 vs 0.14, `prelude.chz` 5.21 vs 0.23,
+`ops.chz` 0.60 vs 0.03. A long-lived process (the LSP, the lib tests) saves the difference on each
+graph after the first. A one-shot `chezzi run` builds one graph, so it fills and saves nothing; each
+`hook_conformance_grid` cell is such a process (265 s after the cache, 271-284 s before).
+
 ### Peak memory vs Go
 
 Peak process RSS, `benches/maxrss.py`, median of 3, 2026-07-25 after the four memory levers

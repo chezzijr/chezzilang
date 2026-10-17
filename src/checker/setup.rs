@@ -181,7 +181,7 @@ impl Checker {
             imported_variants: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
             skip_range_bodies: false,
-            skip_fn_bodies: HashSet::new(),
+            skip_fn_bodies: crate::resolver::SkippedFns::default(),
             type_keys: HashMap::new(),
             current_module_id: None,
             bare_types: HashMap::new(),

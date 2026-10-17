@@ -82,7 +82,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    - TICKET-265, group C, builtin types and protocols. Part 1 is done (2026-10-17): the std
      protocols live in `std.ops`/`std.cmp`/`std.iter`/`std.string`/`std.path`/`std.convert` and a bound
      needs the import, `Hashable` embeds `Eq`, `T?` derives no ordering. A std import checks and
-     compiles only the std fns the program reaches; `std.iter`/`std.string`/`std.ops` imports still
+     compiles only the std fns the program reaches, and a process parses each embedded std module once (`shared_std_parse`; debug, fill vs clone: `string.chz` 3.65 vs 0.19 ms, `iter.chz` 3.24 vs 0.14, `prelude.chz` 5.21 vs 0.23, `ops.chz` 0.60 vs 0.03); `std.iter`/`std.string`/`std.ops` imports still
      cost 2-3 ms over `print(1)` (`docs/contributing/benchmarks.md`). Part 2 is open: fact 10
      (row 70), rows 62, 94, `Hashable` opt-in, `Deque`/`Heap`/`Counter` `Iterable`, the collection
      convention table, the U5 sibling gaps.
