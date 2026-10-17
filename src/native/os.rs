@@ -75,7 +75,7 @@ fn hostname(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 }
 
 /// `home_dir()` — the user home from the HostConfig `HOME` (the SAME source `env` reads, not
-/// `std::env::var`), so it stays deterministic/testable. `None` when unset. Unix-focused (Windows
+/// `std::env::var`), so an injected env decides it. `None` when unset. Unix-focused (Windows
 /// `USERPROFILE` fallback is a follow-up).
 fn home_dir(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "home_dir", 0)?;

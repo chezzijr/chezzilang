@@ -924,8 +924,12 @@ impl Vm {
     }
 
     /// `chezzi test` — construct a fresh VM over a compiled program (the runner owns the lifecycle).
+    /// The program reads the real process env, as under `chezzi run`; args stay empty and stdin is
+    /// at EOF, so a test never blocks on the terminal.
     pub fn for_program(program: Arc<Program>) -> Self {
-        Vm::new(program)
+        let mut vm = Vm::new(program);
+        vm.host.env = crate::native::HostConfig::process_env();
+        vm
     }
 
     /// `chezzi test --max-heap=<N>` — set the per-test live-heap cap in bytes (`0` = OFF, the

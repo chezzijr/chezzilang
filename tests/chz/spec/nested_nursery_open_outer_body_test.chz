@@ -11,9 +11,9 @@
 # early (passes without asserting) when that is 1000 ms or more, so the debug gates stay green and
 # the release run (`chezzi test` on the release binary, the ticket's declared command) asserts.
 # The fan-out also needs two workers: at `CHEZZI_THREADS=1` the 8 children run one after another
-# (~1.7 s on release). `chezzi test` gives a program an empty env, so `can_fan_out()` reads the worker
-# count from the run itself: two burns in a nursery take about one burn's time only on two workers.
+# (~1.7 s on release), so `can_fan_out()` returns early there too.
 import std.concurrency
+import std.os
 import std.time
 
 fn burn(n: int) -> int:
@@ -25,17 +25,11 @@ fn burn(n: int) -> int:
     return x
 
 fn can_fan_out() -> bool:
+    if (os.env("CHEZZI_THREADS") ?? "") == "1":
+        return false
     t0 := time.monotonic()
     burn(1500000)
-    solo := (time.monotonic() - t0) * 1000.0
-    if solo >= 1000.0:
-        return false
-    t1 := time.monotonic()
-    parallel:
-        spawn: burn(1500000)
-        spawn: burn(1500000)
-    pair := (time.monotonic() - t1) * 1000.0
-    return pair < solo * 1.5
+    return (time.monotonic() - t0) * 1000.0 < 1000.0
 
 fn fan_open() -> int:
     ch := Channel[int](0)

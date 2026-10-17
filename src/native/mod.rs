@@ -217,8 +217,9 @@ fn not_utf8() -> HostError {
 
 /// Engine-neutral runtime configuration the [`Host`] exposes to native std modules: program args
 /// (`std.os.args`), environment (`std.os.env`), and stdin (`std.io.read_line`). [`Default`] is the
-/// deterministic, inert config used by tests and by `run_file` (empty args/env, EOF stdin); the CLI
-/// builds one from the real process via [`HostConfig::from_process`].
+/// deterministic, inert config used by Rust tests and by `run_file` (empty args/env, EOF stdin); the
+/// CLI builds one from the real process via [`HostConfig::from_process`]. `chezzi test` takes only the
+/// real env ([`HostConfig::process_env`]).
 #[derive(Debug, Default)]
 pub struct HostConfig {
     pub args: Vec<String>,
@@ -242,24 +243,30 @@ impl HostConfig {
     pub fn from_process(args: Vec<String>) -> Self {
         HostConfig {
             args,
-            // `vars_os`, not `vars`: `std::env::vars()` PANICS on a non-UTF-8 key or value, so one
-            // hostile variable anywhere in the environment aborted startup with rc=101 — even for a
-            // program that never touches `std.os`. Decoding is LOSSY (invalid bytes → U+FFFD, so two
-            // raw keys can collide, last wins); documented in docs/reference/stdlib/ under std.os.
-            // Collection ORDER is irrelevant here — `os.environ` sorts by key before lowering.
-            env: std::sync::Arc::new(std::sync::Mutex::new(
-                std::env::vars_os()
-                    .map(|(k, v)| {
-                        (
-                            k.to_string_lossy().into_owned(),
-                            v.to_string_lossy().into_owned(),
-                        )
-                    })
-                    .collect(),
-            )),
+            env: Self::process_env(),
             stdin: Stdin::Real,
             stream: false,
         }
+    }
+
+    /// The real process environment, as one shared map. `from_process` and the `chezzi test` VM
+    /// (`Vm::for_program`) read it here, so `chezzi run` and `chezzi test` see the same env.
+    pub fn process_env() -> std::sync::Arc<std::sync::Mutex<HashMap<String, String>>> {
+        // `vars_os`, not `vars`: `std::env::vars()` PANICS on a non-UTF-8 key or value, so one
+        // hostile variable anywhere in the environment aborted startup with rc=101 — even for a
+        // program that never touches `std.os`. Decoding is LOSSY (invalid bytes → U+FFFD, so two
+        // raw keys can collide, last wins); documented in docs/reference/stdlib/ under std.os.
+        // Collection ORDER is irrelevant here — `os.environ` sorts by key before lowering.
+        std::sync::Arc::new(std::sync::Mutex::new(
+            std::env::vars_os()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect(),
+        ))
     }
 }
 

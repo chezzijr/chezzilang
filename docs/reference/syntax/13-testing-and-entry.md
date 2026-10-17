@@ -54,6 +54,8 @@ field, mutated through `self`.
 - A suite runs `before_all? → [before_each? → test → after_each? (always, even on failure)]* →
   after_all?` and builds the suite instance once.
 - Tests run on the M:N scheduler like `chezzi run`; `CHEZZI_THREADS` sets the worker count.
+- A test reads the real process env (`os.env`, `os.environ`), as under `chezzi run`. `os.args()` is
+  empty and stdin is at EOF, so a test never waits on the terminal.
 
 The repo's own Chezzi test suite is in `tests/chz/` (`spec/` for language behaviour, `stdlib/` for
 modules, `suites/` for lifecycle suites), separate from `examples/` (golden-output demos). `cargo test`

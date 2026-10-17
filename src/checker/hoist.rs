@@ -234,7 +234,7 @@ impl Checker {
                     // `range`, `Range`) shadows it in this module; the name resolves to the user fn
                     // first (`resolve::classify_ident`). A second declaration of the name is
                     // reported by `GlobalBinding::clashes`.
-                    let sig = self.fn_sig(decl, s.span, None);
+                    let sig = self.fn_sig(decl, decl.name_span, None);
                     self.functions.insert(decl.name.clone(), sig);
                     // Same-module fn name (top-level `fn` only, NOT an import) — licenses the
                     // generic-fn-as-value turbofish B-path in `infer_index`, in lockstep with the

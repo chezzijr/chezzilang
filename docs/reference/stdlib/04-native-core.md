@@ -250,8 +250,8 @@ remainder (so a later read in any task sees EOF); `read_char` consumes one scala
 | `chdir` | `(p: PathLike) -> None!` | Change the **real process cwd** (`!e` on failure). **Process-global**: one cwd for all M:N workers, so a task's `chdir` shifts sibling tasks' relative paths (Python/Go have the same limit). |
 | `exit` | `(code: int) -> never` | Hard, uncatchable halt, unwinding past any `recover:`. **Does NOT run `defer`s.** The process status is the **low 8 bits** of `code` (`code & 0xff`), like POSIX `exit(3)` / bash / Python / Go: `os.exit(-1)` → **255**, `os.exit(300)` → **44**, `os.exit(0)` → `0`. (It is a *mask*, not a clamp: a negative code must never report SUCCESS.) |
 
-**Env source:** `env` / `environ` / `setenv` read and write the engine's injected env config
-(deterministic and testable). One env map is shared across M:N workers (an `Arc<Mutex<…>>`), so a
+**Env source:** `env` / `environ` / `setenv` read and write the engine's injected env config.
+`chezzi run` and `chezzi test` fill it from the real process env; a Rust test harness injects its own. One env map is shared across M:N workers (an `Arc<Mutex<…>>`), so a
 `setenv` inside a task is visible to the parent and siblings. A child that `process.cmd` spawns does
 **not** see a `setenv` (it inherits the real process env). `getpid` / `platform` / `hostname` /
 `home_dir` / `temp_dir` are plain queries.

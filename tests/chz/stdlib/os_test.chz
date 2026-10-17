@@ -27,3 +27,10 @@ test fn chdir_missing_path_names_the_path():
     match os.chdir("/nope/zz-TICKET-081"):
         !e: assert e.message().contains("/nope/zz-TICKET-081"), e.message()
         ?_:  assert false, "expected Err for a nonexistent directory"
+
+# `chezzi test` hands a program the real process env, as `chezzi run` does. A login shell and
+# `cargo test` set `PATH`; `env -i chezzi test` clears it and fails this test by design.
+test fn chezzi_test_reads_the_process_env():
+    match os.env("PATH"):
+        ?p: assert p.len() > 0
+        None: assert false, "os.env(\"PATH\") is None under chezzi test"
