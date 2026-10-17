@@ -159,11 +159,26 @@ test fn datetime_fmod_is_floored_like_python():
 
 test fn atomic_cas_faults_on_a_std_native_fn_payload_too():
     # Measured on the base binary: `Atomic(math.sqrt).cas(a.load(), math.sqrt)` is `false` (a std
-    # native fn loads back unequal to itself), unlike the global builtin `ord`.
+    # native fn loads back unequal to itself).
     a := Atomic(math.sqrt)
     r := recover: try_cas(a, math.sqrt)
     match r:
         ?v: assert false, "cas on a native fn payload returned {v}"
         !e: assert e.message() == "Atomic.cas: the payload holds a function value, which cas cannot compare", e.message()
+
+test fn atomic_cas_faults_on_a_builtin_fn_payload_too():
+    # One rule for every fn value (owner answer 2026-10-17, Go: a func is uncomparable). On the base
+    # binary `try_cas(o, ord)` answered `true`, because a builtin compares by name.
     o := Atomic(ord)
-    assert try_cas(o, ord) == true
+    r := recover: try_cas(o, ord)
+    match r:
+        ?v: assert false, "cas on a builtin fn payload returned {v}"
+        !e: assert e.message() == "Atomic.cas: the payload holds a function value, which cas cannot compare", e.message()
+    # A builtin nested in a container is the same payload.
+    l := Atomic([chr])
+    r2 := recover: try_cas(l, [chr])
+    match r2:
+        ?v: assert false, "cas on a nested builtin fn payload returned {v}"
+        !e: assert e.message() == "Atomic.cas: the payload holds a function value, which cas cannot compare", e.message()
+    # `==` still compares a builtin by name after the load.
+    assert o.load() == ord

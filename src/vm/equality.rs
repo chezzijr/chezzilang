@@ -607,18 +607,23 @@ impl Vm {
         }
     }
 
-    /// The kind of the first heap object reachable from `v` whose `==` is slot identity
-    /// ([`Identity::Slot`]), or `None`. `Atomic.cas` refuses such a payload: every `load()`
-    /// rebuilds that object in a fresh slot, so the compare could never succeed and a CAS retry
-    /// loop would spin forever (TICKET-144, DEC-144). Reads the same [`Obj::identity`] the
-    /// equality arm does. A `Core` handle is not descended: it compares by core, never by what the
-    /// core holds. `seen` makes a cyclic payload terminate.
+    /// The kind of the first heap object reachable from `v` that is a fn value or whose `==` is
+    /// slot identity ([`Identity::Slot`]), or `None`. `Atomic.cas` refuses such a payload: every
+    /// `load()` rebuilds a slot-identity object in a fresh slot, so the compare could never succeed
+    /// and a CAS retry loop would spin forever (TICKET-144, DEC-144). Every fn value is refused,
+    /// a builtin (`ord`) included, whose `==` is by name: one rule for every fn, as Go's func is
+    /// uncomparable (TICKET-264). [`Vm::callable`] decides fn-ness; [`Obj::identity`], read by the
+    /// equality arm too, decides the rest. A `Core` handle is not descended: it compares by core,
+    /// never by what the core holds. `seen` makes a cyclic payload terminate.
     pub(super) fn slot_identity_in(&self, v: Value) -> Option<&'static str> {
         let mut stack: Vec<GcRef> = v.child_gcref().into_iter().collect();
         let mut seen = super::fxhash::FxHashSet::default();
         while let Some(h) = stack.pop() {
             if !seen.insert(h) {
                 continue;
+            }
+            if self.callable(Value::obj(h)).is_some() {
+                return Some("a function value");
             }
             match self.heap.get(h).identity() {
                 Identity::Slot(what) => return Some(what),

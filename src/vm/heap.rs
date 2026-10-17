@@ -577,7 +577,8 @@ impl Obj {
             // or a `ptr` that crossed, is a distinct slot around one address.
             Obj::Ptr(addr) => core(*addr),
             // A bare Func, Native or Cffi is one slot per fn per heap (Vm::fn_value, TICKET-215), so its
-            // == survives a crossing; it stays Slot so Atomic.cas refuses it (DEC-177).
+            // == survives a crossing; it stays Slot (DEC-177). Atomic.cas refuses every fn value, a
+            // Builtin included, through Vm::callable (TICKET-264).
             Obj::Func { .. } | Obj::Closure { .. } | Obj::Native { .. } | Obj::Cffi(_) => {
                 Identity::Slot("a function value")
             }

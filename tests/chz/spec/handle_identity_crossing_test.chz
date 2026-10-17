@@ -121,7 +121,8 @@ fn grid[T: StructuralEq](kind: str, a: T, c: T, ops: fn(T, T, T) -> List[str]) -
 
 # `Atomic.cas` refuses a payload whose equality does not survive the store (TICKET-144's rule, read
 # from `Obj::identity` since TICKET-177): every fn kind and an iterator compare by heap slot, and a
-# store re-materializes them in a fresh one. A handle compares by core, so the grid's `cas` cells above
+# store re-materializes them in a fresh one. A builtin fn (`ord`) compares by name, but `cas` refuses it
+# like every fn value (TICKET-264). A handle compares by core, so the grid's `cas` cells above
 # are accepted. `cas_self` is generic so the checker's static fn check cannot see the payload.
 extern "libm.so.6":
     fn cos(x: float) -> float
@@ -163,8 +164,9 @@ test fn atomic_cas_refuses_every_payload_whose_equality_does_not_survive_the_sto
     if not refused(r5, "an iterator"):
         bad.push("iterator")
     bv := ord
-    if not cas_self(Atomic(bv), bv):
-        bad.push("builtin-fn-accepted")
+    r6 := recover: cas_self(Atomic(bv), bv)
+    if not refused(r6, "a function value"):
+        bad.push("builtin-fn")
     assert bad.len() == 0, " ".join(bad)
 
 # The refusal walk descends into content: a fn inside a list is still refused.

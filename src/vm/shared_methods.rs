@@ -417,7 +417,8 @@ impl Vm {
                 // TICKET-144 / TICKET-177: a payload whose `==` is slot identity (a fn value, an
                 // iterator) can never compare equal to a fresh `load()`, so `false` would spin the CAS
                 // retry loop forever — Go's `atomic.Value.CompareAndSwap` panics on the same shape.
-                // `Obj::identity` is the one classification; a handle payload compares by core and is
+                // Every fn value is refused, a builtin included (TICKET-264); `Vm::slot_identity_in`
+                // reads `Vm::callable` and `Obj::identity`. A handle payload compares by core and is
                 // accepted. (`g` drops on the early return, leaving the box unchanged.)
                 if let Some(what) = self.slot_identity_in(cur) {
                     return Err(self.err(
