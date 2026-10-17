@@ -82,9 +82,12 @@ load average about 4, wall ms mean ± σ. Source: [2026-10](../history/benchmark
 | `many_map` | 1M int -> struct entries | 495 ± 30 |
 | `many_struct` | 2M `P{x, y}` kept alive | 832 ± 48 |
 | `empty` | startup, empty program | 5 ± 0 |
+| `print_loop` | 600000 direct prints, three shapes (`sep=` included), stdout to `/dev/null` | 639 ± 23 |
 
 Later records changed none of these beyond noise: TICKET-255 (2026-10-14) measured `loop` and `list`
-flat, and builtin dispatch by id (2026-10-16) measured eight benches between -0.7% and +1.4%.
+flat, builtin dispatch by id (2026-10-16) measured eight benches between -0.7% and +1.4%, and
+TICKET-264 (2026-10-17) measured `hof` and `closure` flat. The `print_loop` row is from TICKET-264:
+the shell `time` keyword, 7 runs, load average about 3 (`hyperfine` was not installed).
 
 ### Ratio to CPython
 

@@ -1,0 +1,13 @@
+# Bench: direct print throughput, 200000 iterations of three print shapes: one argument, two
+# arguments with the default separator, and one argument with `sep=`. 600000 lines; send stdout
+# to /dev/null. Every direct print goes through the one print routine (TICKET-264).
+
+fn main():
+    i := 0
+    while i < 200000:
+        print(i)
+        print(i, i)
+        print(i, sep="-")
+        i += 1
+
+main()
