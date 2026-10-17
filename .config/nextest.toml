@@ -4,6 +4,9 @@
 # Sampled n=5 on main (2026-09-30): 146-211 s vs `cargo test` 764-800 s, same red rate (2/5 each; the
 # replay test that was red then is byte-for-byte since TICKET-205).
 # `timing` at 1 thread made the group itself the bottleneck (~500 s); 4 matches cargo test's in-binary parallelism.
+# deadlock_halt_single_judge, executor_job_owner and executor_reentrant_shutdown joined the group on
+# 2026-10-17: they are scheduler binaries, and each one failed at verifying under parallel worktree load
+# (TICKET-246, 254 and 221-227). The group lowers their load and retries nothing.
 
 [profile.default]
 test-threads = 8
@@ -14,7 +17,7 @@ fail-fast = false
 timing = { max-threads = 4 }
 
 [[profile.default.overrides]]
-filter = 'binary(chezzi_threads_cli) | binary(blocking_context_grid) | binary(channel_handoff_grid) | binary(examples_golden) | binary(native_callback_stdin_read_frees_width) | binary(mn_pool_ignores_cpu_quota_hangs) | binary(sched_seed_cli) | binary(chezzi_nested_nursery_deadlock) | binary(deadlock_verdict_misses) | binary(chz_suite)'
+filter = 'binary(chezzi_threads_cli) | binary(blocking_context_grid) | binary(channel_handoff_grid) | binary(examples_golden) | binary(native_callback_stdin_read_frees_width) | binary(mn_pool_ignores_cpu_quota_hangs) | binary(sched_seed_cli) | binary(chezzi_nested_nursery_deadlock) | binary(deadlock_verdict_misses) | binary(chz_suite) | binary(deadlock_halt_single_judge) | binary(executor_job_owner) | binary(executor_reentrant_shutdown)'
 test-group = 'timing'
 
 # TICKET-265: each cell of this grid runs its own `chezzi` process, and each cell now pays one std
