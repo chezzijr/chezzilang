@@ -190,8 +190,8 @@ impl Vm {
     pub(super) fn compare_op(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
-        // TICKET-146: a same-kind tuple / List / Option pair orders lexicographically. MUST precede
-        // the struct/enum gate below — an `Option` is an `Obj::Enum` with no `compare` method.
+        // TICKET-146: a same-kind tuple / List pair orders lexicographically. MUST precede the
+        // struct/enum gate below.
         if self.seq_pair(l, r) {
             let b = match self.seq_order(l, r, false, span)? {
                 Some(ord) => match op {
@@ -747,20 +747,13 @@ impl Vm {
         }
     }
 
-    /// Which lexicographic container `v` is, for the TICKET-146 ordering walk: `0` tuple, `1` list,
-    /// `2` `Option` (an `Obj::Enum` stamped with the reserved `VID_SOME`/`VID_NONE_VARIANT` id,
-    /// disjoint from every user variant id). `None` for anything else, so a user enum or a
-    /// `Result` never enters the walk.
+    /// Which lexicographic container `v` is, for the TICKET-146 ordering walk: `0` tuple, `1` list.
+    /// `None` for anything else, so a user enum, an `Option` or a `Result` never enters the walk
+    /// (the checker rejects every `T?` ordering: owner decision 4 of TICKET-265).
     pub(super) fn seq_kind(&self, v: Value) -> Option<u8> {
-        use crate::base::op::{VID_NONE_VARIANT, VID_SOME};
         match self.heap.get(v.as_obj()?) {
             Obj::Tuple(_) => Some(0),
             Obj::List(_) => Some(1),
-            Obj::Enum { variant_id, .. }
-                if *variant_id == VID_SOME || *variant_id == VID_NONE_VARIANT =>
-            {
-                Some(2)
-            }
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -794,8 +787,7 @@ impl Vm {
     }
 
     /// `Some(k)` when `a` and `b` are the same [`Self::seq_kind`] — the pairs every ordering gate
-    /// hands to [`Self::seq_order`] BEFORE its struct/enum user-`compare` gate (an `Option` is an
-    /// `Obj::Enum` with no `compare` method, so reaching that gate would fault).
+    /// hands to [`Self::seq_order`] BEFORE its struct/enum user-`compare` gate.
     pub(super) fn seq_pair(&self, a: Value, b: Value) -> bool {
         matches!((self.seq_kind(a), self.seq_kind(b)), (Some(x), Some(y)) if x == y)
     }
@@ -808,8 +800,8 @@ impl Vm {
         }
     }
 
-    /// Lexicographic order of two same-kind tuple/List/Option values (TICKET-146): elements left to
-    /// right, the first non-equal pair decides, a shorter prefix sorts first, `None < Some(_)`.
+    /// Lexicographic order of two same-kind tuple/List values (TICKET-146): elements left to
+    /// right, the first non-equal pair decides, a shorter prefix sorts first.
     ///
     /// `total` picks the flavour. `false` is the OPERATOR order (`<`/`<=`/`>`/`>=`): partial, so a NaN
     /// element pair yields `None` (all four ops false). `true` is the TOTAL order behind
@@ -825,24 +817,8 @@ impl Vm {
         total: bool,
         span: Span,
     ) -> Result<Option<std::cmp::Ordering>, RuntimeError> {
-        use crate::base::op::VID_SOME;
         use std::cmp::Ordering;
         self.with_roots(&[a, b], |vm| {
-            if vm.seq_kind(a) == Some(2) {
-                let payload = |vm: &Self, v: Value| match v.as_obj().map(|h| vm.heap.get(h)) {
-                    Some(Obj::Enum {
-                        variant_id,
-                        payload,
-                    }) if *variant_id == VID_SOME => payload.first().copied(),
-                    _ => None,
-                };
-                return match (payload(vm, a), payload(vm, b)) {
-                    (None, None) => Ok(Some(Ordering::Equal)),
-                    (None, Some(_)) => Ok(Some(Ordering::Less)),
-                    (Some(_), None) => Ok(Some(Ordering::Greater)),
-                    (Some(x), Some(y)) => vm.elem_order(x, y, total, span),
-                };
-            }
             let mut i = 0;
             loop {
                 let (len_a, x) = vm.seq_elem(a, i);

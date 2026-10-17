@@ -374,14 +374,15 @@ impl Checker {
             };
         }
         if protocol == "Comparable" {
-            // TICKET-146: a tuple / `List` / `Option` is Comparable when every element type is
-            // (lexicographic; `None < Some(_)`). Each element is asked through `satisfies` with a
+            // TICKET-146: a tuple / `List` is Comparable when every element type is; `T?` never is
+            // (owner decision 4 of TICKET-265). Each element is asked through `satisfies` with a
             // FRESH `seen` set: the shared one is keyed by embed name without the subject type, so
             // reusing it would skip the element's own `Eq` embed.
             let elems: Option<Vec<&Ty>> = match ty {
                 Ty::Tuple(es) => Some(es.iter().collect()),
-                Ty::List(e) | Ty::Option(e) => Some(vec![&**e]),
-                Ty::Int
+                Ty::List(e) => Some(vec![&**e]),
+                Ty::Option(_)
+                | Ty::Int
                 | Ty::Float
                 | Ty::Bool
                 | Ty::Str

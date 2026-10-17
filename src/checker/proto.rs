@@ -62,10 +62,9 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     ("Comparable", "compare", RecvKind::Str),
     ("Comparable", "compare", RecvKind::Bytes),
     ("Comparable", "compare", RecvKind::ByteArray),
-    // A tuple / List / Option is Comparable exactly when every element type is (TICKET-146).
+    // A tuple / List is Comparable exactly when every element type is (TICKET-146).
     ("Comparable", "compare", RecvKind::Tuple),
     ("Comparable", "compare", RecvKind::List),
-    ("Comparable", "compare", RecvKind::Option),
     // Eq — D1: EVERY receiver kind whose `==` this table can key a row on except `nil` (not
     // spellable as a value). Most rows are the structural derive (`Vm::values_equal`): the four
     // scalars are all here because `==` is defined on `bool` too, unlike `Comparable`;

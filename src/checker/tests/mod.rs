@@ -13,12 +13,33 @@ const ERR_VALUE_NEEDS_TYPE_TEXT: &str = "a `!` value needs its type from an anno
 fn check_src(src: &str) -> Vec<CheckError> {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
     let module = parser::parse(tokens).expect("parse should succeed");
-    let errs = match check(&module) {
-        Ok(()) => Vec::new(),
-        Err(e) => e,
+    // A program with an `import` goes through the module graph, so `import Add from std.ops` binds
+    // the protocol as it does for `chezzi check`. A program the resolver rejects stays on the
+    // single-module path (its test pins that path's diagnostic).
+    let imports = module
+        .stmts
+        .iter()
+        .any(|s| matches!(s.kind, crate::ast::StmtKind::Import(_)));
+    let errs = match imports.then(|| graph_check(src)).flatten() {
+        Some(errs) => errs,
+        None => match check(&module) {
+            Ok(()) => Vec::new(),
+            Err(e) => e,
+        },
     };
     assert_no_removed_spelling(src, &errs);
     errs
+}
+
+/// [`check_entry`] without the panic: `None` when the resolver rejects the program.
+fn graph_check(src: &str) -> Option<Vec<CheckError>> {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&entry).ok()?;
+    Some(match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    })
 }
 
 /// TICKET-228 (D6) — a diagnostic names a carrier by its type (`int?`, `int!str`) or its pattern

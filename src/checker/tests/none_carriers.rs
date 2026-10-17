@@ -936,10 +936,10 @@ fn carrier_wrap_check_grid() {
     }
     cells.push(("x: float? = ?1.0\nprint(x)\n".to_string(), Clean));
 
-    // Comparability: `T?` orders when `T` does, `None` first; `T!E` does not order.
+    // Comparability: `T?` never orders (owner decision 4 of TICKET-265); `T!E` does not order.
     cells.push((
         "a: int? = 1\nb: int? = 2\nprint(a < b)\n".to_string(),
-        Clean,
+        Has("cannot compare int? and int?".to_string()),
     ));
     cells.push((
         "a: bool? = true\nb: bool? = false\nprint(a < b)\n".to_string(),
@@ -1000,10 +1000,6 @@ fn carrier_wrap_check_grid() {
         ),
         ("fn f() -> int!str:\n    return ?5\nprint(f())\n", "5\n"),
         ("x: float? = ?1.0\nprint(x)\n", "1.0\n"),
-        (
-            "a: int? = None\nb: int? = 2\nprint(a < b)\nprint(b < a)\n",
-            "true\nfalse\n",
-        ),
     ] {
         ok(src);
         assert_eq!(
@@ -1554,8 +1550,11 @@ fn an_err_value_beside_a_result_sibling_takes_its_type_in_both_scopes() {
 /// is still an error about the optional.
 #[test]
 fn a_present_value_operand_compares_in_a_fn_body() {
-    ok("fn main(): print(?1 < ?2)\n");
-    ok("print(?1 < ?2)\n");
+    rejects(
+        "fn main(): print(?1 < ?2)\n",
+        "cannot compare int? and int?",
+    );
+    rejects("print(?1 < ?2)\n", "cannot compare int? and int?");
     rejects(
         "fn main(): print(1 + ?5)\n",
         "cannot apply + to int and int?",

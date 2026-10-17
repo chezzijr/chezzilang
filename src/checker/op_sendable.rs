@@ -93,13 +93,9 @@ impl Checker {
                 self.satisfies(l, protocol).is_ok()
             }
             (Ty::Bytes, Ty::ByteArray) | (Ty::ByteArray, Ty::Bytes) => true,
-            // TICKET-146: a tuple / `List` / `Option` pair orders lexicographically when every
-            // element type is Comparable; `compatible` keeps `(int, int) < (int, str)` out.
-            (Ty::Tuple(_), Ty::Tuple(_))
-            | (Ty::List(_), Ty::List(_))
-            | (Ty::Option(_), Ty::Option(_))
-                if self.join_ty(l, r) =>
-            {
+            // TICKET-146: a tuple / `List` pair orders lexicographically when every element type is
+            // Comparable; `compatible` keeps `(int, int) < (int, str)` out.
+            (Ty::Tuple(_), Ty::Tuple(_)) | (Ty::List(_), Ty::List(_)) if self.join_ty(l, r) => {
                 self.satisfies(l, protocol).is_ok()
             }
             // No `(Ty::Protocol, Ty::Protocol)` arm — `Comparable.compare(self, o: Self)` (and

@@ -3208,3 +3208,203 @@ fn add_bound_without_import_is_unknown_name() {
 fn optional_int_has_no_ordering() {
     rejects("a: int? = 1\nb: int? = 2\nprint(a < b)\n", "cannot compare");
 }
+
+/// One program per way to order an optional: every operator, `.compare()`, `sort`/`min`/`max`, the
+/// `Comparable` and `Num` bounds, nested tuple and `List`, the `[K: Comparable]` methods and the
+/// `std.cmp` / `std.bisect` generics. `p` is the payload type. Returns `(cell name, imports, body)`.
+fn optional_order_cells(p: &str) -> Vec<(String, &'static str, String)> {
+    let mut cells: Vec<(String, &'static str, String)> = Vec::new();
+    for op in ["<", "<=", ">", ">="] {
+        let body = format!("fn t(a: {p}?, b: {p}?) -> bool:\n    return a {op} b\n");
+        cells.push((format!("{p}? {op}"), "", body));
+    }
+    let two = format!("a: {p}?, b: {p}?");
+    let key = format!("xs: List[{p}], f: fn({p}) -> {p}?");
+    let none = "";
+    let cmp = "import std.cmp\n";
+    let bis = "import std.bisect\n";
+    let rows: Vec<(&str, &str, String)> = vec![
+        (
+            "compare",
+            none,
+            format!("fn t({two}) -> int:\n    return a.compare(b)\n"),
+        ),
+        (
+            "sort",
+            none,
+            format!("fn t(xs: List[{p}?]):\n    xs.sort()\n"),
+        ),
+        (
+            "min",
+            none,
+            format!("fn t(xs: List[{p}?]):\n    print(xs.min())\n"),
+        ),
+        (
+            "max",
+            none,
+            format!("fn t(xs: List[{p}?]):\n    print(xs.max())\n"),
+        ),
+        (
+            "Comparable bound",
+            none,
+            format!("fn f[T: Comparable](x: T):\n    pass\nfn t(a: {p}?):\n    f(a)\n"),
+        ),
+        (
+            "Num bound",
+            none,
+            format!("fn f[T: Num](x: T):\n    pass\nfn t(a: {p}?):\n    f(a)\n"),
+        ),
+        (
+            "tuple",
+            none,
+            format!("fn t({two}) -> bool:\n    return (a, 1) < (b, 1)\n"),
+        ),
+        (
+            "list",
+            none,
+            format!("fn t({two}) -> bool:\n    return [a] < [b]\n"),
+        ),
+        (
+            "sort_by_key",
+            none,
+            format!("fn t({key}):\n    xs.sort_by_key(f)\n"),
+        ),
+        (
+            "min_by",
+            none,
+            format!("fn t({key}):\n    print(xs.min_by(f))\n"),
+        ),
+        (
+            "max_by",
+            none,
+            format!("fn t({key}):\n    print(xs.max_by(f))\n"),
+        ),
+        (
+            "cmp.max",
+            cmp,
+            format!("fn t({two}) -> {p}?:\n    return cmp.max(a, b)\n"),
+        ),
+        (
+            "cmp.min",
+            cmp,
+            format!("fn t({two}) -> {p}?:\n    return cmp.min(a, b)\n"),
+        ),
+        (
+            "cmp.clamp",
+            cmp,
+            format!("fn t({two}) -> {p}?:\n    return cmp.clamp(a, a, b)\n"),
+        ),
+        (
+            "bisect_left",
+            bis,
+            format!(
+                "fn t(xs: List[{p}?], a: {p}?) -> int:\n    return bisect.bisect_left(xs, a)\n"
+            ),
+        ),
+        (
+            "bisect_right",
+            bis,
+            format!(
+                "fn t(xs: List[{p}?], a: {p}?) -> int:\n    return bisect.bisect_right(xs, a)\n"
+            ),
+        ),
+        (
+            "bisect",
+            bis,
+            format!("fn t(xs: List[{p}?], a: {p}?) -> int:\n    return bisect.bisect(xs, a)\n"),
+        ),
+        (
+            "insort_left",
+            bis,
+            format!("fn t(xs: List[{p}?], a: {p}?):\n    bisect.insort_left(xs, a)\n"),
+        ),
+        (
+            "insort_right",
+            bis,
+            format!("fn t(xs: List[{p}?], a: {p}?):\n    bisect.insort_right(xs, a)\n"),
+        ),
+    ];
+    for (n, imp, body) in rows {
+        cells.push((format!("{p}? {n}"), imp, body));
+    }
+    cells
+}
+
+/// Owner decision 4 (TICKET-265): `T?` derives no ordering from `T`. One cell per way to order an
+/// optional, for every payload the `Comparable` rows of `INTRINSIC_PROTO_METHODS` name, plus a user
+/// struct and a user enum that define `compare`. `==` on `T?` and ordering on `T` stay legal (controls).
+#[test]
+fn optional_never_orders_grid() {
+    use crate::checker::proto::{INTRINSIC_PROTO_METHODS, RecvKind};
+    let user_struct = "struct S:\n    n: int\n    fn compare(self, other: S) -> int:\n        return self.n - other.n\n    fn eq(self, other: S) -> bool:\n        return self.n == other.n\n";
+    let user_enum = "enum E:\n    A\n    B\n    fn compare(self, other: E) -> int:\n        return 0\n    fn eq(self, other: E) -> bool:\n        return true\n";
+    // (payload spelling, declarations the payload needs)
+    let mut payloads: Vec<(&str, &str)> = Vec::new();
+    for (proto, _, kind) in INTRINSIC_PROTO_METHODS {
+        if *proto != "Comparable" {
+            continue;
+        }
+        let spelling = match kind {
+            RecvKind::Int => Some("int"),
+            RecvKind::Float => Some("float"),
+            RecvKind::Str => Some("str"),
+            RecvKind::Bytes => Some("bytes"),
+            RecvKind::ByteArray => Some("bytearray"),
+            RecvKind::Tuple => Some("(int, int)"),
+            RecvKind::List => Some("List[int]"),
+            RecvKind::Option
+            | RecvKind::Bool
+            | RecvKind::Map
+            | RecvKind::Set
+            | RecvKind::Struct
+            | RecvKind::Cursor
+            | RecvKind::Enum
+            | RecvKind::Result
+            | RecvKind::Func
+            | RecvKind::Protocol
+            | RecvKind::Channel
+            | RecvKind::Shared
+            | RecvKind::RwShared
+            | RecvKind::Atomic => None,
+        };
+        if let Some(s) = spelling {
+            payloads.push((s, ""));
+        }
+    }
+    payloads.push(("S", user_struct));
+    payloads.push(("E", user_enum));
+    assert!(
+        payloads.len() >= 7,
+        "the Comparable rows named too few payloads"
+    );
+    let wanted = [
+        "cannot compare",
+        "does not satisfy Comparable",
+        "has no method 'compare'",
+        "does not satisfy Num",
+    ];
+    let mut red: Vec<String> = Vec::new();
+    for (p, decls) in &payloads {
+        for (name, imports, body) in optional_order_cells(p) {
+            let errs = check_src(&format!("{imports}{decls}{body}"));
+            if !errs
+                .iter()
+                .any(|e| wanted.iter().any(|w| e.message.contains(w)))
+            {
+                red.push(format!("{name}: {errs:?}"));
+            }
+        }
+        // Controls: `==` on `P?`, ordering on `P`, ordering a tuple of `P`.
+        for body in [
+            format!("fn t(a: {p}?, b: {p}?) -> bool:\n    return a == b\n"),
+            format!("fn t(a: {p}, b: {p}) -> bool:\n    return a < b\n"),
+            format!("fn t(a: {p}, b: {p}) -> bool:\n    return (a, 1) < (b, 1)\n"),
+        ] {
+            let errs = check_src(&format!("{decls}{body}"));
+            if !errs.is_empty() {
+                red.push(format!("control {body:?}: {errs:?}"));
+            }
+        }
+    }
+    assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
+}

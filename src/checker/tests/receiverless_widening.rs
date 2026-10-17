@@ -2668,9 +2668,9 @@ fn question_op_in_undeclared_return_closure_names_the_missing_return_type() {
 fn comparable_tuple_list_option_ok() {
     ok("print((1, 2) < (1, 3))\n");
     ok("print([1] < [2])\n");
-    ok("print(?1 < ?2)\n");
+    rejects("print(?1 < ?2)\n", "cannot compare");
     ok("xs := [(2, \"b\"), (1, \"z\")]\nxs.sort()\n");
-    ok("a: int? = None\nprint(a < ?0)\n");
+    rejects("a: int? = None\nprint(a < ?0)\n", "cannot compare");
     ok("xs := [(1, \"a\")]\nxs.sort()\n");
     ok("xs := [(1, 2)]\nprint(xs.min())\n");
     ok("fn f[T: Comparable](a: T):\n    pass\nf((1, \"a\"))\n");
