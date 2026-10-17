@@ -599,13 +599,6 @@ impl Checker {
             .or_else(|| self.owning_protocol_def(&key))
     }
 
-    /// Is `t` a protocol with no embeds and no methods (`Any`)? Every type satisfies it.
-    pub(super) fn is_empty_protocol(&self, t: &Ty) -> bool {
-        matches!(t, Ty::Protocol(p, _) if self
-            .protocol_shape(p)
-            .is_some_and(|shape| shape.embeds.is_empty() && shape.methods.is_empty()))
-    }
-
     // --- member-resolution fallback by the value's OWN module-scoped identity key ---
     //
     // User types are MODULE-SCOPED: their per-module shape tables (`self.structs` / `self.enums` +

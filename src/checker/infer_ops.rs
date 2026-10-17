@@ -211,11 +211,7 @@ impl Checker {
         Ty::Unknown
     }
 
-    /// `pack`: the literal is a variadic call's synthesized pack. An `Any` element type (an EMPTY
-    /// protocol) hands no hint to an item: it pins no type parameter and joins no branch, so
-    /// `print(id)` stays undetermined and `print(if c: 1 else: "a")` stays a branch mismatch, as
-    /// before `print` was an ordinary variadic. Every item is still checked against `Any`.
-    pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>, pack: bool) -> Ty {
+    pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>) -> Ty {
         let sib = match expected {
             Some(Ty::List(e)) if !e.is_unknown() => None,
             _ => self
@@ -251,15 +247,11 @@ impl Checker {
             Some(Ty::List(e)) if !e.is_unknown() => Some((**e).clone()),
             _ => None,
         };
-        let hint_items = !(pack
-            && elem_expected
-                .as_ref()
-                .is_some_and(|e| self.is_empty_protocol(e)));
         let tys: Vec<Ty> = items
             .iter()
             .map(|it| match &elem_expected {
-                Some(e) if hint_items => self.infer_value_in(it, e),
-                Some(_) | None => self.infer_value(it),
+                Some(e) => self.infer_value_in(it, e),
+                None => self.infer_value(it),
             })
             .collect();
 

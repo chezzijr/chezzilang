@@ -1827,12 +1827,14 @@ fn one_line_if_statement_branches_need_not_join() {
         "c := false\n(if c: print(1) else: 2)\n",
         // a `recover:` block has no tail value: its last statement is a discarded one-line `if`
         "c := false\nr := recover:\n    if c: 1 else: \"a\"\n",
+        // an `Any` argument (print's `...args: Any`) joins both branches, as `fn oa(x: Any)` does
+        "c := false\nprint(if c: 1 else: \"a\")\n",
     ] {
         ok(src);
     }
     for src in [
         "c := false\nx := if c: 1 else: \"a\"\n",
-        "c := false\nprint(if c: 1 else: \"a\")\n",
+        "fn ti(x: int) -> int:\n    return x\nc := false\nprint(ti(if c: 1 else: \"a\"))\n",
         "fn f(c: bool) -> int: if c: 1 else: \"a\"\n",
         "fn f(c: bool) -> int:\n    return if c: 1 else: \"a\"\n",
         "c := false\nn := 1\nx := match n:\n    1: if c: 1 else: \"a\"\n    _: 2\n",

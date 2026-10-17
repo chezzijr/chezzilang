@@ -427,10 +427,8 @@ fn else_owner_grid() {
             "!unused variable 'y'",
         ),
         ("y := if t: recover: 1 else: 2", "!unused variable 'y'"),
-        (
-            "if t: print(if f: recover: 1 else: 2)",
-            "!branches have incompatible types",
-        ),
+        // print's `...args: Any` joins `int!E` and `int`, as any `Any` argument does
+        ("if t: print(if f: recover: 1 else: 2)", "=2\nafter"),
         (
             "if t: y := (if f: recover: 1 else: 2) else: print(3)",
             "!takes an expression in each branch",
@@ -579,8 +577,14 @@ fn mixed_branch_types_grid() {
         ),
         (
             "call argument",
-            "c := false\nprint(if c: 1 else: \"a\")",
+            "fn ti(x: int) -> int:\n    return x\nc := false\nprint(ti(if c: 1 else: \"a\"))",
             "!branches have incompatible types",
+        ),
+        // an `Any` argument (print's `...args: Any`) joins both branches, as `fn oa(x: Any)` does
+        (
+            "Any call argument",
+            "c := false\nprint(if c: 1 else: \"a\")",
+            "=a",
         ),
         (
             "inline fn body, declared return",

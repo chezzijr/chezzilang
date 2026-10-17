@@ -1654,7 +1654,7 @@ fn generic_value_join_grid() {
             "f := {\"a\": {A}, \"b\": {B}}\n    print(f[\"a\"]{P})\n",
             false,
         ),
-        ("==", "print({A} == {B})\n", false),
+        ("==", "e := {A} == {B}\n    print(e)\n", false),
         ("list +", "f := [{A}] + [{B}]\n    print(f[0]{P})\n", false),
         (
             "list +=",

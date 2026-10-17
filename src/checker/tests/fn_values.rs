@@ -1801,14 +1801,14 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
     ok(
         "fn ident[T](x: T) -> T:\n    return x\n\nfn run(x: int, f: fn(int) -> int = ident) -> int:\n    return f(x)\n\nfn main():\n    print(run(5))\n",
     );
-    // The message must still stay TRUE in a position with no binding to annotate at all (`print`):
-    // it may not claim "nothing determines T" or tell the user to annotate a binding.
-    let joined =
-        check_src("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    print(ident)\n")
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join(" | ");
+    // The message must still stay TRUE in a position with no binding to annotate at all (a bare
+    // expression statement): it may not claim "nothing determines T" or tell the user to annotate
+    // a binding. (`print(ident)` pins `T := Any` from print's `...args: Any`, as any `Any` argument does.)
+    let joined = check_src("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    ident\n")
+        .iter()
+        .map(|e| e.message.clone())
+        .collect::<Vec<_>>()
+        .join(" | ");
     assert!(
         joined.contains("T is not determined here")
             && !joined.contains("nothing here determines")
@@ -2681,17 +2681,10 @@ fn print_keywords_bind_through_the_declaration() {
     entry_ok("print(1, 2, end=\"\", sep=\"-\")\n");
 }
 
-// TICKET-264: an `Any` pack hands no hint to its items. `p(ident)` is accepted if the pack hints
-// `Any` (it pins `T := Any`); `p(if true: 1 else: "a")` is accepted if the hint joins the branches.
-// A mixed pack `p(1, "a", true)` still checks, since every item satisfies `Any`.
+// TICKET-264: a mixed `Any` pack `p(1, "a", true)` checks, since every item satisfies `Any`.
 #[test]
-fn an_any_variadic_pack_gives_its_items_no_hint() {
+fn an_any_variadic_pack_takes_mixed_items() {
     let decl = "fn ident[T](x: T) -> T:\n    return x\nfn p(...xs: Any):\n    print(xs.len())\n";
-    entry_rejects(&format!("{decl}p(ident)\n"), "T is not determined here");
-    entry_rejects(
-        &format!("{decl}p(if true: 1 else: \"a\")\n"),
-        "branches have incompatible types",
-    );
     entry_ok(&format!("{decl}p(1, \"a\", true)\n"));
     entry_ok(&format!("{decl}p(ident[int])\n"));
 }
@@ -2848,5 +2841,40 @@ fn a_required_keyword_only_param_refuses_a_list_slot_call() {
     entry_rejects(
         "fn rk(...r: int, t: int) -> int:\n    return t\nfn main():\n    fs := [rk]\n    print(fs[0](1, 2))\n",
         "missing required keyword argument 't'",
+    );
+}
+
+// TICKET-264 review: a variadic pack hints each item with its element type, as a `List[Any]` or
+// `Any` argument does, so an `Any` pack joins two branches (base `1`).
+#[test]
+fn a_variadic_any_pack_joins_branches_like_an_argument() {
+    ok(
+        "fn va(...xs: Any) -> int:\n    return xs.len()\nc := false\nprint(va(if c: 1 else: \"a\"))\n",
+    );
+}
+
+// TICKET-264 review: the same pack through a certain binding (base `1`).
+#[test]
+fn a_variadic_any_pack_joins_branches_through_a_binding() {
+    ok(
+        "fn va(...xs: Any) -> int:\n    return xs.len()\nc := false\nh := va\nprint(h(if c: 1 else: \"a\"))\n",
+    );
+}
+
+// TICKET-264 review: an `Any` pack item pins a generic fn value's `T`, as an `Any` argument does
+// (base `1`).
+#[test]
+fn a_variadic_any_pack_pins_a_generic_fn_value() {
+    ok(
+        "fn id[T](x: T) -> T:\n    return x\nfn va(...xs: Any) -> int:\n    return xs.len()\nprint(va(id))\n",
+    );
+}
+
+// TICKET-264 review: a concrete pack element still refuses a branch pair it does not accept.
+#[test]
+fn a_variadic_int_pack_still_rejects_mixed_branches() {
+    entry_rejects(
+        "fn vi(...xs: int) -> int:\n    return xs.len()\nfn main():\n    c := false\n    print(vi(if c: 1 else: \"a\"))\n",
+        "branches have incompatible types",
     );
 }

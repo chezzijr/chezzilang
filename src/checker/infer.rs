@@ -374,13 +374,13 @@ impl Checker {
             ExprKind::NoneLit => self.infer_ident(expr, crate::lexer::NONE, expr.span),
             ExprKind::Pass => Ty::Nil,
             ExprKind::Ident(name) => self.infer_ident(expr, name, expr.span),
-            ExprKind::List(items, pack) => {
+            ExprKind::List(items, _) => {
                 // Consume any expected-type hint (a `List[E]` slot: an annotated `let`, a call
                 // arg, a return position — or the synthesized variadic list). `take()` so the
                 // hint drives THIS literal's element type and never leaks into a nested element
                 // call. `None` keeps the ordinary bottom-up inference.
                 let hint = self.expected_hint.take().map(|t| t.slot_payload().clone());
-                self.infer_list(items, hint.as_ref(), pack.is_some())
+                self.infer_list(items, hint.as_ref())
             }
             ExprKind::Tuple(items) => {
                 // TICKET-124 (W13-13): consume any expected-type hint (a `(Box[Named], int)` slot),
