@@ -151,7 +151,7 @@ List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/
   no compile-time multi-pass check).
 - `for`, `List(it)` or `Set(it)` on a named cursor consumes it in place, so a partial `for … break`
   leaves the rest for a later `next()`/`List()`.
-- A cursor crosses `spawn` as a deep copy, like a `list`. `Iterable` / `Iterator` are prebuilt names.
+- A cursor crosses `spawn` as a deep copy, like a `list`. `Iterable` and `Iterator` are members of `std.iter`.
 
 ### Generators (`yield`)
 

@@ -70,7 +70,7 @@ top-level annotation) it is `unknown type 'Self'`.
 ### Ordering: `Comparable`
 
 ```chezzi
-protocol Comparable:                 # PREBUILT/reserved — its shape is file-backed in std/prelude.chz
+protocol Comparable:                 # std protocol — its shape is declared in std/cmp.chz
     Eq                               # embedded: ordered ⇒ equatable (Rust's `Ord: Eq`)
     fn compare(self, other: Self) -> int
 

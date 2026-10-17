@@ -1,6 +1,6 @@
 ### Iteration: `Iterable[T]` and `Iterator[T]`
 
-The prebuilt `Iterable[T]` and `Iterator[T]` are parameterized bounds that **recover** `T` from the
+The `std.iter` protocols `Iterable[T]` and `Iterator[T]` are parameterized bounds that **recover** `T` from the
 iterand's element (user protocols take their args explicitly). `T` then reaches the loop variable and
 the return type. Recovery unifies structurally, so `Iterable[(A, B)]`, `Iterable[A?]` and
 `Index[int, (A, B)]` recover every type param they mention. The two differ in what they accept (Rust's

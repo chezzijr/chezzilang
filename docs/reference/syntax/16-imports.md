@@ -69,7 +69,7 @@ with one Go-style exception: importing the same module or name twice in one file
 ### Reserved names
 
 **Only keywords are reserved.** A builtin fn (`print`, `ord`), a builtin type (`int`, `List`), a std
-type (`int32`, `Match`) or a prebuilt protocol (`Comparable`) is an ordinary name. A module-level
+type (`int32`, `Match`) or a std protocol (`Comparable`) is an ordinary name. A module-level
 declaration or import of it shadows the builtin in that module (as Go and Python do):
 
 ```chezzi
@@ -86,15 +86,17 @@ fn f[List](x: List) -> List:    # a type parameter shadows inside its fn
 Lookup tries the module's own declarations and imports first, then the builtins. In a module that
 declares `struct int`, `int` in a type position is that struct.
 
-**The prebuilt protocols** are `Any`, `Comparable`, `Eq`, `Stringable`, `Hashable`, `Error`, `Add`,
-`Sub`, `Mul`, `Div`, `Mod`, `Neg`, `Arithmetic`, `Num`, `Iterator`, `Iterable`, `Index`, `IndexSet`,
-`Slice`, `Convert`, `Contains` and `PathLike`.
+**The std protocols** are `Any` and `Error` (global, in `std/prelude.chz`) and these, each a member of
+its std module: `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`,
+`Arithmetic`, `Num`, `Index`, `IndexSet`, `Slice` and `Contains` (`std.ops`); `Eq`, `Comparable` and
+`Hashable` (`std.cmp`); `Iterator` and `Iterable` (`std.iter`); `Stringable` (`std.string`);
+`PathLike` (`std.path`); `Convert` (`std.convert`).
 
-- Their shapes are plain `protocol` decls in `std/prelude.chz`. Intrinsic conformance (for example
-  `int` satisfies `Add` with no method) and operator binding (`+`→`add`, `<`→`compare`, `for`→`Iterator`,
-  `[]`→`Index`, `[a..b]`→`Slice`) are built into the compiler.
-- All but `PathLike` back syntax (an operator, indexing, `for`, `in`, `T.convert(...)`, interpolation,
-  map keys, `!` and `recover:`, the top type), so they need no import.
+- Their shapes are plain `protocol` decls in those `std/*.chz` files, the only source. Intrinsic
+  conformance (for example `int` satisfies `Add` with no method) and operator binding (`+`→`add`,
+  `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[a..b]`→`Slice`) are built into the compiler.
+- The syntax a protocol backs (an operator, indexing, `for`, `in`, `T.convert(...)`, interpolation, map
+  keys, `!` and `recover:`) needs no import. Only a bound or a value type that names the protocol does.
 - `Convert[S]` (`fn convert(x: S) -> Self`, a static method, Rust's `From`) is bound-only
   (`[T: Convert[str]]`; a value annotation is rejected) and callable through the bound (§7a).
 - `PathLike` (`fn as_path(self) -> bytes`) is the path input of the std filesystem surface:
@@ -204,6 +206,6 @@ b := std.concurrency.Shared(0)    # Python reading: the full path of the same mo
 A bare type whose module was imported whole but not named-imported is a check-time error
 (`unknown type 'Point'; import it from geo`). Two modules may declare the same type name. Each user
 type has one internal identity key (`<module-key>::Name`), but output prints the bare name, so two
-`Point`s both print `Point(...)`. Reserved/native types (`T!E`/`T?`, `Iterator`, the std types,
-FFI widths) are global. An imported `type` alias is transparent: its body resolves in the defining
+`Point`s both print `Point(...)`. Reserved/native types (`T!E`/`T?`, the std types,
+FFI widths) are global. `Iterator` is a member of `std.iter`. An imported `type` alias is transparent: its body resolves in the defining
 module (with any FFI-width license).
