@@ -243,29 +243,14 @@ impl Checker {
                 sig.types.insert(name.clone());
             }
         }
-        // PASS 1c — protocol exports (TICKET-250; std.concurrency's `StructuralEq`). The protocol is
-        // hoisted the ordinary way and moved into the sig: this harvest runs WITHOUT `begin_module`,
-        // so the entry `hoist_protocol` inserts under the bare name must not stay visible to a later
-        // module that never imported it. A reserved protocol (the prelude mirrors) is not exported.
+        // PASS 1c — protocol exports (TICKET-250; std.concurrency's `StructuralEq`). A std protocol's
+        // shape is already seeded from its declaration (`seed_std_protocols`), so the sig takes a
+        // copy of that shape.
         for s in &ast.stmts {
-            if let StmtKind::Protocol {
-                name,
-                type_params,
-                methods,
-                embeds,
-                ..
-            } = &s.kind
-                && !is_reserved_protocol(name)
+            if let StmtKind::Protocol { name, .. } = &s.kind
+                && let Some(info) = self.protocols.get(name).cloned()
             {
-                let key = self.bare_key(name);
-                let prev = self.protocols.remove(&key);
-                self.hoist_protocol(name, type_params, methods, embeds, s.span);
-                if let Some(info) = self.protocols.remove(&key) {
-                    Self::export_protocol(sig, name, info, None);
-                }
-                if let Some(prev) = prev {
-                    self.protocols.insert(key, prev);
-                }
+                Self::export_protocol(sig, name, info, None);
             }
         }
         // PASS 1b — native METHODS (phase 4c; self added 4c-followup). A `native fn` inside a `native
@@ -640,155 +625,62 @@ impl Checker {
         }
     }
 
-    /// Phase 5c-protocols — harvest the SHAPE of a reserved protocol declared in `std/prelude.chz` as a
-    /// plain `protocol` decl (its `type_params`, `embeds`, and method `FnSig`s), WITHOUT inserting it
-    /// into `self.protocols` or emitting any error. It reads a
-    /// `StmtKind::Protocol`, replicating the exact `Self` + own-type-param scope [`hoist_protocol`] uses
-    /// to resolve the method sigs (`self` → `Ty::Unknown`, `Self`/own params → `Ty::Param`). Used ONLY by
-    /// the always-on debug DRIFT GUARD [`assert_native_protocol_shape_matches`] to prove the file-backed
-    /// SHAPE byte-matches the live Rust seed [`prebuilt_protocols`] (which stays the runtime source — the
-    /// `.chz` decl is an ADDITIVE mirror, never registered). Returns `None` if `name` isn't declared in `ast`.
-    pub(super) fn harvest_protocol_shape(
-        &mut self,
-        ast: &crate::ast::Module,
-        name: &str,
-    ) -> Option<ProtocolInfo> {
-        for s in &ast.stmts {
-            if let StmtKind::Protocol {
-                name: pn,
-                type_params,
-                methods,
-                embeds,
-                ..
-            } = &s.kind
-                && pn == name
-            {
-                // Same scope hoist_protocol builds: swap in a clean map with only `Self` + the
-                // protocol's own type params visible, resolve, then restore.
-                let mut saved = self.type_params.clone();
-                std::mem::swap(&mut self.type_params, &mut saved);
-                self.type_params.insert("Self".to_string(), Vec::new());
-                let resolved = self.resolve_bounds(type_params, s.span);
-                for rtp in resolved {
-                    self.type_params.insert(rtp.name, rtp.bounds);
-                }
-                let sigs: Vec<(String, FnSig)> = methods
-                    .iter()
-                    .map(|m| {
-                        let params = m
-                            .params
-                            .iter()
-                            .map(|p| match &p.ty {
-                                Some(t) => self.resolve_type(t, s.span),
-                                None => Ty::Unknown, // leading bare `self`
-                            })
-                            .collect();
-                        let ret = m
-                            .ret
-                            .as_ref()
-                            .map(|t| self.resolve_ret_type(t, s.span))
-                            .unwrap_or(Ty::Nil);
-                        let mut sig = FnSig::plain(params, ret);
-                        sig.labels = super::proto::protocol_labels(&m.params);
-                        (m.name.clone(), sig)
-                    })
-                    .collect();
-                // TICKET-202: embeds resolve here, while the protocol's own params are in scope.
-                let embeds: Vec<TyBound> = embeds
-                    .iter()
-                    .map(|b| self.resolve_bound(b, s.span))
-                    .collect();
-                self.type_params = saved;
-                return Some(ProtocolInfo {
-                    type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
-                    methods: sigs,
-                    embeds,
-                });
-            }
+    /// Harvest the SHAPE of a `protocol` declaration (its `type_params`, `embeds` and method `FnSig`s)
+    /// into a value, with the same `Self` and own-type-param scope [`Checker::hoist_protocol`] uses.
+    /// `None` for a statement that is not a protocol. The caller inserts the result.
+    pub(super) fn harvest_protocol_stmt(&mut self, s: &crate::ast::Stmt) -> Option<ProtocolInfo> {
+        let StmtKind::Protocol {
+            type_params,
+            methods,
+            embeds,
+            ..
+        } = &s.kind
+        else {
+            return None;
+        };
+        // Same scope hoist_protocol builds: swap in a clean map with only `Self` + the
+        // protocol's own type params visible, resolve, then restore.
+        let mut saved = self.type_params.clone();
+        std::mem::swap(&mut self.type_params, &mut saved);
+        self.type_params.insert("Self".to_string(), Vec::new());
+        let resolved = self.resolve_bounds(type_params, s.span);
+        for rtp in resolved {
+            self.type_params.insert(rtp.name, rtp.bounds);
         }
-        None
+        let sigs = self.protocol_method_sigs(methods, s.span);
+        // TICKET-202: embeds resolve here, while the protocol's own params are in scope.
+        let embeds: Vec<TyBound> = embeds
+            .iter()
+            .map(|b| self.resolve_bound(b, s.span))
+            .collect();
+        self.type_params = saved;
+        Some(ProtocolInfo {
+            type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
+            methods: sigs,
+            embeds,
+        })
     }
 
-    /// Phase 5c-protocols DRIFT GUARD — assert each reserved protocol's SHAPE declared in
-    /// `std/prelude.chz` (as a plain `protocol` decl) byte-matches the live Rust seed
-    /// [`prebuilt_protocols`], which stays the RUNTIME source of truth. The file-backed decls are an
-    /// ADDITIVE mirror — never inserted into `self.protocols` (the `hoist_protocol` stdlib gate no-ops
-    /// them) — so nothing at runtime consults them; this guard is the only thing that reads them, keeping
-    /// the two source expressions from silently drifting. The guarded set is not a list of its own any
-    /// more: it IS [`RESERVED_PROTOCOLS`], the single declaration `is_reserved_protocol` also answers
-    /// from — and the first assertion below pins that const's contents EQUAL to `prebuilt_protocols`'s
-    /// key set, so "reserved but not seeded" and "seeded but not reserved" fail here too. That closes
-    /// the mechanism behind `gaps.md` §L4b (a hand-copied guard list that omitted `PathLike` for
-    /// months, leaving its shape the one that could silently drift).
-    /// `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves (via `resolve_type`'s dedicated
-    /// `Iterator[T]` value arm) to the same `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape
-    /// byte-matches too. Called only on the always-linked prelude module; the body is
-    /// `cfg!(debug_assertions)`-guarded so it is a NO-OP in release yet stays COMPILED (so
-    /// `harvest_protocol_shape` is never dead code).
-    /// TICKET-187 — copy each reserved protocol method's parameter names from its `std/prelude.chz`
-    /// declaration onto the live [`prebuilt_protocols`] entry, which carries none. The prelude decl is
-    /// the one source of those names; conformance (`param_name_mismatch`) and protocol-call binding
-    /// read them. Runs on both prelude paths (graph and single-module `seed_native_prelude_sigs`).
-    pub(super) fn adopt_reserved_protocol_labels(&mut self, prelude: &crate::ast::Module) {
-        for &name in crate::checker::RESERVED_PROTOCOLS {
-            let Some(shape) = self.harvest_protocol_shape(prelude, name) else {
-                continue;
-            };
-            let Some(live) = self.protocols.get_mut(name) else {
-                continue;
-            };
-            for (mname, sig) in &mut live.methods {
-                if let Some((_, decl)) = shape.methods.iter().find(|(n, _)| n == mname) {
-                    sig.labels = decl.labels.clone();
+    /// Fill `self.protocols` from the `protocol` declarations in `std/*.chz` (`std_protocol_decls`),
+    /// the one source of which protocols exist and their shapes. Two passes: the first inserts every
+    /// shape, the second re-harvests so an embed declared later in the file order (`Num` embeds
+    /// `Comparable`) resolves. Runs as stdlib, so the declarations resolve names no user module sees.
+    pub(super) fn seed_std_protocols(&mut self) {
+        let outer_std = std::mem::replace(&mut self.current_module_is_stdlib, true);
+        for pass in 0..2 {
+            // The first pass meets an embed whose protocol is not inserted yet; the second pass
+            // re-resolves it, so the first pass's diagnostics are dropped.
+            let mark = self.diag_mark();
+            for d in super::graph_pass::std_protocol_decls() {
+                if let Some(info) = self.harvest_protocol_stmt(&d.stmt) {
+                    self.protocols.insert(d.name.clone(), info);
                 }
             }
-        }
-    }
-
-    pub(super) fn assert_native_protocol_shape_matches(&mut self, ast: &crate::ast::Module) {
-        if !cfg!(debug_assertions) {
-            return;
-        }
-        let seed = prebuilt_protocols();
-        // The set half of the guard: the reserved-name const and the seed's keys must be the SAME set.
-        // A protocol seeded but never reserved (redeclarable — it would shadow the builtin) or reserved
-        // but never seeded (usable as a bound that resolves to nothing) both fail right here.
-        let mut reserved: Vec<&str> = crate::checker::RESERVED_PROTOCOLS.to_vec();
-        reserved.sort_unstable();
-        let mut seeded: Vec<&str> = seed.keys().map(String::as_str).collect();
-        seeded.sort_unstable();
-        debug_assert_eq!(
-            reserved, seeded,
-            "RESERVED_PROTOCOLS and prebuilt_protocols disagree on the reserved protocol set"
-        );
-        for &name in crate::checker::RESERVED_PROTOCOLS {
-            let got = self.harvest_protocol_shape(ast, name).unwrap_or_else(|| {
-                panic!("reserved protocol '{name}' missing from std/prelude.chz")
-            });
-            let want = seed
-                .get(name)
-                .unwrap_or_else(|| panic!("reserved protocol '{name}' missing from prebuilt seed"));
-            debug_assert_eq!(
-                got.type_params, want.type_params,
-                "protocol '{name}' type_params drifted from prebuilt_protocols"
-            );
-            debug_assert_eq!(
-                got.embeds, want.embeds,
-                "protocol '{name}' embeds drifted from prebuilt_protocols"
-            );
-            debug_assert_eq!(
-                got.methods.len(),
-                want.methods.len(),
-                "protocol '{name}' method count drifted from prebuilt_protocols"
-            );
-            for ((gn, gs), (wn, ws)) in got.methods.iter().zip(&want.methods) {
-                debug_assert_eq!(gn, wn, "protocol '{name}' method name/order drifted");
-                debug_assert!(
-                    fn_sig_eq(gs, ws),
-                    "protocol '{name}' method '{gn}' sig drifted from prebuilt_protocols"
-                );
+            if pass == 0 {
+                self.diag_rollback(mark);
             }
         }
+        self.current_module_is_stdlib = outer_std;
     }
 
     /// Phase 4c — look up a method sig on a reserved native handle type in the harvested method table

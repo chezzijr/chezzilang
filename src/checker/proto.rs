@@ -52,8 +52,8 @@ use std::collections::{HashMap, HashSet};
 /// **Stays reserved-protocol-only.** A built-in witnessing a USER protocol (TICKET-024, W8-32,
 /// `Checker::satisfies_native`) is a DIFFERENT kind of grant — it goes through
 /// [`Grant::no_intrinsic_method`], not this table, because a user protocol's bare name can never be
-/// a row key here (every row key is one of the ~20 [`RESERVED_PROTOCOLS`](super::RESERVED_PROTOCOLS)
-/// names), and the method behind that grant is a REAL native method with a runtime arm already, not
+/// a row key here (every row key is a std protocol name, see
+/// `is_std_protocol`), and the method behind that grant is a REAL native method with a runtime arm already, not
 /// a promise this ratchet needs to police.
 pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     // Comparable — int/float/str scalars.
@@ -510,44 +510,14 @@ impl Checker {
         Ok(Grant::no_intrinsic_method())
     }
 
-    /// Register a `protocol` declaration's method signatures. `Self` resolves to `Ty::Param("Self")`.
-    pub(super) fn hoist_protocol(
+    /// The method requirements of a `protocol` declaration, resolved with `Self` and the protocol's
+    /// own type params in scope. `hoist_protocol` and `harvest_protocol_stmt` both call it.
+    pub(super) fn protocol_method_sigs(
         &mut self,
-        name: &str,
-        type_params: &[TypeParam],
         methods: &[MethodSig],
-        embeds: &[Bound],
         span: Span,
-    ) {
-        if is_reserved_protocol(name) && self.current_module_is_stdlib {
-            // Phase 5c-protocols — a builtin protocol's SHAPE is also declared in `std/prelude.chz` as
-            // a plain `protocol` decl (a drift-guarded ADDITIVE mirror; see
-            // `assert_native_protocol_shape_matches`). In a stdlib module that decl is
-            // VALIDATE-AND-NO-OP: the live source stays `prebuilt_protocols`. A USER module may
-            // declare a protocol of a builtin's name: only keywords are reserved, and the user
-            // protocol shadows the builtin in its module.
-            return;
-        }
-        let key = self.bare_key(name);
-        let mut saved = self.type_params.clone();
-        std::mem::swap(&mut self.type_params, &mut saved); // start clean, with only Self visible
-        self.type_params.insert("Self".to_string(), Vec::new());
-        // The protocol's own type params are in scope while resolving its method signatures, so
-        // `fn get(self, i: int) -> T` resolves `T` to `Ty::Param("T")`.
-        let resolved = self.resolve_bounds(type_params, span);
-        for (tp, rtp) in type_params.iter().zip(resolved) {
-            if tp.name == "Self" {
-                self.error(
-                    span,
-                    "protocol type parameter cannot be named 'Self'".to_string(),
-                );
-            }
-            self.type_params.insert(tp.name.clone(), rtp.bounds);
-        }
-        for tp in type_params {
-            self.check_bounds(&tp.bounds, &tp.name, span);
-        }
-        let sigs = methods
+    ) -> Vec<(String, FnSig)> {
+        methods
             .iter()
             .map(|m| {
                 let self_param = Ty::Param("Self".to_string());
@@ -588,7 +558,45 @@ impl Checker {
                 sig.labels = protocol_labels(&m.params);
                 (m.name.clone(), sig)
             })
-            .collect();
+            .collect()
+    }
+
+    /// Register a `protocol` declaration's method signatures. `Self` resolves to `Ty::Param("Self")`.
+    pub(super) fn hoist_protocol(
+        &mut self,
+        name: &str,
+        type_params: &[TypeParam],
+        methods: &[MethodSig],
+        embeds: &[Bound],
+        span: Span,
+    ) {
+        if is_std_protocol(name) && self.current_module_is_stdlib {
+            // A std protocol's SHAPE comes from its `protocol` decl in `std/*.chz`, harvested once by
+            // `seed_std_protocols`. In a stdlib module the decl is a no-op here. A USER module may
+            // declare a protocol of a builtin's name: only keywords are reserved, and the user
+            // protocol shadows the builtin in its module.
+            return;
+        }
+        let key = self.bare_key(name);
+        let mut saved = self.type_params.clone();
+        std::mem::swap(&mut self.type_params, &mut saved); // start clean, with only Self visible
+        self.type_params.insert("Self".to_string(), Vec::new());
+        // The protocol's own type params are in scope while resolving its method signatures, so
+        // `fn get(self, i: int) -> T` resolves `T` to `Ty::Param("T")`.
+        let resolved = self.resolve_bounds(type_params, span);
+        for (tp, rtp) in type_params.iter().zip(resolved) {
+            if tp.name == "Self" {
+                self.error(
+                    span,
+                    "protocol type parameter cannot be named 'Self'".to_string(),
+                );
+            }
+            self.type_params.insert(tp.name.clone(), rtp.bounds);
+        }
+        for tp in type_params {
+            self.check_bounds(&tp.bounds, &tp.name, span);
+        }
+        let sigs = self.protocol_method_sigs(methods, span);
         self.type_params = saved; // restore
         self.protocols.insert(
             key,
@@ -621,7 +629,7 @@ impl Checker {
     ) {
         // The prelude's mirror of a builtin protocol (a std module); a user protocol of that name is
         // its own protocol.
-        if is_reserved_protocol(name) && self.current_module_is_stdlib {
+        if is_std_protocol(name) && self.current_module_is_stdlib {
             return;
         }
         let own: HashMap<String, Vec<TyBound>> = type_params
@@ -644,7 +652,7 @@ impl Checker {
     /// required method → error, regardless of order or sig; (2) two embeds pulling the same method name
     /// with DIFFERING signatures → error (identical sigs dedup silently — the legal diamond); (3) a
     /// cyclic embed (A embeds B, B embeds A) → error. Built-in protocols (registered via
-    /// [`prebuilt_protocols`], not here) are trusted and skipped.
+    /// `seed_std_protocols`, not here) are trusted and skipped.
     pub(super) fn validate_protocol_embeds(
         &mut self,
         name: &str,
@@ -653,7 +661,7 @@ impl Checker {
         embeds: &[Bound],
         span: Span,
     ) {
-        if is_reserved_protocol(name) && self.current_module_is_stdlib {
+        if is_std_protocol(name) && self.current_module_is_stdlib {
             return; // the prelude's mirror of a builtin protocol
         }
         // Each embed must name a real protocol.
@@ -912,7 +920,7 @@ pub(super) fn protocol_labels(params: &[crate::ast::Param]) -> Vec<Option<String
 
 /// Does `ty` mention the built-in `Error` protocol existential anywhere (the E side of a bare `T!`,
 /// or nested inside a container/struct)? Drives the concrete-error-type hint on a non-sendable
-/// channel element. Matches `Error` by name — it is a reserved protocol (`prebuilt_protocols`), so a
+/// channel element. Matches `Error` by name — it is a global std protocol (`is_global_protocol`), so a
 /// user protocol can never shadow it.
 pub(super) fn ty_mentions_error_existential(ty: &Ty) -> bool {
     match ty {

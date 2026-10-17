@@ -205,7 +205,7 @@ impl Checker {
                 | StmtKind::TypeAlias { name, .. }
                 | StmtKind::Protocol { name, .. } = &s.kind
                     && !(matches!(s.kind, StmtKind::Protocol { .. })
-                        && is_reserved_protocol(name)
+                        && is_std_protocol(name)
                         && self.current_module_is_stdlib)
                 {
                     let key = self.type_key(mid, name);
@@ -218,6 +218,11 @@ impl Checker {
         }
         self.note_variant_import_binds(stmts);
         self.collect_names(stmts);
+        if self.current_module_is_stdlib && self.protocols.is_empty() {
+            // The first std module is the prelude. Its signatures name `Hashable` and `Any`, so
+            // the shapes from the `protocol` declarations in `std/*.chz` exist before it is hoisted.
+            self.seed_std_protocols();
+        }
         self.collect_docs(stmts);
         self.hoist(stmts);
         self.bind_variant_imports(stmts);

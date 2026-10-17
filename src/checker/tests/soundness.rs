@@ -1886,7 +1886,7 @@ fn same_module_duplicate_protocol_is_still_an_error() {
 }
 
 /// TICKET-027 ceiling pin: a reserved protocol bound needs no import in ANY module -- the 21
-/// `RESERVED_PROTOCOLS` are never keyed.
+/// std protocols are never keyed.
 #[test]
 fn reserved_protocol_bound_needs_no_import_in_any_module() {
     files_ok(&[

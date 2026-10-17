@@ -137,10 +137,10 @@ impl Checker {
                     }
                 }
                 StmtKind::Protocol { name, .. } => {
-                    // A reserved protocol is never exported: `prebuilt_protocols` stays the live
-                    // source for its 21 names (mirrored, drift-guarded, in `std/prelude.chz`), so
-                    // exporting it here would put a second, sig-borne copy into `sig.types`.
-                    if !(is_reserved_protocol(name) && self.current_module_is_stdlib)
+                    // A std protocol is never exported from its own declaring module: `seed_std_protocols`
+                    // is the live source for its shape, so exporting it here would put a second,
+                    // sig-borne copy into `sig.types`.
+                    if !(is_std_protocol(name) && self.current_module_is_stdlib)
                         && let Some(info) = self.protocol_shape(name).cloned()
                     {
                         let doc = self.name_docs.get(name).cloned();

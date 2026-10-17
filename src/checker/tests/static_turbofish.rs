@@ -1460,53 +1460,6 @@ fn native_enum_option_result_register_as_ordinary_enums() {
     );
 }
 
-/// Phase 5c-protocols BEHAVIOR-PRESERVING DRIFT GUARD: every reserved protocol is ALSO declared
-/// in `std/prelude.chz` as a plain `protocol` decl, but `prebuilt_protocols` stays the live runtime source
-/// (conformance / operator lowering / `check_bounds` untouched). This asserts each file-backed protocol's
-/// harvested SHAPE (`type_params`, `embeds`, ordered method `FnSig`s) BYTE-EQUALS the Rust seed, so the two
-/// source expressions can never silently drift. `Iterable` is the interesting one: its `iter(self) ->
-/// Iterator[Elem]` return type resolves via `resolve_type`'s dedicated `Iterator[T]` value arm to the same
-/// `Ty::Struct("Iterator",[Elem])` the seed uses, so its shape byte-matches like the rest. Iterates
-/// `RESERVED_PROTOCOLS` (not a hand-copied subset — this list had gone stale at 17 of 21 names).
-#[test]
-fn native_protocol_shapes_match_prebuilt_seed() {
-    let path = crate::resolver::std_root().join("prelude.chz");
-    let src = std::fs::read_to_string(&path).expect("read std/prelude.chz");
-    let toks = crate::lexer::tokenize(&src).expect("tokenize prelude");
-    let module = crate::parser::parse(toks).expect("parse prelude");
-    let mut c = Checker::new();
-    c.current_module_is_stdlib = true;
-    // The prelude protocols name `Option[T]` (`Iterator.next`), which resolves through the enum
-    // tables: seed the carriers as every checking path does before it reads the prelude.
-    c.carrier_seeds = c.harvest_native_enums(&module);
-    c.seed_carrier_enums();
-    c.seed_range_struct(&module);
-    let seed = prebuilt_protocols();
-    for &name in crate::checker::RESERVED_PROTOCOLS {
-        let got = c.harvest_protocol_shape(&module, name).unwrap_or_else(|| {
-            panic!("reserved protocol '{name}' must be declared in std/prelude.chz")
-        });
-        let want = seed.get(name).expect("reserved protocol in prebuilt seed");
-        assert_eq!(
-            got.type_params, want.type_params,
-            "protocol '{name}' type_params drift"
-        );
-        assert_eq!(got.embeds, want.embeds, "protocol '{name}' embeds drift");
-        assert_eq!(
-            got.methods.len(),
-            want.methods.len(),
-            "protocol '{name}' method count drift"
-        );
-        for ((gn, gs), (wn, ws)) in got.methods.iter().zip(&want.methods) {
-            assert_eq!(gn, wn, "protocol '{name}' method name/order drift");
-            assert!(
-                fn_sig_eq(gs, ws),
-                "protocol '{name}' method '{gn}' sig drift"
-            );
-        }
-    }
-}
-
 /// Phase 3a — the migrated builtins keep their historical first-classness through the `.chz` decls.
 /// `native fn` (ord/chr/panic) stays a first-class VALUE (binds to a name, types `Ty::Func`);
 /// `native ctor` (int/str/…) stays NON-first-class (value-position use is a checker error). This is

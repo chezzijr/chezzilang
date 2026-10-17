@@ -350,50 +350,12 @@ pub(crate) fn is_firstclass_builtin_fn(name: &str) -> bool {
     prelude_fn(name).is_some_and(Builtin::first_class)
 }
 
-/// THE declaration of the reserved (prebuilt) protocol set — one list, three consumers:
-/// [`is_reserved_protocol`] (the redeclaration gate), [`prebuilt_protocols`] (the live runtime seed,
-/// whose key set this must EQUAL — asserted by the drift guard), and
-/// `Checker::assert_native_protocol_shape_matches` (which iterates this to prove each name's
-/// `std/prelude.chz` mirror byte-matches its seed). Previously three hand-maintained copies that
-/// nothing forced to agree: `PathLike` sat in the first two and was missing from the third for months,
-/// so its shape was the one that could silently drift (`docs/contributing/gaps.md` §L4b). Adding a protocol now
-/// means adding it HERE and seeding it; omit either and the debug guard fails.
-pub(crate) const RESERVED_PROTOCOLS: &[&str] = &[
-    "Any",
-    "Comparable",
-    "Eq",
-    "Stringable",
-    "Hashable",
-    "Error",
-    "Add",
-    "Sub",
-    "Mul",
-    "Div",
-    "Mod",
-    "Neg",
-    "BitAnd",
-    "BitOr",
-    "BitXor",
-    "Shl",
-    "Shr",
-    "Arithmetic",
-    "Num",
-    "Iterator",
-    "Iterable",
-    "Index",
-    "IndexSet",
-    "Slice",
-    "Convert",
-    "Contains",
-    "PathLike",
-];
-
-/// Prebuilt protocols a user program may use as bounds but must not redeclare (the
-/// [`RESERVED_PROTOCOLS`] membership test). Every caller is a per-DECLARATION hoist/setup check
-/// (`hoist_protocol`, the `struct`/`enum`/`type` reserved-name arms), so the linear scan is
-/// off any hot path — it sits beside an identical `native::ffi::is_width(..)` scan.
-fn is_reserved_protocol(name: &str) -> bool {
-    RESERVED_PROTOCOLS.contains(&name)
+/// True when a std file declares a protocol called `name`. The `protocol` declarations in `std/*.chz`
+/// (`graph_pass::std_protocol_decls`) are the one source of which protocols exist; a user module may
+/// still declare a protocol of that name, which shadows the std one in its own module. Every caller
+/// is a per-DECLARATION hoist/setup check or a name resolution, off any hot path.
+fn is_std_protocol(name: &str) -> bool {
+    graph_pass::std_protocol_owner(name).is_some()
 }
 
 /// True if the native fn `module_id.member` diverges (never returns), like `panic`. Used to

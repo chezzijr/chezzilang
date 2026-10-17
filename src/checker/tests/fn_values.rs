@@ -1150,7 +1150,8 @@ fn any_param_accepts_anything() {
 /// A direct `satisfies` unit check: every scalar satisfies the empty `Any` protocol.
 #[test]
 fn any_satisfied_by_all_scalars_unit() {
-    let c = Checker::new();
+    let mut c = Checker::new();
+    c.seed_std_protocols();
     for ty in [Ty::Int, Ty::Float, Ty::Bool, Ty::Str, Ty::Nil] {
         assert!(
             c.satisfies_args(&ty, "Any", &[]).is_ok(),

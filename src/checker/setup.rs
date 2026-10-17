@@ -79,7 +79,7 @@ impl Checker {
             local_fn_names: std::collections::HashSet::new(),
             raw_ctor_owner: None,
             structs: HashMap::new(),
-            protocols: prebuilt_protocols(),
+            protocols: HashMap::new(),
             type_params: HashMap::new(),
             enums: HashMap::new(),
             enum_type_params: HashMap::new(),
@@ -461,14 +461,14 @@ impl Checker {
     /// protocol shadows a builtin of the same name (only keywords are reserved). Every other reader
     /// asks [`Checker::protocol_key`], which gives the builtin.
     pub(super) fn user_protocol_key(&self, name: &str) -> String {
-        if is_reserved_protocol(name) && self.bare_types.contains_key(name) {
+        if is_std_protocol(name) && self.bare_types.contains_key(name) {
             self.bare_key(name)
         } else {
             self.protocol_key(name)
         }
     }
 
-    /// The runtime key for a protocol name: unchanged (bare) for a [`RESERVED_PROTOCOLS`] member,
+    /// The runtime key for a protocol name: unchanged (bare) for a std protocol (`is_std_protocol`),
     /// else [`Checker::bare_key`] (mirrors the struct/enum treatment, TICKET-027). Falls back to
     /// [`Checker::protocol_alias_key`] ONLY when `name` misses as a protocol directly — alias-first
     /// could send another module's bare protocol key to a same-named LOCAL alias. A module-qualified
@@ -480,7 +480,7 @@ impl Checker {
         // A builtin protocol's name is its key: the checker's own references (`==` reads `Eq`,
         // a map key needs `Hashable`) always mean the builtin. A name the USER wrote resolves
         // through `user_protocol_key`, where a module's own protocol shadows the builtin.
-        let key = if is_reserved_protocol(name) {
+        let key = if is_std_protocol(name) {
             name.to_string()
         } else {
             self.bare_key(name)
@@ -570,7 +570,7 @@ impl Checker {
         if let Some(Ty::Protocol(key, args)) = self.imported_alias_tys.get(&head) {
             return args.is_empty().then(|| key.clone());
         }
-        let key = if is_reserved_protocol(&head) {
+        let key = if is_std_protocol(&head) {
             head.clone()
         } else {
             self.bare_key(&head)

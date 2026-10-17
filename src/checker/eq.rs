@@ -293,7 +293,7 @@ impl Checker {
             Ty::Param(name) => {
                 let carries = self.type_params.get(name).is_some_and(|bs| {
                     bs.iter()
-                        .any(|b| self.protocol_provides(&b.name, &b.args, STRUCTURAL_EQ_KEY, &[]))
+                        .any(|b| self.protocol_provides(&b.name, &b.args, "StructuralEq", &[]))
                 });
                 (!carries).then(|| EqReach::Param(name.clone()))
             }

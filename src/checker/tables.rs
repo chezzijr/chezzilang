@@ -33,11 +33,6 @@ pub(super) enum Obligation {
     },
 }
 
-/// The key of `std.concurrency`'s sealed protocol `StructuralEq`
-/// (TICKET-250): the module-scoped identity key `run_graph_pass` gives a protocol that a native
-/// module exports. Only the bare NAME is import-gated, through [`Checker::protocol_key`].
-pub(crate) const STRUCTURAL_EQ_KEY: &str = "std.concurrency::StructuralEq";
-
 /// A deferred [`Obligation`] with the type-parameter scope it was asked in.
 pub(super) type DeferredObligation = (Obligation, HashMap<String, Vec<TyBound>>);
 

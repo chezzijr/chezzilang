@@ -262,7 +262,7 @@ impl Checker {
         // protocol embeds `Num`, so erasure cannot bypass the seal.
         // TICKET-250: `StructuralEq` is SEALED too. Its body is empty, so without this arm every
         // type would satisfy it through the empty-protocol rule below.
-        if protocol == STRUCTURAL_EQ_KEY {
+        if protocol == "StructuralEq" {
             return self
                 .structural_eq(ty)
                 .map(|()| Grant::no_intrinsic_method());
@@ -768,7 +768,7 @@ impl Checker {
         // hand-written intrinsic arm above whose grant is a W6-3 promise about a method with no
         // user code behind it; routing them through the native table too would silently re-decide
         // conformance for every built-in (`Set.add` sits one signature check from witnessing `Add`).
-        if !is_reserved_protocol(protocol)
+        if !is_std_protocol(protocol)
             && let Some(key) = Self::native_witness_key(ty)
         {
             return self

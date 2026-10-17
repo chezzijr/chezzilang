@@ -155,13 +155,6 @@ impl Checker {
                 // replacement). Cached AFTER `attach_native_module_metadata` (unlike net's before-attach
                 // cache) because that step mutates `RwShared.read`/`Executor.submit`'s closure-param sigs
                 // — caching before would seed the pre-port (unannotated) tables.
-                // TICKET-250 -- a protocol a native module exports gets a module-scoped identity
-                // key, so `owning_protocol_def` finds it by that key alone. Under the bare key a
-                // std module's types keep, every module would see it with no import.
-                for pname in sig.protocol_defs.keys() {
-                    c.type_keys
-                        .insert((lm.id.clone(), pname.clone()), format!("{name}::{pname}"));
-                }
                 if name == "std.concurrency" {
                     for tn in ["Shared", "RwShared", "Atomic", "AtomicInt", "Executor"] {
                         if let Some(info) = sig.struct_defs.get(tn) {
@@ -307,18 +300,6 @@ impl Checker {
                     }
                 }
             }
-            if lm.dotted == ["std", "prelude"] {
-                // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). All 18 reserved
-                // protocols (`Any`, Comparable/Stringable/Error/Hashable, the operator protocols, the
-                // `Arithmetic` bundle, `Iterator`, `Iterable`, `Index`/`IndexSet`/`Slice`, `Convert`) are now ALSO declared in
-                // `std/prelude.chz` as plain `protocol` decls, but `prebuilt_protocols` stays the live
-                // runtime source (conformance/operator-lowering/`check_bounds` untouched). Assert the
-                // parsed+resolved shape byte-equals the Rust seed so the two can't drift. Keeps
-                // `harvest_protocol_shape` production-live (no dead_code) AND is assert-only (no effect on
-                // resolution/output), so behavior + output are unchanged.
-                c.assert_native_protocol_shape_matches(&lm.ast);
-                c.adopt_reserved_protocol_labels(&lm.ast);
-            }
             // M24 — the manifest's `[project] entrypoint = "mod:fn"` names a function the runtime
             // invokes BY NAME at a fixed arity of ZERO, exactly like a `test fn`. A hidden witness
             // parameter has no call site to come from there, so a bare `chezzi run` would fault at
@@ -462,17 +443,28 @@ pub(super) fn declared_type_name(kind: &StmtKind) -> Option<&str> {
     }
 }
 
-/// Every public type and protocol name a std module declares → its modules (`std.regex` for
-/// `Match`), read once from the embedded std sources. The prelude is left out: its types are in
-/// scope everywhere.
-pub(super) fn std_type_owners() -> &'static HashMap<String, Vec<String>> {
-    static OWNERS: std::sync::OnceLock<HashMap<String, Vec<String>>> = std::sync::OnceLock::new();
-    OWNERS.get_or_init(|| {
-        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+/// One `protocol` declaration of an embedded std file: the owner of that protocol's name, module
+/// and shape. `Checker::seed_std_protocols` harvests the shape; `is_std_protocol` and `import_hint`
+/// read the name and module.
+pub(super) struct StdProtocol {
+    pub name: String,
+    pub module: String,
+    pub stmt: crate::ast::Stmt,
+}
+
+/// What the embedded std sources declare, parsed once: the module of every public type and protocol
+/// name, and every `protocol` declaration in file order.
+pub(super) struct StdDecls {
+    type_owners: HashMap<String, Vec<String>>,
+    protocols: Vec<StdProtocol>,
+}
+
+fn std_decls() -> &'static StdDecls {
+    static DECLS: std::sync::OnceLock<StdDecls> = std::sync::OnceLock::new();
+    DECLS.get_or_init(|| {
+        let mut type_owners: HashMap<String, Vec<String>> = HashMap::new();
+        let mut protocols: Vec<StdProtocol> = Vec::new();
         for (rel, src) in crate::native::std_embed::STD_FILES {
-            if *rel == "prelude.chz" {
-                continue;
-            }
             let module = format!("std.{}", rel.trim_end_matches(".chz").replace('/', "."));
             let Ok(tokens) = crate::lexer::tokenize(src) else {
                 continue;
@@ -481,17 +473,52 @@ pub(super) fn std_type_owners() -> &'static HashMap<String, Vec<String>> {
                 continue;
             };
             for s in &ast.stmts {
-                if let Some(name) = declared_type_name(&s.kind)
+                if let StmtKind::Protocol { name, .. } = &s.kind {
+                    protocols.push(StdProtocol {
+                        name: name.clone(),
+                        module: module.clone(),
+                        stmt: s.clone(),
+                    });
+                }
+                // The prelude's types are in scope everywhere, so it owns no type name.
+                if *rel != "prelude.chz"
+                    && let Some(name) = declared_type_name(&s.kind)
                     && !is_std_internal_name(name)
                 {
-                    out.entry(name.to_string())
+                    type_owners
+                        .entry(name.to_string())
                         .or_default()
                         .push(module.clone());
                 }
             }
         }
-        out
+        StdDecls {
+            type_owners,
+            protocols,
+        }
     })
+}
+
+/// Every public type and protocol name a std module declares → its modules (`std.regex` for
+/// `Match`), read once from the embedded std sources. The prelude is left out: its types are in
+/// scope everywhere.
+pub(super) fn std_type_owners() -> &'static HashMap<String, Vec<String>> {
+    &std_decls().type_owners
+}
+
+/// Every `protocol` declaration in the embedded std sources, in file order: the one source of which
+/// protocols exist, their shapes and the module that owns each.
+pub(super) fn std_protocol_decls() -> &'static [StdProtocol] {
+    &std_decls().protocols
+}
+
+/// The std module that declares the protocol `name` (`std.prelude` for `Any` and `Error`), or `None`
+/// when no std file declares it.
+pub(super) fn std_protocol_owner(name: &str) -> Option<&'static str> {
+    std_protocol_decls()
+        .iter()
+        .find(|p| p.name == name)
+        .map(|p| p.module.as_str())
 }
 
 pub(super) fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {

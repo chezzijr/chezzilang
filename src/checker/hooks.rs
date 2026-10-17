@@ -334,7 +334,7 @@ impl Checker {
     /// user protocol declares itself is an ordinary method call.
     pub(super) fn hook_requirement(&self, protocol: &str, method: &str) -> Option<Hook> {
         let owner = self.requirement_owner(protocol, method, &mut HashSet::new())?;
-        if !is_reserved_protocol(&owner) {
+        if !is_std_protocol(&owner) {
             return None;
         }
         HOOKS

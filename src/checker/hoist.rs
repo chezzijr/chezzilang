@@ -930,6 +930,7 @@ impl Checker {
         self.carrier_seeds = self.harvest_native_enums(&module);
         self.seed_carrier_enums();
         self.seed_range_struct(&module);
+        self.seed_std_protocols();
         for s in &module.stmts {
             if let StmtKind::Native(decl) = &s.kind {
                 self.register_native_decl(decl);
@@ -951,7 +952,6 @@ impl Checker {
                 self.structs.insert(tn.to_string(), info);
             }
         }
-        self.adopt_reserved_protocol_labels(&module);
         self.current_module_is_stdlib = outer_std;
         // Re-seed under the caller's module, which may be a user module.
         self.seed_carrier_enums();
