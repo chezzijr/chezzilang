@@ -75,12 +75,16 @@ Details of each step are in [`docs/history/progress/2026-10.md`](docs/history/pr
 
 Each group below is one fact decided in two or more places (grouped 2026-10-16).
 
-1. **In the pipeline (filed 2026-10-16; TICKET-263 resumed at triage 2026-10-18):**
-   - TICKET-263, group A, names: one owner for "which names hold a slot" (owners.md row 44; fixes
-     `'None' is not callable` for an imported alias read before `Count := …`); one name per module
-     (the owner decision below); a recursive local lambda (`unknown name 'fact'`); a divergent fn.
-     All four parts are done on the branch (2026-10-18): `os.exit` and a `die()` helper are ordinary
-     calls (write `panic(...)` after them).
+1. **In the pipeline (filed 2026-10-16):**
+   - TICKET-263, group A, names: merged 2026-10-18 (one owner for which names hold a slot; one name
+     per module; a let binder is not readable in its own value; `os.exit` is an ordinary call, so
+     write `panic(...)` after it). The owner hand-merged it after `verifying` escalated on one
+     `else_guard_grid` cell, with one review fix: an ambiguous import pair (`import a.math` +
+     `import b.math`) binds `math` once, so a third binding clashes. Open, low: a nested fn read only
+     by itself warns `unused variable`, where rustc says `function is never used`.
+   - TICKET-266, a `never` return type (filed 2026-10-18): `exit` and `panic` declare `-> never`,
+     and a call of that type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")`
+     lines that TICKET-263 put after `os.exit`.
    - TICKET-265, group C, builtin types and protocols. Part 1 is done (2026-10-17): the std
      protocols live in `std.ops`/`std.cmp`/`std.iter`/`std.string`/`std.path`/`std.convert` and a bound
      needs the import, `Hashable` embeds `Eq`, `T?` derives no ordering. A std import checks and
