@@ -321,7 +321,7 @@ impl Checker {
     }
 
     /// The type of an inline expression body, for a named fn (`infer_inline_fn_ret`) and for a
-    /// lambda (`infer_closure`). A sole diverging call (`panic(...)`, `os.exit(...)`) never returns
+    /// lambda (`infer_closure`). A sole diverging call (`panic(...)`) never returns
     /// a value, so it is `None` and not an un-inferable `Unknown`. This is the one place that
     /// decides it.
     pub(super) fn inline_body_ty(&mut self, body: &Expr, slot: Option<Ty>) -> Ty {

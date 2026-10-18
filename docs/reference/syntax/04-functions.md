@@ -185,7 +185,7 @@ Param types are required. With no `-> T` the body shape decides:
   `cannot infer return type of 'fact': a call in its body has no known type yet (return types that depend on each other are not inferred); add a -> annotation`.
   A function that only calls such a function reports the same text.
 - An inline body with an open slot (`fn f(): []`) is `cannot infer return type of 'f'; add a -> annotation`.
-- A function whose sole body is a diverging call (`fn boom(): panic("msg")`, `os.exit(...)`) is
+- A function whose sole body is a diverging call (`fn boom(): panic("msg")`) is
   `None` (named function or lambda). `fn b() -> int: panic(...)` is valid: bottom fits any return.
 - A generator writes `-> Iterator[T]` (§6).
 - An inline body that forwards a call has that call's declared type: `fn f(): g()` with
@@ -214,8 +214,10 @@ These terminate:
 - an `if`/`else`, exhaustive `match` or `wait:` whose every branch (and `else`) returns
 - a `return` inside `parallel:`
 - `while true:` with no `break` of its own (a `break` in an `if`/`match`/`wait:` arm or a `parallel:` body counts)
-- a tail call whose resolved callee diverges (`panic`, `os.exit`, `exit` imported from `std.os` under
-  any name; a user fn, method, local or parameter named `exit`/`panic` does not count)
+- a tail call to `panic`. Any other call does not terminate, however its callee ends: `os.exit(n)`
+  and a `die()` helper that only panics are ordinary calls (Go has no never type). Write
+  `panic("unreachable")` after such a call; the error says so when the last statement is a call.
+  A user fn, method, local or parameter named `panic` does not count.
 
 A `for` body may run zero times, so a `return` in it does not terminate. Inline-expr bodies are exempt.
 

@@ -444,17 +444,16 @@ impl Checker {
         id.0 != crate::ast::NodeId::SYNTH.0 && !self.generic_arg_prepass && !self.resolving_returns
     }
 
-    /// TICKET-184 — whether a callee resolved to `r` never returns: the `panic` builtin, or a fn of a
-    /// native module that [`is_diverging_native`] names (`std.os.exit`, under any bound name). Never
-    /// a name test: a user fn, method, local or parameter named `exit`/`panic` returns normally.
+    /// TICKET-184 — whether a callee resolved to `r` never returns: only the `panic` builtin. A fn
+    /// call never diverges to the checker, however its body ends, and `std.os.exit` is an ordinary
+    /// fn (TICKET-263, Go `os.Exit`). Never a name test: a user fn, method, local or parameter
+    /// named `panic` returns normally.
     pub(super) fn resolution_diverges(&self, r: &Resolution) -> bool {
         match r {
             Resolution::Builtin(b) => *b == Builtin::Panic,
-            Resolution::Fn { module, name } | Resolution::ModuleMember { module, name } => self
-                .module_idx_of
-                .iter()
-                .any(|(id, i)| *i == *module && is_diverging_native(id, name)),
-            Resolution::Local
+            Resolution::Fn { .. }
+            | Resolution::ModuleMember { .. }
+            | Resolution::Local
             | Resolution::Global { .. }
             | Resolution::StructCtor(_)
             | Resolution::Provider

@@ -109,7 +109,6 @@ impl Checker {
             self.infer_all(args);
             return Ty::Unknown;
         };
-        let diverges = self.resolution_diverges(&self.fn_resolution(name));
         // TICKET-186: keyword labels through a module slot bind only where
         // `labels_certain` says the slot holds this fn (K5).
         if let Some(named) = self
@@ -158,11 +157,6 @@ impl Checker {
             self.check_c_variadic_args(name, &sig.params, args, span);
         } else {
             self.check_args_range(name, &sig.params, sig.min_params, args, span);
-        }
-        // TICKET-077: a `from`-imported diverging native fn (`exit`, under any bound
-        // name) bottom-types like `panic`, so it type-checks in value position.
-        if diverges {
-            return Ty::Unknown;
         }
         sig.ret
     }

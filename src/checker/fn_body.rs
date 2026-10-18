@@ -823,10 +823,18 @@ impl Checker {
             && let Some(span) = decl.body.first().map(|s| s.span)
         {
             let ret = &sig.ret;
+            // TICKET-263: a call the checker does not know never returns (`os.exit`, a `die()`
+            // helper) leaves the fn falling off; the hint names the fix.
+            let hint = match decl.body.last().map(|s| &s.kind) {
+                Some(StmtKind::Expr(e)) if matches!(e.kind, ExprKind::Call { .. }) => {
+                    "; if a call above never returns, write `panic(...)` after it"
+                }
+                _ => "",
+            };
             self.error(
                 span,
                 format!(
-                    "function '{}' has return type {ret} but can fall off the end without returning a value; add an explicit `return`, or use a closure `fn() -> {ret}: <expr>` which implicitly returns its expression body",
+                    "function '{}' has return type {ret} but can fall off the end without returning a value; add an explicit `return`, or use a closure `fn() -> {ret}: <expr>` which implicitly returns its expression body{hint}",
                     decl.name
                 ),
             );

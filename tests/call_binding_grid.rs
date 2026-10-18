@@ -897,7 +897,7 @@ fn n3_cells() -> Vec<Cell> {
         ),
         cell(
             "n3/diverge/import",
-            &format!("import exit from std.os\n{div}print(f(1))\n"),
+            &format!("import exit from std.os\n{div}    panic(\"unreachable\")\nprint(f(1))\n"),
             prints("1"),
         ),
         cell(

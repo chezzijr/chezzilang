@@ -350,8 +350,9 @@ fn handle(conn: Conn):
 
 **`else` = handle and leave.** `v := f() else e: <block>` binds `v` on success. On failure the block
 runs with the error bound to `e` (`else _:` binds nothing, like `else:`) and MUST leave: `return`
-(including `return !e`), `break`, `continue`, `panic(...)`, `os.exit(n)`, or an `if` / `match` whose
-every branch leaves. It never produces a value; use `??` for a default and `match` for a computed value.
+(including `return !e`), `break`, `continue`, `panic(...)`, or an `if` / `match` whose every branch
+leaves. `os.exit(n)` is an ordinary call to the checker (Go's `os.Exit`): write `panic("unreachable")`
+after it. The block never produces a value; use `??` for a default and `match` for a computed value.
 
 ```chezzi
 fn load(path: str) -> Config!str:
@@ -390,8 +391,8 @@ fn span(path: str) -> int!str:
   ``an `elif` body ends its line; write the next `elif` or `else:` on its own line, and an `else:` guard in an indented body``.
 - `else e:` on a `T?` is an error: `` `else e:` needs an error to bind, and int? has none; write `else:` ``.
 - On an `int?!E` value `else` handles the outer error, and `v` is the `int?`.
-- At module top level there is no `return`: leave with `panic`, `os.exit`, `break` / `continue` in a
-  loop, or use `?`. Inside a nested fn or a generator `return` leaves that fn.
+- At module top level there is no `return`: leave with `panic`, `break` / `continue` in a
+  loop, or use `?`. `os.exit` ends the program but does not count as leaving for the checker. Inside a nested fn or a generator `return` leaves that fn.
 - A `spawn:` block and a `defer:` block reject it, as they reject `?`.
 
 **How a carrier prints** (`print`, `str()`, interpolation, a container element, an `assert` message, a

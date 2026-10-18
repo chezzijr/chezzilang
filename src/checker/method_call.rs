@@ -118,8 +118,6 @@ impl Checker {
         match &obj_ty {
             // `module.fn(args)` is a plain call on the member — no `self`.
             Ty::Module(mname) => {
-                // Captured before `sig`'s borrow, for the diverging-native check below (TICKET-077).
-                let mod_id = self.imported_modules.get(mname).cloned();
                 let sig = self
                     .imported_modules
                     .get(mname)
@@ -165,14 +163,6 @@ impl Checker {
                         self.check_c_variadic_args(method, &fsig.params, args, span);
                     } else {
                         self.check_args_range(method, &fsig.params, fsig.min_params, args, span);
-                    }
-                    // TICKET-077: a diverging native fn (`os.exit`) bottom-types like `panic`, so
-                    // it type-checks in value position (e.g. a `match` arm).
-                    if mod_id
-                        .as_ref()
-                        .is_some_and(|id| is_diverging_native(id, method))
-                    {
-                        return Ty::Unknown;
                     }
                     return fsig.ret;
                 }

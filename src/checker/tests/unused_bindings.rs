@@ -1243,17 +1243,17 @@ fn ticket184_flow_grid() {
         ("D1", "fn g() -> int:\n    panic(\"x\")\nprint(g())\n", "ok"),
         (
             "D2",
-            "import std.os\nfn g() -> int:\n    os.exit(1)\nprint(g())\n",
+            "import std.os\nfn g() -> int:\n    os.exit(1)\n    panic(\"unreachable\")\nprint(g())\n",
             "ok",
         ),
         (
             "D3",
-            "import exit from std.os\nfn g() -> int:\n    exit(1)\nprint(g())\n",
+            "import exit from std.os\nfn g() -> int:\n    exit(1)\n    panic(\"unreachable\")\nprint(g())\n",
             "ok",
         ),
         (
             "D4",
-            "import exit as quit from std.os\nfn g() -> int:\n    quit(1)\nprint(g())\n",
+            "import exit as quit from std.os\nfn g() -> int:\n    quit(1)\n    panic(\"unreachable\")\nprint(g())\n",
             "ok",
         ),
         (
@@ -1355,7 +1355,7 @@ fn ticket184_flow_grid() {
         (
             "V1",
             "import exit as quit from std.os\nfn main():\n    r: int!str = !\"boom\"\n    x := match r:\n        ?v: v\n        !e: quit(2)\n    print(x)\nmain()\n",
-            "ok",
+            "branches have incompatible types: int and None",
         ),
         (
             "V2",

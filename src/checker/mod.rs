@@ -365,15 +365,6 @@ fn is_global_protocol(name: &str) -> bool {
     graph_pass::std_protocol_owner(name) == Some("std.prelude")
 }
 
-/// True if the native fn `module_id.member` diverges (never returns), like `panic`. Used to
-/// bottom-type its call so it type-checks in value position (TICKET-077). Keyed on the resolved
-/// module id plus member name, never the bare callee name, so a shadowing local or user method
-/// named `exit` is untouched. A native module's [`crate::base::module_id::ModuleId`] is the synthetic path
-/// `<native:std.os>` (see `crate::resolver::native_id`), not the dotted string itself.
-fn is_diverging_native(module_id: &crate::base::module_id::ModuleId, member: &str) -> bool {
-    member == "exit" && module_id.0.to_string_lossy() == "<native:std.os>"
-}
-
 /// True if `name` is one of the four recognized suite lifecycle hooks.
 fn is_lifecycle_hook(name: &str) -> bool {
     crate::base::op::LIFECYCLE_HOOKS.contains(&name)

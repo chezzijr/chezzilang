@@ -79,6 +79,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    - TICKET-263, group A, names: one owner for "which names hold a slot" (owners.md row 44; fixes
      `'None' is not callable` for an imported alias read before `Count := …`); one name per module
      (the owner decision below); a recursive local lambda (`unknown name 'fact'`); a divergent fn.
+     All four parts are done on the branch (2026-10-18): `os.exit` and a `die()` helper are ordinary
+     calls (write `panic(...)` after them).
    - TICKET-265, group C, builtin types and protocols. Part 1 is done (2026-10-17): the std
      protocols live in `std.ops`/`std.cmp`/`std.iter`/`std.string`/`std.path`/`std.convert` and a bound
      needs the import, `Hashable` embeds `Eq`, `T?` derives no ordering. A std import checks and

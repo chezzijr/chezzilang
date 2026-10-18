@@ -85,13 +85,13 @@ fn a_program_that_never_exits_explicitly_succeeds() {
 
 #[test]
 fn os_exit_in_a_match_arm_exits_with_that_status() {
-    // TICKET-077: `os.exit` is bottom-typed, so a `match` arm calling it type-checks against the
-    // other arm's `int`. Confirm it also runs correctly: the process exits with that status and the
-    // `print(x)` after the match never runs (its branch never returns).
+    // TICKET-263 (owner, 2026-10-18; Go `os.Exit`): `os.exit` is an ordinary call to the checker, so
+    // a statement arm calls it and writes `panic("unreachable")` after it. The process exits with
+    // that status and the `print("after")` after the match never runs.
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
-        "import std.os\nfn main():\n    r: int!str = !\"boom\"\n    x := match r:\n        ?v: v\n        !e: os.exit(2)\n    print(x)\nmain()\n",
+        "import std.os\nfn main():\n    r: int!str = !\"boom\"\n    match r:\n        ?v: print(v)\n        !e:\n            os.exit(2)\n            panic(\"unreachable\")\n    print(\"after\")\nmain()\n",
     );
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .arg("run")

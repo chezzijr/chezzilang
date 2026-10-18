@@ -8,8 +8,8 @@
 # Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/os.rs`,
 # dispatched via `native_members("std.os")`). The backends compile NOTHING for a `native fn`.
 #
-# `exit(code)` never returns, but the checker has no `never` type; `None` is the closest void-ish
-# result and lets (unreachable) statements follow it.
+# `exit(code)` never returns, but the checker does not know it (Go `os.Exit`): write `panic(...)`
+# after the call when a value is required.
 
 import std.path
 

@@ -972,9 +972,38 @@ fn non_void_fn_termination_no_false_positive() {
 }
 
 #[test]
-fn non_void_fn_exit_terminates() {
-    // fn ending in `os.exit(1)` (std.os.exit never returns) -> terminates, not a fall-through.
-    entry_ok("import std.os\nfn a() -> int:\n    os.exit(1)\nfn main():\n    print(a())\nmain()\n");
+fn non_void_fn_ending_in_os_exit_falls_off() {
+    // TICKET-263 (owner, 2026-10-18; Go `os.Exit` is an ordinary call): the checker does not know
+    // `os.exit` never returns, so the fn falls off the end and the error says to write `panic(...)`.
+    entry_rejects(
+        "import std.os\nfn a() -> int:\n    os.exit(1)\nfn main():\n    print(a())\nmain()\n",
+        "if a call above never returns, write `panic(...)` after it",
+    );
+    entry_ok(
+        "import std.os\nfn a() -> int:\n    os.exit(1)\n    panic(\"unreachable\")\nfn main():\n    print(a())\nmain()\n",
+    );
+}
+
+#[test]
+fn a_fall_off_after_a_call_hints_panic() {
+    // TICKET-263 part 4: a user fn that only panics is an ordinary call (Go has no never type).
+    // The hint appears only when the last statement is a call.
+    let die = "fn die(m: str):\n    panic(m)\n";
+    rejects(
+        &format!(
+            "{die}fn f(x: int) -> int:\n    if x > 0:\n        return x\n    die(\"no\")\nprint(f(1))\n"
+        ),
+        "if a call above never returns, write `panic(...)` after it",
+    );
+    let errs = check_src(&format!(
+        "{die}fn f(x: int) -> int:\n    if x > 0:\n        return x\n    if x < 0:\n        print(x)\nprint(f(1))\n"
+    ));
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].message.contains("fall off the end"), "{errs:?}");
+    assert!(!errs[0].message.contains("write `panic(...)`"), "{errs:?}");
+    ok(&format!(
+        "{die}fn f(x: int) -> int:\n    if x > 0:\n        return x\n    die(\"no\")\n    panic(\"unreachable\")\nprint(f(1))\n"
+    ));
 }
 
 #[test]
@@ -1134,15 +1163,6 @@ fn panic_typechecks_in_value_position_as_bottom() {
 }
 
 #[test]
-fn os_exit_typechecks_in_value_position_as_bottom() {
-    // TICKET-077: `os.exit` diverges just like `panic`, so a `match` arm that calls it must be
-    // bottom-typed, not `nil`. Currently rejected: "branches have incompatible types: int and nil".
-    entry_ok(
-        "import std.os\nfn main():\n    r: int!str = !\"boom\"\n    x := match r:\n        ?v: v\n        !e: os.exit(2)\n    print(x)\nmain()\n",
-    );
-}
-
-#[test]
 fn int_comparison_chain_typechecks() {
     // TICKET-077: `0 <= i < n` is a chained comparison, Python-style.
     ok("fn main():\n    i := 2\n    n := 5\n    print(0 <= i < n)\nmain()\n");
@@ -1158,11 +1178,36 @@ fn a_mixed_type_link_in_a_chain_is_rejected() {
 }
 
 #[test]
-fn os_exit_from_imported_typechecks_in_value_position_as_bottom() {
-    // TICKET-077: same as above, but through `import exit from std.os` and a bare call.
-    entry_ok(
-        "import exit from std.os\nfn main():\n    r: int!str = !\"boom\"\n    x := match r:\n        ?v: v\n        !e: exit(2)\n    print(x)\nmain()\n",
+fn an_else_block_ending_in_os_exit_must_still_leave() {
+    // TICKET-263: `os.exit` is an ordinary call, so an `else` block that ends in it does not leave
+    // (the pre-change binary accepted it). `panic(...)` after it leaves.
+    let head = "import std.os\nfn f() -> int!str:\n    return !\"bad\"\n";
+    entry_rejects(
+        &format!("{head}v := f() else e:\n    print(e)\n    os.exit(5)\nprint(v)\n"),
+        "else block must leave",
     );
+    entry_ok(&format!(
+        "{head}v := f() else e:\n    print(e)\n    os.exit(5)\n    panic(\"unreachable\")\nprint(v)\n"
+    ));
+}
+
+#[test]
+fn os_exit_in_value_position_is_an_ordinary_call() {
+    // TICKET-263 (owner, 2026-10-18; Go `os.Exit`): `os.exit` returns `None` to the checker, so a
+    // `match` arm that calls it is `None`, qualified or imported. `panic` stays bottom (above).
+    for call in ["os.exit(2)", "exit(2)"] {
+        let import = if call == "exit(2)" {
+            "import exit from std.os"
+        } else {
+            "import std.os"
+        };
+        entry_rejects(
+            &format!(
+                "{import}\nfn main():\n    r: int!str = !\"boom\"\n    x := match r:\n        ?v: v\n        !e: {call}\n    print(x)\nmain()\n"
+            ),
+            "branches have incompatible types: int and None",
+        );
+    }
 }
 
 #[test]

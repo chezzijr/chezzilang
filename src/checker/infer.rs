@@ -747,7 +747,7 @@ impl Checker {
             self.check_stmt(stmt);
         }
         self.pop_scope();
-        // Read after the body is checked: `call_diverges` knows a `panic` / `os.exit` call only
+        // Read after the body is checked: `call_diverges` knows a `panic` call only
         // once that call has been inferred.
         if self.block_flow(body).falls_through {
             self.error(

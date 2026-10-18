@@ -238,7 +238,7 @@ line joining; every pattern form; numeric literal edges; all 143 code blocks of 
 | Finding | Detail |
 |---|---|
 | a user type named like a builtin function is accepted and its constructor is dead | `struct print: x: int` checks clean; `print(1)` still prints. `enum chr: A` then `chr(65)` prints `A`. But `print := 3` shadows, `fn print` is rejected, `struct range` is rejected. Order at audit time: variable > builtin > user type |
-| divergence is decided by name | `panic` and `os.exit` are bottom-typed; a user `fn die(msg: str): panic(msg)` is not, so its caller "can fall off the end". No `never` type |
+| divergence is decided by name | only `panic` is bottom-typed; `os.exit` and a user `fn die(msg: str): panic(msg)` are ordinary calls (TICKET-263, Go `os.Exit`), so a caller "can fall off the end" and the error says to write `panic(...)` after the call. No `never` type |
 | `Error.line()`, `.col()`, `.file()` | exist only on the bare `Error` existential |
 
 Builtins the language itself cannot express: `int()`/`float()`/`bool()` (an untyped parameter, overloaded
