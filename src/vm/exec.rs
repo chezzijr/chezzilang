@@ -1163,18 +1163,19 @@ impl Vm {
             Import::Variants { .. } => {}
             Import::From { names, .. } => {
                 for (member, alias) in names {
-                    // Bind the member's runtime value if the target module exports one (a fn/value).
-                    // A `from`-imported USER type (struct/enum/alias) carries NO runtime value — it
-                    // resolves through the program-global type tables by name — so a member with no
-                    // global that IS a known type name is skipped (not an error). A member that is
-                    // neither a value nor a type is a genuine "no member". The value bind is tried
-                    // FIRST so a fn named like a type IN ANOTHER MODULE is still bound here.
+                    // Bind a member exactly when the importer holds a slot for it: its compiled slot
+                    // list (`resolver::graph_global_binds`) holds a `from` member iff the home module
+                    // holds one. A `from`-imported type carries no runtime value, so it has no slot
+                    // here and is skipped. A home with no slot for a listed member is a genuine
+                    // "no member".
                     match self.slot_index(target_obj, member) {
                         Some(idx) => {
                             let value = self.read_slot(target_obj, idx, imp.span)?;
                             self.module_define(into, alias.as_ref().unwrap_or(member), value);
                         }
-                        None if self.program.type_names.contains(member) => {}
+                        None if self
+                            .slot_index(into, alias.as_ref().unwrap_or(member))
+                            .is_none() => {}
                         None => {
                             let tname = self.module_name(target_obj);
                             return Err(self.err(

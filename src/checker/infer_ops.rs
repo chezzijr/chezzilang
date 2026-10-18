@@ -3,7 +3,6 @@
 //! Split out of `src/checker/pattern.rs`. `super::*` is the parent module.
 
 use super::fn_value::fn_spelling;
-use super::resolve::PathPos;
 use super::setup::TypeRead;
 use super::*;
 use crate::ast::consteval;
@@ -17,7 +16,7 @@ impl Checker {
         // wins, which is what `shadowing_type_param` excludes. Go, the one-namespace ancestor, is the
         // reference: reading a type parameter as a value is *"foo (type) is not an expression"*.
         // The rule table leaves exactly that name unnamed; every arm below reads its answer.
-        let Some(res) = self.resolve_path(e, PathPos::Value) else {
+        let Some(res) = self.resolve_path(e) else {
             return self.type_param_shadow_error(
                 name,
                 "a type parameter is a type, not a value — it is erased at runtime, so there is nothing to read",

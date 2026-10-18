@@ -142,9 +142,11 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // Pass 2: compile each module's toplevel + functions. The entry module is last (deps first);
     // only its `test fn`s / suites are recorded for `chezzi test` discovery.
     let entry_idx = graph.modules.len().saturating_sub(1);
+    let binds = crate::resolver::graph_global_binds(graph);
     for (idx, lm) in graph.modules.iter().enumerate() {
         c.skip_fns = graph.fn_skips(lm);
-        let toplevel = c.compile_module(idx, &lm.ast, &lm.imports, idx == entry_idx, lm.native)?;
+        let toplevel =
+            c.compile_module(idx, &lm.ast, &lm.imports, idx == entry_idx, &binds[idx])?;
         let global_slots = std::mem::take(&mut c.global_slots);
         let let_lines = std::mem::take(&mut c.global_let_lines);
         debug_assert_eq!(let_lines.len(), global_slots.len());
@@ -226,7 +228,6 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         | StmtKind::TypeAlias { name, .. } = &s.kind
         {
             c.module_types[0].insert(name.clone());
-            c.program.type_names.insert(name.clone());
             c.type_keys.insert(
                 (0, name.clone()),
                 format!("{STANDALONE_MODULE_KEY}::{name}"),
@@ -253,7 +254,10 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.resolutions = rs;
     c.ret_coerce = rc;
     c.wraps = wr;
-    let toplevel = c.compile_module(0, module, &[], true, None)?;
+    let binds = crate::resolver::module_global_binds(&[], &module.stmts, None, &|_, _| {
+        unreachable!("a standalone module has no import")
+    });
+    let toplevel = c.compile_module(0, module, &[], true, &binds)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     let let_lines = std::mem::take(&mut c.global_let_lines);
     debug_assert_eq!(let_lines.len(), global_slots.len());
@@ -588,7 +592,6 @@ impl Compiler {
             cffi_defs: Vec::new(),
             tests: Vec::new(),
             suites: Vec::new(),
-            type_names: std::collections::HashSet::new(),
         };
         // Built-in Result / Option variants, available without declaration. M19 lever #2 — these are
         // registered FIRST so they get the fixed dense ids `Ok`=VID_OK(0), `Err`=VID_ERR(1),
@@ -691,8 +694,7 @@ impl Compiler {
     /// `<module-key>::<Name>` (via [`crate::resolver::module_keys`]) — no winner/loser, no bare keys,
     /// so every user type is unique by construction (a cross-module name clash is just two distinct
     /// keys). Reserved/native names are never user-declared here, so they keep their bare name (absent
-    /// from this map). Also seeds `program.type_names` (the engines' `bind_import` skips from-imported
-    /// type members) and `module_types` (per-module declared names, deps-first).
+    /// from this map). Also seeds `module_types` (per-module declared names, deps-first).
     fn assign_type_keys(&mut self, graph: &ModuleGraph) {
         self.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
         for (idx, lm) in graph.modules.iter().enumerate() {
@@ -710,18 +712,6 @@ impl Compiler {
                     _ => None,
                 } {
                     self.module_types[idx].insert(sname.to_string());
-                    self.program.type_names.insert(sname.to_string());
-                }
-                // A native module's types (`native type ptr`, `native struct Shared`, `protocol
-                // StructuralEq`) carry no runtime value; register each name so `Vm::bind_import` skips
-                // it like any known type name.
-                for s in &lm.ast.stmts {
-                    if let StmtKind::NativeType { name, .. }
-                    | StmtKind::NativeStruct { name, .. }
-                    | StmtKind::Protocol { name, .. } = &s.kind
-                    {
-                        self.program.type_names.insert(name.clone());
-                    }
                 }
                 continue;
             }
@@ -733,13 +723,6 @@ impl Compiler {
                 | StmtKind::TypeAlias { name, .. } = &s.kind
                 {
                     self.module_types[idx].insert(name.clone());
-                    self.program.type_names.insert(name.clone());
-                }
-                // A protocol has NO runtime representation, so only its NAME is registered — for
-                // `Vm::bind_import`'s skip — deliberately NOT `module_types`/`type_keys`, which key
-                // runtime LAYOUTS a protocol never has.
-                if let StmtKind::Protocol { name, .. } = &s.kind {
-                    self.program.type_names.insert(name.clone());
                 }
             }
         }
@@ -799,12 +782,7 @@ impl Compiler {
     ///
     /// `native` is the module's native-std name (`Some("std.fs")`) — a HYBRID native module's
     /// `native fn`s are module globals too, see the `StmtKind::Native` arm below.
-    fn collect_globals(
-        &mut self,
-        imports: &[ResolvedImport],
-        stmts: &[Stmt],
-        native: Option<&'static str>,
-    ) {
+    fn collect_globals(&mut self, binds: &[(String, crate::resolver::GlobalSource)]) {
         use crate::resolver::GlobalSource;
         self.globals.clear();
         self.global_slots.clear();
@@ -817,7 +795,7 @@ impl Compiler {
             }
         };
         // Every slot before the first `let` holds a hoisted value from the start: no let line.
-        for (name, source) in crate::resolver::module_global_binds(imports, stmts, native) {
+        for (name, source) in binds.iter().cloned() {
             match source {
                 GlobalSource::Import | GlobalSource::Native | GlobalSource::Extern => {
                     add(name, &mut self.globals, &mut self.global_slots);
@@ -951,11 +929,11 @@ impl Compiler {
         module: &Module,
         imports: &[ResolvedImport],
         is_entry: bool,
-        native: Option<&'static str>,
+        binds: &[(String, crate::resolver::GlobalSource)],
     ) -> Result<ProtoId, CompileError> {
         // M19 Phase 2b: assign a stable slot to every module global before emitting any code, so
         // forward references (method/fn bodies, imports used before their line) resolve to a slot.
-        self.collect_globals(imports, &module.stmts, native);
+        self.collect_globals(binds);
         // Module-scoped types: record this module's index + its imported module bindings, so a
         // qualified `geo.Point(...)` resolves to the right module's runtime key.
         self.current_module_idx = module_idx;

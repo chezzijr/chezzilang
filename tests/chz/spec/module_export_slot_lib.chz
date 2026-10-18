@@ -1,7 +1,7 @@
-# A module binds each name once: `f` is a let-held closure, `S` a struct with a value of its name.
+# A module binds each name once: `f` is a let-held closure, `S2` one beside the struct `S`.
 f := fn(a: int, b: int) -> str: "{a}{b}"
 struct S:
     n: int
-S := fn(n: int) -> int: n * 100
+S2 := fn(n: int) -> int: n * 100
 fn g(a: int, b: int = 5) -> str:
     return "{a}{b}"

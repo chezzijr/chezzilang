@@ -143,10 +143,9 @@ impl Checker {
     /// `find -> Result[Option[Match]]`): pass 1 harvests every `native struct` (into `sig.struct_defs`/
     /// `sig.types`, origin FORCED [`StructOrigin::Builtin`]) and TRANSIENTLY inserts each name into
     /// `self.struct_names` (so pass 2's `resolve_type` sees the bare type) AND transiently installs THIS
-    /// module's harvested layout into `self.structs` (save+restore). The latter is load-bearing: this arm
-    /// runs OUTSIDE `begin_module`, so `self.structs` is LEFTOVER from the previously-checked module — a
-    /// sibling user module may legally declare a generic `struct Match[T]` (Match is import-gated, not
-    /// reserved), overwriting the seeded nparams-0 native layout; without the transient install, pass 2's
+    /// module's harvested layout into `self.structs` (save+restore). The native branch's entry `begin_module` cleared `self.structs` and re-seeded the
+    /// stdlib structs; the transient install puts THIS module's harvested layout in place of the seeded
+    /// one. Without it, pass 2's
     /// `resolve_type` would key off that generic arity and spuriously reject with `type 'Match' expects 1
     /// type argument(s), got 0`. With it, the name resolves against its own (nparams-0) shape — byte-
     /// identical to the old hand-built `Ty::Struct("Match", vec![])` and immune to sibling-module /
@@ -210,11 +209,10 @@ impl Checker {
                 };
                 sig.struct_defs.insert(name.clone(), info.clone());
                 sig.types.insert(name.clone());
-                // This harvest runs in the native-module arm WITHOUT `begin_module`, so `self.structs`
-                // holds LEFTOVER state from the previously-checked module. A sibling user module may
-                // legally declare a generic `struct Match[T]` (Match is import-gated, not reserved),
-                // overwriting the seeded nparams-0 native layout. PASS 2 below resolves this type's own
-                // name in the fns' return types (`find -> Result[Option[Match]]`) via `resolve_type`,
+                // The native branch's entry `begin_module` cleared `self.structs` and re-seeded the stdlib
+                // structs; the transient install puts THIS module's harvested layout in place of the
+                // seeded one. PASS 2 below resolves this type's own name in the fns' return types
+                // (`find -> Result[Option[Match]]`) via `resolve_type`,
                 // whose struct arm keys on the layout's `type_params.len()` — so it would spuriously
                 // reject with `type 'Match' expects 1 type argument(s), got 0`. Transiently install THIS
                 // module's native layout under the BARE name AND point `bare_types[name]` at the bare

@@ -545,14 +545,4 @@ impl Checker {
         }
         Resolution::Member
     }
-
-    /// Does the slot `name` of the whole-module import bound as `mname` hold a function? A
-    /// same-named fn (or a `:=` fn value, TICKET-196) replaces a type's ctor (DEC-029/055/172), so
-    /// `lib.Q(..)` calls the slot.
-    pub(super) fn module_declares_fn(&self, mname: &str, name: &str) -> bool {
-        self.imported_modules
-            .get(mname)
-            .and_then(|mid| self.module_sigs.get(mid))
-            .is_some_and(|sig| sig.member(name).is_some_and(MemberSig::holds_fn))
-    }
 }

@@ -343,7 +343,7 @@ fn fs_predicates_parity() {
 }
 
 /// gaps §6 — fs.stat/fs.walk + the FileInfo native struct. Proves the
-/// reserved-type gate (`from fs import FileInfo`) + the `type_names` bind_import skip,
+/// reserved-type gate (`from fs import FileInfo`) + the importer slot list skipping a type member,
 /// and that stat/walk read the real filesystem identically. Scratch tree is self-owned (file-dependent
 /// size — mtime is NOT asserted). Walk order is deterministic (per-dir sort) → exact stdout match.
 #[test]
@@ -356,7 +356,7 @@ fn fs_stat_walk_fileinfo_parity() {
     let file = file.to_string_lossy();
     let root = scratch.0.join("root");
     let root = root.to_string_lossy();
-    // `import FileInfo from std.fs` proves the reserved-type gate + `type_names` bind_import skip on
+    // `import FileInfo from std.fs` proves the reserved-type gate + the importer slot list skipping a type on
     // BOTH engines (it runtime-traps if FileInfo is not registered). `import std.fs` licenses the
     // `fs.stat`/`fs.walk` qualified calls.
     let src = format!(

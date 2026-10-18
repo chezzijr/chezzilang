@@ -144,10 +144,10 @@ fn native_fs_list_dir_returns_result_list_path() {
 
 #[test]
 fn path_ctor_accepts_str_like_every_other_path_fn() {
-    // TICKET-029 — every free fn in std.path takes PathLike (str/bytes/bytearray/Path), but the
-    // struct's auto-generated ctor demands `raw: bytes` exactly, so `path.Path("/a/b")` rejects
-    // while `path.join(["/a/b"])` and `path.is_abs("/a/b")` accept the same literal.
-    entry_ok("import std.path\nfn main():\n    p := path.Path(\"/a/b\")\n    print(p.str())\n");
+    // Every free fn in std.path takes PathLike (str/bytes/bytearray/Path), but the struct's
+    // auto-generated ctor demands `raw: bytes` exactly, so the static `Path.new` takes the same
+    // literal that `path.join(["/a/b"])` and `path.is_abs("/a/b")` accept.
+    entry_ok("import std.path\nfn main():\n    p := path.Path.new(\"/a/b\")\n    print(p.str())\n");
 }
 
 #[test]
@@ -158,11 +158,11 @@ fn path_ctor_still_takes_bytes() {
 
 #[test]
 fn path_ctor_rejects_a_non_pathlike() {
-    // TICKET-029 — the new fn ctor still names PathLike, not bytes, in its rejection.
-    let errs = check_entry("import std.path\nfn main():\n    p := path.Path(3)\n");
+    // `Path.new` names PathLike, not bytes, in its rejection.
+    let errs = check_entry("import std.path\nfn main():\n    p := path.Path.new(3)\n");
     assert_eq!(errs.len(), 1, "expected one error, got: {errs:?}");
     assert!(
-        errs[0].message.contains("argument 1 of 'Path'")
+        errs[0].message.contains("argument 1 of 'new'")
             && errs[0].message.contains("expected PathLike"),
         "got: {}",
         errs[0].message
@@ -171,7 +171,7 @@ fn path_ctor_rejects_a_non_pathlike() {
 
 #[test]
 fn path_value_still_satisfies_pathlike() {
-    // TICKET-029 — a Path built through the fn ctor still satisfies PathLike structurally.
+    // A Path built through the raw ctor satisfies PathLike structurally.
     entry_ok(
         "import std.path\nimport std.fs\nfn main():\n    p := path.Path(b\"/a\")\n    print(fs.exists(p))\n",
     );
@@ -179,9 +179,9 @@ fn path_value_still_satisfies_pathlike() {
 
 #[test]
 fn path_from_imported_ctor_is_usable_as_a_type() {
-    // TICKET-029 — a colliding from-import must bind both the fn (call) and the type (annotation).
+    // A from-imported `Path` binds the type (annotation) and its static `new`.
     entry_ok(
-        "import Path from std.path\nfn main():\n    p: Path = Path(\"/a/b\")\n    print(p.bytes())\n",
+        "import Path from std.path\nfn main():\n    p: Path = Path.new(\"/a/b\")\n    print(p.bytes())\n",
     );
 }
 

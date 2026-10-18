@@ -372,18 +372,27 @@ fn qualified_variant_pattern_checks() {
     );
 }
 
-// 28. A *module-global* binding named like an enum shadows qualified access. The compiler reads
-// the checker's Resolution, so the checker's order is the only one; CPython rebinding
-// `Color = Box(7)` then `Color.Red` gives 7. `Color.Red` is the `Box` field, an `int`.
+// 28. A *module-global* binding beside an enum reads its own field: `color.Red` is the `Box`
+// field, an `int`, and `Color.Red` stays the variant. A global named `Color` is a second binding.
 #[test]
-fn global_binding_shadows_qualified_variant() {
+fn global_binding_beside_an_enum_reads_its_own_field() {
     let t = TmpDir::new();
     let good = t.write(
             "good.chz",
-            "enum Color:\n    Red\n    Green\nstruct Box:\n    Red: int\nColor := Box(7)\nfn show() -> int:\n    return Color.Red\nfn main(): print(show())\n",
+            "enum Color:\n    Red\n    Green\nstruct Box:\n    Red: int\ncolor := Box(7)\nfn show() -> int:\n    return color.Red\nfn main(): print(show())\n",
         );
     let res = check_entry(&good);
     assert!(res.is_ok(), "expected no type errors, got: {res:?}");
+    let bad = t.write(
+            "bad.chz",
+            "enum Color:\n    Red\n    Green\nstruct Box:\n    Red: int\nColor := Box(7)\nfn main(): print(Color.Red)\n",
+        );
+    let errs = errors(&bad);
+    assert!(
+        errs.iter()
+            .any(|m| m.contains("'Color' is already defined")),
+        "expected the second binding of 'Color' to be rejected: {errs:?}"
+    );
 }
 
 // 29. The `Enum.` qualifier is validated even under an int/str/bool scrutinee: `case Color.Bogus:`

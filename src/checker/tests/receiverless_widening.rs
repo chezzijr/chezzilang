@@ -2516,7 +2516,7 @@ fn constant_int_overflow_scan_is_linear() {
         crate::on_frontend_stack_scoped(move || {
             let mut c = Checker::new();
             c.seed_native_prelude_sigs();
-            c.check_module(&module.stmts, None, &[]);
+            c.check_module(&module.stmts, None, &[], &[]);
             c.const_scan_visits
         })
     }

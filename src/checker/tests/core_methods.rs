@@ -59,12 +59,13 @@ fn duplicate_function_is_reported() {
 }
 
 #[test]
-fn struct_ctor_is_replaced_by_a_same_module_fn() {
-    // TICKET-055: this pair is DEC-029, not a collision. A module-level `fn S` beside `struct S`
-    // deliberately replaces the struct's field ctor at every in-scope call site -- shipped as
-    // `std/path.chz:36`'s public `fn Path(p: PathLike) -> Path`. The human confirmed on 2026-09-04
-    // that the ticket's original "reject the pair" premise was false.
-    ok("struct S:\n    n: int\nfn S(n: int) -> int:\n    return n * 2\nprint(S(3))\n");
+fn a_same_module_fn_named_after_a_struct_is_bound_twice() {
+    // A module binds a name once, and a type binds it too (owner 2026-10-16; Go: `S redeclared in
+    // this block`; Rust: E0428). The constructor wrapper is a static `S.new`, as `std/path.chz` has.
+    rejects(
+        "struct S:\n    n: int\nfn S(n: int) -> int:\n    return n * 2\nprint(S(3))\n",
+        "is already defined",
+    );
 }
 
 #[test]
@@ -652,14 +653,11 @@ fn reserved_module_bind_alias_escape_hatch() {
     ]);
 }
 
-/// Wave-5 residual 4, DIAGNOSTIC-ONLY: `is_reserved_module_bind` gates the 34 reserved names, so a
-/// module bind colliding with a same-named USER `struct`/`enum` ctor is NOT rejected at the import —
-/// the module (a VALUE-namespace bind) simply wins in expression position and the ctor call is a hard
-/// type error. That is the Python-normal outcome and the alias is the cure, so this stays a diagnostic
-/// (not a resolver-level module namespace): NAME the collision instead of the bare, mystifying
-/// `module Point is not callable`.
+/// A whole-module import binds its last path segment, and a same-module `struct`/`enum` of that name
+/// is a second binding of it (Go: `Point redeclared in this block`). The error names the prior
+/// import; the alias is the cure.
 #[test]
-fn module_bind_shadowing_user_type_names_the_collision() {
+fn a_module_import_and_a_same_named_type_are_bound_twice() {
     let point = ("lib/Point.chz", "x := 1\n");
     let shape = ("lib/Shape.chz", "y := 2\n");
     // a struct ctor …
@@ -671,9 +669,9 @@ fn module_bind_shadowing_user_type_names_the_collision() {
                 "import lib.Point\n\nstruct Point:\n    a: int\n\np := Point(1)\nprint(p.a)\n",
             ),
         ],
-        "shadows the same-named type 'Point'",
+        "'Point' is already imported",
     );
-    // … and an enum ctor: same VALUE-namespace collision, same diagnostic.
+    // … and an enum: same collision, same diagnostic.
     files_reject(
         &[
             shape,
@@ -682,7 +680,7 @@ fn module_bind_shadowing_user_type_names_the_collision() {
                 "import lib.Shape\n\nenum Shape:\n    Dot\n\ns := Shape.Dot\nprint(Shape(1))\n",
             ),
         ],
-        "shadows the same-named type 'Shape'",
+        "'Shape' is already imported",
     );
     // the escape hatch: alias the import and BOTH the module and the ctor are reachable.
     files_ok(&[
@@ -1047,7 +1045,7 @@ fn stack_probe_frontend_walker_depth() {
                 let module = prepared.expect("prepared");
                 let mut c = Checker::new();
                 c.seed_native_prelude_sigs();
-                c.check_module(&module.stmts, None, &[]);
+                c.check_module(&module.stmts, None, &[], &[]);
                 let errs = c.errors.len();
                 std::mem::forget(module);
                 std::mem::forget(c);

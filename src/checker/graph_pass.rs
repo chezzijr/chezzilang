@@ -89,6 +89,7 @@ impl Checker {
                 }
             }
         }
+        let binds = crate::resolver::graph_global_binds(graph);
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of.insert(lm.id.clone(), idx);
             c.skip_range_bodies = graph.skips_range_methods(lm);
@@ -98,11 +99,16 @@ impl Checker {
             c.graph_module_idx = idx;
             // A native std module (std.math/io/os) has no AST: its public surface is a static table.
             if let Some(name) = lm.native {
-                // A native std module is always stdlib. The native branch never runs `begin_module`
-                // (which sets this for AST modules), so set it here. Its own builtin types
+                // A native std module is always stdlib. The native branch runs `begin_module` once at
+                // its entry, for the clash pass; set stdlib here too. Its own builtin types
                 // (std.net's `Socket` in `connect -> Socket!`) resolve through `bind_own_builtins`
                 // below.
                 c.current_module_is_stdlib = true;
+                // The one clash pass and the one bare-import decision, as `check_module` runs them: a
+                // native module never reaches `check_module`. A later `begin_module` keeps `globals`
+                // and the decision.
+                c.begin_module(Some(lm.label()));
+                c.collect_module_globals(&lm.ast.stmts, &lm.imports, &binds[idx]);
                 // FILE-BACKED native modules harvest their whole SIGNATURE (fns, native structs,
                 // `native type` exports, std.time's `timer` license) from the real `std/<M>.chz` AST
                 // the resolver loaded; no Rust-side sig exists. Same predicate as the resolver's
@@ -113,16 +119,14 @@ impl Checker {
                 // The harvest RESOLVES those types, so the imports must be bound BEFORE it — the
                 // `has_bodied` bind below (which exists for bodied BODIES) runs far too late and the
                 // signature errored `unknown module 'path'`. `begin_module` first, so the harvest sees
-                // the same clean, stdlib-seeded env `check_module` gives an AST module rather than
-                // whatever the previously-checked module left behind.
-                // Gated on actually HAVING an import, so every pure-native module's live-table state is
-                // byte-identical to before this change.
+                // the same clean, stdlib-seeded env `check_module` gives an AST module.
+                // Gated on having an import: only then does the harvest need bound imports.
                 if !lm.imports.is_empty() {
                     c.current_module_is_stdlib = true;
                     c.begin_module(Some(lm.label()));
                     c.push_scope(); // `bind_import` declares the bound name — it needs a live scope
                     for imp in &lm.imports {
-                        c.bind_import(imp);
+                        c.bind_import(imp, &binds[idx]);
                     }
                 }
                 // The module's own sigs name the builtin types it owns (`std/ffi.chz`'s `ptr`).
@@ -179,8 +183,8 @@ impl Checker {
                 // native arm skips `check_module`, so those bodies would go UNCHECKED — a `str`
                 // returned under an `int` sig would slip straight through. Type-check them here via the
                 // same `check_fn_body` a normal module uses, on a clean `begin_module` env. Gated on
-                // actually having a bodied decl so a pure-native module (os/fs/regex/…) pays nothing
-                // and its live-table state is left exactly as the harvest above produced it.
+                // actually having a bodied decl so a pure-native module (os/fs/regex/…) pays no second
+                // `begin_module` and its live-table state is left exactly as the harvest above produced it.
                 let has_bodied = lm.ast.stmts.iter().any(|s| {
                     matches!(&s.kind, StmtKind::Fn(_) | StmtKind::Let { .. })
                         || matches!(&s.kind, StmtKind::NativeStruct { bodied_methods, .. } if !bodied_methods.is_empty())
@@ -193,7 +197,7 @@ impl Checker {
                     // `.chz` may `import` like any other module; deps are checked earlier in graph order,
                     // so their sigs are already in `module_sigs`).
                     for imp in &lm.imports {
-                        c.bind_import(imp);
+                        c.bind_import(imp, &binds[idx]);
                     }
                     // `begin_module` cleared the live tables; repopulate the callables/types the
                     // harvested `sig` holds so a bodied body can call a sibling fn or name a sibling
@@ -291,7 +295,7 @@ impl Checker {
             // Maintained on every graph pass (cheap) so a recorded value+keyword call is keyed under
             // the SAME module index the backends derive — mirrors the extern-sig keying.
             c.graph_module_idx = idx;
-            let mut sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
+            let mut sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports, &binds[idx]);
             // The builtin types this std module owns (`std.iter`'s `Iterator`): a qualified
             // `iter.Iterator[int]` resolves to the builtin type, as the bare name does.
             if lm.is_std() {
@@ -389,7 +393,7 @@ impl Checker {
                 // runs; it used to surface only after the module's top level. `Span::RUNTIME`: there
                 // is no declaration to point at (DEC-048). A binding that exists but is not callable
                 // stays a run-time error — its checker type may be `Any`, so the checker declines.
-                if decl.is_none() && !entry_module_binds(&lm.ast.stmts, &lm.imports, &f) {
+                if decl.is_none() && !entry_module_binds(&binds[idx], &f) {
                     c.error(
                         Span::RUNTIME,
                         format!(

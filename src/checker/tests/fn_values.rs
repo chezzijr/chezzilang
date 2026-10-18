@@ -1418,7 +1418,7 @@ fn a_non_propagating_carrier_in_a_default_and_a_try_outside_one_stay_legal() {
 #[test]
 fn a_struct_field_and_a_same_named_fn_parameter_do_not_share_a_provider() {
     let errs = check_desugared(
-        "fn g() -> int:\n    return 7\n\nstruct S:\n    m: int = g()\n\nfn S(m: int = g()) -> int:\n    return m\n",
+        "fn g() -> int:\n    return 7\n\nstruct S:\n    m: int = g()\n\nfn mk(m: int = g()) -> int:\n    return m\n",
     );
     assert!(errs.is_empty(), "expected clean, got: {errs:?}");
     // The neighbours that were already fine, so the fix is not just "the collision moved": two

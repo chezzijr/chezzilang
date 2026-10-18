@@ -2,7 +2,6 @@
 //! Split out of `src/checker/pattern.rs`. `super::*` is the parent module.
 
 use super::infer_access::json_decode_sig;
-use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind, TypeRead};
 use super::*;
 
@@ -548,7 +547,7 @@ impl Checker {
         let app = crate::ast::type_application(e)?;
         let head = app.head;
         let written = Some((app.args.clone(), app.args_span));
-        match self.resolve_path(head, PathPos::Value) {
+        match self.resolve_path(head) {
             // A fn-like path: its own type params take the written arguments. A fn head resolves to
             // `Resolution::Fn`, the one fact the compiler erases on (DEC-197).
             Some(

@@ -15,16 +15,6 @@
 use super::setup::{HeadBinding, TypeHeadKind};
 use super::*;
 
-/// Where a path is read. It changes one rule of [`Checker::classify_path`] only: a struct's raw
-/// constructor inside its same-named fn.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum PathPos {
-    /// The callee of a call (`P(..)`).
-    Callee,
-    /// Every other read (`f := P`, `ap(P, 1)`, `P == g`).
-    Value,
-}
-
 impl Checker {
     /// The one table write: fills `callee_diverges` on every walk, and the resolutions table on
     /// the recording walk only. A second, different write for one NodeId is a checker bug
@@ -57,27 +47,27 @@ impl Checker {
         );
     }
 
-    /// What the path `e` denotes at position `pos`, from the one rule table, memoised per NodeId
+    /// What the path `e` denotes, from the one rule table, memoised per NodeId
     /// on the recording walk. A non-recording walk (a SYNTH id, the generic-arg prepass,
     /// `resolving_returns`) classifies afresh and writes only `callee_diverges` (DEC-180,
     /// DEC-025). `None` when `e` names nothing this table classifies (a type parameter, a type
     /// path's miss, std.json's decode); nothing is written then. Every reader matches on the answer.
-    pub(super) fn resolve_path(&mut self, e: &Expr, pos: PathPos) -> Option<Resolution> {
+    pub(super) fn resolve_path(&mut self, e: &Expr) -> Option<Resolution> {
         if self.records_node(e.id)
             && let Some(r) = self.resolutions.get(&(self.graph_module_idx, e.id.0))
         {
             return Some(r.clone());
         }
-        let r = self.classify_path(e, pos)?;
+        let r = self.classify_path(e)?;
         self.commit_resolution(e.id, r.clone(), e.span);
         Some(r)
     }
 
     /// THE rule table: what the path `e` names. Only an `Ident` or a non-tuple `Field` is a path;
     /// a bracket node is never classified, its head is. Every input is an existing `&self` decider.
-    pub(super) fn classify_path(&self, e: &Expr, pos: PathPos) -> Option<Resolution> {
+    pub(super) fn classify_path(&self, e: &Expr) -> Option<Resolution> {
         match &e.kind {
-            ExprKind::Ident(n) => self.classify_ident(e, n, pos),
+            ExprKind::Ident(n) => self.classify_ident(e, n),
             ExprKind::NoneLit => {
                 self.imported_variants
                     .get(crate::lexer::NONE)
@@ -120,7 +110,7 @@ impl Checker {
         }
     }
 
-    fn classify_ident(&self, e: &Expr, n: &str, pos: PathPos) -> Option<Resolution> {
+    fn classify_ident(&self, e: &Expr, n: &str) -> Option<Resolution> {
         // A default provider `desugar` synthesized (`$def$…`), unspellable by a user.
         if n.starts_with(crate::base::provider_name::PROVIDER_PREFIX)
             && (e.id.0 == crate::ast::NodeId::SYNTH.0 || !self.functions.contains_key(n))
@@ -136,19 +126,6 @@ impl Checker {
             HeadBinding::Local | HeadBinding::Global | HeadBinding::Module
         ) {
             return Some(self.value_head_resolution(n));
-        }
-        // The one rule that reads the position: inside `fn P` of a module declaring `struct P`,
-        // the CALLEE `P(..)` is the struct's raw constructor and a VALUE read of `P` is the fn
-        // (DEC-029/055/172). Rust draws the same line with its two namespaces: with
-        // `struct P { x: i64 }` and `fn P(x: i64) -> P`, inside `fn P` the struct expression
-        // `P { x }` constructs and `let f = P;` is the fn (`rustc --edition 2021`, run:
-        // `P { x: 104 }`). Chezzi's callee `P(x=..)` is that struct-expression spelling.
-        let ctor = self.struct_ctor_key(n);
-        if pos == PathPos::Callee
-            && let Some(key) = &ctor
-            && self.raw_ctor_owner.as_deref() == Some(key.as_str())
-        {
-            return Some(Resolution::StructCtor(key.clone()));
         }
         if self.functions.contains_key(n) {
             // A module binds the name once, so the fn declaration is the slot (DEC-201).
@@ -169,7 +146,7 @@ impl Checker {
         }
         // A struct this module sees beats a builtin of its name (only keywords are reserved): a
         // user `struct int` makes `int(4)` its constructor.
-        if let Some(key) = ctor {
+        if let Some(key) = self.struct_ctor_key(n) {
             return Some(Resolution::StructCtor(key));
         }
         if let Some(b) = self.builtin_callee(n) {
@@ -183,7 +160,7 @@ impl Checker {
     }
 
     /// The struct a bare `n(..)` constructs: a bare-resolvable struct (`struct_names`) or an alias
-    /// of one, unless a same-named fn replaces its constructor outside its own body.
+    /// of one. A module binds the name once, so no same-named fn replaces the constructor.
     fn struct_ctor_key(&self, n: &str) -> Option<String> {
         if !self.struct_names.contains(n) && self.alias_struct_head(n).is_none() {
             return None;
@@ -192,9 +169,7 @@ impl Checker {
             .alias_struct_head(n)
             .map(|(k, _)| k)
             .unwrap_or_else(|| self.bare_key(n));
-        ((self.raw_ctor_owner.as_deref() == Some(key.as_str()) || !self.functions.contains_key(n))
-            && self.structs.contains_key(&key))
-        .then_some(key)
+        self.structs.contains_key(&key).then_some(key)
     }
 
     fn classify_field(&self, obj: &Expr, name: &str) -> Option<Resolution> {
@@ -252,17 +227,14 @@ impl Checker {
     }
 
     /// `m.name(..)` constructing through a whole-module import `m`: a qualified struct (not a
-    /// reserved native type, not replaced by a same-named fn slot), an exported struct alias, or a
-    /// native module's builtin constructor (`c.Shared(0)`, `time.timer(100)`).
+    /// reserved native type), an exported struct alias, or a native module's builtin constructor
+    /// (`c.Shared(0)`, `time.timer(100)`).
     fn qualified_ctor(&self, m: &str, name: &str) -> Option<Resolution> {
         if !self.head_is_value(m)
             && let Some(mid) = self.imported_modules.get(m)
             && let Some(sig) = self.module_sigs.get(mid)
         {
-            if !sig.builtins.contains(name)
-                && sig.struct_defs.contains_key(name)
-                && !sig.member(name).is_some_and(MemberSig::holds_fn)
-            {
+            if !sig.builtins.contains(name) && sig.struct_defs.contains_key(name) {
                 return Some(Resolution::StructCtor(self.type_key(mid, name)));
             }
             if sig.builtins.contains(name)
@@ -272,9 +244,7 @@ impl Checker {
                 return Some(Resolution::Builtin(b));
             }
         }
-        if let Some(Ty::Struct(key, _)) = self.qualified_alias_ty(m, name)
-            && !self.module_declares_fn(m, name)
-        {
+        if let Some(Ty::Struct(key, _)) = self.qualified_alias_ty(m, name) {
             return Some(Resolution::StructCtor(key));
         }
         None

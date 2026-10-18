@@ -246,12 +246,13 @@ pub fn witness_key_span(callee: &Expr, call_span: Span) -> Span {
     }
 }
 
-/// Whether the entry module binds `name` as a module global at run time: one of the names
-/// `resolver::module_global_binds` lists, the list the compiler builds the slot table from.
+/// Whether the entry module binds `name` as a module global at run time: one of the names of its
+/// slot list (`resolver::graph_global_binds`), the list the compiler builds the slot table from.
 /// `Vm::invoke_entrypoint` looks the manifest entrypoint up in exactly that slot table, so a name
 /// absent here can never be invoked (TICKET-150, W14-35c).
-pub(super) fn entry_module_binds(stmts: &[Stmt], imports: &[ResolvedImport], name: &str) -> bool {
-    crate::resolver::module_global_binds(imports, stmts, None)
-        .iter()
-        .any(|(bound, _)| bound == name)
+pub(super) fn entry_module_binds(
+    binds: &[(String, crate::resolver::GlobalSource)],
+    name: &str,
+) -> bool {
+    binds.iter().any(|(bound, _)| bound == name)
 }

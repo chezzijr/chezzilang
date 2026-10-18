@@ -4,6 +4,7 @@
 use super::setup::TypeHeadKind;
 use super::setup::variant_import_binds;
 use super::*;
+use crate::resolver::GlobalSource;
 
 impl Checker {
     /// A std-internal name (`is_std_internal_name`) read from a module that is not std.
@@ -145,8 +146,6 @@ impl Checker {
         self.type_params.clear();
         self.imported_modules.clear();
         self.import_paths.clear();
-        self.implicit_binds.clear();
-        self.ambiguous_binds.clear();
         self.import_binds.clear();
         self.imported_alias_tys.clear();
         self.imported_alias_ctypes.clear();
@@ -155,7 +154,6 @@ impl Checker {
         if let Some(m) = label.as_deref() {
             self.bind_own_builtins(m);
         }
-        self.implicit_import_names.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
         // must be imported). Clear the per-module type tables so a prior module's types don't leak.
         // The synthetic stdlib structs (`Match`/`Response`) and pre-seeded protocols are global, so
@@ -187,11 +185,12 @@ impl Checker {
         stmts: &[Stmt],
         id: Option<&ModuleId>,
         imports: &[ResolvedImport],
+        binds: &[(String, GlobalSource)],
     ) -> ModuleSig {
         self.push_scope();
         // The one record per module slot, built before any body is walked (TICKET-186).
         // `seed_module_globals` and the fn-writes pass read it.
-        self.collect_module_globals(stmts, imports);
+        self.collect_module_globals(stmts, imports, binds);
         // Module-scoped types: record THIS module's id and seed its locally-declared type names into
         // `bare_types` under their runtime key (bare unless disambiguated), so a bare annotation /
         // constructor resolves to the same key the layout is registered under. `bind_import` then adds
@@ -219,7 +218,7 @@ impl Checker {
             }
         }
         for imp in imports {
-            self.bind_import(imp);
+            self.bind_import(imp, binds);
         }
         self.note_variant_import_binds(stmts);
         self.collect_names(stmts);
@@ -265,9 +264,9 @@ impl Checker {
     }
 
     /// Record that `bind` is bound by an import at `span`. Returns `true` if this name was ALREADY
-    /// bound by an earlier import in this module — the caller then emits the duplicate-import error
-    /// and skips re-binding. Spans across ALL import namespaces (values/functions/modules/types) so a
-    /// value-then-fn or fn-then-fn collision is caught (which the separate tables otherwise miss).
+    /// bound by an earlier import in this module: the caller then skips the re-bind. It reports
+    /// nothing: the registry keeps the first import's span for messages, and
+    /// `GlobalBinding::clashes` reports a second import.
     ///
     /// An import no one wrote (`Span::NOWHERE`) has no entry: every message that names an import
     /// reads this registry, and that import has no line to name.
@@ -276,27 +275,18 @@ impl Checker {
             return false;
         }
         if self.import_binds.contains_key(bind) {
-            self.error(span, format!("'{bind}' is already imported"));
             return true;
         }
         self.import_binds.insert(bind.to_string(), span);
         false
     }
 
-    /// Enter every variant import of this module into the import registry (TICKET-229). A name the
-    /// prelude binds may not be rebound (the prelude's own import of it is skipped silently); a
-    /// reserved bound name is rejected like a from-import alias; `note_import_bind` reports a second
-    /// import of one name. Adds no collision test of its own.
+    /// Enter every variant import of this module into the import registry (TICKET-229). A
+    /// declaration or an import in a user module shadows a name the prelude binds, as a builtin; a
+    /// reserved bound name is rejected like a from-import alias; `GlobalBinding::clashes` reports a
+    /// second import of one name. Adds no collision test of its own.
     fn note_variant_import_binds(&mut self, stmts: &[Stmt]) {
-        for (bind, en, variant, span) in variant_import_binds(stmts) {
-            if let Some(iv) = self.imported_variants.get(&bind)
-                && iv.prelude
-            {
-                if iv.head.name != en || iv.variant != variant {
-                    self.error(span, format!("'{bind}' is already imported by the prelude"));
-                }
-                continue;
-            }
+        for (bind, _, _, span) in variant_import_binds(stmts) {
             self.note_import_bind(&bind, span);
         }
     }
@@ -352,9 +342,8 @@ impl Checker {
         ))
     }
 
-    /// TICKET-187 — bind the TYPE a from-import names (`import Q from lib`), whatever the value
-    /// branch bound for the same member: a struct, enum, alias, protocol or `std` type
-    /// name. The one type binder for a from-import; a fn twin never needs its own clause.
+    /// TICKET-187 — bind the TYPE a from-import names (`import Q from lib`): a struct, enum, alias,
+    /// protocol or `std` type name. The one type binder for a from-import.
     #[allow(clippy::too_many_arguments, clippy::ptr_arg)] // the branch body, moved verbatim
     fn bind_imported_type(
         &mut self,
@@ -464,9 +453,44 @@ impl Checker {
         }
     }
 
+    /// THE one decision of which module imports bind their bare name (TICKET-175): when two
+    /// un-aliased dotted imports share a last segment (`import a.math` + `import b.math`), neither
+    /// binds the bare name, both full paths stay bound, and a bare use reports the ambiguity. It
+    /// writes `ambiguous_binds` and `nameless_imports`.
+    pub(super) fn decide_bare_imports(&mut self, imports: &[ResolvedImport]) {
+        self.ambiguous_binds.clear();
+        self.nameless_imports.clear();
+        let mut first: HashMap<String, (String, Span)> = HashMap::new();
+        for imp in imports {
+            let Import::Module {
+                path, alias: None, ..
+            } = &imp.import
+            else {
+                continue;
+            };
+            let Some(name) = path.last().filter(|_| path.len() >= 2) else {
+                continue;
+            };
+            let dotted = path.join(".");
+            let Some((prev, prev_span)) = first.get(name).cloned() else {
+                first.insert(name.clone(), (dotted, imp.span));
+                continue;
+            };
+            if prev != dotted {
+                self.ambiguous_binds
+                    .entry(name.clone())
+                    .or_insert((prev, dotted));
+                self.nameless_imports.insert((prev_span, name.clone()));
+                self.nameless_imports.insert((imp.span, name.clone()));
+            }
+        }
+    }
+
     /// Bind an import into the current module: a whole-module import becomes a `Ty::Module` name;
     /// a `from` import injects each member (function/value) into scope, validating it exists.
-    pub(super) fn bind_import(&mut self, imp: &ResolvedImport) {
+    /// `binds` is the module's slot list: a `from` member is bound as a value exactly when it holds
+    /// a slot there.
+    pub(super) fn bind_import(&mut self, imp: &ResolvedImport, binds: &[(String, GlobalSource)]) {
         match &imp.import {
             Import::Module {
                 path,
@@ -480,34 +504,15 @@ impl Checker {
                 // std.math as int`) shadows the builtin in this module, as a local binding does.
                 // The resolver's synthetic full-path bind (`a.b` for `import a.b`, TICKET-175).
                 let full = crate::ast::is_full_path_bind(&name);
-                let dotted = path.join(".");
-                // Two un-aliased imports sharing a last segment (`import a.math` + `import b.math`):
-                // both full paths stay bound, and the bare name becomes ambiguous (unbound).
-                if !full
-                    && alias.is_none()
-                    && path.len() >= 2
-                    && let Some(prev) = self.implicit_binds.get(&name).cloned()
-                    && prev != dotted
-                {
-                    self.ambiguous_binds.insert(name.clone(), (prev, dotted));
-                    self.imported_modules.remove(&name);
-                    if let Some(scope) = self.scopes.last_mut() {
-                        scope.remove(&name);
-                    }
+                // `decide_bare_imports` decided whether this import binds its bare name.
+                let bare = !self.nameless_imports.contains(&(imp.span, name.clone()));
+                if bare && self.note_import_bind(&name, imp.span) {
                     return;
-                }
-                if self.note_import_bind(&name, imp.span) {
-                    return;
-                }
-                if !full && alias.is_none() && path.len() >= 2 {
-                    self.implicit_binds
-                        .entry(name.clone())
-                        .or_insert_with(|| dotted.clone());
                 }
                 // Editor hover (decl-site): record the bound module name's type at the bound-name
                 // token (`math` / the `as` alias). Probe-gated no-op off the probe / outside entry.
                 // The synthetic full-path bind shares that token, so it records nothing.
-                if self.hover_probe.is_some() && !full {
+                if bare && self.hover_probe.is_some() && !full {
                     self.hover_record_at(
                         *name_span,
                         &Ty::Module(name.clone()),
@@ -515,15 +520,19 @@ impl Checker {
                         None,
                     );
                 }
-                self.imported_modules
-                    .insert(name.clone(), imp.target.clone());
+                if bare {
+                    self.imported_modules
+                        .insert(name.clone(), imp.target.clone());
+                }
                 // Record each dotted import for the diagnostics of a full path that does not resolve
                 // (`pkg.deep.X` after `import pkg.deep as d`, or `pkg.other.X` never imported).
                 if !full && path.len() >= 2 {
                     self.import_paths
                         .push((path.clone(), name.clone(), alias.is_none()));
                 }
-                self.declare(&name, Ty::Module(name.clone()));
+                if bare {
+                    self.declare(&name, Ty::Module(name.clone()));
+                }
                 // Register the imported module's struct/enum LAYOUTS into the per-module shape tables
                 // (so `geo.Point(1,2).x` and `geo`'s enum methods resolve), but NOT into the bare
                 // *_names sets — a bare `Point` must still error. The bare-name gate (`struct_names`/
@@ -587,15 +596,30 @@ impl Checker {
                 // anchors the decl-site hover at the bound import name.
                 for ((member, alias), name_span) in names.iter().zip(name_spans.iter()) {
                     let bind = alias.as_ref().unwrap_or(member);
-                    // Reject a second import binding the same name (across ALL namespaces), but only
-                    // when the member actually exists — a missing member is its own error below, and
-                    // shouldn't also claim the name. The bind-name (alias wins) is the collision key,
-                    // so `import x as y` + `import z as y` collides while distinct names don't.
-                    let member_exists = sig.member(member).is_some() || sig.types.contains(member);
-                    if member_exists && self.note_import_bind(bind, imp.span) {
+                    if self.note_import_bind(bind, imp.span) {
                         continue;
                     }
-                    if let Some(fsig) = sig.certain_fn(member) {
+                    let holds = binds
+                        .iter()
+                        .any(|(n, src)| n == bind && matches!(src, GlobalSource::Import));
+                    let no_member = |this: &mut Self| {
+                        let candidates = Self::sig_member_names(&sig);
+                        this.error_help(
+                            *name_span,
+                            format!(
+                                "module '{}' has no member '{member}'",
+                                module_label(&imp.import)
+                            ),
+                            suggest::did_you_mean(member, &candidates),
+                        );
+                    };
+                    if !holds {
+                        if sig.types.contains(member) {
+                            self.bind_imported_type(bind, member, &sig, imp, path, name_span);
+                        } else {
+                            no_member(self);
+                        }
+                    } else if let Some(fsig) = sig.certain_fn(member) {
                         self.functions.insert(bind.clone(), fsig.clone());
                         if let Some(&home) = self.module_idx_of.get(&imp.target) {
                             self.fn_homes.insert(bind.clone(), (home, member.clone()));
@@ -621,21 +645,8 @@ impl Checker {
                         // in `check_assign` (see `imported_values`). Its const-ness arrives through
                         // its `GlobalBinding` (`DeclKind::Import`).
                         self.imported_values.insert(bind.clone(), path.join("."));
-                    } else if !sig.types.contains(member) {
-                        let candidates = Self::sig_member_names(&sig);
-                        self.error_help(
-                            *name_span,
-                            format!(
-                                "module '{}' has no member '{member}'",
-                                module_label(&imp.import)
-                            ),
-                            suggest::did_you_mean(member, &candidates),
-                        );
-                    }
-                    // TICKET-187: the value namespace and the type namespace bind independently, so
-                    // a fn twin of a struct, alias, enum or protocol leaves the type usable.
-                    if sig.types.contains(member) {
-                        self.bind_imported_type(bind, member, &sig, imp, path, name_span);
+                    } else {
+                        no_member(self);
                     }
                 }
             }

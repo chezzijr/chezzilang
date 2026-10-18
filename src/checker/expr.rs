@@ -2,7 +2,6 @@
 // Expression & call inference, keyword calls, type application, indexing.
 
 use super::fn_value::WrittenTypeArgs;
-use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
@@ -179,7 +178,7 @@ impl Checker {
         }
         // What the callee names: ONE answer from the rule table (`resolve.rs`). Every arm below takes
         // its branch from it and none re-decides what the path is.
-        let res = self.resolve_path(callee, PathPos::Callee);
+        let res = self.resolve_path(callee);
         // An **out-of-closure default provider** call. `desugar` lowers every omitted non-literal
         // default to a call on the hidden zero-arg provider `fn` its defining module declares. When
         // the definer IS in this module's transitive import closure a synthetic `from` import binds
@@ -667,8 +666,7 @@ impl Checker {
         // declaration (`print`'s `sep`/`end`); a user fn of the same name (it shadows the builtin)
         // takes its own: the callee's resolution decides.
         if !named.is_empty()
-            && let Some(Resolution::Builtin(b)) =
-                self.classify_path(callee, super::resolve::PathPos::Callee)
+            && let Some(Resolution::Builtin(b)) = self.classify_path(callee)
             && self
                 .builtin_sig(b.name())
                 .is_none_or(|sig| sig.slots.is_none())
@@ -821,27 +819,6 @@ impl Checker {
                 for a in args {
                     self.infer(a);
                 }
-                Ty::Unknown
-            }
-            // A module bind lands in the VALUE namespace, so `import lib.Point` beats a same-named
-            // USER `struct`/`enum` ctor in expression position (`is_reserved_module_bind` gates only
-            // the RESERVED names). The call is a hard error either way — name the collision instead of
-            // leaving the user to wonder where their ctor went.
-            Ty::Module(m)
-                if self.structs.contains_key(&self.bare_key(m.as_str()))
-                    || self.enums.contains_key(&self.bare_key(m.as_str())) =>
-            {
-                let m = m.clone();
-                for a in args {
-                    self.infer(a);
-                }
-                self.error(
-                    span,
-                    format!(
-                        "module bind '{m}' shadows the same-named type '{m}' — alias the import: `import ... as {}`",
-                        m.to_lowercase()
-                    ),
-                );
                 Ty::Unknown
             }
             other @ Ty::Int

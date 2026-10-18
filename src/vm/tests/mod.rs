@@ -74,7 +74,6 @@ pub(crate) fn empty_program() -> Program {
         cffi_defs: vec![],
         tests: vec![],
         suites: vec![],
-        type_names: Default::default(),
     }
 }
 

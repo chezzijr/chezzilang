@@ -77,7 +77,6 @@ impl Checker {
             functions: HashMap::new(),
             fn_write_scopes: Vec::new(),
             local_fn_names: std::collections::HashSet::new(),
-            raw_ctor_owner: None,
             structs: HashMap::new(),
             protocols: HashMap::new(),
             type_params: HashMap::new(),
@@ -121,8 +120,8 @@ impl Checker {
             json_module: None,
             range_key: crate::resolver::RANGE_STRUCT.to_string(),
             import_paths: Vec::new(),
-            implicit_binds: HashMap::new(),
             ambiguous_binds: HashMap::new(),
+            nameless_imports: std::collections::HashSet::new(),
             import_binds: HashMap::new(),
             imported_alias_tys: HashMap::new(),
             imported_alias_ctypes: HashMap::new(),
@@ -166,7 +165,6 @@ impl Checker {
             types_by_name: HashMap::new(),
             imported_values: HashMap::new(),
             builtin_binds: HashMap::new(),
-            implicit_import_names: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
@@ -423,14 +421,12 @@ impl Checker {
         }
     }
 
-    /// Bind a from-imported struct name into every namespace a colliding fn import must ALSO reach
-    /// (TICKET-029) — a colliding from-import binds both, so this is called from both the struct
-    /// branch and the fn branch of the `Import::From` loop. Registers the layout and makes the name
-    /// bare-visible as a TYPE (`struct_names`/`bare_types`). A same-named declaration in this module
-    /// is "already defined" through `import_binds`.
+    /// Bind a from-imported struct name: registers the layout and makes the name bare-visible as a
+    /// TYPE (`struct_names`/`bare_types`). A same-named declaration in this module is "already
+    /// defined" through `GlobalBinding::clashes`.
     ///
-    /// `implicit` is true for the import no one wrote (`Span::NOWHERE`): the bind name joins
-    /// `implicit_import_names`, the one fact a same-named `fn` collides with.
+    /// `implicit` is true for the import no one wrote (`Span::NOWHERE`): a module's own declaration
+    /// of that name shadows it.
     pub(super) fn bind_imported_struct_name(
         &mut self,
         bind: &str,
@@ -442,9 +438,6 @@ impl Checker {
         // `struct Range:` in a user module is that module's `Range`.
         if implicit && self.bare_types.get(bind).is_some_and(|own| own != key) {
             return;
-        }
-        if implicit {
-            self.implicit_import_names.insert(bind.to_string());
         }
         self.structs.insert(key.to_string(), info.clone());
         self.struct_names.insert(bind.to_string());

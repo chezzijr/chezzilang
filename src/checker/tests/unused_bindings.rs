@@ -729,47 +729,47 @@ fn resolution_records_local_for_a_closure_named_like_a_builtin() {
     assert_eq!(r, Resolution::Local);
 }
 
-/// TICKET-180 K2 — inside `fn Q` over `type Q = P`, the recursive `Q(...)` is the fn.
+/// TICKET-180 K2 — a recursive call inside a fn, beside `type Q = P`, is the fn.
 #[test]
-fn resolution_records_fn_for_a_recursive_call_inside_fn_named_like_an_alias() {
+fn resolution_records_fn_for_a_recursive_call_inside_a_fn() {
     let r = head_resolution(
-        "struct P:\n    x: int\ntype Q = P\nfn Q(s: str) -> P:\n    if s == \"\":\n        return P(0)\n    return Q(s[1..])\nprint(Q(\"abc\"))\n",
+        "struct P:\n    x: int\ntype Q = P\nfn walk(s: str) -> P:\n    if s == \"\":\n        return P(0)\n    return walk(s[1..])\nprint(walk(\"abc\"))\n",
         7,
         12,
     );
     assert!(
-        matches!(&r, Resolution::Fn { name, .. } if name == "Q"),
+        matches!(&r, Resolution::Fn { name, .. } if name == "walk"),
         "{r:?}"
     );
 }
 
-/// TICKET-180 / DEC-029 — inside `fn P` over `struct P`, the bare `P(...)` is the raw ctor.
+/// TICKET-180 — the bare `P(...)` of a struct `P` is its constructor, inside a fn too.
 #[test]
-fn resolution_records_the_raw_ctor_inside_fn_named_like_its_struct() {
+fn resolution_records_the_struct_ctor_inside_a_fn() {
     let r = head_resolution(
-        "struct P:\n    x: int\nfn P(n: int) -> P:\n    return P(n)\nprint(P(4))\n",
+        "struct P:\n    x: int\nfn mk(n: int) -> P:\n    return P(n)\nprint(mk(4))\n",
         4,
         12,
     );
     assert!(matches!(&r, Resolution::StructCtor(_)), "{r:?}");
 }
 
-/// TICKET-180 step 7: a let named like a type or a builtin is seeded like any other module
-/// global (DEC-183), so a fn body reads the global whether the let is above or below the fn.
-/// CPython `class P: ...; def g(): return P(4); P = lambda n: f"v{n}"; print(g())` prints `v4`.
+/// TICKET-180 step 7: a let beside a type or named like a builtin is seeded like any other module
+/// global (DEC-183), so a fn body reads the global whether the let is above or below the fn. (A
+/// let named like a type is a second binding: `a_type_name_and_a_value_name_never_share_a_module_name`.)
 #[test]
-fn a_fn_body_resolves_a_type_named_global_in_both_orders() {
-    const P_BIND: &str = "P := fn(n: int) -> str: \"v{n}\"\n";
+fn a_fn_body_resolves_a_global_in_both_orders() {
+    const P_BIND: &str = "q := fn(n: int) -> str: \"v{n}\"\n";
     const ORD_BIND: &str = "ord := fn(s: str) -> int: 1000\n";
     const G_ORD: &str = "fn g() -> int:\n    h := ord\n    return h(\"a\")\n";
     // (1) an inferred body above the let returns the global's `str`, not the struct.
     rejects(
-        &format!("struct P:\n    x: int\nfn g(): P(4)\n{P_BIND}y: int = g()\n"),
+        &format!("struct P:\n    x: int\nfn g(): q(4)\n{P_BIND}y: int = g()\n"),
         "cannot assign str to variable of type int",
     );
     // (2) an annotated body above the let calls the global.
     ok(&format!(
-        "struct P:\n    x: int\nfn g() -> str:\n    return P(4)\n{P_BIND}print(g())\n"
+        "struct P:\n    x: int\nfn g() -> str:\n    return q(4)\n{P_BIND}print(g())\n"
     ));
     // (3) a builtin-named global read in a body above its let.
     rejects(
@@ -790,7 +790,8 @@ fn a_fn_body_resolves_a_type_named_global_in_both_orders() {
 
 /// A whole-module import bind and a same-module top-level `fn` or type may not share a name, in
 /// either source order (owner decisions 2026-09-29; Go: `f redeclared in this block`). The error
-/// lands on the later of the two declarations. A from-imported type beside `fn P` is legal.
+/// lands on the later of the two declarations. A from-imported type binds its own name, not the
+/// module's (`a_type_import_beside_a_fn_is_bound_twice` rejects `fn P` beside it).
 #[test]
 fn a_fn_or_type_named_like_a_module_import_is_rejected() {
     const LIB: &str = "fn h(n: int) -> str:\n    return \"L{n}\"\nstruct P:\n    x: int\n";
@@ -844,7 +845,7 @@ fn a_fn_or_type_named_like_a_module_import_is_rejected() {
     files_ok(&[
         (
             "main.chz",
-            "import P from lib\nfn P(a: int) -> int:\n    return a\nprint(1)\n",
+            "import P from lib\nfn p(a: int) -> int:\n    return a\nprint(1)\n",
         ),
         ("lib.chz", LIB),
     ]);

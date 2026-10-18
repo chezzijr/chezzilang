@@ -22,9 +22,9 @@ exhaustiveness treat them like a user enum. Any module can import the variants o
 - **Pattern matching**: `match` on enums (also int/str/bool + tuple + **struct** scrutinees),
   exhaustiveness-checked.
   - A struct destructures **positionally** (`Point(x, y)` binds the fields in declaration order); a
-    struct has one constructor, so a lone all-binding arm is irrefutable (no `_`). A module-level `fn`
-    named after the struct **replaces** that positional constructor at every call site where the fn is
-    in scope (`syntax.md` §7a); a `match` pattern still destructures the struct's fields directly.
+    struct has one constructor, so a lone all-binding arm is irrefutable (no `_`). `S(..)` only sets
+    the fields; a module `fn` named after the struct is a second binding of the name and an error
+    (`syntax.md` §7a), so a constructor with logic is a static `S.new(..)`.
   - Nested patterns (incl. nested nullary variants like `?None`) + **or-patterns** (`p1 | p2`; every
     alternative must bind the same variables). A full enum or-pattern is exhaustive without `_`, and so
     is `true | false` on a bool scrutinee; the open int/str domains still require a `_`.

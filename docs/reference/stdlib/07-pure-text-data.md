@@ -94,8 +94,9 @@ structurally, so `fs.exists(p)` takes it directly.
 | `as_path` | `(self) -> bytes` | `PathLike` conformance. |
 
 `Path` splits DISPLAY (`str`) from CONVERSION (`decode`), as Rust does (its `Path` implements no
-`Display`). The constructor takes any `PathLike` (`str`, `bytes`, `bytearray`, another `Path`):
-`path.Path("/a/b")` and `path.Path(b"/a/b")` build the same value. Convert to a mutable buffer with
+`Display`). The static `Path.new` takes any `PathLike` (`str`, `bytes`, `bytearray`, another `Path`):
+`path.Path.new("/a/b")` and `path.Path.new(b"/a/b")` build the same value; `Path(raw)` only sets the
+`raw: bytes` field. Convert to a mutable buffer with
 `bytearray(p.bytes())` (there is no `bytearray` method).
 
 > **Hazard:** `fs.exists(p.str())` on a non-UTF-8 path names a *different* (usually nonexistent) file,

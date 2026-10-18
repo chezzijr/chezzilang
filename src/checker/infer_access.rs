@@ -4,7 +4,6 @@
 
 use super::fn_value::fn_spelling;
 use super::pattern::OPT_RECV_PREFIX;
-use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeRead};
 use super::*;
 
@@ -64,7 +63,7 @@ impl Checker {
             }
         }
         // What `obj.name` names: the rule table's answer; every arm below reads it.
-        let res = self.resolve_path(e, PathPos::Value);
+        let res = self.resolve_path(e);
         match &res {
             // MEMBER-as-a-value position through a type parameter: `Col.Red` inside
             // `fn f[Col: Tagged]` is the PARAMETER. Nothing is reachable through an erased type

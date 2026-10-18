@@ -224,3 +224,73 @@ fn ill_typed_bodied_native_struct_method_is_rejected() {
         "expected a yield-type error, got: {err}"
     );
 }
+
+/// A module binds each name once, a native std module included: a cell appends a second binding of a
+/// name the file already binds, and the run reports it exactly once.
+/// Row: (std file, appended block, main module, needle).
+const BOUND_ONCE: &[(&str, &str, &str, &str)] = &[
+    (
+        "math.chz",
+        "\nimport reverse from std.string\nimport reverse from std.string\n",
+        "math",
+        "'reverse' is already imported",
+    ),
+    (
+        "math.chz",
+        "\nimport std.string as s\nimport std.io as s\n",
+        "math",
+        "'s' is already imported",
+    ),
+    (
+        "math.chz",
+        "\nimport std.string as floor\n",
+        "math",
+        "function 'floor' is already defined",
+    ),
+    (
+        "io.chz",
+        "\nimport std.string as Reader\n",
+        "io",
+        "type 'Reader' is already defined",
+    ),
+    (
+        "io.chz",
+        "\nfn Reader() -> int:\n    return 1\n",
+        "io",
+        "type 'Reader' is already defined",
+    ),
+    (
+        "ffi.chz",
+        "\nimport std.string as ptr\n",
+        "ffi",
+        "type 'ptr' is already defined",
+    ),
+    (
+        "prelude.chz",
+        "\nfn Option() -> int:\n    return 1\n",
+        "math",
+        "type 'Option' is already defined",
+    ),
+];
+
+#[test]
+fn a_native_module_binds_each_name_once() {
+    let mut wrong = Vec::new();
+    for (file, block, main, needle) in BOUND_ONCE {
+        let stddir = copied_std();
+        let path = stddir.0.join(file);
+        let mut src = std::fs::read_to_string(&path).unwrap();
+        src.push_str(block);
+        std::fs::write(&path, src).unwrap();
+        let t = TmpDir::new();
+        let prog = t.write("main.chz", &format!("import std.{main}\nprint(1)\n"));
+        let (_, err, ok) = run(&prog, &[], Some(&stddir.0));
+        if ok || err.matches(needle).count() != 1 {
+            wrong.push(format!(
+                "{file} + {block:?}: want one `{needle}`, got ok={ok}: {}",
+                err.lines().next().unwrap_or("")
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}

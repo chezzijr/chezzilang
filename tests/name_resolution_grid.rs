@@ -1,8 +1,8 @@
 //! TICKET-180: the name-resolution grid. Every binder kind x every name kind it can shadow
 //! x every position the name can be read in, one generated program per cell, run through the
 //! built `chezzi` binary. The expected value is the CPython / Rust meaning: the innermost
-//! binding wins, a same-module `fn S` replaces the ctor of `S` (DEC-029/055/172), and inside
-//! `fn S`'s own body `S` is the raw ctor.
+//! binding wins, and a module binds each name once, a type included (owner 2026-10-16), so a
+//! same-module `fn S` beside a type `S` is a second binding.
 //!
 //! The checker decides what a name means and the compiler reads that decision
 //! (`checker::ResolutionTable`). A red cell here means the two halves disagree again.
@@ -22,10 +22,14 @@ struct Cell {
     expect: Expect,
 }
 
+/// The module name a declaration binds; a type binds it too (owner 2026-10-16).
 #[derive(Clone, Copy, PartialEq)]
-enum Slot {
-    None,
+enum Binds {
+    /// No module name: a builtin, or a name that is a member of a module.
+    Nothing,
+    /// The name came from an import.
     Import,
+    /// The module declares the name itself.
     Own,
 }
 
@@ -36,8 +40,8 @@ struct Kind {
     decl: &'static str,
     /// The argument the call cell passes (the defaulted-fn kind calls `f(1)`).
     arg: u32,
-    /// The module value slot the declaration fills, if any (a builtin and a type fill none).
-    slot: Slot,
+    /// The module name the declaration binds, if any.
+    binds: Binds,
 }
 
 const KINDS: &[Kind] = &[
@@ -46,63 +50,63 @@ const KINDS: &[Kind] = &[
         name: "ord",
         decl: "",
         arg: 4,
-        slot: Slot::None,
+        binds: Binds::Nothing,
     },
     Kind {
         tag: "builtin_ctor",
         name: "Channel",
         decl: "",
         arg: 4,
-        slot: Slot::None,
+        binds: Binds::Nothing,
     },
     Kind {
         tag: "std_ctor",
         name: "timer",
         decl: "import std.time\n",
         arg: 4,
-        slot: Slot::None,
+        binds: Binds::Nothing,
     },
     Kind {
         tag: "struct",
         name: "P",
         decl: "struct P:\n    x: int\n",
         arg: 4,
-        slot: Slot::None,
+        binds: Binds::Own,
     },
     Kind {
         tag: "enum",
         name: "E",
         decl: "enum E:\n    A\n",
         arg: 4,
-        slot: Slot::None,
+        binds: Binds::Own,
     },
     Kind {
         tag: "alias",
         name: "Q",
         decl: "struct P:\n    x: int\ntype Q = P\n",
         arg: 4,
-        slot: Slot::None,
+        binds: Binds::Own,
     },
     Kind {
         tag: "imported_fn",
         name: "f",
         decl: "import f from lib\n",
         arg: 4,
-        slot: Slot::Import,
+        binds: Binds::Import,
     },
     Kind {
         tag: "imported_type",
         name: "T",
         decl: "import T from lib\n",
         arg: 4,
-        slot: Slot::None,
+        binds: Binds::Import,
     },
     Kind {
         tag: "module",
         name: "math",
         decl: "import std.math\n",
         arg: 4,
-        slot: Slot::Import,
+        binds: Binds::Import,
     },
     // A defaulted fn: the checker binds its omitted argument (TICKET-182).
     Kind {
@@ -110,7 +114,7 @@ const KINDS: &[Kind] = &[
         name: "f",
         decl: "fn f(a: int, b: int = 10) -> int:\n    return a + b\n",
         arg: 1,
-        slot: Slot::Own,
+        binds: Binds::Own,
     },
 ];
 
@@ -163,81 +167,122 @@ fn positions(k: &Kind) -> Vec<Pos> {
     ]
 }
 
-/// The binder kinds that bind a VALUE; `None` when the binder cannot bind this position.
-fn bind(binder: &str, n: &str, p: &Pos) -> Option<String> {
-    let (ty, ret, zero, e, r) = (p.ty, p.ret, p.zero, &p.value, &p.read);
-    Some(match binder {
-        "param" => format!("fn g({n}: {ty}) -> {ret}:\n    return {r}\nprint(g({e}))\n"),
-        "local" => format!("fn g() -> {ret}:\n    {n} := {e}\n    return {r}\nprint(g())\n"),
-        "toplevel_let" => format!("{n} := {e}\nprint({r})\n"),
-        "for_var" => format!("for {n} in [{e}]:\n    print({r})\n"),
-        "match_binding" => {
-            format!("match ?{e}:\n    ?{n}: print({r})\n    None: print(\"none\")\n")
+/// The enum and `ALL` come from one list, so a new binder is in `ALL`; every decision below is an
+/// exhaustive `match`, so the build fails until it decides the variant.
+macro_rules! binders {
+    ($($v:ident),+ $(,)?) => {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Binder {
+            $($v),+
         }
-        "closure_param" => format!("print((fn({n}: {ty}) -> {ret}: {r})({e}))\n"),
-        "comprehension_var" => format!("print([{r} for {n} in [{e}]][0])\n"),
-        "wait_recv" => format!(
-            "fn g() -> {ret}:\n    ch := Channel[{ty}](1)\n    ch.send({e})\n    out := {zero}\n    wait:\n        {n} := ch.recv(): out = {r}\n    return out\nprint(g())\n"
-        ),
-        "nested_fn" if p.tag == "call" => format!(
-            "fn g() -> str:\n    fn {n}(n: int) -> str:\n        return \"B{{n}}\"\n    return {r}\nprint(g())\n"
-        ),
-        "toplevel_fn" if p.tag == "call" => {
-            format!("fn {n}(n: int) -> str:\n    return \"B{{n}}\"\nprint({r})\n")
+        impl Binder {
+            const ALL: &'static [Binder] = &[$(Binder::$v),+];
         }
-        "import_alias" if p.tag == "member" => format!("import lib as {n}\nprint({r})\n"),
-        _ => return None,
-    })
+    };
 }
 
-const BINDERS: &[&str] = &[
-    "param",
-    "local",
-    "toplevel_let",
-    "for_var",
-    "match_binding",
-    "closure_param",
-    "comprehension_var",
-    "wait_recv",
-    "nested_fn",
-    "toplevel_fn",
-    "import_alias",
-];
+binders!(
+    Param,
+    Local,
+    ToplevelLet,
+    ForVar,
+    MatchBinding,
+    ClosureParam,
+    ComprehensionVar,
+    WaitRecv,
+    NestedFn,
+    ToplevelFn,
+    ImportAlias
+);
+
+impl Binder {
+    fn tag(self) -> &'static str {
+        match self {
+            Binder::Param => "param",
+            Binder::Local => "local",
+            Binder::ToplevelLet => "toplevel_let",
+            Binder::ForVar => "for_var",
+            Binder::MatchBinding => "match_binding",
+            Binder::ClosureParam => "closure_param",
+            Binder::ComprehensionVar => "comprehension_var",
+            Binder::WaitRecv => "wait_recv",
+            Binder::NestedFn => "nested_fn",
+            Binder::ToplevelFn => "toplevel_fn",
+            Binder::ImportAlias => "import_alias",
+        }
+    }
+
+    /// Does the binder declare a name of the MODULE (a top-level let, fn or import alias)? The
+    /// other eight bind in a scope below it.
+    fn binds_module_name(self) -> bool {
+        match self {
+            Binder::ToplevelLet | Binder::ToplevelFn | Binder::ImportAlias => true,
+            Binder::Param
+            | Binder::Local
+            | Binder::ForVar
+            | Binder::MatchBinding
+            | Binder::ClosureParam
+            | Binder::ComprehensionVar
+            | Binder::WaitRecv
+            | Binder::NestedFn => false,
+        }
+    }
+}
+
+/// The cell's expected rejection, from the one fact both sides carry: does the binder declare a
+/// module name, and does the name already hold one. A module binds each name once.
+fn rejection(binder: Binder, prior: Binds) -> Option<&'static str> {
+    match (binder.binds_module_name(), prior) {
+        (false, _) | (true, Binds::Nothing) => None,
+        (true, Binds::Import) => Some("is already imported"),
+        (true, Binds::Own) => Some("is already defined"),
+    }
+}
+
+/// The binder kinds that bind a VALUE; `None` when the binder cannot bind this position.
+fn bind(binder: Binder, n: &str, p: &Pos) -> Option<String> {
+    let (ty, ret, zero, e, r) = (p.ty, p.ret, p.zero, &p.value, &p.read);
+    match binder {
+        Binder::Param => Some(format!(
+            "fn g({n}: {ty}) -> {ret}:\n    return {r}\nprint(g({e}))\n"
+        )),
+        Binder::Local => Some(format!(
+            "fn g() -> {ret}:\n    {n} := {e}\n    return {r}\nprint(g())\n"
+        )),
+        Binder::ToplevelLet => Some(format!("{n} := {e}\nprint({r})\n")),
+        Binder::ForVar => Some(format!("for {n} in [{e}]:\n    print({r})\n")),
+        Binder::MatchBinding => Some(format!(
+            "match ?{e}:\n    ?{n}: print({r})\n    None: print(\"none\")\n"
+        )),
+        Binder::ClosureParam => Some(format!("print((fn({n}: {ty}) -> {ret}: {r})({e}))\n")),
+        Binder::ComprehensionVar => Some(format!("print([{r} for {n} in [{e}]][0])\n")),
+        Binder::WaitRecv => Some(format!(
+            "fn g() -> {ret}:\n    ch := Channel[{ty}](1)\n    ch.send({e})\n    out := {zero}\n    wait:\n        {n} := ch.recv(): out = {r}\n    return out\nprint(g())\n"
+        )),
+        Binder::NestedFn => (p.tag == "call").then(|| {
+            format!(
+                "fn g() -> str:\n    fn {n}(n: int) -> str:\n        return \"B{{n}}\"\n    return {r}\nprint(g())\n"
+            )
+        }),
+        Binder::ToplevelFn => (p.tag == "call").then(|| {
+            format!("fn {n}(n: int) -> str:\n    return \"B{{n}}\"\nprint({r})\n")
+        }),
+        Binder::ImportAlias => {
+            (p.tag == "member").then(|| format!("import lib as {n}\nprint({r})\n"))
+        }
+    }
+}
 
 /// Cells the language rejects by a named declaration rule, with the rule.
-fn named_rejection(binder: &str, k: &Kind) -> Option<&'static str> {
-    // A top-level name is bound once (Go and Rust), so a top-level let of a name an import or a
-    // `fn` already binds is rejected.
-    match (binder, k.slot) {
-        ("toplevel_let", Slot::Import) => return Some("is already imported"),
-        ("toplevel_let", Slot::Own) => return Some("is already defined"),
-        _ => {}
-    }
-    match (binder, k.tag) {
-        // Only keywords are reserved (owner rule 2026-10-15): an import alias or a top-level `fn`
-        // named after a builtin shadows it, like every other binder here.
-        // Two imports under one name.
-        ("import_alias", "imported_fn" | "imported_type" | "module") => Some("already"),
-        // A whole-module import after a same-module `fn` or type of its name (Go: `redeclared in
-        // this block`); the message names the prior declaration.
-        ("import_alias", "struct" | "enum" | "alias" | "defaulted_fn") => {
-            Some("is already defined")
-        }
-        // Two top-level declarations of one name (Go: `redeclared in this block`).
-        ("toplevel_fn", "imported_fn") => Some("is already imported"),
-        ("toplevel_fn", "defaulted_fn") => Some("is already defined"),
-        // A top-level `fn` over an imported module name: the import and the fn would share one
-        // runtime global slot; Go rejects the redeclaration.
-        ("toplevel_fn", "module") => Some("is already imported"),
-        _ => None,
-    }
+fn named_rejection(b: Binder, k: &Kind) -> Option<&'static str> {
+    rejection(b, k.binds)
 }
 
 fn grid() -> Vec<Cell> {
     let mut cells = Vec::new();
     for k in KINDS {
         for p in positions(k) {
-            for binder in BINDERS {
+            for &binder in Binder::ALL {
                 let Some(body) = bind(binder, k.name, &p) else {
                     continue;
                 };
@@ -247,7 +292,7 @@ fn grid() -> Vec<Cell> {
                     None => Expect::Prints(p.expect.clone()),
                 };
                 cells.push(Cell {
-                    name: format!("{binder}/{}/{}", k.tag, p.tag),
+                    name: format!("{}/{}/{}", binder.tag(), k.tag, p.tag),
                     files: vec![("main.chz".into(), src), ("lib.chz".into(), LIB.into())],
                     expect,
                 });
@@ -393,7 +438,7 @@ fn with_lib(name: &str, main: &str, lib: &str, expect: Expect) -> Cell {
     }
 }
 
-/// DEC-029/055/172: a same-module top-level `fn S` over a struct or alias `S`.
+/// A same-module `fn S` beside a type `S` is a second binding (owner 2026-10-16).
 fn same_module_fn_cells() -> Vec<Cell> {
     let p = "struct P:\n    x: int\n";
     let bn = "(n: int) -> str:\n    return \"B{n}\"\n";
@@ -401,15 +446,14 @@ fn same_module_fn_cells() -> Vec<Cell> {
         one(
             "toplevel_fn/struct/raw_ctor_in_own_body",
             format!("{p}fn P(n: int) -> P:\n    return P(n)\nprint(P(4))\n"),
-            Expect::Prints("P(x=4)".into()),
+            Expect::Rejects("is already defined"),
         ),
-        // Inside its own body the CALL `P(..)` is the raw ctor, but a VALUE read of `P` is the fn.
         one(
             "toplevel_fn/struct/value_read_in_own_body",
             format!(
                 "{p}fn P(x: int) -> P:\n    if x > 100:\n        return P(x=x)\n    f := P\n    return f(x + 100)\nprint(P(4))\n"
             ),
-            Expect::Prints("P(x=104)".into()),
+            Expect::Rejects("is already defined"),
         ),
         // A variant lives under its enum, so a top-level `fn` may share its name; the bare call
         // is the fn, as the bare read is (Rust: `fn Circle` beside `Shape::Circle` prints `1`).
@@ -424,38 +468,36 @@ fn same_module_fn_cells() -> Vec<Cell> {
             "x := None(1)\n".into(),
             Expect::Rejects("is not callable"),
         ),
-        // K2: the recursive call inside `fn Q` is the fn, not the alias ctor.
         one(
             "toplevel_fn/alias/k2_recursive_call",
             format!(
                 "{p}type Q = P\nfn Q(s: str) -> P:\n    if s == \"\":\n        return P(0)\n    return Q(s[1..])\nprint(Q(\"abc\"))\n"
             ),
-            Expect::Prints("P(x=0)".into()),
+            Expect::Rejects("is already defined"),
         ),
         with_lib(
             "importer/struct/qualified_call",
             "import lib\nprint(lib.P(4))\n",
             &format!("{p}fn P{bn}"),
-            Expect::Prints("B4".into()),
+            Expect::Rejects("is already defined"),
         ),
         with_lib(
             "importer/alias/qualified_call",
             "import lib\nprint(lib.Q(4))\n",
             &format!("{p}type Q = P\nfn Q{bn}"),
-            Expect::Prints("B4".into()),
+            Expect::Rejects("is already defined"),
         ),
-        // K3: `lib.Q` is `fn Q(s: str)`, so `lib.Q(5)` is a type error (Rust rejects `lib::Q(5)`).
         with_lib(
             "importer/alias/k3_str_arg",
             "import lib\nprint(lib.Q(\"abc\"))\n",
             &format!("{p}type Q = P\nfn Q(s: str) -> P:\n    return P(s.len())\n"),
-            Expect::Prints("P(x=3)".into()),
+            Expect::Rejects("is already defined"),
         ),
         with_lib(
             "importer/alias/k3_int_arg",
             "import lib\nprint(lib.Q(5))\n",
             &format!("{p}type Q = P\nfn Q(s: str) -> P:\n    return P(s.len())\n"),
-            Expect::Rejects("expected str, found int"),
+            Expect::Rejects("is already defined"),
         ),
     ]
 }
@@ -495,19 +537,21 @@ struct FieldHead {
     member: &'static str,
     ty: &'static str,
     value: &'static str,
+    /// The module name the head binds.
+    binds: Binds,
 }
 
 const VV: &str = "V(A=4, k=4, pi=4)";
 
 #[rustfmt::skip]
 const FIELD_HEADS: &[FieldHead] = &[
-    FieldHead { tag: "struct", name: "P", decl: "struct P:\n    x: int\n", member: "k", ty: "V", value: VV },
-    FieldHead { tag: "enum", name: "E", decl: "enum E:\n    A\n", member: "A", ty: "V", value: VV },
-    FieldHead { tag: "enum_alias", name: "R", decl: "enum E:\n    A\ntype R = E\n", member: "A", ty: "V", value: VV },
-    FieldHead { tag: "alias", name: "Q", decl: "struct P:\n    x: int\ntype Q = P\n", member: "k", ty: "V", value: VV },
-    FieldHead { tag: "imported_type", name: "T", decl: "import T from lib\n", member: "k", ty: "V", value: VV },
-    FieldHead { tag: "module", name: "math", decl: "import std.math\n", member: "pi", ty: "V", value: VV },
-    FieldHead { tag: "qualified_enum", name: "lib", decl: "import lib\n", member: "E.A", ty: "W", value: "W(E=V(A=4, k=4, pi=4))" },
+    FieldHead { tag: "struct", name: "P", decl: "struct P:\n    x: int\n", member: "k", ty: "V", value: VV, binds: Binds::Own },
+    FieldHead { tag: "enum", name: "E", decl: "enum E:\n    A\n", member: "A", ty: "V", value: VV, binds: Binds::Own },
+    FieldHead { tag: "enum_alias", name: "R", decl: "enum E:\n    A\ntype R = E\n", member: "A", ty: "V", value: VV, binds: Binds::Own },
+    FieldHead { tag: "alias", name: "Q", decl: "struct P:\n    x: int\ntype Q = P\n", member: "k", ty: "V", value: VV, binds: Binds::Own },
+    FieldHead { tag: "imported_type", name: "T", decl: "import T from lib\n", member: "k", ty: "V", value: VV, binds: Binds::Import },
+    FieldHead { tag: "module", name: "math", decl: "import std.math\n", member: "pi", ty: "V", value: VV, binds: Binds::Import },
+    FieldHead { tag: "qualified_enum", name: "lib", decl: "import lib\n", member: "E.A", ty: "W", value: "W(E=V(A=4, k=4, pi=4))", binds: Binds::Import },
 ];
 
 /// The read `r` in one context, every line indented `ind` spaces.
@@ -530,77 +574,60 @@ fn field_block(r: &str, ctx: &str, ind: usize) -> String {
     lines.iter().map(|l| format!("{pad}{l}\n")).collect()
 }
 
-fn field_bind(binder: &str, n: &str, ty: &str, e: &str, r: &str, ctx: &str) -> Option<String> {
+fn field_bind(binder: Binder, n: &str, ty: &str, e: &str, r: &str, ctx: &str) -> Option<String> {
     let b = |ind| field_block(r, ctx, ind);
-    Some(match binder {
-        "param" => format!("fn g({n}: {ty}):\n{}g({e})\n", b(4)),
-        "local" => format!("fn g():\n    {n} := {e}\n{}g()\n", b(4)),
-        "toplevel_let" => format!("{n} := {e}\n{}", b(0)),
-        "for_var" => format!("for {n} in [{e}]:\n{}", b(4)),
-        "match_binding" => format!(
+    // A closure body is one expression: only the `read` and `arg` contexts fit.
+    let one_expr = || match ctx {
+        "read" => Some(r.to_string()),
+        "arg" => Some(format!("id({r})")),
+        _ => None,
+    };
+    match binder {
+        Binder::Param => Some(format!("fn g({n}: {ty}):\n{}g({e})\n", b(4))),
+        Binder::Local => Some(format!("fn g():\n    {n} := {e}\n{}g()\n", b(4))),
+        Binder::ToplevelLet => Some(format!("{n} := {e}\n{}", b(0))),
+        Binder::ForVar => Some(format!("for {n} in [{e}]:\n{}", b(4))),
+        Binder::MatchBinding => Some(format!(
             "match ?{e}:\n    ?{n}:\n{}    None: print(\"none\")\n",
             b(8)
-        ),
-        "wait_recv" => format!(
+        )),
+        Binder::WaitRecv => Some(format!(
             "fn g():\n    ch := Channel[{ty}](1)\n    ch.send({e})\n    wait:\n        {n} := ch.recv():\n{}g()\n",
             b(12)
-        ),
-        "import_alias" => format!("import lib as {n}\n{}", b(0)),
-        "closure_param" | "comprehension_var" => {
-            // A closure body is one expression: only the `read` and `arg` contexts fit.
-            let x = match ctx {
-                "read" => r.to_string(),
-                "arg" => format!("id({r})"),
-                _ => return None,
-            };
-            if binder == "closure_param" {
-                format!("print((fn({n}: {ty}) -> int: {x})({e}))\n")
-            } else {
-                format!("print([{x} for {n} in [{e}]][0])\n")
-            }
+        )),
+        Binder::ImportAlias => Some(format!("import lib as {n}\n{}", b(0))),
+        Binder::ClosureParam => {
+            one_expr().map(|x| format!("print((fn({n}: {ty}) -> int: {x})({e}))\n"))
         }
-        _ => return None,
-    })
+        Binder::ComprehensionVar => {
+            one_expr().map(|x| format!("print([{x} for {n} in [{e}]][0])\n"))
+        }
+        // A fn is no value binder of a field read.
+        Binder::NestedFn | Binder::ToplevelFn => None,
+    }
 }
 
-fn field_rejection(binder: &str, tag: &str) -> Option<&'static str> {
-    match (binder, tag) {
-        ("toplevel_let", "module" | "qualified_enum") => Some("is already imported"),
-        ("import_alias", "module" | "qualified_enum" | "imported_type") => Some("already"),
-        // A whole-module import after a same-module type of its name.
-        ("import_alias", "struct" | "enum" | "enum_alias" | "alias") => Some("is already defined"),
-        _ => None,
-    }
+fn field_rejection(b: Binder, h: &FieldHead) -> Option<&'static str> {
+    rejection(b, h.binds)
 }
 
 /// The value-field read position: a value binder named like a type or module, read as `X.m`
 /// (not called) in a print, an argument, a match scrutinee and a return.
 fn field_cells() -> Vec<Cell> {
-    let binders = [
-        "param",
-        "local",
-        "toplevel_let",
-        "for_var",
-        "match_binding",
-        "closure_param",
-        "comprehension_var",
-        "wait_recv",
-        "import_alias",
-    ];
     let mut cells = Vec::new();
     for h in FIELD_HEADS {
         for ctx in ["read", "arg", "scrutinee", "return"] {
-            for binder in binders {
+            for &binder in Binder::ALL {
                 let r = format!("{}.{}", h.name, h.member);
                 let Some(body) = field_bind(binder, h.name, h.ty, h.value, &r, ctx) else {
                     continue;
                 };
-                let expect = match field_rejection(binder, h.tag) {
+                let expect = match field_rejection(binder, h) {
                     Some(frag) => Expect::Rejects(frag),
                     None => Expect::Prints("4".into()),
                 };
                 cells.push(with_lib(
-                    &format!("{binder}/{}/field_{ctx}", h.tag),
+                    &format!("{}/{}/field_{ctx}", binder.tag(), h.tag),
                     &format!("{}{FIELD_DECLS}{body}", h.decl),
                     FIELD_LIB,
                     expect,
@@ -611,7 +638,7 @@ fn field_cells() -> Vec<Cell> {
     cells
 }
 
-const ORDER_PRE: &str = "struct P:\n    x: int\nenum E:\n    A\nstruct V:\n    A: int\n";
+const ORDER_PRE: &str = "struct V:\n    A: int\n";
 
 const ORDER_LIB: &str = "A := 4\n";
 
@@ -630,7 +657,7 @@ struct OrderHead {
 }
 
 const ORD_BIND: &str = "ord := fn(s: str) -> int: 1000\n";
-const P_BIND: &str = "P := fn(n: int) -> str: \"v{n}\"\n";
+const P_BIND: &str = "p := fn(n: int) -> str: \"v{n}\"\n";
 const INT_AS_STR: &str = "cannot assign int to variable of type str";
 const STR_AS_INT: &str = "cannot assign str to variable of type int";
 
@@ -638,9 +665,9 @@ const STR_AS_INT: &str = "cannot assign str to variable of type int";
 const ORDER_HEADS: &[OrderHead] = &[
     OrderHead { tag: "ord_call", binding: ORD_BIND, body: &["return ord(\"a\")"], inline: "ord(\"a\")", ret: "int", out: "1000", wrong: "str", rejects: INT_AS_STR },
     OrderHead { tag: "ord_read", binding: ORD_BIND, body: &["h := ord", "return h(\"a\")"], inline: "[ord][0](\"a\")", ret: "int", out: "1000", wrong: "str", rejects: INT_AS_STR },
-    OrderHead { tag: "P_call", binding: P_BIND, body: &["return P(4)"], inline: "P(4)", ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
-    OrderHead { tag: "P_read", binding: P_BIND, body: &["h := P", "return h(4)"], inline: "[P][0](4)", ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
-    OrderHead { tag: "E_field", binding: "E := V(4)\n", body: &["return E.A"], inline: "E.A", ret: "int", out: "4", wrong: "str", rejects: INT_AS_STR },
+    OrderHead { tag: "p_call", binding: P_BIND, body: &["return p(4)"], inline: "p(4)", ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
+    OrderHead { tag: "p_read", binding: P_BIND, body: &["h := p", "return h(4)"], inline: "[p][0](4)", ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
+    OrderHead { tag: "e_field", binding: "e := V(4)\n", body: &["return e.A"], inline: "e.A", ret: "int", out: "4", wrong: "str", rejects: INT_AS_STR },
     OrderHead { tag: "x_read", binding: "x := 5\n", body: &["return x"], inline: "x", ret: "int", out: "5", wrong: "str", rejects: INT_AS_STR },
 ];
 
@@ -690,12 +717,12 @@ fn order_cells() -> Vec<Cell> {
         (
             "swap/fn_first/call",
             format!("{p}{fn_p}{g_p}print(g())\n"),
-            Expect::Prints("B4".into()),
+            Expect::Rejects("is already defined"),
         ),
         (
             "swap/fn_last/call",
             format!("{p}{g_p}{fn_p}print(g())\n"),
-            Expect::Prints("B4".into()),
+            Expect::Rejects("is already defined"),
         ),
         // A whole-module import and a same-module type may not share a name, in either order;
         // the enum comes first in both, so the error names it.
@@ -722,8 +749,8 @@ fn order_cells() -> Vec<Cell> {
         ),
         (
             "toplevel/enum_field_above_let",
-            format!("{ORDER_PRE}print(E.A)\nE := V(4)\nprint(E.A)\n"),
-            Expect::Prints("A\n4".into()),
+            format!("enum E:\n    A\n{ORDER_PRE}print(E.A)\nE := V(4)\nprint(E.A)\n"),
+            Expect::Rejects("is already defined"),
         ),
         (
             "order/after/closure/ord_call",
@@ -805,9 +832,9 @@ fn t187_cells() -> Vec<Cell> {
             Expect::Prints("a".into()),
         ),
         with_lib(
-            "t187/from_import/alias_with_fn_twin",
-            "import Q from lib\nq: Q = Q(\"ab\")\nprint(q.s.len())\n",
-            "struct P:\n    s: str\ntype Q = P\nfn Q(s: str) -> P:\n    return P(s)\n",
+            "t187/from_import/alias_ctor",
+            "import Q from lib\nq: Q = Q(s=\"ab\")\nprint(q.s.len())\n",
+            "struct P:\n    s: str\ntype Q = P\n",
             Expect::Prints("2".into()),
         ),
         one(

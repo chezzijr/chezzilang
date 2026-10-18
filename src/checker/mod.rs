@@ -77,8 +77,8 @@ pub(super) struct ImportedVariant {
     /// The enum's head, as `bare_type_head` answered it at the import (DEC-204).
     head: setup::TypeHead,
     variant: String,
-    /// Bound by the prelude (`Some` / `None` / `Ok` / `Err`): a declaration may shadow it, and an
-    /// explicit import may not rebind it.
+    /// Bound by the prelude (`Some` / `None` / `Ok` / `Err`): a declaration or an import in a user
+    /// module shadows it, as a builtin.
     prelude: bool,
 }
 
@@ -893,11 +893,6 @@ struct Checker {
     /// this concrete binding never fires for it. Saved/restored via `mem::replace` at the method-sig
     /// hoist sites and at `infer_inline_fn_ret`/`check_fn_body` entry (from their `self_ty` argument).
     current_self_ty: Option<Ty>,
-    /// `Some(key)` while checking the body of a module-level `fn` whose name equals a struct
-    /// declared in the same module (TICKET-029) — `key` is that struct's runtime key. There, and
-    /// only there, the bare struct name is the RAW field constructor rather than a recursive call to
-    /// this fn. Every other body inherits the flag (closures/nested fns), like `current_self_ty`.
-    raw_ctor_owner: Option<String>,
     /// `Some(T)` while checking a generator function body whose declared return is `Iterator[T]` —
     /// the element type each `yield` must produce. `None` outside a generator, so a stray `yield`
     /// is diagnosed. Saved/restored across nested fn/closure boundaries like `current_ret`.
@@ -995,19 +990,16 @@ struct Checker {
     /// only `c`. Read only by the diagnostics for a full path that does not resolve (`a.b.X` after an
     /// aliased import, or naming an unimported module); never a binding itself.
     import_paths: Vec<(Vec<String>, String, bool)>,
-    /// Un-aliased dotted import's bound name (its last segment) → its dotted path, first wins
-    /// (TICKET-175). Detects a second un-aliased import that binds the same last segment.
-    implicit_binds: HashMap<String, String>,
     /// A bare name two un-aliased imports both bind (`import a.math` + `import b.math`) → the two
     /// dotted paths (TICKET-175). The name is unbound; a use of it reports the ambiguity, and both
     /// full paths stay usable.
     ambiguous_binds: HashMap<String, (String, String)>,
+    /// The module imports that bind no bare name (TICKET-175), keyed by statement span and bound
+    /// name. `decide_bare_imports` writes it; `collect_module_globals` and `bind_import` read it.
+    nameless_imports: std::collections::HashSet<(Span, String)>,
     /// Every name an `import`/`import … from` binds in the *current* module → the span of its first
-    /// import, across ALL import namespaces (values, functions, modules, type-names). Used to reject
-    /// a SECOND import binding the same name (`import f from lib` + `import f from lib2`, or
-    /// value-then-fn `import v` + `import v`), which the separate namespace tables otherwise let pass
-    /// last-wins (and which makes the checker and runtime disagree on the binding). Per-module:
-    /// cleared in `begin_module`.
+    /// import. The registry keeps the first import's span for messages; `GlobalBinding::clashes`
+    /// reports a second import. Per-module: cleared in `begin_module`.
     import_binds: HashMap<String, Span>,
     /// Type names `from`-imported into the *current* module that resolve to an aliased `Ty`
     /// (`import Len from m` where `m` declares `type Len = int32`). Resolved in the DEFINING module's
@@ -1203,10 +1195,6 @@ struct Checker {
     /// `S`), and a std module binds the builtins it owns. A name outside it is not a builtin here.
     /// Per-module: cleared in `begin_module`.
     builtin_binds: HashMap<String, String>,
-    /// Names bound by the import no one wrote (`Range`, from `Span::NOWHERE`). A same-module `fn`
-    /// of such a name would sit beside the struct constructor. Per-module: cleared in
-    /// `begin_module`.
-    implicit_import_names: std::collections::HashSet<String>,
     /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
     current_module_label: Option<String>,
     /// How many enclosing `for`/`while` loops we're inside *within the current function body*.

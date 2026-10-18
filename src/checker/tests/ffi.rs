@@ -1346,13 +1346,22 @@ fn extern_duplicate_name_rejected() {
 }
 
 #[test]
-fn extern_named_after_struct_is_the_value_beside_the_type() {
-    // A struct is a type and an extern fn is a value: the two namespaces hold one each, and a call
-    // reaches the value, as a module `fn S` beside `struct S` does (TICKET-029). Both decl orders,
-    // on the single-module and the graph path (which keys `self.structs` module-scoped).
-    ok("extern \"libc.so.6\":\n    fn S(x: int) -> int\n\nstruct S:\n    a: int\n");
-    entry_ok("extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n\nstruct strlen:\n    s: str\n");
-    entry_ok("struct S:\n    a: int\n\nextern \"libc.so.6\":\n    fn S(x: int) -> int\n");
+fn extern_named_after_struct_is_bound_twice() {
+    // A struct is a type and an extern fn is a value, and a module binds a name once, as a module
+    // `fn S` beside `struct S` is bound twice. Both decl orders, on the single-module and the graph
+    // path (which keys `self.structs` module-scoped).
+    rejects(
+        "extern \"libc.so.6\":\n    fn S(x: int) -> int\n\nstruct S:\n    a: int\n",
+        "is already defined",
+    );
+    entry_rejects(
+        "extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n\nstruct strlen:\n    s: str\n",
+        "is already defined",
+    );
+    entry_rejects(
+        "struct S:\n    a: int\n\nextern \"libc.so.6\":\n    fn S(x: int) -> int\n",
+        "is already defined",
+    );
 }
 
 #[test]
@@ -1366,10 +1375,13 @@ fn extern_named_after_unimported_native_struct_ok() {
 }
 
 #[test]
-fn extern_named_after_imported_native_struct_ok() {
-    // An imported native struct binds the type namespace only, so an extern of its name is the
-    // value beside it, as a `fn` of that name is.
-    entry_ok("import Match from std.regex\n\nextern \"libc.so.6\":\n    fn Match(x: int) -> int\n");
+fn extern_named_after_imported_native_struct_is_bound_twice() {
+    // An imported native struct binds its name, so an extern of that name is a second binding, as a
+    // `fn` of that name is.
+    entry_rejects(
+        "import Match from std.regex\n\nextern \"libc.so.6\":\n    fn Match(x: int) -> int\n",
+        "is already imported",
+    );
 }
 
 #[test]
@@ -1392,11 +1404,13 @@ fn extern_named_after_result_option_type_ok() {
 }
 
 #[test]
-fn extern_named_after_enum_type_ok() {
-    // An enum TYPE name is NOT callable in either backend (only its variants are), so an extern
-    // sharing the enum's type name is reachable and must be ACCEPTED — symmetric with a plain
-    // `fn Tree` alongside `enum Tree`. Only struct names and variant names are real collisions.
-    ok("extern \"libc.so.6\":\n    fn Tree(x: int) -> int\n\nenum Tree:\n    Leaf\n    Node\n");
+fn extern_named_after_enum_type_is_bound_twice() {
+    // An enum type binds its name, so an extern sharing it is a second binding, symmetric with a
+    // plain `fn Tree` alongside `enum Tree`.
+    rejects(
+        "extern \"libc.so.6\":\n    fn Tree(x: int) -> int\n\nenum Tree:\n    Leaf\n    Node\n",
+        "is already defined",
+    );
 }
 
 #[test]

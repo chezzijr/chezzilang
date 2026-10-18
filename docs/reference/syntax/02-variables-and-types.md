@@ -132,10 +132,10 @@ These never warn:
 #### Declaring one name twice at module level
 
 A module binds each name once, as Go (`x redeclared in this block`) and Rust (E0428, E0255) do. A
-top-level `:=` or typed let declares; `=` reassigns. A module has two namespaces, as in Rust: a
-**type** (`struct`, `enum`, `type`, `protocol`) and a **value** (`fn`, `extern` fn, `:=`). A type and a
-value of one name coexist, and a call reaches the value (a module `fn S` beside `struct S` is its
-constructor, see §7a). A second declaration in a taken namespace is an error, in either source order:
+top-level `:=` or typed let declares; `=` reassigns. A type (`struct`, `enum`, `type`, `protocol`)
+and a value (`fn`, `extern` fn, `:=`, an import) never share a name (owner 2026-10-16; Rust: E0428
+for a callable type). A second declaration of a name is an error, in either source order. A
+constructor with logic is a static `S.new(...)` (§7a):
 
 ```chezzi
 x := 1
@@ -149,8 +149,8 @@ fn f():
 
 | prior binding | `fn` / `extern` fn / `:=` | `struct` / `enum` / `type` / `protocol` |
 |---|---|---|
-| fn, extern fn, top-level `:=`, value import | ✗ already defined / imported | ✓ both live |
-| type, type import | ✓ both live (an expression reads the value) | ✗ already defined / imported |
+| fn, extern fn, top-level `:=`, value import | ✗ already defined / imported | ✗ already defined / imported |
+| type, type import | ✗ already defined / imported | ✗ already defined / imported |
 | whole-module or variant import | ✗ already imported | ✗ already imported |
 | builtin (`ord`, `str`) | ✓ shadows | ✓ shadows |
 

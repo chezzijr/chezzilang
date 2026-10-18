@@ -228,7 +228,7 @@ fn named_fn_import_factory_struct_method_runtime() {
 }
 
 /// TICKET-023: a named import of a PROTOCOL binds at runtime. `golden_file_entry` runs no checker,
-/// so this pins the `program.type_names` half: without it `Vm::bind_import` faults "module 'shapes'
+/// so this pins the slot-list half (a type member holds no slot): without it `Vm::bind_import` faults "module 'shapes'
 /// has no member 'Drawable'" trying to bind a runtime global for a name with no runtime value.
 #[test]
 fn protocol_named_import_binds_at_runtime() {

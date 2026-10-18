@@ -219,6 +219,7 @@ fn module_export_grid() {
     const LET_F: &str = "f := fn(b: int, a: int) -> str: \"{a}{b}\"\n";
     const VF: &str = "fn f(a: int, ...rest: int) -> str:\n    return \"{a}\"\nf := fn(a: int, b: int) -> str: \"{a}{b}\"\n";
     const GF: &str = "fn idt[T](x: T) -> T:\n    return x\nidt := fn(x: int) -> int: x + 1\n";
+    const ST: &str = "struct S:\n    n: int\n";
     const SF: &str = "struct S:\n    n: int\nfn S(n: int) -> int:\n    return n\n";
     const SL: &str = "struct S:\n    n: int\nS := fn(n: int) -> int: n * 100\n";
     const SN: &str = "struct S:\n    n: int\nS := 5\n";
@@ -248,10 +249,13 @@ fn module_export_grid() {
         ("struct_fn_then_let", format!("{SF}S := fn(m: int) -> int: m * 100\n"), "import lib\nprint(lib.S(2))\n".into(), Some(DUP)),
         ("witness_then_let", format!("{WL}mk := fn(x: N) -> N: N(v=1)\n"), "import lib\nprint(lib.N(v=5).v)\n".into(), Some(DUP)),
         ("write_fn_then_let", format!("{WF}w := fn(xs: List[int], out: Channel[int]): out.send(xs.len())\n"), par("import lib", "spawn lib.w(xs, out)"), Some(DUP)),
-        // A type and a value of one name: the value is the slot.
-        ("struct_fn_qualified_kw", SF.into(), "import lib\nprint(lib.S(n=2))\n".into(), None),
-        ("struct_let_fn_calls_slot", SL.into(), "import lib\nx: int = lib.S(2)\nprint(x)\n".into(), None),
-        ("struct_let_int_keeps_ctor", SN.into(), "import lib\nprint(lib.S(2))\n".into(), None),
+        // A type and a value of one name are a second binding, rejected at home.
+        ("struct_fn_qualified_kw", SF.into(), "import lib\nprint(lib.S(n=2))\n".into(), Some(DUP)),
+        ("struct_let_fn_calls_slot", SL.into(), "import lib\nx: int = lib.S(2)\nprint(x)\n".into(), Some(DUP)),
+        ("struct_let_int_keeps_ctor", SN.into(), "import lib\nprint(lib.S(2))\n".into(), Some(DUP)),
+        // A type alone is the qualified constructor.
+        ("struct_qualified_ctor", ST.into(), "import lib\nprint(lib.S(n=2).n)\n".into(), None),
+        ("alias_qualified_ctor", format!("{ST}type Q = S\n"), "import lib\nprint(lib.Q(n=3).n)\n".into(), None),
         ("let_only_closure_qualified_kw", LO.into(), "import lib\nprint(lib.g(a=1, b=2))\n".into(), Some(VAL)),
         // An imported name is bound once in the importer too.
         ("const_from_import_colon_eq", CO.into(), "import Y from lib\nY := 7\nprint(Y)\n".into(), Some(IMP)),
@@ -2041,21 +2045,22 @@ fn enum_ty_and_as_enum_are_inverse_on_every_enum_shape() {
     assert!(Ty::list(Ty::Int).as_enum().is_none());
 }
 
-/// A type-only import holds no value slot, so a module `fn` of its name is that slot's one
-/// declaration, as a same-module `struct S` + `fn S` is: keyword calls bind the fn's labels, from a
-/// body too, and a call in a `spawn:` block carries the fn's write summary. (The slot was counted as
-/// declared twice before, which denied the keyword call as "reassigned" and left the spawned write
-/// to a runtime fault.)
+/// A type-only import and a module `fn` of its name bind the name twice: the import holds the
+/// type, the `fn` holds the slot, and a module binds a name once (Go: `S redeclared in this
+/// block`). The one rule is `GlobalBinding::clashes`.
 #[test]
-fn a_type_import_beside_a_fn_holds_no_slot() {
+fn a_type_import_beside_a_fn_is_bound_twice() {
     let lib = ("lib.chz", "struct S:\n    v: int\n");
-    files_ok(&[
-        lib,
-        (
-            "main.chz",
-            "import S from lib\nfn S(a: int, b: int) -> str:\n    return \"{a}{b}\"\nfn g() -> str:\n    return S(b=1, a=2)\nprint(g())\nprint(S(b=3, a=4))\n",
-        ),
-    ]);
+    files_reject(
+        &[
+            lib,
+            (
+                "main.chz",
+                "import S from lib\nfn S(a: int, b: int) -> str:\n    return \"{a}{b}\"\nfn g() -> str:\n    return S(b=1, a=2)\nprint(g())\nprint(S(b=3, a=4))\n",
+            ),
+        ],
+        "'S' is already imported",
+    );
     files_reject(
         &[
             lib,
@@ -2064,7 +2069,7 @@ fn a_type_import_beside_a_fn_holds_no_slot() {
                 "import S from lib\nxs := [0]\nfn S(a: int, b: int = 9) -> int:\n    xs.push(a)\n    return a\nfn main():\n    spawn:\n        print(S(8))\nmain()\n",
             ),
         ],
-        "'xs' is this task's copy",
+        "'S' is already imported",
     );
 }
 
@@ -2094,8 +2099,60 @@ fn a_type_import_and_a_later_value_bind_the_name_twice() {
                 "import Count from lib2\nfn g() -> int:\n    return Count(3)\nprint(g())\nCount := fn(n: int) -> int: n * 10\n",
             ),
         ],
-        "'Count' is already defined",
+        "'Count' is already imported",
     );
+}
+
+/// A second import of one name is one error, not one per pass over the import. Two modules that
+/// share a last segment are legal, and a bare read of that segment is ambiguous (TICKET-175,
+/// `docs/reference/syntax/16-imports.md`).
+#[test]
+fn a_second_import_of_a_name_is_reported_once() {
+    let count = |files: &[(&str, &str)], needle: &str| {
+        check_files(files)
+            .iter()
+            .filter(|e| e.message.contains(needle))
+            .count()
+    };
+    assert_eq!(
+        count(
+            &[
+                ("lib.chz", "fn f() -> int:\n    return 1\n"),
+                ("lib2.chz", "fn f() -> int:\n    return 2\n"),
+                (
+                    "main.chz",
+                    "import f from lib\nimport f from lib2\nprint(f())\n"
+                ),
+            ],
+            "'f' is already imported",
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &[
+                ("a/math.chz", "X := 1\n"),
+                ("main.chz", "import a.math\nimport a.math\nprint(math.X)\n"),
+            ],
+            "'math' is already imported",
+        ),
+        1
+    );
+    let both = [
+        ("a/math.chz", "X := 1\n"),
+        ("b/math.chz", "X := 2\n"),
+        (
+            "main.chz",
+            "import a.math\nimport b.math\nprint(a.math.X)\nprint(b.math.X)\n",
+        ),
+    ];
+    assert!(check_files(&both).is_empty(), "{:?}", check_files(&both));
+    let bare = [
+        ("a/math.chz", "X := 1\n"),
+        ("b/math.chz", "X := 2\n"),
+        ("main.chz", "import a.math\nimport b.math\nprint(math.X)\n"),
+    ];
+    assert_eq!(count(&bare, "'math' is ambiguous"), 1);
 }
 
 /// A local lambda reaches its own binding, as the top-level one does.

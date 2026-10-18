@@ -6,10 +6,10 @@ struct P:
 
 type Q = P
 
-fn Q(s: str) -> P:
+fn q_of(s: str) -> P:
     if s == "":
         return P(0)
-    return Q(s[1..])
+    return q_of(s[1..])
 
 fn local_shadows_builtin() -> int:
     ord := fn(s: str) -> int: 1000
@@ -24,5 +24,8 @@ test fn local_closure_shadows_builtin_ord():
 test fn param_shadows_struct_ctor():
     assert param_shadows_struct(fn(n: int) -> str: "v" + str(n)) == "v4"
 
-test fn fn_shadows_type_alias_ctor():
-    assert Q("abc").x == 0
+test fn fn_beside_a_type_alias_is_a_fn():
+    assert q_of("abc").x == 0
+
+test fn type_alias_is_the_ctor():
+    assert Q(x=3).x == 3

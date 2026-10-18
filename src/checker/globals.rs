@@ -15,49 +15,21 @@ pub(super) enum DeclKind {
     /// An `extern` fn or a `native` decl.
     Hoisted,
     /// A `struct`, `enum`, `type` or `protocol` (the word its "already defined" message names).
-    /// It binds the type namespace only, so it holds no slot.
+    /// It binds the module name; it holds no slot.
     Type(&'static str),
 }
 
 /// What an importer knows about the home slot of a from-imported name (TICKET-196), read from the
-/// home module's `MemberSig`, and which namespaces the import binds.
+/// home module's `MemberSig`: whether the import holds a slot, and whether it is a constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct ImportFacts {
     pub(super) is_const: bool,
-    /// It binds a value: a fn, a let, a variant, a module, or a name the home sig does not type.
+    /// It holds a slot: a fn, a let, a module, or a name the home sig does not type. A type-only
+    /// import holds none.
     pub(super) value: bool,
-    /// It binds a type: a struct, enum, alias or protocol, a module, or a name the home sig does
-    /// not type.
-    pub(super) ty: bool,
-}
-
-/// The two namespaces of a module (Rust's): a type and a value of one name coexist, and a call
-/// reaches the value (TICKET-029: `fn Path` beside `struct Path` is its constructor).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Namespace {
-    Value,
-    Type,
 }
 
 impl DeclKind {
-    /// Does this declaration bind `ns`?
-    fn declares(self, ns: Namespace) -> bool {
-        match (self, ns) {
-            (
-                DeclKind::Let | DeclKind::ConstLet | DeclKind::Fn | DeclKind::Hoisted,
-                Namespace::Value,
-            ) => true,
-            (DeclKind::Type(_), Namespace::Type) => true,
-            (DeclKind::Import(f), Namespace::Value) => f.value,
-            (DeclKind::Import(f), Namespace::Type) => f.ty,
-            (
-                DeclKind::Let | DeclKind::ConstLet | DeclKind::Fn | DeclKind::Hoisted,
-                Namespace::Type,
-            )
-            | (DeclKind::Type(_), Namespace::Value) => false,
-        }
-    }
-
     /// The word of a "`<word>` '`<name>`' is already defined" message.
     fn word(self) -> &'static str {
         match self {
@@ -81,8 +53,8 @@ pub(super) struct GlobalBinding {
     /// Every top-level declaration of the name's slot, in source order, with its statement span
     /// and the span of the name itself (a destructure's element; `clashes` points at it).
     pub(super) decls: Vec<(DeclKind, Span, Span)>,
-    /// Every top-level `struct`/`enum`/`type`/`protocol` of the name. A type holds no slot, so
-    /// only `clashes` reads these.
+    /// Every top-level `struct`/`enum`/`type`/`protocol` of the name, and every type-only import.
+    /// None holds a slot, so only `clashes` reads these.
     pub(super) types: Vec<(DeclKind, Span, Span)>,
     /// `seed_module_globals` typed it before any body was walked (TICKET-183).
     pub(super) seeded: bool,
@@ -132,12 +104,13 @@ impl GlobalBinding {
             .find(|(k, _, _)| matches!(k, DeclKind::Let | DeclKind::ConstLet))
             .map(|(_, s, _)| *s)
     }
-    /// The one "already defined" rule for a module's top level, per namespace: a name is bound
-    /// once (Go: `x redeclared in this block`; Rust: E0428 / E0255, and a `static` twice is E0428),
-    /// so a second declaration in a namespace a prior one binds is an error at the later of the
-    /// two. A top-level `:=` is a declaration; `=` reassigns. Two imports are `note_import_bind`'s
-    /// ("is already imported"); an import no one wrote (`Span::NOWHERE`, the prelude's) is shadowed
-    /// like a builtin. A name repeated in one target is a parse error (`reject_repeated_binders`).
+    /// The one "already defined" rule for a module's top level: a module binds each name once (Go:
+    /// `x redeclared in this block`; Rust: E0428 / E0255), so a second declaration of a name is an
+    /// error at the later of the two, whatever the two are: a type and a value never share a name
+    /// either, because Chezzi calls a type name. Two imports are a pair like any other. A top-level
+    /// `:=` is a declaration; `=` reassigns. A name repeated in one target is a parse error
+    /// (`reject_repeated_binders`). The prelude's `Range` import is a `ResolvedImport`, never a
+    /// statement, so it never enters this list.
     fn clashes(&self, name: &str) -> Vec<(Span, String)> {
         let mut all: Vec<(DeclKind, Span)> = self
             .decls
@@ -146,27 +119,23 @@ impl GlobalBinding {
             .map(|&(kind, _, at)| (kind, at))
             .collect();
         all.sort_by_key(|(_, s)| (s.line, s.col));
-        let mut out = Vec::new();
-        for ns in [Namespace::Value, Namespace::Type] {
-            let mut prior: Option<DeclKind> = None;
-            for &(kind, span) in &all {
-                if !kind.declares(ns) || span.is_nowhere() {
-                    continue;
-                }
-                let Some(first) = prior else {
-                    prior = Some(kind);
-                    continue;
-                };
-                // The message names the PRIOR binding: the one this declaration collides with.
-                let msg = match (first, kind) {
-                    (DeclKind::Import(_), DeclKind::Import(_)) => continue,
-                    (DeclKind::Import(_), _) => format!("'{name}' is already imported"),
-                    _ => format!("{} '{name}' is already defined", first.word()),
-                };
-                out.push((span, msg));
-            }
-        }
-        out
+        let mut all = all.into_iter();
+        let Some((first, _)) = all.next() else {
+            return Vec::new();
+        };
+        // The message names the FIRST binding: the one every later declaration collides with.
+        all.map(|(_, span)| {
+            let msg = match first {
+                DeclKind::Import(_) => format!("'{name}' is already imported"),
+                DeclKind::Let
+                | DeclKind::ConstLet
+                | DeclKind::Fn
+                | DeclKind::Hoisted
+                | DeclKind::Type(_) => format!("{} '{name}' is already defined", first.word()),
+            };
+            (span, msg)
+        })
+        .collect()
     }
 
     /// Seeded, and the walk has not reached its first let: hidden from top-level statements.
@@ -179,13 +148,19 @@ impl Checker {
     /// Build `self.globals` from the module's top-level statements, in source order.
     /// `imports` pairs each from-import with its home module, whose sig is already in
     /// `module_sigs` (dependencies are checked first).
-    pub(super) fn collect_module_globals(&mut self, stmts: &[Stmt], imports: &[ResolvedImport]) {
+    pub(super) fn collect_module_globals(
+        &mut self,
+        stmts: &[Stmt],
+        imports: &[ResolvedImport],
+        binds: &[(String, crate::resolver::GlobalSource)],
+    ) {
         self.globals.clear();
+        self.decide_bare_imports(imports);
         for s in stmts {
             let mut add = |name: &str, kind: DeclKind, span: Span, at: Span| {
                 if !crate::ast::is_blank_name(name) {
                     let g = self.globals.entry(name.to_string()).or_default();
-                    // A type-only import binds no slot, so it sits with the types.
+                    // A type-only import holds no slot, so it sits with the types.
                     let list = match kind {
                         DeclKind::Type(_) => &mut g.types,
                         DeclKind::Import(f) if !f.value => &mut g.types,
@@ -216,41 +191,59 @@ impl Checker {
                     let name = alias
                         .clone()
                         .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                    let facts = ImportFacts {
-                        value: true,
-                        ty: true,
-                        ..ImportFacts::default()
-                    };
-                    add(&name, DeclKind::Import(facts), s.span, s.span);
+                    // An import that binds no bare name (TICKET-175) makes no pair.
+                    if !self.nameless_imports.contains(&(s.span, name.clone())) {
+                        let facts = ImportFacts {
+                            value: true,
+                            ..ImportFacts::default()
+                        };
+                        add(&name, DeclKind::Import(facts), s.span, s.span);
+                    }
                 }
-                StmtKind::Import(Import::From { names, .. }) => {
-                    let home = imports
+                StmtKind::Import(Import::From { path, names, .. }) => {
+                    let resolved: Vec<&ResolvedImport> =
+                        imports.iter().filter(|ri| ri.span == s.span).collect();
+                    // `import n1, n2 from std` is a module import per name, as the resolver expanded
+                    // it (`expand_std_namespace`), and one it dropped as a twin of a plain
+                    // `import std.n` makes no pair.
+                    let modules: Vec<&String> = resolved
                         .iter()
-                        .find(|ri| ri.span == s.span)
+                        .filter_map(|ri| match &ri.import {
+                            Import::Module { alias, .. } => alias.as_ref(),
+                            Import::From { .. } | Import::Variants { .. } => None,
+                        })
+                        .collect();
+                    if crate::resolver::is_std_namespace_from(path) {
+                        for bound in modules {
+                            let facts = ImportFacts {
+                                value: true,
+                                ..ImportFacts::default()
+                            };
+                            add(bound, DeclKind::Import(facts), s.span, s.span);
+                        }
+                        continue;
+                    }
+                    let home = resolved
+                        .first()
                         .and_then(|ri| self.module_sigs.get(&ri.target));
                     for (member, alias) in names {
                         let slot = home.and_then(|sig| sig.member(member));
-                        let is_type = home.is_some_and(|sig| sig.types.contains(member));
+                        let bound = alias.as_ref().unwrap_or(member);
                         let facts = ImportFacts {
                             is_const: slot.is_some_and(|m| m.is_const),
-                            value: slot.is_some() || !is_type,
-                            ty: is_type || slot.is_none(),
+                            value: binds.iter().any(|(n, src)| {
+                                n == bound && matches!(src, crate::resolver::GlobalSource::Import)
+                            }),
                         };
-                        add(
-                            alias.as_ref().unwrap_or(member),
-                            DeclKind::Import(facts),
-                            s.span,
-                            s.span,
-                        );
+                        add(bound, DeclKind::Import(facts), s.span, s.span);
                     }
                 }
-                // A variant is a value and a constructor head, so it binds both namespaces (Rust
-                // E0255 for `use E::Red;` + `struct Red;`). It is a constant: `Red = …` is rejected.
+                // A variant binds the module name once (Rust E0255 for `use E::Red;` + `struct Red;`).
+                // It is a constant: `Red = …` is rejected.
                 StmtKind::Import(Import::Variants { names, .. }) => {
                     let facts = ImportFacts {
                         is_const: true,
                         value: true,
-                        ty: true,
                     };
                     for (member, alias) in names {
                         add(
@@ -266,10 +259,20 @@ impl Checker {
                         add(&f.name, DeclKind::Hoisted, f.span, f.span);
                     }
                 }
-                StmtKind::Native(d) => add(&d.name, DeclKind::Hoisted, s.span, s.span),
+                // A `native ctor` is the call of the builtin type it names, uniform with a struct's
+                // ctor (`NativeKind` doc), so it binds no second name: the prelude's `native ctor
+                // str` and `native struct str` are one binding. The resolver gives it no slot for
+                // the same reason (`native_members`).
+                StmtKind::Native(d) => match d.kind {
+                    crate::ast::NativeKind::Fn => add(&d.name, DeclKind::Hoisted, s.span, s.span),
+                    crate::ast::NativeKind::Ctor => {}
+                },
                 StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
-                | StmtKind::TypeAlias { name, .. } => {
+                | StmtKind::TypeAlias { name, .. }
+                | StmtKind::NativeStruct { name, .. }
+                | StmtKind::NativeEnum { name, .. }
+                | StmtKind::NativeType { name, .. } => {
                     add(name, DeclKind::Type("type"), s.span, s.span)
                 }
                 StmtKind::Protocol { name, .. } => {
@@ -289,9 +292,6 @@ impl Checker {
                 | StmtKind::Break
                 | StmtKind::Continue
                 | StmtKind::Pass
-                | StmtKind::NativeStruct { .. }
-                | StmtKind::NativeEnum { .. }
-                | StmtKind::NativeType { .. }
                 | StmtKind::Assert { .. }
                 | StmtKind::Expr(_) => {}
             }

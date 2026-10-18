@@ -115,7 +115,7 @@ pub fn check_diags_with(
         // the eight migrated universe-builtin signatures from it directly (graph path hoists them
         // normally).
         c.seed_native_prelude_sigs();
-        c.check_module(&module.stmts, None, &[]);
+        c.check_module(&module.stmts, None, &[], &[]);
         c.check_provider_cycles();
         let (res, warnings) = c.finish_diags();
         (res, warnings, c.fn_body_checks, c.index_value_checks)

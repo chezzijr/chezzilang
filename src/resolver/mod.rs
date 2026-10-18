@@ -311,13 +311,14 @@ pub enum GlobalSource {
 /// THE one list of the names a module binds as run-time globals, in slot order: imports (the alias,
 /// else the last path segment or the member), then in source order each top-level `fn`, each injected
 /// `native fn` of a hybrid native module (`native` names the module), each `extern` fn, then every
-/// top-level `let` binder. A name can appear more than once (a `let` rebinding a fn); its slot is its
-/// first appearance. The compiler builds its slot table from this list, and the checker asks it
-/// whether the entry module binds a name (TICKET-150).
+/// top-level `let` binder. A module binds each name once (`GlobalBinding::clashes`); a `from` member
+/// is listed exactly when its home module lists it (`holds_slot`, answered by
+/// [`graph_global_binds`]). The compiler, the checker and `Vm::bind_import` read this list.
 pub fn module_global_binds(
     imports: &[ResolvedImport],
     stmts: &[crate::ast::Stmt],
     native: Option<&str>,
+    holds_slot: &dyn Fn(&ResolvedImport, &str) -> bool,
 ) -> Vec<(String, GlobalSource)> {
     let mut out = Vec::new();
     for imp in imports {
@@ -332,6 +333,9 @@ pub fn module_global_binds(
             Import::Variants { .. } => {}
             Import::From { names, .. } => {
                 for (member, alias) in names {
+                    if !holds_slot(imp, member) {
+                        continue;
+                    }
                     out.push((
                         alias.clone().unwrap_or_else(|| member.clone()),
                         GlobalSource::Import,
@@ -372,6 +376,31 @@ pub fn module_global_binds(
                 ));
             }
         }
+    }
+    out
+}
+
+/// The slot list of every module of `graph`, in `graph.modules` order (dependencies first, the entry
+/// last; an import cycle is a resolver error). A `from` member holds a slot exactly when its home
+/// module's list holds it, so a type-only import holds none.
+pub fn graph_global_binds(graph: &ModuleGraph) -> Vec<Vec<(String, GlobalSource)>> {
+    let mut out: Vec<Vec<(String, GlobalSource)>> = Vec::with_capacity(graph.modules.len());
+    for (i, lm) in graph.modules.iter().enumerate() {
+        let binds = {
+            let holds = |imp: &ResolvedImport, member: &str| -> bool {
+                let t = graph
+                    .modules
+                    .iter()
+                    .position(|m| m.id == imp.target)
+                    .expect("an import targets a graph module");
+                let Some(home) = out.get(t) else {
+                    unreachable!("graph modules are deps first: module {t} is not below module {i}")
+                };
+                home.iter().any(|(n, _)| n == member)
+            };
+            module_global_binds(&lm.imports, &lm.ast.stmts, lm.native, &holds)
+        };
+        out.push(binds);
     }
     out
 }
@@ -1334,6 +1363,12 @@ fn full_path_import(import: &Import) -> Option<Import> {
     }
 }
 
+/// Is `path` the `std` of `import n1, n2 from std`? That form names modules, so
+/// [`expand_std_namespace`] turns each name into a module import.
+pub fn is_std_namespace_from(path: &[String]) -> bool {
+    path.len() == 1 && path[0] == "std"
+}
+
 /// Expand `import n1, n2 as a from std` into one `import std.<n> as <bound>` per name (TICKET-175):
 /// `std` is a namespace of modules, so each name is a module, as in Python's `from os import path`.
 /// The full path `std.<n>` is NOT bound. An expanded entry that binds its member under its own name
@@ -1357,7 +1392,7 @@ fn expand_std_namespace(imports: Vec<(Import, Span)>) -> Vec<(Import, Span)> {
                 path,
                 names,
                 name_spans,
-            } if path.len() == 1 && path[0] == "std" => {
+            } if is_std_namespace_from(&path) => {
                 for (i, (member, alias)) in names.into_iter().enumerate() {
                     let bound = alias.unwrap_or_else(|| member.clone());
                     if bound == member && plain.remove(&member) {
@@ -2176,6 +2211,38 @@ mod tests {
                     lm.file
                 );
             }
+        }
+    }
+
+    // A `from` member holds a slot exactly when its home module lists it: a type holds none.
+    #[test]
+    fn a_type_only_from_import_holds_no_slot() {
+        let t = TmpDir::new();
+        let main = t.write(
+            "main.chz",
+            "import v, f, abs, S, E, Pr, Count, Deep, deepf from lib2\nimport exit from std.os\nimport Match from std.regex\nimport pi from std.math\nprint(1)\n",
+        );
+        t.write(
+            "lib2.chz",
+            "import Deep, deepf from lib3\nv := 1\nfn f() -> int:\n    return 1\nextern \"libc.so.6\":\n    fn abs(x: int) -> int\nstruct S:\n    a: int\nenum E:\n    A\nprotocol Pr:\n    fn p(self) -> int\ntype Count = int\n",
+        );
+        t.write(
+            "lib3.chz",
+            "type Deep = int\nfn deepf() -> int:\n    return 1\n",
+        );
+        let graph = build_graph(&main).expect("build");
+        let binds = graph_global_binds(&graph);
+        let entry = graph
+            .modules
+            .iter()
+            .position(|m| m.id == graph.entry)
+            .expect("entry");
+        let names: Vec<&str> = binds[entry].iter().map(|(n, _)| n.as_str()).collect();
+        for held in ["v", "f", "abs", "deepf", "exit", "pi"] {
+            assert!(names.contains(&held), "{held} holds a slot: {names:?}");
+        }
+        for typed in ["S", "E", "Pr", "Count", "Deep", "Match"] {
+            assert!(!names.contains(&typed), "{typed} holds no slot: {names:?}");
         }
     }
 }

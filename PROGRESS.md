@@ -65,7 +65,7 @@ lists each remaining copy as DUPLICATE.
 | 2 | one topic per file (byte-exact moves; `tests/source_layout.rs` guards size and topic lines) | done 2026-10-15 |
 | 3 | one owner per fact: facts 1-9 (blank name, places, `self`, type-application head, operator hooks, pattern names, reserved names, std module members, type keys) | done 2026-10-16 |
 | 3, fact 8 step 2 | builtin dispatch by an id (`enum Builtin` in `base/builtin.rs`) | done 2026-10-16 |
-| 3, names | one redeclaration rule per namespace; a module binds a name once | done 2026-10-16 |
+| 3, names | one redeclaration rule; a module binds each name once, a type and a value never sharing it (TICKET-263) | done 2026-10-18 |
 | 5 | workspace crates: `chezzi-syntax`, `chezzi-native`, `chezzi-base`, `chezzi-front`, `chezzi-vm` | done 2026-10-16 |
 | docs | docs split into `reference/`, `design/`, `contributing/`, `history/` | in progress (branch `docs/refactor`) |
 

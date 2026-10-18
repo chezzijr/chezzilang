@@ -7,7 +7,10 @@ test fn a_let_slot_runs_its_closure():
     assert f(1, 2) == "12"
 
 test fn a_value_beside_a_struct_is_the_call():
-    assert module_export_slot_lib.S(2) == 200
+    assert module_export_slot_lib.S2(2) == 200
+
+test fn a_struct_is_the_qualified_ctor():
+    assert module_export_slot_lib.S(n=2).n == 2
 
 test fn single_fn_keeps_labels_and_defaults():
     assert module_export_slot_lib.g(b=2, a=1) == "12"

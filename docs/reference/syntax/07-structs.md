@@ -94,8 +94,9 @@ match Email.parse("a@b"):
     !m: print(m)
 ```
 
-**A module-level `fn` named after a struct in the same module replaces its positional constructor**
-(a static method is called `Type.method(...)`, never `Type(...)`):
+**`Type(...)` only sets the fields; a constructor with logic is a static method** (`Type.new(...)`,
+never a module `fn` of the type's name: a module binds each name once, a type included, so
+`fn Path` beside `struct Path` is `'Path' is already defined`):
 
 ```chezzi
 import PathLike from std.path
@@ -103,17 +104,14 @@ import PathLike from std.path
 struct Path:
     raw: bytes
 
-fn Path(p: PathLike) -> Path:      # module-level, same name as the struct
-    return Path(p.as_path())       # inside THIS body only, Path(...) is still the raw field ctor
+    fn new(p: PathLike) -> Path:   # static: called Path.new(...)
+        return Path(p.as_path())   # Path(...) sets the field
 
-p := Path("/a/b")                  # calls the fn, not the field ctor
+p := Path.new("/a/b")              # normalizes any PathLike
+q := Path(b"/a/b")                 # sets the field
 ```
 
-- The fn wins wherever it is in scope: bare in the declaring module, `import Path from m` then
-  `Path(args)`, `m.Path(args)`, and `path.Path(args)` after a whole-module import.
-- Inside the fn's own body the bare name is the raw field constructor (else the fn would recurse).
-- A nested fn named after a same-module struct shadows it only in its scope (§3); only a module-level
-  fn replaces the constructor.
+- A nested fn named after a same-module struct shadows it only in its scope (§3).
 
 **Enums** get static methods too (for example `from_str(s) -> Color?`). A variant and a static method
 may not share a name (a declaration-time error), so `Color.Red` is always the variant.

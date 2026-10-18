@@ -23,9 +23,8 @@ exceptions. Scripting feel and `None`: Python. The hidden-carrier surface: Zig (
 `E.A`) exactly one resolution (item + kind), memoised per node. A module fn is `Fn`, a type method
 `MethodFn`, a payload variant `VariantFn`. The call side, the value side and the compiler only read
 it, by a `match`. Only reject-only checks stay beside the match (a miss's message, the type-parameter
-shadow, a type-only native name). Position rule (`PathPos`): inside `fn P` of a module that declares
-`struct P`, the callee `P(..)` is the raw constructor and a value read of `P` is the fn, as Rust
-splits `P { x }` and `P` by namespace.
+shadow, a type-only native name). There is no position rule: a module binds each name once, so no
+`fn P` sits beside `struct P` (owner 2026-10-16, TICKET-263).
 
 **R2. One bracket node, one type grammar.** `[]` stays for type arguments (as in Go). `head[X]` is one
 node, `ExprKind::Index { obj, index, types }`, that carries both readings; `X` is parsed by the real
