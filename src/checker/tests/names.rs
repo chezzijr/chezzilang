@@ -2163,6 +2163,33 @@ fn a_second_import_of_a_name_is_reported_once() {
         ),
     ];
     assert_eq!(count(&repeated, "'math' is ambiguous"), 1);
+    // The ambiguous pair binds `math` once, under its first path, so a third binding of the name
+    // is a second binding (Go: `math redeclared in this block`).
+    for third in [
+        "math := 3\n",
+        "fn math() -> int:\n    return 7\n",
+        "struct math:\n    v: int\n",
+        "import math from std\n",
+    ] {
+        // In either order: the VM binds the bare segment of each module import, so an accepted
+        // pair would overwrite the third binding at run time.
+        for main in [
+            format!("import a.math\nimport b.math\n{third}print(1)\n"),
+            format!("{third}import a.math\nimport b.math\nprint(1)\n"),
+        ] {
+            let clash = [
+                ("a/math.chz", "X := 1\n"),
+                ("b/math.chz", "X := 2\n"),
+                ("main.chz", main.as_str()),
+            ];
+            assert_eq!(
+                count(&clash, "'math' is already "),
+                1,
+                "{main}: {:?}",
+                check_files(&clash)
+            );
+        }
+    }
 }
 
 /// A let's binder is not readable inside its own value, at any closure depth (owner 2026-10-18; Go

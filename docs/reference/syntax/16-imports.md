@@ -198,7 +198,9 @@ b := std.concurrency.Shared(0)    # Python reading: the full path of the same mo
 - **Shadowing.** A local, a parameter, a type parameter or any module-level name spelled like the path
   head hides the full path (as in Python).
 - **Same last segment.** `import a.math` plus `import b.math` is legal: `a.math.f()` and `b.math.f()`
-  work, and a bare `math.f()` is `'math' is ambiguous` with a hint to `import a.math as am`.
+  work, and a bare `math.f()` is `'math' is ambiguous` with a hint to `import a.math as am`. The pair
+  still binds the name `math` once, so a third binding (`math := 3`, `fn math`) is `'math' is already
+  imported`.
 - A **struct pattern** stays two-level: after `import pkg.deep`, write `deep.Point(x)` (or `Point(x)`
   after `import Point from pkg.deep`); `pkg.deep.Point(x)` is `struct patterns use two-level paths`.
 - **`import X from <package>`** works only for `std` (`import math from std`). For a user package

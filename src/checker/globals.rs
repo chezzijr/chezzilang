@@ -191,8 +191,15 @@ impl Checker {
                     let name = alias
                         .clone()
                         .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                    // An import that binds no bare name (TICKET-175) makes no pair.
-                    if !self.nameless_imports.contains(&(s.span, name.clone())) {
+                    // An ambiguous segment (TICKET-175) binds its name once, under its first path:
+                    // an import of another path makes no pair, and a third binding of the name
+                    // clashes with the first path's import.
+                    let other_path = self.nameless_imports.contains(&(s.span, name.clone()))
+                        && self
+                            .ambiguous_binds
+                            .get(&name)
+                            .is_some_and(|(first, _)| *first != path.join("."));
+                    if !other_path {
                         let facts = ImportFacts {
                             value: true,
                             ..ImportFacts::default()
