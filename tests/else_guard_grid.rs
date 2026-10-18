@@ -102,12 +102,12 @@ fn else_guard_grid() {
         ),
         prints(
             "os.exit leaves",
-            "fn f(n: int) -> int:\n    v := r(n) else e:\n        os.exit(3)\n    return v\nprint(f(2))",
+            "fn f(n: int) -> int:\n    v := r(n) else e:\n        os.exit(3)\n        panic(\"unreachable\")\n    return v\nprint(f(2))",
             "2",
         ),
         rejects(
             "os.exit runs on failure",
-            "fn f(n: int) -> int:\n    v := r(n) else e:\n        os.exit(3)\n    return v\nprint(f(0))",
+            "fn f(n: int) -> int:\n    v := r(n) else e:\n        os.exit(3)\n        panic(\"unreachable\")\n    return v\nprint(f(0))",
             "",
         ),
         prints(
