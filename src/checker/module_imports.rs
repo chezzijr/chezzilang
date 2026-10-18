@@ -460,7 +460,8 @@ impl Checker {
     pub(super) fn decide_bare_imports(&mut self, imports: &[ResolvedImport]) {
         self.ambiguous_binds.clear();
         self.nameless_imports.clear();
-        let mut first: HashMap<String, (String, Span)> = HashMap::new();
+        // The candidates: every un-aliased dotted module import, with its last segment.
+        let mut bare: Vec<(&String, String, Span)> = Vec::new();
         for imp in imports {
             let Import::Module {
                 path, alias: None, ..
@@ -471,17 +472,25 @@ impl Checker {
             let Some(name) = path.last().filter(|_| path.len() >= 2) else {
                 continue;
             };
-            let dotted = path.join(".");
-            let Some((prev, prev_span)) = first.get(name).cloned() else {
-                first.insert(name.clone(), (dotted, imp.span));
-                continue;
-            };
-            if prev != dotted {
+            bare.push((name, path.join("."), imp.span));
+        }
+        for (name, dotted, _) in &bare {
+            let first = bare
+                .iter()
+                .find(|(n, _, _)| n == name)
+                .map(|(_, d, _)| d.clone())
+                .expect("the candidate itself matches");
+            if first != *dotted {
                 self.ambiguous_binds
-                    .entry(name.clone())
-                    .or_insert((prev, dotted));
-                self.nameless_imports.insert((prev_span, name.clone()));
-                self.nameless_imports.insert((imp.span, name.clone()));
+                    .entry((*name).clone())
+                    .or_insert((first, dotted.clone()));
+            }
+        }
+        // A last segment with two different paths is ambiguous: every import of it, a repeat of
+        // the first path included, binds no bare name.
+        for (name, _, span) in &bare {
+            if self.ambiguous_binds.contains_key(*name) {
+                self.nameless_imports.insert((*span, (*name).clone()));
             }
         }
     }

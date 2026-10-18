@@ -2153,6 +2153,16 @@ fn a_second_import_of_a_name_is_reported_once() {
         ("main.chz", "import a.math\nimport b.math\nprint(math.X)\n"),
     ];
     assert_eq!(count(&bare, "'math' is ambiguous"), 1);
+    // A repeat of the first path before the second path is ambiguous too: no copy binds `math`.
+    let repeated = [
+        ("a/math.chz", "X := 1\n"),
+        ("b/math.chz", "X := 2\n"),
+        (
+            "main.chz",
+            "import a.math\nimport a.math\nimport b.math\nprint(math.X)\n",
+        ),
+    ];
+    assert_eq!(count(&repeated, "'math' is ambiguous"), 1);
 }
 
 /// A let's binder is not readable inside its own value, at any closure depth (owner 2026-10-18; Go

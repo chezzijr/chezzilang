@@ -825,10 +825,11 @@ impl Checker {
             let ret = &sig.ret;
             // TICKET-263: a call the checker does not know never returns (`os.exit`, a `die()`
             // helper) leaves the fn falling off; the hint names the fix.
-            let hint = match decl.body.last().map(|s| &s.kind) {
-                Some(StmtKind::Expr(e)) if matches!(e.kind, ExprKind::Call { .. }) => {
-                    "; if a call above never returns, write `panic(...)` after it"
-                }
+            let hint = match decl.body.last().and_then(|s| s.kind.as_expr()) {
+                Some(Expr {
+                    kind: ExprKind::Call { .. },
+                    ..
+                }) => "; if a call above never returns, write `panic(...)` after it",
                 _ => "",
             };
             self.error(
