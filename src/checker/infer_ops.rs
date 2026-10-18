@@ -36,12 +36,9 @@ impl Checker {
             // collection, a value of un-inferable type) is pinned by walk-order code this body cannot
             // see, so decline rather than guess: ask for an annotation.
             if self.in_fn_body
-                && !self.inferring_ret
                 && self.globals.get(name).is_some_and(|g| g.unreached())
                 && self.owning_scope(name) == Some(0)
-                // A fn value whose return is still being inferred (`g := fn(n: int): g(n)`) is
-                // not this gate's: the closure's own return rule reports it.
-                && (ty.is_unknown() || (!matches!(ty, Ty::Func { .. }) && ty.has_hole()))
+                && (ty.is_unknown() || ty.has_hole())
             {
                 if self.globals.get(name).is_some_and(|g| g.cycle) {
                     return Ty::Unknown;
@@ -201,12 +198,12 @@ impl Checker {
             );
             return Ty::Unknown;
         }
-        let names = self.in_scope_names();
-        self.error_help(
-            span,
-            format!("unknown name '{name}'"),
-            suggest::did_you_mean(name, &names),
-        );
+        let help = if self.let_binders.iter().any(|(n, _)| n == name) {
+            Some(format!("use `fn {name}(...)` for recursion"))
+        } else {
+            suggest::did_you_mean(name, &self.in_scope_names())
+        };
+        self.error_help(span, format!("unknown name '{name}'"), help);
         Ty::Unknown
     }
 

@@ -699,10 +699,7 @@ fn named_fn_return_grid() {
         "cannot assign int!str to variable of type str",
     );
     ok("g := fn(): panic(\"x\")\n");
-    one(
-        "g := fn(n: int): g(n)\n",
-        "cannot infer return type of '<closure>'; add a -> annotation",
-    );
+    one("g := fn(n: int): g(n)\n", "unknown name 'g'");
 }
 
 /// TICKET-228 (owner, 2026-10-09) — a `T!E` type is never inferred from returns or branches. An

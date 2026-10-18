@@ -103,8 +103,8 @@ A `const List[int]` rejects `xs += ys` too. Extend it in place with `xs.extend(y
 
 #### Unused locals warn
 
-A fn-local or block-local `:=`/`let` binding, or a `for` loop variable, that is never read emits a
-**warning** (never an error; Rust's model):
+A fn-local or block-local `:=`/`let` binding, a nested `fn` name, or a `for` loop variable, that
+is never read emits a **warning** (never an error; Rust's model):
 
 ```chezzi
 fn total(xs: List[int]) -> int:
@@ -125,7 +125,9 @@ These never warn:
   make `x` a candidate
 - a `match` / `wait:` arm binding, or a comprehension `for` variable
 - a name read only inside a closure, `defer:`, `spawn:`/`parallel:` body, a nested `fn`, or an
-  interpolated fragment (`"{x}"`, `"{s:<{w}}"`): all are reads
+  interpolated fragment (`"{x}"`, `"{s:<{w}}"`): all are reads. The one exception: a call inside a
+  nested `fn`'s own body is not a read of its name, so `fn lone(n: int) -> int: return lone(n)`
+  that nothing else calls warns (rustc `dead_code`)
 - a module-scope global (an importer may read it)
 - anything inside a `std.*` module
 
@@ -156,6 +158,28 @@ fn f():
 
 A binding inside a fn or block body (a param, a `:=`, a nested `fn`, a top-level `if:` body) shadows
 every row. Where Go and Rust split, Chezzi follows Rust. `tests/redeclaration_grid.rs` runs every cell.
+
+#### A binder is not readable in its own value
+
+The binder of a `:=` or typed let is not readable inside its own value, at any closure depth (owner
+2026-10-18; Go `initialization cycle`, Rust E0425). In a fn body the name resolves outward: `x := x + 1`
+reads the outer `x`, and a local `print := fn(s: str): print(s)` calls the builtin. With nothing
+outside, the read is `unknown name 'fact'` with the help ``use `fn fact(...)` for recursion``. A module
+name is in scope in the whole module, so at top level the value reaching its own binder is that error
+too, a builtin or prelude name included (`print := fn(s: str): print(s)`).
+
+```chezzi
+fact := fn(n: int) -> int: if n == 0: 1 else: n * fact(n - 1)   # ✗ unknown name 'fact'
+
+fn fact(n: int) -> int:             # ✓ recursion uses a fn declaration, top level or nested
+    if n == 0:
+        return 1
+    return n * fact(n - 1)
+f := fact                           # ✓ a fn is a value
+```
+
+A separately declared fn may read a later global; a read before that global's let faults at run time
+(`'Count' is read before its initialization at line 4`).
 
 #### What a module-level binding means
 

@@ -920,6 +920,10 @@ struct Checker {
     /// the runtime unwinds an unhandled Err/None at the program boundary) vs a nil-returning fn body
     /// (illegal — the propagated Err/None would be silently swallowed). See `infer_try`.
     in_fn_body: bool,
+    /// The binders of each let whose value is being checked, innermost last, each with the index
+    /// into `scopes` of the scope the let binds into. A binder is not readable inside its own value
+    /// (owner 2026-10-18).
+    let_binders: Vec<(String, usize)>,
     /// TICKET-239 — set by `infer_null_coalesce` just before it infers the `match` a `??` lowers
     /// to, and taken at the entry of `infer_match`, so a side mismatch names `??`, not "branches".
     coalesce_join: bool,
@@ -1115,6 +1119,9 @@ struct Checker {
     fall_off: FallOffTable,
     /// Graph index of every module, so a from-imported fn's [`Resolution::Fn`] names its home.
     module_idx_of: HashMap<crate::base::module_id::ModuleId, usize>,
+    /// The slot list of every module of the graph (`resolver::graph_global_binds`), in
+    /// `module_idx_of` order. A `from` import binds a value exactly when its home's list holds it.
+    graph_binds: std::rc::Rc<Vec<Vec<(String, crate::resolver::GlobalSource)>>>,
     /// The current module's from-imported fns: bound name -> (declaring module, declared name).
     fn_homes: HashMap<String, (usize, String)>,
     /// W7-43 — a monotonic counter for the `__opt{n}` binding the Option lowering synthesizes, so a

@@ -380,6 +380,13 @@ pub fn module_global_binds(
     out
 }
 
+/// Does the slot list `home` of a module hold `member`? The one answer to "does this `from` import
+/// bind a run-time value": `module_global_binds` and the checker's `bind_import` both ask it of the
+/// import's HOME module, never of the importer, whose own `fn` or other import may bind the name.
+pub fn home_holds(home: &[(String, GlobalSource)], member: &str) -> bool {
+    home.iter().any(|(n, _)| n == member)
+}
+
 /// The slot list of every module of `graph`, in `graph.modules` order (dependencies first, the entry
 /// last; an import cycle is a resolver error). A `from` member holds a slot exactly when its home
 /// module's list holds it, so a type-only import holds none.
@@ -396,7 +403,7 @@ pub fn graph_global_binds(graph: &ModuleGraph) -> Vec<Vec<(String, GlobalSource)
                 let Some(home) = out.get(t) else {
                     unreachable!("graph modules are deps first: module {t} is not below module {i}")
                 };
-                home.iter().any(|(n, _)| n == member)
+                home_holds(home, member)
             };
             module_global_binds(&lm.imports, &lm.ast.stmts, lm.native, &holds)
         };

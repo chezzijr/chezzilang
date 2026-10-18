@@ -2155,10 +2155,88 @@ fn a_second_import_of_a_name_is_reported_once() {
     assert_eq!(count(&bare, "'math' is ambiguous"), 1);
 }
 
-/// A local lambda reaches its own binding, as the top-level one does.
+/// A let's binder is not readable inside its own value, at any closure depth (owner 2026-10-18; Go
+/// `initialization cycle`, Rust E0425). Recursion uses a `fn` declaration. Every reject cell gives
+/// exactly one error, with the `fn` hint; every accept cell reads the name OUTSIDE the let.
 #[test]
-fn a_recursive_local_lambda_sees_its_own_binding() {
-    ok(
-        "fn m():\n    fact := fn(n: int) -> int: if n == 0: 1 else: n * fact(n - 1)\n    print(fact(3))\nm()\n",
+fn a_let_binder_is_not_in_scope_in_its_own_value() {
+    const FACT: &str = "fact := fn(n: int) -> int: if n == 0: 1 else: n * fact(n - 1)";
+    let typed = "fact: fn(int) -> int = fn(n: int) -> int: if n == 0: 1 else: n * fact(n - 1)";
+    let cells: [(String, &str); 10] = [
+        (format!("fn m():\n    {FACT}\n    print(fact(3))\nm()\n"), "fact"),
+        (format!("{FACT}\nprint(fact(3))\n"), "fact"),
+        (format!("{typed}\nprint(fact(3))\n"), "fact"),
+        (
+            "fn m():\n    fact: fn(int) -> int = fn(n: int) -> int: fact(n)\n    print(fact(1))\nm()\n"
+                .to_string(),
+            "fact",
+        ),
+        ("print := fn(s: str): print(s)\n".to_string(), "print"),
+        ("Some := fn(x: int) -> int: Some(x)\n".to_string(), "Some"),
+        ("xs := [fn() -> int: xs.len()]\n".to_string(), "xs"),
+        (
+            "f := fn() -> int: (fn() -> int: f())()\n".to_string(),
+            "f",
+        ),
+        ("x := x + 1\n".to_string(), "x"),
+        ("fn m():\n    x := x + 1\n    print(x)\nm()\n".to_string(), "x"),
+    ];
+    for (src, n) in &cells {
+        let errs = check_src(src);
+        assert_eq!(errs.len(), 1, "{src:?}: {errs:?}");
+        assert_eq!(errs[0].message, format!("unknown name '{n}'"), "{src:?}");
+        assert_eq!(
+            errs[0].help.as_deref(),
+            Some(format!("use `fn {n}(...)` for recursion").as_str()),
+            "{src:?}"
+        );
+    }
+    let run = crate::compiler::run_for_tests::run_capture;
+    let accepts: [(&str, &str); 7] = [
+        // Go and Rust read the OUTER `x` in a local binder's own value.
+        (
+            "x := 10\nfn m():\n    x := fn() -> int: x\n    print(x())\nm()\n",
+            "10\n",
+        ),
+        (
+            "x := 10\nfn m():\n    x := x + 1\n    print(x)\nm()\n",
+            "11\n",
+        ),
+        // A local binder is not in scope in its value, so the read reaches the builtin.
+        (
+            "fn m():\n    print := fn(s: str): print(s)\n    print(\"a\")\nm()\n",
+            "a\n",
+        ),
+        (
+            "struct P:\n    x: int\nfn m():\n    p0 := P(x=4)\n    P := fn(p: P) -> int: p.x\n    print(P(p0))\nm()\n",
+            "4\n",
+        ),
+        (
+            "fn m():\n    fn fact(n: int) -> int:\n        if n == 0:\n            return 1\n        return n * fact(n - 1)\n    print(fact(3))\nm()\n",
+            "6\n",
+        ),
+        // C2: a nested `fn x` reads itself, not the outer `x`.
+        (
+            "x := 10\nfn m():\n    fn x(n: int) -> int:\n        if n == 0:\n            return 0\n        return x(n - 1)\n    print(x(3))\nm()\n",
+            "0\n",
+        ),
+        // A separately declared fn may read a later global.
+        (
+            "fn g() -> int:\n    return Count\nCount := 7\nprint(g())\n",
+            "7\n",
+        ),
+    ];
+    for (src, want) in accepts {
+        ok(src);
+        assert_eq!(run(src).expect("the program runs"), want, "{src:?}");
+    }
+    // C3 (TICKET-183): a read before the let checks clean and faults at run time.
+    let early =
+        "fn g() -> int:\n    return Count(3)\nprint(g())\nCount := fn(n: int) -> int: n * 10\n";
+    ok(early);
+    let err = run(early).expect_err("the early read faults");
+    assert!(
+        format!("{err:?}").contains("'Count' is read before its initialization at line 4"),
+        "{err:?}"
     );
 }

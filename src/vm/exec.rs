@@ -1166,23 +1166,12 @@ impl Vm {
                     // Bind a member exactly when the importer holds a slot for it: its compiled slot
                     // list (`resolver::graph_global_binds`) holds a `from` member iff the home module
                     // holds one. A `from`-imported type carries no runtime value, so it has no slot
-                    // here and is skipped. A home with no slot for a listed member is a genuine
-                    // "no member".
-                    match self.slot_index(target_obj, member) {
-                        Some(idx) => {
-                            let value = self.read_slot(target_obj, idx, imp.span)?;
-                            self.module_define(into, alias.as_ref().unwrap_or(member), value);
-                        }
-                        None if self
-                            .slot_index(into, alias.as_ref().unwrap_or(member))
-                            .is_none() => {}
-                        None => {
-                            let tname = self.module_name(target_obj);
-                            return Err(self.err(
-                                format!("module '{tname}' has no member '{member}'"),
-                                imp.span,
-                            ));
-                        }
+                    // here and is skipped, even when the importer's own `fn` of that name holds a
+                    // slot (it shadows a prelude type). A member the home does not declare is a
+                    // check error, never a run-time one.
+                    if let Some(idx) = self.slot_index(target_obj, member) {
+                        let value = self.read_slot(target_obj, idx, imp.span)?;
+                        self.module_define(into, alias.as_ref().unwrap_or(member), value);
                     }
                 }
             }

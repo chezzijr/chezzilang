@@ -89,7 +89,8 @@ impl Checker {
                 }
             }
         }
-        let binds = crate::resolver::graph_global_binds(graph);
+        let binds = std::rc::Rc::new(crate::resolver::graph_global_binds(graph));
+        c.graph_binds = std::rc::Rc::clone(&binds);
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of.insert(lm.id.clone(), idx);
             c.skip_range_bodies = graph.skips_range_methods(lm);
@@ -126,7 +127,7 @@ impl Checker {
                     c.begin_module(Some(lm.label()));
                     c.push_scope(); // `bind_import` declares the bound name — it needs a live scope
                     for imp in &lm.imports {
-                        c.bind_import(imp, &binds[idx]);
+                        c.bind_import(imp);
                     }
                 }
                 // The module's own sigs name the builtin types it owns (`std/ffi.chz`'s `ptr`).
@@ -197,7 +198,7 @@ impl Checker {
                     // `.chz` may `import` like any other module; deps are checked earlier in graph order,
                     // so their sigs are already in `module_sigs`).
                     for imp in &lm.imports {
-                        c.bind_import(imp, &binds[idx]);
+                        c.bind_import(imp);
                     }
                     // `begin_module` cleared the live tables; repopulate the callables/types the
                     // harvested `sig` holds so a bodied body can call a sibling fn or name a sibling

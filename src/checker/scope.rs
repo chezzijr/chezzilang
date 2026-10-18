@@ -365,12 +365,19 @@ impl Checker {
     /// `scopes` (TICKET-183). A module global seeded before any body is walked
     /// (`seed_module_globals`) is visible in every fn/closure body, but a top-level statement sees
     /// it only once the walk reaches its first let — module scope is order-free for bodies and
-    /// lexical for statements.
+    /// lexical for statements. The first let of a module global is a top-level statement through
+    /// every closure of its own value, so the value never reads its own binder (owner 2026-10-18;
+    /// Go `initialization cycle`, Rust E0425). A local binder is declared after its value, so locals
+    /// need no clause.
     pub(super) fn scope_has(&self, i: usize, name: &str) -> bool {
         self.scopes[i].contains_key(name)
             && !(i == 0
-                && !self.in_fn_body
-                && self.globals.get(name).is_some_and(|g| g.unreached()))
+                && self.globals.get(name).is_some_and(|g| g.unreached())
+                && (!self.in_fn_body || self.in_own_value(i, name)))
+    }
+    /// Is `name` the binder of a let into scope `i` whose value is being checked?
+    pub(super) fn in_own_value(&self, i: usize, name: &str) -> bool {
+        self.let_binders.iter().any(|(n, s)| *s == i && n == name)
     }
     /// Which scope owns `name` (innermost binding wins, shadowing-aware)? The ONE innermost-first
     /// walk over `scopes` (TICKET-183): every "which scope owns this name" question calls it, so the
@@ -381,7 +388,10 @@ impl Checker {
             .find(|&i| self.scope_has(i, name))
     }
     /// The one answer to what a bare head names, over `owning_scope`: a binding in scope >= 1, then
-    /// a type parameter (DEC-108), then scope 0, then unbound (TICKET-180).
+    /// a type parameter (DEC-108), then scope 0, then unbound (TICKET-180). A module binder is in
+    /// scope in the whole module, its own value included, so a builtin, a prelude variant or a
+    /// struct ctor of its spelling is not reached there; `scope_has` hides its value, so the read is
+    /// `unknown name`.
     pub(super) fn head_binding(&self, name: &str) -> HeadBinding {
         match self.owning_scope(name) {
             Some(i) if i > 0 => HeadBinding::Local,
@@ -390,6 +400,7 @@ impl Checker {
                 HeadBinding::Module
             }
             Some(_) => HeadBinding::Global,
+            None if self.in_own_value(0, name) => HeadBinding::Global,
             None => HeadBinding::Unbound,
         }
     }

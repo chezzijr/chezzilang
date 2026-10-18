@@ -6,10 +6,11 @@
 //! reads each identifier exactly once.
 //!
 //! The warn/silent table is measured against the runtime (`docs/reference/syntax/` §"Unused locals warn"):
-//! candidates are fn-local and block-local `:=`/`let` names and `for` loop variables. Never a
-//! candidate: module-scope bindings (an importer may read them), parameters (Go does not warn),
-//! `match`/`wait:`/comprehension bindings, nested `fn` names, and any `_`-prefixed name. A plain `=`
-//! is a write, not a read; a compound `+=` counts as a read (Go counts it as a use).
+//! candidates are fn-local and block-local `:=`/`let` names, nested `fn` names and `for` loop
+//! variables. Never a candidate: module-scope bindings (an importer may read them), parameters (Go
+//! does not warn), `match`/`wait:`/comprehension bindings, and any `_`-prefixed name. A call inside a
+//! nested fn's own body is not a read of its name (rustc `dead_code`). A plain `=` is a write, not a
+//! read; a compound `+=` counts as a read (Go counts it as a use).
 
 use crate::ast::{
     Block, DeferTarget, Expr, ExprKind, FnDecl, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind,
@@ -163,8 +164,13 @@ impl Scan {
                 }
             }
             StmtKind::Fn(d) => {
-                self.bind(&d.name, d.name_span, false);
+                self.bind(&d.name, d.name_span, true);
+                // Module scope binds nothing, so only a nested fn has a binding to reset.
+                let own = (!self.scopes.is_empty()).then(|| self.all.len() - 1);
                 self.fn_decl(d);
+                if let Some(i) = own {
+                    self.all[i].read = false;
+                }
             }
             StmtKind::Struct { methods, .. } | StmtKind::Enum { methods, .. } => {
                 for m in methods {

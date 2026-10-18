@@ -381,6 +381,10 @@ impl Checker {
         // resolve the annotation first so its unannotated params bind to the slot's param
         // types. Only the single-name, `fn`-typed case (destructuring never binds one).
         // Otherwise ordinary bottom-up inference.
+        let into = self.scopes.len() - 1;
+        let outer = self.let_binders.len();
+        self.let_binders
+            .extend(target.binder_names().into_iter().map(|n| (n, into)));
         let let_mark = self.tyvar_mark();
         let val_ty = match &annotated {
             // Expected-type checking-mode for a NON-closure value bound to an annotation:
@@ -401,6 +405,7 @@ impl Checker {
             None => self.infer_value(value),
         };
         let val_ty = self.close_operand(let_mark, val_ty);
+        self.let_binders.truncate(outer);
         (annotated, val_ty)
     }
 

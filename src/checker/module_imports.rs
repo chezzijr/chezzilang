@@ -218,7 +218,7 @@ impl Checker {
             }
         }
         for imp in imports {
-            self.bind_import(imp, binds);
+            self.bind_import(imp);
         }
         self.note_variant_import_binds(stmts);
         self.collect_names(stmts);
@@ -488,9 +488,9 @@ impl Checker {
 
     /// Bind an import into the current module: a whole-module import becomes a `Ty::Module` name;
     /// a `from` import injects each member (function/value) into scope, validating it exists.
-    /// `binds` is the module's slot list: a `from` member is bound as a value exactly when it holds
-    /// a slot there.
-    pub(super) fn bind_import(&mut self, imp: &ResolvedImport, binds: &[(String, GlobalSource)]) {
+    /// A `from` member is bound as a value exactly when its home module's slot list holds it
+    /// (`resolver::home_holds`).
+    pub(super) fn bind_import(&mut self, imp: &ResolvedImport) {
         match &imp.import {
             Import::Module {
                 path,
@@ -599,9 +599,11 @@ impl Checker {
                     if self.note_import_bind(bind, imp.span) {
                         continue;
                     }
-                    let holds = binds
-                        .iter()
-                        .any(|(n, src)| n == bind && matches!(src, GlobalSource::Import));
+                    let holds = self
+                        .module_idx_of
+                        .get(&imp.target)
+                        .and_then(|&home| self.graph_binds.get(home))
+                        .is_some_and(|home| crate::resolver::home_holds(home, member));
                     let no_member = |this: &mut Self| {
                         let candidates = Self::sig_member_names(&sig);
                         this.error_help(

@@ -1535,3 +1535,16 @@ fn t186_module_global_record_grid() {
         bad.join("\n")
     );
 }
+
+/// TICKET-263 — a nested `fn` name is a candidate, and a call inside the fn's own body is not a read
+/// (rustc `dead_code`). A recursive nested fn that the enclosing fn calls stays silent.
+#[test]
+fn a_nested_fn_used_only_by_itself_is_reported() {
+    warns(
+        "fn m():\n    fn lone(n: int) -> int:\n        return lone(n)\nm()\n",
+        "unused variable 'lone'",
+    );
+    no_warn(
+        "fn m():\n    fn fact(n: int) -> int:\n        if n == 0:\n            return 1\n        return n * fact(n - 1)\n    print(fact(3))\nm()\n",
+    );
+}
