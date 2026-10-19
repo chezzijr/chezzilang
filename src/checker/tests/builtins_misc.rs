@@ -1533,3 +1533,27 @@ fn raw_string_is_str_type() {
     // ...and using it where an `int` is expected is rejected (proves it's classified `str`, not int).
     rejects("fn main():\n    n: int = r\"x\"\nmain()\n", "str");
 }
+
+#[test]
+fn generator_ban_messages_do_not_say_experimental() {
+    // The generator ban on `defer` / `spawn` / `parallel:` is a rule, not an experiment.
+    for body in [
+        "defer print(0)",
+        "parallel:\n        spawn print(0)",
+        "spawn print(0)",
+    ] {
+        let src = format!(
+            "import Iterator from std.iter\nfn g() -> Iterator[int]:\n    {body}\n    yield 1\n"
+        );
+        let errs = check_src(&src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("inside a generator")),
+            "expected a generator ban error for {body:?}, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|e| e.message.contains("experimental")),
+            "generator ban message calls the ban experimental for {body:?}: {errs:?}"
+        );
+    }
+}

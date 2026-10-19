@@ -2042,3 +2042,13 @@ fn interpolation_fragment_checked_without_desugar() {
     rejects("print(\"{nope}\")\n", "unknown name 'nope'");
     front_rejects("print(\"a}b\")\n", "unmatched '}'");
 }
+
+#[test]
+fn question_mark_in_defer_block_is_rejected() {
+    // A `defer:` block has no caller to take a fired error, as a `spawn:` block has none. The
+    // checker used to type `?` against a discarding context and drop the error with no trace.
+    rejects(
+        "fn g() -> int!:\n    return !\"bad\"\nfn h() -> int!:\n    defer:\n        g()?\n    return 1\nprint(h())\n",
+        "'?' is not allowed inside a defer block",
+    );
+}
