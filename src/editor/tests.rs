@@ -1324,3 +1324,47 @@ fn hover_and_diagnostics_name_no_removed_spelling() {
     );
     clean(&ds[0].message);
 }
+
+/// TICKET-271 -- a CRLF file highlights like the same file with LF line breaks, line by line: a
+/// multi-line string's extent, a `#` on its last line and a trailing comment end where they end
+/// in the LF form. The hover lookup (`token_at`) agrees at every cursor position.
+#[test]
+fn a_crlf_file_highlights_and_hovers_like_lf() {
+    let cells = [
+        ("plain string", "s := \"a\nb\nc\n#\"\nx := 1\n"),
+        ("triple string", "s := \"\"\"a\n\n\n\n#\"\"\"\nx := 1\n"),
+        (
+            "hash on the last line",
+            "s := \"\"\"a\nb # c\"\"\"  # d\nx := 1  # e\n",
+        ),
+    ];
+    let mut red = Vec::new();
+    for (cell, lf) in cells {
+        let crlf = lf.replace('\n', "\r\n");
+        let (want, got) = (semantic_tokens(lf), semantic_tokens(&crlf));
+        for (line0, text) in lf.lines().enumerate() {
+            let on = |toks: &[SemTok]| -> Vec<SemTok> {
+                toks.iter()
+                    .filter(|t| t.line as usize == line0)
+                    .cloned()
+                    .collect()
+            };
+            if on(&got) != on(&want) {
+                red.push(format!("{cell}: highlight line {line0}: {:?}", on(&got)));
+            }
+            for col in 0..=text.chars().count() {
+                if token_at(&crlf, line0, col) != token_at(lf, line0, col) {
+                    red.push(format!("{cell}: token_at line {line0} col {col}"));
+                }
+            }
+        }
+        if got.len() != want.len() {
+            red.push(format!(
+                "{cell}: {} highlights, LF has {}",
+                got.len(),
+                want.len()
+            ));
+        }
+    }
+    assert!(red.is_empty(), "CRLF highlights unlike LF in: {red:#?}");
+}

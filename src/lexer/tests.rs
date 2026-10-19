@@ -2028,3 +2028,66 @@ fn crlf_line_break_in_a_string_is_one_lf() {
     });
     assert_eq!(text, lf);
 }
+
+/// Every lexer site that reads a line break, each written once with LF and once with CRLF: the
+/// CRLF form lexes to the same tokens, spans and doc comments.
+#[test]
+fn crlf_reads_as_lf_at_every_lexer_site() {
+    let cells = [
+        (
+            "blank line in a block",
+            "fn main():\n    x := 1\n\n    print(x)\nmain()\n",
+        ),
+        (
+            "comment line in a block",
+            "fn main():\n    x := 1\n    # c\n    print(x)\n",
+        ),
+        ("doc comment", "# a\n# b\nfn f():\n    1\n"),
+        ("trailing comment", "x := 1  # c\ny := 2\n"),
+        ("plain string", "s := \"a\nb\"\n"),
+        ("triple string", "s := \"\"\"a\n\nb\"\"\"\n"),
+        ("raw string", "s := r\"\"\"a\nb\"\"\"\n"),
+        ("bytes literal", "s := b\"a\nb\"\n"),
+        ("hole", "s := f\"{1 +\n2}\"\n"),
+        ("brackets", "x := [\n    1,\n\n    2,\n]\n"),
+        ("pipe continuation", "r := 5\n\n    |> dbl()\nprint(r)\n"),
+        ("no final newline", "x := 1\ny := 2"),
+    ];
+    let mut red = Vec::new();
+    for (cell, lf) in cells {
+        let crlf = lf.replace('\n', "\r\n");
+        let want = tokenize_with_comments(lf, 0).map(|(t, d)| (format!("{t:?}"), d));
+        let got = tokenize_with_comments(&crlf, 0).map(|(t, d)| (format!("{t:?}"), d));
+        assert!(want.is_ok(), "cell {cell}: the LF form must lex");
+        if got.map_err(|e| e.message) != want.map_err(|e| e.message) {
+            red.push(cell);
+        }
+    }
+    assert!(red.is_empty(), "CRLF lexes unlike LF in: {red:?}");
+}
+
+/// A lone `\r` keeps its reading: inline whitespace between tokens, a char inside a literal.
+/// An escaped `\r` is one CR. A `\` before a CRLF is the same error as before an LF.
+#[test]
+fn a_lone_cr_and_an_escaped_cr_keep_their_reading() {
+    assert_eq!(kinds("x := 1\r\ny := 2\n"), kinds("x := 1\ny := 2\n"));
+    assert_eq!(kinds("x :=\r1\n"), kinds("x := 1\n"));
+    assert_eq!(kinds("x := 1\r\r\n"), kinds("x := 1\n"));
+    let lit = |src: &str| {
+        kinds(src).into_iter().find_map(|t| match t {
+            Token::Str(s) => Some(format!("{s:?}")),
+            _ => None,
+        })
+    };
+    assert_eq!(lit("s := \"a\rb\"\n"), Some("\"a\\rb\"".to_string()));
+    assert_eq!(
+        lit("s := \"a\\r\\nb\"\r\n"),
+        Some("\"a\\r\\nb\"".to_string())
+    );
+    let crlf = tokenize("s := \"a\\\r\nb\"\r\n").unwrap_err();
+    let lf = tokenize("s := \"a\\\nb\"\n").unwrap_err();
+    assert_eq!(
+        (crlf.line, crlf.col, crlf.message),
+        (lf.line, lf.col, lf.message)
+    );
+}
