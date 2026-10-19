@@ -20,7 +20,7 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
 /// [`check_graph_diags`]. Warnings never affect the `Result`.
 #[cfg(any(test, feature = "test-api"))]
 pub fn check_diags(module: &crate::ast::Module) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
-    let (res, warnings, _, _) = check_diags_with(module, true);
+    let (res, warnings, _, _, _) = check_diags_with(module, true);
     (res, warnings)
 }
 
@@ -30,7 +30,7 @@ pub fn check_diags(module: &crate::ast::Module) -> (Result<(), Vec<CheckError>>,
 pub fn check_counting_fn_body_checks(
     module: &crate::ast::Module,
 ) -> (Result<(), Vec<CheckError>>, usize) {
-    let (res, _, checks, _) = check_diags_with(module, true);
+    let (res, _, checks, _, _) = check_diags_with(module, true);
     (res, checks)
 }
 
@@ -62,8 +62,18 @@ pub fn check_graph_counting_writer_scans(graph: &ModuleGraph) -> usize {
 pub fn check_counting_index_values(
     module: &crate::ast::Module,
 ) -> (Result<(), Vec<CheckError>>, usize) {
-    let (res, _, _, indexes) = check_diags_with(module, true);
+    let (res, _, _, indexes, _) = check_diags_with(module, true);
     (res, indexes)
+}
+
+/// [`check`], plus the number of member-head receivers `bracket_is_index` inferred (TICKET-269;
+/// `Checker::bracket_receivers`): one per `recv.name[X](args)` link when each is inferred once.
+#[cfg(any(test, feature = "test-api"))]
+pub fn check_counting_bracket_receivers(
+    module: &crate::ast::Module,
+) -> (Result<(), Vec<CheckError>>, usize) {
+    let (res, _, _, _, receivers) = check_diags_with(module, true);
+    (res, receivers)
 }
 
 /// [`check_diags`] with the nested-fn return memo off (`Checker::ret_memo`), for the twin comparison
@@ -72,7 +82,7 @@ pub fn check_counting_index_values(
 pub fn check_diags_no_memo(
     module: &crate::ast::Module,
 ) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
-    let (res, warnings, _, _) = check_diags_with(module, false);
+    let (res, warnings, _, _, _) = check_diags_with(module, false);
     (res, warnings)
 }
 
@@ -107,7 +117,13 @@ impl Checker {
 pub fn check_diags_with(
     module: &crate::ast::Module,
     memo_enabled: bool,
-) -> (Result<(), Vec<CheckError>>, Vec<CheckError>, usize, usize) {
+) -> (
+    Result<(), Vec<CheckError>>,
+    Vec<CheckError>,
+    usize,
+    usize,
+    usize,
+) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
         c.memo_enabled = memo_enabled;
@@ -118,7 +134,13 @@ pub fn check_diags_with(
         c.check_module(&module.stmts, None, &[], &[]);
         c.check_provider_cycles();
         let (res, warnings) = c.finish_diags();
-        (res, warnings, c.fn_body_checks, c.index_value_checks)
+        (
+            res,
+            warnings,
+            c.fn_body_checks,
+            c.index_value_checks,
+            c.bracket_receivers,
+        )
     })
 }
 

@@ -1278,6 +1278,10 @@ impl Checker {
                 )
             }
             ExprKind::Field { obj, name, .. } if !crate::ast::is_tuple_index(name) => {
+                #[cfg(any(test, feature = "test-api"))]
+                {
+                    self.bracket_receivers += 1;
+                }
                 let mark = self.diag_mark();
                 let recv = self.infer(obj);
                 self.diag_rollback(mark);

@@ -202,6 +202,8 @@ impl Checker {
             #[cfg(any(test, feature = "test-api"))]
             index_value_checks: 0,
             #[cfg(any(test, feature = "test-api"))]
+            bracket_receivers: 0,
+            #[cfg(any(test, feature = "test-api"))]
             writer_scans: 0,
             memo_verify: std::env::var_os("CHEZZI_MEMO_VERIFY").is_some(),
             memo_verifying: false,

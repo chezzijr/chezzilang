@@ -2022,24 +2022,61 @@ fn every_hook_has_one_row() {
 }
 
 /// TICKET-269: `bracket_is_index` probes a member head's receiver and the call path infers it again,
-/// so a chain of n `recv.name[T](args)` links infers the first receiver 2^n times. 24 links must
-/// check in linear time. The check runs on a worker thread so the red run fails at the timeout
-/// instead of running for minutes.
+/// so a chain of n `recv.name[T](args)` links infers the first receiver 2^n times. The probe infers
+/// each value receiver once, so 12 links cost at most twice 6 links plus a constant. Counted, not
+/// timed (DEC-233: a growth claim counts the receivers `bracket_is_index` infers).
 #[test]
 fn type_arg_call_chain_checks_in_linear_time() {
-    let mut chain = String::from("Box(0)");
-    for _ in 0..24 {
-        chain.push_str(".map[int](inc)");
-    }
-    let src = format!(
-        "struct Box:\n    v: int\n    fn map[U](self, f: fn(int) -> int) -> Box:\n        return Box(f(self.v))\nfn inc(x: int) -> int:\n    return x + 1\nfn main():\n    print({chain}.v)\n"
+    let receivers = |links: usize| {
+        let chain = format!("Box(0){}", ".map[int](inc)".repeat(links));
+        let src = format!(
+            "struct Box:\n    v: int\n    fn map[U](self, f: fn(int) -> int) -> Box:\n        return Box(f(self.v))\nfn inc(x: int) -> int:\n    return x + 1\nfn main():\n    print({chain}.v)\n"
+        );
+        let tokens = lexer::tokenize(&src).expect("lex should succeed");
+        let module = parser::parse(tokens).expect("parse should succeed");
+        let (res, receivers) = check_counting_bracket_receivers(&module);
+        assert!(res.is_ok(), "{links} links: {res:?}");
+        receivers
+    };
+    let (short, long) = (receivers(6), receivers(12));
+    assert!(
+        long <= 2 * short + 4,
+        "a 6-link recv.name[T](args) chain inferred {short} receivers, a 12-link one {long}"
     );
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(check_src(&src));
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok(errs) => assert!(errs.is_empty(), "expected no type errors, got: {errs:?}"),
-        Err(_) => panic!("a 24-link recv.name[T](args) chain took over 5 s to check"),
+}
+
+/// TICKET-269: a member call head's value receiver is inferred once and both bracket readings take
+/// it. Receiver kind (bare name, call value) x reading (type argument, index), plus the two error
+/// cells the handoff touches: the index reading's type-shaped skip counts the receiver's errors
+/// (`mk("s").fs[int](3)` adds no `'int' is a type, not a value`), and a receiver's errors come
+/// before the type argument's, in source order.
+#[test]
+fn a_value_receiver_feeds_both_bracket_readings() {
+    let prelude = "struct Box:\n    v: int\n    fn map[U](self, f: fn(int) -> int) -> Box:\n        return Box(f(self.v))\nstruct H:\n    fs: List[fn(int) -> int]\nfn inc(x: int) -> int:\n    return x + 1\nfn mk(x: int) -> H:\n    return H([inc])\n";
+    let cells: [(&str, &[&str]); 6] = [
+        ("b := Box(0)\n    print(b.map[int](inc).v)", &[]),
+        ("h := mk(0)\n    print(h.fs[k](1))", &[]),
+        ("print(Box(0).map[int](inc).v)", &[]),
+        ("print(mk(0).fs[k](1))", &[]),
+        (
+            "print(mk(\"s\").fs[int](3))",
+            &["argument 1 of 'mk': expected int, found str"],
+        ),
+        (
+            "print(Box(0).nomethod(1).map[Nope](inc).v)",
+            &[
+                "type Box has no method 'nomethod'",
+                "unknown type 'Nope'",
+                "method 'map' takes no type argument(s)",
+            ],
+        ),
+    ];
+    for (line, want) in cells {
+        let src = format!("{prelude}fn main():\n    k := 0\n    {line}\n");
+        let got = check_src(&src);
+        assert!(
+            got.len() == want.len() && got.iter().zip(want).all(|(g, w)| g.message.contains(w)),
+            "{line}: expected errors {want:?} in this order, got {got:?}"
+        );
     }
 }

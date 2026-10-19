@@ -1416,6 +1416,10 @@ struct Checker {
     /// TICKET-253 — `index_value` entries of this pass; read by [`check_counting_index_values`].
     #[cfg(any(test, feature = "test-api"))]
     index_value_checks: usize,
+    /// TICKET-269 — member-head receivers `bracket_is_index` inferred in this pass; read by
+    /// [`check_counting_bracket_receivers`].
+    #[cfg(any(test, feature = "test-api"))]
+    bracket_receivers: usize,
     /// TICKET-265 — top-level fns `infer_fn_writers` scanned in this pass; read by
     /// [`check_graph_counting_writer_scans`].
     #[cfg(any(test, feature = "test-api"))]
