@@ -930,9 +930,9 @@ impl Vm {
     /// Depth-counted worker behind [`Vm::to_snap`] — the M:N module-global crossing path. Shares
     /// [`Vm::to_wire_depth`]'s cyclic-data guard: the same
     /// `MAX_STRUCTURAL_DEPTH` bound turns a cyclic module global into a recoverable `RuntimeError`
-    /// (re-stamped with the real nursery span by `ensure_snapshot`) rather than a host `SIGABRT`. The
-    /// fast path threads `depth` into `to_wire_depth` and every slow arm recurses at `depth + 1`, so
-    /// the shared budget keeps `to_snap` and `to_wire` in lockstep.
+    /// (re-stamped with the real nursery span by `ensure_snapshot`) rather than a host `SIGABRT`.
+    /// The fast path passes `depth` to `to_wire_depth` and every slow arm recurses at `depth + 1`,
+    /// so one budget, `MAX_STRUCTURAL_DEPTH`, bounds both walks.
     fn to_snap_depth(
         &self,
         v: Value,

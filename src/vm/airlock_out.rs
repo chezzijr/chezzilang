@@ -557,8 +557,7 @@ impl WalkSrc<'_> {
     /// recurse on the HOST stack and `SIGABRT`, uncatchable) — the SAME `MAX_STRUCTURAL_DEPTH` limit
     /// and message the display / `==` paths use (`stmt.rs` / `arith.rs`), turned into a recoverable
     /// `RuntimeError` (placeholder `Span{0,0}`, re-stamped with the real airlock site by `to_wire_at`).
-    /// Kept in lockstep with [`Vm::to_snap`] (which shares this budget on its fast path) so the serial
-    /// and M:N engines trip at the identical depth.
+    /// `to_snap_depth` passes its `depth` to this walk on its fast path, so both trip at the one `MAX_STRUCTURAL_DEPTH`.
     #[inline(always)]
     fn to_wire_depth(
         &self,

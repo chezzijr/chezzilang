@@ -97,7 +97,8 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Quiescence verdict | `decide_since` (`vm/quiesce.rs`) | |
 | Airlock crossing policy | `base/crossing.rs` | D4 |
 | Cross-heap store check | `ensure_crossable` (`vm/worker_vm.rs`), `to_wire_crossable` (`vm/airlock_out.rs`) | a missed guard is UB |
-| `WireValue` walks | DUPLICATE: `wire_summary` (`vm/core.rs`), `collect_core_gcrefs` (`vm/core.rs`), the `to_wire` budget in `vm/airlock_out.rs` | |
+| `WireValue` walks | `WireValue::visit` (`vm/wire.rs`): the children of each variant, and whether it is a handle or a nested core | `has_handle` (`vm/wire.rs`), `wire_summary`, `collect_gcrefs_structural` and `nested_core_bytes_structural` (`vm/core.rs`) read it; grid `wire::walk_grid`. TICKET-267 |
+| `to_wire`/`to_snap` depth budget | `MAX_STRUCTURAL_DEPTH` (`base/words.rs`) | `to_snap_depth` (`vm/worker_vm.rs`) passes its `depth` to `to_wire_depth` (`vm/airlock_out.rs`). Both walk `Value`, not `WireValue`, so neither reads `WireValue::visit` |
 | Hook calls | `invoke_hook` (`vm/method_call.rs`) | DUPLICATE: direct `run_proto` (`vm/frames.rs`) calls in `vm/call.rs`, `vm/method_call.rs` and `vm/step.rs`; waits on Family D |
 | Shared/RwShared box heap | `vm/boxctx.rs` | |
 | Range value at run time | `as_range` (`vm/range.rs`) | |

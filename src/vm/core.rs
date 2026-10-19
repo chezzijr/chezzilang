@@ -13,7 +13,7 @@
 //! parks the *fiber* (it does not block on a primitive), so the condvar is dead on that engine.
 
 use super::value::GcRef;
-use super::wire::{WireGenState, WireValue};
+use super::wire::{WireNode, WireValue};
 use crate::lexer::Span;
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
@@ -1594,115 +1594,19 @@ pub fn collect_gcrefs_structural(
     seen: &mut SeenCores,
     pending: &mut Vec<WireValue>,
 ) {
-    match w {
-        WireValue::Handle(g) => out.push(*g),
-        WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => xs
-            .iter()
-            .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
-        WireValue::Map { entries, .. } => entries.iter().for_each(|(_, k, v)| {
-            collect_gcrefs_structural(k, out, seen, pending);
-            collect_gcrefs_structural(v, out, seen, pending);
-        }),
-        WireValue::Set { entries, .. } => entries
-            .iter()
-            .for_each(|(_, e)| collect_gcrefs_structural(e, out, seen, pending)),
-        WireValue::Struct { fields, .. } => fields
-            .iter()
-            .for_each(|(_, v)| collect_gcrefs_structural(v, out, seen, pending)),
-        WireValue::Enum { payload, .. } => payload
-            .iter()
-            .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
-        // A cell queued in a channel/executor roots its inner value's handles.
-        WireValue::Cell { inner, .. } => collect_gcrefs_structural(inner, out, seen, pending),
-        // A cursor queued in a channel/executor roots its snapshot items' handles (like `List`).
-        WireValue::Iter { items, .. } => items
-            .iter()
-            .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
-        // F3 path C: a generator queued in a channel/executor crosses by value, but its backing
-        // closure or a parked slot could still embed a `Handle` into the live heap — root them while
-        // the generator sits in the queue (like `Closure`/`Iter`).
-        WireValue::Generator { closure, state, .. } => {
-            if let Some(c) = closure {
-                collect_gcrefs_structural(c, out, seen, pending);
-            }
-            match state {
-                WireGenState::Pending(args, _) => args
-                    .iter()
-                    .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
-                WireGenState::Suspended { stack, .. } => stack
-                    .iter()
-                    .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
-                WireGenState::Done | WireGenState::Unsendable(_) => {}
-            }
-        }
+    match w.visit(|x| collect_gcrefs_structural(x, out, seen, pending)) {
+        WireNode::Handle(g) => out.push(g),
         // A nested core is QUEUED, never locked here — `seen` keeps each one queued at most once,
         // which is also what terminates a cyclic core graph. Cloning the variant is an `Arc` refcount
         // bump, and it is what keeps the core alive between the queue and the drain.
-        WireValue::Channel(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
+        WireNode::Core(id) => {
+            if seen.insert(id) {
                 pending.push(w.clone());
             }
         }
-        WireValue::Shared(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
-                pending.push(w.clone());
-            }
-        }
-        WireValue::RwShared(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
-                pending.push(w.clone());
-            }
-        }
-        WireValue::Atomic(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
-                pending.push(w.clone());
-            }
-        }
-        // `AtomicInt` holds a plain i64 — no heap refs to trace (identity-only wire visit).
-        WireValue::AtomicInt(_) => {}
-        WireValue::Executor(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
-                pending.push(w.clone());
-            }
-        }
-        // B3.6: a submitted closure queued in an `Executor` crosses by value, but its captures may
-        // still embed `Handle`s into the live heap (a captured `Channel[str]`'s bytes root nothing,
-        // but a captured callable would) — root them while the task sits in the queue.
-        WireValue::Closure { captured, .. } => {
-            captured
-                .iter()
-                .for_each(|(_, v)| collect_gcrefs_structural(v, out, seen, pending));
-        }
-        // B3.3a: `Str` crosses by value (owned bytes in the core) — it roots no heap object.
-        // D6: a `Socket`/`Listener` core holds an OS fd + a poll key — no `WireValue`s, no `GcRef`s.
-        // `bytes`/`bytearray` cross by value (owned raw bytes) — root no heap object.
-        // An opaque `ptr` crosses by value (a raw address) — it roots no heap object.
-        // A first-class builtin fn crosses by value (its name) — pure code, roots no heap object.
-        // A native fn crosses by value (name + fn ptr) and a Cffi as a shared `Arc` — neither holds a
-        // `GcRef`, so both root no heap object.
-        // B3.3: a bare fn crosses by value (proto id + home index) — no captures, roots no heap object.
-        // R2: a `Writer` core holds an fd/buffer + a key — no `WireValue`s, no `GcRef`s (like `Socket`).
-        // R2b: a `Reader` core holds a BufReader<File> + a key — likewise no `WireValue`s, no `GcRef`s.
-        // A back-reference roots nothing: its target (an already-walked identity-preserved node — a
-        // Cell/Closure or a container) is reachable elsewhere in the same wire graph, so its handles
-        // are already collected there. It also TERMINATES the walk on a now-cyclic wire graph.
-        WireValue::Backref(_)
-        | WireValue::Str(_)
-        | WireValue::Bytes(_)
-        | WireValue::ByteArray(_)
-        | WireValue::Int(_)
-        | WireValue::Float(_)
-        | WireValue::Bool(_)
-        | WireValue::Socket(_)
-        | WireValue::Listener(_)
-        | WireValue::Writer(_)
-        | WireValue::Reader(_)
-        | WireValue::Ptr(_)
-        | WireValue::Builtin(_)
-        | WireValue::Native { .. }
-        | WireValue::Cffi(_)
-        | WireValue::Func { .. }
-        | WireValue::Nil => {}
+        // A data node's children were walked above. A `Backref` has none: its target is walked
+        // elsewhere in the same graph, which also ends the walk on a cyclic wire graph.
+        WireNode::Data { .. } => {}
     }
 }
 
@@ -1775,82 +1679,19 @@ impl WireSummary {
 /// samples the cap before dispatch, with the pending call's operands rooted on the operand stack.
 /// (Since TICKET-235 such a task runs behind an entry thunk and has a frame; the sample stays.)
 ///
-/// Keep the arms in lockstep with [`collect_core_gcrefs`] — a new `WireValue` variant must be added to both.
+/// The children and the per-node bytes come from [`WireValue::visit`], the one owner of what a variant holds.
 pub fn wire_summary(w: &WireValue) -> (usize, bool) {
-    fn walk(acc: &mut (usize, bool), x: &WireValue) {
+    let mut acc = (std::mem::size_of::<WireValue>(), false);
+    match w.visit(|x| {
         let (b, d) = wire_summary(x);
         acc.0 += b;
         acc.1 |= d;
-    }
-    let mut acc = (std::mem::size_of::<WireValue>(), false);
-    match w {
-        WireValue::Handle(_) => acc.1 = true,
-        WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => {
-            xs.iter().for_each(|x| walk(&mut acc, x))
-        }
-        WireValue::Map { entries, .. } => entries.iter().for_each(|(_, k, v)| {
-            acc.0 += std::mem::size_of::<u64>();
-            walk(&mut acc, k);
-            walk(&mut acc, v);
-        }),
-        WireValue::Set { entries, .. } => entries.iter().for_each(|(_, e)| {
-            acc.0 += std::mem::size_of::<u64>();
-            walk(&mut acc, e);
-        }),
-        WireValue::Struct { name, fields, .. } => {
-            acc.0 += name.len();
-            fields.iter().for_each(|(n, v)| {
-                acc.0 += n.len();
-                walk(&mut acc, v);
-            })
-        }
-        WireValue::Enum { payload, .. } => payload.iter().for_each(|x| walk(&mut acc, x)),
-        WireValue::Cell { inner, .. } => walk(&mut acc, inner),
-        WireValue::Iter { items, .. } => items.iter().for_each(|x| walk(&mut acc, x)),
-        WireValue::Generator { closure, state, .. } => {
-            if let Some(c) = closure {
-                walk(&mut acc, c);
-            }
-            match state {
-                WireGenState::Pending(args, _) => args.iter().for_each(|x| walk(&mut acc, x)),
-                WireGenState::Suspended { stack, .. } => {
-                    stack.iter().for_each(|x| walk(&mut acc, x))
-                }
-                WireGenState::Done | WireGenState::Unsendable(_) => {}
-            }
-        }
-        WireValue::Closure { captured, .. } => {
-            captured.iter().for_each(|(n, v)| {
-                acc.0 += n.len();
-                walk(&mut acc, v);
-            });
-        }
+    }) {
+        WireNode::Handle(_) => acc.1 = true,
         // A nested core: conservatively dirty (a store on the INNER core can introduce a handle
         // without ever touching this one's cache), and the walk stops here.
-        WireValue::Channel(_)
-        | WireValue::Shared(_)
-        | WireValue::RwShared(_)
-        | WireValue::Atomic(_)
-        | WireValue::Executor(_) => acc.1 = true,
-        WireValue::Str(s) => acc.0 += s.len(),
-        WireValue::Bytes(b) | WireValue::ByteArray(b) => acc.0 += b.len(),
-        // Leaves — root nothing, own no extra bytes. `Backref` also TERMINATES a cyclic wire graph
-        // (exactly like `collect_core_gcrefs`).
-        WireValue::Backref(_)
-        | WireValue::AtomicInt(_)
-        | WireValue::Int(_)
-        | WireValue::Float(_)
-        | WireValue::Bool(_)
-        | WireValue::Socket(_)
-        | WireValue::Listener(_)
-        | WireValue::Writer(_)
-        | WireValue::Reader(_)
-        | WireValue::Ptr(_)
-        | WireValue::Builtin(_)
-        | WireValue::Native { .. }
-        | WireValue::Cffi(_)
-        | WireValue::Func { .. }
-        | WireValue::Nil => {}
+        WireNode::Core(_) => acc.1 = true,
+        WireNode::Data { bytes } => acc.0 += bytes,
     }
     acc
 }
@@ -1872,8 +1713,7 @@ pub fn wire_summary(w: &WireValue) -> (usize, bool) {
 /// Only entered under a live `mem_cap` (see `live_bytes`) — with no cap `over_cap` is meaningless and
 /// this walk is pure cost.
 ///
-/// Keep the arms in lockstep with [`collect_core_gcrefs`] and [`wire_summary`] — a new `WireValue`
-/// variant must be added to all three.
+/// The children come from [`WireValue::visit`], which [`collect_core_gcrefs`] and [`wire_summary`] read too.
 ///
 /// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
 /// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
@@ -1923,6 +1763,10 @@ pub fn drain_pending_core_bytes(
             }
             // W7-26 — the queue half under its own scoped guard, then `ExecutorCore::held_bytes` (the
             // one facade `Heap::live_bytes`'s `Obj::Executor` arm reads too), never both held at once.
+            // Both halves are charged here because `seen` is SHARED with `live_bytes`: whichever walk
+            // meets a core first is the only one that charges it. Measured during W7-26 review: an
+            // executor holding 880 400 bytes of eager results, reached through an `Obj::Shared`
+            // payload, was counted as 240 when this arm read one half.
             WireValue::Executor(c) => {
                 let queued = {
                     let g = c.inner.lock().unwrap();
@@ -1988,116 +1832,16 @@ fn nested_core_bytes_structural(
     pending: &mut Vec<WireValue>,
 ) -> usize {
     let mut acc = 0usize;
-    match w {
-        WireValue::List { items: xs, .. } | WireValue::Tuple { items: xs, .. } => {
-            for x in xs {
-                acc += nested_core_bytes_structural(x, seen, pending);
-            }
-        }
-        WireValue::Map { entries, .. } => {
-            for (_, k, v) in entries.iter() {
-                acc += nested_core_bytes_structural(k, seen, pending)
-                    + nested_core_bytes_structural(v, seen, pending);
-            }
-        }
-        WireValue::Set { entries, .. } => {
-            for (_, e) in entries.iter() {
-                acc += nested_core_bytes_structural(e, seen, pending);
-            }
-        }
-        WireValue::Struct { fields, .. } => {
-            for (_, v) in fields {
-                acc += nested_core_bytes_structural(v, seen, pending);
-            }
-        }
-        WireValue::Enum { payload, .. } => {
-            for x in payload {
-                acc += nested_core_bytes_structural(x, seen, pending);
-            }
-        }
-        WireValue::Cell { inner, .. } => acc += nested_core_bytes_structural(inner, seen, pending),
-        WireValue::Iter { items, .. } => {
-            for x in items {
-                acc += nested_core_bytes_structural(x, seen, pending);
-            }
-        }
-        WireValue::Generator { closure, state, .. } => {
-            if let Some(c) = closure {
-                acc += nested_core_bytes_structural(c, seen, pending);
-            }
-            match state {
-                WireGenState::Pending(args, _) => {
-                    for x in args {
-                        acc += nested_core_bytes_structural(x, seen, pending);
-                    }
-                }
-                WireGenState::Suspended { stack, .. } => {
-                    for x in stack {
-                        acc += nested_core_bytes_structural(x, seen, pending);
-                    }
-                }
-                WireGenState::Done | WireGenState::Unsendable(_) => {}
-            }
-        }
-        WireValue::Closure { captured, .. } => {
-            for (_, v) in captured {
-                acc += nested_core_bytes_structural(v, seen, pending);
-            }
-        }
-        // The nested cores themselves — charge each one's payload ONCE per heap, then keep
-        // recursing (a core nested two deep is just as invisible as one nested once).
-        WireValue::Channel(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
+    match w.visit(|x| acc += nested_core_bytes_structural(x, seen, pending)) {
+        // A nested core: queue it, so `drain_pending_core_bytes` charges its payload ONCE per heap
+        // and keeps recursing (a core nested two deep is just as invisible as one nested once).
+        WireNode::Core(id) => {
+            if seen.insert(id) {
                 pending.push(w.clone());
             }
         }
-        // W7-26 — BOTH halves, exactly like `Heap::live_bytes`'s `Obj::Executor` arm. Keeping them
-        // in lockstep is not cosmetic: `seen`/`cores` is SHARED between the two walks, so whichever
-        // one meets a core first is the only one that charges it. An arm that reads a single half
-        // would therefore silently drop the other half whenever the enclosing core happens to be
-        // visited first — measured during review of this fix: an executor holding 880 400 bytes of
-        // eager results, reached through an `Obj::Shared` payload, was counted as 240.
-        WireValue::Executor(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
-                pending.push(w.clone());
-            }
-        }
-        WireValue::Shared(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
-                pending.push(w.clone());
-            }
-        }
-        WireValue::RwShared(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
-                pending.push(w.clone());
-            }
-        }
-        WireValue::Atomic(core) => {
-            if seen.insert(Arc::as_ptr(core) as usize) {
-                pending.push(w.clone());
-            }
-        }
-        // Leaves — own no nested core. `Backref` also TERMINATES a cyclic wire graph (exactly like
-        // `collect_core_gcrefs` / `wire_summary`).
-        WireValue::Handle(_)
-        | WireValue::Backref(_)
-        | WireValue::AtomicInt(_)
-        | WireValue::Str(_)
-        | WireValue::Bytes(_)
-        | WireValue::ByteArray(_)
-        | WireValue::Int(_)
-        | WireValue::Float(_)
-        | WireValue::Bool(_)
-        | WireValue::Socket(_)
-        | WireValue::Listener(_)
-        | WireValue::Writer(_)
-        | WireValue::Reader(_)
-        | WireValue::Ptr(_)
-        | WireValue::Builtin(_)
-        | WireValue::Native { .. }
-        | WireValue::Cffi(_)
-        | WireValue::Func { .. }
-        | WireValue::Nil => {}
+        // A handle owns no nested core; a data node's children were walked above.
+        WireNode::Handle(_) | WireNode::Data { .. } => {}
     }
     acc
 }

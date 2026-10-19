@@ -66,6 +66,7 @@ lists each remaining copy as DUPLICATE.
 | 3 | one owner per fact: facts 1-9 (blank name, places, `self`, type-application head, operator hooks, pattern names, reserved names, std module members, type keys) | done 2026-10-16 |
 | 3, fact 8 step 2 | builtin dispatch by an id (`enum Builtin` in `base/builtin.rs`) | done 2026-10-16 |
 | 3, names | one redeclaration rule; a module binds each name once, a type and a value never sharing it (TICKET-263) | done 2026-10-18 |
+| 3, fact 11 | one `WireValue` child visitor: `WireValue::visit` owns what a variant holds (TICKET-267) | done 2026-10-19 |
 | 5 | workspace crates: `chezzi-syntax`, `chezzi-native`, `chezzi-base`, `chezzi-front`, `chezzi-vm` | done 2026-10-16 |
 | docs | docs split into `reference/`, `design/`, `contributing/`, `history/` | in progress (branch `docs/refactor`) |
 
@@ -92,20 +93,18 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
      cost 2-3 ms over `print(1)` (`docs/contributing/benchmarks.md`). Part 2 is open: fact 10
      (row 70), rows 62, 94, `Hashable` opt-in, `Deque`/`Heap`/`Counter` `Iterable`, the collection
      convention table, the U5 sibling gaps.
-2. **Group D, fact 11 (TICKET-267, filed 2026-10-19).** One `WireValue` visitor for `wire_summary`, `collect_core_gcrefs` and the
-   `to_snap`/`to_wire` budget (row 93).
-3. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): `resolve_ty_ro_d` and
+2. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): `resolve_ty_ro_d` and
    `resolve_type` resolve the same annotations; `src/checker/resolve_ctype.rs:89`, `:137`, `:145`, `:160`
    say "mirrors". One resolver must call the other. Its own refactor unit, after TICKET-264.
-4. **Group E.** Overflow fault labels in `consteval`, `vm/arith.rs` and `vm/shared_methods.rs` (row 61).
-5. **Group F, syntax.** Row 25 (waits on G5); top-level `return`; the empty enum; `g()?` in `defer:`
+3. **Group E.** Overflow fault labels in `consteval`, `vm/arith.rs` and `vm/shared_methods.rs` (row 61).
+4. **Group F, syntax.** Row 25 (waits on G5); top-level `return`; the empty enum; `g()?` in `defer:`
    and `defer` in a generator (U11); a line break inside a hole (U8); the 1-tuple (U9); CRLF (U14);
    the exponential `.map[int](f)` chain (U17); `oo(x)??` (S2-3). Statuses in
    `docs/contributing/special-cases.md`.
-6. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
+5. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
    name (`:=`, `fn`, import) never share a name in one module, as Go does and as Rust does for a
    callable type (`struct E(i32);` + `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
-7. **Std modules compiled at build time** (owner decision 2026-10-18, option 1; no ticket yet). A
+6. **Std modules compiled at build time** (owner decision 2026-10-18, option 1; no ticket yet). A
    std import costs ~3.4 ms per run: `chezzi run` of `print(1)` takes 8.3 ms, and 11.7 ms after
    `import Iterator from std.iter` (release, `hyperfine -N -r 40`). Each run parses, checks and compiles
    the embedded std source again. CPython pays ~0 ms for `itertools` (C code in the binary) and loads
@@ -113,7 +112,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    each `std/*.chz` at `cargo build` time and embed the result in the binary; `std/*.chz` stays the one
    source. Open for its plan: the reach set (`resolver::unreached_std_fns`) and the program-wide slot
    and type keys depend on the importing program.
-8. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+7. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 
