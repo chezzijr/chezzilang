@@ -2007,3 +2007,24 @@ fn ident_words_reads_holes_and_skips_comments_and_text() {
         ]
     );
 }
+
+#[test]
+fn crlf_blank_line_lexes_like_lf() {
+    let lf = "fn main():\n    x := 1\n\n    print(x)\nmain()\n";
+    let crlf = lf.replace('\n', "\r\n");
+    assert_eq!(kinds(&crlf), kinds(lf));
+}
+
+#[test]
+fn crlf_line_break_in_a_string_is_one_lf() {
+    let toks = kinds("s := \"a\r\nb\"\r\n");
+    let text = toks.iter().find_map(|t| match t {
+        Token::Str(s) => Some(format!("{s:?}")),
+        _ => None,
+    });
+    let lf = kinds("s := \"a\nb\"\n").iter().find_map(|t| match t {
+        Token::Str(s) => Some(format!("{s:?}")),
+        _ => None,
+    });
+    assert_eq!(text, lf);
+}
