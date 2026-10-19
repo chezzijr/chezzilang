@@ -200,15 +200,14 @@ fn defer_block_form_shares_latest_value() {
     );
 }
 
-/// A `?` short-circuit INSIDE a `defer:` block: the block has no error-return contract, so the
-/// propagated `Err` is discarded (statements after the `?` don't run). The VM runs the block as a
-/// closure and discards its return at the defer boundary (regression for a found divergence
-/// where the since-removed interp engine leaked a "? propagation" runtime error).
+/// An error handled INSIDE a `defer:` block: a `?` there is a check error (TICKET-274: the block
+/// has no caller), so the cleanup `match`es the error or catches it in a nested `recover:`, and the
+/// rest of the block still runs.
 #[test]
-fn defer_block_form_discards_question_propagation() {
+fn defer_block_form_handles_an_error_inside_the_block() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main() -> int!:\n    defer:\n        log(\"clean start\")\n        n := risky(false)?\n        log(\"clean end\")\n    log(\"body\")\n    return ?0\nmain()\n",
-        "body\nclean start\n",
+        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main() -> int!:\n    defer:\n        log(\"clean start\")\n        match risky(false):\n            ?n: log(\"clean {n}\")\n            !e: log(\"clean failed: {e}\")\n        r := recover: risky(false)?\n        log(\"recovered {r}\")\n        log(\"clean end\")\n    log(\"body\")\n    return ?0\nmain()\n",
+        "body\nclean start\nclean failed: boom\nrecovered !boom\nclean end\n",
     );
 }
 

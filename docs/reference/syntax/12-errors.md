@@ -123,7 +123,7 @@ n    := fetch()?.len()                  # T!E: propagate the error (`?`), then `
   (`x := c?.bump()`) it is `expression returns no value (None) and cannot be used as a value`.
 - **On a `T!E`**, `x?.field` means `?` then `.`: propagate the `!e` out of the fn, then access the
   `T`. It is identical to `x? .field`, with the same return-kind rule (module top level accepts
-  either), the same behaviour in `defer:` and `recover:`, and the same rejection inside `spawn:`.
+  either), the same behaviour in `recover:`, and the same rejection inside `spawn:` and `defer:`.
   `f()?.len()` is Rust's idiom.
 - The `T!E` form does not chain tries through a nested carrier: with `a: X?` and `a.b: Y!E`,
   `a?.b?.c` is an `(Y!E)?` followed by a field access on a `T!E`, an error.
@@ -323,7 +323,7 @@ Top-level defers run LIFO when the program ends (or while unwinding an unhandled
 - It runs in the same task and captures free variables by reference: `x := 1; defer: print(x); x = 99`
   prints `99`, and reassigning an enclosing local mutates it. (The call form evaluates its arguments at
   the `defer` point.)
-- A `?` short-circuit inside the block is discarded.
+- A `?` in the block (also `?.` on a `T!E`) is ``'?' is not allowed inside a defer block: a deferred block has no caller to propagate to; handle the error in the block with `match` or `??` ``, whatever the function returns. A `?` in a `recover:`, a nested `fn` or a closure in the block targets that construct. Rust rejects `?` in `Drop::drop`, and a Go deferred func cannot return an error to its caller.
 - `return` anywhere in the block (also in an `if`/`for`/`match`/`wait:` arm) is
   `'return' is not allowed inside a defer block`. A `return` in a nested `fn` declared in the block is fine.
 

@@ -952,11 +952,10 @@ struct Checker {
     /// one writer; no call site knows about it.
     untyped_call: Option<Option<Span>>,
     /// True while checking statements lexically inside a `defer:` BLOCK (reset across nested
-    /// fn/closure boundaries, like `recover_depth`). A `?` here is DISCARDED at the block boundary
-    /// (`syntax.md`: "a `?` short-circuit inside the block is discarded — a cleanup body has no
-    /// error-return contract"), so it must NOT be validated against the enclosing function's return
-    /// type. See `infer_try`. Entering a defer block also zeroes `recover_depth` (the block is its
-    /// own closure — a `?` in it cannot target an outer `recover:` boundary).
+    /// fn/closure boundaries, like `recover_depth`). The block runs at scope exit with no caller,
+    /// so `infer_try` rejects a `?` here (TICKET-274). Entering a defer block also zeroes
+    /// `recover_depth` (the block is its own closure: a `?` in it cannot target an outer
+    /// `recover:` boundary).
     in_defer_block: bool,
     /// True while checking statements lexically inside a `spawn:` BLOCK. Set at the task boundary
     /// (`SpawnTarget::Block`) and cleared across every nested fn/closure boundary, where it is

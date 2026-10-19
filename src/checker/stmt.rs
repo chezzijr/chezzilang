@@ -693,13 +693,10 @@ impl Checker {
                     );
                 }
                 let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
-                // The `defer:` block is its own closure with a `?`-DISCARDING contract: a fired
-                // Err/None short-circuits the block and is dropped, never reaching the enclosing
-                // fn's return (`syntax.md`). So a `?` here must be typed against a defer-local
-                // discarding context, NOT the enclosing `current_ret` (which over-rejects when the
-                // fn returns nil/int, and mis-accepts-by-coincidence when it returns Result). Zero
-                // `recover_depth` too — this closure boundary means a `?` in the block cannot target
-                // an enclosing `recover:` boundary (a `recover:` nested INSIDE the block re-arms it).
+                // The `defer:` block is its own closure with NO CALLER: a `?` in it has nowhere to
+                // propagate to, so `infer_try` rejects it (TICKET-274). Zero `recover_depth` too: a
+                // `?` in the block cannot target an enclosing `recover:` (a `recover:` nested INSIDE
+                // the block re-arms it).
                 let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
                 let saved_in_defer = std::mem::replace(&mut self.in_defer_block, true);
                 // M24 Task 4: the witness scope carries in — `compile_defer`'s block arm appends the
@@ -951,7 +948,7 @@ impl Checker {
                         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
                         // A spawned task is its OWN frame (the compiler emits a fresh child proto),
                         // so the `?`-targeting state belonging to the enclosing frame stops at this
-                        // boundary: an enclosing `defer:`'s discard contract and an enclosing
+                        // boundary: an enclosing `defer:`'s no-caller flag and an enclosing
                         // `recover:` boundary are zeroed here and restored below. `in_spawn_block`
                         // then says what the resulting context IS — a task has no caller, so a `?`
                         // in it is rejected with the spawn-specific diagnostic rather than one

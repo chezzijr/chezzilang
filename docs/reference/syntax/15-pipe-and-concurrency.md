@@ -75,8 +75,8 @@ main()
 - **`?` (and `?.`) inside a `spawn:` block is a compile error** (`'?' is not allowed inside a spawn
   block: a spawned task has no caller to propagate to`), whatever the enclosing function returns and
   even under `recover:` or `defer:`. Send the error on a channel or `match` it in the task. Legal: a
-  `?` in a `parallel:` body, in a nested `fn`/closure declared in the task, in a `defer:`/`recover:`
-  inside the task, and in an argument of the call form `spawn f(g()?)` (arguments run in the parent).
+  `?` in a `parallel:` body, in a nested `fn`/closure declared in the task, in a `recover:`
+  inside the task, and in an argument of the call form `spawn f(g()?)` (arguments run in the parent). A `?` in a `defer:` inside the task is the `defer:` error.
 
 ```chezzi
 fn fetch_all(urls: List[str]):

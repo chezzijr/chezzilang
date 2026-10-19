@@ -104,7 +104,7 @@ impl Checker {
         }
     }
 
-    /// Experimental generators do not support the structured-concurrency / cleanup statements whose
+    /// Generators do not support the structured-concurrency / cleanup statements whose
     /// state (nurseries, frame defers) the suspendable generator context does not manage. Reject them
     /// with a clear message rather than mis-execute. Recurses through nested control-flow blocks but
     /// not into nested `fn` definitions (those have their own generator status).
@@ -119,22 +119,18 @@ impl Checker {
                 self.check_generator_restrictions(b);
             }
             match &s.kind {
-                StmtKind::Defer(_) => self.error(
-                    s.span,
-                    "`defer` is not supported inside a generator (experimental)",
-                ),
-                StmtKind::Spawn(_) => self.error(
-                    s.span,
-                    "`spawn` is not supported inside a generator (experimental)",
-                ),
-                StmtKind::Parallel { .. } => self.error(
-                    s.span,
-                    "`parallel:` is not supported inside a generator (experimental)",
-                ),
-                StmtKind::Wait { .. } => self.error(
-                    s.span,
-                    "`wait:` is not supported inside a generator (experimental)",
-                ),
+                StmtKind::Defer(_) => {
+                    self.error(s.span, "`defer` is not supported inside a generator")
+                }
+                StmtKind::Spawn(_) => {
+                    self.error(s.span, "`spawn` is not supported inside a generator")
+                }
+                StmtKind::Parallel { .. } => {
+                    self.error(s.span, "`parallel:` is not supported inside a generator")
+                }
+                StmtKind::Wait { .. } => {
+                    self.error(s.span, "`wait:` is not supported inside a generator")
+                }
                 StmtKind::If {
                     branches,
                     else_block,

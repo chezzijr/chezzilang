@@ -209,42 +209,80 @@ fn parallel_body_still_allows_return() {
     entry_ok("fn f() -> int:\n    parallel:\n        return 7\n    return 1\nprint(f())\n");
 }
 
+/// TICKET-274 — the `defer:`-block `?` diagnostic.
+const DEFER_Q: &str = "'?' is not allowed inside a defer block";
+
 #[test]
-fn defer_block_q_still_allowed() {
-    // `?` inside a `defer:` block short-circuits the block and is discarded (docs/reference/syntax/) — an
-    // expression, not a statement: the escaping-flow guard never sees it.
-    entry_ok(
-        "fn g() -> int!:\n    return ?2\nfn f() -> int!:\n    defer:\n        v := g()?\n        print(v)\n    return ?1\nprint(f())\n",
-    );
+fn defer_block_q_rejects_whatever_the_enclosing_frame_returns() {
+    // A `defer:` block runs at scope exit with no caller, so a `?` / `?.` directly in it is
+    // rejected whatever the enclosing frame returns (owner decision 2026-10-19: Rust rejects `?` in
+    // `Drop::drop`, a Go deferred func cannot return an error to its caller). Before TICKET-274
+    // every cell checked clean and the fired error was dropped. A `spawn:` OUTSIDE the `defer:`
+    // does not win: the `defer:` is the inner boundary, so its message is the one reported.
+    let head = "import std.concurrency\nfn g() -> int!:\n    return !\"x\"\nfn o() -> int?:\n    return None\nfn s() -> str!:\n    return !\"x\"\n";
+    let tries = [
+        "v := g()?",
+        "v := o()?",
+        "v := s()?.len()",
+        "v := s()? .len()",
+    ];
+    for t in tries {
+        let frames = [
+            format!(
+                "fn f() -> int!:\n    defer:\n        {t}\n        print(v)\n    return ?1\nprint(f())\n"
+            ),
+            format!(
+                "fn f() -> int?:\n    defer:\n        {t}\n        print(v)\n    return ?1\nprint(f())\n"
+            ),
+            format!(
+                "fn f() -> int:\n    defer:\n        {t}\n        print(v)\n    return 7\nprint(f())\n"
+            ),
+            format!(
+                "fn f():\n    defer:\n        {t}\n        print(v)\n    print(\"body\")\nf()\n"
+            ),
+            format!("defer:\n    {t}\n    print(v)\nprint(\"top\")\n"),
+            format!(
+                "fn f() -> int!:\n    r := recover:\n        defer:\n            {t}\n            print(v)\n        1\n    print(r)\n    return ?1\nprint(f())\n"
+            ),
+            format!(
+                "fn f():\n    spawn:\n        defer:\n            {t}\n            print(v)\n        print(\"body\")\nf()\n"
+            ),
+        ];
+        for frame in frames {
+            let src = format!("{head}{frame}");
+            let errs = check_entry(&src);
+            assert!(
+                errs.iter().any(|e| e.message.contains(DEFER_Q)),
+                "expected {DEFER_Q:?} for:\n{src}\ngot: {errs:?}"
+            );
+            assert!(
+                !errs.iter().any(|e| e.message.contains(SPAWN_Q)),
+                "the inner `defer:` boundary must win over an outer `spawn:` for:\n{src}\ngot: {errs:?}"
+            );
+        }
+    }
 }
 
 #[test]
-fn defer_block_q_discards_regardless_of_enclosing_return() {
-    // The `?`-in-defer contract is DISCARD — the enclosing fn's return type is irrelevant (the block
-    // is its own closure). Before the fix, `infer_try` validated the defer-block `?` against the
-    // enclosing `current_ret`, so it over-rejected under a nil/int-returning fn and only accepted
-    // under a Result-returning one by coincidence. All of these must check clean now:
-    // nil-returning enclosing fn:
-    entry_ok(
-        "fn g() -> int!:\n    return !\"x\"\nfn f():\n    defer:\n        v := g()?\n        print(v)\n    print(\"body\")\nf()\n",
-    );
-    // plain int-returning enclosing fn:
-    entry_ok(
-        "fn g() -> int!:\n    return ?2\nfn f() -> int:\n    defer:\n        v := g()?\n        print(v)\n    return 7\nprint(f())\n",
-    );
-    // Option `?` discarded under a nil-returning fn (its kind need not match the enclosing return):
-    entry_ok(
-        "fn h() -> int?:\n    return None\nfn f():\n    defer:\n        v := h()?\n        print(v)\n    print(\"body\")\nf()\n",
-    );
-    // module top-level defer block:
-    entry_ok(
-        "fn g() -> int!:\n    return !\"x\"\ndefer:\n    v := g()?\n    print(v)\nprint(\"top\")\n",
-    );
+fn q_inside_a_defer_block_keeps_its_own_target() {
+    // The neighbours of the TICKET-274 reject stay legal: a `recover:`, a nested `fn` or a closure
+    // declared in the block is the `?`'s own target, and the call form evaluates its argument in
+    // the enclosing frame at the `defer` point.
+    let head = "fn g() -> int!:\n    return !\"x\"\n";
+    for body in [
+        "fn f():\n    defer:\n        r := recover: g()?\n        match r:\n            ?v: print(v)\n            !e: print(\"cleanup failed: {e}\")\n    print(\"body\")\nf()\n",
+        "fn f():\n    defer:\n        fn inner() -> int!:\n            return ?(g()? + 1)\n        print(inner())\n    print(\"body\")\nf()\n",
+        "fn f():\n    defer:\n        c := fn() -> int!: ?(g()? + 1)\n        print(c())\n    print(\"body\")\nf()\n",
+        "fn f():\n    defer:\n        print(g() ?? 0)\n    print(\"body\")\nf()\n",
+        "fn f() -> int!:\n    defer print(g()?)\n    return ?1\nprint(f())\n",
+    ] {
+        entry_ok(&format!("{head}{body}"));
+    }
 }
 
 #[test]
 fn defer_block_q_still_rejects_non_sum_operand() {
-    // The discard arm must still reject a `?` on a non-Result/Option operand.
+    // The no-caller arm must still reject a `?` on a non-Result/Option operand.
     let errs = check_entry(
         "fn f():\n    defer:\n        v := (1 + 2)?\n        print(v)\n    print(\"b\")\nf()\n",
     );
@@ -274,10 +312,10 @@ fn fn_declared_in_defer_block_gets_own_q_context() {
 }
 
 #[test]
-fn spawn_block_in_defer_does_not_inherit_q_discard() {
+fn spawn_block_in_defer_reports_the_spawn_q() {
     // `in_defer_block` must NOT leak across a spawn task boundary: a spawned task is its own closure,
     // so a `?` inside it targets the task (nil-returning → reject), exactly like a bare
-    // `spawn: v := g()?` — NOT the enclosing defer's discard. (Regression for the leak the F1 flag
+    // `spawn: v := g()?` — NOT the enclosing defer's message. (Regression for the leak the F1 flag
     // introduced.) Both the defer-wrapped and the bare spawn form must reject identically.
     let wrapped = check_entry(
         "import std.concurrency\nfn g() -> int!:\n    return !\"x\"\nfn f():\n    defer:\n        spawn:\n            v := g()?\n            print(v)\n    print(\"b\")\nf()\n",
@@ -351,11 +389,6 @@ fn q_next_to_a_spawn_block_stays_legal() {
     // `SpawnTarget::Call` — the argument evaluates in the PARENT frame before the task starts.
     entry_ok(&format!(
         "{head}fn h(n: int):\n    print(n)\nfn main() -> int!str:\n    spawn h(g()?)\n    return ?0\nprint(main())\n"
-    ));
-    // A `defer:` INSIDE the spawn: the discard contract is per-frame and this defer is in the
-    // task's frame, so its `?` is discarded there exactly as in any other frame.
-    entry_ok(&format!(
-        "{head}fn main() -> int!str:\n    spawn:\n        defer:\n            v := g()?\n            print(v)\n        print(\"body\")\n    return ?0\nprint(main())\n"
     ));
     // A `recover:` INSIDE the spawn: its boundary is in the same frame as the `?`, so
     // short-circuiting to it is correct.

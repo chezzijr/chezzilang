@@ -1017,71 +1017,35 @@ impl Checker {
                 }
             };
         }
-        // Inside a `defer:` block (but not a `recover:` nested in it — that's handled above), a `?`
-        // is DISCARDED at the block boundary: the block is its own closure with no error-return
-        // contract, so a fired Err/None just short-circuits the cleanup and is dropped
-        // (`syntax.md`). The enclosing function's return type is therefore irrelevant — accept any
-        // Result/Option and yield the success payload; a non-sum operand is rejected as everywhere.
-        if self.in_defer_block {
-            return match t {
-                Ty::Result(ok, _) => *ok,
-                Ty::Option(inner) => *inner,
-                Ty::Unknown => Ty::Unknown,
-                other @ Ty::Int
-                | other @ Ty::Float
-                | other @ Ty::Bool
-                | other @ Ty::Str
-                | other @ Ty::Bytes
-                | other @ Ty::ByteArray
-                | other @ Ty::Nil
-                | other @ Ty::List(_)
-                | other @ Ty::Map(..)
-                | other @ Ty::Set(_)
-                | other @ Ty::Func { .. }
-                | other @ Ty::Tuple(_)
-                | other @ Ty::Struct(..)
-                | other @ Ty::Enum(..)
-                | other @ Ty::Param(_)
-                | other @ Ty::Channel(_)
-                | other @ Ty::Shared(_)
-                | other @ Ty::Atomic(_)
-                | other @ Ty::AtomicInt
-                | other @ Ty::RwShared(_)
-                | other @ Ty::Executor
-                | other @ Ty::Socket
-                | other @ Ty::Listener
-                | other @ Ty::Writer
-                | other @ Ty::Reader
-                | other @ Ty::Ptr
-                | other @ Ty::Width(_)
-                | other @ Ty::Protocol(..)
-                | other @ Ty::Module(_)
-                | other @ Ty::Var(_) => {
-                    self.error(
-                        span,
-                        format!("'?' expects a `T?` or `T!E` value, found {other}"),
-                    );
-                    Ty::Unknown
-                }
-            };
-        }
-        // A spawned task is its own frame with NO CALLER: the nursery discards a task's returned
-        // `Err` by design (W7-46, Go's contract), so a `?` here propagates to nothing — reject it.
-        // The gate order is load-bearing, and is why the spawn arm zeroes `recover_depth` /
-        // `in_defer_block`: a `recover:`/`defer:` OUTSIDE the spawn has its state zeroed at the task
-        // boundary, so its `?` falls through to here and is rejected; one nested INSIDE the spawn
+        // A `defer:` block and a spawned task run with NO CALLER, so a `?` there propagates to
+        // nothing — reject it. The nursery discards a task's returned `Err` by design (W7-46, Go's
+        // contract). A deferred block runs at scope exit: Rust rejects `?` in `Drop::drop`, and a Go
+        // deferred func cannot hand an error to its caller (owner decision 2026-10-19,
+        // TICKET-274). The user handles the error inside the block (`match`, `??`, a `recover:`).
+        // The gate order is load-bearing, and is why each boundary zeroes `recover_depth` and the
+        // spawn arm zeroes `in_defer_block`: a `recover:` OUTSIDE the boundary has its depth zeroed
+        // there, so its `?` falls through to here and is rejected; a `recover:` nested INSIDE
         // re-arms from zero, so its own gate above fires first and stays legal (its boundary is in
-        // the same frame as the `?`).
-        // Shaped like the two gates above: a non-carrier operand keeps the `expects Result or
-        // Option` diagnostic (the spawn message would HIDE that defect), and `Unknown` stays silent
-        // so an already-reported operand does not cascade a second error.
-        if self.in_spawn_block {
+        // the same frame as the `?`). `defer:` is tested first because it is the inner boundary of
+        // `spawn: defer: g()?`: entering a `defer:` does not clear `in_spawn_block`.
+        // Shaped like the recover gate above: a non-carrier operand keeps the `expects` diagnostic
+        // (the boundary message would HIDE that defect), and `Unknown` stays silent so an
+        // already-reported operand does not cascade a second error.
+        let no_caller = if self.in_defer_block {
+            Some(
+                "'?' is not allowed inside a defer block: a deferred block has no caller to propagate to; handle the error in the block with `match` or `??`",
+            )
+        } else if self.in_spawn_block {
+            Some(
+                "'?' is not allowed inside a spawn block: a spawned task has no caller to propagate to",
+            )
+        } else {
+            None
+        };
+        if let Some(msg) = no_caller {
             return match t {
                 Ty::Result(..) | Ty::Option(_) => {
-                    self.error(
-                        span,
-                        "'?' is not allowed inside a spawn block: a spawned task has no caller to propagate to".to_string(),
-                    );
+                    self.error(span, msg.to_string());
                     Ty::Unknown
                 }
                 Ty::Unknown => Ty::Unknown,

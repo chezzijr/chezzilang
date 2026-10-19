@@ -259,29 +259,34 @@ test fn result_carrier_inside_recover_short_circuits_to_the_boundary():
         _: assert false, "wrong shape"
     assert "{good}" == "{good_spaced}"
 
-# ---- 7: `?.` on a `T!E` value inside `defer:` — observable side effects ----
+# ---- 7: `?.` on a `T!E` value in a `recover:` inside `defer:` — observable side effects ----
 #
-# In a defer body a fired `!e` is DISCARDED at the block boundary: it short-circuits the rest of
-# the cleanup. Assert that through a Shared accumulator, never through print order.
+# A `?` directly in a `defer:` block is a check error: the block has no caller. A `recover:` nested
+# in the block is the `?`'s own target, so a fired `!e` ends the `recover:` and the rest of the
+# cleanup still runs. Assert that through a Shared accumulator, never through print order.
 
 fn run_defer_dot(log: Shared[str], good: bool):
     defer:
         log.update(fn(s: str) -> str: s + "A")
-        n := pick(good)?.len()
-        log.update(fn(s: str) -> str: s + "{n}")
+        r := recover: pick(good)?.len()
+        match r:
+            ?n: log.update(fn(s: str) -> str: s + "{n}")
+            !e: log.update(fn(s: str) -> str: s + "E")
         log.update(fn(s: str) -> str: s + "B")
 
 fn run_defer_spaced(log: Shared[str], good: bool):
     defer:
         log.update(fn(s: str) -> str: s + "A")
-        n := pick(good)? .len()
-        log.update(fn(s: str) -> str: s + "{n}")
+        r := recover: pick(good)? .len()
+        match r:
+            ?n: log.update(fn(s: str) -> str: s + "{n}")
+            !e: log.update(fn(s: str) -> str: s + "E")
         log.update(fn(s: str) -> str: s + "B")
 
-fn pick(good: bool) -> str!str:
+fn pick(good: bool) -> str!MyErr:
     if good:
         return ?"hello"
-    return !"boom"
+    return !MyErr(4)
 
 test fn result_carrier_inside_defer_matches_the_spaced_spelling():
     ok_dot := Shared("")
@@ -295,8 +300,8 @@ test fn result_carrier_inside_defer_matches_the_spaced_spelling():
     run_defer_dot(err_dot, false)
     err_spaced := Shared("")
     run_defer_spaced(err_spaced, false)
-    # the error short-circuits the cleanup: everything after the `?.` is skipped, and it is DROPPED
-    assert err_dot.get() == "A", "got {err_dot.get()}"
+    # the error ends the `recover:` only: the cleanup handles it and runs to the end
+    assert err_dot.get() == "AEB", "got {err_dot.get()}"
     assert err_dot.get() == err_spaced.get()
 
 # ---- 8: inside a closure with its own `-> a `T!E` value`, and inside a nested `fn` ----

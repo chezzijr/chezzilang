@@ -102,9 +102,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    `int_neg` and `IntFault` in `src/ast/consteval.rs`; a binary op's name comes from `HOOKS`. The VM ops,
    `Atomic`, `sum`, the natives and the checker read it. Done 2026-10-19.
 4. **Group F, syntax (filed 2026-10-19).** Row 25 waits on G5. Open tickets: postfix `??` and `?..`
-   (S2-3, TICKET-272); the 1-tuple type and pattern `a, := t` (S2-7, U9, TICKET-273); `?` in `defer:`
-   is a check error, as `12-errors.md` says, and the generator ban drops "(experimental)" (U11,
-   TICKET-274). Done: CRLF line breaks (U14, TICKET-271: the lexer and the editor read a CRLF pair as
+   (S2-3, TICKET-272); the 1-tuple type and pattern `a, := t` (S2-7, U9, TICKET-273). Done: `?` in `defer:` is a check error, as in `spawn:`, and the generator ban drops "(experimental)" (U11, TICKET-274); CRLF line breaks (U14, TICKET-271: the lexer and the editor read a CRLF pair as
    one `\n`); the `.map[int](f)` chain (U17, TICKET-269: the
    checker infers each value receiver once); a line break inside a hole already works (U8, TICKET-260).
    Owner decisions (2026-10-19): top-level `return` stays an error, as Python's `SyntaxError: 'return'
