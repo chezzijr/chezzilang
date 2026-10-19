@@ -861,3 +861,27 @@ fn two_level_type_path_parses() {
     // `c.Shared[int]` is a valid qualified type annotation.
     parse_ok("fn f(x: c.Shared[int]): print(1)\n");
 }
+
+// ===== TICKET-273: the 1-tuple has a type form and a pattern form =====
+
+#[test]
+fn one_tuple_type_parses() {
+    let StmtKind::Fn(f) = only("fn one() -> (int,):\n    return (1,)\n") else {
+        panic!()
+    };
+    assert_eq!(f.ret, Some(Type::Tuple(vec![Type::named("int")])));
+}
+
+#[test]
+fn one_tuple_unpack_target_parses() {
+    let m = parse_ok("t := (1,)\na, := t\n(b,), c := (t, 2)\n");
+    assert_eq!(m.stmts.len(), 3);
+}
+
+#[test]
+fn one_tuple_match_pattern_parses() {
+    match first_arm_pattern("match t:\n    (a,): print(a)\n    _: print(0)\n") {
+        Pattern::Tuple(elems) => assert_eq!(elems.len(), 1),
+        other => panic!("{other:?}"),
+    }
+}
