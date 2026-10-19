@@ -96,7 +96,13 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
 2. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): `resolve_ty_ro_d` and
    `resolve_type` resolve the same annotations; `src/checker/resolve_ctype.rs:89`, `:137`, `:145`, `:160`
    say "mirrors". One resolver must call the other. Its own refactor unit, after TICKET-264.
-3. **Group E.** Overflow fault labels in `consteval`, `vm/arith.rs` and `vm/shared_methods.rs` (row 61).
+3. **Group E (TICKET-268, filed 2026-10-19).** Overflow fault labels in `consteval`, `vm/arith.rs` and `vm/shared_methods.rs` (row 61).
+   Also a constant fault that `consteval` sees but the checker accepts (2026-10-19): `print(1 / 0)`,
+   `print(1 % 0)` and `print(1 << 64)` check OK, then fault at run time (`division by zero`,
+   `modulo by zero`, `shift amount 64 out of range (0..64)`). `consteval` returns `None` for them.
+   Go rejects both at compile time (`invalid operation: division by zero`; `1 << 64` overflows
+   int64); rustc rejects both (`this operation will panic at runtime`, `this arithmetic operation
+   will overflow`).
 4. **Group F, syntax.** Row 25 (waits on G5); top-level `return`; the empty enum; `g()?` in `defer:`
    and `defer` in a generator (U11); a line break inside a hole (U8); the 1-tuple (U9); CRLF (U14);
    the exponential `.map[int](f)` chain (U17); `oo(x)??` (S2-3). Statuses in
