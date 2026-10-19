@@ -103,10 +103,12 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    Go rejects both at compile time (`invalid operation: division by zero`; `1 << 64` overflows
    int64); rustc rejects both (`this operation will panic at runtime`, `this arithmetic operation
    will overflow`).
-4. **Group F, syntax.** Row 25 (waits on G5); top-level `return`; the empty enum; `g()?` in `defer:`
+4. **Group F, syntax.** Row 25 (waits on G5); the empty enum; `g()?` in `defer:`
    and `defer` in a generator (U11); a line break inside a hole (U8); the 1-tuple (U9); CRLF (U14);
    the exponential `.map[int](f)` chain (U17); `oo(x)??` (S2-3). Statuses in
    `docs/contributing/special-cases.md`.
+   Top-level `return` is dropped (owner, 2026-10-19): it stays an error, as Python's `SyntaxError:
+   'return' outside function`; a manifest entrypoint `-> T!` already ends the program with an error.
 5. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
    name (`:=`, `fn`, import) never share a name in one module, as Go does and as Rust does for a
    callable type (`struct E(i32);` + `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
