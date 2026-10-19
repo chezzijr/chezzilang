@@ -92,7 +92,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
      cost 2-3 ms over `print(1)` (`docs/contributing/benchmarks.md`). Part 2 is open: fact 10
      (row 70), rows 62, 94, `Hashable` opt-in, `Deque`/`Heap`/`Counter` `Iterable`, the collection
      convention table, the U5 sibling gaps.
-2. **Group D, fact 11.** One `WireValue` visitor for `wire_summary`, `collect_core_gcrefs` and the
+2. **Group D, fact 11 (TICKET-267, filed 2026-10-19).** One `WireValue` visitor for `wire_summary`, `collect_core_gcrefs` and the
    `to_snap`/`to_wire` budget (row 93).
 3. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): `resolve_ty_ro_d` and
    `resolve_type` resolve the same annotations; `src/checker/resolve_ctype.rs:89`, `:137`, `:145`, `:160`
