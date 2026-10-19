@@ -104,6 +104,8 @@ impl Checker {
         };
         let saved = self.call_ctx.replace(ctx);
         let t = self.infer_call_dispatch(callee, args, named, type_args, span);
+        // TICKET-269: a handed receiver lives for this call only; a later pass re-infers the node.
+        self.handed_recv = None;
         // D4 layer A inside a `spawn:` body, through the plan the dispatch just bound.
         let slots = self.bound_slots(call_id, args, named);
         self.report_named_call_writes(callee, &slots, false);
@@ -203,13 +205,15 @@ impl Checker {
         // CPython). The one choice between that reading and the type-argument reading.
         if type_args.len() == 1
             && let Some(ix) = self.call_ctx.as_ref().and_then(|c| c.bracket.clone())
-            && self.bracket_is_index(callee)
         {
-            if let Some(id) = self.call_ctx.as_ref().map(|c| c.id) {
-                self.record_index_call(id, span);
+            let mark = self.errors.len();
+            if self.bracket_is_index(callee, res.as_ref()) {
+                if let Some(id) = self.call_ctx.as_ref().map(|c| c.id) {
+                    self.record_index_call(id, span);
+                }
+                let callee_ty = self.index_value_since(callee, &ix, true, mark);
+                return self.apply_value_call(None, None, callee_ty, args, named, span);
             }
-            let callee_ty = self.index_value(callee, &ix, true);
-            return self.apply_value_call(None, None, callee_ty, args, named, span);
         }
         // Explicit call-site type arguments `name[T, …](…)`. Resolved once here; only generic
         // by-name calls (fn / struct / variant constructors) can consume them.
@@ -359,9 +363,7 @@ impl Checker {
     ) -> Ty {
         // A type parameter under a TYPE-LEVEL turbofish (`Item[int].tag()`, in either carrier) is
         // the parameter, which takes no type arguments (rustc E0109). A reject before any reading.
-        if let Some(tname) = type_apply_param_head(obj)
-            && self.shadowing_type_param(&tname)
-        {
+        if let Some(tname) = self.applied_type_param(obj) {
             self.infer_all(args);
             return self.type_param_shadow_error(
                 &tname,
@@ -1262,11 +1264,18 @@ impl Checker {
         }
     }
 
+    /// The type parameter a member call's receiver applies (`Item[int]` in `Item[int].tag()`), when
+    /// that name is a shadowing type parameter here.
+    fn applied_type_param(&self, obj: &Expr) -> Option<String> {
+        type_apply_param_head(obj).filter(|t| self.shadowing_type_param(t))
+    }
+
     /// The one answer to whether a call's one-arg bracket indexes its head (`fs[k](10)`) or passes
     /// a type argument (`idt[int](3)`). Never an index when the head is a fn-like path; a bare name
     /// indexes when it binds a local or a global; a member head indexes when its member is data
-    /// ([`Self::data_member_ty`]) for the receiver's type, learned by a speculative probe.
-    fn bracket_is_index(&mut self, callee: &Expr) -> bool {
+    /// ([`Self::data_member_ty`]) for the receiver's type: inferred once for a value receiver
+    /// (`res` is `Member`), learned by a speculative probe for any other.
+    fn bracket_is_index(&mut self, callee: &Expr, res: Option<&Resolution>) -> bool {
         if self.path_fn(callee).is_some() {
             return false;
         }
@@ -1281,6 +1290,19 @@ impl Checker {
                 #[cfg(any(test, feature = "test-api"))]
                 {
                     self.bracket_receivers += 1;
+                }
+                // TICKET-269: a value receiver both readings infer first is inferred once, here,
+                // with its diagnostics, and the chosen reading's `infer(obj)` takes it from
+                // `handed_recv`. A bare name stays a probe: it costs O(1), and a method call
+                // reports its task write before it reads the name. An applied type parameter is
+                // rejected before either reading infers it.
+                if matches!(res, Some(Resolution::Member))
+                    && obj.kind.as_ident().is_none()
+                    && self.applied_type_param(obj).is_none()
+                {
+                    let recv = self.infer(obj);
+                    self.handed_recv = Some((obj.id, recv.clone()));
+                    return self.data_member_ty(&recv, name).is_some();
                 }
                 let mark = self.diag_mark();
                 let recv = self.infer(obj);

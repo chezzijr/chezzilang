@@ -98,6 +98,7 @@ impl Checker {
             tyvars: std::cell::RefCell::new(tyvar::TyVars::default()),
             expected_hint: None,
             hint_owner: None,
+            handed_recv: None,
             hint_owned: false,
             arith_parent: false,
             const_scan_visits: 0,

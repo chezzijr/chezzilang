@@ -1223,6 +1223,9 @@ struct Checker {
     /// TICKET-227 -- the node `expected_hint` was installed FOR (its slot's value). Only `infer` of
     /// that node may wrap it into the hint's carrier; every other reader treats the hint as a seed.
     hint_owner: Option<crate::ast::NodeId>,
+    /// TICKET-269 -- a member call head's receiver, inferred once by `bracket_is_index` and taken
+    /// by the chosen reading's own `infer` of that node, so a `recv.name[T](args)` chain is linear.
+    handed_recv: Option<(crate::ast::NodeId, Ty)>,
     /// TICKET-227 -- set by `infer` for one `infer_kind_inner` call: the node being inferred owns its
     /// hint. An if/match that owns its hint makes each branch value own it.
     hint_owned: bool,

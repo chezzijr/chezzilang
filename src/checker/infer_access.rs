@@ -304,6 +304,19 @@ impl Checker {
     /// index is not inferred: that reading would report `int` as an unknown name on top of the
     /// head's error (DEC-158: the mark counts errors only).
     pub(super) fn index_value(&mut self, obj: &Expr, index: &Expr, type_shaped: bool) -> Ty {
+        let mark = self.errors.len();
+        self.index_value_since(obj, index, type_shaped, mark)
+    }
+
+    /// [`Self::index_value`] with its error mark taken at `mark`: a call head `recv.fs[k](..)`
+    /// counts the errors of the receiver `bracket_is_index` inferred before this read.
+    pub(super) fn index_value_since(
+        &mut self,
+        obj: &Expr,
+        index: &Expr,
+        type_shaped: bool,
+        mark: usize,
+    ) -> Ty {
         #[cfg(any(test, feature = "test-api"))]
         {
             self.index_value_checks += 1;
@@ -311,7 +324,6 @@ impl Checker {
         // TICKET-225: the read's expected type is the ELEMENT's slot, never the object's or the
         // subscript's; left in place, `x: int8 = xs[200]` checked the int index `200` against int8.
         self.expected_hint = None;
-        let mark = self.errors.len();
         let obj_ty = self.infer_value(obj);
         if self.errors.len() > mark && type_shaped {
             return Ty::Unknown;

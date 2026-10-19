@@ -146,6 +146,10 @@ impl Checker {
     }
 
     pub(super) fn infer(&mut self, expr: &Expr) -> Ty {
+        // TICKET-269: the receiver `bracket_is_index` already inferred, with its diagnostics.
+        if let Some((_, ty)) = self.handed_recv.take_if(|r| r.0.0 == expr.id.0) {
+            return ty;
+        }
         // TICKET-225: a var bound since a type was stored reads as its binding.
         if self.tyvars.borrow().any()
             && let Some(h) = &self.expected_hint
