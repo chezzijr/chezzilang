@@ -98,7 +98,9 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    say "mirrors". One resolver must call the other. Its own refactor unit, after TICKET-264.
 3. **Group E (TICKET-268, 2026-10-19).** `chezzi check` rejects a constant int fault: an overflow, a
    constant zero divisor and a constant shift amount outside `0..64`, whatever the int left operand is
-   (`1 / 0`, `x % 0`, `x <<= 64`). Open: one owner for an int op's fault (row 61).
+   (`1 / 0`, `x % 0`, `x <<= 64`). One owner for an int op's fault: `int_binop`, `operand_fault`,
+   `int_neg` and `IntFault` in `src/ast/consteval.rs`; a binary op's name comes from `HOOKS`. The VM ops,
+   `Atomic`, `sum`, the natives and the checker read it. Done 2026-10-19.
 4. **Group F, syntax.** Row 25 (waits on G5); the empty enum; `g()?` in `defer:`
    and `defer` in a generator (U11); a line break inside a hole (U8); the 1-tuple (U9); CRLF (U14);
    the exponential `.map[int](f)` chain (U17; TICKET-269, filed 2026-10-19: infer each receiver once); `oo(x)??` (S2-3). Statuses in

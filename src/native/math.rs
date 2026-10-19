@@ -7,6 +7,13 @@
 //! Pure Rust `std` — no third-party crates.
 
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
+use crate::ast::consteval::{IntFault, IntOp};
+
+/// The owner's text for a math fn's int overflow. A math fn names no binary op, so the
+/// `protocol` callback never runs.
+fn overflow_text(op: IntOp) -> String {
+    IntFault::Overflow(op).message(|b| unreachable!("math names no binary op: {b:?}"))
+}
 
 // `abs` is declared `[T: Num]` in `std/math.chz`, so the checker guarantees the arg is one int or
 // one float: int args yield an int result, float args a float, and `arg_is_int(0)`
@@ -15,10 +22,10 @@ use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 fn abs(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "abs", 1)?;
     if h.arg_is_int(0) {
-        // `i64::MIN.abs()` has no representable result (panics in debug, wraps in release). Surface a
-        // recoverable overflow instead — matches the engines' checked `"integer overflow in <Op>"`.
+        // `i64::MIN.abs()` has no representable result (panics in debug, wraps in release): fault with
+        // the owner's `IntFault::Overflow(IntOp::Abs)` text.
         let v = h.arg_int(0)?.checked_abs().ok_or(HostError {
-            message: "integer overflow in abs".to_string(),
+            message: overflow_text(IntOp::Abs),
         })?;
         Ok(NativeRet::Int(v))
     } else {
@@ -123,8 +130,8 @@ fn lcm_i64(a: i64, b: i64) -> Result<i64, String> {
     let g = gcd_u64(a, b);
     let l = (a / g)
         .checked_mul(b)
-        .ok_or_else(|| "integer overflow in lcm".to_string())?;
-    i64::try_from(l).map_err(|_| "integer overflow in lcm".to_string())
+        .ok_or_else(|| overflow_text(IntOp::Lcm))?;
+    i64::try_from(l).map_err(|_| overflow_text(IntOp::Lcm))
 }
 
 /// `n!` for `0 <= n <= 20` (21! > i64::MAX, so the ceiling is the i64 limit not a design choice).
@@ -276,7 +283,7 @@ fn gcd(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     let g = gcd_u64(h.arg_int(0)?.unsigned_abs(), h.arg_int(1)?.unsigned_abs());
     // Only the 2^63 corner (an input is i64::MIN, the other 0/i64::MIN) overflows i64 — fault like abs.
     let v = i64::try_from(g).map_err(|_| HostError {
-        message: "integer overflow in gcd".to_string(),
+        message: overflow_text(IntOp::Gcd),
     })?;
     Ok(NativeRet::Int(v))
 }

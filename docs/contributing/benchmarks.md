@@ -86,7 +86,7 @@ load average about 4, wall ms mean ± σ. Source: [2026-10](../history/benchmark
 
 Later records changed none of these beyond noise: TICKET-255 (2026-10-14) measured `loop` and `list`
 flat, builtin dispatch by id (2026-10-16) measured eight benches between -0.7% and +1.4%, and
-TICKET-264 (2026-10-17) measured `hof` and `closure` flat. The `print_loop` row is from TICKET-264:
+TICKET-264 (2026-10-17) measured `hof` and `closure` flat. TICKET-268 (2026-10-19) moved the fused int ops onto `Vm::int_op`: release, `hyperfine -N -r 10 --warmup 2`, load average about 4, base `40fe4d7e` against the change, `fib` 543 ± 20 ms against 520 ± 18 ms, `loop` 1769 ± 46 ms against 1781 ± 30 ms. Without `#[inline(always)]` on `int_binop`, `operand_fault` and `Vm::int_op`, `loop` ran 1887 ms against 1786 ms in the reversed order. The `print_loop` row is from TICKET-264:
 the shell `time` keyword, 7 runs, load average about 3 (`hyperfine` was not installed).
 
 ### Ratio to CPython

@@ -3,6 +3,7 @@
 
 use super::call::py_blank;
 use super::*;
+use crate::ast::BinaryOp;
 
 impl Vm {
     pub(super) fn intrinsic_proto_method(
@@ -785,9 +786,7 @@ impl Vm {
                             let mut acc = 0_i64;
                             for &v in &elems {
                                 if let Some(n) = self.int_val(v) {
-                                    acc = acc.checked_add(n).ok_or_else(|| {
-                                        self.err("integer overflow in Add".to_string(), span)
-                                    })?;
+                                    acc = self.int_op(BinaryOp::Add, acc, n, span)?;
                                 } else {
                                     return Err(self.err(format!("sum() expects a numeric list, got an element of type {}", self.type_name(v)), span));
                                 }

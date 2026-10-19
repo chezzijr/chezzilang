@@ -17,7 +17,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Where a block ended (dedent, `else`, EOF) | `ended_at_block` (`parser/cursor.rs`) | Family A |
 | Where a block expression may start (value site) | `parse_value` (`parser/expr.rs`), `open_value` (`parser/expr.rs`) | U8 |
 
-| Constant value of an expression | `eval` (`ast/consteval.rs`) | overflow lint, width check, const |
+| Constant value of an expression | `eval` (`ast/consteval.rs`) | overflow lint, constant fault check, width check, const |
 | Fewest args a decl may be entered with | `min_callable_params` (`ast/mod.rs`) | one owner: the checker's `FnSig.min_params`, the compiler's `Proto::min_arity` and the natives read it |
 | Value type of a named fn or builtin | `fn_value_ty` (`checker/mod.rs`) | one builder for every `FnSig` value and hover type; a builtin value is a `Ty::Func`, and the variadic flag is part of the type (TICKET-264) |
 | Native decl signature and slots | `harvest_native_fn_sig` (`checker/harvest.rs`) | prelude natives included; `register_native_decl` calls it |
@@ -65,7 +65,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Operator → hook → protocol and method | `of_binary` (`base/hooks.rs`), `HOOKS` (`base/hooks.rs`) | `binary_protocol` (`checker/ty_util.rs`), the protocol shapes harvested by `seed_std_protocols` (`checker/harvest.rs`) from the `protocol` decls in `std/*.chz` and the operator typing in `checker/infer_ops.rs` derive from it. DUPLICATE still: the method column of `INTRINSIC_PROTO_METHODS` (`checker/proto.rs`) |
 | Which std module declares a protocol, and is its name global | `std_protocol_owner` (`checker/graph_pass.rs`, re-exported as `checker::std_protocol_owner`), read from the `protocol` decls in `std/*.chz` | `is_std_protocol` and `is_global_protocol` (`checker/mod.rs`), `user_protocol_key` (`checker/setup.rs`), the owner of the builtin type Iterator (`checker/builtin_type.rs`) derive from it. No other list of protocol names exists. |
 | Which builtin type satisfies which operator protocol | `INTRINSIC_PROTO_METHODS` (`checker/proto.rs`) | `builtin_arith_kind` (`checker/op_sendable.rs`) derives from it (`builtin_operator_protocol_grid`) |
-| Overflow fault label of an arithmetic op | DUPLICATE: `checked` in `ast/consteval.rs`, the op labels in `vm/arith.rs` and `vm/shared_methods.rs` | |
+| Fault of an int op (overflow name, zero divisor, shift range) and its text | `int_binop`, `operand_fault`, `int_neg`, `IntFault::message` (`ast/consteval.rs`); a binary op's name is its `HOOKS` protocol, `int_fault_message` (`base/hooks.rs`) | checker `scan_const_overflow`/`report_const_fault`, peephole, VM `int_op` (`vm/arith.rs`), `Atomic`/`AtomicInt` `add`/`sub`, `sum`, `math.abs`/`lcm`/`gcd`; grid `int_fault_one_message_per_op_at_every_site` |
 | What an Iterable yields | DUPLICATE: `iterable_elem` (`checker/iter_index.rs`), `iter_elem` (`checker/iter_index.rs`), `struct_iter_elem` (`checker/iter_index.rs`), `struct_iterable_elem` (`checker/iter_index.rs`), `for_bindings` (`checker/iter_index.rs`), the for-lowering in `compiler/loops.rs` | waits on the U6 design |
 | Does a write change a value no name holds | `temporary_write` (`checker/fresh.rs`) | TICKET-254 |
 | Can an operator result alias an operand | `aliases_operand` (`checker/fn_writes.rs`) | Family C |

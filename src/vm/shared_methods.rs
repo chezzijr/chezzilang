@@ -2,6 +2,7 @@
 //! Split out of `src/vm/netio.rs`. `super::*` is the parent module.
 
 use super::*;
+use crate::ast::BinaryOp;
 
 impl Vm {
     /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
@@ -465,14 +466,12 @@ impl Vm {
                 let mut g = core.v.lock().unwrap();
                 let new = match (&*g, &delta) {
                     (WireValue::Int(a), WireValue::Int(b)) => {
-                        let (r, label) = if method == "add" {
-                            (a.checked_add(*b), "Add")
+                        let op = if method == "add" {
+                            BinaryOp::Add
                         } else {
-                            (a.checked_sub(*b), "Sub")
+                            BinaryOp::Sub
                         };
-                        WireValue::Int(r.ok_or_else(|| {
-                            self.err(format!("integer overflow in {label}"), span)
-                        })?)
+                        WireValue::Int(self.int_op(op, *a, *b, span)?)
                     }
                     (WireValue::Float(a), WireValue::Float(b)) => {
                         WireValue::Float(if method == "add" { a + b } else { a - b })
@@ -538,18 +537,16 @@ impl Vm {
                 self.arity_err(method, args, 1, span)?;
                 let delta = self.int_of(args[0]);
                 let core = self.atomic_int_core(h);
-                let label = if method == "add" { "Add" } else { "Sub" };
+                let op = if method == "add" {
+                    BinaryOp::Add
+                } else {
+                    BinaryOp::Sub
+                };
                 // Checked compare_exchange CAS-loop: raw fetch_add/fetch_sub wrap silently (behavior
                 // regression vs Atomic's Mutex + checked_add). Retry on a racing writer.
                 loop {
                     let cur = core.v.load(SeqCst);
-                    let r = if method == "add" {
-                        cur.checked_add(delta)
-                    } else {
-                        cur.checked_sub(delta)
-                    };
-                    let new =
-                        r.ok_or_else(|| self.err(format!("integer overflow in {label}"), span))?;
+                    let new = self.int_op(op, cur, delta, span)?;
                     if core.v.compare_exchange(cur, new, SeqCst, SeqCst).is_ok() {
                         return Ok(self.make_int(new));
                     }

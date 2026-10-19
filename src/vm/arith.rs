@@ -2,6 +2,7 @@
 // Arithmetic, comparison, ordering, hashing, equality.
 
 use super::*;
+use crate::ast::BinaryOp;
 use crate::base::hooks::Hook;
 
 impl Vm {
@@ -278,9 +279,7 @@ impl Vm {
         let at = self.base() + slot;
         let cur = self.stack[at];
         if let Some(x) = cur.as_int_inline() {
-            let v = x
-                .checked_add(delta)
-                .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
+            let v = self.int_op(BinaryOp::Add, x, delta, span)?;
             self.stack[at] = self.make_int(v);
         } else if cur.is_float() {
             let f = self.float_of(cur);
@@ -298,6 +297,23 @@ impl Vm {
         Ok(())
     }
 
+    /// One int arithmetic or bitwise op through its owner, `consteval::int_binop`: the value, or
+    /// the op's fault as a run-time error at `span`.
+    #[inline(always)]
+    pub(super) fn int_op(
+        &self,
+        op: BinaryOp,
+        a: i64,
+        b: i64,
+        span: Span,
+    ) -> Result<i64, RuntimeError> {
+        match crate::ast::consteval::int_binop(op, a, b) {
+            Some(Ok(n)) => Ok(n),
+            Some(Err(f)) => Err(self.err(crate::base::hooks::int_fault_message(f), span)),
+            None => unreachable!("{op:?} is not int arithmetic"),
+        }
+    }
+
     /// Int/Int fast path for the fused binops (`BinLocalLocal` / `BinLocalConst`). Must match
     /// `arith` (overflow / div-by-zero errors) and `compare_op` (ordering) for `Int` operands
     /// exactly. Anything non-`Int` never reaches here — the caller falls back to the slow path.
@@ -312,43 +328,11 @@ impl Vm {
         // Arithmetic is computed in true i64 (overflow still faults past i64), then `make_int` boxes
         // any result outside ±2^62 — the inline↔box fork, invisible to the program.
         let v = match kind {
-            BinKind::Add => {
-                let n = x
-                    .checked_add(y)
-                    .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
-                self.make_int(n)
-            }
-            BinKind::Sub => {
-                let n = x
-                    .checked_sub(y)
-                    .ok_or_else(|| self.err("integer overflow in Sub".to_string(), span))?;
-                self.make_int(n)
-            }
-            BinKind::Mul => {
-                let n = x
-                    .checked_mul(y)
-                    .ok_or_else(|| self.err("integer overflow in Mul".to_string(), span))?;
-                self.make_int(n)
-            }
-            BinKind::Div => {
-                if y == 0 {
-                    return Err(self.err("division by zero".to_string(), span));
-                }
-                let n = x
-                    .checked_div(y)
-                    .ok_or_else(|| self.err("integer overflow in Div".to_string(), span))?;
-                self.make_int(n)
-            }
-            BinKind::Mod => {
-                if y == 0 {
-                    return Err(self.err("modulo by zero".to_string(), span));
-                }
-                // `wrapping_rem` == `checked_rem` for every input except `MIN % -1`, where the true
-                // mathematical remainder IS `0` (representable) — Rust's `checked_rem` returns `None`
-                // there only to dodge the x86 `IDIV` hardware trap, not because the answer overflows.
-                // Unlike `Div`, `%` never overflows past `b == 0`.
-                self.make_int(x.wrapping_rem(y))
-            }
+            BinKind::Add => self.make_int(self.int_op(BinaryOp::Add, x, y, span)?),
+            BinKind::Sub => self.make_int(self.int_op(BinaryOp::Sub, x, y, span)?),
+            BinKind::Mul => self.make_int(self.int_op(BinaryOp::Mul, x, y, span)?),
+            BinKind::Div => self.make_int(self.int_op(BinaryOp::Div, x, y, span)?),
+            BinKind::Mod => self.make_int(self.int_op(BinaryOp::Mod, x, y, span)?),
             BinKind::Lt => Value::bool(x < y),
             BinKind::LtEq => Value::bool(x <= y),
             BinKind::Gt => Value::bool(x > y),
@@ -382,12 +366,12 @@ impl Vm {
     pub(super) fn arith(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
-        let name = match op {
-            Op::Add => "Add",
-            Op::Sub => "Sub",
-            Op::Mul => "Mul",
-            Op::Div => "Div",
-            Op::Mod => "Mod",
+        let bop = match op {
+            Op::Add => BinaryOp::Add,
+            Op::Sub => BinaryOp::Sub,
+            Op::Mul => BinaryOp::Mul,
+            Op::Div => BinaryOp::Div,
+            Op::Mod => BinaryOp::Mod,
             Op::ConstInt(_)
             | Op::ConstFloat(_)
             | Op::ConstStr(_)
@@ -499,142 +483,12 @@ impl Vm {
             | Op::NewExecutor
             | Op::NewExecutorN => unreachable!(),
         };
+        let name = Hook::of_binary(bop)
+            .expect("an arithmetic op has a hook")
+            .protocol();
         let result = if self.is_integral(l) && self.is_integral(r) {
             let (a, b) = (self.int_of(l), self.int_of(r));
-            let v = match op {
-                Op::Add => a.checked_add(b),
-                Op::Sub => a.checked_sub(b),
-                Op::Mul => a.checked_mul(b),
-                Op::Div | Op::Mod if b == 0 => {
-                    return Err(self.err(
-                        format!(
-                            "{} by zero",
-                            if matches!(op, Op::Div) {
-                                "division"
-                            } else {
-                                "modulo"
-                            }
-                        ),
-                        span,
-                    ));
-                }
-                Op::Div => a.checked_div(b),
-                // `wrapping_rem` never overflows past the `b == 0` guard above (see `fast_int_bin`'s
-                // `BinKind::Mod` arm) — wrap in `Some` so this shared overflow check never fires for Mod.
-                Op::Mod => Some(a.wrapping_rem(b)),
-                Op::ConstInt(_)
-                | Op::ConstFloat(_)
-                | Op::ConstStr(_)
-                | Op::ConstBytes(_)
-                | Op::True
-                | Op::False
-                | Op::Nil
-                | Op::Pop
-                | Op::StampGen(_)
-                | Op::Assert { .. }
-                | Op::LoadBuiltin(_)
-                | Op::GetLocal(_)
-                | Op::SetLocal(_)
-                | Op::GetGlobalSlot(_)
-                | Op::DefineGlobalSlot(_)
-                | Op::SetGlobalSlot(_)
-                | Op::GetCaptured(_)
-                | Op::Neg
-                | Op::Not
-                | Op::Lt
-                | Op::LtEq
-                | Op::Gt
-                | Op::GtEq
-                | Op::Eq
-                | Op::NotEq
-                | Op::BitAnd
-                | Op::BitOr
-                | Op::BitXor
-                | Op::Shl
-                | Op::Shr
-                | Op::Contains
-                | Op::AsBool
-                | Op::AsInt
-                | Op::BinLocalLocal { .. }
-                | Op::BinLocalConst { .. }
-                | Op::IncLocal { .. }
-                | Op::Jump(_)
-                | Op::JumpIfFalse(_)
-                | Op::JumpIfFalseKeep(_)
-                | Op::JumpIfTrueKeep(_)
-                | Op::PushHandler(_)
-                | Op::PopHandler
-                | Op::Call(_)
-                | Op::CallMethod { .. }
-                | Op::CallHook { .. }
-                | Op::CallStatic { .. }
-                | Op::CallStaticDyn { .. }
-                | Op::CallBuiltin(..)
-                | Op::CallPrint(_)
-                | Op::CallPrintSep { .. }
-                | Op::Return
-                | Op::Yield
-                | Op::DeferCall(_)
-                | Op::DeferMethod(..)
-                | Op::EnterDeferScope
-                | Op::LeaveDeferScope
-                | Op::DrainHandlerDefers
-                | Op::Try
-                | Op::JsonDecode(_)
-                | Op::JsonToValue
-                | Op::NewList(_)
-                | Op::NewTuple(_)
-                | Op::NewMap(_)
-                | Op::NewSet(_)
-                | Op::NewStruct(..)
-                | Op::NewCell
-                | Op::CellLoad
-                | Op::CellStore
-                | Op::NewEnum { .. }
-                | Op::MakeFunc(_)
-                | Op::MakeFuncIn(_)
-                | Op::MakeMethodFunc { .. }
-                | Op::JumpIfProvided(..)
-                | Op::MakeCffi(_)
-                | Op::MakeClosure(..)
-                | Op::GetField { .. }
-                | Op::GetIndex
-                | Op::SliceRange
-                | Op::SetField { .. }
-                | Op::SetIndex
-                | Op::Dup
-                | Op::Dup2
-                | Op::ToStr
-                | Op::ToStrFmt(_)
-                | Op::BuildStr(_)
-                | Op::ListClone
-                | Op::ArrLen
-                | Op::HasNextHook
-                | Op::IsGenerator
-                | Op::IsCursor
-                | Op::IterableToCursor
-                | Op::IsChannel
-                | Op::ChanRecvOrClosed
-                | Op::EnsureEnum(_)
-                | Op::MatchArm { .. }
-                | Op::MatchNoArm(_)
-                | Op::EnterNursery
-                | Op::JoinNursery
-                | Op::ReclaimNursery
-                | Op::SpawnCall(..)
-                | Op::SpawnRecv(..)
-                | Op::SpawnBlock(..)
-                | Op::WaitPoll(_)
-                | Op::NewChannel(_)
-                | Op::NewShared
-                | Op::NewRwShared
-                | Op::NewAtomic
-                | Op::NewAtomicInt
-                | Op::NewExecutor
-                | Op::NewExecutorN => unreachable!(),
-            };
-            let n = v.ok_or_else(|| self.err(format!("integer overflow in {name}"), span))?;
-            self.make_int(n)
+            self.make_int(self.int_op(bop, a, b, span)?)
         } else if self.is_numeric(l) && self.is_numeric(r) {
             let (x, y) = (self.as_f64(l), self.as_f64(r));
             // Float arithmetic is total IEEE-754: division/modulo by zero yields inf/-inf/NaN,
@@ -868,9 +722,8 @@ impl Vm {
     /// same struct/enum `neg(self)` overload dispatch.
     pub(super) fn neg_value(&mut self, v: Value, span: Span) -> Result<Value, RuntimeError> {
         if let Some(n) = self.int_val(v) {
-            let neg = n
-                .checked_neg()
-                .ok_or_else(|| self.err("integer overflow in negation".to_string(), span))?;
+            let neg = crate::ast::consteval::int_neg(n)
+                .map_err(|f| self.err(crate::base::hooks::int_fault_message(f), span))?;
             Ok(self.make_int(neg))
         } else if v.is_float() {
             let f = self.float_of(v);
@@ -1167,12 +1020,12 @@ impl Vm {
     pub(super) fn bitwise(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
-        let name = match op {
-            Op::BitAnd => "BitAnd",
-            Op::BitOr => "BitOr",
-            Op::BitXor => "BitXor",
-            Op::Shl => "Shl",
-            Op::Shr => "Shr",
+        let bop = match op {
+            Op::BitAnd => BinaryOp::BitAnd,
+            Op::BitOr => BinaryOp::BitOr,
+            Op::BitXor => BinaryOp::BitXor,
+            Op::Shl => BinaryOp::Shl,
+            Op::Shr => BinaryOp::Shr,
             Op::ConstInt(_)
             | Op::ConstFloat(_)
             | Op::ConstStr(_)
@@ -1284,143 +1137,12 @@ impl Vm {
             | Op::NewExecutor
             | Op::NewExecutorN => unreachable!(),
         };
+        let name = Hook::of_binary(bop)
+            .expect("a bitwise op has a hook")
+            .protocol();
         let result = if self.is_integral(l) && self.is_integral(r) {
             let (a, b) = (self.int_of(l), self.int_of(r));
-            let v = match op {
-                Op::BitAnd => a & b,
-                Op::BitOr => a | b,
-                Op::BitXor => a ^ b,
-                Op::Shl | Op::Shr => {
-                    if !(0..64).contains(&b) {
-                        return Err(
-                            self.err(format!("shift amount {b} out of range (0..64)"), span)
-                        );
-                    }
-                    if matches!(op, Op::Shl) {
-                        // Left shift can overflow (drop high bits) like `+ - * /`; treat
-                        // it as a recoverable fault, not a silent wrap. Round-trip test:
-                        // `(a << b) >> b == a` holds iff no significant bit was shifted out
-                        // (correct for negative operands too — `-1 << 63` round-trips).
-                        let v = a << (b as u32);
-                        if (v >> (b as u32)) != a {
-                            return Err(self.err(format!("integer overflow in {name}"), span));
-                        }
-                        v
-                    } else {
-                        a >> (b as u32)
-                    }
-                }
-                Op::ConstInt(_)
-                | Op::ConstFloat(_)
-                | Op::ConstStr(_)
-                | Op::ConstBytes(_)
-                | Op::True
-                | Op::False
-                | Op::Nil
-                | Op::Pop
-                | Op::StampGen(_)
-                | Op::Assert { .. }
-                | Op::LoadBuiltin(_)
-                | Op::GetLocal(_)
-                | Op::SetLocal(_)
-                | Op::GetGlobalSlot(_)
-                | Op::DefineGlobalSlot(_)
-                | Op::SetGlobalSlot(_)
-                | Op::GetCaptured(_)
-                | Op::Add
-                | Op::Sub
-                | Op::Mul
-                | Op::Div
-                | Op::Mod
-                | Op::Neg
-                | Op::Not
-                | Op::Lt
-                | Op::LtEq
-                | Op::Gt
-                | Op::GtEq
-                | Op::Eq
-                | Op::NotEq
-                | Op::Contains
-                | Op::AsBool
-                | Op::AsInt
-                | Op::BinLocalLocal { .. }
-                | Op::BinLocalConst { .. }
-                | Op::IncLocal { .. }
-                | Op::Jump(_)
-                | Op::JumpIfFalse(_)
-                | Op::JumpIfFalseKeep(_)
-                | Op::JumpIfTrueKeep(_)
-                | Op::PushHandler(_)
-                | Op::PopHandler
-                | Op::Call(_)
-                | Op::CallMethod { .. }
-                | Op::CallHook { .. }
-                | Op::CallStatic { .. }
-                | Op::CallStaticDyn { .. }
-                | Op::CallBuiltin(..)
-                | Op::CallPrint(_)
-                | Op::CallPrintSep { .. }
-                | Op::Return
-                | Op::Yield
-                | Op::DeferCall(_)
-                | Op::DeferMethod(..)
-                | Op::EnterDeferScope
-                | Op::LeaveDeferScope
-                | Op::DrainHandlerDefers
-                | Op::Try
-                | Op::JsonDecode(_)
-                | Op::JsonToValue
-                | Op::NewList(_)
-                | Op::NewTuple(_)
-                | Op::NewMap(_)
-                | Op::NewSet(_)
-                | Op::NewStruct(..)
-                | Op::NewCell
-                | Op::CellLoad
-                | Op::CellStore
-                | Op::NewEnum { .. }
-                | Op::MakeFunc(_)
-                | Op::MakeFuncIn(_)
-                | Op::MakeMethodFunc { .. }
-                | Op::JumpIfProvided(..)
-                | Op::MakeCffi(_)
-                | Op::MakeClosure(..)
-                | Op::GetField { .. }
-                | Op::GetIndex
-                | Op::SliceRange
-                | Op::SetField { .. }
-                | Op::SetIndex
-                | Op::Dup
-                | Op::Dup2
-                | Op::ToStr
-                | Op::ToStrFmt(_)
-                | Op::BuildStr(_)
-                | Op::ListClone
-                | Op::ArrLen
-                | Op::HasNextHook
-                | Op::IsGenerator
-                | Op::IsCursor
-                | Op::IterableToCursor
-                | Op::IsChannel
-                | Op::ChanRecvOrClosed
-                | Op::EnsureEnum(_)
-                | Op::MatchArm { .. }
-                | Op::MatchNoArm(_)
-                | Op::EnterNursery
-                | Op::JoinNursery
-                | Op::ReclaimNursery
-                | Op::SpawnCall(..)
-                | Op::SpawnRecv(..)
-                | Op::SpawnBlock(..)
-                | Op::WaitPoll(_)
-                | Op::NewChannel(_)
-                | Op::NewShared
-                | Op::NewRwShared
-                | Op::NewAtomic
-                | Op::NewAtomicInt
-                | Op::NewExecutor
-                | Op::NewExecutorN => unreachable!(),
-            };
+            let v = self.int_op(bop, a, b, span)?;
             self.make_int(v)
         } else {
             match (l.view(), r.view()) {

@@ -66,7 +66,7 @@ impl IntFault {
 
 /// The fault the right operand `b` gives `a OP b` for every int `a`: a zero divisor, or a shift
 /// amount outside `0..64`. [`int_binop`] reads it first.
-#[inline]
+#[inline(always)]
 pub fn operand_fault(op: BinaryOp, b: i64) -> Option<IntFault> {
     match op {
         BinaryOp::Div if b == 0 => Some(IntFault::DivByZero),
@@ -102,7 +102,7 @@ pub fn int_neg(a: i64) -> Result<i64, IntFault> {
 
 /// One int binary op with the VM's semantics, the one owner of its value and its fault.
 /// `Some(Err(fault))` is the fault the VM raises; `None` is an op that is not int arithmetic.
-#[inline]
+#[inline(always)]
 pub fn int_binop(op: BinaryOp, a: i64, b: i64) -> Option<Result<i64, IntFault>> {
     if let Some(f) = operand_fault(op, b) {
         return Some(Err(f));
