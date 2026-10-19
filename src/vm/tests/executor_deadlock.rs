@@ -1098,6 +1098,36 @@ print(\"after\")
     );
 }
 
+/// The program of `a_self_shut_executor_still_has_its_slots_reduced_at_program_exit`.
+const SELF_SHUT_PROGRAM: &str = r#"
+import Executor from std.concurrency
+ex := Executor()
+done := Channel[int]()
+fn closer():
+    ex.shutdown()
+    done.send(1)
+ex.submit(fn(): print("A"))
+ex.submit(closer)
+ex.submit(fn(): print("C"))
+done.recv()
+print("end")
+"#;
+
+/// TICKET-270: `SELF_SHUT_PROGRAM` submits a third job after `closer`, so it faults whenever a pool
+/// thread runs `closer` first. This test forces that order: main waits for `closer` to finish
+/// `shutdown()` before the third submit. The program must be `Ok` under that order.
+#[test]
+fn a_self_shut_program_does_not_submit_after_its_own_shutdown() {
+    let forced = SELF_SHUT_PROGRAM
+        .replace("ex.submit(closer)", "ex.submit(closer)\ndone.recv()")
+        .replace("done.recv()\nprint", "print");
+    let r = run_capture(&forced);
+    assert!(
+        r.is_ok(),
+        "closer ran first and the third submit faulted: {r:?}"
+    );
+}
+
 /// A job that shuts down the executor it is running under leaves that core's submission slots
 /// UNREDUCED — its own slot is still live, so `join_executor` may not `mem::take` the vector. The
 /// program-exit drain must therefore pick the core up even though it is already `shut`, or every
@@ -1139,22 +1169,8 @@ fn a_self_shut_executor_still_has_its_slots_reduced_at_program_exit() {
         return;
     }
 
-    let out = run_capture(
-        "
-import Executor from std.concurrency
-ex := Executor()
-done := Channel[int]()
-fn closer():
-    ex.shutdown()
-    done.send(1)
-ex.submit(fn(): print(\"A\"))
-ex.submit(closer)
-ex.submit(fn(): print(\"C\"))
-done.recv()
-print(\"end\")
-",
-    )
-    .expect("a job shutting down its own executor is healthy — see the self-join fix");
+    let out = run_capture(SELF_SHUT_PROGRAM)
+        .expect("a job shutting down its own executor is healthy — see the self-join fix");
     // `end` first: `main` prints it before the exit drain, which is what then flushes the slots.
     // A before C is the W7-5c per-slot flush on the buffered sink, in SUBMISSION order — that half
     // IS ordered, unlike the streamed `chezzi run` path (see `the Executor's sched`'s doc).
