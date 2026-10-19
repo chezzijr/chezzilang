@@ -193,3 +193,22 @@ fn the_scan_reads_code_only() {
         production_code("if p.name == \"self\" {}\nlet m = \"say p == \\\"self\\\" here\";\n");
     assert_eq!(named.matches("== \"self\"").count(), 1, "{named}");
 }
+
+/// TICKET-267: the `WireValue` walks read one child visitor, not a "keep the arms in lockstep" comment.
+#[test]
+fn wire_value_walks_share_one_child_visitor() {
+    let core = fs::read_to_string("src/vm/core.rs").unwrap();
+    let owners = fs::read_to_string("docs/contributing/owners.md").unwrap();
+    let row = owners
+        .lines()
+        .find(|l| l.starts_with("| `WireValue` walks"))
+        .expect("owners.md has a `WireValue` walks row");
+    assert!(
+        !core.contains("Keep the arms in lockstep"),
+        "src/vm/core.rs still keeps `WireValue` walks equal by comment"
+    );
+    assert!(
+        !row.contains("DUPLICATE"),
+        "owners.md still marks the `WireValue` walks DUPLICATE: {row}"
+    );
+}
