@@ -98,13 +98,7 @@ impl Vm {
                     for v in items {
                         parts.push(self.display_guarded(*v, depth + 1)?);
                     }
-                    // A 1-tuple renders `(1,)` — the trailing comma is what distinguishes it from a
-                    // parenthesised scalar, as in Python's repr.
-                    if n == 1 {
-                        Ok(format!("({},)", parts.join(", ")))
-                    } else {
-                        Ok(format!("({})", parts.join(", ")))
-                    }
+                    Ok(crate::base::words::tuple_text(parts))
                 }
                 Obj::Map(m) => {
                     let mut parts = Vec::with_capacity(m.entries.len());
@@ -382,14 +376,9 @@ impl Vm {
                     .join(", ");
                 format!("[{inner}]")
             }
-            WireValue::Tuple { items, .. } => {
-                let inner = items
-                    .iter()
-                    .map(|v| self.display_wire_in(v, snaps, seen))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("({inner})")
-            }
+            WireValue::Tuple { items, .. } => crate::base::words::tuple_text(
+                items.iter().map(|v| self.display_wire_in(v, snaps, seen)),
+            ),
             WireValue::Map { entries, .. } => {
                 let inner = entries
                     .iter()
@@ -780,11 +769,7 @@ impl Vm {
             Obj::Tuple(items) => {
                 out.push('(');
                 self.stringify_seq_into(out, &items, span, depth + 1)?;
-                // A 1-tuple renders `(1,)` — the trailing comma is what distinguishes it from a
-                // parenthesised scalar, as in Python's repr.
-                if items.len() == 1 {
-                    out.push(',');
-                }
+                out.push_str(crate::base::words::tuple_tail(items.len()));
                 out.push(')');
             }
             Obj::Map(m) => {

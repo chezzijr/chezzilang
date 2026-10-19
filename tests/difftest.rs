@@ -392,6 +392,45 @@ fn p0_tuple_render() {
     );
 }
 
+/// The 1-tuple (S2-7): its value `(1,)`, its field and its one-name unpack `a, := t` match
+/// CPython's `a, = t`.
+#[test]
+fn p0_one_tuple_render() {
+    let cfg = config();
+    let prog = Program {
+        funcs: vec![],
+        main: vec![
+            Stmt::Let {
+                name: "t".into(),
+                ty: Ty::Tuple(vec![Ty::Int]),
+                init: Expr::TupleLit(vec![Expr::IntLit(1)]),
+            },
+            Stmt::Print(vec![Expr::Var("t".into())]),
+            Stmt::Print(vec![Expr::TupleField {
+                base: Box::new(Expr::Var("t".into())),
+                idx: 0,
+                ret: Ty::Int,
+            }]),
+            Stmt::Unpack {
+                names: vec!["a".into()],
+                init: Expr::Var("t".into()),
+            },
+            Stmt::Print(vec![Expr::Var("a".into())]),
+        ],
+    };
+    let (outcome, chz, py) = run::run_program(&cfg, &prog);
+    assert!(
+        matches!(outcome, Outcome::Match | Outcome::AllowListed(_)),
+        "{}",
+        difftest::describe(0, &outcome, &chz, &py)
+    );
+    assert!(
+        chz.contains("t := (1,)\n") && chz.contains("a, := t\n"),
+        "{chz}"
+    );
+    assert!(py.contains("(1,)") && py.contains("a, = t\n"), "{py}");
+}
+
 /// Non-tautology guard for the tuple shim arm: a raw Python tuple print
 /// (`(1, 'two', True)`) differs from the Chezzi spelling, so removing the shim
 /// arm surfaces a real divergence.
@@ -1195,6 +1234,31 @@ fn gen_emits_tuple() {
             |s| matches!(s, Stmt::Unpack { .. }),
         ),
         "generator never emitted a tuple"
+    );
+}
+
+/// S2-7 (TICKET-273): the 1-tuple spells `(x,)` in Chezzi and CPython, so the generator emits one,
+/// as a literal and as a one-name unpack, inside the seed range `fuzz_tuples` compares.
+#[test]
+fn gen_emits_one_tuple() {
+    let feat = feat_only(false, false, false, true);
+    assert!(
+        emits(
+            feat,
+            200,
+            |e| matches!(e, Expr::TupleLit(items) if items.len() == 1),
+            |_| false,
+        ),
+        "generator never emitted a 1-tuple literal"
+    );
+    assert!(
+        emits(
+            feat,
+            200,
+            |_| false,
+            |s| matches!(s, Stmt::Unpack { names, .. } if names.len() == 1),
+        ),
+        "generator never emitted a one-name unpack"
     );
 }
 

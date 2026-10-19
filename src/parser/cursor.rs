@@ -728,6 +728,28 @@ impl Parser {
         !self.ended_at_block() && self.eat(t)
     }
 
+    /// The rest of a comma list whose first element is `first`: `(, elem)*`, with one optional
+    /// trailing comma before a token of `end`. The one tuple shape of a value, a type, a pattern
+    /// and a target (S2-7). The bool says the list had a comma: `x,` and `(x,)` are a 1-tuple;
+    /// `x` and `(x)` are `x`. An empty `end` admits no trailing comma.
+    pub(super) fn comma_tail<T>(
+        &mut self,
+        first: T,
+        end: &[Token],
+        mut elem: impl FnMut(&mut Self) -> PResult<T>,
+    ) -> PResult<(Vec<T>, bool)> {
+        let mut elems = vec![first];
+        let mut comma = false;
+        while self.eat_in_line(&Token::Comma) {
+            comma = true;
+            if end.iter().any(|t| self.check(t)) {
+                break;
+            }
+            elems.push(elem(self)?);
+        }
+        Ok((elems, comma))
+    }
+
     /// A simple statement must end the logical line; otherwise trailing tokens are a syntax error
     /// (e.g. `x := 5 y := 6` packed onto one line).
     pub(super) fn expect_stmt_end(&mut self) -> PResult<()> {

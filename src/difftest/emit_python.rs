@@ -13,6 +13,7 @@
 
 use super::ast::*;
 use super::emit_chezzi::float_lit;
+use chezzi::base::words::{tuple_parts, tuple_text};
 
 /// Prelude prepended to every emitted Python program.
 pub const SHIM: &str = r#"import math as _math
@@ -38,7 +39,7 @@ def _chz_str(v):
         if v == float("-inf"): return "-inf"
         return repr(v)
     if isinstance(v, str): return v
-    if isinstance(v, tuple): return "(" + ", ".join(_chz_repr(x) for x in v) + ")"
+    if isinstance(v, tuple): return "(" + ", ".join(_chz_repr(x) for x in v) + ("," if len(v) == 1 else "") + ")"
     if isinstance(v, list): return "[" + ", ".join(_chz_repr(x) for x in v) + "]"
     if isinstance(v, dict): return "{" + ", ".join(_chz_repr(k) + ": " + _chz_repr(x) for k, x in v.items()) + "}"
     return str(v)
@@ -106,12 +107,7 @@ impl Emitter {
                 self.out.push('\n');
             }
             Stmt::Unpack { names, init } => {
-                for (i, n) in names.iter().enumerate() {
-                    if i > 0 {
-                        self.out.push_str(", ");
-                    }
-                    self.out.push_str(n);
-                }
+                self.out.push_str(&tuple_parts(names));
                 self.out.push_str(" = ");
                 self.expr(init);
                 self.out.push('\n');
@@ -256,14 +252,13 @@ impl Emitter {
                 recv, method, args, ..
             } => self.method(recv, *method, args),
             Expr::TupleLit(items) => {
-                self.out.push('(');
-                for (i, it) in items.iter().enumerate() {
-                    if i > 0 {
-                        self.out.push_str(", ");
-                    }
+                let mut parts = Vec::with_capacity(items.len());
+                for it in items {
+                    let start = self.out.len();
                     self.expr(it);
+                    parts.push(self.out.split_off(start));
                 }
-                self.out.push(')');
+                self.out.push_str(&tuple_text(parts));
             }
             Expr::TupleField { base, idx, .. } => {
                 self.out.push('(');

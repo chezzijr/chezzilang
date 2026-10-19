@@ -1487,9 +1487,9 @@ impl Gen {
     }
 
     fn rand_ty(&mut self) -> Ty {
-        // Tuple arity >= 2 (single-element `(1,)` and empty `()` diverge from Chezzi spelling).
+        // Tuple arity 1..3. The empty tuple `()` is not a Chezzi value.
         if self.feat.tuples && self.rng.chance(0.18) {
-            let arity = 2 + self.rng.below(2) as usize; // 2..3
+            let arity = 1 + self.rng.below(3) as usize; // 1..3
             let elems = (0..arity).map(|_| self.rand_scalar_ty()).collect();
             return Ty::Tuple(elems);
         }

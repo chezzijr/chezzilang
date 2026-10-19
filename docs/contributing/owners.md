@@ -16,6 +16,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 |---|---|---|
 | Where a block ended (dedent, `else`, EOF) | `ended_at_block` (`parser/cursor.rs`) | Family A |
 | Where a block expression may start (value site) | `parse_value` (`parser/expr.rs`), `open_value` (`parser/expr.rs`) | U8 |
+| A comma list is a tuple (a trailing comma makes one element a 1-tuple) | `comma_tail` (`parser/cursor.rs`) | the value, type, match-pattern, binding-target, assignment and wait-arm lists read it; `end` names where a trailing comma may stand, and the statement-end value list (`parse_value_list` (`parser/pattern.rs`)) admits none (S2-7, TICKET-273) |
 | What a line break is in source text | `source_chars` (`lexer/mod.rs`) | U14. Readers: `Lexer::new_file`, and the editor's token and highlight walks `token_at` and `semantic_tokens_inner` (`editor/mod.rs`), so a lexer column or literal length indexes the same chars. A CRLF pair is one `\n`; a lone `\r` is not a line break. `render_snippet` and `word_end_col` read raw source through `str::lines()`, which agrees |
 
 | Constant value of an expression | `eval` (`ast/consteval.rs`) | overflow lint, constant fault check, width check, const |
@@ -29,6 +30,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | May `head[X]` be a type application | `is_named_head` (`ast/mod.rs`) | all three parser sites read it; the checker infers a value receiver once per link and hands it to the reading (`checker/expr.rs` `bracket_is_index`, TICKET-269) |
 | Grammar | `docs/reference/grammar.bnf` | DUPLICATE with the hand parser; `conformance.rs` compares accept/reject only; waits on G5 |
 | Format mini-language (`{x:spec}`), float display | `repr_float` (`fmtspec.rs`) | |
+| How a tuple's parts are written (`(a,)` for one part, `(a, b)` otherwise) | `tuple_tail` (`base/words.rs`) | `tuple_parts` (`base/words.rs`) and `tuple_text` (`base/words.rs`) wrap it. Readers: the `Ty::Tuple` arm of the type Display in `checker/ty.rs`, `render_wit` (`checker/exhaust.rs`), `display_guarded` (`vm/display.rs`), `stringify_obj_into` (`vm/display.rs`), `display_wire_in` (`vm/display.rs`), `ty_str` (`difftest/emit_chezzi.rs`) and the tuple literal and unpack arms of both difftest emitters. The Python shim in `difftest/emit_python.rs` keeps its own copy in Python: it is the oracle (S2-7, TICKET-273) |
 | Slice and negative index | `norm_index` (`slice.rs`), `range_indices` (`slice.rs`) | |
 
 ## Names and resolution

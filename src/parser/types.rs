@@ -145,17 +145,16 @@ impl Parser {
             ty = self.parse_type_postfix(ty)?;
             return Ok(ty);
         }
-        // `(T)` unwraps to `T`; `(T1, T2, …)` is a tuple type. The `?`/`!` postfix still applies.
+        // `(T)` unwraps to `T`; `(T,)` and `(T1, T2, …)` are tuple types. The `?`/`!` postfix
+        // still applies.
         if self.eat(&Token::LParen) {
-            let mut types = vec![self.parse_type()?];
-            while self.eat(&Token::Comma) {
-                types.push(self.parse_type()?);
-            }
+            let first = self.parse_type()?;
+            let (mut types, comma) = self.comma_tail(first, &[Token::RParen], Self::parse_type)?;
             self.expect(&Token::RParen)?;
-            let mut ty = if types.len() == 1 {
-                types.pop().unwrap()
-            } else {
+            let mut ty = if comma {
                 Type::Tuple(types)
+            } else {
+                types.pop().expect("one element")
             };
             ty = self.parse_type_postfix(ty)?;
             return Ok(ty);

@@ -4,6 +4,7 @@
 //! cannot diverge from the Python rendering through precedence differences.
 
 use super::ast::*;
+use chezzi::base::words::{tuple_parts, tuple_text};
 
 pub fn emit(p: &Program) -> String {
     let mut e = Emitter { out: String::new() };
@@ -77,12 +78,7 @@ impl Emitter {
                 self.out.push('\n');
             }
             Stmt::Unpack { names, init } => {
-                for (i, n) in names.iter().enumerate() {
-                    if i > 0 {
-                        self.out.push_str(", ");
-                    }
-                    self.out.push_str(n);
-                }
+                self.out.push_str(&tuple_parts(names));
                 self.out.push_str(" := ");
                 self.expr(init);
                 self.out.push('\n');
@@ -243,14 +239,13 @@ impl Emitter {
                 self.out.push(')');
             }
             Expr::TupleLit(items) => {
-                self.out.push('(');
-                for (i, it) in items.iter().enumerate() {
-                    if i > 0 {
-                        self.out.push_str(", ");
-                    }
+                let mut parts = Vec::with_capacity(items.len());
+                for it in items {
+                    let start = self.out.len();
                     self.expr(it);
+                    parts.push(self.out.split_off(start));
                 }
-                self.out.push(')');
+                self.out.push_str(&tuple_text(parts));
             }
             Expr::TupleField { base, idx, .. } => {
                 self.out.push('(');
@@ -326,10 +321,7 @@ fn ty_str(t: &Ty) -> String {
         Ty::Float => "float".into(),
         Ty::List(e) => format!("List[{}]", ty_str(e)),
         Ty::Map(k, v) => format!("Map[{}, {}]", ty_str(k), ty_str(v)),
-        Ty::Tuple(elems) => {
-            let inner: Vec<String> = elems.iter().map(ty_str).collect();
-            format!("({})", inner.join(", "))
-        }
+        Ty::Tuple(elems) => tuple_text(elems.iter().map(ty_str)),
     }
 }
 

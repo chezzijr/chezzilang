@@ -1198,16 +1198,9 @@ impl Ty {
                 }
                 write!(f, ") -> {}", Named(ret, names))
             }
-            Ty::Tuple(elems) => {
-                write!(f, "(")?;
-                for (i, t) in elems.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", Named(t, names))?;
-                }
-                write!(f, ")")
-            }
+            Ty::Tuple(elems) => f.write_str(&crate::base::words::tuple_text(
+                elems.iter().map(|t| Named(t, names).to_string()),
+            )),
             Ty::Unknown => write!(f, "?"),
             // A pending variable prints a token; the two diagnostic funnels replace it with the
             // variable's bound type or its `T?` default (`Checker::resolve_var_tokens`).

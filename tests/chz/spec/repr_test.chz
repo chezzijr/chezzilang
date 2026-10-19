@@ -108,3 +108,12 @@ test fn non_printable_characters_escape():
 # TICKET-088, `docs/contributing/gaps.md` W7-25). CPython's `repr` prints them literally.
 test fn combining_marks_stay_literal_in_nested_repr():
     assert str(["नमस्ते"]) == "['नमस्ते']"
+
+# A 1-tuple keeps its comma inside a box too (S2-7, TICKET-273): the box renderer and `print(x)`
+# read one rule, `tuple_text` (`base/words.rs`).
+test fn a_boxed_one_tuple_keeps_its_comma():
+    s := Shared((1,))
+    assert "{s}" == "Shared((1,))"
+    m := Shared([(2,)])
+    assert "{m}" == "Shared([(2,)])"
+    assert "{(3,)}" == "(3,)"

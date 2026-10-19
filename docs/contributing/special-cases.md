@@ -51,7 +51,7 @@ day's binary.
 | U6 | One iteration source: `for`, comprehensions, `List()`/`Set()`/`Map()`, destructuring and `Iterable` ask one function | range, channel, Set of tuples, std containers, `std.iter` | TICKET-253 (ranges), TICKET-257 (channels) | decided, see below |
 | U7 | A range is a value | every "a range is only valid as" site, `range()`, slice spelling | TICKET-253, TICKET-254 (landed) | decided, see below |
 | U8 | A block expression is an expression wherever layout exists, and layout exists inside brackets and interpolation holes | `match`/`recover:` rejected inside brackets, parameter default against field default, inline fn body against lambda body, line breaks in a hole | TICKET-260 (landed); re-run 2026-10-16: still open a line break inside a hole | decided, see below |
-| U9 | One pattern grammar at every binding site; a bare tuple is a tuple wherever an expression list ends a statement | destructuring differences, `return a, b`, 1-tuple types | TICKET-257 (map pairs only); re-run 2026-10-16: bare tuples fixed, 1-tuple still open | decided, see below |
+| U9 | One pattern grammar at every binding site; a bare tuple is a tuple wherever an expression list ends a statement | destructuring differences, `return a, b`, 1-tuple types | TICKET-257 (map pairs only); re-run 2026-10-16: bare tuples fixed; 1-tuple fixed by TICKET-273 | decided, see below |
 | U10 | A function is a function: one parameter-list grammar and one "is a value" rule for every callable | defaults/variadics/generics by function kind, constructors and builtins as values | TICKET-259 ("a type name is never a value") | decided, see below |
 | U11 | A boundary block (`spawn:`, `defer:`, `recover:`, generator body) states once what may cross it | six separate checks, three message families | TICKET-274 (2026-10-19) rejects `?` in `defer:` and drops 'experimental' from the generator ban; the six checks and three families stay open | small |
 | U12 | The string / hole seam has one owner: the hole scanner sees what was written, not what escapes produced | escapes live as syntax, nested literals unescaped twice | TICKET-252 (landed) | no |
@@ -187,8 +187,10 @@ Destructuring by binding site:
 | list `[a, b]`, rest `*r` | no | no | no | no | no |
 
 A bare tuple: `a, b := 1, 2` and `a, b = b, a` work; `x := 1, 2`, `return a, b` ✔, `yield a, b`,
-`for x in 1, 2` do not (CPython and Go accept `return a, b`). A 1-tuple `(1,)` can be built but its type
-`(int,)` and its pattern `(a,)` do not parse, and the type prints as `(int)`.
+`for x in 1, 2` do not (CPython and Go accept `return a, b`). Since TICKET-273 a 1-tuple is a value `(1,)`, a type
+`(int,)` and a pattern (`a, := t`, nested `(b,)`, `match` arm `(a,)`); its type, a match witness and a
+box's contents print it `(int,)` / `(false,)` / `Shared((1,))` through one helper, `tuple_text`.
+`x := 1,` stays an error (CPython makes a 1-tuple).
 
 `Self` is a type only: `-> Self` works; `Self(1)`, `Self.mk()` and a pattern `Self.A` do not (Rust
 accepts all three).
@@ -211,7 +213,7 @@ Open rows (S1-1, S1-2, S2-8 and S2-1 went to TICKET-249, 250 and 252; see the au
 | S1-4 ✔ | P2 | CRLF inside a string literal keeps `\r` | `"a⏎b".len()` is `4` | CPython `3` | fixed by TICKET-271 |
 | S2-3 ✔ | P2 | postfix `?` lost to maximal munch: `oo(x)??`, `o(x)?..5` | parse error; `oo(x)?? - 1` parses as coalesce | Rust runs both | not filed |
 | S2-4 ✔ | P2 | `return a / b, a % b` | `expected end of line, found ','` | CPython, Go `3 1` | not filed |
-| S2-7 | P3 | 1-tuple type and pattern | parse error; renders `(int)` | Rust `(i64,)` | not filed |
+| S2-7 | P3 | 1-tuple type and pattern | parse error; renders `(int)` | Rust `(i64,)` | fixed by TICKET-273 (one comma-list reader, `comma_tail`; one tuple writer, `tuple_tail`) |
 | S3-1 ✔ | P1 | check and run are exponential in a `recv.name[X](args)` chain: `.map[int](inc)` repeated | 12 links 224 ms, 16 links 3.5 s, 18 links over 10 s; without `[int]` 30 links take 8 ms | rustc: 30 links in 81 ms | fixed by TICKET-269 (debug `chezzi check`, 16 links: 7243 ms -> 27 ms) |
 | S3-3 ✔ | P2 | `t.0[i](5)` on a tuple whose element 0 is a list of functions | `unknown type 'i'` (read as a type argument); `t.0[0](5)` works | Rust, CPython `4` | not filed |
 | S3-4 ✔ | P2 | the generator ban on `spawn`/`defer`/`parallel:`/`wait:` is bypassed inside a `recover:` block in an `assert`; same gap gives a false "`yield` can only appear inside a generator" | check OK; the task outlives the generator | the checker's own rule | not filed |
@@ -224,7 +226,7 @@ Facts with several deciders (from the grammar hunter's table):
 | what `head[X]` means (index or type argument) | three parser copies of the "headed" test (the first lacks the tuple-index exclusion); the checker infers a value receiver once per link (TICKET-269) | one `bracket_head` function; the checker decides from the receiver type it already has (S3-1, S3-3) |
 | what a statement contains | `stmt_expr_recover_blocks` (`src/ast/mod.rs`) is a partial hand copy of the exhaustive `ids_in_stmt`; it omitted `assert` and match-arm guards | one exhaustive visitor with no wildcard arm (S3-4) |
 | a fused two-character token that means two operators | `??` is split by hand in type, prefix and pattern position, not in postfix position | split it in one place (S2-3) |
-| the shape of a tuple, a negative literal, a bound head | parsed by separate code in expression, type and pattern position | one helper per form, parameterised by the element parser (S2-7, S3-6) |
+| the shape of a tuple, a negative literal, a bound head | a tuple: one reader, `comma_tail` (`parser/cursor.rs`), for the value, type, pattern and target lists, and one writer, `tuple_tail` (`base/words.rs`) (TICKET-273); a negative literal and a bound head: separate code in expression, type and pattern position | one helper per form, parameterised by the element parser (S3-6) |
 | the grammar is the specification | `cargo test conformance` compares accept/reject on a corpus; it never compares the tree and never checks that a parser-accepted program is derived by the grammar | a mutation differential in the suite (a working model ran about 146,000 mutants with no parser crash) |
 
 Clean: the expression parser (3,000-expression parenthesisation differential, 0 differences); statements

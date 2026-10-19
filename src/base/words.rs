@@ -61,3 +61,30 @@ pub const MAX_STRUCTURAL_DEPTH: usize = 10_000;
 pub fn bare_display(key: &str) -> String {
     key.rsplit("::").next().unwrap_or(key).to_string()
 }
+
+/// The text that closes a tuple's parts before its `)`: `,` for one part, nothing otherwise. The
+/// comma is what makes one part a tuple and not a grouped value (S2-7). The one rule for a tuple
+/// value, a tuple type, a match witness and an unpacking target list.
+pub fn tuple_tail(n: usize) -> &'static str {
+    if n == 1 { "," } else { "" }
+}
+
+/// A tuple's parts without the parentheses: `a,` for one part, `a, b` otherwise.
+pub fn tuple_parts<S: AsRef<str>>(parts: impl IntoIterator<Item = S>) -> String {
+    let mut out = String::new();
+    let mut n = 0;
+    for p in parts {
+        if n > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(p.as_ref());
+        n += 1;
+    }
+    out.push_str(tuple_tail(n));
+    out
+}
+
+/// A tuple in parentheses: `(a,)` for one part, `(a, b)` otherwise.
+pub fn tuple_text<S: AsRef<str>>(parts: impl IntoIterator<Item = S>) -> String {
+    format!("({})", tuple_parts(parts))
+}

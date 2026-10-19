@@ -278,6 +278,17 @@ fn witness_prints_pattern_syntax() {
     );
 }
 
+/// A 1-tuple witness prints with its comma (S2-7): `(false,)`, never `(false)`, which reads as
+/// `false`.
+#[test]
+fn a_one_tuple_witness_prints_with_its_comma() {
+    rejects_help(
+        "t := (true,)\nmatch t:\n    (true,):\n        print(1)\n",
+        "non-exhaustive match",
+        "pattern `(false,)` is not covered",
+    );
+}
+
 /// TICKET-228 — the three `?`-outside-a-carrier texts name the types by their spelling.
 #[test]
 fn try_messages_name_no_removed_spelling() {

@@ -169,8 +169,9 @@ Granular `Features` flags, all on in `full()`:
   Slice results carry `len: None`, so they are never scalar-indexed.
 - **Membership** (`membership`): `x in xs`, `k in m`, `sub in s`.
 - **Tuples** (`tuples`): literals `(a, b)`, positional fields (`(t).N` / `(t)[N]`), destructuring
-  (`a, b := t` / `a, b = t`). The shim's `_chz_str` spells tuples (`(1, 'two', true)`). Arity is ≥ 2,
-  because `(1,)` and `()` print differently in Chezzi.
+  (`a, b := t` / `a, b = t`). The shim's `_chz_str` spells tuples (`(1, 'two', true)`). Arity is 1 to 3: a
+  1-tuple spells `(1,)` and unpacks with `a, := t` (`a, = t`) in both languages since TICKET-273.
+  The empty tuple `()` is not a Chezzi value.
 - **Floats** (`floats`): `Add`/`Sub`/`Mul`/`Div`/`Mod` over in-scope float variables, call and index
   leaves, and literals; floats are assignable (`=`, `+=`, `-=`). Leaves are `n/8` scaled by `2^e`
   (exact), which reaches Python's scientific-notation crossover (`|x| >= 1e16` / `< 1e-4`).

@@ -1,0 +1,3 @@
+# rule: letLhs
+# expect: must be a name
+(a,) := t

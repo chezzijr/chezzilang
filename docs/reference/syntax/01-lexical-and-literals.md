@@ -176,8 +176,11 @@ t := (
 )
 ```
 
-**`(x)` is `x`; `(x,)` is a one-element tuple**, and it prints with the comma: `print((1,))` writes
-`(1,)`, as in Python.
+**`(x)` is `x`; `(x,)` is a one-element tuple**, as a value, a type and a pattern. It prints with
+the comma: `print((1,))` writes `(1,)`, as in Python, and its type prints `(int,)`. `fn one() -> (int,)`
+returns one (Rust `(i64,)`); `a, := t` unpacks one (CPython `a, = t`); a nested one is `(b,)`
+(`a, (b,) := (1, (2,))`); a `match` arm takes `(a,)`. A value list takes no trailing comma:
+`x := 1,` is an error.
 
 **Tuple elements are read with `.0`, `.1`, … (Rust's spelling), never `t[0]`.** The index must be a
 literal. Tuples are immutable, so `.N` is read-only. Accesses chain: `t.0.1` is the second element of
@@ -200,8 +203,8 @@ x := 1, 2         # a bare tuple ends a statement: `x` is `(1, 2)` (CPython); so
 target grammar: names separated by commas, a nested target in parentheses, `_` for a skipped slot
 (`a, (b, c) := t`, `for k, (a, b) in xs`, `[a for a, (_, c) in xs]`).
 
-- The whole target takes no outer parentheses: `(a, b) := t` and `for (a, b) in xs` are errors
-  (CPython accepts both).
+- The whole target takes no outer parentheses: `(a, b) := t`, `(a,) := t` and `for (a, b) in xs`
+  are errors (CPython accepts all three). A one-name group `(a) := t` is `a := t`.
 - Outside `match` only tuples unpack. The element of any iterable unpacks the same way:
   `for a, b in {(1, "x")}` over a Set, a Map's `(key, value)` pair, a generator, a channel.
 - A struct or an enum variant unpacks in `match` only. There is no list pattern and no `*rest`.

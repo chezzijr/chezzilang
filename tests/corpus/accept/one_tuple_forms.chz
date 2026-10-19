@@ -1,0 +1,17 @@
+# rule: type, bindList, bindElem, lvalueList, tuplePattern, forStmt, compClause, waitArm
+fn one() -> (int,):
+    return (1,)
+t := one()
+a, := t
+x, (y,) := (1, (2,))
+p, q, := (1, 2)
+for b, in [t]:
+    print(b)
+ws := [c for c, in [t]]
+a, = t
+match t:
+    (d,): print(d)
+u: (int) = 3
+wait:
+    e, := ch.recv():
+        print(e)

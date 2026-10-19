@@ -80,13 +80,14 @@
 <elseGuard> ::= "ELSE" <block> | <errGuard>
 # The guard with a binder. On the line of an inline `if` / `elif` it is the only guard (<ifBlock>).
 <errGuard>  ::= "ELSE" "IDENT" <block>
-# A binding target: two or more comma-separated elements, each a name (`_` skips a slot) or a
-# parenthesized nested target. Used at `:=`, `for`, a comprehension clause and a wait arm.
-# A one-name group `(x)` is that name, as a sole target and as an element. A multi-name target
-# takes no outer parentheses (`(a, b) := t`, `for (a, b) in xs` are errors, owner rule U9).
-<bindList>  ::= <bindElem> "COMMA" <bindElems>
-<bindElems> ::= <bindElem> | <bindElem> "COMMA" <bindElems>
-<bindElem>  ::= "IDENT" | "LPAREN" <bindElem> "RPAREN" | "LPAREN" <bindElem> "COMMA" <bindElems> "RPAREN"
+# A binding target: a comma list of elements, each a name (`_` skips a slot) or a parenthesized
+# nested target. Used at `:=`, `for`, a comprehension clause and a wait arm. One optional trailing
+# comma ends the list; it makes one element a 1-tuple target (`a, := t`, nested `a, (b,) := t`).
+# A one-name group `(x)` is that name, as a sole target and as an element. A tuple target takes no
+# outer parentheses (`(a, b) := t`, `(a,) := t`, `for (a, b) in xs` are errors, owner rule U9).
+<bindList>  ::= <bindElem> "COMMA" | <bindElem> "COMMA" <bindElems>
+<bindElems> ::= <bindElem> | <bindElem> "COMMA" | <bindElem> "COMMA" <bindElems>
+<bindElem>  ::= "IDENT" | "LPAREN" <bindElem> "RPAREN" | "LPAREN" <bindList> "RPAREN"
 <groupedName> ::= "LPAREN" "IDENT" "RPAREN" | "LPAREN" <groupedName> "RPAREN"
 
 # Assignment target is restricted to a name / field / index (the parser's lvalue guard):
@@ -110,7 +111,8 @@
                | <lvalueList> "ASSIGN" <exprList> "COMMA" <expr> "NEWLINE"
                | <lvalueList> "ASSIGN" <value>
 # A multi-target list nests like a binding target: an element is an lvalue or a parenthesized list.
-<lvalueList> ::= <lvalueElem> "COMMA" <lvalueElem> | <lvalueElem> "COMMA" <lvalueList>
+# One optional trailing comma ends it, so `a, = t` assigns the element of a 1-tuple.
+<lvalueList> ::= <lvalueElem> "COMMA" | <lvalueElem> "COMMA" <lvalueElem> | <lvalueElem> "COMMA" <lvalueList>
 <lvalueElem> ::= <lvalue> | "LPAREN" <lvalueElem> "RPAREN" | "LPAREN" <lvalueList> "RPAREN"
 <lvalue> ::= "IDENT"
            | <postfix> "DOT" "IDENT"
@@ -531,7 +533,8 @@
                 | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
                 | "INT" "DOTDOT" "INT"
 <subpatterns> ::= <subpattern> | <subpattern> "COMMA" <subpatterns>
-<tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN"
+# One sub-pattern is grouping (`(p)` is `p`); a trailing comma makes it a 1-tuple pattern (`(a,)`).
+<tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN" | "LPAREN" <subpatterns> "COMMA" "RPAREN"
 # A carrier pattern compares the outer tag and binds inside it: `?v` is a present `T?` or a
 # successful `T!E`, `!e` is the error of a `T!E`. The operand is one sub-pattern primary, so an
 # or-alternation or a tuple payload takes parentheses (`?(a | b)`, `?(a, b)`); `??v` is `?(?v)`.
@@ -541,8 +544,9 @@
 
 # ===== types =====
 # Postfix sugar on a base type: `T?` = an optional T, `T!` = T or an `Error`, `T!E` = T or an E
-# (stacks left-to-right). A parenthesized type is grouping when it has one element (`(T)` ⇒ `T`)
-# and a tuple type when it has two or more (`(T1, T2, …)`).
+# (stacks left-to-right). A parenthesized type is grouping when it has one element and no comma
+# (`(T)` ⇒ `T`), and a tuple type when it has a comma (`(T,)`, `(T1, T2, …)`, one optional trailing
+# comma).
 # A `IDENT.IDENT` (optionally with `[typeList]`) is a MODULE-QUALIFIED type (`geo.Point`,
 # `geo.Box[int]`): the first ident is a bound module name (the same name `geo.func()` uses), the
 # second is a type in that module. Types are module-scoped — a type declared in one module is
@@ -553,7 +557,7 @@
              | "IDENT" "DOT" <dottedPath> | "IDENT" "DOT" <dottedPath> "LBRACKET" <typeList> "RBRACKET"
              | "FN" "LPAREN" "RPAREN" "ARROW" <type>
              | "FN" "LPAREN" <fnParamList> "RPAREN" "ARROW" <type>
-             | "LPAREN" <typeList> "RPAREN"
+             | "LPAREN" <typeList> "RPAREN" | "LPAREN" <typeList> "COMMA" "RPAREN"
              | <type> "QUESTION" | <type> "QUESTIONQUESTION" | <type> "BANG" | <type> "BANG" <type>
              # Prefix `!E` is `None!E`, a bare `!` is `None!`: a fallible call with no value.
              | "BANG" | "BANG" <type>

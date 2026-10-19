@@ -123,10 +123,7 @@ fn render_wit(w: &Wit) -> String {
         Wit::Wild => "_".to_string(),
         Wit::Ctor(name, args) if args.is_empty() => name.clone(),
         Wit::Ctor(name, args) if name.is_empty() => {
-            format!(
-                "({})",
-                args.iter().map(render_wit).collect::<Vec<_>>().join(", ")
-            )
+            crate::base::words::tuple_text(args.iter().map(render_wit))
         }
         Wit::Ctor(name, args) => {
             format!(

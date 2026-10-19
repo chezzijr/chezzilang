@@ -520,15 +520,14 @@ impl Parser {
         // not a name list, and `bind_target_error` reports it. The other shape is tuple assignment
         // `a, b = b, a` / `data[0], (data[1], x.f) = …` (lvalues, `=`; op==Eq only).
         // `for k, v in m:` never reaches here (parse_for handles it); a parenthesized `(a, b)` is a
-        // single expr (no top-level comma).
+        // single expr (no top-level comma). A trailing comma before `=` or `:=` ends the list
+        // (`a, = t` assigns a 1-tuple's element).
         if self.ended_at_block() {
             return Ok(StmtKind::Expr(expr));
         }
         if self.peek() == &Token::Comma {
-            let mut targets = vec![expr];
-            while self.eat_in_line(&Token::Comma) {
-                targets.push(self.parse_expr()?);
-            }
+            let (mut targets, _) =
+                self.comma_tail(expr, &[Token::Assign, Token::Walrus], Self::parse_expr)?;
             if self.eat_in_line(&Token::Walrus) {
                 let _ = self.parse_value_list(ValueSite::DestructLet)?;
                 let msg = "expected an identifier on the left of ':=' (destructuring binds names)";
@@ -833,10 +832,8 @@ impl Parser {
         let mut listed = false;
         if self.peek() == &Token::Comma {
             let list_span = lhs.span;
-            let mut places = vec![lhs];
-            while self.eat_in_line(&Token::Comma) {
-                places.push(self.parse_expr()?);
-            }
+            let (places, _) =
+                self.comma_tail(lhs, &[Token::Assign, Token::Walrus], Self::parse_expr)?;
             lhs = Expr {
                 id: crate::ast::NodeId::fresh(),
                 kind: ExprKind::Tuple(places),

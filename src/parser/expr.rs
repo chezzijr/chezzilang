@@ -881,29 +881,19 @@ impl Parser {
             Token::NoneKw => ExprKind::NoneLit,
             Token::Ident(name) => ExprKind::Ident(name),
             Token::LParen => {
-                // `()` stays unchanged (no inner expr → falls through to the error path below);
-                // `(e)` is grouping; `(e1, e2, …)` is a tuple; `(e,)` is a parse error.
+                // `()` is an error; `(e)` is grouping; `(e,)` and `(e1, e2, …)` are tuples.
                 if self.check(&Token::RParen) {
                     return Err(self.err("unexpected ')' in expression".to_string()));
                 }
                 let first = self.parse_expr()?;
-                if self.eat(&Token::Comma) {
-                    // A comma after the first element ⇒ a tuple. `(e,)` is a 1-element tuple
-                    // (distinct from grouping `(e)`); `(e1, e2,)` allows an optional trailing comma.
-                    let mut elems = vec![first];
-                    // The just-eaten comma may be the trailing one (`(e,)` or `(…,)`): stop here.
-                    while !self.check(&Token::RParen) {
-                        elems.push(self.parse_expr()?);
-                        if !self.eat(&Token::Comma) {
-                            break;
-                        }
-                    }
-                    self.expect(&Token::RParen)?;
-                    ExprKind::Tuple(elems)
-                } else {
-                    self.expect(&Token::RParen)?;
-                    return Ok(first); // grouped — keep the inner expr (and its span)
+                let (mut elems, comma) =
+                    self.comma_tail(first, &[Token::RParen], Self::parse_expr)?;
+                self.expect(&Token::RParen)?;
+                if !comma {
+                    // grouped — keep the inner expr (and its span)
+                    return Ok(elems.pop().expect("one element"));
                 }
+                ExprKind::Tuple(elems)
             }
             Token::LBracket => {
                 // `[]` is the empty list. A first element followed by `for` is a list

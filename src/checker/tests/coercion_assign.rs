@@ -181,6 +181,21 @@ fn success_coercion_survives_a_speculative_return_inference_pass() {
     assert_eq!(out, "some 1\n");
 }
 
+/// A 1-tuple type prints with its comma, as it is written (S2-7): `(int,)`, never `(int)`. The
+/// annotation and the unpack check; `(int)` stays a grouped `int`.
+#[test]
+fn a_one_tuple_type_prints_with_its_comma() {
+    rejects(
+        "x: int = (1,)\n",
+        "cannot assign (int,) to variable of type int",
+    );
+    rejects(
+        "x: (int,) = 1\n",
+        "cannot assign int to variable of type (int,)",
+    );
+    ok("fn one() -> (int,):\n    return (1,)\na, := one()\nb: (int) = a\nprint(b)\n");
+}
+
 /// Lossy / wrong-direction conversions MUST stay type errors (the widen arm is one-way Float←Int only).
 #[test]
 fn widen_float_into_int_still_rejected() {

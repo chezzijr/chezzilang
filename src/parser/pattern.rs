@@ -383,20 +383,18 @@ impl Parser {
         self.parse_paren_list(Self::parse_subpattern)
     }
 
-    /// Parse `( elem (, elem)* )`, the one parenthesized pattern list (a match tuple pattern and a
-    /// nested binding target share it). One element is grouping and returns it; two or more form a
-    /// `Tuple`.
+    /// Parse `( elem (, elem)* ,? )`, the one parenthesized pattern list (a match tuple pattern and a
+    /// nested binding target share it). One element with no comma is grouping and returns it; a
+    /// comma makes a `Tuple`, so `(a,)` is a 1-tuple.
     fn parse_paren_list(&mut self, elem: fn(&mut Self) -> PResult<Pattern>) -> PResult<Pattern> {
         self.expect(&Token::LParen)?;
-        let mut elems = vec![elem(self)?];
-        while self.eat(&Token::Comma) {
-            elems.push(elem(self)?);
-        }
+        let first = elem(self)?;
+        let (mut elems, comma) = self.comma_tail(first, &[Token::RParen], elem)?;
         self.expect(&Token::RParen)?;
-        if elems.len() == 1 {
-            Ok(elems.pop().expect("one element"))
-        } else {
+        if comma {
             Ok(Pattern::Tuple(elems))
+        } else {
+            Ok(elems.pop().expect("one element"))
         }
     }
 
@@ -419,23 +417,23 @@ impl Parser {
         Ok(target)
     }
 
-    /// A comma list of binding-target elements (`a, (b, c)`), as the elements.
-    fn parse_bind_target_list(&mut self) -> PResult<Vec<Pattern>> {
-        let mut elems = vec![self.parse_bind_target()?];
-        while self.eat_in_line(&Token::Comma) {
-            elems.push(self.parse_bind_target()?);
-        }
-        Ok(elems)
+    /// A comma list of binding-target elements (`a, (b, c)`) that ends before `end`; the bool says it
+    /// had a comma, so `a,` is a 1-tuple target.
+    fn parse_bind_target_list(&mut self, end: &Token) -> PResult<(Vec<Pattern>, bool)> {
+        let first = self.parse_bind_target()?;
+        self.comma_tail(first, std::slice::from_ref(end), Self::parse_bind_target)
     }
 
     /// `for` and comprehension targets: a bare name, `_`, or a comma list. A target that is one
     /// parenthesized tuple (`for (a, b) in xs`) is an error: an unpacking target takes no outer
-    /// parentheses. One element is itself; two or more are a `Tuple`.
+    /// parentheses. One element with no comma is itself; a comma makes a `Tuple` (`for a, in xs`).
     pub(super) fn parse_loop_target(&mut self) -> PResult<Pattern> {
         let span = self.cur_span();
         let parenthesized = self.check(&Token::LParen);
-        let mut elems = self.parse_bind_target_list()?;
-        if elems.len() == 1 {
+        let (mut elems, comma) = self.parse_bind_target_list(&Token::In)?;
+        let target = if comma {
+            Pattern::Tuple(elems)
+        } else {
             let only = elems.pop().expect("one element");
             if parenthesized && matches!(only, Pattern::Tuple(_)) {
                 return Err(ParseError {
@@ -443,13 +441,10 @@ impl Parser {
                     span,
                 });
             }
-            reject_repeated_binders(&only)?;
-            Ok(only)
-        } else {
-            let target = Pattern::Tuple(elems);
-            reject_repeated_binders(&target)?;
-            Ok(target)
-        }
+            only
+        };
+        reject_repeated_binders(&target)?;
+        Ok(target)
     }
 
     /// Speculatively read `<target> :=`. Commits (`Some`, the `:=` eaten) only for a name, `_` (each
@@ -462,15 +457,15 @@ impl Parser {
         let save = self.pos;
         let save_depth = self.depth;
         let save_fold = self.fold_depth;
-        if let Ok(mut elems) = self.parse_bind_target_list()
+        if let Ok((mut elems, comma)) = self.parse_bind_target_list(&Token::Walrus)
             && self.check(&Token::Walrus)
-            && (elems.len() > 1 || !matches!(elems[0], Pattern::Tuple(_)))
+            && (comma || !matches!(elems[0], Pattern::Tuple(_)))
         {
             self.advance(); // ':='
-            let target = if elems.len() == 1 {
-                elems.pop().expect("one element")
-            } else {
+            let target = if comma {
                 Pattern::Tuple(elems)
+            } else {
+                elems.pop().expect("one element")
             };
             reject_repeated_binders(&target)?;
             return Ok(Some(target));
@@ -490,10 +485,8 @@ impl Parser {
             return Ok((first, false));
         }
         let span = first.span;
-        let mut values = vec![first];
-        while self.eat_in_line(&Token::Comma) {
-            values.push(self.parse_expr()?);
-        }
+        // No trailing comma here: `x := 1,` is an error, not a 1-tuple.
+        let (values, _) = self.comma_tail(first, &[], Self::parse_expr)?;
         Ok((
             Expr {
                 id: crate::ast::NodeId::fresh(),

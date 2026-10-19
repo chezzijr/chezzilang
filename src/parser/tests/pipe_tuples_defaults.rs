@@ -885,3 +885,63 @@ fn one_tuple_match_pattern_parses() {
         other => panic!("{other:?}"),
     }
 }
+
+/// `for a, in xs` and `[a for a, in xs]` bind the element of a 1-tuple (S2-7).
+#[test]
+fn one_tuple_loop_and_comprehension_targets_parse() {
+    match only("for a, in xs:\n    print(a)\n") {
+        StmtKind::For {
+            target: Pattern::Tuple(elems),
+            ..
+        } => assert_eq!(elems.len(), 1),
+        other => panic!("{other:?}"),
+    }
+    match let_value("ys := [a for a, in xs]\n").kind {
+        ExprKind::Comprehension { clauses, .. } => {
+            assert!(matches!(&clauses[0].target, Pattern::Tuple(e) if e.len() == 1));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// `a, = t` assigns, and a wait arm takes `a, :=` and `a, =` (S2-7).
+#[test]
+fn one_tuple_assignment_and_wait_arm_targets_parse() {
+    match only("a, = t\n") {
+        StmtKind::Assign { target, .. } => {
+            assert!(matches!(target.kind, ExprKind::Tuple(ref e) if e.len() == 1));
+        }
+        other => panic!("{other:?}"),
+    }
+    parse_ok("wait:\n    a, := ch.recv():\n        print(a)\n");
+    parse_ok("wait:\n    a, = ch.recv():\n        print(a)\n");
+}
+
+/// `(int,)` is a 1-tuple type in every type position; `(int)` stays `int` (`paren_single_type_unwraps`).
+#[test]
+fn one_tuple_type_in_every_type_position() {
+    match only("x: (int,) = (1,)\n") {
+        StmtKind::Let { ty, .. } => assert_eq!(ty, Some(Type::Tuple(vec![Type::named("int")]))),
+        other => panic!("{other:?}"),
+    }
+    parse_ok(
+        "l: List[(int,)] = []\no: (int,)? = None\nstruct S:\n    p: (int,)\nfn f(t: (str,)) -> (int, str,):\n    return 1, t.0\n",
+    );
+}
+
+/// A 1-tuple target takes no outer parentheses, as `(a, b) := t` takes none (U9); a value list
+/// takes no trailing comma (`x := 1,` is an error, not a 1-tuple).
+#[test]
+fn one_tuple_outer_parens_and_bare_trailing_comma_rejected() {
+    assert!(parse_err("(a,) := t\n").message.contains("must be a name"));
+    assert!(
+        parse_err("for (a,) in xs:\n    print(a)\n")
+            .message
+            .contains("outer parentheses")
+    );
+    assert!(
+        parse_err("x := 1,\n")
+            .message
+            .contains("unexpected end of line")
+    );
+}

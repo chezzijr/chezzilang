@@ -89,3 +89,31 @@ test fn nested_wait_arm_assigns_places():
         a, (b, c) = ch.recv():
             pass
     assert a == 4 and b == 5 and c == 6
+
+fn one() -> (int,):
+    return (1,)
+
+test fn one_tuple_type_and_every_unpack():
+    t := one()
+    assert "{t}" == "(1,)"
+    a, := t
+    assert a == 1
+    x, (y,) := (2, (3,))
+    assert x == 2 and y == 3
+    total := 0
+    for b, in [(4,), (5,)]:
+        total += b
+    assert total == 9
+    assert [c for c, in [(6,), (7,)]] == [6, 7]
+    a, = (8,)
+    assert a == 8
+    got := 0
+    match t:
+        (d,): got = d
+    assert got == 1
+    ch := Channel[(int,)](1)
+    ch.send((9,))
+    wait:
+        e, := ch.recv():
+            got = e
+    assert got == 9
