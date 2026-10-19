@@ -25,7 +25,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | print's separator and terminator | the `native fn print` declaration (`std/prelude.chz`), read by `prelude_print_defaults` (`compiler/call.rs`) | `Program.print_defaults` carries them to `Op::CallPrint` and the VM value arm |
 | Is this name the blank `_` | `is_blank_name` (`ast/mod.rs`) | the parser encodes a blank at every binding site (`Pattern::Wildcard`, an `else _:` binder as no binder); `tests/owner_guards.rs` rejects a `== "_"` anywhere else |
 | Valid assignment target | `is_place` (`ast/mod.rs`) | the parser admits only places; the non-place arms of `check_assign` (`checker/assign.rs`), `compile_assign` (`compiler/assign.rs`) and `emit_assign_value_first` (`compiler/stmt.rs`) are `internal:` errors, never a second decision |
-| May `head[X]` be a type application | `is_named_head` (`ast/mod.rs`) | all three parser sites read it; the checker still probes the receiver twice per chained link (`checker/expr.rs`, U17's remaining half) |
+| May `head[X]` be a type application | `is_named_head` (`ast/mod.rs`) | all three parser sites read it; the checker infers a value receiver once per link and hands it to the reading (`checker/expr.rs` `bracket_is_index`, TICKET-269) |
 | Grammar | `docs/reference/grammar.bnf` | DUPLICATE with the hand parser; `conformance.rs` compares accept/reject only; waits on G5 |
 | Format mini-language (`{x:spec}`), float display | `repr_float` (`fmtspec.rs`) | |
 | Slice and negative index | `norm_index` (`slice.rs`), `range_indices` (`slice.rs`) | |
