@@ -1275,3 +1275,310 @@ fn consteval_matches_vm_arith() {
     }
     assert!(red.is_empty(), "{}", red.join("\n"));
 }
+
+/// TICKET-268: every int fault x every site that raises it shows one message, the owner's.
+/// `golden` is the literal text; its exhaustive matches on `IntFault`, `IntOp` and `BinaryOp`
+/// make a new variant fail the build here until it has a message and its sites.
+#[test]
+fn int_fault_one_message_per_op_at_every_site() {
+    use crate::ast::BinaryOp as B;
+    use crate::ast::consteval::{IntFault, IntOp, int_binop};
+    use crate::base::hooks::{Hook, int_fault_message};
+    const MAX: &str = "9223372036854775807";
+    const MIN: &str = "(0 - 9223372036854775807 - 1)";
+    let golden = |f: IntFault| -> String {
+        match f {
+            IntFault::Overflow(op) => match op {
+                IntOp::Bin(b) => match b {
+                    B::Add => "integer overflow in Add",
+                    B::Sub => "integer overflow in Sub",
+                    B::Mul => "integer overflow in Mul",
+                    B::Div => "integer overflow in Div",
+                    B::Shl => "integer overflow in Shl",
+                    B::Mod
+                    | B::BitAnd
+                    | B::BitOr
+                    | B::BitXor
+                    | B::Shr
+                    | B::Lt
+                    | B::LtEq
+                    | B::Gt
+                    | B::GtEq
+                    | B::Eq
+                    | B::NotEq
+                    | B::And
+                    | B::Or
+                    | B::In => {
+                        unreachable!("{b:?} never overflows")
+                    }
+                },
+                IntOp::Neg => "integer overflow in negation",
+                IntOp::Abs => "integer overflow in abs",
+                IntOp::Lcm => "integer overflow in lcm",
+                IntOp::Gcd => "integer overflow in gcd",
+            }
+            .to_string(),
+            IntFault::DivByZero => "division by zero".to_string(),
+            IntFault::ModByZero => "modulo by zero".to_string(),
+            IntFault::ShiftRange(n) => format!("shift amount {n} out of range (0..64)"),
+        }
+    };
+    let why = |f: IntFault| match f {
+        IntFault::Overflow(_) => "this constant expression does not fit in int (i64)",
+        IntFault::DivByZero | IntFault::ModByZero | IntFault::ShiftRange(_) => {
+            "its right operand is a constant, so it always faults at run time"
+        }
+    };
+    // The operator and constant right operand of each fault a constant operand causes.
+    let operand = |f: IntFault| -> Vec<(&'static str, String)> {
+        match f {
+            IntFault::Overflow(_) => vec![],
+            IntFault::DivByZero => vec![("/", "0".into())],
+            IntFault::ModByZero => vec![("%", "0".into())],
+            IntFault::ShiftRange(n) => vec![("<<", n.to_string()), (">>", n.to_string())],
+        }
+    };
+    // Per fault: the constant form (`None`: a call, which the checker does not fold), the two
+    // operands, and the run-time bodies over the int params `a` and `b` (`; ` splits lines).
+    let site = |f: IntFault| -> (Option<String>, String, String, Vec<&'static str>) {
+        match f {
+            IntFault::Overflow(op) => match op {
+                IntOp::Bin(b) => match b {
+                    B::Add => (
+                        Some(format!("{MAX} + 1")),
+                        MAX.into(),
+                        "1".into(),
+                        vec![
+                            "a + b",
+                            "id(a) + id(b)",
+                            "x := a; x += b; x",
+                            "x := a; x += 1; x",
+                            "t := Atomic(a); t.add(b); t.load()",
+                            "t := AtomicInt(a); t.add(b); t.load()",
+                            "[a, b].sum()",
+                        ],
+                    ),
+                    B::Sub => (
+                        Some(format!("{MIN} - 1")),
+                        MIN.into(),
+                        "1".into(),
+                        vec![
+                            "a - b",
+                            "id(a) - id(b)",
+                            "x := a; x -= b; x",
+                            "t := Atomic(a); t.sub(b); t.load()",
+                            "t := AtomicInt(a); t.sub(b); t.load()",
+                        ],
+                    ),
+                    B::Mul => (
+                        Some(format!("{MAX} * 2")),
+                        MAX.into(),
+                        "2".into(),
+                        vec!["a * b", "id(a) * id(b)", "x := a; x *= b; x"],
+                    ),
+                    B::Div => (
+                        Some(format!("{MIN} / -1")),
+                        MIN.into(),
+                        "-1".into(),
+                        vec!["a / b", "id(a) / id(b)", "x := a; x /= b; x"],
+                    ),
+                    B::Shl => (
+                        Some("1 << 63".into()),
+                        "1".into(),
+                        "63".into(),
+                        vec!["a << b", "id(a) << id(b)", "x := a; x <<= b; x"],
+                    ),
+                    B::Mod
+                    | B::BitAnd
+                    | B::BitOr
+                    | B::BitXor
+                    | B::Shr
+                    | B::Lt
+                    | B::LtEq
+                    | B::Gt
+                    | B::GtEq
+                    | B::Eq
+                    | B::NotEq
+                    | B::And
+                    | B::Or
+                    | B::In => {
+                        unreachable!("{b:?} never overflows")
+                    }
+                },
+                IntOp::Neg => (
+                    Some(format!("-{MIN}")),
+                    MIN.into(),
+                    "0".into(),
+                    vec!["-a", "-id(a)"],
+                ),
+                IntOp::Abs => (None, MIN.into(), "0".into(), vec!["math.abs(a)"]),
+                IntOp::Lcm => (
+                    None,
+                    MAX.into(),
+                    "9223372036854775806".into(),
+                    vec!["math.lcm(a, b)"],
+                ),
+                IntOp::Gcd => (None, MIN.into(), "0".into(), vec!["math.gcd(a, b)"]),
+            },
+            IntFault::DivByZero => (
+                Some("1 / 0".into()),
+                "1".into(),
+                "0".into(),
+                vec!["a / b", "id(a) / id(b)", "x := a; x /= b; x"],
+            ),
+            IntFault::ModByZero => (
+                Some("1 % 0".into()),
+                "1".into(),
+                "0".into(),
+                vec!["a % b", "id(a) % id(b)", "x := a; x %= b; x"],
+            ),
+            IntFault::ShiftRange(n) => (
+                Some(format!("1 << {n}")),
+                "1".into(),
+                n.to_string(),
+                vec![
+                    "a << b",
+                    "a >> b",
+                    "id(a) << id(b)",
+                    "x := a; x <<= b; x",
+                    "x := a; x >>= b; x",
+                ],
+            ),
+        }
+    };
+    let check = |prog: &str| -> Vec<String> {
+        let module =
+            crate::parser::parse(crate::lexer::tokenize(prog).expect("lex")).expect("parse");
+        crate::checker::check(&module)
+            .err()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
+    };
+    let faults: Vec<IntFault> = [B::Add, B::Sub, B::Mul, B::Div, B::Shl]
+        .map(IntOp::Bin)
+        .into_iter()
+        .chain([IntOp::Neg, IntOp::Abs, IntOp::Lcm, IntOp::Gcd])
+        .map(IntFault::Overflow)
+        .chain([
+            IntFault::DivByZero,
+            IntFault::ModByZero,
+            IntFault::ShiftRange(64),
+            IntFault::ShiftRange(-1),
+        ])
+        .collect();
+    let mut red = Vec::new();
+    // The owner decides the fault set: every fault `int_binop` raises has a row here.
+    let ops = [
+        B::Add,
+        B::Sub,
+        B::Mul,
+        B::Div,
+        B::Mod,
+        B::BitAnd,
+        B::BitOr,
+        B::BitXor,
+        B::Shl,
+        B::Shr,
+        B::Lt,
+        B::LtEq,
+        B::Gt,
+        B::GtEq,
+        B::Eq,
+        B::NotEq,
+        B::And,
+        B::Or,
+        B::In,
+    ];
+    let sample = [i64::MIN, -1, 0, 1, 2, 63, 64, i64::MAX];
+    for op in ops {
+        for a in sample {
+            for b in sample {
+                if let Some(Err(f)) = int_binop(op, a, b)
+                    && !faults.iter().any(|g| {
+                        std::mem::discriminant(&f) == std::mem::discriminant(g)
+                            && (!matches!(f, IntFault::Overflow(_)) || f == *g)
+                    })
+                {
+                    red.push(format!(
+                        "int_binop({op:?}, {a}, {b}) raises {f:?}, which has no row"
+                    ));
+                }
+            }
+        }
+    }
+    // Legal forms stay legal: a non-constant operand, a float left operand.
+    let legal = check(
+        "x := \"\".len()\nz := 0\nprint(recover: x / z)\nprint(x / 2)\nprint(x << 63)\ny := 1.5\nprint(y / 0)\nw := 2.0\nw /= 0\nprint(1.0 / 0.0)\n",
+    );
+    if !legal.is_empty() {
+        red.push(format!("legal forms rejected: {legal:?}"));
+    }
+    let mut defs = String::from(
+        "import Atomic, AtomicInt from std.concurrency\nimport std.math\nfn id(v: int) -> int:\n    return v\n",
+    );
+    let mut calls = String::new();
+    let mut want: Vec<(String, &str)> = Vec::new();
+    for f in faults {
+        let g = golden(f);
+        if int_fault_message(f) != g {
+            red.push(format!(
+                "{f:?}: owner says {:?}, golden {g:?}",
+                int_fault_message(f)
+            ));
+        }
+        if let IntFault::Overflow(IntOp::Bin(b)) = f {
+            let hook = format!(
+                "integer overflow in {}",
+                Hook::of_binary(b).expect("hook").protocol()
+            );
+            if int_fault_message(f) != hook {
+                red.push(format!(
+                    "{f:?}: fault name {:?}, hook name {hook:?}",
+                    int_fault_message(f)
+                ));
+            }
+        }
+        let (k, a, b, bodies) = site(f);
+        // Check time: each constant form and each constant-operand form, compound included.
+        let mut forms: Vec<String> = k.iter().map(|k| format!("print({k})\n")).collect();
+        for (sym, rhs) in operand(f) {
+            forms.push(format!("x := \"\".len()\nprint(x {sym} {rhs})\n"));
+            forms.push(format!("x := \"\".len()\nx {sym}= {rhs}\n"));
+        }
+        for prog in &forms {
+            let errs = check(prog);
+            if errs != [format!("{g}: {}", why(f))] {
+                red.push(format!("{f:?} check `{prog}`: {errs:?}"));
+            }
+        }
+        // Peephole: `run_capture` skips the checker, so the compiler meets the constant, must
+        // not fold it, and the VM raises the same text.
+        if let Some(k) = k {
+            match run_capture(&format!("print({k})\n")) {
+                Err(e) if e.message == g => {}
+                other => red.push(format!("{f:?} peephole `{k}`: {other:?}")),
+            }
+        }
+        for body in bodies {
+            let i = want.len();
+            defs += &format!("fn c{i}(a: int, b: int):\n    r := recover:\n");
+            for line in body.split("; ") {
+                defs += &format!("        {line}\n");
+            }
+            defs += "    match r:\n        ?v: print(str(v))\n        !e: print(e.message())\n";
+            calls += &format!("c{i}({a}, {b})\n");
+            want.push((g.clone(), body));
+        }
+    }
+    let out = run_capture(&(defs + &calls)).expect("the program runs");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), want.len(), "one line per cell:\n{out}");
+    for ((g, body), got) in want.iter().zip(&lines) {
+        if *got != g.as_str() {
+            red.push(format!("`{body}`: want {g:?}, got {got:?}"));
+        }
+    }
+    assert!(red.is_empty(), "{}", red.join("\n"));
+}
