@@ -101,12 +101,15 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    (`1 / 0`, `x % 0`, `x <<= 64`). One owner for an int op's fault: `int_binop`, `operand_fault`,
    `int_neg` and `IntFault` in `src/ast/consteval.rs`; a binary op's name comes from `HOOKS`. The VM ops,
    `Atomic`, `sum`, the natives and the checker read it. Done 2026-10-19.
-4. **Group F, syntax.** Row 25 (waits on G5); the empty enum; `g()?` in `defer:`
-   and `defer` in a generator (U11); a line break inside a hole (U8); the 1-tuple (U9); CRLF (U14);
-   the `.map[int](f)` chain (U17), fixed by TICKET-269 (2026-10-19): the checker infers each value receiver once; `oo(x)??` (S2-3). Statuses in
-   `docs/contributing/special-cases.md`.
-   Top-level `return` is dropped (owner, 2026-10-19): it stays an error, as Python's `SyntaxError:
-   'return' outside function`; a manifest entrypoint `-> T!` already ends the program with an error.
+4. **Group F, syntax (filed 2026-10-19).** Row 25 waits on G5. Open tickets: CRLF line breaks (U14,
+   TICKET-271); postfix `??` and `?..` (S2-3, TICKET-272); the 1-tuple type and pattern `a, := t`
+   (S2-7, U9, TICKET-273); `?` in `defer:` is a check error, as `12-errors.md` says, and the generator
+   ban drops "(experimental)" (U11, TICKET-274). Done: the `.map[int](f)` chain (U17, TICKET-269: the
+   checker infers each value receiver once); a line break inside a hole already works (U8, TICKET-260).
+   Owner decisions (2026-10-19): top-level `return` stays an error, as Python's `SyntaxError: 'return'
+   outside function` (a manifest entrypoint `-> T!` already ends the program with an error); an enum
+   needs at least one variant, and `struct S:` + `pass` is the empty type (Go `struct{}`); `?` in
+   `defer:` is rejected, as Rust's `Drop` and Go's deferred func; `defer` in a generator stays banned.
 5. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
    name (`:=`, `fn`, import) never share a name in one module, as Go does and as Rust does for a
    callable type (`struct E(i32);` + `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
