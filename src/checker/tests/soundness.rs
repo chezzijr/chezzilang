@@ -1086,6 +1086,15 @@ fn compound_rhs_constant_overflow_rejected() {
     rejects("x := 1\nx += 9223372036854775807 + 1\n", needle);
 }
 
+// TICKET-268: a constant int op that always faults at run time is a check-time error, with the
+// run-time message text. A float zero divisor and a non-constant divisor stay legal.
+#[test]
+fn constant_int_fault_rejected_at_check_time() {
+    rejects("print(1 / 0)\n", "division by zero");
+    rejects("print(1 % 0)\n", "modulo by zero");
+    rejects("print(1 << 64)\n", "shift amount 64 out of range (0..64)");
+}
+
 #[test]
 fn index_set_asymmetric_plain_write_still_ok() {
     // NO-OVER-REJECTION: a plain `=` NEVER reads through `index`, so an asymmetric pair stays legal
