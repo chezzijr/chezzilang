@@ -1582,3 +1582,40 @@ fn reports_error_with_location() {
     assert!(err.message.contains("identifier"), "{}", err.message);
     assert_eq!(err.span.line, 1);
 }
+
+/// S2-3: `??` after an operand is two postfix `?`, not a coalesce with a missing right side.
+#[test]
+fn postfix_double_question_is_two_tries() {
+    match only("y := oo(x)??\n") {
+        StmtKind::Let { value, .. } => match value.kind {
+            ExprKind::Try(inner) => assert!(matches!(inner.kind, ExprKind::Try(_))),
+            other => panic!("expected Try(Try(..)), got {other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+}
+
+/// S2-3: `?..` is postfix `?` then `..`.
+#[test]
+fn postfix_question_then_range() {
+    match only("r := o(x)?..5\n") {
+        StmtKind::Let { value, .. } => match value.kind {
+            ExprKind::Range { start, .. } => {
+                assert!(matches!(start.expect("start").kind, ExprKind::Try(_)))
+            }
+            other => panic!("expected Range, got {other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+}
+
+/// S2-3: `a ?? b` with an operand on the right stays a coalesce.
+#[test]
+fn coalesce_with_right_operand_still_coalesces() {
+    match only("y := a ?? b\n") {
+        StmtKind::Let { value, .. } => {
+            assert!(matches!(value.kind, ExprKind::NullCoalesce { .. }))
+        }
+        other => panic!("{other:?}"),
+    }
+}
