@@ -118,7 +118,13 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    each `std/*.chz` at `cargo build` time and embed the result in the binary; `std/*.chz` stays the one
    source. Open for its plan: the reach set (`resolver::unreached_std_fns`) and the program-wide slot
    and type keys depend on the importing program.
-7. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+7. **Gate flakes (TICKET-270, filed 2026-10-19).** Four scheduler tests fail the `verifying` gate at
+   random: `a_self_shut_executor_still_has_its_slots_reduced_at_program_exit` (its program races its own
+   `shutdown`), `an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout` (row W15-8),
+   `eager_send_blocked_on_a_full_channel_faults_when_the_channel_is_closed` and
+   `done_is_monotone_while_another_task_reads`. TICKET-269 escalated twice on them and was merged by hand
+   (front-end lib 2517 passed, the bracket grids and `chz_suite` 49 passed, clippy clean).
+8. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 
