@@ -16,6 +16,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 |---|---|---|
 | Where a block ended (dedent, `else`, EOF) | `ended_at_block` (`parser/cursor.rs`) | Family A |
 | Where a block expression may start (value site) | `parse_value` (`parser/expr.rs`), `open_value` (`parser/expr.rs`) | U8 |
+| What a line break is in source text | `source_chars` (`lexer/mod.rs`) | U14. Readers: `Lexer::new_file`, and the editor's token and highlight walks `token_at` and `semantic_tokens_inner` (`editor/mod.rs`), so a lexer column or literal length indexes the same chars. A CRLF pair is one `\n`; a lone `\r` is not a line break. `render_snippet` and `word_end_col` read raw source through `str::lines()`, which agrees |
 
 | Constant value of an expression | `eval` (`ast/consteval.rs`) | overflow lint, constant fault check, width check, const |
 | Fewest args a decl may be entered with | `min_callable_params` (`ast/mod.rs`) | one owner: the checker's `FnSig.min_params`, the compiler's `Proto::min_arity` and the natives read it |

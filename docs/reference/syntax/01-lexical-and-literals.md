@@ -45,7 +45,8 @@ struct Point:
 - **Source encoding:** files are UTF-8. One byte-order mark (`U+FEFF`) at the start of a file is
   stripped, as CPython and Go do. A `U+FEFF` anywhere else, including a second one at the start, is a
   lex error. A `chezzi.toml` whose first bytes are `EF BB BF` parses as the same file without them.
-- **Logical lines** end at a newline. Blank / comment-only lines are ignored. A struct, enum, protocol
+- **Logical lines** end at a newline. A CRLF pair (`\r\n`) is one newline everywhere, inside string
+  and bytes literals too, as in CPython, Go and Rust; a lone `\r` is not a newline. Blank / comment-only lines are ignored. A struct, enum, protocol
   or native body takes one declaration per logical line: two fields, two variants, or a variant and a
   method on one line is a parse error.
 - **Identifiers:** letter or `_`, then letters/digits/`_`. Case-sensitive.

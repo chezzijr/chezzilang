@@ -251,6 +251,23 @@ pub fn strip_bom(source: &str) -> &str {
     source.strip_prefix('\u{feff}').unwrap_or(source)
 }
 
+/// The source as the lexer reads it: one leading BOM removed ([`strip_bom`]) and each CRLF pair
+/// read as one `\n`. The one owner of "what is a line break" in source text: every lexer site
+/// (indentation, blank and comment lines, literal bodies) sees only `\n`, and the editor indexes
+/// lexer columns and literal lengths into this same list. A lone `\r` stays, so it keeps its old
+/// reading. Columns do not move: the dropped `\r` ends its line.
+pub fn source_chars(source: &str) -> Vec<char> {
+    let mut chars: Vec<char> = Vec::with_capacity(source.len());
+    let mut it = strip_bom(source).chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\r' && it.peek() == Some(&'\n') {
+            continue;
+        }
+        chars.push(c);
+    }
+    chars
+}
+
 pub fn render_snippet(span: Span, source: &str) -> Option<String> {
     // A Span::default() has line: 0; only the fatal path (a synthesized import span) can reach
     // this function with one.
@@ -785,7 +802,7 @@ impl Lexer {
     /// [`Span::file`]). `0` is identical to [`Lexer::new`].
     pub fn new_file(source: &str, file: u32) -> Self {
         Lexer {
-            chars: strip_bom(source).chars().collect(),
+            chars: source_chars(source),
             pos: 0,
             line: 1,
             file,

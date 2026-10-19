@@ -299,7 +299,7 @@ fn utf16_to_char_col(line: &str, utf16_col: u32) -> usize {
 /// (Newline/Indent/Dedent/Eof) and a lex error yield `None`.
 fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(u32, u32)> {
     use crate::lexer::{self, Token};
-    let chars: Vec<char> = source.chars().collect();
+    let chars: Vec<char> = crate::lexer::source_chars(source);
     let line_starts = line_start_offsets(&chars);
     let toks = lexer::tokenize(source).ok()?;
     let target_line = (line0 + 1) as u32; // tokens use 1-based lines
@@ -482,7 +482,7 @@ pub fn semantic_tokens(source: &str) -> Vec<SemTok> {
 fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
     use crate::lexer::{self, Token};
     let source = crate::lexer::strip_bom(source);
-    let chars: Vec<char> = source.chars().collect();
+    let chars: Vec<char> = crate::lexer::source_chars(source);
     let line_starts = line_start_offsets(&chars);
     let toks = match lexer::tokenize(source) {
         Ok(t) => t,

@@ -56,7 +56,7 @@ day's binary.
 | U11 | A boundary block (`spawn:`, `defer:`, `recover:`, generator body) states once what may cross it | six separate checks, three message families, `?` silently dropped in `defer:` | not filed; re-run 2026-10-16: all three still open | small |
 | U12 | The string / hole seam has one owner: the hole scanner sees what was written, not what escapes produced | escapes live as syntax, nested literals unescaped twice | TICKET-252 (landed) | no |
 | U13 | One name-resolution rule and one reserved set | user type named like a builtin, std import against user import, "unknown name 'str'" | `ea2ecda3`, `b19dab23`, `8c90e406` (a declaration shadows a builtin; one reserved set; one binding per name); re-run 2026-10-16: still open a divergent fn (`panic` inside) is not bottom-typed | small |
-| U14 | A physical line has one definition | CRLF blank line, CRLF in strings, tab on a blank line | not filed | no |
+| U14 | A physical line has one definition | CRLF blank line, CRLF in strings, tab on a blank line | TICKET-271 (CRLF, landed); still open: a tab on a blank line is a lex error (CPython runs it) | no |
 | U15 | Derive rules are stated once | hashable derivation, compound assignment in place, `for a, b in map` by static type | TICKET-258 (compound assignment) | decided, see below |
 | U16 | Collection method conventions | `contains` against `has`, `remove` return shapes, miss behaviour | TICKET-257 (`contains`) | partly decided, see below |
 | U17 | `head[X]` has one reading, decided once | exponential check on `.m[T](../..)` chains, `t.0[i](5)` | fixed: `t.0[i](5)` (fact 4) and the chain (TICKET-269, 2026-10-19: the probe infers a value receiver once and hands it to the reading; 24 links check in 24 ms on the debug binary) | no |
@@ -209,8 +209,8 @@ Open rows (S1-1, S1-2, S2-8 and S2-1 went to TICKET-249, 250 and 252; see the au
 | ID | Sev | Finding | Chezzi | Ancestor | Status |
 |---|---|---|---|---|---|
 | S1-5, S2-2 ✔ | P2 | a line break between operands inside a hole | `unexpected end of line in expression` | CPython `6` | not filed |
-| S1-3 ✔ | P1 | CRLF file with a blank line inside a block | `unexpected indented block in expression` | CPython runs | not filed |
-| S1-4 ✔ | P2 | CRLF inside a string literal keeps `\r` | `"a⏎b".len()` is `4` | CPython `3` | not filed |
+| S1-3 ✔ | P1 | CRLF file with a blank line inside a block | `unexpected indented block in expression` | CPython runs | fixed by TICKET-271 |
+| S1-4 ✔ | P2 | CRLF inside a string literal keeps `\r` | `"a⏎b".len()` is `4` | CPython `3` | fixed by TICKET-271 |
 | S2-3 ✔ | P2 | postfix `?` lost to maximal munch: `oo(x)??`, `o(x)?..5` | parse error; `oo(x)?? - 1` parses as coalesce | Rust runs both | not filed |
 | S2-4 ✔ | P2 | `return a / b, a % b` | `expected end of line, found ','` | CPython, Go `3 1` | not filed |
 | S2-7 | P3 | 1-tuple type and pattern | parse error; renders `(int)` | Rust `(i64,)` | not filed |
