@@ -264,6 +264,16 @@ impl Hook {
     }
 }
 
+/// The run-time text of an int fault: `IntFault::message`, with a binary op named by its hook's
+/// protocol (`integer overflow in Add`). The checker and the VM print it.
+pub fn int_fault_message(f: crate::ast::consteval::IntFault) -> String {
+    f.message(|op| {
+        Hook::of_binary(op)
+            .expect("an int arithmetic op has a hook")
+            .protocol()
+    })
+}
+
 /// The hooks one declared type has.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HookSet(pub u32);

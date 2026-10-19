@@ -1238,6 +1238,11 @@ struct Checker {
     /// re-inferred root does not report twice. Speculative state: `DiagMark` snapshots and
     /// `diag_rollback` restores it.
     const_overflow_seen: std::collections::HashSet<Span>,
+    /// TICKET-268: `Binary` node span -> its op and the fault its constant right operand gives every
+    /// int left operand. The tree scan notes it; `infer_binary` reports it once the left type is
+    /// `int`. A function of the AST alone (a span carries its module), so no `DiagMark` entry.
+    const_operand_faults:
+        std::collections::HashMap<Span, (BinaryOp, crate::ast::consteval::IntFault)>,
     /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
     /// at the point the task body opened. A binding living at a scope index *below* the innermost
     /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).

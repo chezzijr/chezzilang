@@ -164,7 +164,7 @@ struct Boom2:
     fn hash(self) -> int:
         return self.n
     fn eq(self, other: Boom2) -> bool:
-        return 1 / 0 == 0
+        return 1 / "".len() == 0
 
 test fn a_faulting_eq_propagates_from_container_probes():
     r1 := recover: Boom2(1) in [Boom2(2)]

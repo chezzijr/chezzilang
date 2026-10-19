@@ -102,6 +102,7 @@ impl Checker {
             arith_parent: false,
             const_scan_visits: 0,
             const_overflow_seen: std::collections::HashSet::new(),
+            const_operand_faults: std::collections::HashMap::new(),
             inferring_ret: false,
             resolving_returns: false,
             in_generator: false,

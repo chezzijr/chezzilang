@@ -276,7 +276,7 @@ fn form_by_position_grid() {
     let arms = "    1: 10\n    _: 20";
     let opt_arms = "    1: g()\n    _: g()";
     let elif = format!("n := 1\nif f: y := match n:\n{arms}\nelif t:\n    print(2)");
-    let rec = "if f: r := recover:\n    1 / 0\nelif true:\n    print(4)".to_string();
+    let rec = "if f: r := recover:\n    1 / \"\".len()\nelif true:\n    print(4)".to_string();
     for (name, body, v) in [
         ("top level", elif.clone(), "=2"),
         ("fn body", format!("fn h():\n{}\nh()", indent(&elif)), "=2"),
@@ -347,10 +347,13 @@ fn recover_inline_grid() {
         ("print(recover: 1)", "=1"),
         ("if (recover: 1) == ?1:\n    print(\"y\")", "=y"),
         ("print((recover: 1), 2)", "=1 2"),
-        ("print(recover: 1 / 0)", "=!division by zero"),
+        ("print(recover: 1 / \"\".len())", "=!division by zero"),
         ("two(recover: 1, 2)", "=2"),
         ("two(b=3, a=recover: 1)", "=3"),
-        ("y := (recover: 1 / 0)\nprint(y)", "=!division by zero"),
+        (
+            "y := (recover: 1 / \"\".len())\nprint(y)",
+            "=!division by zero",
+        ),
         ("print(recover: 1 + 2, recover: 3)", "=3 3"),
         ("print(recover: (recover: 1))", "=1"),
         ("print(recover: 1,\n2)", "=1 2"),
@@ -361,7 +364,7 @@ fn recover_inline_grid() {
             "print(not recover: true)",
             "!'not' expects bool, found bool!",
         ),
-        ("calls(fn(): recover: 1 / 0)", "=!division by zero"),
+        ("calls(fn(): recover: 1 / \"\".len())", "=!division by zero"),
         (
             "y := (if t: recover: 1 else: 2)",
             "!branches have incompatible types",

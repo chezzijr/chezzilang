@@ -73,8 +73,8 @@ the concurrency rows use **Go 1.26** (go1.26.6), because Chezzi's concurrency pr
 | `s.split("")` | `split: sep must not be empty` | `ValueError: empty separator` | — |
 | `b.decode()` on invalid UTF-8 | `invalid UTF-8 in decode()` | `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff…` | **`b.decode_lossy()`** (Python `decode(errors="replace")`) |
 | `rand.int(lo, hi)`, `hi <= lo` | `rand.int(lo, hi): hi must be > lo` | `ValueError: empty range in randint(5, 1)` | — |
-| `a / b`, `a % b` with `b == 0` | `division by zero` / `modulo by zero` | `ZeroDivisionError: division by zero` | — |
-| `a << n` with `n` out of range | `shift amount -1 out of range (0..64)` | `ValueError: negative shift count` | — |
+| `a / b`, `a % b` with `b == 0` | `division by zero` / `modulo by zero` (a constant right operand is a type error at check time) | `ZeroDivisionError: division by zero` | — |
+| `a << n` with `n` out of range | `shift amount -1 out of range (0..64)` (a constant right operand is a type error at check time) | `ValueError: negative shift count` | — |
 | integer overflow | `integer overflow in Add` | *(upward divergence: Python ints are arbitrary-precision; Chezzi's i64 faults recoverably instead of wrapping)* | — |
 | `crypto.secure_bytes(n)`, `n` out of range | `secure_bytes: n must be >= 0, got -1` | *(deliberate fail-closed: a crypto primitive must not silently produce fewer bytes)* | — |
 | `Range(a, b, 0)`, step is zero | `Range() step cannot be zero` | `ValueError: range() arg 3 must not be zero` | — |

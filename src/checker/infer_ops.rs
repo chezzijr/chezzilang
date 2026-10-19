@@ -658,7 +658,7 @@ impl Checker {
         hint.unwrap_or(Ty::Unknown)
     }
 
-    pub(super) fn infer_binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Ty {
+    pub(super) fn infer_binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr, span: Span) -> Ty {
         // `infer_call` drains the single `expected_hint` slot via `take()` (src/checker/expr.rs:33),
         // so without re-installing it the second-inferred operand loses the hint a generic call
         // there would need to pin its type parameter. Same hop `infer_if_else_chain` makes per
@@ -670,23 +670,47 @@ impl Checker {
         self.expected_hint = hint.clone();
         let l = self.infer_value(lhs);
         let r = self.infer_binary_rhs(rhs, hint);
+        // TICKET-268: a constant right operand that faults for every int left operand (`x / 0`,
+        // `x << 64`) is a check-time error once the left operand is known to be an `int`.
+        if let Some(&(nop, f)) = self.const_operand_faults.get(&span)
+            && nop == op
+            && matches!(l, Ty::Int)
+        {
+            self.report_const_fault(f, span);
+        }
         self.binary_result(op, l, r, lhs.span, rhs.span)
     }
 
-    /// Report the first i64 overflow in the constant expression `expr`, once per span. The root of an
+    /// Report the first int fault in the constant expression `expr`, once per span, and note each
+    /// node whose constant right operand always faults (`const_operand_faults`). The root of an
     /// arithmetic tree calls it; its children are covered by that scan (`arith_parent`).
-    pub(super) fn scan_const_overflow(&mut self, expr: &Expr) {
-        if !self.inferring_ret
-            && let consteval::Fold::Overflow(sp, op) =
-                consteval::eval(expr, &mut self.const_scan_visits)
-            && self.const_overflow_seen.insert(sp)
-        {
-            self.error(
-                sp,
-                format!(
-                    "integer overflow in {op}: this constant expression does not fit in int (i64)"
-                ),
-            );
+    pub(super) fn scan_const_overflow(&mut self, expr: &Expr) -> consteval::Fold {
+        if self.inferring_ret {
+            return consteval::Fold::NotConst;
+        }
+        let mut noted = Vec::new();
+        let fold = consteval::eval_noting(expr, &mut self.const_scan_visits, &mut |sp, op, f| {
+            noted.push((sp, (op, f)))
+        });
+        self.const_operand_faults.extend(noted);
+        if let consteval::Fold::Fault(sp, f) = fold {
+            self.report_const_fault(f, sp);
+        }
+        fold
+    }
+
+    /// Report the int fault `f` that a constant gives at `sp`, once per span.
+    pub(super) fn report_const_fault(&mut self, f: consteval::IntFault, sp: Span) {
+        use consteval::IntFault;
+        let why = match f {
+            IntFault::Overflow(_) => "this constant expression does not fit in int (i64)",
+            IntFault::DivByZero | IntFault::ModByZero | IntFault::ShiftRange(_) => {
+                "its right operand is a constant, so it always faults at run time"
+            }
+        };
+        if !self.inferring_ret && self.const_overflow_seen.insert(sp) {
+            let text = crate::base::hooks::int_fault_message(f);
+            self.error(sp, format!("{text}: {why}"));
         }
     }
 

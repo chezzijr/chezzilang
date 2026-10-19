@@ -205,7 +205,7 @@ match r:
 ```
 
 **The inline form** `recover: expr` is an expression of type `T!`, legal in every expression position:
-`print(recover: 1 / 0)`, `x := (recover: parse(s))`, `f(a, key=recover: g())`, `[recover: 1]`,
+`print(recover: a / b)`, `x := (recover: parse(s))`, `f(a, key=recover: g())`, `[recover: 1]`,
 `print(1 + recover: 1)`. Its body is one expression that extends to the right like a lambda body
 (`recover: a + b` recovers `a + b`); use parentheses to end it earlier (`(recover: a) + b`). For an
 assignment, an `assert` or a `return`, use the block form. A body that diverges

@@ -2502,7 +2502,7 @@ fn constant_int_overflow_rejected_at_check() {
     );
     ok("print(9223372036854775807 - 1)\n");
     ok("x := 9223372036854775807\nprint(x + 1)\n");
-    ok("print(1 / 0)\n");
+    ok("z := 0\nprint(1 / z)\n");
 }
 
 // TICKET-142 (W14-33): the constant-overflow scan runs once per maximal arithmetic tree, so it is

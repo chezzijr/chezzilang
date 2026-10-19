@@ -145,7 +145,8 @@ fn squares(n: int) -> Iterator[int]:
 fn guarded() -> Iterator[int]:
     r := recover:
         yield 10
-        boom := 1 / 0
+        z := 0
+        boom := 1 / z
         yield boom
     yield 20
 

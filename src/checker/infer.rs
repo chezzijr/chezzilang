@@ -332,7 +332,7 @@ impl Checker {
         let shown = match consteval::eval(expr, &mut self.const_scan_visits) {
             Fold::Value(Const::Float(f)) if float && !w.fits_f64(f) => format!("{f:e}"),
             Fold::Value(Const::Int(k)) if !float && !w.fits_int(k, true) => k.to_string(),
-            Fold::Value(_) | Fold::Overflow(..) | Fold::NotConst => return,
+            Fold::Value(_) | Fold::Fault(..) | Fold::NotConst => return,
         };
         if self.const_overflow_seen.insert(expr.span) {
             let name = w.width_name().unwrap_or("?");
@@ -422,7 +422,7 @@ impl Checker {
                 clauses,
             } => self.infer_comprehension(*kind, key.as_deref(), elem, clauses),
             ExprKind::Unary { op, expr: inner } => self.infer_unary(expr, *op, inner),
-            ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
+            ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs, expr.span),
             ExprKind::Compare { operands, ops } => self.infer_compare_chain(operands, ops),
             // TICKET-253: a range is a VALUE of the prelude struct `Range`; its bounds are `int`s.
             ExprKind::Range { start, end, .. } => {

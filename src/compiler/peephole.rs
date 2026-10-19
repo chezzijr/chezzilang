@@ -545,8 +545,8 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
     if m >= 2 {
         match (&out[m - 2], &out[m - 1]) {
             (Op::ConstInt(n), Op::Neg) => {
-                // `Vm::Neg` uses `checked_neg`; i64::MIN overflows — leave it for the runtime.
-                if let Some(v) = n.checked_neg() {
+                // `consteval::int_neg` is the VM's `Neg`; i64::MIN faults — leave it for the runtime.
+                if let Ok(v) = consteval::int_neg(*n) {
                     return Some(Fold {
                         op: Op::ConstInt(v),
                         window: 2,

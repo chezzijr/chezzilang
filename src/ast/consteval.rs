@@ -1,8 +1,8 @@
 //! TICKET-225 — the one constant evaluator. The checker's overflow lint, its width check (an untyped
 //! constant meeting an `int8`/`float32` slot) and the compiler's peephole fold all read it, so a
-//! constant has one value everywhere. Int arithmetic follows the VM (`src/vm/arith.rs`): `+ - * /`
-//! and `<<` overflow, `%` wraps, and a zero divisor or a shift amount outside `0..64` stays a
-//! runtime fault (`None` here, never folded).
+//! constant has one value everywhere. TICKET-268: it is also the one owner of an int op's value and
+//! fault. The VM's int ops call [`int_binop`]; a zero divisor or a shift amount outside `0..64` is a
+//! fault the checker reports when the right operand is a constant ([`operand_fault`]).
 
 use super::{BinaryOp, Expr, ExprKind, Span, UnaryOp};
 
@@ -17,33 +17,113 @@ pub enum Const {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Fold {
     Value(Const),
-    /// The innermost node whose int arithmetic overflows, and the VM's name for its op.
-    Overflow(Span, &'static str),
+    /// The innermost node whose int arithmetic always faults, and its fault.
+    Fault(Span, IntFault),
     NotConst,
 }
 
-/// One int binary op with the VM's semantics. `Some(Err(name))` is an overflow the VM reports as
-/// `integer overflow in {name}`; `None` is a runtime fault of another kind (a zero divisor, a shift
-/// amount outside `0..64`) or an op that is not int arithmetic.
-pub fn int_binop(op: BinaryOp, a: i64, b: i64) -> Option<Result<i64, &'static str>> {
-    let checked = |r: Option<i64>, name| Some(r.ok_or(name));
+/// The op an int overflow fault names. A binary op is named by its `HOOKS` protocol.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IntOp {
+    Bin(BinaryOp),
+    Neg,
+    Abs,
+    Lcm,
+    Gcd,
+}
+
+/// The run-time fault of one int op.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IntFault {
+    Overflow(IntOp),
+    DivByZero,
+    ModByZero,
+    ShiftRange(i64),
+}
+
+impl IntFault {
+    /// The fault's run-time text. `protocol` names a binary op: the caller passes its `HOOKS`
+    /// protocol, which `chezzi-base` owns (`base::hooks::int_fault_message`). `negation` has a
+    /// `HOOKS` row (`Neg`) but keeps its own name; `abs`, `lcm` and `gcd` have no row.
+    pub fn message(self, protocol: impl FnOnce(BinaryOp) -> &'static str) -> String {
+        match self {
+            IntFault::Overflow(op) => {
+                let name = match op {
+                    IntOp::Bin(b) => protocol(b),
+                    IntOp::Neg => "negation",
+                    IntOp::Abs => "abs",
+                    IntOp::Lcm => "lcm",
+                    IntOp::Gcd => "gcd",
+                };
+                format!("integer overflow in {name}")
+            }
+            IntFault::DivByZero => "division by zero".to_string(),
+            IntFault::ModByZero => "modulo by zero".to_string(),
+            IntFault::ShiftRange(b) => format!("shift amount {b} out of range (0..64)"),
+        }
+    }
+}
+
+/// The fault the right operand `b` gives `a OP b` for every int `a`: a zero divisor, or a shift
+/// amount outside `0..64`. [`int_binop`] reads it first.
+#[inline]
+pub fn operand_fault(op: BinaryOp, b: i64) -> Option<IntFault> {
     match op {
-        BinaryOp::Add => checked(a.checked_add(b), "Add"),
-        BinaryOp::Sub => checked(a.checked_sub(b), "Sub"),
-        BinaryOp::Mul => checked(a.checked_mul(b), "Mul"),
-        BinaryOp::Div | BinaryOp::Mod if b == 0 => None,
-        BinaryOp::Div => checked(a.checked_div(b), "Div"),
+        BinaryOp::Div if b == 0 => Some(IntFault::DivByZero),
+        BinaryOp::Mod if b == 0 => Some(IntFault::ModByZero),
+        BinaryOp::Shl | BinaryOp::Shr if !(0..64).contains(&b) => Some(IntFault::ShiftRange(b)),
+        BinaryOp::Div
+        | BinaryOp::Mod
+        | BinaryOp::Shl
+        | BinaryOp::Shr
+        | BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::BitAnd
+        | BinaryOp::BitOr
+        | BinaryOp::BitXor
+        | BinaryOp::Lt
+        | BinaryOp::LtEq
+        | BinaryOp::Gt
+        | BinaryOp::GtEq
+        | BinaryOp::Eq
+        | BinaryOp::NotEq
+        | BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::In => None,
+    }
+}
+
+/// Int unary `-`: `-MIN` overflows.
+#[inline]
+pub fn int_neg(a: i64) -> Result<i64, IntFault> {
+    a.checked_neg().ok_or(IntFault::Overflow(IntOp::Neg))
+}
+
+/// One int binary op with the VM's semantics, the one owner of its value and its fault.
+/// `Some(Err(fault))` is the fault the VM raises; `None` is an op that is not int arithmetic.
+#[inline]
+pub fn int_binop(op: BinaryOp, a: i64, b: i64) -> Option<Result<i64, IntFault>> {
+    if let Some(f) = operand_fault(op, b) {
+        return Some(Err(f));
+    }
+    let overflow = || IntFault::Overflow(IntOp::Bin(op));
+    match op {
+        BinaryOp::Add => Some(a.checked_add(b).ok_or_else(overflow)),
+        BinaryOp::Sub => Some(a.checked_sub(b).ok_or_else(overflow)),
+        BinaryOp::Mul => Some(a.checked_mul(b).ok_or_else(overflow)),
+        BinaryOp::Div => Some(a.checked_div(b).ok_or_else(overflow)),
+        // `MIN % -1` is mathematically 0: `wrapping_rem` gives it, where `checked_rem` faults.
         BinaryOp::Mod => Some(Ok(a.wrapping_rem(b))),
         BinaryOp::BitAnd => Some(Ok(a & b)),
         BinaryOp::BitOr => Some(Ok(a | b)),
         BinaryOp::BitXor => Some(Ok(a ^ b)),
-        BinaryOp::Shl | BinaryOp::Shr if !(0..64).contains(&b) => None,
         BinaryOp::Shl => {
             let v = a << (b as u32);
             Some(if (v >> (b as u32)) == a {
                 Ok(v)
             } else {
-                Err("Shl")
+                Err(overflow())
             })
         }
         BinaryOp::Shr => Some(Ok(a >> (b as u32))),
@@ -90,6 +170,17 @@ pub fn float_binop(op: BinaryOp, a: f64, b: f64) -> Option<f64> {
 /// kind is `NotConst` without descending, so a caller runs one scan per maximal arithmetic tree.
 /// `visits` counts the nodes entered, once each, so a test can pin that the scan is linear.
 pub fn eval(e: &Expr, visits: &mut usize) -> Fold {
+    eval_noting(e, visits, &mut |_, _, _| {})
+}
+
+/// [`eval`], and `note(span, op, fault)` for each `Binary` node whose left operand is not a constant
+/// and whose constant right operand faults for every int left operand ([`operand_fault`]). The
+/// checker reports a noted node once it knows the left operand is an `int`.
+pub fn eval_noting(
+    e: &Expr,
+    visits: &mut usize,
+    note: &mut dyn FnMut(Span, BinaryOp, IntFault),
+) -> Fold {
     *visits += 1;
     match &e.kind {
         ExprKind::Int(n) => Fold::Value(Const::Int(*n)),
@@ -97,23 +188,28 @@ pub fn eval(e: &Expr, visits: &mut usize) -> Fold {
         ExprKind::Unary {
             op: UnaryOp::Neg,
             expr,
-        } => match eval(expr, visits) {
-            Fold::Value(Const::Int(v)) => match v.checked_neg() {
-                Some(n) => Fold::Value(Const::Int(n)),
-                None => Fold::Overflow(e.span, "negation"),
+        } => match eval_noting(expr, visits, note) {
+            Fold::Value(Const::Int(v)) => match int_neg(v) {
+                Ok(n) => Fold::Value(Const::Int(n)),
+                Err(f) => Fold::Fault(e.span, f),
             },
             Fold::Value(Const::Float(f)) => Fold::Value(Const::Float(-f)),
-            other @ Fold::Overflow(..) | other @ Fold::NotConst => other,
+            other @ Fold::Fault(..) | other @ Fold::NotConst => other,
         },
         ExprKind::Binary { op, lhs, rhs } => {
-            let l = eval(lhs, visits);
-            let r = eval(rhs, visits);
+            let l = eval_noting(lhs, visits, note);
+            let r = eval_noting(rhs, visits, note);
+            if let (Fold::NotConst, Fold::Value(Const::Int(b))) = (l, r)
+                && let Some(f) = operand_fault(*op, b)
+            {
+                note(e.span, *op, f);
+            }
             match (l, r) {
-                (o @ Fold::Overflow(..), _) | (_, o @ Fold::Overflow(..)) => o,
+                (o @ Fold::Fault(..), _) | (_, o @ Fold::Fault(..)) => o,
                 (Fold::Value(Const::Int(a)), Fold::Value(Const::Int(b))) => {
                     match int_binop(*op, a, b) {
                         Some(Ok(v)) => Fold::Value(Const::Int(v)),
-                        Some(Err(name)) => Fold::Overflow(e.span, name),
+                        Some(Err(f)) => Fold::Fault(e.span, f),
                         None => Fold::NotConst,
                     }
                 }
@@ -178,15 +274,49 @@ mod tests {
         assert_eq!(v("0 - 1", &mut n), Fold::Value(Const::Int(-1)));
         assert_eq!(v("3e38 + 3e38", &mut n), Fold::Value(Const::Float(6e38)));
         assert_eq!(v("-3e38 * 2.0", &mut n), Fold::Value(Const::Float(-6e38)));
-        assert!(matches!(v("1 << 63", &mut n), Fold::Overflow(_, "Shl")));
+        assert!(matches!(
+            v("1 << 63", &mut n),
+            Fold::Fault(_, IntFault::Overflow(IntOp::Bin(BinaryOp::Shl)))
+        ));
         assert!(matches!(
             v("(9223372036854775807 + 1) * 2", &mut n),
-            Fold::Overflow(s, "Add") if s.col > 1
+            Fold::Fault(s, IntFault::Overflow(IntOp::Bin(BinaryOp::Add))) if s.col > 1
         ));
-        // A runtime fault of another kind, mixed operands, and a non-constant leaf are not folded.
-        assert_eq!(v("1 / 0", &mut n), Fold::NotConst);
-        assert_eq!(v("1 << 64", &mut n), Fold::NotConst);
+        // A zero divisor and a shift amount outside `0..64` are faults, not values.
+        assert!(matches!(
+            v("1 / 0", &mut n),
+            Fold::Fault(_, IntFault::DivByZero)
+        ));
+        assert!(matches!(
+            v("1 % 0", &mut n),
+            Fold::Fault(_, IntFault::ModByZero)
+        ));
+        assert!(matches!(
+            v("1 << 64", &mut n),
+            Fold::Fault(_, IntFault::ShiftRange(64))
+        ));
+        assert!(matches!(
+            v("1 >> -1", &mut n),
+            Fold::Fault(_, IntFault::ShiftRange(-1))
+        ));
+        // A float zero divisor is legal (IEEE), mixed operands and a non-constant leaf are not folded.
+        assert_eq!(v("1.0 / 0.0", &mut n), Fold::NotConst);
         assert_eq!(v("1 + 2.0", &mut n), Fold::NotConst);
         assert_eq!(v("len([1]) + 1", &mut n), Fold::NotConst);
+    }
+
+    #[test]
+    fn eval_noting_notes_a_constant_operand_that_faults_for_every_left_operand() {
+        let mut n = 0;
+        let mut notes = Vec::new();
+        let y = parse_expr("y / 0");
+        let f = eval_noting(&y, &mut n, &mut |_, op, f| notes.push((op, f)));
+        assert_eq!(f, Fold::NotConst);
+        assert_eq!(notes, vec![(BinaryOp::Div, IntFault::DivByZero)]);
+        // A fully constant node is a `Fault`, not a note.
+        let mut notes = Vec::new();
+        let k = parse_expr("1 / 0");
+        eval_noting(&k, &mut n, &mut |_, op, f| notes.push((op, f)));
+        assert!(notes.is_empty());
     }
 }

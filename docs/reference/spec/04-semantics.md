@@ -21,7 +21,14 @@ The library surface (global builtins, methods on the built-in types, the runtime
 arithmetic (`+ - * /`), left shift (`<<`, when a significant bit is shifted out), negation,
 `MIN / -1`, `math.abs(MIN)`, and integer `List.sum()` (checked add). `%` never overflows: `MIN % -1`
 is `0` (as in Go and Python), because a true remainder always fits the dividend's range. Integer `/`
-and `%` by zero fault. Integer `/` truncates toward zero and `%` takes the dividend's sign.
+and `%` by zero fault. A constant int expression that always faults is a type error at `chezzi check`,
+with the run-time text: an overflow (`9223372036854775807 + 1`), `1 / 0`, `1 % 0` and `1 << 64`. A
+constant divisor of zero, or a constant shift amount outside `0..64`, is a type error
+whatever the int left operand is: `x / 0`, `x % 0`, `x << 64`, `x >> -1`, and each compound form
+(`x /= 0`, `x <<= 64`). Go and rustc reject the same forms. A float left operand (`1.5 / 0`, `1.0 / 0.0`), a left operand of a
+type with a `div` hook, and a generic `T` left operand stay legal. A divisor or shift amount that is
+not a constant faults at run time, and `recover:` catches it. Integer `/` truncates toward zero and `%`
+takes the dividend's sign.
 
 **Floats are total IEEE-754.** A `float` op *never* faults: `1.0/0.0` is `inf`, `-1.0/0.0` is `-inf`,
 `0.0/0.0` and `5.0%0.0` are `NaN`, and `math.sqrt(-1.0)` is `NaN`. `inf`/`NaN` are ordinary values;

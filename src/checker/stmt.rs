@@ -186,7 +186,18 @@ impl Checker {
                         } else {
                             // TICKET-258 (U15): `x OP= v` is `x = x OP v`: the operand is
                             // inferred by the call `infer_binary` makes for its right operand.
-                            self.scan_const_overflow(value);
+                            let folded = self.scan_const_overflow(value);
+                            // TICKET-268: `x /= 0` and `x <<= 64` always fault for an int target.
+                            if let crate::ast::consteval::Fold::Value(
+                                crate::ast::consteval::Const::Int(b),
+                            ) = folded
+                                && let Some(f) = op
+                                    .to_binop()
+                                    .and_then(|bop| crate::ast::consteval::operand_fault(bop, b))
+                                && matches!(target_ty.scalar(), Ty::Int)
+                            {
+                                self.report_const_fault(f, span);
+                            }
                             self.infer_binary_rhs(value, Some(target_ty))
                         }
                     } else {

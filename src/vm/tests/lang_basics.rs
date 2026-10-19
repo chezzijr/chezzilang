@@ -1265,10 +1265,9 @@ fn consteval_matches_vm_arith() {
     for ((op, a, b, w), got) in want.iter().zip(&lines) {
         let agrees = match w {
             Some(Ok(v)) => *got == v.to_string(),
-            Some(Err(name)) => {
-                got.starts_with("F ") && got.contains(&format!("integer overflow in {name}"))
-            }
-            None => got.starts_with("F ") && !got.contains("integer overflow"),
+            Some(Err(f)) => *got == format!("F {}", crate::base::hooks::int_fault_message(*f)),
+            // Every op in the list is int arithmetic, so `int_binop` never answers `None`.
+            None => false,
         };
         if !agrees {
             red.push(format!("{op:?}({a}, {b}): int_binop {w:?}, vm {got:?}"));

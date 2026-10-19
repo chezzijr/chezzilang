@@ -179,7 +179,7 @@ test fn non_hook_eq_satisfies_eq_too():
 struct Boom:
     n: int
     fn eq(self, other: Boom) -> bool:
-        return 1 / 0 == 0
+        return 1 / "".len() == 0
 
 test fn a_faulting_eq_propagates():
     r := recover: Boom(1) == Boom(1)

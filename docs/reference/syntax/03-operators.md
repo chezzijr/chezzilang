@@ -26,7 +26,8 @@ The relative order follows Python (comparison looser than `..` < `|` < `^` < `&`
 
 **Shifts and overflow.**
 
-- A shift amount outside `0..64` is a runtime error.
+- A shift amount outside `0..64` is a runtime error. A constant one (`x << 64`, `x >>= -1`) is a type
+  error at check time when the left operand is an `int`.
 - A `<<` that drops a significant bit is a recoverable `integer overflow in Shl` (for example
   `n := 1; n << 63`), as for `+ - * /`. Round-trip-safe shifts, including `-1 << 63 == INT_MIN`,
   succeed. `>>` never overflows.

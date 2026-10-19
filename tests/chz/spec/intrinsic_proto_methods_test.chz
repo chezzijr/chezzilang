@@ -96,11 +96,11 @@ test fn arith_method_faults_match_operator_faults():
     ro = recover: big * 2
     assert msg_of(rm, "mul_m") == msg_of(ro, "*")
     rm = recover: div_m(1, 0)
-    ro = recover: 1 / 0
+    ro = recover: 1 / "".len()
     assert msg_of(rm, "div_m") == msg_of(ro, "/")
     assert msg_of(rm, "div_m") == "division by zero"
     rm = recover: mod_m(1, 0)
-    ro = recover: 1 % 0
+    ro = recover: 1 % "".len()
     assert msg_of(rm, "mod_m") == msg_of(ro, "%")
     rm = recover: neg_m(small)
     ro = recover: -small
@@ -140,7 +140,7 @@ test fn mod_fast_path_ordinary_values_still_correct():
 
 test fn min_mod_zero_and_min_div_neg_one_still_fault():
     MIN := -9223372036854775807 - 1
-    rm := recover: MIN % 0
+    rm := recover: MIN % "".len()
     match rm:
         ?_: assert false, "MIN % 0 must still fault"
         !e: assert e.message() == "modulo by zero"
