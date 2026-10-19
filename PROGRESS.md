@@ -105,7 +105,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    will overflow`).
 4. **Group F, syntax.** Row 25 (waits on G5); the empty enum; `g()?` in `defer:`
    and `defer` in a generator (U11); a line break inside a hole (U8); the 1-tuple (U9); CRLF (U14);
-   the exponential `.map[int](f)` chain (U17); `oo(x)??` (S2-3). Statuses in
+   the exponential `.map[int](f)` chain (U17; TICKET-269, filed 2026-10-19: infer each receiver once); `oo(x)??` (S2-3). Statuses in
    `docs/contributing/special-cases.md`.
    Top-level `return` is dropped (owner, 2026-10-19): it stays an error, as Python's `SyntaxError:
    'return' outside function`; a manifest entrypoint `-> T!` already ends the program with an error.
