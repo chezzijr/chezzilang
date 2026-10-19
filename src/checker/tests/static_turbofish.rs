@@ -2020,3 +2020,26 @@ fn every_hook_has_one_row() {
     }
     assert_eq!(binary_protocol(B::And), None);
 }
+
+/// TICKET-269: `bracket_is_index` probes a member head's receiver and the call path infers it again,
+/// so a chain of n `recv.name[T](args)` links infers the first receiver 2^n times. 24 links must
+/// check in linear time. The check runs on a worker thread so the red run fails at the timeout
+/// instead of running for minutes.
+#[test]
+fn type_arg_call_chain_checks_in_linear_time() {
+    let mut chain = String::from("Box(0)");
+    for _ in 0..24 {
+        chain.push_str(".map[int](inc)");
+    }
+    let src = format!(
+        "struct Box:\n    v: int\n    fn map[U](self, f: fn(int) -> int) -> Box:\n        return Box(f(self.v))\nfn inc(x: int) -> int:\n    return x + 1\nfn main():\n    print({chain}.v)\n"
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(check_src(&src));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(errs) => assert!(errs.is_empty(), "expected no type errors, got: {errs:?}"),
+        Err(_) => panic!("a 24-link recv.name[T](args) chain took over 5 s to check"),
+    }
+}
