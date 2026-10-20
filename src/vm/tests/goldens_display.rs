@@ -1081,17 +1081,24 @@ main()
 /// runs past the cap. This program crosses on base (`crossed`/`ok`); the unsound skip faulted it with
 /// the depth-exceeded error instead. `holder.x` reaches `h`'s 1000th descendant `m` directly at depth
 /// 1 and mints it; `holder.y` then reaches `h` itself at a much deeper depth, doomed by the
-/// generator's earlier depth-tripped attempt.
+/// generator's earlier depth-tripped attempt. `make` holds a generator in a reference cycle (`g`'s
+/// pending argument `c` holds `g`). Every speculative attempt that reaches `g` fails, so each node of
+/// `holder.y` takes a slow arm. Before TICKET-276 the program held a module value (`p := [k]`), which
+/// `chezzi check` rejects.
 #[test]
 fn airlock_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_t119_review_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
     let entry = dir.join("main.chz");
-    let src = "import k\nstruct N:\n    next: N?\nstruct Last:\n    count: fn() -> int\n    tail: N\nstruct P:\n    next: P?\n    last: Last?\nstruct Holder:\n    gen: Iterator[int]\n    x: N\n    y: P\nfn make() -> fn() -> int:\n    p := [k]\n    fn count() -> int:\n        return p.len()\n    return count\nfn mk(k: int) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    return head\nfn chain_to(k: int, tail: N) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    cur.next = ?tail\n    return head\nfn nth(h: N, i: int) -> N:\n    cur := h\n    for j in 0..i:\n        match cur.next:\n            ?n: cur = n\n            None: return cur\n    return cur\nfn drive(deep: N) -> Iterator[int]:\n    yield 1\n    match deep.next:\n        ?n: yield 2\n        None: yield 0\nfn build() -> Holder:\n    h := mk(3000)\n    y := P(None, ?Last(make(), h))\n    for i in 0..2600:\n        y = P(?y, None)\n    return Holder(drive(chain_to(2500, h)), nth(h, 1000), y)\nholder: Holder = build()\nstarted := holder.gen.next()\nfn main():\n    r := recover:\n        parallel:\n            spawn:\n                print(\"crossed\")\n        0\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"err: {e.message()}\")\nmain()\n";
+    let src = "import Iterator from std.iter\nstruct N:\n    next: N?\nstruct Last:\n    count: fn() -> int\n    tail: N\nstruct P:\n    next: P?\n    last: Last?\nstruct Holder:\n    gen: Iterator[int]\n    x: N\n    y: P\nstruct C:\n    g: Iterator[int]?\nfn spin(c: C) -> Iterator[int]:\n    yield 1\nfn make() -> fn() -> int:\n    c := C(None)\n    g := spin(c)\n    c.g = ?g\n    p := [g]\n    fn count() -> int:\n        return p.len()\n    return count\nfn mk(k: int) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    return head\nfn chain_to(k: int, tail: N) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    cur.next = ?tail\n    return head\nfn nth(h: N, i: int) -> N:\n    cur := h\n    for j in 0..i:\n        match cur.next:\n            ?n: cur = n\n            None: return cur\n    return cur\nfn drive(deep: N) -> Iterator[int]:\n    yield 1\n    match deep.next:\n        ?n: yield 2\n        None: yield 0\nfn build() -> Holder:\n    h := mk(3000)\n    y := P(None, ?Last(make(), h))\n    for i in 0..2600:\n        y = P(?y, None)\n    return Holder(drive(chain_to(2500, h)), nth(h, 1000), y)\nholder: Holder = build()\nstarted := holder.gen.next()\nfn main():\n    r := recover:\n        parallel:\n            spawn:\n                print(\"crossed\")\n        0\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"err: {e.message()}\")\nmain()\n";
     std::fs::write(&entry, src).unwrap();
+    let graph = crate::resolver::build_graph(&entry).expect("resolve");
+    let checked = crate::checker::check_graph(&graph);
     let (vm_out, _e, vm_res, _) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
+    if let Err(errs) = checked {
+        panic!("the program must type-check: {errs:?}");
+    }
     assert!(vm_res.is_ok(), "unexpected top-level fault: {vm_res:?}");
     assert_eq!(
         vm_out, "crossed\nok\n",
