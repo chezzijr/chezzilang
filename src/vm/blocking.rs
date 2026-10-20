@@ -822,6 +822,8 @@ impl Vm {
             };
             // TICKET-168 — DEC-141's bracket list missed this wait; a body wait: hangs at T=1 without it.
             let refs: Vec<&Arc<ChannelCore>> = arm_cores.iter().collect();
+            #[cfg(test)]
+            WAIT_ARM0_ENTRIES.fetch_add(1, Ordering::Relaxed);
             self.wait_released_on(&refs, |_| {
                 let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
                 #[cfg_attr(not(test), allow(unused_mut))]
@@ -949,4 +951,13 @@ pub(crate) static WAIT_ARM0_BLOCKS: std::sync::atomic::AtomicU64 =
 /// (TICKET-059).
 #[cfg(test)]
 pub(crate) static WAIT_ARM0_SLEPT_WHILE_READY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// TICKET-270 — how many times `op_wait_poll` reached its blocking arm-0 wait, counted BEFORE
+/// the wait, process-wide. The gate for [`WAIT_ARM0_BLOCKS`]: a run whose `wait:`s all found
+/// their value queued never enters the block branch, so its blocks floor proves nothing. Only
+/// ever read as a delta: a zero delta skips the floor, a nonzero one requires the blocks delta
+/// to be `>= 1` (a blind-sleep revert keeps this counter and drops that one to 0).
+#[cfg(test)]
+pub(crate) static WAIT_ARM0_ENTRIES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);

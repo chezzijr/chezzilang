@@ -1500,7 +1500,12 @@ ex.submit(closer)
 /// timeout — the trick `demote_wait_block` already used for the same N-arms-no-single-condvar problem,
 /// which is why the earlier "this needs a new multi-channel wait primitive" note was wrong.
 ///
-/// 300 blocking `wait:` wakeups must each block on arm 0's condvar and none of them may sleep its
+/// TICKET-270 -- the blocks floor is gated on `WAIT_ARM0_ENTRIES`: a `main` descheduled after
+/// `gate.send(true)` finds the value queued and never enters the block branch (W15-8: `got 149`,
+/// `got 178`, `got 229`). No entry skips the floor; any entry needs `blocks >= 1`. The `skewed_even`
+/// cell makes that interleaving on half the rounds with no host load.
+///
+/// Every blocking `wait:` wakeup must block on arm 0's condvar and none of them may sleep its
 /// whole tick with arm 0 already ready (TICKET-059: `WAIT_ARM0_BLOCKS` / `WAIT_ARM0_SLEPT_WHILE_READY`
 /// replace a wall-clock bound, which was NOT redundant — measured, a blind `thread::sleep(tick)`
 /// revert still prints `44850` and passes every output assertion, only the timing failed
@@ -1510,15 +1515,30 @@ ex.submit(closer)
 /// plain `wait_timeout` revert (W7-13's own defect).
 #[test]
 fn an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout() {
-    let blocks0 = crate::vm::blocking::WAIT_ARM0_BLOCKS.load(std::sync::atomic::Ordering::Relaxed);
-    let stalls0 =
-        crate::vm::blocking::WAIT_ARM0_SLEPT_WHILE_READY.load(std::sync::atomic::Ordering::Relaxed);
-    // The `gate` handshake is what makes this test exercise the path at all: `cons` announces that it
-    // is about to block, and only then does `prod` send. Without it `prod` races ahead, every `wait:`
-    // finds its value already queued, and the block branch is never reached — measured: the vacuous
-    // version passed even with the wait stubbed back to a blind sleep.
-    let src = "
+    use crate::vm::blocking::{WAIT_ARM0_BLOCKS, WAIT_ARM0_ENTRIES, WAIT_ARM0_SLEPT_WHILE_READY};
+    use std::sync::atomic::Ordering::Relaxed;
+    // `skewed_even` delays `main` between its `gate.send` and its `wait:` on even rounds, so `prod`
+    // wins that race and `main` finds the value queued: the interleaving a descheduled `main` makes
+    // under host load (W15-8), reproduced with no load.
+    let cells = [
+        ("plain", ""),
+        (
+            "skewed_even",
+            "    if i % 2 == 0:\n        time.sleep_ms(2)\n",
+        ),
+    ];
+    for (name, skew) in cells {
+        let entries0 = WAIT_ARM0_ENTRIES.load(Relaxed);
+        let blocks0 = WAIT_ARM0_BLOCKS.load(Relaxed);
+        let stalls0 = WAIT_ARM0_SLEPT_WHILE_READY.load(Relaxed);
+        // The `gate` handshake is what makes this test exercise the path at all: `cons` announces that it
+        // is about to block, and only then does `prod` send. Without it `prod` races ahead, every `wait:`
+        // finds its value already queued, and the block branch is never reached — measured: the vacuous
+        // version passed even with the wait stubbed back to a blind sleep.
+        let src = format!(
+            "
 import Executor from std.concurrency
+import std.time
 data: Channel[int] = Channel[int](1)
 other: Channel[int] = Channel[int](1)
 gate: Channel[bool] = Channel[bool](1)
@@ -1531,44 +1551,51 @@ ex.submit(prod)
 s := 0
 for i in 0..300:
     gate.send(true)
-    wait:
+{skew}    wait:
         v := data.recv():
             s = s + v
         w := other.recv():
             s = s + w
 ex.shutdown()
 print(s)
-";
-    let entry = write_temp_chz("w713a_wait_wakeups", src);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let e = entry.clone();
-    std::thread::spawn(move || {
-        let (o, _e2, r, _c) = run_file(&e);
-        let _ = tx.send((o, format!("{r:?}"), r.is_err()));
-    });
-    let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
-    let _ = std::fs::remove_file(&entry);
-    let (out, rdbg, failed) = outcome.expect("300 `wait:` wakeups did not finish in 60 s");
-    assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
-    assert_eq!(
-        out, "44850\n",
-        "every arm value must still be received exactly once"
-    );
-    let blocks =
-        crate::vm::blocking::WAIT_ARM0_BLOCKS.load(std::sync::atomic::Ordering::Relaxed) - blocks0;
-    let stalls = crate::vm::blocking::WAIT_ARM0_SLEPT_WHILE_READY
-        .load(std::sync::atomic::Ordering::Relaxed)
-        - stalls0;
-    assert!(
-        blocks >= 250,
-        "300 gated handoffs must each block on arm 0's condvar; got {blocks} (measured 300 fixed, 0 \
-         under a blind thread::sleep)"
-    );
-    assert_eq!(
-        stalls, 0,
-        "an eager `wait:` slept its whole tick with arm 0 already ready -- the W7-13 lost wakeup is \
-         back (measured 0 fixed, 3 under a plain wait_timeout)"
-    );
+"
+        );
+        let entry = write_temp_chz("w713a_wait_wakeups", &src);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let e = entry.clone();
+        std::thread::spawn(move || {
+            let (o, _e2, r, _c) = run_file(&e);
+            let _ = tx.send((o, format!("{r:?}"), r.is_err()));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_file(&entry);
+        let (out, rdbg, failed) = outcome.expect("300 `wait:` wakeups did not finish in 60 s");
+        assert!(!failed, "the program must succeed: out={out:?} r={rdbg}");
+        assert_eq!(
+            out, "44850\n",
+            "every arm value must still be received exactly once"
+        );
+        let entries = WAIT_ARM0_ENTRIES.load(Relaxed) - entries0;
+        let blocks = WAIT_ARM0_BLOCKS.load(Relaxed) - blocks0;
+        let stalls = WAIT_ARM0_SLEPT_WHILE_READY.load(Relaxed) - stalls0;
+        assert_eq!(
+            stalls, 0,
+            "{name}: an eager `wait:` slept its whole tick with arm 0 already ready -- the W7-13 lost \
+         wakeup is back (measured 0 fixed, 3 under a plain wait_timeout)"
+        );
+        if entries == 0 {
+            eprintln!(
+                "SKIP {name}: no `wait:` reached the block branch (main arrived after every send), so \
+             this run cannot tell a condvar wait from a blind sleep"
+            );
+            continue;
+        }
+        assert!(
+            blocks >= 1,
+            "{name}: {entries} `wait:` entries reached the block branch and none waited on arm 0's \
+         condvar -- a blind thread::sleep is back (measured 0 under that revert)"
+        );
+    }
 }
 
 /// W7-13r(a)'s LIVE-LOCK fence — a CLOSED arm 0 beside a live arm must not spin the eager `wait:`.

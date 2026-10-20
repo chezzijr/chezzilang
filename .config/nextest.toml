@@ -26,11 +26,3 @@ test-group = 'timing'
 [[profile.default.overrides]]
 filter = 'binary(hook_conformance_grid) & test(operator_and_bound_agree_in_every_cell)'
 slow-timeout = { period = "60s", terminate-after = 8 }
-
-# Known flakes tracked in docs/contributing/gaps.md, retried so they do not fail the verifying gate on load alone.
-# The T=1 seeded replay test left this list with TICKET-205: it is byte-for-byte now, so a red run is
-# a regression. A retry that then
-# passes is reported as FLAKY, never hidden. Delete an entry when its ledger row closes.
-[[profile.default.overrides]]
-filter = 'test(~an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout)'
-retries = 2

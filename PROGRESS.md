@@ -124,9 +124,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    each `std/*.chz` at `cargo build` time and embed the result in the binary; `std/*.chz` stays the one
    source. Open for its plan: the reach set (`resolver::unreached_std_fns`) and the program-wide slot
    and type keys depend on the importing program.
-7. **Gate flakes (TICKET-270, filed 2026-10-19).** Two scheduler tests fail the `verifying` gate at
-   random: `an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout` (row W15-8) and
-   `done_is_monotone_while_another_task_reads`. TICKET-269 escalated twice on them and was merged by hand
+7. **Gate flakes (TICKET-270, filed 2026-10-19).** One scheduler test fails the `verifying` gate at
+   random: `done_is_monotone_while_another_task_reads`. TICKET-269 escalated twice on them and was merged by hand
    (front-end lib 2517 passed, the bracket grids and `chz_suite` 49 passed, clippy clean).
 8. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
@@ -185,7 +184,7 @@ before any airlock work, and [`w16.md`](docs/history/bug-hunts/w16.md) Family 4.
 ## Ledger
 
 [`docs/contributing/gaps.md`](docs/contributing/gaps.md) is a short ledger of open rows. Each row is
-re-verified on the release binary. **9 open rows** today: W8-19, W13-28, W15-4, W15-5, W15-8, W15-10,
+re-verified on the release binary. **8 open rows** today: W8-19, W13-28, W15-4, W15-5, W15-10,
 W17-1, W22-1, W23-1. All are P2/P3 or tracking rows. `tests/gaps_ledger_count.rs` checks this count.
 After each merge, re-derive it with `grep -c '^| \*\*W' docs/contributing/gaps.md`: a merge can
 produce a wrong counter with no conflict marker. Closed rows and the bug-hunt session logs are in
