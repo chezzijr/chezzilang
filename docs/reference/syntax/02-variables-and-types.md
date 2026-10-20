@@ -436,7 +436,7 @@ sides match: `a ?? b` and `a??b`. Glued on both sides means the char after `??` 
 letter, a digit, a quote, `(`, `[`, `{`, or a `-` or `!` that does not begin `->`, `-=` or `!=` (so
 `oo(x)??-1` is `oo(x) ?? -1`). Glued to the value only, it is two `?`: `oo(x)??` tries twice,
 `oo(x)?? - 1` tries twice and then subtracts, `a??!=b` is `(a?)? != b`, and `int??`, `v: int??=None`
-and `List[int??]` are `Option[Option[int]]`. With no value before it, `??x` and `?? x` wrap twice; a
+and `List[int??]` are an `int?` that is itself optional. With no value before it, `??x` and `?? x` wrap twice; a
 `?` keeps the reading of what comes before it, so `? ??x` wraps three times and `x? ?? 1` is `x?`
 then a coalesce. The code of an interpolation hole starts with no value before it, so `"{a}{??b}"`
 wraps `b` twice. `a ??b` is the lex error `'??' after a value takes the same spacing on both sides`.
