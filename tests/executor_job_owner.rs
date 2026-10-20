@@ -73,10 +73,19 @@ impl Got {
     }
 }
 
+/// The hang guard of a grid cell: each cell's program ends in well under a second.
+const HANG: Duration = Duration::from_secs(10);
+/// The hang guard of `TD2`, which is CPU-bound: debug, 2026-10-19, `TD2` took 6.9 s idle at
+/// `CHEZZI_THREADS=2` and 7.1 s at `=0`, 14.9 s and 14.0 s under `CPUQuota=50%`, and 13 s at host
+/// load 20-33. A 10 s guard killed healthy runs (`code=None started=false`, TICKET-270). This one
+/// is 8x the quota measurement and below nextest's 300 s kill, so a real hang still names its cell.
+const TD2_HANG: Duration = Duration::from_secs(120);
+
 /// Runs `src` at `threads` workers. `started` reports whether the target job printed `T start`
 /// to stderr: `io.eprint` is `Kind::Inline`, so no checkpoint stands between a job's start and
 /// the marker (`fs.mkdir` is `Kind::Blocking`, a checkpoint that cuts the job before the write).
-fn run(src: &str, threads: &str, seed: Option<&str>) -> Got {
+/// Kills the child after `budget` and reports `code=None`.
+fn run(src: &str, threads: &str, seed: Option<&str>, budget: Duration) -> Got {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("chz-t219-{}-{n}", std::process::id()));
@@ -116,7 +125,7 @@ fn run(src: &str, threads: &str, seed: Option<&str>) -> Got {
         if let Some(s) = child.try_wait().expect("wait") {
             break Some(s.code().unwrap_or(-1));
         }
-        if start.elapsed() > Duration::from_secs(10) {
+        if start.elapsed() > budget {
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -542,7 +551,7 @@ fn job_owner_grid() {
                     let Some(&(p, h, s, e, t, seed)) = cells.get(i) else {
                         break;
                     };
-                    let g = run(&prog(p, h, s, e), t, seed);
+                    let g = run(&prog(p, h, s, e), t, seed, HANG);
                     if let Some(why) = check(p, h, s, e, &g) {
                         misses.lock().unwrap().push(format!(
                             "{p:?} x {h:?} x {s:?} x {e:?} T={t} seed={seed:?}: {why}\n{}",
@@ -613,7 +622,7 @@ fn defer_reader_settles_after_a_job_fault() {
     let mut misses = Vec::new();
     for (name, src) in [("dheld", DHELD), ("drun", DRUN)] {
         for t in ["1", "2", "0"] {
-            let g = run(src, t, None);
+            let g = run(src, t, None, HANG);
             if g.code != Some(1) || !g.err.contains("boom") || g.out != want {
                 misses.push(format!("{name} T={t}: {}", g.show()));
             }
@@ -647,7 +656,7 @@ main()
 fn done_is_monotone_while_another_task_reads() {
     let mut misses = Vec::new();
     for t in ["2", "0"] {
-        let g = run(TD2, t, None);
+        let g = run(TD2, t, None, TD2_HANG);
         if g.code != Some(0) || g.out != "flips 0\n" {
             misses.push(format!("T={t}: {}", g.show()));
         }

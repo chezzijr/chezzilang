@@ -124,10 +124,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    each `std/*.chz` at `cargo build` time and embed the result in the binary; `std/*.chz` stays the one
    source. Open for its plan: the reach set (`resolver::unreached_std_fns`) and the program-wide slot
    and type keys depend on the importing program.
-7. **Gate flakes (TICKET-270, filed 2026-10-19).** One scheduler test fails the `verifying` gate at
-   random: `done_is_monotone_while_another_task_reads`. TICKET-269 escalated twice on them and was merged by hand
-   (front-end lib 2517 passed, the bracket grids and `chz_suite` 49 passed, clippy clean).
-8. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+7. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 
