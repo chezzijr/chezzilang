@@ -2342,3 +2342,158 @@ print("done")
     );
     assert!(out.contains("done"), "main must finish: {out:?}");
 }
+
+/// TICKET-270 — a job that ends the run (a fault or an `os.exit`) keeps its own output wherever
+/// main is when the run end lands. The `quiesce` seam holds the window between the run-end cell
+/// and the job's slot store open for 300 ms. Measured on the unfixed engine: nine cells red with
+/// `out=""` (`fault/alone`, `fault/same_exec_waiter`, `fault/other_exec_first`, every `exit/` cell).
+#[test]
+fn a_job_that_ends_the_run_keeps_its_output_at_every_drain_position() {
+    let ends = [
+        (
+            "fault",
+            "    panic(\"TICKET-270 job fault window\")\n",
+            None,
+        ),
+        ("exit", "    os.exit(3)\n", Some(3)),
+    ];
+    let positions = [
+        ("alone", "b := Executor()\nb.submit(job)\n"),
+        (
+            "same_exec_waiter",
+            "b := Executor()\nb.submit(waiter)\nb.submit(job)\n",
+        ),
+        (
+            "other_exec_first",
+            "a := Executor()\na.submit(waiter)\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "other_exec_after",
+            "b := Executor()\nb.submit(job)\na := Executor()\na.submit(waiter)\n",
+        ),
+        (
+            "main_recv",
+            "b := Executor()\nb.submit(job)\n_ := gate.recv()\n",
+        ),
+        (
+            "main_recv_other_first",
+            "a := Executor()\na.submit(waiter)\nb := Executor()\nb.submit(job)\n_ := gate.recv()\n",
+        ),
+    ];
+    let mut red = Vec::new();
+    for (end, body, code) in ends {
+        for (pos, tail) in positions {
+            let src = format!(
+                "import Executor from std.concurrency\nimport std.os\ngate: Channel[int] = Channel[int]()\nfn waiter():\n    _ := gate.recv()\nfn job():\n    print(\"job output\")\n{body}{tail}"
+            );
+            let entry = write_temp_chz("t270_run_end_window", &src);
+            let (out, _e, r, c) = run_file(&entry);
+            let _ = std::fs::remove_file(&entry);
+            let rs = format!("{r:?}");
+            let ended = match code {
+                Some(k) => c == Some(k),
+                None => rs.contains("TICKET-270 job fault window"),
+            };
+            if !out.contains("job output") || !ended {
+                red.push(format!("{end}/{pos}: out={out:?} code={c:?} r={rs}"));
+            }
+        }
+    }
+    assert!(red.is_empty(), "red cells: {red:?}");
+}
+
+/// TICKET-270 — W7-57's fence: an `os.exit` beside a task that spins in its `defer` still ends
+/// the run, and the exiting party's output is kept. A flush waits until the exiting fiber stored
+/// its slot, so an exit whose unwind waited on the spinner would hang here. Measured on the
+/// unfixed engine: every cell ends; `job_body_exits`, `job_child_exits` and
+/// `job_exits_other_exec_spins` lose `quit`.
+#[test]
+fn an_exit_beside_a_spinning_defer_ends_the_run_and_keeps_its_output() {
+    let head = "import Executor from std.concurrency\nimport std.os\nch: Channel[int] = Channel[int]()\nfn spin():\n    defer:\n        while true:\n            pass\n    _ := ch.recv()\nfn quit():\n    print(\"quit\")\n    os.exit(3)\n";
+    let cells = [
+        (
+            "job_body_exits",
+            "fn job():\n    parallel:\n        spawn spin()\n        print(\"quit\")\n        os.exit(3)\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "job_child_exits",
+            "fn job():\n    parallel:\n        spawn spin()\n        spawn quit()\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "main_child_exits",
+            "parallel:\n    spawn spin()\n    spawn quit()\n",
+        ),
+        (
+            "job_exits_other_exec_spins",
+            "a := Executor()\na.submit(spin)\nb := Executor()\nb.submit(quit)\n_ := ch.recv()\n",
+        ),
+    ];
+    let mut red = Vec::new();
+    for (name, tail) in cells {
+        let entry = write_temp_chz("t270_exit_beside_spin", &format!("{head}{tail}"));
+        let e = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file(&e));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok((out, _e, _r, c)) if out.contains("quit") && c == Some(3) => {}
+            Ok((out, _e, r, c)) => red.push(format!("{name}: out={out:?} code={c:?} r={r:?}")),
+            Err(_) => red.push(format!("{name}: no end in 60 s")),
+        }
+        let _ = std::fs::remove_file(&entry);
+    }
+    assert!(red.is_empty(), "red cells: {red:?}");
+}
+
+/// TICKET-270 — DEC-213 beside a RUNNING sibling: a job exits while a task of its own nursery
+/// spins in a CPU loop (not parked) with a `defer` that prints. The exit code must be readable
+/// before the exit's cancel reaches the spinner (`classify_mn_outcome` trips it before
+/// `finish`), so no `defer` runs; the job's output is kept and the code is 3. 20 runs at
+/// `CHEZZI_THREADS=1` and 20 at `=2`. Measured: base engine with the seams 20 red at T=2
+/// (`out=""`); the round-3 code, which stored a fiber's exit only in `finish`, 19 red at T=2
+/// (`defer ran`).
+#[test]
+fn an_exit_beside_a_running_sibling_runs_no_defer_and_keeps_its_output() {
+    if crate::vm::rerun_in_child(
+        module_path!(),
+        "an_exit_beside_a_running_sibling_runs_no_defer_and_keeps_its_output",
+    ) {
+        return;
+    }
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    let src = "import Executor from std.concurrency\nimport std.os\nstarted: Channel[int] = Channel[int]()\nfn busy():\n    defer:\n        print(\"defer ran\")\n    started.send(1)\n    i := 0\n    while true:\n        i += 1\nfn job():\n    parallel:\n        spawn busy()\n        _ := started.recv()\n        print(\"job output\")\n        os.exit(3)\nb := Executor()\nb.submit(job)\n";
+    let mut red = Vec::new();
+    for t in [1usize, 2] {
+        crate::vm::set_worker_count(t);
+        for i in 0..20 {
+            let entry = write_temp_chz(&format!("t270_running_sibling_{t}_{i}"), src);
+            let e = entry.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(run_file(&e));
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+                Ok((out, _e, _r, c))
+                    if out.contains("job output") && !out.contains("defer ran") && c == Some(3) => {
+                }
+                Ok((out, _e, r, c)) => {
+                    red.push(format!("T={t} run {i}: out={out:?} code={c:?} r={r:?}"))
+                }
+                Err(_) => red.push(format!("T={t} run {i}: no end in 60 s")),
+            }
+            let _ = std::fs::remove_file(&entry);
+        }
+    }
+    assert!(red.is_empty(), "{} red run(s): {red:?}", red.len());
+}

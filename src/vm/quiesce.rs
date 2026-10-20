@@ -454,7 +454,14 @@ impl QuiesceState {
     /// the status, and a later one cannot rewrite it.
     pub(super) fn request_exit(&self, code: i32) {
         let mut g = self.exit.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        let hold = code == RUN_END_WINDOW_EXIT && g.is_none();
         g.get_or_insert(code);
+        drop(g);
+        #[cfg(test)]
+        if hold {
+            hold_run_end_window();
+        }
     }
 
     /// The pending run-wide exit code, if any.
@@ -494,8 +501,17 @@ impl QuiesceState {
         err: super::RuntimeError,
         trace: Vec<super::TraceFrame>,
     ) {
+        #[cfg(test)]
+        let hold = err.message.contains(RUN_END_WINDOW_MARK);
         let mut g = self.job_fault.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        let hold = hold && g.is_none();
         g.get_or_insert((err, trace));
+        drop(g);
+        #[cfg(test)]
+        if hold {
+            hold_run_end_window();
+        }
     }
 
     /// The pending job fault, if any.
@@ -769,6 +785,21 @@ impl Drop for PartyGuard {
             g.swap_remove(i);
         }
     }
+}
+
+/// TICKET-270 — test-only: a job fault whose message contains this text holds its publisher open.
+#[cfg(test)]
+const RUN_END_WINDOW_MARK: &str = "TICKET-270 job fault window";
+/// TICKET-270 — test-only: an `os.exit` with this code holds its publisher open.
+#[cfg(test)]
+const RUN_END_WINDOW_EXIT: i32 = 3;
+
+/// TICKET-270 — test-only: the first publisher of a marked run end sleeps 300 ms after the cell
+/// is stored and before its slot is stored, so a joiner that reads the halt inside that window is
+/// reachable with no host load (`a_job_that_ends_the_run_keeps_its_output_at_every_drain_position`).
+#[cfg(test)]
+fn hold_run_end_window() {
+    std::thread::sleep(std::time::Duration::from_millis(300));
 }
 
 #[cfg(test)]
