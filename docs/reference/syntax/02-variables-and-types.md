@@ -431,6 +431,17 @@ main()
 mean the spaced form. `g: fn() -> int!= one` has the type `fn() -> int!`. `!=` between two
 expressions is unchanged (`x: bool!= a != b`), and `y: int!== 6` is a parse error.
 
+**A run of `?` reads by its spacing, Swift's rule.** After a value, `??` is the coalesce when its two
+sides match: `a ?? b` and `a??b`. Glued on both sides means the char after `??` starts an operand: a
+letter, a digit, a quote, `(`, `[`, `{`, or a `-` or `!` that does not begin `->`, `-=` or `!=` (so
+`oo(x)??-1` is `oo(x) ?? -1`). Glued to the value only, it is two `?`: `oo(x)??` tries twice,
+`oo(x)?? - 1` tries twice and then subtracts, `a??!=b` is `(a?)? != b`, and `int??`, `v: int??=None`
+and `List[int??]` are `Option[Option[int]]`. With no value before it, `??x` and `?? x` wrap twice; a
+`?` keeps the reading of what comes before it, so `? ??x` wraps three times and `x? ?? 1` is `x?`
+then a coalesce. The code of an interpolation hole starts with no value before it, so `"{a}{??b}"`
+wraps `b` twice. `a ??b` is the lex error `'??' after a value takes the same spacing on both sides`.
+`?..` is `?` then `..` (`o(x)?..5`), and `??.` is `?` then `?.` (`oo(x)??.y`).
+
 **Success-coercion (implicit wrap).** At every typed slot a plain success value wraps: `T -> T?`
 gives a present value, `T -> T!E` a success value. A bare `return` (or falling off the end) in a
 `None!E` fn gives its success value.

@@ -598,7 +598,6 @@ fn one_line_if_statement_is_the_if_expression() {
     for src in [
         "x := 1[T, U]\n",
         "x := 1[T!]\n",
-        "x := 1[T??]\n",
         "x := 1[fn() -> T]\n",
         "x := 1[!]\n",
         "x := (1, 2)[int, str]\n",

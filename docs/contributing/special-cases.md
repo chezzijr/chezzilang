@@ -211,7 +211,7 @@ Open rows (S1-1, S1-2, S2-8 and S2-1 went to TICKET-249, 250 and 252; see the au
 | S1-5, S2-2 ✔ | P2 | a line break between operands inside a hole | `unexpected end of line in expression` | CPython `6` | not filed |
 | S1-3 ✔ | P1 | CRLF file with a blank line inside a block | `unexpected indented block in expression` | CPython runs | fixed by TICKET-271 |
 | S1-4 ✔ | P2 | CRLF inside a string literal keeps `\r` | `"a⏎b".len()` is `4` | CPython `3` | fixed by TICKET-271 |
-| S2-3 ✔ | P2 | postfix `?` lost to maximal munch: `oo(x)??`, `o(x)?..5` | parse error; `oo(x)?? - 1` parses as coalesce | Rust runs both | not filed |
+| S2-3 ✔ | P2 | postfix `?` lost to maximal munch: `oo(x)??`, `o(x)?..5` | parse error; `oo(x)?? - 1` parses as coalesce | Rust runs both | fixed by TICKET-272 (2026-10-20): `Lexer::question` reads a `?` run by its spacing |
 | S2-4 ✔ | P2 | `return a / b, a % b` | `expected end of line, found ','` | CPython, Go `3 1` | not filed |
 | S2-7 | P3 | 1-tuple type and pattern | parse error; renders `(int)` | Rust `(i64,)` | fixed by TICKET-273 (one comma-list reader, `comma_tail`; one tuple writer, `tuple_tail`) |
 | S3-1 ✔ | P1 | check and run are exponential in a `recv.name[X](args)` chain: `.map[int](inc)` repeated | 12 links 224 ms, 16 links 3.5 s, 18 links over 10 s; without `[int]` 30 links take 8 ms | rustc: 30 links in 81 ms | fixed by TICKET-269 (debug `chezzi check`, 16 links: 7243 ms -> 27 ms) |
@@ -225,7 +225,7 @@ Facts with several deciders (from the grammar hunter's table):
 |---|---|---|
 | what `head[X]` means (index or type argument) | three parser copies of the "headed" test (the first lacks the tuple-index exclusion); the checker infers a value receiver once per link (TICKET-269) | one `bracket_head` function; the checker decides from the receiver type it already has (S3-1, S3-3) |
 | what a statement contains | `stmt_expr_recover_blocks` (`src/ast/mod.rs`) is a partial hand copy of the exhaustive `ids_in_stmt`; it omitted `assert` and match-arm guards | one exhaustive visitor with no wildcard arm (S3-4) |
-| a fused two-character token that means two operators | `??` is split by hand in type, prefix and pattern position, not in postfix position | split it in one place (S2-3) |
+| a fused two-character token that means two operators | one decider, `Lexer::question` (`lexer/mod.rs`); the three parser splits are deleted (TICKET-272). `!=` after a type is still split in the parser (`bang_eq`) | split it in one place (S2-3) |
 | the shape of a tuple, a negative literal, a bound head | a tuple: one reader, `comma_tail` (`parser/cursor.rs`), for the value, type, pattern and target lists, and one writer, `tuple_tail` (`base/words.rs`) (TICKET-273); a negative literal and a bound head: separate code in expression, type and pattern position | one helper per form, parameterised by the element parser (S3-6) |
 | the grammar is the specification | `cargo test conformance` compares accept/reject on a corpus; it never compares the tree and never checks that a parser-accepted program is derived by the grammar | a mutation differential in the suite (a working model ran about 146,000 mutants with no parser crash) |
 

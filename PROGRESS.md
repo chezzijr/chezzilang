@@ -101,8 +101,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    (`1 / 0`, `x % 0`, `x <<= 64`). One owner for an int op's fault: `int_binop`, `operand_fault`,
    `int_neg` and `IntFault` in `src/ast/consteval.rs`; a binary op's name comes from `HOOKS`. The VM ops,
    `Atomic`, `sum`, the natives and the checker read it. Done 2026-10-19.
-4. **Group F, syntax (filed 2026-10-19).** Row 25 waits on G5. Open tickets: postfix `??` and `?..`
-   (S2-3, TICKET-272). Done: `?` in `defer:` is a check error, as in `spawn:`, and the generator ban
+4. **Group F, syntax (filed 2026-10-19).** Row 25 waits on G5. Done: postfix `??` and `?..`
+   (S2-3, TICKET-272: the lexer reads a `?` run by its spacing); `?` in `defer:` is a check error, as in `spawn:`, and the generator ban
    drops "(experimental)" (U11, TICKET-274); the 1-tuple type `(int,)` and pattern `a, := t` (S2-7, U9,
    TICKET-273: one comma-list reader, `comma_tail`, and one tuple writer, `tuple_tail`, which also fixed
    `Shared((1))` and a `(false)` match witness; the CPython differential now generates 1-tuples); CRLF

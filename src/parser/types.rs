@@ -259,11 +259,6 @@ impl Parser {
                 self.bang_eq = Some(self.pos);
                 ty = Type::Generic(private_name("Result"), vec![ty], Span::default());
                 break;
-            } else if self.eat(&Token::QuestionQuestion) {
-                // Adjacent `??` lexes as ONE token: `int??` is `Option[Option[int]]`.
-                chain += 2;
-                ty = Type::Generic(private_name("Option"), vec![ty], Span::default());
-                ty = Type::Generic(private_name("Option"), vec![ty], Span::default());
             } else {
                 break;
             }

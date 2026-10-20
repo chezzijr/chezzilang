@@ -243,29 +243,14 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// Prefix unary operators (`-`, `!` error value, `?` present/success value; `??` is two
-    /// nested `?`), then a postfix chain. `not` is parsed one level up.
+    /// Prefix unary operators (`-`, `!` error value, `?` present/success value), then a postfix
+    /// chain. `not` is parsed one level up.
     fn parse_unary(&mut self) -> PResult<Expr> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             return Err(self.too_deep());
         }
         let span = self.cur_span();
-        if self.check(&Token::QuestionQuestion) {
-            // Adjacent `??` lexes as ONE token: prefix `??x` is `?(?x)`, two nodes.
-            self.advance();
-            let inner = self.parse_unary();
-            self.depth -= 1;
-            let wrap = |e: Expr| Expr {
-                id: crate::ast::NodeId::fresh(),
-                kind: ExprKind::Unary {
-                    op: UnaryOp::Wrap,
-                    expr: Box::new(e),
-                },
-                span,
-            };
-            return inner.map(|e| wrap(wrap(e)));
-        }
         let op = match self.peek() {
             Token::Minus => Some(UnaryOp::Neg),
             Token::Bang => Some(UnaryOp::ErrVal),

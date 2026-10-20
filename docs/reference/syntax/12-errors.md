@@ -136,8 +136,9 @@ n    := fetch()?.len()                  # T!E: propagate the error (`?`), then `
 '??' applies to a `T?` or `T!E` value, found int
 ```
 
-`f()?.len() ?? 0` on a `T!E` is that error: `f()?.len()` is already an `int`. Both operators need
-their two chars adjacent (`x?.f`, `a ?? b`). `?.` on a non-carrier is
+`f()?.len() ?? 0` on a `T!E` is that error: `f()?.len()` is already an `int`. Each operator needs
+its two chars adjacent (`x?.f`, `a ?? b`); `a ??b` is a lex error and `oo(x)??` is two `?`
+(`02-variables-and-types.md`). `?.` on a non-carrier is
 `'?.' applies to a `T?` or `T!E` value, found int`.
 
 **Unhandled errors exit the program only at a `?` or a manifest entrypoint's return.** A top-level

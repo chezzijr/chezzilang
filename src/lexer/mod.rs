@@ -112,8 +112,8 @@ pub enum Token {
     Arrow,            // ->
     Pipe,             // |>
     Question,         // ?
-    QuestionDot,      // ?.  (optional chaining — only when the chars are adjacent)
-    QuestionQuestion, // ??  (null-coalescing — only when the chars are adjacent)
+    QuestionDot,      // ?.  (optional chaining; `?..` is `?` then `..`)
+    QuestionQuestion, // ??  (null-coalescing; `Lexer::question` decides by spacing)
     Bang,             // !  (used in type position: `T!` = Result[T])
     Amp,              // &  (bitwise and)
     Caret,            // ^  (bitwise xor)
@@ -791,6 +791,9 @@ pub struct Lexer {
     /// Memoized char index of the `|` of a resolved leading-`|>` continuation (see
     /// [`Lexer::pipe_continues_next_line`]): scan a blank/comment run once, not once per line.
     pipe_cont: Option<usize>,
+    /// Whether the last emitted token ends an operand ([`ends_operand`]): a `??` after one can
+    /// be the coalesce, a `??` after anything else is two prefix `?` ([`Lexer::question`]).
+    after_operand: bool,
 }
 
 impl Lexer {
@@ -816,6 +819,7 @@ impl Lexer {
             hole_comment: None,
             doc_comments: Vec::new(),
             pipe_cont: None,
+            after_operand: false,
         }
     }
 
@@ -920,6 +924,52 @@ impl Lexer {
         }
     }
 
+    /// The token a `?` at `start` begins: the one place a run of `?` becomes tokens (S2-3).
+    /// A run of exactly two after an operand is the coalesce `??` when the spacing says binary,
+    /// Swift's rule: glued on both sides (`a??b`) or on neither (`a ?? b`). Glued on the left only
+    /// is two `?`: postfix `oo(x)??`, type `int??`, `int??=None`. With no operand before it
+    /// (`??x`, `x := ?? 5`) the run is prefix, two `?`. Any other run is one `?` per char. `?.` is
+    /// the optional chain unless a second `.` follows: `o(x)?..5` is `?` then `..`. A value then
+    /// `??b` is an error: no prefix `??` follows a value, so the spacing is a mistyped coalesce.
+    fn question(&mut self, start: usize) -> Result<Token, LexError> {
+        let before = start.checked_sub(1).map(|i| self.chars[i]);
+        let run = self.chars[start..]
+            .iter()
+            .take_while(|&&c| c == '?')
+            .count();
+        if self.after_operand && before != Some('?') && run == 2 {
+            let left = before.is_some_and(|c| !c.is_whitespace());
+            let right = self.starts_operand(start + 2);
+            if left == right {
+                self.advance();
+                return Ok(Token::QuestionQuestion);
+            }
+            if right {
+                let msg =
+                    "'??' after a value takes the same spacing on both sides: `a ?? b` or `a??b`";
+                return Err(self.error_at(start, msg));
+            }
+        }
+        if self.peek() == '.' && self.peek_next() != '.' {
+            self.advance();
+            return Ok(Token::QuestionDot);
+        }
+        Ok(Token::Question)
+    }
+
+    /// Whether the char at `i` can start an operand: a word char (a name, a keyword, a number, a
+    /// `b"` or `r"` prefix), a quote, an opener, or a prefix `-`, `!` or `?` that does not begin
+    /// `->`, `-=` or `!=`. [`Lexer::question`] reads a `??` glued to such a char as the coalesce.
+    fn starts_operand(&self, i: usize) -> bool {
+        let next = self.chars.get(i + 1).copied();
+        match self.chars.get(i).copied() {
+            Some('-') => !matches!(next, Some('>' | '=')),
+            Some('!') => next != Some('='),
+            Some(c) => is_word(c) || matches!(c, '"' | '\'' | '(' | '[' | '{' | '?'),
+            None => false,
+        }
+    }
+
     // ----- the main driver -----
 
     /// Produce all tokens. This outer loop is provided so you can see how the pieces connect:
@@ -956,8 +1006,18 @@ impl Lexer {
         Ok((tokens, self.doc_comments))
     }
 
-    /// Produce the next single token (it's fine for ONE call to also emit layout tokens —
-    /// see the indentation design note below; you may buffer pending Dedents in a field).
+    /// Produce the next single token, and record whether it ends an operand ([`ends_operand`]).
+    /// Every scanned token comes out of here, so [`Lexer::question`] reads the flag of the token
+    /// before it.
+    fn next_token(&mut self) -> Result<Tok, LexError> {
+        let tok = self.scan_token()?;
+        self.after_operand = ends_operand(&tok.kind, self.after_operand);
+        Ok(tok)
+    }
+
+    /// The body of [`Self::next_token`]: scan one token (it's fine for ONE call to also emit
+    /// layout tokens — see the indentation design note below; you may buffer pending Dedents in a
+    /// field).
     ///
     /// LEARN — the overall shape of a scanner's core:
     ///   1. Handle start-of-line indentation (1g/1h) — this is what makes Chezzi special.
@@ -976,7 +1036,7 @@ impl Lexer {
     /// (like `peek`/`is_at_end` were). YOUR remaining work is the three helpers below —
     /// `identifier` (1e), `number` (1c), `string` (1d) — and INDENTATION (1h), whose seam is
     /// marked with `TODO(1h)` inside this function.
-    fn next_token(&mut self) -> Result<Tok, LexError> {
+    fn scan_token(&mut self) -> Result<Tok, LexError> {
         // === STEP 0: drain queued layout tokens ===
         // One source position can need several tokens at once (closing N blocks → N Dedents).
         // We compute them together in `scan_indentation` and queue the extras here.
@@ -1210,17 +1270,7 @@ impl Lexer {
                         Token::Caret
                     }
                 }
-                // `??` / `?.` are recognized only when adjacent (no whitespace): `match_char` checks the
-                // very next char. `x? .field` (space) stays `Question` + `Dot` (try-then-field).
-                '?' => {
-                    if self.match_char('?') {
-                        Token::QuestionQuestion
-                    } else if self.match_char('.') {
-                        Token::QuestionDot
-                    } else {
-                        Token::Question
-                    }
-                }
+                '?' => self.question(start)?,
                 // Openers/closers also drive `bracket_depth` (multi-line literal layout suppression).
                 '(' => {
                     self.bracket_depth += 1;
@@ -1829,6 +1879,8 @@ impl Lexer {
         self.bracket_depth += 1;
         let base = self.bracket_depth;
         let outer_base = std::mem::replace(&mut self.hole_base, base);
+        // A hole's code starts a new expression: no operand sits before its first token.
+        self.after_operand = false;
         let result = self.hole_tokens(brace, base);
         self.hole_base = outer_base;
         result
@@ -2260,6 +2312,26 @@ pub fn word_end_col(source: &str, line1: usize, col1: usize) -> u32 {
         col0 + 1
     };
     end as u32
+}
+
+/// Whether `t` can be the last token of an operand: a literal, a name or a closer. A `?` is
+/// postfix exactly when an operand ends before it, so it keeps `before`, the reading of the token
+/// before it: `x?` still ends an operand, a prefix `?` still starts one.
+fn ends_operand(t: &Token, before: bool) -> bool {
+    use Token::*;
+    match t {
+        Question => before,
+        Int(_) | IntMinMagnitude | Float(_) | Str(_) | Bytes(_) | RawStr(_) | Ident(_) | True
+        | False | NoneKw | RParen | RBracket | RBrace => true,
+        Fn | Return | If | Else | Elif | For | While | In | Break | Continue | Pass | Struct
+        | Enum | Protocol | Type | Match | Recover | Defer | Assert | Test | Spawn | Parallel
+        | Wait | Yield | Import | Extern | Native | From | As | Const | And | Or | Not | Where
+        | Plus | Minus | Star | Slash | Percent | Assign | Walrus | EqEq | NotEq | Lt | LtEq
+        | Gt | GtEq | PlusEq | MinusEq | StarEq | SlashEq | PercentEq | AmpEq | PipeEq
+        | CaretEq | ShlEq | ShrEq | Arrow | Pipe | QuestionDot | QuestionQuestion | Bang | Amp
+        | Caret | BitOr | Shl | Shr | LParen | LBracket | LBrace | Comma | Colon | Dot | DotDot
+        | DotDotEq | DotDotDot | Newline | Indent | Dedent | Eof => false,
+    }
 }
 
 pub fn is_word(c: char) -> bool {

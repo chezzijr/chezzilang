@@ -98,19 +98,14 @@ impl Parser {
             }
             // A parenthesised group is a tuple pattern (gap #15).
             Token::LParen => return self.parse_tuple_pattern(),
-            // `?p` / `!p` -- a carrier pattern. The prefixes are collected in a loop (`??` lexes as
-            // one token and is two nested `?`), so a long run costs no native stack. The operand
-            // is always a sub-position: a bare name there binds.
-            Token::Question | Token::QuestionQuestion | Token::Bang => {
+            // `?p` / `!p` -- a carrier pattern. The prefixes are collected in a loop, so a long run
+            // costs no native stack. The operand is always a sub-position: a bare name there binds.
+            Token::Question | Token::Bang => {
                 use crate::ast::CarrierTag;
                 let mut tags = Vec::new();
                 loop {
                     match self.peek() {
                         Token::Question => tags.push(CarrierTag::Present),
-                        Token::QuestionQuestion => {
-                            tags.push(CarrierTag::Present);
-                            tags.push(CarrierTag::Present);
-                        }
                         Token::Bang => tags.push(CarrierTag::Error),
                         Token::Int(_)
                         | Token::IntMinMagnitude
@@ -182,6 +177,7 @@ impl Parser {
                         | Token::Arrow
                         | Token::Pipe
                         | Token::QuestionDot
+                        | Token::QuestionQuestion
                         | Token::Amp
                         | Token::Caret
                         | Token::BitOr
@@ -290,6 +286,7 @@ impl Parser {
             | Token::Arrow
             | Token::Pipe
             | Token::QuestionDot
+            | Token::QuestionQuestion
             | Token::Amp
             | Token::Caret
             | Token::BitOr

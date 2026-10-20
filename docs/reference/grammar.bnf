@@ -537,10 +537,10 @@
 <tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN" | "LPAREN" <subpatterns> "COMMA" "RPAREN"
 # A carrier pattern compares the outer tag and binds inside it: `?v` is a present `T?` or a
 # successful `T!E`, `!e` is the error of a `T!E`. The operand is one sub-pattern primary, so an
-# or-alternation or a tuple payload takes parentheses (`?(a | b)`, `?(a, b)`); `??v` is `?(?v)`.
+# or-alternation or a tuple payload takes parentheses (`?(a | b)`, `?(a, b)`); `??v` lexes as two
+# QUESTION and is `?(?v)`.
 <carrierPattern> ::= "QUESTION" <subpatternPrimary>
                 | "BANG" <subpatternPrimary>
-                | "QUESTIONQUESTION" <subpatternPrimary>
 
 # ===== types =====
 # Postfix sugar on a base type: `T?` = an optional T, `T!` = T or an `Error`, `T!E` = T or an E
@@ -558,7 +558,7 @@
              | "FN" "LPAREN" "RPAREN" "ARROW" <type>
              | "FN" "LPAREN" <fnParamList> "RPAREN" "ARROW" <type>
              | "LPAREN" <typeList> "RPAREN" | "LPAREN" <typeList> "COMMA" "RPAREN"
-             | <type> "QUESTION" | <type> "QUESTIONQUESTION" | <type> "BANG" | <type> "BANG" <type>
+             | <type> "QUESTION" | <type> "BANG" | <type> "BANG" <type>
              # Prefix `!E` is `None!E`, a bare `!` is `None!`: a fallible call with no value.
              | "BANG" | "BANG" <type>
 <typeList> ::= <type> | <type> "COMMA" <typeList>
@@ -634,13 +634,16 @@
 <addExpr>  ::= <mulExpr> | <addExpr> "PLUS" <mulExpr> | <addExpr> "MINUS" <mulExpr>
 <mulExpr>  ::= <coalesceExpr>
              | <mulExpr> "STAR" <coalesceExpr> | <mulExpr> "SLASH" <coalesceExpr> | <mulExpr> "PERCENT" <coalesceExpr>
+# The lexer emits QUESTIONQUESTION only for a binary `??` (`Lexer::question`): after an operand,
+# glued on both sides (`a??b`) or on neither (`a ?? b`). Every other `??` is two QUESTION: postfix
+# `oo(x)??`, prefix `??x`, type `int??`. `?..` is QUESTION then DOTDOT.
 # null-coalescing `??` (gap): binds tighter than every binary operator and looser than unary `-`
 # and the postfix chain. RIGHT-associative (`a ?? b ?? c` = `a ?? (b ?? c)`) — modeled by
 # right-recursion. `??` takes a `T?` OR a `T!E` (TICKET-039); it SURVIVES desugar and the
 # CHECKER picks `lower_carrier_option` or `lower_carrier_result_coalesce` from the operand's type
 # (the `T!E` form discards the error, like Rust's `unwrap_or`).
 <coalesceExpr> ::= <unary> | <unary> "QUESTIONQUESTION" <coalesceExpr>
-<unary>    ::= <postfix> | "MINUS" <unary> | "BANG" <unary> | "QUESTION" <unary> | "QUESTIONQUESTION" <unary>
+<unary>    ::= <postfix> | "MINUS" <unary> | "BANG" <unary> | "QUESTION" <unary>
 
 # postfix chain: calls, field access, indexing, the `?` try operator, explicit call-site type
 # arguments `name[Type, …](args)` (JSON's `json.decode[Type](arg)` is one of these: an ordinary

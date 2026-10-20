@@ -1,0 +1,71 @@
+# TICKET-272 (S2-3): the lexer reads a run of `?` by its spacing (`Lexer::question`). A postfix `??`
+# is two `?`, `?..` is `?` then `..`, `??.` is `?` then `?.`, and `a ?? b` / `a??b` stay a coalesce.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+struct P:
+    v: int
+
+fn oo(x: int) -> int??:
+    return ??x
+
+fn o(x: int) -> int?:
+    return x
+
+fn op(x: int) -> P??:
+    return ??P(x)
+
+fn two_tries(x: int) -> int?:
+    y := oo(x)??
+    return y
+
+fn two_tries_then_minus(x: int) -> int?:
+    return oo(x)?? - 1
+
+fn try_then_range(x: int) -> str?:
+    r := o(x)?..5
+    return "{r}"
+
+fn try_then_chain(x: int) -> int?:
+    return op(x)??.v
+
+fn tries_in_brackets(x: int) -> int?:
+    xs := [oo(x)??, 2]
+    return xs[0] + "{oo(x)??}".len()
+
+fn try_then_coalesce(v: int??) -> int?:
+    return v? ?? 1
+
+test fn postfix_double_question_is_two_tries():
+    assert two_tries(1) == ?1
+    assert two_tries_then_minus(1) == ?0
+    assert tries_in_brackets(7) == ?8
+
+test fn postfix_question_then_range():
+    assert try_then_range(1) == ?"1..5"
+
+test fn question_question_dot_is_a_try_then_a_chain():
+    assert try_then_chain(3) == ?3
+
+test fn a_coalesce_keeps_its_meaning():
+    a: int? = None
+    b := ?3
+    assert (a ?? 7) == 7
+    assert (a??7) == 7
+    assert (b ?? 7) == 3
+    assert (oo(2) ?? ?9) == ?2
+    assert try_then_coalesce(??5) == ?5
+
+test fn a_prefix_run_is_two_wraps():
+    x := ??5
+    y := ?? 5
+    assert x == y
+    z := ? ??5
+    assert z == ???5
+    match x:
+        ??v: assert v == 5
+        _: assert false
+
+test fn a_glued_type_run_is_two_options():
+    v: int??=None
+    assert v == None
+    xs: List[int??]=[]
+    assert xs.len() == 0
