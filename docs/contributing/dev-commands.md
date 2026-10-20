@@ -23,7 +23,8 @@ cargo nextest run               # SAME full suite, test binaries in parallel (~3
 #   300 s number. Nextest prints `SLOW [> 60.000s]` in the gate log for a test past 60 s, so a
 #   growing test shows there before it times out. Split a slow grid into one test per row with
 #   `grid_tests!` (`tests/support/grid_tests.rs`), or make its slow case faster. Never raise the
-#   limit or add a per-test `slow-timeout` override: `tests/test_time_budget.rs` fails when one does.
+#   limit or add a per-test `slow-timeout` override. `tests/test_time_budget.rs` fails on a
+#   `slow-timeout` line without `terminate-after = 5 }`.
 cargo test --lib                 # INNER LOOP: just the lib unit suite (unit + goldens + conformance, no integration/bin)
 cargo test --lib checker::       # scope to the area you're editing → seconds (use while implementing)
 cargo test --features lsp --test lsp_smoke   # the feature-gated LSP server smoke test (off the default build)
