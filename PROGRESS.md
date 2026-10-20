@@ -125,14 +125,16 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    source. Open for its plan: the reach set (`resolver::unreached_std_fns`) and the program-wide slot
    and type keys depend on the importing program.
 7. **Slow gate grid (TICKET-275, done 2026-10-20).** `channel_handoff_grid` runs one test per
-   (context, sender kind) program plus one per named program, from one `grid_programs!` list. The
+   (context, sender kind) program plus one per named program, from one `grid_tests!` list. The
    slowest test takes 50.6 s idle (load 1.9-3.8) and 85.1 s at load 22-29; base had one 198 s test.
    Its gates failed on `executor_autodrain_skipped_on_os_exit`, a test TICKET-270 exposed: it expected
    a job submitted before `os.exit` to print nothing; the job now waits on a gate (`a94aac76`), and 275
    was rebased onto it by hand.
-8. **Test time budget (TICKET-276, filed 2026-10-20).** Seven tests need 111-407 s of the 300 s
-   nextest limit (`hook_conformance_grid` has its own 480 s cap). Split each so no test needs more than
-   100 s, delete the 480 s cap, and add one check that names a test over the budget.
+8. **Test time budget (TICKET-276, done 2026-10-21).** Seven tests needed 111-407 s of the 300 s
+   nextest limit. Each slow grid is now one test per row (`grid_tests!` in
+   `tests/support/grid_tests.rs`), the 480 s `hook_conformance_grid` cap is deleted, and no test ran
+   longer than 55.202 s with two suites at once. `tests/test_time_budget.rs` fails on a raised limit or a
+   per-test override; the rule is in `docs/contributing/dev-commands.md`.
 9. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner

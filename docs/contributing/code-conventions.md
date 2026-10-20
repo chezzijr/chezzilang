@@ -62,9 +62,10 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   A test that asserts a program's **observable behavior** (a value, a collection, a fault message)
   belongs in the native suite **`tests/chz/`** as `test fn` + `assert` (`spec/` = language behavior,
   `stdlib/` = std modules, `suites/` = struct suites with lifecycle hooks). It runs via `chezzi test`
-  and is gated by the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.rs`, its own process —
-  `vm::pool` is one process-wide `OnceLock`), which runs the whole suite and asserts every test
-  passes; `tests/chezzi_threads_cli.rs` then runs it again at `CHEZZI_THREADS=2`. Prefer this: it dogfoods the language and shrinks the Rust test surface. **Fault-path IS
+  and is gated by the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.rs`: one test per
+  subdirectory, each runs `chezzi test` as its own process, because `vm::pool` is one process-wide
+  `OnceLock`), which together run the whole suite and assert every test passes;
+  `tests/chezzi_threads_cli.rs` then runs each directory again at `CHEZZI_THREADS=2`. Prefer this: it dogfoods the language and shrinks the Rust test surface. **Fault-path IS
   Chezzi-able** — `r := recover: <faulting expr>` then `assert r` is `!e` and check `e.message()`
   (don't reach for Rust just because a test expects a panic). **Fall back to Rust `#[cfg(test)]` ONLY
   for what `assert` genuinely can't express:** compile-time checker diagnostics (`rejects`/`ok`),

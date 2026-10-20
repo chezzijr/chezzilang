@@ -144,8 +144,9 @@ compiles only the top-level fns the program reaches, `resolver::unreached_std_fn
 The target is each row within 1 ms of `print(1)`; `std.cmp` meets it, the other three do not. For
 `std.string` the per-phase timers put the rest at: lex 270 us, parse 370 us, checker 380 us over two
 passes (hoist and signatures of every fn), compile 120 us, reach and desugar 120 us.
-`operator_and_bound_agree_in_every_cell` in `tests/hook_conformance_grid.rs` imports a std module in
-each cell: 284 s on the branch, 189 s on main (load about 3.5 on the box).
+The grid in `tests/hook_conformance_grid.rs` imports a std module in each cell. Its one test
+`operator_and_bound_agree_in_every_cell` took 284 s on the branch, 189 s on main (load about 3.5 on
+the box). The grid is one test per owner x hook since TICKET-276.
 
 Std parse cache (TICKET-265, `resolver::shared_std_parse`): a process lexes and parses each embedded
 std module once and copies the AST into each later graph. Debug, one process, first load (fill) vs a
