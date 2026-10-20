@@ -124,7 +124,10 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    each `std/*.chz` at `cargo build` time and embed the result in the binary; `std/*.chz` stays the one
    source. Open for its plan: the reach set (`resolver::unreached_std_fns`) and the program-wide slot
    and type keys depend on the importing program.
-7. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+7. **Slow gate grid (TICKET-275, filed 2026-10-20).** `channel_handoff_grid` is one test that takes
+   198 s of nextest's 300 s limit alone at load 3; it timed out in the 268, 269 and 270 gates while a
+   second suite ran. Split it so no test needs more than a third of the limit, with the same cells.
+8. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 
