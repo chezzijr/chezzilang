@@ -478,3 +478,24 @@ fn every_sender_hands_every_value_to_exactly_one_receiver() {
         failures.join("\n")
     );
 }
+
+/// TICKET-275: the whole grid in one `#[test]` took 198 s of nextest's 300 s limit on a quiet box.
+/// The grid must be one test per (context, sender kind) program plus one per named program, so
+/// nextest runs them in parallel and gives each its own limit.
+#[test]
+fn grid_is_split_into_one_test_per_program() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--list", "--format", "terse"])
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&out.stdout);
+    let grid_tests = listed
+        .lines()
+        .filter(|l| l.ends_with(": test") && !l.contains("grid_is_split_into_one_test_per_program"))
+        .count();
+    let want = CTXS.len() * SKS.len() + 3;
+    assert!(
+        grid_tests >= want,
+        "grid runs as {grid_tests} test(s), want one per program ({want})"
+    );
+}
