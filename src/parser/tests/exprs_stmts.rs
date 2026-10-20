@@ -1619,3 +1619,103 @@ fn coalesce_with_right_operand_still_coalesces() {
         other => panic!("{other:?}"),
     }
 }
+
+/// S2-3 grid: what a run of `?` means in every position the parser reads one. A cell is the
+/// source and either the count of each named node in the module's `Debug` text, or a fragment of
+/// the lex or parse error. The hole cells pin that a hole's code starts with no operand before
+/// it, whatever token closed the hole before it (`Lexer::hole_code`). The `? ??` cells pin that a
+/// `?` keeps the reading of the token before it, and the glued-type cells pin that a `??` glued to
+/// a char that starts no operand (`=`, `:`, `]`) is two `?`.
+#[test]
+fn question_run_position_grid() {
+    type Want = Result<&'static [(&'static str, usize)], &'static str>;
+    let try2: Want = Ok(&[("Try(", 2), ("NullCoalesce", 0)]);
+    let wrap2: Want = Ok(&[("Wrap", 2), ("NullCoalesce", 0)]);
+    let wrap3: Want = Ok(&[("Wrap", 3), ("NullCoalesce", 0)]);
+    let coalesce: Want = Ok(&[("NullCoalesce", 1), ("Try(", 0)]);
+    let opt2: Want = Ok(&[("Option", 2), ("Try(", 0), ("NullCoalesce", 0)]);
+    let cells: &[(&str, Want)] = &[
+        ("y := oo(x)??\n", try2),
+        (
+            "y := oo(x)?? - 1\n",
+            Ok(&[("Try(", 2), ("NullCoalesce", 0), ("Sub", 1)]),
+        ),
+        ("y := ooo(x)???\n", Ok(&[("Try(", 3), ("NullCoalesce", 0)])),
+        ("y := f(oo(x)??, 2)\n", try2),
+        ("y := [oo(x)??]\n", try2),
+        ("y := d[oo(x)??]\n", try2),
+        ("y := {k: oo(x)??}\n", try2),
+        ("y := \"{oo(x)??}\"\n", try2),
+        (
+            "y := oo(x)??.v\n",
+            Ok(&[("Try(", 1), ("OptChain", 1), ("NullCoalesce", 0)]),
+        ),
+        ("r := o(x)?..5\n", Ok(&[("Try(", 1), ("Range", 1)])),
+        (
+            "r := p?.v?..3\n",
+            Ok(&[("Try(", 1), ("OptChain", 1), ("Range", 1)]),
+        ),
+        ("y := a ?? b\n", coalesce),
+        ("y := a??b\n", coalesce),
+        ("y := (a\n    ?? b)\n", coalesce),
+        ("y := a??-1\n", coalesce),
+        (
+            "y := a??!=b\n",
+            Ok(&[("Try(", 2), ("NullCoalesce", 0), ("NotEq", 1)]),
+        ),
+        ("y := a ?? ??b\n", Ok(&[("NullCoalesce", 1), ("Wrap", 2)])),
+        ("y := ??x\n", wrap2),
+        ("y := ?? x\n", wrap2),
+        ("y := ???x\n", wrap3),
+        ("y := ? ??x\n", wrap3),
+        ("y := ? ?? x\n", wrap3),
+        ("y := x? ?? 1\n", Ok(&[("Try(", 1), ("NullCoalesce", 1)])),
+        ("y := f(??x)\n", wrap2),
+        ("y := \"{a}{??b}\"\n", wrap2),
+        ("y := \"{a} {??b}\"\n", wrap2),
+        ("y := \"{x}{?? b}\"\n", wrap2),
+        ("y := \"{a:>{w}}{??b}\"\n", wrap2),
+        ("y := v + \"{??b}\"\n", wrap2),
+        ("v: int?? = None\n", opt2),
+        ("v: int??=None\n", opt2),
+        ("xs: List[int??]=[]\n", opt2),
+        ("fn f() -> int??:\n    pass\n", opt2),
+        (
+            "fn f(a: int??) -> int??:\n    return a\n",
+            Ok(&[("Option", 4), ("Try(", 0)]),
+        ),
+        (
+            "match o:\n    ??v: print(v)\n",
+            Ok(&[("Present", 2), ("NullCoalesce", 0)]),
+        ),
+        ("y := a ??b\n", Err("same spacing on both sides")),
+        ("y := a?? b\n", Err("")),
+        ("a??=b\n", Err("invalid assignment target")),
+    ];
+    let mut red = Vec::new();
+    for (src, want) in cells {
+        let got = match lexer::tokenize(src) {
+            Ok(toks) => parse(toks).map(|m| format!("{m:?}")).map_err(|e| e.message),
+            Err(e) => Err(e.message),
+        };
+        let ok = match (want, &got) {
+            (Ok(counts), Ok(text)) => counts.iter().all(|(n, c)| text.matches(n).count() == *c),
+            (Err(frag), Err(msg)) => msg.contains(frag),
+            (Ok(_), Err(_)) | (Err(_), Ok(_)) => false,
+        };
+        if !ok {
+            let got = got.map(|t| {
+                let n = ["Try(", "Wrap", "NullCoalesce", "Option", "Present"];
+                n.map(|k| format!("{k}{}", t.matches(k).count())).join(" ")
+            });
+            red.push(format!("{src:?}: want {want:?}, got {got:?}"));
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "{} of {} cells red:\n{}",
+        red.len(),
+        cells.len(),
+        red.join("\n")
+    );
+}

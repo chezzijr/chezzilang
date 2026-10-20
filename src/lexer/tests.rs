@@ -2091,3 +2091,95 @@ fn a_lone_cr_and_an_escaped_cr_keep_their_reading() {
         (lf.line, lf.col, lf.message)
     );
 }
+
+/// S2-3 grid: a run of two `?` after every token the lexer's tables name (`KEYWORDS`,
+/// `PUNCTUATION`) and one sample per literal kind, in four spacings, then glued before each of
+/// them. After a token that ends an operand, `p ?? 1` and `p??1` are one `??`, `p??` at the line
+/// end is two `?`, and `p ??1` is an error. After any other token every spacing is two `?`. Glued
+/// on both sides, `x??r` is one `??` exactly when `r` starts an operand. A `?` keeps the reading of
+/// the token before it: after a prefix `?` the run is prefix, after a postfix `?` it can coalesce.
+#[test]
+fn question_run_after_every_token_grid() {
+    // A keyword or punctuation added to the tables lands in the "no operand" half until listed.
+    let ends = |t: &Token| {
+        matches!(
+            t,
+            Token::True
+                | Token::False
+                | Token::NoneKw
+                | Token::RParen
+                | Token::RBracket
+                | Token::RBrace
+        )
+    };
+    // Every keyword is a word, and a word after `??` starts an operand. A punctuation added to the
+    // table lands in the "not an operand" half until listed.
+    let starts = |t: &Token| {
+        matches!(
+            t,
+            Token::LParen | Token::LBracket | Token::LBrace | Token::Minus | Token::Bang
+        )
+    };
+    let mut prev: Vec<(String, bool)> = KEYWORDS
+        .iter()
+        .map(|(w, t)| (w.to_string(), ends(t)))
+        .collect();
+    let mut next: Vec<(String, bool)> = KEYWORDS
+        .iter()
+        .map(|(w, _)| (w.to_string(), true))
+        .collect();
+    for t in PUNCTUATION {
+        if matches!(
+            t,
+            Token::Question | Token::QuestionDot | Token::QuestionQuestion
+        ) {
+            continue;
+        }
+        let s = t.lexeme().expect("a spelling").to_string();
+        prev.push((s.clone(), ends(t)));
+        next.push((s, starts(t)));
+    }
+    for lit in ["x", "7", "1.5", "\"s\"", "'s'", "b\"s\"", "r\"s\""] {
+        prev.push((lit.to_string(), true));
+        next.push((lit.to_string(), true));
+    }
+    // (source, one `??` token, a lex error)
+    let mut cells: Vec<(String, bool, bool)> = Vec::new();
+    for (p, operand) in &prev {
+        cells.push((format!("{p} ?? 1\n"), *operand, false));
+        cells.push((format!("{p}??1\n"), *operand, false));
+        cells.push((format!("{p}??\n"), false, false));
+        cells.push((format!("{p} ??1\n"), false, *operand));
+    }
+    for (r, operand) in &next {
+        cells.push((format!("x??{r}\n"), *operand, false));
+    }
+    for (src, fused, error) in [
+        ("y := ? ??x\n", false, false),
+        ("y := ? ?? x\n", false, false),
+        ("y := x? ?? 1\n", true, false),
+        ("y := x? ??1\n", false, true),
+    ] {
+        cells.push((src.to_string(), fused, error));
+    }
+    let mut red = Vec::new();
+    for (src, fused, error) in &cells {
+        let got = tokenize(src).map(|ts| ts.iter().any(|t| t.kind == Token::QuestionQuestion));
+        let ok = match &got {
+            Ok(g) => !error && g == fused,
+            Err(e) => *error && e.message.contains("same spacing on both sides"),
+        };
+        if !ok {
+            red.push(format!(
+                "{src:?}: want fused={fused} error={error}, got {got:?}"
+            ));
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "{} of {} cells red:\n{}",
+        red.len(),
+        cells.len(),
+        red.join("\n")
+    );
+}
