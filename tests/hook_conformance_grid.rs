@@ -9,13 +9,41 @@ use std::process::Command;
 
 #[path = "support/grid_cell.rs"]
 mod grid_cell;
+#[path = "support/grid_tests.rs"]
+#[macro_use]
+mod grid_tests;
+
+// One test per (owner kind, hook), per hook of the conditional and declaration-verdict families,
+// and per remaining row group (TICKET-276); `every_grid_hook_has_a_test` ties the hook lists to
+// `hooks()`.
+grid_tests!(OWNERS x HOOK_NAMES: [r#struct, r#enum, gstruct, genum, zstruct] x [iter, next, index, set_index, slice, str, eq, hash, compare, add, sub, mul, div, r#mod, neg, contains, bitand, bitor, bitxor, shl, shr] => crate::assert_owner_hook);
+grid_tests!(CONDITIONAL_HOOKS in conditional: [iter, next, index, set_index, slice, str, eq, hash, compare, add, sub, mul, div, r#mod, neg, contains, bitand, bitor, bitxor, shl, shr] => crate::assert_conditional_hook);
+grid_tests!(DECLARATION_VERDICT_HOOKS in declaration_verdict: [iter, next, index, set_index, slice, str, eq, hash, compare, add, sub, mul, div, r#mod, neg, contains, bitand, bitor, bitxor, shl, shr] => crate::assert_declaration_verdict_hook);
+
+/// The grid row of a hook, by its method name.
+fn hook_named(name: &str) -> Hook {
+    hooks()
+        .into_iter()
+        .find(|hook| hook.name == name)
+        .unwrap_or_else(|| panic!("no grid row for hook {name}"))
+}
+
+/// Fails with every wrong row of one family, sorted.
+fn assert_rows(what: &str, mut bad: Vec<String>) {
+    bad.sort();
+    assert!(
+        bad.is_empty(),
+        "{} {what} cells wrong:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}
 
 fn m(sig: &str, body: &str) -> String {
     format!("    fn {sig}:\n        {body}\n")
 }
 
 const SHAPES: [&str; 6] = ["conf", "gen", "static", "wrongret", "extra", "generic"];
-const OWNERS: [&str; 5] = ["struct", "enum", "gstruct", "genum", "zstruct"];
 
 struct Hook {
     name: &'static str,
@@ -758,7 +786,7 @@ fn eq_failures() -> Vec<String> {
 /// path, because the run time cannot tell the two instantiations apart.
 ///
 /// `str` has no unsatisfied row: `print` accepts every value and has no check-time decider.
-fn conditional_failures() -> Vec<String> {
+fn conditional_hook_failures(hook: &Hook) -> Vec<String> {
     let mut bad = Vec::new();
     let unsatisfied = |src: &str| {
         // `N` goes after the program's leading import lines.
@@ -777,60 +805,65 @@ fn conditional_failures() -> Vec<String> {
                 .replace("X[int]", "X[N]")
         )
     };
-    for hook in &hooks() {
-        for kind in ["gstruct", "genum"] {
-            let plain = owner(kind, &hook.shapes[0]);
-            // Every method of the shape carries the bound (`set_index` comes with an `index`).
-            let cond_methods: String = hook.shapes[0]
+    for kind in ["gstruct", "genum"] {
+        let plain = owner(kind, &hook.shapes[0]);
+        // Every method of the shape carries the bound (`set_index` comes with an `index`).
+        let cond_methods: String = hook.shapes[0]
+            .lines()
+            .map(|line| match line.strip_suffix(':') {
+                Some(sig) if line.starts_with("    fn ") => {
+                    format!("{sig} where T: Comparable:\n")
+                }
+                _ => format!("{line}\n"),
+            })
+            .collect();
+        let cond = owner(kind, &cond_methods);
+        let cell = format!("{kind}|{}|where", hook.name);
+        for ((u, src), (_, src_plain)) in uses(hook, hook.proto, &cond)
+            .into_iter()
+            .zip(uses(hook, hook.proto, &plain))
+        {
+            // The conditional program spells `where T: Comparable`; the `op` use imports nothing.
+            let imports_comparable = src
                 .lines()
-                .map(|line| match line.strip_suffix(':') {
-                    Some(sig) if line.starts_with("    fn ") => {
-                        format!("{sig} where T: Comparable:\n")
-                    }
-                    _ => format!("{line}\n"),
-                })
-                .collect();
-            let cond = owner(kind, &cond_methods);
-            let cell = format!("{kind}|{}|where", hook.name);
-            for ((u, src), (_, src_plain)) in uses(hook, hook.proto, &cond)
-                .into_iter()
-                .zip(uses(hook, hook.proto, &plain))
-            {
-                // The conditional program spells `where T: Comparable`; the `op` use imports nothing.
-                let imports_comparable = src
-                    .lines()
-                    .any(|l| l.starts_with("import ") && l.contains("Comparable"));
-                let cmp = if imports_comparable {
-                    ""
-                } else {
-                    "import Comparable from std.cmp\n"
-                };
-                let src = format!("{cmp}{src}");
-                let tag = format!("{kind}_{}_where_{u}", hook.name);
-                let got = run(&format!("{tag}_sat"), &src, &mut bad);
-                let want = run(&format!("{tag}_plain"), &src_plain, &mut bad);
-                if got.ok != want.ok || got.stdout != want.stdout {
-                    bad.push(format!(
+                .any(|l| l.starts_with("import ") && l.contains("Comparable"));
+            let cmp = if imports_comparable {
+                ""
+            } else {
+                "import Comparable from std.cmp\n"
+            };
+            let src = format!("{cmp}{src}");
+            let tag = format!("{kind}_{}_where_{u}", hook.name);
+            let got = run(&format!("{tag}_sat"), &src, &mut bad);
+            let want = run(&format!("{tag}_plain"), &src_plain, &mut bad);
+            if got.ok != want.ok || got.stdout != want.stdout {
+                bad.push(format!(
                         "{cell}|{u}: a satisfied bound gives {:?} (ok={}), the unconditional hook {:?} (ok={}): {}",
                         got.stdout, got.ok, want.stdout, want.ok, got.text
                     ));
-                }
-                if hook.name == "str" {
-                    continue;
-                }
-                let (clean, text) = check(&format!("{tag}_unsat"), &unsatisfied(&src));
-                if clean {
-                    bad.push(format!(
-                        "{cell}|{u}: an instantiation that fails the bound checks clean"
-                    ));
-                } else if matches!(u, "op" | "bound") && !text.contains("N: Comparable") {
-                    bad.push(format!(
-                        "{cell}|{u}: the error does not name the bound: {text}"
-                    ));
-                }
+            }
+            if hook.name == "str" {
+                continue;
+            }
+            let (clean, text) = check(&format!("{tag}_unsat"), &unsatisfied(&src));
+            if clean {
+                bad.push(format!(
+                    "{cell}|{u}: an instantiation that fails the bound checks clean"
+                ));
+            } else if matches!(u, "op" | "bound") && !text.contains("N: Comparable") {
+                bad.push(format!(
+                    "{cell}|{u}: the error does not name the bound: {text}"
+                ));
             }
         }
     }
+    bad
+}
+
+/// The conditional-hook rows beside the per-hook grid: a conditional `iter` beside `next`, and a
+/// zero-field struct with a conditional `hash`.
+fn conditional_failures() -> Vec<String> {
+    let mut bad = Vec::new();
     // A type with the `next` hook and a conditional `iter` hook of another element type. A
     // satisfied bound iterates through `iter`. An unsatisfied one is not iterable: `iter` wins
     // at run time, so no consumer may read the `next` elements.
@@ -928,7 +961,7 @@ fn conditional_failures() -> Vec<String> {
 /// have no row: a return type `T` binds the protocol's own argument, so it conforms at the
 /// declaration, and they take no `Self` operand. `neg` and the arithmetic hooks have no
 /// `ret_t` row: no `T` equals `X[T]`.
-fn declaration_verdict_failures() -> Vec<String> {
+fn declaration_verdict_hook_failures(hook: &Hook) -> Vec<String> {
     let mut bad = Vec::new();
     // (variant, signature, body, the instantiation the signature conforms for, another one)
     type Inst = (&'static str, &'static str);
@@ -950,87 +983,91 @@ fn declaration_verdict_failures() -> Vec<String> {
             ("str", "\"s\""),
         )
     };
-    for hook in &hooks() {
-        let n = hook.name;
-        let variants = match n {
-            "iter" => vec![ret_t(
-                "iter(self) -> T",
-                ("Iterator[int]", "[1, 2].iter()"),
+    let n = hook.name;
+    let variants = match n {
+        "iter" => vec![ret_t(
+            "iter(self) -> T",
+            ("Iterator[int]", "[1, 2].iter()"),
+            ("int", "1"),
+        )],
+        "next" => vec![ret_t("next(self) -> T", ("int?", "None"), ("int", "1"))],
+        "str" => vec![ret_t("str(self) -> T", ("str", "\"s\""), ("int", "1"))],
+        "hash" => vec![ret_t("hash(self) -> T", ("int", "1"), ("str", "\"s\""))],
+        "contains" => vec![ret_t(
+            "contains(self, item: int) -> T",
+            ("bool", "true"),
+            ("int", "1"),
+        )],
+        "eq" => vec![
+            ret_t("eq(self, other: Self) -> T", ("bool", "true"), ("int", "1")),
+            operand("eq(self, other: X[int]) -> bool".to_string(), "return true"),
+        ],
+        "compare" => vec![
+            ret_t(
+                "compare(self, other: Self) -> T",
                 ("int", "1"),
-            )],
-            "next" => vec![ret_t("next(self) -> T", ("int?", "None"), ("int", "1"))],
-            "str" => vec![ret_t("str(self) -> T", ("str", "\"s\""), ("int", "1"))],
-            "hash" => vec![ret_t("hash(self) -> T", ("int", "1"), ("str", "\"s\""))],
-            "contains" => vec![ret_t(
-                "contains(self, item: int) -> T",
-                ("bool", "true"),
-                ("int", "1"),
-            )],
-            "eq" => vec![
-                ret_t("eq(self, other: Self) -> T", ("bool", "true"), ("int", "1")),
-                operand("eq(self, other: X[int]) -> bool".to_string(), "return true"),
-            ],
-            "compare" => vec![
-                ret_t(
-                    "compare(self, other: Self) -> T",
-                    ("int", "1"),
-                    ("str", "\"s\""),
-                ),
-                operand(
-                    "compare(self, other: X[int]) -> int".to_string(),
-                    "return -1",
-                ),
-            ],
-            "neg" => vec![operand("neg(self) -> X[int]".to_string(), "return MK(1)")],
-            "add" | "sub" | "mul" | "div" | "mod" | "bitand" | "bitor" | "bitxor" | "shl"
-            | "shr" => vec![operand(
+                ("str", "\"s\""),
+            ),
+            operand(
+                "compare(self, other: X[int]) -> int".to_string(),
+                "return -1",
+            ),
+        ],
+        "neg" => vec![operand("neg(self) -> X[int]".to_string(), "return MK(1)")],
+        "add" | "sub" | "mul" | "div" | "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => {
+            vec![operand(
                 format!("{n}(self, other: X[int]) -> X[int]"),
                 "return other",
-            )],
-            "index" | "slice" | "set_index" => Vec::new(),
-            other => panic!("no declaration-verdict row for hook `{other}`"),
-        };
-        for (variant, sig, body, conf, other) in variants {
-            for (kind, head, mk) in [
-                (
-                    "gstruct",
-                    "struct X[T]:\n    n: T\n    fn get(self) -> T:\n        return self.n\n",
-                    "X",
-                ),
-                (
-                    "genum",
-                    "enum X[T]:\n    A(T)\n    fn get(self) -> T:\n        match self:\n            X.A(v): return v\n",
-                    "X.A",
-                ),
-            ] {
-                let method =
-                    m(&sig, &format!("print(\"HOOK RAN\")\n        {body}")).replace("MK", mk);
-                for (inst, (ty, arg)) in [("conf", conf), ("other", other)] {
-                    let vals = format!("x: X[{ty}] = {mk}({arg})\ny: X[{ty}] = {mk}({arg})\n");
-                    let with = format!("{head}{method}{vals}");
-                    let without = format!("{head}{vals}");
-                    for ((u, src), (_, src_none)) in uses(hook, hook.proto, &with)
-                        .into_iter()
-                        .zip(uses(hook, hook.proto, &without))
-                    {
-                        let tag = format!("decl_{kind}_{n}_{variant}_{inst}_{u}");
-                        let cell = format!("{kind}|{n}|{variant}|{inst}|{u}");
-                        let (clean, text) = check(&tag, &src);
-                        let (clean_none, _) = check(&format!("{tag}_none"), &src_none);
-                        let got = run(&tag, &src, &mut bad);
-                        let want = run(&format!("{tag}_none"), &src_none, &mut bad);
-                        if clean != clean_none || got.ok != want.ok || got.stdout != want.stdout {
-                            bad.push(format!(
-                                "{cell}: check clean={clean}, run ok={}, {:?}; the owner with no \
+            )]
+        }
+        "index" | "slice" | "set_index" => Vec::new(),
+        other => panic!("no declaration-verdict row for hook `{other}`"),
+    };
+    for (variant, sig, body, conf, other) in variants {
+        for (kind, head, mk) in [
+            (
+                "gstruct",
+                "struct X[T]:\n    n: T\n    fn get(self) -> T:\n        return self.n\n",
+                "X",
+            ),
+            (
+                "genum",
+                "enum X[T]:\n    A(T)\n    fn get(self) -> T:\n        match self:\n            X.A(v): return v\n",
+                "X.A",
+            ),
+        ] {
+            let method = m(&sig, &format!("print(\"HOOK RAN\")\n        {body}")).replace("MK", mk);
+            for (inst, (ty, arg)) in [("conf", conf), ("other", other)] {
+                let vals = format!("x: X[{ty}] = {mk}({arg})\ny: X[{ty}] = {mk}({arg})\n");
+                let with = format!("{head}{method}{vals}");
+                let without = format!("{head}{vals}");
+                for ((u, src), (_, src_none)) in uses(hook, hook.proto, &with)
+                    .into_iter()
+                    .zip(uses(hook, hook.proto, &without))
+                {
+                    let tag = format!("decl_{kind}_{n}_{variant}_{inst}_{u}");
+                    let cell = format!("{kind}|{n}|{variant}|{inst}|{u}");
+                    let (clean, text) = check(&tag, &src);
+                    let (clean_none, _) = check(&format!("{tag}_none"), &src_none);
+                    let got = run(&tag, &src, &mut bad);
+                    let want = run(&format!("{tag}_none"), &src_none, &mut bad);
+                    if clean != clean_none || got.ok != want.ok || got.stdout != want.stdout {
+                        bad.push(format!(
+                            "{cell}: check clean={clean}, run ok={}, {:?}; the owner with no \
                                  such method: check clean={clean_none}, run ok={}, {:?}: {text}{}",
-                                got.ok, got.stdout, want.ok, want.stdout, got.text
-                            ));
-                        }
+                            got.ok, got.stdout, want.ok, want.stdout, got.text
+                        ));
                     }
                 }
             }
         }
     }
+    bad
+}
+
+/// The review's named programs for the declaration verdict, each at check and at run.
+fn declaration_verdict_named_failures() -> Vec<String> {
+    let mut bad = Vec::new();
     // The review's named programs, each at check and at run.
     for (name, src, want) in [
         (
@@ -1249,48 +1286,81 @@ fn every_hook_row_has_a_grid_row() {
     assert_eq!(sorted.0, sorted.1, "HOOKS: {table:?}, grid: {grid:?}");
 }
 
-#[test]
-fn operator_and_bound_agree_in_every_cell() {
-    let hooks = hooks();
-    let mut cells: Vec<(&str, &Hook, usize)> = Vec::new();
-    for kind in OWNERS {
-        for hook in &hooks {
-            for si in 0..SHAPES.len() {
-                cells.push((kind, hook, si));
-            }
-        }
+/// One (owner kind, hook): every shape cell.
+fn assert_owner_hook(kind: &str, name: &str) {
+    let hook = hook_named(name);
+    let mut bad = Vec::new();
+    for si in 0..SHAPES.len() {
+        bad.extend(cell_failures(kind, &hook, si));
     }
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let bad = std::sync::Mutex::new(Vec::new());
-    std::thread::scope(|scope| {
-        for _ in 0..4 {
-            scope.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let Some((kind, hook, si)) = cells.get(i) else {
-                        break;
-                    };
-                    let found = cell_failures(kind, hook, *si);
-                    bad.lock().expect("grid lock").extend(found);
-                }
-            });
-        }
-    });
-    let mut bad = bad.into_inner().expect("grid lock");
-    bad.extend(iter_call_failures());
-    bad.extend(iter_run_failures());
-    bad.extend(eq_failures());
-    bad.extend(conditional_failures());
-    bad.extend(declaration_verdict_failures());
-    bad.extend(iterator_bound_failures());
-    bad.sort();
-    assert!(
-        bad.is_empty(),
-        "{} of {} cells wrong:\n{}",
-        bad.len(),
-        cells.len(),
-        bad.join("\n")
+    assert_rows(&format!("{kind} x {name}"), bad);
+}
+
+/// One hook of the conditional-hook grid.
+fn assert_conditional_hook(name: &str) {
+    assert_rows(
+        &format!("conditional {name}"),
+        conditional_hook_failures(&hook_named(name)),
     );
+}
+
+/// One hook of the declaration-verdict grid. `index`, `slice` and `set_index` have no variant, so
+/// their test checks zero rows; it keeps the list equal to `hooks()`.
+fn assert_declaration_verdict_hook(name: &str) {
+    assert_rows(
+        &format!("declaration-verdict {name}"),
+        declaration_verdict_hook_failures(&hook_named(name)),
+    );
+}
+
+#[test]
+fn iter_call_rows_agree() {
+    assert_rows("iter call", iter_call_failures());
+}
+
+#[test]
+fn iter_run_rows_agree() {
+    assert_rows("iter run", iter_run_failures());
+}
+
+#[test]
+fn eq_rows_agree() {
+    assert_rows("eq", eq_failures());
+}
+
+#[test]
+fn conditional_rows_agree() {
+    assert_rows("conditional", conditional_failures());
+}
+
+#[test]
+fn declaration_verdict_named_programs_agree() {
+    assert_rows(
+        "declaration-verdict named",
+        declaration_verdict_named_failures(),
+    );
+}
+
+#[test]
+fn iterator_bound_rows_agree() {
+    assert_rows("iterator bound", iterator_bound_failures());
+}
+
+/// Each hook list of the split grids names every hook of `hooks()` once, so a hook added to
+/// `HOOKS` cannot go untested (with `every_hook_row_has_a_grid_row`, all three lists tie to it).
+#[test]
+fn every_grid_hook_has_a_test() {
+    let mut want: Vec<&str> = hooks().iter().map(|hook| hook.name).collect();
+    want.sort_unstable();
+    for (list, rows) in [
+        ("HOOK_NAMES", HOOK_NAMES),
+        ("CONDITIONAL_HOOKS", CONDITIONAL_HOOKS),
+        ("DECLARATION_VERDICT_HOOKS", DECLARATION_VERDICT_HOOKS),
+    ] {
+        let mut have: Vec<&str> = rows.to_vec();
+        have.sort_unstable();
+        assert_eq!(have, want, "{list} must list every hook of hooks()");
+    }
 }
 
 /// TICKET-250 (D6) — `iterable_elem` is the one reader of "what does iterating this yield".
@@ -1380,7 +1450,7 @@ fn a_warning_fires_exactly_where_the_operator_skips_the_method() {
     let hooks = hooks();
     let mut bad = Vec::new();
     let mut cells = 0;
-    for kind in OWNERS {
+    for &kind in OWNERS {
         for hook in &hooks {
             for (si, shape) in SHAPES.iter().enumerate() {
                 let Some(conforming) = conforms(hook, shape) else {
