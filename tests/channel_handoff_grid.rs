@@ -6,7 +6,7 @@
 //! (sender context, sender kind) runs every (receiver, cap, order, close) cell as a section and
 //! prints `cell <name>: got=[..] sent=[..] st=<status>`. Each run is a fresh process at
 //! `CHEZZI_THREADS` 1, 2 and 0 (default), plus one seeded run, under a 90 s hang limit ([`LIMIT`]).
-//! Each program and each named program is its own `#[test]` (TICKET-275).
+//! Each (program, run) pair and each named program is its own `#[test]` (TICKET-275, TICKET-276).
 //!
 //! The order axis is SHAPED by a 200000-iteration spin on the other side; no expectation depends
 //! on the spin winning. The Go rule every line is judged by ([`judge`]):
@@ -226,31 +226,14 @@ fn cell(name: str, ctx: int, sk: int, rk: int, cap: int, order: int, close: int,
 fn main():
 "#;
 
-/// The one list of sender contexts and sender kinds, in the order `HARNESS` numbers them. It
-/// defines [`CTXS`], [`SKS`] and one `#[test]` `<context>::<sender kind>` per program, so nextest
-/// gives each program its own process and its own time limit (TICKET-275).
-macro_rules! grid_programs {
-    ([$($ctx:ident),+ $(,)?] x $sks:tt) => {
-        const CTXS: &[&str] = &[$(stringify!($ctx)),+];
-        const SKS: &[&str] = &grid_programs!(@names $sks);
-        $(grid_programs!(@ctx $ctx $sks);)+
-    };
-    (@names [$($sk:ident),+ $(,)?]) => {
-        [$(stringify!($sk)),+]
-    };
-    (@ctx $ctx:ident [$($sk:ident),+ $(,)?]) => {
-        mod $ctx {
-            $(
-                #[test]
-                fn $sk() {
-                    super::assert_program(stringify!($ctx), stringify!($sk));
-                }
-            )+
-        }
-    };
-}
+#[path = "support/grid_tests.rs"]
+#[macro_use]
+mod grid_tests;
 
-grid_programs!([fiber, job, main, body, demoted] x [send, trysend, waitsend]);
+// The one list of sender contexts, sender kinds and runs, in the order `HARNESS` numbers the first
+// two. It defines [`CTXS`], [`SKS`], [`RUN_NAMES`] and one `#[test]` `<context>::<sender kind>::<run>`
+// per program run, so nextest gives each its own process and its own time limit (TICKET-275, 276).
+grid_tests!(CTXS x SKS x RUN_NAMES: [fiber, job, main, body, demoted] x [send, trysend, waitsend] x [t1, t2, t0, t2_seed185] => crate::assert_program);
 const RKS: [&str; 6] = ["recv", "tryrecv", "forin", "waitrecv", "demrecv", "demwait"];
 const CAPS: [i64; 3] = [0, 1, -1];
 const ORDERS: [&str; 2] = ["senderfirst", "receiverfirst"];
@@ -367,11 +350,19 @@ fn run_label(t: &str, seed: Option<u32>) -> String {
     }
 }
 
-/// Runs one grid program at every [`RUNS`] entry and returns one failure line per bad cell.
-fn check_program(ctx: usize, sk: usize) -> Vec<String> {
+/// A run's row name in [`RUN_NAMES`]: `t<threads>`, plus `_seed<seed>` for a seeded run.
+fn run_name(t: &str, seed: Option<u32>) -> String {
+    match seed {
+        Some(s) => format!("t{t}_seed{s}"),
+        None => format!("t{t}"),
+    }
+}
+
+/// Runs one grid program at one [`RUNS`] entry and returns one failure line per bad cell.
+fn check_program(ctx: usize, sk: usize, t: &str, seed: Option<u32>) -> Vec<String> {
     let (cells, src) = channel_handoff_grid_cells(ctx, sk);
     let mut failures = Vec::new();
-    for (t, seed) in RUNS {
+    {
         let label = run_label(t, seed);
         let (code, out, err) =
             run_with(&format!("{}-{}", CTXS[ctx], SKS[sk]), &src, t, seed, LIMIT);
@@ -482,8 +473,8 @@ fn assert_go(what: &str, failures: Vec<String>) {
     );
 }
 
-/// One (context, sender kind) program of the grid, named as in [`CTXS`] and [`SKS`].
-fn assert_program(ctx: &str, sk: &str) {
+/// One (context, sender kind, run) of the grid, named as in [`CTXS`], [`SKS`] and [`RUN_NAMES`].
+fn assert_program(ctx: &str, sk: &str, run: &str) {
     let c = CTXS
         .iter()
         .position(|x| *x == ctx)
@@ -492,7 +483,27 @@ fn assert_program(ctx: &str, sk: &str) {
         .iter()
         .position(|x| *x == sk)
         .expect("sender kind in SKS");
-    assert_go(&format!("{ctx}-{sk}"), check_program(c, s));
+    let (t, seed) = RUNS
+        .into_iter()
+        .find(|(t, seed)| run_name(t, *seed) == run)
+        .expect("run in RUNS");
+    assert_go(&format!("{ctx}-{sk}-{run}"), check_program(c, s, t, seed));
+}
+
+/// Every [`RUNS`] entry has a row in [`RUN_NAMES`], and every row names a run.
+#[test]
+fn every_run_has_a_test() {
+    let mut have: Vec<String> = RUNS
+        .into_iter()
+        .map(|(t, seed)| run_name(t, seed))
+        .collect();
+    let mut want: Vec<String> = RUN_NAMES.iter().map(|n| n.to_string()).collect();
+    have.sort();
+    want.sort();
+    assert_eq!(
+        have, want,
+        "every RUNS entry needs a row in the RUN_NAMES list"
+    );
 }
 
 #[test]
@@ -512,7 +523,7 @@ fn named_own_sender_never_takes_its_own_value() {
 }
 
 /// TICKET-275: the whole grid in one `#[test]` took 198 s of nextest's 300 s limit on a quiet box.
-/// The grid must be one test per (context, sender kind) program plus one per named program, so
+/// The grid must be one test per (context, sender kind, run) plus one per named program, so
 /// nextest runs them in parallel and gives each its own limit.
 #[test]
 fn grid_is_split_into_one_test_per_program() {
@@ -525,7 +536,7 @@ fn grid_is_split_into_one_test_per_program() {
         .lines()
         .filter(|l| l.ends_with(": test") && !l.contains("grid_is_split_into_one_test_per_program"))
         .count();
-    let want = CTXS.len() * SKS.len() + 3;
+    let want = CTXS.len() * SKS.len() * RUN_NAMES.len() + 3;
     assert!(
         grid_tests >= want,
         "grid runs as {grid_tests} test(s), want one per program ({want})"
