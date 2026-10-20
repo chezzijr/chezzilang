@@ -5,7 +5,8 @@
 //! sender context × sender kind × receiver × cap × order × close. One program per
 //! (sender context, sender kind) runs every (receiver, cap, order, close) cell as a section and
 //! prints `cell <name>: got=[..] sent=[..] st=<status>`. Each run is a fresh process at
-//! `CHEZZI_THREADS` 1, 2 and 0 (default), plus one seeded run, under a hard 20 s limit.
+//! `CHEZZI_THREADS` 1, 2 and 0 (default), plus one seeded run, under a 90 s hang limit ([`LIMIT`]).
+//! Each program and each named program is its own `#[test]` (TICKET-275).
 //!
 //! The order axis is SHAPED by a 200000-iteration spin on the other side; no expectation depends
 //! on the spin winning. The Go rule every line is judged by ([`judge`]):
@@ -225,8 +226,31 @@ fn cell(name: str, ctx: int, sk: int, rk: int, cap: int, order: int, close: int,
 fn main():
 "#;
 
-const CTXS: [&str; 5] = ["fiber", "job", "main", "body", "demoted"];
-const SKS: [&str; 3] = ["send", "trysend", "waitsend"];
+/// The one list of sender contexts and sender kinds, in the order `HARNESS` numbers them. It
+/// defines [`CTXS`], [`SKS`] and one `#[test]` `<context>::<sender kind>` per program, so nextest
+/// gives each program its own process and its own time limit (TICKET-275).
+macro_rules! grid_programs {
+    ([$($ctx:ident),+ $(,)?] x $sks:tt) => {
+        const CTXS: &[&str] = &[$(stringify!($ctx)),+];
+        const SKS: &[&str] = &grid_programs!(@names $sks);
+        $(grid_programs!(@ctx $ctx $sks);)+
+    };
+    (@names [$($sk:ident),+ $(,)?]) => {
+        [$(stringify!($sk)),+]
+    };
+    (@ctx $ctx:ident [$($sk:ident),+ $(,)?]) => {
+        mod $ctx {
+            $(
+                #[test]
+                fn $sk() {
+                    super::assert_program(stringify!($ctx), stringify!($sk));
+                }
+            )+
+        }
+    };
+}
+
+grid_programs!([fiber, job, main, body, demoted] x [send, trysend, waitsend]);
 const RKS: [&str; 6] = ["recv", "tryrecv", "forin", "waitrecv", "demrecv", "demwait"];
 const CAPS: [i64; 3] = [0, 1, -1];
 const ORDERS: [&str; 2] = ["senderfirst", "receiverfirst"];
@@ -448,35 +472,43 @@ const OWN: &str = r#"fn main():
 main()
 "#;
 
-#[test]
-fn every_sender_hands_every_value_to_exactly_one_receiver() {
-    let mut failures: Vec<String> = Vec::new();
-    let jobs: Vec<(usize, usize)> = (0..CTXS.len())
-        .flat_map(|c| (0..SKS.len()).map(move |s| (c, s)))
-        .collect();
-    // Four programs at a time: each is its own process with its own worker pool.
-    for chunk in jobs.chunks(4) {
-        let handles: Vec<_> = chunk
-            .iter()
-            .map(|&(c, s)| std::thread::spawn(move || check_program(c, s)))
-            .collect();
-        for h in handles {
-            failures.extend(h.join().unwrap());
-        }
-    }
-    failures.extend(check_named(
-        "h1",
-        H1,
-        "received by workers: 100 left in channel: 0 None\n",
-    ));
-    failures.extend(check_named("h3", H3, "[1]\n"));
-    failures.extend(check_named("own", OWN, "got 1\nback 2\n"));
+/// Fails with one line per bad cell of one program; `what` names the program.
+fn assert_go(what: &str, failures: Vec<String>) {
     assert!(
         failures.is_empty(),
-        "{} channel hand-off cells differ from Go:\n{}",
+        "{} channel hand-off cells of {what} differ from Go:\n{}",
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// One (context, sender kind) program of the grid, named as in [`CTXS`] and [`SKS`].
+fn assert_program(ctx: &str, sk: &str) {
+    let c = CTXS
+        .iter()
+        .position(|x| *x == ctx)
+        .expect("context in CTXS");
+    let s = SKS
+        .iter()
+        .position(|x| *x == sk)
+        .expect("sender kind in SKS");
+    assert_go(&format!("{ctx}-{sk}"), check_program(c, s));
+}
+
+#[test]
+fn named_h1_worker_pool() {
+    let want = "received by workers: 100 left in channel: 0 None\n";
+    assert_go("h1", check_named("h1", H1, want));
+}
+
+#[test]
+fn named_h3_wait_send_into_a_callback_receiver() {
+    assert_go("h3", check_named("h3", H3, "[1]\n"));
+}
+
+#[test]
+fn named_own_sender_never_takes_its_own_value() {
+    assert_go("own", check_named("own", OWN, "got 1\nback 2\n"));
 }
 
 /// TICKET-275: the whole grid in one `#[test]` took 198 s of nextest's 300 s limit on a quiet box.
