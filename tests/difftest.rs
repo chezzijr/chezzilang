@@ -27,25 +27,26 @@ fn manifest(rel: &str) -> PathBuf {
 // P0 — the riskiest piece (output formatting) proven before any generation.
 // ---------------------------------------------------------------------------
 
-/// The existing hand-written bench pairs must already agree through the runner. This
+// One test per bench pair (TICKET-276): `p0_existing_bench_pairs_match::<pair>`.
+#[path = "support/grid_tests.rs"]
+#[macro_use]
+mod grid_tests;
+
+grid_tests!(BENCH_PAIRS in p0_existing_bench_pairs_match: [fib, r#loop, str, primes, list, map, map_str, r#struct, empty] => crate::assert_bench_pair);
+
+/// One existing hand-written bench pair must already agree through the runner. This
 /// validates the process harness (capture, exit codes, diff) end-to-end.
-#[test]
-fn p0_existing_bench_pairs_match() {
+fn assert_bench_pair(name: &str) {
     let cfg = config();
-    let names = [
-        "fib", "loop", "str", "primes", "list", "map", "map_str", "struct", "empty",
-    ];
-    for name in names {
-        let chz = std::fs::read_to_string(manifest(&format!("benches/chz/{name}.chz")))
-            .unwrap_or_else(|_| panic!("missing benches/chz/{name}.chz"));
-        let py = std::fs::read_to_string(manifest(&format!("benches/py/{name}.py")))
-            .unwrap_or_else(|_| panic!("missing benches/py/{name}.py"));
-        let outcome = run::run_sources(&cfg, &chz, &py, None);
-        assert!(
-            matches!(outcome, Outcome::Match | Outcome::AllowListed(_)),
-            "bench pair {name} diverged: {outcome:?}"
-        );
-    }
+    let chz = std::fs::read_to_string(manifest(&format!("benches/chz/{name}.chz")))
+        .unwrap_or_else(|_| panic!("missing benches/chz/{name}.chz"));
+    let py = std::fs::read_to_string(manifest(&format!("benches/py/{name}.py")))
+        .unwrap_or_else(|_| panic!("missing benches/py/{name}.py"));
+    let outcome = run::run_sources(&cfg, &chz, &py, None);
+    assert!(
+        matches!(outcome, Outcome::Match | Outcome::AllowListed(_)),
+        "bench pair {name} diverged: {outcome:?}"
+    );
 }
 
 /// The shim's value-stringifying must reproduce Chezzi's spelling for the by-design diffs:
