@@ -124,11 +124,12 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    each `std/*.chz` at `cargo build` time and embed the result in the binary; `std/*.chz` stays the one
    source. Open for its plan: the reach set (`resolver::unreached_std_fns`) and the program-wide slot
    and type keys depend on the importing program.
-7. **Slow gate grid (TICKET-275, filed 2026-10-20).** `channel_handoff_grid` is one test that takes
-   198 s of nextest's 300 s limit alone at load 3; it timed out in the 268, 269 and 270 gates while a
-   second suite ran. Split it so no test needs more than a third of the limit, with the same cells.
-   Its first gate failed on `executor_autodrain_skipped_on_os_exit`, a test TICKET-270 exposed: it
-   expected a job submitted before `os.exit` to print nothing; the job now waits on a gate (2026-10-20).
+7. **Slow gate grid (TICKET-275, done 2026-10-20).** `channel_handoff_grid` runs one test per
+   (context, sender kind) program plus one per named program, from one `grid_programs!` list. The
+   slowest test takes 50.6 s idle (load 1.9-3.8) and 85.1 s at load 22-29; base had one 198 s test.
+   Its gates failed on `executor_autodrain_skipped_on_os_exit`, a test TICKET-270 exposed: it expected
+   a job submitted before `os.exit` to print nothing; the job now waits on a gate (`a94aac76`), and 275
+   was rebased onto it by hand.
 8. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
