@@ -156,16 +156,12 @@ struct H[T]:
     v: T
 ";
 
-const SHAPES: [&str; 8] = [
-    "local",
-    "global",
-    "captured",
-    "field",
-    "index",
-    "key",
-    "hook_index",
-    "hook_index_split",
-];
+// One test per target shape (TICKET-276): `shape::<row>` calls `assert_shape`.
+#[path = "support/grid_tests.rs"]
+#[macro_use]
+mod grid_tests;
+
+grid_tests!(SHAPES in shape: [local, global, captured, field, index, key, hook_index, hook_index_split] => crate::assert_shape);
 
 /// The program for one cell. `stmt` is the compound statement or its desugar, written with `@` for
 /// the target. `hook_index_split` ignores the operand type: its `index` returns `int` while its
@@ -203,9 +199,11 @@ fn program(shape: &str, o: &Operands, stmt: &str) -> String {
     )
 }
 
-fn dir() -> PathBuf {
+/// One directory per shape: under `cargo test` the shapes run on parallel threads of one process,
+/// and each shape removes its own directory when it ends.
+fn dir(shape: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "chezzi-compound-assign-grid-{}",
+        "chezzi-compound-assign-grid-{}-{shape}",
         std::process::id()
     ));
     std::fs::create_dir_all(&d).expect("create the cell directory");
@@ -213,8 +211,8 @@ fn dir() -> PathBuf {
 }
 
 /// `chezzi <cmd> <src>`: the exit status, stdout and stderr.
-fn chezzi(cmd: &str, name: &str, src: &str) -> (bool, String, String) {
-    let path = dir().join(format!("{name}.chz"));
+fn chezzi(cmd: &str, shape: &str, name: &str, src: &str) -> (bool, String, String) {
+    let path = dir(shape).join(format!("{name}.chz"));
     std::fs::write(&path, src).expect("write the cell");
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .arg(cmd)
@@ -228,59 +226,55 @@ fn chezzi(cmd: &str, name: &str, src: &str) -> (bool, String, String) {
     )
 }
 
-#[test]
-fn compound_assign_equals_its_desugar_in_every_cell() {
+/// One target shape: every compound operator x operand pair, in both columns.
+fn assert_shape(shape: &str) {
     let ops = compound_ops();
     assert!(
         ops.iter().any(|(c, _)| c == "+="),
         "the parser must accept `+=`: {ops:?}"
     );
     let mut bad = Vec::new();
-    let mut defined = vec![0; SHAPES.len()];
+    let mut defined = 0;
     for (i, (compound, bin)) in ops.iter().enumerate() {
         for o in OPERANDS {
-            for (s, shape) in SHAPES.iter().enumerate() {
-                if *shape == "hook_index_split" && o.name != "int_float" {
-                    continue;
-                }
-                let cell = format!("{shape}_{}_{i}", o.name);
-                let a = program(shape, o, &format!("@ {compound} {}", o.rhs));
-                let b = program(shape, o, &format!("@ = @ {bin} {}", o.rhs));
-                let (a_chk, _, a_chk_err) = chezzi("check", &format!("{cell}_compound"), &a);
-                let (b_chk, _, b_chk_err) = chezzi("check", &format!("{cell}_desugar"), &b);
-                if a_chk != b_chk {
-                    bad.push(format!(
-                        "CHECK {shape} {} `{compound} {}`: compound ok={a_chk} err={a_chk_err:?}; desugar ok={b_chk} err={b_chk_err:?}",
-                        o.ty, o.rhs
-                    ));
-                }
-                let (a_ok, a_out, a_err) = chezzi("run", &format!("{cell}_compound"), &a);
-                let (b_ok, b_out, b_err) = chezzi("run", &format!("{cell}_desugar"), &b);
-                let lines: Vec<&str> = a_out.lines().collect();
-                let alias_kept = !a_ok || (lines.len() == 3 && lines[1] == lines[2]);
-                if a_ok != b_ok || a_out != b_out || !alias_kept {
-                    bad.push(format!(
-                        "RUN {shape} {} `{compound} {}`: compound ok={a_ok} out={a_out:?} err={a_err:?}; desugar ok={b_ok} out={b_out:?} err={b_err:?}",
-                        o.ty, o.rhs
-                    ));
-                }
-                if b_ok {
-                    defined[s] += 1;
-                }
+            if shape == "hook_index_split" && o.name != "int_float" {
+                continue;
+            }
+            let cell = format!("{shape}_{}_{i}", o.name);
+            let a = program(shape, o, &format!("@ {compound} {}", o.rhs));
+            let b = program(shape, o, &format!("@ = @ {bin} {}", o.rhs));
+            let (a_chk, _, a_chk_err) = chezzi("check", shape, &format!("{cell}_compound"), &a);
+            let (b_chk, _, b_chk_err) = chezzi("check", shape, &format!("{cell}_desugar"), &b);
+            if a_chk != b_chk {
+                bad.push(format!(
+                    "CHECK {shape} {} `{compound} {}`: compound ok={a_chk} err={a_chk_err:?}; desugar ok={b_chk} err={b_chk_err:?}",
+                    o.ty, o.rhs
+                ));
+            }
+            let (a_ok, a_out, a_err) = chezzi("run", shape, &format!("{cell}_compound"), &a);
+            let (b_ok, b_out, b_err) = chezzi("run", shape, &format!("{cell}_desugar"), &b);
+            let lines: Vec<&str> = a_out.lines().collect();
+            let alias_kept = !a_ok || (lines.len() == 3 && lines[1] == lines[2]);
+            if a_ok != b_ok || a_out != b_out || !alias_kept {
+                bad.push(format!(
+                    "RUN {shape} {} `{compound} {}`: compound ok={a_ok} out={a_out:?} err={a_err:?}; desugar ok={b_ok} out={b_out:?} err={b_err:?}",
+                    o.ty, o.rhs
+                ));
+            }
+            if b_ok {
+                defined += 1;
             }
         }
     }
-    let _ = std::fs::remove_dir_all(dir());
+    let _ = std::fs::remove_dir_all(dir(shape));
     // A shape whose every desugar cell fails proves nothing: its program template is broken.
-    for (s, shape) in SHAPES.iter().enumerate() {
-        assert!(
-            defined[s] > 0,
-            "no `{shape}` cell type-checks: the shape's template is broken"
-        );
-    }
+    assert!(
+        defined > 0,
+        "no `{shape}` cell type-checks: the shape's template is broken"
+    );
     assert!(
         bad.is_empty(),
-        "{} cell(s) differ from the desugar:\n{}",
+        "{} cell(s) of `{shape}` differ from the desugar:\n{}",
         bad.len(),
         bad.join("\n")
     );
