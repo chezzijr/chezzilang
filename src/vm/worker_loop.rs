@@ -395,24 +395,17 @@ impl Vm {
                     // `finish` reports whether the STORED outcome aborts: it may itself turn a `Done`
                     // into a hard-halt over-memory `Fault` (W7-26r), which needs the same sibling
                     // drain a task's own fault does.
-                    // TICKET-208 — a fire-and-forget `Executor` job faulted: that ends the whole
-                    // run (Go: a goroutine panic). Published BEFORE `finish` records the outcome, so
-                    // no join sees the job finished while the cell is empty; in `request_exit`'s
-                    // order: the cell, every sched halted, then the hint. A deadlock verdict and a
-                    // `--timeout` cut are the run's own causes, never a job fault. A deadlock verdict
-                    // is its own run halt: `QuiesceState::decide` latches it before any victim is
-                    // recorded, so a job's deadlock outcome is that verdict's victim record, never
-                    // a second halt (TICKET-223).
-                    if sched.is_job_scope(scope_id)
-                        && let TaskOutcome::Fault { err, trace, .. } = &outcome
-                        && !err.is_deadlock
-                        && !err.is_timed_out
-                    {
-                        self.quiesce.request_job_fault(err.clone(), trace.clone());
-                        self.halt_all_scheds();
-                        self.quiesce.mark_run_halt();
+                    // TICKET-270 — `finish` also reports whether it published a job fault (the cell is
+                    // stored before the slot); the teardown runs here, outside its lock.
+                    let (aborts, job_fault) = sched.finish(task_index, scope_id, outcome);
+                    if job_fault {
+                        self.halt_run();
                     }
-                    let aborts = sched.finish(task_index, scope_id, outcome);
+                    // TICKET-270 — this fiber called `os.exit`: its slot now holds its output, so a
+                    // flush waiting in `take_finished_streams` may read it.
+                    if std::mem::take(&mut self.exit_origin) {
+                        self.quiesce.end_exit_origin();
+                    }
                     // A fault/exit tripped the FIBER's SCOPE cancel (in `classify_mn_outcome`, via the
                     // re-pointed `self.cancel`); requeue THAT scope's parked siblings so they observe it
                     // and unwind (running ones see it at a back-edge). `drain_family(scope_id)` reaches
@@ -1061,6 +1054,15 @@ impl Vm {
         for s in live {
             s.cancel_all();
         }
+    }
+
+    /// W7-57 — the teardown half of a run end, after its cell is stored: halt every live sched,
+    /// then latch the hint, so `true` publishes the teardown to whoever reads it. The host
+    /// `request_exit` and the `Disp::Finish` arm (a job fault, `MnSched::publish_job_fault`) both
+    /// run it.
+    pub(super) fn halt_run(&self) {
+        self.halt_all_scheds();
+        self.quiesce.mark_run_halt();
     }
 
     /// W7-56 — publish a freshly built `MnSched` on the run's registry (see [`Vm::sched_registry`]).

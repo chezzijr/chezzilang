@@ -512,9 +512,7 @@ impl Vm {
                 .collect();
             return self.reduce_task_slots(slots);
         };
-        let flush = e.is_timed_out
-            || self.pending_exit.is_some()
-            || matches!(self.cut, Some(crate::vm::block::Cut::RunFault));
+        let flush = self.join_leave_flushes(&e);
         if e.is_timed_out {
             crate::vm::trip_cancel_flag(&core.cancel);
             sched.drain_family(0);
@@ -529,6 +527,37 @@ impl Vm {
             drop(take_scope(core));
         }
         Err(e)
+    }
+
+    /// Does a join that left with `e` take the finished jobs' output? A `--timeout`, this party's
+    /// own `os.exit` and the run-wide job fault (`Cut::RunFault`) end the run, so finished output
+    /// is the last it prints. A cancel or a delivered child fault leaves the jobs running and takes
+    /// nothing (DEC-208). `join_executor` and the exit drain both read this one rule.
+    pub(super) fn join_leave_flushes(&self, e: &RuntimeError) -> bool {
+        e.is_timed_out
+            || self.pending_exit.is_some()
+            || matches!(self.cut, Some(crate::vm::block::Cut::RunFault))
+    }
+
+    /// TICKET-270 — the run ended: take every live executor's finished output, in creation order
+    /// from registry index `from`. A job that ended the run in a later executor than the one being
+    /// joined holds its output only in its slot. `take_finished_streams` waits for every exiting
+    /// fiber's slot, then takes the core lock, under which `MnSched::publish_job_fault` stored a job
+    /// fault's cell before the slot; so the slot of the job that ended the run is filled here.
+    pub(super) fn flush_finished_jobs_from(&mut self, from: usize) {
+        let live: Vec<_> = self
+            .exec_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .skip(from)
+            .filter_map(|c| c.sched())
+            .collect();
+        for sched in live {
+            let (out, stderr) = sched.take_finished_streams();
+            self.out.extend_from_slice(&out);
+            self.stderr.extend_from_slice(&stderr);
+        }
     }
 
     /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a

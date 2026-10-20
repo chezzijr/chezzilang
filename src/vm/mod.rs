@@ -997,6 +997,11 @@ pub struct Vm {
     /// every `recover:` handler and unwinds to the top — a hard, uncatchable halt; the driver then
     /// reports `code` as the process exit status.
     pending_exit: Option<i32>,
+    /// TICKET-270 — this party is a fiber that called `os.exit` and counted itself with
+    /// `QuiesceState::begin_exit_origin`; the `Disp::Finish` arm ends the count after the slot
+    /// store. Per-`Vm` scratch like `pending_exit`: an exiting fiber unwinds without parking, so the
+    /// worker that ran the call also runs its `Disp::Finish`.
+    exit_origin: bool,
     /// TICKET-246 — the open box calls of the task running on this `Vm`, innermost last (see
     /// `boxctx.rs`). A `Vm` field, NOT a `FiberCtx` field, and `swap_ctx` does not move it: a box
     /// closure runs under `Vm::reentered`, where no other fiber runs on this stack (DEC-245).

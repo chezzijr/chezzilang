@@ -862,12 +862,6 @@ impl MnSched {
         opened
     }
 
-    /// Whether `scope_id` is one of the Executor's own scopes, so its fiber is a job and not a
-    /// job's nursery child.
-    pub(super) fn is_job_scope(&self, scope_id: usize) -> bool {
-        self.lock().is_job_scope(scope_id)
-    }
-
     /// TICKET-211 — THE runner-count decision: the wids the caller must start now (`Vm::start_runners`).
     /// Claims free wids while fewer than `n` (the worker count) are set and fewer fiber runners than
     /// undone tasks run. The body's own thread (bit 0 while scope 0's body is open) counts toward `n`
@@ -955,8 +949,11 @@ impl MnSched {
 
     /// W7-60 — the buffered output of every task that has ALREADY finished, in slot order, for a
     /// joiner that leaves while other tasks are unfinished. Length-preserving (a running task keeps
-    /// its index) and idempotent (a second call returns nothing).
+    /// its index) and idempotent (a second call returns nothing). TICKET-270 — first waits until
+    /// every fiber that called `os.exit` stored its slot ([`quiesce::QuiesceState::await_exit_origins`]); the
+    /// caller holds no sched lock.
     pub(super) fn take_finished_streams(&self) -> (Vec<u8>, Vec<u8>) {
+        self.quiesce.await_exit_origins();
         let mut c = self.lock();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         for o in c.slots.iter_mut().flatten() {

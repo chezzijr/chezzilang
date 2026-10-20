@@ -450,9 +450,18 @@ impl crate::native::Host for VmHost<'_> {
         // measured result was a sibling `defer` that ran 2/8 times and once died mid-body. That
         // guarantee lives in [`Vm::exit_halt`], which decides from the flag's PRESENCE and so needs no
         // ordering; this sequence is only about publishing the code and the teardown before the hint.
+        // TICKET-270 — a FIBER that exits counts itself as an exit origin BEFORE the code is
+        // published: a joiner that reads the code and flushes finished output then waits in
+        // `take_finished_streams` until this fiber's slot holds what it printed. The code itself stays
+        // here, at the call: `classify_mn_outcome` trips this fiber's scope cancel before `finish`, and
+        // a sibling woken by it must already read the exit, or it runs its `defer` (DEC-213). `main` is
+        // not a fiber and holds its own output.
+        if self.vm.fiber_scope.is_some() && !self.vm.exit_origin {
+            self.vm.exit_origin = true;
+            self.vm.quiesce.begin_exit_origin();
+        }
         self.vm.quiesce.request_exit(code);
-        self.vm.halt_all_scheds();
-        self.vm.quiesce.mark_run_halt();
+        self.vm.halt_run();
     }
 }
 

@@ -360,6 +360,12 @@ pub(super) struct QuiesceState {
     /// `test fn` that calls `os.exit` would latch the cell and halt every LATER test that blocks.
     /// [`Vm::invoke_test`] clears it, beside the other per-test resets.
     exit: Mutex<Option<i32>>,
+    /// TICKET-270 — how many fibers called `os.exit` and have not yet stored their slot. A flush of
+    /// finished output ([`super::MnSched::take_finished_streams`]) waits on `exit_origins_cv` until
+    /// it is 0, so it never reads an exiting fiber's empty slot. [`Self::clear_exit`] does not reset
+    /// it: each origin ends its own count when it finishes.
+    exit_origins: Mutex<usize>,
+    exit_origins_cv: std::sync::Condvar,
     /// gaps.md W7-57 — the lock-free mirror of `exit.is_some()`, for the two CPU-side checkpoints that
     /// cannot afford a mutex: `jump_checked`'s loop back-edge (sampled 1/1024) and `guarded`'s
     /// per-element native-HOF re-entry. A party that is spinning in a loop or grinding through a
@@ -467,6 +473,33 @@ impl QuiesceState {
     /// The pending run-wide exit code, if any.
     pub(super) fn pending(&self) -> Option<i32> {
         *self.exit.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// TICKET-270 — a fiber called `os.exit`. The host `request_exit` calls this BEFORE it publishes
+    /// the code, so a joiner that reads the code also sees the count.
+    pub(super) fn begin_exit_origin(&self) {
+        *self.exit_origins.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+    }
+
+    /// TICKET-270 — an exiting fiber's `MnSched::finish` returned: its slot holds its output.
+    pub(super) fn end_exit_origin(&self) {
+        let mut g = self.exit_origins.lock().unwrap_or_else(|e| e.into_inner());
+        *g = g.saturating_sub(1);
+        drop(g);
+        self.exit_origins_cv.notify_all();
+    }
+
+    /// TICKET-270 — wait until every fiber that called `os.exit` stored its slot. Bounded: an
+    /// origin runs no `defer` and joins nothing after the call (DEC-213), so it reaches `finish`
+    /// at once. The caller must hold no sched lock.
+    pub(super) fn await_exit_origins(&self) {
+        let mut g = self.exit_origins.lock().unwrap_or_else(|e| e.into_inner());
+        while *g > 0 {
+            g = self
+                .exit_origins_cv
+                .wait(g)
+                .unwrap_or_else(|e| e.into_inner());
+        }
     }
 
     /// W7-57 — latch the back-edge flag. Called by the host `request_exit` AFTER the code is published

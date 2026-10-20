@@ -145,6 +145,7 @@ impl Vm {
             cur_base: 0,
             handlers: Vec::new(),
             pending_exit: None,
+            exit_origin: false,
             box_chain: Vec::new(),
             box_view_err: None,
             fault_trace: None,

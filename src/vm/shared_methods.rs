@@ -756,7 +756,14 @@ impl Vm {
                 (self.fault_trace, self.fault_trace_depth) = trace;
                 Err(e)
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // TICKET-270 — an exit joins nothing, but what a finished job printed still
+                // reaches the sink (Go: a goroutine's writes before `os.Exit` are on stdout).
+                if self.pending_exit.is_some() {
+                    self.flush_finished_jobs_from(0);
+                }
+                Err(e)
+            }
         }
     }
 
@@ -767,6 +774,7 @@ impl Vm {
     /// at module top level or in `before_all` alive for the tests that follow.
     pub(super) fn drain_live_executors_from(&mut self, from: usize) -> Result<(), RuntimeError> {
         if self.pending_exit.is_some() {
+            self.flush_finished_jobs_from(from);
             return Ok(());
         }
         // EAGER (D1) — the executor is DETACHED: its work is already running, and this is where
@@ -797,9 +805,19 @@ impl Vm {
             core.inner.lock().unwrap_or_else(|e| e.into_inner()).shut = true;
             // TICKET-048 — the program-exit drain has no call site of its own, so it names where
             // this Executor was created.
-            self.join_executor(&core, core.created_at)?;
-            if self.pending_exit.is_some() || core.sched().is_some() {
-                break; // a joined job called os.exit — hard halt, stop joining
+            if let Err(e) = self.join_executor(&core, core.created_at) {
+                if self.join_leave_flushes(&e) {
+                    self.flush_finished_jobs_from(from);
+                }
+                return Err(e);
+            }
+            if self.pending_exit.is_some() {
+                // A joined job called os.exit — hard halt, stop joining.
+                self.flush_finished_jobs_from(from);
+                break;
+            }
+            if core.sched().is_some() {
+                break;
             }
         }
         Ok(())

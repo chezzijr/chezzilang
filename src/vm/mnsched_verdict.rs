@@ -14,10 +14,17 @@ impl MnSched {
     /// `cancel_drain` its parked siblings need. It is computed here, not by the caller, because the
     /// W7-26r backlog verdict below can turn a `Done` into a hard-halt `Fault` — a caller-side
     /// `matches!` on the outcome it handed in would miss that and leave the scope's parked fibers
-    /// with nobody to wake them.
-    pub(super) fn finish(&self, task_index: usize, scope_id: usize, outcome: TaskOutcome) -> bool {
+    /// with nobody to wake them. Also returns whether it published a job fault
+    /// ([`MnSched::publish_job_fault`]), so the caller runs [`Vm::halt_run`].
+    pub(super) fn finish(
+        &self,
+        task_index: usize,
+        scope_id: usize,
+        outcome: TaskOutcome,
+    ) -> (bool, bool) {
         let mut c = self.lock();
         debug_assert!(Arc::ptr_eq(&c.left, &self.quiesce.epoch()));
+        let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
         c.leave_running();
         // DEC-205 — a task's submit-time bytes stay charged until it FINISHES.
         if let Some(charge) = c.slot_charge.remove(&task_index) {
@@ -81,7 +88,32 @@ impl MnSched {
         self.notify_waiters();
         drop(c);
         self.wake_sealed(step.sealed);
-        aborts
+        (aborts, job_fault)
+    }
+
+    /// TICKET-270 — THE publisher of a fire-and-forget `Executor` job's fault (TICKET-208, Go: a
+    /// goroutine panic ends the run). It stores the cell under `finish`'s core-lock hold, before the
+    /// slot: a joiner that reads the halt takes this lock to read finished output
+    /// (`take_finished_streams`), so it finds the job's slot filled, and `job_event` reads the cell
+    /// before it releases a held job (DEC-219). A deadlock verdict and a `--timeout` cut are the
+    /// run's own causes, never a job fault (TICKET-223). An `os.exit` is not published here: the
+    /// host `request_exit` stores its code at the call (W7-57, DEC-213). The caller runs
+    /// [`Vm::halt_run`] after `finish` returns: `halt_all_scheds` takes every core lock.
+    fn publish_job_fault(&self, c: &SchedCore, scope_id: usize, outcome: &TaskOutcome) -> bool {
+        match outcome {
+            TaskOutcome::Fault { err, trace, .. }
+                if c.is_job_scope(scope_id) && !err.is_deadlock && !err.is_timed_out =>
+            {
+                self.quiesce.request_job_fault(err.clone(), trace.clone());
+                true
+            }
+            TaskOutcome::Fault { .. }
+            | TaskOutcome::Exit { .. }
+            | TaskOutcome::Done(_)
+            | TaskOutcome::Cancelled { .. }
+            | TaskOutcome::CancelledFault { .. }
+            | TaskOutcome::Deadlocked { .. } => false,
+        }
     }
 
     /// N4 — trip scope `scope_id`'s cancel **under the core lock**. Two reasons the lock is not

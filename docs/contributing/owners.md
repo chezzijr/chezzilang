@@ -99,6 +99,9 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | May this op block here, and how | `mode` (`vm/block.rs`), `block_ctx` (`vm/block.rs`) | TICKET-181 |
 | CPU width / runner permits | `RUNNERS` (`vm/width.rs`) | TICKET-205/230 |
 | Quiescence verdict | `decide_since` (`vm/quiesce.rs`) | |
+| A fire-and-forget job's fault ends the run: publish the cell | `publish_job_fault` (`vm/mnsched_verdict.rs`) | TICKET-270: under `finish`'s core lock, before the slot |
+| A flush of finished output waits for each exiting fiber's slot | `QuiesceState::await_exit_origins` (`vm/quiesce.rs`), read by `take_finished_streams` (`vm/mnsched.rs`) | TICKET-270: the host `request_exit` counts a fiber's exit before the code; the code stays at the call (DEC-213) |
+| A join that left takes the finished jobs' output | `join_leave_flushes` (`vm/worker_vm.rs`) | TICKET-270: `join_executor` and the exit drain read it |
 | Airlock crossing policy | `base/crossing.rs` | D4 |
 | Cross-heap store check | `ensure_crossable` (`vm/worker_vm.rs`), `to_wire_crossable` (`vm/airlock_out.rs`) | a missed guard is UB |
 | `WireValue` walks | `WireValue::visit` (`vm/wire.rs`): the children of each variant, and whether it is a handle or a nested core | `has_handle` (`vm/wire.rs`), `wire_summary`, `collect_gcrefs_structural` and `nested_core_bytes_structural` (`vm/core.rs`) read it; grid `wire::walk_grid`. TICKET-267 |
