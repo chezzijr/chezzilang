@@ -133,7 +133,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
 8. **Test time budget (TICKET-276, done 2026-10-21).** Seven tests needed 111-407 s of the 300 s
    nextest limit. Each slow grid is now one test per row (`grid_tests!` in
    `tests/support/grid_tests.rs`), the `hook_conformance_grid` cap override is deleted, and no test ran
-   longer than 55.202 s with two suites at once. `tests/test_time_budget.rs` fails on a `slow-timeout` line
+   longer than 60.310 s with two suites at once (two runs: 55.202 s and 60.310 s). `tests/test_time_budget.rs` fails on a `slow-timeout` line
    without `terminate-after = 5 }`; the rule is in `docs/contributing/dev-commands.md`.
 9. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
