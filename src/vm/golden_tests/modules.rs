@@ -900,12 +900,26 @@ fn collision_struct_sent_across_task() {
 #[test]
 fn executor_autodrain_skipped_on_os_exit() {
     // `os.exit` is a hard halt — like `defer`, the program-exit auto-drain is skipped, so a
-    // submitted-but-un-shut executor's work must NOT run. Driven through the file path since it
-    // imports std.os.
-    let out = golden_entry(
-        "import Executor from std.concurrency\nimport std.os\nfn j():\n    print(\"RAN\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    print(\"before exit\")\n    os.exit(0)\nmain()\n",
+    // submitted-but-un-shut executor's job is never joined. The job waits on a gate that `main`
+    // never opens: an Executor job starts at `submit` (eager), so a job free to run could print
+    // before the exit (Go: a goroutine's writes before `os.Exit` are on stdout), and since
+    // TICKET-270 the captured sink keeps that output. A drain that joined the held job would end
+    // in a deadlock fault, not a clean exit 0. Driven through the file path since it imports std.os.
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        "import Executor from std.concurrency\nimport std.os\ngate := Channel[int]()\nfn j():\n    _ := gate.recv()\n    print(\"RAN\")\nfn main():\n    ex := Executor()\n    ex.submit(j)\n    print(\"before exit\")\n    os.exit(0)\nmain()\n",
     );
-    assert_eq!(out, "before exit\n");
+    let (out, _err, result, code) = crate::vm::run_file_engine(
+        &entry,
+        crate::native::HostConfig::default(),
+        None,
+        None,
+        false,
+    );
+    assert_eq!(captured(out), "before exit\n");
+    assert!(result.is_ok(), "the exit is clean: {result:?}");
+    assert_eq!(code, Some(0));
 }
 
 // ----- Executor.submit crosses a submitted closure BY VALUE (previously diverged: serial vs M:N) -----

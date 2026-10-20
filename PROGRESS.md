@@ -127,6 +127,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
 7. **Slow gate grid (TICKET-275, filed 2026-10-20).** `channel_handoff_grid` is one test that takes
    198 s of nextest's 300 s limit alone at load 3; it timed out in the 268, 269 and 270 gates while a
    second suite ran. Split it so no test needs more than a third of the limit, with the same cells.
+   Its first gate failed on `executor_autodrain_skipped_on_os_exit`, a test TICKET-270 exposed: it
+   expected a job submitted before `os.exit` to print nothing; the job now waits on a gate (2026-10-20).
 8. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
