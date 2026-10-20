@@ -6,6 +6,10 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "support/grid_tests.rs"]
+#[macro_use]
+mod grid_tests;
+
 fn run(src: &str, threads: &str, tag: &str) -> Option<(String, String, Option<i32>)> {
     run_env(src, threads, None, tag)
 }
@@ -219,28 +223,27 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
     (src, expected)
 }
 
-#[test]
-fn h1_scope_identity_grid_every_cell_exits_clean() {
+// One test per H1 (nest, cancel) cell (TICKET-276): `<nest>::<cancel>` calls `assert_h1_cell`.
+grid_tests!(NESTS x CANCELS: [spawn, recover, job, two_deep] x [child, sibling, shutdown_now, exit] => crate::assert_h1_cell);
+
+/// One H1 grid cell: three worker counts x 20 runs, each exiting clean.
+fn assert_h1_cell(nest: &str, cancel: &str) {
     let mut failures = Vec::new();
-    for nest in ["spawn", "recover", "job", "two_deep"] {
-        for cancel in ["child", "sibling", "shutdown_now", "exit"] {
-            let (src, expected) = h1_program(nest, cancel);
-            for t in ["2", "4", "0"] {
-                let cell = format!("{nest}-{cancel}-T{t}");
-                for i in 0..20 {
-                    match run(&src, t, &format!("h1g-{nest}-{cancel}-{t}")) {
-                        None => {
-                            failures.push(format!("{cell} run {i}: hang"));
-                            break;
-                        }
-                        Some((out, err, code)) => {
-                            if code != Some(0) || err.contains("panicked at") || out != expected {
-                                failures.push(format!(
-                                    "{cell} run {i}: code={code:?} stdout={out:?} stderr={err:?}"
-                                ));
-                                break;
-                            }
-                        }
+    let (src, expected) = h1_program(nest, cancel);
+    for t in ["2", "4", "0"] {
+        let cell = format!("{nest}-{cancel}-T{t}");
+        for i in 0..20 {
+            match run(&src, t, &format!("h1g-{nest}-{cancel}-{t}")) {
+                None => {
+                    failures.push(format!("{cell} run {i}: hang"));
+                    break;
+                }
+                Some((out, err, code)) => {
+                    if code != Some(0) || err.contains("panicked at") || out != expected {
+                        failures.push(format!(
+                            "{cell} run {i}: code={code:?} stdout={out:?} stderr={err:?}"
+                        ));
+                        break;
                     }
                 }
             }
@@ -248,7 +251,7 @@ fn h1_scope_identity_grid_every_cell_exits_clean() {
     }
     assert!(
         failures.is_empty(),
-        "{} grid cells failed:\n{}",
+        "{} runs of h1 {nest}-{cancel} failed:\n{}",
         failures.len(),
         failures.join("\n")
     );
