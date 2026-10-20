@@ -10,6 +10,10 @@
 
 [profile.default]
 test-threads = 8
+# The 300 s limit (60 s x 5) stops a hung test; nextest prints SLOW for a test past 60 s. A test
+# finishes well under 100 s (a third of it): split a slow grid with grid_tests!
+# (tests/support/grid_tests.rs), never raise this limit or add an override
+# (docs/contributing/dev-commands.md, TICKET-276).
 slow-timeout = { period = "60s", terminate-after = 5 }
 fail-fast = false
 
@@ -19,10 +23,3 @@ timing = { max-threads = 4 }
 [[profile.default.overrides]]
 filter = 'binary(chezzi_threads_cli) | binary(blocking_context_grid) | binary(channel_handoff_grid) | binary(examples_golden) | binary(native_callback_stdin_read_frees_width) | binary(mn_pool_ignores_cpu_quota_hangs) | binary(sched_seed_cli) | binary(chezzi_nested_nursery_deadlock) | binary(deadlock_verdict_misses) | binary(chz_suite) | binary(deadlock_halt_single_judge) | binary(executor_job_owner) | binary(executor_reentrant_shutdown)'
 test-group = 'timing'
-
-# TICKET-265: each cell of this grid runs its own `chezzi` process, and each cell now pays one std
-# import (`import Add from std.ops` and siblings), so the test outgrew the default 300 s cap.
-# Measured alone, debug: main 189 s, branch 265 s. Cap 480 s.
-[[profile.default.overrides]]
-filter = 'binary(hook_conformance_grid) & test(operator_and_bound_agree_in_every_cell)'
-slow-timeout = { period = "60s", terminate-after = 8 }
