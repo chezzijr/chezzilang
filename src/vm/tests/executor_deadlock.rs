@@ -1107,8 +1107,8 @@ fn closer():
     ex.shutdown()
     done.send(1)
 ex.submit(fn(): print("A"))
-ex.submit(closer)
 ex.submit(fn(): print("C"))
+ex.submit(closer)
 done.recv()
 print("end")
 "#;
