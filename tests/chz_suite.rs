@@ -1,33 +1,39 @@
-//! Task 7b — `tests/chz` dogfood gate (`chezzi test` on the M:N VM), moved out of the lib unit-test
-//! binary into its own process. Was `test_runner::tests::chz_suite_passes`.
+//! The `tests/chz` dogfood gate: `chezzi test tests/chz/<dir>` on the M:N VM, one test per subdirectory.
 //!
-//! **Lives in `tests/`, in its own process — same reason as `executor_results_not_retained.rs` /
-//! `executor_reentrant_shutdown.rs` / `chezzi_threads_cli.rs`.** `vm::pool` is ONE process-wide
-//! `OnceLock`. Under `cargo test --lib` (`RUST_TEST_THREADS=4`) this test ran concurrently with
-//! ~4150 unrelated lib tests all contending for that one pool, and one `tests/chz` case,
-//! `shutdown_now_interrupts_a_sleeping_job` (`tests/chz/stdlib/sleep_cancel_test.chz:45`), asserts a
-//! wall-clock bound (`d < 1.0s`, 3x headroom under the job's real 3s deadline) on how fast a cancelled
-//! job's pool worker gets a chance to notice the cancel. Measured on this branch: **8/8 full
-//! `cargo test --lib` runs failed this exact assertion**, `d` landing 1.03s–1.44s — well under the 3s
-//! deadline (the cancel genuinely lands, just delayed by pool starvation past the 1.0s bound), and
-//! every failure was this one test. Filtering it alone inside the same binary
-//! (`--lib chz_suite_passes`) already passed in 3.5s, which is the same fix this file makes permanent:
-//! cargo runs test BINARIES one at a time, so its own process gets `vm::pool` to itself with no
-//! outside contention.
-//!
-//! No `TEST_UUID_LOCK`/`clear_seed()` dance here (unlike the in-process version this replaces): that
-//! guarded against interleaving with `vm::golden_tests::golden_uuid_via_run_file`, which lives in the
-//! LIB test binary. A separate integration-test binary is a separate OS process with its own copy of
-//! every `static`, sequenced strictly before/after the lib binary by cargo — interleaving is no longer
-//! physically possible, so the guard has nothing left to guard against here.
+//! `vm::pool` is one process-wide `OnceLock`, and `sleep_cancel_test.chz` asserts `d < 1.0s` on how
+//! fast a cancelled job's worker runs, which failed 8 of 8 runs when other tests shared the pool.
+//! Since TICKET-276 each directory runs the `chezzi` binary as its own process, because `cargo test`
+//! runs a binary's tests on parallel threads that would share one pool.
 
-#[test]
-fn chz_suite_passes() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/chz");
-    let report = chezzi::test_runner::run_tests(&root);
+#[path = "support/chz_dirs.rs"]
+mod chz_dirs;
+#[path = "support/grid_tests.rs"]
+#[macro_use]
+mod grid_tests;
+
+grid_tests!(CHZ_DIRS in chz_suite_passes: [spec, stdlib, suites] => crate::assert_chz_dir);
+
+/// One `tests/chz` directory through `chezzi test`, in its own process and its own pool.
+fn assert_chz_dir(dir: &str) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/chz")
+        .join(dir);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("test")
+        .arg(&path)
+        .env_remove("CHEZZI_THREADS")
+        .output()
+        .expect("run chezzi test");
     assert!(
-        report.passed,
-        "tests/chz must pass on the M:N VM; report:\n{}",
-        report.text
+        out.status.success(),
+        "tests/chz/{dir} must pass on the M:N VM; report:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// Every subdirectory of `tests/chz` has a row in [`CHZ_DIRS`], and no `.chz` file sits outside one.
+#[test]
+fn every_tests_chz_subdirectory_has_a_test() {
+    chz_dirs::assert_every_subdirectory_listed(CHZ_DIRS);
 }
