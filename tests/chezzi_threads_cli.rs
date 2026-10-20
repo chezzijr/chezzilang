@@ -35,6 +35,12 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "support/chz_dirs.rs"]
+mod chz_dirs;
+#[path = "support/grid_tests.rs"]
+#[macro_use]
+mod grid_tests;
+
 #[cfg(unix)]
 #[path = "support/child_rusage.rs"]
 mod child_rusage;
@@ -92,46 +98,64 @@ fn run_chz_test(
     (out.status.success(), summary, stdout, stderr)
 }
 
-/// The differential itself: `tests/chz` must pass identically at the default (auto-sized) worker
-/// count and at `CHEZZI_THREADS=2`. ~550 real behavioural assertions, run twice, each in its own
-/// process/pool — the standing second-schedule gate now that `--serial` is gone.
-#[test]
-fn chz_suite_passes_at_a_second_worker_count() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/chz");
+// One test per `tests/chz` subdirectory (TICKET-276): `chz_suite_passes_at_a_second_worker_count::<dir>`.
+grid_tests!(CHZ_DIRS in chz_suite_passes_at_a_second_worker_count: [spec, stdlib, suites] => crate::assert_chz_dir_at_two_worker_counts);
 
-    let (ok_default, summary_default, out_default, err_default) = run_chz_test(&root, None, None);
+/// Every subdirectory of `tests/chz` has a row in [`CHZ_DIRS`], and no `.chz` file sits outside one.
+#[test]
+fn every_tests_chz_subdirectory_has_a_worker_count_test() {
+    chz_dirs::assert_every_subdirectory_listed(CHZ_DIRS);
+}
+
+/// The differential itself: one `tests/chz` directory must pass identically at the default
+/// (auto-sized) worker count and at `CHEZZI_THREADS=2`. ~550 real behavioural assertions over the
+/// three directories, run twice, each in its own process/pool — the standing second-schedule gate
+/// now that `--serial` is gone. Both runs go at once: measured 32264 ms for `stdlib` against
+/// 30583 ms alone.
+fn assert_chz_dir_at_two_worker_counts(dir: &str) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/chz")
+        .join(dir);
+
+    let ((ok_default, summary_default, out_default, err_default), (ok_2, summary_2, out_2, err_2)) =
+        std::thread::scope(|scope| {
+            let default = scope.spawn(|| run_chz_test(&root, None, None));
+            let two = scope.spawn(|| run_chz_test(&root, Some("2"), None));
+            (
+                default.join().expect("default-count run"),
+                two.join().expect("two-worker run"),
+            )
+        });
     assert!(
         ok_default,
-        "tests/chz must pass at the default worker count\nsummary: {summary_default}\nstderr: {err_default}\nFAIL/ERROR line(s):\n{}",
+        "tests/chz/{dir} must pass at the default worker count\nsummary: {summary_default}\nstderr: {err_default}\nFAIL/ERROR line(s):\n{}",
         fail_lines(&out_default)
     );
     assert!(
         summary_default.contains(" passed, 0 failed, 0 errored"),
-        "default run must be all-passing: {summary_default}"
+        "tests/chz/{dir} default run must be all-passing: {summary_default}"
     );
-
-    let (ok_2, summary_2, out_2, err_2) = run_chz_test(&root, Some("2"), None);
     assert!(
         ok_2,
-        "tests/chz must pass with CHEZZI_THREADS=2\nsummary: {summary_2}\nstderr: {err_2}\nFAIL/ERROR line(s):\n{}",
+        "tests/chz/{dir} must pass with CHEZZI_THREADS=2\nsummary: {summary_2}\nstderr: {err_2}\nFAIL/ERROR line(s):\n{}",
         fail_lines(&out_2)
     );
     assert!(
         summary_2.contains(" passed, 0 failed, 0 errored"),
-        "CHEZZI_THREADS=2 run must be all-passing: {summary_2}"
+        "tests/chz/{dir} CHEZZI_THREADS=2 run must be all-passing: {summary_2}"
     );
 
     // Same suite discovered both times (apples-to-apples): the total test count in the summary must
     // match, so a broken/short-circuited second run can't silently "pass" by running fewer tests.
     assert_eq!(
         summary_default, summary_2,
-        "the two worker counts must produce the identical pass tally over the same discovered suite"
+        "the two worker counts must produce the identical pass tally over tests/chz/{dir}"
     );
     // A sanity floor: catches a `path`/discovery regression that quietly ran zero tests and "passed"
     // vacuously (`summary_default == summary_2` alone can't tell "0 == 0" from "550 == 550").
     assert!(
         !summary_default.starts_with("0 test(s)"),
-        "the suite must not be empty: {summary_default}"
+        "tests/chz/{dir} must not be empty: {summary_default}"
     );
 }
 
@@ -663,19 +687,85 @@ main()
 /// W15-2 (TICKET-168) — every in-place wait a top-level body can sit in while gated must release
 /// its width permit, or the body hangs at `CHEZZI_THREADS=1` once the body holds the only permit.
 /// One probe per blocking-point class found in `## Digest`'s enumeration.
-#[test]
-fn threads_one_top_level_body_blocking_points_release_the_permit() {
-    assert_clean_sampled_at_thread_one("bp_blocking.chz", BODY_BP_BLOCKING, "fs true 1\n");
-    assert_clean_sampled_at_thread_one("bp_escape.chz", BODY_BP_ESCAPE, "escape 5\n");
-    assert_clean_sampled_at_thread_one("bp_hof.chz", BODY_BP_HOF, "hof done\n");
-    assert_clean_sampled_at_thread_one("bp_nested.chz", BODY_BP_NESTED, "inner 3\nnested ok\n");
-    assert_clean_sampled_at_thread_one("bp_net.chz", BODY_BP_NET, "accepted\n");
-    assert_clean_sampled_at_thread_one("bp_recv.chz", BODY_BP_RECV, "recv 7\n");
-    assert_clean_sampled_at_thread_one("bp_send.chz", BODY_BP_SEND, "send ok\n");
-    assert_clean_sampled_at_thread_one("bp_shared.chz", BODY_BP_SHARED, "shared 11\n");
-    assert_clean_sampled_at_thread_one("bp_sleep.chz", BODY_BP_SLEEP, "sleep flag 1\n");
-    assert_clean_sampled_at_thread_one("bp_spin.chz", BODY_BP_SPIN, "spin saw it\n");
-    assert_clean_sampled_at_thread_one("bp_wait.chz", BODY_BP_WAIT, "wait b 2\n");
+mod threads_one_top_level_body_blocking_points_release_the_permit {
+    #[test]
+    fn blocking() {
+        super::assert_clean_sampled_at_thread_one(
+            "bp_blocking.chz",
+            super::BODY_BP_BLOCKING,
+            "fs true 1\n",
+        );
+    }
+
+    #[test]
+    fn escape() {
+        super::assert_clean_sampled_at_thread_one(
+            "bp_escape.chz",
+            super::BODY_BP_ESCAPE,
+            "escape 5\n",
+        );
+    }
+
+    #[test]
+    fn hof() {
+        super::assert_clean_sampled_at_thread_one("bp_hof.chz", super::BODY_BP_HOF, "hof done\n");
+    }
+
+    #[test]
+    fn nested() {
+        super::assert_clean_sampled_at_thread_one(
+            "bp_nested.chz",
+            super::BODY_BP_NESTED,
+            "inner 3\nnested ok\n",
+        );
+    }
+
+    #[test]
+    fn net() {
+        super::assert_clean_sampled_at_thread_one("bp_net.chz", super::BODY_BP_NET, "accepted\n");
+    }
+
+    #[test]
+    fn recv() {
+        super::assert_clean_sampled_at_thread_one("bp_recv.chz", super::BODY_BP_RECV, "recv 7\n");
+    }
+
+    #[test]
+    fn send() {
+        super::assert_clean_sampled_at_thread_one("bp_send.chz", super::BODY_BP_SEND, "send ok\n");
+    }
+
+    #[test]
+    fn shared() {
+        super::assert_clean_sampled_at_thread_one(
+            "bp_shared.chz",
+            super::BODY_BP_SHARED,
+            "shared 11\n",
+        );
+    }
+
+    #[test]
+    fn sleep() {
+        super::assert_clean_sampled_at_thread_one(
+            "bp_sleep.chz",
+            super::BODY_BP_SLEEP,
+            "sleep flag 1\n",
+        );
+    }
+
+    #[test]
+    fn spin() {
+        super::assert_clean_sampled_at_thread_one(
+            "bp_spin.chz",
+            super::BODY_BP_SPIN,
+            "spin saw it\n",
+        );
+    }
+
+    #[test]
+    fn wait() {
+        super::assert_clean_sampled_at_thread_one("bp_wait.chz", super::BODY_BP_WAIT, "wait b 2\n");
+    }
 }
 
 /// TICKET-141 (W14-14) — guards the handoff for a CPU loop preempted INSIDE a native callback: the
