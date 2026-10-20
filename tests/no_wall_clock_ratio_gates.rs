@@ -300,7 +300,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 112] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 113] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     // TICKET-208, `tests/executor_task_grid.rs`. Every `time.sleep_ms` of these five is inside a
     // fixture .chz program's SOURCE STRING: a job's long work (3 s, 6 s) that a cut must end, or a
@@ -343,6 +343,10 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 112] = [
     "a_wait_timer_arm_in_a_native_callback_loses_to_a_sibling_value",
     "a_yielded_pool_thread_retires_instead_of_growing_the_pool",
     "abort_diagnoses_even_with_a_full_unread_stdout_pipe",
+    // TICKET-270. Its 2ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING: it
+    // skews `main` late on purpose so the `skewed_even` cell reaches the interleaving a loaded host
+    // makes (W15-8). The Rust test orders nothing with it; the assertions read counter deltas.
+    "an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout",
     "an_eager_wait_timer_arm_loses_to_a_sibling_value",
     "an_executor_jobs_send_wakes_a_task_parked_on_another_scheds_channel",
     "cancel_cascade_crosses_the_airlock",
