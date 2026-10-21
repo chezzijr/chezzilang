@@ -1948,3 +1948,94 @@ fn list_min_max_return_option_and_keep_their_bound() {
     // the `min_by` key type `K` is independent of the element type — `Option[str]` here, from `T`
     ok("xs := [\"bb\", \"a\"]\nv: str? = xs.max_by(fn(s: str) -> int: s.len())\n");
 }
+
+/// TICKET-281 — `resolve_type_at` (mutable) and `resolve_ty_ro` (read-only) both map an annotation
+/// to a `Ty`. One grid, one program: every annotation kind must give the same `Ty` from both.
+#[test]
+fn resolve_type_and_resolve_ty_ro_map_every_annotation_to_the_same_ty() {
+    let decls = [
+        "struct P:",
+        "    x: int",
+        "struct G[T]:",
+        "    v: T",
+        "enum E:",
+        "    A",
+        "    B",
+        "enum GE[T]:",
+        "    X(T)",
+        "    Y",
+        "protocol Pr:",
+        "    fn name(self) -> str",
+        "protocol PG[T]:",
+        "    fn get(self) -> T",
+        "type Al = List[int]",
+        "type Al2 = Al",
+        "struct Executor:",
+        "    x: int",
+    ]
+    .join("\n");
+    let annotations = [
+        "int",
+        "float",
+        "str",
+        "bool",
+        "bytes",
+        "List[int]",
+        "Map[str, int]",
+        "Set[int]",
+        "P",
+        "G[int]",
+        "E",
+        "GE[int]",
+        "Pr",
+        "PG[int]",
+        "Al",
+        "Al2",
+        "int?",
+        "int!str",
+        "None!str",
+        "(int, str)",
+        "fn(int) -> str",
+        "fn(a: int, ...b: str) -> int",
+        "Self",
+        "List[P?]",
+        "Executor",
+        "Shared[int]",
+        "Channel[int]",
+        "Iterator[int]",
+        "Atomic[int]",
+    ];
+    let probes: String = annotations
+        .iter()
+        .enumerate()
+        .map(|(i, a)| format!("fn probe{i}(a: {a}):\n    pass\n"))
+        .collect();
+    let tokens = lexer::tokenize(&format!("{decls}\n{probes}")).expect("lex");
+    let module = parser::parse(tokens).expect("parse");
+    let n_decls = module.stmts.len() - annotations.len();
+    let (decl_stmts, probe_stmts) = module.stmts.split_at(n_decls);
+    let diffs: Vec<String> = crate::on_frontend_stack_scoped(|| {
+        let mut c = Checker::new();
+        c.seed_native_prelude_sigs();
+        c.check_module(decl_stmts, None, &[], &[]);
+        c.current_self_ty = Some(Ty::strukt("P".to_string()));
+        let mut diffs = Vec::new();
+        for (a, s) in annotations.iter().zip(probe_stmts) {
+            let StmtKind::Fn(d) = &s.kind else {
+                panic!("probe is not a fn")
+            };
+            let ty = d.params[0].ty.clone().expect("annotated");
+            let ro = c.resolve_ty_ro(&ty);
+            let rw = c.resolve_type_at(&ty, Span::default(), crate::checker::sig::TypePos::Void);
+            if ro != rw {
+                diffs.push(format!("{a}: read-only {ro} vs mutable {rw}"));
+            }
+        }
+        diffs
+    });
+    assert!(
+        diffs.is_empty(),
+        "resolvers disagree:\n{}",
+        diffs.join("\n")
+    );
+}
