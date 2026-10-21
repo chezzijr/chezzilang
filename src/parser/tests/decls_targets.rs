@@ -1609,3 +1609,20 @@ fn a_name_is_bound_once_per_target_and_parameter_list() {
     parse_ok("_, _ := (1, 2)\n");
     parse_ok("fn g(_: int, _: int):\n    pass\n");
 }
+
+/// An enum needs at least one variant: `pass` and a methods-only body give the same error; an
+/// enum with a variant plus a method stays legal.
+#[test]
+fn enum_without_variant_is_rejected_for_every_body() {
+    let msg = "empty enums are not supported; an enum needs at least one variant";
+    for src in [
+        "enum Z:\n    pass\n",
+        "enum Z:\n    fn f(self) -> int:\n        return 1\n",
+    ] {
+        match try_parse(src) {
+            Err((_, m)) => assert_eq!(m, msg, "wrong error for {src:?}"),
+            Ok(_) => panic!("variant-less enum parsed: {src:?}"),
+        }
+    }
+    parse_ok("enum Z:\n    A\n    fn f(self) -> int:\n        return 1\n");
+}
