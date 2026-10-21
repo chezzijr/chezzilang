@@ -7,10 +7,11 @@
 
 pub use crate::lexer::Span;
 
+pub mod codec;
 pub mod consteval;
 
 /// A whole parsed source file: a flat sequence of top-level statements.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct Module {
     pub stmts: Vec<Stmt>,
 }
@@ -84,13 +85,13 @@ pub fn write_dump(out: &mut impl std::io::Write, module: &Module) -> std::io::Re
 
 // ===== statements =====
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct Stmt {
     pub kind: StmtKind,
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum StmtKind {
     /// `x := expr` (ty = None) or `name: Type = expr` (ty = Some). `target` holds one `Ident` for a
     /// plain/typed let, or a `Tuple` of `Ident`/`Wildcard`/`Tuple` for a destructuring let
@@ -341,7 +342,7 @@ impl StmtKind {
 
 /// A single C function signature inside an `extern "lib":` block — like a body-less [`FnDecl`],
 /// mirroring [`MethodSig`] but carrying its own [`Span`] (for per-fn marshallability errors).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct ExternFn {
     pub name: String,
     pub params: Vec<Param>,
@@ -356,7 +357,7 @@ pub struct ExternFn {
 /// scalar/type CONSTRUCTOR (`native ctor`). It agrees with `Builtin::first_class` (`base/builtin.rs`):
 /// `Fn` ⇒ first-class (value-position use emits `LoadBuiltin`, typed `Ty::Func`); `Ctor` ⇒ never
 /// first-class (uniform with a user struct ctor / `List` — value-position use is a checker error).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum NativeKind {
     Fn,
     Ctor,
@@ -367,7 +368,7 @@ pub enum NativeKind {
 /// DYNAMIC-PARAM CONVENTION (native-decl-scoped, no user-facing `any`): an UNANNOTATED param (`ty ==
 /// None`) means the dynamic "accepts anything" type (`Ty::Unknown`); a missing `-> ret` (`ret ==
 /// None`) means native-controlled/never (`Ty::Unknown` return, e.g. `panic`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct NativeDecl {
     pub name: String,
     pub name_span: Span,
@@ -391,7 +392,7 @@ pub struct NativeDecl {
 /// closure limit for the common case; form 2 allows a multi-statement cleanup body that runs
 /// top-to-bottom at scope exit (LIFO relative to other `defer`s). Unlike `spawn`, the block runs in
 /// the same task, so its captured free variables are not read-only.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum DeferTarget {
     /// `defer f(args)` / `defer obj.m(args)` — the expression must be a call (checker-enforced).
     Call(Expr),
@@ -402,7 +403,7 @@ pub enum DeferTarget {
 /// The target of a `spawn` statement: a named call (`spawn f(x)`) or an anonymous indented block
 /// (`spawn:`). Form 1 sidesteps the single-expression closure limit for the common case; form 2
 /// allows a multi-statement task body.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum SpawnTarget {
     /// `spawn f(args)` — the expression must be a call (parser-enforced).
     Call(Expr),
@@ -413,7 +414,7 @@ pub enum SpawnTarget {
 /// One arm of a `wait:` — either a recv-arm `<target> (:= | =) <chan>.recv(): <body>` or a send-arm
 /// `<chan>.send(v): <body>`. The parser is lenient (a bare non-`:=`/`=` expr becomes a `Send{call}`);
 /// the CHECKER validates that a send-arm's `call` is exactly `chan.send(value)` with matching types.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct WaitArm {
     pub kind: WaitArmKind,
     pub body: Block,
@@ -424,7 +425,7 @@ pub struct WaitArm {
 /// a send-arm blocks until its channel can accept `v` (bounded-with-space / unbounded / closed →
 /// faults), then runs its body binding nothing. Both are gated on readiness and selected in
 /// deterministic source order (§6d).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum WaitArmKind {
     /// `x := ch.recv():` / `y = ch.recv():` / `_ := ch.recv():` — `chan` is evaluated once.
     Recv { target: Pattern, chan: Expr },
@@ -432,7 +433,7 @@ pub enum WaitArmKind {
     Send { call: Expr },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum AssignOp {
     Eq,        // =
     PlusEq,    // +=
@@ -468,7 +469,7 @@ impl AssignOp {
 }
 
 /// A function definition — used both for top-level `fn`s and `struct` methods.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct FnDecl {
     pub name: String,
     /// Source span of the function-NAME token. Diagnostic metadata for editor tooling (the LSP
@@ -512,7 +513,7 @@ pub struct FnDecl {
 /// A generic type parameter declaration: `T`, `T: Comparable`, `T: Add + Mul`, or a parameterized
 /// bound `S: Iterator[T]`. `bounds` lists the protocols the instantiating type must satisfy
 /// (empty = unbounded).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct TypeParam {
     pub name: String,
     /// Source span of the param-NAME token (`T` in `fn id[T]` / `struct Box[T]`). Diagnostic-only
@@ -527,7 +528,7 @@ pub struct TypeParam {
 /// `Iterator` consumes its args today (element-type recovery); other protocols ignore them.
 /// `name` is the SOURCE spelling, bare (`Comparable`) or module-qualified `alias.Name`
 /// (`m.Factory`, TICKET-173); the checker re-spells a stored bound to its protocol key (DEC-027).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct Bound {
     pub name: String,
     pub args: Vec<Type>,
@@ -535,7 +536,7 @@ pub struct Bound {
 
 /// A protocol method signature — like an [`FnDecl`] but body-less. `Self` (as `Type::Named("Self")`)
 /// inside the params/ret refers to the conforming type.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct MethodSig {
     pub name: String,
     pub params: Vec<Param>,
@@ -546,7 +547,7 @@ pub struct MethodSig {
 /// `default` is `Some` for a defaulted param (`x: int = 10`). The default may be any expression that
 /// does not reference another parameter (the desugar pass enforces this and fills it in at omitting
 /// call sites). Free functions and struct methods allow defaults; closures do not.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct Param {
     pub name: String,
     /// Source span of the parameter-NAME token. Diagnostic-only (LSP overlay marks params
@@ -590,7 +591,7 @@ impl FnDecl {
 /// A struct field: `name: Type`, optionally with a default (`name: Type = expr`). A defaulted field
 /// is filled in by the desugar pass when a constructor call omits it. The default may be any
 /// expression that does not reference another field.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct Field {
     pub name: String,
     /// Source span of the field-NAME token. Diagnostic-only (LSP overlay marks struct field decls
@@ -601,7 +602,7 @@ pub struct Field {
 }
 
 /// An enum variant: `Circle(int)` → payload `[int]`; `Point` → payload `[]`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct Variant {
     pub name: String,
     /// Source span of the variant-NAME token. Diagnostic-only (the editor records a decl-site hover
@@ -613,7 +614,7 @@ pub struct Variant {
 }
 
 /// One arm of a `match`: `pattern [if guard]: body`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct MatchArm {
     /// Source position of the arm's first pattern token. Diagnostic-only: the checker reports
     /// arm-level pattern errors here. Runtime-inert; never read by desugar/compiler/vm.
@@ -631,7 +632,7 @@ pub struct MatchArm {
 /// (`0`, `"a"`, `true`) against int/str/bool scrutinees, a plain binding name in a sub-position,
 /// and a `_` wildcard catch-all. Sub-patterns nest arbitrarily (`Variant`/`Tuple` bindings are
 /// themselves `Pattern`s).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum Pattern {
     /// A binding name in a sub-position (a variant payload slot or tuple element), e.g. the `h` and
     /// `t` in `Cons(h, t)` or the `a`/`b` in `(a, b)`. A bare identifier at the *top* of an arm is a
@@ -780,7 +781,7 @@ impl Pattern {
 }
 
 /// Which side of a carrier a `?p` / `!p` pattern (or an `else` guard) tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum CarrierTag {
     /// `?p`: the present value of a `T?`, the success value of a `T!E`.
     Present,
@@ -799,7 +800,7 @@ impl CarrierTag {
 }
 
 /// A literal value usable as a `match` pattern.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum LitPattern {
     Int(i64),
     Str(String),
@@ -818,7 +819,7 @@ pub fn is_full_path_bind(name: &str) -> bool {
 /// `Type`'s `Named` span): the spans are pure editor-tooling metadata (the LSP records a decl-site
 /// hover at the bound import name); making position flip equality would break the parser tests that
 /// compare whole `Import`s and is semantically meaningless (runtime-inert, never read by a backend).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum Import {
     /// `import a.b.c` or `import a.b.c as alias`.
     Module {
@@ -1002,7 +1003,9 @@ pub fn min_callable_params(params: &[Param], has_witness_params: bool) -> usize 
 
 /// Whether a function TYPE ends in a variadic parameter, and which kind. The one owner of the
 /// fact: the parser sets it, `Ty::Func` carries it, and every comparison reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, borsh::BorshSerialize, borsh::BorshDeserialize,
+)]
 pub enum Variadic {
     /// No variadic parameter.
     No,
@@ -1019,7 +1022,7 @@ pub enum Variadic {
 /// editor-tooling metadata (the LSP overlay marks type references `type`); making position flip
 /// equality would break the parser tests that compare whole `Type`s and is semantically meaningless
 /// (no non-test code compares `Type`s — all uses are `matches!`/`if let`). Runtime-inert.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum Type {
     /// A bare type name (`int`, `Point`, `T`). `span` points at the name token (diagnostic-only,
     /// equality-neutral — see the type-level doc; `Span::default()` for a synthesized annotation).
@@ -1153,7 +1156,7 @@ pub fn is_tuple_index(name: &str) -> bool {
 
 // ===== expressions =====
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
@@ -1166,14 +1169,14 @@ pub struct Expr {
 /// `{expr}`). The third field holds the spec's nested `{expr}` fields (`{s:<{w}}`, `{x:.{p}f}`), width
 /// before precision — the order they evaluate in, after the value. Empty without a nested field.
 /// Built by the parser (`Parser::interp_chunks`) from the holes the lexer found.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum Chunk {
     Lit(String),
     Expr(Expr, Option<crate::fmtspec::FormatSpec>, Vec<Expr>),
 }
 
 /// Which form of `recover:` the parser read. The parser decides it once; no later phase re-derives it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum RecoverForm {
     /// `recover: expr` on one line: an ordinary expression of type `T!`.
     Inline,
@@ -1181,7 +1184,7 @@ pub enum RecoverForm {
     Block,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum ExprKind {
     Int(i64),
     Float(f64),
@@ -1497,7 +1500,7 @@ impl ExprKind {
 }
 
 /// The call part of an optional-chained method call `obj?.name(args)` — see [`ExprKind::OptChain`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct OptCall {
     pub args: Vec<Expr>,
     pub named: Vec<(String, Expr)>,
@@ -1505,7 +1508,7 @@ pub struct OptCall {
 }
 
 /// One arm of an expression-position `match`: `pattern [if guard]: value-expr`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct MatchExprArm {
     /// Source position of the arm's first pattern token. Diagnostic-only: the checker reports
     /// arm-level pattern errors here. Runtime-inert; never read by desugar/compiler/vm.
@@ -1517,7 +1520,7 @@ pub struct MatchExprArm {
 }
 
 /// Which collection a comprehension builds.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum CompKind {
     List,
     Set,
@@ -1529,14 +1532,14 @@ pub enum CompKind {
 /// follow this clause (Python allows an `if` after any clause, and even a chain — all must pass).
 /// The clause's `target` names are in scope for every later clause's `iter`/`guards` and for the
 /// element/key expressions.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct CompClause {
     pub target: Pattern,
     pub iter: Box<Expr>,
     pub guards: Vec<Expr>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum UnaryOp {
     Neg,    // -x
     Not,    // not x
@@ -1544,7 +1547,7 @@ pub enum UnaryOp {
     Wrap,   // ?x -- a present/success value of the expected `T?` / `T!E` (TICKET-227)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum BinaryOp {
     Add,
     Sub,

@@ -28,7 +28,7 @@
 /// requesting more is rejected. This is the real fix for the prior OOM (unbounded `repeat`).
 pub const MAX_FIELD: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum Align {
     Left,
     Right,
@@ -39,12 +39,14 @@ pub enum Align {
 
 /// A parsed format spec. A default (all-`None`/`false`) spec renders the base value with no padding
 /// — i.e. `{x:}` behaves like `{x}`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct FormatSpec {
+    #[borsh(serialize_with = "ser_char", deserialize_with = "de_char")]
     pub fill: char,
     pub align: Option<Align>,
     /// The sign char written before the digits: `'+'`, `'-'` or `' '`. `None` means the default
     /// (a leading `-` on negatives only, nothing on non-negatives).
+    #[borsh(serialize_with = "ser_opt_char", deserialize_with = "de_opt_char")]
     pub sign: Option<char>,
     /// `z` — coerce a negative zero (after rounding to the precision) to positive zero.
     pub zero_coerce: bool,
@@ -60,9 +62,36 @@ pub struct FormatSpec {
     /// placeholder so the presence checks in [`spec_valid_for_scalar`] still fire.
     pub dyn_precision: bool,
     /// `,` or `_` digit-group separator (CPython slot order: `[width][grouping][.precision][type]`).
+    #[borsh(serialize_with = "ser_opt_char", deserialize_with = "de_opt_char")]
     pub group: Option<char>,
     pub precision: Option<usize>,
+    #[borsh(serialize_with = "ser_opt_char", deserialize_with = "de_opt_char")]
     pub ty: Option<char>,
+}
+
+// `borsh` has no `char` encoding: a `char` travels as its `u32` scalar value.
+fn ser_char<W: std::io::Write>(c: &char, w: &mut W) -> std::io::Result<()> {
+    borsh::BorshSerialize::serialize(&u32::from(*c), w)
+}
+
+fn de_char<R: std::io::Read>(r: &mut R) -> std::io::Result<char> {
+    let n = <u32 as borsh::BorshDeserialize>::deserialize_reader(r)?;
+    char::from_u32(n).ok_or_else(not_a_char)
+}
+
+fn ser_opt_char<W: std::io::Write>(c: &Option<char>, w: &mut W) -> std::io::Result<()> {
+    borsh::BorshSerialize::serialize(&c.map(u32::from), w)
+}
+
+fn de_opt_char<R: std::io::Read>(r: &mut R) -> std::io::Result<Option<char>> {
+    match <Option<u32> as borsh::BorshDeserialize>::deserialize_reader(r)? {
+        Some(n) => char::from_u32(n).map(Some).ok_or_else(not_a_char),
+        None => Ok(None),
+    }
+}
+
+fn not_a_char() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "not a char")
 }
 
 impl Default for FormatSpec {

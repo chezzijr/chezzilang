@@ -174,7 +174,9 @@ pub enum Token {
 /// in practice: a source file cannot realistically reach 4 billion lines or columns. A fourth field
 /// costs 4 more bytes plus padding — measure `benches/run.chz` and re-probe those two constants
 /// before adding one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, borsh::BorshSerialize, borsh::BorshDeserialize,
+)]
 pub struct Span {
     pub line: u32,
     pub col: u32,
