@@ -3,6 +3,9 @@ name = "chezzi-native"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+chezzi-syntax = { path = "../chezzi-syntax" }
+
 [dependencies]
 chezzi-syntax = { path = "../chezzi-syntax" }
 libc = "0.2.186"
