@@ -1548,3 +1548,37 @@ fn a_nested_fn_used_only_by_itself_is_reported() {
         "fn m():\n    fn fact(n: int) -> int:\n        if n == 0:\n            return 1\n        return n * fact(n - 1)\n    print(fact(3))\nm()\n",
     );
 }
+
+/// TICKET-283 — an unused nested `fn` is named a function, in rustc's wording (`function 'f' is never
+/// used`), not `unused variable`. A plain unused local keeps `unused variable`.
+#[test]
+fn an_unused_nested_fn_is_named_a_function() {
+    let msgs = |src: &str| -> Vec<String> {
+        let (errs, warns) = warn_src(src);
+        assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+        warns.into_iter().map(|w| w.message).collect()
+    };
+    let unused = msgs("fn m():\n    fn f() -> int:\n        return 1\n    print(1)\nm()\n");
+    let rec = msgs(
+        "fn m():\n    fn rec(n: int) -> int:\n        if n == 0:\n            return 0\n        return rec(n - 1)\n    print(1)\nm()\n",
+    );
+    let once = msgs("fn m():\n    fn f() -> int:\n        return 1\n    print(f())\nm()\n");
+    let local = msgs("fn m():\n    x := 1\n    print(1)\nm()\n");
+    let all = format!("unused={unused:?} rec={rec:?} once={once:?} local={local:?}");
+    assert!(
+        unused
+            .iter()
+            .any(|m| m.contains("function 'f' is never used")),
+        "unused nested fn: {all}"
+    );
+    assert!(
+        rec.iter()
+            .any(|m| m.contains("function 'rec' is never used")),
+        "self-recursive nested fn: {all}"
+    );
+    assert!(once.is_empty(), "nested fn read once: {all}");
+    assert!(
+        local.iter().any(|m| m.contains("unused variable 'x'")),
+        "unused local: {all}"
+    );
+}
