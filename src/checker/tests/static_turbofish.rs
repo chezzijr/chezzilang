@@ -509,46 +509,48 @@ fn empty_protocol_accepts_all_like_any() {
         main()\n");
 }
 
-/// A zero-field struct (`struct S:\n    pass`) is intrinsically `Hashable`: usable as a Set element
-/// and a Map key with no explicit `hash(self)` method.
+/// TICKET-280 (owner decision U15): a zero-field struct (`struct S:\n    pass`) is no `Hashable` on
+/// its own, so it is neither a Set element nor a Map key without `hash` and `eq`.
 #[test]
-fn empty_struct_is_hashable() {
-    ok("struct S:\n    pass\n\
+fn empty_struct_is_not_hashable() {
+    rejects(
+        "struct S:\n    pass\n\
         fn main():\n\
         \x20   seen: Set[S] = {S(), S()}\n\
-        \x20   m: Map[S, int] = {S(): 1}\n\
-        \x20   print(seen.len() + m.len())\n\
-        main()\n");
+        main()\n",
+        "Set element type must implement Hashable",
+    );
 }
 
-/// TICKET-250 — a zero-field struct is `Hashable` with the constant hash unless it has the `hash`
-/// hook. A `hash` that does not satisfy `Hashable`'s requirement (wrong return, extra parameter)
-/// is an ordinary method: the struct hashes as one with no `hash` at all, and the method never
-/// runs under `Set` or `Map`.
+/// TICKET-250 — a `hash` that does not satisfy `Hashable`'s requirement (wrong return, extra
+/// parameter) is an ordinary method, so the zero-field struct has no `hash` hook and is no key
+/// (TICKET-280: no struct is `Hashable` on its own).
 #[test]
 fn empty_struct_with_mistyped_hash_is_not_the_hook() {
-    ok(
+    rejects(
         "struct S:\n    fn hash(self) -> str:\n        return \"x\"\n\
         fn main():\n\
         \x20   m: Map[S, int] = {S(): 1}\n\
         \x20   print(m.len())\n\
         main()\n",
+        "Map key type must implement Hashable",
     );
     // Arity variant: an extra parameter is the same class.
-    ok(
+    rejects(
         "struct S:\n    fn hash(self, k: int) -> int:\n        return k\n\
         fn main():\n\
         \x20   seen: Set[S] = {S()}\n\
         \x20   print(seen.len())\n\
         main()\n",
+        "Set element type must implement Hashable",
     );
 }
 
-/// A zero-field struct WITH a correctly-typed `hash(self) -> int` method stays Hashable (the
-/// structural check passes) — the intrinsic fix must not reject a valid explicit hash.
+/// A zero-field struct WITH a correctly-typed `hash(self) -> int` and an `eq` is Hashable.
 #[test]
 fn empty_struct_with_valid_hash_ok() {
     ok("struct S:\n    fn hash(self) -> int:\n        return 42\n\
+        \x20   fn eq(self, other: S) -> bool:\n        return true\n\
         fn main():\n\
         \x20   seen: Set[S] = {S()}\n\
         \x20   print(seen.len())\n\

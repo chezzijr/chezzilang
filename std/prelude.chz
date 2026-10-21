@@ -411,6 +411,10 @@ struct Range:
             h = h ^ 1
         return h
 
+    # The `Eq` hook a map key needs beside `hash` (TICKET-280): field by field, as `==` was.
+    fn eq(self, other: Self) -> bool:
+        return self.start == other.start and self.end == other.end and self.step == other.step and self.inclusive == other.inclusive
+
     fn str(self) -> str:
         a := ""
         match self.start:

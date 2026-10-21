@@ -565,24 +565,23 @@ impl Checker {
             return self.grant_intrinsic(protocol, ty);
         }
         // `Hashable` is satisfied intrinsically by the scalar key types (mirrors the map/set key
-        // restriction; float is excluded — its equality is a hazard). Struct conformance falls
-        // through to the structural check (needs a `hash(self) -> int` method).
+        // restriction; float is excluded — its equality is a hazard). A struct or enum needs both
+        // hooks (below).
         if protocol == "Hashable" && matches!(ty, Ty::Int | Ty::Str | Ty::Bytes | Ty::Bool) {
             return self.grant_intrinsic(protocol, ty);
         }
-        // A ZERO-FIELD struct WITHOUT an explicit `hash(self)` method is intrinsically `Hashable`: it
-        // has no state to hash, so the runtime returns a constant hash for it (with `==`'s type-tag
-        // guard keeping distinct empty-struct types unequal despite the hash collision). This lets
-        // `struct S: pass` be used as a Set element / Map key without an explicit `hash(self)` method.
-        // A zero-field struct that HAS the `hash` hook falls through to the structural check and
-        // gets its method dispatched. `declares_hook` is the one answer to "does the run time
-        // call the method".
+        // TICKET-280 (owner decision U15): a struct or enum is `Hashable` only when it declares both
+        // hooks, `hash` and `eq`, as Rust needs `Hash` and `Eq`. No declared type is a key on its
+        // own: a zero-field struct needs both hooks, and structural `==` does not count as the `Eq`
+        // half. A type without the `hash` hook falls through to the structural check below, which
+        // names `hash`. `declares_hook` is false for every type that is not a struct or an enum.
         if protocol == "Hashable"
-            && let Ty::Struct(name, _) = ty
-            && self.structs.get(name).is_some_and(|d| d.fields.is_empty())
-            && !self.declares_hook(ty, "Hashable", "hash")
+            && self.declares_hook(ty, "Hashable", "hash")
+            && !self.declares_hook(ty, "Eq", "eq")
         {
-            return self.grant_intrinsic(protocol, ty);
+            return Err(format!(
+                "type {ty} does not satisfy Hashable (missing method 'eq')"
+            ));
         }
         // `str` conforms to `Error` intrinsically (Go-style: its message is itself).
         if protocol == "Error" && matches!(ty, Ty::Str) {

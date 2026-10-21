@@ -545,7 +545,7 @@ fn binary_op_hint_reaches_both_operands_in_every_hinted_position() {
     }
 
     // operator column: set operators on Set[H[T]]
-    const SET_PRELUDE: &str = "import Eq from std.cmp\nstruct H[T: Eq]:\n    v: T\n    fn hash(self) -> int:\n        return 1\nfn mks[T: Eq]() -> Set[H[T]]:\n    return mks[T]()\n";
+    const SET_PRELUDE: &str = "import Eq from std.cmp\nstruct H[T: Eq]:\n    v: T\n    fn hash(self) -> int:\n        return 1\n    fn eq(self, other: Self) -> bool:\n        return self.v == other.v\nfn mks[T: Eq]() -> Set[H[T]]:\n    return mks[T]()\n";
     for op in ["|", "&", "^", "-"] {
         ok(&format!(
             "{SET_PRELUDE}fn use[Z: Eq]():\n    a: Set[H[Z]] = mks() {op} mks()\n    print(1)\nuse[int]()\n"
@@ -1157,7 +1157,7 @@ fn tuple_match_witness_stays_parenthesised() {
 #[test]
 fn w12_7_protocol_typed_map_set_key_accepts_literal_satisfying_value() {
     ok(
-        "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nm: Map[Keyed, str] = {}\nm[A(1)] = \"lit\"\ns: Set[Keyed] = {A(1), A(2)}\nprint(m)\nprint(s)\n",
+        "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\n    fn eq(self, other: A) -> bool:\n        return self.n == other.n\nm: Map[Keyed, str] = {}\nm[A(1)] =\"lit\"\ns: Set[Keyed] = {A(1), A(2)}\nprint(m)\nprint(s)\n",
     );
 }
 
@@ -1166,7 +1166,7 @@ fn w12_7_protocol_typed_map_set_key_accepts_literal_satisfying_value() {
 /// existing `List[Keyed]` and `Map[Hashable, int]` spellings unchanged.
 #[test]
 fn w12_7_protocol_key_neighbours_accept_and_reject() {
-    let prelude = "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nstruct B:\n    n: int\nm: Map[Keyed, str] = {}\n";
+    let prelude = "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\n    fn eq(self, other: A) -> bool:\n        return self.n == other.n\nstruct B:\n    n: int\nm: Map[Keyed, str] = {}\n";
     ok(&format!("{prelude}print(m[A(1)])\n"));
     ok(&format!("{prelude}print(A(1) in m)\n"));
     ok(&format!(
@@ -2003,7 +2003,7 @@ fn reassignment_hint_neighbours_accept() {
         "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nll: List[List[Named]] = [[A()]]\nll[0] = [A()]\nstruct Box[T]:\n    v: T\nb: Box[Named] = Box(A())\nbb: Box[Box[Named]] = Box[Box[Named]](b)\nbb.v = Box(A())\n",
     );
     ok(
-        "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nstruct B:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nm2: Map[Keyed, int] = {B(2): 5}\nm2 = {B(3): 6}\nfn f(m: Map[Keyed, int]) -> int:\n    return m.len()\nnested: Map[Keyed, Map[Keyed, int]] = {A(1): {B(2): 5}}\nnested[A(1)] = {B(2): 5}\n",
+        "protocol Keyed:\n    fn hash(self) -> int\nstruct A:\n    n: int\n    fn hash(self) -> int:\n        return self.n\n    fn eq(self, other: A) -> bool:\n        return self.n == other.n\nstruct B:\n    n: int\n    fn hash(self) -> int:\n        return self.n\n    fn eq(self, other: B) -> bool:\n        return self.n == other.n\nm2: Map[Keyed, int] = {B(2): 5}\nm2 = {B(3): 6}\nfn f(m: Map[Keyed, int]) -> int:\n    return m.len()\nnested: Map[Keyed, Map[Keyed, int]] = {A(1): {B(2): 5}}\nnested[A(1)] = {B(2): 5}\n",
     );
     ok(
         "protocol Named:\n    fn name(self) -> str\nstruct A:\n    fn name(self) -> str:\n        return \"a\"\nl: List[Named] = []\nl = [A()]\n",

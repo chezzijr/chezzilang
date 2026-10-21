@@ -54,7 +54,7 @@ impl Checker {
                 return Some(why);
             }
             let mut msg = format!(
-                "must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found {t}"
+                "must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int and eq(self, other: Self) -> bool), found {t}"
             );
             if let Some(bad) = self.unhashable_tuple_elem(t) {
                 msg.push_str(&format!(": element {bad} is not Hashable"));

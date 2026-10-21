@@ -833,7 +833,7 @@ impl Vm {
     /// W6-3 — dispatch an **intrinsic** protocol method: one the checker grants a BUILT-IN with no
     /// user method behind it (`src/checker/proto.rs::satisfies_args_d`'s `grant_intrinsic` early-outs
     /// — `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` + `Comparable` on int/float, `Hashable`
-    /// on int/str/bytes/bool/zero-field-struct, `Index`/`IndexSet`/`Slice` on list/map/str/bytes/
+    /// on int/str/bytes/bool/tuple, `Index`/`IndexSet`/`Slice` on list/map/str/bytes/
     /// bytearray). An erased `[T: Add]` body may write `a.add(b)`, so the VM must answer it.
     ///
     /// EVERY arm **delegates** to the exact primitive the operator form uses — `arith` for

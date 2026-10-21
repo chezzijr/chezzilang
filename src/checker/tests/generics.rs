@@ -1481,6 +1481,8 @@ struct Point:
     y: int
     fn hash(self) -> int:
         return self.x * 31 + self.y
+    fn eq(self, other: Point) -> bool:
+        return self.x == other.x and self.y == other.y
 ";
 
 #[test]
@@ -1639,6 +1641,8 @@ struct Id:
     n: int
     fn hash(self) -> int:
         return self.n
+    fn eq(self, other: Id) -> bool:
+        return self.n == other.n
 fn keyed[T: Hashable](v: T) -> int:
     return v.hash()
 x := keyed(Id(7))
@@ -1720,7 +1724,10 @@ fn tuple_key_of_hashable_elements_checks_ok() {
     ok("s: Set[(int, str)] = Set()\n");
     ok("s := Set([(1, 2)])\n");
     ok("m := {(i, i): i for i in 0..3}\n");
-    ok("struct Z:\n    pass\nm := {(1, Z()): \"a\"}\n");
+    rejects(
+        "struct Z:\n    pass\nm := {(1, Z()): \"a\"}\n",
+        "element Z is not Hashable",
+    );
     ok(
         "import Hashable from std.cmp\nfn f[T: Hashable](x: T) -> int:\n    return x.hash()\nprint(f((1, 2)))\n",
     );
@@ -2251,6 +2258,107 @@ fn resolve_type_and_resolve_ty_ro_map_every_annotation_to_the_same_ty() {
 fn zero_field_struct_is_not_hashable_on_its_own() {
     rejects(
         "struct Z:\n    pass\nm2 := {Z(): 1}\n",
-        "Map key type must implement Hashable",
+        "map key type must implement Hashable",
     );
+}
+
+/// TICKET-280 — the declarations the grid below shares: one type per kind.
+const HASHABLE_DECLS: &str = "\
+import Hashable from std.cmp
+struct Z:
+    pass
+struct ZS:
+    fn hash(k: int) -> int:
+        return k
+struct F:
+    x: int
+struct H:
+    x: int
+    fn hash(self) -> int:
+        return self.x
+struct HE:
+    x: int
+    fn hash(self) -> int:
+        return self.x
+    fn eq(self, other: HE) -> bool:
+        return self.x == other.x
+enum C:
+    A
+    B
+enum PE:
+    A(int)
+    B
+enum CH:
+    A
+    B
+    fn hash(self) -> int:
+        return 1
+enum CHE:
+    A
+    B
+    fn hash(self) -> int:
+        return 1
+    fn eq(self, other: CHE) -> bool:
+        return true
+struct G[T]:
+    v: T
+struct GH[T]:
+    v: T
+    fn hash(self) -> int:
+        return 1
+    fn eq(self, other: GH[T]) -> bool:
+        return true
+fn k[T: Hashable](x: T) -> int:
+    return 1
+opt: int? = 1
+";
+
+const RUSTC: &str = "rustc 1.98.1";
+
+/// TICKET-280 (owner decision U15, 2026-10-16): the verdict "is `T` Hashable" is one answer that
+/// the map key, the set element and the `Hashable` bound all read. A struct or enum is `Hashable`
+/// only with its own `hash` and `eq` (Rust: `#[derive(Hash)] struct P` as a `HashMap` key gives
+/// `the trait bound P: Eq is not satisfied`; `struct Z;` gives `Z: Hash is not satisfied`); a tuple
+/// is `Hashable` when every element is. The `opt` row follows the owner decision of 2026-10-21 in
+/// the TICKET-280 thread, not Rust: a wrapper type takes none of `T`'s protocols, so `int?` is no
+/// key, and a user who wants an optional key declares an enum with `hash` and `eq` (Rust accepts
+/// `Option<i32>` as a key).
+#[test]
+fn hashable_is_one_verdict_per_kind_at_every_site() {
+    let owner =
+        "owner 2026-10-21: T? takes no protocol of T; Rust and Python accept Option/None as a key";
+    let kinds: [(&str, bool, &str); 15] = [
+        ("Z()", false, RUSTC),
+        ("ZS()", false, RUSTC),
+        ("F(1)", false, RUSTC),
+        ("H(1)", false, RUSTC),
+        ("HE(1)", true, RUSTC),
+        ("C.A", false, RUSTC),
+        ("PE.A(1)", false, RUSTC),
+        ("CH.A", false, RUSTC),
+        ("CHE.A", true, RUSTC),
+        ("G(1)", false, RUSTC),
+        ("GH(1)", true, RUSTC),
+        ("(1, \"a\")", true, RUSTC),
+        ("(1, Z())", false, RUSTC),
+        ("(1, HE(1))", true, RUSTC),
+        ("opt", false, owner),
+    ];
+    let sites: [(&str, fn(&str) -> String); 3] = [
+        ("map key", |v| format!("m := {{{v}: 1}}\n")),
+        ("set element", |v| format!("s := Set([{v}])\n")),
+        ("Hashable bound", |v| format!("print(k({v}))\n")),
+    ];
+    let mut wrong = Vec::new();
+    for (v, verdict, oracle) in kinds {
+        for (site, line) in &sites {
+            let errs = check_src(&format!("{HASHABLE_DECLS}{}", line(v)));
+            if errs.is_empty() != verdict {
+                wrong.push(format!(
+                    "{site} {v}: want {verdict} ({oracle}), got {errs:?}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

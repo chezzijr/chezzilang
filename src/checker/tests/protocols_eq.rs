@@ -935,7 +935,7 @@ b := Box(Tag(2))
 
     // Ordinary key types, at the literal / comprehension / ctor / annotation / index sites.
     entry_ok(
-        "struct Z:\n    pass\nstruct H:\n    n: int\n    fn hash(self) -> int:\n        return self.n\nprint(Set([1]).len())\nprint(Set([\"s\"]).len())\nprint(Set([true]).len())\nprint(Set([b\"a\"]).len())\nprint(Set([Z()]).len())\nprint(Set([H(1)]).len())\nprint({\"k\": 1}.len())\nprint({x for x in [1]}.len())\nprint({x: 1 for x in [1]}.len())\nxs := [1, 2]\nprint(Set(xs).len())\nm := {\"k\": 1}\nprint(m[\"k\"])\nm[\"j\"] = 2\n",
+        "struct H:\n    n: int\n    fn hash(self) -> int:\n        return self.n\n    fn eq(self, other: H) -> bool:\n        return self.n == other.n\nprint(Set([1]).len())\nprint(Set([\"s\"]).len())\nprint(Set([true]).len())\nprint(Set([b\"a\"]).len())\nprint(Set([H(1)]).len())\nprint({\"k\": 1}.len())\nprint({x for x in [1]}.len())\nprint({x: 1 for x in [1]}.len())\nxs := [1, 2]\nprint(Set(xs).len())\nm := {\"k\": 1}\nprint(m[\"k\"])\nm[\"j\"] = 2\n",
     );
     // The SATISFIED instantiation of the very same conditional-`eq` struct, everywhere.
     entry_ok(&format!(

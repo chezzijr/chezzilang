@@ -297,7 +297,7 @@ impl Checker {
     /// TICKET-250 — the near-miss warning. A receiver-first method that [`Self::hook_verdict`]
     /// rejects for its shape warns only where the operator still accepts the type and silently
     /// skips the method: the operator is total (`print`), or the type satisfies the protocol
-    /// without the hook (structural `==`, a zero-field `Set` element, `for` through the other
+    /// without the hook (structural `==`, `for` through the other
     /// iteration hook). Where the operator rejects the type, that use is already a check error
     /// with the same reason, so nothing is silent and no warning fires. For a generic owner the
     /// question is asked with each of its type parameters carrying the protocol, the most an

@@ -45,9 +45,8 @@ use std::collections::{HashMap, HashSet};
 ///   the VM, so a row must be genuinely granted *and* genuinely callable.
 ///
 /// Many-to-many on purpose: `IndexSet` contributes two methods, and `Index`/`IndexSet` share `index`.
-/// `"struct"` is a coarsening — the `Hashable` grant is only for a ZERO-FIELD struct without its own
-/// `hash`, and the `Iterable`/`Iterator` grants only for a struct with `iter`/`next` — so the probe
-/// receiver for that kind is one struct that satisfies all three at once.
+/// `"struct"` is a coarsening — the `Iterable`/`Iterator` grants are only for a struct with `iter`/`next`
+/// — so the probe receiver for that kind is one struct that satisfies both at once.
 ///
 /// **Stays reserved-protocol-only.** A built-in witnessing a USER protocol (TICKET-024, W8-32,
 /// `Checker::satisfies_native`) is a DIFFERENT kind of grant — it goes through
@@ -128,12 +127,11 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     ("Stringable", "str", RecvKind::Shared),
     ("Stringable", "str", RecvKind::RwShared),
     ("Stringable", "str", RecvKind::Atomic),
-    // Hashable — the scalar key types + a zero-field struct with no own `hash`.
+    // Hashable — the scalar key types. A struct or enum needs its own `hash` and `eq` (TICKET-280).
     ("Hashable", "hash", RecvKind::Int),
     ("Hashable", "hash", RecvKind::Str),
     ("Hashable", "hash", RecvKind::Bytes),
     ("Hashable", "hash", RecvKind::Bool),
-    ("Hashable", "hash", RecvKind::Struct),
     // A tuple is Hashable exactly when every element type is (TICKET-161; CPython's rule).
     ("Hashable", "hash", RecvKind::Tuple),
     // Error — `str`'s message is itself (Go model).

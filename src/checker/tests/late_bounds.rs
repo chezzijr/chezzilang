@@ -409,7 +409,7 @@ fn static_method_is_not_a_hook_for_the_operator() {
 
 /// TICKET-250 — a receiver-first method with a hook's name that `hook_verdict` rejects for its
 /// shape warns, and only where the operator still accepts the type and silently skips the method
-/// (`==`, `print`, a zero-field `Set` element, `for` through the other iteration hook). A static
+/// (`==`, `print`, `for` through the other iteration hook). A static
 /// method never warns. A type the operator rejects never warns: that use is already a check error
 /// carrying the reason, and a `Set`-like `fn add(self, item)` must stay silent.
 #[test]
@@ -440,10 +440,8 @@ fn a_near_miss_hook_warns_only_where_the_operator_silently_skips_it() {
     for (m, needle) in cases {
         warns(&p(m), needle);
     }
-    warns(
-        "struct Z:\n    fn hash(self) -> str:\n        return \"h\"\nz := Z()\nprint(z)\n",
-        "'hash' on Z is not the Hashable hook",
-    );
+    // `Hashable` never warns (TICKET-280): the operator rejects every struct without the hook.
+    no_warn("struct Z:\n    fn hash(self) -> str:\n        return \"h\"\nz := Z()\nprint(z)\n");
     warns(
         "import Iterator from std.iter\nstruct C:\n    n: int\n    fn next(self) -> int?:\n        return None\n    fn iter(self, k: int) -> Iterator[int]:\n        return [k].iter()\nc := C(1)\nprint(c.n)\n",
         "'iter' on C is not the Iterable hook",

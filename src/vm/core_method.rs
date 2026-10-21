@@ -66,8 +66,7 @@ impl Vm {
                 Ok(Some(Value::obj(self.heap.alloc(Obj::Str(s.into())))))
             }
             // `Hashable` → the SAME hash a Map/Set key gets, so `x.hash()` can never disagree with
-            // `m[x]` / `s.contains(x)` membership. A zero-field struct with no `hash` hook gets
-            // `declared_hash`'s constant. `recv` stays rooted across the (possibly re-entrant,
+            // `m[x]` / `s.contains(x)` membership. `recv` stays rooted across the (possibly re-entrant,
             // possibly allocating) hash + the result box.
             ("hash", 0) => {
                 self.push(recv);

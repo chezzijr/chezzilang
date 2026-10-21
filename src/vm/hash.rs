@@ -206,9 +206,8 @@ impl Vm {
         }
     }
 
-    /// Hash a struct or enum key through its `hash` hook, returning the `i64` as a `u64`. A
-    /// zero-field struct with no hook hashes to the constant 0: it has no state, and `==`'s
-    /// type-tag guard keeps distinct empty-struct types unequal despite the shared hash.
+    /// Hash a struct or enum key through its `hash` hook, returning the `i64` as a `u64`. The
+    /// checker admits no struct or enum key without the hook (TICKET-280), so a miss faults.
     pub(super) fn declared_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         if let Some(res) = self.reentered(|vm| vm.invoke_hook(Hook::Hash, v, &[], span))? {
             return match self.int_val(res) {
@@ -223,16 +222,15 @@ impl Vm {
             return Err(self.missing_hook(v, Hook::Hash, span));
         };
         let name = self.struct_name_of_tid(*tid);
-        match self.program.structs.get(name) {
-            Some(def) if def.fields.is_empty() => Ok(0),
-            def => Err(self.err(
-                format!(
-                    "struct '{}' has no 'hash' method (needed to use it as a map/set key)",
-                    def.map_or(name, |d| d.display_name.as_str())
-                ),
-                span,
-            )),
-        }
+        let shown = self
+            .program
+            .structs
+            .get(name)
+            .map_or(name, |d| d.display_name.as_str());
+        Err(self.err(
+            format!("struct '{shown}' has no 'hash' method (needed to use it as a map/set key)"),
+            span,
+        ))
     }
 
     /// Hash `key`, keeping `roots` alive on the operand stack across the call. A struct key's

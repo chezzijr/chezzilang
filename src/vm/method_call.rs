@@ -846,9 +846,8 @@ impl Vm {
                     .get(name)
                     .map(|d| d.display_name.clone())
                     .unwrap_or_else(|| crate::base::words::bare_display(name));
-                // W6-3 — a zero-field struct with no `hash` hook is intrinsically `Hashable`
-                // (`proto.rs`), so `x.hash()` in an erased `[T: Hashable]` body must answer with the
-                // SAME constant `declared_hash` gives it as a Map/Set key.
+                // W6-3 — the `Eq`, `Stringable`, `Iterable` and `Iterator` struct rows are intrinsic
+                // (`proto.rs`), so a call in an erased `[T: Eq]` body answers through them.
                 if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
                     self.push(v);
                     return Ok(());
