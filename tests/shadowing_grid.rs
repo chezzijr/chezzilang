@@ -192,7 +192,7 @@ const CELLS: &[(&str, &str, &str)] = &[
     ),
     (
         "map-key-under-user-Hashable",
-        "protocol Hashable:\n    fn zap(self) -> int\nstruct P:\n    a: int\n    fn hash(self) -> int:\n        return self.a\nm := {P(1): \"x\"}\nprint(m.len())\n",
+        "protocol Hashable:\n    fn zap(self) -> int\nstruct P:\n    a: int\n    fn hash(self) -> int:\n        return self.a\n    fn eq(self, other: P) -> bool:\n        return self.a == other.a\nm := {P(1): \"x\"}\nprint(m.len())\n",
         "1\n",
     ),
     (

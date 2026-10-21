@@ -155,6 +155,8 @@ enum EH:
     fn hash(self) -> int:
         match self:
             EH.A(x): return x
+    fn eq(self, other: EH) -> bool:
+        return self.hash() == other.hash()
 
 fn gen(v: int) -> Iterator[int]:
     yield v

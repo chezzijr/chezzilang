@@ -1289,13 +1289,13 @@ fn f():
 "#,
         [
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int and eq(self, other: Self) -> bool), found None"#,
             ),
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int and eq(self, other: Self) -> bool), found None"#,
             ),
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int and eq(self, other: Self) -> bool), found None"#,
             ),
         ],
     ),
@@ -1310,13 +1310,13 @@ fn f():
 "#,
         [
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int and eq(self, other: Self) -> bool), found None"#,
             ),
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int and eq(self, other: Self) -> bool), found None"#,
             ),
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int and eq(self, other: Self) -> bool), found None"#,
             ),
         ],
     ),

@@ -931,9 +931,9 @@ fn conditional_failures() -> Vec<String> {
             }
         }
     }
-    // A zero-field struct with a conditional `hash`: the constant-hash grant applies only when
-    // the declaration has no `hash` hook, so an unsatisfied instantiation is not `Hashable`.
-    let z = "import Comparable from std.cmp\nstruct Z[T]:\n    fn hash(self) -> int where T: Comparable:\n        print(\"hash ran\")\n        return 7\n";
+    // A zero-field struct with a conditional `hash`: the conditional `hash` decides the
+    // instantiation, so an unsatisfied instantiation is not `Hashable`.
+    let z = "import Comparable from std.cmp\nstruct Z[T]:\n    fn hash(self) -> int where T: Comparable:\n        print(\"hash ran\")\n        return 7\n    fn eq(self, other: Self) -> bool:\n        return true\n";
     let (clean, text) = check(
         "where_zero_field_unsat",
         &format!("{z}struct N:\n    w: int\ns: Set[Z[N]] = Set()\ns.add(Z[N]())\n"),
