@@ -1537,16 +1537,18 @@ fn t186_module_global_record_grid() {
 }
 
 /// TICKET-263 — a nested `fn` name is a candidate, and a call inside the fn's own body is not a read
-/// (rustc `dead_code`). A recursive nested fn that the enclosing fn calls stays silent.
+/// (rustc `dead_code`): the warning reads `function 'lone' is never used`. A recursive nested fn that
+/// the enclosing fn calls stays silent, and so does a `_`-prefixed one.
 #[test]
 fn a_nested_fn_used_only_by_itself_is_reported() {
     warns(
         "fn m():\n    fn lone(n: int) -> int:\n        return lone(n)\nm()\n",
-        "unused variable 'lone'",
+        "function 'lone' is never used",
     );
     no_warn(
         "fn m():\n    fn fact(n: int) -> int:\n        if n == 0:\n            return 1\n        return n * fact(n - 1)\n    print(fact(3))\nm()\n",
     );
+    no_warn("fn m():\n    fn _lone(n: int) -> int:\n        return _lone(n)\nm()\n");
 }
 
 /// TICKET-283 — an unused nested `fn` is named a function, in rustc's wording (`function 'f' is never
