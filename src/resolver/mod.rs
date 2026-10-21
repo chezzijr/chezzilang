@@ -2162,6 +2162,24 @@ mod tests {
         );
     }
 
+    // TICKET-282 — a std import costs about 3.4 ms because every run lexes and parses the embedded
+    // std source again. The AST comes from a build-time artifact, so a run lexes and parses no std
+    // file. The test inverts the `== 1` pin in the test above.
+    #[test]
+    fn a_std_import_lexes_and_parses_no_std_source_at_run_time() {
+        let t = TmpDir::new();
+        let entry = t.write(
+            "main.chz",
+            "import Eq from std.cmp\nfn f[T: Eq](a: T) -> T:\n    return a\n",
+        );
+        build_graph(&entry).expect("graph should build");
+        assert_eq!(
+            std_parse_count("cmp.chz"),
+            0,
+            "std.cmp was lexed and parsed at run time"
+        );
+    }
+
     // W7-49 — `Span::file` is a TABLE KEY component, so the ONE thing that can make the fix silently
     // not work is a lex seam that forgets to stamp it, leaving two modules both on `file: 0`. Assert
     // the property as a GRAPH-LEVEL invariant over every module (not a spot check): every id is
