@@ -1,4 +1,4 @@
-//! TICKET-090 — the unused-local warning (Rust's shape: `unused variable`, never Go's error).
+//! TICKET-090 — the unused-local warning (Rust's shape: `unused variable`, or rustc's `function 'f' is never used` for a nested `fn`; never Go's error).
 //!
 //! A separate SYNTACTIC pass over one module's statements, run once per module after the type-check
 //! loop. It is not folded into inference because inference re-checks fn bodies (return-inference
@@ -19,11 +19,20 @@ use crate::ast::{
 use crate::compiler::chunk_exprs;
 use std::collections::HashSet;
 
+/// What a never-read binding reports: rustc's `unused_variables` for a local, `dead_code` for a
+/// nested `fn`.
+#[derive(Clone, Copy)]
+enum Report {
+    /// A binding that shadows but is never reported (a parameter, a `match` binding…).
+    Never,
+    Variable,
+    Function,
+}
+
 struct Binding {
     name: String,
     span: Span,
-    /// `false` for a binding that shadows but is never reported (a parameter, a `match` binding…).
-    tracked: bool,
+    report: Report,
     read: bool,
 }
 
@@ -35,29 +44,45 @@ struct Scan {
     all: Vec<Binding>,
 }
 
-/// Every never-read local of the module, as `(name, span of the binding)`, in source order.
-pub(super) fn unused_locals(stmts: &[Stmt]) -> Vec<(String, Span)> {
+/// Every never-read local of the module, as `(span of the binding, warning text)`, in source order.
+pub(super) fn unused_locals(stmts: &[Stmt]) -> Vec<(Span, String)> {
     let mut s = Scan::default();
     s.block_items(stmts);
     s.all
         .into_iter()
-        .filter(|b| b.tracked && !b.read)
-        .map(|b| (b.name, b.span))
+        .filter(|b| !b.read)
+        .filter_map(|b| {
+            let name = &b.name;
+            let msg = match b.report {
+                Report::Never => return None,
+                Report::Variable => format!(
+                    "unused variable '{name}': it is never read; prefix it with '_' if that is intended"
+                ),
+                Report::Function => {
+                    format!("function '{name}' is never used; prefix it with '_' if that is intended")
+                }
+            };
+            Some((b.span, msg))
+        })
         .collect()
 }
 
 impl Scan {
-    fn bind(&mut self, name: &str, span: Span, tracked: bool) {
+    fn bind(&mut self, name: &str, span: Span, report: Report) {
         // Module scope binds nothing: a global may be read by an importer.
         let Some(top) = self.scopes.last_mut() else {
             return;
         };
-        let tracked = tracked && !name.starts_with('_');
+        let report = if name.starts_with('_') {
+            Report::Never
+        } else {
+            report
+        };
         top.push(self.all.len());
         self.all.push(Binding {
             name: name.to_string(),
             span,
-            tracked,
+            report,
             read: false,
         });
     }
@@ -92,7 +117,7 @@ impl Scan {
             }
         }
         for p in params {
-            self.bind(&p.name, p.name_span, false);
+            self.bind(&p.name, p.name_span, Report::Never);
         }
     }
 
@@ -107,7 +132,7 @@ impl Scan {
         let mut names = HashSet::new();
         names.extend(p.binder_names());
         for n in names {
-            self.bind(&n, Span::RUNTIME, false);
+            self.bind(&n, Span::RUNTIME, Report::Never);
         }
     }
 
@@ -122,7 +147,7 @@ impl Scan {
             StmtKind::Let { target, value, .. } => {
                 self.expr(value);
                 for (n, span) in target.binders() {
-                    self.bind(n, span, true);
+                    self.bind(n, span, Report::Variable);
                 }
             }
             StmtKind::Assign { target, op, value } => {
@@ -164,7 +189,7 @@ impl Scan {
                 }
             }
             StmtKind::Fn(d) => {
-                self.bind(&d.name, d.name_span, true);
+                self.bind(&d.name, d.name_span, Report::Function);
                 // Module scope binds nothing, so only a nested fn has a binding to reset.
                 let own = (!self.scopes.is_empty()).then(|| self.all.len() - 1);
                 self.fn_decl(d);
@@ -198,7 +223,7 @@ impl Scan {
                 self.expr(iter);
                 self.scoped(|s| {
                     for (v, span) in target.binders() {
-                        s.bind(v, span, true);
+                        s.bind(v, span, Report::Variable);
                     }
                     s.block_items(body);
                 });
@@ -233,7 +258,7 @@ impl Scan {
                             WaitArmKind::Recv { target, chan } => {
                                 s.expr(chan);
                                 for (n, _) in target.binders() {
-                                    s.bind(n, arm.span, false);
+                                    s.bind(n, arm.span, Report::Never);
                                 }
                             }
                             WaitArmKind::Send { call } => s.expr(call),
@@ -295,7 +320,7 @@ impl Scan {
                 for c in clauses {
                     s.expr(&c.iter);
                     for (v, _) in c.target.binders() {
-                        s.bind(v, Span::RUNTIME, false);
+                        s.bind(v, Span::RUNTIME, Report::Never);
                     }
                     c.guards.iter().for_each(|g| s.expr(g));
                 }
@@ -371,7 +396,7 @@ impl Scan {
                 self.expr(value);
                 self.scoped(|s| {
                     if let Some((name, span)) = err {
-                        s.bind(name, *span, false);
+                        s.bind(name, *span, Report::Never);
                     }
                     s.block_items(body);
                 });
