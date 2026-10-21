@@ -1,6 +1,7 @@
 # TICKET-278 (U16): the collection convention rows. The oracle is Rust's std, run for each value:
-#   Vec::remove(i) -> T          HashSet::insert(v) -> bool      HashMap::insert(k, v) -> Option<V>
-#   HashSet::remove(&v) -> bool  HashMap::remove(&k) -> Option<V>
+#   Vec::remove(i) -> T          HashSet::insert(v) -> bool      HashMap::insert(k, v) -> V?
+#   HashSet::remove(&v) -> bool  HashMap::remove(&k) -> V?
+# (Rust returns its optional type where this table writes `V?`.)
 # `List.remove(i)` takes the index rule of `xs[i]` (a negative index counts from the end; Rust has no
 # negative index), and an index out of range is a fault (Rust panics). The concurrent handles agree
 # with their plain twins.
