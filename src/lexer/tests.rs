@@ -1952,39 +1952,6 @@ fn render_snippet_tab_keeps_columns() {
     assert!(caret_line.ends_with(" ^"), "got: {out}");
 }
 
-/// `tokenize_statement` stops at the end of ONE top-level statement: after the `Dedent` that closes
-/// its block, or after a `Newline` when no block follows. It never reads the statements after it.
-#[test]
-fn tokenize_statement_ends_at_the_block_close() {
-    let src = "protocol A:\n    fn f(self)\n# note\n\n    fn g(self)\nx := 1\n";
-    let toks = tokenize_statement(src, 7).unwrap();
-    let last = toks.last().unwrap();
-    assert_eq!(last.kind, Token::Eof);
-    assert!(
-        toks.iter().all(|t| t.kind != Token::Ident("x".into())),
-        "the next statement leaked: {toks:?}"
-    );
-    let g = toks
-        .iter()
-        .find(|t| t.kind == Token::Ident("g".into()))
-        .expect("the second method is in the block");
-    assert_eq!(g.span.line, 11, "spans count from first_line");
-}
-
-#[test]
-fn tokenize_statement_without_a_block_ends_at_its_newline() {
-    let toks = tokenize_statement("x := 1\ny := 2\n", 1).unwrap();
-    assert!(toks.iter().all(|t| t.kind != Token::Ident("y".into())));
-    assert_eq!(toks.last().unwrap().kind, Token::Eof);
-}
-
-#[test]
-fn tokenize_statement_ends_at_eof_with_no_trailing_newline() {
-    let toks = tokenize_statement("protocol A:\n    fn f(self)", 1).unwrap();
-    assert_eq!(toks.last().unwrap().kind, Token::Eof);
-    assert!(toks.iter().any(|t| t.kind == Token::Ident("f".into())));
-}
-
 /// TICKET-265 — `ident_words` lists each identifier with its line, the ones inside a string hole
 /// and a spec field included. A keyword, a comment and plain string text are not words.
 #[test]

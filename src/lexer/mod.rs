@@ -2178,53 +2178,6 @@ pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
     Lexer::new(source).tokenize()
 }
 
-/// The tokens of the ONE top-level statement that begins at the first character of `source`, then
-/// an `Eof`. Line numbers count from `first_line`, so a span is the span the whole file would give.
-/// The statement ends where the layout says so: after the `Dedent` that closes its indented block,
-/// or after its `Newline` when no block follows. The lexer reads no further than the first token
-/// of the next statement, so a caller that wants one declaration of a long file does not lex the
-/// rest of it.
-pub fn tokenize_statement(source: &str, first_line: usize) -> Result<Vec<Tok>, LexError> {
-    let mut lexer = Lexer::new(source);
-    lexer.line = first_line;
-    let mut tokens: Vec<Tok> = Vec::new();
-    let mut depth = 0usize;
-    let mut after_newline = false;
-    loop {
-        let tok = lexer.next_token()?;
-        let ends_here = after_newline && !matches!(tok.kind, Token::Indent);
-        let closes_block = matches!(tok.kind, Token::Dedent) && depth == 1;
-        let at_eof = matches!(tok.kind, Token::Eof);
-        if ends_here || at_eof {
-            let span = tok.span;
-            tokens.push(Tok {
-                kind: Token::Eof,
-                span,
-                indent: None,
-            });
-            return Ok(tokens);
-        }
-        after_newline = false;
-        if matches!(tok.kind, Token::Indent) {
-            depth += 1;
-        } else if matches!(tok.kind, Token::Dedent) {
-            depth = depth.saturating_sub(1);
-        } else if matches!(tok.kind, Token::Newline) && depth == 0 {
-            after_newline = true;
-        }
-        let span = tok.span;
-        tokens.push(tok);
-        if closes_block {
-            tokens.push(Tok {
-                kind: Token::Eof,
-                span,
-                indent: None,
-            });
-            return Ok(tokens);
-        }
-    }
-}
-
 /// TICKET-265 — call `each` with the line and the text of each identifier of `toks`, in token
 /// order. The tokens of a string hole and of a spec field count; a keyword, a comment and string
 /// text do not. The module graph reads it to find the std fns a program names.

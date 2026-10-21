@@ -257,14 +257,15 @@ fn operators_need_no_import() {
     );
 }
 
-/// `std_protocol_decls` parses only the `protocol` slices of each std file (startup cost). It must
-/// equal what a full parse of every `STD_FILES` entry finds, spans included.
+/// `std_protocol_decls` reads the `protocol` statements the build script extracted from its parse
+/// of each std file. It must equal what a full parse of every `STD_FILES` entry finds, spans
+/// included: a std file's spans carry its id, `index + 1`.
 #[test]
 fn std_protocol_decls_equal_a_full_parse() {
     let mut full: Vec<(String, String, crate::ast::Stmt)> = Vec::new();
-    for (rel, src) in crate::native::std_embed::STD_FILES {
+    for (index, (rel, src)) in crate::native::std_embed::STD_FILES.iter().enumerate() {
         let module = format!("std.{}", rel.trim_end_matches(".chz").replace('/', "."));
-        let ast = crate::parser::parse(crate::lexer::tokenize(src).expect("std lexes"))
+        let (ast, _) = crate::parser::parse_module_source(src, index as u32 + 1, &|_: &str| false)
             .expect("std parses");
         for s in &ast.stmts {
             if let StmtKind::Protocol { name, .. } = &s.kind {
@@ -277,23 +278,6 @@ fn std_protocol_decls_equal_a_full_parse() {
         .map(|p| (p.name.clone(), p.module.clone(), p.stmt.clone()))
         .collect();
     assert_eq!(found, full);
-}
-
-/// A protocol block ends where the lexer ends it: a column-0 comment line and a blank line stay
-/// inside it, a dedent ends it, and a `protocol` word inside a string is not a declaration.
-#[test]
-fn protocol_stmts_follow_the_lexer_block_extent() {
-    let src = "# c\nprotocol A:\n    fn a(self)\n# note\n    fn b(self)\n\n    fn c(self)\nfn f():\n    pass\n    s = \"protocol Z:\"\nprotocol B:\n    fn d(self)\n";
-    let shape: Vec<(String, usize, usize)> = graph_pass::protocol_stmts(src)
-        .iter()
-        .filter_map(|s| {
-            let StmtKind::Protocol { name, methods, .. } = &s.kind else {
-                return None;
-            };
-            Some((name.clone(), methods.len(), s.span.line as usize))
-        })
-        .collect();
-    assert_eq!(shape, [("A".to_string(), 3, 2), ("B".to_string(), 1, 11)]);
 }
 
 /// A signature error in a struct or enum method points into that method's line, not at the type's

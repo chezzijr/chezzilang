@@ -480,31 +480,6 @@ fn std_module_of(rel: &str) -> String {
     format!("std.{}", rel.trim_end_matches(".chz").replace('/', "."))
 }
 
-/// Every `protocol` declaration of one std source, in file order, found WITHOUT parsing the rest of
-/// the file: the protocol table is read on every program start, and lexing all of `std/*.chz` for
-/// it costs 5 ms in a release build and 10 ms in a debug build. A column-0 `protocol ` line only
-/// says where to start. `crate::lexer::tokenize_statement` decides where the statement ends, so
-/// the extent of a block is the lexer's, comments and strings included. Its spans are the file's.
-/// `std_protocol_decls_equal_a_full_parse` holds this to a full parse.
-pub(super) fn protocol_stmts(src: &str) -> Vec<crate::ast::Stmt> {
-    let mut stmts = Vec::new();
-    let mut offset = 0;
-    for (index, line) in src.split_inclusive('\n').enumerate() {
-        if line.starts_with("protocol ")
-            && let Ok(tokens) = crate::lexer::tokenize_statement(&src[offset..], index + 1)
-            && let Ok(ast) = crate::parser::parse(tokens)
-        {
-            stmts.extend(
-                ast.stmts
-                    .into_iter()
-                    .filter(|s| matches!(s.kind, StmtKind::Protocol { .. })),
-            );
-        }
-        offset += line.len();
-    }
-    stmts
-}
-
 /// Every public type name a std module declares → its modules (`std.regex` for `Match`), read once
 /// from the shared std parse (`resolver::std_module_ast`) on the first diagnostic that needs an import hint, never at
 /// startup. The prelude is left out: its types are in scope everywhere. A protocol is left out
@@ -539,21 +514,25 @@ pub(super) fn std_type_owners() -> &'static HashMap<String, Vec<String>> {
 }
 
 /// Every `protocol` declaration in the embedded std sources, in file order: the one source of which
-/// protocols exist, their shapes and the module that owns each.
+/// protocols exist, their shapes and the module that owns each. The build script extracts them
+/// from the same parse as the module ASTs (`std_embed::STD_PROTOCOLS`), so their spans carry the
+/// file's id.
 pub(super) fn std_protocol_decls() -> &'static [StdProtocol] {
     static PROTOCOLS: std::sync::OnceLock<Vec<StdProtocol>> = std::sync::OnceLock::new();
     PROTOCOLS.get_or_init(|| {
+        let decoded = crate::ast::codec::decode::<Vec<(u32, crate::ast::Stmt)>>(
+            crate::native::std_embed::STD_PROTOCOLS,
+        )
+        .expect("the std protocol artifact decodes");
         let mut protocols = Vec::new();
-        for (rel, src) in crate::native::std_embed::STD_FILES {
-            let module = std_module_of(rel);
-            for stmt in protocol_stmts(src) {
-                if let StmtKind::Protocol { name, .. } = &stmt.kind {
-                    protocols.push(StdProtocol {
-                        name: name.clone(),
-                        module: module.clone(),
-                        stmt,
-                    });
-                }
+        for (index, stmt) in decoded {
+            let module = std_module_of(crate::native::std_embed::STD_FILES[index as usize].0);
+            if let StmtKind::Protocol { name, .. } = &stmt.kind {
+                protocols.push(StdProtocol {
+                    name: name.clone(),
+                    module,
+                    stmt,
+                });
             }
         }
         protocols
