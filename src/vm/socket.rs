@@ -750,7 +750,7 @@ impl Vm {
     fn socket_write(
         &mut self,
         h: GcRef,
-        method: &str,
+        which: SocketMethod,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
@@ -759,7 +759,7 @@ impl Vm {
             return Ok(self.sock_err("timeout"));
         }
         let timeout = self.parse_timeout_ms(args.get(1), span)?;
-        let data = if method == "write_bytes"
+        let data = if which == SocketMethod::WriteBytes
             && let Some(v) = args.first()
         {
             self.collect_bytes_arg("write_bytes", *v, span)?
@@ -866,7 +866,7 @@ impl Vm {
             // `write(s[, timeout_ms])` (str) and R1's `write_bytes(b[, timeout_ms])` (raw `bytes`)
             // are the SAME write path — only the byte-extraction differs.
             SocketMethod::Write | SocketMethod::WriteBytes => {
-                let r = self.socket_write(h, method, args, span);
+                let r = self.socket_write(h, which, args, span);
                 // N2 — `write` now latches its deadline on the fiber like `read` (a re-park must not
                 // re-arm the budget), so it MUST drop the latch on completion too.
                 self.drop_poll_latch();

@@ -1245,27 +1245,20 @@ impl Vm {
                         };
                         let out = self.with_roots(&[Value::obj(h), args[0]], |vm| {
                             let mut out = SetData::default();
-                            match method {
-                                "union" => {
-                                    for (he, e) in mine.iter().chain(other.entries.iter()) {
-                                        add(vm, &mut out, *he, *e)?;
-                                    }
+                            // This arm serves exactly Union, Intersection and Difference.
+                            if which == SetMethod::Union {
+                                for (he, e) in mine.iter().chain(other.entries.iter()) {
+                                    add(vm, &mut out, *he, *e)?;
                                 }
+                            } else {
                                 // intersection keeps mine's elements present in other; difference drops them.
-                                m => {
-                                    let keep_when_present = m == "intersection";
-                                    for (he, e) in &mine {
-                                        let in_other = vm
-                                            .set_slot(
-                                                &other.entries,
-                                                other.candidates(*he),
-                                                *e,
-                                                span,
-                                            )?
-                                            .is_some();
-                                        if in_other == keep_when_present {
-                                            add(vm, &mut out, *he, *e)?;
-                                        }
+                                let keep_when_present = which == SetMethod::Intersection;
+                                for (he, e) in &mine {
+                                    let in_other = vm
+                                        .set_slot(&other.entries, other.candidates(*he), *e, span)?
+                                        .is_some();
+                                    if in_other == keep_when_present {
+                                        add(vm, &mut out, *he, *e)?;
                                     }
                                 }
                             }

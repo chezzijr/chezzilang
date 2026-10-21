@@ -322,18 +322,18 @@ impl Vm {
             }
             RwSharedPrim::Contains => {
                 self.arity_err(method, args, 1, span)?;
-                let hit = self.rwshared_find(&core, method, args[0], false, span)?;
+                let hit = self.rwshared_find(&core, prim, args[0], false, span)?;
                 Ok(Value::bool(hit.is_some()))
             }
             RwSharedPrim::Has => {
                 self.arity_err(method, args, 1, span)?;
-                let hit = self.rwshared_find(&core, method, args[0], false, span)?;
+                let hit = self.rwshared_find(&core, prim, args[0], false, span)?;
                 Ok(Value::bool(hit.is_some()))
             }
             RwSharedPrim::GetKey => {
                 self.arity_err(method, args, 1, span)?;
                 Ok(
-                    match self.rwshared_find(&core, method, args[0], true, span)? {
+                    match self.rwshared_find(&core, prim, args[0], true, span)? {
                         Some(v) => self.alloc_enum("Option", "Some", vec![v]),
                         None => self.alloc_enum("Option", "None", vec![]),
                     },
@@ -353,12 +353,12 @@ impl Vm {
     fn rwshared_find(
         &mut self,
         core: &Arc<RwSharedCore>,
-        method: &str,
+        prim: RwSharedPrim,
         needle: Value,
         with_value: bool,
         span: Span,
     ) -> Result<Option<Value>, RuntimeError> {
-        let on_set = method == "_contains";
+        let on_set = prim == RwSharedPrim::Contains;
         let qh = self.hash_value(needle, span)?;
         let cands = self.rwshared_read(core, span, |vm, ctx| {
             let mut out = Vec::new();
@@ -377,9 +377,10 @@ impl Vm {
                 }
                 _ => {
                     let want = if on_set { "set" } else { "map" };
-                    return Err(
-                        vm.err(format!("RwShared.{method} requires a {want} element"), span)
-                    );
+                    return Err(vm.err(
+                        format!("RwShared.{} requires a {want} element", prim.name()),
+                        span,
+                    ));
                 }
             }
             Ok(out)

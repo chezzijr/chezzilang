@@ -1556,7 +1556,7 @@ fn collection_convention_rows_hold() {
         "import std.concurrency.collection\nc := collection.ConcurrentMap[str, int].new()";
     const CSET: &str =
         "import std.concurrency.collection\nc := collection.ConcurrentSet[int].new()";
-    let rows: [(&str, &str, &str); 8] = [
+    let rows: [(&str, &str, &str); 9] = [
         ("xs := [1, 2, 3]", "xs.remove(0)", "int"),
         ("s := {1, 2}", "s.insert(5)", "bool"),
         ("s := {1, 2}", "s.remove(1)", "bool"),
@@ -1565,6 +1565,7 @@ fn collection_convention_rows_hold() {
         (CMAP, "c.insert(\"a\", 1)", "int?"),
         (CMAP, "c.remove(\"a\")", "int?"),
         (CSET, "c.insert(1)", "bool"),
+        (CSET, "c.remove(1)", "bool"),
     ];
     for (setup, call, ty) in rows {
         ok(&format!("{setup}\nx: {ty} = {call}\nprint(x)\n"));

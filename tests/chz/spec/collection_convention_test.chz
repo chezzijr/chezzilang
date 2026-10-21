@@ -36,6 +36,13 @@ test fn list_remove_faults_out_of_range_and_keeps_the_list():
     empty: List[int] = []
     assert faults(fn() -> int: empty.remove(0))
 
+test fn list_remove_fault_names_the_index_and_length():
+    ys := [1, 2]
+    res := recover: ys.remove(5)
+    match res:
+        ?_: assert false
+        !e: assert e.message() == "index 5 out of bounds (len 2)"
+
 test fn set_insert_reports_whether_the_value_was_new():
     s := Set[int]()
     assert s.insert(1) == true

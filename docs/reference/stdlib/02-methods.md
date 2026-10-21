@@ -109,7 +109,7 @@ Keep callbacks pure; if you need both, sort a copy and merge after.
 | `keys` | `() -> List[K]` | Insertion order. |
 | `values` | `() -> List[V]` | Insertion order. |
 | `items` | `() -> List[(K, V)]` | Insertion order, the same order as `keys()`, so `Map(m.items()) == m`. Returns a fresh list (a snapshot, like `keys()`; CPython returns a live view). |
-| `insert` | `(key: K, val: V) -> V?` | *mutates*: sets `m[key] = val` and returns the value it replaced, or `None` for a new key (Rust `HashMap::insert`). A bare `m.insert(k, v)` statement warns, like every dropped `V?`; write `_ := m.insert(k, v)`. |
+| `insert` | `(key: K, val: V) -> V?` | *mutates*: sets `m[key] = val` and returns the value it replaced, or `None` for a new key (Rust `HashMap::insert`). A bare `m.insert(k, v)` statement warns, like every dropped `V?`; write `m[k] = v`, or `_ := m.insert(k, v)`. |
 | `remove` | `(key: K) -> V?` | *mutates*: returns the removed value, or `None`. |
 | `merge` | `(other: Map[K, V]) -> Map[K, V]` | Returns a **new** map (`other` wins on key clash). |
 | `update` | `(other: Map[K, V]) -> None` | *mutates*: merge `other` into self. |

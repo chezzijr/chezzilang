@@ -147,7 +147,7 @@ None open on 2026-10-16.
 
 ### Owner decisions not yet implemented
 
-- **Collection protocols** (U16, 2026-10-16): the `Sized` and `Extend` protocols are not declared yet.
+- **U16: `Sized` and `Extend` protocols not declared yet** (owner decision 2026-10-16).
   A protocol only where generic code needs one; a new protocol goes in a std module, not the global
   namespace. The convention rows themselves are done (TICKET-278, 2026-10-21): Set
   `insert`/`remove` return `bool`, Map `insert`/`remove` return `V?`, List `remove(i)` returns `T`,
