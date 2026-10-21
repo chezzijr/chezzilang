@@ -1,6 +1,7 @@
 //! Checker: type resolution: arity and bounds, `resolve_type`, `resolve_type_at`.
 //! Split out of `src/checker/sig.rs`. `super::*` is the parent module.
 
+use super::setup::TypeHead;
 use super::setup::TypeHeadKind;
 use super::sig::TypePos;
 use super::sig::ffi_width_ty;
@@ -65,6 +66,157 @@ impl Checker {
         None
     }
 
+    /// Record the hover of an annotation head at `at`, with the doc its arm names ([`TypeDoc`]).
+    /// Probe-gated so off-probe checks pay nothing; gated on `!generic_arg_prepass` so the
+    /// generic-arg unification prepass cannot first-hit-wins latch an incomplete type.
+    fn record_type_hover(&mut self, n: &str, at: Span, resolved: &Ty, doc: TypeDoc) {
+        if self.hover_probe.is_none() || self.generic_arg_prepass {
+            return;
+        }
+        let doc = match doc {
+            TypeDoc::Builtin(b) => builtin_type_doc(b.name()),
+            TypeDoc::Decl => self.name_docs.get(n).cloned(),
+            TypeDoc::NoDoc => None,
+        };
+        self.hover_record_at(at, resolved, HoverKind::Type, doc);
+    }
+
+    /// TICKET-281 — the one answer to "which arm does the bare type name `n` take here". Both type
+    /// resolvers read it: `resolve_type_at` adds diagnostics and hover, `resolve_ty_ro_d` adds none.
+    pub(super) fn named_arm(&self, n: &str) -> NamedArm {
+        // Only keywords are reserved: a type parameter in scope, then a type this module declares
+        // or imports, shadow a builtin of the same name.
+        let user_first = self.declares_type_here(n);
+        let param = self.type_params.contains_key(n);
+        if !user_first
+            && !param
+            && self.bound_builtin(n).is_none()
+            && let Some(t) = Self::scalar_bound_ty(n)
+            && let Some(b) = BuiltinType::from_name(n)
+        {
+            return NamedArm::Scalar(b, t);
+        }
+        if param {
+            return NamedArm::Param;
+        }
+        if n == "Self"
+            && let Some(t) = &self.current_self_ty
+        {
+            return NamedArm::SelfTy(t.clone());
+        }
+        if !user_first && let Some(b) = self.builtin_type_named(n) {
+            if let Some(t) = b.plain_ty() {
+                return NamedArm::Builtin(b, t);
+            }
+            if let BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic = b {
+                return NamedArm::BareBox(b);
+            }
+        }
+        if let Some(body) = self.aliases.get(n) {
+            return NamedArm::Alias(body.clone());
+        }
+        if let Some(t) = self.imported_alias_tys.get(n) {
+            return NamedArm::ImportedAlias(t.clone());
+        }
+        if !user_first {
+            if let Some(w) = self
+                .bound_builtin(n)
+                .filter(|w| crate::native::ffi::is_width(w))
+            {
+                return NamedArm::Width(w.to_string());
+            }
+            if crate::native::ffi::is_width(n)
+                && self
+                    .alias_resolving
+                    .last()
+                    .is_some_and(|a| self.ffi_alias_ok.contains(a))
+            {
+                return NamedArm::Width(n.to_string());
+            }
+        }
+        if self.struct_names.contains(n) {
+            return NamedArm::Struct(self.bare_key(n));
+        }
+        if self.enum_names.contains(n) {
+            return NamedArm::Enum(self.bare_key(n));
+        }
+        if self.user_protocol_shape(n).is_some() {
+            return NamedArm::Protocol(self.user_protocol_key(n).unwrap_or_else(|| n.to_string()));
+        }
+        NamedArm::Unknown
+    }
+
+    /// TICKET-281 — the one answer to "which arm does the generic head `n` written with `nargs`
+    /// type arguments take here", read by both type resolvers.
+    pub(super) fn generic_arm(&self, n: &str, nargs: usize) -> GenericArm {
+        // A generic type this module declares shadows a builtin of the same name.
+        if !self.declares_type_here(n)
+            && let Some(b) = self.builtin_type_named(n)
+            && b.applied_ty(vec![Ty::Unknown; nargs]).is_some()
+        {
+            return GenericArm::Builtin(b);
+        }
+        if self.struct_names.contains(n) {
+            return GenericArm::Struct(self.bare_key(n));
+        }
+        // `T?` / `T!E` spell the carrier privately (`$Option`): it is the prelude's carrier.
+        let bare = crate::ast::unprivate(n);
+        if bare != n && self.enums.contains_key(bare) {
+            return GenericArm::Enum(bare.to_string());
+        }
+        if self.enum_names.contains(n) {
+            return GenericArm::Enum(self.bare_key(n));
+        }
+        if self.user_protocol_shape(n).is_some() {
+            return GenericArm::Protocol(
+                self.user_protocol_key(n).unwrap_or_else(|| n.to_string()),
+            );
+        }
+        if let Some(th) = self.bare_type_head(n).filter(|th| th.pinned.is_some()) {
+            return GenericArm::AliasHead(th);
+        }
+        GenericArm::Unknown
+    }
+
+    /// TICKET-281 — the one answer to "what does `name` in module `mid` name as a type", read by
+    /// `resolve_type_at`, `resolve_qualified_ro` and `resolve_ctype_d`. A RESERVED native type
+    /// (`Shared`, `Socket`, ...) has a harvested METHOD-table entry but is not nominal: `Builtin`.
+    pub(super) fn qualified_arm(&self, mid: &ModuleId, name: &str) -> QualifiedArm {
+        let Some(sig) = self.module_sigs.get(mid) else {
+            return QualifiedArm::Missing;
+        };
+        let builtin = sig.builtins.contains(name);
+        if let Some(info) = sig.struct_defs.get(name)
+            && !builtin
+        {
+            QualifiedArm::Struct {
+                key: self.type_key(mid, name),
+                nparams: info.type_params.len(),
+            }
+        } else if let Some(edef) = sig.enum_defs.get(name) {
+            QualifiedArm::Enum {
+                key: self.type_key(mid, name),
+                nparams: edef.type_params.len(),
+            }
+        } else if let Some(asig) = sig.type_aliases.get(name) {
+            QualifiedArm::Alias {
+                body: asig.body.clone(),
+                ctype: asig.ctype.clone(),
+            }
+        } else if let Some(pdef) = sig.protocol_defs.get(name)
+            && !builtin
+        {
+            QualifiedArm::Protocol {
+                key: self.type_key(mid, name),
+                nparams: pdef.info.type_params.len(),
+            }
+        } else if builtin {
+            QualifiedArm::Builtin
+        } else {
+            QualifiedArm::Missing
+        }
+    }
+
     pub(super) fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
         self.resolve_type_at(t, span, TypePos::Value)
     }
@@ -122,65 +274,27 @@ impl Checker {
             } => {
                 // Only keywords are reserved: a type parameter in scope, then a type this module
                 // declares or imports, shadow a builtin of the same name.
-                let user_first = self.declares_type_here(n);
-                let resolved = match n.as_str() {
-                    s if !user_first
-                        && !self.type_params.contains_key(s)
-                        && self.bound_builtin(s).is_none()
-                        && let Some(t) = Self::scalar_bound_ty(s) =>
-                    {
-                        t
-                    }
-                    // A generic type parameter (`T`) or `Self`, in scope while checking a generic fn
-                    // signature/body or a protocol method. Resolved BEFORE every reserved/module name
-                    // below (ptr / owned_str / Executor / Shared|RwShared|Atomic / Socket / Listener)
-                    // and before user structs/aliases, so an in-scope type param uniformly shadows them
-                    // (e.g. `fn id[Executor](x: Executor)`), instead of being hijacked by the builtin
-                    // arm or mis-erroring with a bogus import hint. Placed below the scalar primitives
-                    // (int/float/bool/str/…) so those keep resolving to their scalar even when used as a
-                    // type-param name (`fn id[int](x: int)` → x is `int`), preserving existing behavior.
-                    _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
-                    // `Self` inside a struct/enum method's signature or body → the concrete
-                    // ENCLOSING type (`fn dup(self) -> Self` in `struct P` ⇒ `Ty::Struct("P", …)`).
-                    // Placed AFTER the type-param arm above so a PROTOCOL method's `Self` (which is in
-                    // `type_params` as `Ty::Param("Self")`, with `current_self_ty` left `None`) keeps
-                    // its existential param binding — this concrete arm fires only for inherent
-                    // methods, where `current_self_ty` is set. Resolving to the concrete type (not a
-                    // `Ty::Param`) makes `-> Self` enforce the real enclosing type. Outside any method
-                    // `current_self_ty` is `None`, so `Self` falls through to `unknown type 'Self'`.
-                    "Self" if self.current_self_ty.is_some() => {
-                        self.current_self_ty.clone().unwrap()
-                    }
-                    // U10: a bare builtin type name resolves through `BuiltinType`: a global one, or
-                    // a module-owned one this module bound (`builtin_type_named`). A type parameter or
-                    // `Self` above shadows these.
-                    s if !user_first
-                        && let Some(b) = self.builtin_type_named(s)
-                        && let Some(t) = b.plain_ty() =>
-                    {
-                        self.builtin_gate(b, t, span)
-                    }
+                let arm = self.named_arm(n);
+                let doc = arm.doc();
+                let resolved = match arm {
+                    NamedArm::Scalar(_, t) | NamedArm::SelfTy(t) => t,
+                    NamedArm::Param => Ty::Param(n.clone()),
+                    NamedArm::Builtin(b, t) => self.builtin_gate(b, t, span),
                     // A bare generic box (`Shared`, `RwShared`, `Atomic`) written without its type
                     // argument.
-                    s if !user_first
-                        && let Some(
-                            BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic,
-                        ) = self.builtin_type_named(s) =>
-                    {
+                    NamedArm::BareBox(_) => {
                         self.error(
                             span,
                             format!("type '{n}' expects 1 type argument(s), got 0"),
                         );
                         Ty::Unknown
                     }
-                    // A transparent type alias resolves to its underlying type (recursively). The
-                    // `alias_resolving` stack breaks cycles (`type A = B; type B = A`).
-                    _ if self.aliases.contains_key(n) => {
+                    // The `alias_resolving` stack breaks cycles (`type A = B; type B = A`).
+                    NamedArm::Alias(aliased) => {
                         if self.alias_resolving.iter().any(|a| a == n) {
                             self.error(span, format!("recursive type alias '{n}'"));
                             Ty::Unknown
                         } else {
-                            let aliased = self.aliases[n].clone();
                             self.alias_resolving.push(n.clone());
                             // An alias expands at the position of its USE.
                             let ty = self.resolve_type_at(&aliased, span, pos);
@@ -188,42 +302,11 @@ impl Checker {
                             ty
                         }
                     }
-                    // A `from`-imported type alias resolves to its pre-resolved body (computed in the
-                    // defining module's scope). A licensed FFI-width alias was already re-seeded into
-                    // `ffi_alias_ok`, but since the body is already a concrete `Ty` no width re-check is
-                    // needed here.
-                    _ if self.imported_alias_tys.contains_key(n) => {
-                        // The body was resolved read-only in its defining module (no gate), so a
-                        // static-ctor protocol could hide in it — re-gate it out of value position here.
-                        let ty = self.imported_alias_tys[n].clone();
-                        self.reject_static_protocol_value(ty, span)
-                    }
-                    // A C width (`int8`..`uint64`, `float32`) this module bound: `Ty::Width`
-                    // (`ffi_width_ty`), a slot tag whose value is a plain `int`/`float`; the backends
-                    // recover the C width from the checker's `resolve_ctype`.
-                    _ if !user_first
-                        && let Some(w) = self
-                            .bound_builtin(n)
-                            .filter(|w| crate::native::ffi::is_width(w))
-                            .map(str::to_string) =>
-                    {
-                        self.width_at(&w, span, pos)
-                    }
-                    // A width reached by expanding an alias body whose defining module bound it
-                    // (`ffi_alias_ok`): the alias stays valid wherever it is used.
-                    _ if !user_first
-                        && crate::native::ffi::is_width(n)
-                        && self
-                            .alias_resolving
-                            .last()
-                            .is_some_and(|a| self.ffi_alias_ok.contains(a)) =>
-                    {
-                        self.width_at(n, span, pos)
-                    }
-                    _ if self.struct_names.contains(n) => {
-                        // The layout is keyed by the runtime key (bare unless disambiguated); the written
-                        // name's bare-visibility is the `struct_names` gate above. Carry the key on the Ty.
-                        let key = self.bare_key(n);
+                    // The body was resolved read-only in its defining module (no gate), so a
+                    // static-ctor protocol could hide in it: re-gate it out of value position here.
+                    NamedArm::ImportedAlias(ty) => self.reject_static_protocol_value(ty, span),
+                    NamedArm::Width(w) => self.width_at(&w, span, pos),
+                    NamedArm::Struct(key) => {
                         // A generic struct written without type arguments is missing them.
                         let nparams = self.structs.get(&key).map_or(0, |i| i.type_params.len());
                         if nparams > 0 {
@@ -234,8 +317,7 @@ impl Checker {
                         }
                         Ty::strukt(key)
                     }
-                    _ if self.enum_names.contains(n) => {
-                        let key = self.bare_key(n);
+                    NamedArm::Enum(key) => {
                         // A generic enum written without type arguments is missing them.
                         let nparams = self.enum_type_params.get(&key).map_or(0, |tps| tps.len());
                         if nparams > 0 {
@@ -246,10 +328,9 @@ impl Checker {
                         }
                         Ty::enum_ty(key, Vec::new())
                     }
-                    // A protocol name used as a value type (existential), e.g. `Error`. BUT a protocol
-                    // with a STATIC method requirement (`Convert`-style static ctor) is witnessable only
-                    // by a static method — a VALUE can't invoke it — so it is BOUND-ONLY, rejected here.
-                    _ if self.user_protocol_shape(n).is_some() => {
+                    // A protocol with a STATIC method requirement is witnessable only by a static
+                    // method, so it is BOUND-ONLY: rejected as a value type here.
+                    NamedArm::Protocol(key) => {
                         if self.protocol_has_static_method(n) {
                             self.error(
                                 span,
@@ -259,13 +340,10 @@ impl Checker {
                             );
                             Ty::Unknown
                         } else {
-                            Ty::Protocol(
-                                self.user_protocol_key(n).unwrap_or_else(|| n.to_string()),
-                                Vec::new(),
-                            )
+                            Ty::Protocol(key, Vec::new())
                         }
                     }
-                    _ => {
+                    NamedArm::Unknown => {
                         // A synthesized annotation's `name_span` is `Span::default()` (line 0);
                         // fall back to the enclosing-statement span there.
                         let at = if name_span.line != 0 {
@@ -303,22 +381,7 @@ impl Checker {
                 // blurb). A current-module user type's own docstring also surfaces here (additive;
                 // the Tier-A decl-name hover already covers the decl site). `builtin_type_doc` stays
                 // FIRST so a builtin name is never shadowed by a same-named `name_docs` entry.
-                if self.hover_probe.is_some() && !self.generic_arg_prepass {
-                    // Suppress the `name_docs` fallback when the name resolved to a type PARAMETER
-                    // (a generic `[T]` in scope) that merely SHADOWS a same-named top-level decl —
-                    // the param is an unrelated entity and must not borrow that decl's docstring
-                    // (mirrors the value-ident hover's scope guard). `builtin_type_doc` is unaffected
-                    // (it never names a param). A real generic head is never a `Ty::Param`, so this
-                    // is a no-op at the head site.
-                    let doc = builtin_type_doc(n).or_else(|| {
-                        if matches!(resolved, Ty::Param(_)) {
-                            None
-                        } else {
-                            self.name_docs.get(n).cloned()
-                        }
-                    });
-                    self.hover_record_at(*name_span, &resolved, HoverKind::Type, doc);
-                }
+                self.record_type_hover(n, *name_span, &resolved, doc);
                 resolved
             }
             Type::Func {
@@ -348,81 +411,68 @@ impl Checker {
                 // so it stays HERE. Their `CallBuiltin` dispatch is the `Builtin` id table
                 // (`base/builtin.rs`); `builtin_container_sig` = flat display/placeholder.
                 // `T?` / `T!E` spell the carrier privately (`$Option`): it is the prelude's carrier.
-                let carrier_key = (crate::ast::unprivate(n) != n)
-                    .then(|| crate::ast::unprivate(n).to_string())
-                    .filter(|k| self.enums.contains_key(k));
-                // A generic type this module declares shadows a builtin of the same name.
-                let builtin = if self.declares_type_here(n) {
-                    None
-                } else {
-                    self.builtin_type_named(n)
-                };
-                let resolved = match (builtin, args.as_slice()) {
-                    (Some(BuiltinType::List), [inner]) => Ty::list(self.resolve_type(inner, span)),
-                    // `Iterator[T]` as a *value* type — the result of calling a generator function.
-                    // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
-                    // type `iterable_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it —
-                    // a cursor is exactly what the `Iterator` bound requires).
-                    // Experimental: only generators produce these; ordinary code still uses adapter
-                    // structs / built-in collections.
-                    (Some(BuiltinType::Iterator), [elem]) => {
-                        Ty::Struct("Iterator".to_string(), vec![self.resolve_type(elem, span)])
-                    }
-                    (Some(BuiltinType::Channel), [inner]) => {
-                        let elem = self.resolve_type(inner, span);
-                        if !self.sendable(&elem) {
-                            let hint = self.sendable_error_hint(&elem);
-                            self.error(
-                                span,
-                                format!("Channel element type must be sendable (able to cross a task boundary), found {elem}{hint}"),
-                            );
-                        }
-                        Ty::channel(elem)
-                    }
-                    // `Shared[T]` (C3): the cross-task mutable box. Unlike a `Channel`, its element type
-                    // isn't gated on sendability — the value lives in one owner and is copied in/out
-                    // through `get`/`set`; the *handle* is what crosses (always sendable). The same for
-                    // the `RwShared`/`Atomic` siblings below.
-                    (Some(BuiltinType::Shared), [inner]) => {
-                        Ty::shared(self.resolve_type(inner, span))
-                    }
-                    (Some(BuiltinType::RwShared), [inner]) => {
-                        Ty::rwshared(self.resolve_type(inner, span))
-                    }
-                    (Some(BuiltinType::Atomic), [inner]) => {
-                        let elem = self.resolve_type(inner, span);
-                        self.conformance_obligation(Obligation::AtomicPayload {
-                            elem: elem.clone(),
-                            span,
-                        });
-                        Ty::atomic(elem)
-                    }
-                    (Some(BuiltinType::Map), [k, v]) => {
-                        let key = self.resolve_type(k, span);
-                        let value = self.resolve_type(v, span);
-                        self.conformance_obligation(Obligation::Hashable {
-                            ty: key.clone(),
-                            what: "Map key type",
-                            span,
-                        });
-                        Ty::map(key, value)
-                    }
-                    (Some(BuiltinType::Set), [t]) => {
-                        let elem = self.resolve_type(t, span);
-                        self.conformance_obligation(Obligation::Hashable {
-                            ty: elem.clone(),
-                            what: "Set element type",
-                            span,
-                        });
-                        Ty::set(elem)
-                    }
-                    // A user-defined generic struct instantiated with type arguments: `Pair[int, str]`.
-                    _ if self.struct_names.contains(n) => {
-                        let key = self.bare_key(n);
+                let arm = self.generic_arm(n, args.len());
+                let doc = arm.doc();
+                let resolved = match arm {
+                    GenericArm::Builtin(b) => {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
-                        // Clone the param list out so the borrow on `self.structs` is dropped before
-                        // the `satisfies`/`error` calls below.
+                        match b {
+                            BuiltinType::Channel => {
+                                if !self.sendable(&resolved[0]) {
+                                    let hint = self.sendable_error_hint(&resolved[0]);
+                                    self.error(
+                                        span,
+                                        format!("Channel element type must be sendable (able to cross a task boundary), found {}{hint}", resolved[0]),
+                                    );
+                                }
+                            }
+                            BuiltinType::Atomic => {
+                                self.conformance_obligation(Obligation::AtomicPayload {
+                                    elem: resolved[0].clone(),
+                                    span,
+                                });
+                            }
+                            BuiltinType::Map => {
+                                self.conformance_obligation(Obligation::Hashable {
+                                    ty: resolved[0].clone(),
+                                    what: "Map key type",
+                                    span,
+                                });
+                            }
+                            BuiltinType::Set => {
+                                self.conformance_obligation(Obligation::Hashable {
+                                    ty: resolved[0].clone(),
+                                    what: "Set element type",
+                                    span,
+                                });
+                            }
+                            BuiltinType::List
+                            | BuiltinType::Iterator
+                            | BuiltinType::Shared
+                            | BuiltinType::RwShared
+                            | BuiltinType::Int
+                            | BuiltinType::Float
+                            | BuiltinType::Bool
+                            | BuiltinType::Str
+                            | BuiltinType::Bytes
+                            | BuiltinType::ByteArray
+                            | BuiltinType::Range
+                            | BuiltinType::Socket
+                            | BuiltinType::Listener
+                            | BuiltinType::Writer
+                            | BuiltinType::Reader
+                            | BuiltinType::Ptr
+                            | BuiltinType::OwnedStr
+                            | BuiltinType::AtomicInt
+                            | BuiltinType::Executor => {}
+                        }
+                        b.applied_ty(resolved)
+                            .expect("generic_arm checked the argument count")
+                    }
+                    GenericArm::Struct(key) => {
+                        let resolved: Vec<Ty> =
+                            args.iter().map(|a| self.resolve_type(a, span)).collect();
                         self.conformance_obligation(Obligation::Bound {
                             name: n.to_string(),
                             key: key.clone(),
@@ -432,9 +482,7 @@ impl Checker {
                         });
                         Ty::Struct(key, resolved)
                     }
-                    // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
-                    _ if carrier_key.is_some() || self.enum_names.contains(n) => {
-                        let key = carrier_key.clone().unwrap_or_else(|| self.bare_key(n));
+                    GenericArm::Enum(key) => {
                         // The success side of a carrier may be `None` (`None!E`; `None?` has
                         // its own reject below).
                         let carrier = key == "Option" || key == "Result";
@@ -469,12 +517,7 @@ impl Checker {
                             Ty::enum_ty(key, resolved)
                         }
                     }
-                    // A parameterized protocol used as a value type (`Container[int]`): resolve the
-                    // args, arity-check against the protocol's own type params, and carry them on the
-                    // existential. Conformance is witnessed at every store/pass boundary (via
-                    // `assignable` → `satisfies_args`); the args are then erased at runtime. Mirrors
-                    // the struct/enum parameterized arms above.
-                    _ if self.user_protocol_shape(n).is_some() => {
+                    GenericArm::Protocol(key) => {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
                         let nparams = self
@@ -489,8 +532,6 @@ impl Checker {
                                 ),
                             );
                         }
-                        // A static-method (static-ctor) protocol like `Convert[int]` is BOUND-ONLY —
-                        // no value can witness a static requirement, so it is rejected in value position.
                         if self.protocol_has_static_method(n) {
                             self.error(
                                 span,
@@ -500,33 +541,23 @@ impl Checker {
                             );
                             Ty::Unknown
                         } else {
-                            Ty::Protocol(
-                                self.user_protocol_key(n).unwrap_or_else(|| n.to_string()),
-                                resolved,
-                            )
+                            Ty::Protocol(key, resolved)
                         }
                     }
-                    _ if self.bare_type_head(n).is_some_and(|th| th.pinned.is_some()) => {
+                    GenericArm::AliasHead(th) => {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
-                        let th = self.bare_type_head(n).expect("matched by the guard");
                         let tps = self.type_params_of(&th.key);
                         let decl = tps.as_ref().map_or(0, Vec::len);
-                        // A pinning or non-generic alias rejects its written args; an unpinned
-                        // generic alias (`type BB = Box`) takes them, as `BB[int](9)` does.
-                        match self.written_head_args(n, decl, th.pinned, resolved, span) {
+                        match self.written_head_args(n, decl, th.pinned.clone(), resolved, span) {
                             None => Ty::Unknown,
                             Some(targs) => {
                                 self.check_type_arity_and_bounds(n, tps, &targs, span);
-                                match th.kind {
-                                    TypeHeadKind::Struct => Ty::Struct(th.key, targs),
-                                    TypeHeadKind::Enum => Ty::enum_ty(th.key, targs),
-                                    TypeHeadKind::Protocol => Ty::Unknown,
-                                }
+                                alias_head_ty(th, targs)
                             }
                         }
                     }
-                    _ => {
+                    GenericArm::Unknown => {
                         self.error(
                             span,
                             format!("unknown generic type '{n}'{}", self.import_hint(n)),
@@ -542,25 +573,10 @@ impl Checker {
                 // to its `name_docs` docstring (the import-line binding seeds that entry). Probe-gated
                 // so off-probe checks pay nothing; gated `!generic_arg_prepass` so the generic-arg
                 // unification prepass can't first-hit-wins latch an incomplete type.
-                if self.hover_probe.is_some() && !self.generic_arg_prepass {
-                    // Suppress the `name_docs` fallback when the name resolved to a type PARAMETER
-                    // (a generic `[T]` in scope) that merely SHADOWS a same-named top-level decl —
-                    // the param is an unrelated entity and must not borrow that decl's docstring
-                    // (mirrors the value-ident hover's scope guard). `builtin_type_doc` is unaffected
-                    // (it never names a param). A real generic head is never a `Ty::Param`, so this
-                    // is a no-op at the head site.
-                    let doc = builtin_type_doc(n).or_else(|| {
-                        if matches!(resolved, Ty::Param(_)) {
-                            None
-                        } else {
-                            self.name_docs.get(n).cloned()
-                        }
-                    });
-                    self.hover_record_at(*head_span, &resolved, HoverKind::Type, doc);
-                }
+                self.record_type_hover(n, *head_span, &resolved, doc);
                 resolved
             }
-            // A module-qualified type `module.Type[args]` (mirrors how a function is reached via its
+            // A module-qualified type `module.Type[args]` (a function is reached the same way, via its
             // bound module name). Resolve `module` in `imported_modules` → the target's `ModuleSig`,
             // confirm the type exists there, and return the matching `Ty`. Enforces arity for generic
             // struct/enum targets.
@@ -569,116 +585,97 @@ impl Checker {
                 let Some(mid) = self.qualified_type_module(module, name, span) else {
                     return Ty::Unknown;
                 };
-                let Some(sig) = self.module_sigs.get(&mid).cloned() else {
-                    self.error(span, format!("module '{module}' has no type '{name}'"));
-                    return Ty::Unknown;
-                };
-                // A RESERVED native type (std.concurrency's `Shared`/`RwShared`/`Atomic`/`Executor`,
-                // std.net's `Socket`/`Listener`) now ALSO has a `sig.struct_defs` entry — for its
-                // harvested METHOD table — but it is NOT a nominal struct: it must resolve to the opaque
-                // reserved `Ty::Shared`/etc via the `sig.types` → `qualified_builtin_ty` branch below,
-                // NOT `Ty::Struct(...)`. Skip the struct_defs arm for these so `concurrency.Shared[int]`
-                // (a qualified annotation / `type` alias body) keeps its reserved `Ty`
-                // (matching the bare-after-import path); otherwise it would mint a divergent
-                // `Ty::Struct("Shared", …)` that fails to unify with a `Shared(v)` ctor's `Ty::shared`.
-                if let Some(info) = sig.struct_defs.get(name)
-                    && !sig.builtins.contains(name)
-                {
-                    if info.type_params.len() != resolved.len() {
-                        self.error(
-                            span,
-                            format!(
-                                "type '{module}.{name}' expects {} type argument(s), got {}",
-                                info.type_params.len(),
-                                resolved.len()
-                            ),
-                        );
-                    }
-                    Ty::Struct(self.type_key(&mid, name), resolved)
-                } else if let Some(edef) = sig.enum_defs.get(name) {
-                    if edef.type_params.len() != resolved.len() {
-                        self.error(
-                            span,
-                            format!(
-                                "type '{module}.{name}' expects {} type argument(s), got {}",
-                                edef.type_params.len(),
-                                resolved.len()
-                            ),
-                        );
-                    }
-                    Ty::enum_ty(self.type_key(&mid, name), resolved)
-                } else if let Some(asig) = sig.type_aliases.get(name) {
-                    // Pre-resolved in the exporting module by the read-only resolver (no gate) — re-gate
-                    // a static-ctor protocol out of value position (`import a; c: a.Foo`).
-                    let body = asig.body.clone();
-                    self.reject_static_protocol_value(body, span)
-                } else if let Some(pdef) = sig.protocol_defs.get(name)
-                    && !sig.builtins.contains(name)
-                {
-                    // A protocol that is also a builtin value type (`Iterator`) takes the builtin arm.
-                    // Mirrors the bare generic-protocol arm: arity is checked only when args are
-                    // WRITTEN, so a bare `shapes.Container` stays legal as an unbound existential —
-                    // exactly like the bare `Container` spelling — while `shapes.Container[int, str]`
-                    // is still caught.
-                    if !resolved.is_empty() && pdef.info.type_params.len() != resolved.len() {
-                        self.error(
-                            span,
-                            format!(
-                                "type '{module}.{name}' expects {} type argument(s), got {}",
-                                pdef.info.type_params.len(),
-                                resolved.len()
-                            ),
-                        );
-                    }
-                    if self.protocol_has_static_method(&self.type_key(&mid, name)) {
-                        self.error(
-                            span,
-                            format!(
-                                "protocol '{module}.{name}' has a static method and can only be used as a bound, not a value type"
-                            ),
-                        );
-                        Ty::Unknown
-                    } else {
-                        Ty::Protocol(self.type_key(&mid, name), resolved)
-                    }
-                } else if sig.builtins.contains(name) {
-                    // A module-owned builtin type reached by qualified path (`concurrency.Shared[int]`,
-                    // `net.Socket`, `ffi.int32`, `ffi.ptr`): the same type the bare name bound by an
-                    // import denotes.
-                    if let Some(ty) = self.qualified_builtin_ty(name, &resolved) {
-                        let expected = BuiltinType::from_name(name).map_or(0, BuiltinType::arity);
-                        if resolved.len() != expected {
+                match self.qualified_arm(&mid, name) {
+                    QualifiedArm::Struct { key, nparams } => {
+                        if nparams != resolved.len() {
                             self.error(
+                                span,
+                                format!(
+                                    "type '{module}.{name}' expects {nparams} type argument(s), got {}",
+                                    resolved.len()
+                                ),
+                            );
+                        }
+                        Ty::Struct(key, resolved)
+                    }
+                    QualifiedArm::Enum { key, nparams } => {
+                        if nparams != resolved.len() {
+                            self.error(
+                                span,
+                                format!(
+                                    "type '{module}.{name}' expects {nparams} type argument(s), got {}",
+                                    resolved.len()
+                                ),
+                            );
+                        }
+                        Ty::enum_ty(key, resolved)
+                    }
+                    QualifiedArm::Alias { body, .. } => {
+                        self.reject_static_protocol_value(body, span)
+                    }
+                    QualifiedArm::Protocol { key, nparams } => {
+                        if !resolved.is_empty() && nparams != resolved.len() {
+                            self.error(
+                                span,
+                                format!(
+                                    "type '{module}.{name}' expects {nparams} type argument(s), got {}",
+                                    resolved.len()
+                                ),
+                            );
+                        }
+                        if self.protocol_has_static_method(&key) {
+                            self.error(
+                                span,
+                                format!(
+                                    "protocol '{module}.{name}' has a static method and can only be used as a bound, not a value type"
+                                ),
+                            );
+                            Ty::Unknown
+                        } else {
+                            Ty::Protocol(key, resolved)
+                        }
+                    }
+                    QualifiedArm::Builtin => {
+                        // A module-owned builtin type reached by qualified path (`concurrency.Shared[int]`,
+                        // `net.Socket`, `ffi.int32`, `ffi.ptr`): the same type the bare name bound by an
+                        // import denotes.
+                        if let Some(ty) = self.qualified_builtin_ty(name, &resolved) {
+                            let expected =
+                                BuiltinType::from_name(name).map_or(0, BuiltinType::arity);
+                            if resolved.len() != expected {
+                                self.error(
                                 span,
                                 format!(
                                     "type '{module}.{name}' expects {expected} type argument(s), got {}",
                                     resolved.len()
                                 ),
                             );
-                        }
-                        match BuiltinType::from_name(name) {
-                            _ if crate::native::ffi::is_width(name) => {
-                                self.width_at(name, span, pos)
                             }
-                            Some(BuiltinType::Atomic) => {
-                                if let Ty::Atomic(elem) = &ty {
-                                    self.conformance_obligation(Obligation::AtomicPayload {
-                                        elem: (**elem).clone(),
-                                        span,
-                                    });
+                            match BuiltinType::from_name(name) {
+                                _ if crate::native::ffi::is_width(name) => {
+                                    self.width_at(name, span, pos)
                                 }
-                                ty
+                                Some(BuiltinType::Atomic) => {
+                                    if let Ty::Atomic(elem) = &ty {
+                                        self.conformance_obligation(Obligation::AtomicPayload {
+                                            elem: (**elem).clone(),
+                                            span,
+                                        });
+                                    }
+                                    ty
+                                }
+                                Some(b) => self.builtin_gate(b, ty, span),
+                                None => ty,
                             }
-                            Some(b) => self.builtin_gate(b, ty, span),
-                            None => ty,
+                        } else {
+                            self.error(span, format!("module '{module}' has no type '{name}'"));
+                            Ty::Unknown
                         }
-                    } else {
+                    }
+                    QualifiedArm::Missing => {
                         self.error(span, format!("module '{module}' has no type '{name}'"));
                         Ty::Unknown
                     }
-                } else {
-                    self.error(span, format!("module '{module}' has no type '{name}'"));
-                    Ty::Unknown
                 }
             }
         }
@@ -706,5 +703,95 @@ pub(super) fn fn_annotation_ty(
         ret: Box::new(ret),
         labels: FnLabels::new(labels.to_vec()),
         variadic,
+    }
+}
+
+/// TICKET-281 — the arm a bare type name takes ([`Checker::named_arm`]). Each resolver matches every
+/// variant, so a new arm fails the build in both.
+pub(super) enum NamedArm {
+    Scalar(BuiltinType, Ty),
+    Param,
+    SelfTy(Ty),
+    Builtin(BuiltinType, Ty),
+    BareBox(BuiltinType),
+    Alias(Type),
+    ImportedAlias(Ty),
+    Width(String),
+    Struct(String),
+    Enum(String),
+    Protocol(String),
+    Unknown,
+}
+
+/// TICKET-281 — the arm a generic head takes ([`Checker::generic_arm`]).
+pub(super) enum GenericArm {
+    Builtin(BuiltinType),
+    Struct(String),
+    Enum(String),
+    Protocol(String),
+    AliasHead(TypeHead),
+    Unknown,
+}
+
+/// The type an alias head `th` applied to `targs` names. A protocol head names no value type.
+pub(super) fn alias_head_ty(th: TypeHead, targs: Vec<Ty>) -> Ty {
+    match th.kind {
+        TypeHeadKind::Struct => Ty::Struct(th.key, targs),
+        TypeHeadKind::Enum => Ty::enum_ty(th.key, targs),
+        TypeHeadKind::Protocol => Ty::Unknown,
+    }
+}
+
+/// TICKET-281 — the arm a module-qualified type takes ([`Checker::qualified_arm`]).
+pub(super) enum QualifiedArm {
+    Struct { key: String, nparams: usize },
+    Enum { key: String, nparams: usize },
+    Alias { body: Ty, ctype: Option<CType> },
+    Protocol { key: String, nparams: usize },
+    Builtin,
+    Missing,
+}
+
+/// Where an annotation head's hover doc comes from. A builtin arm reads `builtin_type_doc`, a
+/// declared type reads its `name_docs` docstring, and a type parameter reads none: it is an
+/// unrelated entity even when it shadows a same-named top-level decl.
+#[derive(Clone, Copy)]
+pub(super) enum TypeDoc {
+    Builtin(BuiltinType),
+    Decl,
+    NoDoc,
+}
+
+impl NamedArm {
+    /// The doc source of this arm's hover.
+    pub(super) fn doc(&self) -> TypeDoc {
+        match self {
+            NamedArm::Scalar(b, _) | NamedArm::Builtin(b, _) | NamedArm::BareBox(b) => {
+                TypeDoc::Builtin(*b)
+            }
+            NamedArm::Param => TypeDoc::NoDoc,
+            NamedArm::SelfTy(_)
+            | NamedArm::Alias(_)
+            | NamedArm::ImportedAlias(_)
+            | NamedArm::Width(_)
+            | NamedArm::Struct(_)
+            | NamedArm::Enum(_)
+            | NamedArm::Protocol(_)
+            | NamedArm::Unknown => TypeDoc::Decl,
+        }
+    }
+}
+
+impl GenericArm {
+    /// The doc source of this arm's hover.
+    pub(super) fn doc(&self) -> TypeDoc {
+        match self {
+            GenericArm::Builtin(b) => TypeDoc::Builtin(*b),
+            GenericArm::Struct(_)
+            | GenericArm::Enum(_)
+            | GenericArm::Protocol(_)
+            | GenericArm::AliasHead(_)
+            | GenericArm::Unknown => TypeDoc::Decl,
+        }
     }
 }

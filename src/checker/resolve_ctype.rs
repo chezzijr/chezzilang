@@ -1,15 +1,36 @@
 //! Checker: read-only type resolution and C types of structs.
 //! Split out of `src/checker/proto.rs`. `super::*` is the parent module.
 
+use super::resolve_type::{GenericArm, NamedArm, QualifiedArm, alias_head_ty};
 use super::*;
 
 /// The C type of a module-owned builtin type, by its own name (`ptr`, `owned_str`, a width), or
 /// `None` for a builtin type with no C form. The bare and the qualified spellings both read it.
-fn builtin_ctype(name: &str) -> Option<CType> {
-    match name {
-        "ptr" => Some(CType::Ptr),
-        "owned_str" => Some(CType::OwnedStr),
-        w => crate::native::cffi::width_ctype(w),
+fn builtin_ctype(b: BuiltinType) -> Option<CType> {
+    match b {
+        BuiltinType::Int => Some(CType::Int),
+        BuiltinType::Float => Some(CType::Float),
+        BuiltinType::Bool => Some(CType::Bool),
+        BuiltinType::Str => Some(CType::Str),
+        BuiltinType::Ptr => Some(CType::Ptr),
+        BuiltinType::OwnedStr => Some(CType::OwnedStr),
+        BuiltinType::Bytes
+        | BuiltinType::ByteArray
+        | BuiltinType::Iterator
+        | BuiltinType::List
+        | BuiltinType::Set
+        | BuiltinType::Map
+        | BuiltinType::Channel
+        | BuiltinType::Range
+        | BuiltinType::Shared
+        | BuiltinType::RwShared
+        | BuiltinType::Atomic
+        | BuiltinType::AtomicInt
+        | BuiltinType::Executor
+        | BuiltinType::Socket
+        | BuiltinType::Listener
+        | BuiltinType::Writer
+        | BuiltinType::Reader => None,
     }
 }
 
@@ -30,72 +51,40 @@ impl Checker {
         }
         match t {
             Type::Nil(_) => Ty::Nil,
-            Type::Named { name: n, .. } => match n.as_str() {
-                s if let Some(t) = self.builtin_type_named(s).and_then(BuiltinType::plain_ty) => t,
-                _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
-                // A bound FFI width resolves to plain `int` (`float` for `float32`); the width is a
-                // marshalling detail. So an exported alias body `type Len = int32` captures
-                // `Ty::Int`, and `type Real = float32` captures `Ty::Float`.
-                _ if let Some(w) = self
-                    .bound_builtin(n)
-                    .filter(|w| crate::native::ffi::is_width(w)) =>
-                {
-                    super::sig::ffi_width_ty(w)
-                }
-                // A bare alias name resolves to its (recursively-resolved) body.
-                _ if self.aliases.contains_key(n) => {
-                    let body = self.aliases[n].clone();
-                    self.resolve_ty_ro_d(&body, depth + 1)
-                }
-                _ if self.imported_alias_tys.contains_key(n) => self.imported_alias_tys[n].clone(),
-                _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
-                _ if self.enum_names.contains(n) => Ty::enum_ty(self.bare_key(n), Vec::new()),
-                _ if self.user_protocol_shape(n).is_some() => Ty::Protocol(
-                    self.user_protocol_key(n).unwrap_or_else(|| n.to_string()),
-                    Vec::new(),
-                ),
-                _ => Ty::Unknown,
+            Type::Named { name: n, .. } => match self.named_arm(n) {
+                NamedArm::Scalar(_, t)
+                | NamedArm::SelfTy(t)
+                | NamedArm::Builtin(_, t)
+                | NamedArm::ImportedAlias(t) => t,
+                NamedArm::Param => Ty::Param(n.clone()),
+                NamedArm::Alias(body) => self.resolve_ty_ro_d(&body, depth + 1),
+                NamedArm::Width(w) => super::sig::ffi_width_ty(&w),
+                NamedArm::Struct(key) => Ty::strukt(key),
+                NamedArm::Enum(key) => Ty::enum_ty(key, Vec::new()),
+                NamedArm::Protocol(key) => Ty::Protocol(key, Vec::new()),
+                NamedArm::BareBox(_) | NamedArm::Unknown => Ty::Unknown,
             },
-            Type::Generic(n, args, ..) => match n.as_str() {
-                s if let Some(b) = self.builtin_type_named(s)
-                    && let Some(t) = b.applied_ty(
-                        args.iter()
-                            .map(|a| self.resolve_ty_ro_d(a, depth + 1))
-                            .collect(),
-                    ) =>
-                {
-                    t
+            Type::Generic(n, args, ..) => {
+                let resolved: Vec<Ty> = args
+                    .iter()
+                    .map(|a| self.resolve_ty_ro_d(a, depth + 1))
+                    .collect();
+                match self.generic_arm(n, args.len()) {
+                    GenericArm::Builtin(b) => b.applied_ty(resolved).unwrap_or(Ty::Unknown),
+                    GenericArm::Struct(key) => Ty::Struct(key, resolved),
+                    GenericArm::Enum(key) => {
+                        let resolved = self.carrier_default_args(&key, resolved);
+                        Ty::enum_ty(key, resolved)
+                    }
+                    GenericArm::Protocol(key) => Ty::Protocol(key, resolved),
+                    GenericArm::AliasHead(th) => {
+                        let decl = self.type_param_count(&th.key);
+                        super::fn_value::head_args(th.pinned.clone(), decl, resolved)
+                            .map_or(Ty::Unknown, |targs| alias_head_ty(th, targs))
+                    }
+                    GenericArm::Unknown => Ty::Unknown,
                 }
-                _ if self.struct_names.contains(n) => Ty::Struct(
-                    self.bare_key(n),
-                    args.iter()
-                        .map(|a| self.resolve_ty_ro_d(a, depth + 1))
-                        .collect(),
-                ),
-                _ if crate::ast::unprivate(n) != n.as_str() || self.enum_names.contains(n) => {
-                    let key = if crate::ast::unprivate(n) != n.as_str() {
-                        crate::ast::unprivate(n).to_string()
-                    } else {
-                        self.bare_key(n)
-                    };
-                    let resolved = args
-                        .iter()
-                        .map(|a| self.resolve_ty_ro_d(a, depth + 1))
-                        .collect();
-                    let resolved = self.carrier_default_args(&key, resolved);
-                    Ty::enum_ty(key, resolved)
-                }
-                // A parameterized protocol used as a value type (`Container[int]`). Mint the carried
-                // args so the read-only resolver no longer silent-accepts it as `Unknown` (which would
-                // erase the witness). Mirrors the mutable `resolve_type` protocol arm.
-                _ if self.user_protocol_shape(n).is_some() => Ty::Protocol(
-                    self.user_protocol_key(n).unwrap_or_else(|| n.to_string()),
-                    args.iter()
-                        .map(|a| self.resolve_ty_ro_d(a, depth + 1))
-                        .collect(),
-                ),
-                _ => Ty::Unknown,
-            },
+            }
             Type::Func {
                 params,
                 ret,
@@ -132,35 +121,19 @@ impl Checker {
         let Some(mid) = self.imported_modules.get(module) else {
             return Ty::Unknown;
         };
-        let Some(sig) = self.module_sigs.get(mid) else {
-            return Ty::Unknown;
-        };
-        // A RESERVED native type (Shared/RwShared/Atomic/Executor/Socket/Listener) has a harvested
-        // `sig.struct_defs` METHOD-table entry but is NOT nominal — skip it here so it resolves to the
-        // reserved builtin `Ty` via the `sig.types` branch below (mirrors `resolve_type`'s guard).
-        if sig.struct_defs.contains_key(name) && !sig.builtins.contains(name) {
-            Ty::Struct(self.type_key(mid, name), args.to_vec())
-        } else if sig.enum_defs.contains_key(name) {
-            Ty::enum_ty(self.type_key(mid, name), args.to_vec())
-        } else if let Some(asig) = sig.type_aliases.get(name) {
-            asig.body.clone()
-        } else if sig.protocol_defs.contains_key(name) && !sig.builtins.contains(name) {
-            // Permissive mirror of `resolve_type`'s qualified protocol arm: no arity error and no
-            // static-ctor gate — the mutable resolver owns both diagnostics.
-            Ty::Protocol(self.type_key(mid, name), args.to_vec())
-        } else if sig.builtins.contains(name) {
-            // `resolve_type`'s qualified builtin branch on the READ-ONLY export path (so an
-            // EXPORTED `type S = concurrency.Shared[int]` resolved via `resolve_ty_ro_d` carries the
-            // right builtin `Ty`). Permissive: no errors.
-            self.qualified_builtin_ty(name, args).unwrap_or(Ty::Unknown)
-        } else {
-            Ty::Unknown
+        match self.qualified_arm(mid, name) {
+            QualifiedArm::Struct { key, .. } => Ty::Struct(key, args.to_vec()),
+            QualifiedArm::Enum { key, .. } => Ty::enum_ty(key, args.to_vec()),
+            QualifiedArm::Alias { body, .. } => body,
+            QualifiedArm::Protocol { key, .. } => Ty::Protocol(key, args.to_vec()),
+            QualifiedArm::Builtin => self.qualified_builtin_ty(name, args).unwrap_or(Ty::Unknown),
+            QualifiedArm::Missing => Ty::Unknown,
         }
     }
 
     /// Resolve a surface extern `Type` to its WIDTH-BEARING [`CType`] in the CURRENT module's
     /// import/alias scope — the SINGLE resolver both backends consume (the FFI collision-fix root).
-    /// Mirrors `resolve_ty_ro_d`'s alias / `from`-import / `Qualified` walk EXACTLY, but stops at the
+    /// Reads the arm table `resolve_ty_ro_d` reads (`named_arm`, `qualified_arm`), but stops at the
     /// width-bearing leaf instead of collapsing every FFI integer to `Ty::Int`. Crucially:
     ///   * a LOCAL alias (`self.aliases`) recurses on its body — resolving each hop in THIS module's
     ///     scope (a colliding same-named alias in another module can never be reached);
@@ -180,33 +153,23 @@ impl Checker {
             return None; // cyclic alias — defended (the marshal gate rejects it cleanly).
         }
         match t {
-            Type::Named { name: n, .. } => match n.as_str() {
-                // A module-owned C type this module bound (`ptr`, `owned_str`, a width), under any
-                // alias. An import binds before a builtin of its name.
-                _ if let Some(c) = self.bound_builtin(n) => builtin_ctype(c),
-                "int" => Some(CType::Int),
-                "float" => Some(CType::Float),
-                "bool" => Some(CType::Bool),
-                "str" => Some(CType::Str),
+            Type::Named { name: n, .. } => match self.named_arm(n) {
+                NamedArm::Scalar(b, _) | NamedArm::Builtin(b, _) => builtin_ctype(b),
+                NamedArm::Width(w) => crate::native::cffi::width_ctype(&w),
                 // A LOCAL transparent alias: recurse on its body in THIS module's scope.
-                _ if self.aliases.contains_key(n) => {
-                    let body = self.aliases[n].clone();
-                    self.resolve_ctype_d(&body, depth + 1)
-                }
+                NamedArm::Alias(body) => self.resolve_ctype_d(&body, depth + 1),
                 // A `from`-imported alias: its CType was computed in the DEFINING module's scope.
-                _ if self.imported_alias_ctypes.contains_key(n) => {
-                    self.imported_alias_ctypes[n].clone()
-                }
+                NamedArm::ImportedAlias(_) => self.imported_alias_ctypes.get(n).cloned().flatten(),
                 // A bare-visible struct (local or `from`-imported): a by-value flat-scalar struct.
-                // SAME-MODULE path (current scope == defining scope): a cache hit (already populated)
-                // OR a field-walk in THIS scope for a not-yet-populated forward-reference nested struct
-                // — both correct here because this is the struct's own defining scope.
-                _ if self.struct_names.contains(n) => {
-                    let key = self.bare_key(n);
-                    self.resolve_struct_ctype(&key)
-                        .or_else(|| self.struct_ctype_from_asts(&key, depth))
-                }
-                _ => None,
+                NamedArm::Struct(key) => self
+                    .resolve_struct_ctype(&key)
+                    .or_else(|| self.struct_ctype_from_asts(&key, depth)),
+                NamedArm::Param
+                | NamedArm::SelfTy(_)
+                | NamedArm::BareBox(_)
+                | NamedArm::Enum(_)
+                | NamedArm::Protocol(_)
+                | NamedArm::Unknown => None,
             },
             // A sync scalar callback param (callbacks #4): `fn(scalars...) -> scalar` (or `-> nil`)
             // lowers to `CType::Callback`. Every param must lower to a C SCALAR (`is_scalar`) — a
@@ -263,25 +226,16 @@ impl Checker {
             // by construction: never the bare flat alias map).
             Type::Qualified { module, name, .. } => {
                 let mid = self.imported_modules.get(module)?;
-                let sig = self.module_sigs.get(mid)?;
-                // A qualified FFI marshalling TYPE name (`ffi.int32` / `ffi.ptr`) in an extern
-                // signature: map to its WIDTH-bearing CType, exactly like the bare `Type::Named`
-                // arm above. The surface name is unchanged (the backends' `ctype_of` reads the
-                // resulting CType, never re-derives from a module prefix), so it marshals identically
-                // to the bare width. Gated on `sig.types` membership — only `std.ffi`'s sig carries
-                // these reserved names — so this fires solely for genuine FFI types.
-                if sig.builtins.contains(name) {
-                    return builtin_ctype(name);
-                }
-                if sig.struct_defs.contains_key(name) {
-                    // CROSS-MODULE: read the qualified struct's CType from the cache VERBATIM (computed
-                    // in ITS defining module's scope, deps-first). NEVER field-walk here — the current
-                    // scope is the IMPORTER's, where the struct's field aliases are invisible/colliding.
-                    self.resolve_struct_ctype(&self.type_key(mid, name))
-                } else if let Some(asig) = sig.type_aliases.get(name) {
-                    asig.ctype.clone()
-                } else {
-                    None
+                match self.qualified_arm(mid, name) {
+                    QualifiedArm::Builtin => BuiltinType::from_name(name)
+                        .map_or_else(|| crate::native::cffi::width_ctype(name), builtin_ctype),
+                    // CROSS-MODULE: read the struct's CType from the cache VERBATIM (computed in ITS
+                    // defining module's scope). NEVER field-walk here.
+                    QualifiedArm::Struct { key, .. } => self.resolve_struct_ctype(&key),
+                    QualifiedArm::Alias { ctype, .. } => ctype,
+                    QualifiedArm::Enum { .. }
+                    | QualifiedArm::Protocol { .. }
+                    | QualifiedArm::Missing => None,
                 }
             }
             Type::Generic(..) | Type::Tuple(_) | Type::Nil(_) => None,

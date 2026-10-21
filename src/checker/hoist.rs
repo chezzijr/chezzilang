@@ -978,48 +978,14 @@ impl Checker {
     /// to a plain `Str` once resolved, losing its return-only-ness. (A plain `str?` param is also
     /// caught by `assert_marshallable`, but this gives it a clearer "return-only" message.)
     ///
-    /// Transparent type aliases are resolved here, mirroring the backends' alias-resolving `ctype_of`:
-    /// `type O = owned_str` makes a param `s: O` whose surface name is `O` (not `owned_str`) yet whose
-    /// `ctype_of` is `CType::OwnedStr` — without alias resolution it would slip past this guard,
-    /// type-check as a plain `Str`, then hit the return-only `unreachable!` param arm at runtime.
+    /// The answer is the C type `resolve_ctype` gives, so it reads the arm table (TICKET-281): a local
+    /// or imported alias, a qualified `ffi.owned_str` and a user type that shadows `str` all get the
+    /// answer the backends' `ctype_of` gets. A cyclic alias stops at `resolve_ctype`'s depth cap.
     pub(super) fn is_return_only_extern_type(&self, t: &Type) -> bool {
-        self.is_return_only_extern_type_seen(t, &mut Vec::new())
-    }
-
-    /// `is_return_only_extern_type` with a shared `seen` set of alias names that spans the WHOLE
-    /// recursion — including the `Named`→`Option`→`Named` re-entry. A single per-loop guard is not
-    /// enough: a cyclic alias routed through an `Option`/`?` form (e.g. `type A = A?`) crosses the
-    /// arm boundary, and without shared state each frame restarts with an empty set and recurses
-    /// forever (stack overflow). The cycle itself is reported separately by `resolve_type`; here we
-    /// just terminate cleanly and report "not return-only".
-    pub(super) fn is_return_only_extern_type_seen(&self, t: &Type, seen: &mut Vec<String>) -> bool {
-        match t {
-            Type::Named { name: n, .. } => {
-                if self.bound_builtin(n) == Some("owned_str") {
-                    return true;
-                }
-                if seen.iter().any(|s| s == n) {
-                    return false; // cycle — terminate; `resolve_type` diagnoses it
-                }
-                if let Some(aliased) = self.aliases.get(n) {
-                    seen.push(n.clone());
-                    return self.is_return_only_extern_type_seen(aliased, seen);
-                }
-                false
-            }
-            // `str?` / `owned_str?` parse to `Option[inner]`; the inner may itself be an alias.
-            Type::Generic(n, args, ..) if crate::ast::unprivate(n) == "Option" => {
-                args.first().is_some_and(|inner| {
-                    matches!(inner, Type::Named { name: s, .. }
-                        if s == "str" || self.bound_builtin(s) == Some("owned_str"))
-                        || self.is_return_only_extern_type_seen(inner, seen)
-                })
-            }
-            Type::Qualified { module, name, .. } => {
-                name == "owned_str" && self.module_owns_builtin(module, name)
-            }
-            Type::Generic(..) | Type::Func { .. } | Type::Tuple(_) | Type::Nil(_) => false,
-        }
+        matches!(
+            self.resolve_ctype(t),
+            Some(CType::OwnedStr | CType::OptStr | CType::OptOwnedStr)
+        )
     }
 
     /// v1 C-ABI marshallability: an extern fn's param/return types must be C-scalar — `int`, `float`,

@@ -406,20 +406,16 @@ impl Checker {
         written: Vec<Ty>,
         span: Span,
     ) -> Option<Vec<Ty>> {
-        if head_args_clash(pinned.as_deref(), decl_params, !written.is_empty()) {
+        let targs = head_args(pinned, decl_params, written);
+        if targs.is_none() {
             self.error(
                 span,
                 format!(
                     "type alias '{spelled}' already fixes its type arguments; write the aliased type to pass your own"
                 ),
             );
-            return None;
         }
-        if written.is_empty() {
-            Some(pinned.unwrap_or_default())
-        } else {
-            Some(written)
-        }
+        targs
     }
 
     /// How many type params the struct or enum keyed `key` declares.
@@ -897,11 +893,29 @@ pub(super) fn fn_spelling(display: &str, tps: &[TyParam]) -> String {
     format!("{display}[{holes}]")
 }
 
+/// The type args a head written with `written` args takes: the written ones, else the alias-pinned
+/// ones. `None` when the alias already fixes them ([`head_args_clash`]). The one choice under
+/// [`Checker::written_head_args`] and the read-only resolver.
+pub(super) fn head_args(
+    pinned: Option<Vec<Ty>>,
+    decl_params: usize,
+    written: Vec<Ty>,
+) -> Option<Vec<Ty>> {
+    if head_args_clash(pinned.as_deref(), decl_params, !written.is_empty()) {
+        return None;
+    }
+    Some(if written.is_empty() {
+        pinned.unwrap_or_default()
+    } else {
+        written
+    })
+}
+
 /// Does a head with alias-pinned args `pinned` over a type declaring `decl_params` params clash
 /// with written type args (DEC-204: an alias that fixes its arguments takes no more)? A pinning
 /// alias (`type BI = Bx[int]`) and a non-generic one (`type P2 = P`) clash; an unpinned alias of a
 /// generic type (`type BB = Box`, TICKET-180) takes the target's arguments and does not. The one
-/// predicate under [`Checker::written_head_args`].
+/// predicate under [`head_args`].
 pub(super) fn head_args_clash(pinned: Option<&[Ty]>, decl_params: usize, written: bool) -> bool {
     written && pinned.is_some_and(|p| !p.is_empty() || decl_params == 0)
 }
