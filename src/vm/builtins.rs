@@ -168,10 +168,53 @@ impl Vm {
             .unwrap_or(v))
     }
 
+    /// What a builtin collection yields per step, as a snapshot: list and set elements, map
+    /// `(key, value)` pairs, a str's 1-char strs, a bytes' or bytearray's ints (0-255), and a
+    /// cursor's remaining items (not advanced). `None` for every other object. The one runtime row
+    /// table: the `for` lowering (`Op::ListClone`), [`drain_iterable`](Self::drain_iterable) and the
+    /// builtin `.iter()` all read it.
+    pub(super) fn builtin_items(&mut self, h: GcRef) -> Option<Vec<Value>> {
+        match self.heap.get(h) {
+            Obj::List(items) => Some(items.clone()),
+            Obj::Set(s) => Some(s.entries.iter().map(|(_, e)| *e).collect()),
+            Obj::Map(_) => Some(self.map_pairs(h)),
+            Obj::Bytes(b) => Some(b.iter().map(|&x| Value::int(x as i64)).collect()),
+            Obj::ByteArray(b) => Some(b.iter().map(|&x| Value::int(x as i64)).collect()),
+            Obj::Str(s) => {
+                let chars: Vec<char> = s.chars().collect();
+                Some(chars.into_iter().map(|c| self.alloc_char(c)).collect())
+            }
+            Obj::Iter { items, pos } => Some(items[(*pos).min(items.len())..].to_vec()),
+            Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Tuple(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
+        }
+    }
+
     /// Drain ANY for-iterable into a `Vec<Value>` of its elements — the runtime peer of the checker's
-    /// `iter_elem` (the single source of truth for "what `for x in X` accepts"). Built-in collections
-    /// copy their elements directly (list/set elems, str→per-char str, bytes/bytearray→per-byte int,
-    /// map→keys, range is already materialized to a list); a `Generator` is driven via `generator_next`
+    /// `iterable_elem` (the owner of "what `for x in X` yields"). A built-in collection reads its
+    /// [`builtin_items`](Self::builtin_items) row; a `Generator` is driven via `generator_next`
     /// until `None`; a user struct with `next(self) -> Option[T]` re-enters the VM (`run_proto`) per
     /// step until `None`. Both re-entrant paths run user code that can GC, so the growing accumulator
     /// is built into a heap `Obj::List` ROOTED on the operand stack across every `.next()` (mirrors
@@ -203,50 +246,8 @@ impl Vm {
             return Ok(drained);
         }
         // Built-in collections: copy directly, no re-entry.
-        if let Some(h) = v.as_obj() {
-            match self.heap.get(h) {
-                Obj::List(items) => return Ok(items.clone()),
-                Obj::Set(s) => return Ok(s.entries.iter().map(|(_, e)| *e).collect()),
-                Obj::Map(_) => return Ok(self.map_pairs(h)),
-                Obj::Bytes(b) => {
-                    let bytes = b.clone();
-                    return Ok(bytes.iter().map(|&x| Value::int(x as i64)).collect());
-                }
-                Obj::ByteArray(b) => {
-                    let bytes = b.clone();
-                    return Ok(bytes.iter().map(|&x| Value::int(x as i64)).collect());
-                }
-                Obj::Str(s) => {
-                    let chars: Vec<char> = s.chars().collect();
-                    return Ok(chars.into_iter().map(|c| self.alloc_char(c)).collect());
-                }
-                // (`Obj::Iter` cursors are handled above by the consume-in-place guard.)
-                Obj::BigInt(_)
-                | Obj::FloatBox(_)
-                | Obj::Iter { .. }
-                | Obj::Tuple(_)
-                | Obj::Struct { .. }
-                | Obj::Enum { .. }
-                | Obj::Cell(_)
-                | Obj::Func { .. }
-                | Obj::Closure { .. }
-                | Obj::Module(_)
-                | Obj::Native { .. }
-                | Obj::Builtin(_)
-                | Obj::Cffi(_)
-                | Obj::Ptr(_)
-                | Obj::Channel(_)
-                | Obj::Shared(_)
-                | Obj::RwShared(_)
-                | Obj::Atomic(_)
-                | Obj::AtomicInt(_)
-                | Obj::Executor(_)
-                | Obj::Socket(_)
-                | Obj::Listener(_)
-                | Obj::Writer(_)
-                | Obj::Reader(_)
-                | Obj::Generator(_) => {}
-            }
+        if let Some(items) = v.as_obj().and_then(|h| self.builtin_items(h)) {
+            return Ok(items);
         }
         // Re-entrant paths (generator / user struct iterator): run user `.next()` until `None`, rooting
         // the source + a heap accumulator list on the operand stack across each call.

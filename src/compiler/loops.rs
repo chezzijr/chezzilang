@@ -159,9 +159,9 @@ impl Compiler {
             self.compile_expr(fc, iter)?;
             let iter_slot = fc.add_hidden();
             fc.emit_hidden_set(iter_slot, span);
-            // ONE-TIME pure-`Iterable` conversion: a struct with `iter()` but no `next()` becomes its
-            // cursor here (then drives via the seq path); every other iterand (struct-with-`next`,
-            // generator, collection) passes through unchanged, so their fast paths are byte-identical.
+            // ONE-TIME conversion: a value with the `iter` hook becomes its cursor here (`iter` wins
+            // over `next`, DEC-250), and the cursor then takes the lazy `next()` step (`IsCursor`);
+            // every other iterand passes through unchanged, so their fast paths are byte-identical.
             fc.emit_hidden_get(iter_slot, span);
             fc.emit(Op::IterableToCursor, iter.span);
             fc.emit_hidden_set(iter_slot, span);

@@ -639,32 +639,24 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
-        // `.iter()` on a built-in collection (str/list/map/set/bytes/bytearray) → a FRESH cursor that
-        // SNAPSHOTS the current contents in the SAME order/elements as `for x in X` (list/set elems,
-        // map → (key, value) pairs, str → per-char str, bytes/bytearray → per-byte int). Reuses `drain_iterable`
-        // (the for-loop's single source of truth), then wraps the snapshot in an `Obj::Iter`. Placed
-        // BEFORE the per-type dispatch so it intercepts `iter` for every collection in one spot; a
-        // collection has no user-defined `iter`, so there is no precedence concern.
-        if method == "iter"
-            && args.is_empty()
-            && matches!(
-                self.heap.get(h),
-                Obj::Str(_)
-                    | Obj::List(_)
-                    | Obj::Map(_)
-                    | Obj::Set(_)
-                    | Obj::Bytes(_)
-                    | Obj::ByteArray(_)
-                    | Obj::Channel(_)
-            )
-        {
-            // `drain_iterable` may alloc (str per-char); root the receiver across the call.
+        // `.iter()` on a built-in collection → a FRESH cursor over a snapshot of what `for x in X`
+        // yields: the [`builtin_items`](Self::builtin_items) row, or a channel's drained values. A
+        // cursor and a generator returned above (their `iter()` is self); any other receiver
+        // (a struct, an enum) falls through to its own `iter` method.
+        if method == "iter" && args.is_empty() {
+            // Both readers may alloc (str per-char); root the receiver across the call.
             self.push(recv);
-            let items = self.drain_iterable(recv, span)?;
+            let items = if matches!(self.heap.get(h), Obj::Channel(_)) {
+                Some(self.drain_iterable(recv, span)?)
+            } else {
+                self.builtin_items(h)
+            };
             self.pop(); // unroot receiver
-            let cursor = self.heap.alloc(Obj::Iter { items, pos: 0 });
-            self.push(Value::obj(cursor));
-            return Ok(());
+            if let Some(items) = items {
+                let cursor = self.heap.alloc(Obj::Iter { items, pos: 0 });
+                self.push(Value::obj(cursor));
+                return Ok(());
+            }
         }
         // Built-in container methods, dispatched off the handle BEFORE the clone-match below so
         // `list.push`/`bytearray.push` mutate the heap object in place (the match clones the Obj):

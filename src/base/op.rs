@@ -457,11 +457,11 @@ pub enum Op {
     /// instead of snapshotting a private copy — keeping `for`/`List()`/`Set()` consistent with
     /// `.next()`. Emitted right after `IsGenerator` (so it runs post-`IterableToCursor` conversion).
     IsCursor,
-    /// `for`-loop one-time conversion for a PURE-`Iterable` struct (one with `iter(self)` but NO
-    /// `next`). Pop a value: if it is a struct that has `iter` but not `next`, call `iter()` once and
-    /// push the resulting cursor (an `Obj::Iter`, which the seq path then drains like any sequence);
-    /// otherwise push the value back UNCHANGED. Emitted once before the loop so a struct-with-`next`
-    /// and a generator stay on their existing fast paths byte-for-byte (this op is a no-op for them).
+    /// `for`-loop one-time conversion of a value with the `iter` hook. Pop a value: if it has the
+    /// `iter` hook, call `iter()` once and push the resulting cursor (`iter` wins over `next`,
+    /// DEC-250); the cursor then takes the lazy `next()` step (`IsCursor`). Every other value is
+    /// pushed back UNCHANGED, so a generator and a collection stay on their existing fast paths
+    /// byte-for-byte (this op is a no-op for them).
     IterableToCursor,
     /// Pop a value; push `true` if it is a `Channel`, else `false`. Used by `for v in ch:` to pick
     /// the blocking channel-iteration path vs the struct/sequence paths at runtime (type-erased).

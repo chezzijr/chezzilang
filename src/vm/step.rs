@@ -665,91 +665,16 @@ impl Vm {
                 self.push(Value::obj(h));
             }
             Op::ListClone => {
-                // Normalise a `for` iterand to an index-iterable list: a list is cloned (so a body
-                // that mutates it doesn't disturb iteration); a map yields its `(key, value)` pairs.
+                // Snapshot a `for` iterand into an index-iterable list (a body that mutates the
+                // source does not disturb iteration). `builtin_items` holds the rows.
                 let v = self.pop();
-                match v.view() {
-                    ValueView::Obj(h) => match self.heap.get(h) {
-                        Obj::List(items) => {
-                            let cloned = items.clone();
-                            let nh = self.heap.alloc(Obj::List(cloned));
-                            self.push(Value::obj(nh));
-                        }
-                        Obj::Map(_) => {
-                            let pairs = self.map_pairs(h);
-                            let nh = self.heap.alloc(Obj::List(pairs));
-                            self.push(Value::obj(nh));
-                        }
-                        Obj::Set(s) => {
-                            let elems: Vec<Value> = s.entries.iter().map(|(_, e)| *e).collect();
-                            let nh = self.heap.alloc(Obj::List(elems));
-                            self.push(Value::obj(nh));
-                        }
-                        // A string iterates as 1-char strings (Python-style; gap: char type).
-                        Obj::Str(s) => {
-                            // Collect `char`s (Copy — no per-char `String`) to release the heap borrow,
-                            // then box each in one alloc via `alloc_char`.
-                            let chars: Vec<char> = s.chars().collect();
-                            let items: Vec<Value> =
-                                chars.into_iter().map(|c| self.alloc_char(c)).collect();
-                            let nh = self.heap.alloc(Obj::List(items));
-                            self.push(Value::obj(nh));
-                        }
-                        // `bytes`/`bytearray` iterate as `int`s (0–255). Snapshots to a list of ints —
-                        // mutating the `bytearray` during iteration does not change the loop sequence.
-                        Obj::Bytes(b) => {
-                            let items: Vec<Value> =
-                                b.iter().map(|&x| Value::int(x as i64)).collect();
-                            let nh = self.heap.alloc(Obj::List(items));
-                            self.push(Value::obj(nh));
-                        }
-                        Obj::ByteArray(b) => {
-                            let items: Vec<Value> =
-                                b.iter().map(|&x| Value::int(x as i64)).collect();
-                            let nh = self.heap.alloc(Obj::List(items));
-                            self.push(Value::obj(nh));
-                        }
-                        // A cursor (`for x in pure_iterable_struct` lowered via `IterableToCursor`)
-                        // snapshots its REMAINING items to the index-iterable list.
-                        Obj::Iter { items, pos } => {
-                            let cloned = items[(*pos).min(items.len())..].to_vec();
-                            let nh = self.heap.alloc(Obj::List(cloned));
-                            self.push(Value::obj(nh));
-                        }
-                        Obj::BigInt(_)
-                        | Obj::FloatBox(_)
-                        | Obj::Tuple(_)
-                        | Obj::Struct { .. }
-                        | Obj::Enum { .. }
-                        | Obj::Cell(_)
-                        | Obj::Func { .. }
-                        | Obj::Closure { .. }
-                        | Obj::Module(_)
-                        | Obj::Native { .. }
-                        | Obj::Builtin(_)
-                        | Obj::Cffi(_)
-                        | Obj::Ptr(_)
-                        | Obj::Channel(_)
-                        | Obj::Shared(_)
-                        | Obj::RwShared(_)
-                        | Obj::Atomic(_)
-                        | Obj::AtomicInt(_)
-                        | Obj::Executor(_)
-                        | Obj::Socket(_)
-                        | Obj::Listener(_)
-                        | Obj::Writer(_)
-                        | Obj::Reader(_)
-                        | Obj::Generator(_) => {
-                            return Err(self
-                                .err(format!("cannot iterate over {}", self.type_name(v)), span));
-                        }
-                    },
-                    ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => {
-                        return Err(
-                            self.err(format!("cannot iterate over {}", self.type_name(v)), span)
-                        );
-                    }
-                }
+                let Some(items) = v.as_obj().and_then(|h| self.builtin_items(h)) else {
+                    return Err(
+                        self.err(format!("cannot iterate over {}", self.type_name(v)), span)
+                    );
+                };
+                let nh = self.heap.alloc(Obj::List(items));
+                self.push(Value::obj(nh));
             }
             Op::ArrLen => {
                 let v = self.pop();
