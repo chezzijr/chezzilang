@@ -2,10 +2,14 @@
 name = "chezzi-base"
 version = "0.1.0"
 edition = "2024"
+build = "../../src/base/build_methods.rs"
 
 [dependencies]
 chezzi-syntax = { path = "../chezzi-syntax" }
 chezzi-native = { path = "../chezzi-native" }
+
+[build-dependencies]
+chezzi-syntax = { path = "../chezzi-syntax" }
 
 [lints]
 workspace = true

@@ -4,6 +4,7 @@
 //! only, so neither the checker nor the VM depends on the other.
 
 pub mod builtin;
+pub mod builtin_method;
 pub mod crossing;
 pub mod hooks;
 pub mod json_desc;
