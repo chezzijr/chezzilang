@@ -1610,19 +1610,28 @@ fn a_name_is_bound_once_per_target_and_parameter_list() {
     parse_ok("fn g(_: int, _: int):\n    pass\n");
 }
 
-/// An enum needs at least one variant: `pass` and a methods-only body give the same error; an
+/// An enum needs at least one variant: every body with no variant (`pass`, methods only, `test`
+/// blocks only, any mix, a `native enum` too) gives the same error at the enum name (line 1); an
 /// enum with a variant plus a method stays legal.
 #[test]
 fn enum_without_variant_is_rejected_for_every_body() {
     let msg = "empty enums are not supported; an enum needs at least one variant";
+    let f = "    fn f(self) -> int:\n        return 1\n";
+    let t = "    test fn t(self):\n        assert true\n";
     for src in [
-        "enum Z:\n    pass\n",
-        "enum Z:\n    fn f(self) -> int:\n        return 1\n",
+        format!("enum Z:\n{f}"),
+        "enum Z:\n    pass\n".to_string(),
+        format!("enum Z:\n{t}"),
+        format!("enum Z:\n{f}{t}"),
+        format!("enum Z:\n{t}{f}"),
+        format!("enum Z:\n    pass\n{f}"),
+        format!("enum Z[T]:\n{f}"),
+        "native enum Z:\n    native fn f(self) -> int\n".to_string(),
     ] {
-        match try_parse(src) {
-            Err((_, m)) => assert_eq!(m, msg, "wrong error for {src:?}"),
+        match try_parse(&src) {
+            Err(e) => assert_eq!(e, (1, msg.to_string()), "wrong error for {src:?}"),
             Ok(_) => panic!("variant-less enum parsed: {src:?}"),
         }
     }
-    parse_ok("enum Z:\n    A\n    fn f(self) -> int:\n        return 1\n");
+    parse_ok(&format!("enum Z:\n    A\n{f}"));
 }
