@@ -1133,7 +1133,7 @@ impl Builder {
         dotted: &[String],
         std_file: bool,
     ) -> Result<(Module, u32), ResolveError> {
-        // An embedded std module is lexed and parsed once per process: every graph that loads it
+        // An embedded std module is decoded once per process: every graph that loads it
         // takes a copy of the shared parse, under the file id the shared parse was stamped with.
         if std_file && let Some(shared) = shared_std_parse(dotted, source) {
             if shared.range_named {
@@ -1235,7 +1235,7 @@ fn lex_and_parse(
     })
 }
 
-/// TICKET-265 — one embedded std module, lexed and parsed once per process.
+/// TICKET-265 — one embedded std module, decoded once per process from the build-time artifact.
 struct SharedStdParse {
     module: Module,
     words: Words,
@@ -1244,7 +1244,8 @@ struct SharedStdParse {
     file: u32,
 }
 
-/// The shared parse of one embedded std file, and how many times this process parsed it.
+/// The shared AST of one embedded std file, and how many times this process lexed and parsed its
+/// TEXT (0 when the artifact decodes).
 struct StdSlot {
     parsed: std::sync::OnceLock<Option<SharedStdParse>>,
     parses: std::sync::atomic::AtomicU32,
@@ -1289,13 +1290,18 @@ fn shared_std_parse_at(index: usize, dotted: &[String]) -> Option<&'static Share
     let slot = &std_slots()[index];
     slot.parsed
         .get_or_init(|| {
-            slot.parses
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let source = std_embed::STD_FILES[index].1;
             let file = index as u32 + 1;
-            // A std file never probes the project root: a user `Option.chz` must not turn the
-            // prelude's carrier import into a module import.
-            let (module, words) = lex_and_parse(source, dotted, file, &|_: &str| false).ok()?;
+            let (module, words) = match std_embed::decode_ast(index) {
+                Some(decoded) => decoded,
+                None => {
+                    slot.parses
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // A std file never probes the project root: a user `Option.chz` must not
+                    // turn the prelude's carrier import into a module import.
+                    lex_and_parse(source, dotted, file, &|_: &str| false).ok()?
+                }
+            };
             Some(SharedStdParse {
                 module,
                 words,
@@ -1316,7 +1322,8 @@ pub fn std_module_ast(rel: &str) -> Option<&'static Module> {
     shared_std_parse_at(index, &dotted).map(|p| &p.module)
 }
 
-/// How many times this process lexed and parsed the embedded std file `rel`.
+/// How many times this process lexed and parsed the embedded TEXT of the std file `rel` (0 when its
+/// artifact decodes).
 #[cfg(test)]
 fn std_parse_count(rel: &str) -> u32 {
     let index = std_embed::STD_FILES
@@ -2109,11 +2116,11 @@ mod tests {
         );
     }
 
-    // TICKET-265 — a std module is lexed and parsed once per process and every graph shares the
+    // TICKET-265 — a std module is decoded once per process and every graph shares the
     // result, so its `Span::file` id cannot depend on the graph: two graphs that load `std.cmp`
     // in a different order give it the same id and the same AST.
     #[test]
-    fn a_std_module_has_one_file_id_and_one_parse_across_graphs() {
+    fn a_std_module_has_one_file_id_and_one_ast_across_graphs() {
         let t = TmpDir::new();
         let first = t.write(
             "first.chz",
@@ -2139,8 +2146,8 @@ mod tests {
         );
         assert_eq!(
             std_parse_count("cmp.chz"),
-            1,
-            "std.cmp was lexed and parsed more than once in one process"
+            0,
+            "std.cmp was lexed and parsed at run time"
         );
     }
 
