@@ -6,6 +6,8 @@ use super::stmt::body_contains_yield;
 use super::*;
 use crate::lexer::Token;
 
+const EMPTY_ENUM: &str = "empty enums are not supported; an enum needs at least one variant";
+
 impl Parser {
     /// `test fn …` — consume the `test` modifier, parse the following `fn`, and tag it `is_test`.
     /// Shared by the free-fn site (`parse_stmt`) and the struct-method site (`parse_struct`).
@@ -537,6 +539,7 @@ impl Parser {
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
+        self.require_variant(name_span, &variants)?;
         Ok(StmtKind::NativeEnum {
             name,
             name_span,
@@ -804,6 +807,19 @@ impl Parser {
         })
     }
 
+    /// An enum needs at least one variant (`struct S:` + `pass` is the empty type). The one check
+    /// for `enum` and `native enum`, on the variant list after the body, so every body with no
+    /// variant (`pass`, methods only, `test` blocks only, any mix) gets this error at the name.
+    fn require_variant(&self, name_span: Span, variants: &[Variant]) -> PResult<()> {
+        if variants.is_empty() {
+            return Err(ParseError {
+                message: EMPTY_ENUM.to_string(),
+                span: name_span,
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn parse_enum(&mut self) -> PResult<StmtKind> {
         let doc = self.doc_above(self.cur_span().line);
         self.expect(&Token::Enum)?;
@@ -813,17 +829,17 @@ impl Parser {
         self.open_block()?;
         let mut variants = Vec::new();
         let mut methods = Vec::new();
+        // The first `pass` or `test` member's error. It waits for the body's end, so a body with
+        // no variant reports `require_variant` instead.
+        let mut misplaced = None;
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
             if self.check(&Token::Pass) {
-                // An empty enum (uninhabited type) is deliberately unsupported: an enum needs at
-                // least one variant. Reject `pass` here with a clear message (unlike struct/protocol,
-                // where a sole `pass` is a valid empty body).
-                return Err(self.err(
-                    "empty enums are not supported; an enum needs at least one variant".to_string(),
-                ));
-            }
-            if self.check(&Token::Fn) {
+                // Unlike struct/protocol, a sole `pass` is not an empty enum body.
+                misplaced.get_or_insert(self.err(EMPTY_ENUM.to_string()));
+                self.advance();
+                self.expect_stmt_end()?;
+            } else if self.check(&Token::Fn) {
                 // Methods accept default params (like free fns / struct methods); the desugar pass
                 // fills omitted args / reorders named args at method call sites by method name.
                 methods.push(self.parse_fn(true)?);
@@ -831,8 +847,12 @@ impl Parser {
                 // Enum test *suites* are not supported: the compiler/test-runner build SuiteInfo +
                 // discovery only for structs, so an enum `test fn` would silently never run (a
                 // false-green). Reject at parse time until enum suites are wired (follow-up).
-                return Err(self
-                    .err("test methods are not supported on enums (only on structs)".to_string()));
+                misplaced.get_or_insert(
+                    self.err(
+                        "test methods are not supported on enums (only on structs)".to_string(),
+                    ),
+                );
+                self.parse_test_fn(true)?;
             } else {
                 // Variants must precede methods: a variant after a method is a structuring error.
                 if !methods.is_empty() {
@@ -864,6 +884,10 @@ impl Parser {
             self.skip_newlines();
         }
         self.expect(&Token::Dedent)?;
+        self.require_variant(name_span, &variants)?;
+        if let Some(e) = misplaced {
+            return Err(e);
+        }
         Ok(StmtKind::Enum {
             name,
             name_span,
