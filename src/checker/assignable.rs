@@ -17,7 +17,7 @@ impl Checker {
     ///
     /// **One question (W7-45, TICKET-265).** `Hashable` — the scalars `int`/`str`/`bool`
     /// intrinsically, a tuple whose every element is `Hashable` (TICKET-161), or a struct/enum
-    /// defining `hash(self) -> int`; `float` is refused (NaN/equality footgun). `Hashable` EMBEDS
+    /// defining both `hash(self) -> int` and `eq` (TICKET-280); `float` is refused (NaN/equality footgun). `Hashable` EMBEDS
     /// `Eq` (owner decision 2, as `Comparable` does), so the one `satisfies` call also asks the
     /// half a probe needs: a probe compares candidates with `values_equal` on a hash COLLISION, so
     /// a key whose `eq` carries `where` bounds this instantiation does not satisfy check-cleaned

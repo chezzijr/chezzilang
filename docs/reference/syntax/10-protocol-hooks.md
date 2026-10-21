@@ -176,7 +176,7 @@ The prebuilt **`Hashable`** protocol (`hash(self) -> int`, and it embeds `Eq`) g
 - A tuple is `Hashable` when every element type is: `{(1, 2): "a"}` and `{("a", true)}` work. A
   rejection names the element (`element List[int] is not Hashable`).
 - `T?` is not a key; declare an enum with `hash` and `eq`. A wrapper type takes none of `T`'s
-  protocols (owner decision 2026-10-21; Rust and Python accept `Option<i32>` / `None` as a key).
+  protocols (owner decision 2026-10-21; Rust accepts a nullable wrapper of an integer as a key).
 - A struct or enum key is hashed by `hash()` and confirmed by its own `eq`.
 - Contract: two keys that `==` calls equal must hash equal (see the `eq` limits in
   [Protocols](09-protocols.md#equality-eq)).
