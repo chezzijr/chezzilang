@@ -812,14 +812,16 @@ pub struct DeclaredType {
 /// The type names `std.ffi` exports, in file order, derived from the `native type` decls of the
 /// embedded `std/ffi.chz` — the one declaring authority (no Rust name list). Its readers run whether
 /// or not the program imports `std.ffi` (decl guards, `resolve_type`, the VM), so the list is built
-/// from the file once, not from a harvest. A declared width with no `cffi::width_ctype` row is a bug
+/// from the file's build-time AST once, not from a harvest. A declared width with no `cffi::width_ctype` row is a bug
 /// and panics at first use.
 pub fn declared_types() -> &'static [DeclaredType] {
     static TYPES: std::sync::OnceLock<Vec<DeclaredType>> = std::sync::OnceLock::new();
     TYPES.get_or_init(|| {
-        let src = crate::native::std_embed::lookup("ffi.chz").expect("std/ffi.chz is embedded");
-        let tokens = crate::lexer::tokenize(src).expect("std/ffi.chz lexes");
-        let module = crate::parser::parse(tokens).expect("std/ffi.chz parses");
+        let index = crate::native::std_embed::STD_FILES
+            .iter()
+            .position(|(k, _)| *k == "ffi.chz")
+            .expect("std/ffi.chz is embedded");
+        let (module, _) = crate::native::std_embed::decode_ast(index).expect("std/ffi.chz parses");
         let mut out = Vec::new();
         for s in &module.stmts {
             let crate::ast::StmtKind::NativeType {
