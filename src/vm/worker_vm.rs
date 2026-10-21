@@ -525,9 +525,7 @@ impl Vm {
             if crate::vm::HOLD_RUN_END_PASS.load(Ordering::Relaxed) && self.fiber_scope.is_some() {
                 std::thread::sleep(std::time::Duration::from_millis(900));
             }
-            let (out, stderr) = sched.take_finished_streams();
-            self.out.extend_from_slice(&out);
-            self.stderr.extend_from_slice(&stderr);
+            self.take_job_streams(&sched);
         }
         if e.is_timed_out && slack == 0 {
             drop(take_scope(core));
@@ -550,25 +548,45 @@ impl Vm {
     /// joined holds its output only in its slot. `take_finished_streams` waits for every exiting
     /// fiber's slot, then takes the core lock, under which `MnSched::publish_job_fault` stored a job
     /// fault's cell before the slot; so the slot of the job that ended the run is filled here.
+    /// TICKET-284 — a job of an Executor this pass already read can take a later Executor's exit
+    /// output and store it in its own slot. So a pass is valid only when no exit count began during
+    /// it ([`QuiesceState::exit_origins_begun`]); else it repeats. A pass that drains exit output
+    /// begins counts itself, so one more pass follows and drains nothing. Each pass re-reads the
+    /// registry, which only grows (DEC-067).
     pub(super) fn flush_finished_jobs_from(&mut self, from: usize) {
-        let live: Vec<_> = self
-            .exec_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .skip(from)
-            .filter_map(|c| c.sched())
-            .collect();
-        for sched in live {
-            let (out, stderr) = sched.take_finished_streams();
-            self.out.extend_from_slice(&out);
-            self.stderr.extend_from_slice(&stderr);
-            // TICKET-284 — test-only: `main` reads the next Executor late (see `HOLD_RUN_END_PASS`).
-            #[cfg(test)]
-            if crate::vm::HOLD_RUN_END_PASS.load(Ordering::Relaxed) && self.fiber_scope.is_none() {
-                std::thread::sleep(std::time::Duration::from_millis(600));
+        loop {
+            let begun = self.quiesce.exit_origins_begun();
+            let live: Vec<_> = self
+                .exec_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .skip(from)
+                .filter_map(|c| c.sched())
+                .collect();
+            for sched in live {
+                self.take_job_streams(&sched);
+                // TICKET-284 — test-only: `main` reads the next Executor late (see `HOLD_RUN_END_PASS`).
+                #[cfg(test)]
+                if crate::vm::HOLD_RUN_END_PASS.load(Ordering::Relaxed)
+                    && self.fiber_scope.is_none()
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                }
+            }
+            if self.quiesce.exit_origins_begun() == begun {
+                break;
             }
         }
+    }
+
+    /// TICKET-284 — move one sched's finished output into this party's buffers, and take over the
+    /// count of the exit output it moved ([`Vm::adopt_exit_output`]).
+    fn take_job_streams(&mut self, sched: &MnSched) {
+        let (out, stderr, exits) = sched.take_finished_streams();
+        self.out.extend_from_slice(&out);
+        self.stderr.extend_from_slice(&stderr);
+        self.adopt_exit_output(exits);
     }
 
     /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a

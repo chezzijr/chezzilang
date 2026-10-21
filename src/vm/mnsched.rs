@@ -951,17 +951,29 @@ impl MnSched {
     /// joiner that leaves while other tasks are unfinished. Length-preserving (a running task keeps
     /// its index) and idempotent (a second call returns nothing). TICKET-270 — first waits until
     /// every fiber that called `os.exit` stored its slot ([`quiesce::QuiesceState::await_exit_origins`]); the
-    /// caller holds no sched lock.
-    pub(super) fn take_finished_streams(&self) -> (Vec<u8>, Vec<u8>) {
-        self.quiesce.await_exit_origins();
-        // TICKET-284 — test-only: the reader reaches the slots after a joined job took them, the
-        // order a loaded host produces (see the hold in `Disp::Finish`).
-        #[cfg(test)]
-        if crate::vm::HOLD_ADOPTED_EXIT.load(Ordering::Relaxed) && self.quiesce.pending() == Some(3)
-        {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        let mut c = self.lock();
+    /// caller holds no sched lock. TICKET-284 — the count is read again under the sched lock, and
+    /// the exit output this call drains is counted under it; the third value is that count, which
+    /// the caller hands to `Vm::adopt_exit_output`.
+    #[must_use]
+    pub(super) fn take_finished_streams(&self) -> (Vec<u8>, Vec<u8>, usize) {
+        // TICKET-284 — a take counts its exit output under the sched lock, so the count is read
+        // again under it: a joiner that took an exit's output after the wait is still counted here.
+        let mut c = loop {
+            self.quiesce.await_exit_origins();
+            // TICKET-284 — test-only: the reader reaches the slots after a joined job took them, the
+            // order a loaded host produces (see the hold in `Disp::Finish`).
+            #[cfg(test)]
+            if crate::vm::HOLD_ADOPTED_EXIT.load(Ordering::Relaxed)
+                && self.quiesce.pending() == Some(3)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let c = self.lock();
+            if !self.quiesce.exit_origins_open() {
+                break c;
+            }
+        };
+        let exits = self.hold_exit_output(c.slots.iter().flatten());
         let (mut out, mut err) = (Vec::new(), Vec::new());
         for o in c.slots.iter_mut().flatten() {
             let (o_out, o_err) = match o {
@@ -979,7 +991,7 @@ impl MnSched {
             s.bytes = 0;
         }
         c.charged = 0;
-        (out, err)
+        (out, err, exits)
     }
 
     /// One tick of an `Executor` join: wait on the sched's condvar while more than `slack` tasks

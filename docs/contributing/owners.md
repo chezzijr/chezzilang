@@ -101,7 +101,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | CPU width / runner permits | `RUNNERS` (`vm/width.rs`) | TICKET-205/230 |
 | Quiescence verdict | `decide_since` (`vm/quiesce.rs`) | |
 | A fire-and-forget job's fault ends the run: publish the cell | `publish_job_fault` (`vm/mnsched_verdict.rs`) | TICKET-270: under `finish`'s core lock, before the slot |
-| A flush of finished output waits for each exiting fiber's slot | `QuiesceState::await_exit_origins` (`vm/quiesce.rs`), read by `take_finished_streams` (`vm/mnsched.rs`) | TICKET-270: the host `request_exit` counts a fiber's exit before the code; the code stays at the call (DEC-213) |
+| A flush of finished output waits for each exiting fiber's slot | `QuiesceState::await_exit_origins` (`vm/quiesce.rs`), read by `take_finished_streams` (`vm/mnsched.rs`) | TICKET-270: the host `request_exit` counts a fiber's exit before the code; the code stays at the call (DEC-213). TICKET-284: every taker of exit output (`MnSched::take_slots`, `take_scope_slots`, `take_finished_streams`) counts it through `MnSched::hold_exit_output` under the sched lock, `Vm::adopt_exit_output` hands the count to the receiving fiber, the reader re-reads it under the sched lock, and `Vm::flush_finished_jobs_from` repeats its pass until `QuiesceState::exit_origins_begun` did not move |
 | A join that left takes the finished jobs' output | `join_leave_flushes` (`vm/worker_vm.rs`) | TICKET-270: `join_executor` and the exit drain read it |
 | Airlock crossing policy | `base/crossing.rs` | D4 |
 | Cross-heap store check | `ensure_crossable` (`vm/worker_vm.rs`), `to_wire_crossable` (`vm/airlock_out.rs`) | a missed guard is UB |

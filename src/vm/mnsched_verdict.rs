@@ -269,8 +269,27 @@ impl MnSched {
     }
 
     /// Drain the per-task outcome slots after the nursery terminates (joining thread, post-loop).
+    #[must_use]
     pub(super) fn take_slots(&self) -> Vec<Option<TaskOutcome>> {
-        std::mem::take(&mut self.lock().slots)
+        let mut c = self.lock();
+        let slots = std::mem::take(&mut c.slots);
+        self.hold_exit_output(slots.iter().flatten());
+        slots
+    }
+
+    /// TICKET-284 — the one count of exit output that leaves its slot. Every taker (`take_slots`,
+    /// `take_scope_slots`, `take_finished_streams`) calls it while it holds the sched lock, so a
+    /// reader that reads the count under that lock sees the output in a slot or counted, never in
+    /// neither. The receiver ends the count ([`Vm::adopt_exit_output`]).
+    pub(super) fn hold_exit_output<'a>(
+        &self,
+        taken: impl IntoIterator<Item = &'a TaskOutcome>,
+    ) -> usize {
+        let n = taken.into_iter().filter(|o| o.holds_exit_output()).count();
+        for _ in 0..n {
+            self.quiesce.begin_exit_origin();
+        }
+        n
     }
 
     /// Cross-nursery flat scheduler — drain ONE scope's contiguous slot sub-range
@@ -279,6 +298,7 @@ impl MnSched {
     /// because `register_scope`/`inject` only ever grow the flat vec / the LAST scope. Replaces each
     /// taken slot with `None` so a re-take is a no-op (and the flat vec keeps its length, so other
     /// scopes' `base_index` stays valid).
+    #[must_use]
     pub(super) fn take_scope_slots(&self, scope_id: usize) -> Vec<Option<TaskOutcome>> {
         let mut c = self.lock();
         let (base, total) = {
@@ -291,7 +311,9 @@ impl MnSched {
         // keeps the counter honest if that ever stops being true, instead of leaving a stale
         // watermark that would fault the NEXT program to reach this scope id.
         c.scopes[scope_id].bytes = 0;
-        (base..base + total).map(|i| c.slots[i].take()).collect()
+        let slots: Vec<_> = (base..base + total).map(|i| c.slots[i].take()).collect();
+        self.hold_exit_output(slots.iter().flatten());
+        slots
     }
 
     /// TICKET-062 (W10-16) — peek at ONE scope's slots for the lowest-index recorded `Fault`, without

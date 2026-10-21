@@ -360,11 +360,11 @@ pub(super) struct QuiesceState {
     /// `test fn` that calls `os.exit` would latch the cell and halt every LATER test that blocks.
     /// [`Vm::invoke_test`] clears it, beside the other per-test resets.
     exit: Mutex<Option<i32>>,
-    /// TICKET-270 — how many fibers called `os.exit` and have not yet stored their slot. A flush of
-    /// finished output ([`super::MnSched::take_finished_streams`]) waits on `exit_origins_cv` until
-    /// it is 0, so it never reads an exiting fiber's empty slot. [`Self::clear_exit`] does not reset
-    /// it: each origin ends its own count when it finishes.
-    exit_origins: Mutex<usize>,
+    /// TICKET-270, TICKET-284 — the exit output in flight ([`ExitOrigins`]). A flush of finished
+    /// output ([`super::MnSched::take_finished_streams`]) waits on `exit_origins_cv` until `open` is
+    /// 0, so it never reads a slot before the exit output that belongs there. [`Self::clear_exit`]
+    /// does not reset it: each party ends its own count when it stores its slot.
+    exit_origins: Mutex<ExitOrigins>,
     exit_origins_cv: std::sync::Condvar,
     /// gaps.md W7-57 — the lock-free mirror of `exit.is_some()`, for the two CPU-side checkpoints that
     /// cannot afford a mutex: `jump_checked`'s loop back-edge (sampled 1/1024) and `guarded`'s
@@ -478,15 +478,36 @@ impl QuiesceState {
     /// TICKET-270 — a fiber called `os.exit`. The host `request_exit` calls this BEFORE it publishes
     /// the code, so a joiner that reads the code also sees the count.
     pub(super) fn begin_exit_origin(&self) {
-        *self.exit_origins.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        let mut g = self.exit_origins.lock().unwrap_or_else(|e| e.into_inner());
+        g.open += 1;
+        g.begun += 1;
     }
 
     /// TICKET-270 — an exiting fiber's `MnSched::finish` returned: its slot holds its output.
     pub(super) fn end_exit_origin(&self) {
         let mut g = self.exit_origins.lock().unwrap_or_else(|e| e.into_inner());
-        *g = g.saturating_sub(1);
+        g.open = g.open.saturating_sub(1);
         drop(g);
         self.exit_origins_cv.notify_all();
+    }
+
+    /// TICKET-284 — is an exit's output still in flight? `MnSched::take_finished_streams` asks it
+    /// under the sched lock, the lock every taker counts under.
+    pub(super) fn exit_origins_open(&self) -> bool {
+        self.exit_origins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .open
+            > 0
+    }
+
+    /// TICKET-284 — how many exit counts ever began. The run-end pass reads it before and after;
+    /// a change means exit output moved while the pass read, so the pass repeats.
+    pub(super) fn exit_origins_begun(&self) -> u64 {
+        self.exit_origins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .begun
     }
 
     /// TICKET-270 — wait until every fiber that called `os.exit` stored its slot. Bounded: an
@@ -494,7 +515,7 @@ impl QuiesceState {
     /// at once. The caller must hold no sched lock.
     pub(super) fn await_exit_origins(&self) {
         let mut g = self.exit_origins.lock().unwrap_or_else(|e| e.into_inner());
-        while *g > 0 {
+        while g.open > 0 {
             g = self
                 .exit_origins_cv
                 .wait(g)
@@ -833,6 +854,16 @@ const RUN_END_WINDOW_EXIT: i32 = 3;
 #[cfg(test)]
 fn hold_run_end_window() {
     std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+/// TICKET-284 — the exit output in flight. `open` counts the parties that hold an exit's output
+/// outside a slot the flush reads (a fiber that called `os.exit`, or one that took exit output out
+/// of a slot) and have not yet stored their own slot. `begun` counts every count ever begun, so the
+/// run-end pass (`Vm::flush_finished_jobs_from`) can tell that output moved while it read.
+#[derive(Default)]
+struct ExitOrigins {
+    open: usize,
+    begun: u64,
 }
 
 #[cfg(test)]

@@ -573,6 +573,21 @@ pub(super) enum TaskOutcome {
     },
 }
 
+impl TaskOutcome {
+    /// TICKET-284 — does this outcome hold an `os.exit`'s output? A taker that moves it out of its
+    /// slot counts it ([`MnSched::hold_exit_output`]); its receiver ends the count.
+    pub(super) fn holds_exit_output(&self) -> bool {
+        match self {
+            TaskOutcome::Exit { out, stderr, .. } => !out.is_empty() || !stderr.is_empty(),
+            TaskOutcome::Done(_)
+            | TaskOutcome::Cancelled { .. }
+            | TaskOutcome::CancelledFault { .. }
+            | TaskOutcome::Fault { .. }
+            | TaskOutcome::Deadlocked { .. } => false,
+        }
+    }
+}
+
 // B3.3-threads had a `TaskSlots` alias + a `DoneSignal` completion guard here, both owned by the
 // batch farm/join helper `run_workers_on_pool`. Eager `Executor` execution retired that helper (its
 // last caller was the `Executor` drain — the legacy `run_parallel_nursery` was already gone, and the

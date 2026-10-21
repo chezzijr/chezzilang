@@ -420,7 +420,8 @@ impl ScopeCancel {
 pub static TEST_WORKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// TICKET-284 — test-only: set inside the forced child of
-/// `a_job_that_adopts_its_childs_exit_keeps_the_childs_output`. The two holds in `Disp::Finish` and
+/// `an_adopted_exit_keeps_its_output_at_every_depth` (`src/vm/tests/executor_cut.rs`), the one test
+/// that sets it. The two holds in `Disp::Finish` and
 /// `MnSched::take_finished_streams` fire only while it is set, so no other test pays them or sees
 /// the order they force.
 #[cfg(test)]
@@ -1015,7 +1016,9 @@ pub struct Vm {
     /// TICKET-270 — this party is a fiber that called `os.exit` and counted itself with
     /// `QuiesceState::begin_exit_origin`; the `Disp::Finish` arm ends the count after the slot
     /// store. Per-`Vm` scratch like `pending_exit`: an exiting fiber unwinds without parking, so the
-    /// worker that ran the call also runs its `Disp::Finish`.
+    /// worker that ran the call also runs its `Disp::Finish`. TICKET-284 — also set by
+    /// `Vm::adopt_exit_output` on a fiber that took exit output out of a slot while `pending_exit`
+    /// is set; that fiber also unwinds without parking.
     exit_origin: bool,
     /// TICKET-246 — the open box calls of the task running on this `Vm`, innermost last (see
     /// `boxctx.rs`). A `Vm` field, NOT a `FiberCtx` field, and `swap_ctx` does not move it: a box

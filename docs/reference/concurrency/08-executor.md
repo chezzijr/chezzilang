@@ -86,7 +86,8 @@ fn main():
   exit, a job fault, a deadlock verdict) drops it. `shutdown_now()` marks the Executor shut before it
   trips the cancel, so a `submit` racing a job's `shutdown_now()` either faults or starts its job.
   `shutdown_now()` cancels held jobs only; a started job runs to its first cancellation point.
-- **A run end keeps what was printed.** A job that faults or calls `os.exit` ends the run. What it
+- **A run end keeps what was printed.** A job that faults or calls `os.exit` ends the run, and so does
+  a task at any depth of a job's `parallel:` blocks, or a job of an Executor that a job joins, that calls `os.exit`. What it
   printed before that reaches stdout, and so does the output of every job that finished, wherever
   `main` is when the run ends: at a `recv`, in a join, or in the exit drain (Go: a goroutine's writes
   before `os.Exit` are on stdout). An `os.exit` still runs no `defer` in any party.

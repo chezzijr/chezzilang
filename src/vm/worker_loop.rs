@@ -822,6 +822,8 @@ impl Vm {
         let mut deadlock_err: Option<RuntimeError> = None;
         // TICKET-147 — the lowest-index `CancelledFault`; used only when no ordinary fault exists.
         let mut first_cancel_fault: Option<(RuntimeError, Vec<TraceFrame>)> = None;
+        // TICKET-284 — how much exit output this reduce took; its take counted each one.
+        let mut exits = 0;
         for slot in slots {
             // W7-60 — a `None` here means the slot was already drained by `MnSched::take_finished_streams`
             // on a `join_executor` bail-out (its output is flushed, its outcome consumed), which is
@@ -830,6 +832,7 @@ impl Vm {
             // filled its slot — is still asserted, at the place that actually knows: the join only
             // reaches `take_slots` with `outstanding() == 0`.
             let Some(outcome) = slot else { continue };
+            exits += usize::from(outcome.holds_exit_output());
             match outcome {
                 TaskOutcome::Done(wr) => {
                     self.out.extend_from_slice(&wr.out);
@@ -939,6 +942,9 @@ impl Vm {
             // It wins over any sibling fault — a hard halt is never demoted to a catchable error.
             (Some(code), _, _) => {
                 self.pending_exit = Some(code);
+                // TICKET-284 — every slot that holds exit output is an `Exit`, so this arm is the
+                // only one that sees `exits > 0`.
+                self.adopt_exit_output(exits);
                 (Err(self.err("exit".to_string(), Span::RUNTIME)), None)
             }
             // A real fault propagates normally so an outer `recover:` can still catch it (unless it
@@ -948,6 +954,24 @@ impl Vm {
             // Deadlock abort: all parked buffers already flushed above; propagate ONE deadlock error.
             (None, None, Some(e)) => (Err(e), None),
             (None, None, None) => (Ok(()), None),
+        }
+    }
+
+    /// TICKET-284 — this party moved `n` outcomes' exit output into its own buffers, and the taker
+    /// counted each one ([`MnSched::hold_exit_output`]). A fiber's output reaches a reader only
+    /// through its own slot, so a fiber keeps one count until its `Disp::Finish` stores that slot;
+    /// it keeps it only with `pending_exit` set, because an exit runs no `defer` (DEC-219), so it
+    /// gets there at once. `main` holds its own output, a fiber that leaves for another cause may
+    /// still run a `defer` (DEC-270: not waited for), and a fiber already counted keeps the count
+    /// it has: each of these ends the taker's counts here.
+    pub(super) fn adopt_exit_output(&mut self, n: usize) {
+        let keep =
+            n > 0 && self.fiber_scope.is_some() && self.pending_exit.is_some() && !self.exit_origin;
+        if keep {
+            self.exit_origin = true;
+        }
+        for _ in 0..n - usize::from(keep) {
+            self.quiesce.end_exit_origin();
         }
     }
 

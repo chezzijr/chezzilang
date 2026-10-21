@@ -225,7 +225,7 @@ fn mnsched_take_charge_reports_growth_only() {
     let first = sched.take_charge();
     assert!(first >= 4000, "one finished task's output: {first}");
     assert_eq!(sched.take_charge(), 0, "no growth since the last call");
-    let (out, _) = sched.take_finished_streams();
+    let (out, _, _) = sched.take_finished_streams();
     assert_eq!(out.len(), 4000);
     assert_eq!(
         sched.held_bytes(),
