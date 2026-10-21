@@ -29,7 +29,7 @@ fn main():
     parallel:
         for i in 0..10:
             spawn:
-                m.set(i, i * i)
+                _ := m.insert(i, i * i)
     s := 0
     for i in 0..10:
         match m.get(i):
@@ -42,7 +42,7 @@ fn main():
     print(m.get_or_insert(100, -1))     # -1  (absent -> inserts default)
     print(m.get_or_insert(100, 999))    # -1  (present -> default ignored)
     print(m.contains(100))              # true
-    m.remove(100)
+    _ := m.remove(100)
     print(m.contains(100))              # false
     print(m.snapshot().len())           # 10  (back to the 10 own-key entries)
 

@@ -495,12 +495,16 @@ fn ops() -> Vec<Op> {
             )),
         },
         Op {
-            name: "ConcurrentMap.set",
+            name: "ConcurrentMap.insert",
             out: "Channel[int](1)",
-            ready: Some(("", "ConcurrentMap(wm).set(1, v)", "wm.get().len() == 1")),
+            ready: Some((
+                "",
+                "_ := ConcurrentMap(wm).insert(1, v)",
+                "wm.get().len() == 1",
+            )),
             wait: Some((
                 "",
-                "_ := held.recv()\nConcurrentMap(wm).set(1, v)",
+                "_ := held.recv()\n_ := ConcurrentMap(wm).insert(1, v)",
                 "after.load() == 0",
                 Some("hold_m"),
             )),
@@ -563,7 +567,7 @@ fn box_guard_ops() -> Vec<Op> {
         ),
         (
             "ConcurrentMap.remove",
-            "ConcurrentMap(wm).remove(1)\ngot.add(v)",
+            "_ := ConcurrentMap(wm).remove(1)\ngot.add(v)",
             "got.load() == 7",
             "hold_m",
         ),
@@ -598,8 +602,8 @@ fn box_guard_ops() -> Vec<Op> {
             "hold_l",
         ),
         (
-            "ConcurrentSet.add",
-            "ConcurrentSet(ws).add(v)",
+            "ConcurrentSet.insert",
+            "ConcurrentSet(ws).insert(v)",
             "ws.get().len() == 1",
             "hold_t",
         ),

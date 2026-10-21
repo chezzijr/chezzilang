@@ -16,13 +16,13 @@ import ConcurrentList, ConcurrentSet, ConcurrentMap from std.concurrency.collect
 fn six_set() -> ConcurrentSet[int]:
     s := ConcurrentSet[int].new()
     for i in 1..7:
-        s.add(i)
+        s.insert(i)
     return s
 
 fn six_map() -> ConcurrentMap[int, str]:
     m := ConcurrentMap[int, str].new()
     for i in 1..7:
-        m.set(i, "v")
+        _ := m.insert(i, "v")
     return m
 
 fn six_list() -> ConcurrentList[int]:
@@ -38,15 +38,15 @@ fn touch_set(s: ConcurrentSet[int], mode: int, x: int):
     if mode == 2:
         s.remove(x + 1)
     if mode == 3:
-        s.add(x + 100)
+        s.insert(x + 100)
 
 fn touch_map(m: ConcurrentMap[int, str], mode: int, k: int):
     if mode == 1:
-        m.remove(k)
+        _ := m.remove(k)
     if mode == 2:
-        m.remove(k + 1)
+        _ := m.remove(k + 1)
     if mode == 3:
-        m.set(k + 100, "n")
+        _ := m.insert(k + 100, "n")
 
 fn visit_set(s: ConcurrentSet[int], seen: List[int], mode: int, x: int):
     seen.push(x)
@@ -142,7 +142,7 @@ fn odd(x: int) -> int:
 fn remover(s: ConcurrentSet[int], m: ConcurrentMap[int, int]):
     for i in 0..2000:
         s.remove(i * 2)
-        m.remove(i * 2)
+        _ := m.remove(i * 2)
 
 fn count_odd(acc: concurrency.Shared[int], x: int):
     if x % 2 == 1:
@@ -164,8 +164,8 @@ test fn a_walk_beside_a_remover_visits_every_entry_present_throughout():
     s := ConcurrentSet[int].new()
     m := ConcurrentMap[int, int].new()
     for i in 0..4000:
-        s.add(i)
-        m.set(i, i)
+        s.insert(i)
+        _ := m.insert(i, i)
     out := Channel[List[int]](1)
     parallel:
         spawn remover(s, m)

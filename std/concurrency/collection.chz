@@ -40,7 +40,7 @@ import std.concurrency
 #
 # CONCURRENCY: the map is a LIVE map in the box's private heap (TICKET-246). get/contains/len are
 # CONCURRENT READS that copy only what they return (an O(1) expected probe of the map's hash
-# index); set/remove/get_or_insert are plain map operations under the box's ONE update guard, the
+# index); insert/remove/get_or_insert are plain map operations under the box's ONE update guard, the
 # same guard `write` takes, and copy nothing but their arguments. `get_or_insert` is
 # COMPOUND-ATOMIC: its check and its insert happen under that one guard, so it cannot lose a race.
 #
@@ -58,13 +58,14 @@ struct ConcurrentMap[K: Hashable, V]:
     fn get(self, key: K) -> V?:
         return self.inner._get_key(key)
 
-    # Insert or overwrite `key` -> `val`. One update guard.
-    fn set(self, key: K, val: V):
-        self.inner._set_key(key, val)
+    # Insert or overwrite `key` -> `val`; returns the value it replaced, or None for a new key (Rust
+    # `HashMap::insert`). One update guard. A statement that drops the `V?` warns: write `_ := m.insert(k, v)`.
+    fn insert(self, key: K, val: V) -> V?:
+        return self.inner._set_key(key, val)
 
-    # Remove `key` if present (no-op if absent). One update guard.
-    fn remove(self, key: K):
-        _ := self.inner._remove_key(key)
+    # Remove `key` and return its value, or None if absent (Rust `HashMap::remove`). One update guard.
+    fn remove(self, key: K) -> V?:
+        return self.inner._remove_key(key)
 
     # True iff `key` is present. CONCURRENT READ.
     fn contains(self, item: K) -> bool:
@@ -150,7 +151,7 @@ struct ConcurrentList[E]:
 # ============================================================================
 #
 # CONCURRENCY: contains/len are CONCURRENT READS (an O(1) expected probe of the set's hash
-# index); for_each/fold copy the set once and walk the copy, as `ConcurrentList` does. add/remove
+# index); for_each/fold copy the set once and walk the copy, as `ConcurrentList` does. insert/remove
 # take the box's ONE update guard and change the set in place; neither copies it.
 struct ConcurrentSet[E: Hashable]:
     inner: concurrency.RwShared[Set[E]]
@@ -159,13 +160,13 @@ struct ConcurrentSet[E: Hashable]:
     fn new() -> ConcurrentSet[E]:
         return ConcurrentSet(concurrency.RwShared(Set[E]()))
 
-    # Insert `item` (no-op if present). One update guard.
-    fn add(self, item: E):
-        self.inner._add(item)
+    # Insert `item`; true when it was new (Rust `HashSet::insert`). One update guard.
+    fn insert(self, item: E) -> bool:
+        return self.inner._add(item)
 
-    # Remove `item` (no-op if absent). One update guard.
-    fn remove(self, item: E):
-        self.inner._remove(item)
+    # Remove `item`; true when it was present (Rust `HashSet::remove`). One update guard.
+    fn remove(self, item: E) -> bool:
+        return self.inner._remove(item)
 
     # True iff `item` is present. CONCURRENT READ.
     fn contains(self, item: E) -> bool:

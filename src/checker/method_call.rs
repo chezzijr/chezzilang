@@ -975,8 +975,8 @@ impl Checker {
                             }
                             // TICKET-192: the single-entry writers (update guard, O(1) expected).
                             RwSharedPrim::SetKey => {
-                                self.check_args_range("_set_key", &[k, v], 2, args, span);
-                                return Ty::Nil;
+                                self.check_args_range("_set_key", &[k, v.clone()], 2, args, span);
+                                return Ty::option(v);
                             }
                             RwSharedPrim::RemoveKey => {
                                 self.check_args_range("_remove_key", &[k], 1, args, span);
@@ -1020,7 +1020,7 @@ impl Checker {
                             }
                             RwSharedPrim::Add | RwSharedPrim::Remove => {
                                 self.check_args_range(prim.name(), &[e], 1, args, span);
-                                return Ty::Nil;
+                                return Ty::Bool;
                             }
                             RwSharedPrim::Push
                             | RwSharedPrim::At

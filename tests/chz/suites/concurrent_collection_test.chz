@@ -24,12 +24,12 @@ test fn map_basic():
     assert m.len() == 0
     assert m.get("a") == None
     assert not m.contains("a")
-    m.set("a", 1)
-    m.set("b", 2)
+    _ := m.insert("a", 1)
+    _ := m.insert("b", 2)
     assert m.get("a") == ?1
     assert m.contains("a")
     assert m.len() == 2
-    m.remove("a")
+    _ := m.remove("a")
     assert m.get("a") == None
     assert not m.contains("a")
     assert m.len() == 1
@@ -43,13 +43,13 @@ test fn map_basic():
 # snapshot returns a COPY of the map (a concurrent read).
 test fn map_snapshot():
     m: collection.ConcurrentMap[str, int] = collection.ConcurrentMap(concurrency.RwShared({}))
-    m.set("x", 10)
-    m.set("y", 20)
+    _ := m.insert("x", 10)
+    _ := m.insert("y", 20)
     snap: Map[str, int] = m.snapshot()
     assert snap.len() == 2
     assert snap["x"] == 10
     # mutating the original after the snapshot does not change the copy
-    m.set("z", 30)
+    _ := m.insert("z", 30)
     assert snap.len() == 2
     assert m.len() == 3
 
@@ -85,7 +85,7 @@ test fn map_each_own_key():
     parallel:
         for i in 0..10:
             spawn:
-                m.set(i, i * i)
+                _ := m.insert(i, i * i)
     s := 0
     for i in 0..10:
         match m.get(i):
@@ -106,7 +106,7 @@ test fn get_or_insert_race_no_fault():
                 m.get_or_insert("k", 7)
         for i in 0..50:
             spawn:
-                m.remove("k")
+                _ := m.remove("k")
     match m.get("k"):
         ?v: assert v == 7
         None: assert true
@@ -176,9 +176,9 @@ test fn list_push_on_empty_and_readers():
 # add is a no-op on a present element and remove on an absent one; colliding user hashes probe by eq.
 test fn set_add_and_remove_single_elements():
     c := collection.ConcurrentSet[CKey].new()
-    c.add(CKey(1, [1]))
-    c.add(CKey(3, [3]))
-    c.add(CKey(1, [99]))
+    c.insert(CKey(1, [1]))
+    c.insert(CKey(3, [3]))
+    c.insert(CKey(1, [99]))
     assert c.len() == 2
     assert c.contains(CKey(3, []))
     assert not c.contains(CKey(5, []))
@@ -190,7 +190,7 @@ test fn set_add_and_remove_single_elements():
     assert c.contains(CKey(3, []))
     c.remove(CKey(3, []))
     assert c.len() == 0
-    c.add(CKey(3, [4]))
+    c.insert(CKey(3, [4]))
     assert c.fold(0, fn(a: int, k: CKey) -> int: a + k.tags[0]) == 4
 
 # remove, add, remove on a set built from elements that held one shared list (a Set snapshots its
@@ -202,7 +202,7 @@ test fn set_remove_then_add_then_remove_keeps_the_survivors():
     c.remove(CKey(1, []))
     assert c.len() == 2
     assert c.fold(0, fn(a: int, k: CKey) -> int: a + k.tags[0]) == 14
-    c.add(CKey(4, [1]))
+    c.insert(CKey(4, [1]))
     c.remove(CKey(2, []))
     assert c.fold(0, fn(a: int, k: CKey) -> int: a + k.n * 10 + k.tags[0]) == 30 + 7 + 40 + 1
 
@@ -214,8 +214,8 @@ test fn list_and_set_writes_from_tasks_reach_the_parent():
         for i in 0..50:
             spawn:
                 cl.push([i, i + 1])
-                cs.add(i % 10)
-                cs.add(100 + i)
+                cs.insert(i % 10)
+                cs.insert(100 + i)
                 cs.remove(100 + i)
     assert cl.len() == 50
     assert cs.len() == 10

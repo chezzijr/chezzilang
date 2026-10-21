@@ -102,6 +102,18 @@ impl Vm {
         })
     }
 
+    /// The `Option` value a RwShared map primitive returns for the wire value it took out of the box
+    /// (`_set_key` the value it replaced, `_remove_key` the value it removed).
+    fn wire_option(&mut self, w: Option<WireValue>) -> Value {
+        match w {
+            Some(w) => {
+                let v = self.from_wire(w);
+                self.alloc_enum("Option", "Some", vec![v])
+            }
+            None => self.alloc_enum("Option", "None", vec![]),
+        }
+    }
+
     fn rwshared_method_rooted(
         &mut self,
         h: GcRef,
@@ -166,13 +178,12 @@ impl Vm {
             RwSharedPrim::SetKey => {
                 self.arity_err(method, args, 2, span)?;
                 let qh = self.hash_value(args[0], span)?;
-                self.rwshared_mutate(&core, args, span, |vm, st, a| {
+                let replaced = self.rwshared_mutate(&core, args, span, |vm, st, a| {
                     want_elem(vm, vm.elem_kind(st), "map")?;
                     let mh = st.as_obj().expect("a map is a heap object");
-                    let _replaced = vm.map_upsert_in_heap(mh, qh, a[0], a[1], span)?;
-                    Ok(None)
+                    vm.map_upsert_in_heap(mh, qh, a[0], a[1], span)
                 })?;
-                Ok(Value::nil())
+                Ok(self.wire_option(replaced))
             }
             RwSharedPrim::RemoveKey => {
                 self.arity_err(method, args, 1, span)?;
@@ -188,13 +199,7 @@ impl Vm {
                     };
                     Ok(Some(m.remove_at(i).2))
                 })?;
-                Ok(match removed {
-                    Some(w) => {
-                        let v = self.from_wire(w);
-                        self.alloc_enum("Option", "Some", vec![v])
-                    }
-                    None => self.alloc_enum("Option", "None", vec![]),
-                })
+                Ok(self.wire_option(removed))
             }
             // Compound-atomic: the probe and the insert run under ONE exclusive lock.
             RwSharedPrim::GetOrInsert => {
@@ -225,6 +230,7 @@ impl Vm {
                 self.arity_err(method, args, 1, span)?;
                 let qh = self.hash_value(args[0], span)?;
                 let add = prim == RwSharedPrim::Add;
+                let mut changed = false;
                 self.rwshared_mutate(&core, args, span, |vm, st, a| {
                     want_elem(vm, vm.elem_kind(st), "set")?;
                     let sh = st.as_obj().expect("a set is a heap object");
@@ -234,15 +240,19 @@ impl Vm {
                         unreachable!()
                     };
                     match pos {
-                        None if add => s.push(qh, e),
+                        None if add => {
+                            s.push(qh, e);
+                            changed = true;
+                        }
                         Some(i) if !add => {
                             s.remove_at(i);
+                            changed = true;
                         }
                         _ => {}
                     }
                     Ok(None)
                 })?;
-                Ok(Value::nil())
+                Ok(Value::bool(changed))
             }
             RwSharedPrim::Push => {
                 self.arity_err(method, args, 1, span)?;

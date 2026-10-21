@@ -76,8 +76,8 @@ fn writer(w: concurrency.RwShared[State], xs: ConcurrentList[int], m: Concurrent
     for i in 0..rounds:
         w.write(step)
         xs.push(i)
-        m.set(i, i)
-        st.add(i)
+        _ := m.insert(i, i)
+        st.insert(i)
 
 fn some_or(o: int?, d: int) -> int:
     match o:

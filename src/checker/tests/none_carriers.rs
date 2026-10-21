@@ -351,6 +351,24 @@ fn carrier_messages_name_no_removed_spelling() {
     );
 }
 
+/// TICKET-278 — `Map.insert` and `ConcurrentMap.insert` return `V?`, so a dropped result warns like
+/// every other carrier; `_ := …` silences it. Lines 3 and 6 are the bare statements.
+#[test]
+fn a_dropped_insert_result_warns_like_every_carrier() {
+    let src = "import std.concurrency.collection\nm := {\"a\": 1}\nm.insert(\"a\", 2)\n_ := m.insert(\"a\", 3)\ncm := collection.ConcurrentMap[str, int].new()\ncm.insert(\"a\", 2)\n_ := cm.insert(\"a\", 3)\n";
+    let (errs, warns) = warn_src(src);
+    assert!(errs.is_empty(), "{errs:?}");
+    let lines: Vec<u32> = warns
+        .iter()
+        .filter(|w| {
+            w.message
+                .contains("the `int?` value returned by 'insert' is discarded")
+        })
+        .map(|w| w.span.line)
+        .collect();
+    assert_eq!(lines, vec![3, 6], "{warns:?}");
+}
+
 /// TICKET-228 — the prefix type `!E` is `None!E` (and `!` is `None!`): one type in every
 /// position, printed in the short form.
 #[test]

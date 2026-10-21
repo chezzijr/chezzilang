@@ -105,10 +105,10 @@ fn _shared_goi[K: Hashable + Eq](s: concurrency.Shared[Map[K, int]], k: K, v: in
 
 # The RwShared single-entry writers (see the header).
 fn _rw_put[K: Hashable + Eq, V](b: concurrency.RwShared[Map[K, V]], k: K, v: V):
-    ConcurrentMap(b).set(k, v)
+    _ := ConcurrentMap(b).insert(k, v)
 
 fn _rw_del[K: Hashable + Eq, V](b: concurrency.RwShared[Map[K, V]], k: K):
-    ConcurrentMap(b).remove(k)
+    _ := ConcurrentMap(b).remove(k)
 
 fn _rw_goi[K: Hashable + Eq, V](b: concurrency.RwShared[Map[K, V]], k: K, v: V) -> V:
     return ConcurrentMap(b).get_or_insert(k, v)
@@ -119,8 +119,14 @@ fn _rw_ops[K: Hashable + Eq](b: concurrency.RwShared[Map[K, int]], keys: List[K]
 fn _rw_items[K: Hashable + Eq](b: concurrency.RwShared[Map[K, int]]) -> str:
     return ConcurrentMap(b).fold_entries("", fn(a, k, v): a + _show(k, v))
 
+fn _cm_put[K: Hashable + Eq](c: ConcurrentMap[K, int], k: K, v: int):
+    _ := c.insert(k, v)
+
+fn _cm_del[K: Hashable + Eq](c: ConcurrentMap[K, int], k: K):
+    _ := c.remove(k)
+
 fn _cm_ops[K: Hashable + Eq](c: ConcurrentMap[K, int], keys: List[K]) -> str:
-    return _ops(keys, fn(k: K, v: int): c.set(k, v), fn(k: K): c.remove(k), fn(k: K) -> int?: c.get(k), fn(k: K) -> bool: c.contains(k), fn() -> int: c.len(), fn(k: K, v: int) -> int: c.get_or_insert(k, v), fn() -> str: _map_items(c.snapshot()))
+    return _ops(keys, fn(k: K, v: int): _cm_put(c, k, v), fn(k: K): _cm_del(c, k), fn(k: K) -> int?: c.get(k), fn(k: K) -> bool: c.contains(k), fn() -> int: c.len(), fn(k: K, v: int) -> int: c.get_or_insert(k, v), fn() -> str: _map_items(c.snapshot()))
 
 # ---- callers ---------------------------------------------------------------------------------------
 fn _child_shared[K: Hashable + Eq](s: concurrency.Shared[Map[K, int]], keys: List[K], ch: Channel[str]):

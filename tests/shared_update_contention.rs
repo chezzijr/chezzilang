@@ -73,7 +73,7 @@ fn contended_shared_update_is_fast_at_every_worker_count() {
 
 /// TICKET-193 grid: op x contention x worker count. `Shared.update` and `RwShared.write` take the
 /// update guard and run a closure (a callback preempt there gates the workers, DEC-141);
-/// `RwShared.read` takes no guard; `Atomic.add` is a Mutex; `ConcurrentMap.set` takes the guard with
+/// `RwShared.read` takes no guard; `Atomic.add` is a Mutex; `ConcurrentMap.insert` takes the guard with
 /// no closure. Every cell does 12000 ops in total and must print `12000`.
 const GRID_OPS: [(&str, &str, &str, &str); 5] = [
     (
@@ -101,9 +101,9 @@ const GRID_OPS: [(&str, &str, &str, &str); 5] = [
         "print(s.load())",
     ),
     (
-        "ConcurrentMap.set",
+        "ConcurrentMap.insert",
         "m: ConcurrentMap[int, int] = ConcurrentMap(RwShared({}))\n    c := AtomicInt(0)",
-        "m.set(c.add(1), 1)",
+        "_ := m.insert(c.add(1), 1)",
         "print(m.len())",
     ),
 ];

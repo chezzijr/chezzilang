@@ -58,7 +58,7 @@ fn _memo_copy_read[K: Hashable, V](shared: concurrency.RwShared[Map[K, V]], f: f
 
 fn _memo_fill[K: Hashable, V](shared: concurrency.RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
     v := f(k)
-    shared._set_key(k, v)
+    _ := shared._set_key(k, v)
     return v
 
 # Wrap `f` so each distinct argument is computed once and cached. Returns a fn with the same

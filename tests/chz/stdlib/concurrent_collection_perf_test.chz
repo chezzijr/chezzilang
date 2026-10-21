@@ -1,8 +1,8 @@
 # tests/chz/stdlib/concurrent_collection_perf_test.chz — TICKET-243.
 #
-# `ConcurrentList.push` and `ConcurrentSet.add` splice ONE element into the stored container under
+# `ConcurrentList.push` and `ConcurrentSet.insert` splice ONE element into the stored container under
 # the update guard; they do not copy it. Measured on main `95d4e6c0`, release binary, 100k elements,
-# 200 calls: a `push` built on whole-value `write` took 1465 ms and such an `add` 3547 ms. One
+# 200 calls: a `push` built on whole-value `write` took 1465 ms and such an `insert` 3547 ms. One
 # absolute bound, 300 ms, no ratio of two samples. The first `push` after a whole store re-encodes
 # the list once (24 ms on the debug binary); the other 199 splice.
 
@@ -34,7 +34,7 @@ test fn push_and_add_on_a_100k_container_do_not_copy_it():
     t1 := time.now_ms()
     i = 0
     while i < 200:
-        cs.add(100000 + i)
+        cs.insert(100000 + i)
         i = i + 1
     add_ms := time.now_ms() - t1
     assert add_ms < 300, "200 add calls on a 100k set took {add_ms} ms; the bound is 300 ms (a whole-value write measured 3547 ms)"

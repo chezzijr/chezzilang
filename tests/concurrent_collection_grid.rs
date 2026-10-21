@@ -102,10 +102,10 @@ const CELLS: &[Cell] = &[
     },
     Cell {
         collection: "ConcurrentMap",
-        method: "set",
+        method: "insert",
         setup: MAP,
         kind: Write(
-            "c.set(100 + i, i)",
+            "_ := c.insert(100 + i, i)",
             "sorted_list(c.snapshot().keys())",
             "[1, 2, 100]",
             "[1, 2, 100, 101, 102, 103, 104, 105, 106, 107]",
@@ -116,7 +116,7 @@ const CELLS: &[Cell] = &[
         method: "remove",
         setup: "c := ConcurrentMap(RwShared({100: 0, 101: 0, 102: 0, 103: 0, 104: 0, 105: 0, 106: 0, 107: 0, 1: 0}))",
         kind: Write(
-            "c.remove(100 + i)",
+            "_ := c.remove(100 + i)",
             "sorted_list(c.snapshot().keys())",
             "[1, 101, 102, 103, 104, 105, 106, 107]",
             "[1]",
@@ -175,10 +175,10 @@ const CELLS: &[Cell] = &[
     },
     Cell {
         collection: "ConcurrentSet",
-        method: "add",
+        method: "insert",
         setup: SET,
         kind: Write(
-            "c.add(100 + i)\n                c.add(1)",
+            "c.insert(100 + i)\n                c.insert(1)",
             "set_sorted(c.snapshot())",
             "[1, 2, 3, 100]",
             "[1, 2, 3, 100, 101, 102, 103, 104, 105, 106, 107]",

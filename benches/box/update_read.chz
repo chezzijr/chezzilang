@@ -124,7 +124,7 @@ fn collections():
     m := ConcurrentMap[int, int].new()
     for i in 0..100000:
         xs.push(i)
-        m.set(i, i)
+        _ := m.insert(i, i)
     for callers in [1, 8]:
         each := 200000 / callers
         t0 := time.monotonic()

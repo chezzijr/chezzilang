@@ -585,15 +585,15 @@ fn rwshared_map_readview_methods() {
 fn rwshared_map_write_entry_methods() {
     // TICKET-192: the single-entry writers of a `RwShared[Map[K, V]]`.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    box.set(\"a\", 2)\n    box.remove(\"a\")\n    print(box.get_or_insert(\"a\", 3) + 1)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    _ := box.insert(\"a\", 2)\n    _ := box.remove(\"a\")\n    print(box.get_or_insert(\"a\", 3) + 1)\nmain()\n",
     );
     // Wrong key type, wrong value type.
     entry_rejects(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    box.set(1, 2)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    _ := box.insert(1, 2)\nmain()\n",
         "expected",
     );
     entry_rejects(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    box.set(\"a\", \"x\")\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(concurrency.RwShared({\"a\": 1}))\n    _ := box.insert(\"a\", \"x\")\nmain()\n",
         "expected",
     );
     // A List element has no map writers.
