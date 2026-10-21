@@ -357,7 +357,7 @@ with a name and a statement body.
 
   **A mutating call on a temporary.** The checker warns (as for the `Shared` read temporary,
   [`concurrency.md`](../concurrency/01-model.md) §6) when a mutating builtin call (`push`, `extend`, `sort`,
-  `add`, `remove`, `update`, ...) or a field/index store lands on a value no name holds:
+  `insert`, `remove`, `update`, ...) or a field/index store lands on a value no name holds:
   - a slice of a builtin (`g[0..2]`, `g[r]`), `.reversed()`, `.copy()`, or another native
     `List`/`Map`/`Set`/`bytearray` method that returns a container
   - an operator result (`xs + ys`), a comprehension, a literal, a struct or variant constructor

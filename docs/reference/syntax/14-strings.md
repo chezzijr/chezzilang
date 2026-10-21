@@ -246,7 +246,7 @@ with `compare`; stable, in place).
 
 **Sets:** `{a, b, c}` is a set literal (deduped, insertion-ordered). `{}` is the empty *map*; the
 empty set is `Set()`; `Set(list)` builds one. Elements are any `Hashable` type (int/str/bool, a struct
-or enum with `hash(self) -> int` and `eq`, or a tuple of those). Methods: `s.add(x)` `s.remove(x)→bool` `s.contains(x)`
+or enum with `hash(self) -> int` and `eq`, or a tuple of those). Methods: `s.insert(x)→bool` `s.remove(x)→bool` `s.contains(x)`
 `s.len()` `s.union(t)` `s.intersection(t)` `s.difference(t)` `s.copy()→set` (shallow). Iterate with
 `for x in s`. `==` ignores order.
 

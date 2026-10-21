@@ -90,10 +90,10 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
      protocols live in `std.ops`/`std.cmp`/`std.iter`/`std.string`/`std.path`/`std.convert` and a bound
      needs the import, `Hashable` embeds `Eq`, `T?` derives no ordering. A std import checks and
      compiles only the std fns the program reaches, and a process decodes each embedded std module once from a build-time AST (`shared_std_parse`, item 6; TICKET-265 had it lex and parse the text once); `std.iter`/`std.string`/`std.ops` imports still
-     cost 2-3 ms over `print(1)` (`docs/contributing/benchmarks.md`). Part 2 is filed (2026-10-21): the method set per
-     builtin type and the collection convention table (TICKET-278); `Hashable` needs `hash` and `eq` for a
-     user type (TICKET-280, landed). Part 2 also had what an Iterable yields and the Deque, Heap and Counter
-     iteration: landed (TICKET-279). Still open: the
+     cost 2-3 ms over `print(1)` (`docs/contributing/benchmarks.md`). Part 2 landed (2026-10-21): the method set per
+     builtin type is generated from the std native decls and the collection convention rows are in
+     (TICKET-278); `Hashable` needs `hash` and `eq` for a user type (TICKET-280). Part 2 also had what an
+     Iterable yields and the Deque, Heap and Counter iteration: landed (TICKET-279). Still open: the
      U5 sibling gaps.
 2. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): one arm table decides what an
    annotation names; the read-only, mutable and C-type walks, the annotation hover and the return-only
@@ -147,11 +147,11 @@ None open on 2026-10-16.
 
 ### Owner decisions not yet implemented
 
-- **Collection methods** (U16, 2026-10-16): one convention table, with Rust's shapes: Set
-  `insert`/`remove` return `bool`, Map `insert`/`remove` return `V?`, List `remove(i)` returns `T` and
-  faults on a bad index; the concurrent collections follow the same rows. A protocol only where
-  generic code needs one (`Iterable`, `Contains`, `Sized`, `Extend`); a new protocol goes in a std
-  module, not the global namespace.
+- **Collection protocols** (U16, 2026-10-16): the `Sized` and `Extend` protocols are not declared yet.
+  A protocol only where generic code needs one; a new protocol goes in a std module, not the global
+  namespace. The convention rows themselves are done (TICKET-278, 2026-10-21): Set
+  `insert`/`remove` return `bool`, Map `insert`/`remove` return `V?`, List `remove(i)` returns `T`,
+  and the concurrent collections follow the same rows.
 
 ## JIT entry rule
 

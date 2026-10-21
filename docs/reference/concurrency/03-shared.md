@@ -40,7 +40,7 @@ fn bump(s: Shared[int]):
 > different: its reads alias the live value (push-through works), but it can't cross the airlock.
 >
 > The checker **warns** on the bare-statement shape: a mutating builtin call (`s.get().push(1)`,
-> `.add`, `.remove`, `.pop`, …) or a field/index assign (`b.get().v = 9`, `s.get()[0] = 9`) on a
+> `.insert`, `.remove`, `.pop`, …) or a field/index assign (`b.get().v = 9`, `s.get()[0] = 9`) on a
 > `Shared`/`RwShared` `get()` or `Atomic` `load()` read temporary. The message names the working
 > spelling — `s.update(…)`, `r.write(…)` or `a.store(…)` — and the exit code is unchanged. The
 > checker cannot tell the write is lost, so it stays silent on four shapes that DO lose it (each
@@ -330,14 +330,14 @@ shared **container** use a collection from `std.concurrency.collection`:
 | collection | methods |
 |---|---|
 | `ConcurrentList[E]` | `len`/`at`/`slice`/`for_each`/`fold`/`push` |
-| `ConcurrentMap[K, V]` | `get`/`contains`/`len`/`for_each_entry`/`fold_entries`/`set`/`remove`/`get_or_insert` |
-| `ConcurrentSet[E]` | `contains`/`len`/`for_each`/`fold`/`add`/`remove` |
+| `ConcurrentMap[K, V]` | `get`/`contains`/`len`/`for_each_entry`/`fold_entries`/`insert`/`remove`/`get_or_insert` |
+| `ConcurrentSet[E]` | `contains`/`len`/`for_each`/`fold`/`insert`/`remove` |
 | `ConcurrentCounter[K]` | `increment`/`add`/`count`/`total` |
 
 The container is a live `List` / `Map` / `Set` in the box heap. The single-entry readers (`len`,
-`at`, `slice`, `get`, `contains`) copy only what they return. The writers (`push`, `set`, `remove`,
-`get_or_insert`, `add`) are the plain container operation under the box's update guard: they copy
-their arguments in and nothing else. `get`/`contains`, `set`, `get_or_insert` and `add` are O(1)
+`at`, `slice`, `get`, `contains`) copy only what they return. The writers (`push`, `insert`, `remove`,
+`get_or_insert`) are the plain container operation under the box's update guard: they copy
+their arguments in and nothing else. `get`/`contains`, `insert` and `get_or_insert` are O(1)
 expected.
 
 **The walk rule.** `for_each`, `fold`, `for_each_entry` and `fold_entries` copy the collection once
@@ -383,6 +383,6 @@ structs — **`ConcurrentList[E]`**, **`ConcurrentMap[K, V]`**, **`ConcurrentSet
 **`ConcurrentCounter[K]`** — each over one `RwShared` box (`c.inner`), built with `X.new()` or
 `X(RwShared(data))`. A struct of all-sendable fields crosses the airlock as a **shared handle** (same
 as `RwShared` itself), so the wrappers keep the cross-task sharing; `get`/`len`/`count`/`snapshot` are
-concurrent reads and `set`/`push`/`add`/`increment`/`get_or_insert` are exclusive writes (the compound
+concurrent reads and `insert`/`push`/`add`/`increment`/`get_or_insert` are exclusive writes (the compound
 ones atomic in one lock). See [`stdlib.md`](../stdlib/01-builtins.md) §5 → `std.concurrency.collection` and
 `examples/concurrent_collection.chz`.

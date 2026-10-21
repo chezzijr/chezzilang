@@ -57,7 +57,7 @@ inside a task is fine and it is never gated.
 
 ### Writes to a task's copy fault (D4)
 
-Reassigning — or mutating in place (`.push`/`.add`/`m[k]=v`/`s.field=x`) — a captured **local** or a
+Reassigning — or mutating in place (`.push`/`.insert`/`m[k]=v`/`s.field=x`) — a captured **local** or a
 **module global** inside a task is a recoverable runtime fault:
 
 ```
@@ -81,8 +81,8 @@ same write is always visible there; the divergence is deliberate. Decision recor
   field stays silent as real sharing;
 - a captured-local cell store, a module-global slot store;
 - `+=`-style in-place arithmetic on a container;
-- every mutating native call: List `push pop reverse sort sort_by sort_by_key extend insert remove_at`,
-  Map `remove update`, Set `add remove`, bytearray `push pop extend`.
+- every mutating native call: List `push pop reverse sort sort_by sort_by_key extend insert remove`,
+  Map `insert remove update`, Set `insert remove`, bytearray `push pop extend`.
 
 Reads never check the mark. A write through a `Shared`/`RwShared`/`Atomic*`/`Channel`/`Socket`/
 `Listener` handle is real sharing and is never marked, so it is never checked either.

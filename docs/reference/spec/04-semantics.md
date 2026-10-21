@@ -6,7 +6,7 @@ The library surface (global builtins, methods on the built-in types, the runtime
 
 - **Builtins (no import):** `print`, `Range`, casts (`int()`/`str()`/`float()`/`bool()`), `ord`/`chr`,
   the container constructors, `panic(msg)`, and the core-type methods (`s.upper()`, `xs.push()`,
-  `m.get()`, `set.add()`).
+  `m.get()`, `set.insert()`).
 - **Native modules** bind Rust functions through the FFI seam (see [Native FFI](#native-ffi)):
   `std.math`, `std.io`, `std.os`, `std.fs`, `std.time`, `std.process`, `std.rand`, `std.regex`,
   `std.request`, `std.net`, `std.ffi`, `std.encoding`, `std.crypto`, `std.uuid`.

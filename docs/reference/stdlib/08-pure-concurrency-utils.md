@@ -55,8 +55,8 @@ and inserts are O(1) expected (the stored map keeps the heap map's hash index). 
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
 | `.get(key)` | `(K) -> V?` | **concurrent read**. `?v` / `None`. |
-| `.set(key, val)` | `(K, V) -> None` | **update guard**. Insert or overwrite; an overwrite keeps the stored key, as `d[k] = v`. |
-| `.remove(key)` | `(K) -> None` | **update guard**. No-op if absent. |
+| `.insert(key, val)` | `(K, V) -> V?` | **update guard**. Insert or overwrite; returns the replaced value, or `None` for a new key. An overwrite keeps the stored key, as `d[k] = v`. A bare statement warns; write `_ := m.insert(k, v)`. |
+| `.remove(key)` | `(K) -> V?` | **update guard**. Returns the removed value, or `None` if absent. A bare statement warns; write `_ := m.remove(k)`. |
 | `.contains(key)` | `(K) -> bool` | **concurrent read**. |
 | `.len()` | `() -> int` | **concurrent read**. |
 | `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the probe and the insert run under ONE update guard with no user closure, so a concurrent `remove` cannot slip between them. Returns the existing value, or `default` if it was absent. |
@@ -68,8 +68,8 @@ and inserts are O(1) expected (the stored map keeps the heap map's hash index). 
 
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
-| `.add(item)` | `(E) -> None` | **update guard**. Inserts one element without copying the set; no-op if present. O(1) expected. |
-| `.remove(item)` | `(E) -> None` | **update guard**. No-op if absent. O(n), as `Set.remove`. |
+| `.insert(item)` | `(E) -> bool` | **update guard**. Inserts one element without copying the set; `true` when new, `false` if present. O(1) expected. |
+| `.remove(item)` | `(E) -> bool` | **update guard**. `true` when the element was present. O(n), as `Set.remove`. |
 | `.contains(item)` | `(E) -> bool` | **concurrent read**, O(1) expected. |
 | `.len()` | `() -> int` | **concurrent read**. |
 | `.for_each(f)` | `(fn(E) -> R) -> None` | Calls `f` once per element, in insertion order. |

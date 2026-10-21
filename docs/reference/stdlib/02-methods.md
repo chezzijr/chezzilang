@@ -59,7 +59,7 @@ recoverable capacity fault in both spellings. The empty-`old` rule of `replace` 
 | `first` / `last` | `() -> T?` | The first / last element, `None` if empty. Non-mutating. |
 | `reversed` | `() -> List[T]` | Returns a **new** reversed list; the receiver is untouched (contrast in-place `reverse`). |
 | `insert` | `(i: int, x: T) -> None` | *mutates*: insert `x` before index `i`. Python-clamped: `i > len` appends, negatives are length-relative and clamp to `0`; never faults. |
-| `remove_at` | `(i: int) -> T` | *mutates*: remove & return the element at index `i` (Python-relative negatives). A true out-of-range index **faults** (`index {i} out of bounds (len {n})`). |
+| `remove` | `(i: int) -> T` | *mutates*: remove & return the element at index `i` (Rust `Vec::remove`). A negative `i` counts from the end, as in `xs[i]`. A true out-of-range index **faults** (`index {i} out of bounds (len {n})`). |
 | `unique` | `() -> List[T]` | Returns a **new** list with all duplicates removed, first-occurrence order kept (Python `dict.fromkeys`). Structural equality; never mutates the receiver. One pass over a hash index when every element is a flat scalar key; a container, `bytearray`, or user-`eq` element falls back to a linear scan with the same result. |
 | `dedup` | `() -> List[T]` | Returns a **new** list collapsing only **consecutive** duplicate runs (Rust `Vec::dedup`); non-adjacent duplicates survive. |
 | `chunk` | `(n: int) -> List[List[T]]` | Consecutive fixed-size chunks (final chunk short if `len` not divisible). `n <= 0` **faults** (`chunk size must be positive, got {n}`). |
@@ -109,6 +109,7 @@ Keep callbacks pure; if you need both, sort a copy and merge after.
 | `keys` | `() -> List[K]` | Insertion order. |
 | `values` | `() -> List[V]` | Insertion order. |
 | `items` | `() -> List[(K, V)]` | Insertion order, the same order as `keys()`, so `Map(m.items()) == m`. Returns a fresh list (a snapshot, like `keys()`; CPython returns a live view). |
+| `insert` | `(key: K, val: V) -> V?` | *mutates*: sets `m[key] = val` and returns the value it replaced, or `None` for a new key (Rust `HashMap::insert`). A bare `m.insert(k, v)` statement warns, like every dropped `V?`; write `_ := m.insert(k, v)`. |
 | `remove` | `(key: K) -> V?` | *mutates*: returns the removed value, or `None`. |
 | `merge` | `(other: Map[K, V]) -> Map[K, V]` | Returns a **new** map (`other` wins on key clash). |
 | `update` | `(other: Map[K, V]) -> None` | *mutates*: merge `other` into self. |
@@ -121,23 +122,41 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 |--------|-----------|-------|
 | `len` | `() -> int` | |
 | `has` | `(x: T) -> bool` | |
-| `add` | `(x: T) -> None` | *mutates*: idempotent insert. |
+| `insert` | `(x: T) -> bool` | *mutates*: idempotent insert; returns `true` when `x` was new (Rust `HashSet::insert`). |
 | `remove` | `(x: T) -> bool` | *mutates*: returns whether it was present. |
 | `union` / `intersection` / `difference` | `(other: Set[T]) -> Set[T]` | Return a **new** set. Operator forms: `a \| b` / `a & b` / `a - b`. |
-| `copy` | `() -> Set[T]` | Returns a **new** set (shallow, Python `set.copy()`); struct/enum elements are snapshotted, as `add` does. |
+| `copy` | `() -> Set[T]` | Returns a **new** set (shallow, Python `set.copy()`); struct/enum elements are snapshotted, as `insert` does. |
 
 > **Set operators.** `\| & - ^` on two `Set[T]` are union / intersection / difference /
 > symmetric-difference, identical to the methods above (`^` has no method form). Lists support `+`
 > (concat) and `*` (repeat); see [`syntax.md` §4](../syntax/03-operators.md).
 
 > **Cyclic keys fault (recoverably).** Map/Set membership and key-equality (`has`, `get`, `remove`,
-> `add`, `m[k]`, `in`, set algebra, and `List.contains`/`index_of`/`unique`/`dedup`) are *defined by*
+> `insert`, `m[k]`, `in`, set algebra, and `List.contains`/`index_of`/`unique`/`dedup`) are *defined by*
 > `==`, so a key holding a reference cycle raises the same recoverable *"maximum structural depth
 > (10000) exceeded"* fault that `a == b` does, never a silent `false`. This matches Python's
 > `RecursionError`. Catch it with `recover:`. The 10 000 is **one budget shared across nested
 > re-entries**: a user `eq`/`str` that compares or stringifies inside its own body continues on the
 > depth the enclosing walk already used, as CPython's single recursion budget does. This keeps a deep
 > hook nesting from overflowing the host stack.
+
+### Collection conventions
+
+One row per verb. The Rust column is the oracle that `tests/chz/spec/collection_convention_test.chz`
+runs against; `ConcurrentMap` and `ConcurrentSet` use the same signatures as `Map` and `Set`.
+
+| Row | Signature | Rust |
+|-----|-----------|------|
+| `List.remove(i)` | `(int) -> T` | `Vec::remove` (a negative `i` counts from the end; out of range faults) |
+| `Set.insert(x)` | `(T) -> bool` | `HashSet::insert` (`true` when new) |
+| `Set.remove(x)` | `(T) -> bool` | `HashSet::remove` (`true` when present) |
+| `Map.insert(k, v)` | `(K, V) -> V?` | `HashMap::insert` (the replaced value) |
+| `Map.remove(k)` | `(K) -> V?` | `HashMap::remove` (the removed value) |
+
+The spellings these rows replaced have no alias; a call to one is the error
+`type … has no method '…'`. `Atomic.add`, `Duration.add`, `Counter.add` and the
+operator-protocol `add` keep their name: they add numbers, they do not insert a member. The
+`Sized` and `Extend` protocols are not declared yet.
 
 ### `bytes` (immutable) and `bytearray` (mutable)
 | Type | Method | Signature | Notes |
