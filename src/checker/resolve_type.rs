@@ -361,7 +361,7 @@ impl Checker {
                     (Some(BuiltinType::List), [inner]) => Ty::list(self.resolve_type(inner, span)),
                     // `Iterator[T]` as a *value* type — the result of calling a generator function.
                     // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
-                    // type `iter_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it —
+                    // type `iterable_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it —
                     // a cursor is exactly what the `Iterator` bound requires).
                     // Experimental: only generators produce these; ordinary code still uses adapter
                     // structs / built-in collections.

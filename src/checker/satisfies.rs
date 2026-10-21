@@ -600,8 +600,8 @@ impl Checker {
         // `Iterator` conformance is "HOLDS a cursor position" — a real cursor/generator
         // (`Ty::Struct("Iterator", [E])`, minted by `.iter()` or returned by a generator) or a user
         // struct with a structural `next(self) -> Option[E]`. NOT a raw collection: `next` is stateful
-        // and a bare list/set/map/str/bytes holds no position, so the old `iter_elem` ("can be
-        // iterated") predicate check-OK'd `c.next()` and then faulted at runtime (W6-3b). A raw
+        // and a bare list/set/map/str/bytes holds no position, so the old can-be-iterated
+        // predicate check-OK'd `c.next()` and then faulted at runtime (W6-3b). A raw
         // collection satisfies `Iterable` instead — `[S: Iterable[T], T]` is the migration form, and it
         // recovers `T` the same way (see `recover_iter_elems`). A `Ty::Param` falls through to the
         // declared-bounds check below (so a `[S: Iterator[T]]` value forwards into another
@@ -619,7 +619,7 @@ impl Checker {
                 Ok(Grant::no_intrinsic_method())
             } else if Self::is_cursor_ty(ty) {
                 self.grant_intrinsic(protocol, ty)
-            } else if !has_next && self.iter_elem(ty).is_some() {
+            } else if !has_next && elem.is_some() {
                 // ITERABLE but position-less (a raw collection): every remedy below actually applies
                 // to it, so spell them out — this is the W6-3b migration path.
                 Err(format!(
@@ -637,9 +637,8 @@ impl Checker {
         }
         // `Iterable` conformance is "can produce a fresh cursor". Built-in collections satisfy it
         // intrinsically; ANY `Iterator[T]`-satisfying type satisfies it too (every Iterator IS
-        // Iterable — `iter()` returns self), so `iter_elem` (which already covers both) is reused as
-        // the predicate. A user struct with a structural `iter(self) -> Iterator[E]` (but no `next`)
-        // is caught by the `iterable_elem` helper. The bound's `[T]` arg, if supplied and concrete,
+        // Iterable — `iter()` returns self), so `iterable_elem`, which covers both and the `iter` hook,
+        // is the predicate. The bound's `[T]` arg, if supplied and concrete,
         // must match the element type (mirrors the parameterized-`Index` arg check). A `Ty::Param`
         // falls through to the declared-bounds check below (so `[S: Iterable[T]]` forwards), and so
         // does a `Ty::Protocol` existential (an `Iterable[T]`-ANNOTATED value): its runtime receiver

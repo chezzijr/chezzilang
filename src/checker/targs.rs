@@ -218,9 +218,8 @@ impl Checker {
     ///
     /// `Iterable` is in scope since W6-3b: `[S: Iterable[T], T]` is what a raw-collection caller
     /// migrates to, and without recovery `T` would stay free and the bound check would then reject the
-    /// very iterand it was given. The predicate stays [`iter_elem`](Self::iter_elem) (NOT
-    /// `iterable_elem`): recovery is deliberately NOT total for `Iterable` — a struct with only
-    /// `iter(self) -> Iterator[E]` still needs a concrete-arg bound (`[S: Iterable[int]]`).
+    /// very iterand it was given. The element comes from [`iterable_elem`](Self::iterable_elem), the
+    /// reader `for` uses, so a struct with only `iter(self) -> Iterator[E]` recovers its `E` too.
     /// W12-8 (TICKET-106) — bind every still-FREE type param a recovered bound arg mentions, at any
     /// depth (`(A, B)`, `Option[A]`, `List[A]`), then check the SUBSTITUTED arg agrees with what was
     /// recovered. `Some(pinned)` = disagreement, for the caller to word. A bare free param reproduces
@@ -384,7 +383,7 @@ impl Checker {
 
     /// The parameterized bounds whose type args are recovered by a dedicated extractor above
     /// (`recover_iter_elems` / `recover_index_args`). They read the arg straight off the concrete
-    /// type (`iter_elem`, `index_kv`, `slice_result`) instead of unifying method signatures, so the
+    /// type (`iterable_elem`, `index_kv`, `slice_result`) instead of unifying method signatures, so the
     /// general recovery below must not re-derive them.
     fn has_direct_arg_recovery(name: &str) -> bool {
         matches!(

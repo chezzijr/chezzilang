@@ -366,7 +366,7 @@ fn encode_only_on_str_decode_only_on_bytes() {
 
 #[test]
 fn constructor_iter_types() {
-    // List() over every for-iterable shape; element type flows through iter_elem.
+    // List() over every for-iterable shape; element type flows through iterable_elem.
     ok("fn main():\n    a: List[int] = List([1, 2])\n    print(a.len())\nmain()\n");
     ok("fn main():\n    s := {1, 2}\n    a: List[int] = List(s)\n    print(a.len())\nmain()\n");
     ok("fn main():\n    a: List[int] = List(b\"hi\")\n    print(a.len())\nmain()\n");
@@ -666,7 +666,7 @@ fn iterable_in_type_position_is_for_iterable() {
     ok(
         "import Iterable, Iterator from std.iter\nfn gen() -> Iterator[int]:\n    yield 1\n    yield 2\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(gen())))\nmain()\n",
     );
-    // a comprehension over an `Iterable[T]` param, and `List(xs)` — the other `iter_elem` consumers.
+    // a comprehension over an `Iterable[T]` param, and `List(xs)` — the other `iterable_elem` consumers.
     ok(
         "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    ys := [v * 2 for v in xs]\n    return ys[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
     );
@@ -674,7 +674,7 @@ fn iterable_in_type_position_is_for_iterable() {
         "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int:\n    return List(xs)[0]\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
     );
     // The pre-fix workaround (`xs.iter()` first) must keep working identically — it now takes the
-    // `iter_elem` fast path instead of the Protocol method arm; both yield `Iterator[int]`.
+    // `iterable_elem` fast path instead of the Protocol method arm; both yield `Iterator[int]`.
     ok(
         "import Iterable from std.iter\nfn f(xs: Iterable[int]) -> int?:\n    return xs.iter().next()\nfn main():\n    print(f([1, 2]))\nmain()\n",
     );
@@ -745,7 +745,7 @@ fn value_level_widening_still_ok() {
 }
 
 /// An `Iterable[T]`-ANNOTATED param forwards into an `[S: Iterable[T], T]` bound, and the bound
-/// recovers `T` from it (`satisfies_args`/`recover_iter_elems` both route through `iter_elem`).
+/// recovers `T` from it (`satisfies_args`/`recover_iter_elems` both route through `iterable_elem`).
 #[test]
 fn iterable_annotated_param_forwards_into_iterable_bound() {
     ok(

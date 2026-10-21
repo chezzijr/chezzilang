@@ -302,7 +302,7 @@ impl std::fmt::Display for RecvKind {
 /// here (rather than silently absent) so the carve-out is asserted instead of rotting.
 ///
 /// **Currently none.** W6-3b retired the only entry: `Iterator[E]`'s `next` used to be granted to every
-/// RAW collection (the grant was keyed on `iter_elem`, i.e. "can be iterated"), but `next` is stateful
+/// RAW collection (the grant was keyed on the old can-be-iterated predicate), but `next` is stateful
 /// and a raw collection holds no cursor position, so it check-OK'd and then faulted. The fix was the
 /// coherent one — narrow the checker grant to real cursors/generators/`next`-structs (see
 /// `satisfies_args_d`'s `Iterator` arm); a raw collection satisfies only `Iterable`.

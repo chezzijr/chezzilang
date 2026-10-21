@@ -355,7 +355,7 @@ fn list_hof_3engine_parity() {
 }
 
 /// Phase 5c-protocols BEHAVIOR-PRESERVING GUARD: all 18 reserved-protocol SHAPES are now file-backed
-/// in std/prelude.chz, but conformance (`satisfies`/`iter_elem`) + operator binding stay Rust-wired
+/// in std/prelude.chz, but conformance (`satisfies`/`iterable_elem`) + operator binding stay Rust-wired
 /// and untouched. This drives int/float INTRINSIC arithmetic, a user 4-op struct under `+ - * /` AND
 /// through `[T: Arithmetic]`, `[T: Comparable]` max over a Comparable struct, a user `Iterator` struct
 /// in a `for`, builtin Index/Slice, and a user IndexSet struct (`[]` get + set) — asserting

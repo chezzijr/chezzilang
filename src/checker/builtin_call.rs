@@ -197,7 +197,7 @@ impl Checker {
                 Some(Ty::Str)
             }
             // `list(it)` → a list from ANY iterable VALUE (list/set/str/bytes/bytearray/map-keys/
-            // Iterator, a `Range` value). The element type flows through `iter_elem`; `List(0..3)` is
+            // Iterator, a `Range` value). The element type flows through `iterable_elem`; `List(0..3)` is
             // `[0, 1, 2]` and `List(5..)` runs until memory ends, as `List(g())` does for an endless
             // generator (TICKET-253). The argument is REQUIRED: an empty list is the `[]` literal
             // (zero args can't infer T).
@@ -264,7 +264,7 @@ impl Checker {
             Builtin::Set => {
                 // `Set()`/`Set[T]()` → empty set (element from the turbofish, else from the expected
                 // type on its own statement, like `{}` for maps); `Set(it)` → a set from ANY iterable VALUE
-                // (broadened from list-only), deduped. The element type flows through `iter_elem`;
+                // (broadened from list-only), deduped. The element type flows through `iterable_elem`;
                 // it must be Hashable. A bare RANGE is not a value, so `Set(0..3)` is rejected —
                 // use `Set(range(0, 3))`. With a turbofish AND an iterable, elements check against `T`.
                 let targ_elem = match targs {

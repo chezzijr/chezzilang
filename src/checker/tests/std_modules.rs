@@ -2025,3 +2025,13 @@ fn iterable_yields_grid() {
     }
     assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
 }
+
+/// TICKET-279: a type with an `iter` hook is iterable, so the `Iterator` bound refuses it with the
+/// `for` / `.iter()` advice, as for a raw list. `iterable_elem` decides it (`satisfies.rs`).
+#[test]
+fn deque_against_an_iterator_bound_gets_the_iterate_advice() {
+    rejects_entry(
+        "import Deque from std.collections\nimport Iterator from std.iter\nfn first[S: Iterator[T], T](xs: S, d: T) -> T:\n    return d\nfn main():\n    d := Deque[int]([], [])\n    n := first(d, 0)\n    print(n)\n",
+        "Iterate it with `for`",
+    );
+}

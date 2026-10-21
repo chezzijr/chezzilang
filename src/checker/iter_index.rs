@@ -100,17 +100,17 @@ impl Checker {
         }
     }
 
-    /// The element type the `iter` hook of declared type `ty` produces, or `None` when `ty` has
-    /// no `iter` hook ([`Checker::hook_method`] decides).
-    pub(super) fn struct_iterable_elem(&self, ty: &Ty) -> Option<Ty> {
-        Self::iter_ret_elem(self.hook_method(ty, "Iterable", "iter")?.0.ret)
-    }
-
-    /// The element type of ANY `Iterable` value — the single source of truth for `Iterable`
-    /// conformance and the `Iterable`-driven `for`. A declared type is iterated through its `iter`
-    /// hook, and through its `next` hook only when `iter` is not the hook (CPython: `for` calls
-    /// `__iter__`). Everything else flows through [`iter_elem`](Self::iter_elem).
-    /// `None` ⇒ not iterable.
+    /// What `for x in v` yields per step when `v` has type `ty` -- the one owner of the fact.
+    /// `for`, a comprehension, `List()`/`Set()`/`Map()`, the `Iterable` and `Iterator` bounds and
+    /// the recovery of an `Iterable[T]` bound's `T` all read it. In order:
+    /// 1. a type parameter yields its `Iterator[T]`/`Iterable[T]` bound's `T`;
+    /// 2. a declared type with the `iter` hook yields that hook's `Iterator[E]` element (the run
+    ///    time calls `iter` wherever the declaration has it, CPython's `__iter__`);
+    /// 3. a builtin receiver yields its [`builtin_iter_elem`](Self::builtin_iter_elem) row;
+    /// 4. an `Iterable[T]`/`Iterator[T]` existential yields `T`;
+    /// 5. a declared type with the `next` hook yields that hook's `Option[E]` payload.
+    ///
+    /// `None` means not iterable.
     pub(super) fn iterable_elem(&self, ty: &Ty) -> Option<Ty> {
         // A type parameter bounded `S: Iterator[T]` or `S: Iterable[T]` yields the bound's
         // element argument (resolved at the declaration, TICKET-202).
@@ -121,68 +121,12 @@ impl Checker {
                     .and_then(|b| b.args.first().cloned())
             });
         }
-        // The run time calls `iter` wherever the declaration has that hook, so its verdict
-        // decides which hook types the elements.
         match self.hook_verdict(ty, "Iterable", "iter") {
-            Ok(_) => self.struct_iterable_elem(ty),
+            Ok((sig, _)) => return Self::iter_ret_elem(sig.ret),
             // `iter` runs and this instantiation fails its bound: no hook can type the elements.
-            Err(HookMiss::Bound(_)) => None,
-            Err(HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_)) => self.iter_elem(ty),
+            Err(HookMiss::Bound(_)) => return None,
+            Err(HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_)) => {}
         }
-    }
-
-    /// What a BUILTIN receiver yields per step: list/set → element, str → str, map → (key, value),
-    /// bytes → int, and an `Iterator[T]` cursor its type argument. No declared type and no
-    /// protocol existential is answered here.
-    pub(super) fn builtin_iter_elem(&self, ty: &Ty) -> Option<Ty> {
-        match ty {
-            Ty::List(e) | Ty::Set(e) => Some((**e).clone()),
-            Ty::Str => Some(Ty::Str),
-            // `bytes`/`bytearray` iterate to `int` (0–255), like Python.
-            Ty::Bytes | Ty::ByteArray => Some(Ty::Int),
-            // A Map iterates its `(key, value)` pairs (owner U9); `m.keys()` gives the keys.
-            Ty::Map(k, v) => Some(Ty::Tuple(vec![(**k).clone(), (**v).clone()])),
-            // A channel yields each received value and ends when it is closed and drained (Go's
-            // `for v := range ch`, Rust's `rx.iter()`).
-            Ty::Channel(e) => Some((**e).clone()),
-            // `Iterator[T]` value (a generator result): element type is its single type argument.
-            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
-                Some(args[0].clone())
-            }
-            Ty::Int
-            | Ty::Float
-            | Ty::Bool
-            | Ty::Nil
-            | Ty::Func { .. }
-            | Ty::Tuple(_)
-            | Ty::Struct(..)
-            | Ty::Enum(..)
-            | Ty::Param(_)
-            | Ty::Result(..)
-            | Ty::Option(_)
-            | Ty::Shared(_)
-            | Ty::Atomic(_)
-            | Ty::AtomicInt
-            | Ty::RwShared(_)
-            | Ty::Executor
-            | Ty::Socket
-            | Ty::Listener
-            | Ty::Writer
-            | Ty::Reader
-            | Ty::Ptr
-            | Ty::Width(_)
-            | Ty::Protocol(..)
-            | Ty::Module(_)
-            | Ty::Unknown
-            | Ty::Var(_) => None,
-        }
-    }
-
-    /// What iterating `ty` yields per step — the `Iterator` element type: a builtin receiver
-    /// ([`builtin_iter_elem`](Self::builtin_iter_elem)), an `Iterator[T]`/`Iterable[T]`
-    /// existential (its single type argument), or a declared type's `next` hook.
-    /// `None` ⇒ not iterable.
-    pub(super) fn iter_elem(&self, ty: &Ty) -> Option<Ty> {
         if let Some(elem) = self.builtin_iter_elem(ty) {
             return Some(elem);
         }
@@ -232,6 +176,53 @@ impl Checker {
             | Ty::Module(_)
             | Ty::Unknown
             | Ty::Var(_) => self.struct_iter_elem(ty),
+        }
+    }
+
+    /// What a BUILTIN receiver yields per step: list/set → element, str → str, map → (key, value),
+    /// bytes → int, and an `Iterator[T]` cursor its type argument. No declared type and no
+    /// protocol existential is answered here.
+    pub(super) fn builtin_iter_elem(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::List(e) | Ty::Set(e) => Some((**e).clone()),
+            Ty::Str => Some(Ty::Str),
+            // `bytes`/`bytearray` iterate to `int` (0–255), like Python.
+            Ty::Bytes | Ty::ByteArray => Some(Ty::Int),
+            // A Map iterates its `(key, value)` pairs (owner U9); `m.keys()` gives the keys.
+            Ty::Map(k, v) => Some(Ty::Tuple(vec![(**k).clone(), (**v).clone()])),
+            // A channel yields each received value and ends when it is closed and drained (Go's
+            // `for v := range ch`, Rust's `rx.iter()`).
+            Ty::Channel(e) => Some((**e).clone()),
+            // `Iterator[T]` value (a generator result): element type is its single type argument.
+            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
+                Some(args[0].clone())
+            }
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Nil
+            | Ty::Func { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
