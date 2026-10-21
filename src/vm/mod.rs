@@ -426,6 +426,14 @@ pub static TEST_WORKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 pub(crate) static HOLD_ADOPTED_EXIT: AtomicBool = AtomicBool::new(false);
 
+/// TICKET-284 — test-only: set by the grid `an_adopted_exit_keeps_its_output_at_every_depth`
+/// for its one cell `run_end_pass_reads_a_job_that_takes_a_later_executor`. A fiber's leave
+/// flush in `join_executor` waits 900 ms before its take, and `main` waits 600 ms after each
+/// Executor of the run-end pass, so the pass reads a job's Executor before the job takes a later
+/// Executor's exit output, and reads that later Executor after the take.
+#[cfg(test)]
+pub(crate) static HOLD_RUN_END_PASS: AtomicBool = AtomicBool::new(false);
+
 /// TICKET-230: `set_worker_count` sets the cap of the process-wide `width::RUNNERS`, so a test that
 /// forces a count throttles every concurrently running lib test. It re-runs itself alone in a child
 /// copy of the test binary, which has its own gate. Returns `true` in the parent (the child already

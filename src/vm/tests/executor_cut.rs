@@ -1172,3 +1172,112 @@ fn interpolation_hole_text_is_read_once() {
         }
     }
 }
+
+/// TICKET-284 — the grid: an exit at each depth below a job and below `main`, and an Executor join
+/// whose job exits, so every taker of an exiting slot's output (a nursery join, an Executor join,
+/// the leaving join's flush, the run-end flush) runs with every kind of receiver (a job, a nursery
+/// child of a job, `main`). Each cell prints `quit` and exits 3. Runs in a forced child with the
+/// `HOLD_ADOPTED_EXIT` holds; the cell whose flag is `true` also sets `HOLD_RUN_END_PASS`, so the
+/// run-end pass reads the joining job's Executor before the job takes the later one's output.
+#[test]
+fn an_adopted_exit_keeps_its_output_at_every_depth() {
+    if crate::vm::rerun_in_child(
+        module_path!(),
+        "an_adopted_exit_keeps_its_output_at_every_depth",
+    ) {
+        return;
+    }
+    crate::vm::HOLD_ADOPTED_EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
+    let head = "import Executor from std.concurrency\nimport std.os\nimport std.time\nch: Channel[int] = Channel[int]()\nfn spin():\n    defer:\n        while true:\n            pass\n    _ := ch.recv()\nfn quit():\n    print(\"quit\")\n    os.exit(3)\nfn mid():\n    parallel:\n        spawn spin()\n        spawn quit()\nfn joiner():\n    c := Executor()\n    c.submit(quit)\n    c.shutdown()\n";
+    let cells = [
+        (
+            "job_body_exits",
+            false,
+            "fn job():\n    parallel:\n        spawn spin()\n        print(\"quit\")\n        os.exit(3)\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "job_child_exits",
+            false,
+            "fn job():\n    parallel:\n        spawn spin()\n        spawn quit()\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "job_grandchild_exits",
+            false,
+            "fn job():\n    parallel:\n        spawn mid()\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "job_great_grandchild_exits",
+            false,
+            "fn top():\n    parallel:\n        spawn mid()\nfn job():\n    parallel:\n        spawn top()\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "job_child_exits_beside_another_executor",
+            false,
+            "a := Executor()\na.submit(spin)\nfn job():\n    parallel:\n        spawn spin()\n        spawn quit()\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "main_child_exits",
+            false,
+            "parallel:\n    spawn spin()\n    spawn quit()\n",
+        ),
+        (
+            "job_with_a_blocking_defer_child_exits",
+            false,
+            "fn job():\n    defer:\n        _ := ch.recv()\n        print(\"job defer\")\n    parallel:\n        spawn spin()\n        spawn quit()\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "main_grandchild_exits",
+            false,
+            "parallel:\n    spawn mid()\n",
+        ),
+        (
+            "main_grandchild_exits_beside_a_job",
+            false,
+            "a := Executor()\na.submit(spin)\nparallel:\n    spawn mid()\n",
+        ),
+        (
+            "job_joins_an_exiting_executor",
+            false,
+            "b := Executor()\nb.submit(joiner)\n",
+        ),
+        (
+            "job_child_joins_an_exiting_executor",
+            false,
+            "fn job():\n    parallel:\n        spawn spin()\n        spawn joiner()\nb := Executor()\nb.submit(job)\n",
+        ),
+        ("main_joins_an_exiting_executor", false, "joiner()\n"),
+        (
+            "run_end_drain_reads_a_later_executor",
+            false,
+            "a := Executor()\na.submit(spin)\nb := Executor()\nb.submit(quit)\n",
+        ),
+        (
+            "job_child_exits_beside_a_sleeping_child",
+            false,
+            "fn sleeper():\n    time.sleep_ms(120000)\nfn job():\n    parallel:\n        spawn sleeper()\n        parallel:\n            spawn quit()\nb := Executor()\nb.submit(job)\n",
+        ),
+        (
+            "run_end_pass_reads_a_job_that_takes_a_later_executor",
+            true,
+            "b := Executor()\nb.submit(joiner)\n",
+        ),
+    ];
+    let mut red = Vec::new();
+    for (name, pass_hold, tail) in cells {
+        crate::vm::HOLD_RUN_END_PASS.store(pass_hold, std::sync::atomic::Ordering::Relaxed);
+        let entry = write_temp_chz("t284_adopted_exit_grid", &format!("{head}{tail}"));
+        let e = entry.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_file(&e));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok((out, _e, _r, c))
+                if out.contains("quit") && !out.contains("job defer") && c == Some(3) => {}
+            Ok((out, _e, r, c)) => red.push(format!("{name}: out={out:?} code={c:?} r={r:?}")),
+            Err(_) => red.push(format!("{name}: no end in 60 s")),
+        }
+        let _ = std::fs::remove_file(&entry);
+    }
+    assert!(red.is_empty(), "red cells: {red:?}");
+}

@@ -519,6 +519,12 @@ impl Vm {
             poke_live_scheds(&self.sched_registry);
         }
         if flush {
+            // TICKET-284 — test-only: a job takes the joined Executor's output after the run-end pass
+            // read the job's own Executor (see `HOLD_RUN_END_PASS`).
+            #[cfg(test)]
+            if crate::vm::HOLD_RUN_END_PASS.load(Ordering::Relaxed) && self.fiber_scope.is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(900));
+            }
             let (out, stderr) = sched.take_finished_streams();
             self.out.extend_from_slice(&out);
             self.stderr.extend_from_slice(&stderr);
@@ -557,6 +563,11 @@ impl Vm {
             let (out, stderr) = sched.take_finished_streams();
             self.out.extend_from_slice(&out);
             self.stderr.extend_from_slice(&stderr);
+            // TICKET-284 — test-only: `main` reads the next Executor late (see `HOLD_RUN_END_PASS`).
+            #[cfg(test)]
+            if crate::vm::HOLD_RUN_END_PASS.load(Ordering::Relaxed) && self.fiber_scope.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+            }
         }
     }
 
