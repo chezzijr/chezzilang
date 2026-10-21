@@ -5,6 +5,7 @@
 // suite captures), never a raw fd.
 
 use super::*;
+use crate::base::builtin_method::{ReaderMethod, WriterMethod};
 use crate::native::strip_eol;
 
 /// R2 — the outcome of a low-level write to a [`WriterCore`].
@@ -161,10 +162,13 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        match method {
-            "write" | "write_bytes" => {
+        let Some(which) = WriterMethod::from_name(method) else {
+            return Err(self.err(format!("type Writer has no method '{method}'"), span));
+        };
+        match which {
+            WriterMethod::Write | WriterMethod::WriteBytes => {
                 self.arity_err(method, args, 1, span)?;
-                let data = if method == "write_bytes"
+                let data = if which == WriterMethod::WriteBytes
                     && let Some(v) = args.first()
                 {
                     self.collect_bytes_arg("write_bytes", *v, span)?
@@ -183,7 +187,7 @@ impl Vm {
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
                 }
             }
-            "flush" => {
+            WriterMethod::Flush => {
                 self.arity_err("flush", args, 0, span)?;
                 let core = self.writer_core(h);
                 match self.flush_core(&core) {
@@ -192,7 +196,7 @@ impl Vm {
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
                 }
             }
-            "close" => {
+            WriterMethod::Close => {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.writer_core(h);
                 // Flush the tail first, THEN take + drop the backing (closing the fd). A flush error on
@@ -204,7 +208,6 @@ impl Vm {
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
                 }
             }
-            _ => Err(self.err(format!("type Writer has no method '{method}'"), span)),
         }
     }
 
@@ -375,8 +378,11 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        match method {
-            "read_line" => {
+        let Some(which) = ReaderMethod::from_name(method) else {
+            return Err(self.err(format!("type Reader has no method '{method}'"), span));
+        };
+        match which {
+            ReaderMethod::ReadLine => {
                 self.arity_err("read_line", args, 0, span)?;
                 let core = self.reader_core(h);
                 let outcome = {
@@ -451,7 +457,7 @@ impl Vm {
                     )),
                 }
             }
-            "read_bytes" => {
+            ReaderMethod::ReadBytes => {
                 self.arity_err("read_bytes", args, 1, span)?;
                 let n = match args.first() {
                     Some(v) if self.is_integral(*v) => self.int_of(*v).max(0) as u64,
@@ -495,7 +501,7 @@ impl Vm {
                     Err(Some(e)) => Ok(self.sock_err(e)),
                 }
             }
-            "close" => {
+            ReaderMethod::Close => {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.reader_core(h);
                 // Take + drop the reader (closing the fd). Idempotent: an already-closed reader is Ok.
@@ -508,7 +514,6 @@ impl Vm {
                 drop(carry);
                 Ok(self.sock_ok(Value::nil()))
             }
-            _ => Err(self.err(format!("type Reader has no method '{method}'"), span)),
         }
     }
 

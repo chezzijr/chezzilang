@@ -6,6 +6,7 @@ use super::expr::RWSHARED_VIEWS;
 use super::expr::RWSHARED_WALKS;
 use super::expr::callable_slots;
 use super::*;
+use crate::base::builtin_method::RwSharedPrim;
 
 impl Checker {
     /// Type-check an instance method call `obj.method(args)`. `type_args` are the explicit
@@ -906,18 +907,23 @@ impl Checker {
                         (Ty::List(_), "List") | (Ty::Map(_, _), "Map") | (Ty::Set(_), "Set")
                     )
                 });
-                let typed = view.is_some_and(|(_, _, names)| names.contains(&method))
-                    && !self.std_internal_hidden(method);
+                let prim = RwSharedPrim::from_name(method).filter(|p| {
+                    view.is_some_and(|(_, _, names)| names.contains(p))
+                        && !self.std_internal_hidden(method)
+                });
                 match &elem {
-                    _ if !typed => {}
+                    _ if prim.is_none() => {}
                     Ty::List(e) => {
                         let e = (**e).clone();
-                        match method {
-                            "_push" => {
+                        let Some(prim) = prim else {
+                            unreachable!("the guard arm answers a method with no primitive")
+                        };
+                        match prim {
+                            RwSharedPrim::Push => {
                                 self.check_args_range("_push", &[e], 1, args, span);
                                 return Ty::Nil;
                             }
-                            "_len" => {
+                            RwSharedPrim::Len => {
                                 self.check_args_range("_len", &[], 0, args, span);
                                 return Ty::Int;
                             }
@@ -925,46 +931,58 @@ impl Checker {
                             // language's other named accessors (`get_key -> Option[V]` below,
                             // `std.json.at -> Option[Json]`). `RwShared` has no `[]` of its own (it
                             // does not satisfy `Index`), so this is its only read accessor.
-                            "_at" => {
+                            RwSharedPrim::At => {
                                 self.check_args_range("_at", &[Ty::Int], 1, args, span);
                                 return Ty::option(e);
                             }
-                            "_slice" => {
+                            RwSharedPrim::Slice => {
                                 let range = self.range_ty();
                                 self.check_args_range("_slice", &[range], 1, args, span);
                                 return Ty::list(e);
                             }
-                            _ => {
-                                unreachable!("RWSHARED_VIEWS lists a method this arm does not type")
+                            RwSharedPrim::SetKey
+                            | RwSharedPrim::RemoveKey
+                            | RwSharedPrim::GetOrInsert
+                            | RwSharedPrim::Add
+                            | RwSharedPrim::Remove
+                            | RwSharedPrim::Contains
+                            | RwSharedPrim::Has
+                            | RwSharedPrim::GetKey => {
+                                unreachable!(
+                                    "RWSHARED_VIEWS lists a primitive this arm does not type"
+                                )
                             }
                         }
                     }
                     Ty::Map(k, v) => {
                         let k = (**k).clone();
                         let v = (**v).clone();
-                        match method {
-                            "_len" => {
+                        let Some(prim) = prim else {
+                            unreachable!("the guard arm answers a method with no primitive")
+                        };
+                        match prim {
+                            RwSharedPrim::Len => {
                                 self.check_args_range("_len", &[], 0, args, span);
                                 return Ty::Int;
                             }
-                            "_get_key" => {
+                            RwSharedPrim::GetKey => {
                                 self.check_args_range("_get_key", &[k], 1, args, span);
                                 return Ty::option(v);
                             }
-                            "_has" => {
+                            RwSharedPrim::Has => {
                                 self.check_args_range("_has", &[k], 1, args, span);
                                 return Ty::Bool;
                             }
                             // TICKET-192: the single-entry writers (update guard, O(1) expected).
-                            "_set_key" => {
+                            RwSharedPrim::SetKey => {
                                 self.check_args_range("_set_key", &[k, v], 2, args, span);
                                 return Ty::Nil;
                             }
-                            "_remove_key" => {
+                            RwSharedPrim::RemoveKey => {
                                 self.check_args_range("_remove_key", &[k], 1, args, span);
                                 return Ty::option(v);
                             }
-                            "_get_or_insert" => {
+                            RwSharedPrim::GetOrInsert => {
                                 self.check_args_range(
                                     "_get_or_insert",
                                     &[k, v.clone()],
@@ -974,28 +992,47 @@ impl Checker {
                                 );
                                 return v;
                             }
-                            _ => {
-                                unreachable!("RWSHARED_VIEWS lists a method this arm does not type")
+                            RwSharedPrim::Push
+                            | RwSharedPrim::At
+                            | RwSharedPrim::Slice
+                            | RwSharedPrim::Add
+                            | RwSharedPrim::Remove
+                            | RwSharedPrim::Contains => {
+                                unreachable!(
+                                    "RWSHARED_VIEWS lists a primitive this arm does not type"
+                                )
                             }
                         }
                     }
                     Ty::Set(e) => {
                         let e = (**e).clone();
-                        match method {
-                            "_len" => {
+                        let Some(prim) = prim else {
+                            unreachable!("the guard arm answers a method with no primitive")
+                        };
+                        match prim {
+                            RwSharedPrim::Len => {
                                 self.check_args_range("_len", &[], 0, args, span);
                                 return Ty::Int;
                             }
-                            "_contains" => {
+                            RwSharedPrim::Contains => {
                                 self.check_args_range("_contains", &[e], 1, args, span);
                                 return Ty::Bool;
                             }
-                            "_add" | "_remove" => {
-                                self.check_args_range(method, &[e], 1, args, span);
+                            RwSharedPrim::Add | RwSharedPrim::Remove => {
+                                self.check_args_range(prim.name(), &[e], 1, args, span);
                                 return Ty::Nil;
                             }
-                            _ => {
-                                unreachable!("RWSHARED_VIEWS lists a method this arm does not type")
+                            RwSharedPrim::Push
+                            | RwSharedPrim::At
+                            | RwSharedPrim::Slice
+                            | RwSharedPrim::SetKey
+                            | RwSharedPrim::RemoveKey
+                            | RwSharedPrim::GetOrInsert
+                            | RwSharedPrim::Has
+                            | RwSharedPrim::GetKey => {
+                                unreachable!(
+                                    "RWSHARED_VIEWS lists a primitive this arm does not type"
+                                )
                             }
                         }
                     }
@@ -1063,8 +1100,9 @@ impl Checker {
                         let under = format!("_{method}");
                         let help = match view {
                             Some((head, coll, names))
-                                if names.contains(&method)
-                                    || names.contains(&under.as_str())
+                                if names
+                                    .iter()
+                                    .any(|p| p.name() == method || p.name() == under)
                                     || RWSHARED_WALKS
                                         .iter()
                                         .any(|(h, walks)| h == head && walks.contains(&method)) =>

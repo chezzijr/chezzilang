@@ -5,6 +5,7 @@ use super::netio::Decoded;
 use super::netio::sock_would_block_msg;
 use super::netio::write_from;
 use super::*;
+use crate::base::builtin_method::{ListenerMethod, SocketMethod};
 
 impl Vm {
     /// D6 — clone out the shared `Arc<SocketCore>`/`Arc<ListenerCore>` behind a handle (refcount bump),
@@ -842,8 +843,11 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        match method {
-            "read" => {
+        let Some(which) = SocketMethod::from_name(method) else {
+            return Err(self.err(format!("type Socket has no method '{method}'"), span));
+        };
+        match which {
+            SocketMethod::Read => {
                 let r = self.socket_read(h, args, span);
                 // B1 — the read's absolute deadline is LATCHED on the fiber (`poll_deadline`) so a park
                 // + ip-rewind re-execution keeps the ORIGINAL `timeout_ms` budget instead of restarting
@@ -852,7 +856,7 @@ impl Vm {
                 self.drop_poll_latch();
                 r
             }
-            "read_bytes" => {
+            SocketMethod::ReadBytes => {
                 let r = self.socket_read_bytes(h, args, span);
                 // Same latch discipline as `read`: drop the deadline unless the op PARKED (the very
                 // same call resumes) — a re-park must not re-arm the timeout budget.
@@ -861,14 +865,14 @@ impl Vm {
             }
             // `write(s[, timeout_ms])` (str) and R1's `write_bytes(b[, timeout_ms])` (raw `bytes`)
             // are the SAME write path — only the byte-extraction differs.
-            "write" | "write_bytes" => {
+            SocketMethod::Write | SocketMethod::WriteBytes => {
                 let r = self.socket_write(h, method, args, span);
                 // N2 — `write` now latches its deadline on the fiber like `read` (a re-park must not
                 // re-arm the budget), so it MUST drop the latch on completion too.
                 self.drop_poll_latch();
                 r
             }
-            "close" => {
+            SocketMethod::Close => {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.socket_core(h);
                 // W15-1 — take the stream out first so a fiber `register`ing concurrently (already past
@@ -882,7 +886,6 @@ impl Vm {
                 drop(stream);
                 Ok(Value::nil())
             }
-            _ => Err(self.err(format!("type Socket has no method '{method}'"), span)),
         }
     }
 
@@ -969,15 +972,18 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        match method {
-            "accept" => {
+        let Some(which) = ListenerMethod::from_name(method) else {
+            return Err(self.err(format!("type Listener has no method '{method}'"), span));
+        };
+        match which {
+            ListenerMethod::Accept => {
                 let r = self.listener_accept(h, args, span);
                 // N2 — `accept` latches its deadline on the fiber like `read`, so it MUST drop the
                 // latch on completion too (a re-park must not re-arm the budget).
                 self.drop_poll_latch();
                 r
             }
-            "addr" => {
+            ListenerMethod::Addr => {
                 self.arity_err("addr", args, 0, span)?;
                 let core = self.listener_core(h);
                 let addr = {
@@ -998,7 +1004,7 @@ impl Vm {
                     Err(e) => Ok(self.sock_err(e)),
                 }
             }
-            "close" => {
+            ListenerMethod::Close => {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.listener_core(h);
                 // W15-1 — same order as `Socket.close`: see its comment.
@@ -1008,7 +1014,6 @@ impl Vm {
                 drop(listener);
                 Ok(Value::nil())
             }
-            _ => Err(self.err(format!("type Listener has no method '{method}'"), span)),
         }
     }
 

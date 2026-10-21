@@ -423,38 +423,6 @@ impl Vm {
                 }
             }
         }
-        // Higher-order list methods (`map`/`filter`/`fold`) call a closure per element, which runs
-        // nested VM frames that may GC at instruction boundaries. They keep the source + result
-        // (and fold's accumulator) rooted on the operand stack across the loop — see `list_hof`.
-        if matches!(self.heap.get(h), Obj::List(_))
-            && matches!(
-                method,
-                "map" | "filter" | "fold" | "take_while" | "drop_while" | "count" | "position"
-            )
-        {
-            let result = self.list_hof(h, method, args, span)?;
-            self.push(result);
-            return Ok(());
-        }
-        // `sort_by` also runs a closure per comparison, but sorts in place and returns nil.
-        if matches!(self.heap.get(h), Obj::List(_)) && method == "sort_by" {
-            let result = self.list_sort_by(h, args, span)?;
-            self.push(result);
-            return Ok(());
-        }
-        // `sort_by_key` calls a key extractor once per element, then sorts in place by key.
-        if matches!(self.heap.get(h), Obj::List(_)) && method == "sort_by_key" {
-            let result = self.list_sort_by_key(h, args, span)?;
-            self.push(result);
-            return Ok(());
-        }
-        // `min_by`/`max_by` call a key extractor once per element (re-entrant, may GC), then return the
-        // ELEMENT with the extremal key — same rooting discipline as `sort_by_key`.
-        if matches!(self.heap.get(h), Obj::List(_)) && matches!(method, "min_by" | "max_by") {
-            let result = self.list_min_max_by(h, args, method == "max_by", span)?;
-            self.push(result);
-            return Ok(());
-        }
         // TICKET-257: the handles are `Eq` by identity (`Eq` grant rows for `Channel`, `Shared`,
         // `RwShared`, `Atomic`): `x.eq(y)` is `x == y`. No handle declares an `eq` of its own.
         if ((method == "eq" && args.len() == 1) || (method == "str" && args.is_empty()))

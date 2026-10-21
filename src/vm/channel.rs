@@ -10,6 +10,7 @@ use super::netio::RENDEZVOUS_SEND_DEADLOCK;
 use super::netio::deadline_gap_wake;
 use super::netio::send_deadlock_msg;
 use super::*;
+use crate::base::builtin_method::ChannelMethod;
 
 impl Vm {
     /// The wake fan-out of a `close()`, a `trip()` and a seal (TICKET-219): wake EVERY receiver of
@@ -38,8 +39,11 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        match method {
-            "send" => {
+        let Some(which) = ChannelMethod::from_name(method) else {
+            return Err(self.err(format!("type Channel has no method '{method}'"), span));
+        };
+        match which {
+            ChannelMethod::Send => {
                 self.arity_err("send", args, 1, span)?;
                 // B3.1: serialize once into the core (the wire form IS the airlock copy). A
                 // non-sendable value (a frame-holding generator, or a module/native/FFI handle) faults
@@ -62,14 +66,14 @@ impl Vm {
             // (`Vm::send_commit`), with no offer: a `try_send` never waits for a taker.
             // NOTE: the full-vs-not decision on a bounded channel under multi-sender contention is the
             // SAME nondeterminism class as `try_recv` returning `None`-vs-`Some` under contention.
-            "try_send" => {
+            ChannelMethod::TrySend => {
                 self.arity_err("try_send", args, 1, span)?;
                 let w = self.to_wire_crossable(args[0], span)?;
                 let core = self.channel_core(h);
                 let sent = matches!(self.send_commit(h, &core, w, None), SendOutcome::Sent);
                 Ok(Value::bool(sent))
             }
-            "recv" => {
+            ChannelMethod::Recv => {
                 self.arity_err("recv", args, 0, span)?;
                 // D5 owe #3 (Path C) — a `recv` reached INSIDE a native callback on the M:N engine
                 // can't snapshot-park, so `recv_step_or_demote` DEMOTES the worker thread: block in
@@ -90,7 +94,7 @@ impl Vm {
                     RecvStep::ClosedEmpty => Err(self.err(CLOSED_RECV.to_string(), span)),
                 }
             }
-            "try_recv" => {
+            ChannelMethod::TryRecv => {
                 // A1: non-blocking poll. Unlike `recv` it never touches the scheduler /
                 // `native_reentry` / `suspend` / `ip` — it always returns immediately with an
                 // `Option`: `Some(v)` if queued, `None` if empty.
@@ -118,7 +122,7 @@ impl Vm {
             // `close()` marks the channel closed (idempotent) and wakes every parked / demoted
             // receiver so each re-runs and observes the close: a `for v in ch:` ends, a bare `recv`
             // faults. Mirrors `send`'s wake fan-out but delivers no value.
-            "close" => {
+            ChannelMethod::Close => {
                 self.arity_err("close", args, 0, span)?;
                 let core = self.channel_core(h);
                 // TICKET-185 — close every parked sender's offer in the same hold that sets
@@ -134,7 +138,7 @@ impl Vm {
             // Idempotent. Reuses `close()`'s exact wake fan-out so a parked `recv`/`wait` re-runs and
             // observes the latch — but does NOT set `closed` (a closed+empty `wait` arm is *skipped*;
             // we need it *ready*).
-            "trip" => {
+            ChannelMethod::Trip => {
                 self.arity_err("trip", args, 0, span)?;
                 let core = self.channel_core(h);
                 // W7-13r(b) — the store happens UNDER `core.q`, the same lock a blocked waiter
@@ -154,7 +158,7 @@ impl Vm {
                 self.wake_receivers_all(h, &core);
                 Ok(Value::nil())
             }
-            "len" => {
+            ChannelMethod::Len => {
                 self.arity_err("len", args, 0, span)?;
                 // The buffer only (TICKET-185): a parked sender's offer is not buffered — Go
                 // measures `len: 0` on an unbuffered channel with a parked sender.
@@ -164,12 +168,11 @@ impl Vm {
             // `cap()` reports the channel's capacity: `-1` for unbounded `Channel[T]()`, `0` for
             // rendezvous `Channel[T](0)`, `n` for bounded `Channel[T](n)`.
             // A capacity above 2^62 boxes as `Obj::BigInt` (`Value::int` would wrap).
-            "cap" => {
+            ChannelMethod::Cap => {
                 self.arity_err("cap", args, 0, span)?;
                 let cap = self.channel_core(h).cap.map_or(-1i64, |c| c as i64);
                 Ok(self.make_int(cap))
             }
-            _ => Err(self.err(format!("type Channel has no method '{method}'"), span)),
         }
     }
 

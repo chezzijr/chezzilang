@@ -125,8 +125,12 @@ fn main() {
     let mut out = String::new();
     for r in &rows {
         let en = enum_name(&r.ty);
+        // A bodied method compiles to bytecode, so only the bodyless names have a VM arm.
+        if r.bodyless.is_empty() {
+            continue;
+        }
         let mut variants: Vec<(String, &String)> = Vec::new();
-        for n in r.bodyless.iter().chain(r.bodied.iter()) {
+        for n in &r.bodyless {
             let v = variant_name(n);
             assert!(
                 !variants.iter().any(|(o, _)| *o == v),
@@ -137,7 +141,7 @@ fn main() {
         }
         let _ = writeln!(
             out,
-            "/// The methods of `{}`, one variant per method declared in `std/`.",
+            "/// The methods of `{}`, one variant per bodyless `native fn` declared in `std/`.",
             r.ty
         );
         let _ = writeln!(out, "#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]");

@@ -3,6 +3,9 @@
 
 use super::*;
 use crate::ast::BinaryOp;
+use crate::base::builtin_method::{
+    AtomicIntMethod, AtomicMethod, ExecutorMethod, RwSharedMethod, RwSharedPrim, SharedMethod,
+};
 
 impl Vm {
     /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
@@ -15,19 +18,22 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        match method {
+        let Some(which) = SharedMethod::from_name(method) else {
+            return Err(self.err(format!("type Shared has no method '{method}'"), span));
+        };
+        match which {
             // TICKET-246: the value lives in the box's private heap. EVERY arm takes the update
             // guard first (TICKET-016 / W8-3, the process-global wait-for graph) and only then the
             // state lock, so a same-box re-entry from the box's own closure FAULTS (the length-1
             // cycle) for `get` / `read` / `set` / `update` alike, a cross-box wait cycle faults, and
             // user code never waits on the state lock itself.
-            "get" => {
+            SharedMethod::Get => {
                 self.arity_err("get", args, 0, span)?;
                 let core = self.shared_core(h);
                 let w = self.shared_copy_out(&core, span)?;
                 Ok(self.from_wire(w))
             }
-            "set" => {
+            SharedMethod::Set => {
                 self.arity_err("set", args, 1, span)?;
                 let w = self.to_wire_crossable(args[0], span)?;
                 let core = self.shared_core(h);
@@ -40,11 +46,15 @@ impl Vm {
             }
             // `update(f)` runs `f` inside the box on the live state and its result becomes the
             // state; `read(f)` does the same with no write-back and copies the result out.
-            "update" | "read" => {
+            SharedMethod::Update | SharedMethod::Read => {
                 self.arity_err(method, args, 1, span)?;
                 let fw = self.cross_closure(
                     "Shared",
-                    if method == "update" { "update" } else { "read" },
+                    if which == SharedMethod::Update {
+                        "update"
+                    } else {
+                        "read"
+                    },
                     args[0],
                     span,
                 )?;
@@ -52,7 +62,7 @@ impl Vm {
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
                 let mut st = core.state.lock();
-                let (r, bytes) = self.box_call(&mut st, fw, method == "update", span);
+                let (r, bytes) = self.box_call(&mut st, fw, which == SharedMethod::Update, span);
                 core.bytes.store(bytes, Ordering::Relaxed);
                 drop(st);
                 Ok(match r? {
@@ -60,7 +70,6 @@ impl Vm {
                     None => Value::nil(),
                 })
             }
-            _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
         }
     }
 
@@ -108,44 +117,53 @@ impl Vm {
                 Err(vm.err(format!("RwShared.{method} requires a {want} element"), span))
             }
         };
-        match method {
-            "get" => {
-                self.arity_err("get", args, 0, span)?;
-                let w = self.rwshared_read(&core, span, |vm, ctx| vm.box_copy_out(ctx, span))?;
-                Ok(self.from_wire(w))
-            }
-            "read" => {
-                self.arity_err("read", args, 1, span)?;
-                let w = self.rwshared_read(&core, span, |vm, ctx| vm.box_copy_out(ctx, span))?;
-                // The lock is dropped: `f` runs on the reader's own copy, in the reader's heap.
-                let cur = self.from_wire(w);
-                self.reentered(|vm| vm.invoke_value(args[0], vec![cur], span))
-            }
-            "set" => {
-                self.arity_err("set", args, 1, span)?;
-                let w = self.to_wire_crossable(args[0], span)?;
-                let key = Arc::as_ptr(&core) as usize;
-                let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
-                let mut st = core.state.write();
-                let bytes = self.box_store(&mut st, w);
-                core.bytes.store(bytes, Ordering::Relaxed);
-                Ok(Value::nil())
-            }
-            // `write(f)` runs `f` inside the box on the live state, exclusive; its result becomes
-            // the state. Exactly `Shared.update` under the write lock.
-            "write" => {
-                self.arity_err("write", args, 1, span)?;
-                let fw = self.cross_closure("RwShared", "write", args[0], span)?;
-                let key = Arc::as_ptr(&core) as usize;
-                let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
-                let mut st = core.state.write();
-                let (r, bytes) = self.box_call(&mut st, fw, true, span);
-                core.bytes.store(bytes, Ordering::Relaxed);
-                drop(st);
-                r?;
-                Ok(Value::nil())
-            }
-            "_set_key" => {
+        if let Some(which) = RwSharedMethod::from_name(method) {
+            return match which {
+                RwSharedMethod::Get => {
+                    self.arity_err("get", args, 0, span)?;
+                    let w =
+                        self.rwshared_read(&core, span, |vm, ctx| vm.box_copy_out(ctx, span))?;
+                    Ok(self.from_wire(w))
+                }
+                RwSharedMethod::Read => {
+                    self.arity_err("read", args, 1, span)?;
+                    let w =
+                        self.rwshared_read(&core, span, |vm, ctx| vm.box_copy_out(ctx, span))?;
+                    // The lock is dropped: `f` runs on the reader's own copy, in the reader's heap.
+                    let cur = self.from_wire(w);
+                    self.reentered(|vm| vm.invoke_value(args[0], vec![cur], span))
+                }
+                RwSharedMethod::Set => {
+                    self.arity_err("set", args, 1, span)?;
+                    let w = self.to_wire_crossable(args[0], span)?;
+                    let key = Arc::as_ptr(&core) as usize;
+                    let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
+                    let mut st = core.state.write();
+                    let bytes = self.box_store(&mut st, w);
+                    core.bytes.store(bytes, Ordering::Relaxed);
+                    Ok(Value::nil())
+                }
+                // `write(f)` runs `f` inside the box on the live state, exclusive; its result becomes
+                // the state. Exactly `Shared.update` under the write lock.
+                RwSharedMethod::Write => {
+                    self.arity_err("write", args, 1, span)?;
+                    let fw = self.cross_closure("RwShared", "write", args[0], span)?;
+                    let key = Arc::as_ptr(&core) as usize;
+                    let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
+                    let mut st = core.state.write();
+                    let (r, bytes) = self.box_call(&mut st, fw, true, span);
+                    core.bytes.store(bytes, Ordering::Relaxed);
+                    drop(st);
+                    r?;
+                    Ok(Value::nil())
+                }
+            };
+        }
+        let Some(prim) = RwSharedPrim::from_name(method) else {
+            return Err(self.err(format!("type RwShared has no method '{method}'"), span));
+        };
+        match prim {
+            RwSharedPrim::SetKey => {
                 self.arity_err(method, args, 2, span)?;
                 let qh = self.hash_value(args[0], span)?;
                 self.rwshared_mutate(&core, args, span, |vm, st, a| {
@@ -156,7 +174,7 @@ impl Vm {
                 })?;
                 Ok(Value::nil())
             }
-            "_remove_key" => {
+            RwSharedPrim::RemoveKey => {
                 self.arity_err(method, args, 1, span)?;
                 let qh = self.hash_value(args[0], span)?;
                 let removed = self.rwshared_mutate(&core, args, span, |vm, st, a| {
@@ -179,7 +197,7 @@ impl Vm {
                 })
             }
             // Compound-atomic: the probe and the insert run under ONE exclusive lock.
-            "_get_or_insert" => {
+            RwSharedPrim::GetOrInsert => {
                 self.arity_err(method, args, 2, span)?;
                 let qh = self.hash_value(args[0], span)?;
                 let present = self.rwshared_mutate(&core, args, span, |vm, st, a| {
@@ -203,10 +221,10 @@ impl Vm {
                     None => args[1],
                 })
             }
-            "_add" | "_remove" => {
+            RwSharedPrim::Add | RwSharedPrim::Remove => {
                 self.arity_err(method, args, 1, span)?;
                 let qh = self.hash_value(args[0], span)?;
-                let add = method == "_add";
+                let add = prim == RwSharedPrim::Add;
                 self.rwshared_mutate(&core, args, span, |vm, st, a| {
                     want_elem(vm, vm.elem_kind(st), "set")?;
                     let sh = st.as_obj().expect("a set is a heap object");
@@ -226,7 +244,7 @@ impl Vm {
                 })?;
                 Ok(Value::nil())
             }
-            "_push" => {
+            RwSharedPrim::Push => {
                 self.arity_err(method, args, 1, span)?;
                 self.rwshared_mutate(&core, args, span, |vm, st, a| {
                     want_elem(vm, vm.elem_kind(st), "list")?;
@@ -239,7 +257,7 @@ impl Vm {
                 })?;
                 Ok(Value::nil())
             }
-            "_len" => {
+            RwSharedPrim::Len => {
                 self.arity_err(method, args, 0, span)?;
                 let n =
                     self.rwshared_read(&core, span, |vm, ctx| match boxctx::state_obj(ctx) {
@@ -252,7 +270,7 @@ impl Vm {
             }
             // `at(i) -> Option[E]` — out of range is `None`, not a fault (the safe accessor, like
             // `get_key`). A negative index counts from the end (`norm_index`).
-            "_at" => {
+            RwSharedPrim::At => {
                 self.arity_err(method, args, 1, span)?;
                 let i = self.int_of(args[0]);
                 let piece =
@@ -274,7 +292,7 @@ impl Vm {
             // are encoded with one memo, so two that alias one node land on one object. The `Range`
             // is read before the lock and resolved against the length INSIDE the read, with the same
             // `range_indices` every other slice site calls.
-            "_slice" => {
+            RwSharedPrim::Slice => {
                 self.arity_err(method, args, 1, span)?;
                 let Some(parts) = self.as_range(args[0]) else {
                     return Err(self.err("RwShared._slice requires a Range".into(), span));
@@ -292,17 +310,17 @@ impl Vm {
                 let items = self.from_wire_pieces(ws);
                 Ok(Value::obj(self.heap.alloc(Obj::List(items))))
             }
-            "_contains" => {
+            RwSharedPrim::Contains => {
                 self.arity_err(method, args, 1, span)?;
                 let hit = self.rwshared_find(&core, method, args[0], false, span)?;
                 Ok(Value::bool(hit.is_some()))
             }
-            "_has" => {
+            RwSharedPrim::Has => {
                 self.arity_err(method, args, 1, span)?;
                 let hit = self.rwshared_find(&core, method, args[0], false, span)?;
                 Ok(Value::bool(hit.is_some()))
             }
-            "_get_key" => {
+            RwSharedPrim::GetKey => {
                 self.arity_err(method, args, 1, span)?;
                 Ok(
                     match self.rwshared_find(&core, method, args[0], true, span)? {
@@ -311,7 +329,6 @@ impl Vm {
                     },
                 )
             }
-            _ => Err(self.err(format!("type RwShared has no method '{method}'"), span)),
         }
     }
 
@@ -382,19 +399,22 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        match method {
-            "load" => {
+        let Some(which) = AtomicMethod::from_name(method) else {
+            return Err(self.err(format!("type Atomic has no method '{method}'"), span));
+        };
+        match which {
+            AtomicMethod::Load => {
                 self.arity_err("load", args, 0, span)?;
                 let w = self.atomic_core(h).v.lock().unwrap().clone();
                 Ok(self.from_wire(w))
             }
-            "store" => {
+            AtomicMethod::Store => {
                 self.arity_err("store", args, 1, span)?;
                 let w = self.to_wire_crossable(args[0], span)?;
                 self.atomic_core(h).store(w);
                 Ok(Value::nil())
             }
-            "exchange" => {
+            AtomicMethod::Exchange => {
                 self.arity_err("exchange", args, 1, span)?;
                 let new_w = self.to_wire_crossable(args[0], span)?;
                 // Summarise BEFORE taking the value lock (the walk is O(payload)) — see
@@ -407,7 +427,7 @@ impl Vm {
                 };
                 Ok(self.from_wire(old))
             }
-            "cas" => {
+            AtomicMethod::Cas => {
                 self.arity_err("cas", args, 2, span)?;
                 let core = self.atomic_core(h);
                 // Hold the value lock across compare+swap so the CAS is atomic. `from_wire`/`to_wire`/
@@ -456,7 +476,7 @@ impl Vm {
                 }
                 Ok(Value::bool(swapped))
             }
-            "add" | "sub" => {
+            AtomicMethod::Add | AtomicMethod::Sub => {
                 self.arity_err(method, args, 1, span)?;
                 // Uniformity: route through the guard like every other store site. The checker gates
                 // `add`/`sub` to numeric deltas, so the handle-reject arm is dead-but-harmless here —
@@ -466,7 +486,7 @@ impl Vm {
                 let mut g = core.v.lock().unwrap();
                 let new = match (&*g, &delta) {
                     (WireValue::Int(a), WireValue::Int(b)) => {
-                        let op = if method == "add" {
+                        let op = if which == AtomicMethod::Add {
                             BinaryOp::Add
                         } else {
                             BinaryOp::Sub
@@ -474,7 +494,11 @@ impl Vm {
                         WireValue::Int(self.int_op(op, *a, *b, span)?)
                     }
                     (WireValue::Float(a), WireValue::Float(b)) => {
-                        WireValue::Float(if method == "add" { a + b } else { a - b })
+                        WireValue::Float(if which == AtomicMethod::Add {
+                            a + b
+                        } else {
+                            a - b
+                        })
                     }
                     // The checker gates `add`/`sub` to numeric element types, so this is unreachable.
                     _ => {
@@ -486,7 +510,6 @@ impl Vm {
                 drop(g);
                 Ok(self.from_wire(new))
             }
-            _ => Err(self.err(format!("type Atomic has no method '{method}'"), span)),
         }
     }
 
@@ -504,25 +527,28 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         use std::sync::atomic::Ordering::SeqCst;
-        match method {
-            "load" => {
+        let Some(which) = AtomicIntMethod::from_name(method) else {
+            return Err(self.err(format!("type AtomicInt has no method '{method}'"), span));
+        };
+        match which {
+            AtomicIntMethod::Load => {
                 self.arity_err("load", args, 0, span)?;
                 let cur = self.atomic_int_core(h).v.load(SeqCst);
                 Ok(self.make_int(cur))
             }
-            "store" => {
+            AtomicIntMethod::Store => {
                 self.arity_err("store", args, 1, span)?;
                 let n = self.int_of(args[0]);
                 self.atomic_int_core(h).v.store(n, SeqCst);
                 Ok(Value::nil())
             }
-            "exchange" => {
+            AtomicIntMethod::Exchange => {
                 self.arity_err("exchange", args, 1, span)?;
                 let n = self.int_of(args[0]);
                 let old = self.atomic_int_core(h).v.swap(n, SeqCst);
                 Ok(self.make_int(old))
             }
-            "cas" => {
+            AtomicIntMethod::Cas => {
                 self.arity_err("cas", args, 2, span)?;
                 let expected = self.int_of(args[0]);
                 let new = self.int_of(args[1]);
@@ -533,11 +559,11 @@ impl Vm {
                     .is_ok();
                 Ok(Value::bool(swapped))
             }
-            "add" | "sub" => {
+            AtomicIntMethod::Add | AtomicIntMethod::Sub => {
                 self.arity_err(method, args, 1, span)?;
                 let delta = self.int_of(args[0]);
                 let core = self.atomic_int_core(h);
-                let op = if method == "add" {
+                let op = if which == AtomicIntMethod::Add {
                     BinaryOp::Add
                 } else {
                     BinaryOp::Sub
@@ -552,7 +578,6 @@ impl Vm {
                     }
                 }
             }
-            _ => Err(self.err(format!("type AtomicInt has no method '{method}'"), span)),
         }
     }
 
@@ -567,8 +592,11 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        match method {
-            "submit" => {
+        let Some(which) = ExecutorMethod::from_name(method) else {
+            return Err(self.err(format!("type Executor has no method '{method}'"), span));
+        };
+        match which {
+            ExecutorMethod::Submit => {
                 self.arity_err("submit", args, 1, span)?;
                 self.executor_submit(h, "submit", args[0], None, span)?;
                 Ok(Value::nil())
@@ -576,7 +604,7 @@ impl Vm {
             // TICKET-219 — a std internal: `submit_result` submits its job with the fresh cap-1
             // channel it created, which the job transition seals with the cancel value when it
             // drops or cuts the job.
-            "_submit_settled" => {
+            ExecutorMethod::StdSubmitSettled => {
                 self.arity_err("_submit_settled", args, 2, span)?;
                 let ch = match args[1].as_obj().map(|c| self.heap.get(c)) {
                     Some(Obj::Channel(core)) => Arc::clone(core),
@@ -598,7 +626,7 @@ impl Vm {
                 )?;
                 Ok(Value::nil())
             }
-            "shutdown" => {
+            ExecutorMethod::Shutdown => {
                 self.arity_err("shutdown", args, 0, span)?;
                 let core = self.executor_core(h);
                 // Mark shut first so a task that re-enters this executor (submit/shutdown) sees it.
@@ -609,7 +637,7 @@ impl Vm {
                 self.cancel_at_join(span)?; // TICKET-147 (W14-15): the join is a cancellation point
                 Ok(Value::nil())
             }
-            "shutdown_now" => {
+            ExecutorMethod::ShutdownNow => {
                 self.arity_err("shutdown_now", args, 0, span)?;
                 let core = self.executor_core(h);
                 {
@@ -638,7 +666,6 @@ impl Vm {
                 self.cancel_at_join(span)?; // TICKET-147 (W14-15): the join is a cancellation point
                 Ok(Value::nil())
             }
-            _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),
         }
     }
 

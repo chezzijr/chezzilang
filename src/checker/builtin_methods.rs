@@ -3,105 +3,7 @@
 //! Split out of `src/checker/mod.rs`. `super::*` is the parent module.
 
 use super::*;
-
-// Editor hover (Tier C): authored method-NAME lists per built-in type, rendered by `builtin_type_doc`
-// as a "methods: a, b, c" line. Each slice is drift-guarded by `builtin_method_slices_all_resolve`
-// (every name MUST resolve from its `*_method_sig`), so the hover can only advertise methods that
-// provably exist. `list.sort` and `bytes`/`bytearray.extend` live in `infer_method_call` (not the
-// `*_method_sig` tables), so they are intentionally absent here — see PROGRESS.md.
-pub(super) const STR_METHODS: &[&str] = &[
-    "len",
-    "upper",
-    "lower",
-    "trim",
-    "strip",
-    "split",
-    "split_lines",
-    "chars",
-    "join",
-    "starts_with",
-    "ends_with",
-    "contains",
-    "replace",
-    "repeat",
-    "reversed",
-    "pad_left",
-    "pad_right",
-    "index_of",
-    "count",
-    "strip_prefix",
-    "strip_suffix",
-    "to_int",
-    "to_float",
-    "parse_int",
-    "parse_float",
-    "encode",
-];
-pub(super) const LIST_METHODS: &[&str] = &[
-    "len",
-    "push",
-    "pop",
-    "reverse",
-    "contains",
-    "index_of",
-    "concat",
-    "extend",
-    "sort",
-    "sum",
-    "map",
-    "filter",
-    "fold",
-    "sort_by",
-    "sort_by_key",
-    "min",
-    "max",
-    "min_by",
-    "max_by",
-    "first",
-    "last",
-    "reversed",
-    "insert",
-    "remove_at",
-    "unique",
-    "dedup",
-    "chunk",
-    "windows",
-    "take_while",
-    "drop_while",
-    "count",
-    "position",
-    "copy",
-];
-pub(super) const MAP_METHODS: &[&str] = &[
-    "len", "contains", "get", "keys", "values", "remove", "merge", "update", "items", "copy",
-];
-pub(super) const SET_METHODS: &[&str] = &[
-    "len",
-    "contains",
-    "add",
-    "remove",
-    "union",
-    "intersection",
-    "difference",
-    "copy",
-];
-pub(super) const CHANNEL_METHODS: &[&str] = &[
-    "send", "try_send", "recv", "try_recv", "close", "trip", "len", "cap",
-];
-pub(super) const SHARED_METHODS: &[&str] = &["get", "set", "update", "read"];
-pub(super) const RWSHARED_METHODS: &[&str] = &["get", "set", "read", "write"];
-pub(super) const ATOMIC_METHODS: &[&str] = &["load", "store", "exchange", "cas", "add", "sub"];
-// `AtomicInt` exposes the same method surface as `Atomic`.
-pub(super) const ATOMIC_INT_METHODS: &[&str] = ATOMIC_METHODS;
-pub(super) const SOCKET_METHODS: &[&str] = &["read", "write", "read_bytes", "write_bytes", "close"];
-pub(super) const LISTENER_METHODS: &[&str] = &["accept", "addr", "close"];
-pub(super) const WRITER_METHODS: &[&str] = &["write", "write_bytes", "flush", "close"];
-pub(super) const READER_METHODS: &[&str] = &["read_line", "read_bytes", "close"];
-pub(super) const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
-pub(super) const BYTES_METHODS: &[&str] = &["decode", "decode_lossy", "len", "reversed"];
-pub(super) const BYTEARRAY_METHODS: &[&str] = &[
-    "len", "push", "pop", "decode", "copy", "reverse", "reversed",
-];
+use crate::base::builtin_method::DECLARED_METHODS;
 
 /// Does `method` mutate its receiver in place (as opposed to returning a new value)? Maps the
 /// receiver's type to its kind and reads the one table, `crate::native::is_mutating_native_kind`.
@@ -230,107 +132,70 @@ pub(super) fn builtin_container_sig(name: &str) -> Option<FnSig> {
 
 /// Editor hover (Tier C): a concise one-line "how to use" blurb for a BUILTIN/STDLIB type or ctor
 /// name, paraphrased from `docs/reference/stdlib/ §1–3`. For a type that owns a method table, a
-/// `\nmethods: a, b, c` line is appended from the authored `*_METHODS` slice (drift-guarded by
-/// `builtin_method_slices_all_resolve`, so every advertised method provably exists). Returns `None`
+/// `\nmethods: a, b, c` line is appended from the `DECLARED_METHODS` row of that type (generated
+/// from the `native fn` decls in `std/`, so every advertised method provably exists). Returns `None`
 /// for any non-builtin name (a user type's own docstring already flows via `name_docs`). Built only
 /// under the hover probe (the call sites are `hover_probe.is_some()`-gated), never on the hot check
 /// path. The method-bearing types are listed first; the no-method types (range/tuple/Result/…) only
 /// get a usage line.
 pub(super) fn builtin_type_doc(name: &str) -> Option<String> {
-    let (usage, methods): (&str, Option<&[&str]>) = match name {
+    let usage: &str = match name {
         // Containers (own a method table) --------------------------------------------------------
-        "List" => (
-            "growable ordered sequence — List[T](); index with xs[i], iterate with `for x in xs:`",
-            Some(LIST_METHODS),
-        ),
-        "Map" => (
-            "key→value hash map — Map[K, V](); index with m[k], iterate with `for k, v in m:`",
-            Some(MAP_METHODS),
-        ),
-        "Set" => (
-            "unordered collection of unique elements — Set[T](); operators | & - ^",
-            Some(SET_METHODS),
-        ),
-        "str" => (
-            "immutable UTF-8 text; index/slice by codepoint, concatenate with +",
-            Some(STR_METHODS),
-        ),
-        "bytes" => (
-            "immutable byte sequence — bytes(x); index with b[i] (byte as int)",
-            Some(BYTES_METHODS),
-        ),
-        "bytearray" => (
-            "mutable byte buffer — bytearray(x); index/assign b[i], push/pop bytes",
-            Some(BYTEARRAY_METHODS),
-        ),
+        "List" => {
+            "growable ordered sequence — List[T](); index with xs[i], iterate with `for x in xs:`"
+        }
+        "Map" => "key→value hash map — Map[K, V](); index with m[k], iterate with `for k, v in m:`",
+        "Set" => "unordered collection of unique elements — Set[T](); operators | & - ^",
+        "str" => "immutable UTF-8 text; index/slice by codepoint, concatenate with +",
+        "bytes" => "immutable byte sequence — bytes(x); index with b[i] (byte as int)",
+        "bytearray" => "mutable byte buffer — bytearray(x); index/assign b[i], push/pop bytes",
         // Concurrency / runtime types (own a method table) ---------------------------------------
-        "Channel" => (
-            "FIFO mailbox between tasks — Channel[T](); iterate received values with `for v in ch:`",
-            Some(CHANNEL_METHODS),
-        ),
-        "Shared" => (
-            "cross-task shared cell — Shared(v) (import std.concurrency)",
-            Some(SHARED_METHODS),
-        ),
-        "RwShared" => (
-            "cross-task read-write cell, many readers OR one writer — RwShared(v) (import std.concurrency)",
-            Some(RWSHARED_METHODS),
-        ),
-        "Atomic" => (
-            "cross-task atomic cell — Atomic(v) (import std.concurrency; add/sub need numeric T)",
-            Some(ATOMIC_METHODS),
-        ),
-        "AtomicInt" => (
-            "monomorphic lock-free int atomic — AtomicInt(v) (import std.concurrency)",
-            Some(ATOMIC_INT_METHODS),
-        ),
-        "Executor" => (
-            "task pool — Executor() (import std.concurrency)",
-            Some(EXECUTOR_METHODS),
-        ),
-        "Socket" => (
-            "TCP connection handle from std.net connect()/accept()",
-            Some(SOCKET_METHODS),
-        ),
-        "Listener" => (
-            "TCP listening socket from std.net listen()",
-            Some(LISTENER_METHODS),
-        ),
-        "Writer" => (
-            "write-only file/stream handle from std.io create()/append()/stdout()/stderr()/buffered()",
-            Some(WRITER_METHODS),
-        ),
-        "Reader" => (
-            "read-only file handle from std.io open() — line/chunk streaming of a large file",
-            Some(READER_METHODS),
-        ),
+        "Channel" => {
+            "FIFO mailbox between tasks — Channel[T](); iterate received values with `for v in ch:`"
+        }
+        "Shared" => "cross-task shared cell — Shared(v) (import std.concurrency)",
+        "RwShared" => {
+            "cross-task read-write cell, many readers OR one writer — RwShared(v) (import std.concurrency)"
+        }
+        "Atomic" => {
+            "cross-task atomic cell — Atomic(v) (import std.concurrency; add/sub need numeric T)"
+        }
+        "AtomicInt" => "monomorphic lock-free int atomic — AtomicInt(v) (import std.concurrency)",
+        "Executor" => "task pool — Executor() (import std.concurrency)",
+        "Socket" => "TCP connection handle from std.net connect()/accept()",
+        "Listener" => "TCP listening socket from std.net listen()",
+        "Writer" => {
+            "write-only file/stream handle from std.io create()/append()/stdout()/stderr()/buffered()"
+        }
+        "Reader" => {
+            "read-only file handle from std.io open() — line/chunk streaming of a large file"
+        }
         // Types without a built-in method table (usage line only) --------------------------------
-        "Range" => (
-            "a range of ints as a value — a..b, a..=b, ..b, a.., or Range(start, end, step); iterable, `in`, slices",
-            None,
-        ),
-        "tuple" => (
-            "fixed-size heterogeneous group — (a, b); destructure with `x, y := t`",
-            None,
-        ),
-        "Result" => (
-            "success-or-error — T!E / T!; build with a plain value or !e, handle with ?, ??, else or match",
-            None,
-        ),
-        "Option" => (
-            "a value or nothing — T?; a plain value or None, handle with ?, ??, else or match",
-            None,
-        ),
-        "Iterator" => (
-            "lazy element cursor — Iterator[T] from a generator or `.iter()`; drive with `for x in it:`",
-            None,
-        ),
+        "Range" => {
+            "a range of ints as a value — a..b, a..=b, ..b, a.., or Range(start, end, step); iterable, `in`, slices"
+        }
+        "tuple" => "fixed-size heterogeneous group — (a, b); destructure with `x, y := t`",
+        "Result" => {
+            "success-or-error — T!E / T!; build with a plain value or !e, handle with ?, ??, else or match"
+        }
+        "Option" => {
+            "a value or nothing — T?; a plain value or None, handle with ?, ??, else or match"
+        }
+        "Iterator" => {
+            "lazy element cursor — Iterator[T] from a generator or `.iter()`; drive with `for x in it:`"
+        }
         _ => return None,
     };
     let mut doc = usage.to_string();
-    if let Some(ms) = methods {
+    if let Some((_, bodyless, bodied)) = DECLARED_METHODS.iter().find(|(ty, _, _)| *ty == name) {
+        let shown: Vec<&str> = bodyless
+            .iter()
+            .chain(bodied.iter())
+            .copied()
+            .filter(|m| !m.starts_with('_'))
+            .collect();
         doc.push_str("\nmethods: ");
-        doc.push_str(&ms.join(", "));
+        doc.push_str(&shown.join(", "));
     }
     Some(doc)
 }

@@ -4,6 +4,7 @@
 use super::fn_value::WrittenTypeArgs;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
+use crate::base::builtin_method::RwSharedPrim;
 
 /// Result of resolving a bodied/native method on one of the reserved native handles
 /// (`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`). The shared
@@ -57,28 +58,38 @@ pub(super) const RWSHARED_WALKS: &[(&str, &[&str])] = &[
     ("Set", &["for_each", "fold"]),
 ];
 
-pub(super) const RWSHARED_VIEWS: &[(&str, &str, &[&str])] = &[
+pub(super) const RWSHARED_VIEWS: &[(&str, &str, &[RwSharedPrim])] = &[
     (
         "List",
         "ConcurrentList",
-        &["_len", "_at", "_slice", "_push"],
+        &[
+            RwSharedPrim::Len,
+            RwSharedPrim::At,
+            RwSharedPrim::Slice,
+            RwSharedPrim::Push,
+        ],
     ),
     (
         "Map",
         "ConcurrentMap",
         &[
-            "_len",
-            "_get_key",
-            "_has",
-            "_set_key",
-            "_remove_key",
-            "_get_or_insert",
+            RwSharedPrim::Len,
+            RwSharedPrim::GetKey,
+            RwSharedPrim::Has,
+            RwSharedPrim::SetKey,
+            RwSharedPrim::RemoveKey,
+            RwSharedPrim::GetOrInsert,
         ],
     ),
     (
         "Set",
         "ConcurrentSet",
-        &["_len", "_contains", "_add", "_remove"],
+        &[
+            RwSharedPrim::Len,
+            RwSharedPrim::Contains,
+            RwSharedPrim::Add,
+            RwSharedPrim::Remove,
+        ],
     ),
 ];
 
