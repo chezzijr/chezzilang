@@ -1267,7 +1267,7 @@ impl Vm {
                         Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
                     }
                     SetMethod::Copy => {
-                        // TICKET-160 — insertion order kept; each struct/enum element snapshotted as Set.add does.
+                        // TICKET-160 — insertion order kept; each struct/enum element snapshotted as Set.insert does.
                         self.arity_err("copy", args, 0, span)?;
                         let mine = s.entries.clone();
                         let mut out = SetData::default();

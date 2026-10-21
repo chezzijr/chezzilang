@@ -826,7 +826,7 @@ fn witness_forwarding_does_not_overcharge_ok() {
 }
 
 /// M24-2 — a member call on a receiver that can NEVER take a witness. `List.push` / `Map.get` /
-/// `Set.add` are BUILTINS, so passing this fn's own `x: T` to one forwards nothing: there is no
+/// `Set.insert` are BUILTINS, so passing this fn's own `x: T` to one forwards nothing: there is no
 /// witness parameter on the other side. Asking only "does this call site carry something of
 /// `decl`'s?" charged every one of these, and the charge costs the fn its function-value position —
 /// so a program that compiled before stopped compiling. The method NAME must ALSO be declared

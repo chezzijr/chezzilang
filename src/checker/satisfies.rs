@@ -766,7 +766,7 @@ impl Checker {
         // table (TICKET-024, W8-32) -- reserved protocols are excluded because each already has a
         // hand-written intrinsic arm above whose grant is a W6-3 promise about a method with no
         // user code behind it; routing them through the native table too would silently re-decide
-        // conformance for every built-in (`Set.add` sits one signature check from witnessing `Add`).
+        // conformance for every built-in (a builtin whose signature matched a protocol method would otherwise witness it).
         if !is_std_protocol(protocol)
             && let Some(key) = Self::native_witness_key(ty)
         {

@@ -1174,7 +1174,7 @@ main()
     assert_golden_out(src, "9\n");
 }
 
-/// Test — every insert entry point snapshots uniformly (map literal, set literal, set.add,
+/// Test — every insert entry point snapshots uniformly (map literal, set literal, set.insert,
 /// Map(iterable), Set(iterable), map index-set). Mutate an original inserted via each path.
 #[test]
 fn all_insert_paths_snapshot() {
@@ -1193,7 +1193,7 @@ fn main():
     sl := {b}
     b.x = 9
     print(sl.difference({K(2)}).len())
-    # set.add
+    # set.insert
     c := K(3)
     sa := {K(0)}
     sa.insert(c)

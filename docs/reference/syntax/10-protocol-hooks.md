@@ -194,7 +194,7 @@ is no key. This is Go's `comparable` and Python's `__hash__` plus `__eq__` pairi
 **Keys are value types (Go model).** A `struct`/`enum` key or element is deep-copied when stored, so
 mutating your original after the insert cannot corrupt the stored key.
 
-- Every insert path copies: `m[k] = v`, `{k: v}` and `{a, b}` literals, `set.add`, `Map.update` /
+- Every insert path copies: `m[k] = v`, `{k: v}` and `{a, b}` literals, `set.insert`, `Map.insert`, `Map.update` /
   `Map.merge`, `Map(it)` / `Set(it)`.
 - Map **values** are not copied. A lookup key (`m[k]`, `k in m`, `s.contains(k)`) is not copied.
   Scalar keys need no copy.

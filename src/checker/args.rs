@@ -409,7 +409,7 @@ impl Checker {
     }
 
     /// [`Checker::check_args_range`] for a List/Set COLLECTION mutator receiver — the only path that
-    /// may show the element-pin annotation hint on a `push`/`add`/`insert` mismatch (handle methods
+    /// may show the element-pin annotation hint on a `push`/`insert` mismatch (handle methods
     /// like `Atomic.add` route through `check_args_range` and never see it).
     pub(super) fn check_args_range_coll(
         &mut self,

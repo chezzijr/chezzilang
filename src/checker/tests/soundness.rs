@@ -1493,7 +1493,7 @@ fn generic_wrapper_struct_holding_channel_substitutes() {
 }
 
 /// F4 — `Atomic.add` type mismatch must NOT show the List/Set collection element-pin hint (wrong
-/// domain); the mismatch error itself is unchanged. `Set.add`'s hint still fires.
+/// domain); the mismatch error itself is unchanged. `Set.insert`'s hint still fires.
 #[test]
 fn atomic_add_mismatch_no_collection_hint() {
     let errs = check_entry("import Atomic from std.concurrency\na := Atomic(0)\na.add(1.5)\n");
@@ -1506,7 +1506,7 @@ fn atomic_add_mismatch_no_collection_hint() {
         !msg.contains("List[<protocol>]"),
         "Atomic.add hint should NOT mention the List collection pin: {msg:?}"
     );
-    // Set.add's collection hint STILL fires (a Set first-use-pinned to int, mismatched later add).
+    // Set.insert's collection hint STILL fires (a Set first-use-pinned to int, mismatched later insert).
     rejects(
         "fn main():\n    s := Set()\n    s.insert(1)\n    s.insert(\"x\")\nmain()\n",
         "cannot infer the",
