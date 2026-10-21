@@ -154,9 +154,6 @@ fn t254_native_calls(kind: &str) -> Vec<String> {
         .keys()
         .cloned()
         .collect();
-    if kind == "bytearray" {
-        methods.push("extend".to_string());
-    }
     methods.sort();
     methods.dedup();
     methods

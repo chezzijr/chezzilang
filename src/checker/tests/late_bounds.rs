@@ -55,7 +55,8 @@ fn std_internal_names_are_hidden_from_user_modules() {
             other => panic!("no initializer for head {other}"),
         };
         let help = format!("use {coll} from std.concurrency.collection");
-        for name in *names {
+        for prim in *names {
+            let name = prim.name();
             let src = format!(
                 "import RwShared from std.concurrency\nfn main():\n    r := RwShared({init})\n    r.{name}()\nmain()\n"
             );

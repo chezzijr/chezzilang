@@ -1638,74 +1638,82 @@ fn container_method_sigs_byte_match() {
     );
 }
 
-/// Drift guard (editor hover, Tier C): every method NAME in each authored `*_METHODS` slice MUST
-/// resolve to `Some` from its owning `*_method_sig` lookup — so the per-type "methods: …" line
-/// `builtin_type_doc` renders can only list methods that provably EXIST. An out-of-date slice (a
-/// renamed/removed method, or a typo) fails here instead of shipping a hover that lies. `Ty::Int` is
-/// the sampled element type for the generic tables so the numeric-gated entries (`sum`/`add`/`sub`)
-/// resolve. (`list.sort` and `bytes`/`bytearray.extend` are handled in `infer_method_call`, NOT these
-/// tables, so they are deliberately absent from the slices — see PROGRESS.md.)
+/// TICKET-278 fact 10: `std/*.chz` owns the method set of a builtin type, and `DECLARED_METHODS`
+/// (generated from those decls by `src/base/build_methods.rs`) is the table every reader derives from.
+/// Three cells over every declared type:
+/// (a) the checker's harvested method table holds exactly the declared names, both directions (a std
+///     module's published sig seals its `_` names, `ModuleSig::seal_std_internals`, so the cell
+///     compares the names without a leading `_`);
+/// (b) the hover (`builtin_type_doc`) lists every declared name that does not start with `_`;
+/// (c) the types whose hover carries a `methods:` line, found by asking `builtin_type_doc` about every
+///     type name the CHECKER knows, equal the declared types, so a declared type with no hover arm and
+///     a hover methods line with no decl both go red. The VM side is its dispatchers' exhaustive
+///     `match` on the generated enums, which fails the build.
 #[test]
-fn builtin_method_slices_all_resolve() {
-    // Phase 5a-containers — List/Map/Set/Channel and the str/bytes/bytearray scalar method sigs are now
-    // HARVESTED from std/prelude.chz into each reserved type's method table (the bespoke
-    // list_/map_/set_/channel_/str_/bytes_/bytearray_method_sig arms are retired). Resolve the hover
-    // slices against those seeded tables.
+fn builtin_method_grid_declared_checked_and_hovered() {
+    use crate::base::builtin_method::DECLARED_METHODS;
+    use std::collections::BTreeSet;
     let cc = prelude_container_checker();
-    let chk_container = |ty: &str, slice: &[&str]| {
-        let methods = &cc
-            .structs
-            .get(ty)
-            .unwrap_or_else(|| panic!("seeded {ty} struct"))
-            .methods;
-        for m in slice {
+    let sigs: Vec<ModuleSig> = ["concurrency", "net", "io", "fs"]
+        .iter()
+        .map(|m| native_module_sig_via_graph(m))
+        .collect();
+    let harvested = |ty: &str| -> Option<BTreeSet<String>> {
+        if let Some(s) = cc.structs.get(ty) {
+            return Some(s.methods.keys().cloned().collect());
+        }
+        sigs.iter()
+            .find_map(|sig| sig.struct_defs.get(ty))
+            .map(|d| d.methods.keys().cloned().collect())
+    };
+    for (ty, bodyless, bodied) in DECLARED_METHODS {
+        let declared: BTreeSet<String> = bodyless
+            .iter()
+            .chain(bodied.iter())
+            .filter(|m| !m.starts_with('_'))
+            .map(|m| m.to_string())
+            .collect();
+        let table: BTreeSet<String> = harvested(ty)
+            .unwrap_or_else(|| panic!("{ty} has no harvested method table"))
+            .into_iter()
+            .filter(|m| !m.starts_with('_'))
+            .collect();
+        for m in declared.difference(&table) {
+            panic!("{ty}.{m} is declared in std/ but the checker's table has no such method");
+        }
+        for m in table.difference(&declared) {
+            panic!("{ty}.{m} is in the checker's table but not declared in std/");
+        }
+        let doc = builtin_type_doc(ty).unwrap_or_else(|| panic!("{ty} has no hover text"));
+        for m in &declared {
             assert!(
-                methods.contains_key(*m),
-                "{ty} hover slice lists '{m}' but the harvested std/prelude.chz {ty} has no such method (drift)"
+                doc.contains(&format!("methods: {m}")) || doc.contains(&format!(", {m}")),
+                "{ty}.{m} is declared but the hover does not list it: {doc}"
             );
         }
-    };
-    chk_container("List", LIST_METHODS);
-    chk_container("Map", MAP_METHODS);
-    chk_container("Set", SET_METHODS);
-    chk_container("Channel", CHANNEL_METHODS);
-    chk_container("str", STR_METHODS);
-    chk_container("bytes", BYTES_METHODS);
-    chk_container("bytearray", BYTEARRAY_METHODS);
-    // Phase 4c-net / 4c-concurrency — Socket/Listener (net) and Shared/RwShared/Atomic/Executor
-    // (concurrency) method sigs are now HARVESTED from std/net.chz / std/concurrency.chz into each
-    // type's method table (the bespoke socket_/listener_/shared_/rwshared_/atomic_/executor_method_sig
-    // arms are retired). Resolve the hover slices against those harvested tables via a graph check.
-    let harvested = |sig: &ModuleSig, ty: &str| -> std::collections::HashMap<String, FnSig> {
-        sig.struct_defs
-            .get(ty)
-            .unwrap_or_else(|| panic!("harvested {ty} struct_def"))
-            .methods
-            .clone()
-    };
-    let chk_harvested = |methods: &std::collections::HashMap<String, FnSig>,
-                         slice: &[&str],
-                         ty: &str| {
-        for m in slice {
-            assert!(
-                methods.contains_key(*m),
-                "{ty} hover slice lists '{m}' but the harvested std/*.chz {ty} has no such method (drift)"
-            );
-        }
-    };
-    let net = native_module_sig_via_graph("net");
-    chk_harvested(&harvested(&net, "Socket"), SOCKET_METHODS, "Socket");
-    chk_harvested(&harvested(&net, "Listener"), LISTENER_METHODS, "Listener");
-    let conc = native_module_sig_via_graph("concurrency");
-    chk_harvested(&harvested(&conc, "Shared"), SHARED_METHODS, "Shared");
-    chk_harvested(&harvested(&conc, "RwShared"), RWSHARED_METHODS, "RwShared");
-    chk_harvested(&harvested(&conc, "Atomic"), ATOMIC_METHODS, "Atomic");
-    chk_harvested(
-        &harvested(&conc, "AtomicInt"),
-        ATOMIC_INT_METHODS,
-        "AtomicInt",
+    }
+    let mut known: BTreeSet<String> = cc.structs.keys().cloned().collect();
+    for sig in &sigs {
+        known.extend(sig.struct_defs.keys().cloned());
+    }
+    for extra in ["Range", "tuple", "Result", "Option", "Iterator"] {
+        known.insert(extra.to_string());
+    }
+    let hovered: BTreeSet<String> = known
+        .iter()
+        .filter(|n| builtin_type_doc(n).is_some_and(|d| d.contains("\nmethods: ")))
+        .cloned()
+        .collect();
+    let declared: BTreeSet<String> = DECLARED_METHODS
+        .iter()
+        .map(|(ty, _, _)| ty.to_string())
+        .collect();
+    let only_hover: Vec<&String> = hovered.difference(&declared).collect();
+    let only_decl: Vec<&String> = declared.difference(&hovered).collect();
+    assert!(
+        only_hover.is_empty() && only_decl.is_empty(),
+        "hover-only types {only_hover:?}, declared-only types {only_decl:?}"
     );
-    chk_harvested(&harvested(&conc, "Executor"), EXECUTOR_METHODS, "Executor");
 }
 
 /// TICKET-179 grid 1: the receiver-write table (`crate::native::is_mutating_native_kind`, the one owner
@@ -1848,9 +1856,6 @@ fn receiver_write_table_matches_observed_behavior() {
             .keys()
             .cloned()
             .collect();
-        if kind == "bytearray" {
-            harvested.push("extend".to_string());
-        }
         harvested.sort();
         harvested.dedup();
         let sampled: Vec<&str> = calls
