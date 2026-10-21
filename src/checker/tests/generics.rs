@@ -2244,3 +2244,13 @@ fn resolve_type_and_resolve_ty_ro_map_every_annotation_to_the_same_ty() {
         missing.join(", ")
     );
 }
+
+/// TICKET-280 (owner decision 2026-10-16, U15): no struct is `Hashable` on its own, so a
+/// zero-field struct without `hash` is not a map key, a set element or a `Hashable` argument.
+#[test]
+fn zero_field_struct_is_not_hashable_on_its_own() {
+    rejects(
+        "struct Z:\n    pass\nm2 := {Z(): 1}\n",
+        "Map key type must implement Hashable",
+    );
+}
