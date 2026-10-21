@@ -139,7 +139,11 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    `tests/support/grid_tests.rs`), the `hook_conformance_grid` cap override is deleted, and no test ran
    longer than 60.310 s with two suites at once (two runs: 55.202 s and 60.310 s). `tests/test_time_budget.rs` fails on a `slow-timeout` line
    without `terminate-after = 5 }`; the rule is in `docs/contributing/dev-commands.md`.
-9. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+9. **`os.exit` output loss under load (TICKET-284, filed 2026-10-21).** An Executor job's nursery
+   child that prints and calls `os.exit` loses its output in the captured run at load 16-22 (1/30 and
+   2/30; `job_child_exits` cell of `an_exit_beside_a_spinning_defer_ends_the_run_and_keeps_its_output`).
+   `chezzi run` kept it in 400/400 runs at load 23.
+10. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 
