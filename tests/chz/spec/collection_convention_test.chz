@@ -1,0 +1,93 @@
+# TICKET-278 (U16): the collection convention rows. The oracle is Rust's std, run for each value:
+#   Vec::remove(i) -> T          HashSet::insert(v) -> bool      HashMap::insert(k, v) -> Option<V>
+#   HashSet::remove(&v) -> bool  HashMap::remove(&k) -> Option<V>
+# `List.remove(i)` takes the index rule of `xs[i]` (a negative index counts from the end; Rust has no
+# negative index), and an index out of range is a fault (Rust panics). The concurrent handles agree
+# with their plain twins.
+import std.concurrency
+import std.concurrency.collection
+
+fn faults[T](f: fn() -> T) -> bool:
+    res := recover: f()
+    match res:
+        ?_: return false
+        !_: return true
+
+test fn list_remove_returns_the_element_at_the_index():
+    xs := [10, 20, 30]
+    assert xs.remove(1) == 20
+    assert xs == [10, 30]
+    assert xs.remove(0) == 10
+    assert xs == [30]
+    assert xs.remove(0) == 30
+    assert xs == []
+
+test fn list_remove_counts_a_negative_index_from_the_end():
+    xs := [10, 20, 30]
+    assert xs.remove(-1) == 30
+    assert xs.remove(-2) == 10
+    assert xs == [20]
+
+test fn list_remove_faults_out_of_range_and_keeps_the_list():
+    xs := [10, 20, 30]
+    assert faults(fn() -> int: xs.remove(3))
+    assert faults(fn() -> int: xs.remove(-4))
+    assert xs == [10, 20, 30]
+    empty: List[int] = []
+    assert faults(fn() -> int: empty.remove(0))
+
+test fn set_insert_reports_whether_the_value_was_new():
+    s := Set[int]()
+    assert s.insert(1) == true
+    assert s.insert(1) == false
+    assert s.insert(2) == true
+    assert s.len() == 2
+    assert s.remove(1) == true
+    assert s.remove(1) == false
+    assert s.len() == 1
+
+test fn map_insert_returns_the_replaced_value():
+    m: Map[str, int] = {}
+    assert m.insert("a", 1) == None
+    assert m.insert("a", 2) == ?1
+    assert m.insert("b", 3) == None
+    assert m["a"] == 2
+    assert m.len() == 2
+    assert m.remove("a") == ?2
+    assert m.remove("a") == None
+    assert m.len() == 1
+
+test fn map_insert_of_a_none_value_is_a_present_slot():
+    m: Map[str, int?] = {}
+    assert m.insert("a", None) == None
+    assert m.contains("a")
+    assert m.len() == 1
+
+test fn concurrent_map_agrees_with_map():
+    c := collection.ConcurrentMap[str, int].new()
+    assert c.insert("a", 1) == None
+    assert c.insert("a", 2) == ?1
+    assert c.insert("b", 3) == None
+    assert c.get("a") == ?2
+    assert c.len() == 2
+    assert c.remove("a") == ?2
+    assert c.remove("a") == None
+    assert c.len() == 1
+
+test fn concurrent_set_agrees_with_set():
+    c := collection.ConcurrentSet[int].new()
+    assert c.insert(1) == true
+    assert c.insert(1) == false
+    assert c.insert(2) == true
+    assert c.len() == 2
+    assert c.remove(1) == true
+    assert c.remove(1) == false
+    assert c.len() == 1
+
+test fn rwshared_set_and_map_handles_report_the_same_answers():
+    ms := collection.ConcurrentMap(concurrency.RwShared({"a": 1}))
+    assert ms.insert("a", 5) == ?1
+    assert ms.remove("zz") == None
+    ss := collection.ConcurrentSet(concurrency.RwShared({1}))
+    assert ss.insert(1) == false
+    assert ss.remove(7) == false

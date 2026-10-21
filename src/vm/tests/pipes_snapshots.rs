@@ -1944,14 +1944,17 @@ fn rwshared_map_get_key_is_not_linear() {
 ///
 /// TICKET-246: a writer decodes its key and its value into the box heap and touches nothing else,
 /// so 4000 writes rebuild 8000 nodes (plus the final `get`). A re-encode would be millions.
+///
+/// TICKET-278: `insert` returns the replaced `V?`, so each overwrite also decodes its `?old` result:
+/// about one more node per overwrite: 10003 in all against 8001 before. Still O(1) per write.
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
     let src = "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(concurrency.RwShared(m))\n    i := 0\n    while i < n:\n        _ := box.insert(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        _ := box.insert(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n2000\n");
     assert!(
-        (4000..=8100).contains(&touches),
-        "2000 ConcurrentMap.insert inserts + 2000 overwrites rebuilt {touches} wire nodes (want 4000..=8100) -- O(n) per write"
+        (4000..=10100).contains(&touches),
+        "2000 ConcurrentMap.insert inserts + 2000 overwrites rebuilt {touches} wire nodes (want 4000..=10100) -- O(n) per write"
     );
 }
 
