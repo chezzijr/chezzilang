@@ -1819,3 +1819,12 @@ fn a_global_protocol_gets_no_import_hint() {
         "; import it from std.iter (`import Iterable from std.iter`)"
     );
 }
+
+// ===== TICKET-279: Deque, Heap and Counter are Iterable =====
+
+#[test]
+fn deque_is_iterable_in_for() {
+    entry_ok(
+        "import Deque from std.collections\nfn main():\n    d := Deque[int]([], [])\n    d.push_back(1)\n    for x in d:\n        n: int = x\n        print(n)\n",
+    );
+}
