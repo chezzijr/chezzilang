@@ -419,6 +419,13 @@ impl ScopeCancel {
 #[cfg(any(test, feature = "test-api"))]
 pub static TEST_WORKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// TICKET-284 — test-only: set inside the forced child of
+/// `a_job_that_adopts_its_childs_exit_keeps_the_childs_output`. The two holds in `Disp::Finish` and
+/// `MnSched::take_finished_streams` fire only while it is set, so no other test pays them or sees
+/// the order they force.
+#[cfg(test)]
+pub(crate) static HOLD_ADOPTED_EXIT: AtomicBool = AtomicBool::new(false);
+
 /// TICKET-230: `set_worker_count` sets the cap of the process-wide `width::RUNNERS`, so a test that
 /// forces a count throttles every concurrently running lib test. It re-runs itself alone in a child
 /// copy of the test binary, which has its own gate. Returns `true` in the parent (the child already

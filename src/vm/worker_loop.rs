@@ -400,8 +400,8 @@ impl Vm {
                     // TICKET-284 — test-only: a joiner that adopts a child's `os.exit` stores its own slot
                     // late (a job is scope 0), so the reader of finished output is reachable with no host load.
                     #[cfg(test)]
-                    if scope_id == 0
-                        && !self.exit_origin
+                    if crate::vm::HOLD_ADOPTED_EXIT.load(Ordering::Relaxed)
+                        && scope_id == 0
                         && matches!(&outcome, TaskOutcome::Exit { code: 3, .. })
                     {
                         std::thread::sleep(std::time::Duration::from_millis(300));

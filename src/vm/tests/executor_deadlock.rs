@@ -2528,9 +2528,17 @@ fn an_exit_beside_a_running_sibling_runs_no_defer_and_keeps_its_output() {
 /// TICKET-284 — a nursery child of an Executor job calls `os.exit` and the job adopts the exit.
 /// The child is the exit origin, so `take_finished_streams` waits for the child's slot only; the
 /// job's own slot, which holds the output the job's join took from the child, is stored later. A
-/// test hook in `Disp::Finish` holds that later store 300 ms, the order a loaded host produces.
+/// test hook in `Disp::Finish` holds that later store 300 ms, the order a loaded host produces. The
+/// test runs in a forced child, so the holds (`HOLD_ADOPTED_EXIT`) reach no other test.
 #[test]
 fn a_job_that_adopts_its_childs_exit_keeps_the_childs_output() {
+    if crate::vm::rerun_in_child(
+        module_path!(),
+        "a_job_that_adopts_its_childs_exit_keeps_the_childs_output",
+    ) {
+        return;
+    }
+    crate::vm::HOLD_ADOPTED_EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
     let src = r#"import Executor from std.concurrency
 import std.os
 ch: Channel[int] = Channel[int]()
