@@ -1828,3 +1828,200 @@ fn deque_is_iterable_in_for() {
         "import Deque from std.collections\nfn main():\n    d := Deque[int]([], [])\n    d.push_back(1)\n    for x in d:\n        n: int = x\n        print(n)\n",
     );
 }
+
+/// One row of the Iterable grid: what iterating one type yields, from the ancestor's run output.
+struct IterRow {
+    name: &'static str,
+    /// Lines before `fn main():` (imports, declarations).
+    head: &'static str,
+    /// The statements that bind `v` inside `main`.
+    make: &'static str,
+    /// What one step yields, spelled as a type.
+    elem: &'static str,
+    /// `print` of the elements in iteration order, or of the sorted elements for an unordered row.
+    want: &'static str,
+    /// The ancestor fixes no order (Rust `BinaryHeap::iter`): each cell sorts what it got, so the
+    /// cell checks the elements and their count, never their order.
+    unordered: bool,
+}
+
+/// The builtin rows: one per `RecvKind` that an `Iterable` row of `INTRINSIC_PROTO_METHODS`
+/// names. A struct row comes from `STD_ROWS` and `USER_ROWS`.
+fn builtin_iterable_rows() -> Vec<IterRow> {
+    use crate::checker::proto::{INTRINSIC_PROTO_METHODS, RecvKind};
+    let row = |name, make, elem, want| IterRow {
+        name,
+        head: "",
+        make,
+        elem,
+        want,
+        unordered: false,
+    };
+    let mut rows = Vec::new();
+    for (proto, _, kind) in INTRINSIC_PROTO_METHODS {
+        if *proto != "Iterable" {
+            continue;
+        }
+        let r = match kind {
+            RecvKind::List => row("List", "v := [3, 1, 2]", "int", "[3, 1, 2]"),
+            RecvKind::Set => row("Set", "v := {3, 1, 2}", "int", "[3, 1, 2]"),
+            RecvKind::Map => row(
+                "Map",
+                "v := {'b': 2, 'a': 1}",
+                "(str, int)",
+                "[('b', 2), ('a', 1)]",
+            ),
+            RecvKind::Str => row("str", "v := 'ab'", "str", "['a', 'b']"),
+            RecvKind::Bytes => row("bytes", "v := b'AB'", "int", "[65, 66]"),
+            RecvKind::ByteArray => row("bytearray", "v := bytearray(b'AB')", "int", "[65, 66]"),
+            RecvKind::Channel => row(
+                "Channel",
+                "v := Channel[int](2)\n    v.send(4)\n    v.send(5)\n    v.close()",
+                "int",
+                "[4, 5]",
+            ),
+            RecvKind::Cursor => row("Iterator", "v := [7, 8].iter()", "int", "[7, 8]"),
+            // A struct yields through its own hook: the std and user rows cover it.
+            RecvKind::Struct => continue,
+            RecvKind::Int
+            | RecvKind::Float
+            | RecvKind::Bool
+            | RecvKind::Tuple
+            | RecvKind::Enum
+            | RecvKind::Option
+            | RecvKind::Result
+            | RecvKind::Func
+            | RecvKind::Protocol
+            | RecvKind::Shared
+            | RecvKind::RwShared
+            | RecvKind::Atomic => panic!("an Iterable row names {kind:?}: give it a grid row"),
+        };
+        rows.push(r);
+    }
+    rows
+}
+
+/// Every std struct that declares an `iter` method, found by parsing `STD_FILES`.
+fn std_structs_with_iter() -> Vec<String> {
+    let mut names = Vec::new();
+    for (_, src) in crate::native::std_embed::STD_FILES {
+        let ast = crate::parser::parse(crate::lexer::tokenize(src).expect("std lexes"))
+            .expect("std parses");
+        for s in &ast.stmts {
+            if let StmtKind::Struct { name, methods, .. } = &s.kind
+                && methods.iter().any(|m| m.name == "iter")
+            {
+                names.push(name.clone());
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+/// The std rows (owner decision 2026-10-16), in name order. Each order is the ancestor's run
+/// output: Deque front to back (Python `list(deque)`, Rust `VecDeque::iter`), Heap in no order
+/// (Rust `BinaryHeap::iter`, so its cells compare sorted contents), Counter as a Map, Range as
+/// Python `range`.
+const STD_ROWS: &[IterRow] = &[
+    IterRow {
+        name: "Counter",
+        head: "import Counter from std.collections\n",
+        make: "v: Counter[str] = Counter({})\n    v.add('b')\n    v.add('a')\n    v.add('b')",
+        elem: "(str, int)",
+        want: "[('b', 2), ('a', 1)]",
+        unordered: false,
+    },
+    IterRow {
+        name: "Deque",
+        head: "import Deque from std.collections\n",
+        make: "v := Deque[int]([], [])\n    v.push_back(2)\n    v.push_back(3)\n    v.push_front(1)\n    v.push_front(0)",
+        elem: "int",
+        want: "[0, 1, 2, 3]",
+        unordered: false,
+    },
+    IterRow {
+        name: "Heap",
+        head: "import min_heap from std.collections\n",
+        make: "v := min_heap()\n    v.push(5)\n    v.push(1)\n    v.push(3)",
+        elem: "int",
+        want: "[1, 3, 5]",
+        unordered: true,
+    },
+    IterRow {
+        name: "Range",
+        head: "",
+        make: "v := 1..4",
+        elem: "int",
+        want: "[1, 2, 3]",
+        unordered: false,
+    },
+];
+
+/// A user struct yields through its `iter` hook as a std struct does.
+const USER_ROWS: &[IterRow] = &[IterRow {
+    name: "user struct",
+    head: "import Iterator from std.iter\nstruct Bag:\n    xs: List[(str, int)]\n\n    fn iter(self) -> Iterator[(str, int)]:\n        return self.xs.iter()\n",
+    make: "v := Bag([('a', 1), ('b', 2)])",
+    elem: "(str, int)",
+    want: "[('a', 1), ('b', 2)]",
+    unordered: false,
+}];
+
+/// TICKET-279: one answer to "what does `for x in v` yield", for every Iterable type x every
+/// position (`for`, comprehension, `List(...)`, `v.iter()`, a tuple target). A cell is red when
+/// the checker rejects it, or when its run prints other than the ancestor's elements.
+#[test]
+fn iterable_yields_grid() {
+    let std_names: Vec<String> = STD_ROWS.iter().map(|r| r.name.to_string()).collect();
+    let mut red: Vec<String> = Vec::new();
+    let declared = std_structs_with_iter();
+    if declared != std_names {
+        red.push(format!(
+            "std structs with `iter` {declared:?}, STD_ROWS {std_names:?}"
+        ));
+    }
+    let rows = builtin_iterable_rows();
+    for IterRow {
+        name,
+        head,
+        make,
+        elem,
+        want,
+        unordered,
+    } in rows.iter().chain(STD_ROWS).chain(USER_ROWS)
+    {
+        let mut cells = vec![
+            (
+                "for",
+                format!("    got: List[{elem}] = []\n    for x in v:\n        got.push(x)\n"),
+            ),
+            ("comprehension", "    got := [x for x in v]\n".to_string()),
+            ("List()", "    got := List(v)\n".to_string()),
+            ("v.iter()", "    got := List(v.iter())\n".to_string()),
+        ];
+        if elem.starts_with('(') {
+            cells.push((
+                "tuple target",
+                format!(
+                    "    got: List[{elem}] = []\n    for a, b in v:\n        got.push((a, b))\n"
+                ),
+            ));
+        }
+        let sort = if *unordered { "    got.sort()\n" } else { "" };
+        for (pos, body) in cells {
+            let src = format!("{head}fn main():\n    {make}\n{body}{sort}    print(got)\n");
+            let errs = check_entry(&src);
+            if let Some(e) = errs.first() {
+                red.push(format!("{name} x {pos}: check: {}", e.message));
+                continue;
+            }
+            match crate::compiler::run_for_tests::run_capture(&format!("{src}main()\n")) {
+                Ok(out) if out.trim_end() == *want => {}
+                Ok(out) => red.push(format!("{name} x {pos}: printed {out:?}, want {want:?}")),
+                Err(e) => red.push(format!("{name} x {pos}: run: {e:?}")),
+            }
+        }
+    }
+    assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
+}
