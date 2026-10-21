@@ -201,6 +201,7 @@ return or parameter **annotation** supplies it: `h: Heap[int] = Heap([], fn(x, y
 | `.pop()` | `() -> T?` | Remove+return the extremum (sift-down), `None` if empty. **O(log n)**. |
 | `.peek()` | `() -> T?` | The extremum without removing, `None` if empty. **O(1)**. |
 | `.len()` / `.is_empty()` | `() -> int` / `-> bool` | **O(1)**. |
+| `.iter()` | `() -> Iterator[T]` | A snapshot cursor over the elements in no particular order (Rust `BinaryHeap::iter`); iterating does not pop. `for`, comprehensions and `List()` use it. **O(n)**. |
 
 **`Deque[T]`**: double-ended queue, **amortized O(1) at both ends** with the **two-stack** design
 (`front`/`back` backing lists; a pop whose near stack is empty drains the far stack into it once, so
@@ -215,6 +216,7 @@ error on that line. (There is no `deque()` factory: a no-argument generic factor
 | `.pop_front()` / `.pop_back()` | `() -> T?` | Remove+return the head/tail, `None` if empty. **Amortized O(1)**. |
 | `.peek_front()` / `.peek_back()` | `() -> T?` | Head/tail without removing, `None` if empty. **O(1)**. |
 | `.len()` / `.is_empty()` | `() -> int` / `-> bool` | **O(1)**. |
+| `.iter()` | `() -> Iterator[T]` | A snapshot cursor, front to back (Python `deque`, Rust `VecDeque::iter`). `for`, comprehensions and `List()` use it. **O(n)**. |
 
 **`Counter[T: Hashable]`**: a frequency table over `Map[T, int]` (`T` must be `Hashable`,
 like any map key; `Hashable` embeds `Eq`). Construct directly:
@@ -228,6 +230,7 @@ error on that line. (No `counter()` factory, for the same reason as `Deque`.)
 | `.count(x)` | `(T) -> int` | Count of `x`, **0 if never added**. **O(1)**. |
 | `.total()` | `() -> int` | Sum of all counts. **O(n)**. |
 | `.most_common(k)` | `(int) -> List[(T, int)]` | Top `k` `(item, count)` pairs by **descending count**; `k` clamped to `[0, len]` (`k<=0`→`[]`, `k>=len`→all). **O(n log n)**. |
+| `.iter()` | `() -> Iterator[(T, int)]` | A snapshot cursor over the `(item, count)` pairs in insertion order, as a `Map` iterates; `for k, n in c` works. **O(n)**. |
 
 **Counter tie-break:** equal counts keep **insertion order**, because `map.keys()` yields insertion
 order **and** the list `sort_by` is a **stable** merge sort. Do not swap `sort_by` to an unstable sort.

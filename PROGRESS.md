@@ -91,8 +91,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
      needs the import, `Hashable` embeds `Eq`, `T?` derives no ordering. A std import checks and
      compiles only the std fns the program reaches, and a process parses each embedded std module once (`shared_std_parse`; debug, fill vs clone: `string.chz` 3.65 vs 0.19 ms, `iter.chz` 3.24 vs 0.14, `prelude.chz` 5.21 vs 0.23, `ops.chz` 0.60 vs 0.03); `std.iter`/`std.string`/`std.ops` imports still
      cost 2-3 ms over `print(1)` (`docs/contributing/benchmarks.md`). Part 2 is filed (2026-10-21): the method set per
-     builtin type and the collection convention table (TICKET-278); what an Iterable yields and
-     `Deque`/`Heap`/`Counter` `Iterable` (TICKET-279); `Hashable` opt-in (TICKET-280). Still open: the
+     builtin type and the collection convention table (TICKET-278); `Hashable` opt-in (TICKET-280).
+     Part 2 also had what an Iterable yields and the Deque, Heap and Counter iteration: landed (TICKET-279). Still open: the
      U5 sibling gaps.
 2. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): `resolve_ty_ro_d` and
    `resolve_type` resolve the same annotations; `src/checker/resolve_ctype.rs:89`, `:137`, `:145`, `:160`
@@ -152,8 +152,6 @@ None open on 2026-10-16.
 - **`Hashable` is opt-in for user types** (2026-10-16). No `struct` or `enum` is `Hashable` on its own
   (the zero-field struct loses it); a user type becomes a key by defining `fn hash` and `fn eq`, as
   Rust requires a derive. Tuples of `Hashable` stay `Hashable` (Rust, Python).
-- **`Deque`, `Heap` and `Counter` are `Iterable`** (2026-10-16). Deque front to back; Heap in no order
-  (Rust `BinaryHeap::iter`, Java `PriorityQueue`); Counter like a Map (Python `Counter` is a `dict`).
 
 ## JIT entry rule
 
