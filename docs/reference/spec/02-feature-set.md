@@ -260,7 +260,7 @@ main()                                 # no auto-entry — `main` is a normal fn
 - As the sole line of a `struct` body it makes a **zero-field struct** whose ctor `Name()` takes no args
   (it prints as `Name()`, equals another `Name()`, and is intrinsically `Hashable`; it still
   heap-allocates).
-- An **empty enum** is not supported (`pass` in an enum body is rejected; an enum needs ≥1 variant).
+- An **empty enum** is not supported: an enum body with no variant is rejected (`pass`, methods only or `test` blocks only); an enum needs ≥1 variant.
 
 **Multi-line literals.** Inside `[]`, `{}`, and `()` the lexer suppresses layout (newlines /
 indentation), so collection literals, call arguments, and parameter lists may span lines. A single

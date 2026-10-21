@@ -154,10 +154,6 @@ None open on 2026-10-16.
   Rust requires a derive. Tuples of `Hashable` stay `Hashable` (Rust, Python).
 - **`Deque`, `Heap` and `Counter` are `Iterable`** (2026-10-16). Deque front to back; Heap in no order
   (Rust `BinaryHeap::iter`, Java `PriorityQueue`); Counter like a Map (Python `Counter` is a `dict`).
-- **An enum needs at least one variant** (owner, 2026-10-19; replaces the 2026-10-16 "empty enum is
-  legal" decision). `struct S:` + `pass` is the empty type (Go `struct{}`). Open: the parser enforces
-  the rule only when it sees `pass` (`src/parser/decl.rs:818`), so `enum Z:` with only a method and no
-  variant is accepted and runs (TICKET-277).
 
 ## JIT entry rule
 

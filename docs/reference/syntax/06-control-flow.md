@@ -227,7 +227,7 @@ struct Unit:           # zero fields → `Unit()` takes no args
 - An empty struct: `Unit()` constructs it, prints as `Unit()`, two `Unit()` are equal, and it is
   `Hashable` (a `Set` element or `Map` key). It still heap-allocates.
 - `pass` must be the only line of such a body; mixed with a field/method or repeated it is a parse error.
-- An empty enum is not supported: `pass` in an enum body is rejected.
+- An empty enum is not supported: an enum body with no variant (`pass`, methods only, `test` blocks only) is rejected at the enum name.
 
 `pass` cannot be a name (variable, parameter, field, function, type, module alias): `pass := 5` is an error.
 
