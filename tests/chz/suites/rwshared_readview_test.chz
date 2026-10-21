@@ -245,6 +245,8 @@ struct CycHash:                # Set/Map-key shapes need a non-recursing `hash`
     back: List[CycHash]
     fn hash(self) -> int:
         return self.val
+    fn eq(self, other: CycHash) -> bool:
+        return self.val == other.val and self.back == other.back
 
 fn cyclic_list() -> List[Cyc]:
     a := Cyc(1, [])
@@ -390,7 +392,7 @@ test fn cyclic_set_contains_faults_recoverably_instead_of_aborting():
     r := recover: box.contains(e)
     match r:
         ?v: assert false, "expected the cyclic-equality depth fault, got " + str(v)
-        !err: assert err.message().contains("maximum structural depth"), err.message()
+        !err: assert err.message().contains("maximum call depth"), err.message()
 
 # AB-BA cross-box: W1 walks map A calling B.set; W2 walks set B calling A.set.
 test fn map_set_read_view_cross_box_no_deadlock():

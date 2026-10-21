@@ -101,18 +101,6 @@ test fn an_enum_has_index_iter_and_contains_hooks():
     assert 7 in g
     assert not (8 in g)
 
-# ---- a zero-field struct with a static `hash` hashes as one with no `hash` ----
-
-struct Unit:
-    fn hash(k: int) -> int:
-        return k
-
-test fn a_zero_field_struct_with_a_static_hash_is_a_set_element():
-    s: Set[Unit] = Set([])
-    s.add(Unit())
-    s.add(Unit())
-    assert s.len() == 1
-
 # ---- `iter` wins over `next` ----
 
 struct Both:

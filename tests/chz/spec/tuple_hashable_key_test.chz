@@ -6,6 +6,8 @@ struct P:
     x: int
     fn hash(self) -> int:
         return self.x
+    fn eq(self, other: P) -> bool:
+        return self.x == other.x
 
 fn total(xs: Iterable[(int, int)]) -> int:
     t := 0

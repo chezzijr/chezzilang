@@ -430,6 +430,9 @@ struct SnapKey:
     fn hash(self) -> int:
         return 7
 
+    fn eq(self, other: SnapKey) -> bool:
+        return self.xs == other.xs
+
 struct KeyProbe:
     n: int
 

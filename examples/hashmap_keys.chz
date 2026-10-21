@@ -1,14 +1,16 @@
 # examples/hashmap_keys.chz — real hash-table map/set with Hashable struct keys.
 #
 # map/set are insertion-ordered hash tables (entries + a hash→position index). Keys/elements may be
-# any Hashable type: int/str/bool intrinsically, or a struct that defines `hash(self) -> int`. The
-# hash routes the probe; structural `==` confirms it. Insertion order is preserved for iteration.
+# any Hashable type: int/str/bool intrinsically, or a struct that defines `hash(self) -> int` and
+# `eq`. The hash routes the probe; `eq` confirms it. Insertion order is preserved for iteration.
 
 struct Point:
     x: int
     y: int
     fn hash(self) -> int:
         return self.x * 31 + self.y
+    fn eq(self, other: Point) -> bool:
+        return self.x == other.x and self.y == other.y
     fn str(self) -> str:
         return "({self.x}, {self.y})"
 
@@ -42,7 +44,7 @@ fn main():
     print("removed (0,0): {label.remove(Point(0, 0))}")
     print("len after remove: {label.len()}")
 
-    # --- set of structs: dedup via custom hash + structural eq ---
+    # --- set of structs: dedup via custom hash + eq ---
     pts: Set[Point] = Set()
     pts.add(Point(2, 2))
     pts.add(Point(2, 2))                  # duplicate — deduped

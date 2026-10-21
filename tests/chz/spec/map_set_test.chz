@@ -104,6 +104,8 @@ struct P:
     y: int = 0
     fn hash(self) -> int:
         return self.x * 31 + self.y
+    fn eq(self, other: P) -> bool:
+        return self.x == other.x and self.y == other.y
 
 test fn struct_key_map():
     m: Map[P, str] = {}
@@ -134,20 +136,22 @@ test fn struct_set_algebra():
     assert a.contains(P(2)) == false
 
 # ---- cyclic-key equality faults recoverably (matches `==` / Python RecursionError) ----
-# A struct with a custom `hash` used as a Set/Map key that holds a genuine reference cycle:
-# container membership / key-equality is DEFINED by `==`, so it must fault the SAME way `==`
-# does (structural-depth cap) instead of silently swallowing the fault into a wrong `false`.
+# A struct with a custom `hash` and `eq` used as a Set/Map key that holds a genuine reference cycle:
+# key-equality runs the user `eq`, so it faults the SAME way `==` does (call-depth cap) instead of
+# silently swallowing the fault into a wrong `false`.
 
 struct Cyc:
     x: int
     next: List[Cyc] = []
     fn hash(self) -> int:
         return self.x
+    fn eq(self, other: Cyc) -> bool:
+        return self.x == other.x and self.next == other.next
 
 fn assert_depth_fault[T](r: T!Error, where_: str):
     match r:
         ?_: assert false, where_ + " must fault on a cyclic key"
-        !e: assert e.message().contains("maximum structural depth"), where_ + ": " + e.message()
+        !e: assert e.message().contains("maximum call depth"), where_ + ": " + e.message()
 
 test fn cyclic_key_faults_everywhere():
     # two DISTINCT self-cyclic keys with the same hash (x=1) -> a candidate collision that

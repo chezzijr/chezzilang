@@ -9,6 +9,8 @@ struct A:
     n: int
     fn hash(self) -> int:
         return self.n
+    fn eq(self, other: A) -> bool:
+        return self.n == other.n
 
 test fn map_accepts_a_protocol_satisfying_literal_key():
     m: Map[Keyed, str] = {}

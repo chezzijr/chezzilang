@@ -149,7 +149,7 @@ test fn a_generic_operand_eq_is_an_ordinary_method():
 
 # ---- C1 (W7-53 follow-up review): a NON-hook `eq` must satisfy `Eq` too ----
 #
-# Before this fix, `Key` below had `==`/`Map`/`Set` all working (structural equality, since `eq`'s
+# Before this fix, `Key` below had `==` working (structural equality, since `eq`'s
 # generic operand means `==` never dispatches it) while `[T: Eq]`/`.eq()` refused it — `==` and a
 # `[T: Eq]` bound disagreeing about the SAME type, the identical defect shape Tasks 1/2 closed for
 # `Ty::Func`/`Ty::Protocol`. `k1 == k2` staying `false` while `k1.eq(k2)` answers
@@ -168,11 +168,6 @@ test fn non_hook_eq_satisfies_eq_too():
     assert (k1 == k2) == false, "== stays structural — the escape hatch is not the hook"
     assert k1.eq(k2) == true, "the method spelling still runs"
     assert eq_bound(k1, k2) == false, "[T: Eq] must agree with == on the SAME comparison"
-    m: Map[Key, int] = {}
-    m[k1] = 7
-    assert m[k1] == 7, "Key must be usable as a Map key (Hashable, and now Eq too)"
-    s := Set([k1, k2])
-    assert s.len() == 2, "structural dedup — a Key with a constant hash and always-true eq[U] never collides"
 
 # ---- a faulting `eq` propagates to the operator's caller ----
 

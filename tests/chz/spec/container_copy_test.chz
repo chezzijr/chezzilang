@@ -6,6 +6,9 @@ struct P:
     fn hash(self) -> int:
         return self.x
 
+    fn eq(self, other: P) -> bool:
+        return self.x == other.x
+
 test fn list_copy_is_independent_at_the_top_level():
     xs := [1, 2, 3]
     ys := xs.copy()

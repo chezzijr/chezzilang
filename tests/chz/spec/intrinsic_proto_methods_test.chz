@@ -198,18 +198,14 @@ test fn hash_method_reachable_through_a_protocol_value():
     y: Hashable = "a"
     assert y.hash() == hash_m("a")
 
-struct Unit:
-    pass
-
 struct OwnHash:
     fn hash(self) -> int:
         return 42
+    fn eq(self, other: OwnHash) -> bool:
+        return true
 
-test fn zero_field_struct_hash_and_user_hash_control():
-    # a zero-field struct is intrinsically Hashable (constant hash, no user method)
-    assert hash_m(Unit()) == hash_m(Unit())
-    assert Set([Unit()]).contains(Unit()), "self-consistent with Set membership"
-    # control: a struct that DEFINES `hash` still gets ITS method
+test fn a_struct_hash_hook_is_the_hash_the_bound_sees():
+    # a struct that DEFINES `hash` and `eq` gets ITS method through the `[T: Hashable]` bound
     assert hash_m(OwnHash()) == 42
     assert OwnHash().hash() == 42
 
