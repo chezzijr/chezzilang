@@ -148,18 +148,15 @@ None open on 2026-10-16.
   faults on a bad index; the concurrent collections follow the same rows. A protocol only where
   generic code needs one (`Iterable`, `Contains`, `Sized`, `Extend`); a new protocol goes in a std
   module, not the global namespace.
-- **Top-level `return` is an error** (TICKET-178, 2026-10-16). Today `print(1)` / `return` /
-  `print(2)` at module level prints `1` and exits 0. CPython: `SyntaxError: 'return' outside
-  function`; Go and Rust have no top-level statements.
 - **`Hashable` is opt-in for user types** (2026-10-16). No `struct` or `enum` is `Hashable` on its own
   (the zero-field struct loses it); a user type becomes a key by defining `fn hash` and `fn eq`, as
   Rust requires a derive. Tuples of `Hashable` stay `Hashable` (Rust, Python).
 - **`Deque`, `Heap` and `Counter` are `Iterable`** (2026-10-16). Deque front to back; Heap in no order
   (Rust `BinaryHeap::iter`, Java `PriorityQueue`); Counter like a Map (Python `Counter` is a `dict`).
-- **An empty enum is legal** (2026-10-16), as Rust's `enum Never {}`: a type with no values.
-  Today `enum Z:` + `pass` is a parse error ("empty enums are not supported") while `enum Z:` with
-  only methods and no variant is accepted; both forms become the same legal type. Python's
-  `class E(Enum): pass` is also legal.
+- **An enum needs at least one variant** (owner, 2026-10-19; replaces the 2026-10-16 "empty enum is
+  legal" decision). `struct S:` + `pass` is the empty type (Go `struct{}`). Open: the parser enforces
+  the rule only when it sees `pass` (`src/parser/decl.rs:818`), so `enum Z:` with only a method and no
+  variant is accepted and runs (TICKET-277).
 
 ## JIT entry rule
 
