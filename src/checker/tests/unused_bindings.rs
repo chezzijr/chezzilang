@@ -70,7 +70,7 @@ fn the_read_temporary_warning_fires_at_top_level_and_inside_a_spawn_block() {
 #[test]
 fn a_set_or_map_payload_mutator_on_a_read_temporary_warns_exactly_once() {
     entry_warns_once(
-        "import Shared from std.concurrency\nfn main():\n    s := Shared[Set[int]](Set[int]())\n    s.get().add(1)\nmain()\n",
+        "import Shared from std.concurrency\nfn main():\n    s := Shared[Set[int]](Set[int]())\n    s.get().insert(1)\nmain()\n",
         "s.update(…)",
     );
     entry_warns_once(
@@ -1078,7 +1078,7 @@ fn bind_call_reports_each_named_argument_error() {
 #[test]
 fn builtin_and_native_callees_refuse_named_arguments() {
     for (src, head) in [
-        ("s := Set([1, 2])\ns.add(x=3)\n", "add"),
+        ("s := Set([1, 2])\ns.insert(x=3)\n", "insert"),
         (
             "import std.net\nfn f(sk: net.Socket) -> str:\n    r := sk.read(10, timeout_ms=5)\n    return \"{r}\"\n",
             "read",
@@ -1093,11 +1093,11 @@ fn builtin_and_native_callees_refuse_named_arguments() {
         entry_rejects(src, &format!("'{head}' takes no named arguments"));
     }
     // A user struct that declares a same-named method changes nothing for a builtin receiver.
-    let src = "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.add(x=3)\n";
+    let src = "struct Counter:\n    n: int\n    fn insert(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.insert(x=3)\n";
     let errs = check_entry(src);
     assert!(
         errs.iter()
-            .any(|e| e.message.contains("'add' takes no named arguments")),
+            .any(|e| e.message.contains("'insert' takes no named arguments")),
         "got: {errs:?}"
     );
     assert!(

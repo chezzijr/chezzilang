@@ -1175,7 +1175,7 @@ fn over_memory_trips_on_an_all_native_task_body() {
 /// | shape | why the old triggers missed it | measured at `--max-heap=8000000` |
 /// |---|---|---|
 /// | `xs.push(i)` ×2 M / 20 M / 80 M | appends into an existing `Vec`: no `Obj`, no wire | PASS at 22.7 / 160 / **617.8 MB (77× the cap)** |
-/// | `m[i] = i` ×2 M, `s.add(i)` ×2 M | same, `Map`/`Set` backing | PASS at 199.5 / 185.5 MB |
+/// | `m[i] = i` ×2 M, `s.insert(i)` ×2 M | same, `Map`/`Set` backing | PASS at 199.5 / 185.5 MB |
 /// | `big.extend(chunk)` ×150 | **unbounded bytes in ONE instruction** — kills an instruction tick | PASS at ~240 MB in ~1200 instructions |
 /// | `s = s + s` ×22 | 41 MB in 22 allocations — under the 256-object threshold | PASS at 127.7 MB |
 /// | `"x".repeat(20000000)` | 20 MB in ONE allocation | PASS |

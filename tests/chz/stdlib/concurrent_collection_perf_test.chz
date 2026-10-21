@@ -16,7 +16,7 @@ test fn push_and_add_on_a_100k_container_do_not_copy_it():
     i := 0
     while i < 100000:
         xs.push(i)
-        st.add(i)
+        st.insert(i)
         i = i + 1
     cl := ConcurrentList(concurrency.RwShared(xs))
     cs := ConcurrentSet(concurrency.RwShared(st))

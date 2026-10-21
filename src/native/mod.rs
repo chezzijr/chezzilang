@@ -776,10 +776,10 @@ pub fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
                 | "sort_by_key"
                 | "extend"
                 | "insert"
-                | "remove_at"
+                | "remove"
         ),
-        "Map" => matches!(method, "remove" | "update"),
-        "Set" => matches!(method, "add" | "remove"),
+        "Map" => matches!(method, "insert" | "remove" | "update"),
+        "Set" => matches!(method, "insert" | "remove"),
         "bytearray" => matches!(method, "push" | "pop" | "extend" | "reverse"),
         _ => false,
     }

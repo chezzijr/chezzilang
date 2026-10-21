@@ -31,7 +31,7 @@ print(n.len())
 
 # Set[T]() turbofish (dedupes):
 s := Set[int]()
-s.add(3)
-s.add(3)
-s.add(4)
+s.insert(3)
+s.insert(3)
+s.insert(4)
 print(s.len())

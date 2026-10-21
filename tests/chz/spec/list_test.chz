@@ -5,7 +5,7 @@
 # assert the value directly. Run: `cargo run -- test tests/chz/`. Every test here is asserted to
 # pass by the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.rs`).
 #
-# Fault-path cases (empty min()/max(), OOB remove_at, non-positive chunk(), overflow sum) stay in
+# Fault-path cases (empty min()/max(), OOB remove, non-positive chunk(), overflow sum) stay in
 # Rust — `assert` cannot catch a runtime fault's message, so they have no in-language equivalent.
 
 import Add from std.ops
@@ -33,9 +33,9 @@ test fn first_last_empty_none():
         ?_: assert false, "empty last must be None"
         None: assert true
 
-# ---- insert / remove_at (Python-clamp / Python-relative) ----
+# ---- insert / remove (Python-clamp / Python-relative) ----
 
-test fn insert_remove_at():
+test fn insert_remove():
     xs := [1, 2, 3]
     xs.insert(0, 9)
     assert xs == [9, 1, 2, 3]
@@ -45,9 +45,9 @@ test fn insert_remove_at():
     assert xs == [9, 1, 8, 2, 3, 7], "i>len appends"
     xs.insert(-1, 5)
     assert xs == [9, 1, 8, 2, 3, 5, 7], "negative is Python-relative"
-    assert xs.remove_at(0) == 9
+    assert xs.remove(0) == 9
     assert xs == [1, 8, 2, 3, 5, 7]
-    assert xs.remove_at(-1) == 7, "negative index removes from the end"
+    assert xs.remove(-1) == 7, "negative index removes from the end"
     assert xs == [1, 8, 2, 3, 5]
 
 # ---- min / max ----

@@ -483,7 +483,7 @@ impl Checker {
                     pnote
                 } else if is_collection
                     && i == 0
-                    && matches!(name, "push" | "add" | "insert")
+                    && matches!(name, "push" | "insert")
                     && !coll_mismatch_is_float_widen
                 {
                     // Only an UN-BOUND/leaked type param (not in scope here) means "un-inferred": a

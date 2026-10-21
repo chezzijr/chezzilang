@@ -38,7 +38,7 @@ fn run(tag: &str, src: &str, threads: Option<&str>) -> (i32, String, String) {
 const ROOTS: [(&str, &str, &str, &str, &str); 6] = [
     ("List", "List[int]", "[0]", "buf.push(1)", ""),
     ("Map", "Map[int, int]", "{0: 0}", "buf[1] = 1", ""),
-    ("Set", "Set[int]", "{0}", "buf.add(1)", ""),
+    ("Set", "Set[int]", "{0}", "buf.insert(1)", ""),
     (
         "bytearray",
         "bytearray",
@@ -263,7 +263,7 @@ const FRESH_OPERATORS: [(&str, &str, &str, &str); 9] = [
     ),
     ("-buf.len()", "int", "[0]", "buf.push(1)"),
     ("0 in buf", "bool", "{0: 0}", "buf[1] = 1"),
-    ("buf == {0}", "bool", "{0}", "buf.add(1)"),
+    ("buf == {0}", "bool", "{0}", "buf.insert(1)"),
 ];
 
 #[test]

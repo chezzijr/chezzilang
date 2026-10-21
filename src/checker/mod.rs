@@ -1314,7 +1314,7 @@ struct Checker {
     /// (order[0], before entry/all others). Like `concurrency_seeds`, these resolve to
     /// the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` (NOT nominal structs) — only the METHOD table is
     /// re-seeded (bare, into `self.structs[name]`) by [`seed_stdlib_structs`] so `xs.push(...)` /
-    /// `m.get(...)` / `s.add(...)` resolve via the normal method path, with each generic method sig's
+    /// `m.get(...)` / `s.insert(...)` resolve via the normal method path, with each generic method sig's
     /// `Ty::Param` substituted with the value's element/key/value type at the call site. The literal
     /// syntax + turbofish ctor stay compiler-wired (`resolve_type`/`builtin_container_sig`). Unlike the
     /// import-gated seeds, these are UNIVERSE (always in scope) — no licensing set gates them. Empty until

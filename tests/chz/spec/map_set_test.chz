@@ -171,7 +171,7 @@ test fn cyclic_key_faults_everywhere():
     assert_depth_fault(r, "in Set")
     r := recover: Set([a1, a2])
     assert_depth_fault(r, "Set([...]) construct")
-    r := recover: s.add(a2)
+    r := recover: s.insert(a2)
     assert_depth_fault(r, "Set.add")
     # set algebra (operator + method forms must both fault)
     r := recover: (Set([a1]) | Set([a2]))
@@ -221,7 +221,7 @@ test fn noncyclic_controls():
     s: Set[Cyc] = Set([k1, k2])
     assert s.contains(Cyc(1)) == true
     assert s.contains(Cyc(9)) == false
-    s.add(Cyc(3))
+    s.insert(Cyc(3))
     assert s.len() == 3
     s.remove(Cyc(1))
     assert s.contains(Cyc(1)) == false

@@ -58,13 +58,13 @@ fn empty_map_float_key_rejected() {
 
 #[test]
 fn empty_set_float_and_nan_rejected() {
-    // s:=Set(); s.add(1.5) and the inf-inf NaN add — both non-Hashable, rejected.
+    // s:=Set(); s.insert(1.5) and the inf-inf NaN add — both non-Hashable, rejected.
     rejects(
-        "fn main():\n s := Set()\n s.add(1.5)\nmain()",
+        "fn main():\n s := Set()\n s.insert(1.5)\nmain()",
         "cannot infer the",
     );
     rejects(
-        "fn main():\n big := 1e308\n inf := big * 10.0\n nan := inf - inf\n s := Set()\n s.add(nan)\nmain()",
+        "fn main():\n big := 1e308\n inf := big * 10.0\n nan := inf - inf\n s := Set()\n s.insert(nan)\nmain()",
         "cannot infer the",
     );
 }
@@ -299,7 +299,7 @@ fn flow_sensitive_map_if_elif_rejects() {
 fn flow_sensitive_set_if_else_rejects() {
     // First-use pin persists across sibling arms: set pinned to Set[int], the str add is rejected.
     rejects(
-        "fn main():\n c := true\n s := Set()\n if c:\n  s.add(1)\n else:\n  s.add(\"x\")\nmain()",
+        "fn main():\n c := true\n s := Set()\n if c:\n  s.insert(1)\n else:\n  s.insert(\"x\")\nmain()",
         "cannot infer the",
     );
 }
@@ -399,7 +399,7 @@ fn never_refined_empty_needs_annotation() {
 #[test]
 fn idiomatic_homogeneous_push_ok() {
     ok(
-        "fn main():\n out: List[int] = []\n out.push(1)\n out.push(2)\n s: Set[str] = Set()\n s.add(\"a\")\n s.add(\"b\")\n m: Map[str, int] = {}\n m[\"k\"] = 1\n m[\"j\"] = 2\nmain()",
+        "fn main():\n out: List[int] = []\n out.push(1)\n out.push(2)\n s: Set[str] = Set()\n s.insert(\"a\")\n s.insert(\"b\")\n m: Map[str, int] = {}\n m[\"k\"] = 1\n m[\"j\"] = 2\nmain()",
     );
 }
 

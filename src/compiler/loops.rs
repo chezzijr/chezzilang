@@ -380,7 +380,7 @@ impl Compiler {
         };
         let innermost_stmt = match kind {
             CompKind::List => method_call_stmt(acc, "push", vec![elem.clone()], span),
-            CompKind::Set => method_call_stmt(acc, "add", vec![elem.clone()], span),
+            CompKind::Set => method_call_stmt(acc, "insert", vec![elem.clone()], span),
             CompKind::Map => {
                 let key = key.expect("a map comprehension carries a key").clone();
                 Stmt {

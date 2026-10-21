@@ -725,7 +725,7 @@ pub struct Heap {
     /// `Sync` (TICKET-246); it is touched only under a live cap.
     ///
     /// This is the door for byte growth that allocates NOTHING: `xs.push(i)` /
-    /// `m[k] = v` / `s.add(x)` / `ba.push(b)` / `big.extend(chunk)` all append into the `Vec` behind
+    /// `m[k] = v` / `s.insert(x)` / `ba.push(b)` / `big.extend(chunk)` all append into the `Vec` behind
     /// an EXISTING `Obj`, so neither the object count nor the wire counter moves and `sweep()` never
     /// runs — `over_cap` is assigned nowhere else, so the cap failed OPEN. Measured on the release
     /// binary against `--max-heap=8000000`: an 80 M-element `List[int]` grown by `push` PASSED at

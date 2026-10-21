@@ -52,7 +52,7 @@ print(zs)
 
 zs.insert(1, 15)
 print(zs)
-removed := zs.remove_at(0)
+removed := zs.remove(0)
 print("removed {removed}")
 print(zs)
 

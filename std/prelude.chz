@@ -87,7 +87,9 @@ native struct List[T]:
     native fn last(self) -> Option[T]
     native fn reversed(self) -> List[T]
     native fn insert(self, i: int, x: T) -> None
-    native fn remove_at(self, i: int) -> T
+    # TICKET-278 — remove the element at index `i` and return it (Rust `Vec::remove`); `i` follows the
+    # `xs[i]` negative-index rule and a bad index faults like `xs[i]` does.
+    native fn remove(self, i: int) -> T
     native fn unique(self) -> List[T]
     native fn dedup(self) -> List[T]
     native fn chunk(self, n: int) -> List[List[T]]
@@ -108,6 +110,8 @@ native struct Map[K: Hashable, V]:
     native fn keys(self) -> List[K]
     native fn values(self) -> List[V]
     native fn remove(self, k: K) -> Option[V]
+    # TICKET-278 — store `v` under `k` and return the value it replaced (Rust `HashMap::insert`).
+    native fn insert(self, k: K, v: V) -> Option[V]
     native fn merge(self, other: Map[K, V]) -> Map[K, V]
     native fn update(self, other: Map[K, V]) -> None
     # TICKET-160 — insertion order, identical to keys(); Map(m.items()) == m.
@@ -117,7 +121,8 @@ native struct Map[K: Hashable, V]:
 native struct Set[T: Hashable]:
     native fn len(self) -> int
     native fn contains(self, v: T) -> bool
-    native fn add(self, v: T) -> None
+    # TICKET-278 — `true` when `v` was new (Rust `HashSet::insert`).
+    native fn insert(self, v: T) -> bool
     native fn remove(self, v: T) -> bool
     native fn union(self, other: Set[T]) -> Set[T]
     native fn intersection(self, other: Set[T]) -> Set[T]

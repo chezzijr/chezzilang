@@ -307,7 +307,7 @@ impl Checker {
             // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set`/`Channel`
             // native-struct METHOD tables so `seed_stdlib_structs` can re-seed them (bare, method-table
             // only) into `self.structs` for every subsequent module, letting `xs.push(...)`/`m.get(...)`/
-            // `s.add(...)`/`ch.send(...)` resolve via the normal method path (the retired bespoke
+            // `s.insert(...)`/`ch.send(...)` resolve via the normal method path (the retired bespoke
             // `list_method_sig`/`map_method_sig`/`set_method_sig`/`channel_method_sig` arms' replacement).
             // Harvested here (NOT from `sig.struct_defs` — the prelude
             // is a normal AST module whose `check_module` no-ops native structs) by resolving the decls

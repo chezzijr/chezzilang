@@ -120,7 +120,7 @@ impl Checker {
         }
         // Phase 5a-containers — re-seed the always-linked prelude's `List`/`Map`/`Set` METHOD tables
         // (harvested from `std/prelude.chz`) under their bare names so `xs.push(...)`/`m.get(...)`/
-        // `s.add(...)` resolve via the normal method path (the `Ty::List`/`Ty::Map`/`Ty::Set` method arms
+        // `s.insert(...)` resolve via the normal method path (the `Ty::List`/`Ty::Map`/`Ty::Set` method arms
         // look the table up here, substituting the value's element/key/value type for the sig's
         // `Ty::Param`). Like `Socket`/`Shared` above — and UNLIKE `Ref` — NO `struct_names`/`bare_types`
         // licensing is added: the three resolve to the RESERVED `Ty::List`/`Ty::Map`/`Ty::Set` via

@@ -9,7 +9,7 @@ print(nums.contains(4))                # true
 print(nums.contains(7))                # false
 
 # Mutation: add is idempotent, remove reports whether it was present.
-nums.add(7)
+nums.insert(7)
 print(nums.contains(7))                # true
 print(nums.remove(7))             # true
 print(nums.remove(7))             # false
@@ -36,6 +36,6 @@ print(order.trim())               # red green blue
 fn count_unique(text: str) -> int:
     seen: Set[str] = Set()
     for w in text.split(" "):
-        seen.add(w)
+        seen.insert(w)
     return seen.len()
 print(count_unique("the cat the dog the bird"))   # 4

@@ -876,9 +876,9 @@ impl Vm {
                         items.insert(idx, x);
                         Ok(Value::nil())
                     }
-                    ListMethod::RemoveAt => {
-                        // Returns the removed element; Python-relative negatives; true OOB faults.
-                        self.arity_err("remove_at", args, 1, span)?;
+                    ListMethod::Remove => {
+                        // Returns the removed element; the `xs[i]` negative-index rule; true OOB faults.
+                        self.arity_err("remove", args, 1, span)?;
                         let Some(i) = self.int_val(args[0]) else {
                             unreachable!()
                         };
@@ -1090,6 +1090,15 @@ impl Vm {
                             None => Ok(self.alloc_enum("Option", "None", vec![])),
                         }
                     }
+                    MapMethod::Insert => {
+                        self.arity_err("insert", args, 2, span)?;
+                        let (key, val) = (args[0], args[1]);
+                        let hk = self.hash_key_rooted(key, &[Value::obj(h), key, val], span)?;
+                        match self.map_upsert_in_heap(h, hk, key, val, span)? {
+                            Some(old) => Ok(self.alloc_enum("Option", "Some", vec![old])),
+                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                        }
+                    }
                     MapMethod::Merge | MapMethod::Update => {
                         self.arity_err(method, args, 1, span)?;
                         // Snapshot the incoming entries (with their cached hashes — engine-wide
@@ -1152,7 +1161,7 @@ impl Vm {
                             // now probes with a possibly re-entrant user `eq`.
                             self.with_roots(&[Value::obj(h), args[0]], |vm| {
                                 for (hk, key, val) in incoming {
-                                    vm.map_upsert_in_heap(h, hk, key, val, span)?;
+                                    let _replaced = vm.map_upsert_in_heap(h, hk, key, val, span)?;
                                 }
                                 Ok(())
                             })?;
@@ -1176,8 +1185,8 @@ impl Vm {
                         let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
                         Ok(Value::bool(self.set_probe(h, hx, x, span)?.is_some()))
                     }
-                    SetMethod::Add => {
-                        self.arity_err("add", args, 1, span)?;
+                    SetMethod::Insert => {
+                        self.arity_err("insert", args, 1, span)?;
                         let x = args[0];
                         let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
                         let present = self.set_probe(h, hx, x, span)?.is_some();
@@ -1191,7 +1200,7 @@ impl Vm {
                             };
                             s.push(hx, x);
                         }
-                        Ok(Value::nil())
+                        Ok(Value::bool(!present))
                     }
                     SetMethod::Remove => {
                         self.arity_err("remove", args, 1, span)?;

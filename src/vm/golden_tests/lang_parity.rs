@@ -404,7 +404,7 @@ fn set_dedup_and_algebra_parity() {
 #[test]
 fn set_mutation_and_iteration_parity() {
     assert_golden_out(
-        "s := Set()\ns.add(10)\ns.add(10)\ns.add(20)\nprint(s.len())\nprint(s.remove(10))\nprint(s.remove(10))\ntotal := 0\nfor x in {5, 15, 25}:\n    total += x\nprint(total)\n",
+        "s := Set()\ns.insert(10)\ns.insert(10)\ns.insert(20)\nprint(s.len())\nprint(s.remove(10))\nprint(s.remove(10))\ntotal := 0\nfor x in {5, 15, 25}:\n    total += x\nprint(total)\n",
         "2\ntrue\nfalse\n45\n",
     );
 }

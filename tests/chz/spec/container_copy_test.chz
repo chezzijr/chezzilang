@@ -19,7 +19,7 @@ test fn list_copy_is_independent_at_the_top_level():
 test fn set_copy_is_independent_at_the_top_level():
     s := {1, 2}
     t := s.copy()
-    t.add(3)
+    t.insert(3)
     assert s == {1, 2}
     assert t == {1, 2, 3}
 

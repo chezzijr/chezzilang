@@ -45,7 +45,7 @@ fn fresh() -> State:
 fn step(s: State) -> State:
     s.a += 1
     s.log.push(s.a)
-    s.seen.add(s.a)
+    s.seen.insert(s.a)
     s.by_name["k" + str(s.a % 8)] = Inner("k", b"ab", (s.a, "v"))
     if s.a % 2 == 0:
         s.tag = Tag.Even(s.a)

@@ -196,12 +196,12 @@ test fn every_mutating_native_faults_on_a_task_copy():
             if not faults(fn(): xs.sort_by_key(fn(a): a)): ok = false
             if not faults(fn(): xs.extend([4])): ok = false
             if not faults(fn(): xs.insert(0, 9)): ok = false
-            if not faults(fn(): xs.remove_at(0)): ok = false
+            if not faults(fn(): xs.remove(0)): ok = false
             if not faults(fn(): idx_set(xs)): ok = false
             if not faults(fn(): map_idx_set(m)): ok = false
             if not faults(fn(): m.remove("a")): ok = false
             if not faults(fn(): m.update({"c": 3})): ok = false
-            if not faults(fn(): s.add(3)): ok = false
+            if not faults(fn(): s.insert(3)): ok = false
             if not faults(fn(): s.remove(1)): ok = false
             if not faults(fn(): bytes_idx_set(b)): ok = false
             if not faults(fn(): b.push(1)): ok = false

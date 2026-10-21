@@ -68,7 +68,7 @@ test fn ci_set_probes_dispatch_eq():
     s: Set[CI] = {CI("ab")}
     assert s.contains(CI("AB")) == true
     assert (CI("Ab") in s) == true
-    s.add(CI("aB"))
+    s.insert(CI("aB"))
     assert s.len() == 1, "an EQUAL element is not a new one"
     assert s.remove(CI("AB")) == true
     assert s.len() == 0
@@ -203,7 +203,7 @@ test fn an_allocating_eq_survives_the_probe():
     assert m[Alloc(3)] == 199 - ((199 - 3) % 7)
     s := Set[Alloc]([])
     for i in 0..200:
-        s.add(Alloc(i % 7))
+        s.insert(Alloc(i % 7))
     assert s.len() == 7
     assert (Alloc(5) in s) == true
 
@@ -233,7 +233,7 @@ struct Mut:
         r := self.n == other.n
         # fire on the TRUE compare only — the position the caller is about to use
         if r and mut_armed.len() > 0:
-            mut_armed.remove_at(0)
+            mut_armed.remove(0)
             _ := mut_map.remove(Mut(0))
             mut_set.remove(Mut(0))
         return r
@@ -242,10 +242,10 @@ fn mut_reset(n: int):
     mut_map = {}
     mut_set = Set([])
     while mut_armed.len() > 0:
-        mut_armed.remove_at(0)
+        mut_armed.remove(0)
     for i in 0..n:
         mut_map[Mut(i)] = i * 11
-        mut_set.add(Mut(i))
+        mut_set.insert(Mut(i))
     mut_armed.push(1)
 
 test fn a_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
@@ -328,7 +328,7 @@ test fn a_satisfied_conditional_eq_dispatches_from_set_and_map_on_a_collision():
     assert s.len() == 2, "eq is what deduped the colliding elements"
     assert s.contains(cond(2)) == true
     assert (cond(3) in s) == false
-    s.add(cond(3))
+    s.insert(cond(3))
     assert s.len() == 3
     m := {cond(1): "a", cond(2): "b"}
     assert m.len() == 2

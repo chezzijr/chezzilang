@@ -55,7 +55,7 @@ fn main():
 
     # --- Set: len / has / add / remove / union / intersection / difference ---
     s := {1, 2, 3}
-    s.add(4)
+    s.insert(4)
     print(s.len())                   # 4
     print(s.contains(2))                  # true
     print(s.contains(9))                  # false

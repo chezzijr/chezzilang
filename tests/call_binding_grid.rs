@@ -546,7 +546,7 @@ fn stmt_fill_cells() -> Vec<Cell> {
 
 /// A native, builtin or `extern` callee takes no named arguments, as CPython's `chr` does not.
 fn native_cells() -> Vec<Cell> {
-    let counter = "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\n";
+    let counter = "struct Counter:\n    n: int\n    fn insert(self, amount: int = 1) -> int:\n        return self.n + amount\n";
     let sock = |call: &str| {
         format!(
             "import std.net\nfn f(sk: net.Socket) -> str:\n    r := {call}\n    return \"{{r}}\"\nprint(\"ok\")\n"
@@ -561,18 +561,18 @@ fn native_cells() -> Vec<Cell> {
     vec![
         cell(
             "builtin_receiver/pos",
-            "s := Set([1, 2])\ns.add(3)\nprint(s.len())\n",
+            "s := Set([1, 2])\ns.insert(3)\nprint(s.len())\n",
             prints("3"),
         ),
         cell(
             "builtin_receiver/kw",
-            "s := Set([1, 2])\ns.add(x=3)\nprint(s.len())\n",
-            Expect::Rejects("'add' takes no named arguments"),
+            "s := Set([1, 2])\ns.insert(x=3)\nprint(s.len())\n",
+            Expect::Rejects("'insert' takes no named arguments"),
         ),
         cell(
             "builtin_receiver_user_twin/kw",
-            &format!("{counter}s := Set([1, 2])\ns.add(x=3)\nprint(s.len())\n"),
-            Expect::Rejects("'add' takes no named arguments"),
+            &format!("{counter}s := Set([1, 2])\ns.insert(x=3)\nprint(s.len())\n"),
+            Expect::Rejects("'insert' takes no named arguments"),
         ),
         cell("native_method/pos", &sock("sk.read(10, 5)"), prints("ok")),
         cell(

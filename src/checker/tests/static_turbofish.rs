@@ -1557,6 +1557,13 @@ fn container_method_sigs_byte_match() {
     chk("Map", "len", &kv(), vec![], Ty::Int);
     chk("Map", "contains", &kv(), vec![Ty::Int], Ty::Bool);
     chk("Map", "get", &kv(), vec![Ty::Int], Ty::option(Ty::Str));
+    chk(
+        "Map",
+        "insert",
+        &kv(),
+        vec![Ty::Int, Ty::Str],
+        Ty::option(Ty::Str),
+    );
     chk("Map", "keys", &kv(), vec![], Ty::list(Ty::Int));
     chk("Map", "values", &kv(), vec![], Ty::list(Ty::Str));
     chk("Map", "remove", &kv(), vec![Ty::Int], Ty::option(Ty::Str));
@@ -1585,7 +1592,7 @@ fn container_method_sigs_byte_match() {
     // Set[Int] — the flat methods.
     chk("Set", "len", &int(), vec![], Ty::Int);
     chk("Set", "contains", &int(), vec![Ty::Int], Ty::Bool);
-    chk("Set", "add", &int(), vec![Ty::Int], Ty::Nil);
+    chk("Set", "insert", &int(), vec![Ty::Int], Ty::Bool);
     chk("Set", "remove", &int(), vec![Ty::Int], Ty::Bool);
     chk(
         "Set",
@@ -1751,7 +1758,7 @@ fn receiver_write_table_matches_observed_behavior() {
                 "last()",
                 "reversed()",
                 "insert(0, 9)",
-                "remove_at(0)",
+                "remove(0)",
                 "unique()",
                 "dedup()",
                 "chunk(2)",
@@ -1770,6 +1777,7 @@ fn receiver_write_table_matches_observed_behavior() {
                 "len()",
                 r#"contains("a")"#,
                 r#"get("a")"#,
+                r#"insert("d", 4)"#,
                 "keys()",
                 "values()",
                 r#"remove("a")"#,
@@ -1785,7 +1793,7 @@ fn receiver_write_table_matches_observed_behavior() {
             &[
                 "len()",
                 "contains(1)",
-                "add(3)",
+                "insert(3)",
                 "remove(1)",
                 "union({9})",
                 "intersection({1})",

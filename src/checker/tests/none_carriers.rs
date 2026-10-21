@@ -867,7 +867,7 @@ fn carrier_wrap_check_grid() {
         (&["z := None", "z = ?5"][..], hole),
         (&["xs := []", "xs.push(?5)"], hole),
         (&["m := {}", "m[\"a\"] = ?5"], hole),
-        (&["s := Set()", "s.add(5)"], hole),
+        (&["s := Set()", "s.insert(5)"], hole),
         (&["z: int? = None", "z = ?5", "z = ?\"ab\""], slot),
         (&["z: int?? = None", "z = ?(?5)", "z = ?(?\"a\")"], slot),
         (

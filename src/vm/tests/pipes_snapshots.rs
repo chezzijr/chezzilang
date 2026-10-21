@@ -857,7 +857,7 @@ fn an_in_place_mutation_between_spawns_refreshes_the_view_once() {
         "q.pop()",
         "qq[0].push(2)",
         "mp[\"b\"] = 2",
-        "st.add(2)",
+        "st.insert(2)",
         "p.x = 2",
         "p.ys.push(2)",
         "ps[0].x = 2",

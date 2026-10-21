@@ -169,7 +169,7 @@ impl Vm {
                 self.rwshared_mutate(&core, args, span, |vm, st, a| {
                     want_elem(vm, vm.elem_kind(st), "map")?;
                     let mh = st.as_obj().expect("a map is a heap object");
-                    vm.map_upsert_in_heap(mh, qh, a[0], a[1], span)?;
+                    let _replaced = vm.map_upsert_in_heap(mh, qh, a[0], a[1], span)?;
                     Ok(None)
                 })?;
                 Ok(Value::nil())

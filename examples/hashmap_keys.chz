@@ -46,9 +46,9 @@ fn main():
 
     # --- set of structs: dedup via custom hash + eq ---
     pts: Set[Point] = Set()
-    pts.add(Point(2, 2))
-    pts.add(Point(2, 2))                  # duplicate — deduped
-    pts.add(Point(3, 3))
+    pts.insert(Point(2, 2))
+    pts.insert(Point(2, 2))                  # duplicate — deduped
+    pts.insert(Point(3, 3))
     print("pts.len: {pts.len()}")
 
     a: Set[Point] = Set([Point(1, 1), Point(2, 2)])

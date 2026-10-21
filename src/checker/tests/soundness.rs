@@ -1508,7 +1508,7 @@ fn atomic_add_mismatch_no_collection_hint() {
     );
     // Set.add's collection hint STILL fires (a Set first-use-pinned to int, mismatched later add).
     rejects(
-        "fn main():\n    s := Set()\n    s.add(1)\n    s.add(\"x\")\nmain()\n",
+        "fn main():\n    s := Set()\n    s.insert(1)\n    s.insert(\"x\")\nmain()\n",
         "cannot infer the",
     );
 }

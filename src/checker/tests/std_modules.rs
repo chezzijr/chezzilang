@@ -364,11 +364,12 @@ fn every_native_container_method_is_classified_by_its_return_type() {
         "Map.contains",
         "Map.len",
         "Map.update",
-        "Set.add",
         "Set.contains",
+        "Set.insert",
         "Set.len",
         "Set.remove",
         "bytearray.decode",
+        "bytearray.extend",
         "bytearray.len",
         "bytearray.pop",
         "bytearray.push",
@@ -1766,13 +1767,13 @@ fn set_literal_infers_set_of_elem() {
 #[test]
 fn set_methods_typecheck() {
     ok(
-        "s := {1, 2}\nb: bool = s.contains(1)\ns.add(3)\nr: bool = s.remove(1)\nu: Set[int] = s.union({4})\nprint(u.len())\n",
+        "s := {1, 2}\nb: bool = s.contains(1)\ns.insert(3)\nr: bool = s.remove(1)\nu: Set[int] = s.union({4})\nprint(u.len())\n",
     );
 }
 
 #[test]
 fn set_builtin_empty_and_from_list() {
-    ok("e: Set[str] = Set()\ne.add(\"x\")\nf: Set[int] = Set([1, 1, 2])\nprint(f.len())\n");
+    ok("e: Set[str] = Set()\ne.insert(\"x\")\nf: Set[int] = Set([1, 1, 2])\nprint(f.len())\n");
 }
 
 #[test]

@@ -37,7 +37,7 @@ fn golden_list_hof_shrink_chz_matches_expected_and_interp() {
 }
 
 /// `examples/list_methods.chz` — pop/reverse/contains/index_of/sum + value/iter ergonomics
-/// (min/max/first/last/reversed/insert/remove_at, unique/dedup/chunk/windows/take_while/drop_while/count/position).
+/// (min/max/first/last/reversed/insert/remove, unique/dedup/chunk/windows/take_while/drop_while/count/position).
 #[test]
 fn golden_list_methods_chz_matches_expected_and_interp() {
     let src = include_str!("../../../examples/list_methods.chz");

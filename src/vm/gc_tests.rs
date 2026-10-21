@@ -219,8 +219,8 @@ struct K:
 fn main():
     a := Set([K(1), K(2), K(2), K(3)])
     print(a.len())
-    a.add(K(3))
-    a.add(K(4))
+    a.insert(K(3))
+    a.insert(K(4))
     print(a.len())
     b := Set([K(3), K(4), K(5)])
     print(a.union(b).len())
@@ -261,8 +261,8 @@ fn make_map() -> Map[K, str]:
 fn main():
     a := make_set()
     print(a.len())
-    a.add(K(3))
-    a.add(K(4))
+    a.insert(K(3))
+    a.insert(K(4))
     print(a.len())
     b := Set([K(3), K(4), K(5)])
     print(a.union(b).len(), a.intersection(b).len(), a.difference(b).len())
@@ -347,21 +347,21 @@ struct K:
         # reference to the elements the caller already snapshotted is that Rust-local snapshot —
         # then allocate, so the stress collector actually runs while the walk still holds them.
         if armed.len() > 0:
-            armed.remove_at(0)
+            armed.remove(0)
             while xs.len() > 0:
-                xs.remove_at(0)
+                xs.remove(0)
             while ys.len() > 0:
-                ys.remove_at(0)
+                ys.remove(0)
             junk := [str(self.n), str(other.n)]
         return self.n == other.n
 
 fn reset():
     while armed.len() > 0:
-        armed.remove_at(0)
+        armed.remove(0)
     while xs.len() > 0:
-        xs.remove_at(0)
+        xs.remove(0)
     while ys.len() > 0:
-        ys.remove_at(0)
+        ys.remove(0)
     xs.push(K(1))
     xs.push(K(2))
     ys.push(K(1))
@@ -423,7 +423,7 @@ struct K:
         return self.n
     fn eq(self, other: K) -> bool:
         if armed.len() > 0:
-            armed.remove_at(0)
+            armed.remove(0)
             sa.remove(K(1))
             sa.remove(K(2))
             sb.remove(K(1))
@@ -437,11 +437,11 @@ struct K:
 
 fn reset():
     while armed.len() > 0:
-        armed.remove_at(0)
-    sa.add(K(1))
-    sa.add(K(2))
-    sb.add(K(1))
-    sb.add(K(2))
+        armed.remove(0)
+    sa.insert(K(1))
+    sa.insert(K(2))
+    sb.insert(K(1))
+    sb.insert(K(2))
     # LIST values, not str: a rebuilt list can never alias an interned program constant.
     ma[K(1)] = [str(1)]
     ma[K(2)] = [str(2)]
@@ -739,7 +739,7 @@ fn main():
     mi := Map([(K(4), str(4)), (K(5), str(5))])  # Map(iterable)
     si := Set([K(6), K(7), K(6)])                # Set(iterable)
     c := K(8)
-    s.add(c)
+    s.insert(c)
     c.n = 92
     ks := \"\"
     for k in m.keys():
@@ -981,7 +981,7 @@ struct P:
     tag: str
     k: int
     fn compare(self, other: P) -> int:
-        pts.remove_at(0)
+        pts.remove(0)
         return self.k - other.k
     fn eq(self, other: P) -> bool:
         return self.k == other.k
@@ -999,7 +999,7 @@ struct Q:
     k: int
 qs: List[Q] = [Q(str(3), 3), Q(str(1), 1), Q(str(2), 2)]
 fn key(q: Q) -> int:
-    qs.remove_at(0)
+    qs.remove(0)
     return q.k
 fn main():
     match qs.min_by(key):

@@ -118,7 +118,7 @@ fn put(d: Map[str, int], k: str, v: int) -> Map[str, int]:
     return d
 
 fn add_to(s: Set[int], v: int) -> Set[int]:
-    s.add(v)
+    s.insert(v)
     return s
 
 fn set_n(a: Acc, n: int) -> Acc:

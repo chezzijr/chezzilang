@@ -936,7 +936,7 @@ fn conditional_failures() -> Vec<String> {
     let z = "import Comparable from std.cmp\nstruct Z[T]:\n    fn hash(self) -> int where T: Comparable:\n        print(\"hash ran\")\n        return 7\n    fn eq(self, other: Self) -> bool:\n        return true\n";
     let (clean, text) = check(
         "where_zero_field_unsat",
-        &format!("{z}struct N:\n    w: int\ns: Set[Z[N]] = Set()\ns.add(Z[N]())\n"),
+        &format!("{z}struct N:\n    w: int\ns: Set[Z[N]] = Set()\ns.insert(Z[N]())\n"),
     );
     if clean || !text.contains("N: Comparable") {
         bad.push(format!(
@@ -945,7 +945,7 @@ fn conditional_failures() -> Vec<String> {
     }
     let got = run(
         "where_zero_field_sat",
-        &format!("{z}s: Set[Z[int]] = Set()\ns.add(Z[int]())\nprint(s.len())\n"),
+        &format!("{z}s: Set[Z[int]] = Set()\ns.insert(Z[int]())\nprint(s.len())\n"),
         &mut bad,
     );
     if got.stdout != "hash ran\n1\nEND\n" {
@@ -1072,7 +1072,7 @@ fn declaration_verdict_named_failures() -> Vec<String> {
     for (name, src, want) in [
         (
             "G",
-            "struct Key[T]:\n    v: T\n    fn hash(self) -> T:\n        return self.v\ns: Set[Key[int]] = Set()\ns.add(Key(1))\nprint(s.len())\n",
+            "struct Key[T]:\n    v: T\n    fn hash(self) -> T:\n        return self.v\ns: Set[Key[int]] = Set()\ns.insert(Key(1))\nprint(s.len())\n",
             "Set element type must implement Hashable",
         ),
         (

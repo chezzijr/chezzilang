@@ -886,7 +886,7 @@ b := Box(Tag(2))
     // Each of these was measured check-clean-then-faulting on the pre-change binary.
     for tail in [
         "print(Set([a]).len())\n",                        // Set literal-ish ctor
-        "s := Set([a])\ns.add(b)\nprint(s.len())\n",      // .add
+        "s := Set([a])\ns.insert(b)\nprint(s.len())\n",   // .insert
         "s := Set([a])\nprint(s.contains(b))\n",          // .has
         "s := Set([a])\nprint(b in s)\n",                 // `in` over a set
         "print({a: 1}.len())\n",                          // map literal
@@ -939,7 +939,7 @@ b := Box(Tag(2))
     );
     // The SATISFIED instantiation of the very same conditional-`eq` struct, everywhere.
     entry_ok(&format!(
-        "{COND}s := Set([Box(1)])\ns.add(Box(2))\nprint(s.contains(Box(1)))\nm := {{Box(1): 1}}\nm[Box(2)] = 2\nprint(m[Box(1)])\nprint(Box(1) in m)\n"
+        "{COND}s := Set([Box(1)])\ns.insert(Box(2))\nprint(s.contains(Box(1)))\nm := {{Box(1): 1}}\nm[Box(2)] = 2\nprint(m[Box(1)])\nprint(Box(1) in m)\n"
     ));
     entry_ok(&format!(
         "{COND}s: Set[Box[int]] = Set([])\nm: Map[Box[int], int] = {{}}\nprint(s.len() + m.len())\n"
@@ -951,7 +951,7 @@ b := Box(Tag(2))
     // measured: the `Holder`-shaped ordinary-`eq`-method escape hatch still checks and runs), so
     // `[T: Hashable]` alone licenses the body, and `[T: Hashable + Eq]` still checks.
     entry_ok(
-        "import Eq, Hashable from std.cmp\nfn h[T: Hashable + Eq](xs: Set[T]) -> int:\n    return xs.len()\nfn k[T: Hashable + Eq](m: Map[T, int]) -> int:\n    return m.len()\nfn s2[T: Hashable + Eq](x: T) -> int:\n    s := Set([x])\n    s.add(x)\n    m := {x: 1}\n    return s.len() + m.len()\nprint(h(Set([1])) + k({1: 2}) + s2(1))\n",
+        "import Eq, Hashable from std.cmp\nfn h[T: Hashable + Eq](xs: Set[T]) -> int:\n    return xs.len()\nfn k[T: Hashable + Eq](m: Map[T, int]) -> int:\n    return m.len()\nfn s2[T: Hashable + Eq](x: T) -> int:\n    s := Set([x])\n    s.insert(x)\n    m := {x: 1}\n    return s.len() + m.len()\nprint(h(Set([1])) + k({1: 2}) + s2(1))\n",
     );
     rejects(
         "fn h[T](xs: Set[T]) -> int:\n    return xs.len()\n",

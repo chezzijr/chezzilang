@@ -392,7 +392,7 @@ test fn every_in_place_mutation_door_refreshes_the_next_tasks_view():
         spawn: seen.send(view213())
         g_map["b"] = 2
         spawn: seen.send(view213())
-        g_set.add(2)
+        g_set.insert(2)
         spawn: seen.send(view213())
         g_box.n = 2
         spawn: seen.send(view213())

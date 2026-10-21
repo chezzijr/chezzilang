@@ -2147,11 +2147,11 @@ mod tests {
     }
 
     #[test]
-    fn real_builtin_set_add_untouched() {
-        // A genuine builtin-type receiver: `s.add(3)` on a Set must NOT be rewritten, even though a
-        // struct also defines `add` with a default. Desugar binds no calls (`Checker::bind_call` does).
+    fn real_builtin_set_insert_untouched() {
+        // A genuine builtin-type receiver: `s.insert(3)` on a Set must NOT be rewritten, even though a
+        // struct also defines `insert` with a default. Desugar binds no calls (`Checker::bind_call` does).
         let s = desugar_ok(
-            "struct Counter:\n    n: int\n    fn add(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.add(3)\n",
+            "struct Counter:\n    n: int\n    fn insert(self, amount: int = 1) -> int:\n        return self.n + amount\ns := Set([1, 2])\ns.insert(3)\n",
         );
         assert_eq!(method_call_arg_ints(&s), vec![3]);
     }

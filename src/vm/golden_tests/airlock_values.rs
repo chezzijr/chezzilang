@@ -1196,7 +1196,7 @@ fn main():
     # set.add
     c := K(3)
     sa := {K(0)}
-    sa.add(c)
+    sa.insert(c)
     c.x = 9
     print(sa.difference({K(3)}).len())
     # Map(iterable)

@@ -1495,7 +1495,7 @@ fn struct_with_hash_is_valid_map_key() {
 #[test]
 fn set_of_hashable_struct_ok() {
     ok(&format!(
-        "{POINT_H}s: Set[Point] = Set()\ns.add(Point(1, 2))\n"
+        "{POINT_H}s: Set[Point] = Set()\ns.insert(Point(1, 2))\n"
     ));
 }
 

@@ -936,7 +936,7 @@ impl Checker {
         // Phase 5a-containers — the single-module `check` path never builds a graph, so the graph-capture
         // of the prelude's `List`/`Map`/`Set`/`Channel`/`str`/`bytes`/`bytearray` method tables (into
         // `container_seeds`, re-seeded by `seed_stdlib_structs`) never runs here. Harvest them straight
-        // into `self.structs` (the same consumption site) so `xs.push(...)`/`m.get(...)`/`s.add(...)`/
+        // into `self.structs` (the same consumption site) so `xs.push(...)`/`m.get(...)`/`s.insert(...)`/
         // `ch.send(...)`/`s.upper(...)`/`b.decode(...)` resolve on the graph-less path exactly as on the
         // graph path — the precise mirror of how this helper backfills the native-fn sigs for the
         // graph-less path. `begin_module` (which would re-clear+re-seed) is never called on this path, so

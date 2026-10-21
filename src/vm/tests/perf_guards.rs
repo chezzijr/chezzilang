@@ -6,10 +6,10 @@ use super::*;
 
 // ---- gaps.md §2 wave-1: List value/ergonomics methods ----
 
-/// `remove_at` on a true out-of-range index faults byte-identically.
+/// `remove` on a true out-of-range index faults byte-identically.
 #[test]
-fn remove_at_oob_faults_both_engines() {
-    let src = "xs := [1, 2, 3]\nprint(\"before\")\nxs.remove_at(9)\n";
+fn remove_oob_faults_both_engines() {
+    let src = "xs := [1, 2, 3]\nprint(\"before\")\nxs.remove(9)\n";
     assert_fault_parity(src, "before\n");
     assert_eq!(run_err(src), "index 9 out of bounds (len 3)");
 }
@@ -48,12 +48,12 @@ fn min_max_by_empty_is_none() {
 fn min_max_shrinking_comparator_no_panic() {
     // `compare` shrinks the module-global list it is invoked on (the receiver) each comparison; the
     // snapshot scan still visits all three original elements → min by x = 1,.
-    let min_src = "struct Point:\n    x: int\n    fn compare(self, other: Point) -> int:\n        pts.remove_at(0)\n        return self.x - other.x\n    fn eq(self, other: Point) -> bool:\n        return self.x == other.x\n\
+    let min_src = "struct Point:\n    x: int\n    fn compare(self, other: Point) -> int:\n        pts.remove(0)\n        return self.x - other.x\n    fn eq(self, other: Point) -> bool:\n        return self.x == other.x\n\
                pts: List[Point] = [Point(3), Point(1), Point(2)]\n\
                match pts.min():\n    ?p: print(p.x)\n    None: print(\"none\")\n";
     assert_mc_parity(min_src, "1\n");
     // Same for `max` (same `list_reduce_extreme` scan, is_max flipped) → max by x = 3.
-    let max_src = "struct Q:\n    x: int\n    fn compare(self, other: Q) -> int:\n        qs.remove_at(0)\n        return self.x - other.x\n    fn eq(self, other: Q) -> bool:\n        return self.x == other.x\n\
+    let max_src = "struct Q:\n    x: int\n    fn compare(self, other: Q) -> int:\n        qs.remove(0)\n        return self.x - other.x\n    fn eq(self, other: Q) -> bool:\n        return self.x == other.x\n\
                qs: List[Q] = [Q(3), Q(1), Q(2)]\n\
                match qs.max():\n    ?q: print(q.x)\n    None: print(\"none\")\n";
     assert_mc_parity(max_src, "3\n");

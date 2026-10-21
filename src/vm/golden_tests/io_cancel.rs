@@ -938,7 +938,7 @@ fn serial_module_global_direct_mutation_forms_isolate_parity() {
     // set .add
     assert_eq!(
         golden_entry(
-            "st := {1, 2}\nfn main():\n    parallel:\n        spawn:\n            recover: st.add(9)\n    print(st.len())\nmain()\n"
+            "st := {1, 2}\nfn main():\n    parallel:\n        spawn:\n            recover: st.insert(9)\n    print(st.len())\nmain()\n"
         ),
         "2\n",
     );

@@ -782,8 +782,9 @@ impl Vm {
         }
     }
 
-    /// Insert-or-overwrite `(hk, key, val)` into the heap map at `h` (last write wins). Used by
-    /// `map.update`. On INSERT it snapshots a struct/enum key (Go value-key model) so the
+    /// Insert-or-overwrite `(hk, key, val)` into the heap map at `h` (last write wins) and return the
+    /// value it replaced (`None` on a new key). Used by `map.insert`, `map.update` and the RwShared
+    /// `_set_key` primitive. On INSERT it snapshots a struct/enum key (Go value-key model) so the
     /// target map does NOT alias the source map's stored key object — otherwise mutating one map's
     /// key (e.g. via `keys()`) would silently corrupt the other. `snapshot_key` is pure alloc (no
     /// GC), so `h` stays valid across it.
@@ -794,7 +795,7 @@ impl Vm {
         key: Value,
         val: Value,
         span: Span,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Option<Value>, RuntimeError> {
         // `key`/`val` are in-flight Rust locals here (the source map's entries were cloned out), so
         // root `val` across the probe — `map_probe` roots the target map and the key itself.
         let pos = self.with_roots(&[val], |vm| vm.map_probe(h, hk, key, span))?;
@@ -803,7 +804,7 @@ impl Vm {
                 let Obj::Map(m) = self.heap.get_mut(h) else {
                     unreachable!()
                 };
-                m.entries[i].2 = val;
+                Ok(Some(std::mem::replace(&mut m.entries[i].2, val)))
             }
             None => {
                 let key = self.snapshot_key(key);
@@ -811,9 +812,9 @@ impl Vm {
                     unreachable!()
                 };
                 m.push(hk, key, val);
+                Ok(None)
             }
         }
-        Ok(())
     }
 
     /// An `int` method-argument, with a uniform type error matching the interp.

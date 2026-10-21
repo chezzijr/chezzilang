@@ -24,7 +24,7 @@ fn set_loop(n: int) -> int:
     s: Set[P] = Set([])
     i := 0
     while i < n:
-        s.add(P(i % 1000))
+        s.insert(P(i % 1000))
         i += 1
     return s.len()
 

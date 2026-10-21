@@ -281,8 +281,8 @@ fn every_crossing_closure_method_reports_a_captured_write() {
                 call.replace("{F}", f)
             )
         };
-        let direct = format!("fn({param}): {tail}seen.remove_at(0)");
-        let value = format!("    f := fn({param}) -> {ret}: {tail}seen.remove_at(0)\n");
+        let direct = format!("fn({param}): {tail}seen.remove(0)");
+        let value = format!("    f := fn({param}) -> {ret}: {tail}seen.remove(0)\n");
         let value = if param.is_empty() {
             "    f := fn(): seen.push(1)\n".to_string()
         } else {
@@ -331,7 +331,7 @@ fn every_crossing_closure_method_reports_a_captured_write() {
     );
     // No row: `RwShared.read` runs its closure in the reader's heap, so a captured write is legal.
     entry_ok(
-        "import RwShared from std.concurrency\nfn main():\n    seen: List[int] = []\n    w := RwShared(1)\n    n := w.read(fn(x: int) -> int: x + seen.remove_at(0))\n    print(n, seen)\nmain()\n",
+        "import RwShared from std.concurrency\nfn main():\n    seen: List[int] = []\n    w := RwShared(1)\n    n := w.read(fn(x: int) -> int: x + seen.remove(0))\n    print(n, seen)\nmain()\n",
     );
 }
 

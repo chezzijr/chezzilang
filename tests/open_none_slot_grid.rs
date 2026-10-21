@@ -1284,7 +1284,7 @@ fn f():
     w: int? = 5
     ws: str? = "s"
     s := {None}
-    s.add({V})
+    s.insert({V})
     print(s.len())
 "#,
         [
