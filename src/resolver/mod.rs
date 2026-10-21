@@ -175,13 +175,8 @@ impl ModuleGraph {
     }
 }
 
-/// TICKET-265 — one module's identifier words: `text` holds them back to back, `at` the line and
-/// byte range of each.
-#[derive(Default, Clone)]
-struct Words {
-    text: String,
-    at: Vec<(u32, std::ops::Range<usize>)>,
-}
+/// TICKET-265 — one module's identifier words; see [`crate::lexer::IdentWords`].
+type Words = crate::lexer::IdentWords;
 
 /// TICKET-265 — the top-level fns of each file-backed std module (the entry excepted) that no
 /// reached code names, keyed by file id. `words` holds each module's identifiers with their lines.
@@ -1201,22 +1196,16 @@ impl Builder {
     }
 }
 
-/// Lex and parse one module's source into its AST and identifier words. `is_project_module` says
-/// whether a variant-import name is really a module of the project (see
-/// `ast::classify_variant_imports`). The ONE lex-and-parse of the module graph: the per-graph path
-/// and the shared std parse both run it.
+/// Lex and parse one module's source into its AST and identifier words, as `ResolveError`s. The
+/// graph's seam over [`parser::parse_module_source`], the ONE lex-and-parse of a module.
 fn lex_and_parse(
     source: &str,
     dotted: &[String],
     file: u32,
     is_project_module: &dyn Fn(&str) -> bool,
 ) -> Result<(Module, Words), ResolveError> {
-    // Capture the doc-comment side-channel alongside the tokens, so the AST the checker/hover
-    // sees carries each declaration's doc. The token stream is identical to `tokenize` — docs are
-    // purely informational (LSP hover) and runtime-inert — so every other resolver behavior is
-    // unchanged. This is the single graph seam that threads docs in.
-    let (tokens, comments) =
-        lexer::tokenize_with_comments(source, file).map_err(|e| ResolveError {
+    parser::parse_module_source(source, file, is_project_module).map_err(|e| match e {
+        parser::SourceError::Lex(e) => ResolveError {
             // `e.message`, NOT `e.to_string()`: the position is already carried on the `span`
             // below and re-rendered by the caller, so `LexError`'s own `(line, col)` prefix
             // stutters it — `resolve error (line 1, col 8): … lex error (line 1, col 8): …`.
@@ -1231,26 +1220,19 @@ fn lex_and_parse(
             // Filled in by the caller (`visit`/`visit_native_file`), which has `id` in scope —
             // `lex_and_parse` itself does not.
             path: None,
-        })?;
-    let mut words = Words::default();
-    lexer::ident_words(&tokens, &mut |line, w| {
-        let start = words.text.len();
-        words.text.push_str(w);
-        words.at.push((line, start..words.text.len()));
-    });
-    let mut ast = parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
-        // `e.message`, NOT `e.to_string()`: same reason as the lex arm above — `ParseError`'s own
-        // `Display` carries its own `parse error (line N, col M): ` prefix, and the position is
-        // already on `span` below, re-rendered by the caller. Using `e.to_string()` here stuttered
-        // it: `resolve error (line 1, col 4): parse error (line 1, col 4): expected identifier,
-        // found '('`.
-        message: prefix(dotted, e.message),
-        span: e.span,
-        module: opt_label(dotted),
-        path: None,
-    })?;
-    crate::ast::classify_variant_imports(&mut ast, is_project_module);
-    Ok((ast, words))
+        },
+        parser::SourceError::Parse(e) => ResolveError {
+            // `e.message`, NOT `e.to_string()`: same reason as the lex arm above — `ParseError`'s
+            // own `Display` carries its own `parse error (line N, col M): ` prefix, and the
+            // position is already on `span` below, re-rendered by the caller. Using
+            // `e.to_string()` here stuttered it: `resolve error (line 1, col 4): parse error
+            // (line 1, col 4): expected identifier, found '('`.
+            message: prefix(dotted, e.message),
+            span: e.span,
+            module: opt_label(dotted),
+            path: None,
+        },
+    })
 }
 
 /// TICKET-265 — one embedded std module, lexed and parsed once per process.

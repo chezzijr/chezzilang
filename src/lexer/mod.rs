@@ -2454,5 +2454,13 @@ pub fn strip_num_underscores_radix(s: &str, radix: u32) -> Option<std::borrow::C
     ))
 }
 
+/// TICKET-265 — one module's identifier words: `text` holds them back to back, `at` the line and
+/// byte range of each.
+#[derive(Debug, Default, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
+pub struct IdentWords {
+    pub text: String,
+    pub at: Vec<(u32, std::ops::Range<usize>)>,
+}
+
 #[cfg(test)]
 mod tests;

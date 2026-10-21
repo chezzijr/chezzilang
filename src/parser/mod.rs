@@ -337,6 +337,39 @@ impl Parser {
     // ----- cursor helpers -----
 }
 
+/// Why [`parse_module_source`] stopped.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceError {
+    Lex(crate::lexer::LexError),
+    Parse(ParseError),
+}
+
+/// Lex and parse one module's source into its AST and identifier words. `is_project_module` says
+/// whether a variant-import name is really a module of the project (see
+/// `ast::classify_variant_imports`). The ONE lex-and-parse of a module: the module graph and the
+/// build script that writes the std artifact both run it.
+///
+/// The doc-comment side-channel rides along with the tokens, so the AST the checker and hover see
+/// carries each declaration's doc. The token stream is identical to `tokenize`'s: docs are
+/// informational (LSP hover) and runtime-inert.
+pub fn parse_module_source(
+    source: &str,
+    file: u32,
+    is_project_module: &dyn Fn(&str) -> bool,
+) -> Result<(Module, crate::lexer::IdentWords), SourceError> {
+    let (tokens, comments) =
+        crate::lexer::tokenize_with_comments(source, file).map_err(SourceError::Lex)?;
+    let mut words = crate::lexer::IdentWords::default();
+    crate::lexer::ident_words(&tokens, &mut |line, w| {
+        let start = words.text.len();
+        words.text.push_str(w);
+        words.at.push((line, start..words.text.len()));
+    });
+    let mut ast = parse_with_docs(tokens, comments).map_err(SourceError::Parse)?;
+    crate::ast::classify_variant_imports(&mut ast, is_project_module);
+    Ok((ast, words))
+}
+
 mod control;
 mod cursor;
 mod decl;
