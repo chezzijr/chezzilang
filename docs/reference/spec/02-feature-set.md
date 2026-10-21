@@ -258,7 +258,7 @@ main()                                 # no auto-entry — `main` is a normal fn
 - As the **sole line** of a `protocol` body it makes a zero-method **accept-all top type** (how `Any` is
   defined).
 - As the sole line of a `struct` body it makes a **zero-field struct** whose ctor `Name()` takes no args
-  (it prints as `Name()`, equals another `Name()`, and is intrinsically `Hashable`; it still
+  (it prints as `Name()`, equals another `Name()`, and is no map key unless it defines `hash` and `eq`; it still
   heap-allocates).
 - An **empty enum** is not supported: an enum body with no variant is rejected (`pass`, methods only or `test` blocks only); an enum needs ≥1 variant.
 

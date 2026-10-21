@@ -76,8 +76,9 @@ hooks the same way.
 
 **Near-miss warning.** A method with a receiver and a hook's name that is not the hook warns
 (`'eq' on P is not the Eq hook (…); == will not call it`) where the operator would skip it silently:
-`==` (structural), `print` and interpolation (default display), a zero-field struct as a `Set`
-element or `Map` key (constant hash), and `for` on a type with the other iteration hook. It is silent
+`==` (structural), `print` and interpolation (default display), and `for` on a type with the other
+iteration hook. A near-miss `hash` never warns: a `Set` element or `Map` key without the hook is a
+check error. It is silent
 where the operator rejects the type, and on a static method. The generic-operand `eq` forms
 (`fn eq(self, x: T)`, `fn eq[U](self, o: U)`) warn too.
 
@@ -93,7 +94,7 @@ is bound-only: `(5).str()` on a concrete scalar is a compile error (use `str(5)`
 
 **Every intrinsic grant is callable and equals its operator form.** Inside an erased `[T: P]` body you
 may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/`a.div(b)`/`a.mod(b)`/`a.neg()` on `int`/`float`,
-`a.compare(b)`, `x.hash()` on `int`/`str`/`bytes`/`bool`/a zero-field struct, and
+`a.compare(b)`, `x.hash()` on `int`/`str`/`bytes`/`bool`/a tuple, and
 `c.index(k)`/`c.set_index(k, v)`/`c.slice(r)` on `list`/`map`/`str`/`bytes`/`bytearray`.
 
 - `a.add(b)` ≡ `a + b` (same overflow / divide-by-zero fault); `c.index(k)` ≡ `c[k]` (negative
@@ -166,13 +167,17 @@ depth` (`recover:` catches it). An acyclic nest deeper than 10 000 levels faults
 
 ### Hashing: `Hashable`
 
-The prebuilt **`Hashable`** protocol (`hash(self) -> int`) governs `map` keys and `set` elements.
+The prebuilt **`Hashable`** protocol (`hash(self) -> int`, and it embeds `Eq`) governs `map` keys and
+`set` elements.
 
-- `int`/`str`/`bool`/`bytes` and a zero-field struct satisfy it; a struct satisfies it with
-  `hash(self) -> int`. `float` is rejected (NaN).
+- `int`/`str`/`bool`/`bytes` satisfy it; a struct or enum satisfies it only by defining both
+  `hash(self) -> int` and `eq(self, other: Self) -> bool` (Rust: `Hash + Eq`). No struct or enum is a
+  key on its own, not even an empty struct. `float` is rejected (NaN).
 - A tuple is `Hashable` when every element type is: `{(1, 2): "a"}` and `{("a", true)}` work. A
   rejection names the element (`element List[int] is not Hashable`).
-- A struct key is hashed by `hash()` and confirmed by `==` (its own `eq` if it has one, else structural).
+- `T?` is not a key; declare an enum with `hash` and `eq`. A wrapper type takes none of `T`'s
+  protocols (owner decision 2026-10-21; Rust and Python accept `Option<i32>` / `None` as a key).
+- A struct or enum key is hashed by `hash()` and confirmed by its own `eq`.
 - Contract: two keys that `==` calls equal must hash equal (see the `eq` limits in
   [Protocols](09-protocols.md#equality-eq)).
 - In a `[T: Hashable]` body `x.hash()` is the hash the container uses. The number is unspecified (a
@@ -206,6 +211,8 @@ struct Point:
     y: int
     fn hash(self) -> int:
         return self.x * 31 + self.y
+    fn eq(self, other: Point) -> bool:
+        return self.x == other.x and self.y == other.y
 
 label: Map[Point, str] = {}
 label[Point(1, 2)] = "here"      # struct key — hashed via Point.hash

@@ -126,8 +126,8 @@ for q in Box(Tag(1)):   →  type error: cannot iterate over Box[Tag]
                             (method 'iter' requires Tag: Comparable)
 ```
 
-`Box[Tag]` does not iterate through `next`; a zero-field `struct Z[T]` with a conditional `hash` gets
-no constant hash for `Z[Tag]`; `Box[Tag]` is not a `StructuralEq` payload when `Box` has a conditional
+`Box[Tag]` does not iterate through `next`; a `struct Z[T]` with a conditional `hash` is no key as
+`Z[Tag]`; `Box[Tag]` is not a `StructuralEq` payload when `Box` has a conditional
 `eq`. `for`, comprehensions, `List()` / `Set()` / `Map()`, `x[k]`, `x[k] = v`, `x[a..b]`, `in`, the
 arithmetic operators, unary `-` and a `Set` / `Map` key all report the bound. Exception: `print`
 accepts every value, so a conditional `str` runs for every instantiation.

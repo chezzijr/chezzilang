@@ -185,7 +185,7 @@ result cached (`K: Hashable`; `Hashable` embeds `Eq`, so it is a map key).
 - Two tasks that miss one key at the same moment may both run `f`, as with CPython's `functools.cache`.
 
 **Limit:** single-argument only. A tuple of Hashable args is a valid map key, so you can write an N-arg
-wrapper that keys a `Map[(A, B), V]`; or curry, or pack the args into a struct with `hash` and memoize
+wrapper that keys a `Map[(A, B), V]`; or curry, or pack the args into a struct with `hash` and `eq` and memoize
 the single-arg wrapper.
 
 ### `std.duration` — Go-like first-class time spans

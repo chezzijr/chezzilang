@@ -224,8 +224,8 @@ struct Unit:           # zero fields → `Unit()` takes no args
 
 - An empty protocol is satisfied by every type. This is how `Any` (§5) is defined: `fn f(x: Top)`
   accepts an `int`, a `str`, a struct; `xs: List[Top] = [1, "a", true]` checks.
-- An empty struct: `Unit()` constructs it, prints as `Unit()`, two `Unit()` are equal, and it is
-  `Hashable` (a `Set` element or `Map` key). It still heap-allocates.
+- An empty struct: `Unit()` constructs it, prints as `Unit()`, and two `Unit()` are equal. It is no
+  key on its own: a `Set` element or `Map` key needs `hash` and `eq`. It still heap-allocates.
 - `pass` must be the only line of such a body; mixed with a field/method or repeated it is a parse error.
 - An empty enum is not supported: an enum body with no variant (`pass`, methods only, `test` blocks only) is rejected at the enum name.
 

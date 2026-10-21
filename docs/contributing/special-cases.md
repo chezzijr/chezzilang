@@ -119,7 +119,7 @@ Sibling types that differed with no stated reason:
 | `"a" + "b"`, `"a" < "b"`, `"b" in "abc"` | `b"a" + b"b"`, `b"a" < b"b"`, `98 in b"abc"` | CPython: all work |
 | `[0] * 3` | `"ab" * 3` (`.repeat(3)` exists) | CPython `ababab` |
 | `1 == 1.0`, `[1] == [1.0]` | `1 in [1.0]`, `[1.0].contains(1)`, `[1] < [1.5]` | CPython: all `True` |
-| tuple and zero-field struct as a map key | enum without payload, struct with fields, `int?` | CPython: enum members and `None` are keys; Rust derives `Hash` |
+| tuple of `Hashable` as a map key; a struct or enum with `hash` and `eq` | zero-field struct, enum or struct without both hooks, `int?` | Rust: `Hash + Eq` derive; CPython: enum members and `None` are keys (U15; `T?` owner note 2026-10-21) |
 | `int? < int?` | `int!str < int!str`; `false < true` | Rust orders both |
 | struct has automatic `.copy()` | enum has none | Rust derives `Clone` on both |
 | `iter.islice({1, 2}, 1)`, `[1.5].sum()` | `iter.enumerate({1, 2})`, `iter.sum([1.5])`, `{1, 2}.map(f)`, `xs.extend({2})`, `",".join({"a"})` | CPython works |

@@ -40,7 +40,7 @@ args a payload cannot bind (a nullary variant: `Box[int].Empty`) and drives a ge
 **Enum methods** are `fn name(self, …)` blocks after all variants. `self` is the whole enum value
 (a body usually does `match self`). A generic enum's methods may use its type parameters
 (`fn get(self) -> T`). Methods satisfy structural protocols (`str(self)` for `Stringable`, `hash(self)`
-for `Hashable`, `add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare` for the operator protocols), pass into
+with `eq(self, other: Self)` for `Hashable`, `add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare` for the operator protocols), pass into
 bound generics (`fn twice[T: Add](x: T)`) and overload operators (`a + b`, `a / b`, `-a`, `a < b`), as
 struct methods do. There is no `derive`. A `test fn` is not allowed in an enum body (test suites are
 struct-only).

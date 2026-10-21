@@ -88,9 +88,10 @@ Full sink list: `syntax.md` §3.
 - **Map/set keys.** Any CONCRETE `Hashable` type is a valid map/set key. `Hashable` embeds `Eq`, so a
   generic `[T: Hashable]` may build, index, or mention a `Map[T, _]`/`Set[T]` and compare `T`.
 - **Enum methods.** `fn name(self, …)` blocks after an enum's variants work like struct methods:
-  generic-enum type params are in scope, an enum can define `str`/`hash`/`add`/`compare` to satisfy
-  `Stringable`/`Hashable`/`Add`/`Comparable` (`compare` alone is enough for `Comparable`, because an
-  enum satisfies `Eq` structurally), it can pass into protocol-bound generics, and it can overload
+  generic-enum type params are in scope, an enum can define `str`/`add`/`compare` to satisfy
+  `Stringable`/`Add`/`Comparable`, and `hash` with `eq` to satisfy `Hashable` (`compare` alone is
+  enough for `Comparable`, because an enum satisfies `Eq` structurally; `Hashable` needs the `eq`
+  hook too), it can pass into protocol-bound generics, and it can overload
   `+`/`-`/`*`/`<`.
 - **No `newtype`.** `newtype` is an ordinary identifier; a one-field `struct` with methods is the
   distinct-type idiom:

@@ -41,9 +41,8 @@ fn golden_empty_protocol_chz_matches_expected_and_interp() {
 }
 
 /// Empty-struct golden: `struct S:\n    pass` has zero fields — `S()` constructs, prints `S()`,
-/// two `S()` compare equal, a distinct empty struct `T()` is not equal, and `S` is usable as a Set
-/// element / Map key (zero-field structs are intrinsically Hashable, returning the
-/// same constant hash). Byte-identical against the golden.
+/// two `S()` compare equal, and a distinct empty struct `T()` is not equal (a zero-field struct is
+/// no Set element or Map key without `hash` and `eq`, TICKET-280). Byte-identical against the golden.
 #[test]
 fn golden_empty_struct_chz_matches_expected_and_interp() {
     let src = include_str!("../../../examples/empty_struct.chz");
