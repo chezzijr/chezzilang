@@ -1949,8 +1949,85 @@ fn list_min_max_return_option_and_keep_their_bound() {
     ok("xs := [\"bb\", \"a\"]\nv: str? = xs.max_by(fn(s: str) -> int: s.len())\n");
 }
 
+/// TICKET-281 — what one scenario of the resolver grid reports: the annotations whose `Ty` differs
+/// between the two resolvers, and which `Type` variants the probes covered.
+const TYPE_VARIANTS: usize = 6;
+
+/// The slot of a `Type` variant in the coverage array. No wildcard: a new variant fails the build here.
+fn type_variant_slot(t: &Type) -> usize {
+    match t {
+        Type::Nil(_) => 0,
+        Type::Named { .. } => 1,
+        Type::Qualified { .. } => 2,
+        Type::Generic(..) => 3,
+        Type::Func { .. } => 4,
+        Type::Tuple(_) => 5,
+    }
+}
+
+/// TICKET-281 — resolve each annotation through `resolve_ty_ro` (read-only) and `resolve_type_at`
+/// (mutable) over one checker built from `decls` (and the module `dep`, imported as `m`), and list
+/// each annotation whose `Ty` differs. Both resolve at `TypePos::CRet` with `in_extern_sig` set: the
+/// one position where `None`, a width and `owned_str` are all legal. `seed` sets checker state
+/// (`Self`, type parameters, import binds) that a module check would clear.
+fn resolver_diffs(
+    decls: &str,
+    dep: Option<&str>,
+    annotations: &[&str],
+    seed: impl FnOnce(&mut Checker) + Send,
+) -> (Vec<String>, [bool; TYPE_VARIANTS]) {
+    let parse = |src: &str| parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
+    let probes: String = annotations
+        .iter()
+        .enumerate()
+        .map(|(i, a)| format!("fn probe{i}(a: {a}):\n    pass\n"))
+        .collect();
+    let head = if dep.is_some() { "import m\n" } else { "" };
+    let module = parse(&format!("{head}{decls}\n{probes}"));
+    let n_decls = module.stmts.len() - annotations.len();
+    let (decl_stmts, probe_stmts) = module.stmts.split_at(n_decls);
+    crate::on_frontend_stack_scoped(|| {
+        let mut c = Checker::new();
+        c.seed_native_prelude_sigs();
+        let mut imports = Vec::new();
+        if let Some(dep_src) = dep {
+            let dep_mod = parse(dep_src);
+            let mid = crate::base::module_id::ModuleId(std::path::PathBuf::from("/m.chz"));
+            let sig = c.check_module(&dep_mod.stmts, Some(&mid), &[], &[]);
+            c.module_sigs.insert(mid.clone(), sig);
+            let StmtKind::Import(import) = &decl_stmts[0].kind else {
+                panic!("the first decl is the import")
+            };
+            imports.push(crate::base::module_id::ResolvedImport {
+                target: mid,
+                import: import.clone(),
+                span: Span::default(),
+            });
+        }
+        c.check_module(decl_stmts, None, &imports, &[]);
+        seed(&mut c);
+        c.in_extern_sig = true;
+        let mut diffs = Vec::new();
+        let mut seen = [false; TYPE_VARIANTS];
+        for (a, s) in annotations.iter().zip(probe_stmts) {
+            let StmtKind::Fn(d) = &s.kind else {
+                panic!("probe is not a fn")
+            };
+            let ty = d.params[0].ty.clone().expect("annotated");
+            seen[type_variant_slot(&ty)] = true;
+            let ro = c.resolve_ty_ro(&ty);
+            let rw = c.resolve_type_at(&ty, Span::default(), crate::checker::sig::TypePos::CRet);
+            // `{:?}`, not `Display`: a user `List[int]` and the builtin print alike.
+            if ro != rw {
+                diffs.push(format!("{a}: read-only {ro:?} vs mutable {rw:?}"));
+            }
+        }
+        (diffs, seen)
+    })
+}
+
 /// TICKET-281 — `resolve_type_at` (mutable) and `resolve_ty_ro` (read-only) both map an annotation
-/// to a `Ty`. One grid, one program: every annotation kind must give the same `Ty` from both.
+/// to a `Ty`. One grid, two scenarios: every annotation kind must give the same `Ty` from both.
 #[test]
 fn resolve_type_and_resolve_ty_ro_map_every_annotation_to_the_same_ty() {
     let decls = [
@@ -1970,8 +2047,24 @@ fn resolve_type_and_resolve_ty_ro_map_every_annotation_to_the_same_ty() {
         "    fn get(self) -> T",
         "type Al = List[int]",
         "type Al2 = Al",
+        "type GA = G",
+        "type GP = G[int]",
         "struct Executor:",
         "    x: int",
+    ]
+    .join("\n");
+    let dep = [
+        "struct Q:",
+        "    x: int",
+        "struct GQ[T]:",
+        "    v: T",
+        "enum F:",
+        "    A",
+        "enum GF[T]:",
+        "    X(T)",
+        "protocol PQ[T]:",
+        "    fn get(self) -> T",
+        "type AlQ = List[int]",
     ]
     .join("\n");
     let annotations = [
@@ -2004,38 +2097,61 @@ fn resolve_type_and_resolve_ty_ro_map_every_annotation_to_the_same_ty() {
         "Channel[int]",
         "Iterator[int]",
         "Atomic[int]",
+        "None",
+        "T",
+        "Exec",
+        "Sh",
+        "I32",
+        "IA",
+        "GA[int]",
+        "GP",
+        "Nope",
+        "Nope[int]",
+        "m.Q",
+        "m.GQ[int]",
+        "m.F",
+        "m.GF[int]",
+        "m.PQ",
+        "m.PQ[int]",
+        "m.AlQ",
+        "m.int32",
+        "m.Nope",
+        "(int, m.Q)",
     ];
-    let probes: String = annotations
-        .iter()
-        .enumerate()
-        .map(|(i, a)| format!("fn probe{i}(a: {a}):\n    pass\n"))
-        .collect();
-    let tokens = lexer::tokenize(&format!("{decls}\n{probes}")).expect("lex");
-    let module = parser::parse(tokens).expect("parse");
-    let n_decls = module.stmts.len() - annotations.len();
-    let (decl_stmts, probe_stmts) = module.stmts.split_at(n_decls);
-    let diffs: Vec<String> = crate::on_frontend_stack_scoped(|| {
-        let mut c = Checker::new();
-        c.seed_native_prelude_sigs();
-        c.check_module(decl_stmts, None, &[], &[]);
+    let (diffs_a, seen_a) = resolver_diffs(&decls, Some(&dep), &annotations, |c| {
         c.current_self_ty = Some(Ty::strukt("P".to_string()));
-        let mut diffs = Vec::new();
-        for (a, s) in annotations.iter().zip(probe_stmts) {
-            let StmtKind::Fn(d) = &s.kind else {
-                panic!("probe is not a fn")
-            };
-            let ty = d.params[0].ty.clone().expect("annotated");
-            let ro = c.resolve_ty_ro(&ty);
-            let rw = c.resolve_type_at(&ty, Span::default(), crate::checker::sig::TypePos::Void);
-            if ro != rw {
-                diffs.push(format!("{a}: read-only {ro} vs mutable {rw}"));
-            }
+        c.type_params.insert("T".to_string(), Vec::new());
+        for (bound, builtin) in [("Exec", "Executor"), ("Sh", "Shared"), ("I32", "int32")] {
+            c.builtin_binds
+                .insert(bound.to_string(), builtin.to_string());
         }
-        diffs
+        c.imported_alias_tys.insert("IA".to_string(), Ty::Int);
+        let mid = crate::base::module_id::ModuleId(std::path::PathBuf::from("/m.chz"));
+        c.module_sigs
+            .get_mut(&mid)
+            .expect("m")
+            .builtins
+            .insert("int32".to_string());
     });
+    // Scenario B: a module that shadows builtins by a user type and a type parameter.
+    let (diffs_b, seen_b) = resolver_diffs(
+        "struct List[T]:\n    v: T\nstruct str:\n    x: int",
+        None,
+        &["List[int]", "str", "bytes", "Set[int]"],
+        |c| {
+            c.type_params.insert("bytes".to_string(), Vec::new());
+        },
+    );
+    let diffs: Vec<String> = diffs_a.into_iter().chain(diffs_b).collect();
     assert!(
         diffs.is_empty(),
         "resolvers disagree:\n{}",
         diffs.join("\n")
     );
+    for slot in 0..TYPE_VARIANTS {
+        assert!(
+            seen_a[slot] || seen_b[slot],
+            "no grid cell covers Type variant slot {slot}"
+        );
+    }
 }

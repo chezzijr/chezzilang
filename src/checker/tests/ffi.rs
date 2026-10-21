@@ -1448,3 +1448,55 @@ fn a_c_variadic_extern_value_keeps_its_varargs() {
         "'f' expects at least 3 argument(s), got 1",
     );
 }
+
+/// TICKET-281 — an `owned_str` / `str?` / `owned_str?` extern param is return-only. The answer is
+/// the C type the resolver gives, so a user type that shadows `str` and an imported alias count.
+#[test]
+fn a_return_only_extern_param_is_the_c_type_the_resolver_gives() {
+    let lib = (
+        "lib.chz",
+        "import owned_str from std.ffi\ntype IO = owned_str\n",
+    );
+    let cells: &[(&str, &str, &str, bool)] = &[
+        (
+            "bound owned_str",
+            "import owned_str from std.ffi\n",
+            "owned_str",
+            true,
+        ),
+        (
+            "local alias",
+            "import owned_str from std.ffi\ntype O = owned_str\n",
+            "O",
+            true,
+        ),
+        ("qualified", "import std.ffi\n", "ffi.owned_str", true),
+        ("imported alias", "import IO from lib\n", "IO", true),
+        ("str?", "", "str?", true),
+        (
+            "owned_str?",
+            "import owned_str from std.ffi\n",
+            "owned_str?",
+            true,
+        ),
+        (
+            "user struct str",
+            "struct str:\n    x: int\n",
+            "str?",
+            false,
+        ),
+        ("plain str", "", "str", false),
+    ];
+    let mut red = Vec::new();
+    for (cell, head, ty, want) in cells {
+        let main = format!("{head}extern \"libc.so.6\":\n    fn f(s: {ty}) -> int\n");
+        let errs = check_files(&[("main.chz", &main), lib]);
+        let got = errs.iter().any(|e| e.message.contains("are return-only"));
+        if got != *want {
+            red.push(format!(
+                "{cell} (`{ty}`): return-only {got}, want {want}: {errs:?}"
+            ));
+        }
+    }
+    assert!(red.is_empty(), "return-only cells:\n{}", red.join("\n"));
+}

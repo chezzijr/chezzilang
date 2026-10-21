@@ -1368,3 +1368,20 @@ fn a_crlf_file_highlights_and_hovers_like_lf() {
     }
     assert!(red.is_empty(), "CRLF highlights unlike LF in: {red:#?}");
 }
+
+/// TICKET-281 — the hover doc of an annotation head comes from the arm the resolver took: a user
+/// `struct str` shows its own docstring, not the builtin `str` blurb.
+#[test]
+fn hover_user_struct_str_annotation_shows_its_own_doc() {
+    let src = "# my text\nstruct str:\n    x: int\nfn f(s: str):\n    pass\n";
+    let h = hov(src, 3, 8).expect("hover on user str annotation");
+    assert_eq!(h.doc.as_deref(), Some("my text"));
+}
+
+/// TICKET-281 — same for a generic head: a user `struct List[T]` shows its own docstring.
+#[test]
+fn hover_user_generic_list_head_shows_its_own_doc() {
+    let src = "# my list\nstruct List[T]:\n    v: T\nfn f(xs: List[int]):\n    pass\n";
+    let h = hov(src, 3, 9).expect("hover on user List head");
+    assert_eq!(h.doc.as_deref(), Some("my list"));
+}
