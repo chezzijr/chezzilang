@@ -1949,19 +1949,107 @@ fn list_min_max_return_option_and_keep_their_bound() {
     ok("xs := [\"bb\", \"a\"]\nv: str? = xs.max_by(fn(s: str) -> int: s.len())\n");
 }
 
-/// TICKET-281 — what one scenario of the resolver grid reports: the annotations whose `Ty` differs
-/// between the two resolvers, and which `Type` variants the probes covered.
-const TYPE_VARIANTS: usize = 6;
+use crate::checker::resolve_type::{GenericArm, NamedArm, QualifiedArm};
 
-/// The slot of a `Type` variant in the coverage array. No wildcard: a new variant fails the build here.
-fn type_variant_slot(t: &Type) -> usize {
-    match t {
-        Type::Nil(_) => 0,
-        Type::Named { .. } => 1,
-        Type::Qualified { .. } => 2,
-        Type::Generic(..) => 3,
-        Type::Func { .. } => 4,
-        Type::Tuple(_) => 5,
+/// TICKET-281 — which `Type` variants and which arms of the arm table the probes of the resolver
+/// grid reached. Each slot index comes from an exhaustive `match` below, no wildcard: a new variant
+/// or arm fails the build there, and then fails the grid until a probe reaches it.
+#[derive(Default)]
+struct GridCoverage {
+    types: [bool; 6],
+    named: [bool; 12],
+    generic: [bool; 6],
+    qualified: [bool; 6],
+}
+
+impl GridCoverage {
+    /// Mark the `Type` variant of `t`, and the arm the table gives its head in `c`. `mid` is the
+    /// module a qualified head names.
+    fn mark(&mut self, c: &Checker, t: &Type, mid: Option<&crate::base::module_id::ModuleId>) {
+        self.types[match t {
+            Type::Nil(_) => 0,
+            Type::Named { .. } => 1,
+            Type::Qualified { .. } => 2,
+            Type::Generic(..) => 3,
+            Type::Func { .. } => 4,
+            Type::Tuple(_) => 5,
+        }] = true;
+        match t {
+            Type::Named { name, .. } => {
+                self.named[match c.named_arm(name) {
+                    NamedArm::Scalar(..) => 0,
+                    NamedArm::Param => 1,
+                    NamedArm::SelfTy(_) => 2,
+                    NamedArm::Builtin(..) => 3,
+                    NamedArm::BareBox(_) => 4,
+                    NamedArm::Alias(_) => 5,
+                    NamedArm::ImportedAlias(_) => 6,
+                    NamedArm::Width(_) => 7,
+                    NamedArm::Struct(_) => 8,
+                    NamedArm::Enum(_) => 9,
+                    NamedArm::Protocol(_) => 10,
+                    NamedArm::Unknown => 11,
+                }] = true;
+            }
+            Type::Generic(name, args, _) => {
+                self.generic[match c.generic_arm(name, args.len()) {
+                    GenericArm::Builtin(_) => 0,
+                    GenericArm::Struct(_) => 1,
+                    GenericArm::Enum(_) => 2,
+                    GenericArm::Protocol(_) => 3,
+                    GenericArm::AliasHead(_) => 4,
+                    GenericArm::Unknown => 5,
+                }] = true;
+            }
+            Type::Qualified { name, .. } => {
+                if let Some(mid) = mid {
+                    self.qualified[match c.qualified_arm(mid, name) {
+                        QualifiedArm::Struct { .. } => 0,
+                        QualifiedArm::Enum { .. } => 1,
+                        QualifiedArm::Alias { .. } => 2,
+                        QualifiedArm::Protocol { .. } => 3,
+                        QualifiedArm::Builtin => 4,
+                        QualifiedArm::Missing => 5,
+                    }] = true;
+                }
+            }
+            Type::Nil(_) | Type::Func { .. } | Type::Tuple(_) => {}
+        }
+    }
+
+    /// The slots of the `self` and `other` coverage, OR-ed.
+    fn or(mut self, other: GridCoverage) -> GridCoverage {
+        for (a, b) in self.types.iter_mut().zip(other.types) {
+            *a |= b;
+        }
+        for (a, b) in self.named.iter_mut().zip(other.named) {
+            *a |= b;
+        }
+        for (a, b) in self.generic.iter_mut().zip(other.generic) {
+            *a |= b;
+        }
+        for (a, b) in self.qualified.iter_mut().zip(other.qualified) {
+            *a |= b;
+        }
+        self
+    }
+
+    /// The names of the slots no probe reached.
+    fn missing(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (kind, slots) in [
+            ("Type variant", &self.types[..]),
+            ("NamedArm", &self.named[..]),
+            ("GenericArm", &self.generic[..]),
+            ("QualifiedArm", &self.qualified[..]),
+        ] {
+            for (i, seen) in slots.iter().enumerate() {
+                if !seen {
+                    out.push(format!("{kind} slot {i}"));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1975,7 +2063,7 @@ fn resolver_diffs(
     dep: Option<&str>,
     annotations: &[&str],
     seed: impl FnOnce(&mut Checker) + Send,
-) -> (Vec<String>, [bool; TYPE_VARIANTS]) {
+) -> (Vec<String>, GridCoverage) {
     let parse = |src: &str| parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
     let probes: String = annotations
         .iter()
@@ -1990,9 +2078,10 @@ fn resolver_diffs(
         let mut c = Checker::new();
         c.seed_native_prelude_sigs();
         let mut imports = Vec::new();
-        if let Some(dep_src) = dep {
+        let dep_mid =
+            dep.map(|_| crate::base::module_id::ModuleId(std::path::PathBuf::from("/m.chz")));
+        if let (Some(dep_src), Some(mid)) = (dep, dep_mid.clone()) {
             let dep_mod = parse(dep_src);
-            let mid = crate::base::module_id::ModuleId(std::path::PathBuf::from("/m.chz"));
             let sig = c.check_module(&dep_mod.stmts, Some(&mid), &[], &[]);
             c.module_sigs.insert(mid.clone(), sig);
             let StmtKind::Import(import) = &decl_stmts[0].kind else {
@@ -2008,13 +2097,13 @@ fn resolver_diffs(
         seed(&mut c);
         c.in_extern_sig = true;
         let mut diffs = Vec::new();
-        let mut seen = [false; TYPE_VARIANTS];
+        let mut seen = GridCoverage::default();
         for (a, s) in annotations.iter().zip(probe_stmts) {
             let StmtKind::Fn(d) = &s.kind else {
                 panic!("probe is not a fn")
             };
             let ty = d.params[0].ty.clone().expect("annotated");
-            seen[type_variant_slot(&ty)] = true;
+            seen.mark(&c, &ty, dep_mid.as_ref());
             let ro = c.resolve_ty_ro(&ty);
             let rw = c.resolve_type_at(&ty, Span::default(), crate::checker::sig::TypePos::CRet);
             // `{:?}`, not `Display`: a user `List[int]` and the builtin print alike.
@@ -2148,10 +2237,10 @@ fn resolve_type_and_resolve_ty_ro_map_every_annotation_to_the_same_ty() {
         "resolvers disagree:\n{}",
         diffs.join("\n")
     );
-    for slot in 0..TYPE_VARIANTS {
-        assert!(
-            seen_a[slot] || seen_b[slot],
-            "no grid cell covers Type variant slot {slot}"
-        );
-    }
+    let missing = seen_a.or(seen_b).missing();
+    assert!(
+        missing.is_empty(),
+        "no grid cell reaches: {}",
+        missing.join(", ")
+    );
 }
