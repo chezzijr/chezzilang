@@ -1534,3 +1534,15 @@ fn d3_native_math_float_param_rejects_int() {
     );
     entry_ok("import std.math\nfn main():\n    print(math.sqrt(16.0))\n");
 }
+
+// TICKET-278: collection methods follow the owner's Rust-shaped convention table (U16).
+
+#[test]
+fn list_remove_by_index_returns_the_element() {
+    ok("xs := [1, 2, 3]\nx: int = xs.remove(0)\nprint(x)\n");
+}
+
+#[test]
+fn set_insert_returns_bool() {
+    ok("s := {1, 2}\nb: bool = s.insert(5)\nprint(b)\n");
+}
