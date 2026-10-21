@@ -2527,41 +2527,39 @@ fn an_exit_beside_a_running_sibling_runs_no_defer_and_keeps_its_output() {
 
 /// TICKET-284 — a nursery child of an Executor job calls `os.exit` and the job adopts the exit.
 /// The child is the exit origin, so `take_finished_streams` waits for the child's slot only; the
-/// job's own slot, which holds the output the job's join took from the child, is stored later. A
-/// test hook in `Disp::Finish` holds that later store 300 ms, the order a loaded host produces. The
-/// test runs in a forced child, so the holds (`HOLD_ADOPTED_EXIT`) reach no other test.
+/// job's join takes that slot, and the job's own slot, which holds the taken output, is stored
+/// later. This drives the sched in that order by hand: the child stores its `Exit` slot and ends
+/// its count, the job's join takes the slot, a reader runs, then the job stores its slot and ends
+/// its count. The reader must not return before the output is back in a slot.
 #[test]
 fn a_job_that_adopts_its_childs_exit_keeps_the_childs_output() {
-    if crate::vm::rerun_in_child(
-        module_path!(),
-        "a_job_that_adopts_its_childs_exit_keeps_the_childs_output",
-    ) {
-        return;
-    }
-    crate::vm::HOLD_ADOPTED_EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
-    let src = r#"import Executor from std.concurrency
-import std.os
-ch: Channel[int] = Channel[int]()
-fn spin():
-    defer:
-        while true:
-            pass
-    _ := ch.recv()
-fn quit():
-    print("quit")
-    os.exit(3)
-fn job():
-    parallel:
-        spawn spin()
-        spawn quit()
-b := Executor()
-b.submit(job)
-"#;
-    let entry = write_temp_chz("t284_job_child_exits", src);
-    let (out, _e, r, c) = run_file(&entry);
-    let _ = std::fs::remove_file(&entry);
+    let sched = Arc::new(mk_sched(1)); // scope 0: the job, slot 0
+    let child = sched.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new()); // slot 1
+    sched.quiesce.begin_exit_origin();
+    sched.lock().slots[1] = Some(TaskOutcome::Exit {
+        code: 3,
+        out: b"quit\n".to_vec(),
+        stderr: Vec::new(),
+    });
+    sched.quiesce.end_exit_origin();
+    let taken = sched.take_scope_slots(child);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = Arc::clone(&sched);
+    std::thread::spawn(move || {
+        let _ = tx.send(reader.take_finished_streams().0);
+    });
+    let early = rx.recv_timeout(std::time::Duration::from_secs(2));
+    sched.lock().slots[0] = taken.into_iter().flatten().next();
+    sched.quiesce.end_exit_origin();
+    let out = match early {
+        Ok(out) => out,
+        Err(_) => rx
+            .recv()
+            .expect("the reader returns once the job stored its slot"),
+    };
+    let out = String::from_utf8_lossy(&out);
     assert!(
-        out.contains("quit") && c == Some(3),
-        "job_child_exits: out={out:?} code={c:?} r={r:?}"
+        out.contains("quit"),
+        "job_child_exits: out={out:?} code=Some(3) (the reader ran after the job took the slot)"
     );
 }
