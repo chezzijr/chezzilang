@@ -954,6 +954,12 @@ impl MnSched {
     /// caller holds no sched lock.
     pub(super) fn take_finished_streams(&self) -> (Vec<u8>, Vec<u8>) {
         self.quiesce.await_exit_origins();
+        // TICKET-284 — test-only: the reader reaches the slots after a joined job took them, the
+        // order a loaded host produces (see the hold in `Disp::Finish`).
+        #[cfg(test)]
+        if self.quiesce.pending() == Some(3) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         let mut c = self.lock();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         for o in c.slots.iter_mut().flatten() {

@@ -397,6 +397,15 @@ impl Vm {
                     // drain a task's own fault does.
                     // TICKET-270 — `finish` also reports whether it published a job fault (the cell is
                     // stored before the slot); the teardown runs here, outside its lock.
+                    // TICKET-284 — test-only: a joiner that adopts a child's `os.exit` stores its own slot
+                    // late (a job is scope 0), so the reader of finished output is reachable with no host load.
+                    #[cfg(test)]
+                    if scope_id == 0
+                        && !self.exit_origin
+                        && matches!(&outcome, TaskOutcome::Exit { code: 3, .. })
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
                     let (aborts, job_fault) = sched.finish(task_index, scope_id, outcome);
                     if job_fault {
                         self.halt_run();

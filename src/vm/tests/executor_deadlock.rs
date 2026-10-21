@@ -2524,3 +2524,36 @@ fn an_exit_beside_a_running_sibling_runs_no_defer_and_keeps_its_output() {
     }
     assert!(red.is_empty(), "{} red run(s): {red:?}", red.len());
 }
+
+/// TICKET-284 — a nursery child of an Executor job calls `os.exit` and the job adopts the exit.
+/// The child is the exit origin, so `take_finished_streams` waits for the child's slot only; the
+/// job's own slot, which holds the output the job's join took from the child, is stored later. A
+/// test hook in `Disp::Finish` holds that later store 300 ms, the order a loaded host produces.
+#[test]
+fn a_job_that_adopts_its_childs_exit_keeps_the_childs_output() {
+    let src = r#"import Executor from std.concurrency
+import std.os
+ch: Channel[int] = Channel[int]()
+fn spin():
+    defer:
+        while true:
+            pass
+    _ := ch.recv()
+fn quit():
+    print("quit")
+    os.exit(3)
+fn job():
+    parallel:
+        spawn spin()
+        spawn quit()
+b := Executor()
+b.submit(job)
+"#;
+    let entry = write_temp_chz("t284_job_child_exits", src);
+    let (out, _e, r, c) = run_file(&entry);
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        out.contains("quit") && c == Some(3),
+        "job_child_exits: out={out:?} code={c:?} r={r:?}"
+    );
+}
