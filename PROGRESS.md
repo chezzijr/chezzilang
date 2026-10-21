@@ -82,7 +82,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
      write `panic(...)` after it). The owner hand-merged it after `verifying` escalated on one
      `else_guard_grid` cell, with one review fix: an ambiguous import pair (`import a.math` +
      `import b.math`) binds `math` once, so a third binding clashes. Open, low: a nested fn read only
-     by itself warns `unused variable`, where rustc says `function is never used`.
+     by itself warns `unused variable`, where rustc says `function is never used` (TICKET-283).
    - TICKET-266, a `never` return type (filed 2026-10-18): `exit` and `panic` declare `-> never`,
      and a call of that type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")`
      lines that TICKET-263 put after `os.exit`.
@@ -90,12 +90,13 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
      protocols live in `std.ops`/`std.cmp`/`std.iter`/`std.string`/`std.path`/`std.convert` and a bound
      needs the import, `Hashable` embeds `Eq`, `T?` derives no ordering. A std import checks and
      compiles only the std fns the program reaches, and a process parses each embedded std module once (`shared_std_parse`; debug, fill vs clone: `string.chz` 3.65 vs 0.19 ms, `iter.chz` 3.24 vs 0.14, `prelude.chz` 5.21 vs 0.23, `ops.chz` 0.60 vs 0.03); `std.iter`/`std.string`/`std.ops` imports still
-     cost 2-3 ms over `print(1)` (`docs/contributing/benchmarks.md`). Part 2 is open: fact 10
-     (row 70), rows 62, 94, `Hashable` opt-in, `Deque`/`Heap`/`Counter` `Iterable`, the collection
-     convention table, the U5 sibling gaps.
+     cost 2-3 ms over `print(1)` (`docs/contributing/benchmarks.md`). Part 2 is filed (2026-10-21): the method set per
+     builtin type and the collection convention table (TICKET-278); what an Iterable yields and
+     `Deque`/`Heap`/`Counter` `Iterable` (TICKET-279); `Hashable` opt-in (TICKET-280). Still open: the
+     U5 sibling gaps.
 2. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): `resolve_ty_ro_d` and
    `resolve_type` resolve the same annotations; `src/checker/resolve_ctype.rs:89`, `:137`, `:145`, `:160`
-   say "mirrors". One resolver must call the other. Its own refactor unit, after TICKET-264.
+   say "mirrors". One resolver must call the other (TICKET-281, filed 2026-10-21).
 3. **Group E (TICKET-268, 2026-10-19).** `chezzi check` rejects a constant int fault: an overflow, a
    constant zero divisor and a constant shift amount outside `0..64`, whatever the int left operand is
    (`1 / 0`, `x % 0`, `x <<= 64`). One owner for an int op's fault: `int_binop`, `operand_fault`,
@@ -116,7 +117,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
 5. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
    name (`:=`, `fn`, import) never share a name in one module, as Go does and as Rust does for a
    callable type (`struct E(i32);` + `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
-6. **Std modules compiled at build time** (owner decision 2026-10-18, option 1; no ticket yet). A
+6. **Std modules compiled at build time** (owner decision 2026-10-18, option 1; TICKET-282, filed 2026-10-21). A
    std import costs ~3.4 ms per run: `chezzi run` of `print(1)` takes 8.3 ms, and 11.7 ms after
    `import Iterator from std.iter` (release, `hyperfine -N -r 40`). Each run parses, checks and compiles
    the embedded std source again. CPython pays ~0 ms for `itertools` (C code in the binary) and loads
