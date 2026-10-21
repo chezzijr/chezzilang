@@ -121,8 +121,8 @@ row above is `hyperfine`'s figure for an empty file.
 Std protocol table (TICKET-265), `print(1)`, release, mean of 100 runs, three rounds interleaved with
 a build of main `25e8912d` on the same box: main 8110 / 7840 / 7990 us, branch 7990 / 7870 / 7650 us.
 Before the fix the branch took 19-22 ms: `std_decls` parsed all 225 KB of `std/*.chz` (11.3 ms) on
-every start to find 28 `protocol` declarations. `std_protocol_decls` now lexes and parses only those
-blocks (`lexer::tokenize_statement` ends each at its block close); `std_type_owners` parses every file
+every start to find 28 `protocol` declarations. `std_protocol_decls` now reads only those
+blocks (the build script extracts them, TICKET-282); `std_type_owners` reads every file
 on the first import-hint diagnostic. Debug `print(1)`: 23.6 ms on the branch, 22 ms on main. Cost of a
 std import (release, `print(1)` after the import): `std.ops` 10.7 ms, `std.cmp` 9.3, `std.iter` 14.4,
 `std.string` 15.6, against 8.1 with none. A protocol name used to cost nothing; it now costs that
@@ -148,12 +148,32 @@ The grid in `tests/hook_conformance_grid.rs` imports a std module in each cell. 
 `operator_and_bound_agree_in_every_cell` took 284 s on the branch, 189 s on main (load about 3.5 on
 the box). The grid is one test per owner x hook since TICKET-276.
 
-Std parse cache (TICKET-265, `resolver::shared_std_parse`): a process lexes and parses each embedded
+Std parse cache (TICKET-265, `resolver::shared_std_parse`; since TICKET-282 the first load decodes a build-time
+AST and these lex and parse figures are the cost it removed): a process lexes and parses each embedded
 std module once and copies the AST into each later graph. Debug, one process, first load (fill) vs a
 later load (clone): `string.chz` 3.65 vs 0.19 ms, `iter.chz` 3.24 vs 0.14, `prelude.chz` 5.21 vs 0.23,
 `ops.chz` 0.60 vs 0.03. A long-lived process (the LSP, the lib tests) saves the difference on each
 graph after the first. A one-shot `chezzi run` builds one graph, so it fills and saves nothing; each
 `hook_conformance_grid` cell is such a process (265 s after the cache, 271-284 s before).
+
+Std build-time AST (TICKET-282): `crates/chezzi-native/build.rs` parses each `std/**/*.chz` once, at
+`cargo build`, and embeds the `borsh` AST; a run decodes it (`std_embed::decode_ast`) and lexes and
+parses no std text. This also deletes the per-run protocol scan (0.65 to 1.1 ms in 5 timed runs) and
+the `ffi.chz` lex. `$CHEZZI_STD` and a live buffer keep the text path. Release, `hyperfine -N -w 5
+-r 40`, base `57dbf708` and the branch each in its own target dir, mean ± σ, load average 2.7:
+
+| Program | base | branch | drop |
+|---|---|---|---|
+| `print(1)` | 8.0 ± 0.3 ms | 6.5 ± 0.4 ms | 1.5 ms |
+| `import Iterator from std.iter` | 10.6 ± 0.5 ms | 9.0 ± 0.4 ms | 1.6 ms |
+| `import Eq from std.cmp` | 8.6 ± 0.4 ms | 6.8 ± 0.4 ms | 1.8 ms |
+| `import split from std.string` | 11.8 ± 0.8 ms | 10.1 ± 0.5 ms | 1.7 ms |
+
+A first run of the same commands at load average 20 gave drops of 1.8, 1.5, 1.2 and 2.0 ms. The
+saving is per run (prelude parse plus protocol scan). A std import still costs about 2.5 ms over
+`print(1)` (`std.iter`: 9.0 against 6.5): graph build, check and compile, which are open. The 35
+encoded ASTs take 601,653 bytes; the release binary grows from 15,760,960 to 16,875,240 bytes (the
+artifact plus the `borsh` code for every AST type).
 
 ### Peak memory vs Go
 

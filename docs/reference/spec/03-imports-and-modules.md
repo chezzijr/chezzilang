@@ -36,7 +36,7 @@ Resolution uses an **optional root marker**, which removes Python's run-relative
    → the script's own dir is root** (`run <file>`) / an error (bare `run` needs a manifest).
 3. `std.*` is reserved and resolves to the **stdlib**. Its source comes from `$CHEZZI_STD` if that env
    var is set (a dev override: "use *this* tree", exclusive; a module missing from it is an error, never
-   a fall-back), else from the **stdlib baked into the binary** (`std/*.chz` is `include_str!`'d at
+   a fall-back), else from the **stdlib baked into the binary** (`std/*.chz` is `include_str!`'d, and parsed into an encoded AST, at
    compile time, like the `docs/*.md` topics). An installed `chezzi` is therefore self-contained: it
    needs no source checkout. A **pre-built** binary plus an edited `std/*.chz` is stale until you
    rebuild it (`cargo run`/`cargo test` rebuild automatically; otherwise use `$CHEZZI_STD`).

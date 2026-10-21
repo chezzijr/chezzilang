@@ -89,7 +89,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    - TICKET-265, group C, builtin types and protocols. Part 1 is done (2026-10-17): the std
      protocols live in `std.ops`/`std.cmp`/`std.iter`/`std.string`/`std.path`/`std.convert` and a bound
      needs the import, `Hashable` embeds `Eq`, `T?` derives no ordering. A std import checks and
-     compiles only the std fns the program reaches, and a process parses each embedded std module once (`shared_std_parse`; debug, fill vs clone: `string.chz` 3.65 vs 0.19 ms, `iter.chz` 3.24 vs 0.14, `prelude.chz` 5.21 vs 0.23, `ops.chz` 0.60 vs 0.03); `std.iter`/`std.string`/`std.ops` imports still
+     compiles only the std fns the program reaches, and a process decodes each embedded std module once from a build-time AST (`shared_std_parse`, item 6; TICKET-265 had it lex and parse the text once); `std.iter`/`std.string`/`std.ops` imports still
      cost 2-3 ms over `print(1)` (`docs/contributing/benchmarks.md`). Part 2 is filed (2026-10-21): the method set per
      builtin type and the collection convention table (TICKET-278); `Hashable` opt-in (TICKET-280).
      Part 2 also had what an Iterable yields and the Deque, Heap and Counter iteration: landed (TICKET-279). Still open: the
@@ -117,14 +117,16 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
 5. **Owner decision for group A (2026-10-16):** a type name (`struct`, `enum`, `type`) and a value
    name (`:=`, `fn`, import) never share a name in one module, as Go does and as Rust does for a
    callable type (`struct E(i32);` + `fn E() {}` is E0428). This also rejects `struct S` + `fn S`.
-6. **Std modules compiled at build time** (owner decision 2026-10-18, option 1; TICKET-282, filed 2026-10-21). A
-   std import costs ~3.4 ms per run: `chezzi run` of `print(1)` takes 8.3 ms, and 11.7 ms after
-   `import Iterator from std.iter` (release, `hyperfine -N -r 40`). Each run parses, checks and compiles
-   the embedded std source again. CPython pays ~0 ms for `itertools` (C code in the binary) and loads
-   saved bytecode for a pure-Python module (`.pyc`; frozen modules in 3.11+). Fix: run the front end on
-   each `std/*.chz` at `cargo build` time and embed the result in the binary; `std/*.chz` stays the one
-   source. Open for its plan: the reach set (`resolver::unreached_std_fns`) and the program-wide slot
-   and type keys depend on the importing program.
+6. **Std modules compiled at build time** (owner decision 2026-10-18, option 1; TICKET-282, filed 2026-10-21).
+   Lex and parse: done 2026-10-21. `crates/chezzi-native/build.rs` parses each `std/**/*.chz` with
+   `parser::parse_module_source` and embeds the `borsh` AST, the identifier words and the `protocol`
+   statements; a run decodes them (`std_embed::decode_ast`) and lexes no std text. `std/*.chz` stays the
+   one source; the next `cargo build` picks up an edit. Release, `hyperfine -N -w 5 -r 40`, base and
+   branch in their own target dirs: `print(1)` 8.0 to 6.5 ms, `import Iterator from std.iter` 10.6 to
+   9.0 ms. Open: check and compile caching. A std import still costs about 2.5 ms over `print(1)`
+   (graph build, check, compile), and the reach set (`resolver::unreached_std_fns`) and the
+   program-wide slot and type keys depend on the importing program. CPython pays ~0 ms for
+   `itertools` (C code in the binary) and loads saved bytecode for a pure-Python module (`.pyc`).
 7. **Slow gate grid (TICKET-275, done 2026-10-20).** `channel_handoff_grid` runs one test per
    (context, sender kind, run) triple plus one per named program, from one `grid_tests!` list. The
    slowest test takes 50.6 s idle (load 1.9-3.8) and 85.1 s at load 22-29; base had one 198 s test.
