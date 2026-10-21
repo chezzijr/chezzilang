@@ -78,6 +78,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Control-flow fall-through | `Flow` (`checker/flow.rs`) | TICKET-184 |
 | Width of a struct field (FFI) | `note_field_widths` (`checker/setup.rs`) | `FieldWidthTable` |
 | C width ranges, vararg promotion | `vararg_promoted` (`native/cffi.rs`), `int_range` (`native/cffi.rs`) | |
+| Which type an annotation names (the arm order) | `named_arm`, `generic_arm`, `qualified_arm` (`checker/resolve_type.rs`) | read by `resolve_type_at` (diagnostics, and `record_type_hover` through `TypeDoc`), `resolve_ty_ro_d` and `resolve_qualified_ro` (`checker/resolve_ctype.rs`, silent), `resolve_ctype_d` (the C type) and `is_return_only_extern_type` (`checker/hoist.rs`, through `resolve_ctype`). `resolve_type_and_resolve_ty_ro_map_every_annotation_to_the_same_ty` (`checker/tests/generics.rs`) runs every arm; `a_return_only_extern_param_is_the_c_type_the_resolver_gives` (`checker/tests/ffi.rs`) runs the return-only forms |
 | Builtin method set per type | `std/prelude.chz` native decls | DUPLICATE: the hover lists such as `STR_METHODS` (`checker/builtin_methods.rs`), `builtin_container_sig` (`checker/builtin_methods.rs`), the VM name dispatch in `core_method` (`vm/core_method.rs`), `vm/socket.rs`, `vm/shared_methods.rs` and `vm/fileio.rs` |
 | Native method mutates its receiver | `is_mutating_native_kind` (`native/mod.rs`) | |
 

@@ -94,9 +94,9 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
      builtin type and the collection convention table (TICKET-278); `Hashable` opt-in (TICKET-280).
      Part 2 also had what an Iterable yields and the Deque, Heap and Counter iteration: landed (TICKET-279). Still open: the
      U5 sibling gaps.
-2. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): `resolve_ty_ro_d` and
-   `resolve_type` resolve the same annotations; `src/checker/resolve_ctype.rs:89`, `:137`, `:145`, `:160`
-   say "mirrors". One resolver must call the other (TICKET-281, filed 2026-10-21).
+2. **Two type resolvers** (found in TICKET-264 review, 2026-10-17): one arm table decides what an
+   annotation names; the read-only, mutable and C-type walks, the annotation hover and the return-only
+   extern check read it; the grids run every arm; done 2026-10-21 (TICKET-281).
 3. **Group E (TICKET-268, 2026-10-19).** `chezzi check` rejects a constant int fault: an overflow, a
    constant zero divisor and a constant shift amount outside `0..64`, whatever the int left operand is
    (`1 / 0`, `x % 0`, `x <<= 64`). One owner for an int op's fault: `int_binop`, `operand_fault`,
