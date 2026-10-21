@@ -118,6 +118,8 @@ print(total([1, 2, 3]))       # 0, silently wrong, before this rule
 `chezzi check` reports `unused variable 'total': it is never read; prefix it with '_' if that is
 intended` at the inner `total := total + x` (`"severity":"warning"` in `--errors=json`; exit code
 unchanged). Prefix the name with `_` (or name it `_`) to opt out.
+An unused nested `fn` reports `function 'f' is never used; prefix it with '_' if that is intended`
+instead (rustc `dead_code`).
 
 These never warn:
 - a **parameter** (Go does not warn either)
@@ -127,7 +129,7 @@ These never warn:
 - a name read only inside a closure, `defer:`, `spawn:`/`parallel:` body, a nested `fn`, or an
   interpolated fragment (`"{x}"`, `"{s:<{w}}"`): all are reads. The one exception: a call inside a
   nested `fn`'s own body is not a read of its name, so `fn lone(n: int) -> int: return lone(n)`
-  that nothing else calls warns (rustc `dead_code`)
+  that nothing else calls warns `function 'lone' is never used`
 - a module-scope global (an importer may read it)
 - anything inside a `std.*` module
 

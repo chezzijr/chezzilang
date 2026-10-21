@@ -81,8 +81,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
      per module; a let binder is not readable in its own value; `os.exit` is an ordinary call, so
      write `panic(...)` after it). The owner hand-merged it after `verifying` escalated on one
      `else_guard_grid` cell, with one review fix: an ambiguous import pair (`import a.math` +
-     `import b.math`) binds `math` once, so a third binding clashes. Open, low: a nested fn read only
-     by itself warns `unused variable`, where rustc says `function is never used` (TICKET-283).
+     `import b.math`) binds `math` once, so a third binding clashes. TICKET-283 closed the
+     low item: a nested fn read only by itself warns `function 'f' is never used` (rustc `dead_code`).
    - TICKET-266, a `never` return type (filed 2026-10-18): `exit` and `panic` declare `-> never`,
      and a call of that type leaves its block (Rust `-> !`). It deletes the `panic("unreachable")`
      lines that TICKET-263 put after `os.exit`.
