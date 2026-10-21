@@ -6,6 +6,7 @@
 # ===== EMPTY SEMANTICS (load-bearing, consistent across all three types) =====
 # Every removal/peek returns T? — Heap.pop/peek, Deque.pop_front/pop_back/peek_front/peek_back.
 # An empty container yields `None` (never a fault), matching the builtin `list.pop() -> T?`.
+# Each type is Iterable (an `iter` hook): see each type's `iter` for its order.
 #
 # ===== ORDERED MAP: intentionally NOT provided =====
 # The builtin `map` is ALREADY insertion-ordered (map.keys()/values()/`for k,v in m` all iterate in
@@ -83,6 +84,11 @@ struct Heap[T]:
     # Is the heap empty? O(1).
     fn is_empty(self) -> bool:
         return self.data.len() == 0
+
+    # A cursor over the elements in NO particular order (Rust `BinaryHeap::iter`). Iterating does not
+    # pop. It reads a snapshot taken when it is made. O(n).
+    fn iter(self) -> Iterator[T]:
+        return self.data.iter()
 
 # A MIN-heap of ints (smallest pops first). Ergonomic factory over the `a < b` comparator.
 fn min_heap() -> Heap[int]:
@@ -167,6 +173,18 @@ struct Deque[T]:
     fn is_empty(self) -> bool:
         return self.front.len() + self.back.len() == 0
 
+    # A cursor over the elements front to back (Python `deque`, Rust `VecDeque::iter`). It reads a
+    # snapshot taken when it is made, so a later push or pop does not change it. O(n).
+    fn iter(self) -> Iterator[T]:
+        out: List[T] = []
+        i := self.front.len() - 1
+        while i >= 0:
+            out.push(self.front[i])
+            i = i - 1
+        for x in self.back:
+            out.push(x)
+        return out.iter()
+
 # NOTE: there is no `deque()` factory — a no-argument generic factory cannot bind T (it would return
 # an uninstantiable `Deque[T]` that will not unify with a `Deque[int]` annotation). Construct directly:
 # `d: Deque[int] = Deque([], [])` or `Deque[int]([], [])`; the statement that creates the deque
@@ -220,6 +238,11 @@ struct Counter[T: Hashable]:
         if kk > pairs.len():
             kk = pairs.len()
         return pairs[0..kk]
+
+    # A cursor over the `(item, count)` pairs in insertion order, as a `Map[T, int]` iterates. It
+    # reads a snapshot taken when it is made. O(n).
+    fn iter(self) -> Iterator[(T, int)]:
+        return self.data.iter()
 
 # NOTE: there is no `counter()` factory — same reason as Deque: a no-argument generic factory cannot
 # bind T. Construct directly: `c: Counter[str] = Counter({})` or `Counter[str]({})`; that statement gives T.
