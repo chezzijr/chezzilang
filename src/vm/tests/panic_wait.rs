@@ -799,11 +799,14 @@ fn parallel_nested_nursery_on_pool() {
 fn executor_faulting_job_does_not_hang_shutdown() {
     let src = "import Executor from std.concurrency\n\
                ex := Executor()\n\
-               ex.submit(fn(): panic(\"boom\"))\n\
+               t := ex.submit(fn(): panic(\"boom\"))\n\
                r: None!Error = recover: ex.shutdown()\n\
                match r:\n    \
                    ?_: print(\"no fault\")\n    \
-                   !e: print(\"caught: {e.message()}\")\n";
+                   !e: print(\"caught: {e.message()}\")\n\
+               match t.get():\n    \
+                   ?_: print(\"value\")\n    \
+                   !e: print(\"task: {e.message()}\")\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));
@@ -811,9 +814,10 @@ fn executor_faulting_job_does_not_hang_shutdown() {
     let got = rx
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("shutdown() must not hang when a job ends abnormally");
-    // TICKET-208 — a fire-and-forget fault ends the run; no `recover:` catches it.
-    let err = got.expect_err("the job's fault ends the run");
-    assert!(err.message.contains("boom"), "fault was: {}", err.message);
+    // TICKET-289 — a job's fault is its Task's outcome: `shutdown()` raises nothing, the run goes
+    // on, and `t.get()` gives the fault message.
+    let out = got.expect("the job's fault does not end the run");
+    assert_eq!(out, "no fault\ntask: boom\n");
 }
 
 /// B3.3-threads (decision F, review coverage gap): each worker buffers its own stdout and the join

@@ -1414,7 +1414,7 @@ fn timed_out_across_spawn() {
 }
 
 #[test]
-fn a_job_fault_never_cuts_a_sibling_so_the_timeout_ends_the_test() {
+fn a_job_fault_does_not_end_a_test_so_its_spinning_sibling_times_out() {
     // TICKET-289 — job 0's fault is its Task's outcome: it cancels no sibling and cuts no `recover:`.
     // Job 1's spin keeps `ex.shutdown()` waiting, so the wall-clock cap ends the test, and the
     // job fault never reaches the report. (TICKET-208 had the fault end the run at once.)
@@ -2834,26 +2834,24 @@ fn json_carries_the_file_level_diagnostic() {
 }
 
 #[test]
-fn a_tests_detached_executor_is_joined_and_its_job_fault_errors_through_get() {
-    // TICKET-289 — an unread job fault leaves the test passing; `task.get()` re-raises it.
+fn a_tests_detached_executor_is_joined_and_its_job_fault_stays_in_its_task() {
+    // TICKET-289 — an unread job fault leaves the test passing; `t.get()` gives it as `!e`.
     let d = TmpDir::new();
-    let head = "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\n\
-                test fn t():\n    ex := concurrency.Executor()\n    task := ex.submit(boom)\n";
-    let unread = d.write("f7_test.chz", &format!("{head}    assert true\n"));
-    let report = run_tests(&unread);
-    assert!(report.passed, "report:\n{}", report.text);
-    let read = d.write(
-        "f7b_test.chz",
-        &format!("{head}    match task.get():\n        ?_: pass\n        !e: panic(e.message())\n"),
+    let f = d.write(
+        "f7_test.chz",
+        "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\n\
+         test fn t():\n    ex := concurrency.Executor()\n    _ := ex.submit(boom)\n\n\
+         test fn kept():\n    ex := concurrency.Executor()\n    t := ex.submit(boom)\n    ex.shutdown()\n    \
+         match t.get():\n        ?v: assert false, \"value {v}\"\n        !e: assert e.message().contains(\"index 9 out of bounds (len 1)\")\n",
     );
-    let report = run_tests(&read);
-    assert!(report.text.contains("ERROR t"), "report:\n{}", report.text);
+    let report = run_tests(&f);
+    assert!(report.passed, "report:\n{}", report.text);
+    assert!(report.text.contains("PASS t"), "report:\n{}", report.text);
     assert!(
-        report.text.contains("index 9 out of bounds (len 1)"),
+        report.text.contains("PASS kept"),
         "report:\n{}",
         report.text
     );
-    assert!(!report.passed, "report:\n{}", report.text);
 }
 
 #[test]

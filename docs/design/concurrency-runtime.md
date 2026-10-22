@@ -55,7 +55,7 @@ before it marks its body blocked, so a judge never sees a blocked body with no p
 **Every blocked thing is asked, and a verdict stands only inside one epoch (TICKET-236).** Two
 windows let a verdict fault a healthy program. Both are closed by derivation, not by a retry.
 
-*The cut window.* `shutdown_now()` cuts a job: the job leaves the counts, its handle is sealed,
+*The cut window.* `ex.cancel()` cuts a job: the job leaves the counts, its handle is sealed,
 the scheduler lock drops, and only then the reader of the handle is requeued. A parked reader
 was only counted (`parked_n`), never asked about its channel, so a judge in that window read
 "all parked". A nursery task reading a cut job's handle faulted `deadlock: every task in this
@@ -67,7 +67,7 @@ count (300 rounds, release). Now one pair of answers, `recv_satisfiable` and `wa
 
 *The read order.* A judge reads schedulers one lock at a time. A job can send and finish between
 two reads: the judge saw the reader blocked on an empty channel, then saw the job done. Each
-read is true and the pair describes no instant. This needs no `shutdown_now()`: a reader inside
+read is true and the pair describes no instant. This needs no `ex.cancel()`: a reader inside
 a `map` callback faulted in 3 to 5 of 60 runs (100 rounds) on the base binary. Now the run has
 one epoch (`QuiesceState::left`). Every way a waker leaves the counts a verdict reads moves it,
 and each verdict entry (`QuiesceState::decide_since`, `MnSched::latch_own_verdict`, the nursery

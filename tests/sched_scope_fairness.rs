@@ -195,7 +195,8 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
         } else {
             "_r2 := recover: ex.shutdown()"
         };
-        // A fire-and-forget job's own fault ends the run, so the job cell recovers inside the job.
+        // A job's own fault stays in its Task; the job cell still recovers inside the job, so the
+        // cell's scope fault is the only fault under test.
         let job = if nest == "job" { "guarded" } else { "outer" };
         format!(
             "c := Channel[int](0)\nstarted := Channel[int](1)\nex := Executor()\n_ := ex.submit(fn(): {job}(c, started))\n{stop}"

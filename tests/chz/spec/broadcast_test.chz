@@ -370,7 +370,8 @@ test fn readers_sharing_a_small_mailbox_count_every_value_once():
     four := small_cap_shared_trial(4)
     assert four == "ok", "4 readers: {four}"
 
-fn blocked_reader(rx: Receiver[int]) -> int:
+fn blocked_reader(rx: Receiver[int], started: Channel[int]) -> int:
+    started.send(1)
     match rx.recv():
         ?v: return v
         !e: return 0 - e.missed
@@ -383,9 +384,14 @@ test fn try_recv_returns_none_while_another_reader_is_receiving():
     b := Broadcast[int].new(4)
     rx := b.subscribe()
     got := Channel[int](1)
+    started := Channel[int](1)
     ex := Executor()
-    _ := ex.submit(fn(): got.send(blocked_reader(rx)))
-    assert rx.try_recv() == None
+    _ := ex.submit(fn(): got.send(blocked_reader(rx, started)))
+    started.recv()
+    # The reader is now parked in `recv` or about to park. A `try_recv` that queued behind its
+    # receive step would never return, since nothing is sent yet.
+    for _ in 0..200:
+        assert rx.try_recv() == None
     b.send(7)
     assert got.recv() == 7
     ex.shutdown()

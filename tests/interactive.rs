@@ -552,8 +552,8 @@ fn fault_under_broken_pipe_is_not_success_mn() {
 /// every submitted job and completes all three writes at `max_workers` 1/2/4 — the ancestor that owns
 /// `Executor` semantics, where every job has a handle (a `Future`), and what this asserts. Go has no
 /// executor; its goroutines take SIGPIPE on fd 1 and the whole process dies — which is what a
-/// FIRE-AND-FORGET job's fault does here since TICKET-208 (it ends the run at once), pinned by
-/// `dead_stdout_in_a_fire_and_forget_job_ends_the_run_naming_the_pipe` below.
+/// dropped job's write to a dead stdout does here: the stream halt (not the job's Task) ends the run
+/// at once, pinned by `dead_stdout_in_a_fire_and_forget_job_ends_the_run_naming_the_pipe` below.
 ///
 /// The `spew` job is what breaks the pipe. The markers write FILES, never stdout, so they are
 /// observable after the pipe is gone — and the run must STILL fault non-zero naming the pipe (main
@@ -562,8 +562,9 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs(threads: Option<usize>, wri
     dead_stdout_under_an_executor(threads, writes, true);
 }
 
-/// `handle` picks how `spew` is submitted: `submit_task` (the fault is the handle's `Err`, siblings
-/// run to completion) or a bare `ex.submit` (the fault ends the run; no marker is asserted, because
+/// `handle` picks how `spew` is submitted: a kept `t := ex.submit(spew)` (the fault is the Task's
+/// `!e` from `t.get()`, siblings run to completion) or a dropped `_ := ex.submit(spew)` (the fault
+/// stays in the unread Task; the dead stdout ends the run, and no marker is asserted, because
 /// whether the sibling wrote before the cut is a race).
 fn dead_stdout_under_an_executor(threads: Option<usize>, writes: usize, handle: bool) {
     let tail = if handle {

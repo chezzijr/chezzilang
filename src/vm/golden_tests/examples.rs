@@ -1264,36 +1264,24 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
 ///
 /// TICKET-195 changed all three to the FAULTING party's frames: the job's `[boom, <closure>]`, the
 /// child's `[boom, <spawned task>]`, at a join or at the exit drain alike (Go prints the panicking
-/// goroutine's stack; CPython the job's traceback). Edge 2 changed with TICKET-208: a
-/// fire-and-forget job's fault ends the run, so it is the report there too, with the job's frames.
+/// goroutine's stack; CPython the job's traceback). TICKET-289 then moved a job's fault into its Task: a
+/// job fault stays in its Task, so the Executor cells below assert a clean run.
 #[test]
 fn executor_task_fault_trace_matches_on_both_engines() {
     let dir = std::env::temp_dir().join("chezzi_b4_executor_trace");
     std::fs::create_dir_all(&dir).unwrap();
 
-    // Executor.submit path.
-    let ex_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    ex.shutdown()\nmain()\n";
+    // Executor.submit path (TICKET-289): the job's fault is its Task's outcome. The run does not
+    // fault and `t.get()` gives the message, on both runs.
+    let ex_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    t := ex.submit(fn(): boom())\n    ex.shutdown()\n    match t.get():\n        ?_: print(\"value\")\n        !e: print(\"task {e.message()}\")\nmain()\n";
     let ex_path = dir.join("ex.chz");
     std::fs::write(&ex_path, ex_src).unwrap();
-    let (_o, _e, se, _) = run_file(&ex_path);
-    let (_o, _e, mn, _) = run_file(&ex_path);
-    let se = se.expect_err("should fault");
-    let mn = mn.expect_err("M:N should fault");
-    let se_names: Vec<&str> = se.trace.iter().map(|f| f.function.as_str()).collect();
-    let mn_names: Vec<&str> = mn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(
-        se_names,
-        vec!["boom", "<closure>"],
-        "Executor trace == the job's"
-    );
-    assert_eq!(
-        mn_names,
-        vec!["boom", "<closure>"],
-        "M:N Executor trace == the job's"
-    );
-    // Soundness invariants (message + location) stay identical across engines.
-    assert_eq!(se.message, mn.message, "same fault message");
-    assert_eq!(se.span, mn.span, "same fault location");
+    let (so, _e, se, _) = run_file(&ex_path);
+    let (mo, _e, mn, _) = run_file(&ex_path);
+    se.expect("a job fault does not end the run");
+    mn.expect("M:N: a job fault does not end the run");
+    assert_eq!(so, "task kaboom\n", "the fault is in the Task");
+    assert_eq!(so, mo, "same output on both runs");
 
     // Neighbor guard: a plain nursery-task panic (non-Executor) prints the child's frames too.
     let nu_src = "fn boom():\n    panic(\"kaboom\")\nfn main():\n    parallel:\n        spawn: boom()\nmain()\n";
@@ -1316,52 +1304,26 @@ fn executor_task_fault_trace_matches_on_both_engines() {
         "M:N nursery trace == the child's"
     );
 
-    // B4 review edge 1: IMPLICIT end-of-program drain (no `ex.shutdown()`) — the executor is
-    // reaped by `drain_live_executors` AFTER `main` returned. It printed an EMPTY trace (no
-    // enclosing `run_until` to re-capture at); since TICKET-195 the drain's join adopts the job's.
-    let im_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\nmain()\n";
+    // B4 review edge 1 (TICKET-289): IMPLICIT end-of-program drain (no `ex.shutdown()`). The drain
+    // joins the executor and raises no job fault, so the run ends clean.
+    let im_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): boom())\nmain()\n";
     let im_path = dir.join("implicit.chz");
     std::fs::write(&im_path, im_src).unwrap();
     let (_o, _e, ise, _) = run_file(&im_path);
     let (_o, _e, imn, _) = run_file(&im_path);
-    let ise = ise.expect_err("implicit drain should fault");
-    let imn = imn.expect_err("M:N implicit drain should fault");
-    let ise_names: Vec<&str> = ise.trace.iter().map(|f| f.function.as_str()).collect();
-    let imn_names: Vec<&str> = imn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(
-        ise_names,
-        vec!["boom", "<closure>"],
-        "implicit-drain trace == the job's"
-    );
-    assert_eq!(
-        imn_names,
-        vec!["boom", "<closure>"],
-        "M:N implicit-drain trace == the job's"
-    );
+    ise.expect("the implicit drain raises no job fault");
+    imn.expect("M:N: the implicit drain raises no job fault");
 
-    // B4 review edge 2: `defer ex.shutdown()` while `main` is unwinding from an outer panic.
-    // TICKET-208 — the fire-and-forget job's fault ends the run and outranks `main`'s own cause
-    // (DEC-200), so the report is `kaboom` with the job's frames.
-    let df_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    defer ex.shutdown()\n    panic(\"outer\")\nmain()\n";
+    // B4 review edge 2 (TICKET-289): `defer ex.shutdown()` while `main` is unwinding from an outer
+    // panic. The dropped job's fault stays in its Task, so `main`'s own fault is the report.
+    let df_src = "import Executor from std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): boom())\n    defer ex.shutdown()\n    panic(\"outer\")\nmain()\n";
     let df_path = dir.join("defer_unwind.chz");
     std::fs::write(&df_path, df_src).unwrap();
     let (_o, _e, dse, _) = run_file(&df_path);
     let (_o, _e, dmn, _) = run_file(&df_path);
     let dse = dse.expect_err("defer-unwind should fault");
     let dmn = dmn.expect_err("M:N defer-unwind should fault");
-    let dse_names: Vec<&str> = dse.trace.iter().map(|f| f.function.as_str()).collect();
-    let dmn_names: Vec<&str> = dmn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(dse.message, "kaboom", "the job's fault is the report");
-    assert_eq!(
-        dse_names,
-        vec!["boom", "<closure>"],
-        "defer-unwind trace == the job's"
-    );
-    assert_eq!(
-        dmn_names,
-        vec!["boom", "<closure>"],
-        "M:N defer-unwind trace == the job's"
-    );
+    assert_eq!(dse.message, "outer", "main's fault is the report");
     assert_eq!(dse.message, dmn.message, "defer-unwind same fault message");
     assert_eq!(dse.span, dmn.span, "defer-unwind same fault location");
 }

@@ -15,7 +15,7 @@ fn main():
         started.send(1)
         return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): s.update(hold))
+    _ := ex.submit(fn(): s.update(hold))
     _ := started.recv()
     s.update(fn(x: int) -> int: x + 1)
     print("main: past the guard, s={s.get()}")
@@ -103,7 +103,7 @@ fn main():
         started.send(1)
         return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): s.update(hold))
+    _ := ex.submit(fn(): s.update(hold))
     _ := started.recv()
     s.update(fn(x: int) -> int: x + 1)
     print("AFTER")
@@ -125,7 +125,7 @@ fn main():
         started.send(1)
         return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): s.update(hold))
+    _ := ex.submit(fn(): s.update(hold))
     _ := started.recv()
     s.update(fn(x: int) -> int: x + 1)
     c.send(1)
@@ -148,7 +148,7 @@ fn main():
         started.send(1)
         return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): r.write(hold))
+    _ := ex.submit(fn(): r.write(hold))
     _ := started.recv()
     v := r.read(fn(x: int) -> int: x)
     print("AFTER {v}")
@@ -168,13 +168,13 @@ import std.time
 fn main():
     c := Channel[int](0)
     ex := Executor()
-    ex.submit(fn(): print(c.recv()))
+    _ := ex.submit(fn(): print(c.recv()))
     time.sleep_ms(50)
     ex.shutdown()
     print("AFTER")
 main()
 "#,
-        site: "6:27",
+        site: "6:32",
         after_ok: false,
         test_mode: false,
     },
@@ -186,14 +186,14 @@ fn main():
     a := Channel[int](0)
     b := Channel[int](0)
     ex := Executor()
-    ex.submit(fn(): b.send(a.recv()))
-    ex.submit(fn(): a.send(b.recv()))
+    _ := ex.submit(fn(): b.send(a.recv()))
+    _ := ex.submit(fn(): a.send(b.recv()))
     time.sleep_ms(50)
     ex.shutdown()
     print("AFTER")
 main()
 "#,
-        site: "7:28",
+        site: "7:33",
         after_ok: false,
         test_mode: false,
     },
@@ -203,12 +203,12 @@ main()
 import std.time
 fn inner(c: Channel[int]):
     ex2 := Executor()
-    ex2.submit(fn(): print(c.recv()))
+    _ := ex2.submit(fn(): print(c.recv()))
     ex2.shutdown()
 fn main():
     c := Channel[int](0)
     ex := Executor()
-    ex.submit(fn(): inner(c))
+    _ := ex.submit(fn(): inner(c))
     time.sleep_ms(50)
     ex.shutdown()
     print("AFTER")
@@ -325,14 +325,14 @@ test fn a_deadlocks():
         started.send(1)
         return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): s.update(hold))
+    _ := ex.submit(fn(): s.update(hold))
     _ := started.recv()
     s.update(fn(x: int) -> int: x + 1)
     print("AFTER")
 
 test fn b_runs():
     ex := Executor()
-    ex.submit(fn(): print("B"))
+    _ := ex.submit(fn(): print("B"))
     ex.shutdown()
 "#,
         site: "13:5",
@@ -452,6 +452,8 @@ main()
         after_ok: false,
         test_mode: false,
     },
+    // TICKET-289: the job's fault stays in its Task, so it is no cut cause. Main waits on a channel
+    // nothing sends to, and the deadlock verdict ends the run at main's own `jch.recv()`.
     Row {
         name: "job_defer",
         src: r#"import Executor from std.concurrency
@@ -461,14 +463,14 @@ fn main():
     stuck := Channel[int](0)
     jch := Channel[int](0)
     ex := Executor()
-    ex.submit(fn(): work(jch, [1, 2]))
+    _ := ex.submit(fn(): work(jch, [1, 2]))
     defer:
         print(stuck.recv())
     print(jch.recv())
     print("AFTER")
 main()
 "#,
-        site: "3:12",
+        site: "11:11",
         after_ok: false,
         test_mode: false,
     },

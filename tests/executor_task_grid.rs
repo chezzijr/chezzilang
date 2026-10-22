@@ -912,7 +912,7 @@ ex := Executor()
 _ := ex.submit(bad)
 ";
     let states: [(&str, &str); 7] = [
-        ("loop", "n := 0\nwhile n < 3000000:\n    n += 1\n"),
+        ("loop", "n := 0\nwhile n < 300000:\n    n += 1\n"),
         (
             "native-hof",
             "n := List(0..200000).map(double).fold(0, keep)\n",

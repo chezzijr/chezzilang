@@ -77,6 +77,7 @@ fn std_internal_names_are_hidden_from_user_modules() {
     // (b) every top-level `_` name and every `_` method of every std file.
     let mut members: Vec<(String, String)> = Vec::new();
     let mut methods = std::collections::BTreeSet::new();
+    let mut fields = std::collections::BTreeSet::new();
     for (module, src) in std_module_sources() {
         let mut owner = String::new();
         for line in src.lines() {
@@ -106,6 +107,13 @@ fn std_internal_names_are_hidden_from_user_modules() {
                     if body.starts_with(kw) {
                         let name = leading_ident(&body[kw.len() - 1..]);
                         methods.insert((module.clone(), owner.clone(), name));
+                    }
+                }
+                // A field line of a struct body: four spaces, `_name:`.
+                if line.len() - body.len() == 4 && body.starts_with('_') {
+                    let name = leading_ident(body);
+                    if body[name.len()..].starts_with(':') {
+                        fields.insert((module.clone(), owner.clone(), name));
                     }
                 }
             }
@@ -159,6 +167,61 @@ fn std_internal_names_are_hidden_from_user_modules() {
         methods, want_methods,
         "a std `_` method needs a call cell below before it joins this set"
     );
+    // TICKET-289: a std struct's `_` field is hidden from user modules (`struct_field_ty`). Every
+    // one the walk found needs a read cell below, a write cell for `Task`, and no help line that
+    // names it.
+    let want_fields: std::collections::BTreeSet<(String, String, String)> = [
+        ("std.concurrency", "Task", "_ch"),
+        ("std.concurrency", "Task", "_cached"),
+        ("std.concurrency", "Task", "_ex"),
+        ("std.concurrency.broadcast", "Receiver", "_ch"),
+        ("std.concurrency.broadcast", "Receiver", "_next"),
+        ("std.concurrency.broadcast", "Receiver", "_held"),
+        ("std.concurrency.broadcast", "Receiver", "_lock"),
+        ("std.concurrency.broadcast", "Broadcast", "_cap"),
+        ("std.concurrency.broadcast", "Broadcast", "_hub"),
+    ]
+    .iter()
+    .map(|(m, o, n)| (m.to_string(), o.to_string(), n.to_string()))
+    .collect();
+    assert_eq!(
+        fields, want_fields,
+        "a std `_` field needs a read cell below before it joins this set"
+    );
+    let task = "import Executor from std.concurrency\nfn f() -> int: return 1\nex := Executor()\nt := ex.submit(f)\n";
+    let bcast = "import Broadcast from std.concurrency.broadcast\nb := Broadcast[int].new(2)\nrx := b.subscribe()\n";
+    for (setup, recv, ty, name) in [
+        (task, "t", "Task[int]", "_ch"),
+        (task, "t", "Task[int]", "_cached"),
+        (task, "t", "Task[int]", "_ex"),
+        (bcast, "rx", "Receiver[int]", "_ch"),
+        (bcast, "rx", "Receiver[int]", "_next"),
+        (bcast, "rx", "Receiver[int]", "_held"),
+        (bcast, "rx", "Receiver[int]", "_lock"),
+        (bcast, "b", "Broadcast[int]", "_cap"),
+        (bcast, "b", "Broadcast[int]", "_hub"),
+    ] {
+        let src = format!("{setup}print({recv}.{name})\n");
+        let errs = check_entry(&src);
+        assert!(
+            errs.iter().any(|e| e
+                .message
+                .contains(&format!("type {ty} has no field '{name}'"))),
+            "{recv}.{name}: expected `has no field`, got: {errs:?}"
+        );
+        assert!(
+            !errs
+                .iter()
+                .any(|e| e.help.as_deref().is_some_and(|h| h.contains(name))),
+            "{recv}.{name}: the help names the hidden field: {errs:?}"
+        );
+    }
+    // A write is sealed too; a public method is not.
+    entry_rejects(
+        &format!("{task}t._ch = Channel[int!](1)\n"),
+        "has no field '_ch'",
+    );
+    entry_ok(&format!("{task}print(t.get())\nprint(t.done())\n"));
     entry_rejects(
         "import std.cancel\nt := cancel.manual()\nt._mark()\n",
         "type Token has no method '_mark'",

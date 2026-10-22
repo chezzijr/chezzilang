@@ -1,9 +1,9 @@
 # tests/chz/stdlib/executor_drain_test.chz — `Executor.shutdown` drain semantics (W7-5).
 #
-# Contract (TICKET-208): `shutdown` waits for EVERY submitted job and raises no job fault. A HANDLE
-# job's fault is its handle's `!e` and costs its own result, never a sibling's work. A
-# fire-and-forget job's fault ends the whole run, so it has no test here (see
-# `tests/executor_task_grid.rs`). Early-stop is opt-in via a `std.cancel.Token`, not a drain mode.
+# Contract (TICKET-208, TICKET-289): `shutdown` waits for EVERY submitted job and raises no job fault. A
+# job's fault is its Task's `!e` from `t.get()` and costs its own result, never a sibling's work. A
+# dropped Task keeps its fault there too (see `tests/executor_task_grid.rs`). Early-stop is `ex.cancel()`
+# or `t.cancel()`, not a drain mode.
 #
 # These assert on an `AtomicInt` accumulator read AFTER the drain returns, never on inter-task print
 # order (N9 / nondeterministic cross-task ordering). Gated by
