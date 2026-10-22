@@ -33,7 +33,7 @@ the netpoller and `std.net`. There is one engine: the bytecode VM on its M:N sch
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:
 
-1. a discarded `T!E` / `T?`;
+1. a discarded `T!E` / `T?`, or an unused std `Task` (TICKET-289);
 2. a mutating call or a store on a temporary copy (a `Shared`/`RwShared`/`Atomic` read, a builtin
    slice, `.copy()`, an operator result);
 3. an unreachable `match` arm;
@@ -140,7 +140,15 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    `tests/support/grid_tests.rs`), the `hook_conformance_grid` cap override is deleted, and no test ran
    longer than 60.310 s with two suites at once (two runs: 55.202 s and 60.310 s). `tests/test_time_budget.rs` fails on a `slow-timeout` line
    without `terminate-after = 5 }`; the rule is in `docs/contributing/dev-commands.md`.
-9. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+9. **One `Executor.submit` (TICKET-289, done 2026-10-22).** `ex.submit(f) -> Task[T]` is the only
+   submit form; `submit_result` and the bare submit are gone. `ex.cancel()` replaces `shutdown_now()`
+   and returns at once; `t.cancel()` is new. A job fault or cancel appears only in `t.get()`:
+   `shutdown()`, the run end and a test end raise no ordinary job fault, and a fault cancels no
+   sibling. A `--max-heap` abort is never a Task outcome and a `--timeout` cut leaves the Task
+   unsettled. A refused submit returns an already-settled Task. Open row: a job parked in a stuck
+   `defer` after a nursery child fault, with a cut sleeping body, is not reported as a deadlock (the
+   base binary has the same miss).
+10. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
 
 ### Open questions for the owner
 

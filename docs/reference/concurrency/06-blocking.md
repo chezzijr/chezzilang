@@ -89,7 +89,7 @@ this `!e`). **The op set is `accept`/`read`/`read_bytes`/`write`; `connect` join
 `Executor` job.** Those four wait on a Chezzi peer fiber that can only run on the very thread they
 would block, whereas a `connect` handshake is completed by the kernel and starves no Chezzi party, so
 top-level `main` blocks it and succeeds, as CPython (0.1 ms) and Go (314 µs) both do. Inside a job,
-`connect` refuses instead of spinning in place (an outer `shutdown_now()` at 200 ms ends the run at
+`connect` refuses instead of spinning in place (an outer `cancel()` at 200 ms ends the run at
 209 ms). Use `spawn`/`parallel:` for socket work, which parks instead of blocking.
 
 - **On top-level `main`, an untimed op has NO escape but SIGINT.** The escapes are the op's own

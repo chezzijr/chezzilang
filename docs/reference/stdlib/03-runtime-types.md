@@ -136,7 +136,7 @@ of a value another task owns: a spawned task's argument or capture, or an Execut
 write to such a value faults `this value is this task's copy` (D4, `concurrency.md`); `is_task_copy`
 reads the same mark, so std code can choose between writing a value and reading shared state without
 attempting the write. `false` for a value the calling task owns, a value received from a `Channel`,
-and a scalar. Its std caller is `Task.get()` (`std.concurrency.task`). It is `Kind::Inline`: it reads
+and a scalar. Its std caller is `Task.get()` (`std.concurrency`). It is `Kind::Inline`: it reads
 the calling task's own heap, so it never runs off-heap on the blocking pool.
 
 ```
@@ -163,45 +163,46 @@ core on behalf of a handle its owner aliases: `Task.get()` and a `memoize1` wrap
 
 ### `concurrency.is_settled` — has a handle channel its outcome
 `is_settled(ch) -> bool` (after `import std.concurrency`). True once the channel `ch` is sealed: a
-`submit_result` channel whose job's outcome has been written. Never blocks, and never reads `false`
+`submit` channel whose job's outcome has been written. Never blocks, and never reads `false`
 after `true`. `Task.done()` is this call. A non-channel argument faults. `Kind::Inline`. Its writer,
-`_settle`, and `Executor._submit_settled` are std internals for `submit_result`: a `_` name a std
+`_settle`, and `Executor._submit_settled` are std internals for `submit`: a `_` name a std
 module declares is hidden from user code (the checker reports `has no member` / `has no method`).
-User code calls `submit_result`.
+User code calls `submit`.
 
 ### `Executor` — task pool
 | Member | Behaviour |
 |---|---|
 | `Executor()` | A pool with no cap on the jobs running at once. |
 | `Executor(n: int)` | **At most `n` jobs run at once** (Python `ThreadPoolExecutor(n)`); a job over the cap is held and starts when a running one finishes. `Executor(0)` (or any `n < 1`) faults `Executor(n) needs n >= 1`. A job parked in a blocking op still counts toward the cap, so `n` jobs that each wait for a held job are a deadlock, reported at the parked job's blocking op. |
-| `submit(task: fn() -> _) -> None` | **Starts the job immediately** (detached, fire-and-forget), like Python's `ThreadPoolExecutor.submit`. `task` is any zero-arg callable: a fn, method path, closure, std native (`time.now_ms`) or extern fn. **A job is a spawned task**: it copies its globals at the submit, inherits its creator's cancel chain and parks like any `spawn`ed task. A fire-and-forget job's fault ends the run; no `recover:` catches it. |
-| `shutdown() -> None` | **Wait** for the submitted work. It raises no job fault: a handle job's fault is its handle's `!e` (see `concurrency.md` §8). |
-| `shutdown_now() -> None` | Ask running jobs to stop **cooperatively**, then wait (Java `shutdownNow`). A RUNNING job with no cancellation point still finishes, but a job **sleeping, waiting a timer, or parked in a nested `Executor` join is ended**. A job held by the `Executor(n)` cap never starts, and its handle settles `!e` (CPython `shutdown(cancel_futures=True)`). See `concurrency.md` §cancellation points. |
-| `submit_result[T](f: fn() -> T) -> Channel[T!]` | Submit `f` and get a cap-1 channel carrying its outcome: `?value`, `!message` when the job faulted, or `!"task cancelled: shutdown_now() stopped it before it finished"` when `shutdown_now()`, a creator cancel or a fire-and-forget job fault dropped or cut it. The channel is **sealed**: every `recv` returns the outcome and takes nothing, so do not iterate it with `for`; to collect several outcomes keep a list of `submit_result` channels. `std.concurrency.task.submit_task` / `Task[T]` wraps this primitive. There is no variant that settles into a caller's channel: std seals only a channel std created. |
+| `submit[T](f: fn() -> T) -> Task[T]` | **Starts the job immediately** (detached) and returns its `Task[T]`, like Python's `ThreadPoolExecutor.submit`. `task` is any zero-arg callable: a fn, method path, closure, std native (`time.now_ms`) or extern fn. **A job is a spawned task**: it copies its globals at the submit, inherits its creator's cancel chain and parks like any `spawn`ed task. A job fault is its Task's `get()` outcome; it ends no run and cancels no sibling. A refused submit returns an already-settled Task. An unused Task gets the discard warning. |
+| `shutdown() -> None` | **Wait** for the submitted work. It raises no job fault: a job's fault is its Task's `!e` (see `concurrency.md` §8). |
+| `cancel() -> None` | Ask running jobs to stop **cooperatively** and return at once; `shutdown()` after it waits (Java `shutdownNow`). A RUNNING job with no cancellation point still finishes, but a job **sleeping, waiting a timer, or parked in a nested `Executor` join is ended**. A job held by the `Executor(n)` cap never starts, and its handle settles `!e` (CPython `shutdown(cancel_futures=True)`). See `concurrency.md` §cancellation points. |
+| `Task[T]` | `get() -> T!` returns `?value` or `!message` when the job faulted, or `!"task cancelled: cancel() stopped it before it finished"` when `cancel()` or a creator cancel dropped or cut it. `done() -> bool` and `cancel() -> None` (drop a held job, cut a running one). The outcome is **sealed**: every `get()` returns it. A `--max-heap` abort is never a Task outcome. |
 
-- No held job starts after an `os.exit`, a fire-and-forget job fault, `shutdown_now()` or a creator
+- No held job starts after an `os.exit`, `cancel()` or a creator
   cancel (`concurrency.md` "Job states").
-- `shutdown_now()` cancels held jobs only. A `submit` that returned without a fault and is under the cap
+- `cancel()` cancels held jobs only. A `submit` that returned without a fault and is under the cap
   always starts, and runs to its first cancellation point. The one exception is a run halt (an
-  `os.exit`, a fire-and-forget job fault, a deadlock verdict), which drops it.
-- A `submit` that reads the Executor as shut faults `submit on a shut-down Executor (it no longer
-  accepts work)`. A `submit` racing a job's `shutdown_now()` can meet this fault.
+  `os.exit`, a deadlock verdict), which drops it.
+- A `submit` that reads the Executor as shut returns an already-settled Task whose `get()` is
+  `!"submit on a shut-down Executor (it no longer accepts work)"`. A `submit` racing a job's
+  `cancel()` can meet this refusal.
 
 **Jobs do not print in submission order, and `shutdown()` does not withhold their output.** Under
 `chezzi run` a job's `print` reaches stdout the moment it runs, so concurrent jobs interleave in
 completion order, as with `spawn` and `ThreadPoolExecutor`. Submission order fixes only which job's
 fault wins (`shutdown()` raises the lowest-index one) and the byte order of the **buffered** sink that
-embedders get. For ordered output, collect results with `submit_result` and print them after the join.
+embedders get. For ordered output, collect results with `submit` and print them after the join.
 Full statement: `concurrency.md` §"Output ordering".
 
-A job may `shutdown()`/`shutdown_now()` the executor it runs under: that join waits for the executor's
+A job may `shutdown()`/`cancel()` the executor it runs under: that join waits for the executor's
 *other* jobs and not for itself, and the enclosing join (or the program-exit join) reduces the slots,
 so no sibling's output or fault is lost.
 
 An `Executor` is **detached**: it outlives the scope that made it, and the program waits for its
 outstanding work at exit. Detached is about **lifetime**, not cancellation. An executor created inside
 a *running job* of another executor is still joined at exit, but it inherits that job's cancel, so an
-outer `shutdown_now()` stops the nested executor's jobs at their checkpoints too (`concurrency.md`
+outer `cancel()` stops the nested executor's jobs at their checkpoints too (`concurrency.md`
 §cancellation points). That inheritance is **sticky** (a cancelled parent stays cancelled, as in Go),
 so a later `submit` to such an executor **faults**: `submit on an Executor whose creating job was
 cancelled`. **Read results after `shutdown()`, never between it and the `submit`**: in that window a

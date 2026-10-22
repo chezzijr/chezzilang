@@ -109,17 +109,18 @@ before the collect, so a task never outlives the call (structured concurrency); 
 into each task by value. `pmap_limited` is also the standard concurrency limiter: use it to cap
 parallel calls into a rate-limited resource.
 
-### `std.concurrency.task` — result handles for `Executor` work
-`import submit_task from std.concurrency.task` (or `import std.concurrency.task`). Pure Chezzi over
-the sealed cap-1 channel that `submit_result` returns. Every copy of the handle reads that channel, so
+### `std.concurrency.Task` — result handles for `Executor` work
+`ex.submit(f)` returns a `Task[T]` (after `import Executor from std.concurrency`). It is pure Chezzi over
+the sealed cap-1 channel of the job's outcome. Every copy of the handle reads that channel, so
 a spawned task or an Executor job holding a copy gets the same answer as the parent (CPython `Future`).
-Bare `Executor.submit(f)` is fire-and-forget (returns nothing); `submit_task` gives you a handle.
+`ex.submit` is the one submit form.
 
 | item | signature | semantics |
 | --- | --- | --- |
-| `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | Submit `f` to `ex` for detached execution and get a handle for its result. The work STARTS at the submit; `shutdown()` (or the program-exit join) waits for it. |
-| `Task.get` | `get(self) -> T!` | Block until the outcome is available, then return it: `?value`, or `!message` when the job faulted or `shutdown_now()` cancelled it (CPython `Future.result()`, a `T!E` in place of a raise). Idempotent, and the same answer in every task. See the identity rules below. |
-| `Task.done` | `done(self) -> bool` | `true` once the job has finished, faulted, or been cancelled by `shutdown_now()`, in every task holding a copy of the handle. Never blocks, and never reads `false` after `true` (it reads `concurrency.is_settled`). A faulted job is done; `get()` then returns its `!e`. |
+| `Executor.submit` | `submit[T](self, f: fn() -> T) -> Task[T]` | Submit `f` for detached execution and get a handle for its result. The work STARTS at the submit; `shutdown()` (or the program-exit join) waits for it. |
+| `Task.get` | `get(self) -> T!` | Block until the outcome is available, then return it: `?value`, or `!message` when the job faulted or `cancel()` cancelled it (CPython `Future.result()`, a `T!E` in place of a raise). A job fault appears only here. Idempotent, and the same answer in every task. See the identity rules below. |
+| `Task.done` | `done(self) -> bool` | `true` once the job has finished, faulted, or been cancelled by `cancel()`, in every task holding a copy of the handle. Never blocks, and never reads `false` after `true` (it reads `concurrency.is_settled`). A faulted job is done; `get()` then returns its `!e`. |
+| `Task.cancel` | `cancel(self) -> None` | Drop the job when it is held, cut it at its next cancellation point when it runs. A job that already returned keeps its value. |
 
 `Task.get` identity:
 - In the task that holds the original handle, every call returns the same object, so
@@ -130,8 +131,7 @@ Bare `Executor.submit(f)` is fire-and-forget (returns nothing); `submit_task` gi
 - A copy whose owner had not called `get()` before the crossing gets a fresh snapshot from the channel
   on each call, marked as the task's copy, so a write to it faults too. `.copy()` gives a writable
   value.
-- A task that `shutdown_now()` cancelled, a held job that `shutdown_now()` dropped, and a job that a
-  fire-and-forget fault cut return `task cancelled: shutdown_now() stopped it before it finished` at
+- A task that `cancel()` cancelled and a held job that `cancel()` dropped return `task cancelled: cancel() stopped it before it finished` at
   once (CPython: `CancelledError`).
 
 Canonical shape: submit every task, `shutdown()`, then `.get()` each. **Determinism rule:** a `Task`'s

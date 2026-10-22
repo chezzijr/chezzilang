@@ -45,10 +45,9 @@ fn main():
 
 | Method | Behaviour |
 |--------|-----------|
-| `submit(f)` | **start** a detached, side-effect-only job at once (results leave via a `Channel`, like `spawn`); returns immediately without waiting for it. **Faults** on an executor that no longer accepts work: after its own `shutdown()`/`shutdown_now()` (`submit on a shut-down Executor (it no longer accepts work)`), or — because the inherited cancel chain is sticky — after the job that CREATED it was cancelled (`submit on an Executor whose creating job was cancelled`) |
-| `submit_result(f)` | like `submit`, and returns a sealed `Channel[T!]` with the outcome ([§5b](02-channel.md#5b-stdconcurrencytask--result-handles-for-executor-work)) |
-| `shutdown()` | **graceful** — stop accepting new work, then **wait** for the submitted work (a handle job's fault does not stop its siblings; a fire-and-forget job's fault ends the run, see [Faults and the drain contract](#faults-and-the-drain-contract)) |
-| `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point (a bare CPU loop with no back-edge, a syscall already in the kernel) still finishes. A job **sleeping, waiting a timer, or parked in a nested `Executor` join IS ended**, and so is a task of a nursery the job opened that is parked on a channel or in a socket `accept`/`read`/`write`/`connect`. It reaches jobs of a NESTED executor too |
+| `submit(f)` | **start** a detached job at once and return its `Task[T]` ([§5b](02-channel.md#5b-stdconcurrencytask--result-handles-for-executor-work)) without waiting for it. A refused submit (after its own `shutdown()`/`cancel()`, or after the job that CREATED the executor was cancelled) returns an already-settled Task whose `get()` is the refusal text (`submit on a shut-down Executor (it no longer accepts work)`, `submit on an Executor whose creating job was cancelled`) |
+| `shutdown()` | **graceful** — stop accepting new work, then **wait** for the submitted work. It raises no job fault: a job fault is its Task's `get()` outcome ([Faults and the drain contract](#faults-and-the-drain-contract)) |
+| `cancel()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, and return at once (Java `shutdownNow`); call `shutdown()` after it to wait for the cut jobs. **Cooperative, not pre-emptive:** a job with no cancellation point (a bare CPU loop with no back-edge, a syscall already in the kernel) still finishes. A job **sleeping, waiting a timer, or parked in a nested `Executor` join IS ended**, and so is a task of a nursery the job opened that is parked on a channel or in a socket `accept`/`read`/`write`/`connect`. It reaches jobs of a NESTED executor too |
 
 - **`defer` is the lifetime knob.** Bind the owner's reaping to any scope with `defer ex.shutdown()` (a
   function, a `recover:` block, the module top level); `defer`'s all-exit-paths guarantee reaps it on
@@ -83,10 +82,10 @@ fn main():
   `worker_count()` plus the number of jobs blocked right now. A job whose nursery is busy keeps its
   slot, so `CHEZZI_THREADS=1` still runs one CPU runner.
 - **A submit that returned without a fault and is under the cap always starts**, unless a run halt (an
-  exit, a job fault, a deadlock verdict) drops it. `shutdown_now()` marks the Executor shut before it
-  trips the cancel, so a `submit` racing a job's `shutdown_now()` either faults or starts its job.
-  `shutdown_now()` cancels held jobs only; a started job runs to its first cancellation point.
-- **A run end keeps what was printed.** A job that faults or calls `os.exit` ends the run, and so does
+  exit, a deadlock verdict) drops it. `cancel()` marks the Executor shut before it
+  trips the cancel, so a `submit` racing a job's `cancel()` either faults or starts its job.
+  `cancel()` cancels held jobs only; a started job runs to its first cancellation point.
+- **A run end keeps what was printed.** A job that calls `os.exit` ends the run, and so does
   a task at any depth of a job's `parallel:` blocks, or a job of an Executor that a job joins, that calls `os.exit`. What it
   printed before that reaches stdout, and so does the output of every job that finished, wherever
   `main` is when the run ends: at a `recv`, in a join, or in the exit drain (Go: a goroutine's writes
@@ -95,41 +94,41 @@ fn main():
 #### Job states
 
 A job is held, running (or parked), or ended. Before it releases a held job, the runtime reads the run
-halt and the Executor's cancel (its own `shutdown_now` flag or its creator's):
+halt and the Executor's cancel (its own `cancel` flag or its creator's):
 
-1. after an `os.exit`: drop every held job and settle no handle. No `defer` runs after an exit and no
+1. after an `os.exit`: drop every held job and settle no Task. No `defer` runs after an exit and no
    reader returns, so nothing runs or prints after it (CPython `os._exit`, Go `os.Exit`).
-2. after a fire-and-forget job fault, or under a cancel: drop every held job and settle each handle
-   job it drops or cuts with the error `task cancelled: shutdown_now() stopped it before it finished`
-   (CPython `shutdown(cancel_futures=True)`). A `defer` still runs after a job fault, and it may read
-   a handle.
-3. else: release held jobs while fewer than `n` run.
+2. under a cancel (`ex.cancel()`, `t.cancel()` on a held job, or a creator cancel): drop every held
+   job and settle each Task it drops or cuts with the error
+   `task cancelled: cancel() stopped it before it finished` (CPython `shutdown(cancel_futures=True)`).
+3. after a deadlock verdict that ended a job: drop every held job.
+4. else: release held jobs while fewer than `n` run.
 
-So no held job starts after an exit, a job fault, `shutdown_now()` or a creator cancel. One shape stays
-accepted: a non-`defer` reader already waiting on a handle when a job fault lands may take the cancel
-`!e` and run to its next wait or back-edge. The deadlock verdict still reaps a parked job without
-settling its handle. Grid: `tests/executor_stop_grid.rs`.
+A job fault does not drop a held job. A started job that returns after a cancel keeps its value, and a
+ready `recv` completes after a cancel. Grid: `tests/executor_stop_grid.rs`.
 
 #### Faults and the drain contract
 
-- **A fire-and-forget job's fault ends the run at once**: no `recover:` catches it, and the first fault
-  is the report.
-- **A handle job** (`submit_result`, `submit_task`) never faults by itself: its fault is its handle's
-  `!e`, and `shutdown()` raises no job fault.
-- **A handle job's fault costs only its own result.** Its siblings still run (Python's
+- **A job fault or cancel appears only in `t.get()`.** `get()` returns the value or the `!e` of the
+  fault (the message, no file or line). `shutdown()`, the run end and the end of a test raise no
+  ordinary job fault. An unused `Task` gets the discard warning: bind it (`t := …`) or discard it
+  (`_ := …`).
+- **A job fault costs only its own result.** Its siblings still run (Python's
   `ThreadPoolExecutor`, Java's `ExecutorService`, Go's `errgroup`, none of which abort siblings by
   default). A non-terminating sibling therefore still blocks `shutdown()`.
-- **A fire-and-forget job's fault stops the siblings with the run.** A held sibling never starts:
+- **A hard abort is never a Task outcome.** A `--max-heap` abort ends the run, and a `--timeout` cut
+  leaves the Task unsettled; `os.exit` and a deadlock verdict are run halts as well.
 
   ```chezzi
   ex := Executor(1)
-  ex.submit(bad)      # faults: index 5 out of bounds
-  ex.submit(slow)     # never runs; "sibling ran" is not printed
-  ex.shutdown()
+  bad_t := ex.submit(bad)    # faults: index 5 out of bounds
+  slow_t := ex.submit(slow)  # still runs: "sibling ran" is printed
+  ex.shutdown()              # no fault here
+  match bad_t.get():
+      ?_: pass
+      !e: print(e.message())   # index 5 out of bounds (len 1)
   ```
 
-  Output: `runtime error (...): index 5 out of bounds (len 1)`, exit 1. Use `submit_result` when a
-  sibling must still run after a fault.
 - **Want the siblings to stop?** Thread a `std.cancel.Token` through the closures and poll
   `tok.cancelled()` ([§6e](05-cancel.md#6e-stdcancel--cooperative-cancellation--timeouts)) — the
   same split Go uses (`errgroup` + `context`), and the reason there is no abort flag on the Executor.
@@ -141,13 +140,13 @@ settling its handle. Grid: `tests/executor_stop_grid.rs`.
   and every sibling still runs to completion, matching CPython's `ThreadPoolExecutor`. Under a graceful
   `shutdown()`, a submitted job that never prints and never returns (`while true: j = j + 1`) runs
   forever, so `chezzi run x.chz | head -1` on that program hangs — CPython hangs on the same shape. Use
-  `shutdown_now()`: it cancels that job at its loop back-edge (measured 54 ms). A `parallel:` nursery
+  `cancel()`: it cancels that job at its loop back-edge (measured 54 ms). A `parallel:` nursery
   aborts siblings on any fault, this one included.
 
 #### Cancelling jobs
 
 - **A job sleeping, waiting a timer, or parked in a NESTED `Executor` join IS ended by
-  `shutdown_now()`** (measured: 55 ms against a `time.sleep_ms(3000)`, and the code after the sleep
+  `cancel()`** (measured: 55 ms against a `time.sleep_ms(3000)`, and the code after the sleep
   never runs; 213 ms against a job parked in an inner `shutdown()` whose own job runs
   `process.run("sleep 6")`). That deadline is ours, so it is a continuous checkpoint
   ([§6e](05-cancel.md#cancellation-points)). This is a **deliberate divergence from CPython**:
@@ -159,8 +158,8 @@ settling its handle. Grid: `tests/executor_stop_grid.rs`.
 - **A NESTED executor's jobs are ended too.** An `Executor` created *by a running job* inherits that
   job's cancel flag — keyed on who **created** the executor, never on who calls `submit` (a job of an
   unrelated executor may submit to it without handing over its cancel chain). Measured: an outer job
-  creates an inner executor, submits a `sleep_ms(8000)`, then sleeps 8000 itself; `shutdown_now()` at
-  50 ms ends the run at 56 ms with no job line printed. The ancestors are split: CPython's nested
+  creates an inner executor, submits a `sleep_ms(8000)`, then sleeps 8000 itself; `cancel()` at
+  50 ms cuts the outer job at 56 ms with no job line printed. The ancestors are split: CPython's nested
   `ThreadPoolExecutor` does not propagate (8.04 s, both lines printed); Go's derived
   `context.WithCancel(parent)` does (50 ms). Chezzi follows its own consistency: one spelling of one
   wait cannot have two cancellation rules.
@@ -168,7 +167,7 @@ settling its handle. Grid: `tests/executor_stop_grid.rs`.
 #### Program exit and `chezzi test`
 
 - **Program-exit join.** An `Executor` is **detached** — it outlives the scope that created it — so an
-  executor never explicitly `shutdown`/`shutdown_now`-ed is joined at a clean program exit, in
+  executor never explicitly `shutdown`/`cancel`-ed is joined at a clean program exit, in
   creation order: the run waits for its in-flight work. A hard `std.os.exit` skips it (consistent with
   how it skips `defer`); a faulting program is not joined. This holds for an executor created inside a
   task too.
@@ -178,7 +177,7 @@ settling its handle. Grid: `tests/executor_stop_grid.rs`.
   joined at exit, not at its creating job's return — but it inherits that job's **cancel** flag.
   Lifetime and cancellation are separate axes.
 - **Under `chezzi test`, the join is scoped per test.** An executor created inside a `test fn` (or a
-  suite method) is joined at the end of THAT test, and a job fault there errors the test. An executor
+  suite method) is joined at the end of THAT test, and a job fault there stays in its Task (`t.get()` errors the test). An executor
   created at a `*_test.chz` module top level or in a suite's `before_all` belongs to no test, so it is
   joined only at the end of the FILE, unattributed and best-effort. A job a test leaks that calls
   `std.os.exit` errors THAT test (the run continues, rc=1), while a job leaked through an executor the

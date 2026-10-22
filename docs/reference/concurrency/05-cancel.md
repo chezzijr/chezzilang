@@ -107,7 +107,7 @@ points**, never at every instruction:
 - **loop back-edges**;
 - **blocking / park ops** (`recv`, `wait:`, a socket op, a blocking native like `sleep_ms`);
 - **a nursery join** (a `parallel:` dedent, a function's implicit-nursery join,
-  `Executor.shutdown()` / `shutdown_now()`). A cancelled owner never runs the code after its join —
+  `Executor.shutdown()` / `cancel()`). A cancelled owner never runs the code after its join —
   the join itself raises the cancel (asyncio never runs code after a cancelled `async with`). The
   join checks the cancel the owner holds from an ENCLOSING scope, never its own nursery's fault, and
   never inside a `defer`.
@@ -130,8 +130,7 @@ Precisions:
   `Shared`/`RwShared` each/fold) is checked once per element. A container walk that calls a hook per
   element (a sort of `compare` structs, `xs == ys` over `eq` structs, a `Map` build by `hash`, `str`
   of a list) is one op and is not checked inside; the hook body's own loops still are.
-- **A run-wide halt also lands at every function entry.** An `os.exit`, a fire-and-forget `Executor`
-  job's fault and a deadlock verdict end the run, so a task also receives them when it enters a
+- **A run-wide halt also lands at every function entry.** An `os.exit` and a deadlock verdict end the run, so a task also receives them when it enters a
   Chezzi function. A loop-free recursion stops at its next call, as Go's `os.Exit` stops every
   goroutine. A cancel and a nursery child's fault are not delivered at a call.
 
@@ -162,7 +161,7 @@ native is ENTRY-only:
 | `fs.*`, `request*`, `process*`, `io.*` file I/O | **entry only** | observed after the syscall returns |
 
 A timer deadline is ours to cut short; a `read(2)` already in the kernel is not. The split holds in a
-`parallel:` nursery, in an `Executor` job and on the top-level `main` thread, so `shutdown_now()` and
+`parallel:` nursery, in an `Executor` job and on the top-level `main` thread, so `cancel()` and
 a sibling's fault reach a sleeping task the same way, and the task still unwinds through its
 `defer`s. Killing a subprocess on cancel is an open proposal:
 [`killable-subprocess.md`](../../design/killable-subprocess.md).
@@ -194,7 +193,7 @@ task in a loop-free recursive computation (`fib(34)`) runs it to completion befo
 Trio's model; making a call a checkpoint would put a checkpoint *before the `defer` line* of any
 prologue that calls a function. Go's `context` cancel is cooperative and Python's `TaskGroup` cancels
 at an `await`, so neither stops a running recursion either. Bound a recursive computation yourself if
-a task must tear down promptly. A run-wide halt (`os.exit`, a fire-and-forget job fault, a deadlock
+a task must tear down promptly. A run-wide halt (`os.exit`, a deadlock
 verdict) does stop it, at its next function entry.
 
 **Cancelling a scope cancels its nested scopes — at their CHECKPOINTS.** A `parallel:` entered from a
@@ -233,8 +232,7 @@ prologue, prints what it prints, registers its `defer`, and dies at its first ch
 a task that calls `std.os.exit` may still run part of its prologue, up to its next function entry,
 where the exit reaches it (`print` is a call); it runs no `defer`.
 
-**A `defer` is never itself cancelled** (by a cancel; an `os.exit` does cut it, and a fire-and-forget
-job fault does not). No cancellation point fires *inside* a deferred call. Every registered `defer` of
+**A `defer` is never itself cancelled** (by a cancel; an `os.exit` does cut it). No cancellation point fires *inside* a deferred call. Every registered `defer` of
 a cancelled task runs, in LIFO order (loops, blocking ops and HOF callbacks inside a defer body
 included), whether the task was cancelled at a checkpoint, returned normally, or faulted on its own
 while a sibling had already tripped the scope cancel. A `spawn` / `parallel:` opened inside a `defer`
@@ -242,7 +240,7 @@ gets a **clean slate** — it does not inherit the already-tripped enclosing can
 to completion (they are still cancellable by their *own* nursery's faults).
 
 **A cancelled task's own `defer` fault is a real fault.** A `defer` of a cancelled task (or of a nested
-nursery it aborted) that panics does not vanish: the nursery join, or `Executor.shutdown_now()`, raises
+nursery it aborted) that panics does not vanish: the nursery join, or `Executor.cancel()`, raises
 it (Go and asyncio surface it too). It ranks BELOW every ordinary fault and above a `deadlock` abort —
 the cancel's root cause is the more useful report (asyncio `TaskGroup` lists
 `['boom', 'cleanup failed']`, root cause first). A stuck cleanup's `deadlock` verdict stays swallowed

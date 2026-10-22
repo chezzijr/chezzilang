@@ -20,7 +20,7 @@ Chapters:
 | file | topic |
 |---|---|
 | 01-model.md (this file) | model, surface syntax, execution semantics |
-| [02-channel.md](02-channel.md) | `Channel[T]`, `pmap`, `std.concurrency.task`, `std.concurrency.broadcast`, `trip()` |
+| [02-channel.md](02-channel.md) | `Channel[T]`, `pmap`, `Task`, `std.concurrency.broadcast`, `trip()` |
 | [03-shared.md](03-shared.md) | `Shared[T]`, `Atomic[T]`, `AtomicInt`, `RwShared[T]`, concurrent collections |
 | [04-timer-wait.md](04-timer-wait.md) | `timer(ms)`, `wait:` |
 | [05-cancel.md](05-cancel.md) | `std.cancel`, cancellation points, `defer` under cancel |
@@ -374,7 +374,7 @@ emits; it is **not** a promise about live CLI output. Three jobs that each `prin
 usually come out in submission order because they are too short to overlap; give them real work and
 they come out in completion order. CPython 3.14.6 `ThreadPoolExecutor` with `shutdown(wait=True)` over
 three jobs doing a few million loop iterations each held submission order in **0 of 30** measured
-runs. If you need ordered output, collect the results (`submit_result` / `std.concurrency.task`) and
+runs. If you need ordered output, collect the results (`submit` and `Task.get`) and
 print them yourself after the join.
 
 ### Early exit from a `parallel:` cancels silently

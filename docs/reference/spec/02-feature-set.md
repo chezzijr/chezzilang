@@ -132,7 +132,7 @@ at every instruction.
   into an already-cancelled scope.
 - A CPU loop stays promptly cancellable (the back-edge is a checkpoint); **loop-free recursion is not a
   checkpoint** and runs to completion first (Trio's model). A run-wide halt (`os.exit`, a
-  fire-and-forget job fault, a deadlock verdict) also lands at every function entry, so it stops a
+  deadlock verdict) also lands at every function entry, so it stops a
   recursion at its next call.
 - A **`defer` is never itself cancelled**: no checkpoint fires inside a deferred call, so every
   registered `defer` runs in full (LIFO). A `recover:` *inside* a defer body catches faults raised

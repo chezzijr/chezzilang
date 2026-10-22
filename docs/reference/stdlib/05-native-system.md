@@ -90,11 +90,11 @@ clock that can step backwards and is never clamped, so never subtract a `monoton
 `import timer from std.time` (an alias works, and `f := time.timer` is a function value).
 
 Both `sleep_ms` and a `timer(ms)` `recv` are **continuous cancellation checkpoints**: the runtime owns
-the deadline, so a scope cancel or an `Executor.shutdown_now()` ends the wait within ~5 ms, and the task
+the deadline, so a scope cancel or an `Executor.cancel()` ends the wait within ~5 ms, and the task
 still runs its `defer`s. `chezzi test --timeout` uses the same checkpoint and reaches every timer wait,
 also one parked in a `parallel:` nursery with no runnable sibling (`concurrency.md` §cancellation
 points). **The same ~5 ms bound covers a nested `Executor` JOIN**: a job parked in an inner
-`shutdown()`/`shutdown_now()` sees an outer cancel and `--timeout` on the join's own poll (measured:
+`shutdown()`/`cancel()` sees an outer cancel and `--timeout` on the join's own poll (measured:
 cancel 6 011 ms → **213 ms**, `--timeout=500` 9 010 ms → **509 ms** over a job that runs `process.run`).
 The bound cannot cross the [uninterruptible in-flight call](04-native-core.md#blocking-calls-cannot-be-interrupted)
 itself: the join unwinds within ~5 ms, and the child process it waited on runs to completion.
