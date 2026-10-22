@@ -7,7 +7,7 @@ fn burn(n: int) -> int:
 fn main():
     ex := Executor()
     for i in 0..4:
-        ex.submit(fn(): print("a{i} {burn(8000000)}"))
+        _ := ex.submit(fn(): print("a{i} {burn(8000000)}"))
     parallel:
         for i in 0..4:
             spawn:

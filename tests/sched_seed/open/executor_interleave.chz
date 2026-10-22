@@ -3,7 +3,7 @@ fn main():
     ch := Channel[int](0)
     ex := Executor()
     for i in 0..6:
-        ex.submit(fn(): ch.send(i))
+        _ := ex.submit(fn(): ch.send(i))
     for _ in 0..6:
         print(ch.recv())
     ex.shutdown()

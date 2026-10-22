@@ -34,7 +34,7 @@ fn main():
     print(a.load())                    # 8
 
     ex := c.Executor()                 # aliased qualified Executor
-    ex.submit(fn(): print("job ran"))
+    _ := ex.submit(fn(): print("job ran"))
     ex.shutdown()                      # drains FIFO -> job ran
 
     t := time.timer(0)                 # qualified timer -> Channel[bool]

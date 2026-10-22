@@ -10,7 +10,7 @@ fn main():
             spawn:
                 ex := Executor()
                 for k in 0..3:
-                    ex.submit(fn() -> int: job("c{c}k{k}", ch))
+                    _ := ex.submit(fn() -> int: job("c{c}k{k}", ch))
                 ex.shutdown()
                 ch.send("joined{c}")
     out: List[str] = []
