@@ -24,6 +24,8 @@ enum Mode {
     Test,
     /// `chezzi test --timeout=300`.
     TestTimeout,
+    /// `chezzi test --max-heap=20000000`.
+    TestMaxHeap,
 }
 
 /// One finished run. `code` is `None` when the harness killed the child at nine seconds.
@@ -70,6 +72,7 @@ fn run(name: &str, src: &str, mode: Mode, threads: &str, stdin_after: Option<Dur
         Mode::Run => cmd.arg("run"),
         Mode::Test => cmd.arg("test"),
         Mode::TestTimeout => cmd.arg("test").arg("--timeout=300"),
+        Mode::TestMaxHeap => cmd.arg("test").arg("--max-heap=20000000"),
     };
     cmd.arg(&path)
         .env("CHEZZI_THREADS", threads)
@@ -964,6 +967,329 @@ test fn two():
             let all = format!("{}{}", g.out, g.err);
             if g.code.is_none() || g.code == Some(0) || !all.contains("boom") {
                 misses.push(format!("D={d} T={t}: {}", g.show()));
+            }
+        }
+    }
+    judge(misses);
+}
+
+// ---------------------------------------------------------------------------------------------
+// TICKET-289: one `submit -> Task[T]`. A job's fault or cancel appears ONLY in `t.get()`.
+// ---------------------------------------------------------------------------------------------
+
+const SUBMIT_DECLS: &str = r#"import std.time
+import Executor, Task from std.concurrency
+fn seven() -> int:
+    return 7
+fn own() -> int!str:
+    return !"mine"
+fn sib(g: Channel[int]) -> int:
+    g.recv()
+    print("sib done")
+    return 1
+fn sibling(ready: Channel[int]) -> int:
+    ready.recv()
+    n := 0
+    while n < 2000000:
+        n += 1
+    print("sib done")
+    return 1
+fn faulter(ready: Channel[int]) -> int:
+    ready.send(1)
+    panic("boom")
+fn at_recv(started: Channel[int], gate: Channel[int]) -> int:
+    started.send(1)
+    gate.recv()
+    return 1
+fn at_sleep(started: Channel[int]) -> int:
+    started.send(1)
+    time.sleep_ms(60000)
+    return 1
+fn at_cpu(started: Channel[int]) -> int:
+    started.send(1)
+    n := 0
+    while n < 2000000000:
+        n += 1
+    return n
+"#;
+
+const READ_TASK: &str =
+    "match t.get():\n    ?v: print(\"ok {v}\")\n    !e: print(\"err {e.message()}\")\n";
+
+/// One grid cell: `form` x `outcome` x main `step`. Returns the program and the stdout lines
+/// (as a multiset: a sibling job prints on its own schedule).
+fn submit_cell(form: &str, outcome: &str, step: &str) -> (String, Vec<String>) {
+    let (kind, at) = outcome.split_once('@').unwrap_or((outcome, ""));
+    let tcancel = kind == "tcancel";
+    let cancelled = tcancel || kind == "xcancel";
+    let held = at == "held";
+    let slots = if tcancel || kind == "fault" { 2 } else { 1 };
+    let mut m = String::from(
+        "started := Channel[int](1)\ngate := Channel[int](1)\nsib_gate := Channel[int](1)\nready := Channel[int](1)\n",
+    );
+    m += &format!("ex := Executor({slots})\n");
+    let mut want: Vec<String> = Vec::new();
+    if held {
+        // Every slot is full before J (DEC-050).
+        m += "_ := ex.submit(fn(): at_recv(started, gate))\n";
+    }
+    if tcancel {
+        m += "s := ex.submit(fn(): sib(sib_gate))\n";
+    }
+    if kind == "fault" {
+        m += "_ := ex.submit(fn(): sibling(ready))\n";
+    }
+    let job = match (kind, at) {
+        ("value", _) => "seven".to_string(),
+        ("fault", _) => "fn(): faulter(ready)".to_string(),
+        ("own", _) => "own".to_string(),
+        (_, "held") => "seven".to_string(),
+        (_, "recv") => "fn(): at_recv(started, gate)".to_string(),
+        (_, "sleep") => "fn(): at_sleep(started)".to_string(),
+        (_, "cpu") => "fn(): at_cpu(started)".to_string(),
+        _ => unreachable!("{outcome}"),
+    };
+    let sub = format!("ex.submit({job})");
+    m += &match form {
+        "kept" => format!("t := {sub}\n"),
+        "stmt" => format!("{sub}\n"),
+        "blank" => format!("_ := {sub}\n"),
+        _ => unreachable!("{form}"),
+    };
+    if cancelled && !held {
+        m += "started.recv()\n";
+    }
+    if cancelled {
+        m += if tcancel {
+            "t.cancel()\n"
+        } else {
+            "ex.cancel()\n"
+        };
+        m += "gate.send(1)\n";
+        if tcancel {
+            m += "sib_gate.send(1)\n";
+        }
+    }
+    match step {
+        "shutdown" => m += "ex.shutdown()\n",
+        "recover" => {
+            m += "r := recover: ex.shutdown()\n";
+            m += "match r:\n    ?_: print(\"clean\")\n    !e: print(\"caught {e.message()}\")\n";
+            want.push("clean".into());
+        }
+        "exit" => {}
+        _ => unreachable!("{step}"),
+    }
+    m += "print(\"after\")\n";
+    want.push("after".into());
+    if kind == "fault" {
+        want.push("sib done".into());
+    }
+    if tcancel {
+        want.push("sib ok 1".into());
+        want.push("sib done".into());
+        m += "match s.get():\n    ?v: print(\"sib ok {v}\")\n    !e: print(\"sib err {e.message()}\")\n";
+    }
+    if form == "kept" {
+        m += READ_TASK;
+        want.push(match kind {
+            "value" => "ok 7".to_string(),
+            "fault" => "err boom".to_string(),
+            "own" => "ok !mine".to_string(),
+            _ => "err task cancelled: cancel() stopped it before it finished".to_string(),
+        });
+    }
+    (format!("{SUBMIT_DECLS}{m}"), want)
+}
+
+fn same_lines(out: &str, want: &[String]) -> bool {
+    let mut a: Vec<&str> = out.lines().collect();
+    let mut b: Vec<&str> = want.iter().map(String::as_str).collect();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
+}
+
+/// Runs one program at every worker count: rc 0, no `runtime error`, the expected lines, and the
+/// unused-Task warning exactly when `warns`.
+fn check_cell(name: &str, src: &str, want: &[String], warns: bool, misses: &mut Vec<String>) {
+    for t in THREADS {
+        let g = run(name, src, Mode::Run, t, None);
+        let warned = g
+            .err
+            .contains("the `Task[int]` value returned by 'submit' is discarded");
+        if g.code != Some(0)
+            || g.err.contains("runtime error")
+            || !same_lines(&g.out, want)
+            || warned != warns
+        {
+            misses.push(format!("{name} T={t} want {want:?}:\n{}\n{src}", g.show()));
+        }
+    }
+}
+
+/// Form x outcome x main step, at every worker count. Every fault and cancel appears only in
+/// `t.get()`; `shutdown()` is clean; a statement submit warns.
+#[test]
+fn submit_form_x_outcome_x_main_grid() {
+    let mut misses = Vec::new();
+    let mut outcomes = vec!["value".to_string(), "fault".into(), "own".into()];
+    for at in ["held", "recv", "sleep", "cpu"] {
+        outcomes.push(format!("tcancel@{at}"));
+        outcomes.push(format!("xcancel@{at}"));
+    }
+    for form in ["kept", "stmt", "blank"] {
+        for outcome in &outcomes {
+            if outcome.starts_with("tcancel") && form != "kept" {
+                continue;
+            }
+            for step in ["shutdown", "recover", "exit"] {
+                let (src, want) = submit_cell(form, outcome, step);
+                let name = format!("{form}-{outcome}-{step}");
+                check_cell(&name, &src, &want, form == "stmt", &mut misses);
+            }
+        }
+    }
+    judge(misses);
+}
+
+/// A refused submit is a settled Task, not a fault.
+#[test]
+fn a_refused_submit_is_a_settled_task() {
+    let after = |stop: &str| {
+        format!(
+            "{SUBMIT_DECLS}ex := Executor(1)\nex.{stop}()\nt := ex.submit(seven)\nprint(t.done())\n{READ_TASK}"
+        )
+    };
+    let mut misses = Vec::new();
+    let want: Vec<String> = vec![
+        "true".into(),
+        "err submit on a shut-down Executor (it no longer accepts work)".into(),
+    ];
+    for stop in ["shutdown", "cancel"] {
+        check_cell(
+            &format!("after_{stop}"),
+            &after(stop),
+            &want,
+            false,
+            &mut misses,
+        );
+    }
+    let creator = format!(
+        r#"{SUBMIT_DECLS}fn report(inner: Executor):
+    t2 := inner.submit(seven)
+    print("inner {{t2.done()}}")
+    match t2.get():
+        ?v: print("inner ok {{v}}")
+        !e: print("inner !{{e.message()}}")
+fn maker(started: Channel[int], go: Channel[int]) -> int:
+    inner := Executor(1)
+    defer report(inner)
+    started.send(1)
+    go.recv()
+    return 0
+started := Channel[int](1)
+go := Channel[int](1)
+outer := Executor(1)
+t := outer.submit(fn(): maker(started, go))
+started.recv()
+outer.cancel()
+outer.shutdown()
+match t.get():
+    ?v: print("ok {{v}}")
+    !e: print("!{{e.message()}}")
+"#
+    );
+    let want: Vec<String> = vec![
+        "inner true".into(),
+        "inner !submit on an Executor whose creating job was cancelled (it no longer accepts work)"
+            .into(),
+        "!task cancelled: cancel() stopped it before it finished".into(),
+    ];
+    check_cell("after_creator_cancel", &creator, &want, false, &mut misses);
+    judge(misses);
+}
+
+/// A cut job's `defer` fault replaces the cancel text in its Task; nothing else reports it.
+#[test]
+fn a_cut_jobs_cleanup_fault_is_its_tasks_outcome() {
+    let src = format!(
+        r#"{SUBMIT_DECLS}fn cleanup():
+    panic("cleanup boom")
+fn cleans(started: Channel[int], gate: Channel[int]) -> int:
+    defer cleanup()
+    started.send(1)
+    gate.recv()
+    return 1
+started := Channel[int](1)
+gate := Channel[int](1)
+ex := Executor(1)
+t := ex.submit(fn(): cleans(started, gate))
+started.recv()
+t.cancel()
+ex.shutdown()
+print("after")
+match t.get():
+    ?v: print("ok {{v}}")
+    !e: print("!{{e.message()}}")
+"#
+    );
+    let want: Vec<String> = vec!["after".into(), "!cleanup boom".into()];
+    let mut misses = Vec::new();
+    check_cell("cleanup_fault", &src, &want, false, &mut misses);
+    judge(misses);
+}
+
+/// A hard abort is never a Task outcome: the test ends with its own verdict, and `t.get()` and the
+/// code after `shutdown()` never run. `chezzi test` prints no stdout of a failing test, so the
+/// asserts carry the evidence.
+#[test]
+fn a_hard_abort_in_a_job_is_never_a_task_outcome() {
+    let grow = r#"fn grow() -> int:
+    xs: List[str] = []
+    i := 0
+    while true:
+        xs.push("{i} abcdefghijklmnopqrstuvwxyz0123456789abcd")
+        i += 1
+    return 0
+"#;
+    let spin = "fn spin() -> int:\n    n := 0\n    while true:\n        n += 1\n    return n\n";
+    let mut misses = Vec::new();
+    for (cell, mode, name, decl, verdict) in [
+        (
+            "hard_max_heap",
+            Mode::TestMaxHeap,
+            "grow",
+            grow,
+            "OVER-MEMORY t",
+        ),
+        (
+            "hard_timeout",
+            Mode::TestTimeout,
+            "spin",
+            spin,
+            "TIMED-OUT t",
+        ),
+    ] {
+        for step in ["get", "recover"] {
+            let main = if step == "get" {
+                "    v := t.get()\n    assert false, \"REACHED get {v}\"\n"
+            } else {
+                "    r := recover: ex.shutdown()\n    assert false, \"REACHED shutdown\"\n"
+            };
+            let src = format!(
+                "import Executor, Task from std.concurrency\n{decl}test fn t():\n    ex := Executor()\n    t := ex.submit({name})\n{main}"
+            );
+            for th in THREADS {
+                let g = run(cell, &src, mode, th, None);
+                let report = format!("{}{}", g.out, g.err);
+                if g.code != Some(1)
+                    || !report.contains(verdict)
+                    || report.contains("REACHED")
+                    || report.contains("FAIL t")
+                {
+                    misses.push(format!("{cell}-{step} T={th}:\n{}\n{src}", g.show()));
+                }
             }
         }
     }

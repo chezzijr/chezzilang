@@ -1,9 +1,9 @@
 # tests/chz/stdlib/executor_dropped_task_fault_test.chz — TICKET-289.
 #
-# A job whose Task the program drops (`ex.submit(f)` as an expression statement) is fire-and-forget:
-# its fault is raised by `ex.shutdown()`, so a `recover:` around the `shutdown()` catches it, like a
-# nursery child's fault caught by a `recover:` around `parallel:`. On base the fault ends the run
-# at once and the `recover:` never sees it.
+# A job's fault appears ONLY in its Task's `t.get()`. A Task the program drops (`ex.submit(f)` as an
+# expression statement) keeps its fault there too: `ex.shutdown()` raises nothing, so a `recover:`
+# around it finds `?_`. The fault no longer ends the run and no `recover:` has to catch it.
+# (The test keeps its first name, a stale reading of the earlier contract.)
 
 import std.concurrency
 
@@ -15,5 +15,5 @@ test fn a_dropped_jobs_fault_is_caught_by_recover_around_shutdown():
     ex.submit(bad)
     res := recover: ex.shutdown()
     match res:
-        ?_: assert false, "shutdown() must raise the dropped job's fault"
-        !e: assert e.message().contains("boom"), e.message()
+        ?_: pass
+        !e: assert false, "shutdown() raised a job fault: {e.message()}"

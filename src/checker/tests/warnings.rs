@@ -1542,3 +1542,38 @@ fn a_parent_side_mutator_reads_the_stale_value_and_warns() {
         "'xs' is this task's copy",
     );
 }
+
+/// TICKET-289: an unused std `Task` warns like an unused `T!` (`Checker::is_must_use`), because its
+/// job's fault appears only in `t.get()`. A user `struct Task` never warns: a std struct keeps its
+/// bare key and `StructOrigin::Builtin`.
+#[test]
+fn an_unused_task_warns_like_an_unused_carrier() {
+    let pre = "import Executor, Task from std.concurrency\nfn seven() -> int:\n    return 7\nfn start(ex: Executor) -> Task[int]:\n    return ex.submit(seven)\n";
+    let needle = "the `Task[int]` value returned by 'submit' is discarded";
+    entry_warns(
+        &format!("{pre}fn f(ex: Executor):\n    ex.submit(seven)\nf(Executor())\n"),
+        needle,
+    );
+    entry_warns(
+        &format!("{pre}ex := Executor()\nex.submit(seven)\n"),
+        needle,
+    );
+    entry_warns(
+        &format!(
+            "{pre}fn f(ex: Executor, c: bool):\n    if c:\n        ex.submit(seven)\n    else:\n        ex.submit(seven)\nf(Executor(), true)\n"
+        ),
+        needle,
+    );
+    entry_warns(
+        &format!("{pre}ex := Executor()\nstart(ex)\n"),
+        "returned by 'start' is discarded",
+    );
+    entry_no_warn(&format!(
+        "{pre}ex := Executor()\nt := ex.submit(seven)\nprint(t.get())\n"
+    ));
+    entry_no_warn(&format!("{pre}ex := Executor()\n_ := ex.submit(seven)\n"));
+    entry_no_warn(&format!(
+        "{pre}ex := Executor()\nprint(ex.submit(seven).get())\n"
+    ));
+    entry_no_warn("struct Task:\n    n: int\nfn mine() -> Task:\n    return Task(n=1)\nmine()\n");
+}
