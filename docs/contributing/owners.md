@@ -99,6 +99,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Bytecode | `Op` (`base/op.rs`) | |
 | `==` between values | `values_equal_guarded` (`vm/equality.rs`) | |
 | May this op block here, and how | `mode` (`vm/block.rs`), `block_ctx` (`vm/block.rs`) | TICKET-181 |
+| May an abort of a fiber-owned nursery park this fiber | `park_abort_origin` (`vm/nursery.rs`) | TICKET-287: read by the `return`/`?` escape park, the fault unwind, the cancel funnel and the catching `recover:`; a fault carries its state in `Fiber::fault_park` (`FaultPark`, `vm/frames.rs`) |
 | CPU width / runner permits | `RUNNERS` (`vm/width.rs`) | TICKET-205/230 |
 | Quiescence verdict | `decide_since` (`vm/quiesce.rs`) | |
 | Which halts end a blocked party, and in which order | `blocked_halt` (`vm/frames.rs`) | TICKET-286: the `--timeout` deadline, then `read_halts` (`vm/frames.rs`): a cancel or a child fault, then `run_exit_err` (`vm/blocking.rs`). Readers: `block_halts` (`vm/blocking.rs`), `resume_halts` (`vm/blocking.rs`, the ladder without the deadline, for a return from a wait that could not poll), the four demote loops in `vm/demote.rs`, the parked-send re-run in `chan_send_step` (`vm/channel.rs`), and the offload and connect resumes in `run_one_fiber` (`vm/worker_loop.rs`). `deliver_halt` is private to `vm/frames.rs`. `arm_timer_sleep` (`vm/mnsched.rs`) keeps its own deadline-then-cancel order: it runs with no `Vm` |
