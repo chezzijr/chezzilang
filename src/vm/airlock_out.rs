@@ -388,9 +388,63 @@ pub(super) struct WireMemo {
     /// TICKET-119 — highest `doom_ids` stamp touched since the recording; a record is valid only
     /// while its enter stamp is above it.
     pub(super) doom_invalid_upto: Option<u32>,
+    /// TICKET-291 — set only for a box call's result: the GC roots of the box heap when the call
+    /// returned (state, the call's own closure, globals). The objects they reach (computed on the
+    /// first closure capture) are what the box keeps; see [`sole_captures`](WireMemo::sole_captures).
+    pub(super) kept_roots: Option<Vec<GcRef>>,
+    pub(super) kept: Option<super::fxhash::FxHashSet<GcRef>>,
 }
 
 impl WireMemo {
+    /// The memo for a box call's result: `roots` are the box heap's GC roots after the call.
+    pub(super) fn box_result(roots: Vec<GcRef>) -> Self {
+        WireMemo {
+            kept_roots: Some(roots),
+            ..WireMemo::default()
+        }
+    }
+
+    /// D4 layer C (TICKET-291), the ONE answer to "is this capture the only live copy of its
+    /// binding": bit `k` is set when capture `k` reaches no object the source heap keeps and no
+    /// copy-marked object. Only a box call's result can answer yes (a box call built the capture
+    /// and the box dropped it); every other crossing answers 0, so every capture is marked.
+    pub(super) fn sole_captures(&mut self, heap: &Heap, captured: &[Value]) -> u64 {
+        let Some(roots) = &self.kept_roots else {
+            return 0;
+        };
+        let kept = self.kept.get_or_insert_with(|| {
+            let mut seen = super::fxhash::FxHashSet::default();
+            let mut work = roots.clone();
+            while let Some(h) = work.pop() {
+                if seen.insert(h) {
+                    work.extend(heap.children(h));
+                }
+            }
+            seen
+        });
+        let sole = |v: &Value| {
+            let mut seen = super::fxhash::FxHashSet::default();
+            let mut work: Vec<GcRef> = v.child_gcref().into_iter().collect();
+            while let Some(h) = work.pop() {
+                // A leaf no write can reach (`slot_is_leaf`), and a closure's `home`, which is
+                // code rather than a binding the capture writes (D2), cannot lose a write.
+                if !seen.insert(h)
+                    || super::boxctx::slot_is_leaf(heap, Value::obj(h))
+                    || matches!(heap.get(h), Obj::Module(_))
+                {
+                    continue;
+                }
+                if kept.contains(&h) || heap.is_copied(h) {
+                    return false;
+                }
+                work.extend(heap.children(h));
+            }
+            true
+        };
+        let claims: Vec<bool> = captured.iter().map(sole).collect();
+        crate::base::crossing::slot_bits(&claims)
+    }
+
     /// TICKET-119 — `h` may be about to become a `Backref` target: invalidate every `doom` record
     /// whose recorded sub-walk contains it.
     pub(super) fn doom_touch(&mut self, h: GcRef) {
@@ -653,7 +707,7 @@ impl WalkSrc<'_> {
                             proto: *proto,
                             captured: wcap,
                             home: self.home_index(*home),
-                            origin_heap: self.heap.closure_stamp(h),
+                            sole: memo.sole_captures(self.heap, captured),
                         }
                     }
                 }

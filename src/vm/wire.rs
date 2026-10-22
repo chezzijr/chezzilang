@@ -354,13 +354,11 @@ pub enum WireValue {
         proto: ProtoId,
         captured: Vec<(Box<str>, WireValue)>,
         home: Option<usize>,
-        /// D4 layer C (TICKET-169): the id of the heap this closure serialized OUT of
-        /// (`Heap::id`). `Sched::from_wire_memo`'s `Closure` arm compares it against the
-        /// reconstructing heap's own id: equal means the value never left this task (a same-task
-        /// `Channel`/`Shared` round-trip, which must stay silent per the owner's 2026-09-23
-        /// ruling), different means a genuine cross-task crossing (which must still mark its
-        /// captures as copies).
-        origin_heap: u64,
+        /// D4 layer C (TICKET-291): bit `k` set = capture `k` is the only live copy of its binding
+        /// (`WireMemo::sole_captures`), so its rebuild keeps the enclosing mark; every other
+        /// capture is marked (`crossing::Route::ClosureCaptures`). A capture at slot 64 or above
+        /// is never sole (a false fault, never a lost write).
+        sole: u64,
     },
     /// B3.3 — a BARE function (`Obj::Func`) carried across the airlock **by value**: its `proto`
     /// (shared via `Arc<Program>`) + its `home` index (as [`Closure`](WireValue::Closure)), no captures.
@@ -777,7 +775,7 @@ mod walk_grid {
                 proto: 0,
                 captured: vec![("x".into(), c())],
                 home: None,
-                origin_heap: 0,
+                sole: 0,
             },
             WireValue::Func {
                 proto: 0,

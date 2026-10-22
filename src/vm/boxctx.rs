@@ -82,8 +82,7 @@ impl Vm {
     /// caller — see [`Vm::box_global`]) and the state slot `stack[0]`, which that heap's own GC
     /// roots.
     pub(super) fn box_new(&mut self) -> Box<FiberCtx> {
-        let mut worker = self.spawn_worker();
-        worker.heap.make_store();
+        let worker = self.spawn_worker();
         Box::new(FiberCtx {
             heap: Some(worker.heap),
             stack: vec![Value::nil()],
@@ -258,8 +257,14 @@ impl Vm {
                     vm.stack[0] = v;
                     Ok(None)
                 } else {
+                    // What the box keeps after the call decides which captures of a closure in
+                    // the result are the only live copy (`WireMemo::sole_captures`).
+                    let mut memo = match v.as_obj() {
+                        Some(_) => airlock_out::WireMemo::box_result(vm.gc_roots()),
+                        None => airlock_out::WireMemo::default(),
+                    };
                     vm.walk_src()
-                        .to_wire_crossable_memo(v, span, &mut airlock_out::WireMemo::default())
+                        .to_wire_crossable_memo(v, span, &mut memo)
                         .map(Some)
                 }
             });

@@ -658,7 +658,7 @@ impl Vm {
                 proto,
                 captured,
                 home,
-                origin_heap,
+                sole,
             } => {
                 let home = self.worker_home(home);
                 let n = captured.len();
@@ -668,22 +668,19 @@ impl Vm {
                     home,
                 });
                 rebuild.insert(id, h);
-                self.heap.note_stored_from(h, origin_heap);
                 // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
-                // D4 layer C (owner ruling 2026-09-23): the captures follow
-                // `Route::ClosureCaptures` (TICKET-189). Back in the exact heap they serialized out
-                // of — a same-task `Channel`/`Shared` round-trip the value never left (W7-4c) —
-                // they keep the enclosing mark. In any other heap they are marked, even when the
-                // closure crosses outside an ambient `copy_mark` walk (a Channel to another task).
+                // D4 layer C (TICKET-291): each capture follows `Route::ClosureCaptures`. It is a
+                // copy of its creator's binding in every heap, the one it left included, so it is
+                // marked unless the wire says it is the only live copy (`sole`).
                 let saved_copy_mark = self.copy_mark;
-                self.copy_mark = crossing::marks(
-                    Route::ClosureCaptures {
-                        same_heap: origin_heap == self.heap.id(),
-                    },
-                    saved_copy_mark,
-                );
-                let cap = self.rebuild_items(captured, rebuild, |(_k, w)| w);
+                let mut cap = Vec::with_capacity(n);
+                for (k, (_name, w)) in captured.into_iter().enumerate() {
+                    let sole = sole.checked_shr(k as u32).is_some_and(|m| m & 1 == 1);
+                    self.copy_mark =
+                        crossing::marks(Route::ClosureCaptures { sole }, saved_copy_mark);
+                    cap.push(self.from_wire_memo(w, rebuild));
+                }
                 self.copy_mark = saved_copy_mark;
                 // Owner decision D2 (TICKET-137): a crossing carries captures only. The closure's
                 // globals are whatever module copy the RUNNING task owns (`home` resolved above).

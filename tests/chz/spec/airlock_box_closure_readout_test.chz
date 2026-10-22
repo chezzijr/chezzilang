@@ -5,7 +5,7 @@
 # `route` row: the four box readout sites (`box_copy_out`, `box_copy_pieces`, the `box_call` result,
 # the `rwshared_mutate` result) and the three wire-stored routes (Channel, Atomic, Task). A reader
 # task faults on a write to a captured list and to a module global (`silent_routes`). The task that
-# stored the closure and reads it back stays writable (`self_read_back_*`, `a_task_reads_back_*`).
+# stored the closure faults too when it reads it back (TICKET-291: a same-task round trip is a crossing).
 import Shared, RwShared, Atomic, Executor from std.concurrency
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
 import submit_task from std.concurrency.task
@@ -126,17 +126,17 @@ test fn list_capture_write_faults_on_every_route():
 test fn global_write_faults_on_every_route():
     assert silent_routes(global_writer) == []
 
-# The task that stored the closure reads it back: the box was a store, so the closure never left.
-test fn self_read_back_stays_writable_on_every_box_route():
+# The task that stored the closure reads it back: the read rebuilt the captures as copies (TICKET-291).
+test fn self_read_back_faults_on_every_box_route():
     for name in BOX_ROUTES:
-        assert outcome(route(name, list_writer())()) == "no-fault", name
+        assert outcome(route(name, list_writer())()).contains(COPY_TAIL), name
 
-test fn a_task_reads_back_its_own_stored_closure_writable():
+test fn a_task_reads_back_its_own_stored_closure_and_faults():
     r := Channel[str](1)
     parallel:
         spawn:
             r.send(outcome(route("Shared.get", list_writer())()))
-    assert r.recv() == "no-fault"
+    assert r.recv().contains(COPY_TAIL)
 
 # A closure a task built and stored, read by main after the join: the Channel twin faults.
 test fn task_built_closure_read_by_main_faults():
@@ -146,12 +146,12 @@ test fn task_built_closure_read_by_main_faults():
             b.set([list_writer()])
     assert outcome(b.get()[0]).contains(COPY_TAIL)
 
-# `update` stores a captured closure: the stamp is the updating task's, so another task faults.
+# `update` stores a captured closure: every reader faults, the updating task included.
 test fn update_stored_closure_read_by_task_faults():
     g := list_writer()
     b := Shared[List[fn() -> None]]([])
     b.update(fn(s): s + [g])
-    assert outcome(b.get()[0]) == "no-fault"
+    assert outcome(b.get()[0]).contains(COPY_TAIL)
     assert in_task(fn(): b.get()[0]).contains(COPY_TAIL)
 
 # A closure built inside the box captures the box's own state; the write would be lost, so it faults.
@@ -214,3 +214,87 @@ fn make_logger() -> fn() -> None:
 test fn box_built_closure_over_fresh_state_does_not_fault():
     c := Shared([1]).read(fn(s): make_logger())
     assert outcome(c) == "no-fault"
+
+# TICKET-291 grid: route x reader x capture kind. Every cell faults except a module-global write
+# by the task that stored the closure: a closure reads the globals of the task that runs it (D2),
+# so that write is the owner's own and lands (`G` grows by one).
+READERS := ["same task", "other task", "relay task"]
+CAPTURES := ["captured list", "module global", "fresh box state", "box state"]
+
+fn writer(capture: str) -> fn() -> None:
+    match capture:
+        "captured list":
+            return list_writer()
+        "module global":
+            return global_writer()
+        "fresh box state":
+            return Shared([0]).read(fn(s): make_logger())
+        "box state":
+            return Shared([0]).read(fn(s): fn(): s.push(9))
+        _: panic("no capture {capture}")
+
+# The relay task reads the closure, stores it again behind a new `name` route, reads it back and
+# calls it.
+fn relay(name: str, read: fn() -> fn() -> None) -> str:
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            r.send(outcome(route(name, read())()))
+    return r.recv()
+
+fn cell(name: str, reader: str, capture: str) -> str:
+    read := route(name, writer(capture))
+    match reader:
+        "same task":
+            return outcome(read())
+        "other task":
+            return in_task(read)
+        "relay task":
+            return relay(name, read)
+        _: panic("no reader {reader}")
+
+test fn closure_capture_grid_faults_except_the_owners_global_write():
+    wrong: List[str] = []
+    for name in ROUTES:
+        for reader in READERS:
+            for capture in CAPTURES:
+                before := G.len()
+                got := cell(name, reader, capture)
+                if reader == "same task" and capture == "module global":
+                    if got != "no-fault" or G.len() != before + 1:
+                        wrong.push("{name}/{reader}/{capture}")
+                elif not got.contains(COPY_TAIL):
+                    wrong.push("{name}/{reader}/{capture}")
+    assert wrong == []
+
+struct Pair:
+    put: fn() -> None
+    size: fn() -> int
+
+fn make_pair() -> Pair:
+    log := [0]
+    return Pair(fn(): log.push(1), fn() -> int: log.len())
+
+fn over_state(s: List[int]) -> fn() -> None:
+    log := [s]
+    return fn(): log[0].push(5)
+
+# C3 row: the closure a box call builds and returns. Over fresh state the caller holds the only
+# live copy, so the write runs and a sibling closure over the same binding sees it. Over the box's
+# state, or fresh state that holds it, the write would be lost, so it faults. `RwShared.read` runs
+# its closure in the reader's heap over the reader's copy of the state (`03-shared.md`), so that
+# write is the reader's own.
+test fn box_call_result_marks_only_what_the_box_keeps():
+    p := Shared([1]).read(fn(s): make_pair())
+    assert outcome(p.put) == "no-fault"
+    assert p.size() == 2
+    q := RwShared([1]).read(fn(s): make_pair())
+    assert outcome(q.put) == "no-fault"
+    assert q.size() == 2
+    b := Shared([1])
+    assert outcome(b.read(fn(s): fn(): s.push(9))).contains(COPY_TAIL)
+    assert outcome(b.read(fn(s): over_state(s))).contains(COPY_TAIL)
+    assert b.get() == [1]
+    rw := RwShared([1])
+    assert outcome(rw.read(fn(s): fn(): s.push(9))) == "no-fault"
+    assert rw.get() == [1]

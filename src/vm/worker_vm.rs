@@ -1458,7 +1458,7 @@ impl Vm {
                 // captures are marked (`Route::ClosureCaptures`).
                 let saved_copy_mark = self.copy_mark;
                 self.copy_mark =
-                    crossing::marks(Route::ClosureCaptures { same_heap: false }, saved_copy_mark);
+                    crossing::marks(Route::ClosureCaptures { sole: false }, saved_copy_mark);
                 let cap: Vec<Value> = captured
                     .iter()
                     .map(|(_k, cv)| self.replay_snap(cv, rb))

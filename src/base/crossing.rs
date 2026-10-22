@@ -200,11 +200,11 @@ pub enum Route {
     /// A spawn's callee captures, arguments and receiver: the parent keeps its bindings, so every
     /// rebuilt object is a copy (what an operand's [`Fresh`] shape names is then unmarked).
     Spawn,
-    /// A crossing closure's captures: a capture is a by-reference binding of its creator.
-    /// `same_heap` is true when the reading heap is the heap that stored the closure
-    /// (`Heap::closure_stamp`: a box is a store, not a party); there, a same-task round-trip, it
-    /// keeps the enclosing mark (W7-4c).
-    ClosureCaptures { same_heap: bool },
+    /// A crossing closure's captures: a capture is a by-reference binding of its creator, so its
+    /// rebuild is a copy in every heap, the one it left included (TICKET-291). `sole` is true for
+    /// a capture that is the only live copy of its binding (a box call built it and nothing the
+    /// box keeps reaches it, `WireMemo::sole_captures`); it keeps the enclosing mark.
+    ClosureCaptures { sole: bool },
     /// The spawn's module snapshot: the parent keeps its globals.
     ModuleSnapshot,
     /// A Channel/Shared/RwShared/Atomic read or an Executor job root: the sender gave the value
@@ -224,8 +224,8 @@ pub fn marks(route: Route, enclosing: bool) -> bool {
         Route::Spawn
         | Route::CopyRead
         | Route::ModuleSnapshot
-        | Route::ClosureCaptures { same_heap: false } => true,
-        Route::ClosureCaptures { same_heap: true } => enclosing,
+        | Route::ClosureCaptures { sole: false } => true,
+        Route::ClosureCaptures { sole: true } => enclosing,
         Route::Handoff => false,
     }
 }
@@ -353,12 +353,9 @@ mod tests {
             assert!(marks(Route::Spawn, enclosing));
             assert!(marks(Route::ModuleSnapshot, enclosing));
             assert!(marks(Route::CopyRead, enclosing));
-            assert!(marks(
-                Route::ClosureCaptures { same_heap: false },
-                enclosing
-            ));
+            assert!(marks(Route::ClosureCaptures { sole: false }, enclosing));
             assert_eq!(
-                marks(Route::ClosureCaptures { same_heap: true }, enclosing),
+                marks(Route::ClosureCaptures { sole: true }, enclosing),
                 enclosing
             );
             assert!(!marks(Route::Handoff, enclosing));
