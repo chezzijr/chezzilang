@@ -88,7 +88,7 @@ same write is always visible there; the divergence is deliberate. Decision recor
 Reads never check the mark. A write through a `Shared`/`RwShared`/`Atomic*`/`Channel`/`Socket`/
 `Listener` handle is real sharing and is never marked, so it is never checked either.
 
-**Three shapes still lose the write silently** (measured on the release binary):
+**Two shapes still lose the write silently** (measured on the release binary):
 
 1. **Closure capture vs. a sibling reference — order-dependent, one shared memo per send.** A tuple
    `(xs, f)`, `f := fn() -> None: xs.push(2)`, sent in one crossing over a `Channel` to a different
@@ -110,16 +110,16 @@ Reads never check the mark. A write through a `Shared`/`RwShared`/`Atomic*`/`Cha
    saw is writable at every depth it built itself, and a list the generator yielded, stored or passed
    on faults. An Executor job, a spawn, the module snapshot and a task copy's `Task.get()` /
    `memoize1` read all apply it; see [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md) rule 2.
-3. **A same-task round-trip is not a crossing.** A closure/value sent on a `Channel`, or stored in a
-   `Shared`/`RwShared`, and read back by the SAME task that sent or stored it never left that task's
-   heap, so its write stays silent, exactly as `main` behaves. A captured closure/cell that crosses
-   into a DIFFERENT task's heap marks the copy: a `spawn` capture/arg, an `Executor` job's captures,
-   and a closure another task receives over a `Channel`, loads from an `Atomic`, gets from a `Task` or
-   reads out of a `Shared`/`RwShared` (`get`, `read`, a concurrent collection's `at`/`get`/`remove`).
-   A box is a store, not a party: a closure keeps the stamp of the task that stored it, and a closure
-   built inside a box closure carries the box's stamp, so every reader faults on a write to its
-   captures. A plain (non-closure) value received over a `Channel`, or read back from a
-   `Shared`/`RwShared` by a DIFFERENT task, is never marked: it belongs to the receiver.
+**A same-task round trip is a crossing** (owner decision 2026-10-22, TICKET-291, reversing the
+2026-09-23 ruling). A closure holds its captures by reference only in the heap that built it. Every
+rebuild of a closure -- a `Channel` send, a `Shared`/`RwShared` store read back (`get`, `read`, a
+concurrent collection's `at`/`get`/`remove`), an `Atomic` load, a `Task` result, a relay task that
+stores it again -- rebuilds its captures as copies, so a write through one faults, the task that sent
+or stored it included. The one exception is a closure that a `Shared.read` closure builds over FRESH
+state and returns: its captures reach nothing the box keeps, so the caller holds the only copy and
+the write runs. A closure over the box's own state, or over fresh state that holds it, faults. A plain
+(non-closure) value received over a `Channel` or read back from a `Shared`/`RwShared` is never marked:
+it belongs to the receiver.
 
 ### Closures and functions cross by value
 
