@@ -145,6 +145,8 @@ fn std_internal_names_are_hidden_from_user_modules() {
     let want_methods: std::collections::BTreeSet<(String, String, String)> = [
         ("std.cancel", "Token", "_mark"),
         ("std.concurrency", "Executor", "_submit_settled"),
+        ("std.concurrency.broadcast", "Receiver", "_accept"),
+        ("std.concurrency.broadcast", "Receiver", "_take_held"),
     ]
     .iter()
     .map(|(m, o, n)| (m.to_string(), o.to_string(), n.to_string()))
@@ -158,6 +160,21 @@ fn std_internal_names_are_hidden_from_user_modules() {
         "type Token has no method '_mark'",
     );
     entry_ok("import std.cancel\nt := cancel.manual()\nt.cancel()\nassert t.cancelled()\n");
+    // TICKET-288: a `Receiver`'s `_` methods are hidden as `Token._mark` is; `recv` stays public.
+    for (call, name) in [
+        ("rx._accept(1)", "_accept"),
+        ("rx._take_held()", "_take_held"),
+    ] {
+        entry_rejects(
+            &format!(
+                "import Broadcast from std.concurrency.broadcast\nb := Broadcast[int].new(2)\nrx := b.subscribe()\n{call}\n"
+            ),
+            &format!("type Receiver[int] has no method '{name}'"),
+        );
+    }
+    entry_ok(
+        "import Broadcast from std.concurrency.broadcast\nb := Broadcast[int].new(2)\nrx := b.subscribe()\nb.send(1)\nprint(rx.recv())\n",
+    );
     entry_ok(
         "struct S:\n    n: int\n    fn _helper(self) -> int:\n        return self.n\nprint(S(1)._helper())\n",
     );

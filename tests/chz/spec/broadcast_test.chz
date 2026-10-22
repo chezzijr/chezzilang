@@ -1,8 +1,9 @@
 # TICKET-288 — `std.concurrency.broadcast`: a pub/sub channel with the tokio `broadcast` contract.
 # One test per contract line of the ticket; line 6 (worker counts) is this file run at
-# `CHEZZI_THREADS` 1, 2 and the default. Every assertion holds at every worker count. Only
-# `a_slow_subscriber_task_counts_every_value_it_missed` drops values across tasks; it asserts the
-# lag invariant, never which values were dropped.
+# `CHEZZI_THREADS` 1, 2 and the default. Every assertion holds at every worker count. Two tests drop
+# values across tasks: `a_slow_subscriber_task_counts_every_value_it_missed` asserts the lag
+# invariant, and `a_reader_that_drains_during_a_send_never_loses_the_newest_value` asserts the
+# newest value arrives. Neither asserts which values were dropped.
 #
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import Broadcast, Receiver, Lagged from std.concurrency.broadcast

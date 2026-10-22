@@ -1957,6 +1957,15 @@ const STD_ROWS: &[IterRow] = &[
         want: "[1, 2, 3]",
         unordered: false,
     },
+    // TICKET-288: a receiver yields `T!Lagged` per step, in send order, until the broadcast is closed.
+    IterRow {
+        name: "Receiver",
+        head: "import Broadcast, Lagged from std.concurrency.broadcast\n",
+        make: "b := Broadcast[int].new(4)\n    v := b.subscribe()\n    b.send(1)\n    b.send(2)\n    b.send(3)\n    b.close()",
+        elem: "int!Lagged",
+        want: "[1, 2, 3]",
+        unordered: false,
+    },
 ];
 
 /// A user struct yields through its `iter` hook as a std struct does.
