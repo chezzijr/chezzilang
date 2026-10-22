@@ -160,3 +160,57 @@ test fn box_built_closure_capture_write_faults():
     built := b.read(fn(s): fn(): s.push(9))
     assert outcome(built).contains(COPY_TAIL)
     assert b.get() == [1]
+
+# TICKET-291 C1: a same-task round trip is a crossing too, so the write faults on every route.
+test fn same_task_round_trip_faults_on_every_route():
+    silent: List[str] = []
+    for name in ROUTES:
+        if not outcome(route(name, list_writer())()).contains(COPY_TAIL):
+            silent.push(name)
+    assert silent == []
+
+# C2: a relay task re-stores the closure; the re-store must keep the mark.
+test fn relay_restore_through_shared_keeps_the_mark():
+    g := list_writer()
+    c := Shared([g])
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            h := c.get()[0]
+            c.set([h])
+            r.send(outcome(c.get()[0]))
+    assert r.recv().contains(COPY_TAIL)
+
+test fn relay_restore_through_channels_keeps_the_mark():
+    g := list_writer()
+    ch := Channel[fn() -> None](1)
+    ch2 := Channel[fn() -> None](1)
+    ch.send(g)
+    h := ch.recv()
+    ch2.send(h)
+    assert outcome(ch2.recv()).contains(COPY_TAIL)
+
+# C4: a closure received inside a box closure is stamped with the storing task, not the sender.
+test fn recv_inside_box_closure_stamps_the_storing_task():
+    ch := Channel[fn() -> None](1)
+    b := Shared[List[fn() -> None]]([])
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            xs := [1]
+            ch.send(fn(): xs.push(2))
+            while b.get().len() == 0:
+                pass
+            r.send(outcome(b.get()[0]))
+        spawn:
+            b.update(fn(s): s + [ch.recv()])
+    assert r.recv().contains(COPY_TAIL)
+
+# C3: a closure the box closure builds over FRESH state loses no write, so it must not fault.
+fn make_logger() -> fn() -> None:
+    log := [0]
+    return fn(): log.push(1)
+
+test fn box_built_closure_over_fresh_state_does_not_fault():
+    c := Shared([1]).read(fn(s): make_logger())
+    assert outcome(c) == "no-fault"
