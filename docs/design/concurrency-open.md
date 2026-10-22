@@ -15,6 +15,14 @@ open-row ledger is [`gaps.md`](../contributing/gaps.md). User-facing rules:
 | `Shared.update` hold-and-wait | A closure that waits on something only another user of the same box can give deadlocks. | Won't-fix by design (Elixir `Agent` rule: keep the closure short). |
 | Restart / supervision for `Executor` | An `Executor` runs and reaps tasks; it does not restart them. | Out of scope. |
 
+## Owner decisions, not yet built (2026-10-22)
+
+| Item | Decision | Ancestor |
+|---|---|---|
+| `Executor` | One `ex.submit(f) -> Task[T]`. A job fault goes into its `Task` (`get()` gives `!e`). `shutdown()` raises the first fault no `get()` read, and a `recover:` catches it. `task.cancel()` cancels one job; `shutdown_now()` cancels all. Siblings run on after a fault. `submit_result` and the fire-and-forget `submit` go away | Python `Future`, Java `Future`, tokio `JoinHandle` |
+| `Broadcast[T]` | Add to `std.concurrency`, in Chezzi over `Channel`. Each subscriber gets every value in its own mailbox and runs its own handler loop; a slow subscriber gets `Lagged(n)` | tokio `broadcast` |
+| Custom heap | No user heap or arena API: `Shared[MyStruct]` gives a custom write interface in its own heap. Add `Frozen[T]` (build once, all tasks read in place, no lock) only when a benchmark shows the `RwShared.read` copy cost | Erlang `persistent_term`, Rust `Arc` |
+
 ## Open, would be fixed if a program needs it
 
 - **N10: timer arm in the inline builder body.** A `wait:` with a live timer arm in the inline body of
