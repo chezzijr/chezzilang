@@ -53,9 +53,9 @@ test fn rwshared_ab_ba_cycle_in_one_task_faults():
 
 fn via_executor(x: int) -> int:
     ex := Executor(2)
-    ch := ex.submit_result(fn() -> int: 5)
+    ch := ex.submit(fn() -> int: 5)
     got := 0
-    match ch.recv():
+    match ch.get():
         ?v: got = v
         !_: got = -1
     ex.shutdown()

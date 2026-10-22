@@ -12,7 +12,6 @@
 
 import std.concurrency
 import std.cancel
-import submit_task from std.concurrency.task
 
 fn bump(c: concurrency.AtomicInt, by: int):
     c.add(by)
@@ -37,18 +36,18 @@ fn guarded_bump(tok: cancel.Token, c: concurrency.AtomicInt):
 test fn every_job_runs_despite_a_handle_job_fault():
     ex := concurrency.Executor()
     c := concurrency.AtomicInt(0)
-    t := submit_task(ex, blow_up_int)
-    ex.submit(fn(): bump(c, 1))
-    ex.submit(fn(): bump(c, 10))
-    ex.submit(fn(): bump(c, 100))
+    t := ex.submit(blow_up_int)
+    _ := ex.submit(fn(): bump(c, 1))
+    _ := ex.submit(fn(): bump(c, 10))
+    _ := ex.submit(fn(): bump(c, 100))
     ex.shutdown()
     assert err_of(t.get()).contains("boom"), err_of(t.get())
     assert c.load() == 111, "every non-faulting job must run, got " + str(c.load())
 
 test fn each_handle_carries_its_own_fault():
     ex := concurrency.Executor()
-    a := submit_task(ex, blow_up_int)
-    b := submit_task(ex, blow_up_late_int)
+    a := ex.submit(blow_up_int)
+    b := ex.submit(blow_up_late_int)
     ex.shutdown()
     assert err_of(a.get()).contains("boom"), err_of(a.get())
     assert not err_of(a.get()).contains("late"), err_of(a.get())
@@ -56,17 +55,17 @@ test fn each_handle_carries_its_own_fault():
 
 test fn a_later_jobs_result_survives_an_earlier_handle_fault():
     ex := concurrency.Executor()
-    t := submit_task(ex, blow_up_int)
-    ch := ex.submit_result(fn() -> int: 7)
+    t := ex.submit(blow_up_int)
+    ch := ex.submit(fn() -> int: 7)
     ex.shutdown()
     assert err_of(t.get()).contains("boom"), err_of(t.get())
-    assert (ch.recv() ?? 0) == 7, "the surviving result must be the job's real value"
+    assert (ch.get() ?? 0) == 7, "the surviving result must be the job's real value"
 
 test fn a_second_shutdown_after_a_handle_fault_is_a_no_op():
     ex := concurrency.Executor()
     c := concurrency.AtomicInt(0)
-    t := submit_task(ex, blow_up_int)
-    ex.submit(fn(): bump(c, 1))
+    t := ex.submit(blow_up_int)
+    _ := ex.submit(fn(): bump(c, 1))
     ex.shutdown()
     ex.shutdown()
     assert err_of(t.get()).contains("boom"), err_of(t.get())
@@ -82,8 +81,8 @@ test fn a_pre_cancelled_token_stops_the_jobs():
     tok := cancel.manual()
     tok.cancel()
     c := concurrency.AtomicInt(0)
-    ex.submit(fn(): guarded_bump(tok, c))
-    ex.submit(fn(): guarded_bump(tok, c))
+    _ := ex.submit(fn(): guarded_bump(tok, c))
+    _ := ex.submit(fn(): guarded_bump(tok, c))
     ex.shutdown()
     assert c.load() == 0, "a cancelled token must stop the later jobs, got " + str(c.load())
 
@@ -93,7 +92,7 @@ test fn a_pre_cancelled_token_stops_the_jobs():
 # and with `main` parked in its own `shutdown()` every party in the run was such a join — so the
 # process-wide verdict declared a program whose every job had ALREADY RUN to be deadlocked. Measured on
 # the pre-fix debug binary: 8/8 runs faulted for the graceful `shutdown()` below, and 8/60 for
-# `shutdown_now()` (the rest escaped only because `shutdown_now` trips the cancel flag, which the joiner
+# `ex.cancel()` (the rest escaped only because `cancel` trips the cancel flag, which the joiner
 # usually noticed before `main`'s 5 ms poll reached the verdict — a coin flip, not a verdict).
 #
 # Reference, CPython 3.14.6, measured: `shutdown(wait=True)` from inside its own worker raises
@@ -107,19 +106,19 @@ test fn a_pre_cancelled_token_stops_the_jobs():
 test fn a_job_may_gracefully_shut_down_its_own_executor():
     ex := concurrency.Executor()
     c := concurrency.AtomicInt(0)
-    ex.submit(fn(): bump(c, 1))
-    ex.submit(fn(): bump(c, 10))
-    ex.submit(fn(): ex.shutdown())
+    _ := ex.submit(fn(): bump(c, 1))
+    _ := ex.submit(fn(): bump(c, 10))
+    _ := ex.submit(fn(): ex.shutdown())
     ex.shutdown()
     # A graceful shutdown trips no cancel, so the siblings the self-join waits for all run.
     assert c.load() == 11, "a self-joining job must wait for its siblings, not report a deadlock; got " + str(c.load())
 
-test fn a_job_may_shutdown_now_its_own_executor():
-    # The reentrant-cancel half of the same seam. No accumulator assertion: `shutdown_now` trips the
+test fn a_job_may_cancel_its_own_executor():
+    # The reentrant-cancel half of the same seam. No accumulator assertion: `cancel` trips the
     # per-core cancel flag, so whether a sibling reaches its next checkpoint first is genuinely
     # nondeterministic. What must be deterministic is that nobody calls this run dead.
     ex := concurrency.Executor()
-    ex.submit(fn(): ex.shutdown_now())
+    _ := ex.submit(fn(): ex.cancel())
     r := recover: ex.shutdown()
     match r:
         ?_: pass
@@ -129,7 +128,7 @@ test fn an_uncancelled_token_is_a_no_op():
     ex := concurrency.Executor()
     tok := cancel.manual()
     c := concurrency.AtomicInt(0)
-    ex.submit(fn(): guarded_bump(tok, c))
-    ex.submit(fn(): guarded_bump(tok, c))
+    _ := ex.submit(fn(): guarded_bump(tok, c))
+    _ := ex.submit(fn(): guarded_bump(tok, c))
     ex.shutdown()
     assert c.load() == 2, "no cancel means every job runs, got " + str(c.load())

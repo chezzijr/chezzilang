@@ -1,89 +1,93 @@
 # tests/chz/stdlib/task_cancel_test.chz — TICKET-148 (W14-13).
 #
-# `shutdown_now()` must not strand a `submit_task` Task: `get()` must promptly return an `!e`
+# `ex.cancel()` must not strand a submitted Task: `get()` must promptly return an `!e`
 # and `done()` must be true. Reference — CPython 3.14 `shutdown(cancel_futures=True)`:
 # `future.result()` raises `CancelledError` at once.
 #
 # No sleep here (DEC-050). `slow` parks on a channel nothing ever sends to, so only a cancel ends
-# it. `shutdown_now()` returns only after every job and its defers finished, so `done()` is settled
-# when it returns, whether or not the job had started.
+# it. `ex.cancel()` does not wait; the `ex.shutdown()` after it returns once every job and its defers
+# finished, so `done()` is settled then, whether or not the job had started.
 
 import std.concurrency
-import submit_task from std.concurrency.task
 
 fn slow(hold: Channel[int]) -> int:
     return hold.recv()
 
-test fn shutdown_now_does_not_strand_a_submitted_task():
+test fn cancel_does_not_strand_a_submitted_task():
     hold := Channel[int](1)
     ex := concurrency.Executor()
-    t := submit_task(ex, fn(): slow(hold))
-    ex.shutdown_now()
-    assert t.done(), "done() must be true after shutdown_now()"
+    t := ex.submit(fn(): slow(hold))
+    ex.cancel()
+    ex.shutdown()
+    assert t.done(), "done() must be true after cancel() and shutdown()"
 
 test fn a_cancelled_tasks_get_returns_the_cancel_error():
     hold := Channel[int](1)
     ex := concurrency.Executor()
-    t := submit_task(ex, fn(): slow(hold))
-    ex.shutdown_now()
+    t := ex.submit(fn(): slow(hold))
+    ex.cancel()
+    ex.shutdown()
     assert t.done(), "done() must be true before get() is called"
     r := t.get()
     match r:
         ?_: assert false, "a cancelled task must not yield a value"
-        !e: assert e.message() == "task cancelled: shutdown_now() stopped it before it finished"
+        !e: assert e.message() == "task cancelled: cancel() stopped it before it finished"
     again := t.get()
     match again:
         ?_: assert false, "get() must replay the cancel"
-        !e: assert e.message() == "task cancelled: shutdown_now() stopped it before it finished"
+        !e: assert e.message() == "task cancelled: cancel() stopped it before it finished"
 
-test fn every_task_is_done_after_shutdown_now_started_or_not():
+test fn every_task_is_done_after_cancel_started_or_not():
     hold := Channel[int](1)
     ex := concurrency.Executor()
-    ts := [submit_task(ex, fn(): slow(hold)) for i in 0..30]
-    ex.shutdown_now()
+    ts := [ex.submit(fn(): slow(hold)) for i in 0..30]
+    ex.cancel()
+    ex.shutdown()
     n := 0
     for t in ts:
         if t.done():
             n += 1
     assert n == 30, "all 30 tasks must be done, got {n}"
 
-test fn shutdown_now_settles_a_submit_result_channel():
+test fn cancel_settles_a_second_submitted_task():
     hold := Channel[int](1)
     ex := concurrency.Executor()
-    ch := ex.submit_result(fn(): slow(hold))
-    ex.shutdown_now()
-    match ch.recv():
+    ch := ex.submit(fn(): slow(hold))
+    ex.cancel()
+    ex.shutdown()
+    match ch.get():
         ?_: assert false, "a cancelled job must not send a value"
-        !e: assert e.message() == "task cancelled: shutdown_now() stopped it before it finished"
+        !e: assert e.message() == "task cancelled: cancel() stopped it before it finished"
 
 test fn a_task_that_finished_carries_no_cancel_message():
     ex := concurrency.Executor()
-    t := submit_task(ex, fn(): 5)
+    t := ex.submit(fn(): 5)
     ex.shutdown()
-    ex.shutdown_now()
+    ex.cancel()
     match t.get():
         ?v: assert v == 5
         !e: assert false, "a finished job must not report a cancel: " + e.message()
 
 # TICKET-219 (C2) — under `Executor(1)` the first job runs and the rest are held, whatever the
-# timing. `shutdown_now()` drops the held jobs; each handle settles `!e` (CPython
+# timing. `ex.cancel()` drops the held jobs; each handle settles `!e` (CPython
 # `cancel_futures=True`), and a sealed channel gives the same `!e` on every `recv`.
-test fn a_held_job_dropped_by_shutdown_now_settles_err():
-    msg := "task cancelled: shutdown_now() stopped it before it finished"
+test fn a_held_job_dropped_by_cancel_settles_err():
+    msg := "task cancelled: cancel() stopped it before it finished"
     hold := Channel[int](1)
     ex := concurrency.Executor(1)
-    first := submit_task(ex, fn(): slow(hold))
-    a := submit_task(ex, fn() -> int: 1)
-    b := submit_task(ex, fn() -> int: 2)
-    c := ex.submit_result(fn() -> int: 3)
-    ex.shutdown_now()
+    first := ex.submit(fn(): slow(hold))
+    a := ex.submit(fn() -> int: 1)
+    b := ex.submit(fn() -> int: 2)
+    c := ex.submit(fn() -> int: 3)
+    ex.cancel()
+    ex.shutdown()
     for t in [first, a, b]:
-        assert t.done(), "done() must be true after shutdown_now()"
+        assert t.done(), "done() must be true after cancel() and shutdown()"
         match t.get():
             ?_: assert false, "a dropped job must not yield a value"
             !e: assert e.message() == msg
     for _ in 0..2:
-        match c.recv():
+        match c.get():
             ?_: assert false, "a dropped job must not send a value"
             !e: assert e.message() == msg
 

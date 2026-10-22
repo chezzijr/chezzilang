@@ -9,6 +9,7 @@
 import Broadcast, Receiver, Lagged from std.concurrency.broadcast
 import Executor, AtomicInt from std.concurrency
 import Iterable from std.iter
+import std.time
 
 fn take_all(rx: Receiver[int]) -> List[str]:
     out: List[str] = []
@@ -170,7 +171,7 @@ test fn a_receiver_crosses_an_executor_job():
     rx := b.subscribe()
     total := Channel[int](1)
     ex := Executor(2)
-    ex.submit(fn(): sum_into(rx, total))
+    _ := ex.submit(fn(): sum_into(rx, total))
     for i in 1..5:
         b.send(i)
     b.close()
@@ -370,18 +371,26 @@ test fn readers_sharing_a_small_mailbox_count_every_value_once():
     four := small_cap_shared_trial(4)
     assert four == "ok", "4 readers: {four}"
 
-# TICKET-292 rule 5. `try_recv` returns `None` while another reader holds the receive step, and
-# never waits for it. The test holds the token itself, as a reader inside `_step` does.
+fn blocked_reader(rx: Receiver[int]) -> int:
+    match rx.recv():
+        ?v: return v
+        !e: return 0 - e.missed
+
+# TICKET-292 rule 5. `try_recv` never waits for the receive step. A reader parked in `recv` holds
+# the step; `try_recv` returns `None` at once instead of queueing behind it, and the parked reader
+# still gets the next value. (TICKET-289 sealed a std struct's `_` fields, so the test no longer
+# takes the `_lock` token itself; it cannot hold the step while a value is ready.)
 test fn try_recv_returns_none_while_another_reader_is_receiving():
     b := Broadcast[int].new(4)
     rx := b.subscribe()
-    b.send(7)
-    tok := rx._lock.recv()
+    got := Channel[int](1)
+    ex := Executor()
+    _ := ex.submit(fn(): got.send(blocked_reader(rx)))
+    time.sleep_ms(50)
     assert rx.try_recv() == None
-    rx._lock.send(tok)
-    match rx.try_recv():
-        ?r: assert (r ?? 0) == 7
-        None: assert false
+    b.send(7)
+    assert got.recv() == 7
+    ex.shutdown()
 
 fn taking_reader(rx: Receiver[int], taken: Channel[int]):
     for r in rx:

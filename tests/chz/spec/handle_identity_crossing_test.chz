@@ -93,7 +93,7 @@ fn via_atomic[T: StructuralEq](x: T) -> T:
 
 fn via_executor[T](x: T) -> T:
     ex := Executor()
-    got := must(ex.submit_result(fn() -> T: x).recv())
+    got := must(ex.submit(fn() -> T: x).get())
     ex.shutdown()
     return got
 

@@ -104,14 +104,14 @@ test fn a_slice_push_in_a_spawn_block_leaves_the_root():
 test fn a_slice_push_in_an_executor_job_leaves_the_root():
     g := [[1], [2], [3]]
     ex := Executor()
-    ex.submit(fn(): push_lit(g))
+    _ := ex.submit(fn(): push_lit(g))
     ex.shutdown()
     assert g == [[1], [2], [3]]
 
 test fn a_copy_push_in_an_executor_job_leaves_the_root():
     g := [[1], [2], [3]]
     ex := Executor()
-    ex.submit(fn(): push_copy(g))
+    _ := ex.submit(fn(): push_copy(g))
     ex.shutdown()
     assert g == [[1], [2], [3]]
 

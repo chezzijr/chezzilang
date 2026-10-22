@@ -10,7 +10,7 @@
 # The `memoize` half (A3) moved to TICKET-192, which owns an O(1) shared cache.
 
 import std.concurrency
-import submit_task, Task from std.concurrency.task
+import Task from std.concurrency
 
 # A handle carries a `T!E`; these tests read a job that did not fault.
 fn must[T](r: T!) -> T:
@@ -69,7 +69,7 @@ fn _mutate_then_get(t: Task[List[int]]) -> str:
 
 test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
     ex := concurrency.Executor()
-    t := submit_task(ex, forty_two)
+    t := ex.submit(forty_two)
     ex.shutdown()
     ch := Channel[str](1)
     parallel:
@@ -84,7 +84,7 @@ test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
 test fn task_pending_parent_get_waits():
     ex := concurrency.Executor()
     gate := Channel[int](1)
-    t := submit_task(ex, fn() -> int: gated(gate))
+    t := ex.submit(fn() -> int: gated(gate))
     assert not t.done()
     gate.send(1)
     assert show(t) == "42"
@@ -94,7 +94,7 @@ test fn task_pending_parent_get_waits():
 test fn task_pending_spawned_and_two_at_once():
     ex := concurrency.Executor()
     gate := Channel[int](1)
-    t := submit_task(ex, fn() -> int: gated(gate))
+    t := ex.submit(fn() -> int: gated(gate))
     out := Channel[str](2)
     parallel:
         spawn child_show(t, out)
@@ -109,9 +109,9 @@ test fn task_pending_spawned_and_two_at_once():
 test fn task_pending_executor_job_caller():
     ex := concurrency.Executor()
     gate := Channel[int](1)
-    t := submit_task(ex, fn() -> int: gated(gate))
+    t := ex.submit(fn() -> int: gated(gate))
     ex2 := concurrency.Executor()
-    t2 := submit_task(ex2, fn() -> int: must(t.get()) + 1)
+    t2 := ex2.submit(fn() -> int: must(t.get()) + 1)
     gate.send(1)
     ex.shutdown()
     ex2.shutdown()
@@ -120,7 +120,7 @@ test fn task_pending_executor_job_caller():
 
 test fn task_done_ok_every_caller():
     ex := concurrency.Executor()
-    t := submit_task(ex, fn() -> int: 42)
+    t := ex.submit(fn() -> int: 42)
     ex.shutdown()
     assert t.done()
     out := Channel[str](3)
@@ -128,7 +128,7 @@ test fn task_done_ok_every_caller():
         spawn child_show(t, out)
         spawn child_show(t, out)
     ex2 := concurrency.Executor()
-    ex2.submit(fn(): child_show(t, out))
+    _ := ex2.submit(fn(): child_show(t, out))
     ex2.shutdown()
     assert out.recv() == "42"
     assert out.recv() == "42"
@@ -137,7 +137,7 @@ test fn task_done_ok_every_caller():
 
 test fn task_done_faulted_every_caller():
     ex := concurrency.Executor()
-    t := submit_task(ex, boom)
+    t := ex.submit(boom)
     ex.shutdown()
     assert t.done()
     out := Channel[str](3)
@@ -145,7 +145,7 @@ test fn task_done_faulted_every_caller():
         spawn child_show(t, out)
         spawn child_show(t, out)
     ex2 := concurrency.Executor()
-    ex2.submit(fn(): child_show(t, out))
+    _ := ex2.submit(fn(): child_show(t, out))
     ex2.shutdown()
     assert out.recv() == "boom"
     assert out.recv() == "boom"
@@ -155,7 +155,7 @@ test fn task_done_faulted_every_caller():
 
 test fn task_mutable_result_parent_get_returns_the_same_object():
     ex := concurrency.Executor()
-    t := submit_task(ex, mk_list)
+    t := ex.submit(mk_list)
     ex.shutdown()
     a := must(t.get())
     a.push(3)
@@ -166,7 +166,7 @@ test fn task_mutable_result_parent_get_returns_the_same_object():
 
 test fn task_mutable_result_spawned_copy_sees_the_value_as_of_the_crossing():
     ex := concurrency.Executor()
-    t := submit_task(ex, mk_list)
+    t := ex.submit(mk_list)
     ex.shutdown()
     a := must(t.get())
     a.push(3)
@@ -179,13 +179,13 @@ test fn task_mutable_result_spawned_copy_sees_the_value_as_of_the_crossing():
 
 test fn task_mutable_result_executor_job_copy_sees_the_value_as_of_the_crossing():
     ex := concurrency.Executor()
-    t := submit_task(ex, mk_list)
+    t := ex.submit(mk_list)
     ex.shutdown()
     a := must(t.get())
     a.push(3)
     out := Channel[str](1)
     ex2 := concurrency.Executor()
-    ex2.submit(fn(): child_mutate(t, out))
+    _ := ex2.submit(fn(): child_mutate(t, out))
     ex2.shutdown()
     got := out.recv()
     assert got == "[1, 2, 3] this value is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()", got
@@ -193,7 +193,7 @@ test fn task_mutable_result_executor_job_copy_sees_the_value_as_of_the_crossing(
 
 test fn task_faulted_first_observer_is_a_spawned_task():
     ex := concurrency.Executor()
-    t := submit_task(ex, boom)
+    t := ex.submit(boom)
     ex.shutdown()
     out := Channel[str](1)
     parallel:
@@ -205,11 +205,11 @@ test fn task_faulted_first_observer_is_a_spawned_task():
 
 test fn task_faulted_first_observer_is_an_executor_job():
     ex := concurrency.Executor()
-    t := submit_task(ex, boom)
+    t := ex.submit(boom)
     ex.shutdown()
     out := Channel[str](1)
     ex2 := concurrency.Executor()
-    ex2.submit(fn(): child_show(t, out))
+    _ := ex2.submit(fn(): child_show(t, out))
     ex2.shutdown()
     got := out.recv()
     assert got == "boom", got
@@ -218,7 +218,7 @@ test fn task_faulted_first_observer_is_an_executor_job():
 
 test fn task_faulted_first_observers_are_two_tasks_at_once():
     ex := concurrency.Executor()
-    t := submit_task(ex, boom)
+    t := ex.submit(boom)
     ex.shutdown()
     out := Channel[str](2)
     parallel:
@@ -234,7 +234,7 @@ test fn task_faulted_first_observers_are_two_tasks_at_once():
 test fn task_pending_then_faulted_spawned_waiter_sees_the_fault():
     ex := concurrency.Executor()
     gate := Channel[int](1)
-    t := submit_task(ex, fn() -> int: gated_boom(gate))
+    t := ex.submit(fn() -> int: gated_boom(gate))
     out := Channel[str](1)
     parallel:
         spawn child_show(t, out)
@@ -247,14 +247,14 @@ test fn task_pending_then_faulted_spawned_waiter_sees_the_fault():
 
 test fn task_done_from_a_spawned_task_in_every_state():
     ex_ok := concurrency.Executor()
-    ok := submit_task(ex_ok, forty_two)
+    ok := ex_ok.submit(forty_two)
     ex_ok.shutdown()
     ex_bad := concurrency.Executor()
-    bad := submit_task(ex_bad, boom)
+    bad := ex_bad.submit(boom)
     ex_bad.shutdown()
     ex_p := concurrency.Executor()
     gate := Channel[int](1)
-    p := submit_task(ex_p, fn() -> int: gated(gate))
+    p := ex_p.submit(fn() -> int: gated(gate))
     out := Channel[str](1)
     parallel:
         spawn child_done3(p, ok, bad, out)
@@ -268,17 +268,17 @@ test fn task_done_from_a_spawned_task_in_every_state():
 
 test fn task_done_from_an_executor_job_in_every_state():
     ex_ok := concurrency.Executor()
-    ok := submit_task(ex_ok, forty_two)
+    ok := ex_ok.submit(forty_two)
     ex_ok.shutdown()
     ex_bad := concurrency.Executor()
-    bad := submit_task(ex_bad, boom)
+    bad := ex_bad.submit(boom)
     ex_bad.shutdown()
     ex_p := concurrency.Executor()
     gate := Channel[int](1)
-    p := submit_task(ex_p, fn() -> int: gated(gate))
+    p := ex_p.submit(fn() -> int: gated(gate))
     out := Channel[str](1)
     ex2 := concurrency.Executor()
-    ex2.submit(fn(): child_done3(p, ok, bad, out))
+    _ := ex2.submit(fn(): child_done3(p, ok, bad, out))
     ex2.shutdown()
     got := out.recv()
     assert got == "false true true", got

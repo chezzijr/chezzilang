@@ -3,41 +3,44 @@
 # A NATIVE fault raised inside a std function is stamped at the user's call into std (Rust's
 # `#[track_caller]`). A `panic(...)` raised from std code stays unstamped: `file()`/`line()`/`col()`
 # answer `None`, whether std calls `panic` directly or calls it as a first-class callback value.
+# A job's fault reaches the user only through its Task, which carries the message alone.
 
 import std.cmp
 import std.concurrency
 import std.iter
-import submit_task from std.concurrency.task
-
-fn submit_on(ex: concurrency.Executor) -> int:
-    t := submit_task(ex, fn(): 1)
-    return t.get() ?? 0
 
 test fn a_native_std_fault_is_located_at_the_users_call():
-    ex := concurrency.Executor()
-    ex.shutdown()
-    r := recover: submit_task(ex, fn(): 1)
+    r := recover: concurrency.is_settled(5)
     match r:
-        ?_: assert false, "submit on a shut-down Executor must fault"
+        ?_: assert false, "is_settled(5) must fault"
         !e:
-            assert e.message() == "submit on a shut-down Executor (it no longer accepts work)"
-            assert e.line() == ?19, "line must be the submit_task call"
-            assert e.col() == ?19, "col must be the submit_task call"
+            assert e.message().contains("Channel"), e.message()
+            assert e.line() == ?13, "line must be the is_settled call"
+            assert e.col() == ?19, "col must be the is_settled call"
             match e.file():
                 None: assert false, "expected the user's file"
                 ?p: assert p.ends_with("std_fault_origin_test.chz"), "file: {p}"
 
-test fn a_native_std_fault_in_a_job_is_located_at_the_users_call():
+test fn a_submit_on_a_shut_down_executor_settles_its_task_with_the_refusal():
     ex := concurrency.Executor()
     ex.shutdown()
+    t := ex.submit(fn(): 1)
+    assert t.done(), "a refused Task is settled at once"
+    match t.get():
+        ?_: assert false, "submit on a shut-down Executor must settle with the refusal"
+        !e:
+            assert e.message() == "submit on a shut-down Executor (it no longer accepts work)"
+            assert e.file() == None, "a Task's error carries the message only"
+
+test fn a_native_std_fault_in_a_job_reaches_only_the_task():
     outer := concurrency.Executor()
-    t := submit_task(outer, fn(): submit_on(ex))
+    t := outer.submit(fn(): concurrency.is_settled(5))
     outer.shutdown()
     match t.get():
         ?_: assert false, "the job must fault"
         !e:
-            assert e.message().contains("submit on a shut-down Executor"), e.message()
-            assert e.file() == None, "a handle's error carries the message only"
+            assert e.message().contains("Channel"), e.message()
+            assert e.file() == None, "a Task's error carries the message only"
 
 test fn a_std_panic_stays_unstamped():
     r := recover: cmp.clamp(5, 3, 1)

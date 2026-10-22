@@ -3,7 +3,6 @@
 import Iterator from std.iter
 import std.concurrency
 import std.time as time
-import submit_task from std.concurrency.task
 import memoize1 from std.memoize
 
 # A handle carries a `T!E`; these tests read a job that did not fault.
@@ -33,7 +32,7 @@ test fn started_generator_drained_in_executor_job_runs():
     g := t190_gen()
     _ := g.next()
     ex := concurrency.Executor()
-    got := must(ex.submit_result(fn() -> str: t190_drain(g)).recv())
+    got := must(ex.submit(fn() -> str: t190_drain(g)).get())
     ex.shutdown()
     assert got == "5"
 
@@ -156,16 +155,16 @@ fn t190_route(route: str, g: Iterator[int]) -> str:
             spawn f()
     elif route == "submit":
         ex := concurrency.Executor()
-        ex.submit(fn(): out.send(t190_cell(g)))
+        _ := ex.submit(fn(): out.send(t190_cell(g)))
         ex.shutdown()
     elif route == "submit_result":
         ex := concurrency.Executor()
-        r := must(ex.submit_result(fn() -> str: t190_cell(g)).recv())
+        r := must(ex.submit(fn() -> str: t190_cell(g)).get())
         ex.shutdown()
         return r
     elif route == "task_get":
         ex := concurrency.Executor()
-        t := submit_task(ex, fn() -> Iterator[int]: g)
+        t := ex.submit(fn() -> Iterator[int]: g)
         ex.shutdown()
         parallel:
             spawn:
@@ -375,7 +374,7 @@ fn t220_started() -> Iterator[int]:
 # TICKET-220: an unobserved Task.get() copy of a generator with a frame-local list must run.
 test fn task_get_copy_of_frame_local_generator_runs():
     ex := concurrency.Executor()
-    t := submit_task(ex, t220_started)
+    t := ex.submit(t220_started)
     ex.shutdown()
     out := Channel[str](1)
     parallel:

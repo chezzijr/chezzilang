@@ -255,7 +255,7 @@ test fn an_executor_job_writing_a_capture_faults():
     xs := [1]
     r := Channel[str](1)
     ex := concurrency.Executor()
-    ex.submit(fn(): executor_job(xs, r))
+    _ := ex.submit(fn(): executor_job(xs, r))
     ex.shutdown()
     assert r.recv() != "no-fault"
 

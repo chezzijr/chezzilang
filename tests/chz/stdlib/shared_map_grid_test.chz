@@ -175,11 +175,11 @@ fn _grid[K: Hashable + Eq](keys: List[K]) -> str:
     b2: concurrency.RwShared[Map[K, int]] = concurrency.RwShared({})
     c2: ConcurrentMap[K, int] = ConcurrentMap(concurrency.RwShared({}))
     ex := concurrency.Executor()
-    o1 := ex.submit_result(fn(): _shared_ops(s2, keys))
-    o2 := ex.submit_result(fn(): _rw_ops(b2, keys))
-    o3 := ex.submit_result(fn(): _cm_ops(c2, keys))
+    o1 := ex.submit(fn(): _shared_ops(s2, keys))
+    o2 := ex.submit(fn(): _rw_ops(b2, keys))
+    o3 := ex.submit(fn(): _cm_ops(c2, keys))
     ex.shutdown()
-    for got in [must(o1.recv()), must(o2.recv()), must(o3.recv())]:
+    for got in [must(o1.get()), must(o2.get()), must(o3.get())]:
         if got != want:
             bad = bad + "executor: " + got + " != " + want + "\n"
     for seen in [_map_items(s2.get()), _rw_items(b2), _map_items(c2.snapshot())]:
@@ -226,9 +226,9 @@ fn _memo_grid[K: Hashable + Eq](keys: List[K]) -> str:
     c2 := concurrency.AtomicInt(0)
     m2 := memoize1(fn(k: K) -> str: _tagged(c2, k))
     ex := concurrency.Executor()
-    o := ex.submit_result(fn(): _call_all(m2, keys))
+    o := ex.submit(fn(): _call_all(m2, keys))
     ex.shutdown()
-    got2 := must(o.recv())
+    got2 := must(o.get())
     if got2 != want or _call_all(m2, keys) != want or c2.load() != keys.len():
         bad = bad + "executor: " + got2 + " calls=" + str(c2.load()) + "\n"
     return bad

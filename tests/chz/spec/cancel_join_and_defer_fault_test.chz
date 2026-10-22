@@ -43,14 +43,15 @@ test fn cancelled_owner_does_not_run_code_after_nursery_join():
     assert ran.get() == 0
 
 
-# Executor twin of the first test: `shutdown_now()` cancels the parked job; its defer fault surfaces.
-test fn shutdown_now_surfaces_a_cancelled_jobs_defer_fault():
+# Executor twin of the first test: `ex.cancel()` cuts the parked job; its defer fault lands in its Task.
+test fn cancel_keeps_a_cancelled_jobs_defer_fault_in_its_task():
     started := Channel[int](1)
     ex := Executor()
-    ex.submit(fn(): cleanup_fails(started))
+    t := ex.submit(fn(): cleanup_fails(started))
     _ := started.recv()
-    r := recover: ex.shutdown_now()
-    assert "{r}" == "!cleanup failed"
+    ex.cancel()
+    ex.shutdown()
+    assert "{t.get()}" == "!cleanup failed"
 
 
 fn owner(started: Channel[int], hold: Channel[int]):
@@ -58,14 +59,15 @@ fn owner(started: Channel[int], hold: Channel[int]):
         spawn cleanup_fails(started)
         _ := hold.recv()
 
-test fn shutdown_now_surfaces_a_nested_childs_defer_fault():
+test fn cancel_keeps_a_nested_childs_defer_fault_in_its_task():
     started := Channel[int](1)
     hold := Channel[int]()
     ex := Executor()
-    ex.submit(fn(): owner(started, hold))
+    t := ex.submit(fn(): owner(started, hold))
     _ := started.recv()
-    r := recover: ex.shutdown_now()
-    assert "{r}" == "!cleanup failed"
+    ex.cancel()
+    ex.shutdown()
+    assert "{t.get()}" == "!cleanup failed"
 
 
 # The other escape routes (`break`, `?`) abort the nursery through the same path as `return`: the

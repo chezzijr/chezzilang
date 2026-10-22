@@ -10,7 +10,7 @@
 # fenced in `test_runner::timeout_aborts_a_sleeping_test_on_every_block_in_place_path`, whose
 # doc-comment names the one shape it does NOT reach (`gaps.md` W7-17).
 #
-# Pre-fix, `shutdown_now()` at 50 ms against a `sleep_ms(3000)` waited the full 3005 ms on M:N AND ran
+# Pre-fix, `ex.cancel()` at 50 ms against a `sleep_ms(3000)` waited the full 3005 ms on M:N AND ran
 # the job's post-sleep code. Both forms below are deterministically red on the pre-fix binary.
 #
 # These assert on an `AtomicInt` read after the reap plus a wall-clock bound with 3× headroom, never
@@ -34,24 +34,24 @@ fn timer_napper():
     _ := t.recv()
     woke.add(1)
 
-test fn shutdown_now_interrupts_a_sleeping_job():
+test fn cancel_interrupts_a_sleeping_job():
     woke.store(0)
     t0 := time.monotonic()
     ex := concurrency.Executor()
-    ex.submit(napper)
+    _ := ex.submit(napper)
     time.sleep_ms(50)
-    ex.shutdown_now()
+    ex.cancel()
     d := time.monotonic() - t0
     assert d < 1.0, "a sleeping job must die at the cancel, not at its deadline: " + str(d) + "s"
     assert woke.load() == 0, "the cancelled job must not run its post-sleep code"
 
-test fn shutdown_now_interrupts_a_job_waiting_on_a_timer():
+test fn cancel_interrupts_a_job_waiting_on_a_timer():
     woke.store(0)
     t0 := time.monotonic()
     ex := concurrency.Executor()
-    ex.submit(timer_napper)
+    _ := ex.submit(timer_napper)
     time.sleep_ms(50)
-    ex.shutdown_now()
+    ex.cancel()
     d := time.monotonic() - t0
     assert d < 1.0, "a timer-waiting job must die at the cancel, not at its deadline: " + str(d) + "s"
     assert woke.load() == 0, "the cancelled job must not run its post-timer code"

@@ -260,7 +260,7 @@ test fn executor_job_alias_write_faults():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-            ex.submit(fn(): r.send("{gl8}"))
+            _ := ex.submit(fn(): r.send("{gl8}"))
     fault := r.recv()
     assert fault.starts_with("this value is this task's copy:"), fault
     got := r.recv()

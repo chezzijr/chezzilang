@@ -1057,9 +1057,9 @@ test fn nest_cell_92():
     b1 := Shared(2)
     fn f1(y: int) -> int:
         ex := Executor()
-        o := ex.submit_result(fn() -> int: K + G.len())
+        o := ex.submit(fn() -> int: K + G.len())
         ex.shutdown()
-        return y + (o.recv() ?? 0)
+        return y + (o.get() ?? 0)
     fn f0(x: int) -> int:
         b1.update(f1)
         return x + 1
@@ -1083,9 +1083,9 @@ test fn nest_cell_94():
     b1 := Shared(2)
     fn f1(y: int) -> int:
         ex := Executor()
-        o := ex.submit_result(fn() -> int: K + G.len())
+        o := ex.submit(fn() -> int: K + G.len())
         ex.shutdown()
-        return y + (o.recv() ?? 0)
+        return y + (o.get() ?? 0)
     fn f0(x: int) -> int:
         b1.update(f1)
         return x + K
@@ -1109,9 +1109,9 @@ test fn nest_cell_96():
     b1 := Shared(2)
     fn f1(y: int) -> int:
         ex := Executor()
-        o := ex.submit_result(fn() -> int: K + G.len())
+        o := ex.submit(fn() -> int: K + G.len())
         ex.shutdown()
-        return y + (o.recv() ?? 0)
+        return y + (o.get() ?? 0)
     fn f0(x: int) -> int:
         b1.update(f1)
         return x + G.len()
@@ -1135,9 +1135,9 @@ test fn nest_cell_98():
     b1 := RwShared(2)
     fn f1(y: int) -> int:
         ex := Executor()
-        o := ex.submit_result(fn() -> int: K + G.len())
+        o := ex.submit(fn() -> int: K + G.len())
         ex.shutdown()
-        return y + (o.recv() ?? 0)
+        return y + (o.get() ?? 0)
     fn f0(x: int) -> int:
         b1.write(f1)
         return x + 1
@@ -1161,9 +1161,9 @@ test fn nest_cell_100():
     b1 := RwShared(2)
     fn f1(y: int) -> int:
         ex := Executor()
-        o := ex.submit_result(fn() -> int: K + G.len())
+        o := ex.submit(fn() -> int: K + G.len())
         ex.shutdown()
-        return y + (o.recv() ?? 0)
+        return y + (o.get() ?? 0)
     fn f0(x: int) -> int:
         b1.write(f1)
         return x + K
@@ -1187,9 +1187,9 @@ test fn nest_cell_102():
     b1 := RwShared(2)
     fn f1(y: int) -> int:
         ex := Executor()
-        o := ex.submit_result(fn() -> int: K + G.len())
+        o := ex.submit(fn() -> int: K + G.len())
         ex.shutdown()
-        return y + (o.recv() ?? 0)
+        return y + (o.get() ?? 0)
     fn f0(x: int) -> int:
         b1.write(f1)
         return x + G.len()
@@ -1218,9 +1218,9 @@ test fn nest_cell_104():
     b2 := Shared(3)
     fn f2(y: int) -> int:
         ex := Executor()
-        o := ex.submit_result(fn() -> int: K + G.len())
+        o := ex.submit(fn() -> int: K + G.len())
         ex.shutdown()
-        return y + (o.recv() ?? 0)
+        return y + (o.get() ?? 0)
     fn f1(x: int) -> int:
         b2.update(f2)
         return x + 1
@@ -1252,9 +1252,9 @@ test fn nest_cell_106():
     b2 := Shared(3)
     fn f2(y: int) -> int:
         ex := Executor()
-        o := ex.submit_result(fn() -> int: K + G.len())
+        o := ex.submit(fn() -> int: K + G.len())
         ex.shutdown()
-        return y + (o.recv() ?? 0)
+        return y + (o.get() ?? 0)
     fn f1(x: int) -> int:
         b2.update(f2)
         return x + K
@@ -1286,9 +1286,9 @@ test fn nest_cell_108():
     b2 := Shared(3)
     fn f2(y: int) -> int:
         ex := Executor()
-        o := ex.submit_result(fn() -> int: K + G.len())
+        o := ex.submit(fn() -> int: K + G.len())
         ex.shutdown()
-        return y + (o.recv() ?? 0)
+        return y + (o.get() ?? 0)
     fn f1(x: int) -> int:
         b2.update(f2)
         return x + G.len()

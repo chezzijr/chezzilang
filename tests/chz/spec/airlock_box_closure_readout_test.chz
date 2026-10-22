@@ -8,7 +8,6 @@
 # stored the closure faults too when it reads it back (TICKET-291: a same-task round trip is a crossing).
 import Shared, RwShared, Atomic, Executor from std.concurrency
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
-import submit_task from std.concurrency.task
 
 COPY_TAIL := "is this task's copy: a write to it would be lost at the join"
 ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get", "ConcurrentMap.remove", "Channel.recv", "Atomic.load", "Task.get"]
@@ -68,7 +67,7 @@ fn route(name: str, f: fn() -> None) -> fn() -> fn() -> None:
             return fn(): a.load()
         "Task.get":
             ex := Executor(1)
-            t := submit_task(ex, fn(): f)
+            t := ex.submit(fn(): f)
             ex.shutdown()
             return fn(): ok(t.get())
         _: panic("no route {name}")

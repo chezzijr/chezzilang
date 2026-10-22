@@ -423,7 +423,7 @@ test fn grid_policy_r45_block_named_capture():
 test fn grid_policy_r16_executor_submit_fresh():
     out := Channel[str](4)
     ex := concurrency.Executor()
-    ex.submit(fn(): t189_w([1], out))
+    _ := ex.submit(fn(): t189_w([1], out))
     ex.shutdown()
     assert out.recv() == "ok 2"
 
@@ -432,7 +432,7 @@ test fn grid_policy_r17_executor_submit_named():
     h := t189_w
     out := Channel[str](4)
     ex := concurrency.Executor()
-    ex.submit(fn(): h(xs, out))
+    _ := ex.submit(fn(): h(xs, out))
     ex.shutdown()
     assert out.recv() == "fault"
     assert xs == [1]
@@ -440,14 +440,14 @@ test fn grid_policy_r17_executor_submit_named():
 test fn grid_policy_r46_executor_submit_result_named():
     xs := [1]
     ex := concurrency.Executor()
-    got := must(ex.submit_result(fn() -> str: t189_try(xs)).recv())
+    got := must(ex.submit(fn() -> str: t189_try(xs)).get())
     ex.shutdown()
     assert got == "fault"
     assert xs == [1]
 
 test fn grid_policy_r47_executor_submit_result_fresh():
     ex := concurrency.Executor()
-    got := must(ex.submit_result(fn() -> str: t189_try([1])).recv())
+    got := must(ex.submit(fn() -> str: t189_try([1])).get())
     ex.shutdown()
     assert got == "ok 2"
 

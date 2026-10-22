@@ -57,7 +57,7 @@ fn cell(bad: List[str], name: str, ok: bool):
     if not ok:
         bad.push(name)
 
-fn ran(bad: List[str], name: str, r: None!):
+fn ran[T](bad: List[str], name: str, r: T!):
     match r:
         ?_:
             pass
@@ -167,11 +167,11 @@ test fn grid_submit_result():
     bad: List[str] = []
     ex := Executor()
     k := 1
-    cell(bad, "plain", ex.submit_result(plain0).recv() == ?7)
-    cell(bad, "method path", ex.submit_result(P.zero).recv() == ?0)
-    cell(bad, "closure", ex.submit_result(fn() -> int: k).recv() == ?1)
-    cell(bad, "native", isok(ex.submit_result(time.now_ms).recv()))
-    cell(bad, "extern", isok(ex.submit_result(getpid).recv()))
+    cell(bad, "plain", ex.submit(plain0).get() == ?7)
+    cell(bad, "method path", ex.submit(P.zero).get() == ?0)
+    cell(bad, "closure", ex.submit(fn() -> int: k).get() == ?1)
+    cell(bad, "native", isok(ex.submit(time.now_ms).get()))
+    cell(bad, "extern", isok(ex.submit(getpid).get()))
     ex.shutdown()
     assert bad.len() == 0, ", ".join(bad)
 

@@ -12,7 +12,7 @@ fn bad():
 
 test fn a_dropped_jobs_fault_is_caught_by_recover_around_shutdown():
     ex := concurrency.Executor()
-    ex.submit(bad)
+    _ := ex.submit(bad)
     res := recover: ex.shutdown()
     match res:
         ?_: pass

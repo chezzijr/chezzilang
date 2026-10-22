@@ -162,7 +162,7 @@ test fn try_recv_sees_a_blocked_in_place_rendezvous_sender():
     rz := Channel[int](0)
     got := Shared(-1)
     ex := Executor()
-    ex.submit(fn(): poll_after_delay(rz, got))
+    _ := ex.submit(fn(): poll_after_delay(rz, got))
     rz.send(7)
     ex.shutdown()
     assert got.get() == 7, "try_recv must see a block-in-place rendezvous sender"
