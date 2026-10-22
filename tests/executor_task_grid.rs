@@ -326,7 +326,16 @@ fn a_write_to_the_copy_faults_for_every_party() {
         let src = prog(p, "", &["$S(wr)", "hs.recv()"], "ex.shutdown()", false);
         for t in THREADS {
             let g = run("copywrite", &src, Mode::Run, t, None);
-            if !g.err.contains("is this task's copy") || g.code == Some(0) || g.code.is_none() {
+            // A job's fault is its Task's outcome (TICKET-289): only a nursery party ends the run.
+            // The `submit` party hands `wr` to the Executor directly, so the checker rejects it.
+            let fault_ends_run =
+                g.err.contains("is this task's copy") && g.code.is_some_and(|c| c != 0);
+            let ok_shape = if p.nursery || p.name == "submit" {
+                fault_ends_run
+            } else {
+                g.code == Some(0) && !g.err.contains("is this task's copy")
+            };
+            if !ok_shape {
                 misses.push(format!("{} T={t}: {}", p.name, g.show()));
             }
         }
@@ -341,14 +350,6 @@ fn cancel_reaches_every_party() {
         // (cutter, body, end, mode, required stderr-or-stdout text, required exit code)
         #[allow(clippy::type_complexity)]
         let mut cells: Vec<(&str, Vec<&str>, &str, Mode, &str, Option<i32>)> = vec![
-            (
-                "sibling-fault",
-                vec!["$S(parked)", "hs.recv()", "$S(boomer)", "hs.recv()"],
-                "ex.shutdown()",
-                Mode::Run,
-                "boom",
-                None,
-            ),
             (
                 "exit",
                 vec!["$S(parked)", "hs.recv()", "os.exit(3)"],
@@ -366,7 +367,17 @@ fn cancel_reaches_every_party() {
                 None,
             ),
         ];
-        if !p.nursery {
+        // A job fault never cancels a sibling job (TICKET-289), so only a nursery party has this cut.
+        if p.nursery {
+            cells.push((
+                "sibling-fault",
+                vec!["$S(parked)", "hs.recv()", "$S(boomer)", "hs.recv()"],
+                "ex.shutdown()",
+                Mode::Run,
+                "boom",
+                None,
+            ));
+        } else {
             cells.push((
                 "shutdown_now",
                 vec!["$S(parked)", "hs.recv()"],
@@ -439,27 +450,20 @@ fn a_job_fault_is_delivered_by_its_handle_or_ends_the_run() {
             }
         }
     }
-    // A fire-and-forget fault ends the run at once, while another Executor's job is unfinished.
+    // A fire-and-forget fault never reaches main or stderr (TICKET-289): it is its Task's outcome.
     for p in PARTIES.iter().filter(|p| !p.nursery) {
         let src = prog(
             p,
             "",
-            &[
-                "ex2 := Executor()",
-                "_ := ex2.submit(slow)",
-                "$S(boomer)",
-                "ex2.shutdown()",
-                "print(\"main done\")",
-            ],
+            &["$S(boomer)", "hs.recv()", "print(\"main done\")"],
             "ex.shutdown()",
             false,
         );
         for t in THREADS {
             let g = run("forget", &src, Mode::Run, t, None);
-            if g.code.is_none()
-                || g.code == Some(0)
-                || !g.err.contains("boom")
-                || g.out.contains("main done")
+            if g.code != Some(0)
+                || g.err.contains("boom")
+                || !g.out.contains("main done")
                 || g.wall >= BOUND
             {
                 misses.push(format!("fire-and-forget {} T={t}: {}", p.name, g.show()));
@@ -743,7 +747,7 @@ print(\"over={over.load()} two={two.load()}\")
 }
 
 #[test]
-fn a_test_run_reports_a_top_level_job_fault() {
+fn a_test_run_ignores_a_top_level_job_fault() {
     let src = "import std.time
 import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 fn slowbad():
@@ -751,7 +755,7 @@ fn slowbad():
     xs := [1]
     print(xs[3])
 ex := Executor()
-ex.submit(slowbad)
+_ := ex.submit(slowbad)
 test fn a():
     time.sleep_ms(500)
 test fn b():
@@ -761,7 +765,10 @@ test fn b():
     for t in THREADS {
         let g = run("c2", src, Mode::Test, t, None);
         let all = format!("{}{}", g.out, g.err);
-        if g.code.is_none() || g.code == Some(0) || !all.contains("out of bounds") {
+        if g.code != Some(0)
+            || all.contains("out of bounds")
+            || !all.contains("0 failed, 0 errored")
+        {
             misses.push(format!("T={t}: {}", g.show()));
         }
     }
@@ -882,7 +889,7 @@ test fn cell():
 /// A flagless `main` holds no cancel flag, so every state it can be in must read the run-wide
 /// halt. The 100 ms only makes a mid-state arrival the common one; either order must pass.
 #[test]
-fn a_fire_and_forget_fault_cuts_main_in_every_state() {
+fn a_fire_and_forget_fault_leaves_main_running_in_every_state() {
     const HEAD: &str = "import std.time
 import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 import std.io
@@ -897,25 +904,25 @@ fn slow():
     time.sleep_ms(6000)
 c := Channel[int](0)
 fn feeder():
-    time.sleep_ms(6000)
+    time.sleep_ms(300)
     c.send(1)
 fn waiter():
     _v := c.recv()
 ex := Executor()
-ex.submit(bad)
+_ := ex.submit(bad)
 ";
     let states: [(&str, &str); 7] = [
-        ("loop", "n := 0\nwhile true:\n    n += 1\n"),
+        ("loop", "n := 0\nwhile n < 3000000:\n    n += 1\n"),
         (
             "native-hof",
-            "n := List(0..10000000).map(double).fold(0, keep)\n",
+            "n := List(0..200000).map(double).fold(0, keep)\n",
         ),
-        ("sleep", "time.sleep_ms(6000)\n"),
+        ("sleep", "time.sleep_ms(300)\n"),
         (
             "recv",
             "ex2 := Executor()\n_ := ex2.submit(feeder)\nv := c.recv()\n",
         ),
-        ("shutdown", "_ := ex.submit(slow)\nex.shutdown()\n"),
+        ("shutdown", "ex.shutdown()\n"),
         (
             "nursery-join",
             "ex2 := Executor()\n_ := ex2.submit(feeder)\nparallel:\n    spawn waiter()\n",
@@ -928,10 +935,9 @@ ex.submit(bad)
         let stdin = (name == "stdin-read").then_some(Duration::from_millis(500));
         for t in THREADS {
             let g = run("cutmain", &src, Mode::Run, t, stdin);
-            if g.code.is_none()
-                || g.code == Some(0)
-                || !g.err.contains("boom")
-                || g.out.contains("main done")
+            if g.code != Some(0)
+                || g.err.contains("boom")
+                || !g.out.contains("main done")
                 || g.wall >= BOUND
             {
                 misses.push(format!("{name} T={t}: {}", g.show()));
@@ -942,7 +948,7 @@ ex.submit(bad)
 }
 
 #[test]
-fn a_test_run_reports_a_job_fault_that_lands_past_a_passing_test() {
+fn a_test_run_ignores_a_job_fault_that_lands_past_a_passing_test() {
     let mut misses = Vec::new();
     for d in [0, 300] {
         let src = format!(
@@ -953,7 +959,7 @@ fn bad():
     panic(\"boom\")
 ex := Executor()
 test fn one():
-    ex.submit(bad)
+    _ := ex.submit(bad)
 test fn two():
     assert true
 "
@@ -961,7 +967,7 @@ test fn two():
         for t in THREADS {
             let g = run("pasttest", &src, Mode::Test, t, None);
             let all = format!("{}{}", g.out, g.err);
-            if g.code.is_none() || g.code == Some(0) || !all.contains("boom") {
+            if g.code != Some(0) || all.contains("boom") || !all.contains("0 failed, 0 errored") {
                 misses.push(format!("D={d} T={t}: {}", g.show()));
             }
         }
@@ -1045,7 +1051,7 @@ fn submit_cell(form: &str, outcome: &str, step: &str) -> (String, Vec<String>) {
         (_, "cpu") => "fn(): at_cpu(started)".to_string(),
         _ => unreachable!("{outcome}"),
     };
-    let sub = format!("_ := ex.submit({job})");
+    let sub = format!("ex.submit({job})");
     m += &match form {
         "kept" => format!("t := {sub}\n"),
         "stmt" => format!("{sub}\n"),
@@ -1061,7 +1067,11 @@ fn submit_cell(form: &str, outcome: &str, step: &str) -> (String, Vec<String>) {
         } else {
             "ex.cancel()\n"
         };
-        m += "gate.send(1)\n";
+        // A job that reaches a `recv` with a value ready completes it (TICKET-194), so a release sent
+        // here would race the cut at one worker. The cut alone must end a job parked at `recv`.
+        if !outcome.ends_with("@recv") {
+            m += "gate.send(1)\n";
+        }
         if tcancel {
             m += "sib_gate.send(1)\n";
         }

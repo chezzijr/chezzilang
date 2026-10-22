@@ -308,9 +308,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     // happens-before edge in the Rust test's own control flow; the ordering edges are channel
     // handshakes (DEC-050).
     "a_cut_joiner_leaves_inside_the_bound_and_the_job_survives",
-    "a_fire_and_forget_fault_cuts_main_in_every_state",
-    "a_test_run_reports_a_job_fault_that_lands_past_a_passing_test",
-    "a_test_run_reports_a_top_level_job_fault",
+    "a_fire_and_forget_fault_leaves_main_running_in_every_state",
+    "a_test_run_ignores_a_job_fault_that_lands_past_a_passing_test",
+    "a_test_run_ignores_a_top_level_job_fault",
     "executor_limit_caps_running_jobs",
     "executor_limit_shutdown_now_ends_held_jobs",
     "executor_limit_shutdown_now_never_starts_a_held_job",
@@ -325,7 +325,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     // final rc and stderr, not an ordering the sleep enforces here (the negative control: NO
     // shutdown_now, so this must still fault).
     "a_job_nursery_deadlock_with_no_shutdown_still_faults",
-    "a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn",
+    "a_job_submitted_to_mains_executor_survives_another_executors_cancel_mn",
     "a_leaked_job_from_a_top_level_executor_still_aborts_a_later_test",
     "a_leaked_jobs_exit_is_attributed_to_the_test_that_leaked_it",
     "a_live_timer_still_delivers_under_a_generous_timeout",
@@ -395,7 +395,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     "module_top_level_fault_is_delivered_twice_and_truncates_after_recover",
     "module_top_level_loop_back_edge_is_not_a_cancel_checkpoint",
     "native_time_now_is_int_monotonic_is_float",
-    "nested_executor_job_is_cancelled_by_an_outer_shutdown_now_mn",
+    "nested_executor_job_is_cancelled_by_an_outer_cancel_mn",
     // TICKET-095. Its sleep is a POLL INTERVAL, not a happens-before edge: the test spawns
     // `chezzi run` on a program that hangs before the fix and polls `try_wait` against a
     // deadline. A hung child never closes its pipes, so `output()` would wedge this test
@@ -451,7 +451,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     "socket_read_bytes_recovers_the_sticky_invalid_utf8_carry",
     "submit_to_a_nested_executor_after_a_graceful_outer_shutdown_runs_mn",
     "submit_to_an_executor_whose_creating_job_was_cancelled_faults_mn",
-    "submit_to_mains_own_executor_after_an_unrelated_shutdown_now_runs_mn",
+    "submit_to_mains_own_executor_after_an_unrelated_cancel_runs_mn",
     "the_deadline_does_not_truncate_a_defer_whose_recv_can_complete",
     // TICKET-073b. Its sleep is a SAMPLING INTERVAL, not a happens-before edge: the test polls
     // `/proc/<pid>/task` for the peak live-thread count while the child runs, and a peak has no
@@ -465,7 +465,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     "timeout_aborts_a_sleeping_test_everywhere",
     // TICKET-200. The `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING; the test
     // asserts the report `chezzi test --timeout=500` prints, not an ordering here.
-    "unjoined_job_fault_before_timeout_is_reported",
+    "unjoined_job_fault_before_timeout_is_not_reported",
     "vm_wait_in_native_callback_demotes_under_parallel",
     "vm_wait_timer_loses_to_send_in_native_callback_parallel",
     "w8_7_demoted_fiber_yield_after_demote_does_not_strand_replacement",

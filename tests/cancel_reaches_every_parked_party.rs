@@ -1,5 +1,5 @@
-//! TICKET-200 (Family B3): a cancel must reach a socket-parked fiber of a job's nursery, and an
-//! unjoined job fault that precedes a `--timeout` must be reported, not dropped.
+//! TICKET-200 (Family B3): a cancel must reach a socket-parked fiber of a job's nursery, and a
+//! job fault nobody reads (`Task.get`) is never reported, so a `--timeout` after it is the only report (TICKET-289).
 
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -29,7 +29,7 @@ fn shutdown_now_reaches_a_job_nursery_fiber_parked_in_accept() {
 }
 
 #[test]
-fn unjoined_job_fault_before_timeout_is_reported() {
+fn unjoined_job_fault_before_timeout_is_not_reported() {
     let dir = std::env::temp_dir().join(format!("chz-t200-rank-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("y2_test.chz");
@@ -50,8 +50,8 @@ fn unjoined_job_fault_before_timeout_is_reported() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        all.contains("index"),
-        "the earlier unjoined job fault must be reported, not only TIMED-OUT: {all:?}"
+        all.contains("TIMED-OUT") && !all.contains("index"),
+        "a job fault nobody reads is not reported; only TIMED-OUT is: {all:?}"
     );
 }
 
@@ -420,7 +420,13 @@ fn ranking_cells() -> Vec<RankCell> {
     let first = |tail: &str| format!("{SUBMIT_SLOWBAD}{tail}");
     let index = "index 3 out of bounds";
     vec![
-        rank("run deadlock", None, bad(DEADLOCK), vec![index], vec![]),
+        rank(
+            "run deadlock",
+            None,
+            bad(DEADLOCK),
+            vec!["deadlock"],
+            vec![index],
+        ),
         // An exit published AFTER an earlier job fault outranks it (DEC-200). The exit sits in a
         // `defer`, which a job fault does not cut; `main`'s own sleep would be cut before it.
         RankCell {
@@ -447,8 +453,8 @@ fn ranking_cells() -> Vec<RankCell> {
             "run own fault after",
             None,
             bad("panic(\"main boom\")\n"),
+            vec!["main boom"],
             vec![index, "at bad"],
-            vec![],
         ),
         rank(
             "run own fault first",
@@ -461,22 +467,22 @@ fn ranking_cells() -> Vec<RankCell> {
             "test timeout",
             Some("--timeout=500"),
             bad("time.sleep_ms(3000)\n"),
-            vec!["ERROR", index],
             vec!["TIMED-OUT"],
+            vec!["ERROR", index],
         ),
         rank(
             "test max-heap",
             Some("--max-heap=20000000"),
             bad(GROW),
-            vec!["ERROR", index],
             vec!["OVER-MEMORY"],
+            vec!["ERROR", index],
         ),
         rank(
             "test deadlock",
             Some(""),
             bad(DEADLOCK),
-            vec!["ERROR", index],
-            vec![],
+            vec!["ERROR", "deadlock"],
+            vec![index],
         ),
         rank(
             "test exit",
@@ -489,8 +495,8 @@ fn ranking_cells() -> Vec<RankCell> {
             "test own fault after",
             Some(""),
             bad("assert 1 == 2\n"),
-            vec!["ERROR", index],
-            vec![],
+            vec!["FAIL"],
+            vec![index],
         ),
         rank(
             "test own fault first",

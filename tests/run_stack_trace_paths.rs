@@ -179,24 +179,22 @@ fn std_module_fault_names_the_std_file_not_a_bare_line() {
     );
 }
 
-/// TICKET-148 (W14-35 part) — a native fault raised inside std, reached through `submit_task` in
-/// a job, is headlined at the user's `submit_task(...)` call, never at `<native:std.concurrency>`.
-/// `ex` is shut down before the job exists, so the inner submit always faults.
+/// TICKET-148 (W14-35 part) — a native fault raised inside std, reached from a nursery fiber, is
+/// headlined at the user's call, never at `<native:std.concurrency>`. A job fault no longer
+/// reaches stderr (it is its Task's outcome, TICKET-289), so the fiber stands in for the job.
 #[test]
-fn std_native_fault_in_a_submit_task_job_names_the_users_call() {
+fn std_native_fault_in_a_nursery_fiber_names_the_users_call() {
     let t = TmpDir::new();
     t.write(
         "main.chz",
-        "import std.concurrency\nex := concurrency.Executor()\nex.shutdown()\nfn outer(ex: concurrency.Executor) -> int:\n    inner := ex.submit(fn(): 5)\n    match inner.get():\n        ?v: return v + 1\n        !_: return 0\nouter_ex := concurrency.Executor()\n_ := outer_ex.submit(fn(): outer(ex))\nouter_ex.shutdown()\n",
+        "import std.concurrency\nfn mk() -> int:\n    _ := concurrency.Executor(0)\n    return 1\nparallel:\n    spawn: mk()\n",
     );
     let (_stdout, stderr, ok) = run(&t.0, &["run", "main.chz"]);
     assert!(!ok, "the program must fault");
     assert!(
-        stderr.starts_with("runtime error (main.chz:6:14): submit on a shut-down Executor"),
-        "headline must name the user's submit_task call, got:\n{stderr}"
+        stderr.starts_with("runtime error (main.chz:3:10): Executor(n) needs n >= 1"),
+        "headline must name the user's call, got:\n{stderr}"
     );
-    // TICKET-195 (Decision 3): the frames below the headline are the faulting JOB's own, and a
-    // `submit_task` job runs inside std (`run_outcome`), so only the headline is checked here.
     let headline = stderr.lines().next().unwrap_or("");
     assert!(
         !headline.contains("<native:std.concurrency>"),
@@ -210,23 +208,23 @@ fn std_native_fault_in_a_submit_task_job_names_the_users_call() {
 #[test]
 fn std_native_fault_on_main_headline_and_caught_origin_agree() {
     let t = TmpDir::new();
-    let head = "import std.concurrency\nex := concurrency.Executor()\nex.shutdown()\n";
+    let head = "import std.concurrency\n";
     t.write(
         "uncaught.chz",
-        &format!("{head}task := ex.submit(fn(): 1)\nprint(task.get())\n"),
+        &format!("{head}fn mk():\n    _ := concurrency.Executor(0)\nmk()\n"),
     );
     let (_o, stderr, ok) = run(&t.0, &["run", "uncaught.chz"]);
     assert!(!ok, "the program must fault");
     assert!(
-        stderr.starts_with("runtime error (uncaught.chz:5:9): submit on a shut-down Executor"),
-        "headline must name the user's submit_task call, got:\n{stderr}"
+        stderr.starts_with("runtime error (uncaught.chz:3:10): Executor(n) needs n >= 1"),
+        "headline must name the user's call, got:\n{stderr}"
     );
     assert!(
         !stderr.contains("<native:std.concurrency>"),
         "got:\n{stderr}"
     );
     assert!(
-        stderr.contains("called at uncaught.chz:5:9"),
+        stderr.contains("called at uncaught.chz:4:1"),
         "the trace keeps its frames, got:\n{stderr}"
     );
 
@@ -234,10 +232,10 @@ fn std_native_fault_on_main_headline_and_caught_origin_agree() {
     t.write(
         "caught.chz",
         &format!(
-            "{head}r := recover: ex.submit(fn(): 1)\nmatch r:\n    ?_: print(\"no fault\")\n    !e: print(\"{{e.file()}} {{e.line()}} {{e.col()}}\")\n"
+            "{head}r := recover: concurrency.Executor(0)\nmatch r:\n    ?_: print(\"no fault\")\n    !e: print(\"{{e.file()}} {{e.line()}} {{e.col()}}\")\n"
         ),
     );
     let (stdout, stderr, ok) = run(&t.0, &["run", "caught.chz"]);
     assert!(ok, "the recovered program must succeed, got:\n{stderr}");
-    assert_eq!(stdout.trim(), "caught.chz 5 15", "caught origin");
+    assert_eq!(stdout.trim(), "caught.chz 2 15", "caught origin");
 }

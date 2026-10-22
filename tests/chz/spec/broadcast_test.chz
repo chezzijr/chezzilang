@@ -9,7 +9,6 @@
 import Broadcast, Receiver, Lagged from std.concurrency.broadcast
 import Executor, AtomicInt from std.concurrency
 import Iterable from std.iter
-import std.time
 
 fn take_all(rx: Receiver[int]) -> List[str]:
     out: List[str] = []
@@ -386,7 +385,6 @@ test fn try_recv_returns_none_while_another_reader_is_receiving():
     got := Channel[int](1)
     ex := Executor()
     _ := ex.submit(fn(): got.send(blocked_reader(rx)))
-    time.sleep_ms(50)
     assert rx.try_recv() == None
     b.send(7)
     assert got.recv() == 7
