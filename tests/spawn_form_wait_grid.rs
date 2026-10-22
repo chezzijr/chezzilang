@@ -134,7 +134,10 @@ const OPS: &[WaitOp] = &[
         name: "ex_shutdown",
         param: "ex: Executor",
         arg: "ex",
-        setup: &["ex := Executor(1)", "ex.submit(fn(): time.sleep_ms(60))"],
+        setup: &[
+            "ex := Executor(1)",
+            "_ := ex.submit(fn(): time.sleep_ms(60))",
+        ],
         call: "ex.shutdown()",
         driver: &["print(\"body\")"],
         done_stdout: "body\nend\n",
@@ -228,8 +231,8 @@ fn program(op: &WaitOp, form: Form, outcome: Outcome) -> String {
         }
         Outcome::Cut => {
             s += "    ex2 := Executor(1)\n";
-            s += &format!("    ex2.submit(fn(): job({}))\n", op.arg);
-            s += "    time.sleep_ms(40)\n    ex2.shutdown_now()\n    print(\"cut\")\n";
+            s += &format!("    _ := ex2.submit(fn(): job({}))\n", op.arg);
+            s += "    time.sleep_ms(40)\n    ex2.cancel()\n    print(\"cut\")\n";
         }
     }
     s += "r := main()\n";
@@ -289,7 +292,7 @@ fn grid_cancelled_by_a_sibling_fault() {
 }
 
 #[test]
-fn grid_cut_by_shutdown_now() {
+fn grid_cut_by_cancel() {
     grid(Outcome::Cut, "cut");
 }
 
@@ -297,7 +300,7 @@ fn grid_cut_by_shutdown_now() {
 /// `ex.submit(ch.recv)` (a native METHOD value) is not expressible: the checker rejects it.
 #[test]
 fn fn_value_heads_complete() {
-    let src = "import std.time\nimport Executor from std.concurrency\nfn main():\n    ex := Executor(1)\n    ex.submit(time.now_ms)\n    ex.shutdown()\n    f := time.sleep_ms\n    fs := [time.sleep_ms]\n    parallel:\n        spawn f(20)\n        spawn fs[0](20)\n    print(\"end\")\nmain()\n";
+    let src = "import std.time\nimport Executor from std.concurrency\nfn main():\n    ex := Executor(1)\n    _ := ex.submit(time.now_ms)\n    ex.shutdown()\n    f := time.sleep_ms\n    fs := [time.sleep_ms]\n    parallel:\n        spawn f(20)\n        spawn fs[0](20)\n    print(\"end\")\nmain()\n";
     let mut bad = Vec::new();
     for t in ["1", "2", "0"] {
         for seed in [None, Some(1), Some(2)] {

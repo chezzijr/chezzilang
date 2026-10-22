@@ -112,7 +112,7 @@ fn c1_timed_wait_in_fiber_callback_completes() {
 /// Go at GOMAXPROCS=1 and CPython complete.
 #[test]
 fn x1_executor_shutdown_in_fiber_releases_the_runner() {
-    let src = "import Executor from std.concurrency\nfn main():\n    ch := Channel[int](0)\n    parallel:\n        spawn:\n            ex := Executor()\n            ex.submit(fn() -> None:\n                print(ch.recv())\n            )\n            ex.shutdown()\n            print(\"done\")\n        spawn:\n            ch.send(7)\nmain()\n";
+    let src = "import Executor from std.concurrency\nfn main():\n    ch := Channel[int](0)\n    parallel:\n        spawn:\n            ex := Executor()\n            _ := ex.submit(fn() -> None:\n                print(ch.recv())\n            )\n            ex.shutdown()\n            print(\"done\")\n        spawn:\n            ch.send(7)\nmain()\n";
     assert_cell("x1", src, "7\ndone\n");
 }
 
@@ -180,7 +180,7 @@ import std.time
 import std.io
 import std.net
 import std.request
-import submit_task from std.concurrency.task
+
 ch := Channel[int](0)
 fc := Channel[int](1)
 s := Shared[int](0)
@@ -277,14 +277,14 @@ fn contexts() -> Vec<Ctx> {
         ),
         ctx(
             "job",
-            "        ex := Executor()\n        ex.submit(job)\n        ex.shutdown()\n",
+            "        ex := Executor()\n        _ := ex.submit(job)\n        ex.shutdown()\n",
             false,
             true,
             dead,
         ),
         ctx(
             "job_cb",
-            "        ex := Executor()\n        ex.submit(job_cb)\n        ex.shutdown()\n",
+            "        ex := Executor()\n        _ := ex.submit(job_cb)\n        ex.shutdown()\n",
             false,
             true,
             dead,
@@ -398,7 +398,7 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "shutdown",
-            "    ex2 := Executor()\n    ex2.submit(recv_job)\n    ex2.shutdown()\n    print(\"done\")",
+            "    ex2 := Executor()\n    _ := ex2.submit(recv_job)\n    ex2.shutdown()\n    print(\"done\")",
             send7,
             "",
             false,
@@ -430,7 +430,7 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "task_get",
-            "    ex3 := Executor()\n    t := submit_task(ex3, recv7)\n    match t.get():\n        ?v: print(v)\n        !e: print(e.message())\n    ex3.shutdown()",
+            "    ex3 := Executor()\n    t := ex3.submit(recv7)\n    match t.get():\n        ?v: print(v)\n        !e: print(e.message())\n    ex3.shutdown()",
             send7,
             "",
             false,

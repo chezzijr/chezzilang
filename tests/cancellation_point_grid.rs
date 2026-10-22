@@ -259,7 +259,7 @@ fn run_src(c: &Cell) -> String {
     let (driver, extra) = match c.halt {
         Halt::ShutdownNow => (
             format!(
-                "ex := Executor()\nex.submit(fn(): act(gate.recv(), {ARGS}))\ngate.send(7)\nex.shutdown_now()"
+                "ex := Executor()\n_ := ex.submit(fn(): act(gate.recv(), {ARGS}))\ngate.send(7)\nex.cancel()\nex.shutdown()"
             ),
             String::new(),
         ),
@@ -280,7 +280,7 @@ fn run_src(c: &Cell) -> String {
     let mut body = format!("gate := Channel[int](0)\nout := {}\n{LOCALS}\n", c.out);
     if let Some(h) = c.holder {
         body += &format!(
-            "hold := Channel[int](0)\nhx := Executor()\nhx.submit(fn(): {h}({}))\n",
+            "hold := Channel[int](0)\nhx := Executor()\n_ := hx.submit(fn(): {h}({}))\n",
             holder_args(h)
         );
     }
@@ -670,17 +670,17 @@ const HOOKS: [(&str, &str); 12] = [
     ("RwShared.read", "got.add(w.read(fn(x: int) -> int: x + v))"),
 ];
 
-const SUBMIT_RESULT_ROUND: &str = "fn round() -> bool:
+const SUBMIT_ROUND: &str = "fn round() -> bool:
     gate := Channel[int](0)
     ex := Executor()
-    o := ex.submit_result(fn() -> int: gate.recv())
+    o := ex.submit(fn() -> int: gate.recv())
     gate.send(7)
-    ex.shutdown_now()
+    ex.cancel()
+    ex.shutdown()
     ok := false
-    match o.try_recv():
-        ?(?x): ok = x == 7
-        ?(!_): pass
-        None: pass
+    match o.get():
+        ?x: ok = x == 7
+        !_: pass
     return ok
 ";
 
@@ -745,8 +745,8 @@ fn cells() -> Vec<Cell> {
         }
     }
     v.push(Cell {
-        name: "submit_result ready ShutdownNow".into(),
-        round: Some(SUBMIT_RESULT_ROUND),
+        name: "submit ready ShutdownNow".into(),
+        round: Some(SUBMIT_ROUND),
         ..BLANK
     });
     v

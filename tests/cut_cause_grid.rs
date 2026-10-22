@@ -238,7 +238,11 @@ fn wrap(party: Party, b: Vec<String>) -> (Vec<String>, Vec<String>) {
         Party::Spawned => (owner(&b), s(&["parallel:", "    spawn owner()"])),
         Party::Job => (
             owner(&b),
-            s(&["ex0 := Executor()", "ex0.submit(owner)", "ex0.shutdown()"]),
+            s(&[
+                "ex0 := Executor()",
+                "_ := ex0.submit(owner)",
+                "ex0.shutdown()",
+            ]),
         ),
         Party::Nested => {
             let mut d = s(&[
@@ -267,7 +271,7 @@ fn cell_src(cause: Cause, party: Party, c: Cleanup, test_mode: bool) -> String {
     if cause == Cause::Job {
         src.push_str(JOB_PRELUDE);
         stmts_all.push("jx := Executor()".to_string());
-        stmts_all.push("jx.submit(fn(): work([1, 2]))".to_string());
+        stmts_all.push("_ := jx.submit(fn(): work([1, 2]))".to_string());
     }
     stmts_all.extend(stmts);
     src.push_str(&join(&decls));
@@ -333,7 +337,7 @@ test fn cell():
         marker.display()
     ));
     let mut body = cleanup_lines(c);
-    body.push("ex.submit(job)".into());
+    body.push("_ := ex.submit(job)".into());
     body.push(
         if joined {
             "ex.shutdown()"

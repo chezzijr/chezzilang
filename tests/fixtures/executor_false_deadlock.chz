@@ -6,17 +6,14 @@ fn leaf() -> int:
     return 1
 
 fn reader(inner: Executor, out: Channel[int]):
-    r := recover: inner.submit_result(fn() -> int: leaf())
-    match r:
-        ?ch:
-            match ch.recv():
-                ?v: out.send(v)
-                !e: out.send(-1)
-        !e: out.send(-2)
+    t := inner.submit(fn() -> int: leaf())
+    match t.get():
+        ?v: out.send(v)
+        !e: out.send(-1)
 
 fn stopper(inner: Executor, ms: int):
     time.sleep_ms(ms)
-    inner.shutdown_now()
+    inner.cancel()
 
 fn main():
     for rn in 0..300:

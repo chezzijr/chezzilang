@@ -567,10 +567,10 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs(threads: Option<usize>, wri
 /// whether the sibling wrote before the cut is a race).
 fn dead_stdout_under_an_executor(threads: Option<usize>, writes: usize, handle: bool) {
     let tail = if handle {
-        "t := submit_task(ex, spew)\nex.submit(markers)\nex.shutdown()\n\
+        "t := ex.submit(spew)\n_ := ex.submit(markers)\nex.shutdown()\n\
          match t.get():\n    ?_: pass\n    !e: panic(e.message())\n"
     } else {
-        "ex.submit(spew)\nex.submit(markers)\nex.shutdown()\n"
+        "_ := ex.submit(spew)\n_ := ex.submit(markers)\nex.shutdown()\n"
     };
     let t = TmpDir::new();
     let dir = t.0.display().to_string();
@@ -583,7 +583,7 @@ fn dead_stdout_under_an_executor(threads: Option<usize>, writes: usize, handle: 
     let entry = t.write(
         "main.chz",
         &format!(
-            "import std.concurrency\nimport submit_task from std.concurrency.task\nimport std.fs\n\n\
+            "import std.concurrency\nimport std.fs\n\n\
              fn spew():\n    i := 0\n    while i < 500000:\n        print(\"x{{i}}\")\n        i = i + 1\n\n\
              fn markers():\n{body}\n\
              ex := concurrency.Executor()\n{tail}"

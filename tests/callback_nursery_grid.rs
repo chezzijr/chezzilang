@@ -74,8 +74,8 @@ const OPS: [(&str, &str); 5] = [
         "    ch := Channel[int]()\n    v := 0\n    parallel:\n        spawn give(ch)\n        v = ch.recv()\n    return x + v\n",
     ),
     (
-        "submit_result",
-        "    ex := Executor()\n    v := must(ex.submit_result(four).recv())\n    ex.shutdown()\n    return x + v\n",
+        "submit_get",
+        "    ex := Executor()\n    v := must(ex.submit(four).get())\n    ex.shutdown()\n    return x + v\n",
     ),
     ("sleep", "    time.sleep_ms(1)\n    return x + 4\n"),
     ("nested_write", "    q.write(add4)\n    return x + 4\n"),

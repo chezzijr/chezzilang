@@ -1,7 +1,7 @@
-//! W13-8: `shutdown_now()` must cancel a job's nursery child parked on a blocking `recv`, since
-//! `recv` is a documented cancellation point (`docs/reference/concurrency/`: `shutdown_now()` "ask[s]
+//! W13-8: `cancel()` must cancel a job's nursery child parked on a blocking `recv`, since
+//! `recv` is a documented cancellation point (`docs/reference/concurrency/`: `cancel()` "ask[s]
 //! running jobs to stop at their next cancellation point"). Instead the nursery's own deadlock
-//! detector fires first and faults the whole run with `deadlock: ...`, before `shutdown_now()`
+//! detector fires first and faults the whole run with `deadlock: ...`, before `cancel()`
 //! gets a chance to cancel the child. Go's `select`+`cancel()` equivalent completes.
 //!
 //! Subprocess-only, matching `executor_reentrant_shutdown.rs`: needs a full-size worker pool.
@@ -21,7 +21,7 @@ fn shutdown_now_cancels_a_jobs_nursery_child_blocked_on_recv() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import Executor from std.concurrency\nimport std.time\nnever := Channel[int](0)\nfn job():\n    parallel:\n        spawn:\n            never.recv()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): job())\n    time.sleep_ms(300)\n    print(\"awake\")\n    ex.shutdown_now()\n    print(\"done\")\nmain()\n",
+        "import Executor from std.concurrency\nimport std.time\nnever := Channel[int](0)\nfn job():\n    parallel:\n        spawn:\n            never.recv()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): job())\n    time.sleep_ms(300)\n    print(\"awake\")\n    ex.cancel()\n    print(\"done\")\nmain()\n",
     )
     .expect("write program");
 
@@ -36,13 +36,13 @@ fn shutdown_now_cancels_a_jobs_nursery_child_blocked_on_recv() {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
-        "shutdown_now() must cancel a job's nursery child blocked on recv, not fault the run: \
+        "cancel() must cancel a job's nursery child blocked on recv, not fault the run: \
          status {:?}\nstdout: {stdout}\nstderr: {stderr}",
         out.status.code(),
     );
     assert_eq!(
         stdout, "awake\ndone\n",
-        "expected both prints to survive a clean shutdown_now(): stdout {stdout:?}, stderr {stderr:?}"
+        "expected both prints to survive a clean cancel(): stdout {stdout:?}, stderr {stderr:?}"
     );
 }
 
@@ -88,7 +88,7 @@ fn assert_clean_run(out: &std::process::Output, want_stdout: &str) {
 }
 
 /// W13-8 — a depth-two nursery child (a nursery nested inside a nursery) parked on `recv` must be
-/// cancelled by `shutdown_now()` too, not just a depth-one child.
+/// cancelled by `cancel()` too, not just a depth-one child.
 #[test]
 fn shutdown_now_cancels_a_depth_two_nursery_child() {
     let program = "import Executor from std.concurrency\n\
@@ -105,7 +105,7 @@ fn shutdown_now_cancels_a_depth_two_nursery_child() {
             ex.submit(fn(): job())\n    \
             time.sleep_ms(300)\n    \
             print(\"awake\")\n    \
-            ex.shutdown_now()\n    \
+            ex.cancel()\n    \
             print(\"done\")\n\
         main()\n";
     assert_at_every_worker_count("h2b.chz", program, 5, |out| {
@@ -129,7 +129,7 @@ fn shutdown_now_cancels_a_nursery_child_synchronised_by_a_handshake() {
             ex.submit(fn(): job())\n    \
             r := ready.recv()\n    \
             print(\"awake {r}\")\n    \
-            ex.shutdown_now()\n    \
+            ex.cancel()\n    \
             print(\"done\")\n\
         main()\n";
     assert_at_every_worker_count("hs.chz", program, 5, |out| {
@@ -137,7 +137,7 @@ fn shutdown_now_cancels_a_nursery_child_synchronised_by_a_handshake() {
     });
 }
 
-/// Negative control — a job nursery child parked on `recv` FOREVER with NO `shutdown_now()` (a
+/// Negative control — a job nursery child parked on `recv` FOREVER with NO `cancel()` (a
 /// plain `shutdown()`) is a genuine deadlock, and must still fault. The W13-8 drain trigger must
 /// never fire in the absence of a tripped cancel flag.
 #[test]
@@ -173,7 +173,7 @@ fn a_job_nursery_deadlock_with_no_shutdown_still_faults() {
     });
 }
 
-/// W13-8 — `shutdown_now()` must end a nursery child whose `defer` blocks forever, cutting the
+/// W13-8 — `cancel()` must end a nursery child whose `defer` blocks forever, cutting the
 /// cleanup short at rc=0 rather than hanging. This is the EXISTING nursery precedent (`nrc.chz`,
 /// `## Digest`), not a new choice this ticket makes: a trigger that re-drains a re-parking fiber
 /// (the cleanup's own `stuck.recv()`) fails the hang deadline instead. Go's twin of this shape
@@ -199,7 +199,7 @@ fn shutdown_now_ends_a_nursery_child_whose_defer_blocks_forever() {
             ex.submit(fn(): job())\n    \
             r := ready.recv()\n    \
             print(\"awake {r}\")\n    \
-            ex.shutdown_now()\n    \
+            ex.cancel()\n    \
             print(\"done\")\n\
         main()\n";
     assert_at_every_worker_count("dfr2.chz", program, 5, |out| {
@@ -207,7 +207,7 @@ fn shutdown_now_ends_a_nursery_child_whose_defer_blocks_forever() {
     });
 }
 
-/// W13-8 — the 10:59Z lost wakeup: `shutdown_now()`'s cancel store must reach a worker that reads
+/// W13-8 — the 10:59Z lost wakeup: `cancel()`'s cancel store must reach a worker that reads
 /// it on the wrong side of the trip. Twenty in-process rounds of submit/handshake/`shutdown_now` at
 /// `CHEZZI_THREADS=1`, run fifty times: this samples the race rather than proving its absence
 /// (a rare miss would show as an occasional hang past the deadline, not a wrong answer).
@@ -226,7 +226,7 @@ fn shutdown_now_races_a_parked_nursery_child_at_one_worker() {
                 ex := Executor()\n        \
                 ex.submit(fn(): job(never, ready))\n        \
                 r := ready.recv()\n        \
-                ex.shutdown_now()\n    \
+                ex.cancel()\n    \
             print(\"awake\")\n    \
             print(\"done\")\n\
         main()\n";

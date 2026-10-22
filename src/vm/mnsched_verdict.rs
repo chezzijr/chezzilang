@@ -54,6 +54,9 @@ impl MnSched {
             outcome,
             TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
         );
+        // A job the deadlock verdict ended: the verdict latched `terminate`, so a released held job
+        // would never run and its `None` slot would hang the join. It reads as a latched verdict.
+        let verdict_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock);
         let seal = match &outcome {
             // The body returned: it sealed its value, or the job was cancelled first (`JobSeal::Done`).
             TaskOutcome::Done(_) => JobSeal::Done,
@@ -75,7 +78,9 @@ impl MnSched {
         c.task_done(scope_id);
         // TICKET-219 — only an Executor's sched (`leaf_site`) holds jobs, so a nursery's finish
         // reads no halt cell.
-        let halt = if c.leaf_site {
+        let halt = if verdict_end && c.is_job_scope(scope_id) {
+            RunHalt::Deadlock
+        } else if c.leaf_site {
             self.quiesce.run_halt()
         } else {
             RunHalt::Running

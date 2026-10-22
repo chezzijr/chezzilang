@@ -151,9 +151,9 @@ fn program(owner: &str, escape: &str, wait: &str, depth: usize, neighbours: &[&s
         "job" => {
             src.push_str("ex := Executor()\n");
             for f in neighbours {
-                src.push_str(&format!("ex.submit(fn(): {f}())\n"));
+                src.push_str(&format!("_ := ex.submit(fn(): {f}())\n"));
             }
-            src.push_str("ex.submit(fn(): owner())\nex.shutdown()\n");
+            src.push_str("_ := ex.submit(fn(): owner())\nex.shutdown()\n");
         }
         other => panic!("unknown owner kind {other}"),
     }

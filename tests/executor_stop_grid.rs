@@ -3,7 +3,7 @@
 //! and asserts which jobs run, that the handle settles, and that no false deadlock is reported.
 //!
 //! The rule the grid pins: a submit that returned without a fault and is under the cap always
-//! starts. `shutdown_now()` cancels held jobs only; a started job runs to its first cancellation
+//! starts. `cancel()` cancels held jobs only; a started job runs to its first cancellation
 //! point. Ancestor: CPython `ThreadPoolExecutor` (`shutdown(wait=False, cancel_futures=True)`
 //! cancels only futures no worker has taken).
 //!
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const OK: &str = "got 7";
-const CANCELLED: &str = "got !task cancelled: shutdown_now() stopped it before it finished";
+const CANCELLED: &str = "got !task cancelled: cancel() stopped it before it finished";
 const SUBMIT_FAULT: &str = "submit on a shut-down Executor (it no longer accepts work)";
 
 /// One finished run. `code` is `None` when the harness killed the child at ten seconds.
@@ -158,7 +158,7 @@ impl Kind {
 const HEAD: &str = r#"import std.time
 import std.concurrency
 import Executor from std.concurrency
-import std.concurrency.task
+
 started := Channel[int](1)
 gate := Channel[int](1)
 go := Channel[int](1)
@@ -174,7 +174,7 @@ fn blocker():
 fn prog(state: State, stop: Stop, stopper: Stopper, kind: Kind) -> String {
     let call = match stop {
         Stop::Shutdown => "shutdown()",
-        Stop::ShutdownNow => "shutdown_now()",
+        Stop::ShutdownNow => "cancel()",
     };
     let same = stopper == Stopper::SameJob;
     let cap = kind.cap();
@@ -216,7 +216,7 @@ fn prog(state: State, stop: Stop, stopper: Stopper, kind: Kind) -> String {
     }
     if same {
         let params = if state == State::Done {
-            "e: Executor, h: task.Task[int]"
+            "e: Executor, h: concurrency.Task[int]"
         } else {
             "e: Executor"
         };
@@ -228,34 +228,34 @@ fn prog(state: State, stop: Stop, stopper: Stopper, kind: Kind) -> String {
     }
 
     s.push_str(&format!("fn main():\n    ex := {}\n", kind.ctor()));
-    const SUBMIT: &str = "    h := task.submit_task(ex, fn() -> int: target())\n";
+    const SUBMIT: &str = "    h := ex.submit(fn() -> int: target())\n";
     match (state, same) {
         (State::Queued, false) => {
             for _ in 0..cap {
-                s.push_str("    ex.submit(fn(): blocker())\n");
+                s.push_str("    _ := ex.submit(fn(): blocker())\n");
             }
             s.push_str(SUBMIT);
         }
         (State::Queued, true) => {
-            s.push_str("    ex.submit(fn(): stopper(ex))\n");
+            s.push_str("    _ := ex.submit(fn(): stopper(ex))\n");
             for _ in 0..cap - 1 {
-                s.push_str("    ex.submit(fn(): blocker())\n");
+                s.push_str("    _ := ex.submit(fn(): blocker())\n");
             }
             s.push_str(SUBMIT);
             s.push_str("    go.send(1)\n");
         }
         (State::Dispatched, true) => {
             // The ticket program: the stopper job is submitted BEFORE the target and stops at once.
-            s.push_str("    ex.submit(fn(): stopper(ex))\n");
+            s.push_str("    _ := ex.submit(fn(): stopper(ex))\n");
             s.push_str(SUBMIT);
         }
         (State::Done, true) => {
             s.push_str(SUBMIT);
-            s.push_str("    ex.submit(fn(): stopper(ex, h))\n");
+            s.push_str("    _ := ex.submit(fn(): stopper(ex, h))\n");
         }
         (_, true) => {
             s.push_str(SUBMIT);
-            s.push_str("    ex.submit(fn(): stopper(ex))\n");
+            s.push_str("    _ := ex.submit(fn(): stopper(ex))\n");
         }
         (_, false) => s.push_str(SUBMIT),
     }

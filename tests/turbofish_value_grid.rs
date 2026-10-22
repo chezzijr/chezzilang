@@ -790,7 +790,7 @@ fn native_cells(out: &mut Vec<Cell>) {
     ));
     out.push(main_only(
         "native_bodied",
-        "import std.concurrency\ng := concurrency.Executor.submit_result\nprint(\"x\")",
+        "import std.concurrency\ng := concurrency.Executor.submit\nprint(\"x\")",
         not_value(),
     ));
     out.push(main_only(

@@ -106,7 +106,7 @@ const CROSSINGS: [(&str, &str); 3] = [
     ),
     (
         "executor",
-        "    ex := Executor(1)\n    ex.submit(fn(): resume(it))\n    ex.shutdown()\n",
+        "    ex := Executor(1)\n    _ := ex.submit(fn(): resume(it))\n    ex.shutdown()\n",
     ),
 ];
 

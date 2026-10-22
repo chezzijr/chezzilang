@@ -562,7 +562,7 @@ fn cells() -> Vec<Cell> {
                     ),
                     CallPath::HofSubmit => (
                         "import Executor from std.concurrency\n".to_string(),
-                        format!("ex := Executor(2)\nex.submit({callee})\nex.shutdown()"),
+                        format!("ex := Executor(2)\n_ := ex.submit({callee})\nex.shutdown()"),
                         None,
                     ),
                 };

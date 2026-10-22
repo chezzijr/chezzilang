@@ -16,7 +16,7 @@ fn shutdown_now_reaches_a_job_nursery_fiber_parked_in_accept() {
     let dir = std::env::temp_dir().join(format!("chz-t200-accept-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("n5.chz");
-    let body = "ln := lis()\nfn srv():\n    defer:\n        print(\"srv defer\")\n    parallel:\n        spawn:\n            defer:\n                print(\"fiber defer\")\n            r := ln.accept()\n            print(\"accept returned {r}\")\nex := Executor()\nex.submit(srv)\ntime.sleep_ms(100)\nex.shutdown_now()\nprint(\"after shutdown_now\")\n";
+    let body = "ln := lis()\nfn srv():\n    defer:\n        print(\"srv defer\")\n    parallel:\n        spawn:\n            defer:\n                print(\"fiber defer\")\n            r := ln.accept()\n            print(\"accept returned {r}\")\nex := Executor()\n_ := ex.submit(srv)\ntime.sleep_ms(100)\nex.cancel()\nprint(\"after shutdown_now\")\n";
     std::fs::write(&path, format!("{NET_PRELUDE}{body}")).expect("write program");
     let out = hang_deadline::run_with_hang_deadline(&path, Some("1"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -35,7 +35,7 @@ fn unjoined_job_fault_before_timeout_is_reported() {
     let path = dir.join("y2_test.chz");
     std::fs::write(
         &path,
-        "import std.time\nimport Executor from std.concurrency\nfn bad():\n    xs := [1]\n    print(xs[3])\ntest fn unjoined_then_times_out():\n    ex := Executor()\n    ex.submit(bad)\n    time.sleep_ms(3000)\n",
+        "import std.time\nimport Executor from std.concurrency\nfn bad():\n    xs := [1]\n    print(xs[3])\ntest fn unjoined_then_times_out():\n    ex := Executor()\n    _ := ex.submit(bad)\n    time.sleep_ms(3000)\n",
     )
     .expect("write program");
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
@@ -116,7 +116,7 @@ fn bump(v: int) -> int:
 ";
 
 /// Holds `g` for 3 s so the guard park waits on it (copied from `tests/owner_fault_grid.rs`).
-const GUARD_PRELUDE: &str = "hx := Executor()\nhx.submit(holder)\ntime.sleep_ms(20)\n";
+const GUARD_PRELUDE: &str = "hx := Executor()\n_ := hx.submit(holder)\ntime.sleep_ms(20)\n";
 
 /// Every cell of the C1 grid that applies. N/A, by reason:
 /// - owner job x {accept, read, write, connect}: a socket op in an Executor job body Refuses
@@ -152,7 +152,7 @@ fn grid_program(src: Source, owner: Owner, op: &str, guard: bool) -> String {
         _ => "",
     };
     let inner_end = if src == Source::NestedShutdownNow {
-        "    time.sleep_ms(50)\n    ex2.shutdown_now()\n"
+        "    time.sleep_ms(50)\n    ex2.cancel()\n"
     } else {
         "    ex2.shutdown()\n"
     };
@@ -167,24 +167,20 @@ fn grid_program(src: Source, owner: Owner, op: &str, guard: bool) -> String {
         "fn nurs():\n    parallel:\n        spawn:\n            op()\n{sibling}"
     ));
     p.push_str(&format!(
-        "fn outer():\n    ex2 := Executor()\n    ex2.submit(nurs)\n{inner_end}"
+        "fn outer():\n    ex2 := Executor()\n    _ := ex2.submit(nurs)\n{inner_end}"
     ));
     let mut main: Vec<&str> = match owner {
         Owner::MainNursery => vec!["nurs()"],
-        Owner::Job => vec!["ex := Executor()", "ex.submit(op)"],
-        Owner::JobNursery => vec!["ex := Executor()", "ex.submit(nurs)"],
-        Owner::NestedJobNursery => vec!["ex := Executor()", "ex.submit(outer)"],
+        Owner::Job => vec!["ex := Executor()", "_ := ex.submit(op)"],
+        Owner::JobNursery => vec!["ex := Executor()", "_ := ex.submit(nurs)"],
+        Owner::NestedJobNursery => vec!["ex := Executor()", "_ := ex.submit(outer)"],
     };
     if owner != Owner::MainNursery {
         main.extend(match src {
             Source::SiblingFault | Source::NestedShutdownNow => {
                 vec!["ex.shutdown()", "print(\"after\")"]
             }
-            Source::ShutdownNow => vec![
-                "time.sleep_ms(100)",
-                "ex.shutdown_now()",
-                "print(\"after\")",
-            ],
+            Source::ShutdownNow => vec!["time.sleep_ms(100)", "ex.cancel()", "print(\"after\")"],
             Source::Exit => vec!["time.sleep_ms(100)", "os.exit(3)"],
             Source::Timeout => vec!["time.sleep_ms(3000)", "ex.shutdown()"],
         });
@@ -386,8 +382,8 @@ fn late_exit():
         os.exit(3)
 ";
 
-const SUBMIT_BAD: &str = "ex := Executor()\nex.submit(bad)\ntime.sleep_ms(100)\n";
-const SUBMIT_SLOWBAD: &str = "ex := Executor()\nex.submit(slowbad)\n";
+const SUBMIT_BAD: &str = "ex := Executor()\n_ := ex.submit(bad)\ntime.sleep_ms(100)\n";
+const SUBMIT_SLOWBAD: &str = "ex := Executor()\n_ := ex.submit(slowbad)\n";
 const DEADLOCK: &str = "_ := Channel[int]().recv()\n";
 const GROW: &str = "xs: List[str] = []\ni := 0\nwhile true:\n    xs.push(\"{i} abcdefghijklmnopqrstuvwxyz0123456789abcd\")\n    i += 1\n";
 
@@ -432,7 +428,7 @@ fn ranking_cells() -> Vec<RankCell> {
             ..rank(
                 "run exit",
                 None,
-                "ex := Executor()\nex.submit(bad)\nlate_exit()\n".to_string(),
+                "ex := Executor()\n_ := ex.submit(bad)\nlate_exit()\n".to_string(),
                 vec![],
                 vec![],
             )

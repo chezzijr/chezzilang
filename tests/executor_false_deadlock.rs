@@ -1,5 +1,5 @@
 //! TICKET-236 (wave 22 family B): a task parked on an Executor job's result channel is declared
-//! deadlocked while `shutdown_now()` cuts that job. The handle settles every round, so the
+//! deadlocked while `cancel()` cuts that job. The handle settles every round, so the
 //! verdict is false. Ancestor: CPython `ThreadPoolExecutor` completes all 300 rounds.
 
 use std::io::Read;

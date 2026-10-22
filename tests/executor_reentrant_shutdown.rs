@@ -1,4 +1,4 @@
-//! C1 fix regression, subprocess-only: a task that calls `shutdown_now()` on its own `Executor`
+//! C1 fix regression, subprocess-only: a task that calls `cancel()` on its own `Executor`
 //! mid-drain (reentrant, from inside a job that `Executor` itself is running).
 //!
 //! **Why this lives in `tests/` and not `src/vm/tests.rs`.** The in-process suite shares one
@@ -8,7 +8,7 @@
 //!
 //! **Reference: CPython 3.14.6.** The `Executor` here dispatches each `submit` EAGERLY to a worker
 //! (docs/contributing/gaps.md N-family; also `gc_tests::eager_executor_self_capturing_closure_survives_gc_stress_parallel`),
-//! so by the time the `stop` job's `shutdown_now()` runs, jobs A and C have typically already
+//! so by the time the `stop` job's `cancel()` runs, jobs A and C have typically already
 //! started and cannot be cancelled — only jobs not yet dispatched are discarded. `ThreadPoolExecutor`
 //! behaves the same way (`submit` hands off to a worker immediately if one is free); the direct
 //! Python equivalent —
@@ -47,13 +47,13 @@
 //!
 //! **What changed from the old (now-removed cooperative-engine) pin.** The deleted in-process test
 //! asserted `"A\nend\n"`: on the cooperative single-thread engine, jobs were NOT eagerly dispatched,
-//! so `stop`'s `shutdown_now()` reached the queue before job C had even started and discarded it.
+//! so `stop`'s `cancel()` reached the queue before job C had even started and discarded it.
 //! M:N's eager dispatch means C has already started by then, so it runs — and so does CPython's.
 
 use std::process::Command;
 
-/// TICKET-232 — `shutdown_now()` marks the Executor shut before it trips the cancel, so a `submit`
-/// racing a job's `shutdown_now()` either starts its job or faults with this text. Both are legal;
+/// TICKET-232 — `cancel()` marks the Executor shut before it trips the cancel, so a `submit`
+/// racing a job's `cancel()` either starts its job or faults with this text. Both are legal;
 /// a `submit` that returns cleanly and runs nothing is not.
 const SUBMIT_FAULT: &str = "submit on a shut-down Executor (it no longer accepts work)";
 
@@ -67,7 +67,7 @@ fn executor_reentrant_shutdown_now_during_drain() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
+        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    _ := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
     )
     .expect("write program");
 
@@ -117,7 +117,7 @@ fn executor_shutdown_now_never_cancels_a_dispatched_job() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
+        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    _ := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
     )
     .expect("write program");
     let mut dropped = 0;

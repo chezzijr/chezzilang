@@ -253,9 +253,9 @@ fn w_call(r: Channel[str], tag: str, d: int, x: List[List[List[int]]]? = mk_l())
             Pack => "spawn w_@S(r, \"@G\", @D, @I, @I)",
             Receiver => "spawn Box_@S(@I).go(r, \"@G\", @D)",
             GenFrame => unreachable!("built by `cell`"),
-            Submit => "ex.submit(fn(): poke_@S(r, \"@G\", @D, @I))",
-            SubmitResult => "_ := ex.submit_result(fn(): poke_@S(r, \"@G\", @D, @I))",
-            SubmitTask => "_ := submit_task(ex, fn(): poke_@S(r, \"@G\", @D, @I))",
+            Submit => "_ := ex.submit(fn(): poke_@S(r, \"@G\", @D, @I))",
+            SubmitResult => "_ := ex.submit(fn(): poke_@S(r, \"@G\", @D, @I))",
+            SubmitTask => "_ := ex.submit(fn(): poke_@S(r, \"@G\", @D, @I))",
             ChannelSend => "spawn w_@S(r, \"@G\", @D, c@N)",
         }
     }
@@ -280,7 +280,7 @@ fn expect(w: Wrapper, i: Inner, d: usize) -> &'static str {
 }
 
 const PRELUDE: &str = "import std.concurrency\nimport Iterator from std.iter\nimport Executor from std.concurrency
-import submit_task from std.concurrency.task
+
 struct N:
     kids: List[List[int]]
 fn verdict(r: Channel[str], tag: str, res: None!):

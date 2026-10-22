@@ -127,8 +127,6 @@ enum Reader {
 /// What the reader waits on.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Wait {
-    /// `recv` on the `submit_result` channel.
-    Recv,
     /// `Task.get`.
     Get,
     /// `recv` on a plain channel the job sends on as its last statement.
@@ -159,7 +157,7 @@ impl End {
     }
 }
 
-/// Who calls `shutdown_now()`. `None` for an end that is not a cut.
+/// Who calls `cancel()`. `None` for an end that is not a cut.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Cutter {
     None,
@@ -196,18 +194,14 @@ fn prog(reader: Reader, wait: Wait, end: End, cutter: Cutter, rounds: usize) -> 
         End::CutParked => "_ := gate.recv()",
     };
     let wait_body = match wait {
-        Wait::Recv => {
-            "    ch := inner.submit_result(fn() -> int: job(gate))\n    started.send(1)\n    match ch.recv():\n        ?v: return v\n        !e: return -1\n"
-        }
         Wait::Get => {
-            "    h := task.submit_task(inner, fn() -> int: job(gate))\n    started.send(1)\n    match h.get():\n        ?v: return v\n        !e: return -1\n"
+            "    h := inner.submit(fn() -> int: job(gate))\n    started.send(1)\n    match h.get():\n        ?v: return v\n        !e: return -1\n"
         }
         Wait::Plain => {
-            "    inner.submit(fn(): jobp(gate, plain))\n    started.send(1)\n    return plain.recv()\n"
+            "    _ := inner.submit(fn(): jobp(gate, plain))\n    started.send(1)\n    return plain.recv()\n"
         }
     };
-    let mut s =
-        String::from("import std.concurrency\nimport std.concurrency.task\nimport std.time\n");
+    let mut s = String::from("import std.concurrency\nimport std.time\n");
     s.push_str("fn boom() -> int:\n    xs := [1]\n    return xs[5]\n");
     s.push_str(&format!(
         "fn job(gate: Channel[int]) -> int:\n    {end_body}\n    return 7\n"
@@ -228,7 +222,7 @@ fn prog(reader: Reader, wait: Wait, end: End, cutter: Cutter, rounds: usize) -> 
         "fn reader_defer({SIG}, out: Channel[int]):\n    defer:\n        out.send(await_j({ARGS}))\n"
     ));
     s.push_str(
-        "import Executor from std.concurrency\nfn stopper(inner: Executor, started: Channel[int], ms: int):\n    _ := started.recv()\n    time.sleep_ms(ms)\n    inner.shutdown_now()\n",
+        "import Executor from std.concurrency\nfn stopper(inner: Executor, started: Channel[int], ms: int):\n    _ := started.recv()\n    time.sleep_ms(ms)\n    inner.cancel()\n",
     );
 
     // One round. The lines land inside `for rn in 0..rounds:`.
@@ -243,19 +237,19 @@ fn prog(reader: Reader, wait: Wait, end: End, cutter: Cutter, rounds: usize) -> 
         "out := Channel[int](1)".into(),
     ];
     if end == End::CutHeld {
-        b.push("inner.submit(fn(): blocker(gate))".into());
+        b.push("_ := inner.submit(fn(): blocker(gate))".into());
     }
     if end == End::DropFinish {
-        b.push("inner.submit(fn(): faulty())".into());
+        b.push("_ := inner.submit(fn(): faulty())".into());
     }
     if cutter == Cutter::Job {
-        b.push("cx.submit(fn(): stopper(inner, started, rn % 3))".into());
+        b.push("_ := cx.submit(fn(): stopper(inner, started, rn % 3))".into());
     }
     let main_cut: &[&str] = if cutter == Cutter::Main {
         &[
             "_ := started.recv()",
             "time.sleep_ms(rn % 3)",
-            "inner.shutdown_now()",
+            "inner.cancel()",
         ]
     } else {
         &[]
@@ -326,21 +320,17 @@ enum Class {
     /// `docs/contributing/gaps.md` W22-1: a real deadlock the verdict does not report. A hang or a deadlock
     /// fault, never a settle.
     Declines,
-    /// The job's own fault ends the run; no deadlock is reported.
-    JobFault,
-    /// The same `shutdown_now()` cuts the reader. Two legal outcomes: every round settles, or the
+    /// The same `cancel()` cuts the reader. Two legal outcomes: every round settles, or the
     /// run ends with a deadlock fault.
     Race,
 }
 
 fn class((reader, wait, end, cutter): Cell) -> Class {
     let cut = end.is_cut();
-    if end == End::DropFinish || (wait == Wait::Plain && end == End::Faults) {
-        Class::JobFault
-    } else if reader == Reader::SameExec && wait != Wait::Plain && cut {
+    if reader == Reader::SameExec && wait != Wait::Plain && cut {
         Class::Race
-    } else if wait == Wait::Plain && cut {
-        if reader == Reader::OtherExec && cutter == Cutter::Sibling {
+    } else if wait == Wait::Plain && (cut || end == End::Faults) {
+        if cut && reader == Reader::OtherExec && cutter == Cutter::Sibling {
             Class::Declines
         } else {
             Class::Deadlock
@@ -358,10 +348,17 @@ fn settled(end: End, rounds: usize, g: &Got) -> Option<String> {
     if !g.ended() {
         return Some("the run did not print `end`".to_string());
     }
+    // TICKET-289: a job fault is its Task's outcome alone. It never reaches stderr, and it never
+    // cancels the job held behind it (`DropFinish`), which runs and returns.
+    if g.err.contains(JOB_FAULT) {
+        return Some("a job fault reached stderr".to_string());
+    }
     let legal = |l: &str| match end {
-        End::Returns => l == "r 7",
+        End::Returns | End::DropFinish => l == "r 7",
         End::Faults => l == "r -1",
-        _ => l == "r 7" || l == "r -1",
+        End::CutHeld | End::CutRunning | End::CutSleeping | End::CutParked => {
+            l == "r 7" || l == "r -1"
+        }
     };
     let rs = g.r_lines();
     if rs.len() != rounds || !rs.iter().all(|l| legal(l)) {
@@ -381,8 +378,6 @@ fn check(cell: Cell, rounds: usize, g: &Got) -> Option<String> {
             .then(|| "a cut feeder of a plain channel must end in a deadlock fault".to_string()),
         Class::Declines => (g.code.is_some() && !g.deadlock_fault())
             .then(|| "W22-1 must hang or report a deadlock, never settle".to_string()),
-        Class::JobFault => (!g.err.contains(JOB_FAULT) || g.err.contains("deadlock"))
-            .then(|| "the job's fault must end the run, with no deadlock".to_string()),
         Class::Race => {
             if g.deadlock_fault() {
                 None
@@ -443,7 +438,7 @@ const READERS: [Reader; 6] = [
 fn reader_grid_every_cell_ends_in_its_class() {
     let mut cells = Vec::new();
     for reader in READERS {
-        for wait in [Wait::Recv, Wait::Get, Wait::Plain] {
+        for wait in [Wait::Get, Wait::Plain] {
             for end in [
                 End::Returns,
                 End::Faults,
@@ -463,7 +458,7 @@ fn reader_grid_every_cell_ends_in_its_class() {
 }
 
 /// The false verdict is a race: one round rarely shows it. 100 rounds made the base binary red in
-/// 28 of 40 runs of `Nursery x Recv x CutSleeping x Sibling`.
+/// 28 of 40 runs of `Nursery x Get x CutSleeping x Sibling`.
 #[test]
 fn reader_grid_handle_cells_survive_stress() {
     let mut cells = Vec::new();
@@ -471,7 +466,7 @@ fn reader_grid_handle_cells_survive_stress() {
         if reader == Reader::SameExec {
             continue;
         }
-        for wait in [Wait::Recv, Wait::Get] {
+        for wait in [Wait::Get] {
             for end in [End::Returns, End::CutSleeping, End::CutParked] {
                 for cutter in cutters(reader, end) {
                     cells.push((reader, wait, end, cutter));
@@ -496,7 +491,7 @@ fn reader(plain: Channel[int], out: Channel[int]):
     out.send(plain.recv())
 
 fn stopper(inner: Executor):
-    inner.shutdown_now()
+    inner.cancel()
 
 fn main():
     inner := Executor(1)

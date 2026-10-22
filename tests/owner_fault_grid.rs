@@ -218,7 +218,7 @@ fn rows() -> Vec<Row> {
         },
         Row {
             spec: "Join",
-            body: "    ex2 := Executor()\n    ex2.submit(recv_job)\n    ex2.shutdown()",
+            body: "    ex2 := Executor()\n    _ := ex2.submit(recv_job)\n    ex2.shutdown()",
             ..R
         },
         Row {
@@ -323,7 +323,7 @@ fn owner_src(kind: &str, ctx: &str) -> String {
             indent(&body, 12)
         ),
         "executor_job" => format!(
-            "fn owner_job() -> None:\n{}ex := Executor()\nex.submit(owner_job)\nex.shutdown()\n",
+            "fn owner_job() -> None:\n{}ex := Executor()\n_ := ex.submit(owner_job)\nex.shutdown()\n",
             indent(&body, 4)
         ),
         _ => unreachable!("owner kind {kind}"),

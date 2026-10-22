@@ -77,7 +77,7 @@ fn a_deadlocked_executor_job_aborts_shutdown() {
         "fn main():",
         "    ch := Channel[int](0)",
         "    ex := Executor()",
-        "    ex.submit(fn(): ch.recv())",
+        "    _ := ex.submit(fn(): ch.recv())",
         "    r := recover: ex.shutdown()",
         "    print(\"after shutdown\")",
         "main()",

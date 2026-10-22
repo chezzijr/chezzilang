@@ -191,14 +191,14 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
     let rounds = if cancel == "exit" { 1 } else { 50 };
     let run_body = if nest == "job" || cancel == "shutdown_now" {
         let stop = if cancel == "shutdown_now" {
-            "_ := started.recv()\n_r2 := recover: ex.shutdown_now()"
+            "_ := started.recv()\n_r2 := recover: ex.cancel()"
         } else {
             "_r2 := recover: ex.shutdown()"
         };
         // A fire-and-forget job's own fault ends the run, so the job cell recovers inside the job.
         let job = if nest == "job" { "guarded" } else { "outer" };
         format!(
-            "c := Channel[int](0)\nstarted := Channel[int](1)\nex := Executor()\nex.submit(fn(): {job}(c, started))\n{stop}"
+            "c := Channel[int](0)\nstarted := Channel[int](1)\nex := Executor()\n_ := ex.submit(fn(): {job}(c, started))\n{stop}"
         )
     } else {
         "c := Channel[int](0)\nstarted := Channel[int](1)\n_r := recover: outer(c, started)"

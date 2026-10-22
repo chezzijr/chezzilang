@@ -9,7 +9,7 @@ const PROG: &str = r#"import std.os
 import std.time
 import std.concurrency
 import Executor from std.concurrency
-import std.concurrency.task
+
 fn job(i: int) -> int:
     if i == 1:
         time.sleep_ms(100)
@@ -18,8 +18,8 @@ fn job(i: int) -> int:
     return i
 fn main():
     ex := concurrency.Executor(1)
-    h1 := task.submit_task(ex, fn() -> int: job(1))
-    h2 := task.submit_task(ex, fn() -> int: job(2))
+    h1 := ex.submit(fn() -> int: job(1))
+    h2 := ex.submit(fn() -> int: job(2))
     print("h2 {h2.get()}")
 main()
 "#;
@@ -51,7 +51,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-const CANCELLED: &str = "!task cancelled: shutdown_now() stopped it before it finished";
+const CANCELLED: &str = "!task cancelled: cancel() stopped it before it finished";
 
 /// One finished run. `code` is `None` when the harness killed the child at ten seconds.
 struct Got {
@@ -194,7 +194,7 @@ import std.io
 import std.time
 import std.concurrency
 import Executor from std.concurrency
-import std.concurrency.task
+
 gate := Channel[int](0)
 g := concurrency.Shared[int](0)
 fn hold(x: int) -> int:
@@ -236,7 +236,7 @@ fn submit_expr(h: Handle, ex: &str, f: &str) -> String {
     match h {
         Handle::Submit => format!("{ex}.submit(fn(): drop({f}))"),
         Handle::SubmitTask => format!("task.submit_task({ex}, fn() -> int: {f})"),
-        Handle::SubmitResult => format!("{ex}.submit_result(fn() -> int: {f})"),
+        Handle::SubmitResult => format!("{ex}.submit(fn() -> int: {f})"),
     }
 }
 
@@ -276,7 +276,7 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
     match h {
         Handle::Submit => {}
         Handle::SubmitTask => src.push_str(
-            "fn rd(h: task.Task[int]):\n    print(\"got {h.get()}\")\n    print(\"done {h.done()}\")\n",
+            "fn rd(h: concurrency.Task[int]):\n    print(\"got {h.get()}\")\n    print(\"done {h.done()}\")\n",
         ),
         Handle::SubmitResult => {
             src.push_str("fn rd(h: Channel[int!]):\n    print(\"got {h.recv()}\")\n")
@@ -298,7 +298,7 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
             Event::ForeignExit => inner.push("os.exit(17)".into()),
             _ => {
                 inner.push("ex3 := Executor()".into());
-                inner.push("ex3.submit(fn(): boom())".into());
+                inner.push("_ := ex3.submit(fn(): boom())".into());
                 inner.push("time.sleep_ms(300)".into());
             }
         }
@@ -307,7 +307,7 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
     } else {
         if s == State::ParkedGuard {
             body.push("exh := Executor()".into());
-            body.push("exh.submit(fn(): holder())".into());
+            body.push("_ := exh.submit(fn(): holder())".into());
             body.push("time.sleep_ms(20)".into());
         }
         let cap = if p == Party::Exec1 { "1" } else { "" };
@@ -327,7 +327,7 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
             }
             if e == Event::FireAndForgetFault {
                 body.push("ex3 := Executor()".into());
-                body.push("ex3.submit(fn(): boom())".into());
+                body.push("_ := ex3.submit(fn(): boom())".into());
                 body.push("time.sleep_ms(300)".into());
             } else {
                 body.push("time.sleep_ms(1000)".into());
@@ -345,7 +345,7 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
                     }
                     body.push("ex.shutdown()".into());
                 }
-                Event::ShutdownNow => body.push("ex.shutdown_now()".into()),
+                Event::ShutdownNow => body.push("ex.cancel()".into()),
                 _ => {}
             }
             if e == Event::HandleFault && s == State::Held {
@@ -371,7 +371,7 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
     }
     if creator {
         src.push_str(
-            "fn main():\n    outer := Executor()\n    outer.submit(fn(): inner())\n    time.sleep_ms(50)\n    outer.shutdown_now()\n    print(\"M end\")\n",
+            "fn main():\n    outer := Executor()\n    _ := outer.submit(fn(): inner())\n    time.sleep_ms(50)\n    outer.cancel()\n    print(\"M end\")\n",
         );
     }
     src.push_str("main()\n");
@@ -568,7 +568,7 @@ fn job_owner_grid() {
 const DHELD: &str = r#"import std.time
 import std.concurrency
 import Executor from std.concurrency
-import std.concurrency.task
+
 fn blocker() -> int:
     time.sleep_ms(300)
     return 1
@@ -578,12 +578,12 @@ fn target() -> int:
 fn boom():
     time.sleep_ms(20)
     panic("boom")
-fn rd(h: task.Task[int]):
+fn rd(h: concurrency.Task[int]):
     print("defer got {h.get()}")
 fn main():
     ex := concurrency.Executor(1)
-    _b := task.submit_task(ex, fn() -> int: blocker())
-    h := task.submit_task(ex, fn() -> int: target())
+    _b := ex.submit(fn() -> int: blocker())
+    h := ex.submit(fn() -> int: target())
     defer: rd(h)
     ex2 := concurrency.Executor()
     ex2.submit(fn(): boom())
@@ -595,7 +595,7 @@ main()
 const DRUN: &str = r#"import std.time
 import std.concurrency
 import Executor from std.concurrency
-import std.concurrency.task
+
 fn target() -> int:
     time.sleep_ms(300)
     print("target ran")
@@ -603,11 +603,11 @@ fn target() -> int:
 fn boom():
     time.sleep_ms(20)
     panic("boom")
-fn rd(h: task.Task[int]):
+fn rd(h: concurrency.Task[int]):
     print("defer got {h.get()}")
 fn main():
     ex := concurrency.Executor()
-    h := task.submit_task(ex, fn() -> int: target())
+    h := ex.submit(fn() -> int: target())
     defer: rd(h)
     ex2 := concurrency.Executor()
     ex2.submit(fn(): boom())
@@ -634,12 +634,12 @@ fn defer_reader_settles_after_a_job_fault() {
 /// `~/.cache/hunt6/chan/p/td2.chz` cut to 50 rounds (CHAN3).
 const TD2: &str = r#"import std.concurrency
 import Executor from std.concurrency
-import std.concurrency.task
+
 fn main():
     flips := concurrency.AtomicInt(0)
     for r in 0..50:
         ex := concurrency.Executor()
-        t := task.submit_task(ex, fn() -> int: r)
+        t := ex.submit(fn() -> int: r)
         ex.shutdown()
         parallel:
             spawn:

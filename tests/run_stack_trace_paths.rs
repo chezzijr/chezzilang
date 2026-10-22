@@ -187,7 +187,7 @@ fn std_native_fault_in_a_submit_task_job_names_the_users_call() {
     let t = TmpDir::new();
     t.write(
         "main.chz",
-        "import std.concurrency\nimport submit_task from std.concurrency.task\nex := concurrency.Executor()\nex.shutdown()\nfn outer(ex: concurrency.Executor) -> int:\n    inner := submit_task(ex, fn(): 5)\n    match inner.get():\n        ?v: return v + 1\n        !_: return 0\nouter_ex := concurrency.Executor()\nouter_ex.submit(fn(): outer(ex))\nouter_ex.shutdown()\n",
+        "import std.concurrency\nex := concurrency.Executor()\nex.shutdown()\nfn outer(ex: concurrency.Executor) -> int:\n    inner := ex.submit(fn(): 5)\n    match inner.get():\n        ?v: return v + 1\n        !_: return 0\nouter_ex := concurrency.Executor()\n_ := outer_ex.submit(fn(): outer(ex))\nouter_ex.shutdown()\n",
     );
     let (_stdout, stderr, ok) = run(&t.0, &["run", "main.chz"]);
     assert!(!ok, "the program must fault");
@@ -210,10 +210,10 @@ fn std_native_fault_in_a_submit_task_job_names_the_users_call() {
 #[test]
 fn std_native_fault_on_main_headline_and_caught_origin_agree() {
     let t = TmpDir::new();
-    let head = "import std.concurrency\nimport submit_task from std.concurrency.task\nex := concurrency.Executor()\nex.shutdown()\n";
+    let head = "import std.concurrency\nex := concurrency.Executor()\nex.shutdown()\n";
     t.write(
         "uncaught.chz",
-        &format!("{head}task := submit_task(ex, fn(): 1)\nprint(task.get())\n"),
+        &format!("{head}task := ex.submit(fn(): 1)\nprint(task.get())\n"),
     );
     let (_o, stderr, ok) = run(&t.0, &["run", "uncaught.chz"]);
     assert!(!ok, "the program must fault");
@@ -234,7 +234,7 @@ fn std_native_fault_on_main_headline_and_caught_origin_agree() {
     t.write(
         "caught.chz",
         &format!(
-            "{head}r := recover: submit_task(ex, fn(): 1)\nmatch r:\n    ?_: print(\"no fault\")\n    !e: print(\"{{e.file()}} {{e.line()}} {{e.col()}}\")\n"
+            "{head}r := recover: ex.submit(fn(): 1)\nmatch r:\n    ?_: print(\"no fault\")\n    !e: print(\"{{e.file()}} {{e.line()}} {{e.col()}}\")\n"
         ),
     );
     let (stdout, stderr, ok) = run(&t.0, &["run", "caught.chz"]);

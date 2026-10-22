@@ -158,27 +158,27 @@ const PARTIES: [Party; 7] = [
     Party {
         name: "submit",
         nursery: false,
-        start: "ex.submit($F)",
+        start: "_ := ex.submit($F)",
     },
     Party {
         name: "job-nursery-fiber",
         nursery: false,
-        start: "ex.submit(fn(): nest($F))",
+        start: "_ := ex.submit(fn(): nest($F))",
     },
     Party {
         name: "job-submits-job",
         nursery: false,
-        start: "ex.submit(fn(): resubmit(ex, $F))",
+        start: "_ := ex.submit(fn(): resubmit(ex, $F))",
     },
     Party {
         name: "executor-in-job",
         nursery: false,
-        start: "ex.submit(fn(): own_ex($F))",
+        start: "_ := ex.submit(fn(): own_ex($F))",
     },
     Party {
         name: "executor-in-job-nursery",
         nursery: false,
-        start: "ex.submit(fn(): nest(fn(): own_ex($F)))",
+        start: "_ := ex.submit(fn(): nest(fn(): own_ex($F)))",
     },
 ];
 
@@ -186,7 +186,7 @@ const PRELUDE: &str = "import std.time
 import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 import std.os
 import std.io
-import submit_task from std.concurrency.task
+
 xs := [1]
 out := Channel[str](4)
 hs := Channel[int](8)
@@ -370,7 +370,7 @@ fn cancel_reaches_every_party() {
             cells.push((
                 "shutdown_now",
                 vec!["$S(parked)", "hs.recv()"],
-                "ex.shutdown_now()",
+                "ex.cancel()",
                 Mode::Run,
                 "",
                 Some(0),
@@ -397,7 +397,7 @@ fn cancel_reaches_every_party() {
 }
 
 const HANDLE_DECLS: &str = "fn h(e: Executor):
-    t := submit_task(e, bad_int)
+    t := e.submit(bad_int)
     match t.get():
         ?_: print(\"ok\")
         !x: print(\"err \" + x.message())
@@ -418,11 +418,11 @@ fn a_job_fault_is_delivered_by_its_handle_or_ends_the_run() {
     // A handle job's fault is an `Err` on the handle; the run exits zero.
     for (name, start) in [
         ("direct", "h(ex)"),
-        ("in-job", "ex.submit(fn(): h(ex))"),
-        ("own-executor-in-job", "ex.submit(h_own)"),
+        ("in-job", "_ := ex.submit(fn(): h(ex))"),
+        ("own-executor-in-job", "_ := ex.submit(h_own)"),
         (
             "own-executor-in-job-nursery",
-            "ex.submit(fn(): nest(h_own))",
+            "_ := ex.submit(fn(): nest(h_own))",
         ),
     ] {
         let src = prog(
@@ -446,7 +446,7 @@ fn a_job_fault_is_delivered_by_its_handle_or_ends_the_run() {
             "",
             &[
                 "ex2 := Executor()",
-                "ex2.submit(slow)",
+                "_ := ex2.submit(slow)",
                 "$S(boomer)",
                 "ex2.shutdown()",
                 "print(\"main done\")",
@@ -470,11 +470,7 @@ fn a_job_fault_is_delivered_by_its_handle_or_ends_the_run() {
     let src = prog(
         submit,
         HANDLE_DECLS,
-        &[
-            "t := submit_task(ex, exits)",
-            "_r := t.get()",
-            "print(\"after\")",
-        ],
+        &["t := ex.submit(exits)", "_r := t.get()", "print(\"after\")"],
         "ex.shutdown()",
         false,
     );
@@ -627,7 +623,7 @@ ex.submit(job)
 ex.submit(job)
 ex.submit(job)
 time.sleep_ms(50)
-ex.shutdown_now()
+ex.cancel()
 print(\"done\")
 ";
     let mut misses = Vec::new();
@@ -655,7 +651,7 @@ ex.submit(slow)
 ex.submit(quick)
 ex.submit(quick)
 time.sleep_ms(50)
-ex.shutdown_now()
+ex.cancel()
 print(\"done\")
 ";
     let mut misses = Vec::new();
@@ -787,13 +783,13 @@ fn the_grid_holds_inside_a_test_fn() {
         ];
         if !p.nursery {
             body.extend([
-                "t := submit_task(ex, bad_int)",
+                "t := ex.submit(bad_int)",
                 "match t.get():",
                 "    ?_: assert false",
                 "    !e: assert e.message().contains(\"boom\")",
                 "$S(parked)",
                 "hs.recv()",
-                "ex.shutdown_now()",
+                "ex.cancel()",
                 "assert not flag.get()",
             ]);
         }
@@ -825,7 +821,7 @@ fn boomer():
     started.recv()
     panic(\"boom\")
 ";
-    const TAIL: &str = "ex.submit(job)
+    const TAIL: &str = "_ := ex.submit(job)
 r := recover: owner()
 print(\"cut\")
 done.recv()
@@ -917,12 +913,12 @@ ex.submit(bad)
         ("sleep", "time.sleep_ms(6000)\n"),
         (
             "recv",
-            "ex2 := Executor()\nex2.submit(feeder)\nv := c.recv()\n",
+            "ex2 := Executor()\n_ := ex2.submit(feeder)\nv := c.recv()\n",
         ),
-        ("shutdown", "ex.submit(slow)\nex.shutdown()\n"),
+        ("shutdown", "_ := ex.submit(slow)\nex.shutdown()\n"),
         (
             "nursery-join",
-            "ex2 := Executor()\nex2.submit(feeder)\nparallel:\n    spawn waiter()\n",
+            "ex2 := Executor()\n_ := ex2.submit(feeder)\nparallel:\n    spawn waiter()\n",
         ),
         ("stdin-read", "_line := io.read_line()\n"),
     ];
@@ -1049,7 +1045,7 @@ fn submit_cell(form: &str, outcome: &str, step: &str) -> (String, Vec<String>) {
         (_, "cpu") => "fn(): at_cpu(started)".to_string(),
         _ => unreachable!("{outcome}"),
     };
-    let sub = format!("ex.submit({job})");
+    let sub = format!("_ := ex.submit({job})");
     m += &match form {
         "kept" => format!("t := {sub}\n"),
         "stmt" => format!("{sub}\n"),

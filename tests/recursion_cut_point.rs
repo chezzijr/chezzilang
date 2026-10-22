@@ -96,12 +96,18 @@ const SHAPES: [&str; 5] = ["loop", "rec", "mutual", "map", "sortkey"];
 /// (party, event, main body, exit code, stderr must contain). `main` is the flagless party; a
 /// `job` holds its executor's cancel flag, so `Vm::exit_halt` takes its other arm.
 const EVENTS: [(&str, &str, &[&str], i32, &str); 5] = [
-    ("main", "exit", &["ex.submit(quit)", "work()"], 7, ""),
-    ("main", "fault", &["ex.submit(bad)", "work()"], 1, "boom"),
+    ("main", "exit", &["_ := ex.submit(quit)", "work()"], 7, ""),
+    (
+        "main",
+        "fault",
+        &["_ := ex.submit(bad)", "work()"],
+        1,
+        "boom",
+    ),
     (
         "job",
         "exit",
-        &["ex.submit(work)", "started.recv()", "os.exit(7)"],
+        &["_ := ex.submit(work)", "started.recv()", "os.exit(7)"],
         7,
         "",
     ),
@@ -109,8 +115,8 @@ const EVENTS: [(&str, &str, &[&str], i32, &str); 5] = [
         "job",
         "fault",
         &[
-            "ex.submit(work)",
-            "ex.submit(bad)",
+            "_ := ex.submit(work)",
+            "_ := ex.submit(bad)",
             "ex.shutdown()",
             r#"print("late main")"#,
         ],
@@ -120,7 +126,7 @@ const EVENTS: [(&str, &str, &[&str], i32, &str); 5] = [
     (
         "job",
         "mainfault",
-        &["ex.submit(work)", "started.recv()", r#"panic("boom")"#],
+        &["_ := ex.submit(work)", "started.recv()", r#"panic("boom")"#],
         1,
         "boom",
     ),

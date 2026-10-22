@@ -176,7 +176,7 @@ fn detached_executor_is_joined_and_faults_error_the_test() {
     let t = TmpDir::new();
     let entry = t.write(
         "f7_test.chz",
-        "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\ntest fn t():\n    ex := concurrency.Executor()\n    ex.submit(boom)\n    assert true\n",
+        "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\ntest fn t():\n    ex := concurrency.Executor()\n    _ := ex.submit(boom)\n    assert true\n",
     );
     let (stdout, _stderr) = run_test(&[entry.to_str().unwrap()]);
     assert!(

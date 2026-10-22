@@ -433,7 +433,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     // TICKET-118 (W13-8). Its 300ms `time.sleep_ms` sits inside the fixture .chz program's SOURCE
     // STRING, not in this Rust test's own control flow -- the same reason as
     // `an_ancestor_send_wakes_a_receiver_parked_in_a_deeper_nursery` above. The edge it guesses at
-    // (the job reaching its nursery park before `shutdown_now()`) is why TICKET-118 ADDS the
+    // (the job reaching its nursery park before `cancel()`) is why TICKET-118 ADDS the
     // handshake-synchronised twin DEC-050 asks for rather than converting this one: this is the
     // ticket's declared `test_file`, and a planning stage may not repoint that field.
     // TICKET-118. Its 300ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING, not
