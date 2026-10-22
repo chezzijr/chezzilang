@@ -400,6 +400,7 @@ impl MnSched {
                 slot_charge: Default::default(),
                 unfinished_bytes: 0,
                 charged: 0,
+                deadline_armed: None,
             }),
             cv: Condvar::new(),
             deadlock_err,

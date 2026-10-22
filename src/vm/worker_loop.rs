@@ -361,6 +361,13 @@ impl Vm {
                 // `Disp::Finish`.
                 self.width_release();
             }
+            // TICKET-286 — a channel park under `--timeout` has nothing else that wakes it at the
+            // deadline: arm the run deadline's one drain.
+            if let (Some(dl), Disp::Park(..) | Disp::SendPark(_) | Disp::WaitPark(_)) =
+                (fiber.park_deadline, &disp)
+            {
+                sched.arm_deadline_wake(dl);
+            }
             match disp {
                 Disp::Park(key, core) => sched.park(key, core, fiber),
                 // Bounded backpressure — the send-side park (gap re-check = space, not a message).
@@ -682,6 +689,7 @@ impl Vm {
         fiber.pending = self.pending.take();
         // A fiber that parks carries its site; one that runs on carries `None`.
         fiber.park_site = self.park_site.take();
+        fiber.park_deadline = self.deadline;
         self.swap_ctx(&mut fiber.ctx);
         disp
     }

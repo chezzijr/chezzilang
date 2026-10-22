@@ -53,7 +53,8 @@ impl MnSched {
         let latched = core.done_latch.load(Ordering::Relaxed);
         // Cross-nursery flat scheduler — read the PARKING fiber's SCOPE cancel (not the sched's global
         // `cancel`), so an inner fault that tripped only its scope re-checks the right flag here.
-        let cancelled = c.scope_cancel_tripped(fiber.scope_id) || fiber.owned_tripped();
+        let cancelled =
+            c.scope_cancel_tripped(fiber.scope_id) || fiber.owned_tripped() || fiber.deadline_due();
         // The fiber carries its slot (and, with or without one, its channel) until its re-run
         // `recv` settles it; a requeued fiber settles at once on that re-run.
         op.at.push((core, 0, false));
@@ -85,7 +86,8 @@ impl MnSched {
     pub(super) fn park_send(&self, key: usize, mut fiber: Fiber) {
         let mut c = self.lock();
         c.leave_running();
-        let cancelled = c.scope_cancel_tripped(fiber.scope_id) || fiber.owned_tripped();
+        let cancelled =
+            c.scope_cancel_tripped(fiber.scope_id) || fiber.owned_tripped() || fiber.deadline_due();
         let settled = fiber.pending.as_ref().is_none_or(|op| !op.p.is_queued());
         if settled || cancelled {
             fiber.state = FiberState::Ready;
@@ -253,6 +255,7 @@ impl MnSched {
         // the shared `Pending`'s state says for every send arm at once.
         let mut ready_now = c.scope_cancel_tripped(fiber.scope_id)
             || fiber.owned_tripped()
+            || fiber.deadline_due()
             || p.as_ref().is_some_and(|p| !p.is_queued());
         // W7-2 — arm accounting is THREE-way, mirroring `op_wait_poll` exactly: READY (take the arm
         // now), DEAD (closed+empty recv arm — the poll SKIPS it and only counts it toward

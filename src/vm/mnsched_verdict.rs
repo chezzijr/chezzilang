@@ -189,13 +189,54 @@ impl MnSched {
     /// continuation too, or `any_cancelled_scope_awaiting_drain` vetoes forever. Every other scope
     /// owns a distinct Arc, so the result is unchanged for them.
     pub(super) fn cancel_drain(&self, scope_id: usize) {
-        let mut c = self.lock();
+        let c = self.lock();
         if c.parked_n == 0 {
             return;
         }
         // A join-parked owner of this family stays filed (see `SchedCore::join_parked`): its
         // children see the tripped token, finish, and `finish` requeues it.
         let family = c.scope_family(scope_id);
+        self.drain_parked(c, |f| f.woken_by(&family));
+    }
+
+    /// TICKET-286 — arm the one [`MnSched::deadline_drain`] job for the run deadline `dl`, once per
+    /// deadline per sched. Called when a fiber parks on a channel under `--timeout`.
+    pub(super) fn arm_deadline_wake(self: &Arc<Self>, dl: std::time::Instant) {
+        {
+            let mut c = self.lock();
+            if c.deadline_armed == Some(dl) {
+                return;
+            }
+            c.deadline_armed = Some(dl);
+        }
+        let sched = Arc::downgrade(self);
+        timer::submit_at(
+            dl,
+            Box::new(move || {
+                if let Some(s) = sched.upgrade() {
+                    s.deadline_drain();
+                }
+            }),
+        );
+    }
+
+    /// TICKET-286 — requeue every parked fiber whose `--timeout` deadline passed, so it re-runs its
+    /// op and returns the hard halt at the op's deadline checkpoint. A stale job (a test that ended
+    /// before its deadline) finds no due fiber: a later test's fibers park under a later deadline.
+    pub(super) fn deadline_drain(&self) {
+        let c = self.lock();
+        if c.parked_n == 0 {
+            return;
+        }
+        self.drain_parked(c, Fiber::deadline_due);
+    }
+
+    /// The one parked-set drain: requeue every parked fiber `wake` selects, in every bucket shape.
+    fn drain_parked(
+        &self,
+        mut c: std::sync::MutexGuard<'_, SchedCore>,
+        wake: impl Fn(&Fiber) -> bool,
+    ) {
         let buckets: Vec<(usize, Vec<ParkedEntry>)> = c.parked.drain().collect();
         let mut drained = 0usize;
         for (key, v) in buckets {
@@ -203,7 +244,7 @@ impl MnSched {
             for entry in v {
                 match entry {
                     ParkedEntry::Recv(mut f) => {
-                        if f.woken_by(&family) {
+                        if wake(&f) {
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -212,7 +253,7 @@ impl MnSched {
                         }
                     }
                     ParkedEntry::Send(mut f) => {
-                        if f.woken_by(&family) {
+                        if wake(&f) {
                             drained += 1;
                             f.state = FiberState::Ready;
                             c.global.push_back(f);
@@ -227,7 +268,7 @@ impl MnSched {
                         // token copy. Only a matching-scope, still-present fiber is claimed + requeued.
                         let in_scope = {
                             let g = wp.fiber.lock().unwrap_or_else(|e| e.into_inner());
-                            g.as_ref().is_some_and(|f| f.woken_by(&family))
+                            g.as_ref().is_some_and(&wake)
                         };
                         if !in_scope {
                             // Either a different scope (keep parked) OR already claimed (drop). Keep the

@@ -649,6 +649,7 @@ impl ReadyWorker {
             resume_native: None,
             pending: None,
             park_site: None,
+            park_deadline: None,
         }
     }
 }

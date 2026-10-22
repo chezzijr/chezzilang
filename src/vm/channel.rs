@@ -522,6 +522,9 @@ impl Vm {
         // `recv_ready` at `block_recv`'s loop head.
         let recv_mode = self.block_mode(WaitSpec::Recv);
         if recv_mode == BlockMode::Park {
+            // TICKET-286 — the ungated park checkpoint the W7-17 comment above names: a park past the
+            // deadline (inside a `defer` too) would requeue at its gap re-check and spin.
+            self.deadline_halt(span)?;
             self.park_recv(h, span);
             return Ok(RecvStep::Parked);
         }

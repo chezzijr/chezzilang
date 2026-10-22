@@ -229,9 +229,19 @@ pub(super) struct Fiber {
     /// TICKET-208 — the site this fiber parked at ([`Vm::park_site`]); `None` while it runs on.
     /// A deadlocked `Executor` job is reported there (see [`SchedCore::record_deadlocked`]).
     pub(super) park_site: Option<(&'static str, Span)>,
+    /// TICKET-286 — the `--timeout` deadline ([`Vm::deadline`]) this fiber parked under; `None`
+    /// with the cap off. Every park gap re-check reads it, and [`MnSched::deadline_drain`] requeues
+    /// the parked fiber once it passes.
+    pub(super) park_deadline: Option<std::time::Instant>,
 }
 
 impl Fiber {
+    /// TICKET-286 — has the `--timeout` deadline this fiber parked under passed?
+    pub(super) fn deadline_due(&self) -> bool {
+        self.park_deadline
+            .is_some_and(|dl| std::time::Instant::now() >= dl)
+    }
+
     /// TICKET-188 — is a flag of a nursery this parked fiber OWNS tripped? Its wake set's owned half,
     /// read by every park gap re-check; `halt_of` decides on resume whether it is a halt.
     pub(super) fn owned_tripped(&self) -> bool {
@@ -1337,6 +1347,8 @@ pub(super) struct SchedCore {
     pub(super) unfinished_bytes: usize,
     /// How much of the scopes' retained-output `bytes` [`MnSched::take_charge`] already reported.
     pub(super) charged: usize,
+    /// TICKET-286 — the run deadline whose [`MnSched::deadline_drain`] job is already armed.
+    pub(super) deadline_armed: Option<std::time::Instant>,
 }
 
 /// D2b — the disposition of one fiber run on a worker shell: park it on a channel (it blocked on an

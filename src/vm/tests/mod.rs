@@ -87,6 +87,7 @@ fn mk_fiber(task_index: usize) -> Fiber {
         resume_native: None,
         pending: None,
         park_site: None,
+        park_deadline: None,
     }
 }
 
@@ -107,6 +108,7 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         resume_native: None,
         pending: None,
         park_site: None,
+        park_deadline: None,
     }
 }
 
