@@ -777,10 +777,17 @@ impl Vm {
             self.program.protos[proto].is_test,
             "invoke_test called on a non-test proto"
         );
-        self.reset_for_invoke();
-        let home = self.entry_home();
-        self.run_proto(proto, home, None, Vec::new(), true, false, Span::RUNTIME)?;
+        self.run_invoke(proto, Vec::new())?;
         Ok(())
+    }
+
+    fn run_invoke(&mut self, proto: ProtoId, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        self.reset_for_invoke();
+        let floor = self.nurseries.len();
+        let home = self.entry_home();
+        let r = self.run_proto(proto, home, None, args, true, false, Span::RUNTIME);
+        let _ = self.drain_escaped_nursery(floor);
+        r
     }
 
     /// The per-invocation reset EVERY `chezzi test` entry point shares — [`Vm::invoke_test`],
@@ -905,24 +912,12 @@ impl Vm {
         proto: ProtoId,
         recv: Value,
     ) -> Result<Value, RuntimeError> {
-        self.reset_for_invoke();
-        let home = self.entry_home();
-        self.run_proto(proto, home, None, vec![recv], true, false, Span::RUNTIME)
+        self.run_invoke(proto, vec![recv])
     }
 
     /// `chezzi test` — construct a suite instance via its synthetic zero-arg `__new_<Suite>` thunk.
     pub fn build_suite_instance(&mut self, new_thunk: ProtoId) -> Result<Value, RuntimeError> {
-        self.reset_for_invoke();
-        let home = self.entry_home();
-        self.run_proto(
-            new_thunk,
-            home,
-            None,
-            Vec::new(),
-            true,
-            false,
-            Span::RUNTIME,
-        )
+        self.run_invoke(new_thunk, Vec::new())
     }
 
     /// `chezzi test` — initialize all modules (run top-levels once) so globals/functions exist before
