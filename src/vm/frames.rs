@@ -756,7 +756,7 @@ impl Vm {
                 let rte = self.unwind_result(p.rte, d, false);
                 self.finish_fault(0, rte, false, std_site)
             }
-            ParkAt::Catch { nursery_len } => self.finish_catch(0, nursery_len, p.rte),
+            ParkAt::Catch { nursery_len } => self.reclaim_caught(0, nursery_len, p.rte),
         }
     }
 
@@ -830,22 +830,31 @@ impl Vm {
                 // cancels its tasks IDENTICALLY to an uncaught `?`.
                 // TICKET-287 — a fiber-owned nursery that is not done parks this fiber here,
                 // after the recover-block defers, as the frame unwind parks.
-                if base_level == 0
-                    && let Some(origin) = self.park_abort_origin(h.nursery_len)
-                {
-                    self.join_suspend = Some(origin);
-                    let at = ParkAt::Catch {
-                        nursery_len: h.nursery_len,
-                    };
-                    self.store_fault_park(at, rte, None);
-                    return Ok(());
-                }
-                self.finish_catch(base_level, h.nursery_len, rte)
+                self.reclaim_caught(base_level, h.nursery_len, rte)
             }
             // Uncaught: `unwind_deferred(target, true)` above already cancelled-and-reported
             // every unwound frame's escaped nurseries (the toplevel module nursery preserved).
             _ => Err(rte),
         }
+    }
+
+    /// TICKET-287/TICKET-294 — the catching `recover:`'s nursery reclaim. At a fiber's outermost
+    /// loop it parks at each fiber-owned level that is not done ([`Vm::park_abort_origin`]), on the
+    /// first run and on every resume, so no level waits inline on this fiber's stack.
+    fn reclaim_caught(
+        &mut self,
+        base_level: usize,
+        nursery_len: usize,
+        rte: RuntimeError,
+    ) -> Result<(), RuntimeError> {
+        if base_level == 0
+            && let Some(origin) = self.park_abort_origin(nursery_len)
+        {
+            self.join_suspend = Some(origin);
+            self.store_fault_park(ParkAt::Catch { nursery_len }, rte, None);
+            return Ok(());
+        }
+        self.finish_catch(base_level, nursery_len, rte)
     }
 
     /// The end of a `recover:` catch: reclaim the nurseries above `nursery_len`, then push the
