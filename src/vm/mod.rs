@@ -144,8 +144,8 @@ impl RuntimeError {
 /// `shutdown()`, a job that never prints and never returns — `ex.submit(fn(): while true: j = j + 1)`
 /// — used to die with the queue and now runs forever, so `chezzi run x.chz | head -1` on that program
 /// hangs where it exited in 4 ms. That is run-all keeping its promise, NOT a new uncancellable job
-/// class: `shutdown_now()` still kills the same job in 54 ms at `--threads=1` and at the default (a
-/// loop back-edge is a cancellation point, and `shutdown_now` trips the per-core cancel flag).
+/// class: `cancel()` still kills the same job in 54 ms at `--threads=1` and at the default (a
+/// loop back-edge is a cancellation point, and `cancel` trips the per-core cancel flag).
 /// CPython hangs on the identical `ThreadPoolExecutor` shape (measured), so this follows the owning
 /// ancestor. Go exits — but by taking SIGPIPE on fd 1 and killing the process, a signal policy Chezzi
 /// does not adopt ([`Vm::stream_halt`] records why: restoring SIGPIPE would break `std.net`'s
@@ -374,7 +374,7 @@ static WORKER_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 static CANCEL_SCAN_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 /// TICKET-126 (W13-24) — bumped once by every cancel-flag trip ([`trip_cancel_flag`]). Process-wide
-/// on purpose: an ancestor flag (an `Executor`'s `shutdown_now`) is shared by scheds the storing site
+/// on purpose: an ancestor flag (an `Executor`'s `cancel`) is shared by scheds the storing site
 /// cannot name. Starts at 1 so a fresh sched (`drain_scan_gen == 0`) always scans once.
 static CANCEL_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -396,7 +396,7 @@ pub(crate) fn trip_cancel_flag(flag: &AtomicBool) {
 }
 
 /// TICKET-200 — THE answer to "is this scope cancelled": its own flag or any ancestor's (an
-/// `Executor`'s `shutdown_now` trips a flag a job's nursery scope carries in `JoinScope::ancestors`).
+/// `Executor`'s `cancel` trips a flag a job's nursery scope carries in `JoinScope::ancestors`).
 /// `SchedCore::scope_cancel_tripped` reads it under the core lock; `poller::register` reads a
 /// snapshot of it under the registry lock, so a socket park re-checks the same flags every other
 /// park path does (DEC-118).

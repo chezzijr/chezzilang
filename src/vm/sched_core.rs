@@ -98,22 +98,22 @@ impl SchedCore {
     /// TICKET-219 — THE job-state transition: the only reader and writer of `exec_held`,
     /// `exec_active` (except the no-runner pre-count in `spawn_into`) and `job_settle`. `halt` is
     /// [`quiesce::QuiesceState::run_halt`], read by the caller under this lock; `cancelled` is
-    /// scope 0's own flag (`shutdown_now`) or an ancestor's (creator cancel). The rule, read before
+    /// scope 0's own flag (`cancel`) or an ancestor's (creator cancel). The rule, read before
     /// anything is released:
     /// 1. `halt` is `Exit` or `Deadlock`: drop every held job, settle nothing; neither runs a
     ///    `defer`. A sealed value is a ready receive (DEC-194), so a seal would let a reader print
     ///    after it ([`RunHalt::settles`], TICKET-223).
     /// 2. else `halt` is `Fault`, or `cancelled`: drop every held job and settle each with its
-    ///    cancel value. A `defer` still runs whole after a job fault, and it may read the handle.
+    ///    cancel value. A `defer` still runs whole after a `--max-heap` abort, and it may read the handle.
     /// 3. else: release held jobs while `exec_active < exec_limit`.
     ///
     /// TICKET-232 — a `Submit` under the cap reads the halt alone, never `cancelled`: the submit
     /// was accepted at the slot reservation, and `spawn_into` starts runner threads between that
-    /// lock hold and this one, so a job's `shutdown_now()` can land there. A cancel read here
+    /// lock hold and this one, so a job's `cancel()` can land there. A cancel read here
     /// dropped the job with exit status zero. A `Submit` over the cap is held and falls through to
     /// the tail, the one cancel read.
     ///
-    /// A fault's cell is stored before any sched's flag trips, so the halt read closes that window.
+    /// A `--max-heap` abort's cell is stored before any sched's flag trips, so the halt read closes that window.
     pub(super) fn job_event(&mut self, ev: JobEvent, halt: RunHalt) -> JobStep {
         let mut step = JobStep::default();
         match ev {
@@ -133,13 +133,18 @@ impl SchedCore {
             JobEvent::Ended {
                 task_index,
                 scope_id,
-                done,
+                seal,
             } => {
                 if !self.is_job_scope(scope_id) {
                     return step;
                 }
                 self.exec_active -= 1;
-                self.settle_job(task_index, !done && halt.settles(), &mut step);
+                let seal = match seal {
+                    JobSeal::Done if self.job_was_cancelled(task_index) => JobSeal::Cancel,
+                    JobSeal::Done => JobSeal::Nothing,
+                    JobSeal::Nothing | JobSeal::Cancel | JobSeal::Fault(_) => seal,
+                };
+                self.settle_job(task_index, seal, &mut step);
             }
             JobEvent::Reaped {
                 task_index,
@@ -149,13 +154,17 @@ impl SchedCore {
                 // `None` slot would hang the join; the parked job's `Deadlocked` is the report.
                 if self.is_job_scope(scope_id) {
                     self.exec_active -= 1;
-                    self.settle_job(task_index, false, &mut step);
+                    self.settle_job(task_index, JobSeal::Nothing, &mut step);
                     self.drop_held(false, &mut step);
                 }
                 return step;
             }
             JobEvent::DropHeld => {
                 self.drop_held(halt.settles(), &mut step);
+                return step;
+            }
+            JobEvent::CancelOne(ch) => {
+                self.cancel_one(&ch, halt, &mut step);
                 return step;
             }
         }
@@ -179,7 +188,17 @@ impl SchedCore {
         step
     }
 
-    /// Scope 0's own cancel flag (`shutdown_now`) or an ancestor's (creator cancel) is tripped.
+    /// Job `task_index` was cancelled: its own flag (`Task.cancel()`), or scope 0's flag or an
+    /// ancestor's (`Executor.cancel()`, creator cancel).
+    fn job_was_cancelled(&self, task_index: usize) -> bool {
+        self.job_cancelled()
+            || self
+                .job_settle
+                .get(&task_index)
+                .is_some_and(|s| s.flag.load(Ordering::Relaxed))
+    }
+
+    /// Scope 0's own cancel flag (`cancel`) or an ancestor's (creator cancel) is tripped.
     fn job_cancelled(&self) -> bool {
         self.scopes.get(0).is_some() && self.scope_cancel_tripped(0)
     }
@@ -193,6 +212,11 @@ impl SchedCore {
     /// A job that never starts: its slot is `Cancelled`, its charge returns (DEC-205), and its
     /// handle settles with the cancel value when `settle` is set.
     fn drop_job(&mut self, f: Fiber, settle: bool, step: &mut JobStep) {
+        let seal = if settle {
+            JobSeal::Cancel
+        } else {
+            JobSeal::Nothing
+        };
         if let Some(charge) = self.slot_charge.remove(&f.task_index) {
             self.unfinished_bytes -= charge;
         }
@@ -201,29 +225,49 @@ impl SchedCore {
             stderr: Vec::new(),
         });
         self.task_done(f.scope_id);
-        self.settle_job(f.task_index, settle, step);
+        self.settle_job(f.task_index, seal, step);
     }
 
-    /// TICKET-232 — THE writer of a handle's cancel outcome: forget job `task_index`'s settle
-    /// record and, when `settle` is set, seal its channel with the cancel value here, in the lock
-    /// hold that ends the job. The join returns on the slot, so a seal written after the unlock
-    /// leaves a reader on an empty channel with no counted party: a false deadlock. The first
-    /// writer wins: a job body that already sealed its value keeps it, and nothing is woken.
-    /// Lock order `SchedCore` then `ChannelCore::q`, as `send_wake`.
-    pub(super) fn settle_job(&mut self, task_index: usize, settle: bool, step: &mut JobStep) {
+    /// TICKET-289 — `Task.cancel()`: the job whose Task channel is `ch`. A held job never starts:
+    /// it is dropped, and its Task settles with the cancel value. A running job gets its own flag
+    /// tripped here, under this lock, and the caller drains what that flag wakes
+    /// ([`JobStep::cut_flag`]). A job that already ended has no record, so nothing happens.
+    fn cancel_one(&mut self, ch: &Arc<ChannelCore>, halt: RunHalt, step: &mut JobStep) {
+        let Some(idx) = self
+            .job_settle
+            .iter()
+            .find(|(_, s)| Arc::ptr_eq(&s.ch, ch))
+            .map(|(i, _)| *i)
+        else {
+            return;
+        };
+        if let Some(pos) = self.exec_held.iter().position(|f| f.task_index == idx) {
+            if let Some(f) = self.exec_held.remove(pos) {
+                self.drop_job(f, halt.settles(), step);
+            }
+            return;
+        }
+        let flag = Arc::clone(&self.job_settle[&idx].flag);
+        crate::vm::trip_cancel_flag(&flag);
+        step.cut_flag = Some(flag);
+    }
+
+    /// TICKET-232 — THE writer of a Task's non-body outcome: forget job `task_index`'s settle
+    /// record and seal its channel as `seal` says, here, in the lock hold that ends the job. The
+    /// join returns on the slot, so a seal written after the unlock leaves a reader on an empty
+    /// channel with no counted party: a false deadlock. The first writer wins: a job body that
+    /// already sealed its value keeps it, and nothing is woken. [`JobSeal::Nothing`] seals
+    /// nothing and counts no leaver. Lock order `SchedCore` then `ChannelCore::q`, as `send_wake`.
+    pub(super) fn settle_job(&mut self, task_index: usize, seal: JobSeal, step: &mut JobStep) {
         let Some(s) = self.job_settle.remove(&task_index) else {
             return;
         };
-        if !settle {
-            return;
-        }
-        let sum = crate::vm::core::wire_summary(&s.cancel);
-        let sealed =
-            s.ch.q
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .seal(sum, s.cancel);
-        if sealed {
+        let v = match seal {
+            JobSeal::Nothing | JobSeal::Done => return,
+            JobSeal::Cancel => s.cancel.clone(),
+            JobSeal::Fault(msg) => s.fault_value(&msg),
+        };
+        if s.seal(v) {
             step.sealed.push(s.ch);
         }
         // TICKET-236 — LAST: the seal above is this leaver's final channel effect, and the caller
@@ -651,6 +695,7 @@ impl ReadyWorker {
             fault_park: None,
             park_site: None,
             park_deadline: None,
+            job_cancel: None,
         }
     }
 }

@@ -9,14 +9,24 @@ use super::*;
 
 impl Checker {
     /// The one lookup of a struct field's type at the receiver's type args (`Stack[int].items` is
-    /// `List[int]`). `None` when `sname` has no field `field`.
+    /// `List[int]`). `None` when `sname` has no field `field`, or when `field` is a std struct's
+    /// `_` field read from a user module (TICKET-289: `Task._ch`).
     pub(super) fn struct_field_ty(&self, sname: &str, targs: &[Ty], field: &str) -> Option<Ty> {
         self.struct_shape(sname).and_then(|info| {
+            if self.hides_field(info, field) {
+                return None;
+            }
             info.fields
                 .iter()
                 .find(|(f, _)| f == field)
                 .map(|(_, ty)| subst(ty, &struct_param_map(info, targs)))
         })
+    }
+
+    /// True when `field` of the std struct `info` is a std internal and the current module is not
+    /// std. The one test `struct_field_ty` and `field_names` read.
+    pub(super) fn hides_field(&self, info: &StructInfo, field: &str) -> bool {
+        info.origin == StructOrigin::Builtin && self.std_internal_hidden(field)
     }
 
     pub(super) fn infer_field(&mut self, e: &Expr, obj: &Expr, name: &str, name_span: Span) -> Ty {

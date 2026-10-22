@@ -235,6 +235,9 @@ pub(super) struct Fiber {
     pub(super) park_deadline: Option<std::time::Instant>,
     /// TICKET-287 — this fiber's carried [`Vm::fault_park`] while it is parked mid fault-unwind.
     pub(super) fault_park: Option<super::frames::FaultPark>,
+    /// TICKET-289 — an Executor job's own cancel flag ([`JobSettle::flag`]); `None` for every
+    /// other fiber. A running job reads it in place of its scope's shared flag.
+    pub(super) job_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Fiber {
@@ -617,10 +620,17 @@ pub(super) const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: bl
 pub(super) const EXEC_NO_RUNNER_MSG: &str =
     "Executor.submit could not start a runner thread (OS thread limit reached)";
 
-/// TICKET-219 — the `Err` a dropped or cut handle job's channel is sealed with (CPython
+/// TICKET-219 — the `Err` a dropped or cut job's Task is sealed with (CPython
 /// `shutdown(cancel_futures=True)`).
 pub(super) const EXEC_CANCELLED_MSG: &str =
-    "task cancelled: shutdown_now() stopped it before it finished";
+    "task cancelled: cancel() stopped it before it finished";
+
+/// TICKET-289 — the `Err` of a Task whose `submit` came after `shutdown()` or `cancel()`.
+pub(super) const EXEC_SHUT_MSG: &str = "submit on a shut-down Executor (it no longer accepts work)";
+
+/// TICKET-289 — the `Err` of a Task whose `submit` came after the creating job was cancelled.
+pub(super) const EXEC_CREATOR_CANCELLED_MSG: &str =
+    "submit on an Executor whose creating job was cancelled (it no longer accepts work)";
 
 /// D2b — the M:N scheduler shared by every worker enlisted on one `parallel:` nursery (the joining
 /// thread + the pool shells it farms). It replaces the legacy `--parallel` "one OS thread per task,
@@ -1215,37 +1225,86 @@ impl std::ops::IndexMut<usize> for ScopeTable {
     }
 }
 
-/// TICKET-219 — what settles a handle job that [`SchedCore::job_event`] drops or cuts: the fresh
-/// cap-1 result channel `submit_result` created, and the cancel value. Registered at the submit.
+/// TICKET-219 — what settles a job that [`SchedCore::job_event`] drops or cuts: the fresh cap-1
+/// result channel of its Task, the cancel value and the job's own cancel flag. Registered at the
+/// submit; every job has one (TICKET-289).
 pub(super) struct JobSettle {
     pub(super) ch: Arc<ChannelCore>,
     pub(super) cancel: WireValue,
+    /// TICKET-289 — the job's own cancel flag: `Task.cancel()` and an uncatchable end of this job
+    /// trip it, and no sibling reads it. The job's fiber carries a clone ([`Fiber::job_cancel`]).
+    pub(super) flag: Arc<AtomicBool>,
+}
+
+impl JobSettle {
+    /// Seal the Task's channel with `v`. Returns whether this call sealed it: the first writer
+    /// wins, and a body that sealed its own value keeps it. Lock order `SchedCore` then
+    /// `ChannelCore::q`, as `send_wake`.
+    pub(super) fn seal(&self, v: WireValue) -> bool {
+        let sum = crate::vm::core::wire_summary(&v);
+        self.ch
+            .q
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .seal(sum, v)
+    }
+
+    /// The cancel value with its one payload replaced by `msg`: the `Err(msg)` of a job that
+    /// ended by a fault. The cancel value is `Result.Err(str)`.
+    pub(super) fn fault_value(&self, msg: &str) -> WireValue {
+        let mut v = self.cancel.clone();
+        if let WireValue::Enum { payload, .. } = &mut v
+            && let Some(slot) = payload.first_mut()
+        {
+            *slot = WireValue::Str(msg.into());
+        }
+        v
+    }
+}
+
+/// TICKET-289 — what [`SchedCore::settle_job`] seals into a job's Task when the job ends without
+/// sealing its own value.
+pub(super) enum JobSeal {
+    /// Seal nothing: the end is a hard abort, which is never a Task outcome, or the run is over.
+    Nothing,
+    /// The body returned. It sealed its value, unless the job was cancelled first (`_settle`
+    /// skips the seal then): a cancelled job's Task reads the cancel value even when a ready
+    /// `recv` let the body finish. [`SchedCore::job_event`] turns it into `Cancel` or `Nothing`.
+    Done,
+    /// Seal the cancel value.
+    Cancel,
+    /// Seal `Err(message)`: the job ended by a fault.
+    Fault(Box<str>),
 }
 
 /// TICKET-219 — an event in an Executor job's life, the input of [`SchedCore::job_event`].
 pub(super) enum JobEvent {
     /// A submitted job, its slot reserved.
     Submit(Box<Fiber>),
-    /// A job's slot was filled at `finish`; `done` is true for a `TaskOutcome::Done`.
+    /// A job's slot was filled at `finish`; `seal` is what the Task gets if the body sealed none.
     Ended {
         task_index: usize,
         scope_id: usize,
-        done: bool,
+        seal: JobSeal,
     },
     /// A parked job was reaped by the deadlock verdict.
     Reaped { task_index: usize, scope_id: usize },
-    /// `shutdown_now` drops the held jobs.
+    /// `cancel` drops the held jobs.
     DropHeld,
+    /// TICKET-289 — `Task.cancel()`: cancel the one job whose Task channel is this one.
+    CancelOne(Arc<ChannelCore>),
 }
 
 /// TICKET-219 — what the caller of [`SchedCore::job_event`] does next: enqueue `start` under the
 /// sched lock, then wake the readers of `sealed` after it drops the lock
 /// ([`MnSched::wake_sealed`]). `sealed` holds the handle channels the transition itself sealed
-/// with their cancel value ([`SchedCore::settle_job`], TICKET-232).
+/// with their cancel value ([`SchedCore::settle_job`], TICKET-232). `cut_flag` is the flag of a
+/// running job `CancelOne` tripped: the caller drains the fibers that flag wakes.
 #[derive(Default)]
 pub(super) struct JobStep {
     pub(super) start: Vec<Fiber>,
     pub(super) sealed: Vec<Arc<ChannelCore>>,
+    pub(super) cut_flag: Option<Arc<AtomicBool>>,
 }
 
 pub(super) struct SchedCore {

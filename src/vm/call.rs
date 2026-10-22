@@ -468,7 +468,7 @@ impl Vm {
         // top-level `main` thread, the inline outermost-`parallel:` builder VM, or a `mn == None`
         // native callback.
         // All of them used to reach `native::time::sleep_ms`'s bare `std::thread::sleep`, which is a
-        // hole in every halt the loop it replaces would have checked: `shutdown_now()` at 50 ms against
+        // hole in every halt the loop it replaces would have checked: `cancel()` at 50 ms against
         // a `sleep_ms(3000)` waited the full 3012 ms AND ran the job's post-sleep code, and
         // `chezzi test --timeout=200` did not abort it either (measured: PASS, 3 s). The deadline is
         // OURS, so it stays a checkpoint for its whole duration — see [`Vm::block_until_deadline`].

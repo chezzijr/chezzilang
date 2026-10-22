@@ -1115,9 +1115,8 @@ fn same_lines(out: &str, want: &[String]) -> bool {
 fn check_cell(name: &str, src: &str, want: &[String], warns: bool, misses: &mut Vec<String>) {
     for t in THREADS {
         let g = run(name, src, Mode::Run, t, None);
-        let warned = g
-            .err
-            .contains("the `Task[int]` value returned by 'submit' is discarded");
+        let warned = g.err.contains("value returned by 'submit' is discarded")
+            && g.err.contains("the `Task[");
         if g.code != Some(0)
             || g.err.contains("runtime error")
             || !same_lines(&g.out, want)

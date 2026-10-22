@@ -24,7 +24,7 @@
 //!
 //! **Cancel/fault draining (D6b).** A poller-parked fiber lives in this service's registry, *not* in
 //! the scheduler's `parked` buckets — so B3.4's `cancel_drain` (which walks `parked`) does not reach
-//! it. [`drain_family`] closes that gap: every cancel site (a sibling fault, `os.exit`, `shutdown_now`)
+//! it. [`drain_family`] closes that gap: every cancel site (a sibling fault, `os.exit`, `cancel`)
 //! calls [`super::MnSched::drain_family`], which runs it beside `cancel_drain` and re-injects every
 //! fiber of the cancelled family parked on its sockets (TICKET-200). The
 //! re-injected fiber resumes and hits the cancel check at [`super::Vm::run_until`]'s loop-top BEFORE
@@ -132,7 +132,7 @@ static SERVICE: OnceLock<NetPoller> = OnceLock::new();
 /// Returns `Some(fiber)` WITHOUT registering iff `cancel` — the PARKING FIBER'S SCOPE cancel, handed
 /// in by `poll_park_offload` (NOT the sched's legacy global/outermost `MnSched::cancel`, which a
 /// cancelled INNER scope does not set) — is already tripped on the scope's own flag or any
-/// ancestor's (DEC-118, TICKET-200: a sibling faulted, or an `Executor`'s `shutdown_now` fired, while
+/// ancestor's (DEC-118, TICKET-200: a sibling faulted, or an `Executor`'s `cancel` fired, while
 /// this fiber was on its way to park), OR iff `closed` (W15-1: the owning `SocketCore`/`ListenerCore` was `close()`d while
 /// this op was on its way to park) is already set. The caller must re-inject it so it resumes and
 /// unwinds or re-faults on the closed handle, rather than parking on a poller that [`drain_family`] may
@@ -178,9 +178,15 @@ pub fn deregister(key: usize) -> bool {
 /// (TICKET-200: a socket-parked fiber is counted `inflight`, not `parked`, so a drain of one half
 /// strands it).
 pub fn drain_family(sched: &MnSched, family: &[usize]) {
+    drain_where(sched, &|f: &Fiber| f.woken_by(family));
+}
+
+/// TICKET-289 — [`drain_family`] for any matcher: the netpoller half of
+/// [`super::MnSched::drain_job`] (`Task.cancel()`).
+pub fn drain_where(sched: &MnSched, wakes: &dyn Fn(&Fiber) -> bool) {
     SERVICE
         .get_or_init(NetPoller::new)
-        .drain_family(sched, family);
+        .drain_where(sched, wakes);
 }
 
 /// TICKET-200 — is any fiber of `sched` that a cancel of `family` wakes still parked on the poller,
@@ -251,7 +257,7 @@ impl NetPoller {
         // serialized — hand the fiber back to unwind rather than park it on a poller a past sweep drained.
         // TICKET-188: a tripped flag of a nursery this fiber OWNS (a child faulted) hands it back too.
         // TICKET-200: so does an ANCESTOR's flag (`ScopeCancel::tripped`, an `Executor`'s
-        // `shutdown_now`), or the drain scan that recorded this trip's `CANCEL_GEN` misses this park.
+        // `cancel`), or the drain scan that recorded this trip's `CANCEL_GEN` misses this park.
         if cancel.tripped() || fiber.owned_tripped() || closed.load(Ordering::Acquire) {
             return Some(fiber);
         }
@@ -325,17 +331,17 @@ impl NetPoller {
 
     /// TICKET-200 — the one match [`Self::drain_family`] and [`Self::any_parked`] share: parked on
     /// `sched` (same scheduler instance) and woken by a cancel of `family`.
-    fn wakes(p: &Parked, sched: &MnSched, family: &[usize]) -> bool {
-        std::ptr::eq(Arc::as_ptr(&p.sched), sched) && p.fiber.woken_by(family)
+    fn wakes(p: &Parked, sched: &MnSched, wakes: &dyn Fn(&Fiber) -> bool) -> bool {
+        std::ptr::eq(Arc::as_ptr(&p.sched), sched) && wakes(&p.fiber)
     }
 
     fn any_parked(&self, sched: &MnSched, family: &[usize]) -> bool {
         self.lock_registry()
             .values()
-            .any(|p| Self::wakes(p, sched, family))
+            .any(|p| Self::wakes(p, sched, &|f: &Fiber| f.woken_by(family)))
     }
 
-    fn drain_family(&self, sched: &MnSched, family: &[usize]) {
+    fn drain_where(&self, sched: &MnSched, wakes: &dyn Fn(&Fiber) -> bool) {
         // Collect-and-remove the matching entries UNDER the registry lock, then release it before
         // touching the scheduler: `complete_offload` takes the sched lock, so doing it here (registry
         // lock held) would nest registry→sched, whereas the fire path nests sched alone — keep the
@@ -347,7 +353,7 @@ impl NetPoller {
             let mut reg = self.lock_registry();
             let keys: Vec<usize> = reg
                 .iter()
-                .filter(|(_, p)| Self::wakes(p, sched, family))
+                .filter(|(_, p)| Self::wakes(p, sched, wakes))
                 .map(|(k, _)| *k)
                 .collect();
             keys.into_iter()
@@ -589,6 +595,7 @@ mod tests {
             fault_park: None,
             park_site: None,
             park_deadline: None,
+            job_cancel: None,
         }
     }
 
@@ -1158,7 +1165,7 @@ mod tests {
     }
 
     /// TICKET-200 — a park whose scope's own flag is clear but whose ANCESTOR's flag is tripped (an
-    /// `Executor`'s `shutdown_now` over a job's nursery) is refused, the same as every other park path
+    /// `Executor`'s `cancel` over a job's nursery) is refused, the same as every other park path
     /// (DEC-118). An untripped ancestor still parks.
     #[test]
     fn register_refuses_a_park_under_a_tripped_ancestor() {

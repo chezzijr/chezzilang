@@ -98,7 +98,7 @@ impl SchedCore {
     }
 
     /// TICKET-118 (W13-8) — is scope `sid`'s cancel flag itself set, or any ancestor's (an
-    /// `Executor`'s `shutdown_now` trips a flag a job's nursery scope carries in
+    /// `Executor`'s `cancel` trips a flag a job's nursery scope carries in
     /// `JoinScope::ancestors`, installed by `Vm::run_one_fiber` as this fiber's `cancel_outer`)?
     pub(super) fn scope_cancel_tripped(&self, sid: usize) -> bool {
         self.scope_cancel(sid).tripped()
@@ -775,12 +775,30 @@ impl MnSched {
         self.wake_sealed(step.sealed);
     }
 
-    /// TICKET-219 — `shutdown_now` drops the held jobs ([`JobEvent::DropHeld`]).
+    /// TICKET-219 — `cancel` drops the held jobs
+    /// ([`JobEvent::DropHeld`]).
     pub(super) fn drop_held(&self) {
         let mut c = self.lock();
         let step = c.job_event(JobEvent::DropHeld, self.quiesce.run_halt());
         drop(c);
         self.wake_sealed(step.sealed);
+    }
+
+    /// TICKET-289 — `Task.cancel()`: cancel the one job whose Task channel is `ch`
+    /// ([`JobEvent::CancelOne`]). A held job is dropped and its Task settles; a running job gets
+    /// its own flag tripped, then the fibers that flag wakes are drained, with no lock held.
+    /// A job that already ended is a no-op.
+    pub(super) fn cancel_job(&self, ch: &Arc<ChannelCore>) {
+        let mut c = self.lock();
+        let step = c.job_event(JobEvent::CancelOne(Arc::clone(ch)), self.quiesce.run_halt());
+        drop(c);
+        if !step.sealed.is_empty() {
+            self.notify_waiters();
+        }
+        self.wake_sealed(step.sealed);
+        if let Some(flag) = step.cut_flag {
+            self.drain_job(&flag);
+        }
     }
 
     /// TICKET-232 — wake the readers of each handle channel [`SchedCore::settle_job`] sealed,
@@ -844,22 +862,22 @@ impl MnSched {
     /// [`MnSched::reserve_slot`] on the Executor's own tail scope, for `Executor.submit` alone: its
     /// submitters are many parties, so the sched keeps the tail. A `spawn` in a job's nursery
     /// reserves on that nursery's scope instead, so a nursery child is never a job.
-    /// `settle` is a handle job's [`JobSettle`] (TICKET-219), registered under its task index.
+    /// `settle` is the job's [`JobSettle`] (TICKET-219), registered under its task index; the
+    /// fiber takes a clone of its cancel flag (TICKET-289).
     pub(super) fn reserve_job_slot(
         &self,
         c: &mut SchedCore,
         fiber: &mut Fiber,
         charge: usize,
-        settle: Option<JobSettle>,
+        settle: JobSettle,
     ) -> Option<usize> {
         let tail = c.exec_tail;
         let opened = self.reserve_slot(c, fiber, tail, charge);
         if let Some(id) = opened {
             c.exec_tail = id;
         }
-        if let Some(s) = settle {
-            c.job_settle.insert(fiber.task_index, s);
-        }
+        fiber.job_cancel = Some(Arc::clone(&settle.flag));
+        c.job_settle.insert(fiber.task_index, settle);
         opened
     }
 

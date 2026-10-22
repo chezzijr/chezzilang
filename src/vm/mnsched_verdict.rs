@@ -54,7 +54,23 @@ impl MnSched {
             outcome,
             TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
         );
-        let done = matches!(outcome, TaskOutcome::Done(_));
+        let seal = match &outcome {
+            // The body returned: it sealed its value, or the job was cancelled first (`JobSeal::Done`).
+            TaskOutcome::Done(_) => JobSeal::Done,
+            // A hard abort is never a Task outcome (TICKET-289): the run halts instead.
+            TaskOutcome::Fault { err, .. } | TaskOutcome::CancelledFault { err, .. }
+                if executor_hard_halt(err) =>
+            {
+                JobSeal::Nothing
+            }
+            TaskOutcome::Fault { err, .. } if err.is_deadlock => JobSeal::Cancel,
+            TaskOutcome::Fault { err, .. } | TaskOutcome::CancelledFault { err, .. } => {
+                JobSeal::Fault(err.message.as_str().into())
+            }
+            TaskOutcome::Cancelled { .. }
+            | TaskOutcome::Exit { .. }
+            | TaskOutcome::Deadlocked { .. } => JobSeal::Cancel,
+        };
         c.slots[task_index] = Some(outcome);
         c.task_done(scope_id);
         // TICKET-219 — only an Executor's sched (`leaf_site`) holds jobs, so a nursery's finish
@@ -68,7 +84,11 @@ impl MnSched {
             JobEvent::Ended {
                 task_index,
                 scope_id,
-                done,
+                seal: if halt.settles() {
+                    seal
+                } else {
+                    JobSeal::Nothing
+                },
             },
             halt,
         );
@@ -91,18 +111,20 @@ impl MnSched {
         (aborts, job_fault)
     }
 
-    /// TICKET-270 — THE publisher of a fire-and-forget `Executor` job's fault (TICKET-208, Go: a
-    /// goroutine panic ends the run). It stores the cell under `finish`'s core-lock hold, before the
-    /// slot: a joiner that reads the halt takes this lock to read finished output
+    /// TICKET-270 — THE publisher of the one job end that halts the run: an `Executor` job's
+    /// `--max-heap` abort (TICKET-289). A hard abort is never a Task outcome, so the run halts and
+    /// the Task seals nothing ([`JobSeal::Nothing`]). Every other job end stays in its Task: an
+    /// ordinary fault, a deadlock verdict and a `--timeout` cut (each party reads the deadline)
+    /// publish nothing. It stores the cell under `finish`'s core-lock hold, before the slot: a
+    /// joiner that reads the halt takes this lock to read finished output
     /// (`take_finished_streams`), so it finds the job's slot filled, and `job_event` reads the cell
-    /// before it releases a held job (DEC-219). A deadlock verdict and a `--timeout` cut are the
-    /// run's own causes, never a job fault (TICKET-223). An `os.exit` is not published here: the
-    /// host `request_exit` stores its code at the call (W7-57, DEC-213). The caller runs
+    /// before it releases a held job (DEC-219). An `os.exit` is not published here: the host
+    /// `request_exit` stores its code at the call (W7-57, DEC-213). The caller runs
     /// [`Vm::halt_run`] after `finish` returns: `halt_all_scheds` takes every core lock.
     fn publish_job_fault(&self, c: &SchedCore, scope_id: usize, outcome: &TaskOutcome) -> bool {
         match outcome {
             TaskOutcome::Fault { err, trace, .. }
-                if c.is_job_scope(scope_id) && !err.is_deadlock && !err.is_timed_out =>
+                if c.is_job_scope(scope_id) && err.is_over_memory =>
             {
                 self.quiesce.request_job_fault(err.clone(), trace.clone());
                 true
@@ -162,7 +184,7 @@ impl MnSched {
     /// TICKET-200 — THE cancel drain: after scope `scope_id`'s cancel (or an ancestor's) is tripped,
     /// requeue every fiber of its family that is parked, in both halves: `cancel_drain` (the `parked`
     /// buckets) and `poller::drain_family` (the netpoller registry). A socket-parked fiber is counted
-    /// `inflight`, not `parked`, so a drain of one half strands it — the `shutdown_now` hang of a
+    /// `inflight`, not `parked`, so a drain of one half strands it — the `cancel` hang of a
     /// job's nursery fiber parked in `accept`/`read`/`write`/`connect`. Every cancel site calls this;
     /// never call either half on its own. A retired id has an empty family (TICKET-199, DEC-199), so
     /// both halves are no-ops.
@@ -170,6 +192,34 @@ impl MnSched {
         let family = self.lock().scope_family(scope_id);
         self.cancel_drain(scope_id);
         poller::drain_family(self, &family);
+    }
+
+    /// TICKET-289 — the cancel drain of one Executor job whose flag is `flag` (`Task.cancel()`):
+    /// requeue the job's own parked fiber and the fibers of every scope under it, in both halves.
+    /// The scope ids are read once, under the lock: a scope registered after the trip starts with
+    /// the flag already tripped and unwinds on its own.
+    pub(super) fn drain_job(&self, flag: &Arc<AtomicBool>) {
+        let under: Vec<usize> = {
+            let c = self.lock();
+            c.scopes
+                .iter()
+                .filter(|(_, s)| s.ancestors.iter().any(|a| Arc::ptr_eq(a, flag)))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        self.drain_where(|f| {
+            f.job_cancel.as_ref().is_some_and(|j| Arc::ptr_eq(j, flag))
+                || under.contains(&f.scope_id)
+                || open_nurseries(&f.ctx.eager_scheds)
+                    .any(|o| under.contains(&o.scope) || o.more.iter().any(|s| under.contains(s)))
+        });
+    }
+
+    /// TICKET-200 — THE cancel drain's two halves, selecting the fibers `wakes` names:
+    /// `cancel_drain_where` (the `parked` buckets) and the netpoller registry.
+    fn drain_where(&self, wakes: impl Fn(&Fiber) -> bool) {
+        self.cancel_drain_where(&wakes);
+        poller::drain_where(self, &wakes);
     }
 
     /// B3.4 — after a scope's cancel is tripped, move every parked fiber **belonging to that scope**
@@ -189,14 +239,19 @@ impl MnSched {
     /// continuation too, or `any_cancelled_scope_awaiting_drain` vetoes forever. Every other scope
     /// owns a distinct Arc, so the result is unchanged for them.
     pub(super) fn cancel_drain(&self, scope_id: usize) {
+        let family = self.lock().scope_family(scope_id);
+        self.cancel_drain_where(&|f: &Fiber| f.woken_by(&family));
+    }
+
+    /// [`MnSched::cancel_drain`] for any matcher ([`MnSched::drain_job`]).
+    fn cancel_drain_where(&self, wakes: &dyn Fn(&Fiber) -> bool) {
         let c = self.lock();
         if c.parked_n == 0 {
             return;
         }
         // A join-parked owner of this family stays filed (see `SchedCore::join_parked`): its
         // children see the tripped token, finish, and `finish` requeues it.
-        let family = c.scope_family(scope_id);
-        self.drain_parked(c, |f| f.woken_by(&family));
+        self.drain_parked(c, wakes);
     }
 
     /// TICKET-286 — arm the one [`MnSched::deadline_drain`] job for the run deadline `dl`, once per

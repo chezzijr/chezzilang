@@ -298,12 +298,7 @@ impl Checker {
                 let obj_ty = self.infer(obj);
                 match &obj_ty {
                     Ty::Struct(sname, targs) => {
-                        let field_ty = self.struct_shape(sname).and_then(|info| {
-                            info.fields
-                                .iter()
-                                .find(|(f, _)| f == name)
-                                .map(|(_, ty)| subst(ty, &struct_param_map(info, targs)))
-                        });
+                        let field_ty = self.struct_field_ty(sname, targs, name);
                         match field_ty {
                             Some(ty) => {
                                 self.check_assign_value(&ty, op, &val_ty, value, target.span);

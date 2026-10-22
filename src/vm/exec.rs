@@ -1189,7 +1189,7 @@ impl Vm {
         let core = Arc::new(ExecutorCore {
             limit,
             // W7-39, TICKET-208 — an executor inherits its CREATOR's whole cancel chain, as
-            // every spawned task does, so an outer `shutdown_now()` or scope cancel reaches
+            // every spawned task does, so an outer `cancel()` or scope cancel reaches
             // the jobs this executor will start. Captured HERE, at creation, not at `submit`:
             // the handle crosses the airlock by `Arc`, so the submitter can belong to an
             // unrelated executor.

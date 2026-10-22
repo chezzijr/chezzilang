@@ -1439,13 +1439,36 @@ impl Checker {
         args: &[Expr],
         span: Span,
     ) {
+        self.with_crossing_floor(owner, method, args, |c| {
+            c.check_args_range(method, params, min_params, args, span);
+        });
+    }
+
+    /// Run `f`, the check of the arguments of `owner.method`, under the capture floor of a
+    /// crossing closure call (see [`Checker::check_crossing_closure_call`]), then report a direct
+    /// write of `args[0]`. A pair that is no row of `CROSSING_CLOSURE_METHODS` runs `f` bare.
+    /// TICKET-289 — `Executor.submit` is a bodied generic, so its caller wraps the whole method
+    /// resolution here and no `Concrete` arm sees the closure.
+    pub(super) fn with_crossing_floor<R>(
+        &mut self,
+        owner: &str,
+        method: &str,
+        args: &[Expr],
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         if !crate::base::crossing::CROSSING_CLOSURE_METHODS.contains(&(owner, method)) {
-            self.check_args_range(method, params, min_params, args, span);
-            return;
+            return f(self);
         }
         self.capture_floors.push(self.scopes.len());
-        self.check_args_range(method, params, min_params, args, span);
+        let r = f(self);
         self.capture_floors.pop();
+        self.report_crossing_writes(args);
+        r
+    }
+
+    /// The write report of [`Checker::with_crossing_floor`]: the first captured local the
+    /// crossing closure `args[0]` writes directly.
+    fn report_crossing_writes(&mut self, args: &[Expr]) {
         let Some(task) = args.first() else {
             return;
         };

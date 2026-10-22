@@ -256,3 +256,8 @@ pub(super) fn entry_module_binds(
 ) -> bool {
     binds.iter().any(|(bound, _)| bound == name)
 }
+
+/// TICKET-289: the std structs whose discarded value warns like a discarded `T!` or `T?`
+/// (`Checker::is_must_use`). A `Task` holds a job's fault or cancel that only `get()` reads.
+/// A std struct keeps its bare key, so `is_must_use` also needs `StructOrigin::Builtin`.
+pub(super) const MUST_USE_STD_STRUCTS: &[&str] = &["Task"];

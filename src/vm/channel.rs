@@ -508,7 +508,7 @@ impl Vm {
                 //
                 // W7-16 — the wait is CHUNKED, not one `thread::sleep`: this deadline is ours, so it
                 // stays a cancellation + `--timeout` checkpoint for its whole duration. Pre-fix an
-                // eager `Executor` job here ran the full 3 s through a `shutdown_now()` at 50 ms (and
+                // eager `Executor` job here ran the full 3 s through a `cancel()` at 50 ms (and
                 // through `--timeout`), while the same `timer(ms).recv()` in a nursery — which parks,
                 // above — was cancelled at 55 ms. Same primitive, two answers.
                 self.block_until_deadline(deadline, span)?;

@@ -271,6 +271,51 @@ impl Checker {
         self.current_provider = saved_provider;
     }
 
+    /// Whether a discarded value of `t` warns: a `Result`/`Option`, or a std struct that
+    /// `MUST_USE_STD_STRUCTS` names (a `Task` holds a job's fault or cancel that only `get()`
+    /// reads). A user struct of the same name has `StructOrigin::User` and never matches.
+    pub(super) fn is_must_use(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Result(..) | Ty::Option(_) => true,
+            Ty::Struct(key, _) => {
+                MUST_USE_STD_STRUCTS.contains(&key.as_str())
+                    && self
+                        .struct_shape(key)
+                        .is_some_and(|s| s.origin == StructOrigin::Builtin)
+            }
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::Tuple(_)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => false,
+        }
+    }
+
     /// An expression whose value is discarded (an expression statement). The one place that
     /// decides it: the carrier and lost-write warnings fire here, and a one-line `if`/`else`
     /// statement checks each branch here instead of joining the branch types.
@@ -322,7 +367,7 @@ impl Checker {
             }
         }
         // `Unknown` lands here too: an already-reported expression must not cascade.
-        if !matches!(t, Ty::Result(..) | Ty::Option(_)) {
+        if !self.is_must_use(&t) {
             return;
         }
         // Name the callee when there is one, so the warning points at the culprit rather

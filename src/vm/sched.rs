@@ -9,10 +9,10 @@ pub(super) enum SpawnTarget {
     /// The innermost open `parallel:` of the calling party (`spawn`).
     Nursery,
     /// The own tail scope of `sched`, with no nursery open on the caller (`Executor.submit`).
-    /// `settle` is a handle job's [`JobSettle`] (TICKET-219, `_submit_settled`).
+    /// `settle` is the job's [`JobSettle`] (TICKET-219, `_submit_settled`).
     Scope {
         sched: Arc<MnSched>,
-        settle: Option<JobSettle>,
+        settle: JobSettle,
     },
 }
 
@@ -237,7 +237,7 @@ pub(super) fn eager_joiner_runs_fibers(n: usize) -> bool {
 /// that read the stale state inside its predicate did so under this same core lock, so acquiring it
 /// here happens-after that read completes — the worker is either already on the condvar (and gets
 /// the notify) or has not yet taken the lock (and will read the new state). A bare notify could land
-/// in the gap and be lost. Also called by `shutdown_now`: a cancel store is a wake source too, and
+/// in the gap and be lost. Also called by `cancel`: a cancel store is a wake source too, and
 /// without this poke a worker deciding under its own core lock could read the flag on both sides of
 /// the trip and park untimed (TICKET-118 plan-validation, 2026-09-15 10:59Z).
 pub(super) fn poke_live_scheds(sched_registry: &crate::vm::SchedRegistry) {

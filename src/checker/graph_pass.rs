@@ -189,6 +189,7 @@ impl Checker {
                 let has_bodied = lm.ast.stmts.iter().any(|s| {
                     matches!(&s.kind, StmtKind::Fn(_) | StmtKind::Let { .. })
                         || matches!(&s.kind, StmtKind::NativeStruct { bodied_methods, .. } if !bodied_methods.is_empty())
+                        || matches!(&s.kind, StmtKind::Struct { methods, .. } if !methods.is_empty())
                 });
                 if has_bodied {
                     c.current_module_is_stdlib = true;
@@ -256,6 +257,26 @@ impl Checker {
                                 .qualified_builtin_ty(name, &args)
                                 .unwrap_or_else(|| c.struct_self_ty(name));
                             for m in bodied_methods {
+                                let msig = c.fn_sig(m, m.name_span, Some(&self_ty));
+                                c.check_fn_body(m, Some(self_ty.clone()), msig);
+                            }
+                            c.exit_type_params(saved);
+                        }
+                    }
+                    // A plain `struct` of the module (TICKET-289: `Task[T]`) has Chezzi methods whose
+                    // bodies the harvest only hoisted. Without this check the compiler faults on every
+                    // program that imports the module (`no name resolution recorded`).
+                    for s in &lm.ast.stmts {
+                        if let StmtKind::Struct {
+                            name,
+                            type_params,
+                            methods,
+                            ..
+                        } = &s.kind
+                        {
+                            let saved = c.enter_type_params(type_params);
+                            let self_ty = c.struct_self_ty(name);
+                            for m in methods {
                                 let msig = c.fn_sig(m, m.name_span, Some(&self_ty));
                                 c.check_fn_body(m, Some(self_ty.clone()), msig);
                             }
@@ -589,20 +610,6 @@ pub(super) fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
                     variadic: crate::ast::Variadic::No,
                 };
             }
-        }
-        // `Executor.submit(f)` — a detached zero-arg task closure whose return is discarded: the param
-        // is retyped to `fn() -> ?` so any-return closures are accepted while a wrong-ARITY closure is
-        // still rejected (Executor is non-generic — no `Ty::Param` involved).
-        if let Some(ex) = sig.struct_defs.get_mut("Executor")
-            && let Some(submit) = ex.methods.get_mut("submit")
-            && let Some(p0) = submit.params.first_mut()
-        {
-            *p0 = Ty::Func {
-                params: vec![],
-                ret: Box::new(Ty::Unknown),
-                labels: FnLabels::default(),
-                variadic: crate::ast::Variadic::No,
-            };
         }
     }
 }

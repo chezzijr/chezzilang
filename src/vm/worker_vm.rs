@@ -410,7 +410,7 @@ impl Vm {
         out
     }
 
-    /// TICKET-208 — THE Executor join, behind `shutdown`, `shutdown_now`, the exit drain and the
+    /// TICKET-208 — THE Executor join, behind `shutdown`, the exit drain and the
     /// per-test reap: wait until the Executor's sched has no unfinished task but the joiner's own
     /// (`slack`: a job that joins its own Executor cannot wait for itself), then reduce the
     /// submission-ordered slots with [`Vm::reduce_task_slots`].
@@ -481,28 +481,28 @@ impl Vm {
             let Some(scope) = take_scope(core) else {
                 return Ok(());
             };
-            // `shutdown()` raises no job fault: a fire-and-forget fault is the run-wide halt, which
-            // the reduce reads through its funnel, and a handle job never faults its fiber. A hard
-            // halt, a deadlock, an exit and a cancelled job's `defer` fault still raise.
+            // `shutdown()` raises no job fault (TICKET-289): an ordinary job fault, and the `defer`
+            // fault of a cancelled job, are the job's `Task.get()` outcome, so the slot reduces as
+            // a cancelled job. A hard halt (`--max-heap`, `--timeout`), a deadlock and an exit still
+            // raise: a hard abort is never a Task outcome.
             let cancelled = core.cancel.load(Ordering::Relaxed);
             let slots = scope
                 .sched
                 .take_slots()
                 .into_iter()
                 .map(|s| match s {
-                    Some(TaskOutcome::Fault {
-                        err,
-                        out,
-                        stderr,
-                        trace,
-                    }) if !executor_hard_halt(&err) && !err.is_deadlock => {
-                        // First writer wins: a no-op when the faulting job already published.
-                        self.quiesce.request_job_fault(err, trace);
-                        self.quiesce.mark_run_halt();
+                    Some(
+                        TaskOutcome::Fault {
+                            err, out, stderr, ..
+                        }
+                        | TaskOutcome::CancelledFault {
+                            err, out, stderr, ..
+                        },
+                    ) if !executor_hard_halt(&err) && !err.is_deadlock => {
                         Some(TaskOutcome::Cancelled { out, stderr })
                     }
                     // Cancel outranks a deadlock verdict (DEC-135): a job the verdict ended after
-                    // `shutdown_now()` cancelled it is a cancelled job. It is parked in its own
+                    // `cancel()` cancelled it is a cancelled job. It is parked in its own
                     // nursery join there, behind a child whose `defer` blocks, so no cut reaches it.
                     Some(TaskOutcome::Deadlocked { out, stderr, .. }) if cancelled => {
                         Some(TaskOutcome::Cancelled { out, stderr })

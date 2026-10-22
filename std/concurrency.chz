@@ -87,23 +87,27 @@ native struct AtomicInt:
     native fn sub(self, v: int) -> int
 
 native struct Executor:
-    native fn submit(self, f) -> None
     native fn shutdown(self) -> None
-    native fn shutdown_now(self) -> None
+    # Cancel every held and running job and mark the Executor shut. It does not wait: a held job
+    # never starts, a running job is cut at its next wait or loop back-edge, and each cut job's
+    # `defer`s run. Each cut job's Task settles `!"task cancelled: cancel() stopped it before it
+    # finished"`. `ex.cancel()` then `ex.shutdown()` waits for the cut jobs to end.
+    native fn cancel(self) -> None
+    # A std internal (TICKET-289): cancel the one job whose result channel is `ch` (`Task.cancel`).
+    native fn _cancel_job(self, ch) -> None
     # A std internal (TICKET-219): submit `f` as a handle job whose result channel is `out`. The
     # job transition seals `out` with the cancel `!e` when it drops or cuts the job. Its only
-    # caller is `submit_result`, with the fresh cap-1 channel it created.
+    # caller is `submit`, with the fresh cap-1 channel it created.
     native fn _submit_settled(self, f: fn() -> None, out) -> None
-    # A BODIED generic method (the first on a native struct): submit `f` and hand back a cap-1
-    # `Channel[T!]` that carries its outcome: `?value`, or `!message` for exactly
-    # what `recover:` catches. The job itself never faults, so `shutdown()` raises nothing for it
-    # and its siblings keep running (CPython `Future.result()`). The channel is SEALED once: every
-    # `recv` returns the same outcome and takes nothing, so do not iterate it with `for`. The
-    # primitive `submit_task`/`Task[T]` wraps.
-    fn submit_result[T](self, f: fn() -> T) -> Channel[T!]:
+    # A BODIED generic method (the first on a native struct): submit `f` and hand back its `Task[T]`.
+    # `t.get()` is the only place the job's outcome appears: `?value`, or `!message` for exactly what
+    # `recover:` catches, or the cancel text. The job itself never faults, so `shutdown()` raises
+    # nothing for it, the run does not end, and its siblings keep running (CPython `Future.result()`).
+    # A submit on a shut-down Executor returns a Task already settled with the refusal.
+    fn submit[T](self, f: fn() -> T) -> Task[T]:
         ch := Channel[T!](1)
         self._submit_settled(fn(): run_outcome(f, ch), ch)
-        return ch
+        return Task(_ch=ch, _cached=None, _ex=self)
 
 # Chezzi closures are single-expression only, so a multi-statement job body must be a named
 # top-level fn the lambda calls.
@@ -115,13 +119,13 @@ native struct Executor:
 # wins under the channel's lock. Two writers exist:
 # 1. this body, for the value of `recover: f()`;
 # 2. the job transition (`SchedCore::job_event`), for the cancel `!e` when it drops a held job
-#    or a job ends cut: by `shutdown_now()`, a creator cancel, or a fire-and-forget job fault,
-#    after which every `defer` still runs and may read the handle (CPython
+#    or a job ends cut: by `cancel()`, `t.cancel()` or a creator cancel, or ends on a fault
+#    `recover:` cannot catch, after which every `defer` still runs and may read the handle (CPython
 #    `shutdown(cancel_futures=True)`). An `os.exit` settles nothing: it runs no `defer`, and no
 #    reader runs after it.
 # A slot never carries a job's return value, so the body is the value's writer. `_submit_settled`
 # and `_settle` are std internals; the only channel they seal is the fresh cap-1 one
-# `submit_result` creates.
+# `submit` creates.
 fn run_outcome[T](f: fn() -> T, out: Channel[T!]):
     r := recover: f()
     _settle(out, r)
@@ -145,3 +149,53 @@ native fn _settle(ch, v) -> None
 # True once the handle channel `ch` holds its outcome. Never blocks, and never reads false after
 # true: a sealed channel stays sealed. `Task.done()` reads it.
 native fn is_settled(ch) -> bool
+
+# A future handle for one `Executor.submit` job (TICKET-289; moved here from `std.concurrency.task`).
+# `get()` is the ONLY place a job's fault or cancel appears; `shutdown()`, the run end and a test end
+# raise none. `_ch` is the sealed cap-1 channel that holds the outcome; `_cached` holds the owner's
+# outcome object; `_ex` is the submitting Executor (for `cancel()`). The `_` fields are std internals:
+# user code cannot read or write them.
+#
+# MODEL (TICKET-219): the channel is written once by a seal: the job body seals the value of
+# `recover: f()`, or the job transition seals the cancel `!e` (or the message of a fault `recover:`
+# cannot catch) when it drops or cuts the job. A sealed channel's receive copies the outcome and
+# takes nothing, so `get()` is `_ch.recv()` and every copy of the handle and every second waiter
+# reads the same outcome: one future, many readers (CPython `Future`). `done()` never blocks and
+# never reads false after true. The work STARTS at the submit and is waited for by `shutdown()` (or
+# the program-exit join). The canonical shape: submit every task, `shutdown()`, then `get()` each.
+#
+# DETERMINISM: a Task's VALUE is `f()`; only when it runs varies. Await the tasks in a fixed
+# (submission) order. There is deliberately no select-on-completion API.
+#
+# IDENTITY: the task that holds the original handle caches the value in `_cached`, so its repeated
+# `get()` returns the SAME object. A copy of the handle (a spawned task's, an Executor job's) carries
+# `_cached` as it was at the crossing; a write to it faults (D4), as for any captured value. A copy
+# whose owner had not called `get()` reads a fresh copy from the channel (`task_copy_of`), so a
+# write to it faults too. `is_task_copy(self)` picks between that copy and the `_cached` write.
+struct Task[T]:
+    _ch: Channel[T!]
+    _cached: (T!)?
+    _ex: Executor
+
+    # Block until the outcome is available, then return it: `?value`, or `!message` when the job
+    # faulted or `cancel()` cut it (a `T!E` in place of a raise). Idempotent.
+    fn get(self) -> T!:
+        match self._cached:
+            ?r: return r
+            None: pass
+        r := self._ch.recv()
+        if is_task_copy(self):
+            return task_copy_of(r)
+        self._cached = ?r
+        return r
+
+    # True once the job has finished, faulted or been cancelled. Never blocks, and never reads
+    # false after true.
+    fn done(self) -> bool:
+        return is_settled(self._ch)
+
+    # Cancel this one job. A held job never starts; a running job is cut at its next wait or loop
+    # back-edge and its `defer`s run; `get()` then gives the cancel `!e`. It does not wait, and its
+    # siblings are untouched. A job that already ended keeps its outcome.
+    fn cancel(self):
+        self._ex._cancel_job(self._ch)

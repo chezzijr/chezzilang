@@ -245,7 +245,7 @@ impl Vm {
             self.pending_exit = Some(code);
             return Some(self.err("exit".to_string(), span));
         }
-        // TICKET-208 — a fire-and-forget `Executor` job faulted: the run ends with THAT fault, and
+        // TICKET-208 — an `Executor` job hit its `--max-heap` limit: the run ends with THAT abort, and
         // no `recover:` of this party catches it (`Cut::RunFault`).
         if let Some((err, trace)) = self.quiesce.job_fault() {
             self.adopt_run_fault(trace);
@@ -259,7 +259,7 @@ impl Vm {
     }
 
     /// TICKET-208 — THE predicate "a run-wide halt is pending for this party": an `os.exit` from
-    /// another party, a fire-and-forget `Executor` job's fault, or a latched deadlock verdict
+    /// another party, an `Executor` job's `--max-heap` abort, or a latched deadlock verdict
     /// (TICKET-223). A CPU-side or in-place checkpoint reads this (behind the lock-free
     /// `run_halt_hint`); it never reads the exit, job-fault or deadlock cell by itself. An exit and
     /// a deadlock are due inside a `defer` too (TICKET-213, TICKET-152); a job fault waits for the
@@ -288,7 +288,7 @@ impl Vm {
         // where every other path observes the deadline. Without it `chezzi test --timeout` could not
         // kill a job blocked forever on a channel — exactly the hang eager execution makes easier to
         // write. No `back_edge_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
-        // `shutdown_now`'s cooperative stop (D4), an enclosing scope's cancel and (TICKET-188) a child
+        // `cancel`'s cooperative stop (D4), an enclosing scope's cancel and (TICKET-188) a child
         // fault of a nursery this party owns arrive first; then W7-47, the run-wide halt (an
         // `os.exit` or a job fault from another party). BELOW cancel, so a party that already holds
         // a cancel flag keeps unwinding as `Cancelled` (only a party with no cancel flag at all —

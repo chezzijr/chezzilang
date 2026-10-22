@@ -470,7 +470,9 @@ impl Vm {
                     // (never outer siblings — structured concurrency), so a net server sharing a
                     // nursery with a faulting sibling unwinds instead of hanging (D6b — the
                     // production-ready gate).
-                    if aborts {
+                    // TICKET-289 — a job's end has no sibling to wake: it tripped its own flag, and
+                    // only its own nursery's fibers read that.
+                    if aborts && fiber.job_cancel.is_none() {
                         sched.drain_family(scope_id);
                     }
                     // A finished Executor job is one fewer live sender for every other sched: an
@@ -552,10 +554,22 @@ impl Vm {
                 let s = &c.scopes[fiber.scope_id];
                 (Arc::clone(&s.cancel), s.ancestors.clone())
             };
-            self.cancel = Some(scope_cancel);
             // …and the ENCLOSING scopes' flags with it: an outer cancel must reach a nested scope's
             // fibers (structured concurrency), or a nested nursery inside a cancelled task never dies.
-            self.cancel_outer = ancestors;
+            // TICKET-289 — an Executor job reads its OWN flag as `cancel`, so a fault, an exit or a
+            // `Task.cancel()` trips only that job; the shared scope flag (`Executor.cancel()`) moves
+            // to the outer chain, last, where it still reaches the job.
+            match &fiber.job_cancel {
+                Some(job) => {
+                    self.cancel = Some(Arc::clone(job));
+                    self.cancel_outer = ancestors;
+                    self.cancel_outer.push(scope_cancel);
+                }
+                None => {
+                    self.cancel = Some(scope_cancel);
+                    self.cancel_outer = ancestors;
+                }
+            }
             // TICKET-103 — `blocked_owner_guard` counts this fiber on its own scope.
             self.fiber_scope = Some(fiber.scope_id);
         }

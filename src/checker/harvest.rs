@@ -233,6 +233,44 @@ impl Checker {
                 }
             }
         }
+        // PASS 1d — plain `struct` exports (TICKET-289; std.concurrency's `Task[T]`). A file-backed
+        // native module may declare an ordinary struct with Chezzi methods beside its native ones.
+        // It joins `sig.struct_defs` and `sig.types`, so `import Task from std.concurrency`
+        // validates. The same transient installs as PASS 1 make its name resolvable in the native
+        // structs' method sigs (`Executor.submit -> Task[T]`); PASS 3 below undoes them.
+        let plain: Vec<crate::ast::Stmt> = ast
+            .stmts
+            .iter()
+            .filter(|s| matches!(&s.kind, StmtKind::Struct { .. }))
+            .cloned()
+            .collect();
+        let plain_names: Vec<String> = plain
+            .iter()
+            .filter_map(|s| {
+                if let StmtKind::Struct { name, .. } = &s.kind {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for name in &plain_names {
+            saved_structs.push((name.clone(), self.structs.get(name).cloned()));
+            saved_bare.push((
+                name.clone(),
+                self.bare_types.insert(name.clone(), name.clone()),
+            ));
+            if self.struct_names.insert(name.clone()) {
+                transient.push(name.clone());
+            }
+        }
+        self.hoist(&plain);
+        for name in &plain_names {
+            if let Some(info) = self.structs.get(name) {
+                sig.struct_defs.insert(name.clone(), info.clone());
+                sig.types.insert(name.clone());
+            }
+        }
         // PASS 1a — `native type` exports (TICKET-218; std.ffi's `ptr` and C widths). Each declared
         // name joins `sig.types`, so `import int32 from std.ffi` validates. The file's own sigs
         // (`native fn null() -> ptr`) resolve the name through the module's own builtin binds.

@@ -1217,48 +1217,42 @@ impl Checker {
                 }
             }
             Ty::Executor => {
-                // `submit(fn() -> _)->nil`, `shutdown()->nil`, `shutdown_now()->nil` (C5 escape hatch).
-                // Non-generic — no element type to substitute (`&[]`). `submit`'s param is typed
-                // `fn() -> ?` by `attach_native_module_metadata` so any-return closures are accepted.
-                // A bodied generic method (`submit_result[T]`) routes through the helper's generic
-                // solver (infer T from the closure return). `submit` itself is non-generic and keeps
-                // the capture-floor path in the Concrete arm; the inner `self.submit(...)` that
-                // `submit_result`'s body emits re-enters this arm on that non-generic path.
-                match self.resolve_native_handle_method(
-                    "Executor",
-                    method,
-                    &[],
-                    name_span,
-                    &obj_ty,
-                    type_args,
-                    args,
-                    span,
-                    hint,
-                ) {
-                    NativeHandleMethod::Generic(t) => t,
-                    NativeHandleMethod::Concrete(sig) => {
-                        self.check_crossing_closure_call(
-                            "Executor",
-                            method,
-                            &sig.params,
-                            sig.min_params,
-                            args,
-                            span,
-                        );
-                        sig.ret
+                // `shutdown()->nil`, `cancel()->nil` and the bodied generic `submit[T](f) -> Task[T]`
+                // (C5 escape hatch). No element type to substitute (`&[]`). The generic `submit`
+                // routes through the helper's generic solver (infer T from the closure return);
+                // the inner `self._submit_settled(..)` that its body emits is the `Concrete` path.
+                // The capture floor wraps the whole resolution (TICKET-289): the generic path
+                // checks the closure inside the solver, so a `Concrete` arm alone would miss it.
+                self.with_crossing_floor("Executor", method, args, |c| {
+                    match c.resolve_native_handle_method(
+                        "Executor",
+                        method,
+                        &[],
+                        name_span,
+                        &obj_ty,
+                        type_args,
+                        args,
+                        span,
+                        hint,
+                    ) {
+                        NativeHandleMethod::Generic(t) => t,
+                        NativeHandleMethod::Concrete(sig) => {
+                            c.check_args_range(method, &sig.params, sig.min_params, args, span);
+                            sig.ret
+                        }
+                        NativeHandleMethod::Miss => {
+                            c.infer_all(args);
+                            let mut names = c.method_names("Executor");
+                            names.retain(|n| !c.std_internal_hidden(n));
+                            c.error_help(
+                                name_span,
+                                format!("type {obj_ty} has no method '{method}'"),
+                                suggest::did_you_mean(method, &names),
+                            );
+                            Ty::Unknown
+                        }
                     }
-                    NativeHandleMethod::Miss => {
-                        self.infer_all(args);
-                        let mut names = self.method_names("Executor");
-                        names.retain(|n| !self.std_internal_hidden(n));
-                        self.error_help(
-                            name_span,
-                            format!("type {obj_ty} has no method '{method}'"),
-                            suggest::did_you_mean(method, &names),
-                        );
-                        Ty::Unknown
-                    }
-                }
+                })
             }
             // D6 — `Socket` / `Listener` (std.net): a small fixed method set. The runtime parks the
             // fiber on a would-block `read`/`write`/`accept`; from the type system they just return

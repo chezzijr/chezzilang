@@ -592,10 +592,12 @@ impl Vm {
         }
     }
 
-    /// `Executor` methods (C5/escape hatch): `submit` (enqueue a detached task closure, rejected once
-    /// shut), `shutdown` (graceful — drain FIFO via the re-entrant call path), `shutdown_now` (discard
-    /// pending). The executor handle is re-rooted on the operand stack across the drain, and each popped task is
-    /// rooted across its nested call (the receiver was popped in `do_method_call`).
+    /// `Executor` natives (C5/escape hatch): `_submit_settled` (start a job with its Task's channel;
+    /// a refused submit settles the Task instead of raising), `shutdown` (graceful: join the jobs),
+    /// `cancel` (discard pending, trip the cancel flag, join nothing) and `_cancel_job` (one job's
+    /// `Task.cancel()`). The executor handle is re-rooted on the operand stack across the drain, and
+    /// each popped task is rooted across its nested call (the receiver was popped in
+    /// `do_method_call`).
     pub(super) fn executor_method(
         &mut self,
         h: GcRef,
@@ -607,34 +609,26 @@ impl Vm {
             return Err(self.err(format!("type Executor has no method '{method}'"), span));
         };
         match which {
-            ExecutorMethod::Submit => {
-                self.arity_err("submit", args, 1, span)?;
-                self.executor_submit(h, "submit", args[0], None, span)?;
-                Ok(Value::nil())
-            }
-            // TICKET-219 — a std internal: `submit_result` submits its job with the fresh cap-1
-            // channel it created, which the job transition seals with the cancel value when it
-            // drops or cuts the job.
+            // TICKET-219 — a std internal: `Executor.submit` starts its job with the fresh cap-1
+            // channel of its Task, which the job transition seals with the job's cancel value or
+            // fault message when the job ends without sealing its own value (TICKET-289).
             ExecutorMethod::StdSubmitSettled => {
                 self.arity_err("_submit_settled", args, 2, span)?;
-                let ch = match args[1].as_obj().map(|c| self.heap.get(c)) {
-                    Some(Obj::Channel(core)) => Arc::clone(core),
-                    _ => {
-                        return Err(
-                            self.err("_submit_settled requires a Channel".to_string(), span)
-                        );
-                    }
-                };
-                let msg = self.alloc_str(super::EXEC_CANCELLED_MSG.to_string());
-                let err = self.alloc_enum("Result", "Err", vec![msg]);
-                let cancel = self.to_wire(err)?;
-                self.executor_submit(
-                    h,
-                    "_submit_settled",
-                    args[0],
-                    Some(JobSettle { ch, cancel }),
-                    span,
-                )?;
+                let ch = self.task_channel("_submit_settled", args[1], span)?;
+                let cancel = self.err_wire(super::EXEC_CANCELLED_MSG)?;
+                let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.executor_submit(h, args[0], JobSettle { ch, cancel, flag }, span)?;
+                Ok(Value::nil())
+            }
+            // TICKET-289 — `Task.cancel()`: cancel the one job whose Task channel is `args[0]`.
+            ExecutorMethod::StdCancelJob => {
+                self.arity_err("_cancel_job", args, 1, span)?;
+                let ch = self.task_channel("_cancel_job", args[0], span)?;
+                if let Some(sched) = self.executor_core(h).sched() {
+                    sched.cancel_job(&ch);
+                }
+                // A cancel is a wake source too (TICKET-118, W13-8).
+                crate::vm::sched::poke_live_scheds(&self.sched_registry);
                 Ok(Value::nil())
             }
             ExecutorMethod::Shutdown => {
@@ -648,8 +642,8 @@ impl Vm {
                 self.cancel_at_join(span)?; // TICKET-147 (W14-15): the join is a cancellation point
                 Ok(Value::nil())
             }
-            ExecutorMethod::ShutdownNow => {
-                self.arity_err("shutdown_now", args, 0, span)?;
+            ExecutorMethod::Cancel => {
+                self.arity_err("cancel", args, 0, span)?;
                 let core = self.executor_core(h);
                 {
                     let mut g = core.inner.lock().unwrap();
@@ -669,67 +663,83 @@ impl Vm {
                 }
                 // TICKET-118 (W13-8) — a cancel is a wake source too.
                 crate::vm::sched::poke_live_scheds(&self.sched_registry);
-                // …then JOIN, exactly like `shutdown`: Chezzi has no `awaitTermination`, so not
-                // waiting here would leave detached jobs running past a `shut` executor. A
-                // cancelled job is swallowed by `reduce_task_slots`, except that its own `defer`
-                // fault is a real fault (TICKET-147, W14-12), which raises here.
-                self.join_executor(&core, span)?;
-                self.cancel_at_join(span)?; // TICKET-147 (W14-15): the join is a cancellation point
+                // TICKET-289 — no join: `cancel()` returns at once, and `shutdown()` (or the run
+                // end) waits for the cut jobs. A job's fault stays in its Task.
                 Ok(Value::nil())
             }
         }
     }
 
-    /// `Executor.submit(f)`: start `f` as a job on the Executor's detached sched. `settle` is a
-    /// handle job's [`JobSettle`] (TICKET-219, `_submit_settled`); `None` for a bare `submit`.
+    /// The channel core of a Task's `_ch`, which a std internal takes as `args`.
+    fn task_channel(
+        &self,
+        method: &str,
+        v: Value,
+        span: Span,
+    ) -> Result<Arc<ChannelCore>, RuntimeError> {
+        match v.as_obj().map(|c| self.heap.get(c)) {
+            Some(Obj::Channel(core)) => Ok(Arc::clone(core)),
+            _ => Err(self.err(format!("{method} requires a Channel"), span)),
+        }
+    }
+
+    /// `Result.Err(msg)` as a wire value: what a Task's channel is sealed with when its job ends
+    /// without a value of its own (TICKET-289).
+    fn err_wire(&mut self, msg: &str) -> Result<WireValue, RuntimeError> {
+        let msg = self.alloc_str(msg.to_string());
+        let err = self.alloc_enum("Result", "Err", vec![msg]);
+        self.to_wire(err)
+    }
+
+    /// TICKET-289 — a submit the Executor refuses (shut down, or its creating job was cancelled)
+    /// returns an already-settled Task: seal the fresh channel of `settle` with `Err(msg)`. The
+    /// channel is unread, so no reader needs a wake.
+    pub(super) fn refuse_job(&mut self, settle: JobSettle, msg: &str) -> Result<(), RuntimeError> {
+        let v = self.err_wire(msg)?;
+        settle.seal(v);
+        Ok(())
+    }
+
+    /// `Executor.submit(f)`: start `f` as a job on the Executor's detached sched. `settle` is the
+    /// job's [`JobSettle`] (TICKET-219, `_submit_settled`). A submit the Executor refuses returns
+    /// `Ok` with its Task already settled (TICKET-289, [`Vm::refuse_job`]).
     pub(super) fn executor_submit(
         &mut self,
         h: GcRef,
-        method: &'static str,
         f: Value,
-        settle: Option<JobSettle>,
+        settle: JobSettle,
         span: Span,
     ) -> Result<(), RuntimeError> {
         // The job's closure crosses on the spawn path (`spawn_into`), so the method is a row of
         // the one list the checker's capture floor reads (TICKET-246, fact A4).
         debug_assert!(
-            super::CROSSING_CLOSURE_METHODS.contains(&("Executor", method)),
-            "Executor.{method} crosses a closure but has no row in CROSSING_CLOSURE_METHODS"
+            super::CROSSING_CLOSURE_METHODS.contains(&("Executor", "_submit_settled")),
+            "Executor._submit_settled crosses a closure but has no row in CROSSING_CLOSURE_METHODS"
         );
         let core = self.executor_core(h);
         // Cheap early reject so a shut executor costs no wiring work. Re-checked below under
         // the lock — this one is advisory, the one that decides is the atomic one.
         if core.inner.lock().unwrap().shut {
-            return Err(self.err(
-                "submit on a shut-down Executor (it no longer accepts work)".to_string(),
-                span,
-            ));
+            return self.refuse_job(settle, super::EXEC_SHUT_MSG);
         }
         // W7-39 follow-up — the inherited chain (`creator_cancel`, captured at
         // `Op::NewExecutor`) is STICKY: nothing ever resets it, matching Go's derived context
         // (a cancelled parent stays cancelled). So once the creating job's executor has been
-        // `shutdown_now`-ed, every job this core dispatches starts already-cancelled and dies
-        // at its first checkpoint. Silently: the handle crosses the airlock by `Arc`, so the
-        // submitter may be `main` holding the only reference, and its own GRACEFUL
-        // `shutdown()` — which promises to wait for its work — returned having run nothing.
-        // Keep the stickiness, drop the silence: this is a `submit` the executor cannot
-        // honour, exactly like a `submit` after `shutdown()`, so it faults the same way.
+        // cancelled, every job this core dispatches would start already-cancelled and die
+        // at its first checkpoint, silently. Keep the stickiness, drop the silence: this is a
+        // `submit` the executor cannot honour, exactly like a `submit` after `shutdown()`, so its
+        // Task settles with the refusal text (TICKET-289).
         //
         // Read-only after construction (no lock), and EMPTY for an executor created by `main`
         // or by a `parallel:`/`spawn` fiber — those are untouched. The core's OWN `cancel` is
-        // deliberately NOT checked here: `shutdown_now` sets `shut` first, so the check above
+        // deliberately NOT checked here: `cancel` sets `shut` first, so the check above
         // already owns that case and adding it would double-report.
         if core
             .creator_cancel
             .iter()
             .any(|c| c.load(std::sync::atomic::Ordering::Relaxed))
         {
-            return Err(self.err(
-                "submit on an Executor whose creating job was cancelled (it no longer \
-                 accepts work)"
-                    .to_string(),
-                span,
-            ));
+            return self.refuse_job(settle, super::EXEC_CREATOR_CANCELLED_MSG);
         }
         // TICKET-208 — a job IS a spawned task. `spawn_into` is the one function behind
         // `spawn` and `submit`: it pins the globals view as of this submit, crosses the
@@ -767,7 +777,7 @@ impl Vm {
     }
 
     /// C5 / A2 — at a clean program end, gracefully
-    /// drain every `Executor` created but never explicitly `shutdown`/`shutdown_now`-ed, in creation
+    /// drain every `Executor` created but never explicitly `shutdown`-ed, in creation
     /// order, reusing the shipped `shutdown` path (FIFO, run-all — every queued job runs and the
     /// lowest-submission-index fault propagates, W7-5). A hard `std.os.exit` is not drained (the
     /// caller gates on `pending_exit`); a task that calls `os.exit` mid-drain stops the remaining

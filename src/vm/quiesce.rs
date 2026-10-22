@@ -100,12 +100,12 @@ pub(super) enum PartyWait {
     /// answers.
     ///
     /// **…minus the joiner's OWN slot** — the `usize` is 1 when the joining thread is itself an
-    /// eager job of this very core, else 0. A job that calls `ex.shutdown()`/`ex.shutdown_now()` on
+    /// eager job of this very core, else 0. A job that calls `ex.shutdown()`/`ex.cancel()` on
     /// the executor it is running under stays counted in that core's `outstanding` for the whole
     /// wait, so a flat `outstanding() == 0` made its party self-referentially unsatisfiable: nothing
     /// the run could do would ever satisfy it, which is exactly the shape the verdict reads as
     /// "unfeedable". Measured on a healthy program whose every job ran to completion (`A` and `C`
-    /// both printed), `main`'s join faulted `deadlock` in 8/60 debug runs with `shutdown_now` and
+    /// both printed), `main`'s join faulted `deadlock` in 8/60 debug runs with `cancel` and
     /// 8/8 with `shutdown`. [`super::Vm::join_executor`] computes the identical slack for its own
     /// wait loop — the two must agree, or a joiner would return while its party still claimed to be
     /// stuck.
@@ -387,7 +387,7 @@ pub(super) struct QuiesceState {
     /// mirrors, and it saves that lock), but correctness does not rest on that store — it rests on the
     /// cell, which every `chezzi test` entry point resets via `Vm::reset_for_invoke`.
     run_halt_hint: AtomicBool,
-    /// TICKET-208 — the fault of a fire-and-forget `Executor` job: the second cause of a run-wide
+    /// TICKET-208 — the `--max-heap` abort of an `Executor` job: the second cause of a run-wide
     /// halt, beside `exit`. Read through the one funnel `Vm::run_exit_err`, taken by `Vm::rank_end`.
     job_fault: Mutex<Option<(super::RuntimeError, Vec<super::TraceFrame>)>>,
     /// TICKET-223 — the deadlock verdict, the third cause of a run-wide halt. Latched once by
@@ -417,7 +417,7 @@ pub(super) struct QuiesceState {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum RunHalt {
     Running,
-    /// A fire-and-forget job fault: every `defer` still runs whole.
+    /// A job's `--max-heap` abort: every `defer` still runs whole.
     Fault,
     /// An `os.exit`: no `defer` runs in any party.
     Exit,
@@ -547,7 +547,7 @@ impl QuiesceState {
             .store(self.has_job_fault(), Ordering::Release);
     }
 
-    /// TICKET-208 — publish a fire-and-forget `Executor` job's fault: it ends the whole run. First
+    /// TICKET-208 — publish an `Executor` job's `--max-heap` abort: it ends the whole run. First
     /// writer wins (Go: the first panic is the report). The caller halts every sched and then
     /// latches the hint ([`Self::mark_run_halt`]), the order `request_exit` uses.
     pub(super) fn request_job_fault(

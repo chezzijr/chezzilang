@@ -149,11 +149,7 @@ impl Vm {
                     let mut c = sched.lock();
                     if !c.scopes.get(0).is_some_and(|s| s.body_open) {
                         drop(c);
-                        return Err(self.err(
-                            "submit on a shut-down Executor (it no longer accepts work)"
-                                .to_string(),
-                            span,
-                        ));
+                        return self.refuse_job(settle, super::EXEC_SHUT_MSG);
                     }
                     sched.reserve_job_slot(&mut c, &mut fiber, charge, settle);
                     sched.claim_runners(&mut c)

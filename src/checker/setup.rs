@@ -778,7 +778,13 @@ impl Checker {
     /// deterministic and needs no sort.
     pub(super) fn field_names(&self, key: &str) -> Vec<String> {
         self.struct_shape(key)
-            .map(|s| s.fields.iter().map(|(n, _)| n.clone()).collect())
+            .map(|s| {
+                s.fields
+                    .iter()
+                    .filter(|(n, _)| !self.hides_field(s, n))
+                    .map(|(n, _)| n.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

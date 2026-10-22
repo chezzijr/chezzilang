@@ -232,7 +232,7 @@ impl MnSched {
                 return Take::Stop;
             }
             // TICKET-118 (W13-8) — drain a cancelled family's parked fibers BEFORE judging a
-            // deadlock, so a `shutdown_now` (or any scope-cancel) that trips an ANCESTOR flag a
+            // deadlock, so a `cancel` (or any scope-cancel) that trips an ANCESTOR flag a
             // parked fiber's own re-check can't see (`SchedCore::scope_cancel_tripped`, only read by
             // `park`/`park_send`/`park_wait`, not by this predicate scan) still requeues that fiber
             // instead of getting faulted as deadlocked. `cancel_drain` moves the family's parks to

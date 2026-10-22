@@ -137,7 +137,7 @@ impl Vm {
     }
 
     /// TICKET-224 — the run-wide halt at a function entry. A loop-free recursion emits no back-edge
-    /// and no wait, so an `os.exit`, a fire-and-forget job fault or a latched deadlock verdict
+    /// and no wait, so an `os.exit`, a job's `--max-heap` abort or a latched deadlock verdict
     /// waited for the whole recursion (`fib(36)` printed 8.5 s after a 100 ms exit). Only the
     /// run-wide halt lands here, through [`Vm::exit_halt`] (DEC-208: one predicate, one funnel). A
     /// cancel and a nursery child's fault do not: cancellation stays at waits and loop back-edges
@@ -1029,7 +1029,7 @@ impl Vm {
             // gaps.md W7-57 — a run-wide `os.exit` from another party. This is the checkpoint for the
             // shapes NO blocking wait can reach: a spinning top-level `main` (`cancel == None`,
             // `cancel_outer` empty — it hung forever) and a spinning eager `Executor` job (whose
-            // `cancel` is its executor's `shutdown_now` token, which an `os.exit` must NOT trip). So the
+            // `cancel` is its executor's `cancel` token, which an `os.exit` must NOT trip). So the
             // rung is deliberately NOT gated on "has no cancel flag" — the job HAS one, it is just the
             // wrong one.
             //
@@ -1190,7 +1190,7 @@ impl Vm {
     ///
     /// A party with NO flag at all still gets `pending_exit` + the `"exit"` sentinel: a top-level
     /// `main` (`cancel == None`, `cancel_outer` empty), which is precisely the shape that hung
-    /// forever. An eager `Executor` job DOES hold one (its executor's `shutdown_now` token), so it
+    /// forever. An eager `Executor` job DOES hold one (its executor's `cancel` token), so it
     /// takes the cancel path — it still dies promptly, and its submitter's join reports the code.
     ///
     /// Nothing suppresses this rung (TICKET-213, owner decision 5): an exit cuts a running `defer`

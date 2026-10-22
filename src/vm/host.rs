@@ -315,6 +315,13 @@ impl crate::native::Host for VmHost<'_> {
             .vm
             .to_wire_crossable(val, Span::default())
             .map_err(|e| crate::native::HostError { message: e.message })?;
+        // TICKET-289 — a cancelled job's value is not its Task's outcome: seal nothing, and the
+        // job's end seals the cancel value (`JobSeal::Done`). A fault the body caught stays.
+        if matches!(w, WireValue::Enum { variant_id, .. } if variant_id == crate::base::op::VID_OK)
+            && matches!(self.vm.halt_requested(), Some(block::Halt::Cancelled))
+        {
+            return Ok(());
+        }
         let sum = crate::vm::core::wire_summary(&w);
         let sealed = core
             .q
