@@ -941,13 +941,27 @@ impl Vm {
         Some(self.deliver_halt(h, span))
     }
 
+    pub(super) fn read_halts(&mut self, read: Option<Halt>, span: Span) -> Option<RuntimeError> {
+        if let Some(h) = read {
+            return Some(self.deliver_halt(h, span));
+        }
+        self.run_exit_err(span)
+    }
+
+    pub(super) fn blocked_halt(&mut self, read: Option<Halt>, span: Span) -> Option<RuntimeError> {
+        if let Err(e) = self.deadline_halt(span) {
+            return Some(e);
+        }
+        self.read_halts(read, span)
+    }
+
     /// Deliver a [`Halt`] read by [`Vm::halt_requested`]. A wait that settles under its sched's core
     /// lock reads the halt BEFORE taking that lock (a child fault's `scope_fault` takes it too, and a
     /// fiber-owned nursery lives on the same sched) and delivers it here, below its settle. Out of
     /// line: it runs once per halt, and inlined it bloats the per-element checkpoints.
     #[cold]
     #[inline(never)]
-    pub(super) fn deliver_halt(&mut self, h: Halt, span: Span) -> RuntimeError {
+    fn deliver_halt(&mut self, h: Halt, span: Span) -> RuntimeError {
         match h {
             Halt::Cancelled => {
                 self.cut = Some(Cut::Cancelled);

@@ -549,14 +549,14 @@ impl Vm {
             let resume_native = match resume_native {
                 Some(r) if !matches!(&r, Err(e) if executor_hard_halt(e)) => {
                     let span = self.frames.last().map(|f| f.call_span).unwrap_or_default();
-                    match self.take_halt(span) {
-                        Some(e) => {
+                    match self.resume_halts(span) {
+                        Err(e) => {
                             if let Err(e) = self.on_step_fault(0, e) {
                                 return Disp::Finish(self.classify_mn_outcome(Err(e)));
                             }
                             None
                         }
-                        None => Some(r),
+                        Ok(()) => Some(r),
                     }
                 }
                 other => other,
@@ -627,7 +627,7 @@ impl Vm {
                 // TICKET-188 — a halt that woke the connect park (a cancel, or a child fault of a
                 // nursery this fiber owns) is delivered like the offload resume's, before
                 // `finish_pending_connect` could report `Ok` for a handshake still in flight.
-                if let Some(e) = self.take_halt(cip.span) {
+                if let Err(e) = self.resume_halts(cip.span) {
                     drop(cip);
                     if let Err(e) = self.on_step_fault(0, e) {
                         return Disp::Finish(self.classify_mn_outcome(Err(e)));

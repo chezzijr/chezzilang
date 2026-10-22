@@ -195,7 +195,10 @@ impl Vm {
         // A re-run after a park: settle the offer this `send` published before it parked, BEFORE
         // the cancel checkpoint — a taken offer means the `send` happened.
         if let Some(op) = self.pending.take() {
-            if op.p.is_queued() && !(self.native_reentry == 0 && self.halt_requested().is_some()) {
+            if op.p.is_queued()
+                && self.deadline_halt(span).is_ok()
+                && !(self.native_reentry == 0 && self.halt_requested().is_some())
+            {
                 // A stray wake: still queued — re-park on the same offer.
                 self.pending = Some(op);
                 self.park_send(h, orig, core.cap, span);
@@ -204,6 +207,7 @@ impl Vm {
             if let Some(r) = self.send_settled(op, span) {
                 return r;
             }
+            self.deadline_halt(span)?;
         }
         if core.cap.is_none() {
             // Unbounded — never blocks.

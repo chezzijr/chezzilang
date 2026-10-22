@@ -125,11 +125,7 @@ impl Vm {
                     // `guarded` (native_reentry > 0), and the predicate's `deferring == 0` term is what
                     // keeps cleanup atomic; it also folds in `cancel_outer` and (TICKET-188) a child
                     // fault of a nursery this party owns.
-                    if let Some(h) = halt {
-                        reg.release(&sched, &mut c);
-                        Err(self.deliver_halt(h, span))
-                    } else if let Some(e) = self.run_exit_err(span) {
-                        // W7-47 — a run-wide `os.exit` from another party, below cancel.
+                    if let Some(e) = self.blocked_halt(halt, span) {
                         reg.release(&sched, &mut c);
                         Err(e)
                     } else if closed {
@@ -215,11 +211,7 @@ impl Vm {
                     reg.release(&sched, &mut c);
                     return Ok(());
                 }
-                if let Some(h) = halt {
-                    reg.release(&sched, &mut c);
-                    return Err(self.deliver_halt(h, span));
-                }
-                if let Some(e) = self.run_exit_err(span) {
+                if let Some(e) = self.blocked_halt(halt, span) {
                     reg.release(&sched, &mut c);
                     return Err(e);
                 }
@@ -320,13 +312,7 @@ impl Vm {
                     return Ok(());
                 }
                 // Cancel (a sibling faulted): swallow the outcome (mirror the snapshot-park cancel arm).
-                if let Some(h) = halt {
-                    reg.release(&sched, &mut c);
-                    drop(c);
-                    return Err(self.deliver_halt(h, span));
-                }
-                // W7-47 — a run-wide `os.exit` from another party, below cancel like every other site.
-                if let Some(e) = self.run_exit_err(span) {
+                if let Some(e) = self.blocked_halt(halt, span) {
                     reg.release(&sched, &mut c);
                     drop(c);
                     return Err(e);
@@ -411,8 +397,10 @@ impl Vm {
             std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now));
             // The one predicate for a run-wide halt (`run_halt_due`): it answers `false` wherever
             // `run_exit_err` below will not fire, so the sleep is never cut short for nothing.
-            if self.halt_requested().is_some() || self.run_halt_due() {
-                break;
+            let read = self.halt_requested();
+            if let Some(e) = self.blocked_halt(read, span) {
+                self.block_exit(reg);
+                return Err(e);
             }
         }
         // 4. Un-account inflight → running (the `+1` is essential — the fiber's next dispatch does

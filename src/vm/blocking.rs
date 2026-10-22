@@ -279,13 +279,8 @@ impl Vm {
     /// in-place blocking native): a cancel or a child fault, then the run-wide halt. No
     /// `--timeout` rung: at a return that would turn a post-hoc timeout into an abort.
     pub(super) fn resume_halts(&mut self, span: Span) -> Result<(), RuntimeError> {
-        if let Some(e) = self.take_halt(span) {
-            return Err(e);
-        }
-        if let Some(e) = self.run_exit_err(span) {
-            return Err(e);
-        }
-        Ok(())
+        let read = self.halt_requested();
+        self.read_halts(read, span).map_or(Ok(()), Err)
     }
 
     /// TICKET-200 — the one list of halts a party blocked in place observes, read with no lock held.
@@ -298,14 +293,16 @@ impl Vm {
         // where every other path observes the deadline. Without it `chezzi test --timeout` could not
         // kill a job blocked forever on a channel — exactly the hang eager execution makes easier to
         // write. No `back_edge_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
-        self.deadline_halt(span)?;
         // `shutdown_now`'s cooperative stop (D4), an enclosing scope's cancel and (TICKET-188) a child
         // fault of a nursery this party owns arrive first; then W7-47, the run-wide halt (an
         // `os.exit` or a job fault from another party). BELOW cancel, so a party that already holds
         // a cancel flag keeps unwinding as `Cancelled` (only a party with no cancel flag at all —
         // precisely top-level `main` — reaches that rung). ABOVE the deadlock verdict, because an
         // `Exit` outranks a synthesized `Deadlocked` — the precedence `reduce_task_slots` encodes.
-        self.resume_halts(span)?;
+        let read = self.halt_requested();
+        if let Some(e) = self.blocked_halt(read, span) {
+            return Err(e);
+        }
         // TICKET-062 (W10-16) / TICKET-096 — a child fault recorded while the exit rung ran (DEC-134:
         // read again below the exit, and again after a positive verdict).
         if let Some(e) = self.take_halt(span) {
@@ -345,14 +342,7 @@ impl Vm {
             // TICKET-134 — the child can record its fault and complete between the rung above and
             // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
             // child's fault-slot write, so this re-read sees the fault.
-            if let Some(e) = self.take_halt(span) {
-                return Err(e);
-            }
-            // A pending run-wide `os.exit` from another party outranks the verdict (Go: exit 3),
-            // inside a `defer` too: read through the one funnel (TICKET-136, TICKET-213).
-            if let Some(e) = self.run_exit_err(span) {
-                return Err(e);
-            }
+            self.resume_halts(span)?;
         }
         // TICKET-052 — an eager `Executor` job (`mn.is_none()`) about to wait another tick hands its
         // pool thread to a replacement, so the job that would unblock it can still get a thread.
