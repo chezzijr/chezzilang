@@ -233,6 +233,8 @@ pub(super) struct Fiber {
     /// with the cap off. Every park gap re-check reads it, and [`MnSched::deadline_drain`] requeues
     /// the parked fiber once it passes.
     pub(super) park_deadline: Option<std::time::Instant>,
+    /// TICKET-287 — this fiber's carried [`Vm::fault_park`] while it is parked mid fault-unwind.
+    pub(super) fault_park: Option<super::frames::FaultPark>,
 }
 
 impl Fiber {

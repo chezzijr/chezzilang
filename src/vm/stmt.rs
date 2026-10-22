@@ -214,7 +214,7 @@ impl Vm {
         target_frame_len: usize,
         report_escaped: bool,
     ) -> Option<RuntimeError> {
-        self.unwind_deferred_escaped(target_frame_len, report_escaped, true)
+        self.unwind_deferred_escaped(target_frame_len, report_escaped, true, false)
             .0
     }
 
@@ -226,7 +226,7 @@ impl Vm {
     /// (W14-39) measured that skipping the escaped-nursery abort orphans parked children and hangs
     /// the join at `CHEZZI_THREADS=1`.
     pub(super) fn unwind_no_defer(&mut self, target_frame_len: usize) {
-        self.unwind_deferred_escaped(target_frame_len, true, false);
+        self.unwind_deferred_escaped(target_frame_len, true, false, false);
     }
 
     /// TICKET-147 (W14-12) — the bypass funnels' unwind: run [`Vm::unwind_deferred_escaped`] and rank
@@ -238,7 +238,8 @@ impl Vm {
         report_escaped: bool,
         rte: RuntimeError,
     ) -> RuntimeError {
-        let (defer, escaped) = self.unwind_deferred_escaped(target_frame_len, report_escaped, true);
+        let (defer, escaped) =
+            self.unwind_deferred_escaped(target_frame_len, report_escaped, true, false);
         self.unwind_result(rte, defer.or(escaped), report_escaped)
     }
 
@@ -286,11 +287,17 @@ impl Vm {
     ///
     /// `run_defers` — `false` ONLY on the fatal-deadlock unwind, TICKET-152: the frames are dropped
     /// where they stand.
+    ///
+    /// `park` — TICKET-287: the fault unwind of a fiber's outermost dispatch loop. At a frame whose
+    /// escaped nursery is fiber-owned and not done, the unwind stops BEFORE that frame's abort and
+    /// defers, with `join_suspend` set ([`Vm::park_abort_origin`]); the caller stores a
+    /// [`FaultPark`](super::frames::FaultPark) and re-enters here at the same frame on resume.
     pub(super) fn unwind_deferred_escaped(
         &mut self,
         target_frame_len: usize,
         report_escaped: bool,
         run_defers: bool,
+        park: bool,
     ) -> (Option<RuntimeError>, Option<RuntimeError>) {
         let mut err = None;
         let mut escaped_err: Option<RuntimeError> = None;
@@ -305,7 +312,12 @@ impl Vm {
                 } else {
                     f.nursery_len
                 };
-                let child = self.drain_escaped_nursery(floor.min(self.nurseries.len()));
+                let floor = floor.min(self.nurseries.len());
+                if park && let Some(origin) = self.park_abort_origin(floor) {
+                    self.join_suspend = Some(origin);
+                    return (err, escaped_err);
+                }
+                let child = self.drain_escaped_nursery(floor);
                 escaped_err = escaped_err.or(child);
             }
             if run_defers && let Some(e) = self.drain_deferred(fi, 0) {
@@ -353,6 +365,35 @@ impl Vm {
                 // short-circuits to that boundary (try-block style): the `Err`/`None` value becomes
                 // the recover's result. Function-scoped `?` (no same-frame handler) falls through.
                 let frame_len = self.frames.len();
+                let same_frame = self
+                    .handlers
+                    .last()
+                    .copied()
+                    .filter(|h| h.frame_len == frame_len);
+                // The escaped `parallel:` body's defers (ORDERING below), drained before the
+                // handler pops so the TICKET-287 park can still rewind this `?`. A re-run finds
+                // them consumed and takes back the fault the first run parked with.
+                let body_defers = match same_frame {
+                    Some(h) if self.nurseries.len() > h.nursery_len => {
+                        let floor = self.nursery_defer_floors[h.nursery_len];
+                        let parked = self.take_escape_park();
+                        self.drain_frame_to(floor).or(parked)
+                    }
+                    _ => None,
+                };
+                // TICKET-287 — a fiber-owned nursery that is not done parks this fiber, as
+                // `park_escaped_abort` does for `return`. A body defer fault parks with it.
+                if let Some(h) = same_frame
+                    && let Some(origin) = self.park_abort_origin(h.nursery_len)
+                {
+                    if let Some(e) = body_defers {
+                        self.store_escape_park(e);
+                    }
+                    self.push(v);
+                    self.rewind_op();
+                    self.join_suspend = Some(origin);
+                    return Ok(());
+                }
                 if let Some(h) = self.handlers.pop_if(|h| h.frame_len == frame_len) {
                     self.stack.truncate(h.stack_len);
                     self.call_depth = h.call_depth;
@@ -379,12 +420,7 @@ impl Vm {
                     // body defers down to the outermost escaped nursery's floor, report, then drain the
                     // remaining (recover-block) defers down to the handler's install-time floor. A body
                     // defer fault is held and superseded by any later recover-block defer fault.
-                    let mut body_defer_err = if self.nurseries.len() > h.nursery_len {
-                        let floor = self.nursery_defer_floors[h.nursery_len];
-                        self.drain_frame_to(floor)
-                    } else {
-                        None
-                    };
+                    let mut body_defer_err = body_defers;
                     if let Some(e) = body_defer_err.take() {
                         body_defer_err = Some(self.cleanup_halt(e)?);
                     }

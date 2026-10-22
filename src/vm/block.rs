@@ -472,7 +472,7 @@ impl Vm {
 
     /// TICKET-245 — THE answer to "may this nursery joiner run fibers on its own stack?", read
     /// from the `Nursery` row of [`mode`]. Only [`Vm::joiner_shell`] asks it. A `Park` joiner that
-    /// reaches an inline wait (a fault-unwind abort, where no op can rewind) still helps.
+    /// reaches an inline wait (an abort that `park_abort_origin` declines) still helps.
     pub(super) fn joiner_helps(&self) -> bool {
         matches!(
             self.block_mode(WaitSpec::Nursery),

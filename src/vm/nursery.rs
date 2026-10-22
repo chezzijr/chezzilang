@@ -469,48 +469,65 @@ impl Vm {
     /// `MnSched::park_join` requeues the fiber; `drain_escaped_nursery`'s re-run then finds the
     /// family settled and pops normally.
     pub(super) fn park_escaped_abort(&mut self, from_len: usize) -> bool {
-        if !matches!(self.block_mode(WaitSpec::Nursery), BlockMode::Park) {
+        let Some(origin) = self.park_abort_origin(from_len) else {
             return false;
+        };
+        self.rewind_op();
+        self.join_suspend = Some(origin);
+        true
+    }
+
+    /// TICKET-132/TICKET-287 — THE park test of an abort: cancel the fiber-owned levels above
+    /// `from_len`, top-down, and return the origin scope of the first one whose family is not done.
+    /// `None` (decline) under the same conditions [`Vm::park_escaped_abort`] lists. The caller sets
+    /// `join_suspend` and stores what its re-entry needs: a rewind for an escape, a
+    /// [`FaultPark`](super::frames::FaultPark) for a fault unwind.
+    pub(super) fn park_abort_origin(&mut self, from_len: usize) -> Option<usize> {
+        if !matches!(self.block_mode(WaitSpec::Nursery), BlockMode::Park) {
+            return None;
         }
         for i in (from_len..self.nurseries.len()).rev() {
             if matches!(self.mn_scopes.get(i), Some(Some(_))) {
-                return false;
+                return None;
             }
             let Some(Some(scope)) = self.eager_scheds.get(i) else {
-                return false;
+                return None;
             };
             if !scope.fiber_owned {
-                return false;
+                return None;
             }
             cancel_fiber_owned_family(scope);
             if !scope.sched.lock().family_done(scope.scope) {
-                let origin = scope.scope;
-                self.rewind_op();
-                self.join_suspend = Some(origin);
-                return true;
+                return Some(scope.scope);
             }
         }
-        false
+        None
     }
 
     /// W14-4 -- escape every `parallel:` level above `from_len`, innermost-first: run the level's
     /// body defers (down to its `nursery_defer_floors` entry), then cancel it and wait for its
     /// children. Enclosing defers therefore run after the cancelled children unwind (Go cancel +
     /// `wg.Wait()`, asyncio `TaskGroup`). Returns `true` when it parked (TICKET-132); the rewound op
-    /// re-runs with the drained defers consumed. It never parks once a defer faulted: the re-run
-    /// would lose the fault.
+    /// re-runs with the drained defers consumed. TICKET-287 — a fault already in hand parks with
+    /// the fiber ([`Vm::store_escape_park`]) and comes back to `err` on the re-run.
     pub(super) fn unwind_escaped_levels(
         &mut self,
         from_len: usize,
         err: &mut Option<RuntimeError>,
     ) -> bool {
+        if let Some(e) = self.take_escape_park() {
+            *err = Some(e);
+        }
         while self.nurseries.len() > from_len {
             let top = self.nurseries.len() - 1;
             let floor = self.nursery_defer_floors[top];
             if let Some(e) = self.drain_frame_to(floor) {
                 *err = Some(e);
             }
-            if err.is_none() && self.park_escaped_abort(top) {
+            if self.park_escaped_abort(top) {
+                if let Some(e) = err.take() {
+                    self.store_escape_park(e);
+                }
                 return true;
             }
             // TICKET-147 — a body defer fault stays the root cause; a child fault only fills the gap.
@@ -1383,7 +1400,7 @@ impl Vm {
                 let _party = self.nursery_party_guard(&sched);
                 // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above,
                 // over the same family (TICKET-103).
-                let mut shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::Runners);
+                let mut shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::RunnersAbort);
                 for &s in &sids {
                     if let Some(shell) = shell.as_mut() {
                         shell.mn_worker_loop(&sched, 0, s);
@@ -1405,7 +1422,8 @@ impl Vm {
             // `main`, which must be a counted party for that span or the process-wide verdict vetoes
             // forever. No-op on a worker shell.
             let _party = self.nursery_party_guard(&sched);
-            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, 0, JoinCover::Runners) {
+            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, 0, JoinCover::RunnersAbort)
+            {
                 shell.mn_worker_loop(&sched, 0, 0);
             }
             sched.wait_for_completion();
@@ -1462,9 +1480,9 @@ impl Vm {
 
     /// TICKET-103/TICKET-132 — `abort_eager_nursery` for a fiber-owned nursery: trip the family's
     /// one cancel token, requeue its parked and socket-parked fibers, then settle them. It waits
-    /// inline ONLY where [`Vm::park_escaped_abort`] declines: a fault-unwind escape (the fault is
-    /// consumed, so no op can rewind) or `native_reentry > 0` (the Rust stack holds the native
-    /// frame). The body's escape error is what propagates, so a task fault here is swallowed.
+    /// inline ONLY where [`Vm::park_abort_origin`] declines: `native_reentry > 0` (the Rust stack holds
+    /// the native frame), a nested dispatch loop, or a lower level that is not fiber-owned. A fault
+    /// unwind parks through [`FaultPark`](super::frames::FaultPark) (TICKET-287). The body's escape error is what propagates, so a task fault here is swallowed.
     fn abort_fiber_owned_nursery(&mut self, scope: EagerScope) -> Option<RuntimeError> {
         let sids = scope.sids();
         cancel_fiber_owned_family(&scope);

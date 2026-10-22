@@ -586,6 +586,7 @@ mod tests {
             span: Span::RUNTIME,
             resume_native: None,
             pending: None,
+            fault_park: None,
             park_site: None,
             park_deadline: None,
         }

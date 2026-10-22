@@ -29,7 +29,7 @@ pub(super) enum SpawnHead {
 
 /// TICKET-132 — trip a fiber-owned family's cancel and drain its parked/socket-parked fibers.
 /// Idempotent: a re-run after a park finds nothing left to trip or drain. Shared by
-/// `Vm::park_escaped_abort` and `Vm::abort_fiber_owned_nursery`.
+/// `Vm::park_abort_origin` and `Vm::abort_fiber_owned_nursery`.
 pub(super) fn cancel_fiber_owned_family(scope: &EagerScope) {
     scope.sched.trip_scope_cancel(scope.scope);
     scope.sched.drain_family(scope.scope);
@@ -72,7 +72,7 @@ pub(super) fn spawn_worker_thread(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let s = Arc::clone(sched);
     spawn_runner_thread(sched, name, move || {
-        shell.mn_worker_loop(&s, wid, owner_scope)
+        shell.mn_thread_loop(&s, wid, owner_scope)
     })
 }
 
@@ -190,6 +190,10 @@ pub(super) enum JoinCover {
     None,
     /// the sched's drainer and its started runners: an eager join
     Runners,
+    /// the same runners, at an eager ABORT (TICKET-287): the joiner never helps. Its cancelled
+    /// family needs no throughput, and a fiber outside it (one blocked in place in a callback)
+    /// would hold the joiner's fault on its stack.
+    RunnersAbort,
 }
 
 /// W8-8 — the inline joiner runs fibers only when the budget has a slot left after the drainer.

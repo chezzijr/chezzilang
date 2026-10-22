@@ -175,6 +175,7 @@ impl Vm {
             send_suspend: None,
             park_site: None,
             pending: None,
+            fault_park: None,
             offload: None,
             poll_park: None,
             pending_connect: None,

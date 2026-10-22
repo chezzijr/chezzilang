@@ -5,6 +5,38 @@
 use super::block::{self, Cut, Halt, OwnedScope, WakeSet};
 use super::*;
 
+/// TICKET-287 — a fault unwind parked at a fiber-owned nursery whose cancelled family is not done
+/// (route (a) of w23 E1). The fiber's OS thread returns to its runner instead of running other
+/// fibers on the faulting fiber's stack; `MnSched::park_join` requeues the fiber when the family
+/// is done, and [`Vm::resume_fault_unwind`] runs the rest of the unwind. A fault has no op to
+/// rewind, so the fault itself is what the fiber carries (`Fiber::fault_park`).
+pub(super) struct FaultPark {
+    at: ParkAt,
+    rte: RuntimeError,
+    /// The `defer` fault the frames above the park point raised, ranked at the end.
+    defer_err: Option<RuntimeError>,
+    cut: Option<Cut>,
+    cancel_unwind_faulted: bool,
+}
+
+/// Where in [`Vm::on_step_fault`] the unwind parked.
+enum ParkAt {
+    /// In the frame unwind down to `target` (uncaught, or above the catching `recover:`), before
+    /// the abort and the `defer`s of the frame it stopped at.
+    Unwind {
+        target: usize,
+        std_site: Option<(Span, Span)>,
+    },
+    /// At the catching `recover:`'s own nursery reclaim, after its recover-block `defer`s.
+    Catch { nursery_len: usize },
+    /// In the cancel funnel's unwind ([`Vm::cancel_unwind`]); `escaped_err` is the first child
+    /// fault of a nursery the frames above the park point aborted.
+    Cancel { escaped_err: Option<RuntimeError> },
+    /// A `return` or `?` escape that parked with a body `defer` fault (`rte`) in hand. Nothing
+    /// resumes here: the rewound op re-runs and takes the fault back ([`Vm::take_escape_park`]).
+    Escape,
+}
+
 impl Vm {
     /// Push a frame for `proto` and run the dispatch loop until it returns; yield its result.
     #[allow(clippy::too_many_arguments)]
@@ -588,7 +620,15 @@ impl Vm {
             // past, like a faulting one. With `false` its nested nursery's parked children
             // were orphaned, and at CHEZZI_THREADS=1 the join hung. The hard halts
             // (`--max-heap`, `--timeout`) keep `false`.
-            let rte = self.unwind_cancelled(base_level, cancel_bypass, rte);
+            // TICKET-287 — an owner bypass aborts its nurseries too: with `false` the owner left
+            // its cancelled family running, and a sleeping child's wake found no runner. At a
+            // fiber's outermost loop both funnels park where the fault unwind parks. A hard halt
+            // still waits inline.
+            let report = cancel_bypass || owner_bypass;
+            if report && base_level == 0 && !over_mem && !timed {
+                return self.cancel_unwind(rte, None, None);
+            }
+            let rte = self.unwind_cancelled(base_level, report, rte);
             let rte = if over_mem { rte.over_memory() } else { rte };
             let rte = if timed { rte.timed_out() } else { rte };
             return Err(rte);
@@ -630,13 +670,105 @@ impl Vm {
         // TICKET-152 (W14-37): a FATAL deadlock drops its frames without running their
         // `defer`s, as Go's all-goroutines-asleep abort does (parked siblings already run
         // none, DEC-092). Per-call, never a VM latch: `chezzi test` keeps running.
+        // TICKET-287 — at a fiber's outermost loop the unwind parks at a fiber-owned nursery that
+        // is not done, instead of running other fibers on this stack while it waits.
         let rte = if fatal {
             self.unwind_no_defer(target);
             rte
         } else {
-            let d = self.unwind_deferred(target, true);
+            let (d, _) = self.unwind_deferred_escaped(target, true, true, base_level == 0);
+            if self.join_suspend.is_some() {
+                self.store_fault_park(ParkAt::Unwind { target, std_site }, rte, d);
+                return Ok(());
+            }
             self.unwind_result(rte, d, false)
         };
+        self.finish_fault(base_level, rte, fatal, std_site)
+    }
+
+    /// TICKET-287 — store the fault unwind this fiber parks in; [`Vm::resume_fault_unwind`] runs
+    /// it on. The cut and its latch travel with it: `run_one_fiber` clears both on every resume.
+    fn store_fault_park(&mut self, at: ParkAt, rte: RuntimeError, defer_err: Option<RuntimeError>) {
+        self.fault_park = Some(FaultPark {
+            at,
+            rte,
+            defer_err,
+            cut: self.cut,
+            cancel_unwind_faulted: self.cancel_unwind_faulted,
+        });
+    }
+
+    /// TICKET-287 — a `return` or recover-scoped `?` parks with a body `defer` fault in hand; the
+    /// rewound op takes it back on its re-run ([`Vm::take_escape_park`]), so the park loses nothing.
+    pub(super) fn store_escape_park(&mut self, defer_err: RuntimeError) {
+        self.store_fault_park(ParkAt::Escape, defer_err, None);
+    }
+
+    /// TICKET-287 — the body `defer` fault an escape parked with ([`Vm::store_escape_park`]).
+    pub(super) fn take_escape_park(&mut self) -> Option<RuntimeError> {
+        self.fault_park
+            .take_if(|p| matches!(p.at, ParkAt::Escape))
+            .map(|p| p.rte)
+    }
+
+    /// TICKET-287 — the cancel funnel of a fiber's outermost loop: [`Vm::unwind_cancelled`] down to
+    /// frame 0 that parks at a fiber-owned nursery that is not done. `defer_err` and `escaped_err`
+    /// are what the frames above an earlier park point raised.
+    fn cancel_unwind(
+        &mut self,
+        rte: RuntimeError,
+        defer_err: Option<RuntimeError>,
+        escaped_err: Option<RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        let (d, e) = self.unwind_deferred_escaped(0, true, true, true);
+        // A lower frame's `defer` runs later and supersedes; the first escaped child fault stays first.
+        let d = d.or(defer_err);
+        let escaped_err = escaped_err.or(e);
+        if self.join_suspend.is_some() {
+            self.store_fault_park(ParkAt::Cancel { escaped_err }, rte, d);
+            return Ok(());
+        }
+        Err(self.unwind_result(rte, d.or(escaped_err), true))
+    }
+
+    /// TICKET-287 — resume a fault unwind that parked ([`Vm::store_fault_park`]) once the family it
+    /// waited for is done. The abort it parked at now finds the family done and waits for nothing.
+    /// A lower level that is not done parks it again.
+    pub(super) fn resume_fault_unwind(&mut self, p: FaultPark) -> Result<(), RuntimeError> {
+        if matches!(p.at, ParkAt::Escape) {
+            // The rewound op re-runs next and takes its fault back (`take_escape_park`).
+            self.fault_park = Some(p);
+            return Ok(());
+        }
+        self.cut = p.cut;
+        self.cancel_unwind_faulted = p.cancel_unwind_faulted;
+        match p.at {
+            ParkAt::Escape => Ok(()),
+            ParkAt::Cancel { escaped_err } => self.cancel_unwind(p.rte, p.defer_err, escaped_err),
+            ParkAt::Unwind { target, std_site } => {
+                let (d, _) = self.unwind_deferred_escaped(target, true, true, true);
+                // A lower frame's `defer` runs later, so its fault supersedes an earlier one.
+                let d = d.or(p.defer_err);
+                if self.join_suspend.is_some() {
+                    self.store_fault_park(ParkAt::Unwind { target, std_site }, p.rte, d);
+                    return Ok(());
+                }
+                let rte = self.unwind_result(p.rte, d, false);
+                self.finish_fault(0, rte, false, std_site)
+            }
+            ParkAt::Catch { nursery_len } => self.finish_catch(0, nursery_len, p.rte),
+        }
+    }
+
+    /// The tail of [`Vm::on_step_fault`] after the frame unwind: relocate a std fault, then catch
+    /// at the nearest `recover:` of this loop or propagate.
+    fn finish_fault(
+        &mut self,
+        base_level: usize,
+        rte: RuntimeError,
+        fatal: bool,
+        std_site: Option<(Span, Span)>,
+    ) -> Result<(), RuntimeError> {
         let rte = if fatal { rte.deadlock() } else { rte };
         // TICKET-148 — relocate a NATIVE std fault to the user's call into std, for the
         // caught stamp below AND the uncaught headline (the trace keeps its frames). A
@@ -696,27 +828,50 @@ impl Vm {
                 // never ran) — the nursery list is always reclaimed on unwind.
                 // TASK B: route through `drain_escaped_nursery` so a `?` caught by `recover:`
                 // cancels its tasks IDENTICALLY to an uncaught `?`.
-                // TICKET-147 — the caught fault is the root cause; a child's fault is dropped.
-                let _ = self.drain_escaped_nursery(h.nursery_len);
-                let rte = self.cleanup_met_halt(base_level, rte)?;
-                // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
-                // boundary's `done` label receives a ready `Result`.
-                let sp = rte.span;
-                let msg = self.alloc_str(rte.message);
-                // W8-22 — stamp the fault's origin on the message handle so `e.line()` etc.
-                // can read it back later. `msg` is always a fresh `Obj::Str`
-                // (`alloc_str` allocates one per call), so this can never alias an
-                // unrelated string's span. A stdlib-raised span is not stamped
-                // (TICKET-045), except a NATIVE fault, which is relocated above to the
-                // user's call into std (TICKET-148).
-                self.stamp_err_span(msg, sp);
-                let err = self.alloc_enum("Result", "Err", vec![msg]);
-                self.push(err);
+                // TICKET-287 — a fiber-owned nursery that is not done parks this fiber here,
+                // after the recover-block defers, as the frame unwind parks.
+                if base_level == 0
+                    && let Some(origin) = self.park_abort_origin(h.nursery_len)
+                {
+                    self.join_suspend = Some(origin);
+                    let at = ParkAt::Catch {
+                        nursery_len: h.nursery_len,
+                    };
+                    self.store_fault_park(at, rte, None);
+                    return Ok(());
+                }
+                self.finish_catch(base_level, h.nursery_len, rte)
             }
             // Uncaught: `unwind_deferred(target, true)` above already cancelled-and-reported
             // every unwound frame's escaped nurseries (the toplevel module nursery preserved).
-            _ => return Err(rte),
+            _ => Err(rte),
         }
+    }
+
+    /// The end of a `recover:` catch: reclaim the nurseries above `nursery_len`, then push the
+    /// caught fault as the boundary's `Err` value.
+    fn finish_catch(
+        &mut self,
+        base_level: usize,
+        nursery_len: usize,
+        rte: RuntimeError,
+    ) -> Result<(), RuntimeError> {
+        // TICKET-147 — the caught fault is the root cause; a child's fault is dropped.
+        let _ = self.drain_escaped_nursery(nursery_len);
+        let rte = self.cleanup_met_halt(base_level, rte)?;
+        // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
+        // boundary's `done` label receives a ready `Result`.
+        let sp = rte.span;
+        let msg = self.alloc_str(rte.message);
+        // W8-22 — stamp the fault's origin on the message handle so `e.line()` etc.
+        // can read it back later. `msg` is always a fresh `Obj::Str`
+        // (`alloc_str` allocates one per call), so this can never alias an
+        // unrelated string's span. A stdlib-raised span is not stamped
+        // (TICKET-045), except a NATIVE fault, which is relocated above to the
+        // user's call into std (TICKET-148).
+        self.stamp_err_span(msg, sp);
+        let err = self.alloc_enum("Result", "Err", vec![msg]);
+        self.push(err);
         Ok(())
     }
 

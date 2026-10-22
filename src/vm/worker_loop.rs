@@ -232,6 +232,7 @@ impl Vm {
             JoinCover::Runners => {
                 helps && eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner()
             }
+            JoinCover::RunnersAbort => false,
             JoinCover::None => helps || !self.hand_joiner_slot(sched, cancel, wid),
         };
         runs.then(|| self.spawn_shell(sched, cancel))
@@ -290,7 +291,7 @@ impl Vm {
     /// D2b — a worker shell's lifetime: pull a runnable fiber, run it to its next park/finish, settle,
     /// repeat until the scheduler terminates, over a shared run queue + park set across threads.
     /// Cross-nursery flat scheduler — `owner_scope` is the scope this worker is the INLINE OWNER of
-    /// (it returns when that scope completes — scope-scoped owner stop), or [`SENTINEL_SCOPE`] for a
+    /// (it returns at the first fiber boundary after that scope's family completes, even with other work runnable — scope-scoped owner stop, TICKET-287), or [`SENTINEL_SCOPE`] for a
     /// FARMED helper / drainer (which never self-stops, only on global terminate). The fiber it runs may
     /// belong to ANY scope (the queue is global): `finish`/`cancel_drain` use the FIBER's `scope_id`,
     /// while `take_runnable`'s stop check uses `owner_scope`.
@@ -299,14 +300,38 @@ impl Vm {
     /// as joiner, a fiber's inline nested-nursery owner) takes it back here before its own Chezzi
     /// code runs again.
     pub(super) fn mn_worker_loop(&mut self, sched: &Arc<MnSched>, wid: usize, owner_scope: usize) {
+        self.worker_loop_held(sched, wid, owner_scope, true);
+    }
+
+    /// TICKET-287 — the loop of a spawned runner thread ([`spawn_worker_thread`]; the eager drainer
+    /// passes its scope). No owner waits under it on this stack, so it stops on its scope only when
+    /// it is idle (`take_runnable`'s `Take::Stop`), never at a fiber boundary: it can be the last
+    /// runner of a cancelled family in another scope.
+    pub(super) fn mn_thread_loop(&mut self, sched: &Arc<MnSched>, wid: usize, owner_scope: usize) {
+        self.worker_loop_held(sched, wid, owner_scope, false);
+    }
+
+    fn worker_loop_held(
+        &mut self,
+        sched: &Arc<MnSched>,
+        wid: usize,
+        owner_scope: usize,
+        boundary_stop: bool,
+    ) {
         let held = width::holds();
-        self.mn_worker_loop_inner(sched, wid, owner_scope);
+        self.mn_worker_loop_inner(sched, wid, owner_scope, boundary_stop);
         if held {
             width::acquire();
         }
     }
 
-    fn mn_worker_loop_inner(&mut self, sched: &Arc<MnSched>, wid: usize, owner_scope: usize) {
+    fn mn_worker_loop_inner(
+        &mut self,
+        sched: &Arc<MnSched>,
+        wid: usize,
+        owner_scope: usize,
+        boundary_stop: bool,
+    ) {
         #[cfg(test)]
         let _runner = RunnerCount::enter(&sched.quiesce);
         self.wid = wid; // D5 owe #3 (Path C) — `demote_recv_block` reuses this for the replacement worker
@@ -321,6 +346,22 @@ impl Vm {
         let mut tick: u64 = 0;
         let mut kept: Option<Fiber> = None;
         loop {
+            // TICKET-287 (E1) — an inline owner stops at the first fiber boundary after its family
+            // is done, even with work still runnable. `take_runnable` tests the same predicate only
+            // when no fiber is runnable, and the `kept` re-run skips it, so a busy fiber outside the
+            // family (a spinner) held a faulting owner's unwind forever at T=1. The kept fiber goes
+            // back to the queue for the runner that continues after this owner.
+            if boundary_stop
+                && owner_scope != SENTINEL_SCOPE
+                && sched.lock().owner_scope_done(owner_scope)
+            {
+                if let Some(f) = kept.take() {
+                    sched.yield_fiber(f);
+                }
+                self.width_release();
+                sched.notify_waiters();
+                return;
+            }
             // TICKET-199 — `tick` counts FRESH slices (Go's `schedtick`): an inherited `runnext`
             // pick runs on the current slice and leaves it unchanged.
             let next = tick.wrapping_add(1);
@@ -477,6 +518,9 @@ impl Vm {
             //       outer `catch_unwind`s in the shells only see a panic from `take_runnable`/`park`/
             //       `finish` themselves, which is a pre-existing scheduler-bug path (see
             //       `eager_joiner_runs_fibers`' own hazard note).
+            //   (d) the owner-stop return at the top of the loop (TICKET-287). It requeues a kept
+            //       fiber through `yield_fiber` and calls `notify_waiters` before returning, so the
+            //       requeued fiber has a woken consumer.
             if self.demoted {
                 // TICKET-230 — a worker keeps its permit across fibers while no thread queues, so
                 // it returns the permit here, on its way out.
@@ -540,6 +584,7 @@ impl Vm {
         // continues past it.
         let resume_native = fiber.resume_native.take();
         self.pending = fiber.pending.take();
+        self.fault_park = fiber.fault_park.take();
         let disp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // D5 — lower + push the offloaded native's result before resuming, so the operand stack
             // holds what the `Call` would have pushed and `run_until` continues correctly. The `Err`
@@ -639,7 +684,15 @@ impl Vm {
                     self.push(v);
                 }
             }
+            // TICKET-287 — a fiber that parked mid fault-unwind ([`Vm::store_fault_park`])
+            // resumes that unwind here, not at its `ip`. It may park again at a lower level.
+            if let Some(p) = self.fault_park.take()
+                && let Err(e) = self.resume_fault_unwind(p)
+            {
+                return Disp::Finish(self.classify_mn_outcome(Err(e)));
+            }
             let res = match state {
+                _ if self.join_suspend.is_some() => Ok(()),
                 FiberState::Pending(task) => self.start_task(task),
                 FiberState::Ready | FiberState::Blocked => self.run_until(0),
             };
@@ -687,6 +740,7 @@ impl Vm {
         }))
         .unwrap_or_else(|p| Disp::Finish(self.panic_outcome(p, span)));
         fiber.pending = self.pending.take();
+        fiber.fault_park = self.fault_park.take();
         // A fiber that parks carries its site; one that runs on carries `None`.
         fiber.park_site = self.park_site.take();
         fiber.park_deadline = self.deadline;

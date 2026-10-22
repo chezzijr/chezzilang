@@ -1100,6 +1100,9 @@ pub struct Vm {
     /// TICKET-103 — origin scope of the fiber-owned nursery whose `JoinNursery` parked the running
     /// fiber; consumed by `run_one_fiber` into `Disp::JoinPark`.
     join_suspend: Option<usize>,
+    /// TICKET-287 — the fault unwind the running fiber parked in ([`Vm::store_fault_park`]);
+    /// moved into `Fiber::fault_park` at the park and back at the resume.
+    fault_park: Option<frames::FaultPark>,
     /// `wait` (§6d) — the multi-channel analogue of `suspend`: the live arm-channel handles a blocking
     /// `wait:` parked the running fiber on. Set by [`Vm::op_wait_poll`]'s M:N snapshot-park, consumed
     /// by [`Vm::run_one_fiber`]'s dispatch (`Disp::WaitPark`), which files the fiber under every key
