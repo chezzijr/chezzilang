@@ -2,7 +2,7 @@
 //! lower through the compiler's name->opcode dispatch and have no entry here.
 //!
 //! `is_task_copy(v)` reads the airlock's own predicate, `Heap::is_copied`, the one every D4 write check
-//! reads before it calls `Vm::copied_write_err`. It lets std code (`std.concurrency.task`) choose between writing a
+//! reads before it calls `Vm::copied_write_err`. It lets std code (`std.concurrency`) choose between writing a
 //! value and reading through shared state without attempting the write and catching the fault.
 //!
 //! `task_copy_of(v)` (TICKET-220) returns `v` rebuilt as this task's copy under `Route::CopyRead`.
@@ -16,11 +16,19 @@ fn is_task_copy(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Bool(h.arg_is_task_copy(0)?))
 }
 
-/// TICKET-219 — a std internal: seal `submit_result`'s fresh cap-1 channel `args[0]` with the job's
+/// TICKET-219 — a std internal: seal `submit`'s fresh cap-1 channel `args[0]` with the job's
 /// outcome `args[1]`. The first writer wins; a later seal changes nothing.
 fn settle(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "_settle", 2)?;
     h.arg_settle_channel(0, 1)?;
+    Ok(NativeRet::Nil)
+}
+
+/// TICKET-289 — a std internal: cancel the one job of Executor `args[0]` whose Task channel is
+/// `args[1]` (`Task.cancel`).
+fn cancel_job(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "_cancel_job", 2)?;
+    h.arg_cancel_job(0, 1)?;
     Ok(NativeRet::Nil)
 }
 
@@ -43,6 +51,7 @@ fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
 pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("is_task_copy", is_task_copy, Kind::Inline),
     ("_settle", settle, Kind::Inline),
+    ("_cancel_job", cancel_job, Kind::Inline),
     ("is_settled", is_settled, Kind::Inline),
     ("task_copy_of", intercepted, Kind::InterceptAirlock),
 ];

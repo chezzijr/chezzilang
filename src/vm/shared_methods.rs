@@ -593,9 +593,9 @@ impl Vm {
     }
 
     /// `Executor` natives (C5/escape hatch): `_submit_settled` (start a job with its Task's channel;
-    /// a refused submit settles the Task instead of raising), `shutdown` (graceful: join the jobs),
-    /// `cancel` (discard pending, trip the cancel flag, join nothing) and `_cancel_job` (one job's
-    /// `Task.cancel()`). The executor handle is re-rooted on the operand stack across the drain, and
+    /// a refused submit settles the Task instead of raising), `shutdown` (graceful: join the jobs)
+    /// and `cancel` (discard pending, trip the cancel flag, join nothing). The executor handle is
+    /// re-rooted on the operand stack across the drain, and
     /// each popped task is rooted across its nested call (the receiver was popped in
     /// `do_method_call`).
     pub(super) fn executor_method(
@@ -618,17 +618,6 @@ impl Vm {
                 let cancel = self.err_wire(super::EXEC_CANCELLED_MSG)?;
                 let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 self.executor_submit(h, args[0], JobSettle { ch, cancel, flag }, span)?;
-                Ok(Value::nil())
-            }
-            // TICKET-289 — `Task.cancel()`: cancel the one job whose Task channel is `args[0]`.
-            ExecutorMethod::StdCancelJob => {
-                self.arity_err("_cancel_job", args, 1, span)?;
-                let ch = self.task_channel("_cancel_job", args[0], span)?;
-                if let Some(sched) = self.executor_core(h).sched() {
-                    sched.cancel_job(&ch);
-                }
-                // A cancel is a wake source too (TICKET-118, W13-8).
-                crate::vm::sched::poke_live_scheds(&self.sched_registry);
                 Ok(Value::nil())
             }
             ExecutorMethod::Shutdown => {
@@ -681,6 +670,16 @@ impl Vm {
             Some(Obj::Channel(core)) => Ok(Arc::clone(core)),
             _ => Err(self.err(format!("{method} requires a Channel"), span)),
         }
+    }
+
+    /// TICKET-289 — `Task.cancel()` (`std.concurrency._cancel_job`): cancel the one job of
+    /// Executor `h` whose Task channel is `ch`. A job that already ended is a no-op.
+    pub(super) fn cancel_task_job(&self, h: GcRef, ch: &Arc<ChannelCore>) {
+        if let Some(sched) = self.executor_core(h).sched() {
+            sched.cancel_job(ch);
+        }
+        // A cancel is a wake source too (TICKET-118, W13-8).
+        crate::vm::sched::poke_live_scheds(&self.sched_registry);
     }
 
     /// `Result.Err(msg)` as a wire value: what a Task's channel is sealed with when its job ends

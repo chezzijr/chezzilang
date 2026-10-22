@@ -1959,10 +1959,10 @@ fn rwshared_map_set_key_is_not_linear() {
 }
 
 /// TICKET-194 X1: an op that does not wait is not a cancellation point. A job that already returned
-/// 7 must deliver it even when `shutdown_now()` lands before its `out.send(v)` (a send into a buffer
-/// with room never waits). Go and CPython keep a finished job's result.
+/// 7 must deliver it when `ex.cancel()` lands after the job returned (TICKET-289: a Task outcome
+/// settles once, so a later cancel changes nothing). Go and CPython keep a finished job's result.
 #[test]
-fn returned_job_keeps_its_result_across_shutdown_now() {
+fn returned_job_keeps_its_result_across_cancel() {
     let src = r#"
 import Executor from std.concurrency
 lost := 0
@@ -1972,20 +1972,19 @@ for _ in 0..20:
     fn job() -> int:
         v := gate.recv()
         return v
-    out := ex.submit_result(job)
+    t := ex.submit(job)
     gate.send(7)
-    ex.shutdown_now()
-    match out.try_recv():
-        ?(?_): pass
-        ?(!_): lost += 1
-        None: lost += 1
+    match t.get():
+        ?_: pass
+        !_: lost += 1
+    ex.cancel()
+    match t.get():
+        ?v: lost += v - 7
+        !_: lost += 1
 print("lost={lost}")
 "#;
     let out = pmap_both("t194_x1", src);
-    assert_eq!(
-        out, "lost=0\n",
-        "a returned job's result was cut by shutdown_now"
-    );
+    assert_eq!(out, "lost=0\n", "a returned job's result was cut by cancel");
 }
 
 /// TICKET-195 C2: a child's panic must be reported when the owner's `defer: ch.recv()` can never

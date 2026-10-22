@@ -1111,7 +1111,7 @@ fn golden_shared_chz_matches_expected_and_interp() {
 }
 
 /// C5 golden: the `Executor` escape hatch — submit/shutdown (FIFO drain), `defer ex.shutdown()`,
-/// shutdown_now (discard). Byte-identical on the VM, the interpreter, and the `.expected` file.
+/// cancel (discard). Byte-identical on the VM, the interpreter, and the `.expected` file.
 #[test]
 fn golden_executor_chz_matches_expected_and_interp() {
     let src = include_str!("../../../examples/executor.chz");
@@ -1233,11 +1233,12 @@ fn executor_submit_runs_fifo_at_shutdown() {
 }
 
 #[test]
-fn executor_submit_after_shutdown_errors() {
-    let src = "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.shutdown()\n    ex.submit(fn(): print(1))\nmain()\n";
-    let err = run_err(src);
-    assert!(err.contains("shut-down Executor"), "got: {err}");
-    // Parity: same fault message on the interpreter.
-    let interp = run_capture(src).expect_err("interp should fault").message;
-    assert_eq!(err, interp, "VM/interp error divergence");
+fn executor_submit_after_shutdown_settles_the_task_with_the_refusal() {
+    // TICKET-289: the refused submit returns an already-settled Task; the run does not fault.
+    let src = "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.shutdown()\n    t := ex.submit(fn(): print(1))\n    match t.get():\n        ?_: print(\"ran\")\n        !e: print(e.message())\nmain()\n";
+    let out = run_capture(src).expect("a refused submit must not fault the run");
+    assert_eq!(
+        out,
+        "submit on a shut-down Executor (it no longer accepts work)\n"
+    );
 }

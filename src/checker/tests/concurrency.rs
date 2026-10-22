@@ -895,9 +895,9 @@ fn executor_construct_and_methods_ok() {
 }
 
 #[test]
-fn executor_shutdown_now_ok() {
+fn executor_cancel_ok() {
     entry_ok(
-        "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.shutdown_now()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.cancel()\nmain()\n",
     );
 }
 

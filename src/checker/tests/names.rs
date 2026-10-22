@@ -184,7 +184,7 @@ struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs
         wrong.len(),
         wrong.join("\n")
     );
-    // Executor has no `map` (`std/concurrency.chz` declares submit/submit_result).
+    // Executor has no `map` (`std/concurrency.chz` declares submit/cancel/shutdown).
     files_reject(
         &[(
             "main.chz",
@@ -195,7 +195,7 @@ struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs
 }
 
 /// TICKET-219: `submit_outcome(f, out)` is deleted. It sealed a caller's channel, which may be
-/// full, unbuffered, or fanned in from several jobs; `submit_result` returns std's own channel.
+/// full, unbuffered, or fanned in from several jobs; `submit` returns a Task that owns its channel.
 #[test]
 fn executor_has_no_submit_outcome() {
     files_reject(

@@ -1371,7 +1371,7 @@ fn concurrency_sig_from_file_not_native_module_sig() {
             "AtomicInt",
             &["load", "store", "exchange", "cas", "add", "sub"],
         ),
-        ("Executor", &["submit", "shutdown", "shutdown_now"]),
+        ("Executor", &["submit", "shutdown", "cancel"]),
     ];
     for (tname, methods) in expected {
         let info = sig
@@ -1390,8 +1390,8 @@ fn concurrency_sig_from_file_not_native_module_sig() {
 
 /// METADATA PORT (phase 4c-concurrency) — two method sigs a plain harvested sig cannot express are
 /// re-attached in `attach_native_module_metadata`: `RwShared.read`'s closure param becomes `fn(T) -> ?`
-/// (any return; R recovered at the call site) and `Executor.submit`'s becomes `fn() -> ?` (any return,
-/// zero-arity). The GENERIC `Shared[T]`/`RwShared[T]`/`Atomic[T]` method sigs carry `Ty::Param("T")` so
+/// (any return; R recovered at the call site). `Executor.submit[T]` (TICKET-289) takes the zero-arity `fn() -> T`
+/// and returns `Task[T]`. The GENERIC `Shared[T]`/`RwShared[T]`/`Atomic[T]` method sigs carry `Ty::Param("T")` so
 /// they substitute at each call site (the net-style native-method-binding capability extended to generics).
 #[test]
 fn concurrency_harvested_method_sigs_shape() {
@@ -1417,9 +1417,13 @@ fn concurrency_harvested_method_sigs_shape() {
     match submit.params.first() {
         Some(Ty::Func { params, ret, .. }) => {
             assert!(params.is_empty(), "submit closure must be zero-arity");
-            assert_eq!(**ret, Ty::Unknown, "submit closure return must be ? (any)");
+            assert_eq!(
+                **ret,
+                Ty::Param("T".into()),
+                "submit closure return is the Task's T"
+            );
         }
-        other => panic!("Executor.submit param 0 must be fn() -> ?, got: {other:?}"),
+        other => panic!("Executor.submit param 0 must be fn() -> T, got: {other:?}"),
     }
 }
 
@@ -1493,11 +1497,11 @@ fn concurrency_methods_resolve_via_harvested_table_with_subst() {
 #[test]
 fn executor_submit_accepts_any_return_rejects_arity() {
     entry_ok(
-        "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.submit(fn(): 42)\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    t := ex.submit(fn(): 42)\n    print(t.get())\n    ex.shutdown()\nmain()\n",
     );
     entry_rejects(
         "import Executor from std.concurrency\nfn main():\n    ex := Executor()\n    ex.submit(fn(x): x)\nmain()\n",
-        "argument 1 of 'submit'",
+        "argument to 'submit'",
     );
 }
 

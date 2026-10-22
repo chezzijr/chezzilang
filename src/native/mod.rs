@@ -448,6 +448,14 @@ pub trait Host {
             message: "this host does not support channel settles".into(),
         })
     }
+    /// TICKET-289 — cancel the one job of the Executor `args[ex]` whose Task channel is `args[ch]`
+    /// (`std.concurrency._cancel_job`). The default errors, as [`Host::arg_is_task_copy`]'s does.
+    fn arg_cancel_job(&mut self, ex: usize, ch: usize) -> Result<(), HostError> {
+        let _ = (ex, ch);
+        Err(HostError {
+            message: "this host does not support job cancels".into(),
+        })
+    }
     /// TICKET-219 — whether the channel `args[i]` is sealed (`std.concurrency.is_settled`). The
     /// default errors, as [`Host::arg_is_task_copy`]'s does.
     fn arg_channel_settled(&self, i: usize) -> Result<bool, HostError> {
@@ -1047,12 +1055,13 @@ mod tests {
             Some("std.concurrency")
         );
         // ...and its callable members are is_task_copy (TICKET-191), the handle-channel pair
-        // _settle / is_settled (TICKET-219), and task_copy_of (TICKET-220).
+        // _settle / is_settled (TICKET-219), _cancel_job (TICKET-289), and task_copy_of (TICKET-220).
         assert_eq!(
             kinds("std.concurrency"),
             [
                 ("is_task_copy", Kind::Inline),
                 ("_settle", Kind::Inline),
+                ("_cancel_job", Kind::Inline),
                 ("is_settled", Kind::Inline),
                 ("task_copy_of", Kind::InterceptAirlock)
             ]

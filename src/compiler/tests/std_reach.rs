@@ -133,9 +133,9 @@ const ROWS: &[Row] = &[
         skipped: &["parse", "since"],
     },
     // a file-backed native module is not gated: `run_outcome`, called only from the method
-    // `Executor.submit_result`, is kept
+    // `Executor.submit`, is kept
     Row {
-        src: "import std.concurrency\nex := concurrency.Executor()\nprint(ex.submit_result(fn() -> int: 1).recv())\nex.shutdown()\n",
+        src: "import std.concurrency\nex := concurrency.Executor()\nprint(ex.submit(fn() -> int: 1).get())\nex.shutdown()\n",
         module: &["std", "concurrency"],
         kept: &["run_outcome"],
         skipped: &[],

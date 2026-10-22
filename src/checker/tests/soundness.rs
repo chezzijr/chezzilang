@@ -1597,7 +1597,7 @@ fn rwshared_readview_nongeneric_method_turbofish_rejected() {
     );
 }
 
-// ===== FIX 1b — a BODIED generic method on a concurrency handle (`Executor.submit_result[T]`) opens
+// ===== FIX 1b — a BODIED generic method on a concurrency handle (`Executor.submit[T]`) opens
 // its own `[T]` and infers T from the closure return, instead of failing "expected fn()->T, found
 // fn()->int". Before the fix the `Ty::Executor` arm only `native_handle_method`+`check_args_range`,
 // so a harvested sig carrying `[T]` never routed through `infer_generic_method`. =====
@@ -1607,9 +1607,9 @@ fn executor_bodied_generic_method_infers_from_closure() {
         "import Executor from std.concurrency\n\
          fn main():\n\
          \x20   ex := Executor()\n\
-         \x20   ch := ex.submit_result(fn() -> int: 5)\n\
+         \x20   t := ex.submit(fn() -> int: 5)\n\
          \x20   ex.shutdown()\n\
-         \x20   print(ch.recv())\n\
+         \x20   print(t.get())\n\
          main()\n",
     );
 }

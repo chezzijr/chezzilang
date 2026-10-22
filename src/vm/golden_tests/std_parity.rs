@@ -951,7 +951,7 @@ fn golden_hello_via_run_file() {
 
 /// `examples/concurrent_jobs.chz` — the self-verifying concurrency stress test that deliberately
 /// touches EVERY concurrency primitive (Channel incl. bounded-cap/try_send backpressure, wait:,
-/// parallel: nursery, spawn, Executor incl. submit_result, Shared/RwShared/Atomic, concurrent
+/// parallel: nursery, spawn, Executor incl. submit, Shared/RwShared/Atomic, concurrent
 /// collections, cancel, timer, and the airlock). It is deterministic by construction, so it is two
 /// tests at once: the 49 self-checks must all PASS, and the output must byte-match `.expected`.
 #[test]

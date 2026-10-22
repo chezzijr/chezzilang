@@ -287,7 +287,7 @@ struct Suite:
 // `chz_suite_passes` moved to `tests/chz_suite.rs` (Task 7b): `vm::pool` is one process-wide
 // `OnceLock`, and running the whole `tests/chz` dogfood suite inside this shared lib-test binary
 // meant it contended with ~4150 unrelated tests for that one pool under `RUST_TEST_THREADS=4` —
-// measured 8/8 failures on `shutdown_now_interrupts_a_sleeping_job`'s wall-clock bound
+// measured 8/8 failures on `cancel_interrupts_a_sleeping_job`'s wall-clock bound
 // (`tests/chz/stdlib/sleep_cancel_test.chz:45`). A dedicated integration-test binary gets the
 // pool to itself (cargo runs test binaries one at a time), matching the same fix already applied
 // to `executor_results_not_retained.rs` / `executor_reentrant_shutdown.rs` / `chezzi_threads_cli.rs`.
@@ -1520,7 +1520,7 @@ fn timeout_aborts_a_sleeping_test_everywhere() {
     // The fixtures are DIFFERENT mechanisms, which is why one is not enough: the top-level sleep
     // blocks the test's own thread inline, the nursery sleep rides the M:N timer offload (its own
     // re-arm loop), and the executor sleep runs on an eager job with no scheduler under it.
-    // `shutdown()` is graceful ON PURPOSE — `shutdown_now()` would end the job by CANCEL and stop
+    // `shutdown()` is graceful ON PURPOSE — `cancel()` would end the job by CANCEL and stop
     // testing the deadline at all.
     //
     // W7-17 — the last two fixtures are the PARK mechanism, the one W7-16 left open and this test

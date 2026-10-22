@@ -9,9 +9,9 @@ import Executor from std.concurrency
 fn main():
     out := Channel[int]()
     ex := Executor()
-    ex.submit(fn(): out.send(30))     # captures `out` (Channel, sendable); runs on a pool thread
-    ex.submit(fn(): out.send(10))
-    ex.submit(fn(): out.send(20))
+    _ := ex.submit(fn(): out.send(30))     # captures `out` (Channel, sendable); runs on a pool thread
+    _ := ex.submit(fn(): out.send(10))
+    _ := ex.submit(fn(): out.send(20))
     ex.shutdown()                     # drains the three tasks onto the pool and joins them
     nums: List[int] = []
     for _ in 0..3:

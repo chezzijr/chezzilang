@@ -333,6 +333,24 @@ impl crate::native::Host for VmHost<'_> {
         }
         Ok(())
     }
+    fn arg_cancel_job(&mut self, ex: usize, ch: usize) -> Result<(), crate::native::HostError> {
+        let Some(ev) = self.args.get(ex).copied() else {
+            return Err(crate::native::HostError::missing_arg(ex));
+        };
+        let h = match ev.as_obj() {
+            Some(h) if matches!(self.vm.heap.get(h), Obj::Executor(_)) => h,
+            _ => {
+                return Err(crate::native::HostError::arg_type(
+                    ex,
+                    "Executor",
+                    self.vm.type_name(ev),
+                ));
+            }
+        };
+        let core = self.vm.channel_core(self.arg_channel(ch)?);
+        self.vm.cancel_task_job(h, &core);
+        Ok(())
+    }
     fn arg_channel_settled(&self, i: usize) -> Result<bool, crate::native::HostError> {
         let h = self.arg_channel(i)?;
         let core = self.vm.channel_core(h);

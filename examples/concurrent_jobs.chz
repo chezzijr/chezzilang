@@ -10,7 +10,7 @@
 # It deliberately touches EVERY concurrency primitive Chezzi offers:
 #   Channel (send/recv/try_send/try_recv/close/len/cap/for-drain, unbounded + bounded-cap backpressure) ·
 #   wait: (recv / = / _ / else / timer / cancel-done arms) · parallel: nursery · spawn expr + spawn:
-#   block · Executor (submit/submit_result/shutdown) ·
+#   block · Executor (submit/cancel/shutdown) ·
 #   Shared · RwShared · Atomic · std.concurrency.collection (ConcurrentMap/ConcurrentCounter) ·
 #   std.cancel (manual/timeout/derive/done/cancelled/reason/cancel) · std.time.timer · defer cleanup ·
 #   and the airlock: recursive-closure + protocol-existential + mid-`recover:` generator crossing.
@@ -231,7 +231,7 @@ fn main():
     for s in 0..shards:
         lo := s * per
         hi := lo + per
-        ex.submit(fn(): shard_fold(lo, hi, out))
+        _ := ex.submit(fn(): shard_fold(lo, hi, out))
     ex.shutdown()                          # drains the queue FIFO; partials land on `out`
     checksum := 0
     for _ in 0..shards:
@@ -240,14 +240,14 @@ fn main():
     for i in 0..n:
         seq_checksum = seq_checksum + value(i) * (i + 1)
     check("p2.checksum", checksum, seq_checksum)
-    # submit_result: bodied generic method on Executor — hands back a Channel[T!] carrying f()'s outcome
+    # submit hands back a Task[T]: `t.get()` is `?value`, or `!message` for the job's fault
     # (deterministic value; the work runs on the pool and the result lands on drain).
     ex2 := concurrency.Executor()
-    rc := ex2.submit_result(fn() -> int: value(7) * 8)
+    rc := ex2.submit(fn() -> int: value(7) * 8)
     ex2.shutdown()
-    match rc.recv():
-        ?v: check("p2.submit_result", v, value(7) * 8)
-        !_: check("p2.submit_result", -1, value(7) * 8)
+    match rc.get():
+        ?v: check("p2.submit", v, value(7) * 8)
+        !_: check("p2.submit", -1, value(7) * 8)
 
     print("== Phase 3a: polymorphic Jobs w/ recursive closures crossing Channel[Job] ==")
     jobs3: Channel[Job] = Channel[Job]()

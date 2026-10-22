@@ -905,21 +905,19 @@ fn pmap_limited_bounds_in_flight_both_engines() {
     assert_eq!(pmap_both("pmap_bound", src), "true\n");
 }
 
-/// `std.concurrency.task` — `submit_task` returns a `Task[T]` handle whose `.get()`, awaited in
-/// SUBMISSION order, is byte-identical serial vs M:N (the value is deterministic; only timing varies).
+/// `Executor.submit` returns a `Task[T]` handle whose `.get()`, awaited in SUBMISSION order, is
+/// byte-identical serial vs M:N (the value is deterministic; only timing varies).
 #[test]
 fn task_submit_get_submission_order_both_engines() {
-    let src = "import std.concurrency\n\
-               import submit_task from std.concurrency.task\n\
-               import Task from std.concurrency.task\n\
+    let src = "import Executor, Task from std.concurrency\n\
                fn work(n: int) -> int:\n\
                \x20   return n * n\n\
                fn main():\n\
-               \x20   ex := concurrency.Executor()\n\
+               \x20   ex := Executor()\n\
                \x20   ts: List[Task[int]] = []\n\
                \x20   for i in 1..6:\n\
                \x20       x := i\n\
-               \x20       ts.push(submit_task(ex, fn() -> int: work(x)))\n\
+               \x20       ts.push(ex.submit(fn() -> int: work(x)))\n\
                \x20   ex.shutdown()\n\
                \x20   for t in ts:\n\
                \x20       match t.get():\n\
@@ -933,11 +931,10 @@ fn task_submit_get_submission_order_both_engines() {
 /// one-shot channel again, which would block forever). `.done()` is true once the result is in hand.
 #[test]
 fn task_get_idempotent_and_done_both_engines() {
-    let src = "import std.concurrency\n\
-               import submit_task from std.concurrency.task\n\
+    let src = "import Executor from std.concurrency\n\
                fn main():\n\
-               \x20   ex := concurrency.Executor()\n\
-               \x20   t := submit_task(ex, fn() -> int: 42)\n\
+               \x20   ex := Executor()\n\
+               \x20   t := ex.submit(fn() -> int: 42)\n\
                \x20   ex.shutdown()\n\
                \x20   print(t.done())\n\
                \x20   match t.get():\n\
@@ -949,30 +946,6 @@ fn task_get_idempotent_and_done_both_engines() {
                \x20   print(t.done())\n\
                main()\n";
     assert_eq!(pmap_both("task_idem", src), "true\n42\n42\ntrue\n");
-}
-
-/// FIX 2 — `Executor.submit_result[T]` is a BODIED generic method on a native struct; its runtime
-/// dispatch goes through `try_native_bodied_method` (newly wired into the `Executor` arm of
-/// `do_method_call`). Submit a few results, drain the returned cap-1 channels in SUBMISSION order,
-/// byte-identical serial vs M:N.
-#[test]
-fn executor_submit_result_both_engines() {
-    let src = "import Executor from std.concurrency\n\
-               fn work(n: int) -> int:\n\
-               \x20   return n * n\n\
-               fn main():\n\
-               \x20   ex := Executor()\n\
-               \x20   chs: List[Channel[int!]] = []\n\
-               \x20   for i in 1..6:\n\
-               \x20       x := i\n\
-               \x20       chs.push(ex.submit_result(fn() -> int: work(x)))\n\
-               \x20   ex.shutdown()\n\
-               \x20   for ch in chs:\n\
-               \x20       match ch.recv():\n\
-               \x20           ?v: print(v)\n\
-               \x20           !e: print(e.message())\n\
-               main()\n";
-    assert_eq!(pmap_both("submit_result", src), "1\n4\n9\n16\n25\n");
 }
 
 /// Call-flattening × M:N parking: a fiber that `recv`-parks **several flattened plain-function

@@ -43,30 +43,31 @@ print("job done? {done.try_recv()}")
     assert!(out.contains("job done? 1"), "job was stopped: out={out:?}");
 }
 
-/// TICKET-195 C3: an Executor job's fault outranks the deadlock verdict of a main that waits on a
-/// channel the job would have sent. Go prints the job's index panic.
+/// TICKET-289 (replaces TICKET-195 C3, where the job's index panic outranked the deadlock verdict):
+/// an Executor job's fault stays in its Task. A main that waits on a channel the faulted job would
+/// have sent gets the deadlock verdict, and the job's fault is in `t.get()`.
 #[test]
-fn unjoined_job_fault_outranks_a_main_deadlock() {
+fn an_unread_job_fault_does_not_outrank_a_main_deadlock() {
     let src = r#"import Executor from std.concurrency
 ch := Channel[int](0)
 fn work(xs: List[int]):
     ch.send(xs[5])
 ex := Executor()
-ex.submit(fn(): work([1, 2]))
+t := ex.submit(fn(): work([1, 2]))
 print(ch.recv())
 ex.shutdown()
 "#;
     let entry = write_temp_chz("t195_c3", src);
     let (_out, _err, res, _code) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
-    let msg = res.expect_err("expected a fault").message;
+    let msg = res.expect_err("expected the deadlock verdict").message;
     assert!(
-        msg.contains("index 5 out of bounds"),
-        "job fault lost, got: {msg}"
+        msg.contains("deadlock"),
+        "the unread job fault must not replace the verdict: {msg}"
     );
     assert!(
-        !msg.contains("deadlock"),
-        "verdict outranked the job fault: {msg}"
+        !msg.contains("index 5 out of bounds"),
+        "the job fault must stay in its Task: {msg}"
     );
 }
 
@@ -388,13 +389,14 @@ fn a_cut_job_handle_is_sealed_in_the_lock_hold_that_ends_the_job() {
         JobSettle {
             ch: Arc::clone(&ch),
             cancel: WireValue::Int(7),
+            flag: Arc::new(AtomicBool::new(false)),
         },
     );
     let _step = c.job_event(
         JobEvent::Ended {
             task_index: 0,
             scope_id: 0,
-            done: false,
+            seal: JobSeal::Cancel,
         },
         RunHalt::Running,
     );
@@ -457,9 +459,10 @@ fn every_way_out_of_the_counts_moves_the_epoch() {
                 JobSettle {
                     ch: empty_core(),
                     cancel: WireValue::Int(7),
+                    flag: Arc::new(AtomicBool::new(false)),
                 },
             );
-            c.settle_job(0, true, &mut JobStep::default());
+            c.settle_job(0, JobSeal::Cancel, &mut JobStep::default());
         }),
     ];
     for (name, leave) in rows {
@@ -493,9 +496,10 @@ fn a_cut_job_seal_moves_the_epoch_after_the_seal() {
                 JobSettle {
                     ch: Arc::clone(&ch),
                     cancel: WireValue::Int(7),
+                    flag: Arc::new(AtomicBool::new(false)),
                 },
             );
-            c.settle_job(0, true, &mut JobStep::default());
+            c.settle_job(0, JobSeal::Cancel, &mut JobStep::default());
         });
         // Until the cutter holds the sched lock; it then blocks at the seal, on `q`.
         while sched.core.try_lock().is_ok() {

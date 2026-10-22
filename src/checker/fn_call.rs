@@ -203,7 +203,7 @@ impl Checker {
                 .is_some_and(|sig| !sig.type_params.is_empty()),
             // Reserved built-in receiver types: their harvested methods live in the re-seeded bare
             // `structs` tables (setup.rs phases 4c/5a), same as a user struct. Without these arms a
-            // shipped generic method (`[1,2,3].map[int](...)`, `ex.submit_result[T](...)`) was told it
+            // shipped generic method (`[1,2,3].map[int](...)`, `ex.submit[T](...)`) was told it
             // "declares no own type parameters" and its member turbofish was an arity error.
             Ty::List(_)
             | Ty::Map(_, _)

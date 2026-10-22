@@ -1,6 +1,6 @@
 # golden: unordered — the jobs and main print concurrently; neither line's position is causally forced.
 # C5 concurrency: program-exit join. An `Executor` is DETACHED — it outlives the scope that created
-# it, and work you submit but never explicitly `shutdown`/`shutdown_now` is still waited for at program
+# it, and work you submit but never explicitly `shutdown`/`cancel` is still waited for at program
 # exit, exactly as a top-level `defer ex.shutdown()` would. Without this the program could exit with
 # its jobs half-done. Matches Python's `ThreadPoolExecutor` (its worker threads are joined at
 # interpreter exit) and Java's `ExecutorService`. `os.exit` stays a hard halt and does NOT join.
@@ -20,8 +20,8 @@ fn job(id: int, done: Atomic[int], total: int):
 fn main():
     ex := Executor()
     done := Atomic(0)
-    ex.submit(fn(): job(1, done, 3))
-    ex.submit(fn(): job(2, done, 3))
+    _ := ex.submit(fn(): job(1, done, 3))
+    _ := ex.submit(fn(): job(2, done, 3))
     print("main() done; executor never shut down")
     # No ex.shutdown() — the runtime waits for the submitted work at program exit.
 

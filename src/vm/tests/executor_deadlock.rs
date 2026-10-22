@@ -3,21 +3,22 @@
 
 use super::*;
 
-/// `shutdown_now` is "attempts to stop" (decision D4) — COOPERATIVE, not preemptive, exactly like
+/// `cancel` is "attempts to stop" (decision D4) — COOPERATIVE, not preemptive, exactly like
 /// Java's `shutdownNow`. The M:N engine starts the job at its `submit`, so by the time
-/// `shutdown_now` trips the cancel flag the job may already have run to completion — a job with no
+/// `cancel` trips the cancel flag the job may already have run to completion — a job with no
 /// cancellation point in it (this one is a single `print`) cannot be stopped at all. So the only
-/// thing assertable is that `shutdown_now` returns promptly and the program finishes.
+/// thing assertable is that `cancel` returns promptly and the program finishes. `cancel` does not
+/// wait (TICKET-289), so a job that ran on prints after `main`'s `0`.
 ///
 /// Asserting the result as a SET rather than a sequence is what keeps this honest: pinning it to
 /// either outcome would encode a race as a guarantee.
 #[test]
-fn executor_shutdown_now_is_cooperative_not_preemptive() {
-    let src = "import Executor from std.concurrency\nfn j():\n    print(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    ex.shutdown_now()\n    print(0)\nmain()\n";
+fn executor_cancel_is_cooperative_not_preemptive() {
+    let src = "import Executor from std.concurrency\nfn j():\n    print(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): j())\n    ex.cancel()\n    print(0)\nmain()\n";
     let mn = run_capture(src).expect("mn run");
     assert!(
-        mn == "0\n" || mn == "99\n0\n",
-        "shutdown_now must either stop the job or let it finish, never anything else; got {mn:?}"
+        mn == "0\n" || mn == "99\n0\n" || mn == "0\n99\n",
+        "cancel must either stop the job or let it finish, never anything else; got {mn:?}"
     );
 }
 
@@ -1034,7 +1035,7 @@ print(\"done\")
 ///    the bug this file now fixes, not a property of the program. The job was waiting for
 ///    `outstanding` to reach 0 while being the only thing keeping it above 0 — waiting for itself.
 ///    `Vm::join_executor` now discounts the joiner's own slot, so that program is healthy (it is
-///    the `shutdown_now`-from-inside-its-own-job shape, which CPython 3.14.6 completes: measured
+///    the `cancel`-from-inside-its-own-job shape, which CPython 3.14.6 completes: measured
 ///    `A\nC\nend`, rc 0, 40/40) and this test would have been pinning the false fault in place.
 ///
 /// **TWO jobs of ONE executor, each joining it**, keeps every virtue of cut 3 and is a genuine
@@ -1179,8 +1180,9 @@ fn a_self_shut_executor_still_has_its_slots_reduced_at_program_exit() {
         "a self-shut executor's buffered job output must survive to the captured stdout"
     );
 
-    // The same hand-off carries FAULTS: a swallowed one exits 0 on a program that failed.
-    let (_out, res) = run_program(
+    // The same hand-off carries FAULTS: a sibling's assertion failure must reach its Task
+    // (TICKET-289: it no longer ends the run), not be dropped by the self-shut hand-off.
+    let (out, res) = run_program(
         "
 import Executor from std.concurrency
 ex := Executor()
@@ -1190,20 +1192,24 @@ fn closer():
     done.send(1)
 fn boom():
     assert 1 == 2
-ex.submit(boom)
-ex.submit(closer)
+t := ex.submit(boom)
+_ := ex.submit(closer)
 done.recv()
+match t.get():
+    ?_: print(\"no fault\")
+    !e: print(\"task fault: {e.message()}\")
 ",
     );
-    let msg = res
-        .expect_err("the sibling job's assertion failure must reach the run, not be dropped")
-        .message;
-    assert!(msg.contains("assertion failed"), "fault was: {msg}");
+    res.expect("a job fault must not end the run");
+    assert!(
+        out.contains("task fault: assertion failed"),
+        "the sibling job's assertion failure must reach its Task: {out:?}"
+    );
 }
 
-/// W7-60 — an `Executor.shutdown_now()` must reach a job that is itself parked in an INNER
+/// W7-60 — an `Executor.cancel()` must reach a job that is itself parked in an INNER
 /// `shutdown()`. Before this, `join_executor` observed only the deadlock verdict, so the inner
-/// join was uncancellable and the outer `shutdown_now` waited for work it had just asked to stop.
+/// join was uncancellable and the outer `cancel` waited for work it had just asked to stop.
 ///
 /// **The inner job is deliberately uninterruptible.** `process.run` is documented as having no
 /// cancellation checkpoint until it returns (`docs/reference/stdlib/` §std.process), so the ONLY party that
@@ -1221,7 +1227,7 @@ done.recv()
 /// Depends on eager dispatch (a lazy queue-at-`submit` model has no running job to cancel) +
 /// watchdogged, for the reasons on the tests above.
 #[test]
-fn shutdown_now_cancels_a_job_parked_in_a_nested_executor_join() {
+fn cancel_cancels_a_job_parked_in_a_nested_executor_join() {
     let src = "
 import Executor, Shared from std.concurrency
 import std.process
@@ -1245,7 +1251,7 @@ ex := Executor()
 ex.submit(nested)
 _ := joining.recv()
 print(\"inner still running: \" + str(not sleep_over.get()))
-ex.shutdown_now()
+ex.cancel()
 print(\"main done\")
 ";
     let entry = write_temp_chz("w760_cancel_nested_join", src);
@@ -1259,7 +1265,7 @@ print(\"main done\")
     });
     let (out, _err, res, _code) = rx
         .recv_timeout(std::time::Duration::from_secs(60))
-        .expect("shutdown_now must not wait out an uninterruptible nested job");
+        .expect("cancel must not wait out an uninterruptible nested job");
     let _ = std::fs::remove_file(&entry);
     res.expect("the program itself completes normally");
     assert!(
@@ -1268,14 +1274,14 @@ print(\"main done\")
     );
     // A swallowed-print assertion alone cannot separate the W7-60 defect from host starvation: both
     // print the same three lines when main is starved past the fixture's 2s sleep before it can call
-    // `shutdown_now` (measured 2026-09-05). `sleep_over`, read immediately before `shutdown_now`, is
+    // `cancel` (measured 2026-09-05). `sleep_over`, read immediately before `cancel`, is
     // the one instant that tells them apart -- checking the host precondition directly, the same
     // shape as the skip on `a_self_shut_executor_still_has_its_slots_reduced_at_program_exit`
     // (TICKET-059).
     if out.contains("inner still running: false") {
         eprintln!(
             "SKIP: the host starved main past the fixture's 2 s sleep -- the joiner had already \
-             left the inner join before shutdown_now was called: {out:?}"
+             left the inner join before cancel was called: {out:?}"
         );
         return;
     }
@@ -1448,8 +1454,11 @@ fn closer():
     _2 := time.timer(50).recv()
     ch.close()
 ex := Executor()
-ex.submit(blocker)
-ex.submit(closer)
+t := ex.submit(blocker)
+_ := ex.submit(closer)
+match t.get():
+    ?_: print(\"blocker ok\")
+    !e: print(\"task fault: {e.message()}\")
 ";
     let entry = write_temp_chz("w713c_send_sees_close", src);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1478,14 +1487,15 @@ ex.submit(closer)
         "the first send must have succeeded, or this test is not exercising the blocked path: \
          out={out:?} r={rdbg}"
     );
+    // TICKET-289: the job's fault lives in its Task, so the run itself ends clean.
     assert!(
-        failed,
-        "the send must fault, not succeed: out={out:?} r={rdbg}"
+        !failed,
+        "a job fault must not end the run: out={out:?} r={rdbg}"
     );
     assert!(
-        rdbg.contains("send on a closed channel"),
-        "the fault must name the CLOSE, not a full-channel deadlock (that was the wrong answer this \
-         fixed): {rdbg}"
+        out.contains("task fault: send on a closed channel"),
+        "the Task must hold the CLOSE fault, not a full-channel deadlock (that was the wrong answer \
+         this fixed): out={out:?} r={rdbg}"
     );
     assert!(
         !out.contains("blocker finished"),
@@ -1904,17 +1914,17 @@ ex.shutdown()
 /// `std::thread::sleep(deadline - now)` observes nothing. `op_wait_poll`'s cancellation checkpoint is
 /// at the top of the op, so it can only fire if something returns to the dispatch loop — and the
 /// inline-sleep never did until the deadline had passed, at which point it TOOK the timer arm. So
-/// `shutdown_now()` (D4's cooperative stop) could not interrupt `wait:` over `timer(3000)`:
+/// `cancel()` (D4's cooperative stop) could not interrupt `wait:` over `timer(3000)`:
 ///
 /// | | before | after |
 /// |---|---|---|
-/// | `shutdown_now()` at 50 ms, job waiting on `timer(3000)` | `timer` printed, exit @ **3007 ms** | nothing printed, exit @ **57 ms** |
+/// | `cancel()` at 50 ms, job waiting on `timer(3000)` | `timer` printed, exit @ **3007 ms** | nothing printed, exit @ **57 ms** |
 ///
 /// Measured on release binaries built in separate target dirs. The block-in-place path re-checks
 /// `block_halt_check` (cancel included) once per tick, so the cancel now lands within one
 /// `DEMOTE_POLL_BACKOFF` instead of one timer deadline — and the arm body never runs.
 #[test]
-fn a_timer_armed_eager_wait_is_cancellable_by_shutdown_now() {
+fn a_timer_armed_eager_wait_is_cancellable_by_cancel() {
     let src = "
 import Executor from std.concurrency
 import std.time\nimport timer from std.time
@@ -1931,7 +1941,7 @@ fn cons():
 ex := Executor()
 ex.submit(cons)
 _ := ready.recv()
-ex.shutdown_now()
+ex.cancel()
 print(\"main done\")
 ";
     let entry = write_temp_chz("w714_cancel_timer_arm", src);
@@ -2116,7 +2126,7 @@ print("main done")
     }
 }
 
-/// `shutdown_now()` must reach a job running inside a NESTED executor, not just the job it submitted
+/// `cancel()` must reach a job running inside a NESTED executor, not just the job it submitted
 /// directly.
 ///
 /// `spawn_into` was the one seam in the tree that installed a cancel token WITHOUT the
@@ -2136,7 +2146,7 @@ print("main done")
 /// cancel. Wall-clock asserted under a `recv_timeout`
 /// watchdog so a regression FAILS loud instead of hanging the suite for 8 s a run.
 #[test]
-fn nested_executor_job_is_cancelled_by_an_outer_shutdown_now_mn() {
+fn nested_executor_job_is_cancelled_by_an_outer_cancel_mn() {
     let src = r#"
 import Executor from std.concurrency
 import std.time
@@ -2154,10 +2164,10 @@ fn outer():
 ex := Executor()
 ex.submit(outer)
 _ := started.recv()
-ex.shutdown_now()
+ex.cancel()
 print("done")
 "#;
-    let entry = write_temp_chz("nested_shutdown_now", src);
+    let entry = write_temp_chz("nested_cancel", src);
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -2167,26 +2177,26 @@ print("done")
     let result = rx.recv_timeout(std::time::Duration::from_secs(30));
     let _ = std::fs::remove_file(&entry);
     let (out, _err, res, _code) =
-        result.expect("hung: an outer shutdown_now never reached the nested executor's job");
+        result.expect("hung: an outer cancel never reached the nested executor's job");
     assert!(res.is_ok(), "the program faulted: {res:?}");
     assert!(
         !out.contains("nap finished"),
-        "the nested job outlived the outer shutdown_now: {out:?}"
+        "the nested job outlived the outer cancel: {out:?}"
     );
     assert!(
         !out.contains("outer finished"),
-        "the outer shutdown_now did not cancel its own job: {out:?}"
+        "the outer cancel did not cancel its own job: {out:?}"
     );
     assert!(out.contains("done"), "main must still finish: {out:?}");
 }
 
-/// The NEGATIVE twin of the test above: a `shutdown_now()` must reach only the executors its own job
+/// The NEGATIVE twin of the test above: a `cancel()` must reach only the executors its own job
 /// CREATED, never one that merely had work submitted to it from inside that job.
 ///
 /// An `Executor` crosses the airlock by `Arc`, so any job can `submit` to any executor it can name. A
 /// first cut keyed cancel inheritance on the SUBMITTER (`if self.the job's sched.is_some() {
 /// rw.worker.cancel_outer = self.scope_ancestors() }`), which handed `other`'s cancel chain to a job
-/// belonging to `main`'s executor: `other.shutdown_now()` then killed an already-started job that was
+/// belonging to `main`'s executor: `other.cancel()` then killed an already-started job that was
 /// none of its business, AND `shared.shutdown()` — a GRACEFUL join that promises to wait for its work
 /// — returned silently with that work dropped ("job started" printed, "shared job ran" never; before
 /// the nested-cancel change both printed). Keying it on the executor's CREATOR
@@ -2195,7 +2205,7 @@ print("done")
 ///
 /// Depends on eager `submit`, for the same reason as its twin.
 #[test]
-fn a_job_submitted_to_mains_executor_survives_another_executors_shutdown_now_mn() {
+fn a_job_submitted_to_mains_executor_survives_another_executors_cancel_mn() {
     let src = r#"
 import Executor from std.concurrency
 import std.time
@@ -2214,11 +2224,11 @@ shared := Executor()
 other := Executor()
 other.submit(jobber)
 _ := started.recv()
-other.shutdown_now()
+other.cancel()
 shared.shutdown()
 print("done")
 "#;
-    let entry = write_temp_chz("cross_executor_shutdown_now", src);
+    let entry = write_temp_chz("cross_executor_cancel", src);
     let run_entry = entry.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -2235,12 +2245,12 @@ print("done")
     );
     assert!(
         out.contains("shared job ran"),
-        "an unrelated executor's shutdown_now killed main's executor's job: {out:?}"
+        "an unrelated executor's cancel killed main's executor's job: {out:?}"
     );
     assert!(out.contains("done"), "main must still finish: {out:?}");
     assert!(
         !out.contains("jobber finished"),
-        "the outer job's own sleep was not cancelled by other.shutdown_now(): {out:?}"
+        "the outer job's own sleep was not cancelled by other.cancel(): {out:?}"
     );
 }
 
@@ -2249,11 +2259,12 @@ print("done")
 ///
 /// `creator_cancel` is captured once at `Op::NewExecutor` and never reset — sticky by design, the way
 /// Go's derived `context.WithCancel(parent)` stays cancelled once the parent is. So after the creating
-/// job's executor is `shutdown_now`-ed, EVERY later job this core dispatches starts already-cancelled.
+/// job's executor is `cancel`-ed, EVERY later job this core dispatches starts already-cancelled.
 /// That is correct; what was indefensible is that it was SILENT: `main` holds the only handle here,
 /// its `submit` vanished, and its own GRACEFUL `shutdown()` — which promises to wait for its work —
 /// returned having run nothing (measured pre-fix: `main done`, rc=0, `inner job ran` never printed).
-/// A `submit` the executor cannot honour now faults, exactly like a `submit` after `shutdown()`.
+/// A `submit` the executor cannot honour now settles its Task with the refusal, exactly like a
+/// `submit` after `shutdown()` (TICKET-289: neither ends the run).
 ///
 /// **The checkpoint trap**: `work` MUST contain a cancellation point (the `sleep_ms`). With a bare
 /// `print` the job finishes before reaching one and runs to completion (D4 is cooperative, not
@@ -2279,25 +2290,25 @@ outer := Executor()
 outer.submit(fn(): jobber(ch))
 inner := ch.recv()
 time.sleep_ms(50)
-outer.shutdown_now()
-inner.submit(work)
+outer.cancel()
+t := inner.submit(work)
 inner.shutdown()
 print("main done")
+match t.get():
+    ?_: print("accepted")
+    !e: print("task fault: {e.message()}")
 "#;
     let entry = write_temp_chz("submit_after_creator_cancel", src);
     let (out, _err, res, _code) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
-    let e = res.expect_err(&format!(
-        "the poisoned submit was accepted silently: {out:?}"
-    ));
+    res.expect("a refused submit settles its Task; it does not end the run");
     assert!(
-        e.message
-            .contains("submit on an Executor whose creating job was cancelled"),
-        "wrong fault: {e:?}"
+        out.contains("task fault: submit on an Executor whose creating job was cancelled"),
+        "the Task must hold the refusal: {out:?}"
     );
     assert!(
-        !out.contains("main done"),
-        "the fault must propagate out of main: {out:?}"
+        !out.contains("inner job ran") && !out.contains("accepted"),
+        "the poisoned submit must not run: {out:?}"
     );
 }
 
@@ -2338,9 +2349,9 @@ print("main done")
 }
 
 /// Negative control 2 — an executor created by `main` has NO `creator_cancel` at all, so an unrelated
-/// executor's `shutdown_now()` cannot reach it. This is the case the new guard must leave untouched.
+/// executor's `cancel()` cannot reach it. This is the case the new guard must leave untouched.
 #[test]
-fn submit_to_mains_own_executor_after_an_unrelated_shutdown_now_runs_mn() {
+fn submit_to_mains_own_executor_after_an_unrelated_cancel_runs_mn() {
     let src = r#"
 import Executor from std.concurrency
 import std.time
@@ -2354,7 +2365,7 @@ mine := Executor()
 other := Executor()
 other.submit(nap)
 time.sleep_ms(50)
-other.shutdown_now()
+other.cancel()
 mine.submit(work)
 mine.shutdown()
 print("done")
@@ -2370,20 +2381,14 @@ print("done")
     assert!(out.contains("done"), "main must finish: {out:?}");
 }
 
-/// TICKET-270 — a job that ends the run (a fault or an `os.exit`) keeps its own output wherever
-/// main is when the run end lands. The `quiesce` seam holds the window between the run-end cell
-/// and the job's slot store open for 300 ms. Measured on the unfixed engine: nine cells red with
-/// `out=""` (`fault/alone`, `fault/same_exec_waiter`, `fault/other_exec_first`, every `exit/` cell).
+/// TICKET-270 — a job that ends the run (an `os.exit`) keeps its own output wherever main is when
+/// the run end lands. The `quiesce` seam holds the window between the run-end cell and the job's
+/// slot store open for 300 ms. Measured on the unfixed engine: every `exit/` cell red with
+/// `out=""`. TICKET-289 removed the `fault/` cells: a job fault no longer ends the run, it stays in
+/// the job's Task.
 #[test]
 fn a_job_that_ends_the_run_keeps_its_output_at_every_drain_position() {
-    let ends = [
-        (
-            "fault",
-            "    panic(\"TICKET-270 job fault window\")\n",
-            None,
-        ),
-        ("exit", "    os.exit(3)\n", Some(3)),
-    ];
+    let ends = [("exit", "    os.exit(3)\n", 3)];
     let positions = [
         ("alone", "b := Executor()\nb.submit(job)\n"),
         (
@@ -2417,10 +2422,7 @@ fn a_job_that_ends_the_run_keeps_its_output_at_every_drain_position() {
             let (out, _e, r, c) = run_file(&entry);
             let _ = std::fs::remove_file(&entry);
             let rs = format!("{r:?}");
-            let ended = match code {
-                Some(k) => c == Some(k),
-                None => rs.contains("TICKET-270 job fault window"),
-            };
+            let ended = c == Some(code);
             if !out.contains("job output") || !ended {
                 red.push(format!("{end}/{pos}: out={out:?} code={c:?} r={rs}"));
             }

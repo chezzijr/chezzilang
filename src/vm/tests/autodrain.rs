@@ -43,29 +43,34 @@ fn executor_autodrain_survives_gc_stress() {
 }
 
 #[test]
-fn a_fire_and_forget_fault_ends_the_run_past_recover() {
-    // TICKET-208 (owner decision 3) — a fire-and-forget job's fault ends the whole run (Go: a
-    // goroutine panic). It replaces the W7-5 run-all contract, where `shutdown()` raised the
-    // lowest-index fault and a `recover:` around it caught it: the fault reaches `main` as a
-    // run-wide halt no `recover:` catches, so `done` never prints.
-    let src = "import Executor from std.concurrency\nfn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
+fn a_job_fault_stays_in_its_task_and_ends_nothing() {
+    // TICKET-289 (replaces TICKET-208 owner decision 3, where a fire-and-forget job's fault ended
+    // the whole run) — a job's fault appears only in its Task. `shutdown()` raises nothing, the
+    // `recover:` around it has nothing to catch, the siblings run, and `done` prints.
+    let src = "import Executor from std.concurrency\nfn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    t := ex.submit(fn(): boom())\n    _ := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    match t.get():\n        ?_: print(\"no fault\")\n        !e: print(\"fault: {e.message()}\")\nfn main():\n    r := recover:\n        run()\n        0\n    match r:\n        ?_: print(\"nothing raised\")\n        !e: print(\"recovered: {e.message()}\")\n    print(\"done\")\nmain()\n";
     let (out, res) = run_program(src);
-    let err = res.expect_err("the job's fault ends the run");
+    res.expect("a job's fault must not end the run");
     assert!(
-        err.message.contains("index 9 out of bounds"),
-        "fault was: {}",
-        err.message
+        out.contains("fault: index 9 out of bounds"),
+        "the Task must hold the fault: {out:?}"
     );
     assert!(
-        !out.contains("done"),
-        "a recover: caught the fault: {out:?}"
+        out.contains("A\n")
+            && out.contains("C\n")
+            && out.contains("nothing raised")
+            && out.contains("done"),
+        "siblings and main must run on: {out:?}"
+    );
+    assert!(
+        !out.contains("recovered:"),
+        "shutdown() raised a job fault: {out:?}"
     );
 }
 
-/// TICKET-208 — with two faulting fire-and-forget jobs, the FIRST fault to land is the run's
-/// report (first writer wins), and that job's own output survives.
+/// TICKET-289 — with two faulting jobs, EACH Task holds its own fault and both jobs' output
+/// survives; no fault wins a "first writer" race for the run.
 #[test]
-fn the_first_fire_and_forget_fault_is_the_report() {
+fn each_faulting_job_keeps_its_own_fault_in_its_task() {
     let src = r#"
 import Executor from std.concurrency
 
@@ -79,26 +84,32 @@ fn boom_b():
 
 fn main():
     ex := Executor()
-    ex.submit(boom_a)
-    ex.submit(boom_b)
+    ta := ex.submit(boom_a)
+    tb := ex.submit(boom_b)
     r: None!Error = recover: ex.shutdown()
     match r:
         ?_: print("no fault")
         !e: print("fault: {e.message()}")
+    match ta.get():
+        ?_: print("ta ok")
+        !e: print("ta: {e.message()}")
+    match tb.get():
+        ?_: print("tb ok")
+        !e: print("tb: {e.message()}")
 
 main()
 "#;
     let (out, res) = run_program(src);
-    let msg = res.expect_err("a job fault ends the run").message;
-    let who = match msg.as_str() {
-        "boom a" => "a",
-        "boom b" => "b",
-        _ => panic!("the report must be one job's own fault, got: {msg}"),
-    };
-    assert!(
-        out.contains(&format!("{who}-before-fault")),
-        "lost the reporting job's output: {out:?}"
-    );
+    res.expect("a job fault must not end the run");
+    for want in [
+        "a-before-fault",
+        "b-before-fault",
+        "no fault",
+        "ta: boom a",
+        "tb: boom b",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in {out:?}");
+    }
 }
 
 #[test]

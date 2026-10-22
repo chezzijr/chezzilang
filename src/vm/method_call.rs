@@ -511,7 +511,7 @@ impl Vm {
         // maps the receiver to its `&'static str` key; a `None` short-circuits straight to the hot
         // collection arms below (this REPLACES the eight per-handle `if matches!` probes that used to
         // sit on that path). For a handle, a BODIED Chezzi method compiled to bytecode (generic like
-        // `Executor.submit_result`, or plain like `Reader.lines`) dispatches FIRST; a miss (`Ok(false)`)
+        // `Executor.submit`, or plain like `Reader.lines`) dispatches FIRST; a miss (`Ok(false)`)
         // falls through to the name-keyed native op body below, BYTE-IDENTICALLY — including each tail
         // (Socket/Listener `poll_park`, Writer `stream_halt`). The single match makes it structurally
         // impossible to add a handle and forget bodied dispatch (the check-OK/run-fault class): adding a

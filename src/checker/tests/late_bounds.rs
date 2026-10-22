@@ -142,6 +142,10 @@ fn std_internal_names_are_hidden_from_user_modules() {
         "import std.concurrency\nconcurrency._settle(5, 1)\n",
         "module 'concurrency' has no member '_settle'",
     );
+    entry_rejects(
+        "import std.concurrency\nconcurrency._cancel_job(5, 1)\n",
+        "module 'concurrency' has no member '_cancel_job'",
+    );
     let want_methods: std::collections::BTreeSet<(String, String, String)> = [
         ("std.cancel", "Token", "_mark"),
         ("std.concurrency", "Executor", "_submit_settled"),
@@ -215,7 +219,7 @@ fn std_internal_names_are_hidden_from_user_modules() {
         "the help names the hidden method: {errs:?}"
     );
     entry_ok(
-        "import std.fs\nimport std.concurrency\nimport ConcurrentList from std.concurrency.collection\nprint(fs.exists(\"x\"))\nh := concurrency.Executor().submit_result(fn(): 4)\nprint(h)\nConcurrentList[int].new().push(1)\n",
+        "import std.fs\nimport std.concurrency\nimport ConcurrentList from std.concurrency.collection\nprint(fs.exists(\"x\"))\nh := concurrency.Executor().submit(fn(): 4)\nprint(h)\nConcurrentList[int].new().push(1)\n",
     );
 }
 
@@ -284,7 +288,7 @@ fn every_crossing_closure_method_reports_a_captured_write() {
         user_rows.len() + 1
     );
     entry_ok(
-        "import Executor from std.concurrency\nfn main():\n    ex := Executor(1)\n    ch := ex.submit_result(fn() -> int: 1)\n    print(ch.recv())\n    ex.shutdown()\nmain()\n",
+        "import Executor from std.concurrency\nfn main():\n    ex := Executor(1)\n    t := ex.submit(fn() -> int: 1)\n    print(t.get())\n    ex.shutdown()\nmain()\n",
     );
     for (owner, method, setup, call, param) in user_rows {
         let ret = if param.is_empty() { "None" } else { "int" };

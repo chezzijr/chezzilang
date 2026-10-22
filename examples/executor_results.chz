@@ -1,12 +1,10 @@
-# The Executor handle contract: a job submitted through `submit_task` never ends the run by its
-# fault. Its `Task.get()` returns `!message`, `shutdown()` raises nothing for it, and every
-# sibling runs (CPython `Future.result()`, with a `T!E` in place of a raise). Results are read
-# back through the handles in submission order, so the printed order is fixed however the jobs
-# interleave. A fire-and-forget `ex.submit(f)` fault is different: it ends the run at once (Go).
+# The Executor handle contract: `ex.submit(f)` returns a `Task[T]`, and a job's fault never ends the
+# run. `Task.get()` returns `!message`, `shutdown()` raises nothing for it, and every sibling runs
+# (CPython `Future.result()`, with a `T!E` in place of a raise). Results are read back through the
+# handles in submission order, so the printed order is fixed however the jobs interleave.
 # Run with: chezzi run examples/executor_results.chz
 
-import std.concurrency
-import std.concurrency.task
+import Executor, Task from std.concurrency
 
 fn score(row: str) -> int:
     if row == "":
@@ -15,11 +13,11 @@ fn score(row: str) -> int:
 
 fn main():
     rows := ["alpha", "", "beta", "gamma"]
-    ex := concurrency.Executor()
+    ex := Executor()
 
-    handles: List[task.Task[int]] = []
+    handles: List[Task[int]] = []
     for r in rows:
-        handles.push(task.submit_task(ex, fn() -> int: score(r)))
+        handles.push(ex.submit(fn() -> int: score(r)))
 
     ex.shutdown()
 

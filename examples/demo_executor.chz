@@ -10,11 +10,11 @@ fn square_into(n: int, out: Channel[int]):
 fn main():
     ch := Channel[int]()
     ex := Executor()
-    ex.submit(fn(): square_into(1, ch))   # starts now, on the pool
-    ex.submit(fn(): square_into(2, ch))
-    ex.submit(fn(): square_into(3, ch))
-    ex.submit(fn(): square_into(4, ch))
-    ex.submit(fn(): square_into(5, ch))
+    _ := ex.submit(fn(): square_into(1, ch))   # starts now, on the pool
+    _ := ex.submit(fn(): square_into(2, ch))
+    _ := ex.submit(fn(): square_into(3, ch))
+    _ := ex.submit(fn(): square_into(4, ch))
+    _ := ex.submit(fn(): square_into(5, ch))
     ex.shutdown()                          # waits: every submitted job has finished after this
     total := 0
     for _ in 0..5:

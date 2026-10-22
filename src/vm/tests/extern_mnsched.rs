@@ -489,7 +489,7 @@ fn mnsched_park_requeues_when_cancel_tripped() {
 }
 
 /// TICKET-118 (W13-8) — the park-gap guard must also requeue on an ANCESTOR's cancel, not just this
-/// scope's own flag: an `Executor`'s `shutdown_now` trips a flag a job's nursery scope carries in
+/// scope's own flag: an `Executor`'s `cancel` trips a flag a job's nursery scope carries in
 /// `JoinScope::ancestors`, not `scopes[sid].cancel` itself.
 #[test]
 fn mnsched_park_requeues_when_an_ancestor_cancel_is_tripped() {
@@ -512,7 +512,7 @@ fn mnsched_park_requeues_when_an_ancestor_cancel_is_tripped() {
 
 /// TICKET-118 (W13-8) — `take_runnable`'s drain trigger must requeue a park whose ancestor's cancel
 /// tripped AFTER the fiber parked (not just before, as the park-gap guard above covers), so a
-/// `shutdown_now` racing a job's nursery `recv` still ends it instead of getting judged deadlocked.
+/// `cancel` racing a job's nursery `recv` still ends it instead of getting judged deadlocked.
 #[test]
 fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_parked() {
     let cancel = Arc::new(AtomicBool::new(false));
@@ -539,7 +539,7 @@ fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_pa
 
 /// TICKET-118 (W13-8) — `poke_live_scheds` must take each live sched's core lock before it notifies,
 /// not just call `notify_all` bare: a `cv.notify_all()` with no lock held can race a worker about to
-/// wait and be lost, which is exactly the lost-wakeup shape `shutdown_now`'s cancel store needs
+/// wait and be lost, which is exactly the lost-wakeup shape `cancel`'s cancel store needs
 /// closed. Proven by observing the poke's completion (a channel send AFTER it returns) stay blocked
 /// while this test holds the sched's core lock, then unblock the instant the lock is released.
 #[test]
@@ -1949,7 +1949,8 @@ fn collect_under_swapped_in_fiber_heap_leaves_parked_host_heap_quiescent() {
 }
 
 /// B3.1: `shut` lives in the shared core, so a `from_wire`'d alias observes a shutdown done through
-/// the original handle — `submit` on the alias then fails with the byte-identical message.
+/// the original handle — `submit` on the alias then settles its Task with the byte-identical
+/// refusal (TICKET-289: a refused submit is no longer a fault of the caller).
 #[test]
 fn executor_core_shut_is_shared_across_handles() {
     let mut vm = Vm::new(Arc::new(empty_program()));
@@ -1962,13 +1963,16 @@ fn executor_core_shut_is_shared_across_handles() {
     };
     let sp = Span::RUNTIME;
     vm.executor_method(h1, "shutdown", &[], sp).unwrap();
-    let dummy = vm.heap.alloc(Obj::Str("task".into()));
-    let err = vm
-        .executor_method(h2, "submit", &[Value::obj(dummy)], sp)
-        .unwrap_err();
-    assert_eq!(
-        err.message,
-        "submit on a shut-down Executor (it no longer accepts work)"
+    let ch = Arc::new(ChannelCore::default());
+    let chv = vm.heap.alloc(Obj::Channel(Arc::clone(&ch)));
+    vm.executor_method(h2, "_submit_settled", &[Value::nil(), Value::obj(chv)], sp)
+        .expect("a refused submit returns Ok with its Task settled");
+    let mut q = ch.q.lock().unwrap();
+    assert!(q.is_sealed(), "the refusal must seal the Task's channel");
+    let sealed = format!("{:?}", q.pop());
+    assert!(
+        sealed.contains("submit on a shut-down Executor (it no longer accepts work)"),
+        "sealed with: {sealed}"
     );
 }
 

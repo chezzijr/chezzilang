@@ -14,7 +14,7 @@
   PASS p1.rwshared_set            = 1
 == Phase 2: Executor checksum (submit / shutdown / collect-via-Channel) ==
   PASS p2.checksum                = 41160
-  PASS p2.submit_result           = 560
+  PASS p2.submit                  = 560
 == Phase 3a: polymorphic Jobs w/ recursive closures crossing Channel[Job] ==
   PASS p3.fib/10                  = 55
   PASS p3.fact/6                  = 720

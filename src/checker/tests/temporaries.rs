@@ -497,7 +497,7 @@ fn t254_program(
             format!("{decls}{root}parallel:\n    spawn:\n        {stmt}\nprint({show})\n")
         }
         T254Ctx::ExecutorJob => format!(
-            "import Executor from std.concurrency\n{decls}{work}{root}ex := Executor()\nex.submit(fn(): work({args}))\nex.shutdown()\nprint({show})\n"
+            "import Executor from std.concurrency\n{decls}{work}{root}ex := Executor()\n_ := ex.submit(fn(): work({args}))\nex.shutdown()\nprint({show})\n"
         ),
         T254Ctx::BoxClosure => format!(
             "import Shared from std.concurrency\n{decls}{work}fn wrap({params}, x: int) -> int:\n    work({args})\n    return x\n{root}s := Shared(0)\ns.update(fn(x: int) -> int: wrap({args}, x))\nprint({show})\n"
@@ -521,17 +521,15 @@ fn t254_control_errors(ctx: T254Ctx) -> bool {
 }
 
 /// A write that reaches the root, run in `ctx` where the program checks clean: the top level and a
-/// plain call write the root; a task, an `Executor` job and a box closure run on a copy, and the run
-/// ends with the D4 fault `this value is this task's copy`. Measured on the base binary: the same
-/// table.
+/// plain call write the root; a task and a box closure run on a copy, and the run ends with the D4
+/// fault `this value is this task's copy`. An `Executor` job also runs on a copy, but its fault lives
+/// only in its `Task` (TICKET-289), which this program discards: the run ends clean, root unchanged.
 fn t254_control_faults(ctx: T254Ctx) -> bool {
     match ctx {
-        T254Ctx::Top | T254Ctx::Fn => false,
-        T254Ctx::SpawnedFn
-        | T254Ctx::SpawnBlock
-        | T254Ctx::ExecutorJob
-        | T254Ctx::BoxClosure
-        | T254Ctx::ImportedFn => true,
+        T254Ctx::Top | T254Ctx::Fn | T254Ctx::ExecutorJob => false,
+        T254Ctx::SpawnedFn | T254Ctx::SpawnBlock | T254Ctx::BoxClosure | T254Ctx::ImportedFn => {
+            true
+        }
     }
 }
 

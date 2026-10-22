@@ -93,8 +93,6 @@ native struct Executor:
     # `defer`s run. Each cut job's Task settles `!"task cancelled: cancel() stopped it before it
     # finished"`. `ex.cancel()` then `ex.shutdown()` waits for the cut jobs to end.
     native fn cancel(self) -> None
-    # A std internal (TICKET-289): cancel the one job whose result channel is `ch` (`Task.cancel`).
-    native fn _cancel_job(self, ch) -> None
     # A std internal (TICKET-219): submit `f` as a handle job whose result channel is `out`. The
     # job transition seals `out` with the cancel `!e` when it drops or cuts the job. Its only
     # caller is `submit`, with the fresh cap-1 channel it created.
@@ -145,6 +143,12 @@ native fn task_copy_of[T](v: T) -> T
 # A std internal (TICKET-219): seal the handle channel `ch` with the outcome `v`. The first seal
 # wins; a later one changes nothing. Called only by `run_outcome`.
 native fn _settle(ch, v) -> None
+
+# A std internal (TICKET-289): cancel the one job of `ex` whose Task channel is `ch`. A held job
+# never starts; a running job is cut at its next wait or loop back-edge. A job that already ended
+# keeps its outcome. Called only by `Task.cancel`. A module fn, not an `Executor` method: a std
+# file checked as the entry has no method table for its own native structs.
+native fn _cancel_job(ex: Executor, ch) -> None
 
 # True once the handle channel `ch` holds its outcome. Never blocks, and never reads false after
 # true: a sealed channel stays sealed. `Task.done()` reads it.
@@ -198,4 +202,4 @@ struct Task[T]:
     # back-edge and its `defer`s run; `get()` then gives the cancel `!e`. It does not wait, and its
     # siblings are untouched. A job that already ended keeps its outcome.
     fn cancel(self):
-        self._ex._cancel_job(self._ch)
+        _cancel_job(self._ex, self._ch)

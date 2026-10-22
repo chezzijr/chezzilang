@@ -821,7 +821,7 @@ fn d4_rule3_declines() {
         no_warn(src);
     }
     entry_no_warn(
-        "import Atomic, Executor from std.concurrency\nfn f():\n    seen := Atomic(0)\n    ex := Executor()\n    ex.submit(fn(): seen.add(3))\n    ex.shutdown()\nf()\n",
+        "import Atomic, Executor from std.concurrency\nfn f():\n    seen := Atomic(0)\n    ex := Executor()\n    _ := ex.submit(fn(): seen.add(3))\n    ex.shutdown()\nf()\n",
     );
 }
 
