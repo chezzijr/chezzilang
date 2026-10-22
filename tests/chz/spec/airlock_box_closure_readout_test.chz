@@ -1,0 +1,51 @@
+# TICKET-285 — D4 layer C: a closure another task reads out of Shared/RwShared marks its
+# captures exactly as the Channel route does, so a write through a capture FAULTS.
+import Shared, RwShared from std.concurrency
+
+COPY_TAIL := "is this task's copy: a write to it would be lost at the join"
+
+test fn shared_get_closure_capture_write_faults():
+    xs := [1]
+    f := fn(): xs.push(2)
+    box := Shared([f])
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            g := box.get()[0]
+            res := recover: g()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    msg := r.recv()
+    assert msg.contains(COPY_TAIL)
+
+test fn rwshared_get_closure_capture_write_faults():
+    xs := [1]
+    f := fn(): xs.push(2)
+    box := RwShared([f])
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            g := box.get()[0]
+            res := recover: g()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    msg := r.recv()
+    assert msg.contains(COPY_TAIL)
+
+test fn channel_recv_closure_capture_write_faults():
+    xs := [1]
+    f := fn(): xs.push(2)
+    ch := Channel[fn() -> None](1)
+    ch.send(f)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            h := ch.recv()
+            res := recover: h()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    msg := r.recv()
+    assert msg.contains(COPY_TAIL)
