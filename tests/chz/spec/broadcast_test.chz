@@ -1,0 +1,250 @@
+# TICKET-288 — `std.concurrency.broadcast`: a pub/sub channel with the tokio `broadcast` contract.
+# One test per contract line of the ticket; line 6 (worker counts) is this file run at
+# `CHEZZI_THREADS` 1, 2 and the default. Every assertion holds at every worker count. Only
+# `a_slow_subscriber_task_counts_every_value_it_missed` drops values across tasks; it asserts the
+# lag invariant, never which values were dropped.
+#
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+import Broadcast, Receiver, Lagged from std.concurrency.broadcast
+import Executor from std.concurrency
+import Iterable from std.iter
+
+fn take_all(rx: Receiver[int]) -> List[str]:
+    out: List[str] = []
+    for r in rx:
+        match r:
+            ?v: out.push("{v}")
+            !e: out.push("lag {e.missed}")
+    return out
+
+# 1. A receiver sees every value sent after its subscribe, in send order.
+test fn a_receiver_sees_the_values_sent_after_its_subscribe_in_order():
+    b := Broadcast[int].new(8)
+    b.send(0)
+    early := b.subscribe()
+    b.send(1)
+    b.send(2)
+    late := b.subscribe()
+    b.send(3)
+    b.close()
+    assert take_all(early) == ["1", "2", "3"]
+    assert take_all(late) == ["3"]
+
+# 2. `send` never blocks on a full mailbox, and every receiver gets its own copy.
+test fn send_never_blocks_and_each_receiver_gets_its_own_copy():
+    b := Broadcast[List[int]].new(2)
+    a := b.subscribe()
+    c := b.subscribe()
+    for i in 0..10:
+        b.send([i])
+    b.close()
+    xs := a.recv()
+    match xs:
+        !e: assert e.missed == 8
+        ?_: assert false
+    va := a.recv() ?? []
+    vc := c.recv()
+    match vc:
+        !e: assert e.missed == 8
+        ?_: assert false
+    vc2 := c.recv() ?? []
+    va.push(99)
+    assert va == [8, 99]
+    assert vc2 == [8]
+
+# 3. A receiver that falls behind gets `!Lagged(missed)`, then the oldest value still held.
+test fn a_lagging_receiver_reports_the_missed_count_then_continues():
+    b := Broadcast[int].new(2)
+    rx := b.subscribe()
+    for i in 1..6:
+        b.send(i)
+    first := rx.recv()
+    match first:
+        !e: assert e.missed == 3
+        ?_: assert false
+    assert (rx.recv() ?? 0) == 4
+    assert (rx.recv() ?? 0) == 5
+    assert rx.try_recv() == None
+    b.send(6)
+    b.send(7)
+    b.send(8)
+    b.close()
+    assert take_all(rx) == ["lag 1", "7", "8"]
+
+test fn try_recv_reports_the_lag_and_then_the_held_value():
+    b := Broadcast[int].new(1)
+    rx := b.subscribe()
+    b.send(1)
+    b.send(2)
+    match rx.try_recv():
+        ?r:
+            match r:
+                !e: assert e.missed == 1
+                ?_: assert false
+        None: assert false
+    match rx.try_recv():
+        ?r: assert (r ?? 0) == 2
+        None: assert false
+    assert rx.try_recv() == None
+
+# 4. `close` ends every `for` after the values already sent; a later send faults.
+test fn close_ends_every_loop_after_the_values_sent():
+    b := Broadcast[int].new(4)
+    r1 := b.subscribe()
+    r2 := b.subscribe()
+    b.send(1)
+    b.send(2)
+    b.close()
+    b.close()
+    assert take_all(r1) == ["1", "2"]
+    assert take_all(r2) == ["1", "2"]
+    assert r1.try_recv() == None
+    after := b.subscribe()
+    assert take_all(after) == []
+    res := recover:
+        b.send(3)
+    match res:
+        ?_: assert false
+        !e: assert e.message() == "send on a closed Broadcast"
+
+fn count_items(xs: Iterable[int!Lagged]) -> int:
+    n := 0
+    for _ in xs:
+        n += 1
+    return n
+
+# `for` and the `Iterable` bound agree: a receiver is an `Iterable[T!Lagged]`.
+test fn a_receiver_satisfies_the_iterable_bound_that_for_uses():
+    b := Broadcast[int].new(4)
+    rx := b.subscribe()
+    b.send(1)
+    b.send(2)
+    b.close()
+    assert count_items(rx) == 2
+
+test fn a_capacity_below_one_faults():
+    res := recover:
+        Broadcast[int].new(0)
+    match res:
+        ?_: assert false
+        !e: assert e.message() == "Broadcast capacity must be at least 1, got 0"
+
+fn collect_into(rx: Receiver[int], out: Channel[List[str]]):
+    out.send(take_all(rx))
+
+fn publish(b: Broadcast[int], n: int):
+    for i in 0..n:
+        b.send(i)
+    b.close()
+
+# 5. Both handles cross `spawn`: a subscriber task and a publisher task share one broadcast.
+test fn a_broadcast_and_its_receivers_cross_spawn():
+    b := Broadcast[int].new(32)
+    r1 := b.subscribe()
+    r2 := b.subscribe()
+    o1 := Channel[List[str]](1)
+    o2 := Channel[List[str]](1)
+    parallel:
+        spawn:
+            collect_into(r1, o1)
+        spawn:
+            collect_into(r2, o2)
+        spawn:
+            publish(b, 20)
+    want: List[str] = []
+    for i in 0..20:
+        want.push("{i}")
+    assert o1.recv() == want
+    assert o2.recv() == want
+
+fn sum_into(rx: Receiver[int], total: Channel[int]):
+    s := 0
+    for r in rx:
+        s += r ?? 0
+    total.send(s)
+
+# 5. A closure handler submitted to an `Executor` runs the subscriber loop in its own task.
+test fn a_receiver_crosses_an_executor_job():
+    b := Broadcast[int].new(8)
+    rx := b.subscribe()
+    total := Channel[int](1)
+    ex := Executor(2)
+    ex.submit(fn(): sum_into(rx, total))
+    for i in 1..5:
+        b.send(i)
+    b.close()
+    ex.shutdown()
+    assert total.recv() == 10
+
+# Busy work between two receives, so the publisher task outruns the subscriber task.
+fn spin(k: int) -> int:
+    acc := 0
+    for i in 0..k:
+        acc += i % 7
+    return acc
+
+# Read every result; send the values it got, then the sum of every `Lagged.missed`.
+fn slow_reader(rx: Receiver[int], got: Channel[List[int]], missed: Channel[int]):
+    vs: List[int] = []
+    lost := 0
+    for r in rx:
+        match r:
+            ?v: vs.push(v)
+            !e: lost += e.missed
+        _ := spin(200)
+    got.send(vs)
+    missed.send(lost)
+
+# 3 across tasks. A publisher task sends 2000 values into mailboxes of 4 while a slow subscriber task
+# reads: the values it gets rise strictly, and the missed counts plus the values it got add up to
+# every value sent.
+test fn a_slow_subscriber_task_counts_every_value_it_missed():
+    n := 2000
+    b := Broadcast[int].new(4)
+    rx := b.subscribe()
+    got := Channel[List[int]](1)
+    missed := Channel[int](1)
+    parallel:
+        spawn:
+            slow_reader(rx, got, missed)
+        spawn:
+            publish(b, n)
+    vs := got.recv()
+    lost := missed.recv()
+    for i in 1..vs.len():
+        assert vs[i - 1] < vs[i], "values out of order at {i}: {vs[i - 1]} then {vs[i]}"
+    assert lost > 0, "the subscriber task never lagged"
+    assert lost + vs.len() == n,"missed {lost} plus got {vs.len()} is not {n}"
+    assert vs[vs.len() - 1] == n - 1
+
+fn publish_range(b: Broadcast[int], start: int, n: int):
+    for i in start..start + n:
+        b.send(i)
+
+fn publish_two_then_close(b: Broadcast[int]):
+    parallel:
+        spawn:
+            publish_range(b, 0, 200)
+        spawn:
+            publish_range(b, 1000, 200)
+    b.close()
+
+# Decision 4. Two publisher tasks send disjoint values; two subscriber tasks with room for every
+# value get the same list in the same order.
+test fn two_publisher_tasks_reach_every_subscriber_in_one_order():
+    b := Broadcast[int].new(400)
+    r1 := b.subscribe()
+    r2 := b.subscribe()
+    o1 := Channel[List[str]](1)
+    o2 := Channel[List[str]](1)
+    parallel:
+        spawn:
+            collect_into(r1, o1)
+        spawn:
+            collect_into(r2, o2)
+        spawn:
+            publish_two_then_close(b)
+    l1 := o1.recv()
+    l2 := o2.recv()
+    assert l1.len() == 400
+    assert l1 == l2

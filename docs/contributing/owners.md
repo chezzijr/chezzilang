@@ -115,6 +115,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Runtime key of the `Range` struct `a..b` builds | `range_key` (`resolver/mod.rs`) | read by the checker's `range_ty` and `Program::range_key` |
 | The std fns a program does not reach (TICKET-265) | `unreached_std_fns` → `ModuleGraph::skipped_fns` (`resolver/mod.rs`); the skip test is `SkippedFns::skips` | desugar's range gate, the checker's `skips_body` (`checker/graph_pass.rs`) and the compiler's top-level loop take their module's set from `ModuleGraph::fn_skips` and call `SkippedFns::skips`; `JSON_DECODE_PARSE` is the one fn the compiler calls by name |
 | How a native fn runs | `Kind` (`native/mod.rs`) | the third element of each `MEMBERS` row |
+| Pub/sub delivery: the order every receiver sees and its lag count | `Broadcast` (`std/concurrency/broadcast.chz`) | TICKET-288: over `Channel`, one `Shared` hub per broadcast; no runtime code |
 
 ## Tests
 

@@ -2037,11 +2037,11 @@ fn deque_against_an_iterator_bound_gets_the_iterate_advice() {
     );
 }
 
-/// TICKET-288: `std.concurrency` exports `Broadcast[T]` (tokio `broadcast`): `subscribe()` gives a
+/// TICKET-288: `std.concurrency.broadcast` exports `Broadcast[T]` (tokio `broadcast`): `subscribe()` gives a
 /// receiver that iterates with `for`, `send` never blocks, `close` ends the loops.
 #[test]
 fn broadcast_is_exported_by_std_concurrency() {
     ok(
-        "import Broadcast from std.concurrency\nfn main():\n    b := Broadcast[int](4)\n    rx := b.subscribe()\n    b.send(1)\n    b.close()\n    for v in rx:\n        print(v)\n",
+        "import Broadcast from std.concurrency.broadcast\nfn main():\n    b := Broadcast[int].new(4)\n    rx := b.subscribe()\n    b.send(1)\n    b.close()\n    for v in rx:\n        print(v)\n",
     );
 }

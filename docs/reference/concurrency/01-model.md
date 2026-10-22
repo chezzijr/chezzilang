@@ -20,7 +20,7 @@ Chapters:
 | file | topic |
 |---|---|
 | 01-model.md (this file) | model, surface syntax, execution semantics |
-| [02-channel.md](02-channel.md) | `Channel[T]`, `pmap`, `std.concurrency.task`, `trip()` |
+| [02-channel.md](02-channel.md) | `Channel[T]`, `pmap`, `std.concurrency.task`, `std.concurrency.broadcast`, `trip()` |
 | [03-shared.md](03-shared.md) | `Shared[T]`, `Atomic[T]`, `AtomicInt`, `RwShared[T]`, concurrent collections |
 | [04-timer-wait.md](04-timer-wait.md) | `timer(ms)`, `wait:` |
 | [05-cancel.md](05-cancel.md) | `std.cancel`, cancellation points, `defer` under cancel |

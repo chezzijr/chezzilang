@@ -26,9 +26,9 @@ The core language is implemented through M24 and still evolves:
 - GC, interpolation, pipe, `defer`, `recover:`, `Iterator[T]`, slicing and indexing protocols, ranges
   as values.
 
-Concurrency is complete through Tier-D: `spawn`, the `parallel:` nursery, `Channel[T]`, `Shared[T]`,
-`Executor`, the OS-thread M:N engine, the netpoller and `std.net`. There is one engine: the bytecode VM
-on its M:N scheduler.
+Concurrency is complete through Tier-D: `spawn`, the `parallel:` nursery, `Channel[T]`,
+`Broadcast[T]` (`std.concurrency.broadcast`), `Shared[T]`, `Executor`, the OS-thread M:N engine,
+the netpoller and `std.net`. There is one engine: the bytecode VM on its M:N scheduler.
 
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:

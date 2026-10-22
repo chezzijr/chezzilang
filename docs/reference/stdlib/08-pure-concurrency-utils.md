@@ -139,6 +139,16 @@ value is deterministic (it is `f()`); only *when* it runs varies (the OS-thread 
 `.get()` is identical across runs **as long as you await in a fixed (e.g. submission) order**. There is
 no `join_next()`/select-on-completion API: completion order is nondeterministic.
 
+### `std.concurrency.broadcast` — pub/sub over `Channel`
+
+**`Broadcast[T]`**, **`Receiver[T]`** and **`Lagged`**: the tokio `broadcast` contract in pure
+Chezzi. `import Broadcast, Receiver, Lagged from std.concurrency.broadcast`. Construct with
+**`Broadcast[T].new(cap)`**. `b.subscribe()` gives a `Receiver[T]`, `b.send(v)` never blocks, and
+`b.close()` ends every receiver's `for`. `rx.recv() -> T!Lagged`, `rx.try_recv() -> (T!Lagged)?`,
+and `for r in rx:` gives `T!Lagged`. A receiver that fell more than `cap` values behind gets
+`!Lagged(missed)` once, then the oldest value still held. The full contract is in
+[`02-channel.md` §5c](../concurrency/02-channel.md).
+
 ### `std.cmp` — ordering generics (`Comparable`)
 `max[T: Comparable](a, b) -> T` · `min[T: Comparable](a, b) -> T` ·
 `clamp[T: Comparable](x, lo, hi) -> T`.

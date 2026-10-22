@@ -1,0 +1,143 @@
+# std.concurrency.broadcast — a pub/sub channel (tokio `broadcast`). Pure Chezzi over `Channel`, one
+# `Shared` box and two small per-receiver boxes; no runtime support.
+#
+# `b := Broadcast[T].new(cap)`; `rx := b.subscribe()`; `b.send(v)`; `b.close()`. Every receiver gets
+# every value sent after its `subscribe`, in send order, in its own mailbox: a channel of capacity
+# `cap`. `send` never blocks. A receiver whose mailbox is full loses its oldest value, and its next
+# receive reports the count it missed as `!Lagged(missed)`, then continues with the oldest value
+# still held (tokio `RecvError::Lagged(n)`).
+#
+# ORDER: `send`, `subscribe` and `close` run inside the hub's one update guard, so every receiver
+# sees the sends of every publisher in one order, and a subscribe falls between two sends. Each
+# value carries its send number (`seq`); a receiver compares it with the number it expects next
+# (`_next`) to count what the hub dropped. A receive takes the value before it reads the count, so
+# the report sits where the gap is, also when the hub drops a value during that receive.
+#
+# HANDLES: every field of `Broadcast` and `Receiver` is a channel or a box, so both cross `spawn`,
+# `parallel:` and `Executor` as shared handles, as a `Channel` does. Two tasks that read one
+# `Receiver` share its cursor and compete for its values; give each reader its own `subscribe()`.
+# A receiver that stops reading keeps at most `cap` values; nothing unsubscribes it.
+
+import std.concurrency
+
+# The error a receive returns when the receiver fell behind: `missed` values were dropped before
+# the value the next receive returns.
+struct Lagged:
+    missed: int
+
+    fn message(self) -> str:
+        return "receiver lagged by {self.missed} values"
+
+# One value in a receiver's mailbox, with its send number.
+struct _Stamped[T]:
+    seq: int
+    v: T
+
+# The hub state inside `Broadcast._hub`: the next send number, the close flag, every mailbox.
+struct _Hub[T]:
+    seq: int
+    closed: bool
+    subs: List[Channel[_Stamped[T]]]
+
+struct Receiver[T]:
+    _ch: Channel[_Stamped[T]]
+    # The send number this receiver expects next.
+    _next: concurrency.AtomicInt
+    # The value a `!Lagged` report held back for the next receive.
+    _held: concurrency.Shared[T?]
+
+    # Block until a value arrives: `?v`, or `!Lagged(missed)` when values were dropped before it.
+    # On a closed and drained broadcast it faults `receive on a closed channel`, as `Channel.recv`.
+    fn recv(self) -> T!Lagged:
+        match self._take_held():
+            ?v: return ?v
+            None: pass
+        return self._accept(self._ch.recv())
+
+    # Never blocks: `None` when no value waits (or the broadcast is closed and drained), else what
+    # `recv` returns.
+    fn try_recv(self) -> (T!Lagged)?:
+        match self._take_held():
+            ?v: return ?(?v)
+            None: pass
+        match self._ch.try_recv():
+            ?s: return ?self._accept(s)
+            None: return None
+
+    # `for r in rx:` gives what `recv` gives, one value per step, and ends once the broadcast is
+    # closed and drained (tokio-stream `BroadcastStream`).
+    fn iter(self) -> Iterator[T!Lagged]:
+        return _drain(self)
+
+    fn _take_held(self) -> T?:
+        h := self._held.get()
+        self._held.set(None)
+        return h
+
+    fn _accept(self, s: _Stamped[T]) -> T!Lagged:
+        missed := s.seq - self._next.exchange(s.seq + 1)
+        if missed > 0:
+            self._held.set(?s.v)
+            return !Lagged(missed)
+        return ?s.v
+
+fn _drain[T](rx: Receiver[T]) -> Iterator[T!Lagged]:
+    match rx._take_held():
+        ?v: yield ?v
+        None: pass
+    for s in rx._ch:
+        yield rx._accept(s)
+        match rx._take_held():
+            ?v: yield ?v
+            None: pass
+
+struct Broadcast[T]:
+    _cap: int
+    _hub: concurrency.Shared[_Hub[T]]
+
+    # A broadcast whose receivers each hold at most `cap` values. A `cap` below 1 faults.
+    fn new(cap: int) -> Broadcast[T]:
+        if cap < 1:
+            panic("Broadcast capacity must be at least 1, got {cap}")
+        return Broadcast(_cap=cap, _hub=concurrency.Shared(_Hub(seq=0, closed=false, subs=[])))
+
+    # A receiver for every value sent after this call. After `close` it is closed and empty.
+    fn subscribe(self) -> Receiver[T]:
+        ch := Channel[_Stamped[T]](self._cap)
+        next := concurrency.AtomicInt(0)
+        self._hub.update(fn(h): _join(h, ch, next))
+        return Receiver(_ch=ch, _next=next, _held=concurrency.Shared(None))
+
+    # Give every receiver its own copy of `v`. Never blocks: a full mailbox drops its oldest value.
+    # With no receiver the value is dropped. After `close` it faults `send on a closed Broadcast`.
+    fn send(self, v: T):
+        self._hub.update(fn(h): _publish(h, v))
+
+    # Close every mailbox: each receiver's `for` ends after the values already sent. Idempotent.
+    fn close(self):
+        self._hub.update(fn(h): _close(h))
+
+fn _join[T](h: _Hub[T], ch: Channel[_Stamped[T]], next: concurrency.AtomicInt) -> _Hub[T]:
+    if h.closed:
+        ch.close()
+    next.store(h.seq)
+    h.subs.push(ch)
+    return h
+
+fn _publish[T](h: _Hub[T], v: T) -> _Hub[T]:
+    if h.closed:
+        panic("send on a closed Broadcast")
+    s := _Stamped(seq=h.seq, v=v)
+    h.seq += 1
+    for ch in h.subs:
+        while not ch.try_send(s):
+            match ch.try_recv():
+                ?_: pass
+                None: break
+    return h
+
+fn _close[T](h: _Hub[T]) -> _Hub[T]:
+    h.closed = true
+    for ch in h.subs:
+        ch.close()
+    return h
