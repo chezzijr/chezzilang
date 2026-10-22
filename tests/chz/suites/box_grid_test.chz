@@ -342,24 +342,31 @@ fn make_ctr() -> Ctr:
         return n
     return Ctr(inc, get)
 
+# TICKET-291: true when `g()` faults because it writes a binding it holds only a copy of.
+fn copy_fault(g: fn() -> None) -> bool:
+    res := recover: g()
+    match res:
+        ?_: return false
+        !e: return e.message().contains("is this task's copy")
+
 fn bump_ctr(c: Ctr) -> Ctr:
     c.inc()
     return c
 
 # A value holding closures over ONE captured cell. Stored into the box it is the box's own
 # value: the closure's write to its cell inside `update` persists. Handed out by `get` / `read`
-# it is the caller's own copy: a write through it is no fault and does not reach the box.
+# it is a copy of the box's binding, so a write through it would be lost and faults (TICKET-291).
 test fn shared_closure_over_a_cell_is_owned_by_whoever_holds_it():
     s := Shared(make_ctr())
     s.update(fn(c): bump_ctr(c))
     s.update(fn(c): bump_ctr(c))
     assert s.read(fn(c): c.get()) == 2
     d := s.get()
-    d.inc()
-    assert d.get() == 3
+    assert copy_fault(d.inc)
+    assert d.get() == 2
     e := s.read(fn(c): c)
-    e.inc()
-    assert e.get() == 3
+    assert copy_fault(e.inc)
+    assert e.get() == 2
     assert s.read(fn(c): c.get()) == 2
     s.set(make_ctr())
     s.update(fn(c): bump_ctr(c))
@@ -601,8 +608,8 @@ test fn rwshared_closure_over_a_cell_is_owned_by_whoever_holds_it():
     s.write(fn(c): bump_ctr(c))
     assert s.read(fn(c): c.get()) == 2
     d := s.get()
-    d.inc()
-    assert d.get() == 3
+    assert copy_fault(d.inc)
+    assert d.get() == 2
     assert s.read(fn(c): c.get()) == 2
 
 test fn rwshared_capture_stored_into_the_state_is_the_boxes_own_value():

@@ -546,11 +546,14 @@ test fn grid_policy_r19_closure_other_heap():
     assert xs == [1]
 
 test fn grid_policy_r20_closure_same_heap():
-    # The received closure is not marked, so its write runs. The send copied its captures by value,
-    # so the parent's `xs` is unchanged.
+    # TICKET-291: a same-task round trip is a crossing. The send copied the captures, so the
+    # received closure's write would be lost: it faults, and the parent's `xs` is unchanged.
     xs := [1]
     c := Channel[fn() -> int](1)
     c.send(fn() -> int: t189_add(xs))
     f := c.recv()
-    assert f() == 2
+    res := recover: f()
+    match res:
+        ?_: assert false, "the received closure's write must fault"
+        !e: assert e.message().contains("is this task's copy"), e.message()
     assert xs == [1]

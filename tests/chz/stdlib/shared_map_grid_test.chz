@@ -283,13 +283,16 @@ test fn single_entry_writes_keep_their_own_aliases():
 
 # The same with cells, where an id collision IS visible: a rebuild reuses the first cell it built for
 # an id, so entry b's closure would share entry a's counter. Fails with the splice memo seeded at 0, or
-# without raising the ceiling after a splice.
+# without raising the ceiling after a splice. The closure only READS its cell: a write through a
+# closure read back out of the box faults (TICKET-291), so `bump` runs here, before the store.
 fn _counter(start: int) -> fn() -> int:
     n := start
-    fn bump() -> int:
+    fn bump():
         n = n + 1
+    fn get() -> int:
         return n
-    return bump
+    bump()
+    return get
 
 test fn single_entry_writes_keep_their_own_cells():
     b: concurrency.RwShared[Map[str, fn() -> int]] = concurrency.RwShared({})
