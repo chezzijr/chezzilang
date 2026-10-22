@@ -668,6 +668,7 @@ impl Vm {
                     home,
                 });
                 rebuild.insert(id, h);
+                self.heap.note_stored_from(h, origin_heap);
                 // Lever #3: rebuild positionally — push values in wire (slot) order, discard the
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
                 // D4 layer C (owner ruling 2026-09-23): the captures follow

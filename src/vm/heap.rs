@@ -777,6 +777,9 @@ pub struct Heap {
     /// branch is what makes this table sound: leaving an entry behind would hand a dead error's
     /// coordinates to whatever `alloc` reuses the slot for next.
     err_spans: FxHashMap<u32, Span>,
+    /// TICKET-285 — `Some` for a box heap only: the heap each closure was stored from, keyed on
+    /// the raw slot index like `err_spans` (pruned by `sweep()`). Read by `closure_stamp`.
+    stored_from: Option<FxHashMap<u32, u64>>,
 }
 
 /// TICKET-246 — a `RwShared` reader walks a box heap through `&Heap` while other readers do the
@@ -815,6 +818,7 @@ impl Default for Heap {
             last_live_bytes: 0,
             force_collect: false,
             err_spans: FxHashMap::default(),
+            stored_from: None,
         }
     }
 }
@@ -906,6 +910,26 @@ impl Heap {
     #[inline]
     pub fn id(&self) -> u64 {
         self.heap_id
+    }
+
+    /// Make this heap a box heap: a store, not a party, so a closure keeps the stamp it came in
+    /// with ([`closure_stamp`](Heap::closure_stamp)).
+    pub fn make_store(&mut self) {
+        self.stored_from = Some(FxHashMap::default());
+    }
+
+    /// Record that closure `h` was rebuilt from a wire stamped `origin`. A no-op off a box heap.
+    pub fn note_stored_from(&mut self, h: GcRef, origin: u64) {
+        if let Some(t) = &mut self.stored_from {
+            t.insert(h.0, origin);
+        }
+    }
+
+    /// The ONE stamp a closure crosses with (`WireValue::Closure::origin_heap`, D4 layer C): the
+    /// heap that stored it into a box, else this heap.
+    pub fn closure_stamp(&self, h: GcRef) -> u64 {
+        let stored = self.stored_from.as_ref().and_then(|t| t.get(&h.0));
+        stored.copied().unwrap_or(self.heap_id)
     }
 
     /// TICKET-213 — start marking a new view: forget the previous view's objects and move the
@@ -1301,6 +1325,9 @@ impl Heap {
                     self.slots[idx].obj = None;
                     self.free.push(idx as u32);
                     self.err_spans.remove(&(idx as u32));
+                    if let Some(t) = &mut self.stored_from {
+                        t.remove(&(idx as u32));
+                    }
                     self.clear_copied(idx);
                     self.live -= 1;
                 }

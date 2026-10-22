@@ -30,10 +30,10 @@ bare/`fn` and **recursive** local fns, **protocol existentials**, `.iter()` curs
 generators** — including one suspended mid-`recover:`. The residual **NOT-sendable** set is small and
 each case is rejected cleanly (a recoverable fault or compile error, **never UB**):
 
-- **[fundamental]** a value carrying a **live host handle** — a **module namespace** itself, a bound
-  **native** handle, or a **raw FFI** resource (a `file`/regex/HTTP `Response`/FFI extern — NOT the
-  concurrency handles above, which *do* cross). A foreign OS/library resource can't be copied into
-  another heap; the runtime airlock (`ensure_crossable`) rejects it.
+- **[fundamental]** a **module namespace** itself: it is not a value, and the checker's `sendable`
+  answers `false` for it alone. The I/O handles `Writer`, `Reader`, `Socket` and `Listener` DO cross,
+  as shared handles (the file or socket lives in a core outside every heap); a regex `Match` and a
+  `request.Response` are plain data structs and cross by deep copy; an FFI `ptr` crosses by value.
 - **[not a real limit]** two **checker-unreachable** suspended-generator shapes (multi-frame,
   pending-`defer`), kept only as defensive guards.
 
@@ -42,16 +42,17 @@ each case is rejected cleanly (a recoverable fault or compile error, **never UB*
 | `int`/`float`/`bool`, `str` | copy |
 | containers + structs whose contents are all sendable | deep copy |
 | `Channel` (reply channels), `Atomic[T]`, `AtomicInt`, `Shared[T]`, `RwShared[T]` handles | shared handle |
+| `Writer`, `Reader`, `Socket`, `Listener` handles | shared handle |
+| a regex `Match`, a `request.Response` | deep copy, like a struct |
 | a `std.cancel` `Token` (a struct over the above) | shared handles inside a copied struct |
 | an `.iter()` snapshot cursor (a frozen data snapshot + read position) | deep copy, like a `list` |
 | a user protocol existential (`Channel[P]`, protocol-typed spawn args) | deep copy of the erased witness |
 | a closure or bare `fn` | by value: proto + deep-copied captures |
 | a live generator | by value: an independent deep copy of its frozen frame |
 
-**Not sendable (checker):** native handles (file/regex/HTTP `Response`/etc.) and a **module
-namespace**. Capturing or passing either across the airlock is a **compile error** at a direct
-spawn/`Channel` site — whether captured directly by a `spawn:` block, or by a closure/nested-fn used as
-a `spawn f()` **callee**/**arg**. A **module-global** non-sendable value, by contrast, is a
+**Not sendable (checker):** a **module namespace**. Capturing or passing it across the airlock is a
+**compile error** at a direct spawn/`Channel` site — whether captured directly by a `spawn:` block,
+or by a closure/nested-fn used as a `spawn f()` **callee**/**arg**. A **module-global** non-sendable value, by contrast, is a
 **read-only global** resolvable in every task (like a free fn), **not** a per-task capture — reading it
 inside a task is fine and it is never gated.
 
@@ -109,13 +110,16 @@ Reads never check the mark. A write through a `Shared`/`RwShared`/`Atomic*`/`Cha
    saw is writable at every depth it built itself, and a list the generator yielded, stored or passed
    on faults. An Executor job, a spawn, the module snapshot and a task copy's `Task.get()` /
    `memoize1` read all apply it; see [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md) rule 2.
-3. **A same-task round-trip is not a crossing.** A closure/value sent on a `Channel` or read back from
-   a `Shared`/`RwShared` and used by the SAME task that sent it never left that task's heap, so its
-   write stays silent, exactly as `main` behaves. Only a captured closure/cell crossing into a
-   DIFFERENT task's heap — a `spawn` capture/arg, an `Executor` job's captures, or a closure sent over
-   a `Channel` and received by another task — marks the copy. A plain (non-closure) value received over
-   a `Channel`, or read back from a `Shared`/`RwShared` by a DIFFERENT task, is never marked — it
-   belongs to the receiver.
+3. **A same-task round-trip is not a crossing.** A closure/value sent on a `Channel`, or stored in a
+   `Shared`/`RwShared`, and read back by the SAME task that sent or stored it never left that task's
+   heap, so its write stays silent, exactly as `main` behaves. A captured closure/cell that crosses
+   into a DIFFERENT task's heap marks the copy: a `spawn` capture/arg, an `Executor` job's captures,
+   and a closure another task receives over a `Channel`, loads from an `Atomic`, gets from a `Task` or
+   reads out of a `Shared`/`RwShared` (`get`, `read`, a concurrent collection's `at`/`get`/`remove`).
+   A box is a store, not a party: a closure keeps the stamp of the task that stored it, and a closure
+   built inside a box closure carries the box's stamp, so every reader faults on a write to its
+   captures. A plain (non-closure) value received over a `Channel`, or read back from a
+   `Shared`/`RwShared` by a DIFFERENT task, is never marked: it belongs to the receiver.
 
 ### Closures and functions cross by value
 

@@ -47,6 +47,7 @@ DEC-189 says a hand-off never marks; the `Channel` route does mark. Single sourc
 its own `Route` to `marks`; `same_heap` compares the storing heap with the reading heap. Owner
 decision: does a closure read from `Shared` mark as the `Channel` route does (ADR D4 rule 3 says
 layer C covers every crossing closure)?
+**Done (TICKET-285):** a box heap records the heap that stored each closure (`Heap::closure_stamp`); `WalkSrc::origin` and `box_caller_heap_id` are deleted. Grid: `tests/chz/spec/airlock_box_closure_readout_test.chz`.
 
 **Family 2: which fault the run reports, and who delivers it (I-2c, I-4b', H-1b, H-4b, J-2c).**
 `Vm::unwind_result` (`src/vm/stmt.rs:257`) ranks only an unwind that has a cause; a `defer` drain from
@@ -77,6 +78,7 @@ decision: may such a party be judged when a recorded sibling fault exists?
 **Docs and owner rows.** `owners.md` has no row for the checker's `sendable`
 (`src/checker/op_sendable.rs:149`, 8 readers); the VM twin `WireValue::has_handle` rejects only a
 module, which no program can make a value. L-1c and J-1d are stale text.
+**Done (TICKET-285):** L-1c is fixed in `07-sendability.md`, and `owners.md` has the `sendable` row.
 
 ## Clean (copies that agree)
 

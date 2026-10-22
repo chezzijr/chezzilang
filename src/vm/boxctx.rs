@@ -82,7 +82,8 @@ impl Vm {
     /// caller — see [`Vm::box_global`]) and the state slot `stack[0]`, which that heap's own GC
     /// roots.
     pub(super) fn box_new(&mut self) -> Box<FiberCtx> {
-        let worker = self.spawn_worker();
+        let mut worker = self.spawn_worker();
+        worker.heap.make_store();
         Box::new(FiberCtx {
             heap: Some(worker.heap),
             stack: vec![Value::nil()],
@@ -213,14 +214,6 @@ impl Vm {
         })
     }
 
-    /// The heap id of the caller of the box call now running (its heap is parked on the chain).
-    fn box_caller_heap_id(&self) -> u64 {
-        self.box_chain
-            .last()
-            .and_then(|f| f.caller.heap.as_ref())
-            .map_or(self.heap.id(), |h| h.id())
-    }
-
     /// Runs INSIDE a box, at the end of a write: collect when the box heap is due (a box whose
     /// users only `set` runs no bytecode of its own, so nothing else would), then report its
     /// bytes. The box heap is collected only here and in the closure's own dispatch loop, both
@@ -265,10 +258,8 @@ impl Vm {
                     vm.stack[0] = v;
                     Ok(None)
                 } else {
-                    // The result is handed to the caller, so it carries the CALLER's stamp.
-                    let mut src = vm.walk_src();
-                    src.origin = vm.box_caller_heap_id();
-                    src.to_wire_crossable_memo(v, span, &mut airlock_out::WireMemo::default())
+                    vm.walk_src()
+                        .to_wire_crossable_memo(v, span, &mut airlock_out::WireMemo::default())
                         .map(Some)
                 }
             });
@@ -284,7 +275,7 @@ impl Vm {
         ctx: &FiberCtx,
         span: Span,
     ) -> Result<WireValue, RuntimeError> {
-        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.program, self.walk_base, self.heap.id());
+        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.program, self.walk_base);
         let w =
             src.to_wire_crossable_memo(ctx.stack[0], span, &mut airlock_out::WireMemo::default())?;
         self.charge_wire(&w);
@@ -400,9 +391,11 @@ impl Vm {
             let state = vm.stack[0];
             let r = op(vm, state, &vals).and_then(|out| {
                 out.map(|v| {
-                    let mut src = vm.walk_src();
-                    src.origin = vm.box_caller_heap_id();
-                    src.to_wire_crossable_memo(v, span, &mut airlock_out::WireMemo::default())
+                    vm.walk_src().to_wire_crossable_memo(
+                        v,
+                        span,
+                        &mut airlock_out::WireMemo::default(),
+                    )
                 })
                 .transpose()
             });
@@ -426,7 +419,7 @@ impl Vm {
         vals: &[Value],
         span: Span,
     ) -> Result<BoxPieces, RuntimeError> {
-        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.program, self.walk_base, self.heap.id());
+        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.program, self.walk_base);
         let encode = |prelude: Option<Value>| -> Result<BoxPieces, RuntimeError> {
             let mut memo = airlock_out::WireMemo::default();
             let mut ws = Vec::with_capacity(vals.len() + 1);

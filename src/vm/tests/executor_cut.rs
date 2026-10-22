@@ -709,7 +709,6 @@ fn walk_src_copies_out_of_a_heap_it_only_borrows() {
         active_generators: &owner.active_generators,
         program: &owner.program,
         walk_base: 0,
-        origin: owner.heap.id(),
     };
     let wire = src
         .to_wire_crossable_memo(

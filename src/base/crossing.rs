@@ -200,13 +200,16 @@ pub enum Route {
     /// A spawn's callee captures, arguments and receiver: the parent keeps its bindings, so every
     /// rebuilt object is a copy (what an operand's [`Fresh`] shape names is then unmarked).
     Spawn,
-    /// A crossing closure's captures: a capture is a by-reference binding of its creator. Back in
-    /// the heap it came from (a same-task round-trip), it keeps the enclosing mark (W7-4c).
+    /// A crossing closure's captures: a capture is a by-reference binding of its creator.
+    /// `same_heap` is true when the reading heap is the heap that stored the closure
+    /// (`Heap::closure_stamp`: a box is a store, not a party); there, a same-task round-trip, it
+    /// keeps the enclosing mark (W7-4c).
     ClosureCaptures { same_heap: bool },
     /// The spawn's module snapshot: the parent keeps its globals.
     ModuleSnapshot,
     /// A Channel/Shared/RwShared/Atomic read or an Executor job root: the sender gave the value
     /// away, so the receiver owns it (DEC-179 item 6).
+    /// A closure inside the value still marks its captures by `ClosureCaptures`.
     Handoff,
     /// A value a task copy read through a handle whose owner aliases it: `Task.get`, a
     /// `memoize1` wrapper (TICKET-213). `std.concurrency.task_copy_of` rebuilds it through
