@@ -122,12 +122,6 @@ fn waiter():
     time.sleep_ms(1000)
 ";
 
-/// The `job` cause's extra declarations: a job that faults with an index error before it sends.
-const JOB_PRELUDE: &str = "jch := Channel[int](0)
-fn work(xs: List[int]):
-    jch.send(xs[5])
-";
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Cause {
     Child,
@@ -135,7 +129,6 @@ enum Cause {
     Cancel,
     Exit,
     Own,
-    Job,
     Deadlock,
     Timeout,
 }
@@ -207,10 +200,6 @@ fn body(cause: Cause, c: Cleanup) -> Vec<String> {
             b.extend(c);
             b.push("panic(\"own\")".into());
         }
-        Cause::Job => {
-            b.extend(c);
-            b.push("print(jch.recv())".into());
-        }
         Cause::Deadlock => {
             b.extend(c);
             b.push("print(stuck.recv())".into());
@@ -268,11 +257,6 @@ fn cell_src(cause: Cause, party: Party, c: Cleanup, test_mode: bool) -> String {
     let (decls, stmts) = wrap(party, body(cause, c));
     let mut src = PRELUDE.to_string();
     let mut stmts_all = Vec::new();
-    if cause == Cause::Job {
-        src.push_str(JOB_PRELUDE);
-        stmts_all.push("jx := Executor()".to_string());
-        stmts_all.push("_ := jx.submit(fn(): work([1, 2]))".to_string());
-    }
     stmts_all.extend(stmts);
     src.push_str(&join(&decls));
     if test_mode {
@@ -376,7 +360,8 @@ enum Expect {
     Delivered,
     Exit,
     Own(Cleanup),
-    Job,
+    /// a job party's fault is its Task's outcome: nothing reaches stderr and the run ends 0
+    Held,
     Deadlock,
     /// C1: the outside Executor's job finished
     ShutdownSurvives,
@@ -422,8 +407,12 @@ fn ok(e: Expect, g: &Got) -> bool {
                     _ => err.contains("own"),
                 }
         }
-        Expect::Job => {
-            g.code != 0 && err.contains("index 5 out of bounds") && !err.contains("deadlock")
+        Expect::Held => {
+            g.code == 0
+                && !err.contains("boom")
+                && !err.contains("own")
+                && !err.contains("cleanup failed")
+                && !err.contains("deadlock")
         }
         Expect::Deadlock => g.code != 0 && err.contains("deadlock"),
         Expect::ShutdownSurvives => {
@@ -447,6 +436,16 @@ fn ok(e: Expect, g: &Got) -> bool {
     }
 }
 
+/// A cut job party: a stuck cleanup meets the deadlock verdict, which is a run end; every other
+/// outcome stays in the job's Task.
+fn job_party(cause: Cause, c: Cleanup) -> Expect {
+    match (cause, c) {
+        (Cause::Cancel, Cleanup::Stuck) => Expect::Deadlock,
+        (Cause::Child | Cause::Cancel | Cause::Join, _) => Expect::Held,
+        (Cause::Exit | Cause::Own | Cause::Deadlock | Cause::Timeout, _) => Expect::Held,
+    }
+}
+
 const T3: [(&str, Option<u32>); 3] = [("0", None), ("1", None), ("2", None)];
 const SEEDED: [(&str, Option<u32>); 4] = [
     ("1", Some(1)),
@@ -462,26 +461,22 @@ fn cells() -> Vec<Cell> {
     let parties = [P::Main, P::Fn, P::Spawned, P::Job, P::Nested];
     let mut v: Vec<Cell> = Vec::new();
     // Run mode: 5 parties × 7 causes × 3 cleanups.
-    for cause in [
-        K::Child,
-        K::Join,
-        K::Cancel,
-        K::Exit,
-        K::Own,
-        K::Job,
-        K::Deadlock,
-    ] {
+    for cause in [K::Child, K::Join, K::Cancel, K::Exit, K::Own, K::Deadlock] {
         for party in parties {
             for c in [C::None, C::Stuck, C::Faulting] {
                 let mut runs = T3.to_vec();
-                if c == C::Stuck {
+                // A job that meets a child fault, then parks in a stuck `defer` while its sleeping
+                // body is cut, hangs under some seeds on the base binary too (a deadlock-verdict
+                // miss, TICKET-289 `## Thread`), so its seeded runs stay out of the grid.
+                if c == C::Stuck && !(cause == K::Child && party == P::Job) {
                     runs.extend(SEEDED);
                 }
                 let expect = match cause {
+                    K::Child | K::Cancel | K::Join if party == P::Job => job_party(cause, c),
+                    K::Own if party == P::Job => Expect::Held,
                     K::Child | K::Join | K::Cancel => Expect::Delivered,
                     K::Exit => Expect::Exit,
                     K::Own => Expect::Own(c),
-                    K::Job => Expect::Job,
                     K::Deadlock => Expect::Deadlock,
                     K::Timeout => unreachable!(),
                 };

@@ -200,6 +200,7 @@ fn shutdown_now_ends_a_nursery_child_whose_defer_blocks_forever() {
             r := ready.recv()\n    \
             print(\"awake {r}\")\n    \
             ex.cancel()\n    \
+            ex.shutdown()\n    \
             print(\"done\")\n\
         main()\n";
     assert_at_every_worker_count("dfr2.chz", program, 5, |out| {

@@ -153,7 +153,7 @@ fn program(owner: &str, escape: &str, wait: &str, depth: usize, neighbours: &[&s
             for f in neighbours {
                 src.push_str(&format!("_ := ex.submit(fn(): {f}())\n"));
             }
-            src.push_str("_ := ex.submit(fn(): owner())\nex.shutdown()\n");
+            src.push_str("t := ex.submit(fn(): owner())\nmatch t.get():\n    ?_: pass\n    !e: panic(e.message())\n");
         }
         other => panic!("unknown owner kind {other}"),
     }

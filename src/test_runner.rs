@@ -267,7 +267,7 @@ fn verdict_from_fault(e: crate::vm::RuntimeError, site: FaultSite) -> Verdict {
 fn apply_timeout_overrun(verdict: Verdict, duration: Duration, opts: &RunOpts) -> Verdict {
     if opts.timeout_ms > 0
         && matches!(verdict, Verdict::Pass)
-        && duration.as_millis() > u128::from(opts.timeout_ms)
+        && duration.as_millis() >= u128::from(opts.timeout_ms)
     {
         return Verdict::TimedOut {
             msg: format!(
@@ -810,8 +810,7 @@ fn invoke_all(
         }
         let start = Instant::now();
         let mark = vm.exec_registry_mark();
-        // TICKET-200 — `rank_end` before the reap: an unjoined job fault recorded before this
-        // test's own cause outranks it (the reap would take the slots it reads).
+        // TICKET-200 — `rank_end` before the reap: the reap takes the slots `rank_end` reads.
         let ran = vm.invoke_test(*proto);
         let mut verdict = match vm.rank_end(ran) {
             Ok(()) => Verdict::Pass,
@@ -869,8 +868,8 @@ fn invoke_all(
     Ok((outcomes, filtered_out))
 }
 
-/// The end-of-file reap. A job fault that lands after the last test is reported as its own
-/// errored row, `(executor job)`: it is never dropped (TICKET-208, C2).
+/// The end-of-file reap. A fault the reap returns is reported as its own errored row,
+/// `(executor job)`: it is never dropped (TICKET-208, C2). A job fault is its Task outcome (TICKET-289).
 fn reap_after_tests_row(
     vm: &mut Vm,
     outcomes: &mut Vec<Outcome>,

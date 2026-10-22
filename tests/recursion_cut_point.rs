@@ -38,7 +38,7 @@ fn exit_lands_inside_a_loop_free_recursion() {
     );
 }
 
-/// TICKET-224 — the run-wide halt grid: a CPU-bound party in five shapes x five run-wide events x
+/// TICKET-224 — the run-wide halt grid: a CPU-bound party in five shapes x three run-wide events (a job fault is its Task's outcome since TICKET-289, so it is no run-wide event) x
 /// T {1, 2}. Each party prints only after its CPU work returns, so a halt that waited for the work
 /// shows on stdout. The halt fires after a channel handshake (DEC-050), and no clock is read.
 const GRID_HDR: &str = r#"import std.os
@@ -95,33 +95,14 @@ const SHAPES: [&str; 5] = ["loop", "rec", "mutual", "map", "sortkey"];
 
 /// (party, event, main body, exit code, stderr must contain). `main` is the flagless party; a
 /// `job` holds its executor's cancel flag, so `Vm::exit_halt` takes its other arm.
-const EVENTS: [(&str, &str, &[&str], i32, &str); 5] = [
+const EVENTS: [(&str, &str, &[&str], i32, &str); 3] = [
     ("main", "exit", &["_ := ex.submit(quit)", "work()"], 7, ""),
-    (
-        "main",
-        "fault",
-        &["_ := ex.submit(bad)", "work()"],
-        1,
-        "boom",
-    ),
     (
         "job",
         "exit",
         &["_ := ex.submit(work)", "started.recv()", "os.exit(7)"],
         7,
         "",
-    ),
-    (
-        "job",
-        "fault",
-        &[
-            "_ := ex.submit(work)",
-            "_ := ex.submit(bad)",
-            "ex.shutdown()",
-            r#"print("late main")"#,
-        ],
-        1,
-        "boom",
     ),
     (
         "job",

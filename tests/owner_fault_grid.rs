@@ -323,7 +323,7 @@ fn owner_src(kind: &str, ctx: &str) -> String {
             indent(&body, 12)
         ),
         "executor_job" => format!(
-            "fn owner_job() -> None:\n{}ex := Executor()\n_ := ex.submit(owner_job)\nex.shutdown()\n",
+            "fn owner_job() -> None:\n{}ex := Executor()\nt := ex.submit(owner_job)\nex.shutdown()\nmatch t.get():\n    ?_: pass\n    !e: panic(e.message())\n",
             indent(&body, 4)
         ),
         _ => unreachable!("owner kind {kind}"),

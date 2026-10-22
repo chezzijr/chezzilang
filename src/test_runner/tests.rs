@@ -1414,32 +1414,30 @@ fn timed_out_across_spawn() {
 }
 
 #[test]
-fn an_earlier_job_fault_outranks_a_later_timeout_in_a_test() {
-    // TICKET-208 (owner decision 3) — job 0's fire-and-forget fault ends the run at once: it
-    // cancels job 1's spin and cuts the test past its `recover:`, long before the wall-clock
-    // cap. So the test errors with `ordinary`, the trailing assert never runs, and no timeout
-    // is reported. (It replaces W7-5 review Fix 1, where the drain ran both jobs and the later
-    // hard-halt timeout won selection.)
+fn a_job_fault_never_cuts_a_sibling_so_the_timeout_ends_the_test() {
+    // TICKET-289 — job 0's fault is its Task's outcome: it cancels no sibling and cuts no `recover:`.
+    // Job 1's spin keeps `ex.shutdown()` waiting, so the wall-clock cap ends the test, and the
+    // job fault never reaches the report. (TICKET-208 had the fault end the run at once.)
     let d = TmpDir::new();
     let f = d.write(
             "exhalt_test.chz",
-            "import Executor from std.concurrency\nfn boom():\n    panic(\"ordinary\")\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    ex.submit(boom)\n    ex.submit(spin)\n    r := recover: ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
+            "import Executor from std.concurrency\nfn boom():\n    panic(\"ordinary\")\nfn spin():\n    while true:\n        pass\ntest fn t():\n    ex := Executor()\n    _ := ex.submit(boom)\n    _ := ex.submit(spin)\n    r := recover: ex.shutdown()\n    assert false, \"SWALLOWED\"\n",
         );
     let report = run_tests_timed(&f, 0, 50);
     assert!(!report.passed, "report:\n{}", report.text);
     assert!(
         !report.text.contains("SWALLOWED"),
-        "a recover: caught the job fault; report:\n{}",
+        "a recover: caught the timeout; report:\n{}",
         report.text
     );
     assert!(
-        report.text.contains("ordinary"),
-        "the job's fault is the report; report:\n{}",
+        !report.text.contains("ordinary"),
+        "a job fault stays in its Task; report:\n{}",
         report.text
     );
     assert!(
-        !report.text.contains("TIMED-OUT t"),
-        "the job fault ends the test before the cap; report:\n{}",
+        report.text.contains("TIMED-OUT t"),
+        "the cap ends the test; report:\n{}",
         report.text
     );
 }
@@ -2836,14 +2834,19 @@ fn json_carries_the_file_level_diagnostic() {
 }
 
 #[test]
-fn a_tests_detached_executor_is_joined_and_faults_the_test() {
+fn a_tests_detached_executor_is_joined_and_its_job_fault_errors_through_get() {
+    // TICKET-289 — an unread job fault leaves the test passing; `task.get()` re-raises it.
     let d = TmpDir::new();
-    let f = d.write(
-            "f7_test.chz",
-            "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\n\
-             test fn t():\n    ex := concurrency.Executor()\n    ex.submit(boom)\n    assert true\n",
-        );
-    let report = run_tests(&f);
+    let head = "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\n\
+                test fn t():\n    ex := concurrency.Executor()\n    task := ex.submit(boom)\n";
+    let unread = d.write("f7_test.chz", &format!("{head}    assert true\n"));
+    let report = run_tests(&unread);
+    assert!(report.passed, "report:\n{}", report.text);
+    let read = d.write(
+        "f7b_test.chz",
+        &format!("{head}    match task.get():\n        ?_: pass\n        !e: panic(e.message())\n"),
+    );
+    let report = run_tests(&read);
     assert!(report.text.contains("ERROR t"), "report:\n{}", report.text);
     assert!(
         report.text.contains("index 9 out of bounds (len 1)"),
@@ -2869,4 +2872,18 @@ fn an_executor_created_before_the_first_test_is_not_joined_by_it() {
         "report:\n{}",
         report.text
     );
+}
+
+/// TICKET-289: a `--timeout` cut ends a job silently, so a test whose body returns at the deadline
+/// reads the cut as a pass. A run of exactly `timeout_ms` is a deadline run; one millisecond less is not.
+#[test]
+fn a_pass_that_ran_to_the_deadline_is_timed_out() {
+    let opts = RunOpts {
+        timeout_ms: 300,
+        ..Default::default()
+    };
+    let at = apply_timeout_overrun(Verdict::Pass, Duration::from_millis(300), &opts);
+    assert!(matches!(at, Verdict::TimedOut { .. }), "at the deadline");
+    let under = apply_timeout_overrun(Verdict::Pass, Duration::from_millis(299), &opts);
+    assert!(matches!(under, Verdict::Pass), "one millisecond under");
 }

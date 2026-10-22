@@ -169,19 +169,26 @@ fn eprint_output_is_captured_under_show_output() {
     );
 }
 
-/// W10-12: a test's detached `Executor` must be joined at the end of the test (or suite); a job
-/// faulting there must turn the test into an ERROR.
+/// W10-12 (TICKET-289): a test's detached `Executor` is joined at the end of the test, and a job
+/// fault stays in its Task. An unread fault leaves the test passing; `task.get()` errors the test.
 #[test]
-fn detached_executor_is_joined_and_faults_error_the_test() {
+fn detached_executor_job_fault_errors_the_test_only_through_get() {
     let t = TmpDir::new();
-    let entry = t.write(
-        "f7_test.chz",
-        "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\ntest fn t():\n    ex := concurrency.Executor()\n    _ := ex.submit(boom)\n    assert true\n",
+    let head = "import std.concurrency\n\nfn boom() -> int:\n    return [1][9]\n\ntest fn t():\n    ex := concurrency.Executor()\n    task := ex.submit(boom)\n";
+    let unread = t.write("f7_test.chz", &format!("{head}    assert true\n"));
+    let (stdout, _stderr) = run_test(&[unread.to_str().unwrap()]);
+    assert!(
+        stdout.contains("1 passed, 0 failed, 0 errored"),
+        "an unread job fault must not error the test, got: {stdout}"
     );
-    let (stdout, _stderr) = run_test(&[entry.to_str().unwrap()]);
+    let read = t.write(
+        "f7b_test.chz",
+        &format!("{head}    match task.get():\n        ?_: pass\n        !e: panic(e.message())\n"),
+    );
+    let (stdout, _stderr) = run_test(&[read.to_str().unwrap()]);
     assert!(
         stdout.contains("index 9 out of bounds (len 1)"),
-        "expected the detached executor's job fault to error the test, got: {stdout}"
+        "expected the read job fault to error the test, got: {stdout}"
     );
 }
 
