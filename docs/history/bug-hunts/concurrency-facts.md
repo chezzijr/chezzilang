@@ -64,7 +64,11 @@ report read.
 `demote.rs` loops (`:128-149`, `:218-235`, `:323-346`), the parked send re-run (`channel.rs:198`),
 `fault_own_deadlock`. The test-entry reset (`src/vm/exec.rs:966`) clears the deadline and the heap
 limit, but not the open nursery or owned halt that a timed-out body leaves. Single source: every
-wait loop calls `block_halts`; a test entry resets the whole halt state.
+wait loop calls `block_halts`; a test entry resets the whole halt state. Fixed by TICKET-286:
+`Vm::blocked_halt` (`src/vm/frames.rs`) is the one ladder; the four demote loops and the send re-run
+read it; `MnSched::deadline_drain` (`src/vm/mnsched_verdict.rs`) wakes a parked channel wait at the
+deadline, which also closes J-2c (Family 2); `Vm::run_invoke` (`src/vm/exec.rs`) aborts the levels a
+hard halt leaves open.
 
 **Family 4: is a blocked party judged (I-4b', W23-1).** `BlockCtx::judged` (`src/vm/block.rs:439`,
 DEC-136) is `native_reentry == deferring`; a callback inside a `defer` drain or an `update` closure

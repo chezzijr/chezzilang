@@ -170,7 +170,11 @@ a sibling's fault reach a sleeping task the same way, and the task still unwinds
 Resource caps, measured:
 
 - **`chezzi test --timeout` reaches every blocking wait** — `sleep_ms` and `timer(ms).recv()`,
-  top-level, in a nursery and in an `Executor`, blocked in place or parked. A parked timer is armed
+  top-level, in a nursery and in an `Executor`, blocked in place or parked, and inside a native
+  callback (`[0].map(f)` whose `f` waits on a `recv`, a `send`, a `wait:`, a `time.sleep_ms` or a
+  `time.timer(ms).recv()`). A parked `send` reads it when it wakes, as a parked `recv` does.
+  A `recv`, `send` or `wait:` parked in a `parallel:` task wakes at the deadline even when no other task wakes it.
+  A parked timer is armed
   for the *sooner* of its own deadline and the run's. A netpoller op (`accept`/`read`/`write`/
   `connect`) registers with the sooner of the op's own `timeout_ms` and the run deadline: the op's own
   deadline stays a catchable `!"timeout"`, the run's is a hard abort. A socket op's `timeout_ms` is

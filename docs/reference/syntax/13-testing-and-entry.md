@@ -51,6 +51,9 @@ field, mutated through `self`.
   recursively.
 - Each test runs in isolation (one failure does not stop the rest). The report is
   `PASS/FAIL name (file:line:col) msg` plus a summary; the exit code is non-zero if a test failed.
+  A test cut by `--timeout` or `--max-heap` has its open `parallel:` tasks
+  stopped and joined before the next test starts, so a later test never sees them. A task inside a
+  blocking host call delays the next test until that call returns.
 - A suite runs `before_all? → [before_each? → test → after_each? (always, even on failure)]* →
   after_all?` and builds the suite instance once.
 - Tests run on the M:N scheduler like `chezzi run`; `CHEZZI_THREADS` sets the worker count.
