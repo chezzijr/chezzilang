@@ -19,7 +19,7 @@ open-row ledger is [`gaps.md`](../contributing/gaps.md). User-facing rules:
 
 | Item | Decision | Ancestor |
 |---|---|---|
-| `Executor` | One `ex.submit(f) -> Task[T]`. A job fault goes into its `Task` (`get()` gives `!e`). `shutdown()` raises the first fault no `get()` read, and a `recover:` catches it. `task.cancel()` cancels one job; `shutdown_now()` cancels all. Siblings run on after a fault. `submit_result` and the fire-and-forget `submit` go away | Python `Future`, Java `Future`, tokio `JoinHandle` |
+| `Executor` | One `ex.submit(f) -> Task[T]`. A kept `Task` holds its job fault (`t.get()` gives `!e`) and `shutdown()` returns. A dropped `Task` (the call is a statement, or bound to `_`) is fire-and-forget: `shutdown()` raises its fault, and a `recover:` catches it. `t.cancel()` cancels one job; `ex.cancel()` cancels all (replaces `shutdown_now()`). Siblings run on after a fault. `submit_result` and `task.submit_task` go away | Python `Future`, Java `Future`, tokio `JoinHandle`, Trio for the dropped fault |
 | `Broadcast[T]` | Add to `std.concurrency`, in Chezzi over `Channel`. Each subscriber gets every value in its own mailbox and runs its own handler loop; a slow subscriber gets `Lagged(n)` | tokio `broadcast` |
 | Custom heap | No user heap or arena API: `Shared[MyStruct]` gives a custom write interface in its own heap. Add `Frozen[T]` (build once, all tasks read in place, no lock) only when a benchmark shows the `RwShared.read` copy cost | Erlang `persistent_term`, Rust `Arc` |
 
