@@ -1202,18 +1202,7 @@ pub(super) fn arm_timer_sleep(sched: Arc<MnSched>, mut fiber: Fiber, t: TimerSle
     // `timed_out` marker. `--timeout` is the outer, absolute halt and must outrank. Nothing in-tree
     // pinned the previous order.
     let halt = if t.run_deadline.is_some_and(|rd| now >= rd) {
-        Some(
-            RuntimeError {
-                message: format!("test exceeded --timeout ({}ms)", t.timeout_ms),
-                span,
-                is_assert: false,
-                is_over_memory: false,
-                is_timed_out: false,
-                is_deadlock: false,
-                is_panic: false,
-            }
-            .timed_out(),
-        )
+        Some(super::exec::timed_out_err(t.timeout_ms, span))
     } else if t.wake.halt().is_some() {
         // TICKET-188 — a cancel, or a child fault of a nursery this fiber owns. `cancelled` is only
         // the resume marker: the resume re-derives the halt through `Vm::take_halt`. A tripped flag

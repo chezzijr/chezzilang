@@ -18,6 +18,13 @@ pub(super) fn plain_err(message: String, span: Span) -> RuntimeError {
     }
 }
 
+/// TICKET-286 — the one `--timeout` hard halt: its text and its `timed_out` marker. The Vm rungs
+/// ([`Vm::deadline_halt`], the back-edge sample, the socket resume) and the sched-side offloaded
+/// sleep (`arm_timer_sleep`) build it here.
+pub(super) fn timed_out_err(timeout_ms: u64, span: Span) -> RuntimeError {
+    plain_err(format!("test exceeded --timeout ({timeout_ms}ms)"), span).timed_out()
+}
+
 /// Behind [`Vm::depth_exceeded_err`]; the one copy of the message.
 pub(super) fn depth_exceeded(span: Span) -> RuntimeError {
     plain_err(

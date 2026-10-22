@@ -213,12 +213,7 @@ impl Vm {
         if let Some(dl) = self.deadline
             && std::time::Instant::now() >= dl
         {
-            return Err(self
-                .err(
-                    format!("test exceeded --timeout ({}ms)", self.timeout_ms),
-                    span,
-                )
-                .timed_out());
+            return Err(super::exec::timed_out_err(self.timeout_ms, span));
         }
         Ok(())
     }

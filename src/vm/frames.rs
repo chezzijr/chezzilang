@@ -855,12 +855,7 @@ impl Vm {
                 && let Some(dl) = self.deadline
                 && std::time::Instant::now() >= dl
             {
-                return Err(self
-                    .err(
-                        format!("test exceeded --timeout ({}ms)", self.timeout_ms),
-                        span,
-                    )
-                    .timed_out());
+                return Err(super::exec::timed_out_err(self.timeout_ms, span));
             }
             // TICKET-188 — a cancel, or a child fault of a nursery this party owns: one predicate.
             // The owned half rides the 1-in-1024 sample (see `halt_read`).

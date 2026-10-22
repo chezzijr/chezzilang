@@ -614,12 +614,7 @@ impl Vm {
                 // checks `peer_addr`). The unwind + re-stamp is the `resume_native` arm's, verbatim: without
                 // it the aborted task skips every `defer` (W7-16's bug, W7-17 lesson 2).
                 if std::mem::take(&mut self.poll_timed_out) {
-                    let rte = self
-                        .err(
-                            format!("test exceeded --timeout ({}ms)", self.timeout_ms),
-                            cip.span,
-                        )
-                        .timed_out();
+                    let rte = super::exec::timed_out_err(self.timeout_ms, cip.span);
                     let d = self.unwind_deferred(0, false);
                     let rte = self.unwind_result(rte, d, false).timed_out();
                     return Disp::Finish(self.classify_mn_outcome(Err(rte)));
