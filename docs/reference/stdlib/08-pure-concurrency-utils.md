@@ -143,7 +143,7 @@ no `join_next()`/select-on-completion API: completion order is nondeterministic.
 
 **`Broadcast[T]`**, **`Receiver[T]`** and **`Lagged`**: the tokio `broadcast` contract in pure
 Chezzi. `import Broadcast, Receiver, Lagged from std.concurrency.broadcast`. Construct with
-**`Broadcast[T].new(cap)`**. `b.subscribe()` gives a `Receiver[T]`, `b.send(v)` never blocks, and
+**`Broadcast[T].new(cap)`**. `b.subscribe()` gives a `Receiver[T]`, `b.send(v)` does not wait for receivers, and
 `b.close()` ends every receiver's `for`. `rx.recv() -> T!Lagged`, `rx.try_recv() -> (T!Lagged)?`,
 and `for r in rx:` gives `T!Lagged`. A receiver that fell more than `cap` values behind gets
 `!Lagged(missed)` once, then the oldest value still held. The full contract is in

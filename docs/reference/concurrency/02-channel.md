@@ -198,10 +198,10 @@ over `Channel`, `Shared` and `AtomicInt`; the runtime has no broadcast code.
 |---|---|---|
 | `Broadcast[T].new(cap)` | `new(cap: int) -> Broadcast[T]` | Each receiver holds at most `cap` values. A `cap` below 1 faults `Broadcast capacity must be at least 1, got <cap>` |
 | `subscribe` | `subscribe(self) -> Receiver[T]` | A receiver for every value sent after this call, in send order. After `close` it is closed and empty |
-| `send` | `send(self, v: T) -> None` | Never blocks. Every receiver gets its own copy of `v`. A full mailbox drops its oldest value. With no receiver the value is dropped. After `close` it faults `send on a closed Broadcast` |
+| `send` | `send(self, v: T) -> None` | Does not wait for receivers; it waits only while another `send`, `subscribe` or `close` holds the hub guard. Every receiver gets its own copy of `v`. A full mailbox drops its oldest value. With no receiver the value is dropped. After `close` it faults `send on a closed Broadcast` |
 | `close` | `close(self) -> None` | Idempotent. Every receiver's `for` ends after the values already sent |
 | `Receiver.recv` | `recv(self) -> T!Lagged` | Blocks. `?v`, or `!Lagged(missed)` when the broadcast dropped `missed` values before the next one. On a closed and drained broadcast it faults `receive on a closed channel` |
-| `Receiver.try_recv` | `try_recv(self) -> (T!Lagged)?` | Never blocks. `None` when no value waits, or when the broadcast is closed and drained |
+| `Receiver.try_recv` | `try_recv(self) -> (T!Lagged)?` | Never blocks. `None` when no value waits, when another task is inside a receive on this receiver, or when the broadcast is closed and drained |
 | `for r in rx:` | `r: T!Lagged` | What `recv` gives, until the broadcast is closed and drained. `Receiver[T]` is an `Iterable[T!Lagged]` |
 
 A receiver that falls behind loses its oldest values. Its next receive reports the count, then
@@ -217,10 +217,13 @@ print(rx.recv())     # 4
 ```
 
 `Broadcast` and `Receiver` cross `spawn`, `parallel:` and an `Executor` job as shared handles, as a
-`Channel` does. Give each reading task its own `subscribe()`: two tasks that read one `Receiver`
-share its cursor and compete for its values. Nothing unsubscribes a receiver; one that stops
-reading keeps at most `cap` values. A hand fan-out over a list of channels blocks the publisher on
-the first full mailbox; `Broadcast.send` drops that receiver's oldest value instead.
+`Channel` does. Two tasks that read one `Receiver` compete for its values: each value reaches
+exactly one of them, as with a `Channel`, and a `Lagged` report counts only the values the broadcast
+dropped. A receive holds the receiver for its whole step, so `try_recv` returns `None` while another
+task is inside a receive. Give each reading task its own `subscribe()` to get every value. Nothing
+unsubscribes a receiver; one that stops reading keeps at most `cap` values. A hand fan-out over a
+list of channels blocks the publisher on the first full mailbox; `Broadcast.send` drops that
+receiver's oldest value instead.
 
 ### 6c'. `Channel.trip()` — the manual level-trigger latch
 

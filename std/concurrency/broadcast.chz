@@ -1,11 +1,11 @@
 # std.concurrency.broadcast — a pub/sub channel (tokio `broadcast`). Pure Chezzi over `Channel`, one
-# `Shared` box and two small per-receiver boxes; no runtime support.
+# `Shared` hub, and per receiver two small boxes and a one-token lock channel; no runtime support.
 #
 # `b := Broadcast[T].new(cap)`; `rx := b.subscribe()`; `b.send(v)`; `b.close()`. Every receiver gets
 # every value sent after its `subscribe`, in send order, in its own mailbox: a channel of capacity
-# `cap`. `send` never blocks. A receiver whose mailbox is full loses its oldest value, and its next
-# receive reports the count it missed as `!Lagged(missed)`, then continues with the oldest value
-# still held (tokio `RecvError::Lagged(n)`).
+# `cap`. `send` does not wait for receivers. A receiver whose mailbox is full loses its oldest value,
+# and its next receive reports the count it missed as `!Lagged(missed)`, then continues with the
+# oldest value still held (tokio `RecvError::Lagged(n)`).
 #
 # ORDER: `send`, `subscribe` and `close` run inside the hub's one update guard, so every receiver
 # sees the sends of every publisher in one order, and a subscribe falls between two sends. Each
@@ -13,10 +13,13 @@
 # (`_next`) to count what the hub dropped. A receive takes the value before it reads the count, so
 # the report sits where the gap is, also when the hub drops a value during that receive.
 #
-# HANDLES: every field of `Broadcast` and `Receiver` is a channel or a box, so both cross `spawn`,
-# `parallel:` and `Executor` as shared handles, as a `Channel` does. Two tasks that read one
-# `Receiver` share its cursor and compete for its values; give each reader its own `subscribe()`.
-# A receiver that stops reading keeps at most `cap` values; nothing unsubscribes it.
+# HANDLES: every field of `Broadcast` and `Receiver` is a channel, a box or the fixed `_cap`, so both
+# cross `spawn`, `parallel:` and `Executor` as shared handles, as a `Channel` does. Two tasks that
+# read one `Receiver` compete for its values: each value reaches exactly one of them, and a `Lagged`
+# counts only the values the hub dropped. A receive holds the receiver's token for its whole step,
+# so `try_recv` returns `None` while another task is inside a receive. Give each reader its own
+# `subscribe()` to get every value. A receiver that stops reading keeps at most `cap` values;
+# nothing unsubscribes it.
 
 import std.concurrency
 
@@ -45,34 +48,53 @@ struct Receiver[T]:
     _next: concurrency.AtomicInt
     # The value a `!Lagged` report held back for the next receive.
     _held: concurrency.Shared[T?]
+    # One token. A receive holds it for its whole `_step`, so two tasks that read this receiver
+    # take each value once and move the cursor in mailbox order.
+    _lock: Channel[int]
 
     # Block until a value arrives: `?v`, or `!Lagged(missed)` when values were dropped before it.
     # On a closed and drained broadcast it faults `receive on a closed channel`, as `Channel.recv`.
     fn recv(self) -> T!Lagged:
-        match self._take_held():
-            ?v: return ?v
-            None: pass
-        return self._accept(self._ch.recv())
+        match self._step(true):
+            ?r: return r
+            None: panic("receive on a closed channel")
 
-    # Never blocks: `None` when no value waits (or the broadcast is closed and drained), else what
-    # `recv` returns.
+    # Never blocks: `None` when no value waits, when another task is inside a receive on this
+    # receiver, or when the broadcast is closed and drained; else what `recv` returns.
     fn try_recv(self) -> (T!Lagged)?:
-        match self._take_held():
-            ?v: return ?(?v)
-            None: pass
-        match self._ch.try_recv():
-            ?s: return ?self._accept(s)
-            None: return None
+        return self._step(false)
 
     # `for r in rx:` gives what `recv` gives, one value per step, and ends once the broadcast is
     # closed and drained (tokio-stream `BroadcastStream`).
     fn iter(self) -> Iterator[T!Lagged]:
         return _drain(self)
 
-    fn _take_held(self) -> T?:
-        h := self._held.get()
-        self._held.set(None)
-        return h
+    # The one receive step: the held value, else one mailbox value and its cursor update, all
+    # under the token. `park` false takes the token and the value with `try_recv` and gives
+    # `None` when either is missing. `park` true parks for both and gives `None` only on a closed
+    # and drained broadcast. The `defer` returns the token on every exit, a cancel included.
+    fn _step(self, park: bool) -> (T!Lagged)?:
+        tok := 0
+        if park:
+            tok = self._lock.recv()
+        else:
+            match self._lock.try_recv():
+                ?t: tok = t
+                None: return None
+        defer:
+            self._lock.send(tok)
+        match self._held.get():
+            ?v:
+                self._held.set(None)
+                return ?(?v)
+            None: pass
+        if park:
+            for s in self._ch:
+                return ?self._accept(s)
+            return None
+        match self._ch.try_recv():
+            ?s: return ?self._accept(s)
+            None: return None
 
     fn _accept(self, s: _Stamped[T]) -> T!Lagged:
         missed := s.seq - self._next.exchange(s.seq + 1)
@@ -81,15 +103,12 @@ struct Receiver[T]:
             return !Lagged(missed)
         return ?s.v
 
+# Each step takes and returns the token, so a `for` that stops early holds nothing.
 fn _drain[T](rx: Receiver[T]) -> Iterator[T!Lagged]:
-    match rx._take_held():
-        ?v: yield ?v
-        None: pass
-    for s in rx._ch:
-        yield rx._accept(s)
-        match rx._take_held():
-            ?v: yield ?v
-            None: pass
+    while true:
+        match rx._step(true):
+            ?r: yield r
+            None: return
 
 struct Broadcast[T]:
     _cap: int
@@ -106,9 +125,12 @@ struct Broadcast[T]:
         ch := Channel[_Stamped[T]](self._cap)
         next := concurrency.AtomicInt(0)
         self._hub.update(fn(h): _join(h, ch, next))
-        return Receiver(_ch=ch, _next=next, _held=concurrency.Shared(None))
+        lock := Channel[int](1)
+        lock.send(0)
+        return Receiver(_ch=ch, _next=next, _held=concurrency.Shared(None), _lock=lock)
 
-    # Give every receiver its own copy of `v`. Never blocks: a full mailbox drops its oldest value.
+    # Give every receiver its own copy of `v`. Does not wait for receivers: a full mailbox drops its
+    # oldest value. It waits for the hub guard while another `send`, `subscribe` or `close` holds it.
     # With no receiver the value is dropped. After `close` it faults `send on a closed Broadcast`.
     fn send(self, v: T):
         self._hub.update(fn(h): _publish(h, v))

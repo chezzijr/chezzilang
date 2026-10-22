@@ -146,7 +146,7 @@ fn std_internal_names_are_hidden_from_user_modules() {
         ("std.cancel", "Token", "_mark"),
         ("std.concurrency", "Executor", "_submit_settled"),
         ("std.concurrency.broadcast", "Receiver", "_accept"),
-        ("std.concurrency.broadcast", "Receiver", "_take_held"),
+        ("std.concurrency.broadcast", "Receiver", "_step"),
     ]
     .iter()
     .map(|(m, o, n)| (m.to_string(), o.to_string(), n.to_string()))
@@ -161,10 +161,7 @@ fn std_internal_names_are_hidden_from_user_modules() {
     );
     entry_ok("import std.cancel\nt := cancel.manual()\nt.cancel()\nassert t.cancelled()\n");
     // TICKET-288: a `Receiver`'s `_` methods are hidden as `Token._mark` is; `recv` stays public.
-    for (call, name) in [
-        ("rx._accept(1)", "_accept"),
-        ("rx._take_held()", "_take_held"),
-    ] {
+    for (call, name) in [("rx._accept(1)", "_accept"), ("rx._step(true)", "_step")] {
         entry_rejects(
             &format!(
                 "import Broadcast from std.concurrency.broadcast\nb := Broadcast[int].new(2)\nrx := b.subscribe()\n{call}\n"

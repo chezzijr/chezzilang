@@ -7,7 +7,7 @@
 #
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import Broadcast, Receiver, Lagged from std.concurrency.broadcast
-import Executor from std.concurrency
+import Executor, AtomicInt from std.concurrency
 import Iterable from std.iter
 
 fn take_all(rx: Receiver[int]) -> List[str]:
@@ -316,3 +316,202 @@ test fn two_tasks_reading_one_receiver_share_each_value_once():
         if c > 1:
             dups += c - 1
     assert lags == 0 and dups == 0 and values == n, "lags {lags} values {values} dups {dups}"
+
+# Read until close; send the values this reader got, then the sum of its `Lagged.missed` reports.
+fn lagging_shared_reader(rx: Receiver[int], slow: bool, got: Channel[List[int]], missed: Channel[int]):
+    vs: List[int] = []
+    lost := 0
+    for r in rx:
+        match r:
+            ?v: vs.push(v)
+            !e: lost += e.missed
+        if slow:
+            _ := spin(200)
+    got.send(vs)
+    missed.send(lost)
+
+# Rules 2 and 3 for `readers` tasks on one receiver of cap 4; reader 0 is slow.
+fn small_cap_shared_trial(readers: int) -> str:
+    n := 2000
+    b := Broadcast[int].new(4)
+    rx := b.subscribe()
+    got := Channel[List[int]](readers)
+    missed := Channel[int](readers)
+    parallel:
+        for k in 0..readers:
+            spawn:
+                lagging_shared_reader(rx, k == 0, got, missed)
+        spawn:
+            shared_publish(b, n)
+    seen: List[int] = []
+    for _ in 0..n:
+        seen.push(0)
+    received := 0
+    lost := 0
+    for _ in 0..readers:
+        vs := got.recv()
+        lost += missed.recv()
+        received += vs.len()
+        for i in 0..vs.len():
+            if i > 0 and vs[i - 1] >= vs[i]:
+                return "values out of order: {vs[i - 1]} then {vs[i]}"
+            seen[vs[i]] += 1
+            if seen[vs[i]] > 1:
+                return "value {vs[i]} reached two readers"
+    if received + lost != n:
+        return "received {received} plus missed {lost} is not {n}"
+    return "ok"
+
+# TICKET-292 rules 2 and 3. Readers that share one small mailbox never get a value twice, and a
+# `Lagged` report counts only the values the hub dropped.
+test fn readers_sharing_a_small_mailbox_count_every_value_once():
+    two := small_cap_shared_trial(2)
+    assert two == "ok", "2 readers: {two}"
+    four := small_cap_shared_trial(4)
+    assert four == "ok", "4 readers: {four}"
+
+# TICKET-292 rule 5. `try_recv` returns `None` while another reader holds the receive step, and
+# never waits for it. The test holds the token itself, as a reader inside `_step` does.
+test fn try_recv_returns_none_while_another_reader_is_receiving():
+    b := Broadcast[int].new(4)
+    rx := b.subscribe()
+    b.send(7)
+    tok := rx._lock.recv()
+    assert rx.try_recv() == None
+    rx._lock.send(tok)
+    match rx.try_recv():
+        ?r: assert (r ?? 0) == 7
+        None: assert false
+
+fn taking_reader(rx: Receiver[int], taken: Channel[int]):
+    for r in rx:
+        match r:
+            ?v: taken.send(v)
+            !e: taken.send(0 - e.missed)
+
+# Read `half` values out of `taken`, let the other nursery's reader start, then fault this nursery.
+fn fault_after(half: int, taken: Channel[int], first: Channel[List[int]], go: Channel[int]):
+    vs: List[int] = []
+    for _ in 0..half:
+        vs.push(taken.recv())
+    first.send(vs)
+    go.send(1)
+    panic("reader nursery faults")
+
+fn reader_after_go(rx: Receiver[int], go: Channel[int], out: Channel[List[int]]):
+    _ := go.recv()
+    shared_reader(rx, out)
+
+fn faulting_nursery_then_rest(b: Broadcast[int], rx: Receiver[int], half: int, n: int, taken: Channel[int], first: Channel[List[int]], go: Channel[int]):
+    res := recover:
+        parallel:
+            spawn:
+                taking_reader(rx, taken)
+            spawn:
+                fault_after(half, taken, first, go)
+    match res:
+        ?_: assert false, "the reader nursery did not fault"
+        !e: assert e.message() == "reader nursery faults"
+    for i in half..n:
+        b.send(i)
+    b.close()
+
+# TICKET-292 rule 6. A reader cancelled while it waits inside the receive step returns the token:
+# the reader in the other nursery still gets every value the first reader did not take.
+test fn a_reader_cancelled_inside_a_receive_does_not_block_the_other_reader():
+    n := 1000
+    half := 500
+    b := Broadcast[int].new(n)
+    rx := b.subscribe()
+    for i in 0..half:
+        b.send(i)
+    taken := Channel[int](n)
+    first := Channel[List[int]](1)
+    go := Channel[int](1)
+    rest := Channel[List[int]](1)
+    parallel:
+        spawn:
+            reader_after_go(rx, go, rest)
+        spawn:
+            faulting_nursery_then_rest(b, rx, half, n, taken, first, go)
+    all := first.recv() + rest.recv()
+    seen: List[int] = []
+    for _ in 0..n:
+        seen.push(0)
+    for x in all:
+        assert x >= 0, "a reader reported a lag"
+        seen[x] += 1
+    for i in 0..n:
+        assert seen[i] == 1, "value {i} arrived {seen[i]} times"
+
+# `recv` on a closed and drained receiver faults with the `Channel.recv` message.
+test fn recv_on_a_closed_and_drained_receiver_faults():
+    b := Broadcast[int].new(2)
+    rx := b.subscribe()
+    b.close()
+    res := recover:
+        _ := rx.recv()
+    match res:
+        ?_: assert false
+        !e: assert e.message() == "receive on a closed channel"
+    assert rx.try_recv() == None
+
+fn note(r: int!Lagged, got: List[int], taken: AtomicInt):
+    match r:
+        ?v: got.push(v)
+        !e: got.push(0 - e.missed)
+    _ := taken.add(1)
+
+fn for_path_reader(rx: Receiver[int], taken: AtomicInt, out: Channel[List[int]]):
+    got: List[int] = []
+    for r in rx:
+        note(r, got, taken)
+    out.send(got)
+
+fn recv_path_reader(rx: Receiver[int], taken: AtomicInt, out: Channel[List[int]]):
+    got: List[int] = []
+    res := recover:
+        while true:
+            note(rx.recv(), got, taken)
+    match res:
+        ?_: pass
+        !e: assert e.message() == "receive on a closed channel"
+    out.send(got)
+
+# Polls until every value is taken: closed-and-drained and empty both give `None`.
+fn try_recv_path_reader(rx: Receiver[int], n: int, taken: AtomicInt, out: Channel[List[int]]):
+    got: List[int] = []
+    while taken.load() < n:
+        match rx.try_recv():
+            ?r: note(r, got, taken)
+            None: pass
+    out.send(got)
+
+# TICKET-292 rule 4. One reader per receive path (`for`, `recv`, `try_recv`) on one receiver with
+# room for every value: each value reaches exactly one reader and no `Lagged` is reported.
+test fn every_receive_path_shares_one_receiver_without_a_duplicate():
+    n := 3000
+    b := Broadcast[int].new(n)
+    rx := b.subscribe()
+    taken := AtomicInt(0)
+    o1 := Channel[List[int]](1)
+    o2 := Channel[List[int]](1)
+    o3 := Channel[List[int]](1)
+    parallel:
+        spawn:
+            for_path_reader(rx, taken, o1)
+        spawn:
+            recv_path_reader(rx, taken, o2)
+        spawn:
+            try_recv_path_reader(rx, n, taken, o3)
+        spawn:
+            shared_publish(b, n)
+    all := o1.recv() + o2.recv() + o3.recv()
+    seen: List[int] = []
+    for _ in 0..n:
+        seen.push(0)
+    for x in all:
+        assert x >= 0, "a reader reported a lag"
+        seen[x] += 1
+    for i in 0..n:
+        assert seen[i] == 1, "value {i} arrived {seen[i]} times"
