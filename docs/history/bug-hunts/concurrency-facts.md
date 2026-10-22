@@ -102,3 +102,12 @@ Latent (code differs, no program reached it): the second job-fault publisher
 | Halt rank | One ranking that every site reads: 1 `os.exit`; 2 the first in time of a real fault, `--timeout` or `--max-heap`; 3 a cancelled task's cleanup fault; 4 deadlock | Family 2 (I-2c, J-2c, H-1b, H-4b) |
 | Judge a wait | A party in a callback inside a `defer`, or in an `update` closure, is judged when a sibling fault is already recorded | Family 4 (I-4b', W23-1) |
 | Shared mark | A closure read out of `Shared`/`RwShared` by another task marks its captures as the `Channel` route does | Family 1 (L-1a) |
+
+## Owner decision: same-task round trip (2026-10-22)
+
+The adversarial review of TICKET-285 found that a same-task round trip loses the write silently:
+`ch.send(f); ch.recv()()` leaves `xs` at `[1]`, because `recv` rebuilds `f` with a copy of its
+captures. The owner keeps D4 ("never a silent lost write") and reverses the 2026-09-23 ruling of
+`07-sendability.md` rule 3: a same-task round trip faults like every other crossing. The same ticket
+fixes the relay and the recv-inside-a-box lost writes, and the false fault on a closure that a box
+closure builds over fresh state (TICKET-285 review charges C1 to C4).
