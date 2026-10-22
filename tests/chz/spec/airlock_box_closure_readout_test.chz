@@ -1,51 +1,162 @@
 # TICKET-285 — D4 layer C: a closure another task reads out of Shared/RwShared marks its
 # captures exactly as the Channel route does, so a write through a capture FAULTS.
-import Shared, RwShared from std.concurrency
+#
+# Grid: closure x readout route x capture kind. Every route a closure can be read out of is one
+# `route` row: the four box readout sites (`box_copy_out`, `box_copy_pieces`, the `box_call` result,
+# the `rwshared_mutate` result) and the three wire-stored routes (Channel, Atomic, Task). A reader
+# task faults on a write to a captured list and to a module global (`silent_routes`). The task that
+# stored the closure and reads it back stays writable (`self_read_back_*`, `a_task_reads_back_*`).
+import Shared, RwShared, Atomic, Executor from std.concurrency
+import ConcurrentList, ConcurrentMap from std.concurrency.collection
+import submit_task from std.concurrency.task
 
 COPY_TAIL := "is this task's copy: a write to it would be lost at the join"
+ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get", "ConcurrentMap.remove", "Channel.recv", "Atomic.load", "Task.get"]
+BOX_ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get"]
+G := [1]
+
+fn some(o: (fn() -> None)?) -> fn() -> None:
+    match o:
+        ?v: return v
+        None: panic("the route holds no closure")
+
+fn ok(o: (fn() -> None)!) -> fn() -> None:
+    match o:
+        ?v: return v
+        !e: panic(e.message())
+
+# The fault message of `g()`, or "no-fault".
+fn outcome(g: fn() -> None) -> str:
+    res := recover: g()
+    match res:
+        ?_: return "no-fault"
+        !e: return e.message()
+
+# Store `f` behind `name` and return the reader that takes it back out.
+fn route(name: str, f: fn() -> None) -> fn() -> fn() -> None:
+    match name:
+        "Shared.get":
+            b := Shared([f])
+            return fn(): b.get()[0]
+        "Shared.read":
+            b := Shared([f])
+            return fn(): b.read(fn(s): s[0])
+        "RwShared.get":
+            b := RwShared([f])
+            return fn(): b.get()[0]
+        "RwShared.read":
+            b := RwShared([f])
+            return fn(): b.read(fn(s): s[0])
+        "ConcurrentList.at":
+            cl := ConcurrentList[fn() -> None].new()
+            cl.push(f)
+            return fn(): some(cl.at(0))
+        "ConcurrentMap.get":
+            cm := ConcurrentMap[int, fn() -> None].new()
+            _ := cm.insert(1, f)
+            return fn(): some(cm.get(1))
+        "ConcurrentMap.remove":
+            cm := ConcurrentMap[int, fn() -> None].new()
+            _ := cm.insert(1, f)
+            return fn(): some(cm.remove(1))
+        "Channel.recv":
+            ch := Channel[fn() -> None](1)
+            ch.send(f)
+            return fn(): ch.recv()
+        "Atomic.load":
+            a := Atomic(f)
+            return fn(): a.load()
+        "Task.get":
+            ex := Executor(1)
+            t := submit_task(ex, fn(): f)
+            ex.shutdown()
+            return fn(): ok(t.get())
+        _: panic("no route {name}")
+
+# Read the closure out in a spawned task and call it there.
+fn in_task(read: fn() -> fn() -> None) -> str:
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            r.send(outcome(read()))
+    return r.recv()
+
+fn list_writer() -> fn() -> None:
+    xs := [1]
+    return fn(): xs.push(2)
+
+fn global_writer() -> fn() -> None:
+    return fn(): G.push(2)
+
+# The routes whose reader task did NOT fault, for a closure from `make`.
+fn silent_routes(make: fn() -> fn() -> None) -> List[str]:
+    out: List[str] = []
+    for name in ROUTES:
+        if not in_task(route(name, make())).contains(COPY_TAIL):
+            out.push(name)
+    return out
 
 test fn shared_get_closure_capture_write_faults():
-    xs := [1]
-    f := fn(): xs.push(2)
-    box := Shared([f])
-    r := Channel[str](1)
-    parallel:
-        spawn:
-            g := box.get()[0]
-            res := recover: g()
-            match res:
-                ?_: r.send("no-fault")
-                !e: r.send(e.message())
-    msg := r.recv()
-    assert msg.contains(COPY_TAIL)
+    assert in_task(route("Shared.get", list_writer())).contains(COPY_TAIL)
 
 test fn rwshared_get_closure_capture_write_faults():
-    xs := [1]
-    f := fn(): xs.push(2)
-    box := RwShared([f])
-    r := Channel[str](1)
-    parallel:
-        spawn:
-            g := box.get()[0]
-            res := recover: g()
-            match res:
-                ?_: r.send("no-fault")
-                !e: r.send(e.message())
-    msg := r.recv()
-    assert msg.contains(COPY_TAIL)
+    assert in_task(route("RwShared.get", list_writer())).contains(COPY_TAIL)
+
+test fn shared_read_result_closure_capture_write_faults():
+    assert in_task(route("Shared.read", list_writer())).contains(COPY_TAIL)
+
+test fn rwshared_read_closure_capture_write_faults():
+    assert in_task(route("RwShared.read", list_writer())).contains(COPY_TAIL)
+
+test fn concurrent_list_at_closure_capture_write_faults():
+    assert in_task(route("ConcurrentList.at", list_writer())).contains(COPY_TAIL)
+
+test fn concurrent_map_get_closure_capture_write_faults():
+    assert in_task(route("ConcurrentMap.get", list_writer())).contains(COPY_TAIL)
+
+test fn concurrent_map_remove_closure_capture_write_faults():
+    assert in_task(route("ConcurrentMap.remove", list_writer())).contains(COPY_TAIL)
 
 test fn channel_recv_closure_capture_write_faults():
-    xs := [1]
-    f := fn(): xs.push(2)
-    ch := Channel[fn() -> None](1)
-    ch.send(f)
+    assert in_task(route("Channel.recv", list_writer())).contains(COPY_TAIL)
+
+test fn list_capture_write_faults_on_every_route():
+    assert silent_routes(list_writer) == []
+
+test fn global_write_faults_on_every_route():
+    assert silent_routes(global_writer) == []
+
+# The task that stored the closure reads it back: the box was a store, so the closure never left.
+test fn self_read_back_stays_writable_on_every_box_route():
+    for name in BOX_ROUTES:
+        assert outcome(route(name, list_writer())()) == "no-fault", name
+
+test fn a_task_reads_back_its_own_stored_closure_writable():
     r := Channel[str](1)
     parallel:
         spawn:
-            h := ch.recv()
-            res := recover: h()
-            match res:
-                ?_: r.send("no-fault")
-                !e: r.send(e.message())
-    msg := r.recv()
-    assert msg.contains(COPY_TAIL)
+            r.send(outcome(route("Shared.get", list_writer())()))
+    assert r.recv() == "no-fault"
+
+# A closure a task built and stored, read by main after the join: the Channel twin faults.
+test fn task_built_closure_read_by_main_faults():
+    b := Shared[List[fn() -> None]]([])
+    parallel:
+        spawn:
+            b.set([list_writer()])
+    assert outcome(b.get()[0]).contains(COPY_TAIL)
+
+# `update` stores a captured closure: the stamp is the updating task's, so another task faults.
+test fn update_stored_closure_read_by_task_faults():
+    g := list_writer()
+    b := Shared[List[fn() -> None]]([])
+    b.update(fn(s): s + [g])
+    assert outcome(b.get()[0]) == "no-fault"
+    assert in_task(fn(): b.get()[0]).contains(COPY_TAIL)
+
+# A closure built inside the box captures the box's own state; the write would be lost, so it faults.
+test fn box_built_closure_capture_write_faults():
+    b := Shared([1])
+    built := b.read(fn(s): fn(): s.push(9))
+    assert outcome(built).contains(COPY_TAIL)
+    assert b.get() == [1]
