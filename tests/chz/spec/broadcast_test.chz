@@ -269,3 +269,50 @@ test fn a_reader_that_drains_during_a_send_never_loses_the_newest_value():
         got := one_lag_trial()
         ok := got == ["0", "1"] or got == ["lag 1", "1"]
         assert ok, "trial {t}: the reader got {got}"
+
+fn shared_reader(rx: Receiver[int], out: Channel[List[int]]):
+    got: List[int] = []
+    for r in rx:
+        match r:
+            ?v: got.push(v)
+            !e: got.push(-e.missed)
+    out.send(got)
+
+fn shared_publish(b: Broadcast[int], n: int):
+    for i in 0..n:
+        b.send(i)
+    b.close()
+
+# TICKET-292 rule 1. Two reader tasks share one `Receiver` with room for every value, so the hub
+# drops nothing: each value reaches exactly one reader and no `Lagged` is reported.
+test fn two_tasks_reading_one_receiver_share_each_value_once():
+    n := 5000
+    b := Broadcast[int].new(n)
+    rx := b.subscribe()
+    o1 := Channel[List[int]](1)
+    o2 := Channel[List[int]](1)
+    parallel:
+        spawn:
+            shared_reader(rx, o1)
+        spawn:
+            shared_reader(rx, o2)
+        spawn:
+            shared_publish(b, n)
+    all := o1.recv() + o2.recv()
+    count: List[int] = []
+    for _ in 0..n:
+        count.push(0)
+    lags := 0
+    for x in all:
+        if x < 0:
+            lags += 1
+        else:
+            count[x] += 1
+    dups := 0
+    values := 0
+    for c in count:
+        if c > 0:
+            values += 1
+        if c > 1:
+            dups += c - 1
+    assert lags == 0 and dups == 0 and values == n, "lags {lags} values {values} dups {dups}"
