@@ -163,9 +163,10 @@ enum Party {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Handle {
+    /// `_ := ex.submit(...)`: the Task is dropped unread.
     Submit,
-    SubmitTask,
-    SubmitResult,
+    /// `h := ex.submit(...)`: the Task is read with `get()`.
+    Kept,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -185,7 +186,7 @@ enum Event {
     FireAndForgetFault,
     HandleFault,
     Shutdown,
-    ShutdownNow,
+    Cancel,
     CreatorCancel,
 }
 
@@ -235,16 +236,15 @@ fn own_action(e: Event) -> &'static str {
 fn submit_expr(h: Handle, ex: &str, f: &str) -> String {
     match h {
         Handle::Submit => format!("{ex}.submit(fn(): drop({f}))"),
-        Handle::SubmitTask => format!("task.submit_task({ex}, fn() -> int: {f})"),
-        Handle::SubmitResult => format!("{ex}.submit(fn() -> int: {f})"),
+        Handle::Kept => format!("{ex}.submit(fn() -> int: {f})"),
     }
 }
 
-/// `v := expr`, or the bare `expr` for `submit`, which returns nothing.
+/// `v := expr`, or `_ := expr` for a Task nobody reads.
 fn bind(h: Handle, v: &str, expr: String) -> String {
     match h {
-        Handle::Submit => expr,
-        _ => format!("{v} := {expr}"),
+        Handle::Submit => format!("_ := {expr}"),
+        Handle::Kept => format!("{v} := {expr}"),
     }
 }
 
@@ -252,11 +252,10 @@ fn bind(h: Handle, v: &str, expr: String) -> String {
 fn read_lines(h: Handle, v: &str) -> Vec<String> {
     match h {
         Handle::Submit => vec![],
-        Handle::SubmitTask => vec![
+        Handle::Kept => vec![
             format!("print(\"got {{{v}.get()}}\")"),
             format!("print(\"done {{{v}.done()}}\")"),
         ],
-        Handle::SubmitResult => vec![format!("print(\"got {{{v}.recv()}}\")")],
     }
 }
 
@@ -275,12 +274,9 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
     // The handle reader `rd` for a `defer:` read (event 3).
     match h {
         Handle::Submit => {}
-        Handle::SubmitTask => src.push_str(
+        Handle::Kept => src.push_str(
             "fn rd(h: concurrency.Task[int]):\n    print(\"got {h.get()}\")\n    print(\"done {h.done()}\")\n",
         ),
-        Handle::SubmitResult => {
-            src.push_str("fn rd(h: Channel[int!]):\n    print(\"got {h.recv()}\")\n")
-        }
     }
 
     // The body that submits and reads: main's, or the outer job's for creator cancel.
@@ -297,6 +293,10 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
             }
             Event::ForeignExit => inner.push("os.exit(17)".into()),
             _ => {
+                // The fault of `boom` stays in its Task, so a parked target needs its release.
+                if s == State::ParkedRecv {
+                    inner.push("gate.send(1)".into());
+                }
                 inner.push("ex3 := Executor()".into());
                 inner.push("_ := ex3.submit(fn(): boom())".into());
                 inner.push("time.sleep_ms(300)".into());
@@ -316,13 +316,13 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
             body.push(bind(h, "b", submit_expr(h, "ex", "blocker()")));
         }
         body.push(bind(h, "h", submit_expr(h, "ex", "target()")));
-        // A fire-and-forget fault cuts main in a sleep; only a `defer:` reads the handle.
+        // A fire-and-forget fault leaves main sleeping (TICKET-289); only a `defer:` reads the handle.
         let ff = e == Event::FireAndForgetFault || (e == Event::HandleFault && h == Handle::Submit);
         if ff {
             if h != Handle::Submit {
                 body.push("defer: rd(h)".into());
             }
-            if s == State::ParkedRecv && e == Event::HandleFault {
+            if s == State::ParkedRecv {
                 body.push("gate.send(1)".into());
             }
             if e == Event::FireAndForgetFault {
@@ -345,7 +345,7 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
                     }
                     body.push("ex.shutdown()".into());
                 }
-                Event::ShutdownNow => body.push("ex.cancel()".into()),
+                Event::Cancel => body.push("ex.cancel()".into()),
                 _ => {}
             }
             if e == Event::HandleFault && s == State::Held {
@@ -389,11 +389,7 @@ fn check(p: Party, h: Handle, s: State, e: Event, g: &Got) -> Option<String> {
     let dropped_held = s == State::Held
         && matches!(
             e,
-            Event::OwnExit
-                | Event::ForeignExit
-                | Event::FireAndForgetFault
-                | Event::ShutdownNow
-                | Event::CreatorCancel
+            Event::OwnExit | Event::ForeignExit | Event::Cancel | Event::CreatorCancel
         );
     if dropped_held && g.started {
         return Some("a held job started".into());
@@ -409,20 +405,19 @@ fn check(p: Party, h: Handle, s: State, e: Event, g: &Got) -> Option<String> {
             }
         }
         Event::FireAndForgetFault => {
-            if g.code != Some(1) || !g.err.contains("boom") || m_end {
-                return Some("the fault did not end the run".into());
+            // A job fault is its Task's outcome alone (TICKET-289): it never ends the run, never
+            // reaches stderr and never cancels a sibling, so the held target runs.
+            if g.code != Some(0) || g.err.contains("boom") || !m_end {
+                return Some("a fire-and-forget fault touched the run".into());
+            }
+            if !g.out.contains("T end") {
+                return Some("the target did not run to its end".into());
             }
             if handle {
-                if gots.len() != 1 {
-                    return Some(format!("{} got lines, want 1", gots.len()));
+                if gots.len() != 1 || gots[0] != "got 7" {
+                    return Some(format!("got lines {gots:?}, want [\"got 7\"]"));
                 }
-                if s == State::Held && gots[0] != format!("got {CANCELLED}") {
-                    return Some("the held handle did not settle cancelled".into());
-                }
-                if !ok_or_cancel(gots[0]) {
-                    return Some("the got line is neither 7 nor cancelled".into());
-                }
-                if h == Handle::SubmitTask && !g.out.contains("done true") {
+                if !g.out.contains("done true") {
                     return Some("no `done true`".into());
                 }
             }
@@ -438,8 +433,8 @@ fn check(p: Party, h: Handle, s: State, e: Event, g: &Got) -> Option<String> {
                 if !m_end {
                     return Some("no `M end`".into());
                 }
-            } else if g.code != Some(1) || !g.err.contains("bad") || m_end {
-                return Some("the fire-and-forget fault did not end the run".into());
+            } else if g.code != Some(0) || g.err.contains("bad") || !m_end {
+                return Some("the unread fault touched the run".into());
             }
         }
         Event::Shutdown => {
@@ -450,15 +445,15 @@ fn check(p: Party, h: Handle, s: State, e: Event, g: &Got) -> Option<String> {
                 return Some("a handle did not read 7".into());
             }
         }
-        Event::ShutdownNow => {
+        Event::Cancel => {
             if g.code != Some(0) || !m_end {
-                return Some("shutdown_now did not end cleanly".into());
+                return Some("cancel did not end cleanly".into());
             }
             if handle {
                 if gots.len() != 1 || !ok_or_cancel(gots[0]) {
                     return Some("want exactly one 7 or cancelled got line".into());
                 }
-                if h == Handle::SubmitTask && !g.out.contains("done true") {
+                if h == Handle::Kept && !g.out.contains("done true") {
                     return Some("no `done true`".into());
                 }
             }
@@ -486,10 +481,10 @@ const EVENTS: [Event; 7] = [
     Event::FireAndForgetFault,
     Event::HandleFault,
     Event::Shutdown,
-    Event::ShutdownNow,
+    Event::Cancel,
     Event::CreatorCancel,
 ];
-const HANDLES: [Handle; 3] = [Handle::Submit, Handle::SubmitTask, Handle::SubmitResult];
+const HANDLES: [Handle; 2] = [Handle::Submit, Handle::Kept];
 
 type Cell = (
     Party,
@@ -586,7 +581,7 @@ fn main():
     h := ex.submit(fn() -> int: target())
     defer: rd(h)
     ex2 := concurrency.Executor()
-    ex2.submit(fn(): boom())
+    _ := ex2.submit(fn(): boom())
     time.sleep_ms(100)
     print("M end")
 main()
@@ -610,20 +605,22 @@ fn main():
     h := ex.submit(fn() -> int: target())
     defer: rd(h)
     ex2 := concurrency.Executor()
-    ex2.submit(fn(): boom())
+    _ := ex2.submit(fn(): boom())
     time.sleep_ms(100)
     print("M end")
 main()
 "#;
 
 #[test]
-fn defer_reader_settles_after_a_job_fault() {
-    let want = format!("defer got {CANCELLED}\n");
+fn defer_reader_gets_its_value_after_another_job_faults() {
+    // TICKET-289: the other job's fault stays in its Task, so the held and the running target both
+    // run, and main ends clean. The job output lands at the `get()` in the `defer`.
+    let want = "M end\ntarget ran\ndefer got 7\n";
     let mut misses = Vec::new();
     for (name, src) in [("dheld", DHELD), ("drun", DRUN)] {
         for t in ["1", "2", "0"] {
             let g = run(src, t, None, HANG);
-            if g.code != Some(1) || !g.err.contains("boom") || g.out != want {
+            if g.code != Some(0) || g.err.contains("boom") || g.out != want {
                 misses.push(format!("{name} T={t}: {}", g.show()));
             }
         }
