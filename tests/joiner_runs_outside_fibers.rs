@@ -273,3 +273,82 @@ fn caught_fault_woken_at_an_offload_resume_parks_before_it_waits() {
         bad.join("\n")
     );
 }
+
+/// TICKET-294: a `recover:` around `depth` nested `parallel:` levels. Every level has a child that
+/// waits on a dead channel and sleeps in a `defer`, so the fault unwind parks at each level in turn.
+/// The catch resume must park per level too; a neighbour that wakes late and blocks in place in a
+/// callback must not land on the owner's stack. Which runner takes the neighbour is a race.
+fn nested_catch_program(depth: usize) -> String {
+    let mut src = String::from(
+        "import std.time\ndead: Channel[int] = Channel()\ndead2: Channel[int] = Channel()\nfn on_dead(x: int) -> int:\n    return x + dead2.recv()\nfn late_inplace():\n    time.sleep_ms(150)\n    print([0].map(on_dead))\nfn owner():\n    r := recover:\n",
+    );
+    for level in 0..depth {
+        let ind = " ".repeat(8 + 4 * level);
+        let sleep = if level + 1 == depth { 50 } else { 600 };
+        src.push_str(&format!(
+            "{ind}parallel:\n{ind}    spawn:\n{ind}        defer time.sleep_ms({sleep})\n{ind}        defer print(\"child {level} defer\")\n{ind}        print(dead.recv())\n"
+        ));
+    }
+    let ind = " ".repeat(8 + 4 * (depth - 1) + 4);
+    src.push_str(&format!("{ind}assert false, \"boom\"\n        1\n"));
+    src.push_str("    print(\"caught\", r)\n    assert false, \"inner boom\"\nparallel:\n    spawn:\n        owner()\n    spawn:\n        late_inplace()\nprint(\"end\")\n");
+    src
+}
+
+#[test]
+fn caught_fault_under_nested_levels_parks_per_level_beside_a_late_inplace_neighbour() {
+    let dir = std::env::temp_dir().join(format!("chz-t294-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let mut runs = Vec::new();
+    for depth in [2usize, 3] {
+        let path = dir.join(format!("nested{depth}.chz"));
+        std::fs::write(&path, nested_catch_program(depth)).expect("write program");
+        for i in 0..12 {
+            runs.push((depth, i, path.clone()));
+        }
+    }
+    let results: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = runs
+            .iter()
+            .map(|(_, _, path)| {
+                s.spawn(move || hang_deadline::run_with_hang_deadline(path, Some("2")))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("run thread"))
+            .collect()
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut bad = Vec::new();
+    for ((depth, i, _), out) in runs.iter().zip(results) {
+        match out {
+            None => bad.push(format!(
+                "depth {depth} run {i}: no exit within the hang deadline"
+            )),
+            Some(o) => {
+                let all = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                if o.status.code() != Some(1)
+                    || !all.contains("inner boom")
+                    || !all.contains("caught")
+                {
+                    bad.push(format!(
+                        "depth {depth} run {i}: rc={:?} {all:?}",
+                        o.status.code()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {} nested-catch runs did not report:\n{}",
+        bad.len(),
+        runs.len(),
+        bad.join("\n")
+    );
+}
