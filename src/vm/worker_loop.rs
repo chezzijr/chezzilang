@@ -685,8 +685,11 @@ impl Vm {
                 }
             }
             // TICKET-287 — a fiber that parked mid fault-unwind ([`Vm::store_fault_park`])
-            // resumes that unwind here, not at its `ip`. It may park again at a lower level.
-            if let Some(p) = self.fault_park.take()
+            // resumes that unwind here, not at its `ip`. It may park again at a lower level. A park
+            // raised by this resume's own halt arms above (`join_suspend` already set) has not
+            // waited yet: it goes to the join as it is.
+            if self.join_suspend.is_none()
+                && let Some(p) = self.fault_park.take()
                 && let Err(e) = self.resume_fault_unwind(p)
             {
                 return Disp::Finish(self.classify_mn_outcome(Err(e)));
