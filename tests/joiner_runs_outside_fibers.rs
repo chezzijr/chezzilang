@@ -214,3 +214,62 @@ fn owner_fault_is_reported_at_every_owner_escape_child_neighbour_and_worker_coun
         bad.join("\n")
     );
 }
+
+/// An owner asleep in its `parallel:` body is woken by a child fault into a `recover:` outside the
+/// nursery. The catch parks at the resume (`on_step_fault` from the offload resume), and the run
+/// must not resume that park at once: the cancelled child holds its family open for 700 ms, and a
+/// neighbour that wakes meanwhile and blocks in place must not land on the owner's stack. Which
+/// runner takes the neighbour is a race, so the program runs 12 times per worker count.
+const SLEEP_CATCH: &str = "import std.time\nfn on_sleep(x: int) -> int:\n    time.sleep_ms(60000)\n    return x\nfn late():\n    time.sleep_ms(300)\n    print([0].map(on_sleep))\nfn owner():\n    r := recover:\n        parallel:\n            spawn:\n                defer time.sleep_ms(700)\n                time.sleep_ms(60000)\n            spawn:\n                time.sleep_ms(100)\n                assert false, \"first boom\"\n            time.sleep_ms(60000)\n        1\n    print(r)\n    assert false, \"inner boom\"\nparallel:\n    spawn:\n        owner()\n    spawn:\n        late()\nprint(\"end\")\n";
+
+#[test]
+fn caught_fault_woken_at_an_offload_resume_parks_before_it_waits() {
+    let dir = std::env::temp_dir().join(format!("chz-t287-sleep-catch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("sleep_catch.chz");
+    std::fs::write(&path, SLEEP_CATCH).expect("write program");
+    let runs: Vec<(&str, usize)> = ["2", "3"]
+        .into_iter()
+        .flat_map(|t| (0..12).map(move |i| (t, i)))
+        .collect();
+    let results: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = runs
+            .iter()
+            .map(|(t, _)| {
+                let path = &path;
+                s.spawn(move || hang_deadline::run_with_hang_deadline(path, Some(*t)))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("run thread"))
+            .collect()
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut bad = Vec::new();
+    for ((t, i), out) in runs.iter().zip(results) {
+        match out {
+            None => bad.push(format!("T={t} run {i}: no exit within the hang deadline")),
+            Some(o) => {
+                let all = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                if o.status.code() != Some(1)
+                    || !all.contains("inner boom")
+                    || !all.contains("first boom")
+                {
+                    bad.push(format!("T={t} run {i}: rc={:?} {all:?}", o.status.code()));
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {} runs did not report:\n{}",
+        bad.len(),
+        runs.len(),
+        bad.join("\n")
+    );
+}
