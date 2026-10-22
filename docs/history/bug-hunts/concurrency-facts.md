@@ -91,3 +91,12 @@ Latent (code differs, no program reached it): the second job-fault publisher
 (`src/vm/worker_vm.rs:493-501`, never first); the `try_lock` join-over copy
 (`src/vm/mnsched.rs:284-298`, may relate to `gaps.md` W22-1); `CHEZZI_THREADS` env warns while
 `--threads` exits 1. Perf (P2): an Executor in each of 8 tasks costs about 30% more CPU at T=1-2.
+
+## Owner decisions (2026-10-22)
+
+| Row | Decision | Closes |
+|---|---|---|
+| Task fault | Keep the Trio model: the first fault cancels the siblings, the join raises it again, a `recover:` around the `parallel:` catches it | none (confirms `01-model.md` §4) |
+| Halt rank | One ranking that every site reads: 1 `os.exit`; 2 the first in time of a real fault, `--timeout` or `--max-heap`; 3 a cancelled task's cleanup fault; 4 deadlock | Family 2 (I-2c, J-2c, H-1b, H-4b) |
+| Judge a wait | A party in a callback inside a `defer`, or in an `update` closure, is judged when a sibling fault is already recorded | Family 4 (I-4b', W23-1) |
+| Shared mark | A closure read out of `Shared`/`RwShared` by another task marks its captures as the `Channel` route does | Family 1 (L-1a) |
