@@ -161,3 +161,12 @@ Other probes: `"12".parse_int() ?? 0` prints `12`; `r.ok()` on `int!str` is `has
 | Drift conventions (table 3) | 22, of which 21 drift |
 | Doc contradictions (table 4) | 9 |
 | Feature checks (section 5) | 10 programs; 2 features missing (generic default, named args on native methods); 1 wrong diagnostic |
+
+## 7. Owner decisions (2026-10-22)
+
+| Rule | Decision | Groups |
+|---|---|---|
+| Search miss | `T?` on every type: `index_of(x, start: int = 0) -> int?` on `List`, `str`, `bytes`; the `-1` sentinel goes away | B4, convention "miss" |
+| Sort shape | Python: one `sort(key=, reverse=)`, one `min(key=)`, one `max(key=)`, and a `sorted()` copy twin. First build a generic default argument and named args on native methods, and fix the wrong "supplied after it" error on a zero-argument call | B1, B2, `_by` suffix |
+| Free fn twins | Methods only. Move `capitalize`, `title`, `swapcase`, `rsplit`, `split_whitespace` onto `str`; delete the `string.*`, `iter.*` and `cancel.derive` twins | B5, B6, B15 |
+| Box verbs | One write verb, `update`, on `Shared` and `RwShared`. `read(f)` is read-only on both: a write inside it faults (D4 layer C) | B10, box family |
