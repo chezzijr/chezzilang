@@ -133,7 +133,11 @@ fn _publish[T](h: _Hub[T], v: T) -> _Hub[T]:
         while not ch.try_send(s):
             match ch.try_recv():
                 ?_: pass
-                None: break
+                None:
+                    # The receiver drained its mailbox after the failed `try_send`: send once
+                    # more. It fails only on a closed mailbox, so the loop still ends.
+                    _ := ch.try_send(s)
+                    break
     return h
 
 fn _close[T](h: _Hub[T]) -> _Hub[T]:

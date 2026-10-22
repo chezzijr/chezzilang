@@ -248,3 +248,23 @@ test fn two_publisher_tasks_reach_every_subscriber_in_one_order():
     l2 := o2.recv()
     assert l1.len() == 400
     assert l1 == l2
+
+fn one_lag_trial() -> List[str]:
+    b := Broadcast[int].new(1)
+    rx := b.subscribe()
+    out := Channel[List[str]](1)
+    parallel:
+        spawn:
+            collect_into(rx, out)
+        spawn:
+            publish(b, 2)
+    return out.recv()
+
+# 3 across tasks. Mailbox of 1, a reader task drains it while the publisher task sends 0, 1 and closes.
+# The reader may drain between the hub's failed `try_send` and its `try_recv`; the newest value must
+# still arrive. Valid runs: `0, 1`, or `lag 1, 1`. A run that ends without `1` lost a value silently.
+test fn a_reader_that_drains_during_a_send_never_loses_the_newest_value():
+    for t in 0..3000:
+        got := one_lag_trial()
+        ok := got == ["0", "1"] or got == ["lag 1", "1"]
+        assert ok, "trial {t}: the reader got {got}"
