@@ -38,7 +38,7 @@ Start with the [syntax reference](reference/syntax/01-lexical-and-literals.md). 
 | [concurrency-open.md](design/concurrency-open.md) | Open concurrency items |
 | [concurrency-runtime.md](design/concurrency-runtime.md) | Scheduler and runtime internals |
 | [killable-subprocess.md](design/killable-subprocess.md) | Proposal (M25), not implemented |
-| [value-structs.md](design/value-structs.md) | Proposal, not started |
+| [value-structs.md](design/value-structs.md) | Proposal, not started; §9 explicit value/ref structs is the owner-preferred route |
 | [packed-storage.md](design/packed-storage.md) | Proposal, not started |
 | [ffi-and-packaging.md](design/ffi-and-packaging.md) | Proposal, not started |
 | [adr-d4-airlock.md](design/adr-d4-airlock.md) | Accepted and implemented |

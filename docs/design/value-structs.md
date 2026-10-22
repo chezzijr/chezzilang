@@ -131,3 +131,78 @@ the cost, and every later stage needs it. If a healthy fraction of sites are non
 and reassess before stages 2-3. If not, keep the 55% already won, land the OS-return lever, and close
 the memory track: 2.2× Go on an all-structs benchmark is acceptable, and the single-object benches in
 `benchmarks.md` sit near 1.0× Go.
+
+## 9. Explicit value and reference structs (owner preference, 2026-10-22)
+
+**Status: idea, not started. The owner prefers this route over escape analysis (§3) as the
+long-term model.** It is a language change, so it waits until after the JIT. The `PackedList[T]`
+experiment in [`packed-storage.md`](packed-storage.md) comes first, because it measures the gain
+without a language change.
+
+The program states which structs are values and which are references, so the compiler needs no
+escape proof:
+
+```chezzi
+struct P:
+    x: int
+    y: int
+
+xs: List[P] = []          # value elements: x, y stored inline, 16 B each
+rs: List[*P] = []         # reference elements: one GC slot each, today's behaviour
+
+a := P(1, 2)
+b := a                    # value: b is a copy
+b.x = 42                  # a.x is still 1
+r := ref P(1, 2)          # reference (the spelling is open)
+s := r
+s.x = 42                  # r.x is 42, as today
+```
+
+### What it gives
+
+| Gain | Source |
+|---|---|
+| Inline storage: 2M two-int structs in about 64 MB instead of 150 MB | `packed-storage.md` measurement, Go `[]P` |
+| No per-struct allocation or GC trace for value structs | one fewer object per element |
+| Value fields in machine registers under the JIT | a value has no identity to keep |
+| A cheaper airlock crossing for a value: a flat copy, no GC walk | values hold no `GcRef` when their fields are scalars |
+| No unsafe proof: the program states the fact that §3a must prove | a wrong escape answer is a use-after-free |
+
+### What it costs
+
+1. **The meaning of `struct` changes.** Today `b := a; b.x = 42` changes `a`. Under a value
+   default it does not, and an old program changes meaning without an error. A migration needs a
+   checker pass that finds each aliasing site.
+2. **Method receivers.** Go has value and pointer receivers, and the method set of `T` differs from
+   that of `*T`. Chezzi needs one rule for which receiver a method takes and when a call copies.
+3. **Interior pointers.** Go's `&xs[0]` points into a list buffer. The GC addresses whole slots
+   (`GcRef` is a slot index, `src/vm/heap.rs`), and a `push` that grows the buffer leaves Go's
+   pointer on the old array. The first version takes no `&` of an element or a field: a reference
+   is made only by `ref T(...)` (or the chosen spelling), so it is always a whole slot.
+4. **Mutation of an element.** `xs[0].x = 7` on a value list must write the element in place
+   (Go allows it, the element is addressable), or the checker rejects it as a write to a
+   temporary (the `PackedList` v1 rule). Pick one.
+5. **Every struct operation** (field get and set, `==`, hash, Display, `match`, the wire and snapshot
+   paths) handles an inline value and a slot. The rule "the representation never shows in output"
+   stays.
+6. **The airlock is unchanged in meaning.** A reference stays inside one task heap and is
+   deep-copied at `spawn`, as a struct is today. A pointer never shares memory across tasks, which
+   differs from Go and matches D4.
+
+### Two spellings to choose from
+
+| Variant | Ancestor | Default | Marked form |
+|---|---|---|---|
+| A. Value by default, `*T` for a reference | Go | `struct P` is a value | `*P`, made by `ref P(...)` or `new` |
+| B. Reference by default, a keyword for a value | Swift and C# `struct` vs `class` | `struct P` stays a reference | `value struct P` |
+
+Variant B breaks no existing program. Variant A follows Go, the concurrency ancestor, but changes
+every struct. The owner decides after the `PackedList` measurement.
+
+### Order
+
+1. The JIT ships first: the VM dispatch cost (`packed-storage.md`, 0.79 s against Go's 0.04 s for an
+   int loop with no structs) is larger than the layout cost.
+2. Run the `PackedList[T]` experiment and record RSS, build time and scan time.
+3. If the gain holds on scans as well as on builds, pick variant A or B and write its full rules
+   (receivers, element mutation, `==`, generic `T` that may be a value or a reference).

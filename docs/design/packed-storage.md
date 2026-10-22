@@ -1,6 +1,6 @@
 # Proposal: packed data and numeric kernels
 
-**Status: proposal, not started.** An additive experiment: it does not change `struct` or `List[T]` semantics. The general escape-analysis alternative is [`value-structs.md`](value-structs.md).
+**Status: proposal, not started.** An additive experiment: it does not change `struct` or `List[T]` semantics. The general escape-analysis alternative is [`value-structs.md`](value-structs.md). The owner prefers explicit value and reference structs ([`value-structs.md` §9](value-structs.md#9-explicit-value-and-reference-structs-owner-preference-2026-10-22)) as the long-term model; this experiment measures the gain first.
 
 ## Goal
 
