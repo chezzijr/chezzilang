@@ -1366,6 +1366,10 @@ pub(super) struct SchedCore {
     /// [`ScopeTable`]: ids are never reissued, and a retired id reads as absent.
     pub(super) scopes: ScopeTable,
     pub(super) terminate: bool, // every worker loop exits once set (all scopes done, deadlock, or os.exit/fault)
+    /// TICKET-296: the deadlock verdict cut every blocked-in-place waiter of this sched. Read through
+    /// `SchedCore::cut_in_place`. `flag_deadlock` latches `terminate` only when no demoted fiber is
+    /// left to resume: a cut fiber unwinds and can requeue itself.
+    pub(super) verdict_cut: bool,
     /// TICKET-181 — THE registry of blocked waiters the counters cannot see: every demoted recv
     /// or `wait:`, every M:N guard wait, and every blocked body of this sched's thread
     /// (`Vm::block_party_guard`), keyed by a token. Each entry answers "can you still be

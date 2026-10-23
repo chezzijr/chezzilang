@@ -54,8 +54,9 @@ impl MnSched {
             outcome,
             TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
         );
-        // A job the deadlock verdict ended: the verdict latched `terminate`, so a released held job
-        // would never run and its `None` slot would hang the join. It reads as a latched verdict.
+        // A job the deadlock verdict ended: the verdict cut the sched (it latched `terminate`, or a
+        // demoted fiber is left to settle), so a released held job would never run and its `None`
+        // slot would hang the join. It reads as a latched verdict.
         let verdict_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock);
         let seal = match &outcome {
             // The body returned: `run_outcome` sealed its value, and the first writer wins.

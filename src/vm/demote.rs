@@ -131,7 +131,7 @@ impl Vm {
                     } else if closed {
                         reg.release(&sched, &mut c);
                         Ok(RecvStep::ClosedEmpty)
-                    } else if c.terminate {
+                    } else if c.cut_in_place() {
                         // Terminate without a delivered value (genuine deadlock / nursery torn down).
                         reg.release(&sched, &mut c);
                         Err(sched.deadlock_err.clone())
@@ -215,7 +215,7 @@ impl Vm {
                     reg.release(&sched, &mut c);
                     return Err(e);
                 }
-                if c.terminate {
+                if c.cut_in_place() {
                     reg.release(&sched, &mut c);
                     return Err(sched.deadlock_err.clone());
                 }
@@ -317,7 +317,7 @@ impl Vm {
                     drop(c);
                     return Err(e);
                 }
-                if c.terminate {
+                if c.cut_in_place() {
                     reg.release(&sched, &mut c);
                     drop(c);
                     return Err(sched.deadlock_err.clone());
@@ -556,7 +556,7 @@ impl Vm {
             // never *self*-fires the predicate (it vetoes it), so a genuine quiesce is surfaced by another
             // worker setting `terminate`, observed here within the backoff.
             if let Some(s) = &sched
-                && s.lock().terminate
+                && s.lock().cut_in_place()
             {
                 break Err(s.deadlock_err.clone());
             }

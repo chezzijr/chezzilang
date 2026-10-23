@@ -391,6 +391,7 @@ impl MnSched {
                     parent_scope: None,
                 }),
                 terminate: false,
+                verdict_cut: false,
                 waiters: std::collections::HashMap::new(),
                 next_waiter_tok: 0,
                 runner_wids: vec![false; nworkers.max(1)],
@@ -564,6 +565,7 @@ impl MnSched {
         // stopped on the stale flag (`take_runnable` checks `terminate` first → `Stop` → the scope would
         // never run and `wait_for_scope` would hang). Harmless on the never-terminated nested path.
         c.terminate = false;
+        c.verdict_cut = false;
         scope_id
     }
 
@@ -604,6 +606,7 @@ impl MnSched {
         // A freshly-registered scope has unfinished work — un-latch any stale global `terminate` (see
         // `register_scope`) so the inline owner that drains it is not stopped on the stale flag.
         c.terminate = false;
+        c.verdict_cut = false;
         // Seed in the SAME lock: bump `runnable` and queue every fiber before the lock is dropped, so the
         // scope and its runnable fibers become visible together (no `runnable == 0` gap).
         self.runnable.fetch_add(total, Ordering::Relaxed);

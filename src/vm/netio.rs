@@ -357,7 +357,7 @@ impl Vm {
             }
             if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
                 let c = sched.lock();
-                if c.terminate {
+                if c.cut_in_place() {
                     drop(c);
                     // The waiter names its own wait (the text and span its party site carries
                     // above), as on the process-wide verdict: a guard wait is not a channel wait.

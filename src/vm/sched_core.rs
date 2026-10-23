@@ -4,16 +4,17 @@
 use super::*;
 
 impl SchedCore {
-    /// Fault every still-parked fiber (across ALL scopes) with the deadlock error and set global
-    /// terminate (called under the lock). Correct because the global predicate firing means nothing can
-    /// progress anywhere. A `Wait` token sits in N buckets but is ONE fiber — claim-once (the wake CAS)
-    /// dedups it so the flat slot is faulted and the fiber's SCOPE's `done` bumped exactly once.
+    /// Fault every still-parked fiber (across ALL scopes) with the deadlock error, cut every
+    /// blocked-in-place waiter (`verdict_cut`) and latch `terminate` unless a demoted fiber is still
+    /// registered (called under the lock). Returns whether `terminate` latched. Correct because the
+    /// global predicate firing means nothing can progress anywhere. A `Wait` token sits in N buckets
+    /// but is ONE fiber — claim-once (the wake CAS) dedups it so the flat slot is faulted and the fiber's SCOPE's `done` bumped exactly once.
     /// Each parked fiber's OWN buffered stdout/stderr (moved into `f.ctx.out`/`stderr` by `swap_ctx`
     /// when it parked) is carried into its `Deadlocked` slot, so `reduce_task_slots` flushes EVERY
     /// parked buffer at its task-order slot — matching what a strictly sequential run would have
     /// printed live before the deadlock returned. A distinct `Deadlocked` outcome (not `Fault`) is what lets
     /// the reduce flush ALL parked buffers here without disturbing the real-fault multi-fault path.
-    pub(super) fn flag_deadlock(&mut self, err: &RuntimeError) {
+    pub(super) fn flag_deadlock(&mut self, err: &RuntimeError) -> bool {
         let buckets: Vec<Vec<ParkedEntry>> = self.parked.drain().map(|(_, v)| v).collect();
         for v in buckets {
             for entry in v {
@@ -51,7 +52,17 @@ impl SchedCore {
             self.record_deadlocked(f, err);
         }
         self.parked_n = 0;
-        self.terminate = true;
+        // TICKET-296: a demoted fiber reads the cut, unwinds and can requeue itself, so the workers
+        // stay until it settles. Returns whether `terminate` latched.
+        self.verdict_cut = true;
+        self.terminate = !self.any_fiber_waiter();
+        self.terminate
+    }
+
+    /// TICKET-296: THE read of every blocked-in-place waiter: the sched is torn down, or the
+    /// deadlock verdict cut it.
+    pub(super) fn cut_in_place(&self) -> bool {
+        self.terminate || self.verdict_cut
     }
 
     /// Store one claimed parked fiber's `Deadlocked` outcome and bump its scope's `done`. Shared by
@@ -145,8 +156,8 @@ impl SchedCore {
                 task_index,
                 scope_id,
             } => {
-                // `flag_deadlock` sets `terminate`, so a released job would never run and its
-                // `None` slot would hang the join; the parked job's `Deadlocked` is the report.
+                // `flag_deadlock` latches `terminate` (or leaves a demoted fiber to settle), so a
+                // released job would never run and its `None` slot would hang the join; the parked job's `Deadlocked` is the report.
                 if self.is_job_scope(scope_id) {
                     self.exec_active -= 1;
                     self.settle_job(task_index, JobSeal::Nothing, &mut step);
@@ -304,7 +315,8 @@ impl SchedCore {
 
     /// TICKET-103 (W12-4) — the deadlock flag, faulting only the parked fibers of JOINED LEAF
     /// families. Returns `true` when it fell back to the sched-wide [`SchedCore::flag_deadlock`]
-    /// (which sets `terminate`), `false` when it faulted leaves only and the sched keeps running.
+    /// (which latches `terminate` unless a demoted fiber is left), `false` when it faulted leaves
+    /// only and the sched keeps running.
     ///
     /// A join-blocked owner feeds by CHANNEL, not by family, so a parked fiber outside the family it
     /// joins may be its next receiver once its `recover:` returns (`cousin_fed`). A *joined* family
@@ -325,7 +337,7 @@ impl SchedCore {
     ///
     /// Returns `None` when the scan found nothing PROVEN and `unproven_ok` is `false` — the caller
     /// must decline (wait, never spin) rather than fault. Otherwise returns `Some(true)` when it fell
-    /// back to the sched-wide [`SchedCore::flag_deadlock`] (which sets `terminate`), `Some(false)`
+    /// back to the sched-wide [`SchedCore::flag_deadlock`] and that latched `terminate`, `Some(false)`
     /// when it faulted leaves only and the sched keeps running.
     pub(super) fn flag_deadlock_leaves(
         &mut self,
@@ -337,8 +349,7 @@ impl SchedCore {
             if !unproven_ok && !self.provable(|_| true) {
                 return None;
             }
-            self.flag_deadlock(err);
-            return Some(true);
+            return Some(self.flag_deadlock(err));
         }
         let provable: Vec<&Vec<usize>> = candidates
             .iter()

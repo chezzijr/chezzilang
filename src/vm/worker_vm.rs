@@ -460,7 +460,7 @@ impl Vm {
                 break Some(e);
             }
             if let Some(m) = self.mn.clone()
-                && m.lock().terminate
+                && m.lock().cut_in_place()
             {
                 break Some(m.deadlock_err.clone());
             }
