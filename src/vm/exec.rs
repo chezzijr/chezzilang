@@ -169,6 +169,7 @@ impl Vm {
             executors: Vec::new(),
             exec_registry: Arc::new(Mutex::new(Vec::new())),
             sched_registry: Arc::new(Mutex::new(Vec::new())), // W7-56
+            root_registry: RootRegistry::default(),           // M1.4
             suspend: None,
             join_suspend: None,
             wait_suspend: None,

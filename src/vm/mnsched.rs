@@ -827,7 +827,7 @@ impl MnSched {
         charge: usize,
     ) -> Option<usize> {
         debug_assert!(
-            matches!(fiber.state, FiberState::Pending(_)),
+            matches!(fiber.state, FiberState::Pending),
             "an injected handler must be unstarted (Pending) so `run_one_fiber` runs its body via `start_task`"
         );
         let base_index = c.slots.len(); // authoritative flat slot index — the slots END

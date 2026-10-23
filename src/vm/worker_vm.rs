@@ -89,6 +89,8 @@ impl Vm {
         // (every eager `Executor` job: this fn sets neither `mn` nor `mn_enlist_sched`) still reaches
         // a fiber parked on one of the run's nurseries. See `Vm::sched_registry`.
         worker.sched_registry = Arc::clone(&self.sched_registry);
+        // M1.4 — and the root registry, so every fiber built from this worker is listed in the run's.
+        worker.root_registry = self.root_registry.clone();
         // B3.3-threads: thread the parent's host state (process args + env) through so a
         // `--parallel` task reading `std.os.args` / an env var sees the same values instead of inert
         // defaults (the B3.2 silent-divergence owe). `args` is read-only (deep-cloned). `env` is

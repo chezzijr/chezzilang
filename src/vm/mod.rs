@@ -16,6 +16,8 @@ mod heap_slab;
 mod poller;
 mod pool;
 mod quiesce;
+mod root_registry;
+use root_registry::{CtxBox, RootRegistry};
 mod runner_cache;
 pub mod sched_seed;
 mod timer;
@@ -693,20 +695,7 @@ impl GeneratorCore {
             // `child_gcref` roots boxed floats (Float tag) too, not just true `Obj`s.
             out.extend(args.iter().filter_map(|v| v.child_gcref()));
         }
-        for v in &self.ctx.stack {
-            if let Some(h) = v.child_gcref() {
-                out.push(h);
-            }
-        }
-        for f in &self.ctx.frames {
-            out.push(f.home);
-            if let Some(c) = f.closure {
-                out.push(c);
-            }
-            for d in &f.deferred {
-                out.extend(d.roots());
-            }
-        }
+        self.ctx.root_view().walk(&mut out);
         out
     }
 }
@@ -1492,6 +1481,10 @@ pub struct Vm {
     /// TICKET-230 — the run's main thread holds one runner permit from `Vm::run` until the root
     /// `Vm` drops.
     run_permit: Option<width::RunPermit>,
+    /// M1.4 — every fiber context of this RUN, so a collection can root the parked ones (see
+    /// [`RootRegistry`]). Shared (not copied) with every worker `Vm` by [`Vm::spawn_worker`], and
+    /// per-run for the same reason [`Vm::exec_registry`] is.
+    root_registry: RootRegistry,
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its

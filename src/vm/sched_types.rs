@@ -188,12 +188,16 @@ pub(super) struct FiberCtx {
     /// W15-3 — bytes of the in-flight `write` already sent; survives a park's ip-rewind re-run,
     /// cleared by `drop_poll_latch`.
     pub(super) poll_written: Option<usize>,
+    /// M1.4 — a spawned, not-yet-started fiber's task (callee + args), launched by `start_task` on
+    /// its first schedule. It lives in the context, not in [`FiberState`], so the context alone
+    /// roots it. `None` once started, and for every non-fiber context. NOT moved by `swap_ctx`.
+    pub(super) start: Option<PendingCall>,
 }
 
 /// Scheduling state of a fiber on the M:N scheduler.
 pub(super) enum FiberState {
-    /// Spawned but not yet started; holds the task to launch on first schedule.
-    Pending(PendingCall),
+    /// Spawned but not yet started; its task waits in [`FiberCtx::start`].
+    Pending,
     /// Started and runnable — resume by re-entering its `run_until`.
     Ready,
     /// Parked on an empty channel; runnable again once a sibling `send`s (the receiver handle stays
@@ -204,7 +208,8 @@ pub(super) enum FiberState {
 /// One child fiber: its saved context plus scheduling state. While the fiber is the one actively
 /// running, its context lives in the live `Vm` fields and `ctx` is empty (see the scheduler).
 pub(super) struct Fiber {
-    pub(super) ctx: FiberCtx,
+    /// M1.4 — boxed, so it never moves and the run's [`RootRegistry`] can list it.
+    pub(super) ctx: CtxBox,
     pub(super) state: FiberState,
     /// D2b — the fiber's stable Decision-F outcome slot. Under the cross-nursery flat scheduler this is
     /// the GLOBAL flat index into `SchedCore::slots` (= `scopes[scope_id].base_index + local_i`),

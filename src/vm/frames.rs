@@ -908,85 +908,23 @@ impl Vm {
         self.heap.sweep();
     }
 
-    /// The GC roots: the whole operand stack (which contains every frame's local slots *and* any
-    /// in-flight expression temporaries), each frame's home module + backing closure, and the module
-    /// namespace cache.
+    /// The GC roots: the live context's fields through the one walker ([`RootView`]), the generator
+    /// hosts parked under a running generator, the running generators, and the running box call.
     pub(super) fn gc_roots(&self) -> Vec<GcRef> {
         let mut work: Vec<GcRef> = Vec::new();
-        for v in &self.stack {
-            if let Some(h) = v.child_gcref() {
-                work.push(h);
-            }
-        }
-        for f in &self.frames {
-            work.push(f.home);
-            if let Some(c) = f.closure {
-                work.push(c);
-            }
-            for d in &f.deferred {
-                work.extend(d.roots());
-            }
-        }
-        // Pending `spawn` tasks (C4): their captured callee/receiver/args are roots until the task
-        // runs at the nursery's join.
-        for nursery in &self.nurseries {
-            for task in nursery {
-                work.extend(task.roots());
-            }
-        }
+        self.root_view().walk(&mut work);
         // Experimental generators — while a generator body runs in the live `Vm` fields above, the
         // host(s) it suspended are parked in `gen_host_ctx` (their frames/stack are not in `self`), so
         // root them here exactly like a parked fiber. The running generators' own handles are roots so
         // their objects survive to be written back (each generator's PARKED ctx, if any, is empty
         // while it runs, so `children` adds nothing extra). Both are empty outside a `generator_next`.
         for host in &self.gen_host_ctx {
-            for v in &host.stack {
-                if let Some(h) = v.child_gcref() {
-                    work.push(h);
-                }
-            }
-            for f in &host.frames {
-                work.push(f.home);
-                if let Some(c) = f.closure {
-                    work.push(c);
-                }
-                for d in &f.deferred {
-                    work.extend(d.roots());
-                }
-            }
+            host.root_view().walk(&mut work);
         }
         work.extend(self.active_generators.iter().copied());
-        // Live executors (C5 / A2): their queued work must survive to the program-exit auto-drain
-        // even when no in-program handle remains.
-        work.extend(self.executors.iter().copied());
-        work.extend(self.module_objs.iter().copied());
-        // M19 Phase 3 — interned `ConstStr` handles are roots: they're cached for reuse across pushes
-        // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
-        // roots the cache for *this* heap (an M:N fiber's cache swapped in with its heap).
-        work.extend(self.str_intern.values().copied());
-        work.extend(self.fn_values.values().copied());
-        // W7-4a — the snapshot rebuild map's cells, heap-keyed like `str_intern` (so this roots them
-        // for *this* heap). BELT AND BRACES today, and deliberately kept: every entry is currently
-        // also reachable from the module global it was just `module_define`d into, and MEASURED —
-        // `airlock_cross_module_shared_binding_is_one_cell` still passes with this line deleted. The
-        // map now outlives a single fault, though, so the moment any entry enters it before something
-        // else roots it, this is the only thing holding it. Cheap; do not "clean it up".
-        work.extend(self.snapshot_rebuild.values().copied());
-        // W7-4c — the snapshot cell registry's KEYS. Unlike the map above this root is LOAD-BEARING:
-        // an unrooted key could be swept and its slot recycled to a different cell, which the seeding
-        // in `deep_clone_all`/`lower_task` would then identify with the dead cell's id and merge into
-        // the wrong binding. A rooted key is never swept, so never recycled.
-        work.extend(self.snapshot_cells.keys().copied());
-        // TICKET-111 — the snapshot node registry's KEYS, load-bearing for the same reason as
-        // `snapshot_cells` above: an unrooted key could be swept and its slot recycled, and adoption
-        // would then identify the wrong node with a live global's id.
-        work.extend(self.snapshot_nodes.keys().copied());
-        // TICKET-111 — the pending-adoption captures' VALUES (the capture's own rebuilt handle, not a
-        // module-global key): load-bearing the same way, so a capture waiting to be adopted by a
-        // module the task has not read yet is never swept out from under it.
-        work.extend(self.snapshot_adopt.values().copied());
         // TICKET-246 — the slot-door cache of the box call now running indexes this (box) heap.
         // The frames below it index parked heaps and are not roots here.
+        // M1.7: one heap — root every `box_chain` frame, not only the last.
         if let Some(frame) = self.box_chain.last() {
             work.extend(frame.roots());
         }

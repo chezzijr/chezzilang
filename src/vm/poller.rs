@@ -585,7 +585,7 @@ mod tests {
 
     fn mk_fiber() -> Fiber {
         Fiber {
-            ctx: super::super::FiberCtx::default(),
+            ctx: super::super::CtxBox::default(),
             state: super::super::FiberState::Ready,
             task_index: 0,
             scope_id: 0,

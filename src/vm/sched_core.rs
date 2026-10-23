@@ -67,13 +67,13 @@ impl SchedCore {
 
     /// Store one claimed parked fiber's `Deadlocked` outcome and bump its scope's `done`. Shared by
     /// `flag_deadlock` and `flag_deadlock_leaves`.
-    fn record_deadlocked(&mut self, f: Fiber, err: &RuntimeError) {
+    fn record_deadlocked(&mut self, mut f: Fiber, err: &RuntimeError) {
         // Carry the parked fiber's OWN buffered stdout/stderr into its Deadlocked slot (not an empty
         // buffer). `swap_ctx` moved this fiber's live prints into `f.ctx.out` when it parked; the
         // downstream `reduce_task_slots` flushes EVERY Deadlocked slot's buffer at its task-order slot
         // (not just the lowest-index one, as with a real Fault), so with two-or-more parked fibers a
         // higher-index printer's output is preserved byte-identically to a strictly sequential run.
-        // `task_index`/`scope_id` are Copy, read before the partial move of `f.ctx.out`/`f.ctx.stderr`.
+        // `task_index`/`scope_id` are Copy, read before `f.ctx.out`/`f.ctx.stderr` are taken.
         let (ti, sid) = (f.task_index, f.scope_id);
         // A scope with its own `deadlock_err` (the owner-fiber arm of `run_mn_nursery_nested`)
         // reports ITS span instead of the sched-wide `err` — see `JoinScope::deadlock_err` and
@@ -87,8 +87,8 @@ impl SchedCore {
         };
         self.slots[ti] = Some(TaskOutcome::Deadlocked {
             err: scope_err,
-            out: f.ctx.out,
-            stderr: f.ctx.stderr,
+            out: std::mem::take(&mut f.ctx.out),
+            stderr: std::mem::take(&mut f.ctx.stderr),
         });
         self.task_done(sid);
         self.job_event(
@@ -653,7 +653,10 @@ impl ReadyWorker {
         let task = match call {
             ReadyCall::Invoke { callee, args } => PendingCall::Call { callee, args, span },
         };
+        let registry = worker.root_registry.clone();
         let ctx = FiberCtx {
+            // M1.4 — the task waits in the context so the context alone roots it.
+            start: Some(task),
             heap: Some(worker.heap),
             module_objs: worker.module_objs,
             module_faulted: worker.module_faulted,
@@ -681,8 +684,8 @@ impl ReadyWorker {
             ..FiberCtx::default()
         };
         Fiber {
-            ctx,
-            state: FiberState::Pending(task),
+            ctx: registry.register(ctx),
+            state: FiberState::Pending,
             task_index,
             scope_id,
             span,

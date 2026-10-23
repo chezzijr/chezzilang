@@ -79,7 +79,7 @@ pub(crate) fn empty_program() -> Program {
 
 fn mk_fiber(task_index: usize) -> Fiber {
     Fiber {
-        ctx: FiberCtx::default(),
+        ctx: CtxBox::default(),
         state: FiberState::Ready,
         task_index,
         scope_id: 0,
@@ -102,8 +102,11 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         span: Span::RUNTIME,
     };
     Fiber {
-        ctx: FiberCtx::default(),
-        state: FiberState::Pending(task),
+        ctx: CtxBox::unlisted(FiberCtx {
+            start: Some(task),
+            ..FiberCtx::default()
+        }),
+        state: FiberState::Pending,
         task_index,
         scope_id: 0,
         span: Span::RUNTIME,

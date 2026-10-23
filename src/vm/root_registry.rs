@@ -1,0 +1,320 @@
+//! VM: GC roots: the one root walker (`RootView`) and the run's registry of boxed fiber contexts.
+//!
+//! Every place that roots an execution context (the live `Vm` fields, a generator's parked host,
+//! a suspended generator, a parked fiber) builds a [`RootView`] and calls [`RootView::walk`], so a
+//! root field is added in one place for all of them.
+//!
+//! The registry lists every fiber context of one run, so a collection can root the PARKED fibers
+//! too, not only the one live in a `Vm`. Each production fiber context is built through
+//! [`RootRegistry::register`] and leaves the registry when its [`CtxBox`] drops. M1.7 marks from it.
+
+use super::fxhash::FxHashMap;
+use super::*;
+use std::ptr::NonNull;
+
+/// The root-holding fields of one execution context, borrowed. A context that lacks a field
+/// leaves it empty (`RootView::default()`).
+#[derive(Default)]
+pub(super) struct RootView<'a> {
+    /// The whole operand stack: every frame's local slots and any in-flight temporaries.
+    pub(super) stack: &'a [Value],
+    /// Each frame's home module, backing closure and pending `defer` calls.
+    pub(super) frames: &'a [CallFrame],
+    /// Pending `spawn` tasks (C4): their callee/receiver/args are roots until the task runs.
+    pub(super) nurseries: &'a [Vec<QueuedTask>],
+    /// A not-yet-started fiber's task, launched on its first schedule.
+    pub(super) start: Option<&'a PendingCall>,
+    /// The module namespace objects.
+    pub(super) module_objs: &'a [GcRef],
+    /// Live executors (C5 / A2): their queued work must survive to the program-exit auto-drain
+    /// even when no in-program handle remains.
+    pub(super) executors: &'a [GcRef],
+    /// The heap-keyed caches, `None` for a context that has none (a generator's).
+    pub(super) caches: Option<HeapCaches<'a>>,
+}
+
+/// The heap-keyed caches of a context whose `GcRef`s are roots.
+pub(super) struct HeapCaches<'a> {
+    pub(super) str_intern: &'a FxHashMap<usize, GcRef>,
+    pub(super) fn_values: &'a FxHashMap<FnKey, GcRef>,
+    pub(super) snapshot_rebuild: &'a FxHashMap<u32, GcRef>,
+    pub(super) snapshot_cells: &'a FxHashMap<GcRef, u32>,
+    pub(super) snapshot_nodes: &'a FxHashMap<GcRef, u32>,
+    pub(super) snapshot_adopt: &'a FxHashMap<u32, GcRef>,
+}
+
+impl RootView<'_> {
+    /// THE root walk of one execution context: append every root it holds to `out`.
+    pub(super) fn walk(&self, out: &mut Vec<GcRef>) {
+        // `child_gcref` roots boxed floats (Float tag) too, not just true `Obj`s.
+        out.extend(self.stack.iter().filter_map(|v| v.child_gcref()));
+        for f in self.frames {
+            out.push(f.home);
+            if let Some(c) = f.closure {
+                out.push(c);
+            }
+            for d in &f.deferred {
+                out.extend(d.roots());
+            }
+        }
+        for nursery in self.nurseries {
+            for task in nursery {
+                out.extend(task.roots());
+            }
+        }
+        if let Some(task) = self.start {
+            out.extend(task.roots());
+        }
+        out.extend(self.module_objs.iter().copied());
+        out.extend(self.executors.iter().copied());
+        let Some(c) = &self.caches else {
+            return;
+        };
+        // M19 Phase 3 — interned `ConstStr` handles are roots: they're cached for reuse across pushes
+        // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
+        // roots the cache for the heap this context indexes.
+        out.extend(c.str_intern.values().copied());
+        out.extend(c.fn_values.values().copied());
+        // W7-4a — the snapshot rebuild map's cells, heap-keyed like `str_intern`. BELT AND BRACES
+        // today, and deliberately kept: every entry is currently also reachable from the module
+        // global it was just `module_define`d into, and MEASURED —
+        // `airlock_cross_module_shared_binding_is_one_cell` still passes with this line deleted. The
+        // map now outlives a single fault, though, so the moment any entry enters it before something
+        // else roots it, this is the only thing holding it. Cheap; do not "clean it up".
+        out.extend(c.snapshot_rebuild.values().copied());
+        // W7-4c — the snapshot cell registry's KEYS. Unlike the map above this root is required: an
+        // unrooted key could be swept and its slot recycled to a different cell, which the seeding
+        // in `deep_clone_all`/`lower_task` would then identify with the dead cell's id and merge into
+        // the wrong binding. A rooted key is never swept, so never recycled.
+        out.extend(c.snapshot_cells.keys().copied());
+        // TICKET-111 — the snapshot node registry's KEYS, required for the same reason as
+        // `snapshot_cells` above: an unrooted key could be swept and its slot recycled, and adoption
+        // would then identify the wrong node with a live global's id.
+        out.extend(c.snapshot_nodes.keys().copied());
+        // TICKET-111 — the pending-adoption captures' VALUES (the capture's own rebuilt handle, not a
+        // module-global key), required the same way, so a capture waiting to be adopted by a module
+        // the task has not read yet is never swept out from under it.
+        out.extend(c.snapshot_adopt.values().copied());
+    }
+}
+
+impl Vm {
+    /// The live per-execution fields as one [`RootView`].
+    pub(super) fn root_view(&self) -> RootView<'_> {
+        RootView {
+            stack: &self.stack,
+            frames: &self.frames,
+            nurseries: &self.nurseries,
+            start: None,
+            module_objs: &self.module_objs,
+            executors: &self.executors,
+            caches: Some(HeapCaches {
+                str_intern: &self.str_intern,
+                fn_values: &self.fn_values,
+                snapshot_rebuild: &self.snapshot_rebuild,
+                snapshot_cells: &self.snapshot_cells,
+                snapshot_nodes: &self.snapshot_nodes,
+                snapshot_adopt: &self.snapshot_adopt,
+            }),
+        }
+    }
+}
+
+impl GenCtx {
+    /// A parked generator context (a suspended generator, or the host a running one parked) holds
+    /// frames and a stack only.
+    pub(super) fn root_view(&self) -> RootView<'_> {
+        RootView {
+            stack: &self.stack,
+            frames: &self.frames,
+            ..RootView::default()
+        }
+    }
+}
+
+impl FiberCtx {
+    /// A fiber context as one [`RootView`]: the fields `Vm::swap_ctx` moves, plus `start`.
+    pub(super) fn root_view(&self) -> RootView<'_> {
+        RootView {
+            stack: &self.stack,
+            frames: &self.frames,
+            nurseries: &self.nurseries,
+            start: self.start.as_ref(),
+            module_objs: &self.module_objs,
+            executors: &self.executors,
+            caches: Some(HeapCaches {
+                str_intern: &self.str_intern,
+                fn_values: &self.fn_values,
+                snapshot_rebuild: &self.snapshot_rebuild,
+                snapshot_cells: &self.snapshot_cells,
+                snapshot_nodes: &self.snapshot_nodes,
+                snapshot_adopt: &self.snapshot_adopt,
+            }),
+        }
+    }
+
+    /// The GC roots this parked fiber context holds.
+    // M1.7 marks from it (through `RootRegistry::roots`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn roots(&self) -> Vec<GcRef> {
+        let mut out = Vec::new();
+        self.root_view().walk(&mut out);
+        out
+    }
+}
+
+/// A registered context's address. Only [`RootRegistry::roots`] reads through it.
+struct CtxPtr(NonNull<FiberCtx>);
+
+// SAFETY: the pointer is a plain address; a thread reads through it only under the contract of
+// `RootRegistry::roots`, and `FiberCtx` itself is `Send` (asserted below).
+unsafe impl Send for CtxPtr {}
+
+const _: fn() = || {
+    fn s<T: Send>() {}
+    s::<FiberCtx>();
+};
+
+#[derive(Default)]
+struct Slots {
+    ctxs: Vec<Option<CtxPtr>>,
+    free: Vec<usize>,
+}
+
+/// The run's registry of fiber contexts. Shared (not copied) with every worker `Vm` by
+/// [`Vm::spawn_worker`], and per-run for the same reason [`Vm::exec_registry`] is.
+#[derive(Clone, Default)]
+pub(super) struct RootRegistry(Arc<Mutex<Slots>>);
+
+impl RootRegistry {
+    /// Box `ctx` and list it here until the returned [`CtxBox`] drops.
+    pub(super) fn register(&self, ctx: FiberCtx) -> CtxBox {
+        let ptr = NonNull::from(Box::leak(Box::new(ctx)));
+        let mut s = super::heap_core::lock(&self.0);
+        let slot = match s.free.pop() {
+            Some(i) => {
+                s.ctxs[i] = Some(CtxPtr(ptr));
+                i
+            }
+            None => {
+                s.ctxs.push(Some(CtxPtr(ptr)));
+                s.ctxs.len() - 1
+            }
+        };
+        drop(s);
+        CtxBox {
+            ptr,
+            reg: Some((self.clone(), slot)),
+        }
+    }
+
+    /// Every root of every registered context.
+    ///
+    /// Contract: no thread mutates a registered context during the walk. Before M1.7 only tests
+    /// call this, and they own every context. M1.7 calls it only inside a stop-the-world
+    /// (`GcCoord`, `vm/gc_coord.rs`), where every attached thread is parked at a safepoint and so
+    /// holds no `&mut` to its context.
+    // M1.7 marks from it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn roots(&self) -> Vec<GcRef> {
+        let s = super::heap_core::lock(&self.0);
+        let mut out = Vec::new();
+        for p in s.ctxs.iter().flatten() {
+            // SAFETY: a registered pointer came from `Box::leak` in `register` and stays valid until
+            // `CtxBox::drop` removes it under this same lock (before it frees the box), so it is live
+            // here. The contract above rules out a concurrent `&mut`.
+            unsafe { p.0.as_ref() }.root_view().walk(&mut out);
+        }
+        out
+    }
+}
+
+/// An owned, boxed `FiberCtx` that never moves, listed in a [`RootRegistry`] while it lives. It
+/// holds the box as a raw pointer rather than a `Box`: moving a `Box` asserts unique access and
+/// would invalidate the registry's alias, while a raw pointer keeps both valid.
+pub(super) struct CtxBox {
+    ptr: NonNull<FiberCtx>,
+    /// The registry and slot this context is listed at; `None` for an unlisted test fixture.
+    reg: Option<(RootRegistry, usize)>,
+}
+
+// SAFETY: `CtxBox` owns its `FiberCtx` exactly as a `Box<FiberCtx>` does, and `FiberCtx: Send`.
+unsafe impl Send for CtxBox {}
+
+impl CtxBox {
+    /// A boxed context listed in no registry.
+    pub(super) fn unlisted(ctx: FiberCtx) -> Self {
+        CtxBox {
+            ptr: NonNull::from(Box::leak(Box::new(ctx))),
+            reg: None,
+        }
+    }
+}
+
+impl Default for CtxBox {
+    fn default() -> Self {
+        CtxBox::unlisted(FiberCtx::default())
+    }
+}
+
+impl std::ops::Deref for CtxBox {
+    type Target = FiberCtx;
+    fn deref(&self) -> &FiberCtx {
+        // SAFETY: `ptr` came from `Box::leak` and is freed only in `drop`; `&self` gives shared
+        // access, and the registry reads only under its contract.
+        unsafe { self.ptr.as_ref() }
+    }
+}
+
+impl std::ops::DerefMut for CtxBox {
+    fn deref_mut(&mut self) -> &mut FiberCtx {
+        // SAFETY: as in `deref`; `&mut self` is the one owner's exclusive access.
+        unsafe { self.ptr.as_mut() }
+    }
+}
+
+impl Drop for CtxBox {
+    fn drop(&mut self) {
+        // Leave the registry BEFORE the box is freed, so a walk never reads a freed context.
+        if let Some((reg, slot)) = self.reg.take() {
+            let mut s = super::heap_core::lock(&reg.0);
+            s.ctxs[slot] = None;
+            s.free.push(slot);
+        }
+        // SAFETY: `ptr` came from `Box::leak`, is no longer listed, and is freed exactly once here.
+        drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sorted(roots: Vec<GcRef>) -> Vec<u32> {
+        let mut v: Vec<u32> = roots.into_iter().map(|h| h.0).collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Three registered contexts with distinct roots: the walker sees all three sets; drop one and
+    /// it sees the other two; drop the rest and it sees nothing.
+    #[test]
+    fn registry_lists_live_ctxs_and_forgets_dropped() {
+        let reg = RootRegistry::default();
+        let ctx = |n: u32| FiberCtx {
+            module_objs: vec![GcRef(n), GcRef(n + 1)],
+            ..FiberCtx::default()
+        };
+        let a = reg.register(ctx(10));
+        let b = reg.register(ctx(20));
+        let c = reg.register(ctx(30));
+        assert_eq!(sorted(reg.roots()), [10, 11, 20, 21, 30, 31]);
+        drop(b);
+        assert_eq!(sorted(reg.roots()), [10, 11, 30, 31]);
+        // A slot freed by `b` is reused, and the reuse lists only the new context.
+        let d = reg.register(ctx(40));
+        assert_eq!(sorted(reg.roots()), [10, 11, 30, 31, 40, 41]);
+        drop((a, c, d));
+        assert!(reg.roots().is_empty());
+    }
+}

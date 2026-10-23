@@ -600,6 +600,8 @@ impl Vm {
         }
         self.yield_now = false;
         let state = std::mem::replace(&mut fiber.state, FiberState::Ready);
+        // M1.4 — a `Pending` fiber's task waits in its context (`swap_ctx` leaves `start` there).
+        let start = fiber.ctx.start.take();
         // D5 — a fiber resumed after a blocking-native offload carries the pool's result. Take it now
         // (heap is swapped in) and push it below so the suspended `Call` completes and dispatch
         // continues past it.
@@ -717,7 +719,9 @@ impl Vm {
             }
             let res = match state {
                 _ if self.join_suspend.is_some() => Ok(()),
-                FiberState::Pending(task) => self.start_task(task),
+                FiberState::Pending => {
+                    self.start_task(start.expect("a Pending fiber holds its task in `ctx.start`"))
+                }
                 FiberState::Ready | FiberState::Blocked => self.run_until(0),
             };
             if res.is_ok() && self.offload.is_some() {

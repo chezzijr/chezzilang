@@ -1503,3 +1503,114 @@ fn timer_offload_parks_then_requeues_fiber_with_nil() {
         "sleep resumes with Nil, native not run"
     );
 }
+
+// ---- M1.4: a fiber context roots itself (one walker, the run's root registry) ----
+
+fn sorted_roots(roots: Vec<GcRef>) -> Vec<u32> {
+    let mut v: Vec<u32> = roots.into_iter().map(|h| h.0).collect();
+    v.sort_unstable();
+    v
+}
+
+/// M1.4 — every root `Vm::gc_roots` finds in the per-fiber fields travels into the `FiberCtx` on a
+/// swap-out, and `FiberCtx::roots` finds the same multiset there: the walker is one, so a field
+/// cannot be rooted live and lost parked.
+#[test]
+fn fiber_roots_equal_vm_roots_after_swap() {
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let obj = |vm: &mut Vm, s: &str| vm.heap.alloc(Obj::Str(s.into()));
+    let on_stack = obj(&mut vm, "stack");
+    let fl = vm.heap.alloc(Obj::FloatBox(1.5));
+    vm.stack = vec![Value::obj(on_stack), Value::int(3), Value::float_ref(fl)];
+    let (home, clo) = (obj(&mut vm, "home"), obj(&mut vm, "closure"));
+    let (d_callee, d_arg) = (obj(&mut vm, "defer-callee"), obj(&mut vm, "defer-arg"));
+    vm.frames.push(CallFrame {
+        proto: 0,
+        ip: 0,
+        base: 0,
+        home,
+        closure: Some(clo),
+        counted: false,
+        is_toplevel: false,
+        deferred: vec![Deferred::Call {
+            callee: Value::obj(d_callee),
+            args: vec![Value::obj(d_arg)],
+            span: Span::RUNTIME,
+        }],
+        defer_markers: Vec::new(),
+        nursery_len: 0,
+        has_implicit_nursery: false,
+        call_span: Span::RUNTIME,
+        argc: 0,
+    });
+    let (t_callee, t_arg) = (obj(&mut vm, "task-callee"), obj(&mut vm, "task-arg"));
+    vm.nurseries.push(vec![QueuedTask {
+        call: PendingCall::Call {
+            callee: Value::obj(t_callee),
+            args: vec![Value::obj(t_arg)],
+            span: Span::RUNTIME,
+        },
+        snap: Err(dl_err()),
+        cell_ids: Vec::new(),
+        fresh: 0,
+    }]);
+    vm.module_objs = vec![obj(&mut vm, "module")];
+    vm.executors = vec![obj(&mut vm, "executor")];
+    let interned = obj(&mut vm, "interned");
+    vm.str_intern.insert(1, interned);
+    let fn_value = obj(&mut vm, "fn-value");
+    vm.fn_values.insert(FnKey::Proto(0), fn_value);
+    let rebuilt = obj(&mut vm, "rebuilt");
+    vm.snapshot_rebuild.insert(1, rebuilt);
+    let cell = obj(&mut vm, "cell");
+    vm.snapshot_cells = Arc::new(fxhash::FxHashMap::from_iter([(cell, 1)]));
+    let node = obj(&mut vm, "node");
+    vm.snapshot_nodes = Arc::new(fxhash::FxHashMap::from_iter([(node, 2)]));
+    let adopt = obj(&mut vm, "adopt");
+    vm.snapshot_adopt.insert(3, adopt);
+
+    let before = sorted_roots(vm.gc_roots());
+    assert_eq!(before.len(), 16, "every root set above is found live");
+    let mut ctx = FiberCtx {
+        heap: Some(Heap::new()),
+        ..FiberCtx::default()
+    };
+    vm.swap_ctx(&mut ctx);
+    assert!(
+        vm.gc_roots().is_empty(),
+        "every root above travels in FiberCtx"
+    );
+    assert_eq!(sorted_roots(ctx.roots()), before);
+}
+
+/// M1.4 — a spawned, not-yet-started fiber holds its task (callee and args) in its own context, so
+/// the context alone roots them, and the run's root registry lists them until the fiber drops.
+#[test]
+fn pending_fiber_roots_its_start() {
+    let vm = Vm::new(Arc::new(empty_program()));
+    let mut worker = vm.spawn_worker();
+    let callee = worker.heap.alloc(Obj::Str("callee".into()));
+    let arg = worker.heap.alloc(Obj::Str("arg".into()));
+    let fl = worker.heap.alloc(Obj::FloatBox(2.5));
+    let fiber = ReadyWorker {
+        worker,
+        call: ReadyCall::Invoke {
+            callee: Value::obj(callee),
+            args: vec![Value::obj(arg), Value::int(1), Value::float_ref(fl)],
+        },
+        span: Span::RUNTIME,
+    }
+    .into_fiber(0, 0);
+    assert!(fiber.ctx.start.is_some(), "the task waits in the context");
+    let own = fiber.ctx.roots();
+    let listed = vm.root_registry.roots();
+    for h in [callee, arg, fl] {
+        assert!(own.contains(&h), "the context roots {h:?}");
+        assert!(listed.contains(&h), "the registry lists {h:?}");
+    }
+    drop(fiber);
+    assert!(
+        vm.root_registry.roots().is_empty(),
+        "a dropped fiber leaves the registry"
+    );
+}
