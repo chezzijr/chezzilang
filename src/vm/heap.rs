@@ -776,10 +776,13 @@ impl Heap {
     }
 
     /// A new handle on this heap's core: it allocates slots no other handle holds and reads every
-    /// object of the core.
-    // Wired in M1.7 (one core per run); only tests call it until then.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn attach(&self) -> Heap {
+    /// object of the core. Tests only: two handles can reach one slot through safe code (a `get`
+    /// on one while the other's `get_mut` grows the object is a use-after-free).
+    ///
+    /// M1.7 turns this into `pub(super) unsafe fn attach` with a `# Safety` section: no two handles
+    /// reach one slot, and sweep runs only while every other handle is stopped or detached.
+    #[cfg(test)]
+    pub(super) fn attach(&self) -> Heap {
         Heap::on(Arc::clone(&self.core))
     }
 
@@ -837,7 +840,9 @@ impl Heap {
         self.core.is_copied(h.0 as usize)
     }
 
-    /// This heap's identity: its core's (see `HeapCore::id`).
+    /// This heap's identity: its core's (see `HeapCore::id`). It names the core, so the TICKET-213
+    /// view stamp `(id, view_epoch)` is unique only while one handle exists per core; M1.7 must
+    /// give the stamp a per-fiber id when the view state moves to `FiberCtx`.
     #[inline]
     pub fn id(&self) -> u64 {
         self.core.id()
@@ -917,7 +922,6 @@ impl Heap {
 
     pub fn get(&self, h: GcRef) -> &Obj {
         self.core
-            .slots
             .get(h)
             .obj
             .as_ref()
@@ -942,7 +946,6 @@ impl Heap {
             self.view_epoch += 1;
         }
         self.core
-            .slots
             .slot_mut(h)
             .obj
             .as_mut()
@@ -1260,7 +1263,6 @@ impl Heap {
     /// the side that matters (an over-count of holders only declines to fault, never faults wrongly).
     pub fn channel_handles(&self, core: &Arc<ChannelCore>) -> usize {
         self.core
-            .slots
             .iter()
             .filter(|s| matches!(&s.obj, Some(Obj::Channel(a)) if Arc::ptr_eq(a, core)))
             .count()
@@ -1309,7 +1311,7 @@ impl Heap {
         // either way. (`CHEZZI_HEAP_STATS`'s cap-off peak therefore still omits nested-core bytes,
         // exactly as it did before this fix.)
         let deep = self.core.mem_cap() != 0;
-        for slot in self.core.slots.iter() {
+        for slot in self.core.iter() {
             let Some(obj) = &slot.obj else { continue };
             total += std::mem::size_of::<Obj>();
             total += match obj {

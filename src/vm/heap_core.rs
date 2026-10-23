@@ -13,7 +13,7 @@
 
 use super::fxhash::FxHashMap;
 use super::heap::Obj;
-use super::heap_slab::{Slab, SlabAppend, SlotBits};
+use super::heap_slab::{Slab, SlabAppend, Slot, SlotBits};
 use super::value::GcRef;
 use crate::lexer::Span;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -44,7 +44,9 @@ struct AllocState {
 /// The shared heap state. See the module doc.
 #[derive(Debug)]
 pub struct HeapCore {
-    pub(super) slots: Slab,
+    /// Private: [`get`](HeapCore::get), [`slot_mut`](HeapCore::slot_mut) and
+    /// [`iter`](HeapCore::iter) are the only ways to a slot, and only `heap.rs` holds a core.
+    slots: Slab,
     alloc_lock: Mutex<AllocState>,
     /// GC mark bits, one per slot. Written only by the collector, so the `_owned` (load, store)
     /// forms are enough. Post-sweep invariant: all bits 0 (survivors cleared, holes never marked).
@@ -129,6 +131,24 @@ impl Default for HeapCore {
 }
 
 impl HeapCore {
+    /// Slot `h` (see `Slab::get`).
+    #[inline]
+    pub(super) fn get(&self, h: GcRef) -> &Slot {
+        self.slots.get(h)
+    }
+
+    /// Slot `h`, writable (see `Slab::slot_mut` for the contract).
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub(super) fn slot_mut(&self, h: GcRef) -> &mut Slot {
+        self.slots.slot_mut(h)
+    }
+
+    /// Every slot, in index order (see `Slab::iter`).
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Slot> {
+        self.slots.iter()
+    }
+
     /// This core's identity, stamped once at construction. Never reused: a fresh core (one per
     /// task today) always gets a fresh id, even after the process has torn down other cores.
     #[inline]
@@ -168,13 +188,15 @@ impl HeapCore {
         }
     }
 
-    /// Put `obj` into the empty slot `idx` from a handle's cache, clearing the slot's copy bit so
-    /// the new object does not inherit it. Its mark is already 0: `sweep_slots` clears every mark.
+    /// Put `obj` into the empty slot `idx` from a handle's cache, clearing the slot's mark and copy
+    /// bit so the new object does not inherit them. The mark is 0 after a normal sweep, but a
+    /// collection that marks a dangling ref and then panics in `children` (caught by `boxctx.rs` or
+    /// `call.rs`) leaves a mark on a free slot, which `sweep_slots` never visits.
     #[inline]
     pub(super) fn reuse(&self, idx: u32, obj: Obj) -> GcRef {
         let h = GcRef(idx);
         self.slots.slot_mut(h).obj = Some(obj);
-        debug_assert!(!self.marks.get(idx as usize), "a free slot is unmarked");
+        self.marks.clear_owned(idx as usize);
         if self.any_copied.load(Ordering::Relaxed) {
             self.copied.clear(idx as usize);
         }
@@ -384,5 +406,19 @@ mod tests {
             !a.is_copied(y) && !b.is_copied(z),
             "each log cleared its own survivor"
         );
+    }
+
+    /// A mark left on a freed slot (the collector marks a dangling ref, then `children` panics on
+    /// it and a `catch_unwind` resumes the run) must not survive into the object that reuses the
+    /// slot: that object would look marked, and the next collection would skip its children.
+    #[test]
+    fn reused_slot_drops_a_stale_mark() {
+        let mut heap = Heap::new();
+        let x = heap.alloc(Obj::List(Vec::new()));
+        heap.sweep();
+        assert!(heap.mark(x), "the freed slot takes a stray mark");
+        let y = heap.alloc(Obj::List(Vec::new()));
+        assert_eq!(y, x, "the freed slot is reused");
+        assert!(heap.mark(y), "the new object starts unmarked");
     }
 }

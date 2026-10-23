@@ -390,6 +390,15 @@ impl SlotBits {
         }
     }
 
+    /// Clear the bit of slot `i` with a load and a store (no-op before its segment has a bit set).
+    /// For a plane that one thread writes at a time.
+    #[inline]
+    pub(super) fn clear_owned(&self, i: usize) {
+        if let Some((w, bit)) = self.word(i) {
+            w.store(w.load(Ordering::Relaxed) & !bit, Ordering::Relaxed);
+        }
+    }
+
     /// Set the bit of slot `i` with a load and a store; returns whether it was clear. For a plane
     /// that one thread writes at a time.
     #[inline]
