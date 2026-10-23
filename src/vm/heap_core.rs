@@ -8,8 +8,9 @@
 //!
 //! The counters are atomics, not fields under a lock: `alloc` and `should_collect` (every
 //! instruction) read `mem_cap` and `next_gc`, and a lock there would cost each instruction a lock
-//! round trip. A `Relaxed` atomic load is a plain load. The free list and the
-//! slab append share one lock (`alloc_lock`), taken once per 64 reused slots or once per new slot.
+//! round trip. A `Relaxed` atomic load is a plain load. The free list and the slab append share
+//! one lock (`alloc_lock`). A handle takes it once per refill of its free-slot cache: up to 64
+//! freed slots, or up to 64 new slots (one new slot per lock below slot 64).
 
 use super::fxhash::FxHashMap;
 use super::heap::Obj;
@@ -48,8 +49,14 @@ pub struct HeapCore {
     /// [`iter`](HeapCore::iter) are the only ways to a slot, and only `heap.rs` holds a core.
     slots: Slab,
     alloc_lock: Mutex<AllocState>,
-    /// GC mark bits, one per slot. Written only by the collector, so the `_owned` (load, store)
-    /// forms are enough. Post-sweep invariant: all bits 0 (survivors cleared, holes never marked).
+    /// GC mark bits, one per slot. Two writers:
+    /// - the collector (`mark`, `sweep_slots`) sets and clears bits with a load and a store, while
+    ///   no handle allocates (the collector runs alone);
+    /// - `reuse` clears the bit of the slot it hands out with `fetch_and`, because two handles can
+    ///   reuse slots of one word at once.
+    ///
+    /// Post-sweep invariant: all bits of live slots 0 (survivors cleared). A free slot can keep a
+    /// stray mark (see `reuse`).
     marks: SlotBits,
     /// D4 layer C (TICKET-169): a side bitset marking a heap object as an airlock COPY (a spawned
     /// task's captures/args/receiver, its module-global snapshot, or a crossing closure's
@@ -196,7 +203,11 @@ impl HeapCore {
     pub(super) fn reuse(&self, idx: u32, obj: Obj) -> GcRef {
         let h = GcRef(idx);
         self.slots.slot_mut(h).obj = Some(obj);
-        self.marks.clear_owned(idx as usize);
+        // Load first: the bit is almost always clear, and a clear bit needs no write. Only the
+        // collector sets marks, and it does not run while a handle allocates.
+        if self.marks.get(idx as usize) {
+            self.marks.clear(idx as usize);
+        }
         if self.any_copied.load(Ordering::Relaxed) {
             self.copied.clear(idx as usize);
         }
@@ -346,8 +357,8 @@ mod tests {
     use crate::vm::value::GcRef;
     use std::collections::HashSet;
 
-    /// Two handles on one core, on two threads, never get the same slot, and each reads back what
-    /// it wrote.
+    /// Two handles on one core, on two threads, never get the same slot, and each handle reads back
+    /// what both threads wrote.
     #[test]
     fn two_handles_alloc_disjoint_slots_concurrently() {
         const N: i64 = 100_000;
@@ -363,14 +374,16 @@ mod tests {
         };
         let (a, b) = (run(first, 0), run(second, 1));
         let (heap_a, refs_a) = a.join().unwrap();
-        let (_heap_b, refs_b) = b.join().unwrap();
+        let (heap_b, refs_b) = b.join().unwrap();
         let all: HashSet<u32> = refs_a.iter().chain(&refs_b).map(|r| r.0).collect();
         assert_eq!(all.len(), 2 * N as usize, "every GcRef is distinct");
-        for (tid, refs) in [(0, &refs_a), (1, &refs_b)] {
-            for (i, r) in refs.iter().enumerate() {
-                match heap_a.get(*r) {
-                    Obj::BigInt(n) => assert_eq!(*n, tid * N + i as i64),
-                    other => panic!("slot {} holds {other:?}", r.0),
+        for heap in [&heap_a, &heap_b] {
+            for (tid, refs) in [(0, &refs_a), (1, &refs_b)] {
+                for (i, r) in refs.iter().enumerate() {
+                    match heap.get(*r) {
+                        Obj::BigInt(n) => assert_eq!(*n, tid * N + i as i64),
+                        other => panic!("slot {} holds {other:?}", r.0),
+                    }
                 }
             }
         }
@@ -420,5 +433,47 @@ mod tests {
         let y = heap.alloc(Obj::List(Vec::new()));
         assert_eq!(y, x, "the freed slot is reused");
         assert!(heap.mark(y), "the new object starts unmarked");
+    }
+
+    /// Two handles that reuse slots of one mark word at once must both clear their slot's mark: a
+    /// load-then-store clear can lose the other thread's clear, and the next collection would then
+    /// skip the new object's children. Slots `[64, 128)` share one word; every round marks all of
+    /// them, then two threads reuse the even and the odd slots.
+    #[test]
+    fn concurrent_reuse_clears_every_mark_in_a_shared_word() {
+        use std::sync::Barrier;
+        const ROUNDS: usize = 20_000;
+        let core = super::HeapCore::default();
+        let mut cache = Vec::new();
+        for i in 0..128 {
+            core.alloc_slot(&mut cache, Obj::BigInt(i));
+        }
+        let start = Barrier::new(3);
+        let done = Barrier::new(3);
+        let lost = std::thread::scope(|s| {
+            for parity in 0..2u32 {
+                let (core, start, done) = (&core, &start, &done);
+                s.spawn(move || {
+                    for _ in 0..ROUNDS {
+                        start.wait();
+                        for idx in (64 + parity..128).step_by(2) {
+                            core.reuse(idx, Obj::BigInt(idx as i64));
+                        }
+                        done.wait();
+                    }
+                });
+            }
+            let mut lost = 0usize;
+            for _ in 0..ROUNDS {
+                for i in 64..128 {
+                    core.marks.set_owned(i);
+                }
+                start.wait();
+                done.wait();
+                lost += (64..128).filter(|&i| core.marks.get(i)).count();
+            }
+            lost
+        });
+        assert_eq!(lost, 0, "a reuse lost another thread's mark clear");
     }
 }

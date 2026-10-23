@@ -1203,7 +1203,7 @@ impl Heap {
 
     /// The origin span stamped on `r`, or `None` if it was never stamped (a user-constructed
     /// `Err`, a struct error, or a slot swept since the stamp). Returns `Span` by value: `Span` is
-    /// `Copy`, so the borrow of `self.err_spans` ends here rather than outliving a caller's
+    /// `Copy`, so the core's `err_spans` lock is released here rather than held across a caller's
     /// subsequent `alloc`/`alloc_str`.
     pub fn err_span(&self, r: GcRef) -> Option<Span> {
         self.core.err_span(r)
