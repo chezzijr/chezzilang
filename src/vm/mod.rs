@@ -7,6 +7,9 @@ mod blocking_pool;
 pub mod chzstr;
 pub mod core;
 mod fxhash;
+// wired in M1.5
+#[cfg_attr(not(test), allow(dead_code))]
+mod gc_coord;
 pub mod heap;
 mod heap_core;
 mod heap_slab;
