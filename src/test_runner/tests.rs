@@ -2871,3 +2871,53 @@ fn an_executor_created_before_the_first_test_is_not_joined_by_it() {
         report.text
     );
 }
+
+/// TICKET-289 — a `defer` that meets the `--timeout` deadline while a fault unwinds is a hard halt,
+/// and no `recover:` catches it. `unwind_result` hands the defer's `is_timed_out` error to
+/// `finish_fault`, which used to catch it at the handler: the test ran on past the deadline
+/// (measured on main `11a496c8`: `REACHED after recover` in 20 of 20 runs at `CHEZZI_THREADS` 0, 1
+/// and 2). Every Executor job body runs inside `run_outcome`'s `recover:`, so a job whose cleanup
+/// hit the deadline sealed a value and `shutdown()` returned. The `time.sleep_ms` is inside the
+/// fixture source: it is the cleanup the deadline cuts, not an ordering edge of this test.
+#[test]
+fn a_timeout_in_a_defer_during_a_fault_unwind_is_not_caught_by_recover() {
+    let d = TmpDir::new();
+    let f = d.write(
+        "recover_timeout_test.chz",
+        "import std.time\n\
+             fn owner():\n    \
+                 defer:\n        \
+                     time.sleep_ms(1000)\n    \
+                 panic(\"own\")\n\
+             test fn t():\n    \
+                 _ := recover: owner()\n    \
+                 assert false, \"REACHED after recover\"\n",
+    );
+    let (text, passed) = run_tests_timed_watchdog("recover_timeout", &f, 300);
+    assert!(!passed, "report:\n{text}");
+    assert!(text.contains("TIMED-OUT t"), "report:\n{text}");
+    assert!(!text.contains("REACHED"), "report:\n{text}");
+}
+
+/// The neighbour of the test above: a `defer` that ends before the deadline, with a fault of its
+/// own, is an ordinary superseding fault, and `recover:` still catches it. Without this cell a
+/// fix that rejects every `recover:` over a faulting `defer` would pass the test above.
+#[test]
+fn a_defer_fault_before_the_deadline_is_still_caught_by_recover() {
+    let d = TmpDir::new();
+    let f = d.write(
+        "recover_defer_fault_test.chz",
+        "fn owner():\n    \
+                 defer:\n        \
+                     panic(\"cleanup\")\n    \
+                 panic(\"own\")\n\
+             test fn t():\n    \
+                 r := recover: owner()\n    \
+                 match r:\n        \
+                     ?_: assert false, \"no fault\"\n        \
+                     !e: assert e.message() == \"cleanup\"\n",
+    );
+    let (text, passed) = run_tests_timed_watchdog("recover_defer_fault", &f, 5000);
+    assert!(passed, "report:\n{text}");
+    assert!(text.contains("PASS t"), "report:\n{text}");
+}

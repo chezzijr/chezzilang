@@ -256,7 +256,10 @@ running during a panic completes normally and its own `recover()` works). It buy
 not the task's life: once the body finishes the pending cancel resumes travelling up — the task still
 dies and the nursery still reports the original sibling fault. A `recover:` **outside** the defer
 still cannot defeat a cancel. `chezzi test`'s `--timeout` / `--max-heap` hard aborts stay
-**un-swallowable everywhere**, inside a defer included.
+**un-swallowable everywhere**, inside a defer included. That covers a `defer` that meets the halt
+while an ordinary fault unwinds: the halt supersedes the fault and no `recover:` catches it. A
+`defer` fault that happens BEFORE the deadline is an ordinary superseding fault, and `recover:`
+still catches it.
 
 **Cleanup that blocks, blocks the teardown.** A `defer` that sleeps, waits on a socket or sends a last
 message is *uninterruptible*: it delays the nursery join by exactly as long as it takes, with no cap

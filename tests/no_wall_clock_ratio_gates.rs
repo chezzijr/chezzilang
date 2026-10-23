@@ -300,7 +300,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 116] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     // TICKET-208, `tests/executor_task_grid.rs`. Every `time.sleep_ms` of these five is inside a
     // fixture .chz program's SOURCE STRING: a job's long work (3 s, 6 s) that a cut must end, or a
@@ -496,6 +496,16 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     // .chz program's SOURCE STRING: an uninterruptible sibling that the exit must end at once (the
     // cell is a hang check). It orders no two events in the Rust test's own control flow.
     "an_adopted_exit_keeps_its_output_at_every_depth",
+    // TICKET-289, `src/vm/tests/sched_wake.rs`. Its 50ms `time.sleep_ms` is inside the fixture .chz
+    // program's SOURCE STRING: it delays the nursery child's fault until the owner job is parked in
+    // `send`. The Rust test orders nothing with it; the `CHEZZI_TEST_FINISH_DRAIN_WINDOW` hook holds
+    // the gap between `finish` and `drain_family` open, and the assertion holds for either arrival
+    // order of the fault.
+    "a_job_parked_in_send_whose_child_faulted_is_not_called_deadlocked",
+    // TICKET-289, `src/test_runner/tests.rs`. Its `time.sleep_ms(1000)` is inside the fixture .chz
+    // program's SOURCE STRING: it is the `defer` cleanup that the 300 ms `--timeout` cuts. It orders
+    // no two events in the Rust test's own control flow.
+    "a_timeout_in_a_defer_during_a_fault_unwind_is_not_caught_by_recover",
 ];
 
 #[test]
