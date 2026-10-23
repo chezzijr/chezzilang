@@ -174,7 +174,8 @@ file at 2,500 lines and a test file at 3,500.
 | Checker tests | `checker/tests/` (one file per topic, helpers in `checker/tests/mod.rs`), `checker/graph_tests.rs` |
 | Compiler | `compiler/mod.rs` (entry, `Compiler`, keys, globals), `compiler/fn_body.rs`, `compiler/stmt.rs`, `compiler/assign.rs`, `compiler/loops.rs`, `compiler/pattern.rs`, `compiler/expr.rs`, `compiler/witness.rs`, `compiler/call.rs`, `compiler/capture.rs` (free variables), `compiler/fncomp.rs`, `compiler/peephole.rs`, `compiler/run_for_tests.rs` (compile and run, for the front end's tests), `compiler/tests/` |
 | VM: core | `vm/mod.rs` (types, errors, traces, module declarations), `vm/value.rs`, `vm/heap.rs`, `vm/chzstr.rs`, `vm/entry.rs` (`run_built`, test run helpers), `vm/host.rs` |
-| VM: heap slot storage | `vm/heap_slab.rs` (the segmented slab: `GcRef` to segment and offset, segments that never move) |
+| VM: heap slot storage | `vm/heap_slab.rs` (the segmented slab: `GcRef` to segment and offset, segments that never move; `SlotBits`, the per-slot bitsets) |
+| VM: shared heap state | `vm/heap_core.rs` (`HeapCore`: the slab, the free list, the mark and copy bits, the GC counters, shared by every `Heap` handle on it) |
 | Base (read by the front end and the VM) | `base/op.rs` (bytecode, `Program`, `CompileError`), `base/crossing.rs`, `base/hooks.rs`, `base/json_desc.rs`, `base/module_id.rs`, `base/provider_name.rs`, `base/words.rs` |
 | Run drivers (front end, then VM) | `run.rs` |
 | VM: execution | `vm/exec.rs` (setup, invoke), `vm/frames.rs` (frames, halts), `vm/step.rs` (dispatch loop), `vm/call.rs` (calls, natives), `vm/method_call.rs` (methods, hooks), `vm/json_decode.rs` |

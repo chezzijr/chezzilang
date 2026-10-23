@@ -29,7 +29,7 @@
 //! NOTE: the derived `PartialEq` compares the raw word — it is **not** the language `==` (two
 //! independently-boxed equal floats have different words). Use `Vm::values_equal` for language `==`.
 
-/// A handle into the GC heap (`Heap::slots` index). `Copy`, so duplicating an `Obj` `Value` aliases
+/// A handle into the GC heap (a slot number of the heap's slab, `vm/heap_slab.rs`). `Copy`, so duplicating an `Obj` `Value` aliases
 /// the same heap object — preserving by-reference sharing for lists / structs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GcRef(pub u32);

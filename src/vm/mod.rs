@@ -8,6 +8,7 @@ pub mod chzstr;
 pub mod core;
 mod fxhash;
 pub mod heap;
+mod heap_core;
 mod heap_slab;
 mod poller;
 mod pool;
