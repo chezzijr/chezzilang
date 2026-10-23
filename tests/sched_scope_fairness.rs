@@ -173,7 +173,7 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
     let second = match cancel {
         "child" => "panic(\"boom\")",
         "sibling" => "pass",
-        "shutdown_now" => "started.send(1)\nwhile true:\n    pass",
+        "executor_cancel" => "started.send(1)\nwhile true:\n    pass",
         "exit" => "os.exit(0)",
         _ => unreachable!(),
     };
@@ -189,8 +189,8 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
         "for _v in c:\n    pass"
     };
     let rounds = if cancel == "exit" { 1 } else { 50 };
-    let run_body = if nest == "job" || cancel == "shutdown_now" {
-        let stop = if cancel == "shutdown_now" {
+    let run_body = if nest == "job" || cancel == "executor_cancel" {
+        let stop = if cancel == "executor_cancel" {
             "_ := started.recv()\n_r2 := recover: ex.cancel()"
         } else {
             "_r2 := recover: ex.shutdown()"
@@ -225,7 +225,7 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
 }
 
 // One test per H1 (nest, cancel) cell (TICKET-276): `<nest>::<cancel>` calls `assert_h1_cell`.
-grid_tests!(NESTS x CANCELS: [spawn, recover, job, two_deep] x [child, sibling, shutdown_now, exit] => crate::assert_h1_cell);
+grid_tests!(NESTS x CANCELS: [spawn, recover, job, two_deep] x [child, sibling, executor_cancel, exit] => crate::assert_h1_cell);
 
 /// One H1 grid cell: three worker counts x 20 runs, each exiting clean.
 fn assert_h1_cell(nest: &str, cancel: &str) {

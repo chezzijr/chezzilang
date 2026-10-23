@@ -507,7 +507,17 @@ impl Vm {
                     Some(TaskOutcome::Deadlocked { out, stderr, .. }) if cancelled => {
                         Some(TaskOutcome::Cancelled { out, stderr })
                     }
-                    s => s,
+                    // Every other slot keeps its outcome: an unfilled slot, a value, a hard-halt or
+                    // deadlock fault, a cancel, an exit, a deadlock with no cancel.
+                    s @ (None
+                    | Some(
+                        TaskOutcome::Done(_)
+                        | TaskOutcome::Fault { .. }
+                        | TaskOutcome::CancelledFault { .. }
+                        | TaskOutcome::Cancelled { .. }
+                        | TaskOutcome::Exit { .. }
+                        | TaskOutcome::Deadlocked { .. },
+                    )) => s,
                 })
                 .collect();
             return self.reduce_task_slots(slots);

@@ -58,15 +58,16 @@ impl MnSched {
         // would never run and its `None` slot would hang the join. It reads as a latched verdict.
         let verdict_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock);
         let seal = match &outcome {
-            // The body returned: it sealed its value, or the job was cancelled first (`JobSeal::Done`).
-            TaskOutcome::Done(_) => JobSeal::Done,
+            // The body returned: `run_outcome` sealed its value, and the first writer wins.
+            TaskOutcome::Done(_) => JobSeal::Nothing,
             // A hard abort is never a Task outcome (TICKET-289): the run halts instead.
             TaskOutcome::Fault { err, .. } | TaskOutcome::CancelledFault { err, .. }
                 if executor_hard_halt(err) =>
             {
                 JobSeal::Nothing
             }
-            TaskOutcome::Fault { err, .. } if err.is_deadlock => JobSeal::Cancel,
+            // A deadlock-verdict `Fault` also lands here, but `halt` below is `Deadlock` for it,
+            // so `Ended` seals nothing: the deadlock ends the run and is never a Task outcome.
             TaskOutcome::Fault { err, .. } | TaskOutcome::CancelledFault { err, .. } => {
                 JobSeal::Fault(err.message.as_str().into())
             }

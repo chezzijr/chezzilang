@@ -24,7 +24,7 @@ test fn task_get_on_a_faulted_job_reports_the_job_error_not_deadlock():
 fn ok_job() -> int:
     return 42
 
-test fn raw_submit_result_on_a_faulted_job_does_not_report_deadlock():
+test fn raw_submit_get_on_a_faulted_job_does_not_report_deadlock():
     ex := concurrency.Executor()
     c := ex.submit(bad)
     ex.shutdown()

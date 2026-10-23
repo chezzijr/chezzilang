@@ -379,7 +379,7 @@ fn cancel_reaches_every_party() {
             ));
         } else {
             cells.push((
-                "shutdown_now",
+                "cancel",
                 vec!["$S(parked)", "hs.recv()"],
                 "ex.cancel()",
                 Mode::Run,
@@ -616,7 +616,7 @@ fn one_runner_at_one_worker_for_every_party() {
 }
 
 #[test]
-fn executor_limit_shutdown_now_ends_held_jobs() {
+fn executor_limit_cancel_ends_held_jobs() {
     let src = "import std.time
 import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 fn job():
@@ -642,7 +642,7 @@ print(\"done\")
 
 /// `quick` has no cancellation point, so only the drop keeps a held `quick` from printing.
 #[test]
-fn executor_limit_shutdown_now_never_starts_a_held_job() {
+fn executor_limit_cancel_never_starts_a_held_job() {
     let src = "import std.time
 import std.concurrency\nimport AtomicInt, Executor, Shared from std.concurrency
 fn slow():
@@ -1242,6 +1242,35 @@ match t.get():
     let want: Vec<String> = vec!["after".into(), "!cleanup boom".into()];
     let mut misses = Vec::new();
     check_cell("cleanup_fault", &src, &want, false, &mut misses);
+    judge(misses);
+}
+
+/// The deadlock verdict is a run end, never a Task outcome: a job whose nursery waits on a channel
+/// nobody sends to ends the run with the deadlock report, rc 1, and the code after `shutdown()`
+/// never runs (the owner contract keeps the verdict as it was).
+#[test]
+fn a_deadlock_in_a_job_ends_the_run_and_is_not_its_tasks_outcome() {
+    let src = "import std.concurrency
+import Executor, Task from std.concurrency
+c := Channel[int](0)
+fn stuck() -> int:
+    parallel:
+        spawn:
+            _ := c.recv()
+    return 1
+ex := Executor()
+t := ex.submit(stuck)
+ex.shutdown()
+print(\"REACHED shutdown\")
+print(t.get())
+";
+    let mut misses = Vec::new();
+    for t in THREADS {
+        let g = run("job_deadlock", src, Mode::Run, t, None);
+        if g.code != Some(1) || !g.err.contains("deadlock:") || g.out.contains("REACHED") {
+            misses.push(format!("T={t}: {}", g.show()));
+        }
+    }
     judge(misses);
 }
 

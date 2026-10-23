@@ -157,7 +157,7 @@ fn t190_route(route: str, g: Iterator[int]) -> str:
         ex := concurrency.Executor()
         _ := ex.submit(fn(): out.send(t190_cell(g)))
         ex.shutdown()
-    elif route == "submit_result":
+    elif route == "submit_value":
         ex := concurrency.Executor()
         r := must(ex.submit(fn() -> str: t190_cell(g)).get())
         ex.shutdown()
@@ -210,7 +210,7 @@ fn t190_snapshot_row(named: List[List[int]], sink: List[List[int]]) -> str:
 test fn generator_route_grid():
     marking := "3,fault,2,fault,3,fault,2,fault,3,2,3,2,fault,0"
     handoff := "3,3,2,2,3,3,2,2,3,2,3,2,1,0"
-    routes := ["spawn_fn", "spawn_block", "spawn_value", "submit", "submit_result", "channel", "shared", "rwshared", "atomic", "task_get", "memoize"]
+    routes := ["spawn_fn", "spawn_block", "spawn_value", "submit", "submit_value", "channel", "shared", "rwshared", "atomic", "task_get", "memoize"]
     for route in routes:
         named: List[List[int]] = [[], [], [], []]
         sink: List[List[int]] = []

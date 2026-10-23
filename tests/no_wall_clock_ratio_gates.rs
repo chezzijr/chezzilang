@@ -312,8 +312,8 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     "a_test_run_ignores_a_job_fault_that_lands_past_a_passing_test",
     "a_test_run_ignores_a_top_level_job_fault",
     "executor_limit_caps_running_jobs",
-    "executor_limit_shutdown_now_ends_held_jobs",
-    "executor_limit_shutdown_now_never_starts_a_held_job",
+    "executor_limit_cancel_ends_held_jobs",
+    "executor_limit_cancel_never_starts_a_held_job",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "an_exit_runs_no_defer_of_a_cancelled_sibling",
     "an_exit_cuts_a_running_defer_body",
@@ -323,7 +323,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     // TICKET-118. Its 300ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING, not
     // a happens-before edge in this Rust test's own control flow -- the test asserts the child's
     // final rc and stderr, not an ordering the sleep enforces here (the negative control: NO
-    // shutdown_now, so this must still fault).
+    // cancel, so this must still fault).
     "a_job_nursery_deadlock_with_no_shutdown_still_faults",
     "a_job_submitted_to_mains_executor_survives_another_executors_cancel_mn",
     "a_leaked_job_from_a_top_level_executor_still_aborts_a_later_test",
@@ -439,11 +439,11 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 114] = [
     // TICKET-118. Its 300ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING, not
     // a happens-before edge in this Rust test's own control flow -- the test asserts the child's
     // final rc and stdout, not an ordering the sleep enforces here.
-    "shutdown_now_cancels_a_depth_two_nursery_child",
-    "shutdown_now_cancels_a_jobs_nursery_child_blocked_on_recv",
+    "cancel_cancels_a_depth_two_nursery_child",
+    "cancel_cancels_a_jobs_nursery_child_blocked_on_recv",
     // TICKET-200. Same as TICKET-118's: the `time.sleep_ms` is inside the fixture .chz program's
     // SOURCE STRING; the test asserts the child's exit and its output, not an ordering here.
-    "shutdown_now_reaches_a_job_nursery_fiber_parked_in_accept",
+    "cancel_reaches_a_job_nursery_fiber_parked_in_accept",
     // TICKET-101. The sleep is a deadline poll (20ms) over a child process that hangs before the
     // fix and never closes its pipes, not a happens-before edge between two events in this test.
     "sibling_send_wakes_receiver_in_a_deeper_nursery_at_eight_workers",

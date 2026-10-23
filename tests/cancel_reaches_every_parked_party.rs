@@ -12,19 +12,19 @@ mod hang_deadline;
 const NET_PRELUDE: &str = "import std.time\nimport std.net\nimport std.concurrency\nimport Executor, Shared from std.concurrency\nfn lis() -> net.Listener:\n    match net.listen(\"127.0.0.1:0\"):\n        ?l: return l\n        !e: panic(\"{e}\")\n";
 
 #[test]
-fn shutdown_now_reaches_a_job_nursery_fiber_parked_in_accept() {
+fn cancel_reaches_a_job_nursery_fiber_parked_in_accept() {
     let dir = std::env::temp_dir().join(format!("chz-t200-accept-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("n5.chz");
-    let body = "ln := lis()\nfn srv():\n    defer:\n        print(\"srv defer\")\n    parallel:\n        spawn:\n            defer:\n                print(\"fiber defer\")\n            r := ln.accept()\n            print(\"accept returned {r}\")\nex := Executor()\n_ := ex.submit(srv)\ntime.sleep_ms(100)\nex.cancel()\nprint(\"after shutdown_now\")\n";
+    let body = "ln := lis()\nfn srv():\n    defer:\n        print(\"srv defer\")\n    parallel:\n        spawn:\n            defer:\n                print(\"fiber defer\")\n            r := ln.accept()\n            print(\"accept returned {r}\")\nex := Executor()\n_ := ex.submit(srv)\ntime.sleep_ms(100)\nex.cancel()\nprint(\"after cancel\")\n";
     std::fs::write(&path, format!("{NET_PRELUDE}{body}")).expect("write program");
     let out = hang_deadline::run_with_hang_deadline(&path, Some("1"));
     let _ = std::fs::remove_dir_all(&dir);
-    let out = out.expect("shutdown_now hung: no exit within 10s");
+    let out = out.expect("cancel hung: no exit within 10s");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
-        stdout.contains("fiber defer") && stdout.contains("after shutdown_now"),
-        "shutdown_now must cut the accept-parked fiber and run its defers: {stdout:?}"
+        stdout.contains("fiber defer") && stdout.contains("after cancel"),
+        "cancel must cut the accept-parked fiber and run its defers: {stdout:?}"
     );
 }
 
@@ -122,8 +122,8 @@ const GUARD_PRELUDE: &str = "hx := Executor()\n_ := hx.submit(holder)\ntime.slee
 /// - owner job x {accept, read, write, connect}: a socket op in an Executor job body Refuses
 ///   (DEC-181).
 /// - sibling fault x owner job: a job has no sibling in its cancel scope.
-/// - shutdown_now and nested shutdown_now x owner main nursery: there is no executor to shut.
-/// - nested shutdown_now x owner job and job's nursery: only a nested job's nursery has an `ex2`.
+/// - cancel and nested cancel x owner main nursery: there is no executor to shut.
+/// - nested cancel x owner job and job's nursery: only a nested job's nursery has an `ex2`.
 fn applies(src: Source, owner: Owner, socket: bool) -> bool {
     if owner == Owner::Job && socket {
         return false;
@@ -352,7 +352,7 @@ fn cancel_grid_failures() -> Vec<String> {
 }
 
 /// C1 grid: cancel source x park x owner x T. Every cell is cut, and runs its defers where the
-/// source unwinds (sibling fault, shutdown_now). os.exit runs no defers (Digest gotcha 3; Go's
+/// source unwinds (sibling fault, cancel). os.exit runs no defers (Digest gotcha 3; Go's
 /// `os.Exit` runs none either).
 #[test]
 fn cancel_grid_every_source_park_owner_and_thread_count() {

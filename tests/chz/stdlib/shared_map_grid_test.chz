@@ -170,7 +170,7 @@ fn _grid[K: Hashable + Eq](keys: List[K]) -> str:
     for seen in [_map_items(s1.get()), _rw_items(b1), _map_items(c1.snapshot())]:
         if seen != _final(want, keys):
             bad = bad + "spawn, parent view: " + seen + "\n"
-    # Executor job: same, through submit_result
+    # Executor job: same, through a kept submit
     s2: concurrency.Shared[Map[K, int]] = concurrency.Shared({})
     b2: concurrency.RwShared[Map[K, int]] = concurrency.RwShared({})
     c2: ConcurrentMap[K, int] = ConcurrentMap(concurrency.RwShared({}))

@@ -154,7 +154,7 @@ native fn _cancel_job(ex: Executor, ch) -> None
 # true: a sealed channel stays sealed. `Task.done()` reads it.
 native fn is_settled(ch) -> bool
 
-# A future handle for one `Executor.submit` job (TICKET-289; moved here from `std.concurrency.task`).
+# A future handle for one `Executor.submit` job.
 # `get()` is the ONLY place a job's fault or cancel appears; `shutdown()`, the run end and a test end
 # raise none. `_ch` is the sealed cap-1 channel that holds the outcome; `_cached` holds the owner's
 # outcome object; `_ex` is the submitting Executor (for `cancel()`). The `_` fields are std internals:

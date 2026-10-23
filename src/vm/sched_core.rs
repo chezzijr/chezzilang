@@ -139,11 +139,6 @@ impl SchedCore {
                     return step;
                 }
                 self.exec_active -= 1;
-                let seal = match seal {
-                    JobSeal::Done if self.job_was_cancelled(task_index) => JobSeal::Cancel,
-                    JobSeal::Done => JobSeal::Nothing,
-                    JobSeal::Nothing | JobSeal::Cancel | JobSeal::Fault(_) => seal,
-                };
                 self.settle_job(task_index, seal, &mut step);
             }
             JobEvent::Reaped {
@@ -186,16 +181,6 @@ impl SchedCore {
             step.start.push(f);
         }
         step
-    }
-
-    /// Job `task_index` was cancelled: its own flag (`Task.cancel()`), or scope 0's flag or an
-    /// ancestor's (`Executor.cancel()`, creator cancel).
-    fn job_was_cancelled(&self, task_index: usize) -> bool {
-        self.job_cancelled()
-            || self
-                .job_settle
-                .get(&task_index)
-                .is_some_and(|s| s.flag.load(Ordering::Relaxed))
     }
 
     /// Scope 0's own cancel flag (`cancel`) or an ancestor's (creator cancel) is tripped.
@@ -263,7 +248,7 @@ impl SchedCore {
             return;
         };
         let v = match seal {
-            JobSeal::Nothing | JobSeal::Done => return,
+            JobSeal::Nothing => return,
             JobSeal::Cancel => s.cancel.clone(),
             JobSeal::Fault(msg) => s.fault_value(&msg),
         };

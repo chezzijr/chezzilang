@@ -58,7 +58,7 @@ use std::process::Command;
 const SUBMIT_FAULT: &str = "submit on a shut-down Executor (it no longer accepts work)";
 
 #[test]
-fn executor_reentrant_shutdown_now_during_drain() {
+fn executor_reentrant_cancel_during_drain() {
     let dir = std::env::temp_dir().join(format!(
         "chz-executor-reentrant-shutdown-{}",
         std::process::id()
@@ -85,7 +85,7 @@ fn executor_reentrant_shutdown_now_during_drain() {
     }
     assert!(
         out.status.success(),
-        "reentrant shutdown_now during drain must not fault: status {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        "reentrant cancel during drain must not fault: status {:?}\nstdout: {stdout}\nstderr: {stderr}",
         out.status.code(),
     );
     let lines: Vec<&str> = stdout.lines().collect();
@@ -99,19 +99,19 @@ fn executor_reentrant_shutdown_now_during_drain() {
     assert_eq!(
         jobs,
         vec!["A", "C"],
-        "reentrant shutdown_now during drain: every dispatched job's output must survive, in any \
+        "reentrant cancel during drain: every dispatched job's output must survive, in any \
          order (see module doc for the CPython reference and why the order is not asserted): \
          {stdout:?}"
     );
 }
 
 /// TICKET-232 symptom 1: a submit that returned without a fault and is under the cap always
-/// starts. The unbounded `Executor` has no cap, so `shutdown_now` from job B must not drop job C
+/// starts. The unbounded `Executor` has no cap, so `cancel` from job B must not drop job C
 /// (CPython `ThreadPoolExecutor`: 0/100 runs drop C, measured). A run that ends in the submit
 /// fault is legal; a run with exit status zero and no `C` is the silent drop.
 /// Chezzi at `CHEZZI_THREADS=0` dropped C in 6/100 and 9/100 runs on `1d766428`, so 200 runs.
 #[test]
-fn executor_shutdown_now_never_cancels_a_dispatched_job() {
+fn executor_cancel_never_cancels_a_dispatched_job() {
     let dir = std::env::temp_dir().join(format!("chz-executor-dispatched-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("main.chz");
@@ -146,6 +146,6 @@ fn executor_shutdown_now_never_cancels_a_dispatched_job() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(
         dropped, 0,
-        "dispatched job C dropped by shutdown_now in {dropped}/200 runs"
+        "dispatched job C dropped by cancel in {dropped}/200 runs"
     );
 }

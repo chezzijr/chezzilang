@@ -4,7 +4,7 @@
 //! a generator resume -- always completes, so a job that returned never loses its result. Go and
 //! CPython keep a finished job's result the same way.
 //!
-//! Grid: op x state {ready, would wait} x halt {`shutdown_now`, sibling-fault cancel, child fault of
+//! Grid: op x state {ready, would wait} x halt {`cancel`, sibling-fault cancel, child fault of
 //! an owned nursery, `--timeout`} x `CHEZZI_THREADS` {1, 2, 4, 0}. A ready cell must complete its op
 //! in every round; a would-wait cell must be cut (its `after` counter stays 0), except a `try_*` op,
 //! which never waits and so always completes. The hook rows are one row per single-call re-entry

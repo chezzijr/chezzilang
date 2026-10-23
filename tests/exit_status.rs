@@ -639,7 +639,7 @@ print("main finished {{total}}")
 }
 
 /// W7-57, the second unnamed shape — a spinning SIBLING eager job. Its `cancel` is its executor's
-/// `shutdown_now` token, which an `os.exit` must NOT trip, so the back-edge rung is deliberately not
+/// `cancel` token, which an `os.exit` must NOT trip, so the back-edge rung is deliberately not
 /// gated on "this party has no cancel flag": the job HAS one, it is just the wrong one. (This shape
 /// already reported rc=3 promptly pre-fix — `main`'s join observed the exit and returned while the
 /// spinner ran on — so it is a FENCE against the teardown reclassifying or delaying it.)
@@ -936,7 +936,7 @@ print("after nursery")
 }
 
 /// W7-57 review defect 1, the other half — a spinning party with no cancel flag of its own (a
-/// top-level `main`) and one whose only flag is its executor's `shutdown_now` token (an eager job)
+/// top-level `main`) and one whose only flag is its executor's `cancel` token (an eager job)
 /// are killed promptly by an exit. Since TICKET-213 `exit_halt` has no suppression at all: an exit
 /// cuts a running `defer` body and an already-cancelled fiber too.
 #[test]

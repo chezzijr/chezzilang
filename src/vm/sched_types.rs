@@ -1267,10 +1267,6 @@ impl JobSettle {
 pub(super) enum JobSeal {
     /// Seal nothing: the end is a hard abort, which is never a Task outcome, or the run is over.
     Nothing,
-    /// The body returned. It sealed its value, unless the job was cancelled first (`_settle`
-    /// skips the seal then): a cancelled job's Task reads the cancel value even when a ready
-    /// `recv` let the body finish. [`SchedCore::job_event`] turns it into `Cancel` or `Nothing`.
-    Done,
     /// Seal the cancel value.
     Cancel,
     /// Seal `Err(message)`: the job ended by a fault.

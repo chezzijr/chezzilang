@@ -5,7 +5,7 @@
 # Axes: route x argument source (explicit, keyword, default fill, variadic) x operand shape (fresh
 # literal, .copy(), named, call result, fresh holding a named) x callee body (writes, conditional).
 # Routes (every consumer of the fact, ticket `## Single source` item 1b): spawn f(), spawn obj.m(),
-# spawn lib.f(), spawn lib.K.f(), spawn value(), spawn: block, Executor submit/submit_result,
+# spawn lib.f(), spawn lib.K.f(), spawn value(), spawn: block, Executor submit (dropped or read),
 # Channel receive, Shared/RwShared get, Atomic load, Shared store, module global (the spawn
 # snapshot), closure capture. `Executor.map` does not exist (`std/concurrency.chz`). A hand-off read
 # (Channel/Shared/RwShared/Atomic) is never marked, so those routes have no fresh-operand axis.
@@ -437,7 +437,7 @@ test fn grid_policy_r17_executor_submit_named():
     assert out.recv() == "fault"
     assert xs == [1]
 
-test fn grid_policy_r46_executor_submit_result_named():
+test fn grid_policy_r46_executor_submit_get_named():
     xs := [1]
     ex := concurrency.Executor()
     got := must(ex.submit(fn() -> str: t189_try(xs)).get())
@@ -445,7 +445,7 @@ test fn grid_policy_r46_executor_submit_result_named():
     assert got == "fault"
     assert xs == [1]
 
-test fn grid_policy_r47_executor_submit_result_fresh():
+test fn grid_policy_r47_executor_submit_get_fresh():
     ex := concurrency.Executor()
     got := must(ex.submit(fn() -> str: t189_try([1])).get())
     ex.shutdown()

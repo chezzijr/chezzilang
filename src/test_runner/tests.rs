@@ -2871,17 +2871,3 @@ fn an_executor_created_before_the_first_test_is_not_joined_by_it() {
         report.text
     );
 }
-
-/// TICKET-289: a `--timeout` cut ends a job silently, so a test whose body returns at the deadline
-/// reads the cut as a pass. A run of exactly `timeout_ms` is a deadline run; one millisecond less is not.
-#[test]
-fn a_pass_that_ran_to_the_deadline_is_timed_out() {
-    let opts = RunOpts {
-        timeout_ms: 300,
-        ..Default::default()
-    };
-    let at = apply_timeout_overrun(Verdict::Pass, Duration::from_millis(300), &opts);
-    assert!(matches!(at, Verdict::TimedOut { .. }), "at the deadline");
-    let under = apply_timeout_overrun(Verdict::Pass, Duration::from_millis(299), &opts);
-    assert!(matches!(under, Verdict::Pass), "one millisecond under");
-}

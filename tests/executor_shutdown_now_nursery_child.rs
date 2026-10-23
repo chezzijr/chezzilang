@@ -12,7 +12,7 @@ use std::process::Command;
 mod hang_deadline;
 
 #[test]
-fn shutdown_now_cancels_a_jobs_nursery_child_blocked_on_recv() {
+fn cancel_cancels_a_jobs_nursery_child_blocked_on_recv() {
     let dir = std::env::temp_dir().join(format!(
         "chz-executor-shutdown-now-nursery-child-{}",
         std::process::id()
@@ -90,7 +90,7 @@ fn assert_clean_run(out: &std::process::Output, want_stdout: &str) {
 /// W13-8 — a depth-two nursery child (a nursery nested inside a nursery) parked on `recv` must be
 /// cancelled by `cancel()` too, not just a depth-one child.
 #[test]
-fn shutdown_now_cancels_a_depth_two_nursery_child() {
+fn cancel_cancels_a_depth_two_nursery_child() {
     let program = "import Executor from std.concurrency\n\
         import std.time\n\
         never := Channel[int](0)\n\
@@ -115,7 +115,7 @@ fn shutdown_now_cancels_a_depth_two_nursery_child() {
 
 /// W13-8 — the same cancellation, synchronised by a channel handshake instead of a sleep (DEC-050).
 #[test]
-fn shutdown_now_cancels_a_nursery_child_synchronised_by_a_handshake() {
+fn cancel_cancels_a_nursery_child_synchronised_by_a_handshake() {
     let program = "import Executor from std.concurrency\n\
         never := Channel[int](0)\n\
         ready := Channel[int](1)\n\
@@ -162,7 +162,7 @@ fn a_job_nursery_deadlock_with_no_shutdown_still_faults() {
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         assert!(
             !out.status.success(),
-            "a genuine deadlock (no shutdown_now) must still fault: rc={:?} stdout: {stdout} \
+            "a genuine deadlock (no cancel) must still fault: rc={:?} stdout: {stdout} \
              stderr: {stderr}",
             out.status
         );
@@ -180,7 +180,7 @@ fn a_job_nursery_deadlock_with_no_shutdown_still_faults() {
 /// reports `fatal error: all goroutines are asleep - deadlock!` — a deliberate, pre-existing
 /// divergence this test pins today's outcome for, not endorses.
 #[test]
-fn shutdown_now_ends_a_nursery_child_whose_defer_blocks_forever() {
+fn cancel_ends_a_nursery_child_whose_defer_blocks_forever() {
     let program = "import Executor from std.concurrency\n\
         never := Channel[int](0)\n\
         stuck := Channel[int](0)\n\
@@ -209,11 +209,11 @@ fn shutdown_now_ends_a_nursery_child_whose_defer_blocks_forever() {
 }
 
 /// W13-8 — the 10:59Z lost wakeup: `cancel()`'s cancel store must reach a worker that reads
-/// it on the wrong side of the trip. Twenty in-process rounds of submit/handshake/`shutdown_now` at
+/// it on the wrong side of the trip. Twenty in-process rounds of submit/handshake/`cancel` at
 /// `CHEZZI_THREADS=1`, run fifty times: this samples the race rather than proving its absence
 /// (a rare miss would show as an occasional hang past the deadline, not a wrong answer).
 #[test]
-fn shutdown_now_races_a_parked_nursery_child_at_one_worker() {
+fn cancel_races_a_parked_nursery_child_at_one_worker() {
     let program = "import Executor from std.concurrency\n\
         fn job(never: Channel[int], ready: Channel[int]):\n    \
             parallel:\n        \

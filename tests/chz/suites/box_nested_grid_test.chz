@@ -2,7 +2,7 @@
 #
 # Grid: depth {2, 3} x inner read {top-level fn, scalar, aggregate, none, qualified module call}
 # x outer closure {reads none, a scalar, an aggregate} x box kinds {Shared, RwShared, mixed}
-# x inner action {plain, spawn, Executor.submit_result}; then global boxes, a later-bound box,
+# x inner action {plain, spawn, Executor.submit}; then global boxes, a later-bound box,
 # a rebinding between calls, and the plan validator's program.
 #
 # Every expected value is the output of the base binary (commit 7e4421e4, encoded store) for

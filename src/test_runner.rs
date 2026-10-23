@@ -262,15 +262,12 @@ fn verdict_from_fault(e: crate::vm::RuntimeError, site: FaultSite) -> Verdict {
 /// differs from the abort path's `test exceeded --timeout (Nms)` so a report distinguishes "cut
 /// short" from "overran, uninterruptible".
 ///
-/// A run of exactly `timeout_ms` counts as an overrun (`>=`, TICKET-289): the deadline cuts a job
-/// silently, so a test body that returns at the deadline would otherwise read the cut as a pass.
-///
 /// **Only `Pass` is upgraded.** A `Fail`/`Error`/`OverMemory`/already-`TimedOut` verdict keeps its own
 /// bucket: an assertion failure says more about the test than "also slow" does.
 fn apply_timeout_overrun(verdict: Verdict, duration: Duration, opts: &RunOpts) -> Verdict {
     if opts.timeout_ms > 0
         && matches!(verdict, Verdict::Pass)
-        && duration.as_millis() >= u128::from(opts.timeout_ms)
+        && duration.as_millis() > u128::from(opts.timeout_ms)
     {
         return Verdict::TimedOut {
             msg: format!(

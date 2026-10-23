@@ -1,8 +1,8 @@
 # TICKET-226 (generics design R4, grid 2): a fn value is (item, type args), and every consumer takes
 # every callable kind. Kind {plain fn, method path, `T.m`, `json.decode[T]`, closure,
 # native, builtin, extern} x consumer {call, spawn direct callee, spawn argument, Executor.submit,
-# submit_result, channel round trip, == (same site, two sites, two modules, across a spawn), repr,
-# global snapshot}. The zero-arg consumers (submit, submit_result) take the kinds that have a
+# submit with a result, channel round trip, == (same site, two sites, two modules, across a spawn), repr,
+# global snapshot}. The zero-arg consumers (submit, submit with a result) take the kinds that have a
 # zero-arg member: plain, method path, closure, native, extern. A `T.m` and
 # `json.decode[T]` always take an argument, and so does every builtin value (`print` as a value is
 # `fn(...Any) -> None`, so `ex.submit(print)` is a type error). A closure is one value per
@@ -163,7 +163,7 @@ test fn grid_executor_submit():
     ran(bad, "extern", r)
     assert bad.len() == 0, ", ".join(bad)
 
-test fn grid_submit_result():
+test fn grid_submit_value():
     bad: List[str] = []
     ex := Executor()
     k := 1
