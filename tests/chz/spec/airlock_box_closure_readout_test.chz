@@ -338,3 +338,57 @@ test fn task_result_closure_over_shared_stored_state_faults():
     t := ex.submit(fn(): shared_logger(box))
     ex.shutdown()
     assert outcome(ok(t.get())).contains(COPY_TAIL)
+
+# TICKET-295 grid: one cell per kind of kept element that a fresh capture holds. The write
+# faults exactly when a write could change the kept element or an object below it.
+struct Pt:
+    x: int
+
+enum Hold:
+    Num(int)
+    Items(List[int])
+
+# The cell `name` when its outcome `got` does not match `faults`, else nothing.
+fn miss(name: str, got: str, faults: bool) -> List[str]:
+    if got.contains(COPY_TAIL) == faults:
+        return []
+    return [name]
+
+fn hold_first[T](s: List[T]) -> fn() -> None:
+    xs := [s[0]]
+    return fn(): xs.push(xs[0])
+
+test fn fresh_capture_over_a_kept_element_grid():
+    wrong: List[str] = []
+    wrong.extend(miss("str", outcome(Shared(["a"]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("tuple of ints", outcome(Shared([(1, 2)]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("option of tuple", outcome(Shared[List[(int, int)?]]([?(1, 2)]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("enum of int", outcome(Shared([Hold.Num(1)]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("tuple holding a list", outcome(Shared([(1, [2])]).read(fn(s): hold_first(s))), true))
+    wrong.extend(miss("option of list", outcome(Shared[List[List[int]?]]([?[2]]).read(fn(s): hold_first(s))), true))
+    wrong.extend(miss("enum holding a list", outcome(Shared([Hold.Items([2])]).read(fn(s): hold_first(s))), true))
+    wrong.extend(miss("struct", outcome(Shared([Pt(1)]).read(fn(s): hold_first(s))), true))
+    wrong.extend(miss("list", outcome(Shared([[1]]).read(fn(s): hold_first(s))), true))
+    wrong.extend(miss("map", outcome(Shared([{1: 2}]).read(fn(s): hold_first(s))), true))
+    assert wrong == []
+
+fn list_capture(l: List[int]) -> fn() -> None:
+    return fn(): l.push(1)
+
+# The outcome of a write through the closure an Executor job built with `f`.
+fn job_closure(f: fn() -> fn() -> None) -> str:
+    ex := Executor(1)
+    t := ex.submit(f)
+    ex.shutdown()
+    return outcome(ok(t.get()))
+
+# TICKET-295 grid: a job result closure faults exactly when a capture reaches a copy.
+test fn task_result_closure_capture_grid():
+    xs := [1]
+    box := Shared[List[int]]([0])
+    wrong: List[str] = []
+    wrong.extend(miss("fresh state", job_closure(fresh_logger), false))
+    wrong.extend(miss("module global", job_closure(global_writer), false))
+    wrong.extend(miss("submitter local", job_closure(fn(): list_capture(xs)), true))
+    wrong.extend(miss("box state", job_closure(fn(): shared_logger(box)), true))
+    assert wrong == []
