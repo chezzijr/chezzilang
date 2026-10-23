@@ -3,12 +3,12 @@
 //! One [`GcCoord`] serves one heap core (one run). It is Go's `stopTheWorldWithSema` plus
 //! `entersyscall`/`exitsyscall` (`go/src/runtime/proc.go`), cut down to what a mark-sweep needs:
 //!
-//! - An ATTACHED thread may touch the heap. It must reach a safepoint ([`GcCoord::poll`]) or
-//!   detach in bounded time.
-//! - A DETACHED thread ([`GcCoord::detach`], Go's syscall state) counts as stopped. It publishes its
-//!   roots first, then may block on anything. [`GcCoord::reattach`] waits for the end of any
+//! - An ATTACHED thread holds an [`Attached`] token from [`GcCoord::attach`] and may touch the heap.
+//!   It must reach a safepoint ([`Attached::poll`]) or detach in bounded time.
+//! - A DETACHED thread ([`Attached::detach`], Go's syscall state) counts as stopped. It publishes its
+//!   roots first, then may block on anything. [`DetachTicket::reattach`] waits for the end of any
 //!   collection before the thread touches the heap again.
-//! - The thread that wants a collection calls [`GcCoord::request_collect`]. It sets `stw`, waits
+//! - The thread that wants a collection calls [`Attached::request_collect`]. It sets `stw`, waits
 //!   until every other attached thread is stopped at a safepoint, runs the collector with the union
 //!   of the roots (its own, the stopped threads', the detached threads'), then releases everyone.
 //!   A second requester during that time stops like a poller: one collection serves both.
@@ -20,17 +20,27 @@
 //!
 //! The coordinator knows nothing about `Vm`: roots are plain [`GcRef`] lists.
 //!
-//! LIVENESS RULE: a thread that is attached but neither polls nor detaches blocks a collection
-//! forever (the requester waits for it). Every blocking call of an attached thread must detach
-//! first; M1.5's guard test enforces that.
+//! What the types enforce:
+//! - Only an attached thread can poll, request a collection or detach: those are methods of
+//!   [`Attached`], and `detach` consumes it. A thread is counted in `stopped` only if it is counted
+//!   in `attached`.
+//! - LEAVE: dropping an [`Attached`] (a return or a panic) leaves the heap, also during a stop.
+//!   Dropping a [`DetachTicket`] without a reattach leaves too and withdraws its published roots.
+//!   A ticket holds its own coordinator, so it can never touch another coordinator's roots.
+//! - A roots closure of `poll` runs before the poll takes the lock: it may call [`GcCoord::epoch`].
 //!
-//! LEAVE RULE: a thread that exits while detached must leave, so that its published roots go away.
-//! A dropped [`DetachTicket`] keeps those roots, and their objects never die. M1.5 adds the leave
-//! path.
+//! What the types do not enforce:
+//! - LIVENESS: a thread that holds an [`Attached`] but neither polls nor detaches blocks a collection
+//!   forever (the requester waits for it). Every blocking call of an attached thread must detach
+//!   first; M1.5's guard test enforces that.
+//! - `collect` runs with the lock released and every other attached thread stopped. It must not
+//!   call into the coordinator except [`GcCoord::epoch`]: an `attach` or a reattach there waits
+//!   for the end of this same stop. (The requester's own token is borrowed, so `collect` cannot
+//!   poll or request with it.)
 
 use crate::vm::value::GcRef;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -41,7 +51,7 @@ enum Phase {
 
 struct State {
     phase: Phase,
-    /// Threads that may touch the heap (detached threads excluded).
+    /// Threads that hold an [`Attached`] token.
     attached: usize,
     /// Attached threads parked at a safepoint in the current stop.
     stopped: usize,
@@ -49,21 +59,31 @@ struct State {
     gc_epoch: u64,
     /// Roots handed in by the threads stopped in the current stop.
     stopped_roots: Vec<GcRef>,
-    /// Roots published by detached threads, keyed by their ticket.
+    /// Roots published by detached threads, keyed by their ticket id.
     detached_roots: Vec<(u64, Vec<GcRef>)>,
     next_ticket: u64,
 }
-
-/// Proof of a [`GcCoord::detach`]; [`GcCoord::reattach`] consumes it to drop that thread's roots.
-#[must_use = "a detached thread must reattach before it touches the heap"]
-#[derive(Debug)]
-pub struct DetachTicket(u64);
 
 pub struct GcCoord {
     st: Mutex<State>,
     cv: Condvar,
     /// Set while a stop is requested; mutators read it with a Relaxed load at each safepoint.
     stw: AtomicBool,
+}
+
+/// An attached thread's right to touch the heap. Dropping it leaves the heap.
+#[must_use = "dropping the token leaves the heap at once"]
+pub struct Attached {
+    coord: Arc<GcCoord>,
+}
+
+/// A detached thread's published roots. [`DetachTicket::reattach`] turns it back into an
+/// [`Attached`]; dropping it instead leaves the heap and withdraws the roots.
+#[must_use = "dropping the ticket withdraws the published roots"]
+pub struct DetachTicket {
+    /// `None` after a reattach took it, so the drop does not withdraw the roots a second time.
+    coord: Option<Arc<GcCoord>>,
+    id: u64,
 }
 
 impl GcCoord {
@@ -104,54 +124,23 @@ impl GcCoord {
     }
 
     /// A thread joins the heap. It waits for a running stop to end first.
-    pub fn attach(&self) {
+    pub fn attach(self: &Arc<Self>) -> Attached {
         let mut st = self.wait_idle(self.lock());
         st.attached += 1;
-    }
-
-    /// Go `entersyscall`: publish `roots` and stop counting this thread. The thread may then block
-    /// on anything; it must not touch the heap until [`GcCoord::reattach`].
-    pub fn detach(&self, roots: Vec<GcRef>) -> DetachTicket {
-        let mut st = self.lock();
-        let ticket = st.next_ticket;
-        st.next_ticket += 1;
-        st.detached_roots.push((ticket, roots));
-        debug_assert!(
-            st.attached >= 1,
-            "detach from a thread that is not attached"
-        );
-        st.attached -= 1;
-        drop(st);
-        // A requester may be waiting for this thread.
-        self.cv.notify_all();
-        DetachTicket(ticket)
-    }
-
-    /// Go `exitsyscall`: wait until no stop is running, drop the published roots, count the thread
-    /// again.
-    pub fn reattach(&self, ticket: DetachTicket) {
-        let mut st = self.wait_idle(self.lock());
-        let at = st.detached_roots.iter().position(|(t, _)| *t == ticket.0);
-        st.detached_roots
-            .swap_remove(at.expect("a DetachTicket names a live detach"));
-        st.attached += 1;
-    }
-
-    /// A safepoint. Cheap (one Relaxed load) when no stop is requested. Under a stop it hands in
-    /// `roots()` and parks until the collection ends.
-    #[inline]
-    pub fn poll(&self, roots: impl FnOnce() -> Vec<GcRef>) {
-        if self.stw.load(Ordering::Relaxed) {
-            self.stop_here(roots);
+        Attached {
+            coord: self.clone(),
         }
     }
 
     #[cold]
     fn stop_here(&self, roots: impl FnOnce() -> Vec<GcRef>) {
+        // Outside the lock: the closure may read the coordinator, and a panic in it leaves the
+        // lock free (the token's drop then leaves the heap).
+        let roots = roots();
         let st = self.lock();
         match st.phase {
-            Phase::Idle => {} // a stale `stw` read: the stop already ended
-            Phase::Requested | Phase::Collecting => self.park(st, roots()),
+            Phase::Idle => {} // a stale `stw` read: the stop already ended, drop the roots
+            Phase::Requested | Phase::Collecting => self.park(st, roots),
         }
     }
 
@@ -165,24 +154,46 @@ impl GcCoord {
             st = self.wait(st);
         }
     }
+}
+
+impl Attached {
+    /// A safepoint. Cheap (one Relaxed load) when no stop is requested. Under a stop it hands in
+    /// `roots()` and parks until the collection ends.
+    #[inline]
+    pub fn poll(&mut self, roots: impl FnOnce() -> Vec<GcRef>) {
+        if self.coord.stw.load(Ordering::Relaxed) {
+            self.coord.stop_here(roots);
+        }
+    }
+
+    /// Go `entersyscall`: publish `roots` and stop counting this thread. The thread may then block
+    /// on anything; it must not touch the heap until [`DetachTicket::reattach`].
+    pub fn detach(self, roots: Vec<GcRef>) -> DetachTicket {
+        let mut st = self.coord.lock();
+        let id = st.next_ticket;
+        st.next_ticket += 1;
+        st.detached_roots.push((id, roots));
+        drop(st);
+        let coord = Some(self.coord.clone());
+        // The drop of `self` is the leave: `attached -= 1` and a wake for a waiting requester.
+        drop(self);
+        DetachTicket { coord, id }
+    }
 
     /// Stop the world and run `collect` with every root. If another thread already requested a
     /// stop, this thread stops like a poller instead and `collect` does not run: one collection
-    /// serves both. The caller must be attached.
-    pub fn request_collect(&self, own_roots: Vec<GcRef>, collect: impl FnOnce(&[GcRef])) {
-        let mut st = self.lock();
+    /// serves both. `collect` runs with the lock released (see the module doc).
+    pub fn request_collect(&mut self, own_roots: Vec<GcRef>, collect: impl FnOnce(&[GcRef])) {
+        let c = &*self.coord;
+        let mut st = c.lock();
         match st.phase {
-            Phase::Requested | Phase::Collecting => return self.park(st, own_roots),
+            Phase::Requested | Phase::Collecting => return c.park(st, own_roots),
             Phase::Idle => {}
         }
-        debug_assert!(
-            st.attached >= 1,
-            "request_collect from a thread that is not attached"
-        );
         st.phase = Phase::Requested;
-        self.stw.store(true, Ordering::Relaxed);
+        c.stw.store(true, Ordering::Relaxed);
         while st.stopped + 1 < st.attached {
-            st = self.wait(st);
+            st = c.wait(st);
         }
         st.phase = Phase::Collecting;
         let mut roots = own_roots;
@@ -192,9 +203,50 @@ impl GcCoord {
         }
         drop(st);
         // Release the world even if `collect` panics, so no stopped thread waits forever.
-        let _release = Release(self);
+        let _release = Release(c);
         collect(&roots);
     }
+}
+
+impl Drop for Attached {
+    /// Leave: the thread stops counting, also during a stop (a waiting requester proceeds).
+    fn drop(&mut self) {
+        let c = &*self.coord;
+        c.lock().attached -= 1;
+        c.cv.notify_all();
+    }
+}
+
+impl DetachTicket {
+    /// Go `exitsyscall`: wait until no stop is running, withdraw the published roots, count the
+    /// thread again.
+    pub fn reattach(mut self) -> Attached {
+        let coord = self
+            .coord
+            .take()
+            .expect("only reattach takes the coordinator");
+        let mut st = coord.wait_idle(coord.lock());
+        withdraw(&mut st, self.id);
+        st.attached += 1;
+        drop(st);
+        Attached { coord }
+    }
+}
+
+impl Drop for DetachTicket {
+    /// Leave while detached: withdraw the published roots.
+    fn drop(&mut self) {
+        if let Some(c) = &self.coord {
+            withdraw(&mut c.lock(), self.id);
+        }
+    }
+}
+
+/// Remove the roots that the ticket `id` published.
+fn withdraw(st: &mut State, id: u64) {
+    let at = st.detached_roots.iter().position(|(t, _)| *t == id);
+    st.detached_roots
+        .swap_remove(at.expect("a live DetachTicket has published roots"));
 }
 
 /// Ends a stop: epoch + 1, `stw` cleared, every stopped thread released.
@@ -206,9 +258,9 @@ impl Drop for Release<'_> {
         let mut st = c.lock();
         st.gc_epoch += 1;
         st.stopped = 0;
-        // Roots handed in after the requester drained them (a caller that parks during
-        // Collecting) belong to this stop only.
-        st.stopped_roots.clear();
+        // The requester drained them, and no thread can park after that: every other attached
+        // thread is already parked, and attach and reattach wait for Idle.
+        debug_assert!(st.stopped_roots.is_empty());
         st.phase = Phase::Idle;
         c.stw.store(false, Ordering::Relaxed);
         drop(st);
@@ -264,11 +316,11 @@ mod tests {
             let detacher = {
                 let (c, barrier) = (c.clone(), barrier.clone());
                 thread::spawn(move || {
-                    c.attach();
+                    let a = c.attach();
                     barrier.wait();
-                    let ticket = c.detach(vec![GcRef(1)]);
+                    let ticket = a.detach(vec![GcRef(1)]);
                     release_rx.recv().unwrap();
-                    c.reattach(ticket);
+                    let _a = ticket.reattach();
                 })
             };
             let poller = {
@@ -279,10 +331,10 @@ mod tests {
                     roots_calls.clone(),
                 );
                 thread::spawn(move || {
-                    c.attach();
+                    let mut a = c.attach();
                     barrier.wait();
                     while !stop.load(Ordering::SeqCst) {
-                        c.poll(|| {
+                        a.poll(|| {
                             roots_calls.fetch_add(1, Ordering::SeqCst);
                             vec![GcRef(2)]
                         });
@@ -291,12 +343,12 @@ mod tests {
                 })
             };
 
-            c.attach();
+            let mut me = c.attach();
             barrier.wait();
             // The detached thread stays blocked until after this returns: the `within` bound is
             // the check that the collector did not wait for it.
             let mut runs = Vec::new();
-            c.request_collect(vec![GcRef(3)], |roots| runs.push(sorted(roots)));
+            me.request_collect(vec![GcRef(3)], |roots| runs.push(sorted(roots)));
             stop.store(true, Ordering::SeqCst);
             release_tx.send(()).unwrap();
             detacher.join().unwrap();
@@ -326,11 +378,11 @@ mod tests {
             let worker = {
                 let (c, finished) = (c.clone(), finished.clone());
                 thread::spawn(move || {
-                    c.attach();
-                    let ticket = c.detach(vec![GcRef(7)]);
+                    let a = c.attach();
+                    let ticket = a.detach(vec![GcRef(7)]);
                     detached_tx.send(()).unwrap();
                     reattach_rx.recv().unwrap();
-                    c.reattach(ticket);
+                    let _a = ticket.reattach();
                     returned_tx.send(finished.load(Ordering::SeqCst)).unwrap();
                 })
             };
@@ -339,9 +391,9 @@ mod tests {
             let collector = {
                 let (c, finished) = (c.clone(), finished.clone());
                 thread::spawn(move || {
-                    c.attach();
+                    let mut me = c.attach();
                     let go_rx = Mutex::new(go_rx);
-                    c.request_collect(vec![], |roots| {
+                    me.request_collect(vec![], |roots| {
                         assert_eq!(sorted(roots), vec![7]);
                         started_tx.send(()).unwrap();
                         go_rx.lock().unwrap().recv().unwrap();
@@ -379,10 +431,10 @@ mod tests {
             let spawn = |id: u32| {
                 let (c, barrier, runs) = (c.clone(), barrier.clone(), runs.clone());
                 thread::spawn(move || {
-                    c.attach();
+                    let mut me = c.attach();
                     for _ in 0..ROUNDS {
                         barrier.wait();
-                        c.request_collect(vec![GcRef(id)], |roots| {
+                        me.request_collect(vec![GcRef(id)], |roots| {
                             assert_eq!(sorted(roots), vec![1, 2]);
                             runs.fetch_add(1, Ordering::SeqCst);
                         });
@@ -415,21 +467,21 @@ mod tests {
                 let (c, barrier, running, stop) =
                     (c.clone(), barrier.clone(), running.clone(), stop.clone());
                 thread::spawn(move || {
-                    c.attach();
+                    let mut a = c.attach();
                     barrier.wait();
                     while !stop.load(Ordering::SeqCst) {
                         running.store(false, Ordering::SeqCst);
-                        c.poll(|| vec![GcRef(2)]);
+                        a.poll(|| vec![GcRef(2)]);
                         running.store(true, Ordering::SeqCst);
                         thread::yield_now();
                     }
                 })
             };
-            c.attach();
+            let mut me = c.attach();
             barrier.wait();
             let mut bad = Vec::new();
             for round in 0..ROUNDS {
-                c.request_collect(vec![GcRef(1)], |roots| {
+                me.request_collect(vec![GcRef(1)], |roots| {
                     let (roots, live) = (sorted(roots), running.load(Ordering::SeqCst));
                     if roots != [1, 2] || live {
                         bad.push((round, roots, live));
@@ -446,33 +498,75 @@ mod tests {
         });
     }
 
-    /// Roots that a thread hands in during one stop never reach the next collection.
+    /// A roots closure may read the coordinator: it runs before the poll takes the lock.
     #[test]
-    fn stop_roots_do_not_leak_into_next_collection() {
+    fn roots_closure_may_call_epoch() {
         within(|| {
             let c = Arc::new(GcCoord::new());
-            let (go_tx, go_rx) = mpsc::channel::<()>();
-            // A thread that is not attached parks during Collecting (misuse the coordinator
-            // must survive).
-            let late = {
-                let c = c.clone();
+            let barrier = Arc::new(Barrier::new(2));
+            let stop = Arc::new(AtomicBool::new(false));
+            let poller = {
+                let (c, barrier, stop) = (c.clone(), barrier.clone(), stop.clone());
                 thread::spawn(move || {
-                    go_rx.recv().unwrap();
-                    c.poll(|| vec![GcRef(5)]);
+                    let mut a = c.attach();
+                    barrier.wait();
+                    while !stop.load(Ordering::SeqCst) {
+                        a.poll(|| vec![GcRef(c.epoch() as u32 + 2)]);
+                        thread::yield_now();
+                    }
                 })
             };
-            c.attach();
+            let mut me = c.attach();
+            barrier.wait();
             let mut runs = Vec::new();
-            c.request_collect(vec![GcRef(1)], |roots| {
-                runs.push(sorted(roots));
-                go_tx.send(()).unwrap();
-                while c.lock().stopped == 0 {
-                    thread::yield_now();
-                }
-            });
-            late.join().unwrap();
-            c.request_collect(vec![GcRef(1)], |roots| runs.push(sorted(roots)));
-            assert_eq!(runs, vec![vec![1], vec![1]]);
+            me.request_collect(vec![GcRef(1)], |roots| runs.push(sorted(roots)));
+            stop.store(true, Ordering::SeqCst);
+            poller.join().unwrap();
+            assert_eq!(runs, vec![vec![1, 2]]);
+        });
+    }
+
+    /// A thread that drops its token while a requester waits for it leaves the count: the
+    /// collection proceeds without it.
+    #[test]
+    fn dropped_attached_does_not_block_a_collection() {
+        within(|| {
+            let c = Arc::new(GcCoord::new());
+            let (ready_tx, ready_rx) = mpsc::channel::<()>();
+            let leaver = {
+                let c = c.clone();
+                thread::spawn(move || {
+                    let a = c.attach();
+                    ready_tx.send(()).unwrap();
+                    // Leave during the stop, never at a safepoint.
+                    while !c.stw.load(Ordering::SeqCst) {
+                        thread::yield_now();
+                    }
+                    drop(a);
+                })
+            };
+            ready_rx.recv().unwrap();
+            let mut me = c.attach();
+            let mut runs = Vec::new();
+            me.request_collect(vec![GcRef(1)], |roots| runs.push(sorted(roots)));
+            leaver.join().unwrap();
+            assert_eq!(runs, vec![vec![1]]);
+            assert_eq!(c.epoch(), 1);
+        });
+    }
+
+    /// A ticket dropped without a reattach withdraws its roots from the next collection.
+    #[test]
+    fn dropped_detach_ticket_releases_its_roots() {
+        within(|| {
+            let c = Arc::new(GcCoord::new());
+            let mut me = c.attach();
+            let ticket = c.attach().detach(vec![GcRef(9)]);
+            let mut runs = Vec::new();
+            me.request_collect(vec![GcRef(1)], |roots| runs.push(sorted(roots)));
+            drop(ticket);
+            me.request_collect(vec![GcRef(1)], |roots| runs.push(sorted(roots)));
+            assert_eq!(runs, vec![vec![1, 9], vec![1]]);
         });
     }
 }
