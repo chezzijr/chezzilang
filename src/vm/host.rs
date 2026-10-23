@@ -313,7 +313,11 @@ impl crate::native::Host for VmHost<'_> {
         let core = self.vm.channel_core(h);
         let w = self
             .vm
-            .to_wire_crossable(val, Span::default())
+            .to_wire_crossable_memo(
+                val,
+                Span::default(),
+                &mut super::airlock_out::WireMemo::job_result(),
+            )
             .map_err(|e| crate::native::HostError { message: e.message })?;
         let sum = crate::vm::core::wire_summary(&w);
         let sealed = core

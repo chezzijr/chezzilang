@@ -202,8 +202,9 @@ pub enum Route {
     Spawn,
     /// A crossing closure's captures: a capture is a by-reference binding of its creator, so its
     /// rebuild is a copy in every heap, the one it left included (TICKET-291). `sole` is true for
-    /// a capture that is the only live copy of its binding (a box call built it and nothing the
-    /// box keeps reaches it, `WireMemo::sole_captures`); it keeps the enclosing mark.
+    /// a capture that is the only live copy of its binding (a box call or an Executor job built
+    /// it, and nothing writable that the source heap keeps reaches it, `WireMemo::sole_captures`);
+    /// it keeps the enclosing mark.
     ClosureCaptures { sole: bool },
     /// The spawn's module snapshot: the parent keeps its globals.
     ModuleSnapshot,

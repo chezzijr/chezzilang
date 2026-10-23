@@ -404,10 +404,20 @@ impl WireMemo {
         }
     }
 
+    /// The memo for an Executor job's outcome, which `_settle` seals as the job's last act: the
+    /// job's heap ends with the job, so it keeps nothing (TICKET-295).
+    pub(super) fn job_result() -> Self {
+        WireMemo {
+            kept_roots: Some(Vec::new()),
+            ..WireMemo::default()
+        }
+    }
+
     /// D4 layer C (TICKET-291), the ONE answer to "is this capture the only live copy of its
-    /// binding": bit `k` is set when capture `k` reaches no object the source heap keeps and no
-    /// copy-marked object. Only a box call's result can answer yes (a box call built the capture
-    /// and the box dropped it); every other crossing answers 0, so every capture is marked.
+    /// binding": bit `k` is set when capture `k` reaches no copy-marked object and no object the
+    /// source heap keeps that a write can change (`boxctx::fixed_after_build`). Two memos carry a
+    /// kept set: a box call's result (`box_result`) and an Executor job's outcome (`job_result`,
+    /// empty). Every other crossing answers 0, so every capture is marked.
     pub(super) fn sole_captures(&mut self, heap: &Heap, captured: &[Value]) -> u64 {
         let Some(roots) = &self.kept_roots else {
             return 0;
