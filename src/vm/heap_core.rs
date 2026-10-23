@@ -6,9 +6,10 @@
 //! this step each `Vm` still makes its own core, so one core has one handle in production;
 //! `Heap::attach` (tests only, until M1.7) puts a second handle on a core.
 //!
-//! The counters are atomics, not fields under a lock: `alloc` and `should_collect` (every
-//! instruction) read `mem_cap` and `next_gc`, and a lock there would cost each instruction a lock
-//! round trip. A `Relaxed` atomic load is a plain load. The free list and the slab append share
+//! The counters are atomics, not fields under a lock: `alloc` reads `mem_cap`, and
+//! `should_collect` (every instruction) reads `next_gc` and `mem_cap` each time its handle's
+//! cached threshold (`Heap.gc_check_at`) is reached. A lock there would cost a lock round trip. A
+//! `Relaxed` atomic load is a plain load. The free list and the slab append share
 //! one lock (`alloc_lock`). A handle takes it once per refill of its free-slot cache: up to 64
 //! freed slots, or up to 64 new slots (one new slot per lock below slot 64).
 
@@ -226,7 +227,9 @@ impl HeapCore {
         self.next_gc.load(Ordering::Relaxed)
     }
 
-    /// Force the next `Heap::should_collect` (see `next_gc`).
+    /// Force the next `Heap::should_collect` (see `next_gc`) of the handle that calls
+    /// `Heap::request_collect`, which also empties that handle's cached threshold. Another handle
+    /// sees the 0 when its cache next empties (M1.7: a request for every handle must empty theirs).
     pub(super) fn request_collect(&self) {
         self.next_gc.store(0, Ordering::Relaxed);
     }

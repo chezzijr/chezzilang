@@ -672,6 +672,14 @@ pub struct Heap {
     view_epoch: u64,
     /// Allocations since the last collection — drives the growth-threshold trigger.
     since_gc: usize,
+    /// The `since_gc` count below which [`should_collect`](Heap::should_collect) answers `false`
+    /// without reading the core. A cache with one refresh point: `should_collect` sets it to the
+    /// core's `next_gc` when it reads the core with no `--max-heap` cap live. 0 means "read the
+    /// core at the next call": [`sweep`](Heap::sweep), [`request_collect`](Heap::request_collect)
+    /// and [`set_mem_cap`](Heap::set_mem_cap) set it to 0, since each can lower the answer. An
+    /// atomic because `should_collect` holds `&self` and `Heap` must be `Sync`; only the handle's
+    /// owner writes it.
+    gc_check_at: AtomicUsize,
     /// BYTES charged since the last collection — the `since_gc` sibling for growth that allocates
     /// (almost) no `Obj`s. A monotonic pacing **HINT**, never accounting: it only decides WHEN to
     /// sample, `live_bytes()` remains the sole measure of what is live (so a replacing store charges,
@@ -768,6 +776,7 @@ impl Heap {
             any_viewed: false,
             view_epoch: 0,
             since_gc: 0,
+            gc_check_at: AtomicUsize::new(0),
             since_gc_bytes: AtomicUsize::new(0),
             pending_mut: Mutex::new(None),
             copy_log: None,
@@ -902,6 +911,7 @@ impl Heap {
     }
 
     /// Allocate an object, returning its handle. Reuses a free slot when available.
+    #[inline]
     pub fn alloc(&mut self, obj: Obj) -> GcRef {
         self.since_gc += 1;
         // Byte funnel 1 of 3 (see `since_gc_bytes`): the only constructor. `since_gc` alone paces
@@ -920,6 +930,7 @@ impl Heap {
         h
     }
 
+    #[inline]
     pub fn get(&self, h: GcRef) -> &Obj {
         self.core
             .get(h)
@@ -928,6 +939,7 @@ impl Heap {
             .expect("dangling GcRef (object was collected while still reachable)")
     }
 
+    #[inline]
     pub fn get_mut(&mut self, h: GcRef) -> &mut Obj {
         // Byte funnel 2 of 3 (see `since_gc_bytes` / `pending_mut`): the sole `&mut Obj` door, and so
         // the sole door for growth INSIDE an existing object. Settle whatever the previous `get_mut`
@@ -1004,11 +1016,17 @@ impl Heap {
     ///
     /// Gated on `mem_cap != 0`: with no cap `over_cap` is meaningless anyway, and pacing stays
     /// bit-for-bit the object-count trigger it has always been.
+    #[inline]
     pub fn should_collect(&self) -> bool {
-        if self.since_gc >= self.core.next_gc() {
+        if self.since_gc < self.gc_check_at.load(Ordering::Relaxed) {
+            return false;
+        }
+        let next_gc = self.core.next_gc();
+        if self.since_gc >= next_gc {
             return true;
         }
         if self.core.mem_cap() == 0 {
+            self.gc_check_at.store(next_gc, Ordering::Relaxed);
             return false;
         }
         self.settle_pending_mut();
@@ -1027,6 +1045,7 @@ impl Heap {
     /// `Vm::sample_mem_cap` in `Vm::start_task` — see the note in `Vm::spawn_worker`.
     pub fn request_collect(&mut self) {
         self.core.request_collect();
+        *self.gc_check_at.get_mut() = 0;
     }
 
     /// Mark one object reachable. Returns `true` if it was *newly* marked (caller should then
@@ -1217,6 +1236,7 @@ impl Heap {
         self.core.give_back(&mut self.free);
         self.core.sweep_slots();
         self.since_gc = 0;
+        *self.gc_check_at.get_mut() = 0;
         *self.since_gc_bytes.get_mut() = 0;
         // Drop the armed `get_mut` record: this is the ONLY thing that frees a slot, so it is also
         // the only thing that could leave the record pointing at a slot `alloc` then re-hands to a
@@ -1476,6 +1496,7 @@ impl Heap {
     /// prior `over_cap` latch so a new test starts clean.
     pub fn set_mem_cap(&mut self, cap: usize) {
         self.core.set_mem_cap(cap);
+        *self.gc_check_at.get_mut() = 0;
         // Disarm `get_mut`'s pending record along with the cap. Cap-off never arms it, so a
         // cap→0→cap toggle is the one way a record could outlive the `sweep()` that freed its slot
         // and be settled against a slot `alloc` re-handed to a different object. Production sets the
@@ -1786,6 +1807,44 @@ mod iter_obj_tests {
         // clear_over_cap resets the latch for the next per-test lifecycle.
         h.clear_over_cap();
         assert!(!h.over_cap());
+    }
+
+    /// `should_collect` caches the core's threshold on the handle (`gc_check_at`). Each write that
+    /// can lower the answer must reach the next call: a sweep that lowers `next_gc`, a
+    /// `request_collect`, and a cap set after the cache was filled.
+    #[test]
+    fn should_collect_sees_each_threshold_change() {
+        let mut h = Heap::new();
+        let live: Vec<GcRef> = (0..300).map(|_| h.alloc(Obj::List(Vec::new()))).collect();
+        assert!(h.should_collect(), "300 allocations pass the 256 floor");
+        for &r in &live {
+            h.mark(r);
+        }
+        h.sweep();
+        assert!(
+            !h.should_collect(),
+            "the threshold is now 600; the cache holds it"
+        );
+        h.sweep();
+        for _ in 0..256 {
+            h.alloc(Obj::List(Vec::new()));
+        }
+        assert!(
+            h.should_collect(),
+            "a sweep that freed everything lowered the threshold to 256"
+        );
+        h.sweep();
+        assert!(!h.should_collect());
+        h.request_collect();
+        assert!(h.should_collect(), "request_collect forces the next call");
+        h.sweep();
+        assert!(!h.should_collect());
+        h.set_mem_cap(8_000_000);
+        h.charge_bytes(2_000_000);
+        assert!(
+            h.should_collect(),
+            "a cap set after the cache was filled paces by bytes"
+        );
     }
 
     /// W6-10 sampling half: off-heap wire bytes pace a sweep ONLY when a `--max-heap` cap is live.
