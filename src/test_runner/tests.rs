@@ -2872,31 +2872,117 @@ fn an_executor_created_before_the_first_test_is_not_joined_by_it() {
     );
 }
 
-/// TICKET-289 — a `defer` that meets the `--timeout` deadline while a fault unwinds is a hard halt,
-/// and no `recover:` catches it. `unwind_result` hands the defer's `is_timed_out` error to
-/// `finish_fault`, which used to catch it at the handler: the test ran on past the deadline
-/// (measured on main `11a496c8`: `REACHED after recover` in 20 of 20 runs at `CHEZZI_THREADS` 0, 1
-/// and 2). Every Executor job body runs inside `run_outcome`'s `recover:`, so a job whose cleanup
-/// hit the deadline sealed a value and `shutdown()` returned. The `time.sleep_ms` is inside the
-/// fixture source: it is the cleanup the deadline cuts, not an ordering edge of this test.
+/// [`run_tests_timed_watchdog`] with a `--max-heap` cap too (`0` = OFF).
+fn run_tests_halt_watchdog(
+    tag: &str,
+    path: &std::path::Path,
+    timeout_ms: u64,
+    max_heap: usize,
+) -> (String, bool) {
+    let owned = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let opts = opts_with(|o| {
+            o.timeout_ms = timeout_ms;
+            o.max_heap = max_heap;
+            o.show_output = true;
+        });
+        let r = run_tests_opts(&owned, opts);
+        let _ = tx.send((r.text, r.passed));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(v) => v,
+        Err(_) => panic!("{tag}: hung, the hard halt never reached the party"),
+    }
+}
+
+/// TICKET-289 — a `defer` that meets `--timeout` or `--max-heap` is a hard halt, and no `recover:`
+/// binds it as its `Err`, whichever route the `recover:` takes to bind. `Vm::cleanup_halt` is the
+/// one post-drain read every route shares. Routes:
+/// - `unwind`: the `defer` is in a callee that panics; the fault unwinds past it to the handler
+///   (`finish_fault`, the frames below the `recover:`).
+/// - `block_panic`: the `defer` is inside the `recover:` block, whose body panics (`finish_fault`,
+///   the handler's own `drain_frame_to`).
+/// - `block_try`: the `defer` is inside the `recover:` block, whose body ends in a recover-scoped
+///   `?` on an `Err` (`stmt.rs`, the inline catch).
+/// - `block_clean` (negative): the same `defer`, no fault. It was already correct before the fix.
+///
+/// Measured on main `11a496c8` (`--timeout=300`): `unwind`, `block_panic` and `block_try` printed
+/// `FAIL t ... REACHED after recover`; `block_clean` printed `TIMED-OUT t`. The `time.sleep_ms` is
+/// inside the fixture source: it is the cleanup the deadline cuts, not an ordering edge of this
+/// test.
 #[test]
-fn a_timeout_in_a_defer_during_a_fault_unwind_is_not_caught_by_recover() {
-    let d = TmpDir::new();
-    let f = d.write(
-        "recover_timeout_test.chz",
-        "import std.time\n\
-             fn owner():\n    \
-                 defer:\n        \
-                     time.sleep_ms(1000)\n    \
-                 panic(\"own\")\n\
-             test fn t():\n    \
-                 _ := recover: owner()\n    \
-                 assert false, \"REACHED after recover\"\n",
-    );
-    let (text, passed) = run_tests_timed_watchdog("recover_timeout", &f, 300);
-    assert!(!passed, "report:\n{text}");
-    assert!(text.contains("TIMED-OUT t"), "report:\n{text}");
-    assert!(!text.contains("REACHED"), "report:\n{text}");
+fn a_hard_halt_in_a_defer_is_never_bound_by_recover_at_every_route() {
+    // (halt, the `defer` body, timeout_ms, max_heap, the bucket the report must name)
+    let halts: [(&str, &str, u64, usize, &str); 2] = [
+        ("timeout", "time.sleep_ms(1000)", 300, 0, "TIMED-OUT t"),
+        (
+            "max_heap",
+            "xs: List[List[int]] = []\nfor i in 0..100000000:\n    xs.push([i])",
+            0,
+            1_000_000,
+            "OVER-MEMORY t",
+        ),
+    ];
+    let indent = |body: &str, n: usize| -> String {
+        body.lines()
+            .map(|l| format!("{}{l}\n", " ".repeat(n)))
+            .collect()
+    };
+    let reached = "    assert false, \"REACHED after recover\"\n";
+    for (halt, body, timeout_ms, max_heap, bucket) in halts {
+        let routes = [
+            (
+                "unwind",
+                format!(
+                    "import std.time\nfn owner():\n    defer:\n{}    panic(\"own\")\n\
+                     test fn t():\n    _ := recover: owner()\n{reached}",
+                    indent(body, 8)
+                ),
+            ),
+            (
+                "block_panic",
+                format!(
+                    "import std.time\ntest fn t():\n    _ := recover:\n        defer:\n{}        panic(\"own\")\n{reached}",
+                    indent(body, 12)
+                ),
+            ),
+            (
+                "block_try",
+                format!(
+                    "import std.time\nfn f() -> int!str:\n    return !\"e\"\n\
+                     test fn t():\n    _ := recover:\n        defer:\n{}        x := f()?\n        print(x)\n{reached}",
+                    indent(body, 12)
+                ),
+            ),
+            (
+                "block_clean",
+                format!(
+                    "import std.time\ntest fn t():\n    _ := recover:\n        defer:\n{}        print(1)\n{reached}",
+                    indent(body, 12)
+                ),
+            ),
+        ];
+        for (route, src) in routes {
+            let d = TmpDir::new();
+            let f = d.write("recover_halt_test.chz", &src);
+            let tag = format!("{halt}/{route}");
+            let (text, passed) = run_tests_halt_watchdog(&tag, &f, timeout_ms, max_heap);
+            assert!(!passed, "{tag}: report:\n{text}\nsource:\n{src}");
+            assert!(
+                text.contains(bucket),
+                "{tag}: report:\n{text}\nsource:\n{src}"
+            );
+            assert!(
+                !text.contains("REACHED"),
+                "{tag}: report:\n{text}\nsource:\n{src}"
+            );
+            assert!(
+                !text.contains("FAIL t"),
+                "{tag}: report:\n{text}\nsource:\n{src}"
+            );
+        }
+    }
 }
 
 /// The neighbour of the test above: a `defer` that ends before the deadline, with a fault of its

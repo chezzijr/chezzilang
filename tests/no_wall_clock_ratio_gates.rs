@@ -503,9 +503,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 116] = [
     // order of the fault.
     "a_job_parked_in_send_whose_child_faulted_is_not_called_deadlocked",
     // TICKET-289, `src/test_runner/tests.rs`. Its `time.sleep_ms(1000)` is inside the fixture .chz
-    // program's SOURCE STRING: it is the `defer` cleanup that the 300 ms `--timeout` cuts. It orders
+    // programs' SOURCE STRINGS: it is the `defer` cleanup that the 300 ms `--timeout` cuts. It orders
     // no two events in the Rust test's own control flow.
-    "a_timeout_in_a_defer_during_a_fault_unwind_is_not_caught_by_recover",
+    "a_hard_halt_in_a_defer_is_never_bound_by_recover_at_every_route",
 ];
 
 #[test]

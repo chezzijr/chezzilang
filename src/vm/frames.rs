@@ -760,7 +760,7 @@ impl Vm {
     /// Unwind to `base_level` past every `recover:` and re-stamp the hard-halt marker of `rte`
     /// (`--max-heap`, `--timeout`) on what emerges: a `defer` that faults mid-unwind replaces the
     /// error, and the marker must travel with it. The one body of both hard-halt bypasses,
-    /// [`Vm::on_step_fault`]'s and [`Vm::finish_fault`]'s.
+    /// [`Vm::on_step_fault`]'s and [`Vm::cleanup_met_halt`]'s.
     fn unwind_keeping_halt(
         &mut self,
         base_level: usize,
@@ -783,13 +783,6 @@ impl Vm {
         std_site: Option<(Span, Span)>,
     ) -> Result<(), RuntimeError> {
         let rte = if fatal { rte.deadlock() } else { rte };
-        // TICKET-289 — a `defer` that met `--timeout` or `--max-heap` while this fault unwound
-        // superseded it ([`Vm::unwind_result`], rule 1 and 4). The error entered `on_step_fault` as
-        // an ordinary fault, so the loop's own hard-halt bypass never saw the marker. It stays
-        // recover-proof: the frames the handler's target kept unwind past it, and it travels up.
-        if !fatal && (rte.is_over_memory || rte.is_timed_out) {
-            return Err(self.unwind_keeping_halt(base_level, false, rte));
-        }
         // TICKET-148 — relocate a NATIVE std fault to the user's call into std, for the
         // caught stamp below AND the uncaught headline (the trace keeps its frames). A
         // superseding `defer` fault (a different span) and a `panic` stay where they are.
@@ -1177,17 +1170,23 @@ impl Vm {
     }
 
     /// TICKET-223 — `on_step_fault`'s read of `Vm::cleanup_halt`: on a verdict it also drops the
-    /// frames left above `base_level` without their `defer`s (DEC-152).
+    /// frames left above `base_level` without their `defer`s (DEC-152). TICKET-289: a hard halt
+    /// (`--timeout`, `--max-heap`) a cleanup met unwinds them past every `recover:` through
+    /// [`Vm::unwind_keeping_halt`], which keeps the marker on what emerges.
     fn cleanup_met_halt(
         &mut self,
         base_level: usize,
         rte: RuntimeError,
     ) -> Result<RuntimeError, RuntimeError> {
-        self.cleanup_halt(rte).inspect_err(|e| {
-            if e.is_deadlock {
+        match self.cleanup_halt(rte) {
+            Ok(rte) => Ok(rte),
+            Err(e) if e.is_deadlock => {
                 self.unwind_no_defer(base_level);
+                Err(e)
             }
-        })
+            Err(e) if executor_hard_halt(&e) => Err(self.unwind_keeping_halt(base_level, false, e)),
+            Err(e) => Err(e),
+        }
     }
 
     /// TICKET-195 — is this party unwinding a cancel ([`Cut::Cancelled`])?

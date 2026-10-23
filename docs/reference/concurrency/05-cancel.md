@@ -257,7 +257,8 @@ not the task's life: once the body finishes the pending cancel resumes travellin
 dies and the nursery still reports the original sibling fault. A `recover:` **outside** the defer
 still cannot defeat a cancel. `chezzi test`'s `--timeout` / `--max-heap` hard aborts stay
 **un-swallowable everywhere**, inside a defer included. That covers a `defer` that meets the halt
-while an ordinary fault unwinds: the halt supersedes the fault and no `recover:` catches it. A
+while an ordinary fault unwinds, or while a `recover:` block drains its own `defer`s after a
+`panic` or a recover-scoped `?`: the halt supersedes the fault and no `recover:` catches it. A
 `defer` fault that happens BEFORE the deadline is an ordinary superseding fault, and `recover:`
 still catches it.
 

@@ -142,12 +142,15 @@ impl Vm {
     }
 
     /// TICKET-223 — THE post-drain read of "a hard halt cut this cleanup": this party is exiting
-    /// (`next_deferred` delivered the exit), or the deadlock verdict is latched. `Err` carries
-    /// `rte`, stamped fatal for a verdict (DEC-135), so no `recover:` catches it; `next_deferred`
-    /// already stops the remaining `defer`s (DEC-152). `rte` keeps its message, so a delivered
-    /// cause still outranks its stuck cleanup in the report (DEC-147).
+    /// (`next_deferred` delivered the exit), the deadlock verdict is latched, or `rte` itself is a
+    /// hard halt (`--timeout`, `--max-heap`: [`executor_hard_halt`]), which a cleanup met while a
+    /// fault unwound or a recover block drained (TICKET-289). `Err` carries `rte`, stamped fatal
+    /// for a verdict (DEC-135), so no `recover:` catches it; `next_deferred` already stops the
+    /// remaining `defer`s (DEC-152). `rte` keeps its message, so a delivered cause still outranks
+    /// its stuck cleanup in the report (DEC-147). Every route that binds a `recover:`'s `Err`
+    /// reads it: `finish_catch` and the recover-scoped `?` catch in `stmt.rs`.
     pub(super) fn cleanup_halt(&self, rte: RuntimeError) -> Result<RuntimeError, RuntimeError> {
-        if self.pending_exit.is_some() {
+        if self.pending_exit.is_some() || executor_hard_halt(&rte) {
             return Err(rte);
         }
         if self.quiesce.run_halt() == RunHalt::Deadlock {
