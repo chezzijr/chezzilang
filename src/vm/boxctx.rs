@@ -33,35 +33,101 @@ impl BoxFrame {
     }
 }
 
-/// The values a module slot can hand to another heap alone, with no view: an immutable leaf, a
-/// `fn` item or an `Arc` core. `Vm::slot_snapshot_reusable` reads the same list, so "safe to
-/// reuse without a rebuild" and "safe to copy without a view" cannot drift.
+/// The values a module slot can hand to another heap alone, with no view: an immutable leaf
+/// (`Fixed::Leaf`), a `fn` item or an `Arc` core. `Vm::slot_snapshot_reusable` reads the same
+/// list, so "safe to reuse without a rebuild" and "safe to copy without a view" cannot drift.
 pub(super) fn slot_is_leaf(heap: &Heap, v: Value) -> bool {
     let Some(h) = v.as_obj() else {
         return true; // inline scalar (int/bool/nil) — immutable
     };
-    matches!(
-        heap.get(h),
+    let o = heap.get(h);
+    fixed_after_build(o) == Some(Fixed::Leaf) || is_arc_core(o)
+}
+
+/// The two kinds of object no write changes in place after it is built (TICKET-295).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Fixed {
+    /// Holds no value: a `str`, bytes, a big int, a boxed float, a pointer, a `fn` item.
+    Leaf,
+    /// Holds values that can still be mutable: a tuple, an enum value.
+    Holder,
+}
+
+/// The ONE list of immutable kinds (TICKET-295): `Some` when no write changes `o` in place after
+/// it is built. A `Holder`'s children can still be mutable, so a caller that asks "can a write
+/// reach it" walks them too. `slot_is_leaf`, `WireMemo::sole_captures` and `Vm::unmark_graph`
+/// read it.
+pub(super) fn fixed_after_build(o: &Obj) -> Option<Fixed> {
+    match o {
         Obj::Str(_)
-            | Obj::Bytes(_)
-            | Obj::BigInt(_)
-            | Obj::FloatBox(_)
-            | Obj::Ptr(_)
-            | Obj::Func { .. }
-            | Obj::Native { .. }
-            | Obj::Builtin(_)
-            | Obj::Cffi(_)
-            | Obj::Channel(_)
-            | Obj::Shared(_)
-            | Obj::RwShared(_)
-            | Obj::Atomic(_)
-            | Obj::AtomicInt(_)
-            | Obj::Executor(_)
-            | Obj::Socket(_)
-            | Obj::Listener(_)
-            | Obj::Writer(_)
-            | Obj::Reader(_)
-    )
+        | Obj::Bytes(_)
+        | Obj::BigInt(_)
+        | Obj::FloatBox(_)
+        | Obj::Ptr(_)
+        | Obj::Func { .. }
+        | Obj::Native { .. }
+        | Obj::Builtin(_) => Some(Fixed::Leaf),
+        Obj::Tuple(_) | Obj::Enum { .. } => Some(Fixed::Holder),
+        Obj::ByteArray(_)
+        | Obj::Iter { .. }
+        | Obj::List(_)
+        | Obj::Map(_)
+        | Obj::Set(_)
+        | Obj::Struct { .. }
+        | Obj::Cell(_)
+        | Obj::Closure { .. }
+        | Obj::Module(_)
+        | Obj::Cffi(_)
+        | Obj::Channel(_)
+        | Obj::Shared(_)
+        | Obj::RwShared(_)
+        | Obj::Atomic(_)
+        | Obj::AtomicInt(_)
+        | Obj::Executor(_)
+        | Obj::Socket(_)
+        | Obj::Listener(_)
+        | Obj::Writer(_)
+        | Obj::Reader(_)
+        | Obj::Generator(_) => None,
+    }
+}
+
+/// Whether `o` is a handle on an `Arc` core: its state lives outside every heap, so a copy of
+/// the handle shares it.
+fn is_arc_core(o: &Obj) -> bool {
+    match o {
+        Obj::Cffi(_)
+        | Obj::Channel(_)
+        | Obj::Shared(_)
+        | Obj::RwShared(_)
+        | Obj::Atomic(_)
+        | Obj::AtomicInt(_)
+        | Obj::Executor(_)
+        | Obj::Socket(_)
+        | Obj::Listener(_)
+        | Obj::Writer(_)
+        | Obj::Reader(_) => true,
+        Obj::Str(_)
+        | Obj::Bytes(_)
+        | Obj::BigInt(_)
+        | Obj::FloatBox(_)
+        | Obj::Ptr(_)
+        | Obj::Func { .. }
+        | Obj::Native { .. }
+        | Obj::Builtin(_)
+        | Obj::Tuple(_)
+        | Obj::Enum { .. }
+        | Obj::ByteArray(_)
+        | Obj::Iter { .. }
+        | Obj::List(_)
+        | Obj::Map(_)
+        | Obj::Set(_)
+        | Obj::Struct { .. }
+        | Obj::Cell(_)
+        | Obj::Closure { .. }
+        | Obj::Module(_)
+        | Obj::Generator(_) => false,
+    }
 }
 
 /// The pieces of one crossing out of (or into) a box, encoded with one memo. With `prelude` the

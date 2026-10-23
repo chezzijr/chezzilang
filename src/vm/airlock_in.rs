@@ -203,9 +203,11 @@ impl Vm {
     fn unmark_graph(&mut self, v: Value) {
         let mut stack: Vec<GcRef> = v.as_obj().into_iter().collect();
         while let Some(h) = stack.pop() {
-            // A tuple and an enum carry no mark and cannot form a cycle on their own, so they
-            // are always entered. Every other data kind is entered once: its mark is the guard.
-            let unmarked_kind = matches!(self.heap.get(h), Obj::Tuple(_) | Obj::Enum { .. });
+            // A holder no write changes (a tuple, an enum value: `boxctx::fixed_after_build`)
+            // carries no mark and cannot form a cycle on its own, so it is always entered. Every
+            // other data kind is entered once: its mark is the guard.
+            let unmarked_kind = super::boxctx::fixed_after_build(self.heap.get(h))
+                == Some(super::boxctx::Fixed::Holder);
             if !unmarked_kind && !self.heap.is_copied(h) {
                 continue;
             }

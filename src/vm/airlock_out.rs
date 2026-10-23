@@ -434,7 +434,12 @@ impl WireMemo {
                 {
                     continue;
                 }
-                if kept.contains(&h) || heap.is_copied(h) {
+                // A kept object no write changes in place (a tuple) loses no write; a mutable
+                // object below it is kept too, so the walk still finds it (TICKET-295).
+                if heap.is_copied(h)
+                    || (kept.contains(&h)
+                        && super::boxctx::fixed_after_build(heap.get(h)).is_none())
+                {
                     return false;
                 }
                 work.extend(heap.children(h));
