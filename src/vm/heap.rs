@@ -10,6 +10,7 @@ use super::core::{
     SharedCore, SocketCore, WriterCore,
 };
 use super::fxhash::FxHashMap;
+use super::heap_slab::{Slab, Slot};
 use super::value::{GcRef, Value};
 use super::wire::HashIndex;
 use crate::base::op::ProtoId;
@@ -590,15 +591,6 @@ impl Obj {
     }
 }
 
-/// One heap slot: the object, or a hole for swept/free slots. Exactly 64B (`Option<Obj>` niche-packs
-/// `None` free). The GC mark bit is NOT here — it lives in [`Heap::marks`], a dense parallel bitset,
-/// so the `mark:bool` no longer pads the slot from 64B to 72B (the memory win). (Sweep still scans
-/// every slot's `obj` to find garbage — the bitset does not avoid that; it saves the per-slot byte.)
-#[derive(Debug)]
-struct Slot {
-    obj: Option<Obj>,
-}
-
 /// Smallest GC threshold — don't collect until at least this many objects have been allocated
 /// since the last collection (avoids thrashing on tiny programs).
 const MIN_GC_THRESHOLD: usize = 256;
@@ -660,7 +652,7 @@ fn obj_bytes_shallow(obj: &Obj) -> usize {
 /// value is reachable from the VM roots — there are no mid-opcode temporaries to miss.
 #[derive(Debug)]
 pub struct Heap {
-    slots: Vec<Slot>,
+    slots: Slab,
     /// GC mark bits, one per slot index (bit `i & 63` of word `i >> 6`). A dense parallel bitset
     /// grown in lockstep with `slots` — pulling the bit out of `Slot` drops it 72B→64B (the mark
     /// test-and-set also touches a compact word rather than a scattered slot byte). Post-sweep
@@ -790,7 +782,7 @@ static NEXT_HEAP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 impl Default for Heap {
     fn default() -> Self {
         Heap {
-            slots: Vec::new(),
+            slots: Slab::default(),
             marks: Vec::new(),
             copied: Vec::new(),
             any_copied: false,
@@ -978,14 +970,13 @@ impl Heap {
             self.charge_bytes(obj_bytes_shallow(&obj));
         }
         if let Some(idx) = self.free.pop() {
-            self.slots[idx as usize].obj = Some(obj);
+            self.slots.get_mut(GcRef(idx)).obj = Some(obj);
             self.clear_mark(idx as usize); // defensive: already 0 post-sweep (matches old mark=false)
             self.clear_copied(idx as usize); // a reused slot must not inherit a stale copy mark
             self.clear_viewed(idx as usize);
             GcRef(idx)
         } else {
-            let idx = self.slots.len() as u32;
-            self.slots.push(Slot { obj: Some(obj) });
+            let idx = self.slots.push(Slot { obj: Some(obj) }).0;
             // Grow `marks` in lockstep so word `idx>>6` exists for a later `set_mark`.
             while self.marks.len() <= (idx as usize) >> 6 {
                 self.marks.push(0);
@@ -995,7 +986,8 @@ impl Heap {
     }
 
     pub fn get(&self, h: GcRef) -> &Obj {
-        self.slots[h.0 as usize]
+        self.slots
+            .get(h)
             .obj
             .as_ref()
             .expect("dangling GcRef (object was collected while still reachable)")
@@ -1018,7 +1010,8 @@ impl Heap {
         if self.any_viewed && self.is_viewed(h.0 as usize) {
             self.view_epoch += 1;
         }
-        self.slots[h.0 as usize]
+        self.slots
+            .get_mut(h)
             .obj
             .as_mut()
             .expect("dangling GcRef (object was collected while still reachable)")
@@ -1291,11 +1284,11 @@ impl Heap {
     /// counter and grows the next-collection threshold relative to the surviving set.
     pub fn sweep(&mut self) {
         for idx in 0..self.slots.len() {
-            if self.slots[idx].obj.is_some() {
+            if self.slots.get(GcRef(idx as u32)).obj.is_some() {
                 if self.is_marked(idx) {
                     self.clear_mark(idx);
                 } else {
-                    self.slots[idx].obj = None;
+                    self.slots.get_mut(GcRef(idx as u32)).obj = None;
                     self.free.push(idx as u32);
                     self.err_spans.remove(&(idx as u32));
                     self.clear_copied(idx);
@@ -1318,7 +1311,7 @@ impl Heap {
         // can be re-handed to another object by then.
         if !self.copy_log.is_empty() {
             let slots = &self.slots;
-            self.copy_log.retain(|&i| slots[i as usize].obj.is_some());
+            self.copy_log.retain(|&i| slots.get(GcRef(i)).obj.is_some());
         }
         let lb = self.live_bytes();
         self.last_live_bytes = lb;
@@ -1412,7 +1405,7 @@ impl Heap {
         // either way. (`CHEZZI_HEAP_STATS`'s cap-off peak therefore still omits nested-core bytes,
         // exactly as it did before this fix.)
         let deep = self.mem_cap != 0;
-        for slot in &self.slots {
+        for slot in self.slots.iter() {
             let Some(obj) = &slot.obj else { continue };
             total += std::mem::size_of::<Obj>();
             total += match obj {
