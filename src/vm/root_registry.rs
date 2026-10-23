@@ -176,8 +176,10 @@ struct CtxPtr(NonNull<FiberCtx>);
 // `RootRegistry::roots`, holds the exclusivity argument written there.
 unsafe impl Send for CtxPtr {}
 
+// A walk and an unattached thread (the deadlock reporter, the netpoller's atomic store) may each
+// hold `&FiberCtx` at once, so shared access must be sound too.
 const _: fn() = || {
-    fn s<T: Send>() {}
+    fn s<T: Send + Sync>() {}
     s::<FiberCtx>();
 };
 
