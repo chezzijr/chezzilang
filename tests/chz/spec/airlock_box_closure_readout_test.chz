@@ -297,3 +297,44 @@ test fn box_call_result_marks_only_what_the_box_keeps():
     rw := RwShared([1])
     assert outcome(rw.read(fn(s): fn(): s.push(9))) == "no-fault"
     assert rw.get() == [1]
+
+fn first_pair(s: List[(int, int)]) -> fn() -> None:
+    xs := [s[0]]
+    return fn(): xs.push((9, 9))
+
+fn first_holder(s: List[List[int]]) -> fn() -> None:
+    xs := [s]
+    return fn(): xs.push(s)
+
+fn fresh_logger() -> fn() -> None:
+    log := [0]
+    return fn(): log.push(1)
+
+fn shared_logger(box: Shared[List[int]]) -> fn() -> None:
+    return box.read(fn(s): fn(): s.push(1))
+
+# TICKET-295 F1: a fresh capture that holds only an immutable object the box keeps loses no write.
+test fn box_call_fresh_capture_over_kept_immutable_does_not_fault():
+    b := Shared([(1, 2)])
+    assert outcome(b.read(fn(s): first_pair(s))) == "no-fault"
+    assert b.get() == [(1, 2)]
+
+# F1 negative: a fresh capture that holds a MUTABLE kept object still faults.
+test fn box_call_fresh_capture_over_kept_mutable_faults():
+    b := Shared([[1]])
+    assert outcome(b.read(fn(s): first_holder(s))).contains(COPY_TAIL)
+
+# F2: a job result closure over fresh state: the job heap ends with the job, so the caller holds the only copy.
+test fn task_result_closure_over_fresh_state_does_not_fault():
+    ex := Executor(1)
+    t := ex.submit(fresh_logger)
+    ex.shutdown()
+    assert outcome(ok(t.get())) == "no-fault"
+
+# F2 negative: a job result closure over state the job stored in a Shared it shares still faults.
+test fn task_result_closure_over_shared_stored_state_faults():
+    box := Shared[List[int]]([0])
+    ex := Executor(1)
+    t := ex.submit(fn(): shared_logger(box))
+    ex.shutdown()
+    assert outcome(ok(t.get())).contains(COPY_TAIL)
