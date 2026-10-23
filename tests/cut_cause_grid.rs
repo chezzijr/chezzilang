@@ -465,13 +465,7 @@ fn cells() -> Vec<Cell> {
         for party in parties {
             for c in [C::None, C::Stuck, C::Faulting] {
                 let mut runs = T3.to_vec();
-                // A job whose nursery meets a child fault (`Child`, `Join`), then parks in a stuck
-                // `defer`, can hang at the program-exit join under some seeds: the verdict never
-                // fires. Main `11a496c8` shows it too, with the Task-returning submit of that time
-                // (`CHEZZI_THREADS=2 CHEZZI_SCHED_SEED=1`: 12 of 40 runs hang). TICKET-296 owns
-                // the hang and deletes this exclusion.
-                let exit_verdict_miss = matches!(cause, K::Child | K::Join) && party == P::Job;
-                if c == C::Stuck && !exit_verdict_miss {
+                if c == C::Stuck {
                     runs.extend(SEEDED);
                 }
                 let expect = match cause {
