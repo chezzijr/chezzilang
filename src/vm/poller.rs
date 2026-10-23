@@ -482,14 +482,16 @@ fn fire_due_socket_timeouts(inner: &Inner) {
             .collect()
     };
     for Parked {
-        mut fiber,
+        fiber,
         sched,
         in_flight,
         ..
     } in timed_out
     {
         in_flight.store(false, Ordering::Release); // the op is no longer parked
-        fiber.ctx.poll_timed_out = true; // the rewound op resumes, sees this, returns Err("timeout")
+        // The rewound op resumes, sees this, returns Err("timeout"). A store through `&`: this
+        // thread is not attached to the GC, so it never takes `&mut` of a registered context.
+        fiber.ctx.poll_timed_out.store(true, Ordering::Relaxed);
         sched.complete_offload(fiber); // inflight→runnable
     }
 }
@@ -740,7 +742,11 @@ mod tests {
             "inflight→runnable on timeout inject"
         );
         // The injected fiber carries the timeout marker so the rewound op returns Err("timeout").
-        let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
+        let timed_out = sched
+            .lock()
+            .global
+            .front()
+            .map(|f| f.ctx.poll_timed_out.load(Ordering::Relaxed));
         assert_eq!(
             timed_out,
             Some(true),
@@ -784,7 +790,11 @@ mod tests {
 
         client.write_all(b"x").unwrap(); // fd readable at once
         wait_until(|| sched.lock().global.len() == 1, "readiness inject");
-        let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
+        let timed_out = sched
+            .lock()
+            .global
+            .front()
+            .map(|f| f.ctx.poll_timed_out.load(Ordering::Relaxed));
         assert_eq!(
             timed_out,
             Some(false),
@@ -824,7 +834,11 @@ mod tests {
             "a past deadline fired promptly: {:?}",
             start.elapsed()
         );
-        let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
+        let timed_out = sched
+            .lock()
+            .global
+            .front()
+            .map(|f| f.ctx.poll_timed_out.load(Ordering::Relaxed));
         assert_eq!(
             timed_out,
             Some(true),
@@ -873,7 +887,11 @@ mod tests {
             || sched.lock().global.len() == 1,
             "socket timeout inject under timer load",
         );
-        let timed_out = sched.lock().global.front().map(|f| f.ctx.poll_timed_out);
+        let timed_out = sched
+            .lock()
+            .global
+            .front()
+            .map(|f| f.ctx.poll_timed_out.load(Ordering::Relaxed));
         assert_eq!(
             timed_out,
             Some(true),

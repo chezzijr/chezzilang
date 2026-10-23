@@ -1570,7 +1570,15 @@ fn fiber_roots_equal_vm_roots_after_swap() {
     vm.snapshot_adopt.insert(3, adopt);
 
     let before = sorted_roots(vm.gc_roots());
-    assert_eq!(before.len(), 16, "every root set above is found live");
+    let live = roots_per_field(&vm.root_view());
+    for (field, roots) in &live {
+        // `start` is a parked fiber's alone: `pending_fiber_roots_its_start` covers it.
+        if *field == "start" {
+            assert!(roots.is_empty(), "the live `Vm` has no `start`");
+        } else {
+            assert!(!roots.is_empty(), "the test fills RootView field `{field}`");
+        }
+    }
     let mut ctx = FiberCtx {
         heap: Some(Heap::new()),
         ..FiberCtx::default()
@@ -1581,6 +1589,96 @@ fn fiber_roots_equal_vm_roots_after_swap() {
         "every root above travels in FiberCtx"
     );
     assert_eq!(sorted_roots(ctx.roots()), before);
+    assert_eq!(
+        roots_per_field(&ctx.root_view()),
+        live,
+        "each RootView field holds the same roots live and parked"
+    );
+}
+
+/// The roots of each [`RootView`] field on its own, by field name. The destructures name every field
+/// with no `..`, so a field added to `RootView` or `HeapCaches` fails to compile here until
+/// `fiber_roots_equal_vm_roots_after_swap` fills it.
+fn roots_per_field(v: &super::root_registry::RootView) -> Vec<(&'static str, Vec<u32>)> {
+    use super::root_registry::{HeapCaches, RootView};
+    let RootView {
+        stack,
+        frames,
+        nurseries,
+        start,
+        module_objs,
+        executors,
+        caches,
+    } = v;
+    let HeapCaches {
+        str_intern,
+        fn_values,
+        snapshot_rebuild,
+        snapshot_cells,
+        snapshot_nodes,
+        snapshot_adopt,
+    } = caches.as_ref().expect("a Vm or fiber view has caches");
+    let walk = |one: RootView| {
+        let mut out = Vec::new();
+        one.walk(&mut out);
+        sorted_roots(out)
+    };
+    vec![
+        (
+            "stack",
+            walk(RootView {
+                stack,
+                ..RootView::default()
+            }),
+        ),
+        (
+            "frames",
+            walk(RootView {
+                frames,
+                ..RootView::default()
+            }),
+        ),
+        (
+            "nurseries",
+            walk(RootView {
+                nurseries,
+                ..RootView::default()
+            }),
+        ),
+        (
+            "start",
+            walk(RootView {
+                start: *start,
+                ..RootView::default()
+            }),
+        ),
+        ("module_objs", sorted_roots(module_objs.to_vec())),
+        ("executors", sorted_roots(executors.to_vec())),
+        (
+            "str_intern",
+            sorted_roots(str_intern.values().copied().collect()),
+        ),
+        (
+            "fn_values",
+            sorted_roots(fn_values.values().copied().collect()),
+        ),
+        (
+            "snapshot_rebuild",
+            sorted_roots(snapshot_rebuild.values().copied().collect()),
+        ),
+        (
+            "snapshot_cells",
+            sorted_roots(snapshot_cells.keys().copied().collect()),
+        ),
+        (
+            "snapshot_nodes",
+            sorted_roots(snapshot_nodes.keys().copied().collect()),
+        ),
+        (
+            "snapshot_adopt",
+            sorted_roots(snapshot_adopt.values().copied().collect()),
+        ),
+    ]
 }
 
 /// M1.4 — a spawned, not-yet-started fiber holds its task (callee and args) in its own context, so

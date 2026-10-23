@@ -67,13 +67,13 @@ impl SchedCore {
 
     /// Store one claimed parked fiber's `Deadlocked` outcome and bump its scope's `done`. Shared by
     /// `flag_deadlock` and `flag_deadlock_leaves`.
-    fn record_deadlocked(&mut self, mut f: Fiber, err: &RuntimeError) {
+    fn record_deadlocked(&mut self, f: Fiber, err: &RuntimeError) {
         // Carry the parked fiber's OWN buffered stdout/stderr into its Deadlocked slot (not an empty
         // buffer). `swap_ctx` moved this fiber's live prints into `f.ctx.out` when it parked; the
         // downstream `reduce_task_slots` flushes EVERY Deadlocked slot's buffer at its task-order slot
         // (not just the lowest-index one, as with a real Fault), so with two-or-more parked fibers a
         // higher-index printer's output is preserved byte-identically to a strictly sequential run.
-        // `task_index`/`scope_id` are Copy, read before `f.ctx.out`/`f.ctx.stderr` are taken.
+        // `task_index`/`scope_id` are Copy, read before `f.ctx` moves out.
         let (ti, sid) = (f.task_index, f.scope_id);
         // A scope with its own `deadlock_err` (the owner-fiber arm of `run_mn_nursery_nested`)
         // reports ITS span instead of the sched-wide `err` — see `JoinScope::deadlock_err` and
@@ -85,10 +85,13 @@ impl SchedCore {
             (None, Some((msg, span))) if self.leaf_site => err.at_site(msg, span),
             _ => err.clone(),
         };
+        // M1.4 — take the context out of the registry before any field moves: this thread may not
+        // be attached to the GC (see `RootRegistry::roots`).
+        let ctx = f.ctx.into_inner();
         self.slots[ti] = Some(TaskOutcome::Deadlocked {
             err: scope_err,
-            out: std::mem::take(&mut f.ctx.out),
-            stderr: std::mem::take(&mut f.ctx.stderr),
+            out: ctx.out,
+            stderr: ctx.stderr,
         });
         self.task_done(sid);
         self.job_event(
@@ -683,6 +686,7 @@ impl ReadyWorker {
             fn_values: worker.fn_values,
             ..FiberCtx::default()
         };
+        debug_assert!(ctx.start.is_some(), "a Pending fiber holds its task");
         Fiber {
             ctx: registry.register(ctx),
             state: FiberState::Pending,

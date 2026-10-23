@@ -320,7 +320,7 @@ impl Vm {
             std::mem::swap(&mut self.pending_connect, &mut ctx.pending_connect);
             // D6c — a socket timeout marker set by the poll thread (on the detached fiber's ctx) swaps
             // in here so the resumed socket op sees it at entry. M:N-only, like `pending_connect`.
-            std::mem::swap(&mut self.poll_timed_out, &mut ctx.poll_timed_out);
+            std::mem::swap(&mut self.poll_timed_out, ctx.poll_timed_out.get_mut());
             // B1 — the in-flight `read`'s latched deadline belongs to the parked fiber's op (which
             // re-executes on wake), so it swaps with the fiber exactly like `poll_timed_out`.
             std::mem::swap(&mut self.poll_deadline, &mut ctx.poll_deadline);

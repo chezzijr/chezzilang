@@ -172,7 +172,9 @@ pub(super) struct FiberCtx {
     /// the wake came from a timeout, not readiness. On schedule-in it swaps into [`Vm::poll_timed_out`];
     /// the rewound socket op checks it at ENTRY (before re-running the syscall) and returns
     /// `Err("timeout")` instead of retrying. `false` whenever no timeout wake is pending. M:N-only.
-    pub(super) poll_timed_out: bool,
+    /// M1.4 — atomic, so the poll thread (not attached to the GC) sets it through `&FiberCtx` and
+    /// never holds a `&mut` to a registered context (see `RootRegistry::roots`).
+    pub(super) poll_timed_out: AtomicBool,
     /// B1 — the absolute deadline of the `Socket.read` in flight on this fiber (its `timeout_ms`,
     /// latched at the first park). Travels WITH the fiber across [`Vm::swap_ctx`] like `poll_timed_out`,
     /// because the whole read op re-executes on every wake: without the latch each park would recompute

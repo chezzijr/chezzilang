@@ -4,9 +4,15 @@
 //! a suspended generator, a parked fiber) builds a [`RootView`] and calls [`RootView::walk`], so a
 //! root field is added in one place for all of them.
 //!
-//! The registry lists every fiber context of one run, so a collection can root the PARKED fibers
-//! too, not only the one live in a `Vm`. Each production fiber context is built through
-//! [`RootRegistry::register`] and leaves the registry when its [`CtxBox`] drops. M1.7 marks from it.
+//! The registry lists the M:N fiber contexts of one run, so a collection can root the PARKED fibers
+//! too, not only the one live in a `Vm`. `ReadyWorker::into_fiber` builds each fiber context
+//! through [`RootRegistry::register`]; it leaves the registry when its [`CtxBox`] drops or
+//! [`CtxBox::into_inner`] takes it out. M1.7 marks from it.
+//!
+//! M1.7: two kinds of parked context are NOT listed: a `Shared`/`RwShared` box context
+//! (`Vm::box_new`, `vm/boxctx.rs`, held in the box's slot) and the caller a box call parks
+//! (`BoxFrame::caller`, `vm/boxctx.rs`). Each roots through its own heap today; with one heap
+//! they must reach the collector too.
 
 use super::fxhash::FxHashMap;
 use super::*;
@@ -166,8 +172,8 @@ impl FiberCtx {
 /// A registered context's address. Only [`RootRegistry::roots`] reads through it.
 struct CtxPtr(NonNull<FiberCtx>);
 
-// SAFETY: the pointer is a plain address; a thread reads through it only under the contract of
-// `RootRegistry::roots`, and `FiberCtx` itself is `Send` (asserted below).
+// SAFETY: sending the address to another thread is sound because the only read through it,
+// `RootRegistry::roots`, holds the exclusivity argument written there.
 unsafe impl Send for CtxPtr {}
 
 const _: fn() = || {
@@ -210,10 +216,19 @@ impl RootRegistry {
 
     /// Every root of every registered context.
     ///
-    /// Contract: no thread mutates a registered context during the walk. Before M1.7 only tests
-    /// call this, and they own every context. M1.7 calls it only inside a stop-the-world
-    /// (`GcCoord`, `vm/gc_coord.rs`), where every attached thread is parked at a safepoint and so
-    /// holds no `&mut` to its context.
+    /// Contract: no `&mut FiberCtx` to a registered context exists during the walk. It holds
+    /// because:
+    /// 1. `CtxBox` owns its context through a raw pointer, so a `&mut Fiber` is no `&mut FiberCtx`.
+    ///    One exists only for the length of a `CtxBox::deref_mut` borrow.
+    /// 2. Only a fiber's runner thread (attached to the GC) calls `deref_mut` on a registered
+    ///    context: `run_one_fiber`'s `swap_ctx` and `start` take. A thread that is not attached
+    ///    writes no registered context: the netpoller sets `poll_timed_out` (an atomic) through
+    ///    `&`, and `record_deadlocked` takes the context out with [`CtxBox::into_inner`] first.
+    /// 3. M1.7 calls this only inside a stop-the-world (`GcCoord`, `vm/gc_coord.rs`), where every
+    ///    attached thread is parked at a safepoint, between two such borrows.
+    ///
+    /// Before M1.7 only tests call it, and they own every context. A new mutable use of a parked
+    /// fiber's context from a thread that is not attached breaks point 2.
     // M1.7 marks from it.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn roots(&self) -> Vec<GcRef> {
@@ -221,11 +236,17 @@ impl RootRegistry {
         let mut out = Vec::new();
         for p in s.ctxs.iter().flatten() {
             // SAFETY: a registered pointer came from `Box::leak` in `register` and stays valid until
-            // `CtxBox::drop` removes it under this same lock (before it frees the box), so it is live
-            // here. The contract above rules out a concurrent `&mut`.
+            // `CtxBox::leave` removes it under this same lock (before the box is freed or taken), so
+            // it is live here. The contract above rules out a concurrent `&mut`.
             unsafe { p.0.as_ref() }.root_view().walk(&mut out);
         }
         out
+    }
+
+    /// How many slots the registry holds, listed or free.
+    #[cfg(test)]
+    fn slot_count(&self) -> usize {
+        super::heap_core::lock(&self.0).ctxs.len()
     }
 }
 
@@ -238,19 +259,44 @@ pub(super) struct CtxBox {
     reg: Option<(RootRegistry, usize)>,
 }
 
-// SAFETY: `CtxBox` owns its `FiberCtx` exactly as a `Box<FiberCtx>` does, and `FiberCtx: Send`.
+// SAFETY: `CtxBox` owns its `FiberCtx` exactly as a `Box<FiberCtx>` does, and `FiberCtx: Send`
+// (asserted above). The registry's alias is covered by `RootRegistry::roots`.
 unsafe impl Send for CtxBox {}
 
 impl CtxBox {
     /// A boxed context listed in no registry.
+    #[cfg(test)]
     pub(super) fn unlisted(ctx: FiberCtx) -> Self {
         CtxBox {
             ptr: NonNull::from(Box::leak(Box::new(ctx))),
             reg: None,
         }
     }
+
+    /// Leave the registry, if listed. Runs BEFORE the box is freed or taken, so a walk never reads
+    /// a context it no longer owns.
+    fn leave(&mut self) {
+        if let Some((reg, slot)) = self.reg.take() {
+            let mut s = super::heap_core::lock(&reg.0);
+            s.ctxs[slot] = None;
+            s.free.push(slot);
+        }
+    }
+
+    /// Take the context out of its box. It leaves the registry first, so any thread may then
+    /// change it.
+    pub(super) fn into_inner(mut self) -> FiberCtx {
+        self.leave();
+        let ptr = self.ptr;
+        // `reg` is `None` now, so forgetting `self` leaks nothing; the box is freed below.
+        std::mem::forget(self);
+        // SAFETY: `ptr` came from `Box::leak`, is no longer listed, and `forget` above skips the
+        // `drop` that would free it a second time.
+        *unsafe { Box::from_raw(ptr.as_ptr()) }
+    }
 }
 
+#[cfg(test)]
 impl Default for CtxBox {
     fn default() -> Self {
         CtxBox::unlisted(FiberCtx::default())
@@ -275,12 +321,7 @@ impl std::ops::DerefMut for CtxBox {
 
 impl Drop for CtxBox {
     fn drop(&mut self) {
-        // Leave the registry BEFORE the box is freed, so a walk never reads a freed context.
-        if let Some((reg, slot)) = self.reg.take() {
-            let mut s = super::heap_core::lock(&reg.0);
-            s.ctxs[slot] = None;
-            s.free.push(slot);
-        }
+        self.leave();
         // SAFETY: `ptr` came from `Box::leak`, is no longer listed, and is freed exactly once here.
         drop(unsafe { Box::from_raw(self.ptr.as_ptr()) });
     }
@@ -311,10 +352,32 @@ mod tests {
         assert_eq!(sorted(reg.roots()), [10, 11, 20, 21, 30, 31]);
         drop(b);
         assert_eq!(sorted(reg.roots()), [10, 11, 30, 31]);
-        // A slot freed by `b` is reused, and the reuse lists only the new context.
+        // The slot `b` freed is reused (the slot count stays 3), and it lists only the new context.
         let d = reg.register(ctx(40));
+        assert_eq!(
+            reg.slot_count(),
+            3,
+            "a register after a drop reuses the freed slot"
+        );
         assert_eq!(sorted(reg.roots()), [10, 11, 30, 31, 40, 41]);
         drop((a, c, d));
         assert!(reg.roots().is_empty());
+    }
+
+    /// A context taken out of its box leaves the registry first, so a thread that is not attached to
+    /// the GC can then change it while a walk runs.
+    #[test]
+    fn into_inner_leaves_the_registry() {
+        let reg = RootRegistry::default();
+        let b = reg.register(FiberCtx {
+            module_objs: vec![GcRef(7)],
+            ..FiberCtx::default()
+        });
+        let ctx = b.into_inner();
+        assert!(
+            reg.roots().is_empty(),
+            "the taken context is no longer listed"
+        );
+        assert_eq!(ctx.module_objs, vec![GcRef(7)]);
     }
 }
