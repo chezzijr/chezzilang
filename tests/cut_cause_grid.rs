@@ -467,9 +467,9 @@ fn cells() -> Vec<Cell> {
                 let mut runs = T3.to_vec();
                 // A job whose nursery meets a child fault (`Child`, `Join`), then parks in a stuck
                 // `defer`, can hang at the program-exit join under some seeds: the verdict never
-                // fires. Base `submit_result` shows it too (main `11a496c8` release,
-                // `CHEZZI_THREADS=2 CHEZZI_SCHED_SEED=1`: 11 of 40 runs hang, seed 2: 0 of 40;
-                // TICKET-289 `## Thread`), so its seeded runs stay out of the grid.
+                // fires. Main `11a496c8` shows it too, with the Task-returning submit of that time
+                // (`CHEZZI_THREADS=2 CHEZZI_SCHED_SEED=1`: 12 of 40 runs hang). TICKET-296 owns
+                // the hang and deletes this exclusion.
                 let exit_verdict_miss = matches!(cause, K::Child | K::Join) && party == P::Job;
                 if c == C::Stuck && !exit_verdict_miss {
                     runs.extend(SEEDED);
