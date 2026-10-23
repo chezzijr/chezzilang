@@ -23,6 +23,10 @@
 //! LIVENESS RULE: a thread that is attached but neither polls nor detaches blocks a collection
 //! forever (the requester waits for it). Every blocking call of an attached thread must detach
 //! first; M1.5's guard test enforces that.
+//!
+//! LEAVE RULE: a thread that exits while detached must leave, so that its published roots go away.
+//! A dropped [`DetachTicket`] keeps those roots, and their objects never die. M1.5 adds the leave
+//! path.
 
 use crate::vm::value::GcRef;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -112,6 +116,10 @@ impl GcCoord {
         let ticket = st.next_ticket;
         st.next_ticket += 1;
         st.detached_roots.push((ticket, roots));
+        debug_assert!(
+            st.attached >= 1,
+            "detach from a thread that is not attached"
+        );
         st.attached -= 1;
         drop(st);
         // A requester may be waiting for this thread.
@@ -198,6 +206,9 @@ impl Drop for Release<'_> {
         let mut st = c.lock();
         st.gc_epoch += 1;
         st.stopped = 0;
+        // Roots handed in after the requester drained them (a caller that parks during
+        // Collecting) belong to this stop only.
+        st.stopped_roots.clear();
         st.phase = Phase::Idle;
         c.stw.store(false, Ordering::Relaxed);
         drop(st);
@@ -247,18 +258,16 @@ mod tests {
             let c = Arc::new(GcCoord::new());
             let barrier = Arc::new(Barrier::new(3));
             let (release_tx, release_rx) = mpsc::channel::<()>();
-            let released = Arc::new(AtomicBool::new(false));
             let stop = Arc::new(AtomicBool::new(false));
             let roots_calls = Arc::new(AtomicUsize::new(0));
 
             let detacher = {
-                let (c, barrier, released) = (c.clone(), barrier.clone(), released.clone());
+                let (c, barrier) = (c.clone(), barrier.clone());
                 thread::spawn(move || {
                     c.attach();
                     barrier.wait();
                     let ticket = c.detach(vec![GcRef(1)]);
                     release_rx.recv().unwrap();
-                    released.store(true, Ordering::SeqCst);
                     c.reattach(ticket);
                 })
             };
@@ -284,16 +293,16 @@ mod tests {
 
             c.attach();
             barrier.wait();
+            // The detached thread stays blocked until after this returns: the `within` bound is
+            // the check that the collector did not wait for it.
             let mut runs = Vec::new();
-            c.request_collect(vec![GcRef(3)], |roots| {
-                runs.push((sorted(roots), released.load(Ordering::SeqCst)));
-            });
+            c.request_collect(vec![GcRef(3)], |roots| runs.push(sorted(roots)));
             stop.store(true, Ordering::SeqCst);
             release_tx.send(()).unwrap();
             detacher.join().unwrap();
             poller.join().unwrap();
 
-            assert_eq!(runs, vec![(vec![1, 2, 3], false)]);
+            assert_eq!(runs, vec![vec![1, 2, 3]]);
             assert_eq!(
                 roots_calls.load(Ordering::SeqCst),
                 1,
@@ -389,6 +398,81 @@ mod tests {
                 "one collection per round"
             );
             assert_eq!(c.epoch(), ROUNDS);
+        });
+    }
+
+    /// A released poller is running again even before it wakes, so a stop requested at once must
+    /// not count it as stopped. Each collection must see the poller parked in that same stop.
+    #[test]
+    fn rerequest_waits_for_released_poller() {
+        const ROUNDS: u64 = 2000;
+        within(|| {
+            let c = Arc::new(GcCoord::new());
+            let barrier = Arc::new(Barrier::new(2));
+            let running = Arc::new(AtomicBool::new(false));
+            let stop = Arc::new(AtomicBool::new(false));
+            let poller = {
+                let (c, barrier, running, stop) =
+                    (c.clone(), barrier.clone(), running.clone(), stop.clone());
+                thread::spawn(move || {
+                    c.attach();
+                    barrier.wait();
+                    while !stop.load(Ordering::SeqCst) {
+                        running.store(false, Ordering::SeqCst);
+                        c.poll(|| vec![GcRef(2)]);
+                        running.store(true, Ordering::SeqCst);
+                        thread::yield_now();
+                    }
+                })
+            };
+            c.attach();
+            barrier.wait();
+            let mut bad = Vec::new();
+            for round in 0..ROUNDS {
+                c.request_collect(vec![GcRef(1)], |roots| {
+                    let (roots, live) = (sorted(roots), running.load(Ordering::SeqCst));
+                    if roots != [1, 2] || live {
+                        bad.push((round, roots, live));
+                    }
+                });
+            }
+            stop.store(true, Ordering::SeqCst);
+            poller.join().unwrap();
+            assert!(
+                bad.is_empty(),
+                "collections ran while the poller ran: {bad:?}"
+            );
+            assert_eq!(c.epoch(), ROUNDS);
+        });
+    }
+
+    /// Roots that a thread hands in during one stop never reach the next collection.
+    #[test]
+    fn stop_roots_do_not_leak_into_next_collection() {
+        within(|| {
+            let c = Arc::new(GcCoord::new());
+            let (go_tx, go_rx) = mpsc::channel::<()>();
+            // A thread that is not attached parks during Collecting (misuse the coordinator
+            // must survive).
+            let late = {
+                let c = c.clone();
+                thread::spawn(move || {
+                    go_rx.recv().unwrap();
+                    c.poll(|| vec![GcRef(5)]);
+                })
+            };
+            c.attach();
+            let mut runs = Vec::new();
+            c.request_collect(vec![GcRef(1)], |roots| {
+                runs.push(sorted(roots));
+                go_tx.send(()).unwrap();
+                while c.lock().stopped == 0 {
+                    thread::yield_now();
+                }
+            });
+            late.join().unwrap();
+            c.request_collect(vec![GcRef(1)], |roots| runs.push(sorted(roots)));
+            assert_eq!(runs, vec![vec![1], vec![1]]);
         });
     }
 }
