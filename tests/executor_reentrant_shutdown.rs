@@ -53,9 +53,15 @@
 use std::process::Command;
 
 /// TICKET-232 — `cancel()` marks the Executor shut before it trips the cancel, so a `submit`
-/// racing a job's `cancel()` either starts its job or faults with this text. Both are legal;
-/// a `submit` that returns cleanly and runs nothing is not.
-const SUBMIT_FAULT: &str = "submit on a shut-down Executor (it no longer accepts work)";
+/// racing a job's `cancel()` either starts its job or returns a Task already settled with this
+/// text (TICKET-289: a refused submit never faults, `t.get()` carries it). Both are legal; a
+/// `submit` that runs nothing and settles its Task with no refusal is not.
+const SUBMIT_REFUSED: &str = "submit on a shut-down Executor (it no longer accepts work)";
+
+/// What `main` prints for job C: the job's own `C`, or `refused <text>` when `t.get()` is `!e`.
+fn refusal_line() -> String {
+    format!("refused {SUBMIT_REFUSED}")
+}
 
 #[test]
 fn executor_reentrant_cancel_during_drain() {
@@ -67,7 +73,7 @@ fn executor_reentrant_cancel_during_drain() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    _ := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
+        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    t := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    match t.get():\n        ?_: pass\n        !e: print(\"refused {e.message()}\")\n    print(\"end\")\nmain()\n",
     )
     .expect("write program");
 
@@ -80,9 +86,6 @@ fn executor_reentrant_cancel_during_drain() {
 
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if !out.status.success() && stderr.contains(SUBMIT_FAULT) {
-        return;
-    }
     assert!(
         out.status.success(),
         "reentrant cancel during drain must not fault: status {:?}\nstdout: {stdout}\nstderr: {stderr}",
@@ -96,9 +99,14 @@ fn executor_reentrant_cancel_during_drain() {
     );
     let mut jobs = lines[..lines.len().saturating_sub(1)].to_vec();
     jobs.sort_unstable();
+    let refused = refusal_line();
+    let expected = if jobs.contains(&refused.as_str()) {
+        vec!["A", refused.as_str()]
+    } else {
+        vec!["A", "C"]
+    };
     assert_eq!(
-        jobs,
-        vec!["A", "C"],
+        jobs, expected,
         "reentrant cancel during drain: every dispatched job's output must survive, in any \
          order (see module doc for the CPython reference and why the order is not asserted): \
          {stdout:?}"
@@ -107,8 +115,9 @@ fn executor_reentrant_cancel_during_drain() {
 
 /// TICKET-232 symptom 1: a submit that returned without a fault and is under the cap always
 /// starts. The unbounded `Executor` has no cap, so `cancel` from job B must not drop job C
-/// (CPython `ThreadPoolExecutor`: 0/100 runs drop C, measured). A run that ends in the submit
-/// fault is legal; a run with exit status zero and no `C` is the silent drop.
+/// (CPython `ThreadPoolExecutor`: 0/100 runs drop C, measured). A run whose C submit was
+/// refused (`t.get()` is `!` that text, printed as `refused ...`) is legal; a run with exit
+/// status zero and neither `C` nor the refusal line is the silent drop.
 /// Chezzi at `CHEZZI_THREADS=0` dropped C in 6/100 and 9/100 runs on `1d766428`, so 200 runs.
 #[test]
 fn executor_cancel_never_cancels_a_dispatched_job() {
@@ -117,7 +126,7 @@ fn executor_cancel_never_cancels_a_dispatched_job() {
     let path = dir.join("main.chz");
     std::fs::write(
         &path,
-        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    _ := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
+        "import Executor from std.concurrency\nfn stop(e: Executor):\n    e.cancel()\nfn main():\n    ex := Executor()\n    _ := ex.submit(fn(): print(\"A\"))\n    _ := ex.submit(fn(): stop(ex))\n    t := ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    match t.get():\n        ?_: pass\n        !e: print(\"refused {e.message()}\")\n    print(\"end\")\nmain()\n",
     )
     .expect("write program");
     let mut dropped = 0;
@@ -128,18 +137,14 @@ fn executor_cancel_never_cancels_a_dispatched_job() {
             .arg(&path)
             .output()
             .expect("run chezzi");
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            assert!(
-                stderr.contains(SUBMIT_FAULT),
-                "a failing run must be the submit fault: {stderr}"
-            );
-            continue;
-        }
-        if !String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .any(|l| l == "C")
-        {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "a refused submit is a settled Task, never a fault: {stderr}"
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let refused = refusal_line();
+        if !stdout.lines().any(|l| l == "C" || l == refused) {
             dropped += 1;
         }
     }

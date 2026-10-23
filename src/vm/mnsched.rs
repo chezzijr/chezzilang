@@ -114,19 +114,22 @@ impl SchedCore {
         }
     }
 
-    /// TICKET-118 (W13-8) — the first scope (if any) whose own flag or an ancestor's is tripped,
-    /// still incomplete, and still owing a `cancel_drain` to some parked fiber. `MnSched::take_runnable`
+    /// TICKET-118 (W13-8) — the first scope (if any) whose own flag or an ancestor's is tripped
+    /// and still owing a `cancel_drain` to some parked fiber. `MnSched::take_runnable`
     /// drains it before judging a deadlock; every other caller reads the own-flag-only
     /// `any_cancelled_scope_awaiting_drain` above.
+    ///
+    /// TICKET-289 — a COMPLETE scope counts too. Its owner is a parked fiber of another scope (a job
+    /// in a full `send`, behind a nursery whose only child just faulted), and that child's `finish`
+    /// completes the scope before its `drain_family` runs. The bound is the undrained park, not
+    /// `done < total`: with the fiber requeued, `scope_has_undrained_park` is false.
     fn cancelled_scope_awaiting_drain(&self, me: &MnSched) -> Option<usize> {
         #[cfg(test)]
         CANCEL_SCAN_CALLS.fetch_add(1, Ordering::Relaxed);
         self.scopes
             .iter()
-            .find(|&(sid, s)| {
-                s.done < s.total
-                    && self.scope_cancel_tripped(sid)
-                    && self.scope_has_undrained_park(me, sid)
+            .find(|&(sid, _)| {
+                self.scope_cancel_tripped(sid) && self.scope_has_undrained_park(me, sid)
             })
             .map(|(sid, _)| sid)
     }

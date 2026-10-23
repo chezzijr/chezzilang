@@ -12,6 +12,11 @@ use super::sched::poke_live_scheds;
 use super::sched::spawn_worker_thread;
 use super::*;
 
+/// TICKET-289 — test-only: arms [`Vm::finish_drain_window_hook`] once per run, through that run's
+/// own `HostConfig.env` (the seam `OWNER_FAULT_WINDOW_ENV` uses).
+#[cfg(test)]
+pub(crate) const FINISH_DRAIN_WINDOW_ENV: &str = "CHEZZI_TEST_FINISH_DRAIN_WINDOW";
+
 impl Vm {
     /// TICKET-016 (W8-3) generalisation of the demote bracket: "I am about to block in place" for any
     /// in-callback blocking op, not just a socket op. `what` names the op in the OS-thread-limit fault
@@ -473,6 +478,8 @@ impl Vm {
                     // TICKET-289 — a job's end has no sibling to wake: it tripped its own flag, and
                     // only its own nursery's fibers read that.
                     if aborts && fiber.job_cancel.is_none() {
+                        #[cfg(test)]
+                        self.finish_drain_window_hook();
                         sched.drain_family(scope_id);
                     }
                     // A finished Executor job is one fewer live sender for every other sched: an
@@ -785,6 +792,24 @@ impl Vm {
             out: Vec::new(),
             stderr: Vec::new(),
             trace: Vec::new(),
+        }
+    }
+
+    /// TICKET-289 — test-only: hold the window between a nursery child's `finish` (its fault is in
+    /// its slot) and the `drain_family` that follows, so a verdict judged inside it is
+    /// deterministically reachable. No-op unless armed via [`FINISH_DRAIN_WINDOW_ENV`] in this
+    /// run's own `HostConfig.env`.
+    #[cfg(test)]
+    fn finish_drain_window_hook(&self) {
+        let armed = self
+            .host
+            .env
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(FINISH_DRAIN_WINDOW_ENV)
+            .is_some();
+        if armed {
+            std::thread::sleep(std::time::Duration::from_millis(300));
         }
     }
 

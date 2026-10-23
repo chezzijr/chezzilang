@@ -1296,6 +1296,74 @@ main()
     }
 }
 
+/// TICKET-289 — a job whose nursery child faults while the job is parked in a full `send` must end
+/// with the child's fault. `finish` records the fault, and `drain_family` wakes the parked owner a
+/// moment later. A verdict judged in that gap sees a quiesced Executor sched with the job parked
+/// and the nursery complete: it read the job as deadlocked, and the deadlock outranked the fault.
+/// `finish_drain_window_hook` holds the gap open for 300 ms so the verdict lands in it.
+#[test]
+fn a_job_parked_in_send_whose_child_faulted_is_not_called_deadlocked() {
+    let src = "\
+import std.concurrency
+import Executor from std.concurrency
+import std.time
+
+fc := Channel[int](1)
+
+fn owner_job() -> None:
+    spawn:
+        time.sleep_ms(50)
+        panic(\"boom\")
+    fc.send(1)
+    fc.send(2)
+    print(\"after\")
+
+ex := Executor()
+t := ex.submit(owner_job)
+ex.shutdown()
+match t.get():
+    ?_: pass
+    !e: panic(e.message())
+";
+    let entry = write_temp_chz("t289_finish_drain_window", src);
+    let cfg = crate::native::HostConfig::default();
+    // The literal equals `worker_loop::FINISH_DRAIN_WINDOW_ENV`, spelled out as the t134 tests do.
+    // The hook `remove`s the key when it arms, so a key still present after the run means THIS run
+    // never reached the window.
+    const KEY: &str = "CHEZZI_TEST_FINISH_DRAIN_WINDOW";
+    cfg.env
+        .lock()
+        .unwrap()
+        .insert(KEY.to_string(), "1".to_string());
+    let env = std::sync::Arc::clone(&cfg.env);
+    let run_entry = entry.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_file_with(&run_entry, cfg));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(&entry);
+    assert!(
+        !env.lock().unwrap().contains_key(KEY),
+        "window not exercised: the hook never armed in this run"
+    );
+    match result {
+        Ok((out, _err, res, _code)) => {
+            assert!(
+                !out.contains("after"),
+                "the job ran past its fault: {out:?}"
+            );
+            let s = format!(
+                "{:?}",
+                res.expect_err("the job's fault reaches main through t.get()")
+            );
+            assert!(s.contains("boom"), "got: {s}");
+            assert!(!s.contains("deadlock"), "got: {s}");
+        }
+        Err(_) => panic!("hung: the finish-drain window regressed"),
+    }
+}
+
 /// gaps.md W10-1 — a main-task `recv` inside a native re-entry (here: a generator resume) must not
 /// fault `deadlock` while a live sibling can still send. Before TICKET-062 the block-in-place gate
 /// required a judged party (`native_reentry == 0`), so main-in-callback fell to the "fault, as
