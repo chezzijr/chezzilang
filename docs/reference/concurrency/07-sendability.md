@@ -115,9 +115,18 @@ Reads never check the mark. A write through a `Shared`/`RwShared`/`Atomic*`/`Cha
 rebuild of a closure -- a `Channel` send, a `Shared`/`RwShared` store read back (`get`, `read`, a
 concurrent collection's `at`/`get`/`remove`), an `Atomic` load, a `Task` result, a relay task that
 stores it again -- rebuilds its captures as copies, so a write through one faults, the task that sent
-or stored it included. The one exception is a closure that a `Shared.read` closure builds over FRESH
-state and returns: its captures reach nothing the box keeps, so the caller holds the only copy and
-the write runs. A closure over the box's own state, or over fresh state that holds it, faults. A plain
+or stored it included. Two rebuilds prove a capture is the only live copy, so its write runs:
+- A closure that a `Shared.read` closure builds and returns. Its captures may reach an object
+  the box keeps only when no write can change that object or anything below it: `[s[0]]` over
+  `Shared([(1, 2)])` runs; over `Shared([(1, [2])])` or `Shared([[1]])` it faults, because the
+  box keeps the list.
+- A closure an `Executor` job returns (`t.get()`). The job's heap ends with the job, so the write
+  faults only when a capture reaches a copy: a value the job received, or a box's state.
+
+A closure over the box's own state, or over fresh state that holds a mutable part of it, faults.
+`RwShared.read` runs its closure in the reader's heap over the reader's copy of the state
+(`03-shared.md`), so `rw.read(fn(s): fn(): s.push(9))` returns a closure that writes the reader's
+copy: no fault, and the box stays `[1]`. A plain
 (non-closure) value received over a `Channel` or read back from a `Shared`/`RwShared` is never marked:
 it belongs to the receiver.
 

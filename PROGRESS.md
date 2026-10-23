@@ -67,7 +67,7 @@ lists each remaining copy as DUPLICATE.
 | 3, fact 8 step 2 | builtin dispatch by an id (`enum Builtin` in `base/builtin.rs`) | done 2026-10-16 |
 | 3, names | one redeclaration rule; a module binds each name once, a type and a value never sharing it (TICKET-263) | done 2026-10-18 |
 | 3, fact 11 | one `WireValue` child visitor: `WireValue::visit` owns what a variant holds (TICKET-267) | done 2026-10-19 |
-| 3, airlock capture copy | one owner per capture, `WireMemo::sole_captures`: every rebuild of a closure marks its captures, a same-task round trip and a relay included; only a box call's result over fresh state stays unmarked (TICKET-285, TICKET-291, concurrency-facts Family 1) | done 2026-10-22 |
+| 3, airlock capture copy | one owner per capture, `WireMemo::sole_captures`: every rebuild of a closure marks its captures, a same-task round trip and a relay included; only a box call's result and an Executor job's result stay unmarked, for a capture that reaches no copy and nothing writable the source keeps (TICKET-295) (TICKET-285, TICKET-291, concurrency-facts Family 1) | done 2026-10-22 |
 | 5 | workspace crates: `chezzi-syntax`, `chezzi-native`, `chezzi-base`, `chezzi-front`, `chezzi-vm` | done 2026-10-16 |
 | docs | docs split into `reference/`, `design/`, `contributing/`, `history/` | in progress (branch `docs/refactor`) |
 

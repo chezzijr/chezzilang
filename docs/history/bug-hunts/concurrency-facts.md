@@ -41,7 +41,7 @@ minor; doc = the docs disagree with the code.
 ## Families and their single source
 
 **Family 1: a hand-off route marks nothing (L-1a).** `crossing::marks` (`src/base/crossing.rs`) owns the answer to 'does this rebuild mark what it allocates'. A closure holds its captures by reference only in the heap that built it, so every rebuild of a closure copies them, the heap the closure left included. Owner decision (2026-10-22): a closure read from `Shared` marks as the `Channel` route does, and a same-task round trip is a crossing too (ADR D4 rule 3: layer C covers every crossing closure).
-**Done (TICKET-285, replaced by TICKET-291):** TICKET-285 stamped each closure with the heap that stored it. A re-store rewrote that stamp, so a relay, a recv inside a box closure and a same-task round trip lost the write. TICKET-291 decides it per capture: `WireMemo::sole_captures` (`src/vm/airlock_out.rs`) sets one bit per capture on `WireValue::Closure::sole`. Only a box call's result over fresh state sets a bit; every other rebuild marks every capture. Grid: `tests/chz/spec/airlock_box_closure_readout_test.chz` (`closure_capture_grid_faults_except_the_owners_global_write`).
+**Done (TICKET-285, replaced by TICKET-291):** TICKET-285 stamped each closure with the heap that stored it. A re-store rewrote that stamp, so a relay, a recv inside a box closure and a same-task round trip lost the write. TICKET-291 decides it per capture: `WireMemo::sole_captures` (`src/vm/airlock_out.rs`) sets one bit per capture on `WireValue::Closure::sole`. A box call's result and an Executor job's result set a bit (TICKET-295); every other rebuild marks every capture. Grid: `tests/chz/spec/airlock_box_closure_readout_test.chz` (`closure_capture_grid_faults_except_the_owners_global_write`).
 
 **Family 2: which fault the run reports, and who delivers it (I-2c, I-4b', H-1b, H-4b, J-2c).**
 `Vm::unwind_result` (`src/vm/stmt.rs:257`) ranks only an unwind that has a cause; a `defer` drain from
@@ -98,7 +98,7 @@ Latent (code differs, no program reached it): the second job-fault publisher
 | Halt rank | One ranking that every site reads: 1 `os.exit`; 2 the first in time of a real fault, `--timeout` or `--max-heap`; 3 a cancelled task's cleanup fault; 4 deadlock | Family 2 (I-2c, J-2c, H-1b, H-4b) |
 | Judge a wait | A party in a callback inside a `defer`, or in an `update` closure, is judged when a sibling fault is already recorded | Family 4 (I-4b', W23-1) |
 | Shared mark | A closure read out of `Shared`/`RwShared` by another task marks its captures as the `Channel` route does | Family 1 (L-1a) |
-| Capture copy | Every rebuild of a closure marks its captures, a same-task round trip and a relay included; only a box call's result over fresh state stays unmarked (`WireMemo::sole_captures`) | Family 1 (TICKET-291) |
+| Capture copy | Every rebuild of a closure marks its captures, a same-task round trip and a relay included; only a box call's result and an Executor job's result stay unmarked, for a capture that reaches no copy and nothing writable the source keeps (TICKET-295) (`WireMemo::sole_captures`) | Family 1 (TICKET-291) |
 
 ## Owner decision: same-task round trip (2026-10-22)
 

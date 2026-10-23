@@ -165,7 +165,7 @@ core on behalf of a handle its owner aliases: `Task.get()` and a `memoize1` wrap
 `is_settled(ch) -> bool` (after `import std.concurrency`). True once the channel `ch` is sealed: a
 `submit` channel whose job's outcome has been written. Never blocks, and never reads `false`
 after `true`. `Task.done()` is this call. A non-channel argument faults. `Kind::Inline`. Its writer,
-`_settle`, and `Executor._submit_settled` are std internals for `submit`: a `_` name a std
+`_settle`, the job body `_run_outcome`, and `Executor._submit_settled` are std internals for `submit`: a `_` name a std
 module declares is hidden from user code (the checker reports `has no member` / `has no method`).
 User code calls `submit`.
 
