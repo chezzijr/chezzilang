@@ -723,9 +723,10 @@ pub struct Heap {
     ///
     /// Why here and not at each growth site: `push`/`insert`/`add`/`extend`/the map index-store/… is
     /// an open N-way set, and charging some arms of it is the mistake this repo has already been
-    /// bitten by twice (`docs/contributing/gaps.md` W7-22). `get_mut` is the SOLE `&mut Obj` door (verified: no
-    /// `.obj.as_mut()` or `slots[..]` access exists outside this file), so a charge here cannot be
-    /// forgotten by a new container method — the same forget-proof argument that put the wire charge
+    /// bitten by twice (`docs/contributing/gaps.md` W7-22). `get_mut` is the SOLE `&mut Obj` door:
+    /// `Slot.obj` is `pub(super)` in `vm/heap_slab.rs`, but the slab is reachable only through the
+    /// private `Heap.slots` field, so no code outside this file can reach a slot. A charge here cannot
+    /// be forgotten by a new container method — the same forget-proof argument that put the wire charge
     /// in `Vm::to_wire_crossable`.
     ///
     /// Why deferred rather than measured on both sides of the call: `get_mut` HANDS OUT the `&mut`,
@@ -1283,12 +1284,17 @@ impl Heap {
     /// Free every unmarked object and clear all marks for the next cycle. Resets the allocation
     /// counter and grows the next-collection threshold relative to the surviving set.
     pub fn sweep(&mut self) {
-        for idx in 0..self.slots.len() {
-            if self.slots.get(GcRef(idx as u32)).obj.is_some() {
+        // Taken out (an empty slab allocates nothing) so the loop can call the bitset methods.
+        let mut slots = std::mem::take(&mut self.slots);
+        for (start, seg) in slots.segments_mut() {
+            for (idx, slot) in (start..).zip(seg.iter_mut()) {
+                if slot.obj.is_none() {
+                    continue;
+                }
                 if self.is_marked(idx) {
                     self.clear_mark(idx);
                 } else {
-                    self.slots.get_mut(GcRef(idx as u32)).obj = None;
+                    slot.obj = None;
                     self.free.push(idx as u32);
                     self.err_spans.remove(&(idx as u32));
                     self.clear_copied(idx);
@@ -1296,6 +1302,7 @@ impl Heap {
                 }
             }
         }
+        self.slots = slots;
         self.since_gc = 0;
         *self.since_gc_bytes.get_mut() = 0;
         // Drop the armed `get_mut` record: this is the ONLY thing that frees a slot, so it is also
