@@ -362,6 +362,8 @@ enum Expect {
     Own(Cleanup),
     /// a job party's fault is its Task's outcome: nothing reaches stderr and the run ends 0
     Held,
+    /// a job party whose Task holds the child's fault: `t.get()` prints `!boom`, the run ends 0
+    HeldGet,
     Deadlock,
     /// C1: the outside Executor's job finished
     ShutdownSurvives,
@@ -412,6 +414,12 @@ fn ok(e: Expect, g: &Got) -> bool {
                 && !err.contains("boom")
                 && !err.contains("own")
                 && !err.contains("cleanup failed")
+                && !err.contains("deadlock")
+        }
+        Expect::HeldGet => {
+            g.code == 0
+                && out.contains("!boom")
+                && !err.contains("boom")
                 && !err.contains("deadlock")
         }
         Expect::Deadlock => g.code != 0 && err.contains("deadlock"),
@@ -486,6 +494,23 @@ fn cells() -> Vec<Cell> {
                 });
             }
         }
+    }
+    // Run mode: a job party whose stuck cleanup meets the verdict after a child fault; `t.get()`
+    // after `shutdown()` prints the fault the Task holds (TICKET-296).
+    for cause in [K::Child, K::Join] {
+        let mut runs = T3.to_vec();
+        runs.extend(SEEDED);
+        v.push(Cell {
+            name: format!("run {cause:?} x JobGet x Stuck"),
+            src: Box::new(move |_| {
+                cell_src(cause, P::Job, C::Stuck, false)
+                    .replace("_ := ex0.submit(owner)", "t := ex0.submit(owner)")
+                    + "print(t.get())\n"
+            }),
+            test_mode: false,
+            runs,
+            expect: Expect::HeldGet,
+        });
     }
     // Run mode: `shutdown` × {child, cancel} × 3 cleanups (C1).
     for cause in [K::Child, K::Cancel] {
