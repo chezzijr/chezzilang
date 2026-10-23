@@ -16,8 +16,9 @@
 //!
 //! The slab is shared by every handle of one `HeapCore` (`vm/heap_core.rs`), so it works through
 //! `&self`: the table entries and `len` are atomics, published with `Release` and read with
-//! `Acquire`. An append needs the [`SlabAppend`] token, which the core keeps under its allocation
-//! lock, so appends are serialized. A slot is read and written in place through `&self`: keeping
+//! `Acquire` (a slot lookup reads its table entry `Relaxed` after an `Acquire` load of `len`). An
+//! append needs the [`SlabAppend`] token, which the core keeps under its allocation lock, so
+//! appends are serialized. A slot is read and written in place through `&self`: keeping
 //! two handles off one slot is the caller's duty (see [`Slab::slot_mut`]).
 //!
 //! [`SlotBits`] is a bitset with one bit per slot, segmented like the slab, for the core's mark and
@@ -47,10 +48,11 @@ const FIRST_BITS: u32 = 2;
 /// Segments: 0 for `[0, 4)`, then one per power of two up to `[1 << 31, 1 << 32)`.
 const SEGS: usize = 33 - FIRST_BITS as usize;
 
-/// `(segment, offset)` of dense slot `i`.
+/// `(segment, offset)` of dense slot `i`. `i | 3` is never 0, so `ilog2` needs no zero case:
+/// segment 0 is `ilog2` 1 (slots 0 to 3), and segment `k >= 1` is `ilog2` `k + 1`.
 #[inline]
 fn locate(i: usize) -> (usize, usize) {
-    let k = (usize::BITS - (i >> FIRST_BITS).leading_zeros()) as usize;
+    let k = (i | ((1 << FIRST_BITS) - 1)).ilog2() as usize + 1 - FIRST_BITS as usize;
     (k, i - seg_start(k))
 }
 
@@ -68,7 +70,9 @@ fn seg_cap(k: usize) -> usize {
 
 /// The segmented slot store behind `HeapCore`. See the module doc.
 pub(super) struct Slab {
-    /// Segment `k`'s storage (`seg_cap(k)` slots), or null before slot `seg_start(k)` exists.
+    /// Segment `k`'s storage (`seg_cap(k)` slots) moved back by `seg_start(k)` slots, so dense
+    /// slot `i` of segment `k` is at `segs[k].wrapping_add(i)` (no offset to compute). Null
+    /// before slot `seg_start(k)` exists. [`seg_base`](Slab::seg_base) gives the storage's address.
     segs: [AtomicPtr<MaybeUninit<Slot>>; SEGS],
     /// Slots ever appended. Every slot below it is initialized (a swept slot holds `obj: None`).
     /// Written only by [`push`](Slab::push), under the [`SlabAppend`] token.
@@ -88,6 +92,14 @@ impl std::fmt::Debug for Slab {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Slab").field("len", &self.len()).finish()
     }
+}
+
+/// The panic of a [`GcRef`] past the slab's end, out of line: the hot `slot_ptr` passes `i` and
+/// `len` in registers only on this path (an inline `assert!` message keeps both on the stack).
+#[cold]
+#[inline(never)]
+fn out_of_range(i: usize, len: usize) -> ! {
+    panic!("GcRef {i} out of range (slab len {len})")
 }
 
 impl Slab {
@@ -112,13 +124,18 @@ impl Slab {
     fn slot_ptr(&self, h: GcRef) -> *mut Slot {
         let i = h.0 as usize;
         let len = self.len();
-        assert!(i < len, "GcRef {i} out of range (slab len {len})");
-        let (k, off) = locate(i);
+        if i >= len {
+            out_of_range(i, len);
+        }
+        let k = locate(i).0;
         // SAFETY: `i < len <= 1 << 32`, so `k < SEGS`, segment `k` is allocated and its slot
-        // `off < seg_cap(k)` is initialized: `push` publishes `len` with `Release` after both.
+        // `i - seg_start(k) < seg_cap(k)` is initialized: `push_holes` publishes `len` with
+        // `Release` after both. The `Acquire` load of `len` orders this load after them, so it can
+        // be `Relaxed`. `wrapping_add(i)` undoes the `wrapping_sub(seg_start(k))` that stored the
+        // entry, so the pointer is in the segment's allocation and keeps its provenance.
         unsafe {
-            let seg = self.segs.get_unchecked(k).load(Ordering::Acquire);
-            seg.add(off).cast::<Slot>()
+            let biased = self.segs.get_unchecked(k).load(Ordering::Relaxed);
+            biased.wrapping_add(i).cast::<Slot>()
         }
     }
 
@@ -163,11 +180,15 @@ impl Slab {
         } else {
             max.min(seg_cap(k) - off).max(1)
         };
-        let mut seg = self.segs[k].load(Ordering::Acquire);
-        if seg.is_null() {
-            seg = Box::into_raw(Box::<[Slot]>::new_uninit_slice(seg_cap(k))).cast();
-            self.segs[k].store(seg, Ordering::Release);
-        }
+        // A segment is allocated at its first slot, so `off == 0` is "not allocated yet".
+        let seg = if off == 0 {
+            let seg: *mut MaybeUninit<Slot> =
+                Box::into_raw(Box::<[Slot]>::new_uninit_slice(seg_cap(k))).cast();
+            self.segs[k].store(seg.wrapping_sub(seg_start(k)), Ordering::Release);
+            seg
+        } else {
+            self.seg_base(k)
+        };
         for j in off..off + n {
             // SAFETY: slots `off..off + n` of segment `k` are inside the segment (`n` stops at its
             // end) and not yet initialized (`off` is its `seg_len`), so the write neither
@@ -182,8 +203,15 @@ impl Slab {
     /// count of `len`.
     #[inline]
     fn seg_raw(&self, k: usize, len: usize) -> *mut [Slot] {
-        let seg = self.segs[k].load(Ordering::Acquire).cast::<Slot>();
-        std::ptr::slice_from_raw_parts_mut(seg, seg_len(k, len))
+        std::ptr::slice_from_raw_parts_mut(self.seg_base(k).cast::<Slot>(), seg_len(k, len))
+    }
+
+    /// The first slot of segment `k`'s storage, for an allocated segment.
+    #[inline]
+    fn seg_base(&self, k: usize) -> *mut MaybeUninit<Slot> {
+        self.segs[k]
+            .load(Ordering::Acquire)
+            .wrapping_add(seg_start(k))
     }
 
     /// Every initialized slot, in index order.
@@ -223,7 +251,7 @@ impl Drop for Slab {
         let len = *self.len.get_mut();
         for k in 0..seg_count(len) {
             let live = self.seg_raw(k, len);
-            let seg = self.segs[k].load(Ordering::Acquire);
+            let seg = self.seg_base(k);
             // SAFETY: `live` is this segment's initialized slots, dropped once here; the segment
             // came from `Box::<[MaybeUninit<Slot>]>` of `seg_cap(k)` slots.
             unsafe {
