@@ -104,7 +104,7 @@ native struct Executor:
     # A submit on a shut-down Executor returns a Task already settled with the refusal.
     fn submit[T](self, f: fn() -> T) -> Task[T]:
         ch := Channel[T!](1)
-        self._submit_settled(fn(): run_outcome(f, ch), ch)
+        self._submit_settled(fn(): _run_outcome(f, ch), ch)
         return Task(_ch=ch, _cached=None, _ex=self)
 
 # Chezzi closures are single-expression only, so a multi-statement job body must be a named
@@ -124,7 +124,7 @@ native struct Executor:
 # A slot never carries a job's return value, so the body is the value's writer. `_submit_settled`
 # and `_settle` are std internals; the only channel they seal is the fresh cap-1 one
 # `submit` creates.
-fn run_outcome[T](f: fn() -> T, out: Channel[T!]):
+fn _run_outcome[T](f: fn() -> T, out: Channel[T!]):
     r := recover: f()
     _settle(out, r)
 
@@ -141,7 +141,7 @@ native fn is_task_copy(v) -> bool
 native fn task_copy_of[T](v: T) -> T
 
 # A std internal (TICKET-219): seal the handle channel `ch` with the outcome `v`. The first seal
-# wins; a later one changes nothing. Called only by `run_outcome`.
+# wins; a later one changes nothing. Called only by `_run_outcome`.
 native fn _settle(ch, v) -> None
 
 # A std internal (TICKET-289): cancel the one job of `ex` whose Task channel is `ch`. A held job

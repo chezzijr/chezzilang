@@ -132,12 +132,12 @@ const ROWS: &[Row] = &[
         kept: &["millis", "_fmt_pos"],
         skipped: &["parse", "since"],
     },
-    // a file-backed native module is not gated: `run_outcome`, called only from the method
+    // a file-backed native module is not gated: `_run_outcome`, called only from the method
     // `Executor.submit`, is kept
     Row {
         src: "import std.concurrency\nex := concurrency.Executor()\nprint(ex.submit(fn() -> int: 1).get())\nex.shutdown()\n",
         module: &["std", "concurrency"],
-        kept: &["run_outcome"],
+        kept: &["_run_outcome"],
         skipped: &[],
     },
     // reached only from a closure: the fn `memoize1` returns calls `_memo_get`

@@ -59,7 +59,7 @@ impl MnSched {
         // slot would hang the join. It reads as a latched verdict.
         let verdict_end = matches!(&outcome, TaskOutcome::Fault { err, .. } if err.is_deadlock);
         let seal = match &outcome {
-            // The body returned: `run_outcome` sealed its value, and the first writer wins.
+            // The body returned: `_run_outcome` sealed its value, and the first writer wins.
             TaskOutcome::Done(_) => JobSeal::Nothing,
             // A hard abort is never a Task outcome (TICKET-289): the run halts instead.
             TaskOutcome::Fault { err, .. } | TaskOutcome::CancelledFault { err, .. }

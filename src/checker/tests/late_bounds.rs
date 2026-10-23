@@ -121,6 +121,7 @@ fn std_internal_names_are_hidden_from_user_modules() {
     }
     for want in [
         ("std.concurrency", "_settle"),
+        ("std.concurrency", "_run_outcome"),
         ("std.fs", "_exists"),
         ("std.concurrency.pmap", "_PmapCell"),
     ] {
@@ -153,6 +154,20 @@ fn std_internal_names_are_hidden_from_user_modules() {
     entry_rejects(
         "import std.concurrency\nconcurrency._cancel_job(5, 1)\n",
         "module 'concurrency' has no member '_cancel_job'",
+    );
+    // TICKET-295: the job body that seals a Task's channel is std-internal. `_settle` encodes its
+    // value with an empty kept set, so a call from a live heap would lose a capture's write.
+    entry_rejects(
+        "import std.concurrency\nconcurrency._run_outcome(fn() -> int: 1, 5)\n",
+        "module 'concurrency' has no member '_run_outcome'",
+    );
+    entry_rejects(
+        "import std.concurrency\nconcurrency.run_outcome(fn() -> int: 1, 5)\n",
+        "module 'concurrency' has no member 'run_outcome'",
+    );
+    entry_rejects(
+        "import run_outcome from std.concurrency\n",
+        "has no member 'run_outcome'",
     );
     let want_methods: std::collections::BTreeSet<(String, String, String)> = [
         ("std.cancel", "Token", "_mark"),
