@@ -43,6 +43,7 @@ Start with the [syntax reference](reference/syntax/01-lexical-and-literals.md). 
 | [ffi-and-packaging.md](design/ffi-and-packaging.md) | Proposal, not started |
 | [adr-d4-airlock.md](design/adr-d4-airlock.md) | Accepted and implemented |
 | [generics-and-carriers.md](design/generics-and-carriers.md) | Accepted and implemented |
+| [go-shared-heap.md](design/go-shared-heap.md) | Experiment notes (branch `exp/go-shared-heap`), not accepted |
 
 ## History
 
