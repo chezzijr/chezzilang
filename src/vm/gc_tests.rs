@@ -1476,3 +1476,47 @@ fn main():
 main()";
     assert_eq!(run_capture_stress(src), "3 4\n2 2\n");
 }
+
+/// M2.4 — a module's global slots live in an `RVec`: a global write is a slot store (no block
+/// retires), and the globals survive collections (gc-stress).
+#[test]
+fn module_slots_are_an_rvec() {
+    let _g = super::rvec::test_serial();
+    let src = "\
+K := [str(7)]
+N := 0
+fn main():
+    for i in 0..20:
+        N = N + i
+    junk := [str(1), str(2)]
+    print(K, N, junk.len())
+main()";
+    let owned = src.to_string();
+    let (out, caps, retired) = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let mut vm = Vm::new(Arc::new(test_program(&owned).expect("compiles")));
+            let result = vm.run();
+            vm.finish_run(result).expect("runs");
+            let caps: Vec<usize> = vm
+                .module_objs
+                .iter()
+                .map(|&m| match vm.heap.get(m) {
+                    Obj::Module(md) => rvec_cap(&md.slots),
+                    _ => unreachable!("a module"),
+                })
+                .collect();
+            let (own, core) = vm.heap.retired_len();
+            (captured(vm.out), caps, own + core)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked");
+    assert_eq!(out, "['7'] 190 2\n");
+    assert!(
+        caps.iter().any(|&c| c >= 2),
+        "the entry module's slots: {caps:?}"
+    );
+    assert_eq!(retired, 0, "a global write retires nothing");
+    assert_eq!(run_capture_stress(src), "['7'] 190 2\n");
+}

@@ -417,9 +417,10 @@ pub(super) struct ModuleSnap {
 /// `i`). Used to snapshot a module deterministically: replaying the pairs in order via
 /// `module_define` rebuilds slots in the same order the compiler assigned them.
 pub(super) fn module_slot_pairs(
-    slots: &[Value],
+    slots: &super::rvec::RVec<Value>,
     index: &std::collections::HashMap<Box<str>, u32>,
 ) -> Vec<(String, Value)> {
+    let slots = slots.to_vec();
     // Invariant: `index` names every slot `0..slots.len()` (the three growth paths — `run_module`
     // pre-size, `module_define` append, `set_global_slot` overwrite — keep `slots`/`index` in
     // lockstep). If that ever breaks, an unnamed hole would replay as a duplicate empty name and

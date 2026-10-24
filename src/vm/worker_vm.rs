@@ -623,7 +623,7 @@ impl Vm {
     pub(super) fn fresh_worker_home(&mut self) -> GcRef {
         self.heap.alloc(Obj::Module(Box::new(ModuleData {
             name: "<worker>".into(),
-            slots: Vec::new(),
+            slots: RVec::new(),
             index: Default::default(),
         })))
     }
@@ -1292,7 +1292,7 @@ impl Vm {
         for m in &snap.modules {
             let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData {
                 name: m.name.clone(),
-                slots: Vec::new(),
+                slots: RVec::new(),
                 index: std::collections::HashMap::new(),
             })));
             self.module_objs.push(wm);
@@ -1471,7 +1471,7 @@ impl Vm {
             SnapValue::ModuleInline { name, globals } => {
                 let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData {
                     name: name.clone(),
-                    slots: Vec::new(),
+                    slots: RVec::new(),
                     index: std::collections::HashMap::new(),
                 })));
                 for (k, gv) in globals {

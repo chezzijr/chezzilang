@@ -63,7 +63,7 @@ impl Vm {
             return Err(self.err(e.message.clone(), span));
         }
         let v = match self.heap.get(module) {
-            Obj::Module(m) => m.slots[slot as usize],
+            Obj::Module(m) => m.slots.get(slot as usize),
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -181,7 +181,7 @@ impl Vm {
         // TICKET-111 — the node registry describes the same snapshot; drop it too.
         self.snapshot_nodes = std::sync::Arc::new(super::fxhash::FxHashMap::default());
         if let Obj::Module(m) = self.heap.get_mut(module) {
-            m.slots[slot as usize] = value;
+            m.slots.set(slot as usize, value);
         }
     }
 
@@ -199,13 +199,23 @@ impl Vm {
         self.snapshot_cells = std::sync::Arc::new(super::fxhash::FxHashMap::default());
         // TICKET-111 — the node registry describes the same snapshot; drop it too.
         self.snapshot_nodes = std::sync::Arc::new(super::fxhash::FxHashMap::default());
+        // A new name appends a slot: a push that outgrows the block retires it (`vm/rvec.rs`),
+        // so a racy reader of the old block never reads freed memory. The index takes `&mut`, the
+        // push takes the shared heap, so the append is two lookups (a cold path).
+        let mut append = false;
         if let Obj::Module(m) = self.heap.get_mut(module) {
             match m.index.get(name) {
-                Some(&i) => m.slots[i as usize] = value,
+                Some(&i) => m.slots.set(i as usize, value),
                 None => {
                     m.index.insert(name.into(), m.slots.len() as u32);
-                    m.slots.push(value);
+                    append = true;
                 }
+            }
+        }
+        if append {
+            let heap = self.heap.write(module);
+            if let Obj::Module(m) = heap.get(module) {
+                m.slots.push(heap, value);
             }
         }
     }

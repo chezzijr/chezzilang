@@ -101,7 +101,7 @@ fn wire_passes_by_reference_objects_as_same_handle() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let m = vm.heap.alloc(Obj::Module(Box::new(ModuleData {
         name: "m".into(),
-        slots: Vec::new(),
+        slots: RVec::new(),
         index: Default::default(),
     })));
     let v = Value::obj(m);

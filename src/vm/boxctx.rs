@@ -216,7 +216,7 @@ impl Vm {
         while self.module_objs.len() < n_mods {
             let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData {
                 name: "".into(),
-                slots: Vec::new(),
+                slots: RVec::new(),
                 index: std::collections::HashMap::new(),
             })));
             self.module_objs.push(wm);
@@ -666,11 +666,9 @@ impl Vm {
         let m = *self.module_objs.get(idx)?;
         let own_is_current = self.box_chain.last().is_none_or(|f| f.view_checked);
         let direct = match self.heap.get(m) {
-            Obj::Module(md) if own_is_current => md
-                .slots
-                .get(slot as usize)
-                .copied()
-                .filter(|v| !v.is_uninit()),
+            Obj::Module(md) if own_is_current => {
+                md.slots.try_get(slot as usize).filter(|v| !v.is_uninit())
+            }
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)

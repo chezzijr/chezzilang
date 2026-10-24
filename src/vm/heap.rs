@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[derive(Debug, Clone)]
 pub struct ModuleData {
     pub name: Box<str>,
-    pub slots: Vec<Value>,
+    pub slots: RVec<Value>,
     pub index: HashMap<Box<str>, u32>,
 }
 
@@ -1095,7 +1095,7 @@ impl Heap {
                 captured.iter().for_each(|v| push(&v));
                 out.push(*home);
             }
-            Obj::Module(m) => m.slots.iter().for_each(&mut push),
+            Obj::Module(m) => m.slots.iter().for_each(|v| push(&v)),
             Obj::Native { .. } => {}
             // A GC leaf: holds only a name, no embedded `GcRef`s (like `Native`).
             Obj::Builtin(_) => {}
