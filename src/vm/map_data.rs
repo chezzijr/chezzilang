@@ -21,6 +21,7 @@
 use super::heap::Heap;
 use super::rvec::{RVec, View};
 use super::value::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A map entry: `(cached hash, key, value)`.
 pub type MapEntry = (u64, Value, Value);
@@ -56,6 +57,27 @@ fn build(n: usize, keys: impl Iterator<Item = (u64, usize)>) -> RVec<IndexSlot> 
         v.set(i, (h, pos as u64 + 1));
     }
     t
+}
+
+/// The count of a table's structural changes: each push (a new position) and each remove (later
+/// positions shift down) adds one; a value write moves nothing and adds none. A probe whose user
+/// `eq` can re-enter reads it before the compare and restarts when it moved (`Vm::map_probe`).
+#[derive(Debug, Default)]
+struct Version(AtomicU64);
+
+impl Version {
+    fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+    fn bump(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Clone for Version {
+    fn clone(&self) -> Self {
+        Version(AtomicU64::new(self.get()))
+    }
 }
 
 /// A heap map's or set's hash index: the open-addressing table on an [`RVec`] (see the module
@@ -182,6 +204,7 @@ pub struct MapData {
     pub entries: RVec<MapEntry>,
     /// `cached-hash → candidate position(s)` (see [`SharedIndex`]). **Not** a GC child.
     index: SharedIndex,
+    version: Version,
 }
 
 impl MapData {
@@ -192,12 +215,18 @@ impl MapData {
         MapData {
             entries: entries.into(),
             index,
+            version: Version::default(),
         }
     }
     /// Positions in `entries` whose key hashed to `h` (the probe candidates).
     #[inline]
     pub fn candidates(&self, h: u64) -> Candidates<'_> {
         self.index.candidates(h, self.entries.len())
+    }
+    /// The count of structural changes (see `Version`).
+    #[inline]
+    pub fn version(&self) -> u64 {
+        self.version.get()
     }
     /// The bytes the entry block and the index table own (`live_bytes`).
     pub fn heap_bytes(&self) -> usize {
@@ -222,6 +251,7 @@ impl MapData {
         let pos = self.entries.len();
         self.entries.push(heap, (h, k, v));
         self.index.insert(heap, h, pos);
+        self.version.bump();
     }
     /// Remove the entry at `i` (preserving order): a new entry block and an index rebuilt from the
     /// cached hashes (pure, no re-hashing) swap in, and the old ones retire on `heap`.
@@ -231,6 +261,7 @@ impl MapData {
         self.entries.replace(heap, &es);
         let hashes: Vec<u64> = es.iter().map(|e| e.0).collect();
         self.index.rebuild(heap, &hashes);
+        self.version.bump();
         removed
     }
 }
@@ -241,6 +272,7 @@ pub struct SetData {
     pub entries: RVec<SetEntry>,
     /// `cached-hash → candidate position(s)` (see [`SharedIndex`]).
     index: SharedIndex,
+    version: Version,
 }
 
 impl SetData {
@@ -251,11 +283,17 @@ impl SetData {
         SetData {
             entries: entries.into(),
             index,
+            version: Version::default(),
         }
     }
     #[inline]
     pub fn candidates(&self, h: u64) -> Candidates<'_> {
         self.index.candidates(h, self.entries.len())
+    }
+    /// The count of structural changes (see `Version`).
+    #[inline]
+    pub fn version(&self) -> u64 {
+        self.version.get()
     }
     /// See [`MapData::heap_bytes`].
     pub fn heap_bytes(&self) -> usize {
@@ -267,6 +305,7 @@ impl SetData {
         let pos = self.entries.len();
         self.entries.push(heap, (h, e));
         self.index.insert(heap, h, pos);
+        self.version.bump();
     }
     /// See [`MapData::remove_at`].
     pub fn remove_at(&self, heap: &Heap, i: usize) -> SetEntry {
@@ -275,6 +314,7 @@ impl SetData {
         self.entries.replace(heap, &es);
         let hashes: Vec<u64> = es.iter().map(|e| e.0).collect();
         self.index.rebuild(heap, &hashes);
+        self.version.bump();
         removed
     }
 }

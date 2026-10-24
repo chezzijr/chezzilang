@@ -180,18 +180,18 @@ impl Vm {
     /// Roots `mh` and `key` on the operand stack for the duration (both are typically off-stack Rust
     /// locals at a method-dispatch site, and a user `eq` can allocate → collect). A caller holding
     /// FURTHER in-flight values (an insert's `val`) wraps the call in [`Self::with_roots`].
-    /// Nothing is copied out of the heap: the candidate list is re-indexed per probe step (a distinct
-    /// key almost always has exactly one candidate, so that is one extra index lookup on the
-    /// terminating step and NO allocation).
+    /// The first candidate is read alone (a distinct key almost always has exactly one candidate:
+    /// NO allocation); the second step copies the remaining candidates once (`next_candidate`),
+    /// so a constant-hash probe stays linear.
     ///
-    /// **The returned position is re-validated after EVERY compare** and the whole probe restarts if
-    /// it moved (CPython `lookdict`'s `DKIX_KEY_CHANGED` → restart). Re-reading the candidate list
-    /// alone is NOT enough: an `eq` that mutates the map on the compare that returns TRUE hands the
-    /// caller a position that has already shifted, and every caller indexes with it — `m.get(k)`
-    /// answered a neighbouring entry's value, or panicked `index out of bounds` on the shrunken
-    /// `entries` (an uncatchable process abort from pure Chezzi source). Validation is one extra
-    /// index read of `(hash, key)` on the terminating step, gated to nothing when no `eq` can
-    /// re-enter. A restart re-runs the user `eq`, so an `eq` that mutates on EVERY call spins — the
+    /// **The map's structural version is re-checked after EVERY compare** and the whole probe
+    /// restarts with fresh candidates if it moved (CPython `lookdict`'s `DKIX_KEY_CHANGED` →
+    /// restart). Checking only the compared position is NOT enough: an `eq` that removes ANOTHER
+    /// key shifts every later position, so the copied candidates go stale and the next step misses
+    /// a key that is still present; an `eq` that mutates on the compare that returns TRUE hands the
+    /// caller a shifted position, and `m.get(k)` answered a neighbour's value or panicked `index out
+    /// of bounds`. The check is one counter load per compare (`MapData::version`), gated to nothing
+    /// when no `eq` can re-enter. A restart re-runs the user `eq`, so an `eq` that mutates on EVERY call spins — the
     /// same way an `eq` containing `while true` does, and interruptible for the same reason (it is
     /// running bytecode); "mutate the map you are being probed against" stays a bad idea, it is just
     /// no longer memory-unsafe.
@@ -204,7 +204,7 @@ impl Vm {
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
         // One whole-program answer, hoisted: with no `eq` hook anywhere, NOTHING inside this loop can
-        // run user code, so both the rooting and the position re-validation are pure overhead.
+        // run user code, so both the rooting and the version check are pure overhead.
         let reenter = self.eq_may_reenter();
         let held = [Value::obj(mh), key];
         let roots: &[Value] = if reenter { &held } else { &[] };
@@ -214,10 +214,10 @@ impl Vm {
                 let mut rest = None;
                 let mut i = 0;
                 loop {
-                    let (p, hs, stored) = match vm.heap.get(mh).as_map() {
+                    let (p, ver, stored) = match vm.heap.get(mh).as_map() {
                         Some(m) => match next_candidate(i, &mut rest, || m.candidates(hk)) {
                             Some(p) => match m.entries.try_get(p) {
-                                Some((h, k, _)) => (p, h, k),
+                                Some((_, k, _)) => (p, m.version(), k),
                                 None => return Ok(None),
                             },
                             None => return Ok(None),
@@ -225,16 +225,12 @@ impl Vm {
                         None => unreachable!("map_probe on non-map"),
                     };
                     let eq = vm.elem_equal(stored, key, 0, span)?;
-                    // Position still holding the key we just compared? (The entry's VALUE may have
-                    // changed — `m[k] = v` inside `eq` does not move anything — so only the cached
-                    // hash and the key are checked.) If not, the map was structurally mutated and
-                    // every position, `p` included, is stale: start over.
+                    // No push or remove during the compare? (A value write — `m[k] = v` inside
+                    // `eq` — moves nothing and does not count.) If one ran, every position, `p`
+                    // and the copied candidates included, is stale: start over.
                     let live = !reenter
                         || match vm.heap.get(mh).as_map() {
-                            Some(m) => m
-                                .entries
-                                .try_get(p)
-                                .is_some_and(|(h, k, _)| h == hs && k == stored),
+                            Some(m) => m.version() == ver,
                             None => unreachable!("map_probe on non-map"),
                         };
                     if !live {
@@ -250,8 +246,8 @@ impl Vm {
     }
 
     /// The Set twin of [`Self::map_probe`] — probe the HEAP set at `sh` for `elem` (pre-hashed to
-    /// `he`), rooting `sh`/`elem` across the (re-entrant) equality and re-validating the position
-    /// after every compare (see [`Self::map_probe`] for why the re-read alone is not enough).
+    /// `he`), rooting `sh`/`elem` across the (re-entrant) equality and re-checking the set's
+    /// structural version after every compare (see [`Self::map_probe`] for why).
     #[inline]
     pub(super) fn set_probe(
         &mut self,
@@ -268,10 +264,10 @@ impl Vm {
                 let mut rest = None;
                 let mut i = 0;
                 loop {
-                    let (p, hs, stored) = match vm.heap.get(sh).as_set() {
+                    let (p, ver, stored) = match vm.heap.get(sh).as_set() {
                         Some(s) => match next_candidate(i, &mut rest, || s.candidates(he)) {
                             Some(p) => match s.entries.try_get(p) {
-                                Some((h, e)) => (p, h, e),
+                                Some((_, e)) => (p, s.version(), e),
                                 None => return Ok(None),
                             },
                             None => return Ok(None),
@@ -281,10 +277,7 @@ impl Vm {
                     let eq = vm.elem_equal(stored, elem, 0, span)?;
                     let live = !reenter
                         || match vm.heap.get(sh).as_set() {
-                            Some(s) => s
-                                .entries
-                                .try_get(p)
-                                .is_some_and(|(h, e)| h == hs && e == stored),
+                            Some(s) => s.version() == ver,
                             None => unreachable!("set_probe on non-set"),
                         };
                     if !live {
@@ -663,8 +656,8 @@ impl Vm {
 
 /// Candidate `i` of a heap probe. A probe cannot hold the table across a compare (a user `eq` can
 /// reach a safepoint), so step 0 reads the first candidate alone (no allocation: the common hit),
-/// and step 1 copies the rest into `rest` once; later steps index it. A mutation that moves the
-/// positions makes the caller restart with a fresh `rest`.
+/// and step 1 copies the rest into `rest` once; later steps index it. A push or remove during a
+/// compare (the table's version moved) makes the caller restart with a fresh `rest`.
 fn next_candidate<I: Iterator<Item = usize>>(
     i: usize,
     rest: &mut Option<Vec<usize>>,

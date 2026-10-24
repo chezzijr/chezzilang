@@ -248,8 +248,8 @@ print([x] == [y])      # true — the recursion reaches the element's `eq`
   print([x] == [x])   # true  — same object, identity short-circuit fires
   ```
 - **An `eq` that mutates the container being probed** gets the answer from the container as it is
-  after the change, never a crash: the probe re-validates after each compare and restarts if the entry
-  moved (CPython's `DKIX_KEY_CHANGED`). An `eq` that mutates on every call makes the probe loop
+  after the change, never a crash: the probe checks after each compare and restarts if a key was
+  added or removed (CPython's `DKIX_KEY_CHANGED`). An `eq` that mutates on every call makes the probe loop
   forever. Do not do it.
 - **`Atomic[T].cas` compares structurally and never calls a user `eq`** (it holds a lock during the
   compare). The checker rejects a payload type that reaches a user `eq` on any element, entry, tuple
