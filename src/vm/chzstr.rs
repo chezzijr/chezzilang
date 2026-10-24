@@ -238,7 +238,7 @@ mod tests {
     fn obj_size_unchanged_by_sso() {
         // SSO must not grow `Obj` past its 64B cap (the heap-slot footprint). `Box<str>`→`ChzStr`
         // adds 8 bytes to the `Str` variant, which still fits. (M2.3: `MapData`/`SetData` hold one
-        // `RVec` and one `RBox` pointer each, so they no longer set the cap.) (M19 lever #3 shrank `Closure` from 88B to 64B —
+        // `RVec` pointers (entries and index), so they no longer set the cap.) (M19 lever #3 shrank `Closure` from 88B to 64B —
         // captures moved from a `HashMap<String,Value>`(48) to a positional `Vec<Value>`(24); lever #2
         // shrank `Enum` — two per-instance `Box<str>`(32) replaced by one `variant_id: u32`;
         // `Module`'s payload is now boxed (`Box<ModuleData>`), so it no longer sets the cap.)
