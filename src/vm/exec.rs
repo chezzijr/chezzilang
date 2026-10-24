@@ -976,11 +976,9 @@ impl Vm {
 
     /// `chezzi test --max-heap=<N>` — set the per-test live-heap cap in bytes (`0` = OFF, the
     /// default). A test whose live heap exceeds `N` is hard-aborted (bypassing `recover:`) and
-    /// bucketed `OverMemory`. Deterministic-in-VM (not OS RSS). The trip point is a per-heap
-    /// high-water check, so a real runaway (unbounded growth) aborts on whichever heap runs it. A
-    /// CONCURRENT test near the boundary can still slip through — each M:N worker isolates its own
-    /// heap, so per-fiber allocations that only sum over the cap may not trip — a documented per-heap
-    /// limit, see `docs/design/roadmap.md §3b`.
+    /// bucketed `OverMemory`. Deterministic-in-VM (not OS RSS). M1.7: the cap is run-wide: every
+    /// task allocates into the run's one heap, and any sweep measures it, so tasks whose live bytes
+    /// only sum over the cap trip it too (`max_heap_caps_the_run_not_each_task`).
     pub fn set_max_heap(&mut self, cap: usize) {
         self.heap.set_mem_cap(cap);
     }

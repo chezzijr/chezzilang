@@ -1368,21 +1368,19 @@ impl Vm {
     /// N aliases of one interned literal become N objects.
     ///
     /// TICKET-235: every task has an entry frame now ([`Vm::task_entry`]), so such a body does
-    /// reach an instruction boundary. The sample stays: a worker heap is born over the cap in few
-    /// objects and `should_collect` counts objects. Removing it needs its own measurement against
+    /// reach an instruction boundary. The sample stays: a task's payload can be born over the cap in
+    /// few objects. Removing it needs its own measurement against
     /// `over_memory_trips_on_an_all_native_task_body`.
     ///
     /// SCOPE — [`start_task`](Vm::start_task), which every task is dispatched through: `spawn`,
-    /// `parallel:` and `Executor` jobs alike. `Heap::request_collect` (set in
-    /// [`spawn_worker`](Vm::spawn_worker)) is the second mechanism; read the note at that call
-    /// site before deleting either.
+    /// `parallel:` and `Executor` jobs alike. The byte pacing (`Heap::should_collect`) is the
+    /// second mechanism (see [`spawn_worker`](Vm::spawn_worker)).
     ///
-    /// COST CEILING: this is a FULL mark-sweep of the heap the fiber runs on, once per task start.
-    /// The heap is the M:N worker's own and freshly born, so it is small. (An engine where every fiber
-    /// shared ONE heap would make a capped run O(live heap × tasks); the cooperative engine that did
-    /// that has been removed, and `--max-heap` was refused with it at the CLI anyway. If a
-    /// shared-heap execution mode is ever reintroduced, this is the line that needs a cheaper
-    /// trigger.)
+    /// COST CEILING (M1.7): every task shares the run's one heap, so a full mark-sweep per start
+    /// made a capped run O(live heap × tasks) (2000 spawns over 200k live objects: 15.7 s against
+    /// 0.16 s). Go checks no memory at spawn. So the sample reads the run-wide counters first
+    /// (`Heap::run_bytes_estimate`: the last sweep's live bytes plus every byte charged since), and
+    /// it collects only when that estimate is over the cap; the fresh sweep then decides.
     ///
     /// **Collecting before the task's entry frame is pushed is sound.** The sample runs in
     /// `start_task` ahead of `invoke_value`, so `self.frames` is still empty here. Empty frames stop
@@ -1396,7 +1394,9 @@ impl Vm {
     /// `is_over_memory` marker alone is what buckets the verdict `OverMemory` and makes it
     /// uncatchable by `recover:`.
     pub(super) fn sample_mem_cap(&mut self, span: Span) -> Result<(), RuntimeError> {
-        self.gc_collect();
+        if self.heap.run_bytes_estimate() > self.heap.mem_cap() {
+            self.gc_collect();
+        }
         if self.heap.over_cap() {
             return Err(self
                 .err(

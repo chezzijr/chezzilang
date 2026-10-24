@@ -971,8 +971,7 @@ pub(super) struct MnSched {
     /// predicate's read is sound.
     pub(super) inflight: AtomicUsize,
     /// W7-26r — the run's `--max-heap` cap (`0` = off), copied from the creating VM's heap. Uniform
-    /// per run (`spawn_worker` gives every worker heap the parent's cap), so one field is the whole
-    /// story. Read by `finish` to decide a scope's retained-backlog verdict — the observation site
+    /// per run (the cap lives in the run's one heap core), so one field is the whole story. Read by `finish` to decide a scope's retained-backlog verdict — the observation site
     /// the blocked joining fiber cannot provide.
     pub(super) mem_cap: usize,
     /// TICKET-167 — this sched's seeded-mode RNG stream, keyed by creation order (see `## Decisions`

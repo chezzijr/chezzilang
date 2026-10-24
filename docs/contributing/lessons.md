@@ -245,10 +245,10 @@ check-OK-then-broken program, and a JIT would trust the static type.
   parse iteratively and overflow the walkers. Do not raise `VM_STACK_BYTES`: each M:N worker reserves
   it.
 - **Opt-in caps measured per heap or by wall clock are not comparable across execution contexts.**
-- **Swap what indexes a heap, and undo the swap on unwind** (TICKET-246). A `Shared`/`RwShared` closure
-  runs in the box's private heap. Each `GcRef` holder travels with its heap (`FiberCtx`, running
-  generators and their parked hosts); `out`/`stderr` swap back. Only `Vm::with_box` swaps, under
-  `catch_unwind`.
+- **Swap what belongs to a context, and undo the swap on unwind** (TICKET-246). A `Shared`/`RwShared`
+  closure runs in the box's own context (M1.7: its objects are in the run's one heap). Each `GcRef`
+  holder travels with its context (`FiberCtx`, running generators and their parked hosts);
+  `out`/`stderr` swap back. Only `Vm::with_box` swaps, under `catch_unwind`.
 - **Render a shared box from a snapshot: copy, drop the lock, then render** (TICKET-246).
   `Vm::display_box` keeps a stack of boxes being rendered and prints `Shared(...)` for one already on
   it. A `&self` render never waits: a busy box prints `Shared(<locked>)`. The print path waits first,

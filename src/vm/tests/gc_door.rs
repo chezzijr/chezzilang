@@ -163,3 +163,30 @@ fn one_collection_marks_every_root_source_and_frees_the_rest() {
         assert!(freed, "the unrooted object is freed");
     });
 }
+
+/// M1.7 fix 2 (I1) — with one heap a task start must not stop the world to sample `--max-heap`
+/// (Go checks no memory at spawn). 2000 spawns with 200k live objects under a cap they stay well
+/// under: the run collects a few times, not once per start (before the fix: one stop per spawn,
+/// 15.7 s release against base 0.16 s).
+#[test]
+fn a_task_start_under_a_cap_does_not_force_a_stop() {
+    let src = "xs: List[List[int]] = []
+for i in 0..200000:
+    xs.push([i])
+fn work(i: int) -> int:
+    return i
+parallel:
+    for i in 0..2000:
+        spawn work(i)
+print(xs.len())
+";
+    let program = crate::compiler::compile_source(src).expect("compile");
+    let mut vm = Vm::new(Arc::new(program));
+    vm.set_max_heap(2_000_000_000);
+    vm.run().expect("run");
+    let (stops, _) = vm.gc_coord.stop_stats();
+    assert!(
+        stops < 200,
+        "{stops} stops for 2000 task starts under a cap that does not trip"
+    );
+}

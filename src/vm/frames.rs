@@ -936,8 +936,8 @@ impl Vm {
         }
         work.extend(self.active_generators.iter().copied());
         // TICKET-246 / M1.7 — every open box call, at every depth, and a frame `as_box_caller`
-        // lifted off the chain: its slot-door cache and the generators it parked. The parked
-        // contexts themselves (`BoxFrame::caller`) are registered, so the registry walk roots them.
+        // lifted off the chain: its parked context (`BoxFrame::caller`), its slot-door cache and the
+        // generators it parked (`BoxFrame::roots`).
         for frame in self.box_chain.iter().chain(&self.box_lifted) {
             frame.roots(&mut work);
         }

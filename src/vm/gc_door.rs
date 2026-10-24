@@ -106,8 +106,10 @@ impl Vm {
         true
     }
 
-    /// Leave this run's heap: a stop no longer waits for this thread.
+    /// Leave this run's heap: a stop no longer waits for this thread. The handle's `get_mut`
+    /// record is settled first, while no sweep can run (`Heap`'s drop does not read it).
     pub(super) fn gc_leave(&mut self) {
+        self.heap.settle_pending_mut();
         self.attached = None;
     }
 

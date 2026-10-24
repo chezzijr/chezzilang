@@ -399,6 +399,12 @@ impl HeapCore {
         self.over_cap.store(cap != 0 && lb > cap, Ordering::Relaxed);
     }
 
+    /// Bytes the handles added to the run's count since the last sweep (`flush_bytes`).
+    #[inline]
+    pub(super) fn charged_bytes(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
     #[inline]
     pub(super) fn last_live_bytes(&self) -> usize {
         self.last_live_bytes.load(Ordering::Relaxed)

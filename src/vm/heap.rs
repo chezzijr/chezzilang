@@ -763,13 +763,9 @@ impl Default for Heap {
 impl Drop for Heap {
     fn drop(&mut self) {
         // A dropped handle's counts still pace the run (a task's payload `Vm` allocates its rebuilt
-        // arguments, fills them through `get_mut`, and is dropped before the task runs). The read
-        // cannot panic: a drop must not.
-        if let Some((h, before)) = self.pending_mut.take()
-            && let Some(obj) = self.core.get(h).obj.as_ref()
-        {
-            self.charge_bytes(obj_bytes_shallow(obj).saturating_sub(before));
-        }
+        // arguments and is dropped before the task runs). The `get_mut` record is NOT read here:
+        // the thread may have left the run's heap, and a sweep may run. It was settled while the
+        // thread was attached (`Vm::gc_leave`, `ReadyWorker::into_fiber`).
         self.core.flush_allocs(self.since_gc);
         self.core.flush_bytes(*self.since_gc_bytes.get_mut());
         self.core.give_back(&mut self.free);
@@ -1290,6 +1286,15 @@ impl Heap {
         self.core.record_live_bytes(lb);
     }
 
+    /// An upper estimate of the run's live bytes with no walk: the live bytes of the last sweep,
+    /// plus what every handle charged since (the run's flushed count and this handle's own).
+    pub(super) fn run_bytes_estimate(&self) -> usize {
+        self.core
+            .last_live_bytes()
+            .saturating_add(self.core.charged_bytes())
+            .saturating_add(self.since_gc_bytes.load(Ordering::Relaxed))
+    }
+
     /// The objects the last sweep freed whose drop the collector runs after the world restarts
     /// (see `graveyard`).
     pub(super) fn take_graveyard(&mut self) -> Vec<Obj> {
@@ -1347,10 +1352,8 @@ impl Heap {
                 // `Heap`, so it used to be counted nowhere and a 195 MB channel backlog sailed past
                 // a 200 KB `--max-heap` cap. Each core's cached byte count is charged ONCE per heap
                 // (`once`, by `Arc` identity — K handles to one core are K views of one allocation,
-                // not K allocations). What this number means: **bytes reachable from THIS heap**. A
-                // core shared by N M:N worker heaps therefore appears in each of them — correct for
-                // a per-heap reachability cap (each worker really can reach it), but it is not an
-                // ownership split, so the N heaps' totals do not add up to process RSS.
+                // not K allocations). M1.7: the walk covers the run's one heap, so each core is
+                // charged once for the whole run, however many tasks hold a handle to it.
                 //
                 // W6-10r — under a cap the charge also RECURSES into the cores nested in this one's
                 // payload, sharing the same `cores` set so a nested core that *also* has an alias
