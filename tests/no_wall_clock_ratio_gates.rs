@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 17] = [
+const CLOCK_READING_TESTS: [&str; 18] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault",
     "a_slow_but_healthy_job_at_the_exit_drain_is_untouched",
@@ -94,6 +94,9 @@ const CLOCK_READING_TESTS: [&str; 17] = [
     // TICKET-151: the same liveness deadline for a DIRECT `io.input` (no callback, no spin); the
     // clock starts at spawn because the fixture prints nothing before the read.
     "sibling_runs_while_a_direct_stdin_read_blocks",
+    // M2.4 fix 1 (vm/rvec.rs): the clock only holds a read open for 50 ms so the take must wait;
+    // the assert is the order (`read_done` before the take returns), not a time.
+    "take_waits_for_a_read_in_progress",
     // threads_one_serializes_cpu_bound_parallel_tasks / _nested_eager_parallel_tasks (TICKET-059):
     // both now read the clock in tests/support/child_rusage.rs, not in their own bodies -- same
     // precedent as many_idle_workers_do_not_thundering_herd_on_yield, never listed here.
