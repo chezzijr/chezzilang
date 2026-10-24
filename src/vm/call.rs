@@ -291,7 +291,9 @@ impl Vm {
     /// and the entrypoint all read it. Borrows the heap object only long enough to copy its
     /// `Copy`/cheap fields, so the hot fn/closure paths allocate nothing. The `match` names every
     /// `Obj` variant and has no `_` arm: a new `Obj` kind does not compile until it is classified.
-    #[inline]
+    /// Always inlined: as a call, its `Option<Callee>` result went back through the stack in
+    /// pieces, and the caller's wide reload stalled on every HOF callback (M2.8 profile).
+    #[inline(always)]
     pub(super) fn callable(&self, v: Value) -> Option<Callee> {
         let h = v.as_obj()?;
         match self.heap.get(h) {
