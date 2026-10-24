@@ -655,6 +655,13 @@ pub(crate) struct Parked {
     ctx: GenCtx,
 }
 
+// Many threads read a parked generator at once (`AtomicBox::with`), so `Parked` must be `Sync`;
+// a `Cell` or `RefCell` added to it fails here.
+const _: fn() = || {
+    fn s<T: Send + Sync>() {}
+    s::<Parked>();
+};
+
 /// Experimental generators — the heap payload of an `Obj::Generator`. A one-shot coroutine driven
 /// synchronously by `.next()`: each call resumes [`Vm::generator_next`] until the next `Op::Yield`
 /// (returns `Some(v)`) or the body ends (`None`, state → `Done`). Generators hold live VM frame

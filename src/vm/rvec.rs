@@ -54,10 +54,10 @@ use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of};
 use std::ptr::{self, NonNull};
-use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 
 mod sealed {
     pub trait Sealed {}
@@ -814,8 +814,9 @@ impl<T: Elem> Iterator for Iter<'_, T> {
 pub struct AtomicBox<T> {
     ptr: AtomicPtr<T>,
     readers: AtomicU32,
-    /// `Send` and `Sync` as a `Mutex<T>`: a take hands the `T` to the taking thread.
-    _t: PhantomData<Mutex<T>>,
+    /// `Send` and `Sync` as an `RwLock<T>`: a take hands the `T` to the taking thread, and `with`
+    /// hands `&T` to many threads at once, so `Sync` needs `T: Send + Sync`.
+    _t: PhantomData<RwLock<T>>,
 }
 
 /// Unregisters one reader of an [`AtomicBox`] when dropped, on the unwind of a panicking read too.
