@@ -1085,10 +1085,11 @@ fn swap_ctx_round_trips_an_mn_fiber_heap() {
 /// D2b: an M:N fiber carries its own per-task SIDE state too — `out`/`stderr` (Decision-F output
 /// buffers) and the heap-keyed roots `module_objs`/`module_faulted`/`executors` (each a `GcRef`
 /// into the fiber's own heap). A task switch (`swap_task`) round-trips all of them alongside the
-/// heap; the side state is gated on `owns_side`, so a cooperative fiber (`owns_side: false`)
-/// leaves the shell's untouched (asserted separately).
+/// heap for a context with `owns_side`. A task owns its output stream, so `swap_task` moves
+/// `out`/`stderr` for every task context, `owns_side` or not; the `owns_side: false` side state is
+/// [`swap_ctx_leaves_side_state_on_the_shell_without_owns_side`].
 #[test]
-fn mn_swap_ctx_round_trips_fiber_side_state() {
+fn swap_task_round_trips_output_and_owns_side_state() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     vm.out.extend_from_slice(b"host-out");
     vm.stderr.extend_from_slice(b"host-err");
@@ -1209,14 +1210,14 @@ fn eager_scope_round_trips_with_fiber_ctx() {
     ));
 }
 
-/// D2b / Task 1 companion to [`swap_ctx_leaves_heap_untouched_for_cooperative_fiber`]: a fiber with
-/// no side state of its own (`owns_side: false`) leaves the shell's side state untouched, and
-/// `swap_ctx` never moves `out` (only a task switch does) —
-/// but `module_objs`/`module_faulted` now swap UNCONDITIONALLY (Task 1: a child carries its own
-/// deep-copied module view). So swapping in a child with an empty view parks the host's REAL modules
-/// into the ctx.
+/// D2b / Task 1 companion to [`swap_ctx_leaves_heap_untouched_for_cooperative_fiber`]: `swap_ctx`
+/// never moves `out` (only a task switch, `swap_task`, does), for any context. But
+/// `module_objs`/`module_faulted` swap UNCONDITIONALLY, `owns_side` or not (Task 1: a child carries
+/// its own deep-copied module view). So swapping in a child with an empty view parks the host's REAL
+/// modules into the ctx. The `owns_side: false` side state is
+/// [`swap_ctx_leaves_side_state_on_the_shell_without_owns_side`].
 #[test]
-fn mn_swap_ctx_swaps_module_objs_but_not_heap_gated_state_for_cooperative_fiber() {
+fn swap_ctx_moves_module_objs_but_not_out_without_owns_side() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     vm.out.extend_from_slice(b"host-out");
     let host_mod = vm.heap.alloc(Obj::Str("host-mod".into()));
@@ -1233,4 +1234,49 @@ fn mn_swap_ctx_swaps_module_objs_but_not_heap_gated_state_for_cooperative_fiber(
     // child's (empty) view.
     assert!(vm.module_objs.is_empty());
     assert_eq!(ctx.module_objs, vec![host_mod]);
+}
+
+/// M1.6 — a context with `owns_side: false` (and `heap: None`) owns no side state, so `swap_ctx`
+/// leaves the shell's `executors`, `str_intern`, `fn_values`, `pending_connect` and `poll_*`
+/// fields on the shell, and the context's own fields stay empty.
+#[test]
+fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).expect("connect");
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let host_exec = vm.heap.alloc(Obj::Str("host-exec".into()));
+    let host_str = vm.heap.alloc(Obj::Str("host-str".into()));
+    let host_fn = vm.heap.alloc(Obj::Str("host-fn".into()));
+    vm.executors = vec![host_exec];
+    vm.str_intern.insert(0x10, host_str);
+    vm.fn_values.insert(FnKey::Proto(0), host_fn);
+    vm.pending_connect = Some(ConnectInProgress {
+        stream,
+        key: 7,
+        in_flight: Arc::new(AtomicBool::new(false)),
+        span: Span::RUNTIME,
+    });
+    vm.poll_timed_out = true;
+    let deadline = std::time::Instant::now();
+    vm.poll_deadline = Some(deadline);
+    vm.poll_partial = Some(2);
+    vm.poll_written = Some(3);
+    let mut ctx = FiberCtx::default();
+    assert!(!ctx.owns_side && ctx.heap.is_none());
+    for _ in 0..2 {
+        vm.swap_ctx(&mut ctx);
+        assert_eq!(vm.executors, vec![host_exec]);
+        assert_eq!(vm.str_intern.get(&0x10), Some(&host_str));
+        assert_eq!(vm.fn_values.get(&FnKey::Proto(0)), Some(&host_fn));
+        assert_eq!(vm.pending_connect.as_ref().map(|c| c.key), Some(7));
+        assert!(vm.poll_timed_out);
+        assert_eq!(vm.poll_deadline, Some(deadline));
+        assert_eq!(vm.poll_partial, Some(2));
+        assert_eq!(vm.poll_written, Some(3));
+        assert!(ctx.executors.is_empty() && ctx.str_intern.is_empty() && ctx.fn_values.is_empty());
+        assert!(ctx.pending_connect.is_none());
+        assert!(!ctx.poll_timed_out.load(Ordering::Relaxed));
+        assert!(ctx.poll_deadline.is_none() && ctx.poll_partial.is_none());
+        assert!(ctx.poll_written.is_none());
+    }
 }

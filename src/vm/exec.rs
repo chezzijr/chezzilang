@@ -264,7 +264,8 @@ impl Vm {
     /// back into the fiber), and by a box call. The fields [`FiberCtx`] holds, except the output
     /// stream ([`Vm::swap_task`]) and `start` — `pending_exit` stays global.
     pub(super) fn swap_ctx(&mut self, ctx: &mut FiberCtx) {
-        debug_assert_eq!(
+        // M1.7: deleting `heap` deletes this check.
+        assert_eq!(
             ctx.owns_side,
             ctx.heap.is_some(),
             "owns_side must equal heap.is_some() until M1.7"
