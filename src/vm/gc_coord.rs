@@ -634,18 +634,24 @@ mod tests {
         });
     }
 
-    /// The longest stop covers its collection: from the request until the world restarts, so a
-    /// lone thread's collection (no wait for others) still reads its own length.
+    /// The longest stop covers its collection: it is recorded when the world restarts, after the
+    /// collection, so a lone thread's stop (no wait for others) still reads its own length. While
+    /// the first collection runs, no stop is recorded yet.
     #[test]
     fn stop_stats_time_the_whole_stop() {
         within(|| {
             let c = Arc::new(GcCoord::new());
             let mut me = c.attach();
-            me.request_collect(vec![], |_| std::thread::sleep(Duration::from_millis(5)));
+            let mut during = None;
+            me.request_collect(vec![], |_| during = Some(c.stop_stats().1));
+            assert_eq!(
+                during,
+                Some(Duration::ZERO),
+                "recorded before the collection ended"
+            );
             assert!(
-                c.stop_stats().1 >= Duration::from_millis(5),
-                "max stop {:?} misses the collection",
-                c.stop_stats().1
+                c.stop_stats().1 > Duration::ZERO,
+                "the stop was not recorded"
             );
         });
     }
