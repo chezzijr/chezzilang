@@ -285,7 +285,7 @@ impl Vm {
     /// under the exclusive lock.
     fn box_settle(&mut self) -> usize {
         if self.heap.should_collect() {
-            self.collect();
+            self.gc_collect();
         }
         self.heap.approx_bytes()
     }

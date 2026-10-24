@@ -91,6 +91,8 @@ impl Vm {
         worker.sched_registry = Arc::clone(&self.sched_registry);
         // M1.4 — and the root registry, so every fiber built from this worker is listed in the run's.
         worker.root_registry = self.root_registry.clone();
+        // M1.5 — and the stop-the-world coordinator: a thread that drives this worker joins it.
+        worker.gc_coord = Arc::clone(&self.gc_coord);
         // B3.3-threads: thread the parent's host state (process args + env) through so a
         // `--parallel` task reading `std.os.args` / an env var sees the same values instead of inert
         // defaults (the B3.2 silent-divergence owe). `args` is read-only (deep-cloned). `env` is
@@ -466,7 +468,7 @@ impl Vm {
             {
                 break Some(m.deadlock_err.clone());
             }
-            sched.join_tick(slack, DEMOTE_POLL_BACKOFF);
+            self.gc_blocking(&[], |_| sched.join_tick(slack, DEMOTE_POLL_BACKOFF));
         };
         if let (Some(reg), Some(m)) = (reg, self.mn.clone()) {
             reg.release(&m, &mut m.lock());
@@ -535,7 +537,9 @@ impl Vm {
             // read the job's own Executor (see `HOLD_RUN_END_PASS`).
             #[cfg(test)]
             if crate::vm::HOLD_RUN_END_PASS.load(Ordering::Relaxed) && self.fiber_scope.is_some() {
-                std::thread::sleep(std::time::Duration::from_millis(900));
+                self.gc_blocking(&[], |_| {
+                    std::thread::sleep(std::time::Duration::from_millis(900))
+                });
             }
             self.take_job_streams(&sched);
         }
@@ -583,7 +587,9 @@ impl Vm {
                 if crate::vm::HOLD_RUN_END_PASS.load(Ordering::Relaxed)
                     && self.fiber_scope.is_none()
                 {
-                    std::thread::sleep(std::time::Duration::from_millis(600));
+                    self.gc_blocking(&[], |_| {
+                        std::thread::sleep(std::time::Duration::from_millis(600))
+                    });
                 }
             }
             if self.quiesce.exit_origins_begun() == begun {
@@ -595,7 +601,7 @@ impl Vm {
     /// TICKET-284 — move one sched's finished output into this party's buffers, and take over the
     /// count of the exit output it moved ([`Vm::adopt_exit_output`]).
     fn take_job_streams(&mut self, sched: &MnSched) {
-        let (out, stderr, exits) = sched.take_finished_streams();
+        let (out, stderr, exits) = self.gc_blocking(&[], |_| sched.take_finished_streams());
         self.out.extend_from_slice(&out);
         self.stderr.extend_from_slice(&stderr);
         self.adopt_exit_output(exits);

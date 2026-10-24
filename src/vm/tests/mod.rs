@@ -175,10 +175,19 @@ fn run_parity(src: &str) -> String {
     run_capture(src).expect("vm run")
 }
 
+impl MnSched {
+    /// M1.5 — [`MnSched::take_runnable`] for a unit test: a fresh fixture `Vm` that holds no GC
+    /// token is the caller, so each wait runs with no door.
+    pub(super) fn take_runnable_unattached(&self, wid: usize, tick: u64, scope_id: usize) -> Take {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        self.take_runnable(&mut vm, wid, tick, scope_id)
+    }
+}
+
 fn take_run(s: &MnSched) -> Fiber {
     // tick=1 → not a periodic-global-check schedule, so the normal own-local-then-global order
     // applies (what the existing unit tests assert).
-    match s.take_runnable(0, 1, 0) {
+    match s.take_runnable_unattached(0, 1, 0) {
         Take::Run(f, _) => f,
         Take::Stop => panic!("expected a runnable fiber, got Stop"),
     }

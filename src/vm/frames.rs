@@ -249,7 +249,7 @@ impl Vm {
             // VM roots (operand stack, frame slots, frame homes/closures, module namespaces) —
             // there are no mid-opcode temporaries off the stack to miss.
             if self.gc_stress || self.heap.should_collect() {
-                self.collect();
+                self.gc_collect();
                 // `chezzi test --max-heap` — if this test's live heap tripped the cap during the
                 // sweep just run, hard-abort it. Modeled on the `Cut::Cancelled` funnel below: unwind
                 // with `report = false` so `recover:` CANNOT catch it. The check is RE-OBSERVED like a
@@ -276,6 +276,8 @@ impl Vm {
                     return Err(self.unwind_result(over_rte, d, false).over_memory());
                 }
             }
+            // M1.5 — the safepoint: one Relaxed load unless another thread asked for a stop.
+            self.gc_poll();
             // CANCELLATION POINTS (the every-instruction cancel check that used to sit here is GONE).
             // A cancel is observed only at CHECKPOINTS: loop back-edges (`jump_checked`, below) and
             // blocking/park ops (`chan_recv_step` / `op_wait_poll` / the blocking-native offload).

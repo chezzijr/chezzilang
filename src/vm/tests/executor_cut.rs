@@ -534,7 +534,10 @@ fn the_sched_idle_judge_latches_the_verdict_before_it_flags_a_leaf() {
         crate::vm::block::WakeSet::default(),
         Some(("x", Span::RUNTIME)),
     );
-    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop));
+    assert!(matches!(
+        sched.take_runnable_unattached(0, 1, 0),
+        Take::Stop
+    ));
     assert_eq!(sched.quiesce.run_halt(), RunHalt::Deadlock);
 }
 

@@ -740,13 +740,18 @@ impl Vm {
             // gaps.md W7-58 — this thread is now blocked in a nursery join; make it visible to the
             // process-wide verdict for exactly that span (RAII, dropped before the reduce).
             let _party = self.nursery_party_guard(&sched);
-            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, 0, JoinCover::None) {
-                shell.mn_worker_loop(&sched, 0, 0); // owner of scope 0
-            }
-            // The owner returned on scope 0; reduce scope 0's sub-range. The sched is released only when
-            // no early-enlisted outer scope is still pending (else those scopes' slots must survive
-            // until their own joins reduce them — `join_enlisted_scope` releases it at the last).
-            sched.wait_for_scope(0);
+            let shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::None);
+            // M1.5 — the join waits detached; an inline loop attaches its own token.
+            self.gc_blocking(&[], |_| {
+                if let Some(mut shell) = shell {
+                    shell.mn_worker_loop(&sched, 0, 0); // owner of scope 0
+                }
+                // The owner returned on scope 0; reduce scope 0's sub-range. The sched is released
+                // only when no early-enlisted outer scope is still pending (else those scopes' slots
+                // must survive until their own joins reduce them — `join_enlisted_scope` releases it
+                // at the last).
+                sched.wait_for_scope(0);
+            });
         }
         // TICKET-164 — publish this run's pick count on the joining thread (read by
         // run_capture_counting_picks).
@@ -816,10 +821,14 @@ impl Vm {
             // recorded as this join's target for `flag_deadlock_leaves`.
             let _owner =
                 self.blocked_owner_guard(sched, self.owns_nested_sched(sched).then_some(scope_id));
-            if let Some(mut shell) = self.joiner_shell(sched, &cancel, wid, JoinCover::None) {
-                shell.mn_worker_loop(sched, wid, scope_id);
-            }
-            sched.wait_for_scope(scope_id);
+            let shell = self.joiner_shell(sched, &cancel, wid, JoinCover::None);
+            // M1.5 — the join waits detached; an inline loop attaches its own token.
+            self.gc_blocking(&[], |_| {
+                if let Some(mut shell) = shell {
+                    shell.mn_worker_loop(sched, wid, scope_id);
+                }
+                sched.wait_for_scope(scope_id);
+            });
         }
         let slots = sched.take_scope_slots(scope_id);
         self.reduce_task_slots(slots)
@@ -902,10 +911,14 @@ impl Vm {
         {
             // gaps.md W7-58 — the enlisted-scope join blocks this (inline builder) thread too.
             let _party = self.nursery_party_guard(&sched);
-            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, wid, JoinCover::None) {
-                shell.mn_worker_loop(&sched, wid, scope_id);
-            }
-            sched.wait_for_scope(scope_id);
+            let shell = self.joiner_shell(&sched, &cancel, wid, JoinCover::None);
+            // M1.5 — the join waits detached; an inline loop attaches its own token.
+            self.gc_blocking(&[], |_| {
+                if let Some(mut shell) = shell {
+                    shell.mn_worker_loop(&sched, wid, scope_id);
+                }
+                sched.wait_for_scope(scope_id);
+            });
         }
         let slots = sched.take_scope_slots(scope_id);
         self.mn_enlisted -= 1;
@@ -948,10 +961,14 @@ impl Vm {
         {
             // gaps.md W7-58 — the cancel-teardown drain blocks this thread just as the normal join does.
             let _party = self.nursery_party_guard(&sched);
-            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, wid, JoinCover::None) {
-                shell.mn_worker_loop(&sched, wid, scope_id);
-            }
-            sched.wait_for_scope(scope_id);
+            let shell = self.joiner_shell(&sched, &cancel, wid, JoinCover::None);
+            // M1.5 — the join waits detached; an inline loop attaches its own token.
+            self.gc_blocking(&[], |_| {
+                if let Some(mut shell) = shell {
+                    shell.mn_worker_loop(&sched, wid, scope_id);
+                }
+                sched.wait_for_scope(scope_id);
+            });
         }
         let slots = sched.take_scope_slots(scope_id);
         self.mn_enlisted -= 1;
@@ -1249,12 +1266,15 @@ impl Vm {
                 let mut shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::Runners);
                 // TICKET-103 — over the nursery's family: its continuation scopes hold the tasks
                 // spawned after a fiber registered a later scope on this sched.
-                for &s in &sids {
-                    if let Some(shell) = shell.as_mut() {
-                        shell.mn_worker_loop(&sched, 0, s);
+                // M1.5 — the join waits detached; an inline loop attaches its own token.
+                self.gc_blocking(&[], |_| {
+                    for &s in &sids {
+                        if let Some(shell) = shell.as_mut() {
+                            shell.mn_worker_loop(&sched, 0, s);
+                        }
+                        sched.wait_for_scope(s);
                     }
-                    sched.wait_for_scope(s);
-                }
+                });
             }
             let slots: Vec<_> = sids
                 .iter()
@@ -1278,15 +1298,22 @@ impl Vm {
             let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
             // TICKET-211 — `close_body` gave the body's runner slot back; the inline joiner runs
             // fibers only if the claim has a slot left (started runners may already fill it).
-            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, 0, JoinCover::Runners) {
-                shell.mn_worker_loop(&sched, 0, 0);
+            let shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::Runners);
+            // M1.5 — the join waits detached; an inline loop attaches its own token.
+            self.gc_blocking(&[], |_| {
+                if let Some(mut shell) = shell {
+                    shell.mn_worker_loop(&sched, 0, 0);
+                }
+                sched.wait_for_completion();
+            });
+        }
+        // M1.5 — waits for this nursery's runner threads, detached.
+        self.gc_blocking(&[], |_| {
+            if let Some(h) = drainer {
+                let _ = h.join();
             }
-            sched.wait_for_completion();
-        }
-        if let Some(h) = drainer {
-            let _ = h.join();
-        }
-        join_helpers(&sched);
+            join_helpers(&sched);
+        });
         // TICKET-164 — publish this run's pick count on the joining thread (read by
         // run_capture_counting_picks).
         #[cfg(test)]
@@ -1397,12 +1424,15 @@ impl Vm {
                 // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above,
                 // over the same family (TICKET-103).
                 let mut shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::RunnersAbort);
-                for &s in &sids {
-                    if let Some(shell) = shell.as_mut() {
-                        shell.mn_worker_loop(&sched, 0, s);
+                // M1.5 — the join waits detached; an inline loop attaches its own token.
+                self.gc_blocking(&[], |_| {
+                    for &s in &sids {
+                        if let Some(shell) = shell.as_mut() {
+                            shell.mn_worker_loop(&sched, 0, s);
+                        }
+                        sched.wait_for_scope(s);
                     }
-                    sched.wait_for_scope(s);
-                }
+                });
             }
             let slots: Vec<_> = sids
                 .iter()
@@ -1418,16 +1448,22 @@ impl Vm {
             // `main`, which must be a counted party for that span or the process-wide verdict vetoes
             // forever. No-op on a worker shell.
             let _party = self.nursery_party_guard(&sched);
-            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, 0, JoinCover::RunnersAbort)
-            {
-                shell.mn_worker_loop(&sched, 0, 0);
+            let shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::RunnersAbort);
+            // M1.5 — the join waits detached; an inline loop attaches its own token.
+            self.gc_blocking(&[], |_| {
+                if let Some(mut shell) = shell {
+                    shell.mn_worker_loop(&sched, 0, 0);
+                }
+                sched.wait_for_completion();
+            });
+        }
+        // M1.5 — waits for this nursery's runner threads, detached.
+        self.gc_blocking(&[], |_| {
+            if let Some(h) = drainer {
+                let _ = h.join();
             }
-            sched.wait_for_completion();
-        }
-        if let Some(h) = drainer {
-            let _ = h.join();
-        }
-        join_helpers(&sched);
+            join_helpers(&sched);
+        });
         let slots = sched.take_slots();
         // `reduce_task_slots` sets `self.pending_exit` for a handler `os.exit` (decision C — a hard
         // halt wins), which the catch site honors after the drain — so it is NOT lost. A handler
@@ -1457,12 +1493,15 @@ impl Vm {
             let wid = self.wid;
             let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
             let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid, JoinCover::None);
-            for &sid in &sids {
-                if let Some(shell) = shell.as_mut() {
-                    shell.mn_worker_loop(&scope.sched, wid, sid);
+            // M1.5 — the join waits detached; an inline loop attaches its own token.
+            self.gc_blocking(&[], |_| {
+                for &sid in &sids {
+                    if let Some(shell) = shell.as_mut() {
+                        shell.mn_worker_loop(&scope.sched, wid, sid);
+                    }
+                    scope.sched.wait_for_scope(sid);
                 }
-                scope.sched.wait_for_scope(sid);
-            }
+            });
         }
         let slots: Vec<_> = sids
             .iter()
@@ -1486,12 +1525,15 @@ impl Vm {
             let wid = self.wid;
             let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
             let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid, JoinCover::None);
-            for &sid in &sids {
-                if let Some(shell) = shell.as_mut() {
-                    shell.mn_worker_loop(&scope.sched, wid, sid);
+            // M1.5 — the join waits detached; an inline loop attaches its own token.
+            self.gc_blocking(&[], |_| {
+                for &sid in &sids {
+                    if let Some(shell) = shell.as_mut() {
+                        shell.mn_worker_loop(&scope.sched, wid, sid);
+                    }
+                    scope.sched.wait_for_scope(sid);
                 }
-                scope.sched.wait_for_scope(sid);
-            }
+            });
         }
         let slots: Vec<_> = sids
             .iter()

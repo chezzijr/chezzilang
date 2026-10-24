@@ -75,22 +75,24 @@ impl Vm {
         mut ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
     ) -> Result<(), RuntimeError> {
         self.block_halt_check(span)?;
-        let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-        #[cfg_attr(not(test), allow(unused_mut))]
-        let (mut guard, waited) = core
-            .cv
-            .wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
-                !ready(g) && !super::width::reserved()
-            })
-            .unwrap_or_else(|e| e.into_inner());
-        #[cfg(test)]
-        {
-            BLOCK_WAITS.fetch_add(1, Ordering::Relaxed);
-            if waited.timed_out() && ready(&mut guard) {
-                BLOCK_WAITS_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
+        self.gc_blocking(&[], |_| {
+            let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+            #[cfg_attr(not(test), allow(unused_mut))]
+            let (mut guard, waited) = core
+                .cv
+                .wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
+                    !ready(g) && !super::width::reserved()
+                })
+                .unwrap_or_else(|e| e.into_inner());
+            #[cfg(test)]
+            {
+                BLOCK_WAITS.fetch_add(1, Ordering::Relaxed);
+                if waited.timed_out() && ready(&mut guard) {
+                    BLOCK_WAITS_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
+                }
             }
-        }
-        drop((guard, waited));
+            drop((guard, waited));
+        });
         Ok(())
     }
 
@@ -99,7 +101,7 @@ impl Vm {
     /// [`Vm::block_halt_check`] closes is deterministically reachable. No-op unless armed via
     /// [`OWNER_FAULT_WINDOW_ENV`] in this run's own `HostConfig.env`.
     #[cfg(test)]
-    fn owner_fault_window_hook(&self) {
+    fn owner_fault_window_hook(&mut self) {
         if !self.owns_nursery() {
             return;
         }
@@ -115,7 +117,9 @@ impl Vm {
         }
         let t0 = std::time::Instant::now();
         while self.halt_requested().is_none() && t0.elapsed() < std::time::Duration::from_secs(10) {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            self.gc_blocking(&[], |_| {
+                std::thread::sleep(std::time::Duration::from_millis(1))
+            });
         }
     }
 
@@ -393,7 +397,9 @@ impl Vm {
                 return Ok(());
             }
             self.block_halt_check(span)?;
-            std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now));
+            self.gc_blocking(&[], |_| {
+                std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now))
+            });
         }
     }
 
@@ -809,21 +815,25 @@ impl Vm {
             let refs: Vec<&Arc<ChannelCore>> = arm_cores.iter().collect();
             #[cfg(test)]
             WAIT_ARM0_ENTRIES.fetch_add(1, Ordering::Relaxed);
-            self.wait_released_on(&refs, |_| {
-                let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-                #[cfg_attr(not(test), allow(unused_mut))]
-                let (mut guard, waited) = first
-                    .cv
-                    .wait_timeout_while(q, tick, |g| !arm0_ready(g) && !super::width::reserved())
-                    .unwrap_or_else(|e| e.into_inner());
-                #[cfg(test)]
-                {
-                    WAIT_ARM0_BLOCKS.fetch_add(1, Ordering::Relaxed);
-                    if waited.timed_out() && arm0_ready(&mut guard) {
-                        WAIT_ARM0_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
+            self.wait_released_on(&refs, |vm| {
+                vm.gc_blocking(&[], |_| {
+                    let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
+                    #[cfg_attr(not(test), allow(unused_mut))]
+                    let (mut guard, waited) = first
+                        .cv
+                        .wait_timeout_while(q, tick, |g| {
+                            !arm0_ready(g) && !super::width::reserved()
+                        })
+                        .unwrap_or_else(|e| e.into_inner());
+                    #[cfg(test)]
+                    {
+                        WAIT_ARM0_BLOCKS.fetch_add(1, Ordering::Relaxed);
+                        if waited.timed_out() && arm0_ready(&mut guard) {
+                            WAIT_ARM0_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
-                }
-                drop((guard, waited));
+                    drop((guard, waited));
+                })
             });
             drop(party);
             self.pending = Some(op);

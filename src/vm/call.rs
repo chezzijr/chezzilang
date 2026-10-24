@@ -520,14 +520,17 @@ impl Vm {
             }
             _ => None,
         };
-        if in_place {
+        let raw = if in_place {
             self.width_release();
-        }
-        let mut host = VmHost { vm: self, args };
-        let raw = func(&mut host);
-        if in_place {
+            // M1.5 — a native that holds its host thread waits detached. It reads its arguments
+            // (pinned) and returns an off-heap `NativeRet`: it allocates nothing on the heap.
+            let pins: Vec<GcRef> = args.iter().filter_map(|v| v.as_obj()).collect();
+            let raw = self.gc_blocking(&pins, |vm| func(&mut VmHost { vm, args }));
             self.width_acquire();
-        }
+            raw
+        } else {
+            func(&mut VmHost { vm: self, args })
+        };
         if let Some(reg) = reg {
             self.block_exit(reg);
         }

@@ -239,11 +239,7 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<core::UpdateGuard, RuntimeError> {
-        let result = match acquire_update_guard_within(
-            key,
-            self.guard_token,
-            Some(std::time::Duration::ZERO),
-        ) {
+        let result = match core::try_update_guard(key, self.guard_token) {
             Ok(Some(guard)) => Ok(guard),
             Err(cycle) => Err(cycle),
             Ok(None) => {
@@ -300,23 +296,23 @@ impl Vm {
         budget: std::time::Duration,
         span: Span,
     ) -> Result<Result<Option<core::UpdateGuard>, GuardCycle>, RuntimeError> {
-        match core::await_update_guard_free(key, self.guard_token, Some(budget)) {
+        let me = self.guard_token;
+        match self.gc_blocking(&[], |_| {
+            core::await_update_guard_free(key, me, Some(budget))
+        }) {
             Err(c) => return Ok(Err(c)),
             Ok(false) => return Ok(Ok(None)),
             Ok(true) => {}
         }
         self.block_halts(span)?;
         self.width_acquire();
-        let zero = Some(std::time::Duration::ZERO);
-        Ok(
-            match acquire_update_guard_within(key, self.guard_token, zero) {
-                Ok(None) => {
-                    self.width_release();
-                    Ok(None)
-                }
-                r => r,
-            },
-        )
+        Ok(match core::try_update_guard(key, self.guard_token) {
+            Ok(None) => {
+                self.width_release();
+                Ok(None)
+            }
+            r => r,
+        })
     }
 
     /// TICKET-063 — the unbounded half of [`Vm::take_update_guard`], reached once the 5 ms bounded

@@ -44,9 +44,11 @@ impl Vm {
     }
 
     /// TICKET-141 — take a width permit in FIFO order. A no-op for an ungated shell or one that
-    /// already holds a permit.
+    /// already holds a permit. M1.5 — a permit that is not free is waited for through the GC door.
     pub(super) fn width_acquire(&mut self) {
-        width::acquire();
+        if !width::try_acquire() {
+            self.gc_blocking(&[], |_| width::acquire());
+        }
     }
 
     /// TICKET-205 — list this gated thread as an in-place waiter of `cores` for as long as the
@@ -77,7 +79,7 @@ impl Vm {
         let _gated = self.gated_register(cores);
         width::release();
         let r = wait(self);
-        width::acquire();
+        self.width_acquire();
         r
     }
 
@@ -132,9 +134,9 @@ impl Vm {
                     std::hint::spin_loop();
                 }
             }
-            4 if worker_count() >= 2 => {
+            4 if worker_count() >= 2 => self.gc_blocking(&[], |_| {
                 std::thread::sleep(std::time::Duration::from_micros(1 + (r >> 8) % 50))
-            }
+            }),
             _ => {}
         }
     }
@@ -324,9 +326,15 @@ impl Vm {
         boundary_stop: bool,
     ) {
         let held = width::holds();
+        // M1.5 — the thread that runs this loop joins the run's heap for its span. On a thread that
+        // already drives a `Vm`, the caller detached first (`Vm::gc_blocking`).
+        let fresh = self.gc_attach();
         self.mn_worker_loop_inner(sched, wid, owner_scope, boundary_stop);
+        if fresh {
+            self.gc_leave();
+        }
         if held {
-            width::acquire();
+            self.width_acquire();
         }
     }
 
@@ -351,6 +359,8 @@ impl Vm {
         let mut tick: u64 = 0;
         let mut kept: Option<Fiber> = None;
         loop {
+            // M1.5 — the fiber boundary is a safepoint: no fiber is swapped in.
+            self.gc_poll();
             // TICKET-287 (E1) — an inline owner stops at the first fiber boundary after its family
             // is done, even with work still runnable. `take_runnable` tests the same predicate only
             // when no fiber is runnable, and the `kept` re-run skips it, so a busy fiber outside the
@@ -372,7 +382,7 @@ impl Vm {
             let next = tick.wrapping_add(1);
             let (mut fiber, slice) = match kept.take() {
                 Some(f) => (f, Slice::Fresh),
-                None => match sched.take_runnable(wid, next, owner_scope) {
+                None => match sched.take_runnable(self, wid, next, owner_scope) {
                     Take::Run(f, slice) => (f, slice),
                     Take::Stop => {
                         debug_assert!(!width::holds(), "TICKET-141: exit holding a permit");
@@ -457,7 +467,9 @@ impl Vm {
                         && scope_id == 0
                         && matches!(&outcome, TaskOutcome::Exit { code: 3, .. })
                     {
-                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        self.gc_blocking(&[], |_| {
+                            std::thread::sleep(std::time::Duration::from_millis(300))
+                        });
                     }
                     let (aborts, job_fault) = sched.finish(task_index, scope_id, outcome);
                     if job_fault {
@@ -804,7 +816,7 @@ impl Vm {
     /// deterministically reachable. No-op unless armed via [`FINISH_DRAIN_WINDOW_ENV`] in this
     /// run's own `HostConfig.env`.
     #[cfg(test)]
-    fn finish_drain_window_hook(&self) {
+    fn finish_drain_window_hook(&mut self) {
         let armed = self
             .host
             .env
@@ -813,7 +825,9 @@ impl Vm {
             .remove(FINISH_DRAIN_WINDOW_ENV)
             .is_some();
         if armed {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            self.gc_blocking(&[], |_| {
+                std::thread::sleep(std::time::Duration::from_millis(300))
+            });
         }
     }
 
@@ -1350,7 +1364,7 @@ impl Vm {
     /// `is_over_memory` marker alone is what buckets the verdict `OverMemory` and makes it
     /// uncatchable by `recover:`.
     pub(super) fn sample_mem_cap(&mut self, span: Span) -> Result<(), RuntimeError> {
-        self.collect();
+        self.gc_collect();
         if self.heap.over_cap() {
             return Err(self
                 .err(

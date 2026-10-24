@@ -4,7 +4,9 @@
 //! `entersyscall`/`exitsyscall` (`go/src/runtime/proc.go`), cut down to what a mark-sweep needs:
 //!
 //! - An ATTACHED thread holds an [`Attached`] token from [`GcCoord::attach`] and may touch the heap.
-//!   It must reach a safepoint ([`Attached::poll`]) or detach in bounded time.
+//!   It must reach a safepoint ([`Attached::poll`]) or detach in bounded time. One token per OS
+//!   thread: a thread that holds two would count twice, and a stop would wait for the one it does
+//!   not poll with.
 //! - A DETACHED thread ([`Attached::detach`], Go's syscall state) counts as stopped. It publishes its
 //!   roots first, then may block on anything. [`DetachTicket::reattach`] waits for the end of any
 //!   collection before the thread touches the heap again.
@@ -27,20 +29,24 @@
 //! - LEAVE: dropping an [`Attached`] (a return or a panic) leaves the heap, also during a stop.
 //!   Dropping a [`DetachTicket`] without a reattach leaves too and withdraws its published roots.
 //!   A ticket holds its own coordinator, so it can never touch another coordinator's roots.
-//! - A roots closure of `poll` runs before the poll takes the lock: it may call [`GcCoord::epoch`].
+//! - A roots closure of `poll` runs before the poll takes the lock: it may read the coordinator
+//!   (`epoch`, [`GcCoord::stop_stats`]).
+//!   A panic in it unwinds out of `poll` before the thread is counted as stopped. The thread leaves
+//!   mid-stop when the unwind drops its token (accepted: the requester then proceeds without it).
 //!
 //! What the types do not enforce:
 //! - LIVENESS: a thread that holds an [`Attached`] but neither polls nor detaches blocks a collection
 //!   forever (the requester waits for it). Every blocking call of an attached thread must detach
 //!   first; M1.5's guard test enforces that.
 //! - `collect` runs with the lock released and every other attached thread stopped. It must not
-//!   call into the coordinator except [`GcCoord::epoch`]: an `attach` or a reattach there waits
-//!   for the end of this same stop. (The requester's own token is borrowed, so `collect` cannot
-//!   poll or request with it.)
+//!   call into the coordinator except to read it (`epoch`, [`GcCoord::stop_stats`]): an `attach`
+//!   or a reattach there waits for the end of this same stop. (The requester's own token is
+//!   borrowed, so `collect` cannot poll or request with it.)
 
 use crate::vm::value::GcRef;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -62,6 +68,10 @@ struct State {
     /// Roots published by detached threads, keyed by their ticket id.
     detached_roots: Vec<(u64, Vec<GcRef>)>,
     next_ticket: u64,
+    /// Stops that reached `Collecting` (`CHEZZI_HEAP_STATS`).
+    stops: u64,
+    /// The longest time from a request entering `Requested` to `Collecting`.
+    max_stop: Duration,
 }
 
 pub struct GcCoord {
@@ -74,7 +84,9 @@ pub struct GcCoord {
 /// An attached thread's right to touch the heap. Dropping it leaves the heap.
 #[must_use = "dropping the token leaves the heap at once"]
 pub struct Attached {
-    coord: Arc<GcCoord>,
+    /// `None` only after [`Attached::detach`] moved it into the ticket, so the drop does not leave
+    /// a second time.
+    coord: Option<Arc<GcCoord>>,
 }
 
 /// A detached thread's published roots. [`DetachTicket::reattach`] turns it back into an
@@ -97,6 +109,8 @@ impl GcCoord {
                 stopped_roots: Vec::new(),
                 detached_roots: Vec::new(),
                 next_ticket: 0,
+                stops: 0,
+                max_stop: Duration::ZERO,
             }),
             cv: Condvar::new(),
             stw: AtomicBool::new(false),
@@ -119,8 +133,22 @@ impl GcCoord {
     }
 
     /// The number of finished collections.
+    #[cfg(test)]
     pub fn epoch(&self) -> u64 {
         self.lock().gc_epoch
+    }
+
+    /// Is a stop requested? The one Relaxed load a safepoint makes ([`Attached::poll`]), for a
+    /// caller that must build its roots before it polls.
+    #[inline]
+    pub fn stop_requested(&self) -> bool {
+        self.stw.load(Ordering::Relaxed)
+    }
+
+    /// The stops so far and the longest wait of a requester for the world to stop.
+    pub fn stop_stats(&self) -> (u64, Duration) {
+        let st = self.lock();
+        (st.stops, st.max_stop)
     }
 
     /// A thread joins the heap. It waits for a running stop to end first.
@@ -128,7 +156,7 @@ impl GcCoord {
         let mut st = self.wait_idle(self.lock());
         st.attached += 1;
         Attached {
-            coord: self.clone(),
+            coord: Some(self.clone()),
         }
     }
 
@@ -141,6 +169,17 @@ impl GcCoord {
         match st.phase {
             Phase::Idle => {} // a stale `stw` read: the stop already ended, drop the roots
             Phase::Requested | Phase::Collecting => self.park(st, roots),
+        }
+    }
+
+    /// Stop counting one attached thread. Only a requester waits for the count to fall, so the
+    /// wake is made only while one waits: a detach or a leave outside a stop makes no syscall.
+    fn leave(&self, mut st: MutexGuard<'_, State>) {
+        st.attached -= 1;
+        let wake = st.phase == Phase::Requested;
+        drop(st);
+        if wake {
+            self.cv.notify_all();
         }
     }
 
@@ -157,34 +196,47 @@ impl GcCoord {
 }
 
 impl Attached {
+    fn coord(&self) -> &GcCoord {
+        self.coord
+            .as_deref()
+            .expect("a live token holds its coordinator")
+    }
+
     /// A safepoint. Cheap (one Relaxed load) when no stop is requested. Under a stop it hands in
     /// `roots()` and parks until the collection ends.
     #[inline]
     pub fn poll(&mut self, roots: impl FnOnce() -> Vec<GcRef>) {
-        if self.coord.stw.load(Ordering::Relaxed) {
-            self.coord.stop_here(roots);
+        let c = self.coord();
+        if c.stw.load(Ordering::Relaxed) {
+            c.stop_here(roots);
         }
     }
 
     /// Go `entersyscall`: publish `roots` and stop counting this thread. The thread may then block
     /// on anything; it must not touch the heap until [`DetachTicket::reattach`].
-    pub fn detach(self, roots: Vec<GcRef>) -> DetachTicket {
-        let mut st = self.coord.lock();
+    pub fn detach(mut self, roots: Vec<GcRef>) -> DetachTicket {
+        let coord = self
+            .coord
+            .take()
+            .expect("a live token holds its coordinator");
+        let mut st = coord.lock();
         let id = st.next_ticket;
         st.next_ticket += 1;
         st.detached_roots.push((id, roots));
-        drop(st);
-        let coord = Some(self.coord.clone());
-        // The drop of `self` is the leave: `attached -= 1` and a wake for a waiting requester.
-        drop(self);
-        DetachTicket { coord, id }
+        // The roots and the leave in one hold: a requester never sees the thread uncounted
+        // without its roots.
+        coord.leave(st);
+        DetachTicket {
+            coord: Some(coord),
+            id,
+        }
     }
 
     /// Stop the world and run `collect` with every root. If another thread already requested a
     /// stop, this thread stops like a poller instead and `collect` does not run: one collection
     /// serves both. `collect` runs with the lock released (see the module doc).
     pub fn request_collect(&mut self, own_roots: Vec<GcRef>, collect: impl FnOnce(&[GcRef])) {
-        let c = &*self.coord;
+        let c = self.coord();
         let mut st = c.lock();
         match st.phase {
             Phase::Requested | Phase::Collecting => return c.park(st, own_roots),
@@ -192,10 +244,13 @@ impl Attached {
         }
         st.phase = Phase::Requested;
         c.stw.store(true, Ordering::Relaxed);
+        let asked = Instant::now();
         while st.stopped + 1 < st.attached {
             st = c.wait(st);
         }
         st.phase = Phase::Collecting;
+        st.stops += 1;
+        st.max_stop = st.max_stop.max(asked.elapsed());
         let mut roots = own_roots;
         roots.append(&mut st.stopped_roots);
         for (_, r) in &st.detached_roots {
@@ -211,9 +266,9 @@ impl Attached {
 impl Drop for Attached {
     /// Leave: the thread stops counting, also during a stop (a waiting requester proceeds).
     fn drop(&mut self) {
-        let c = &*self.coord;
-        c.lock().attached -= 1;
-        c.cv.notify_all();
+        if let Some(c) = &self.coord {
+            c.leave(c.lock());
+        }
     }
 }
 
@@ -229,7 +284,7 @@ impl DetachTicket {
         withdraw(&mut st, self.id);
         st.attached += 1;
         drop(st);
-        Attached { coord }
+        Attached { coord: Some(coord) }
     }
 }
 
@@ -261,6 +316,7 @@ impl Drop for Release<'_> {
         // The requester drained them, and no thread can park after that: every other attached
         // thread is already parked, and attach and reattach wait for Idle.
         debug_assert!(st.stopped_roots.is_empty());
+        st.stopped_roots.clear();
         st.phase = Phase::Idle;
         c.stw.store(false, Ordering::Relaxed);
         drop(st);
@@ -567,6 +623,24 @@ mod tests {
             drop(ticket);
             me.request_collect(vec![GcRef(1)], |roots| runs.push(sorted(roots)));
             assert_eq!(runs, vec![vec![1, 9], vec![1]]);
+        });
+    }
+
+    /// The stop stats count each collection, not each request: a requester that joins a running
+    /// stop as a poller adds nothing. `stop_requested` reads the flag a safepoint checks.
+    #[test]
+    fn stop_stats_count_each_collection() {
+        within(|| {
+            let c = Arc::new(GcCoord::new());
+            let mut me = c.attach();
+            assert_eq!(c.stop_stats().0, 0);
+            assert!(!c.stop_requested());
+            let mut seen = Vec::new();
+            me.request_collect(vec![], |_| seen.push(c.stop_stats().0));
+            me.request_collect(vec![], |_| {});
+            assert_eq!(seen, vec![1], "the stop counts before its collection runs");
+            assert_eq!(c.stop_stats().0, 2);
+            assert!(!c.stop_requested(), "the flag clears at release");
         });
     }
 }

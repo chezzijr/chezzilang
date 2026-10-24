@@ -419,7 +419,8 @@ pub fn run_built(
     };
     let mut vm = Vm::new(Arc::new(program));
     vm.host = cfg;
-    vm.gc_stress = stress;
+    // `Vm::new` already set it from `CHEZZI_GC_STRESS`.
+    vm.gc_stress |= stress;
     // On a clean finish, gracefully reap any Executor never explicitly shut down (C5 / A2). A
     // deadlock verdict still drains, so finished jobs' buffered output reaches the sink (TICKET-195);
     // skipped on any other fault (the program is already erroring) and on a hard `std.os.exit`
@@ -445,12 +446,16 @@ pub fn run_built(
     // gated on `CHEZZI_HEAP_STATS=1`. `.max(live_bytes())` covers workloads under the GC threshold
     // that never `sweep()` (peak would otherwise be 0). Real stderr, never `vm.out`/`vm.stderr`, so
     // stdout parity is untouched.
+    // M1.5 — and the run's stops of the world: how many, and the longest wait for one.
     if std::env::var("CHEZZI_HEAP_STATS").is_ok() {
         let peak = vm.heap.peak_live_bytes().max(vm.heap.live_bytes());
+        let (stw, stw_max) = vm.gc_coord.stop_stats();
         eprintln!(
-            "[heap-stats] peak_live_bytes={} size_of_value={}",
+            "[heap-stats] peak_live_bytes={} size_of_value={} stw={} stw_max_us={}",
             peak,
-            std::mem::size_of::<Value>()
+            std::mem::size_of::<Value>(),
+            stw,
+            stw_max.as_micros()
         );
     }
     // A pending exit means `result` is the `exit()` unwind sentinel, not a fault: report the

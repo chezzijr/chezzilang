@@ -92,6 +92,12 @@ pub fn acquire_update_guard_within(
     }
 }
 
+/// M1.5 — take the update guard for `key` as task `me` only if no wait is needed: a zero budget,
+/// so it returns at once. `Ok(None)`: another task holds it.
+pub fn try_update_guard(key: usize, me: u64) -> Result<Option<UpdateGuard>, GuardCycle> {
+    acquire_update_guard_within(key, me, Some(Duration::ZERO))
+}
+
 /// TICKET-193 — what an acquire of `key` by task `me` would do right now. The ONE decider: the wait
 /// loop ([`wait_update_guard`]) and the deadlock verdict ([`guard_wait_satisfiable`]) both read it.
 /// The cycle walk starts at `waiting[me]`, so a caller that wants the cycle answer registers first.

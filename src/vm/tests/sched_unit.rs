@@ -372,7 +372,7 @@ fn mn_owner_stops_on_own_scope_not_global() {
     }
     // The owner of the DONE scope 0 stops immediately (queue empty, its scope done).
     assert!(
-        matches!(sched.take_runnable(0, 1, 0), Take::Stop),
+        matches!(sched.take_runnable_unattached(0, 1, 0), Take::Stop),
         "owner of done scope 0 stops"
     );
     // The global terminate was NOT set (scope 1 still in flight), so the stop was scope-scoped, not
@@ -893,7 +893,7 @@ fn offload_native_panic_still_completes_and_faults() {
         std::thread::yield_now();
     }
     // The fiber came back runnable carrying a fault to raise on resume.
-    let f0 = match sched.take_runnable(0, 1, 0) {
+    let f0 = match sched.take_runnable_unattached(0, 1, 0) {
         Take::Run(f, _) => f,
         Take::Stop => panic!("fiber not requeued after panicking offload"),
     };
@@ -1418,7 +1418,7 @@ fn offload_runs_native_and_requeues_fiber_with_result() {
 
     // The requeued fiber carries the lowered-pending native result (Int(21)*2 == Int(42)).
     let mut found = None;
-    while let Take::Run(f, _) = sched.take_runnable(0, 1, 0) {
+    while let Take::Run(f, _) = sched.take_runnable_unattached(0, 1, 0) {
         if f.task_index == 0 {
             found = Some(f);
             break;
@@ -1490,7 +1490,7 @@ fn timer_offload_parks_then_requeues_fiber_with_nil() {
     );
 
     let mut found = None;
-    while let Take::Run(f, _) = sched.take_runnable(0, 1, 0) {
+    while let Take::Run(f, _) = sched.take_runnable_unattached(0, 1, 0) {
         if f.task_index == 0 {
             found = Some(f);
             break;

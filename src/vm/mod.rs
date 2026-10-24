@@ -7,9 +7,8 @@ mod blocking_pool;
 pub mod chzstr;
 pub mod core;
 mod fxhash;
-// wired in M1.5
-#[cfg_attr(not(test), allow(dead_code))]
 mod gc_coord;
+mod gc_door;
 pub mod heap;
 mod heap_core;
 mod heap_slab;
@@ -29,7 +28,7 @@ use crate::base::{crossing, op};
 use core::{
     AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore,
     GUARD_DEMOTE_BUDGET, GuardCycle, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
-    SocketCore, WriterCore, acquire_update_guard_within,
+    SocketCore, WriterCore,
 };
 use heap::{Fields, Heap, Identity, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
@@ -1485,6 +1484,11 @@ pub struct Vm {
     /// [`RootRegistry`]). Shared (not copied) with every worker `Vm` by [`Vm::spawn_worker`], and
     /// per-run for the same reason [`Vm::exec_registry`] is.
     root_registry: RootRegistry,
+    /// M1.5 — the run's stop-the-world coordinator. Shared (not copied) with every worker `Vm` by
+    /// [`Vm::spawn_worker`], per run for the same reason [`Vm::exec_registry`] is.
+    gc_coord: Arc<gc_coord::GcCoord>,
+    /// M1.5 — this thread's GC token while it drives this `Vm` (`gc_door.rs`).
+    attached: Option<gc_door::ThreadToken>,
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its

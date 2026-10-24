@@ -2,6 +2,7 @@
 //! Split out of `src/vm/tests.rs`. `super::*` is the parent module.
 
 use super::*;
+use crate::vm::core::acquire_update_guard_within;
 
 // ===== Multi-line pipe chains (leading-`|>` line continuation) + `iter.sum` =====
 

@@ -157,7 +157,7 @@ impl Vm {
             box_view_err: None,
             fault_trace: None,
             fault_trace_depth: 0,
-            gc_stress: false,
+            gc_stress: gc_door::gc_stress_env(),
             nurseries: Vec::new(),
             mn_scopes: Vec::new(),
             mn_enlisted: 0,
@@ -170,6 +170,8 @@ impl Vm {
             exec_registry: Arc::new(Mutex::new(Vec::new())),
             sched_registry: Arc::new(Mutex::new(Vec::new())), // W7-56
             root_registry: RootRegistry::default(),           // M1.4
+            gc_coord: Arc::new(gc_coord::GcCoord::new()),     // M1.5
+            attached: None,
             suspend: None,
             join_suspend: None,
             wait_suspend: None,
@@ -752,8 +754,10 @@ impl Vm {
         #[cfg(test)]
         width::set_probe(Some(Arc::clone(&self.quiesce.width_probe)));
         if self.run_permit.is_none() {
-            self.run_permit = Some(width::RunPermit::take());
+            self.run_permit = Some(self.gc_blocking(&[], |_| width::RunPermit::take()));
         }
+        // M1.5 — this thread runs the program: it joins the run's heap until the `Vm` drops.
+        self.gc_attach();
         for idx in 0..self.program.modules.len() {
             self.run_module(idx)?;
         }

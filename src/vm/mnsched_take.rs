@@ -13,9 +13,18 @@ impl MnSched {
     /// queue to test under the split); `running == 0` is the key — while any fiber runs it might
     /// `send`/`yield` and make a sibling runnable, so an idle worker waits rather than declaring
     /// deadlock. (D4c will insert work-stealing passes between the local and the park.)
-    pub(super) fn take_runnable(&self, wid: usize, tick: u64, scope_id: usize) -> Take {
+    ///
+    /// M1.5 — `vm` is the worker shell that calls this, with no fiber swapped in: each wait here
+    /// runs through its GC door ([`Vm::gc_blocking`]), so a stop never waits for an idle worker.
+    pub(super) fn take_runnable(
+        &self,
+        vm: &mut Vm,
+        wid: usize,
+        tick: u64,
+        scope_id: usize,
+    ) -> Take {
         let mut spun = false;
-        let t = self.take_runnable_inner(wid, tick, scope_id, &mut spun);
+        let t = self.take_runnable_inner(vm, wid, tick, scope_id, &mut spun);
         #[cfg(test)]
         if matches!(t, Take::Run(..)) {
             self.picks.fetch_add(1, Ordering::Relaxed);
@@ -45,7 +54,14 @@ impl MnSched {
         }
     }
 
-    fn take_runnable_inner(&self, wid: usize, tick: u64, scope_id: usize, spun: &mut bool) -> Take {
+    fn take_runnable_inner(
+        &self,
+        vm: &mut Vm,
+        wid: usize,
+        tick: u64,
+        scope_id: usize,
+        spun: &mut bool,
+    ) -> Take {
         // gaps.md W7-58 — "this worker has already asked the process-wide verdict since its last
         // wait". Bounds the (relatively expensive, `parties`-locking) escalation below to ONE call per
         // wait, so it can never spin. It is NOT a claim that the verdict's inputs only move on a
@@ -86,7 +102,7 @@ impl MnSched {
             // old pick rule: an idle holder must not draw from the seeded RNG (`try_steal`, the
             // global-first coin) with nothing runnable (DEC-205, DEC-209).
             if !width::holds() && (self.runnable.load(Ordering::Relaxed) > 0 || width::reserved()) {
-                width::acquire();
+                vm.width_acquire();
             } else if !sched_seed::on() {
                 width::try_acquire();
             }
@@ -217,11 +233,13 @@ impl MnSched {
             if self.detached.is_some() && c.all_scopes_done() {
                 if !lingered {
                     lingered = true;
-                    let (guard, _) = self
-                        .cv
-                        .wait_timeout(c, EXEC_RUNNER_LINGER)
-                        .unwrap_or_else(|e| e.into_inner());
-                    drop(guard);
+                    vm.gc_blocking(&[], |_| {
+                        let (guard, _) = self
+                            .cv
+                            .wait_timeout(c, EXEC_RUNNER_LINGER)
+                            .unwrap_or_else(|e| e.into_inner());
+                        drop(guard);
+                    });
                     continue;
                 }
                 c.release_runner(wid);
@@ -265,11 +283,13 @@ impl MnSched {
                 let Some(relocked) =
                     self.latch_own_verdict(|c| c.victims_proven() || self.may_fault_unproven())
                 else {
-                    let (guard, _) = self
-                        .cv
-                        .wait_timeout(self.lock(), DEMOTE_POLL_BACKOFF)
-                        .unwrap_or_else(|e| e.into_inner());
-                    drop(guard);
+                    vm.gc_blocking(&[], |_| {
+                        let (guard, _) = self
+                            .cv
+                            .wait_timeout(self.lock(), DEMOTE_POLL_BACKOFF)
+                            .unwrap_or_else(|e| e.into_inner());
+                        drop(guard);
+                    });
                     judged = false;
                     continue;
                 };
@@ -281,11 +301,13 @@ impl MnSched {
                 // licenses it yet: wait (timed — `judged = false` so the next pass re-derives the
                 // W7-58 verdict too), never spin on the same declined judgement.
                 let Some(done) = self.flag_leaves_and_wake(&mut c) else {
-                    let (guard, _) = self
-                        .cv
-                        .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                        .unwrap_or_else(|e| e.into_inner());
-                    drop(guard);
+                    vm.gc_blocking(&[], |_| {
+                        let (guard, _) = self
+                            .cv
+                            .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                            .unwrap_or_else(|e| e.into_inner());
+                        drop(guard);
+                    });
                     judged = false;
                     continue;
                 };
@@ -338,11 +360,13 @@ impl MnSched {
                     // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict
                     // wait as above.
                     let Some(done) = self.flag_leaves_and_wake(&mut c) else {
-                        let (guard, _) = self
-                            .cv
-                            .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                            .unwrap_or_else(|e| e.into_inner());
-                        drop(guard);
+                        vm.gc_blocking(&[], |_| {
+                            let (guard, _) = self
+                                .cv
+                                .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                                .unwrap_or_else(|e| e.into_inner());
+                            drop(guard);
+                        });
                         continue;
                     };
                     self.notify_waiters();
@@ -384,11 +408,13 @@ impl MnSched {
             if self.runnable.load(Ordering::Relaxed) > 0 {
                 self.spinning.fetch_add(1, Ordering::Relaxed);
                 *spun = true;
-                let (guard, _) = self
-                    .cv
-                    .wait_timeout(c, SPIN_BACKOFF)
-                    .unwrap_or_else(|e| e.into_inner());
-                drop(guard);
+                vm.gc_blocking(&[], |_| {
+                    let (guard, _) = self
+                        .cv
+                        .wait_timeout(c, SPIN_BACKOFF)
+                        .unwrap_or_else(|e| e.into_inner());
+                    drop(guard);
+                });
                 self.spinning.fetch_sub(1, Ordering::Relaxed);
                 judged = false; // W7-58 — a real wait ended: the verdict's inputs may have moved.
                 continue;
@@ -421,11 +447,13 @@ impl MnSched {
             match self.joiner_step(&c, me, &mut idle_since) {
                 JoinerStep::Untimed => {}
                 JoinerStep::Timed => {
-                    let (guard, _) = self
-                        .cv
-                        .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                        .unwrap_or_else(|e| e.into_inner());
-                    drop(guard);
+                    vm.gc_blocking(&[], |_| {
+                        let (guard, _) = self
+                            .cv
+                            .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                            .unwrap_or_else(|e| e.into_inner());
+                        drop(guard);
+                    });
                     judged = false;
                     continue;
                 }
@@ -437,11 +465,13 @@ impl MnSched {
                 }
             }
             if judged {
-                let (guard, _) = self
-                    .cv
-                    .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                    .unwrap_or_else(|e| e.into_inner());
-                drop(guard);
+                vm.gc_blocking(&[], |_| {
+                    let (guard, _) = self
+                        .cv
+                        .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                        .unwrap_or_else(|e| e.into_inner());
+                    drop(guard);
+                });
             } else {
                 // TICKET-128 (W13-25) — a worker with NOTHING runnable sleeps on `idle_cv`, not `cv`,
                 // so a rendezvous handoff can recruit exactly this one sleeper (`recruit`) instead of
@@ -454,18 +484,22 @@ impl MnSched {
                 // untimed on `idle_cv` as before TICKET-230, and every wake reaches it through
                 // `notify_waiters` or `recruit`.
                 if !width::listed() {
-                    self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
-                    let guard = self.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
-                    self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
-                    drop(guard);
+                    vm.gc_blocking(&[], |_| {
+                        self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+                        let guard = self.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
+                        self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
+                        drop(guard);
+                    });
                 } else if !width::reserved() {
-                    self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
-                    let (guard, _) = self
-                        .idle_cv
-                        .wait_timeout(c, DEMOTE_POLL_BACKOFF)
-                        .unwrap_or_else(|e| e.into_inner());
-                    self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
-                    drop(guard);
+                    vm.gc_blocking(&[], |_| {
+                        self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+                        let (guard, _) = self
+                            .idle_cv
+                            .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                            .unwrap_or_else(|e| e.into_inner());
+                        self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
+                        drop(guard);
+                    });
                 }
             }
             judged = false; // W7-58 — see above.

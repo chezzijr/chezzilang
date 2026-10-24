@@ -529,7 +529,10 @@ fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_pa
         "fiber parks while the ancestor is not yet cancelled"
     );
     crate::vm::trip_cancel_flag(&ancestor);
-    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Run(..)));
+    assert!(matches!(
+        sched.take_runnable_unattached(0, 1, 0),
+        Take::Run(..)
+    ));
     assert_eq!(
         sched.lock().parked_n,
         0,
@@ -581,7 +584,10 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
     let b = take_run(&sched);
     sched.park(core_key(&c1), Arc::clone(&c1), a);
     sched.park(core_key(&c2), Arc::clone(&c2), b);
-    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop));
+    assert!(matches!(
+        sched.take_runnable_unattached(0, 1, 0),
+        Take::Stop
+    ));
     let slots = sched.take_slots();
     assert_eq!(slots.len(), 2);
     for s in slots {
@@ -1565,7 +1571,7 @@ fn mnsched_a_vetoed_sched_polls_instead_of_parking_untimed() {
     let (tx, rx) = std::sync::mpsc::channel();
     let a2 = Arc::clone(&a);
     std::thread::spawn(move || {
-        tx.send(matches!(a2.take_runnable(0, 1, 0), Take::Stop))
+        tx.send(matches!(a2.take_runnable_unattached(0, 1, 0), Take::Stop))
             .ok();
     });
 
@@ -1794,7 +1800,10 @@ fn mnsched_finish_writes_slot_and_terminates_at_total() {
         assert_eq!(c.scopes[0].done, 2);
         assert!(c.terminate);
     }
-    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop));
+    assert!(matches!(
+        sched.take_runnable_unattached(0, 1, 0),
+        Take::Stop
+    ));
 }
 
 /// D2b/U5 (mechanics half): `cancel_drain` moves every parked fiber back onto the run queue so a

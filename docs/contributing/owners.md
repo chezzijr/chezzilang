@@ -99,6 +99,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Bytecode | `Op` (`base/op.rs`) | |
 | `==` between values | `values_equal_guarded` (`vm/equality.rs`) | |
 | May this op block here, and how | `mode` (`vm/block.rs`), `block_ctx` (`vm/block.rs`) | TICKET-181 |
+| May a thread wait while it holds a GC token | `Vm::gc_blocking` (`vm/gc_door.rs`) | M1.5: every wait of an attached thread runs in its closure; `tests/wait_site_guard.rs` scans `src/vm` for each wait and lists the waits of threads that hold no token |
 | May an abort of a fiber-owned nursery park this fiber | `park_abort_origin` (`vm/nursery.rs`) | TICKET-287: read by the `return`/`?` escape park, the fault unwind, the cancel funnel and the catching `recover:`; a fault carries its state in `Fiber::fault_park` (`FaultPark`, `vm/frames.rs`) |
 | CPU width / runner permits | `RUNNERS` (`vm/width.rs`) | TICKET-205/230 |
 | Quiescence verdict | `decide_since` (`vm/quiesce.rs`) | |
@@ -178,6 +179,7 @@ file at 2,500 lines and a test file at 3,500.
 | VM: shared heap state | `vm/heap_core.rs` (`HeapCore`: the slab, the free list, the mark and copy bits, the GC counters, shared by every `Heap` handle on it) |
 | VM: GC roots | `vm/root_registry.rs` (`RootView`, the one root walk of an execution context that `Vm::gc_roots`, `GeneratorCore::gc_roots` and `FiberCtx::roots` call; `RootRegistry`, the run's list of boxed fiber contexts, each a `CtxBox`) |
 | VM: stop-the-world GC coordinator | `vm/gc_coord.rs` (`GcCoord`, and the `Attached` and `DetachTicket` tokens: attach, leave, detach and reattach, safepoint polls, one collection per stop, the root hand-off) |
+| VM: GC door | `vm/gc_door.rs` (each thread's GC token on the `Vm` it drives: attach and leave, the safepoint poll, the GC entry `Vm::gc_collect`, and `Vm::gc_blocking`, the one door each wait of an attached thread runs in) |
 | Base (read by the front end and the VM) | `base/op.rs` (bytecode, `Program`, `CompileError`), `base/crossing.rs`, `base/hooks.rs`, `base/json_desc.rs`, `base/module_id.rs`, `base/provider_name.rs`, `base/words.rs` |
 | Run drivers (front end, then VM) | `run.rs` |
 | VM: execution | `vm/exec.rs` (setup, invoke), `vm/frames.rs` (frames, halts), `vm/step.rs` (dispatch loop), `vm/call.rs` (calls, natives), `vm/method_call.rs` (methods, hooks), `vm/json_decode.rs` |
