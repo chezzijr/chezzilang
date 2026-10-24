@@ -357,10 +357,13 @@ impl HeapCore {
         {
             let mut st = lock(&self.alloc_lock);
             let mut spans = lock(&self.err_spans);
+            // No copy bit was ever set: the freed slots have none to clear.
+            let any_copied = self.any_copied.load(Ordering::Relaxed);
             // SAFETY: the caller's contract above: the gc_coord invariant, every other handle
             // stopped or detached for the sweep (`vm/gc_coord.rs`).
             for (start, seg) in unsafe { self.slots.segments_mut() } {
                 let marks = self.marks.segment_words(start);
+                let copied = self.copied.segment_words(start);
                 for (idx, slot) in (start..).zip(seg.iter_mut()) {
                     if slot.obj.is_none() {
                         continue;
@@ -381,8 +384,17 @@ impl HeapCore {
                                 slot.obj = None;
                             }
                             st.free.push(idx as u32);
-                            spans.remove(&(idx as u32));
-                            self.copied.clear(idx);
+                            if !spans.is_empty() {
+                                spans.remove(&(idx as u32));
+                            }
+                            // A load and, for a set bit, a store: the world is stopped, so the
+                            // locked `fetch_and` of `SlotBits::clear` was a cost per freed slot.
+                            if any_copied
+                                && let Some(w) = copied.get((idx >> 6) - (start >> 6))
+                                && w.load(Ordering::Relaxed) & bit != 0
+                            {
+                                w.store(w.load(Ordering::Relaxed) & !bit, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -502,6 +514,29 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A sweep clears the copy bit of each slot it frees and keeps a survivor's, in the inline
+    /// low word (slots below 64) and in a segment past it, before any reuse could clear it.
+    #[test]
+    fn sweep_clears_copy_bits_of_freed_slots_only() {
+        let mut heap = Heap::new();
+        let refs: Vec<GcRef> = (0..300).map(|i| heap.alloc(Obj::BigInt(i))).collect();
+        for &r in &refs {
+            heap.set_copied(r);
+        }
+        for &r in refs.iter().step_by(3) {
+            heap.mark(r);
+        }
+        heap.sweep();
+        for (i, &r) in refs.iter().enumerate() {
+            assert_eq!(
+                heap.is_copied(r),
+                i % 3 == 0,
+                "slot {} after the sweep",
+                r.0
+            );
         }
     }
 
