@@ -90,9 +90,11 @@ macro_rules! word_elem {
         impl sealed::Sealed for $t {}
         impl Elem for $t {
             type Slot = AtomicU64;
+            #[inline(always)]
             fn load(slot: &AtomicU64) -> Self {
                 $from(slot.load(Ordering::Relaxed))
             }
+            #[inline(always)]
             fn store(slot: &AtomicU64, v: Self) {
                 slot.store($to(v), Ordering::Relaxed);
             }
@@ -109,9 +111,11 @@ word_elem!(Value, Value::to_bits, Value::from_bits);
 impl sealed::Sealed for (u64, Value, Value) {}
 impl Elem for (u64, Value, Value) {
     type Slot = [AtomicU64; 3];
+    #[inline(always)]
     fn load([h, k, v]: &[AtomicU64; 3]) -> Self {
         (u64::load(h), Value::load(k), Value::load(v))
     }
+    #[inline(always)]
     fn store([h, k, v]: &[AtomicU64; 3], (eh, ek, ev): Self) {
         u64::store(h, eh);
         Value::store(k, ek);
@@ -123,9 +127,11 @@ impl Elem for (u64, Value, Value) {
 impl sealed::Sealed for (u64, u64) {}
 impl Elem for (u64, u64) {
     type Slot = [AtomicU64; 2];
+    #[inline(always)]
     fn load([h, p]: &[AtomicU64; 2]) -> Self {
         (u64::load(h), u64::load(p))
     }
+    #[inline(always)]
     fn store([h, p]: &[AtomicU64; 2], (eh, ep): Self) {
         u64::store(h, eh);
         u64::store(p, ep);
@@ -136,9 +142,11 @@ impl Elem for (u64, u64) {
 impl sealed::Sealed for (u64, Value) {}
 impl Elem for (u64, Value) {
     type Slot = [AtomicU64; 2];
+    #[inline(always)]
     fn load([h, e]: &[AtomicU64; 2]) -> Self {
         (u64::load(h), Value::load(e))
     }
+    #[inline(always)]
     fn store([h, e]: &[AtomicU64; 2], (eh, ee): Self) {
         u64::store(h, eh);
         Value::store(e, ee);
@@ -148,9 +156,11 @@ impl Elem for (u64, Value) {
 impl sealed::Sealed for u8 {}
 impl Elem for u8 {
     type Slot = AtomicU8;
+    #[inline(always)]
     fn load(slot: &AtomicU8) -> Self {
         slot.load(Ordering::Relaxed)
     }
+    #[inline(always)]
     fn store(slot: &AtomicU8, v: Self) {
         slot.store(v, Ordering::Relaxed);
     }
@@ -166,26 +176,29 @@ pub(super) struct Header {
 }
 
 impl Header {
+    #[inline(always)]
     fn cap(&self) -> usize {
         self.cap as usize
     }
 
+    #[inline(always)]
     fn len(&self) -> usize {
         self.len.load(Ordering::Acquire) as usize
     }
 
     /// Publish `n` elements (Release: the slots below `n` are written first).
+    #[inline(always)]
     fn set_len(&self, n: usize) {
         self.len.store(n as u64, Ordering::Release);
     }
 }
 
-/// The offset of slot 0 from the block's start (the same for every `cap`).
+/// The offset of slot 0 from the block's start (the same for every `cap`): the header, padded to
+/// the slot's alignment, as `Layout::extend` places it. A constant, so a slot access in a debug
+/// build does not run the layout math (it was most of a list op's time there).
+#[inline(always)]
 fn data_offset<T: Elem>() -> usize {
-    Layout::new::<Header>()
-        .extend(Layout::new::<T::Slot>())
-        .expect("an RVec block layout")
-        .1
+    const { size_of::<Header>().next_multiple_of(align_of::<T::Slot>()) }
 }
 
 /// The layout of a block of `cap` slots, or `None` when its byte size passes `isize::MAX`.
@@ -298,6 +311,7 @@ unsafe fn free_block(ptr: NonNull<u8>, layout: Layout) {
 /// # Safety
 ///
 /// `h` is a live block of `T`s and `i < cap`; the returned reference does not outlive the block.
+#[inline(always)]
 unsafe fn slot<'a, T: Elem>(h: *mut Header, i: usize) -> &'a T::Slot {
     // SAFETY: the caller's contract: the slot lies inside the block's allocation, and
     // `alloc_block` zeroed it, so it is a valid `T::Slot`.
@@ -314,6 +328,7 @@ unsafe fn slot<'a, T: Elem>(h: *mut Header, i: usize) -> &'a T::Slot {
 /// # Safety
 ///
 /// As for [`slot`].
+#[inline(always)]
 unsafe fn load<T: Elem>(h: *mut Header, i: usize) -> T {
     let () = T::FITS_SLOT;
     // SAFETY: the caller's contract.
@@ -325,6 +340,7 @@ unsafe fn load<T: Elem>(h: *mut Header, i: usize) -> T {
 /// # Safety
 ///
 /// As for [`slot`].
+#[inline(always)]
 unsafe fn store<T: Elem>(h: *mut Header, i: usize, v: T) {
     let () = T::FITS_SLOT;
     // SAFETY: the caller's contract.
@@ -866,6 +882,7 @@ pub struct Iter<'a, T: Elem> {
 impl<T: Elem> Iterator for Iter<'_, T> {
     type Item = T;
 
+    #[inline(always)]
     fn next(&mut self) -> Option<T> {
         if self.i >= self.len {
             return None;
@@ -1012,6 +1029,34 @@ mod tests {
     use crate::vm::value::Value;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The constant slot offset is where `Layout::extend` puts the first slot, for every element
+    /// type (the block layout reads `Layout`, a slot access reads the constant).
+    #[test]
+    fn data_offset_matches_the_block_layout() {
+        use super::{Elem, Header, data_offset};
+        use crate::vm::map_data::{IndexSlot, MapEntry, SetEntry};
+        use std::alloc::Layout;
+        fn check<T: Elem>() {
+            let by_layout = Layout::new::<Header>()
+                .extend(Layout::new::<T::Slot>())
+                .unwrap()
+                .1;
+            assert_eq!(
+                data_offset::<T>(),
+                by_layout,
+                "{}",
+                std::any::type_name::<T>()
+            );
+        }
+        check::<u8>();
+        check::<u64>();
+        check::<i64>();
+        check::<Value>();
+        check::<MapEntry>();
+        check::<SetEntry>();
+        check::<IndexSlot>();
+    }
 
     /// An iterator whose size hint is exact is collected straight into one block of that size.
     /// The hint is not trusted: a short iterator publishes only what it wrote, and a long one
