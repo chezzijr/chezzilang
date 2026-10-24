@@ -180,8 +180,8 @@ file at 2,500 lines and a test file at 3,500.
 | VM: core | `vm/mod.rs` (types, errors, traces, module declarations), `vm/value.rs`, `vm/heap.rs`, `vm/chzstr.rs`, `vm/entry.rs` (`run_built`, test run helpers), `vm/host.rs` |
 | VM: heap slot storage | `vm/heap_slab.rs` (the segmented slab: `GcRef` to segment and offset, segments that never move; `SlotBits`, the per-slot bitsets) |
 | VM: shared heap state | `vm/heap_core.rs` (`HeapCore`: the slab, the free list, the mark and copy bits, the run-wide GC counters, shared by every `Heap` handle of one run) |
-| VM: retiring vector | `vm/rvec.rs` (`RVec`, the growable vector of `Elem`s whose grows retire the old block on the `Heap` handle's `RetireList`; `RBox`, one boxed value whose swaps retire the old box; the run's list, which the stop-the-world sweep frees) |
-| VM: map and set payloads | `vm/map_data.rs` (`MapData`, `SetData`, the plain `HashIndex` a wire table also owns, and the heap side's clone-on-grow index whose old tables retire) |
+| VM: retiring vector | `vm/rvec.rs` (`RVec`, the growable vector of `Elem`s whose grows retire the old block on the `Heap` handle's `RetireList`; the run's list, which the stop-the-world sweep frees) |
+| VM: map and set payloads | `vm/map_data.rs` (`MapData`, `SetData`, and their index: an open-addressing table on atomic slots whose old tables retire) |
 | VM: view stamp | `vm/heap_view.rs` (`ViewState`: the TICKET-213 view of one execution context, its stamp and its per-slot bits) |
 | VM: GC roots | `vm/root_registry.rs` (`RootView`, the one root walk of an execution context that `Vm::gc_roots`, `GeneratorCore::gc_roots` and `FiberCtx::roots` call; `RootRegistry`, the run's list of boxed fiber contexts, each a `CtxBox`) |
 | VM: stop-the-world GC coordinator | `vm/gc_coord.rs` (`GcCoord`, and the `Attached` and `DetachTicket` tokens: attach, leave, detach and reattach, safepoint polls, one collection per stop, the root hand-off) |

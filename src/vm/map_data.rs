@@ -1,177 +1,150 @@
-//! The hash map and set payloads (`MapData`, `SetData`) and their hash index (`HashIndex`).
+//! The hash map and set payloads (`MapData`, `SetData`) and their hash index (`SharedIndex`).
 //!
-//! M2.3 (Go parity, `vm/rvec.rs`): a map's entries live on an [`RVec`] and its index in an
-//! [`RBox`], so a grow, a remove or a rewrite retires the old entry block or index table, and only
-//! the stop-the-world sweep frees it. A racy prober can see a torn entry or a half-written table
-//! (the user's race, a documented known limit), but never freed memory:
-//! - An insert that fits the current table writes it in place. An insert of a new key into a full
-//!   table clones the table into one twice the size, swaps it in, and retires the old one.
-//! - A `Pos::Many` overflow vec pushes in place while it has spare capacity; a full one is copied
-//!   into a new vec twice the size, and the old vec retires.
+//! M2.3 (Go parity, `vm/rvec.rs`): a map's entries and its index each live on an [`RVec`], so a
+//! grow, a remove or a rewrite retires the old entry block or index table, and only the
+//! stop-the-world sweep frees it. A racy prober can see a torn entry or a half-written slot (a
+//! wrong or missing hit: the user's race, a documented known limit), but every read is an atomic
+//! load inside a live block:
+//! - The index is an open-addressing table of [`IndexSlot`]s, `(cached hash, position + 1)`, with
+//!   linear probing; position 0 is an empty slot. A collision takes the next free slot.
+//! - The load factor stays at most 1/2: an insert whose entry count would pass half the capacity
+//!   builds a table twice the size, swaps it in, and retires the old one. Any other insert writes
+//!   one empty slot in place.
+//! - A probe reads at most `capacity` slots, so a racy table cannot make it loop, and it yields
+//!   only positions below the entry count it read first.
 //! - A remove builds a new entry block and a new table, and swaps both in.
 //!
 //! The borrow rule (as for a list, M2.2): a mutator takes `&self` plus the `&Heap` that
 //! `Heap::write(h)` hands back for a heap object, or the VM's `&self.heap` for a Rust-local
-//! payload. A caller holds no `candidates` slice across a mutator call.
+//! payload.
 
-use super::fxhash::FxHashMap;
 use super::heap::Heap;
-use super::rvec::{RBox, RVec, retire_box};
+use super::rvec::{RVec, View};
 use super::value::Value;
 
 /// A map entry: `(cached hash, key, value)`.
 pub type MapEntry = (u64, Value, Value);
 /// A set entry: `(cached hash, element)`.
 pub type SetEntry = (u64, Value);
+/// One index slot: `(cached hash, position + 1)`; a zero position is an empty slot.
+pub(super) type IndexSlot = (u64, u64);
 
-/// A single key's position(s) in `entries`. Numeric keys hash injectively (`(n as f64).to_bits()`),
-/// so the overwhelmingly common case is a single candidate — [`Pos::One`] inlines it with **zero
-/// heap allocation** (the old `Vec<usize>` paid one tiny alloc per distinct key). [`Pos::Many`]
-/// holds the overflow for genuine hash collisions only (string `DefaultHasher`, or a user `hash()`
-/// that returns a constant); boxing the `Vec` keeps `Pos` at two words. Probing always confirms a
-/// hit with `values_equal`, so a collision is still correct.
-#[derive(Debug, Clone)]
-pub(crate) enum Pos {
-    One(usize),
-    // `Box` keeps `Pos` at 2 words (`usize` + tag) instead of 4; the alloc only happens on a real
-    // collision, which is off the numeric-key hot path entirely.
-    #[allow(clippy::box_collection)]
-    Many(Box<Vec<usize>>),
+/// The Fibonacci-hashing multiplier: it spreads the cached hash (an int key's hash is its `f64`
+/// bits, whose low bits are mostly zero) over the top bits that pick the first slot.
+const SPREAD: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// The first slot for hash `h` in a table of `cap` slots (a power of two, at least 2).
+fn first_slot(h: u64, cap: usize) -> usize {
+    (h.wrapping_mul(SPREAD) >> (64 - cap.trailing_zeros())) as usize
 }
 
-/// `cached-hash → candidate position(s)`, FxHash-keyed (the `u64` is already a content hash; see
-/// [`super::fxhash`]). The plain table: a wire table ([`WireTable`](super::wire::WireTable)) owns
-/// one outright, and a heap map or set holds one in a [`SharedIndex`]. Holds plain `usize`s,
-/// **not** GC children (only `entries`' keys/values are traced).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct HashIndex(FxHashMap<u64, Pos>);
-
-impl HashIndex {
-    /// Positions whose key hashed to `h` (the probe candidates). One → a 1-element slice in place;
-    /// Many → the overflow vec; absent → empty.
-    #[inline]
-    pub(crate) fn candidates(&self, h: u64) -> &[usize] {
-        match self.0.get(&h) {
-            Some(Pos::One(p)) => std::slice::from_ref(p),
-            Some(Pos::Many(v)) => v.as_slice(),
-            None => &[],
-        }
-    }
-    /// Record that `entries[pos]`'s key hashed to `h`, in a table no other thread can see.
-    /// Absent → `One`; first collision → upgrade to `Many` carrying BOTH the prior and the new
-    /// position; further collisions → push.
-    #[inline]
-    pub(crate) fn insert(&mut self, h: u64, pos: usize) {
-        self.insert_with(h, pos, |v, pos| v.push(pos));
-    }
-    /// [`insert`](HashIndex::insert) for a table racy readers may hold: `push_many` appends to a
-    /// `Many` vec.
-    #[inline]
-    fn insert_with(
-        &mut self,
-        h: u64,
-        pos: usize,
-        push_many: impl FnOnce(&mut Box<Vec<usize>>, usize),
-    ) {
-        use std::collections::hash_map::Entry;
-        match self.0.entry(h) {
-            Entry::Vacant(e) => {
-                e.insert(Pos::One(pos));
-            }
-            Entry::Occupied(mut e) => match e.get_mut() {
-                Pos::One(prev) => {
-                    let prev = *prev;
-                    e.insert(Pos::Many(Box::new(vec![prev, pos])));
-                }
-                Pos::Many(v) => push_many(v, pos),
-            },
-        }
-    }
-    /// Whether inserting `h` keeps the table's allocation: `h` is present, or the table has room
-    /// for one more key (no remove ever leaves a tombstone, so room is `len < capacity`).
-    fn fits(&self, h: u64) -> bool {
-        self.0.len() < self.0.capacity() || self.0.contains_key(&h)
-    }
-    /// A copy of this table with room for twice its keys (at least 4).
-    fn grown(&self) -> HashIndex {
-        let mut t =
-            FxHashMap::with_capacity_and_hasher((self.0.len() * 2).max(4), Default::default());
-        t.extend(self.0.iter().map(|(&h, p)| (h, p.clone())));
-        HashIndex(t)
-    }
-    /// The bytes the table owns (its slots and the `Many` vecs), for the retire charge.
-    fn heap_bytes(&self) -> usize {
-        let many: usize = self
-            .0
-            .values()
-            .map(|p| match p {
-                Pos::One(_) => 0,
-                Pos::Many(v) => v.capacity() * size_of::<usize>(),
-            })
-            .sum();
-        self.0.capacity() * (size_of::<(u64, Pos)>() + 1) + many
-    }
-    /// The index of a table whose `i`-th entry's key hashed to the `i`-th item of `hashes`.
-    pub(crate) fn from_hashes(hashes: impl Iterator<Item = u64>) -> HashIndex {
-        let mut ix = HashIndex::default();
-        for (pos, h) in hashes.enumerate() {
-            ix.insert(h, pos);
-        }
-        ix
-    }
+/// The capacity of a table for `n` entries: a power of two, at least 8, at most half full.
+fn table_cap(n: usize) -> usize {
+    n.saturating_mul(2).next_power_of_two().max(8)
 }
 
-/// A heap map's or set's [`HashIndex`]: the table in an [`RBox`], so a table or `Many` vec that
-/// must reallocate is replaced and retired, never freed under a racy prober (see the module doc).
+/// A table of `n` entries, from their `(hash, position)` pairs; no other thread sees it yet.
+fn build(n: usize, keys: impl Iterator<Item = (u64, usize)>) -> RVec<IndexSlot> {
+    let cap = table_cap(n);
+    let t: RVec<IndexSlot> = RVec::zeroed(cap);
+    let v = t.view();
+    for (h, pos) in keys {
+        let mut i = first_slot(h, cap);
+        while v.get(i).1 != 0 {
+            i = (i + 1) & (cap - 1);
+        }
+        v.set(i, (h, pos as u64 + 1));
+    }
+    t
+}
+
+/// A heap map's or set's hash index: the open-addressing table on an [`RVec`] (see the module
+/// doc). Holds positions, **not** GC children (only `entries`' keys/values are traced).
 #[derive(Debug, Clone, Default)]
-struct SharedIndex(RBox<HashIndex>);
+struct SharedIndex(RVec<IndexSlot>);
 
 impl SharedIndex {
-    fn from_hashes(hashes: impl Iterator<Item = u64>) -> Self {
-        SharedIndex(RBox::new(HashIndex::from_hashes(hashes)))
+    /// The index of a table whose `i`-th entry's key hashed to `hashes[i]`.
+    fn from_hashes(hashes: &[u64]) -> Self {
+        if hashes.is_empty() {
+            return SharedIndex::default();
+        }
+        SharedIndex(build(hashes.len(), hashes.iter().copied().zip(0..)))
     }
+    /// The positions below `limit` whose cached hash is `h` (the probe candidates).
     #[inline]
-    fn candidates(&self, h: u64) -> &[usize] {
-        self.0.get().map_or(&[], |ix| ix.candidates(h))
-    }
-    /// Record that `entries[pos]`'s key hashed to `h`; a reallocation retires on `heap`.
-    #[inline]
-    fn insert(&self, heap: &Heap, h: u64, pos: usize) {
-        match self.0.get() {
-            Some(ix) if ix.fits(h) => {
-                self.0.update_in_place(|ix| {
-                    ix.insert_with(h, pos, |v, pos| {
-                        if v.len() < v.capacity() {
-                            v.push(pos);
-                        } else {
-                            let mut new = Vec::with_capacity(v.capacity() * 2);
-                            new.extend_from_slice(v);
-                            new.push(pos);
-                            let old = std::mem::replace(v, Box::new(new));
-                            let bytes = old.capacity() * size_of::<usize>();
-                            retire_box(heap, old, bytes);
-                        }
-                    })
-                });
-            }
-            cur => {
-                let (mut new, old_bytes) = match cur {
-                    Some(ix) => (ix.grown(), ix.heap_bytes()),
-                    None => (
-                        HashIndex(FxHashMap::with_capacity_and_hasher(3, Default::default())),
-                        0,
-                    ),
-                };
-                new.insert(h, pos);
-                self.0.replace(heap, new, old_bytes);
-            }
+    fn candidates(&self, h: u64, limit: usize) -> Candidates<'_> {
+        let v = self.0.view();
+        let cap = v.len();
+        Candidates {
+            i: if cap == 0 { 0 } else { first_slot(h, cap) },
+            left: cap,
+            v,
+            h,
+            limit,
         }
     }
+    /// Record that `entries[pos]`'s key hashed to `h`, where `pos` is the entry count before the
+    /// push; a grow retires the old table on `heap`.
+    #[inline]
+    fn insert(&self, heap: &Heap, h: u64, pos: usize) {
+        let v = self.0.view();
+        let cap = v.len();
+        if (pos + 1) * 2 <= cap {
+            let mut i = first_slot(h, cap);
+            for _ in 0..cap {
+                if v.get(i).1 == 0 {
+                    v.set(i, (h, pos as u64 + 1));
+                    return;
+                }
+                i = (i + 1) & (cap - 1);
+            }
+        }
+        // Past half full (or full under a racing writer): a table twice the size.
+        let old = (0..cap)
+            .map(|i| v.get(i))
+            .filter(|s| s.1 != 0)
+            .map(|(sh, sp)| (sh, sp as usize - 1));
+        let t = build(cap.max(pos + 1), old.chain([(h, pos)]));
+        self.0.install(heap, t);
+    }
     /// Swap in the index of `hashes`; the old table retires on `heap`.
-    fn rebuild(&self, heap: &Heap, hashes: impl Iterator<Item = u64>) {
-        let old_bytes = self.0.get().map_or(0, HashIndex::heap_bytes);
+    fn rebuild(&self, heap: &Heap, hashes: &[u64]) {
         self.0
-            .replace(heap, HashIndex::from_hashes(hashes), old_bytes);
+            .install(heap, build(hashes.len(), hashes.iter().copied().zip(0..)));
+    }
+}
+
+/// See [`SharedIndex::candidates`]. Do not hold it across a safepoint after the table could
+/// retire (a mutator of the same map or set).
+pub struct Candidates<'a> {
+    v: View<'a, IndexSlot>,
+    h: u64,
+    i: usize,
+    left: usize,
+    limit: usize,
+}
+
+impl Iterator for Candidates<'_> {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        let mask = self.v.len().wrapping_sub(1);
+        while self.left > 0 {
+            let (sh, sp) = self.v.get(self.i);
+            self.i = (self.i + 1) & mask;
+            self.left -= 1;
+            if sp == 0 {
+                self.left = 0;
+                return None;
+            }
+            let pos = (sp - 1) as usize;
+            if sh == self.h && pos < self.limit {
+                return Some(pos);
+            }
+        }
+        None
     }
 }
 
@@ -185,14 +158,15 @@ impl SharedIndex {
 #[derive(Debug, Clone, Default)]
 pub struct MapData {
     pub entries: RVec<MapEntry>,
-    /// `cached-hash → candidate position(s)` (see [`HashIndex`]). **Not** a GC child.
+    /// `cached-hash → candidate position(s)` (see [`SharedIndex`]). **Not** a GC child.
     index: SharedIndex,
 }
 
 impl MapData {
     /// A map of `entries`, which hold distinct keys.
     pub fn from_entries(entries: Vec<MapEntry>) -> Self {
-        let index = SharedIndex::from_hashes(entries.iter().map(|e| e.0));
+        let hashes: Vec<u64> = entries.iter().map(|e| e.0).collect();
+        let index = SharedIndex::from_hashes(&hashes);
         MapData {
             entries: entries.into(),
             index,
@@ -200,8 +174,8 @@ impl MapData {
     }
     /// Positions in `entries` whose key hashed to `h` (the probe candidates).
     #[inline]
-    pub fn candidates(&self, h: u64) -> &[usize] {
-        self.index.candidates(h)
+    pub fn candidates(&self, h: u64) -> Candidates<'_> {
+        self.index.candidates(h, self.entries.len())
     }
     /// The value of entry `i`.
     #[inline]
@@ -229,7 +203,8 @@ impl MapData {
         let mut es = self.entries.to_vec();
         let removed = es.remove(i);
         self.entries.replace(heap, &es);
-        self.index.rebuild(heap, es.iter().map(|e| e.0));
+        let hashes: Vec<u64> = es.iter().map(|e| e.0).collect();
+        self.index.rebuild(heap, &hashes);
         removed
     }
 }
@@ -238,22 +213,23 @@ impl MapData {
 #[derive(Debug, Clone, Default)]
 pub struct SetData {
     pub entries: RVec<SetEntry>,
-    /// `cached-hash → candidate position(s)` (see [`HashIndex`]).
+    /// `cached-hash → candidate position(s)` (see [`SharedIndex`]).
     index: SharedIndex,
 }
 
 impl SetData {
     /// A set of `entries`, which hold distinct elements.
     pub fn from_entries(entries: Vec<SetEntry>) -> Self {
-        let index = SharedIndex::from_hashes(entries.iter().map(|e| e.0));
+        let hashes: Vec<u64> = entries.iter().map(|e| e.0).collect();
+        let index = SharedIndex::from_hashes(&hashes);
         SetData {
             entries: entries.into(),
             index,
         }
     }
     #[inline]
-    pub fn candidates(&self, h: u64) -> &[usize] {
-        self.index.candidates(h)
+    pub fn candidates(&self, h: u64) -> Candidates<'_> {
+        self.index.candidates(h, self.entries.len())
     }
     /// See [`MapData::push`].
     #[inline]
@@ -267,7 +243,53 @@ impl SetData {
         let mut es = self.entries.to_vec();
         let removed = es.remove(i);
         self.entries.replace(heap, &es);
-        self.index.rebuild(heap, es.iter().map(|e| e.0));
+        let hashes: Vec<u64> = es.iter().map(|e| e.0).collect();
+        self.index.rebuild(heap, &hashes);
         removed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MapData;
+    use crate::vm::heap::Heap;
+    use crate::vm::value::Value;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// One thread inserts 50k keys (growing the entry block and the index many times) while
+    /// another probes. Every probe reads only live blocks; a hit names the key it was asked for.
+    /// After both join, every key is found once.
+    #[test]
+    fn racing_insert_and_probe() {
+        const N: u64 = 50_000;
+        let _g = crate::vm::rvec::test_serial();
+        let mut heap = Heap::new();
+        let m = MapData::default();
+        let done = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for k in 0..N {
+                    m.push(&heap, k, Value::int(k as i64), Value::int(-(k as i64)));
+                }
+                done.store(true, Ordering::Release);
+            });
+            s.spawn(|| {
+                let mut k = 0u64;
+                while !done.load(Ordering::Acquire) {
+                    for p in m.candidates(k) {
+                        if let Some((h, key, _)) = m.entries.try_get(p) {
+                            assert!(h != k || key == Value::int(k as i64));
+                        }
+                    }
+                    k = (k + 7919) % N;
+                }
+            });
+        });
+        for k in 0..N {
+            let hits: Vec<usize> = m.candidates(k).collect();
+            assert_eq!(hits, [k as usize], "key {k}");
+            assert_eq!(m.value_at(hits[0]), Value::int(-(k as i64)));
+        }
+        heap.sweep();
     }
 }

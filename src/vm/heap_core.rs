@@ -412,10 +412,10 @@ impl HeapCore {
         self.retired.len()
     }
 
-    /// Retired boxes (not `RVec` blocks) on the run's retire list (tests only).
+    /// Retired blocks of `T`s on the run's retire list (tests only).
     #[cfg(test)]
-    pub(super) fn retired_boxes(&self) -> usize {
-        self.retired.boxes()
+    pub(super) fn retired_count_of<T: super::rvec::Elem>(&self) -> usize {
+        self.retired.count_of::<T>()
     }
 
     /// Record the `live_bytes()` a sweep measured: the last value, the peak and the cap verdict.

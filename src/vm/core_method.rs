@@ -943,7 +943,7 @@ impl Vm {
                                 for &v in &items {
                                     let hv = vm.scalar_hash(v);
                                     let mut dup = false;
-                                    for &p in seen.candidates(hv) {
+                                    for p in seen.candidates(hv) {
                                         if vm.elem_equal(seen.entries.get(p).1, v, 0, span)? {
                                             dup = true;
                                             break;

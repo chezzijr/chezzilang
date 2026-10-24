@@ -1165,16 +1165,16 @@ main()";
 /// the grows retired the old blocks on the run's retire lists, a collection frees them all, and
 /// the container reads back intact (the print, and the same program under gc-stress).
 fn growth_retires_until_collect(src: &str, want: &str) {
-    growth_retires_boxes_until_collect(src, want, 0);
+    growth_retires_index_until_collect(src, want, 0);
 }
 
-/// [`growth_retires_until_collect`], and at least `min_boxes` of the retired entries are boxes
-/// (a map's or a set's old index table, or an old `Pos::Many` overflow vec).
-fn growth_retires_boxes_until_collect(src: &str, want: &str, min_boxes: usize) {
+/// [`growth_retires_until_collect`], and at least `min_index` of the retired blocks are old
+/// index tables of a map or a set.
+fn growth_retires_index_until_collect(src: &str, want: &str, min_index: usize) {
     use super::rvec::{test_counts, test_serial, test_track};
     let _g = test_serial();
     let owned = src.to_string();
-    let (out, retired, boxes, left, freed) = std::thread::Builder::new()
+    let (out, retired, index, left, freed) = std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
             test_track();
@@ -1182,12 +1182,12 @@ fn growth_retires_boxes_until_collect(src: &str, want: &str, min_boxes: usize) {
             let result = vm.run();
             vm.finish_run(result).expect("runs");
             let (own, core) = vm.heap.retired_len();
-            let boxes = vm.heap.retired_boxes();
+            let index = vm.heap.retired_index_blocks();
             let before = test_counts().1;
             vm.gc_collect();
             let freed = test_counts().1 - before;
             let (own2, core2) = vm.heap.retired_len();
-            (captured(vm.out), own + core, boxes, own2 + core2, freed)
+            (captured(vm.out), own + core, index, own2 + core2, freed)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -1198,12 +1198,12 @@ fn growth_retires_boxes_until_collect(src: &str, want: &str, min_boxes: usize) {
         "each grow retired its old block, got {retired}"
     );
     assert!(
-        retired - boxes >= 1,
-        "a grow retired an old entry block, got {retired} entries, {boxes} boxes"
+        retired - index >= 1,
+        "a grow retired an old entry block, got {retired} blocks, {index} index blocks"
     );
     assert!(
-        boxes >= min_boxes,
-        "an index grow retired the old table, got {boxes} < {min_boxes} boxes"
+        index >= min_index,
+        "an index grow retired the old table, got {index} < {min_index} index blocks"
     );
     assert_eq!(left, 0, "the collection freed every retired block");
     assert!(
@@ -1248,7 +1248,7 @@ fn main():
         m[i] = i * 2
     print(m.len(), m[0], m[50], m[99])
 main()";
-    growth_retires_boxes_until_collect(src, "100 0 100 198\n", 3);
+    growth_retires_index_until_collect(src, "100 0 100 198\n", 3);
 }
 
 /// M2.3 — the Set twin of [`map_insert_growth_retires_index_and_entries`].
@@ -1261,13 +1261,13 @@ fn main():
         s.insert(i)
     print(s.len(), 0 in s, 50 in s, 99 in s, 100 in s)
 main()";
-    growth_retires_boxes_until_collect(src, "100 true true true false\n", 3);
+    growth_retires_index_until_collect(src, "100 true true true false\n", 3);
 }
 
-/// M2.3 — keys whose `hash()` is one constant share one index key, so the index table never
-/// grows: every retired box is an old `Pos::Many` overflow vec.
+/// M2.3 — keys whose `hash()` is one constant probe one cluster of the index table; inserts past
+/// the table's capacity retire the old index block, and every key reads back.
 #[test]
-fn many_overflow_growth_retires_old_vec() {
+fn constant_hash_growth_retires_old_index() {
     let src = "\
 struct K:
     n: int
@@ -1282,5 +1282,5 @@ fn main():
         s.insert(K(i))
     print(s.len(), K(0) in s, K(19) in s, K(20) in s)
 main()";
-    growth_retires_boxes_until_collect(src, "20 true true false\n", 3);
+    growth_retires_index_until_collect(src, "20 true true false\n", 3);
 }

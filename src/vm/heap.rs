@@ -1260,11 +1260,12 @@ impl Heap {
         (self.retired.len(), self.core.retired_len())
     }
 
-    /// Retired boxes (a map's or a set's old index, `vm/map_data.rs`) on this handle's list and
-    /// the run's (tests only).
+    /// Retired index blocks (a map's or a set's old hash table, `vm/map_data.rs`) on this
+    /// handle's list and the run's (tests only).
     #[cfg(test)]
-    pub(super) fn retired_boxes(&self) -> usize {
-        self.retired.boxes() + self.core.retired_boxes()
+    pub(super) fn retired_index_blocks(&self) -> usize {
+        use super::map_data::IndexSlot;
+        self.retired.count_of::<IndexSlot>() + self.core.retired_count_of::<IndexSlot>()
     }
 
     /// The objects the last sweep freed whose drop the collector runs after the world restarts

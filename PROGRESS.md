@@ -256,13 +256,14 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
   pack one per byte): a grow, sort or reverse retires the old block, and only the stop-the-world
   sweep frees it. A list or a `bytearray` holds at most `u32::MAX` elements (the block header is
   two `u32`s). Gates: `list_growth_retires_until_collect`, `bytearray_growth_retires_until_collect`.
-- M2.3: `Map`/`Set` entries live on an `RVec` and their hash index in an `RBox`
-  (`vm/map_data.rs`): an insert past the table's room clones it into a larger one, a full
-  `Pos::Many` collision vec is copied into a larger one, a remove builds new entries and a new
-  table; each old block, table or vec retires until the stop-the-world sweep. A racy probe can see
-  a torn entry or a half-written table (user fault, Go parity). A map or set holds at most
-  `u32::MAX` entries. `Obj` is now under 64 B. Gates: `map_insert_growth_retires_index_and_entries`,
-  `set_insert_growth_retires_index_and_entries`, `many_overflow_growth_retires_old_vec`.
+- M2.3: `Map`/`Set` entries live on an `RVec`, and their hash index is an open-addressing table
+  on an `RVec` of atomic `(hash, position + 1)` slots, linear probing, at most half full
+  (`vm/map_data.rs`). A grow past half full or a remove builds a new table; each old entry block
+  or table retires until the stop-the-world sweep. A racy probe reads only live blocks, at most
+  `capacity` slots, and only positions below the entry count; it can miss or see a torn entry
+  (user fault, Go parity). A map or set holds at most `u32::MAX` entries. `Obj` is now under 64 B.
+  Gates: `map_insert_growth_retires_index_and_entries`, `set_insert_growth_retires_index_and_entries`,
+  `constant_hash_growth_retires_old_index`, `racing_insert_and_probe`.
 
 ## Later
 

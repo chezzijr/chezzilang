@@ -120,7 +120,7 @@ impl Vm {
     pub(super) fn set_slot(
         &mut self,
         entries: &RVec<SetEntry>,
-        cands: &[usize],
+        cands: impl Iterator<Item = usize>,
         key: Value,
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
@@ -132,7 +132,7 @@ impl Vm {
             Vec::new()
         };
         self.with_elem_roots(&elems, &[key], |vm| {
-            for &p in cands {
+            for p in cands {
                 if vm.elem_equal(entries.get(p).1, key, 0, span)? {
                     return Ok(Some(p));
                 }
@@ -150,7 +150,7 @@ impl Vm {
     pub(super) fn map_slot(
         &mut self,
         entries: &RVec<MapEntry>,
-        cands: &[usize],
+        cands: impl Iterator<Item = usize>,
         key: Value,
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
@@ -162,7 +162,7 @@ impl Vm {
             Vec::new()
         };
         self.with_elem_roots(&elems, &[key], |vm| {
-            for &p in cands {
+            for p in cands {
                 if vm.elem_equal(entries.get(p).1, key, 0, span)? {
                     return Ok(Some(p));
                 }
@@ -213,8 +213,8 @@ impl Vm {
                 let mut i = 0;
                 loop {
                     let (p, hs, stored) = match vm.heap.get(mh).as_map() {
-                        Some(m) => match m.candidates(hk).get(i) {
-                            Some(&p) => match m.entries.try_get(p) {
+                        Some(m) => match m.candidates(hk).nth(i) {
+                            Some(p) => match m.entries.try_get(p) {
                                 Some((h, k, _)) => (p, h, k),
                                 None => return Ok(None),
                             },
@@ -266,8 +266,8 @@ impl Vm {
                 let mut i = 0;
                 loop {
                     let (p, hs, stored) = match vm.heap.get(sh).as_set() {
-                        Some(s) => match s.candidates(he).get(i) {
-                            Some(&p) => match s.entries.try_get(p) {
+                        Some(s) => match s.candidates(he).nth(i) {
+                            Some(p) => match s.entries.try_get(p) {
                                 Some((h, e)) => (p, h, e),
                                 None => return Ok(None),
                             },

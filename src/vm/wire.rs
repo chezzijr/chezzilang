@@ -13,11 +13,70 @@ use super::core::{
     AtomicCore, AtomicIntCore, ChannelCore, ExecutorCore, ListenerCore, ReaderCore, RwSharedCore,
     SharedCore, SocketCore, WriterCore,
 };
-use super::map_data::HashIndex;
+use super::fxhash::FxHashMap;
 use super::value::GcRef;
 use crate::ast::Span;
 use crate::base::op::ProtoId;
 use std::sync::Arc;
+
+/// A single key's position(s) in `entries`. Numeric keys hash injectively (`(n as f64).to_bits()`),
+/// so the overwhelmingly common case is a single candidate — [`Pos::One`] inlines it with **zero
+/// heap allocation** (the old `Vec<usize>` paid one tiny alloc per distinct key). [`Pos::Many`]
+/// holds the overflow for genuine hash collisions only (string `DefaultHasher`, or a user `hash()`
+/// that returns a constant); boxing the `Vec` keeps `Pos` at two words. Probing always confirms a hit with `values_equal`, so a collision is still correct.
+#[derive(Debug, Clone)]
+pub(crate) enum Pos {
+    One(usize),
+    // `Box` keeps `Pos` at 2 words (`usize` + tag) instead of 4; the alloc only happens on a real
+    // collision, which is off the numeric-key hot path entirely.
+    #[allow(clippy::box_collection)]
+    Many(Box<Vec<usize>>),
+}
+
+/// `cached-hash → candidate position(s)`, FxHash-keyed (the `u64` is already a content hash; see
+/// [`super::fxhash`]) of a [`WireTable`], which owns it outright: it is never shared (a heap map
+/// or set has its own atomic table, `vm/map_data.rs`). Holds plain `usize`s, not GC children.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HashIndex(FxHashMap<u64, Pos>);
+
+impl HashIndex {
+    /// Positions whose key hashed to `h` (the probe candidates). One → a 1-element slice in place;
+    /// Many → the overflow vec; absent → empty.
+    #[inline]
+    pub(crate) fn candidates(&self, h: u64) -> &[usize] {
+        match self.0.get(&h) {
+            Some(Pos::One(p)) => std::slice::from_ref(p),
+            Some(Pos::Many(v)) => v.as_slice(),
+            None => &[],
+        }
+    }
+    /// Record that `entries[pos]`'s key hashed to `h`. Absent → `One`; first collision → upgrade to
+    /// `Many` carrying BOTH the prior and the new position; further collisions → push.
+    #[inline]
+    pub(crate) fn insert(&mut self, h: u64, pos: usize) {
+        use std::collections::hash_map::Entry;
+        match self.0.entry(h) {
+            Entry::Vacant(e) => {
+                e.insert(Pos::One(pos));
+            }
+            Entry::Occupied(mut e) => match e.get_mut() {
+                Pos::One(prev) => {
+                    let prev = *prev;
+                    e.insert(Pos::Many(Box::new(vec![prev, pos])));
+                }
+                Pos::Many(v) => v.push(pos),
+            },
+        }
+    }
+    /// The index of a table whose `i`-th entry's key hashed to the `i`-th item of `hashes`.
+    pub(crate) fn from_hashes(hashes: impl Iterator<Item = u64>) -> HashIndex {
+        let mut ix = HashIndex::default();
+        for (pos, h) in hashes.enumerate() {
+            ix.insert(h, pos);
+        }
+        ix
+    }
+}
 
 /// An entry that carries its key's cached hash (the `u64` the heap map computed at insert).
 pub trait CachedHash {
@@ -38,9 +97,8 @@ impl CachedHash for (u64, WireValue) {
     }
 }
 
-/// TICKET-192 — the entries of a wire `Map`/`Set` plus the same plain [`HashIndex`] the heap
-/// `MapData`/`SetData` wrap (`vm/map_data.rs`), so a stored `RwShared` map answers
-/// `get_key`/`has` in O(1) expected instead of scanning. Insertion order stays the iteration order.
+/// TICKET-192 — the entries of a wire `Map`/`Set` plus a [`HashIndex`] of their cached hashes,
+/// so a stored `RwShared` map answers `get_key`/`has` in O(1) expected instead of scanning. Insertion order stays the iteration order.
 ///
 /// Read through `Deref` to a slice; there is deliberately no `DerefMut`. Every mutation goes
 /// through a method that keeps `index` in step with `entries`.

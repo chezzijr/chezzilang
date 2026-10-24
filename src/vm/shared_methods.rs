@@ -392,14 +392,14 @@ impl Vm {
             let mut out = Vec::new();
             match boxctx::state_obj(&vm.heap, ctx) {
                 Some(Obj::Map(m)) if !on_set => {
-                    for &p in m.candidates(qh) {
+                    for p in m.candidates(qh) {
                         let (_, k, v) = m.entries.get(p);
                         let picked = if with_value { vec![k, v] } else { vec![k] };
                         out.push(vm.box_copy_pieces(ctx, &picked, span)?);
                     }
                 }
                 Some(Obj::Set(s)) if on_set => {
-                    for &p in s.candidates(qh) {
+                    for p in s.candidates(qh) {
                         out.push(vm.box_copy_pieces(ctx, &[s.entries.get(p).1], span)?);
                     }
                 }

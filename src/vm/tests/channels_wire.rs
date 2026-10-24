@@ -89,8 +89,8 @@ fn wire_preserves_map_hashes_and_order() {
         "cached hashes / order must survive the round-trip"
     );
     // The index must reflect the cached hashes (collision bucket points at positions 0 and 2).
-    assert_eq!(rebuilt.candidates(42), &[0, 2]);
-    assert_eq!(rebuilt.candidates(7), &[1]);
+    assert_eq!(rebuilt.candidates(42).collect::<Vec<_>>(), [0, 2]);
+    assert_eq!(rebuilt.candidates(7).collect::<Vec<_>>(), [1]);
 }
 
 /// By-reference callables (`Func`/`Closure`/`Module`/`Native`) cross the airlock **by handle** —
@@ -164,8 +164,8 @@ fn wire_str_map_key_survives_roundtrip() {
     assert_eq!(rh, h, "cached hash preserved");
     assert_eq!(rv, Value::int(42));
     assert_eq!(
-        rebuilt.candidates(h),
-        &[0],
+        rebuilt.candidates(h).collect::<Vec<_>>(),
+        [0],
         "index bucket points at the rebuilt key"
     );
     assert!(
