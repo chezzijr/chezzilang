@@ -264,7 +264,7 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
   (user fault, Go parity). A map or set holds at most `u32::MAX` entries; its live bytes count the index. `Obj` is now 40 B.
   Gates: `map_insert_growth_retires_index_and_entries`, `set_insert_growth_retires_index_and_entries`,
   `constant_hash_growth_retires_old_index`, `racing_insert_and_probe`.
-- M2.4: a struct's spilled fields, a closure's captures, an enum payload and a module's global slots live in fixed `RVec` blocks (a write is one atomic slot store; an empty payload allocates nothing; a new global's append retires the outgrown block). A parked generator sits behind one atomic owner pointer (`rvec::AtomicBox`): a resume from a second thread faults "generator already running" instead of tearing its frames. `Obj` stays 40 B. Gates: `spill_field_write_is_slot_store`, `generator_ctx_take_is_exclusive`, `generator_next_from_two_tasks_faults_cleanly`.
+- M2.4: a struct's spilled fields, a closure's captures, an enum payload and a module's global slots live in fixed `RVec` blocks (a write is one atomic slot store; an empty payload allocates nothing; a new global's append retires the outgrown block). A parked generator sits behind one atomic owner pointer (`rvec::AtomicBox`): a resume from a second thread faults "generator already running" instead of tearing its frames; reads of a parked generator (GC trace, a crossing copy) run at once and never fault each other, and a Rust panic inside a resume leaves the generator done. `Obj` stays 40 B. Gates: `spill_field_write_is_slot_store`, `generator_ctx_take_is_exclusive`, `generator_next_from_two_tasks_faults_cleanly`, `tests/chz/spec/generator_shared_read_test.chz`.
 
 ## Later
 

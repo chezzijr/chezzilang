@@ -1,0 +1,32 @@
+# tests/chz/spec/generator_shared_read_test.chz — M2.4: many tasks read one shared, started
+# generator at once (`RwShared.get` copies it). A read never sees another read as a running
+# generator, so no read faults. Go: concurrent reads of one value never fail.
+import Iterator from std.iter
+import std.concurrency
+
+fn m24_gen() -> Iterator[int]:
+    for i in 0..3:
+        yield i
+
+fn m24_reader(sh: concurrency.RwShared[Iterator[int]]) -> int:
+    bad := 0
+    for _ in 0..2000:
+        r := recover:
+            _ := sh.get()
+        match r:
+            ?_: pass
+            !_: bad += 1
+    return bad
+
+test fn concurrent_reads_of_a_shared_generator_never_fault():
+    g := m24_gen()
+    _ := g.next()
+    sh := concurrency.RwShared[Iterator[int]](g)
+    out := Channel[int](8)
+    parallel:
+        for _ in 0..4:
+            spawn: out.send(m24_reader(sh))
+    total := 0
+    for _ in 0..4:
+        total += out.recv()
+    assert total == 0

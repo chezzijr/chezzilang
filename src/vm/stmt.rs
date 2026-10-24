@@ -441,7 +441,7 @@ impl Vm {
                             let sp = e.span;
                             let msg = self.alloc_str(e.message);
                             self.stamp_err_span(msg, sp);
-                            let err = self.alloc_enum("Result", "Err", vec![msg]);
+                            let err = self.alloc_enum("Result", "Err", &[msg]);
                             self.push(err);
                         }
                         None => match body_defer_err {
@@ -451,7 +451,7 @@ impl Vm {
                                 let sp = e.span;
                                 let msg = self.alloc_str(e.message);
                                 self.stamp_err_span(msg, sp);
-                                let err = self.alloc_enum("Result", "Err", vec![msg]);
+                                let err = self.alloc_enum("Result", "Err", &[msg]);
                                 self.push(err);
                             }
                             None => self.push(v), // the propagated Result/Option value IS the result

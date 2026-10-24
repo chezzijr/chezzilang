@@ -411,9 +411,9 @@ impl Vm {
                 match outcome {
                     Ok(Some(line)) => {
                         let sv = self.alloc_str(line);
-                        Ok(self.alloc_enum("Option", "Some", vec![sv]))
+                        Ok(self.alloc_enum("Option", "Some", &[sv]))
                     }
-                    Ok(None) => Ok(self.alloc_enum("Option", "None", vec![])),
+                    Ok(None) => Ok(self.alloc_enum("Option", "None", &[])),
                     Err(None) => Err(self.err("read_line on a closed reader".into(), span)),
                     Err(Some(e)) => Err(self.err(
                         format!("{e} — read binary files with Reader.read_bytes"),

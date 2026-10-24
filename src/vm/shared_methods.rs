@@ -130,9 +130,9 @@ impl Vm {
         match w {
             Some(w) => {
                 let v = self.from_wire(w);
-                self.alloc_enum("Option", "Some", vec![v])
+                self.alloc_enum("Option", "Some", &[v])
             }
-            None => self.alloc_enum("Option", "None", vec![]),
+            None => self.alloc_enum("Option", "None", &[]),
         }
     }
 
@@ -319,9 +319,9 @@ impl Vm {
                 Ok(match piece {
                     Some(ws) => {
                         let v = self.from_wire_pieces(ws);
-                        self.alloc_enum("Option", "Some", v)
+                        self.alloc_enum("Option", "Some", &v)
                     }
-                    None => self.alloc_enum("Option", "None", vec![]),
+                    None => self.alloc_enum("Option", "None", &[]),
                 })
             }
             // `slice(r)` is ONE crossing that returns a container, like `get`: the elements
@@ -362,8 +362,8 @@ impl Vm {
                 self.arity_err(method, args, 1, span)?;
                 Ok(
                     match self.rwshared_find(&core, prim, args[0], true, span)? {
-                        Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                        None => self.alloc_enum("Option", "None", vec![]),
+                        Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                        None => self.alloc_enum("Option", "None", &[]),
                     },
                 )
             }
@@ -714,7 +714,7 @@ impl Vm {
     /// without a value of its own (TICKET-289).
     fn err_wire(&mut self, msg: &str) -> Result<WireValue, RuntimeError> {
         let msg = self.alloc_str(msg.to_string());
-        let err = self.alloc_enum("Result", "Err", vec![msg]);
+        let err = self.alloc_enum("Result", "Err", &[msg]);
         self.to_wire(err)
     }
 

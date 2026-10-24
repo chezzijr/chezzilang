@@ -651,7 +651,7 @@ fn native_result_option_have_fixed_variant_ids() {
     assert_eq!(vid("Option", "None"), VID_NONE_VARIANT);
     // A native-built enum (alloc_enum ⇒ Option::Some) must carry the right id.
     let mut vm = Vm::new(Arc::new(program));
-    let v = vm.alloc_enum("Option", "Some", vec![Value::int(7)]);
+    let v = vm.alloc_enum("Option", "Some", &[Value::int(7)]);
     let Some(h) = v.as_obj() else { panic!() };
     let Obj::Enum { variant_id, .. } = vm.heap.get(h) else {
         panic!("expected enum")

@@ -894,7 +894,7 @@ impl Vm {
         // (TICKET-045), except a NATIVE fault, which is relocated above to the
         // user's call into std (TICKET-148).
         self.stamp_err_span(msg, sp);
-        let err = self.alloc_enum("Result", "Err", vec![msg]);
+        let err = self.alloc_enum("Result", "Err", &[msg]);
         self.push(err);
         Ok(())
     }

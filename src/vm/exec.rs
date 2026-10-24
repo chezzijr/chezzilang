@@ -652,8 +652,39 @@ impl Vm {
         }
         if matches!(parked.state, GenState::Done) {
             self.gen_put(h, parked);
-            return Ok(self.alloc_enum("Option", "None", Vec::new()));
+            return Ok(self.alloc_enum("Option", "None", &[]));
         }
+        // The box goes back on every exit of the resume. A Rust panic inside it (a task fault)
+        // puts it back `Done` with an empty ctx: Python marks a generator that raised as finished.
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.generator_resume(h, span, &mut parked)
+        }));
+        match run {
+            Ok(r) => {
+                self.gen_put(h, parked);
+                match r? {
+                    Some(v) => Ok(self.alloc_enum("Option", "Some", &[v])),
+                    None => Ok(self.alloc_enum("Option", "None", &[])),
+                }
+            }
+            Err(p) => {
+                parked.state = GenState::Done;
+                parked.ctx = GenCtx::default();
+                self.gen_put(h, parked);
+                std::panic::resume_unwind(p)
+            }
+        }
+    }
+
+    /// The body of [`Vm::generator_next`] while it holds `parked`: run generator `h` to its next
+    /// `yield` (→ `Some(v)`, `parked` suspended) or to its end (→ `None`, `parked` stays `Done`).
+    /// A fault leaves `parked` `Done` with an empty ctx.
+    fn generator_resume(
+        &mut self,
+        h: GcRef,
+        span: Span,
+        parked: &mut Parked,
+    ) -> Result<Option<Value>, RuntimeError> {
         // Take the lifecycle state + parked context out of the box, which holds `Done` and an
         // empty ctx while this run owns it; the real state goes back after the run.
         let state = std::mem::replace(&mut parked.state, GenState::Done);
@@ -743,12 +774,8 @@ impl Vm {
             self.gen_fault_prefix = gen_trace.unwrap_or_default();
         }
 
-        // A fault inside the generator: put it back `Done` (already set) with an empty ctx,
-        // propagate.
-        if let Err(e) = run {
-            self.gen_put(h, parked);
-            return Err(e);
-        }
+        // A fault inside the generator: `parked` stays `Done` (already set) with an empty ctx.
+        run?;
 
         if yielded {
             // The yielded value sits on the generator's private stack top. Park the rest to resume.
@@ -758,13 +785,11 @@ impl Vm {
                 .expect("yielded value on the generator stack");
             parked.ctx = new_ctx;
             parked.state = GenState::Suspended;
-            self.gen_put(h, parked);
-            Ok(self.alloc_enum("Option", "Some", vec![v]))
+            Ok(Some(v))
         } else {
             // Body returned / fell off → exhausted: the box keeps `Done` and an empty ctx, and the
             // drained context drops.
-            self.gen_put(h, parked);
-            Ok(self.alloc_enum("Option", "None", Vec::new()))
+            Ok(None)
         }
     }
 

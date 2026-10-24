@@ -111,8 +111,8 @@ impl Vm {
                     core::RecvReady::Closed | core::RecvReady::Wait => None,
                 };
                 Ok(match got {
-                    Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                    None => self.alloc_enum("Option", "None", vec![]),
+                    Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                    None => self.alloc_enum("Option", "None", &[]),
                 })
             }
             // `close()` marks the channel closed (idempotent) and wakes every parked / demoted

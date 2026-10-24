@@ -811,17 +811,17 @@ impl Vm {
             }
             N::Ok(inner) => {
                 let p = self.lower_native(*inner);
-                self.alloc_enum("Result", "Ok", vec![p])
+                self.alloc_enum("Result", "Ok", &[p])
             }
             N::Err(msg) => {
                 let p = self.alloc_str(msg);
-                self.alloc_enum("Result", "Err", vec![p])
+                self.alloc_enum("Result", "Err", &[p])
             }
             N::Some(inner) => {
                 let p = self.lower_native(*inner);
-                self.alloc_enum("Option", "Some", vec![p])
+                self.alloc_enum("Option", "Some", &[p])
             }
-            N::None => self.alloc_enum("Option", "None", Vec::new()),
+            N::None => self.alloc_enum("Option", "None", &[]),
         }
     }
 

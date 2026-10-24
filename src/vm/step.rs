@@ -752,11 +752,11 @@ impl Vm {
                     // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
                     RecvStep::Got(w) | RecvStep::Filled(w) => {
                         let val = self.from_wire(w);
-                        let opt = self.alloc_enum("Option", "Some", vec![val]);
+                        let opt = self.alloc_enum("Option", "Some", &[val]);
                         self.push(opt);
                     }
                     RecvStep::ClosedEmpty => {
-                        let opt = self.alloc_enum("Option", "None", vec![]);
+                        let opt = self.alloc_enum("Option", "None", &[]);
                         self.push(opt);
                     }
                     // `chan_recv_step` re-rooted the handle + set `suspend`; `run_until`'s `paused()`

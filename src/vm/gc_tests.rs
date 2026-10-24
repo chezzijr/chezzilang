@@ -1179,6 +1179,10 @@ fn growth_retires_index_until_collect(src: &str, want: &str, min_index: usize) {
         .spawn(move || {
             test_track();
             let mut vm = Vm::new(Arc::new(test_program(&owned).expect("compiles")));
+            // The counts below are what the run's grows left retired: an env
+            // `CHEZZI_GC_STRESS` collect inside the run would free them first. The stressed run
+            // is the `run_capture_stress` check at the end.
+            vm.gc_stress = false;
             let result = vm.run();
             vm.finish_run(result).expect("runs");
             let (own, core) = vm.heap.retired_len();
@@ -1447,9 +1451,9 @@ fn enum_payload_is_a_fixed_rvec_and_empty_allocates_nothing() {
     let _g = test_serial();
     let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
     let (a0, _) = test_counts();
-    let none = vm.alloc_enum("Option", "None", Vec::new());
+    let none = vm.alloc_enum("Option", "None", &[]);
     assert_eq!(test_counts().0, a0, "an empty payload allocates no block");
-    let some = vm.alloc_enum("Option", "Some", vec![Value::int(1)]);
+    let some = vm.alloc_enum("Option", "Some", &[Value::int(1)]);
     assert_eq!(test_counts().0, a0 + 1, "a one-value payload is one block");
     for (v, cap) in [(none, 0), (some, 1)] {
         let Obj::Enum { payload, .. } = vm.heap.get(v.as_obj().expect("an object")) else {
@@ -1498,14 +1502,19 @@ main()";
             let mut vm = Vm::new(Arc::new(test_program(&owned).expect("compiles")));
             let result = vm.run();
             vm.finish_run(result).expect("runs");
-            let caps: Vec<usize> = vm
+            // The entry module (the one that binds `K`): its block holds exactly its slots.
+            let caps = vm
                 .module_objs
                 .iter()
-                .map(|&m| match vm.heap.get(m) {
-                    Obj::Module(md) => rvec_cap(&md.slots),
-                    _ => unreachable!("a module"),
+                .find_map(|&m| match vm.heap.get(m) {
+                    Obj::Module(md) if md.index.contains_key("K") => {
+                        let mut names: Vec<&str> = md.index.keys().map(|k| &**k).collect();
+                        names.sort();
+                        Some((rvec_cap(&md.slots), md.slots.len(), names.join(",")))
+                    }
+                    _ => None,
                 })
-                .collect();
+                .expect("the entry module");
             let (own, core) = vm.heap.retired_len();
             (captured(vm.out), caps, own + core)
         })
@@ -1513,9 +1522,10 @@ main()";
         .join()
         .expect("VM thread panicked");
     assert_eq!(out, "['7'] 190 2\n");
-    assert!(
-        caps.iter().any(|&c| c >= 2),
-        "the entry module's slots: {caps:?}"
+    assert_eq!(
+        caps,
+        (3, 3, "K,N,main".to_string()),
+        "the entry module's block holds exactly its 3 slots"
     );
     assert_eq!(retired, 0, "a global write retires nothing");
     assert_eq!(run_capture_stress(src), "['7'] 190 2\n");
@@ -1668,4 +1678,23 @@ main()"
         first_none > last_val,
         "a None at tick {first_none} came before the last value at tick {last_val}"
     );
+}
+
+/// M2.4 fix 1 — a Rust panic inside a resume puts the generator back `Done` (Python marks a
+/// generator that raised as finished), so a later resume reads it exhausted, not running.
+#[test]
+fn a_panic_inside_a_resume_leaves_the_generator_done() {
+    let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
+    let home = vm.heap.alloc(Obj::Str("home".into()));
+    // No proto 9999 exists, so building the first frame panics inside the resume.
+    let g = vm.alloc_generator(9999, home, None, Vec::new());
+    let h = g.as_obj().expect("a generator object");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = vm.generator_next(h, Span::RUNTIME);
+    }));
+    assert!(r.is_err(), "the resume panicked");
+    let Ok(parked) = vm.gen_take(h, Span::RUNTIME) else {
+        panic!("the panic put the box back")
+    };
+    assert!(matches!(parked.state, GenState::Done));
 }

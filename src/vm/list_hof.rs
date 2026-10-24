@@ -250,8 +250,8 @@ impl Vm {
                 self.pop(); // unroot source
                 if is_pos {
                     Ok(match found {
-                        Some(i) => self.alloc_enum("Option", "Some", vec![Value::int(i as i64)]),
-                        None => self.alloc_enum("Option", "None", vec![]),
+                        Some(i) => self.alloc_enum("Option", "Some", &[Value::int(i as i64)]),
+                        None => self.alloc_enum("Option", "None", &[]),
                     })
                 } else {
                     Ok(Value::int(count))
@@ -521,7 +521,7 @@ impl Vm {
             None => unreachable!("list_reduce_extreme on non-list"),
         };
         if n == 0 {
-            return Ok(self.alloc_enum("Option", "None", vec![]));
+            return Ok(self.alloc_enum("Option", "None", &[]));
         }
         // A Comparable-struct element's `compare` re-enters user code, which may MUTATE (shrink) the
         // source list, so scan an immutable SNAPSHOT (mirrors `list_sort_by_key`/`list_min_max_by`) —
@@ -572,7 +572,7 @@ impl Vm {
         // this method call, not during it. Kept because a shrinking comparator can leave `result`
         // reachable ONLY through the snapshot, so if anything between here and the caller's
         // `push` ever re-enters the VM, this is the order that is already correct.
-        let some = self.alloc_enum("Option", "Some", vec![result]);
+        let some = self.alloc_enum("Option", "Some", &[result]);
         self.pop(); // unroot snapshot
         self.pop(); // unroot source
         Ok(some)
@@ -605,7 +605,7 @@ impl Vm {
             None => unreachable!("list_min_max_by on non-list"),
         };
         if n == 0 {
-            return Ok(self.alloc_enum("Option", "None", vec![]));
+            return Ok(self.alloc_enum("Option", "None", &[]));
         }
         self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
@@ -670,7 +670,7 @@ impl Vm {
         }
         // Wrap while the snapshot is still rooted — see `list_reduce_extreme` for why that is
         // belt-and-braces rather than load-bearing.
-        let some = self.alloc_enum("Option", "Some", vec![result]);
+        let some = self.alloc_enum("Option", "Some", &[result]);
         self.pop(); // unroot keys
         self.pop(); // unroot snapshot
         self.pop(); // unroot source

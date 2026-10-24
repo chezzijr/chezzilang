@@ -37,8 +37,8 @@ impl Vm {
                 _ => None,
             };
             return Ok(Some(match answer {
-                Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                None => self.alloc_enum("Option", "None", Vec::new()),
+                Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                None => self.alloc_enum("Option", "None", &[]),
             }));
         }
         // `Add`/`Sub`/`Mul`/`Div`/`Mod` → the binary-arith primitive.
@@ -609,9 +609,9 @@ impl Vm {
                         match strip_num_underscores(s.trim()).and_then(|t| t.parse::<i64>().ok()) {
                             Some(n) => {
                                 let nv = self.make_int(n);
-                                Ok(self.alloc_enum("Option", "Some", vec![nv]))
+                                Ok(self.alloc_enum("Option", "Some", &[nv]))
                             }
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     StrMethod::ToFloat => {
@@ -619,9 +619,9 @@ impl Vm {
                         match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
                             Some(f) => {
                                 let fv = self.box_float(f);
-                                Ok(self.alloc_enum("Option", "Some", vec![fv]))
+                                Ok(self.alloc_enum("Option", "Some", &[fv]))
                             }
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     // Result-returning parse siblings of to_int/to_float — carry a human-readable
@@ -631,18 +631,18 @@ impl Vm {
                         match parse_i64_pep515(s.trim()) {
                             Ok(n) => {
                                 let nv = self.make_int(n);
-                                Ok(self.alloc_enum("Result", "Ok", vec![nv]))
+                                Ok(self.alloc_enum("Result", "Ok", &[nv]))
                             }
                             Err(IntParseErr::Overflow) => {
                                 let msg = self.alloc_str(format!(
                                     "'{s}' overflows i64 (range -9223372036854775808..=9223372036854775807)"
                                 ));
-                                Ok(self.alloc_enum("Result", "Err", vec![msg]))
+                                Ok(self.alloc_enum("Result", "Err", &[msg]))
                             }
                             Err(IntParseErr::Malformed) => {
                                 let msg =
                                     self.alloc_str(format!("cannot parse '{s}' as an integer"));
-                                Ok(self.alloc_enum("Result", "Err", vec![msg]))
+                                Ok(self.alloc_enum("Result", "Err", &[msg]))
                             }
                         }
                     }
@@ -651,11 +651,11 @@ impl Vm {
                         match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
                             Some(f) => {
                                 let fv = self.box_float(f);
-                                Ok(self.alloc_enum("Result", "Ok", vec![fv]))
+                                Ok(self.alloc_enum("Result", "Ok", &[fv]))
                             }
                             None => {
                                 let msg = self.alloc_str(format!("cannot parse '{s}' as a float"));
-                                Ok(self.alloc_enum("Result", "Err", vec![msg]))
+                                Ok(self.alloc_enum("Result", "Err", &[msg]))
                             }
                         }
                     }
@@ -689,8 +689,8 @@ impl Vm {
                         // M19 lever #2 — route through `alloc_enum` so the dense `variant_id` is stamped
                         // (replacing the two ad-hoc per-instance `Box<str>` builds).
                         Ok(match popped {
-                            Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                            None => self.alloc_enum("Option", "None", vec![]),
+                            Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                            None => self.alloc_enum("Option", "None", &[]),
                         })
                     }
                     ListMethod::Reverse => {
@@ -832,8 +832,8 @@ impl Vm {
                             items.len().checked_sub(1).and_then(|i| items.try_get(i))
                         };
                         Ok(match picked {
-                            Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                            None => self.alloc_enum("Option", "None", vec![]),
+                            Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                            None => self.alloc_enum("Option", "None", &[]),
                         })
                     }
                     ListMethod::Reversed => {
@@ -1051,8 +1051,8 @@ impl Vm {
                             m.value_at(p)
                         });
                         match found {
-                            Some(v) => Ok(self.alloc_enum("Option", "Some", vec![v])),
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                            Some(v) => Ok(self.alloc_enum("Option", "Some", &[v])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     MapMethod::Keys => {
@@ -1098,9 +1098,9 @@ impl Vm {
                                     unreachable!()
                                 };
                                 let (_, _, v) = m.remove_at(heap, i);
-                                Ok(self.alloc_enum("Option", "Some", vec![v]))
+                                Ok(self.alloc_enum("Option", "Some", &[v]))
                             }
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     MapMethod::Insert => {
@@ -1108,8 +1108,8 @@ impl Vm {
                         let (key, val) = (args[0], args[1]);
                         let hk = self.hash_key_rooted(key, &[Value::obj(h), key, val], span)?;
                         match self.map_upsert_in_heap(h, hk, key, val, span)? {
-                            Some(old) => Ok(self.alloc_enum("Option", "Some", vec![old])),
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                            Some(old) => Ok(self.alloc_enum("Option", "Some", &[old])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     MapMethod::Merge | MapMethod::Update => {
@@ -1383,8 +1383,8 @@ impl Vm {
                 };
                 let popped = b.pop();
                 Ok(match popped {
-                    Some(x) => self.alloc_enum("Option", "Some", vec![Value::int(x as i64)]),
-                    None => self.alloc_enum("Option", "None", vec![]),
+                    Some(x) => self.alloc_enum("Option", "Some", &[Value::int(x as i64)]),
+                    None => self.alloc_enum("Option", "None", &[]),
                 })
             }
             BytearrayMethod::Extend => {

@@ -420,9 +420,11 @@ impl Vm {
                     .iter()
                     .map(|&x| self.snapshot_value(x, visited, depth + 1))
                     .collect();
-                // `nh` is this snapshot's own new list: no other thread can hold its block.
+                // `nh` is this snapshot's own new list: slot stores into its one block.
                 if let Obj::List(dst) = self.heap.get_mut(nh) {
-                    *dst = copied.into();
+                    for (k, x) in copied.into_iter().enumerate() {
+                        dst.set(k, x);
+                    }
                 }
                 Value::obj(nh)
             }
@@ -440,18 +442,21 @@ impl Vm {
                 Value::obj(nh)
             }
             Obj::Struct { tid, fields } => {
-                let (tid, fields) = (*tid, fields.clone());
+                let (tid, vals) = (*tid, fields.to_vec());
                 let nh = self.heap.alloc(Obj::Struct {
                     tid,
-                    fields: fields.clone(),
+                    fields: Fields::from_vec(vals.clone()),
                 });
                 visited.insert(h, nh);
-                let copied: Vec<Value> = fields
+                let copied: Vec<Value> = vals
                     .iter()
-                    .map(|f| self.snapshot_value(f, visited, depth + 1))
+                    .map(|&f| self.snapshot_value(f, visited, depth + 1))
                     .collect();
+                // `nh` is this snapshot's own new struct: slot stores into its one block.
                 if let Obj::Struct { fields, .. } = self.heap.get_mut(nh) {
-                    *fields = Fields::from_vec(copied);
+                    for (k, f) in copied.into_iter().enumerate() {
+                        fields.set(k, f);
+                    }
                 }
                 Value::obj(nh)
             }

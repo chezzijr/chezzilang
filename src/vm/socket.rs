@@ -50,11 +50,11 @@ impl Vm {
     /// D6 — build a `Result::Ok(v)` / `Result::Err(msg)` for a socket op (mirrors `lower_native`'s
     /// `Ok`/`Err` arms — the surface contract is `read/write/accept -> Result`).
     pub(super) fn sock_ok(&mut self, v: Value) -> Value {
-        self.alloc_enum("Result", "Ok", vec![v])
+        self.alloc_enum("Result", "Ok", &[v])
     }
     pub(super) fn sock_err(&mut self, msg: impl Into<String>) -> Value {
         let ev = self.alloc_str(msg.into());
-        self.alloc_enum("Result", "Err", vec![ev])
+        self.alloc_enum("Result", "Err", &[ev])
     }
 
     /// N3(a) — the ONE builder for the "read took a partial codepoint then could not finish it" error,

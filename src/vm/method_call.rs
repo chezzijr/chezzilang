@@ -475,8 +475,8 @@ impl Vm {
                         None
                     };
                     let result = match item {
-                        Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                        None => self.alloc_enum("Option", "None", Vec::new()),
+                        Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                        None => self.alloc_enum("Option", "None", &[]),
                     };
                     self.push(result);
                 }

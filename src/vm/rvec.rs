@@ -44,8 +44,9 @@
 //! No API hands out `&mut [T]`. Miri and TSan are not available on this box, so the races here
 //! are tested only by the stress tests below.
 //!
-//! [`AtomicBox`] is the owner-pointer sibling for a value that a thread takes whole (a parked
-//! generator): a take swaps the pointer to null, so a second taker sees the value held.
+//! [`AtomicBox`] is the owner-pointer sibling for a value that a run takes whole (a parked
+//! generator): a take swaps the pointer to a RUNNING sentinel and waits out the readers, so a
+//! second taker sees it running, and reads never block each other.
 
 use super::heap::Heap;
 use super::value::Value;
@@ -791,71 +792,110 @@ impl<T: Elem> Iterator for Iter<'_, T> {
     }
 }
 
-/// One boxed `T` behind an atomic owner pointer: a thread takes the box whole, or sees that
-/// another thread holds it (a null pointer). A parked generator lives here (`vm/exec.rs`), so two
-/// threads that resume one generator never both write its frames.
+/// One boxed `T` behind an atomic owner pointer, with two kinds of access. A parked generator
+/// lives here (`vm/exec.rs`), so two threads that resume one generator never both write its
+/// frames, and any number of threads can read it at once.
 ///
-/// No reader borrows the box in place. Every access takes it ([`take`](AtomicBox::take), or
-/// [`with`](AtomicBox::with) for a read) and puts it back, so the taker owns it alone, and the
-/// put that swaps a box out may drop it: nothing retires.
+/// - A RUN takes the box whole ([`take`](AtomicBox::take)): it swaps the pointer to the RUNNING
+///   sentinel (null), then waits until no reader is left. A second take sees RUNNING and gets
+///   `None`. [`put`](AtomicBox::put) stores the box back.
+/// - A READ ([`with`](AtomicBox::with)) registers in `readers`, then loads the pointer. RUNNING
+///   gives the reader `None`; any other pointer is a parked box that no run can mutate or free
+///   until the reader unregisters. Reads never wait for each other.
+///
+/// Every counter and pointer access is `SeqCst`: the read side is "add to `readers`, then load
+/// the pointer", and the run side is "swap the pointer, then load `readers`" (Dekker's pattern).
+/// In the one total order, a reader that loaded the parked pointer added itself before the swap,
+/// so the run's later load of `readers` sees it and waits. Acquire/Release does not order a
+/// store before a later load of another location, so it is not enough here.
+///
+/// The wait is a spin: a read body is plain Rust that never reaches a safepoint or a lock, so a
+/// reader leaves in bounded time.
 pub struct AtomicBox<T> {
     ptr: AtomicPtr<T>,
+    readers: AtomicU32,
     /// `Send` and `Sync` as a `Mutex<T>`: a take hands the `T` to the taking thread.
     _t: PhantomData<Mutex<T>>,
+}
+
+/// Unregisters one reader of an [`AtomicBox`] when dropped, on the unwind of a panicking read too.
+struct ReadGuard<'a>(&'a AtomicU32);
+
+impl Drop for ReadGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl<T> AtomicBox<T> {
     pub fn new(v: T) -> Self {
         AtomicBox {
             ptr: AtomicPtr::new(Box::into_raw(Box::new(v))),
+            readers: AtomicU32::new(0),
             _t: PhantomData,
         }
     }
 
-    /// Take the box, or `None` when another take holds it.
-    pub fn take(&self) -> Option<Box<T>> {
-        let p = self.ptr.swap(ptr::null_mut(), Ordering::AcqRel);
-        // SAFETY: a non-null pointer came from `Box::into_raw`, and the swap made this thread its
-        // only owner.
-        (!p.is_null()).then(|| unsafe { Box::from_raw(p) })
+    /// Spin until no reader holds the box (see the type doc for why the wait is bounded).
+    fn wait_for_readers(&self) {
+        while self.readers.load(Ordering::SeqCst) != 0 {
+            std::hint::spin_loop();
+        }
     }
 
-    /// Put `b` in. A box that was there (a put with no take before it) is dropped: the swap made
-    /// this thread its only owner.
+    /// Take the box for a run, or `None` when a run holds it.
+    pub fn take(&self) -> Option<Box<T>> {
+        let p = self.ptr.swap(ptr::null_mut(), Ordering::SeqCst);
+        if p.is_null() {
+            return None;
+        }
+        self.wait_for_readers();
+        // SAFETY: a non-null pointer came from `Box::into_raw`; the swap made this thread its
+        // only owner, and every reader that loaded it has left (the type doc).
+        Some(unsafe { Box::from_raw(p) })
+    }
+
+    /// Put `b` back. A box that was there (a put with no take before it) is dropped once its
+    /// readers have left.
     pub fn put(&self, b: Box<T>) {
-        let old = self.ptr.swap(Box::into_raw(b), Ordering::AcqRel);
+        let old = self.ptr.swap(Box::into_raw(b), Ordering::SeqCst);
         if !old.is_null() {
+            self.wait_for_readers();
             // SAFETY: as for `take`.
             drop(unsafe { Box::from_raw(old) });
         }
     }
 
-    /// Run `f` on the box while this thread holds it (`None` when another take holds it), then
-    /// put it back.
+    /// Read the box (`None` while a run holds it). Many reads run at once; a panic in `f`
+    /// unregisters the reader.
     pub fn with<R>(&self, f: impl FnOnce(Option<&T>) -> R) -> R {
-        let b = self.take();
-        let r = f(b.as_deref());
-        if let Some(b) = b {
-            self.put(b);
-        }
-        r
+        self.readers.fetch_add(1, Ordering::SeqCst);
+        let _g = ReadGuard(&self.readers);
+        let p = self.ptr.load(Ordering::SeqCst);
+        // SAFETY: a non-null pointer is a parked box; this reader is registered, so no take or
+        // put frees or mutates it before `_g` drops (the type doc).
+        f(unsafe { p.as_ref() })
     }
 
     /// The box, through `&mut self` (no other thread can reach it).
     pub fn get_mut(&mut self) -> Option<&mut T> {
-        // SAFETY: `&mut self` excludes every take; a non-null pointer came from `Box::into_raw`.
+        // SAFETY: `&mut self` excludes every take and read; a non-null pointer came from
+        // `Box::into_raw`.
         unsafe { self.ptr.get_mut().as_mut() }
     }
 }
 
 impl<T: Clone> Clone for AtomicBox<T> {
-    /// A copy of the box, or an empty one while another take holds it.
+    /// A copy of the parked box, read alongside any other reader. While a run holds the box the
+    /// copy is RUNNING too and holds no state, so such a copy must stay a temporary (it never
+    /// gets a put).
     fn clone(&self) -> Self {
         let p = self
             .with(|b| b.map(|v| Box::into_raw(Box::new(v.clone()))))
             .unwrap_or(ptr::null_mut());
         AtomicBox {
             ptr: AtomicPtr::new(p),
+            readers: AtomicU32::new(0),
             _t: PhantomData,
         }
     }
@@ -1131,6 +1171,77 @@ mod tests {
         assert_eq!(v.to_vec(), [1, 2, 3]);
         heap.sweep();
         assert_eq!(test_counts().1, freed + 1, "the stop frees the old block");
+    }
+
+    /// M2.4 fix 1 — reads of one `AtomicBox` run at once: no read sees another read as a take.
+    #[test]
+    fn concurrent_reads_never_see_a_take() {
+        let b = super::AtomicBox::new(7u64);
+        let missed = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..100_000 {
+                        if b.with(|v| v.copied()) != Some(7) {
+                            missed.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            missed.load(Ordering::Relaxed),
+            0,
+            "a read saw the box taken"
+        );
+    }
+
+    /// A take waits for a read that is in progress, then owns the box; a read after the take
+    /// sees it taken.
+    #[test]
+    fn take_waits_for_a_read_in_progress() {
+        let b = super::AtomicBox::new(1u64);
+        let inside = AtomicBool::new(false);
+        let read_done = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                b.with(|v| {
+                    assert_eq!(v.copied(), Some(1));
+                    inside.store(true, Ordering::SeqCst);
+                    let t = std::time::Instant::now();
+                    while t.elapsed() < std::time::Duration::from_millis(50) {
+                        std::hint::spin_loop();
+                    }
+                    read_done.store(true, Ordering::SeqCst);
+                });
+            });
+            while !inside.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+            let taken = b.take().expect("the take owns the box");
+            assert!(
+                read_done.load(Ordering::SeqCst),
+                "the take waited for the read"
+            );
+            assert_eq!(
+                b.with(|v| v.copied()),
+                None,
+                "a read after the take sees it taken"
+            );
+            b.put(taken);
+        });
+        assert_eq!(b.with(|v| v.copied()), Some(1));
+    }
+
+    /// A panic inside a read leaves the box in place (the reader unregisters on the unwind).
+    #[test]
+    fn a_panic_inside_a_read_keeps_the_box() {
+        let b = super::AtomicBox::new(3u64);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            b.with(|_| panic!("a read panics"));
+        }));
+        assert!(r.is_err());
+        assert_eq!(b.take().map(|v| *v), Some(3), "the box is still parked");
     }
 
     #[test]
