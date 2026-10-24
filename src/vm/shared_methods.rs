@@ -214,10 +214,11 @@ impl Vm {
                     let Some(i) = vm.map_probe(mh, qh, a[0], span)? else {
                         return Ok(None);
                     };
-                    let Obj::Map(m) = vm.heap.get_mut(mh) else {
+                    let heap = vm.heap.write(mh);
+                    let Obj::Map(m) = heap.get(mh) else {
                         unreachable!()
                     };
-                    Ok(Some(m.remove_at(i).2))
+                    Ok(Some(m.remove_at(heap, i).2))
                 })?;
                 Ok(self.wire_option(removed))
             }
@@ -232,13 +233,14 @@ impl Vm {
                         let Obj::Map(m) = vm.heap.get(mh) else {
                             unreachable!()
                         };
-                        return Ok(Some(m.entries[i].2));
+                        return Ok(Some(m.value_at(i)));
                     }
                     let k = vm.snapshot_key(a[0]);
-                    let Obj::Map(m) = vm.heap.get_mut(mh) else {
+                    let heap = vm.heap.write(mh);
+                    let Obj::Map(m) = heap.get(mh) else {
                         unreachable!()
                     };
-                    m.push(qh, k, a[1]);
+                    m.push(heap, qh, k, a[1]);
                     Ok(None)
                 })?;
                 Ok(match present {
@@ -390,7 +392,7 @@ impl Vm {
             match boxctx::state_obj(&vm.heap, ctx) {
                 Some(Obj::Map(m)) if !on_set => {
                     for &p in m.candidates(qh) {
-                        let (_, k, v) = m.entries[p];
+                        let (_, k, v) = m.entries.get(p);
                         let picked = if with_value { vec![k, v] } else { vec![k] };
                         out.push(vm.box_copy_pieces(ctx, &picked, span)?);
                     }

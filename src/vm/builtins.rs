@@ -496,7 +496,7 @@ impl Vm {
         // is popped after the build, on both the Ok and Err path.
         let stack_base = self.stack.len();
         let built = (|| {
-            let mut map = MapData::default();
+            let map = MapData::default();
             for elem in &drained {
                 let (k, v) = match elem.as_obj().map(|eh| self.heap.get(eh)) {
                     Some(Obj::Tuple(parts)) if parts.len() == 2 => (parts[0], parts[1]),
@@ -520,8 +520,10 @@ impl Vm {
                 // last-wins upsert (mirrors the map literal + interp `map_upsert`).
                 let pos = self.map_slot(&map.entries, map.candidates(hk), k, span)?;
                 match pos {
-                    Some(p) => map.entries[p].2 = v,
-                    None => map.push(hk, k, v),
+                    Some(p) => {
+                        map.set_value(p, v);
+                    }
+                    None => map.push(&self.heap, hk, k, v),
                 }
             }
             Ok(map)

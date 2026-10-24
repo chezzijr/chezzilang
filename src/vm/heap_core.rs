@@ -412,6 +412,12 @@ impl HeapCore {
         self.retired.len()
     }
 
+    /// Retired boxes (not `RVec` blocks) on the run's retire list (tests only).
+    #[cfg(test)]
+    pub(super) fn retired_boxes(&self) -> usize {
+        self.retired.boxes()
+    }
+
     /// Record the `live_bytes()` a sweep measured: the last value, the peak and the cap verdict.
     pub(super) fn record_live_bytes(&self, lb: usize) {
         self.last_live_bytes.store(lb, Ordering::Relaxed);

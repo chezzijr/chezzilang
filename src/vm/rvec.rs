@@ -10,7 +10,8 @@
 //!   header's `cap` and `len` are `u32`s, so a vec holds at most `u32::MAX` elements; a larger
 //!   capacity panics (a task fault).
 //! - `T` is an [`Elem`]: `Copy`, no padding, in an atomic slot of its own size (`u64`, `i64`
-//!   and `Value` in an `AtomicU64`, `u8` in an `AtomicU8`, so bytes pack one per byte). Every slot
+//!   and `Value` in an `AtomicU64`, `u8` in an `AtomicU8`, so bytes pack one per byte; a map or
+//!   set entry in one `AtomicU64` per field, so a racy reader can see it torn). Every slot
 //!   access is a `Relaxed` atomic of the element, so a racing read and write on one slot is no data
 //!   race and never tears. `Copy` is also what makes a racy read sound: a reader copies the bits,
 //!   and a copied `T` with a drop would drop twice.
@@ -38,6 +39,9 @@
 //! Pacing: a grow charges the retired block's bytes to its handle (`Heap::charge_bytes`), once.
 //! The hand-off does not charge them again. The sweep that frees the block zeroes the run's byte
 //! count in the same stop, which uncharges them.
+//!
+//! [`RBox`] is the same retire rule for one boxed value that is not an `Elem` (a map's or a set's
+//! index table, `vm/map_data.rs`): a swap retires the old box, with the drop fn of its type.
 //!
 //! No `as_slice`: a `&[T]` over a block that another thread can write with `set` is not sound.
 //! No API hands out `&mut [T]`. Miri and TSan are not available on this box, so the races here
@@ -92,6 +96,34 @@ macro_rules! word_elem {
 word_elem!(u64, |v: u64| v, |b: u64| b);
 word_elem!(i64, |v: i64| v as u64, |b: u64| b as i64);
 word_elem!(Value, Value::to_bits, Value::from_bits);
+
+/// A map entry, `(cached hash, key, value)`, in one `AtomicU64` per field. A racy reader can
+/// see a torn entry (fields of two writes): the user's race, like a torn Go struct.
+impl sealed::Sealed for (u64, Value, Value) {}
+impl Elem for (u64, Value, Value) {
+    type Slot = [AtomicU64; 3];
+    fn load([h, k, v]: &[AtomicU64; 3]) -> Self {
+        (u64::load(h), Value::load(k), Value::load(v))
+    }
+    fn store([h, k, v]: &[AtomicU64; 3], (eh, ek, ev): Self) {
+        u64::store(h, eh);
+        Value::store(k, ek);
+        Value::store(v, ev);
+    }
+}
+
+/// A set entry, `(cached hash, element)`, as a map entry without the value.
+impl sealed::Sealed for (u64, Value) {}
+impl Elem for (u64, Value) {
+    type Slot = [AtomicU64; 2];
+    fn load([h, e]: &[AtomicU64; 2]) -> Self {
+        (u64::load(h), Value::load(e))
+    }
+    fn store([h, e]: &[AtomicU64; 2], (eh, ee): Self) {
+        u64::store(h, eh);
+        Value::store(e, ee);
+    }
+}
 
 impl sealed::Sealed for u8 {}
 impl Elem for u8 {
@@ -265,25 +297,59 @@ unsafe fn store<T: Elem>(h: *mut Header, i: usize, v: T) {
 fn retire<T: Elem>(heap: &Heap, old: *mut Header, cap: usize) {
     let ptr = NonNull::new(old.cast::<u8>()).expect("a retired block is not null");
     let layout = block_layout::<T>(cap);
-    heap.retire_list().lock().push(RetiredBlock { ptr, layout });
+    heap.retire_list().lock().push(Retired {
+        ptr,
+        free: Free::Block(layout),
+    });
     heap.charge_bytes(layout.size());
 }
 
-/// A retired block: freeing it needs only its layout (an `Elem` has no drop).
-struct RetiredBlock {
-    ptr: NonNull<u8>,
-    layout: Layout,
+/// Put the box `b`, which its owner no longer points to, on `heap`'s retire list, and charge
+/// `bytes` (what the box owns) to `heap`. A reader that loaded the old pointer before the swap
+/// can still read it until the next stop. Only the stop-the-world sweep drops it.
+pub(super) fn retire_box<T: Send + 'static>(heap: &Heap, b: Box<T>, bytes: usize) {
+    let ptr = NonNull::from(Box::leak(b)).cast::<u8>();
+    heap.retire_list().lock().push(Retired {
+        ptr,
+        free: Free::Drop(drop_box::<T>),
+    });
+    heap.charge_bytes(bytes);
 }
 
-// SAFETY: a retired block is plain memory that no `RVec` points to; the list that holds it is
-// the only thing that frees it, on whichever thread drains the list.
-unsafe impl Send for RetiredBlock {}
+/// Drop a box that [`retire_box`] leaked.
+///
+/// # Safety
+///
+/// `p` came from `Box::<T>::leak` in `retire_box`, and no reference to the box lives.
+unsafe fn drop_box<T>(p: NonNull<u8>) {
+    // SAFETY: the caller's contract.
+    drop(unsafe { Box::from_raw(p.cast::<T>().as_ptr()) });
+}
+
+/// How a retired entry is freed.
+enum Free {
+    /// An `RVec` block: only its layout (an `Elem` has no drop).
+    Block(Layout),
+    /// A box ([`retire_box`]): the drop fn of its type, which frees what the value owns too.
+    Drop(unsafe fn(NonNull<u8>)),
+}
+
+/// A retired `RVec` block or box.
+struct Retired {
+    ptr: NonNull<u8>,
+    free: Free,
+}
+
+// SAFETY: a retired entry is memory that no owner points to (a box holds only `Send` types,
+// `retire_box`); the list that holds it is the only thing that frees it, on whichever thread
+// drains the list.
+unsafe impl Send for Retired {}
 
 /// Retired blocks: a `Heap` handle's own (not yet handed off), or the run's (`HeapCore.retired`),
 /// which the stop-the-world sweep frees. A handle hands its list to the core before it drops, so
 /// only the core's list is ever dropped with blocks on it.
 #[derive(Default)]
-pub(super) struct RetireList(Mutex<Vec<RetiredBlock>>);
+pub(super) struct RetireList(Mutex<Vec<Retired>>);
 
 impl std::fmt::Debug for RetireList {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -292,7 +358,7 @@ impl std::fmt::Debug for RetireList {
 }
 
 impl RetireList {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<RetiredBlock>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Retired>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -309,6 +375,15 @@ impl RetireList {
         self.lock().len()
     }
 
+    /// Retired boxes on this list (tests only).
+    #[cfg(test)]
+    pub(super) fn boxes(&self) -> usize {
+        self.lock()
+            .iter()
+            .filter(|r| matches!(r.free, Free::Drop(_)))
+            .count()
+    }
+
     /// Free every block on this list.
     ///
     /// # Safety
@@ -317,10 +392,18 @@ impl RetireList {
     /// detached, `vm/gc_coord.rs`), or no handle of the run is left. Either way no reader holds a
     /// pointer to a block on this list.
     pub(super) unsafe fn free_all(&self) {
-        let blocks = std::mem::take(&mut *self.lock());
-        for b in blocks {
-            // SAFETY: the caller's contract; no `RVec` points to a retired block.
-            unsafe { free_block(b.ptr, b.layout) };
+        let retired = std::mem::take(&mut *self.lock());
+        for r in retired {
+            match r.free {
+                // SAFETY: the caller's contract; no `RVec` points to a retired block.
+                Free::Block(layout) => unsafe { free_block(r.ptr, layout) },
+                Free::Drop(drop_fn) => {
+                    // SAFETY: the caller's contract; no `RBox` points to a retired box.
+                    unsafe { drop_fn(r.ptr) };
+                    #[cfg(test)]
+                    count(&FREES);
+                }
+            }
         }
     }
 }
@@ -651,6 +734,88 @@ impl<T: Elem> Drop for RVec<T> {
             let layout = block_layout::<T>(unsafe { (*h).cap() });
             // SAFETY: as above.
             unsafe { free_block(p, layout) };
+        }
+    }
+}
+
+/// One boxed `T` behind an atomic pointer whose swaps retire the old box (see the module doc).
+/// A null pointer is no value. A read holds the box only until its next safepoint.
+pub struct RBox<T: Send + 'static> {
+    ptr: AtomicPtr<T>,
+    _t: PhantomData<Box<T>>,
+}
+
+impl<T: Send + 'static> Default for RBox<T> {
+    fn default() -> Self {
+        RBox {
+            ptr: AtomicPtr::new(ptr::null_mut()),
+            _t: PhantomData,
+        }
+    }
+}
+
+impl<T: Send + 'static> RBox<T> {
+    pub fn new(v: T) -> Self {
+        RBox {
+            ptr: AtomicPtr::new(Box::into_raw(Box::new(v))),
+            _t: PhantomData,
+        }
+    }
+
+    /// The value, or `None` when there is none.
+    pub fn get(&self) -> Option<&T> {
+        let p = self.ptr.load(Ordering::Acquire);
+        // SAFETY: a box this cell pointed to is live until a stop (a swap retires it); this
+        // thread holds the reference only until its next safepoint (see the module doc).
+        unsafe { p.as_ref() }
+    }
+
+    /// Write the value in place; `None` when there is none. The caller must not hold a
+    /// reference from [`get`](RBox::get) across this call: the VM reaches a heap object's box
+    /// only through one `Heap` borrow per read or write. A racing reader on another thread is the
+    /// user's race (Go parity), and stays inside the live box as long as `f` does not free what
+    /// the box owns (it retires it instead).
+    pub fn update_in_place<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        let p = self.ptr.load(Ordering::Acquire);
+        // SAFETY: as for `get`; the contract above keeps this thread's other references off it.
+        unsafe { p.as_mut() }.map(f)
+    }
+
+    /// Swap in `v`; the old box retires on `heap`, charged `old_bytes` (what it owns).
+    pub fn replace(&self, heap: &Heap, v: T, old_bytes: usize) {
+        let old = self.ptr.swap(Box::into_raw(Box::new(v)), Ordering::AcqRel);
+        if !old.is_null() {
+            // SAFETY: `old` came from `Box::into_raw` and no cell points to it any more; a reader
+            // that loaded it before the swap holds it until its next safepoint, and the box
+            // retires, so only the stop drops it.
+            retire_box(heap, unsafe { Box::from_raw(old) }, old_bytes);
+        }
+    }
+}
+
+impl<T: Send + Clone + 'static> Clone for RBox<T> {
+    /// A new box holding a copy of the value.
+    fn clone(&self) -> Self {
+        match self.get() {
+            Some(v) => RBox::new(v.clone()),
+            None => RBox::default(),
+        }
+    }
+}
+
+impl<T: Send + std::fmt::Debug + 'static> std::fmt::Debug for RBox<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.get().fmt(f)
+    }
+}
+
+impl<T: Send + 'static> Drop for RBox<T> {
+    /// As for an `RVec`: no reader of the cell is left, so drop the current box at once.
+    fn drop(&mut self) {
+        let p = *self.ptr.get_mut();
+        if !p.is_null() {
+            // SAFETY: `&mut self`: no reader is left, and `p` came from `Box::into_raw`.
+            drop(unsafe { Box::from_raw(p) });
         }
     }
 }

@@ -166,7 +166,7 @@ impl Vm {
                 Obj::Tuple(xs) => xs.get(i).copied(),
                 Obj::Enum { payload, .. } => payload.get(i).copied(),
                 Obj::Struct { fields, .. } => fields.get(i).copied(),
-                Obj::Map(m) => m.entries.get(i).map(|e| e.2),
+                Obj::Map(m) => m.entries.try_get(i).map(|e| e.2),
                 Obj::Str(_)
                 | Obj::Bytes(_)
                 | Obj::ByteArray(_)
@@ -461,13 +461,14 @@ impl Vm {
                 rebuild.insert(id, h);
                 // Reconstruction reuses the CARRIED hash (`push(hash, …)`) — never re-hashes a
                 // (possibly cyclic) key, and keeps iteration order + index byte-identical.
-                let mut out = MapData::default();
-                for (hash, k, val) in entries.into_entries() {
+                let entries = entries.into_entries();
+                let mut out = Vec::with_capacity(entries.len());
+                for (hash, k, val) in entries {
                     let ck = self.from_wire_memo(k, rebuild);
                     let cv = self.from_wire_memo(val, rebuild);
-                    out.push(hash, ck, cv);
+                    out.push((hash, ck, cv));
                 }
-                *self.heap.get_mut(h) = Obj::Map(out);
+                *self.heap.get_mut(h) = Obj::Map(MapData::from_entries(out));
                 Value::obj(h)
             }
             WireValue::Set { id, entries } => {

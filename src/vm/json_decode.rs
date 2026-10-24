@@ -226,7 +226,7 @@ impl Vm {
                     return Err(mismatch("object").into());
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])).as_map() {
-                    Some(m) => m.entries.clone(),
+                    Some(m) => m.entries.to_vec(),
                     None => return Err(mismatch("object").into()),
                 };
                 // Values are rooted on the operand stack, as in the list arm; the keys belong to
@@ -239,11 +239,14 @@ impl Vm {
                     self.push(coerced);
                     keys.push((hk, k));
                 }
-                let mut out = MapData::default();
-                for ((hk, k), coerced) in keys.into_iter().zip(self.stack.split_off(child_base)) {
-                    out.push(hk, k, coerced); // str keys unchanged → reuse the cached hash
-                }
-                Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
+                // str keys unchanged → reuse the cached hash
+                let out: Vec<MapEntry> = (keys.into_iter())
+                    .zip(self.stack.split_off(child_base))
+                    .map(|((hk, k), coerced)| (hk, k, coerced))
+                    .collect();
+                Ok(Value::obj(
+                    self.heap.alloc(Obj::Map(MapData::from_entries(out))),
+                ))
             }
             D::Struct {
                 key,
@@ -255,7 +258,7 @@ impl Vm {
                     return Err(mismatch(&format!("object for {display}")).into());
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])).as_map() {
-                    Some(m) => m.entries.clone(),
+                    Some(m) => m.entries.to_vec(),
                     None => return Err(mismatch("object").into()),
                 };
                 // Positional layout: `fields` (the type descriptor) is already in the struct's
@@ -423,8 +426,8 @@ impl Vm {
                 Obj::Tuple(items) => self.json_arr(items, depth),
                 Obj::Map(m) => {
                     let inner = Self::json_enter(depth)?;
-                    let mut out = MapData::default();
-                    for (hk, k, val) in m.entries {
+                    let out = MapData::default();
+                    for (hk, k, val) in &m.entries {
                         if self.val_str(k).is_none() {
                             return Err(format!(
                                 "json.encode: object keys must be str, found {}",
@@ -432,7 +435,7 @@ impl Vm {
                             ));
                         }
                         let jv = self.json_of(val, inner)?;
-                        out.push(hk, k, jv);
+                        out.push(&self.heap, hk, k, jv);
                     }
                     let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
                     self.json_variant("Obj", vec![mv])
@@ -447,12 +450,12 @@ impl Vm {
                         .map(|d| d.fields.clone())
                         .unwrap_or_default();
                     let field_vals: Vec<Value> = fields.as_slice().to_vec();
-                    let mut out = MapData::default();
+                    let out = MapData::default();
                     for (fname, fval) in field_names.into_iter().zip(field_vals) {
                         let key_v = self.alloc_str(fname);
                         let hk = self.scalar_hash(key_v);
                         let jv = self.json_of(fval, inner)?;
-                        out.push(hk, key_v, jv);
+                        out.push(&self.heap, hk, key_v, jv);
                     }
                     let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
                     self.json_variant("Obj", vec![mv])

@@ -7,12 +7,12 @@ use super::*;
 /// host-side map readers can be unit-tested without compiling a program.
 fn build_str_map(vm: &mut Vm, pairs: &[(&str, &str)]) -> Value {
     let span = Span::RUNTIME;
-    let mut map = MapData::default();
+    let map = MapData::default();
     for (k, v) in pairs {
         let kv = vm.alloc_str((*k).to_string());
         let vv = vm.alloc_str((*v).to_string());
         let hk = vm.hash_value(kv, span).unwrap();
-        map.push(hk, kv, vv);
+        map.push(&vm.heap, hk, kv, vv);
     }
     Value::obj(vm.heap.alloc(Obj::Map(map)))
 }
@@ -56,10 +56,10 @@ fn extract_native_args_snapshots_str_map() {
     );
     // A map with a non-str value (here an int) is not snapshottable → None (safe inline fallback).
     let span = Span::RUNTIME;
-    let mut bad = MapData::default();
+    let bad = MapData::default();
     let kv = vm.alloc_str("k".to_string());
     let hk = vm.hash_value(kv, span).unwrap();
-    bad.push(hk, kv, Value::int(7));
+    bad.push(&vm.heap, hk, kv, Value::int(7));
     let bad_map = Value::obj(vm.heap.alloc(Obj::Map(bad)));
     assert_eq!(vm.extract_native_args(&[bad_map]), None);
 }

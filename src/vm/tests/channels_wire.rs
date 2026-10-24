@@ -25,9 +25,9 @@ fn wire_roundtrip_preserves_value_equality() {
         variant_id: crate::base::op::VID_NONE,
         payload: vec![Value::int(9)],
     });
-    let mut m = MapData::default();
-    m.push(10, Value::int(1), Value::int(100));
-    m.push(20, Value::obj(s), Value::int(200));
+    let m = MapData::default();
+    m.push(&vm.heap, 10, Value::int(1), Value::int(100));
+    m.push(&vm.heap, 20, Value::obj(s), Value::int(200));
     let map = vm.heap.alloc(Obj::Map(m));
     let mut set = SetData::default();
     set.push(5, Value::int(1));
@@ -68,10 +68,10 @@ fn wire_roundtrip_preserves_value_equality() {
 #[test]
 fn wire_preserves_map_hashes_and_order() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let mut m = MapData::default();
-    m.push(42, Value::int(1), Value::int(10)); // collides with the third entry on hash 42
-    m.push(7, Value::int(2), Value::int(20));
-    m.push(42, Value::int(3), Value::int(30));
+    let m = MapData::default();
+    m.push(&vm.heap, 42, Value::int(1), Value::int(10)); // collides with the third entry on hash 42
+    m.push(&vm.heap, 7, Value::int(2), Value::int(20));
+    m.push(&vm.heap, 42, Value::int(3), Value::int(30));
     let map = Value::obj(vm.heap.alloc(Obj::Map(m)));
 
     let w = vm.to_wire(map).expect("map should serialize");
@@ -82,7 +82,7 @@ fn wire_preserves_map_hashes_and_order() {
     let Obj::Map(rebuilt) = vm.heap.get(h) else {
         panic!("expected map")
     };
-    let hashes: Vec<u64> = rebuilt.entries.iter().map(|(hash, ..)| *hash).collect();
+    let hashes: Vec<u64> = rebuilt.entries.iter().map(|(hash, ..)| hash).collect();
     assert_eq!(
         hashes,
         vec![42, 7, 42],
@@ -143,9 +143,9 @@ fn wire_crosses_str_by_value() {
 fn wire_str_map_key_survives_roundtrip() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let key = vm.heap.alloc(Obj::Str("k".into()));
-    let mut m = MapData::default();
+    let m = MapData::default();
     let h = vm.scalar_hash(Value::obj(key));
-    m.push(h, Value::obj(key), Value::int(42));
+    m.push(&vm.heap, h, Value::obj(key), Value::int(42));
     let map = Value::obj(vm.heap.alloc(Obj::Map(m)));
 
     let w = vm
@@ -160,16 +160,16 @@ fn wire_str_map_key_survives_roundtrip() {
     };
     // Same single entry: a fresh str key, value-equal, same cached hash → same bucket.
     assert_eq!(rebuilt.entries.len(), 1);
-    let (rh, rk, rv) = &rebuilt.entries[0];
-    assert_eq!(*rh, h, "cached hash preserved");
-    assert_eq!(*rv, Value::int(42));
+    let (rh, rk, rv) = rebuilt.entries.get(0);
+    assert_eq!(rh, h, "cached hash preserved");
+    assert_eq!(rv, Value::int(42));
     assert_eq!(
         rebuilt.candidates(h),
         &[0],
         "index bucket points at the rebuilt key"
     );
     assert!(
-        vm.values_equal(*rk, Value::obj(key)),
+        vm.values_equal(rk, Value::obj(key)),
         "rebuilt str key is value-equal"
     );
 }

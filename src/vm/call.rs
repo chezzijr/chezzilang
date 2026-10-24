@@ -801,12 +801,12 @@ impl Vm {
             N::Map(entries) => {
                 // Native maps have unique scalar (str) keys — hash them directly (no re-entry, no
                 // dedup needed).
-                let mut map = MapData::default();
+                let map = MapData::default();
                 for (k, v) in entries {
                     let lk = self.lower_native(k);
                     let lv = self.lower_native(v);
                     let hk = self.scalar_hash(lk);
-                    map.push(hk, lk, lv);
+                    map.push(&self.heap, hk, lk, lv);
                 }
                 Value::obj(self.heap.alloc(Obj::Map(map)))
             }

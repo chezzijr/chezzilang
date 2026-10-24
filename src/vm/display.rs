@@ -142,8 +142,8 @@ impl Vm {
                     for (_, k, v) in &m.entries {
                         parts.push(format!(
                             "{}: {}",
-                            self.display_guarded(*k, depth + 1)?,
-                            self.display_guarded(*v, depth + 1)?
+                            self.display_guarded(k, depth + 1)?,
+                            self.display_guarded(v, depth + 1)?
                         ));
                     }
                     Ok(format!("{{{}}}", parts.join(", ")))
@@ -978,7 +978,7 @@ impl Vm {
         &mut self,
         out: &mut String,
         h: GcRef,
-        entries: &[(u64, Value, Value)],
+        entries: &RVec<MapEntry>,
         span: Span,
         depth: usize,
     ) -> Result<(), RuntimeError> {
@@ -988,12 +988,12 @@ impl Vm {
             if i > 0 {
                 out.push_str(", ");
             }
-            r = self.stringify_nested_into(out, *k, span, depth + 1);
+            r = self.stringify_nested_into(out, k, span, depth + 1);
             if r.is_err() {
                 break;
             }
             out.push_str(": ");
-            r = self.stringify_nested_into(out, *mv, span, depth + 1);
+            r = self.stringify_nested_into(out, mv, span, depth + 1);
             if r.is_err() {
                 break;
             }

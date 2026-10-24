@@ -816,14 +816,15 @@ impl Vm {
                 let Obj::Map(m) = self.heap.get_mut(h) else {
                     unreachable!()
                 };
-                Ok(Some(std::mem::replace(&mut m.entries[i].2, val)))
+                Ok(Some(m.set_value(i, val)))
             }
             None => {
                 let key = self.snapshot_key(key);
-                let Obj::Map(m) = self.heap.get_mut(h) else {
+                let heap = self.heap.write(h);
+                let Obj::Map(m) = heap.get(h) else {
                     unreachable!()
                 };
-                m.push(hk, key, val);
+                m.push(heap, hk, key, val);
                 Ok(None)
             }
         }
@@ -876,7 +877,7 @@ impl Vm {
         let Obj::Map(m) = self.heap.get(h) else {
             unreachable!("map_pairs on a non-map")
         };
-        let pairs: Vec<(Value, Value)> = m.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+        let pairs: Vec<(Value, Value)> = m.entries.iter().map(|(_, k, v)| (k, v)).collect();
         pairs
             .into_iter()
             .map(|(k, v)| Value::obj(self.heap.alloc(Obj::Tuple(vec![k, v]))))

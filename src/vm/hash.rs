@@ -340,11 +340,7 @@ impl Vm {
             Obj::Enum { payload, .. } => payload.clone(),
             Obj::List(items) => items.to_vec(),
             Obj::Tuple(items) => items.to_vec(),
-            Obj::Map(m) => m
-                .entries
-                .iter()
-                .flat_map(|(_, k, val)| [*k, *val])
-                .collect(),
+            Obj::Map(m) => m.entries.iter().flat_map(|(_, k, val)| [k, val]).collect(),
             Obj::Set(s) => s.entries.iter().map(|(_, e)| *e).collect(),
             Obj::Str(_)
             | Obj::Bytes(_)
@@ -479,7 +475,7 @@ impl Vm {
                 Value::obj(nh)
             }
             Obj::Map(m) => {
-                let entries = m.entries.clone();
+                let entries = m.entries.to_vec();
                 let nh = self.heap.alloc(Obj::Map(m.clone()));
                 visited.insert(h, nh);
                 let copied: Vec<(u64, Value, Value)> = entries
@@ -492,8 +488,9 @@ impl Vm {
                         )
                     })
                     .collect();
-                if let Obj::Map(dst) = self.heap.get_mut(nh) {
-                    dst.entries = copied;
+                let heap = self.heap.write(nh);
+                if let Obj::Map(dst) = heap.get(nh) {
+                    dst.entries.replace(heap, &copied);
                 }
                 Value::obj(nh)
             }

@@ -11,56 +11,15 @@ use super::core::{
 };
 use super::heap_core::{CopyLog, HeapCore, lock};
 use super::heap_view::ViewState;
+use super::map_data::HashIndex;
+pub use super::map_data::{MapData, MapEntry};
 use super::rvec::{RVec, RetireList};
 use super::value::{GcRef, Value};
-use super::wire::HashIndex;
 use crate::base::op::ProtoId;
 use crate::lexer::Span;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// A real hash table that *also* preserves insertion order. `entries` is the insertion-ordered
-/// store (so iteration, `keys()`, set equality, and GC tracing stay deterministic); `index` maps a
-/// key's cached hash to its candidate position(s) in `entries` for O(1)-average lookup. The cached
-/// `u64` per entry makes index rebuild (after a remove) a pure, engine-free pass — no re-hashing of
-/// user `hash()` methods. Probing always confirms a hash hit with the engine's `values_equal`
-/// (structural), so a collision never returns the wrong key. The `index` holds plain `usize` — it
-/// is **not** a GC child (only `entries`' keys/values are traced).
-#[derive(Debug, Clone, Default)]
-pub struct MapData {
-    pub entries: Vec<(u64, Value, Value)>,
-    /// `cached-hash → candidate position(s)` (see [`HashIndex`]). **Not** a GC child.
-    index: HashIndex,
-}
-
-impl MapData {
-    /// Positions in `entries` whose key hashed to `h` (the probe candidates).
-    #[inline]
-    pub fn candidates(&self, h: u64) -> &[usize] {
-        self.index.candidates(h)
-    }
-    /// Append a fresh entry (caller has confirmed the key is absent), updating the index.
-    #[inline]
-    pub fn push(&mut self, h: u64, k: Value, v: Value) {
-        let pos = self.entries.len();
-        self.entries.push((h, k, v));
-        self.index.insert(h, pos);
-    }
-    /// Remove the entry at `i` (shifting the tail, preserving order) and rebuild the index from the
-    /// cached hashes — pure, no re-hashing.
-    pub fn remove_at(&mut self, i: usize) -> (u64, Value, Value) {
-        let removed = self.entries.remove(i);
-        self.rebuild_index();
-        removed
-    }
-    fn rebuild_index(&mut self) {
-        self.index.clear();
-        for (pos, (h, _, _)) in self.entries.iter().enumerate() {
-            self.index.insert(*h, pos);
-        }
-    }
-}
 
 /// A hash *set* with the same insertion-order-preserving design as [`MapData`].
 #[derive(Debug, Clone, Default)]
@@ -1139,8 +1098,8 @@ impl Heap {
             Obj::List(items) => items.iter().for_each(|v| push(&v)),
             Obj::Tuple(items) => items.iter().for_each(&mut push),
             Obj::Map(m) => m.entries.iter().for_each(|(_, k, v)| {
-                push(k);
-                push(v);
+                push(&k);
+                push(&v);
             }),
             Obj::Set(s) => s.entries.iter().for_each(|(_, e)| push(e)),
             Obj::Struct { fields, .. } => fields.iter().for_each(&mut push),
@@ -1332,6 +1291,13 @@ impl Heap {
     #[cfg(test)]
     pub(super) fn retired_len(&self) -> (usize, usize) {
         (self.retired.len(), self.core.retired_len())
+    }
+
+    /// Retired boxes (a map's or a set's old index, `vm/map_data.rs`) on this handle's list and
+    /// the run's (tests only).
+    #[cfg(test)]
+    pub(super) fn retired_boxes(&self) -> usize {
+        self.retired.boxes() + self.core.retired_boxes()
     }
 
     /// The objects the last sweep freed whose drop the collector runs after the world restarts
@@ -1563,20 +1529,22 @@ mod iter_obj_tests {
         assert!(Obj::List(RVec::new()).as_enum().is_none());
     }
 
-    /// `Obj::Iter` must stay within the 64B cap (Vec 24B + usize 8B = 32B; `MapData`/`SetData` at
-    /// 56B of payload + the 8B enum discriminant set the cap now that `Module`'s payload is boxed).
+    /// `Obj::Iter` must stay within the 64B cap (an `RVec` 8B + usize 8B).
     #[test]
     fn obj_iter_within_size_cap() {
-        assert_eq!(std::mem::size_of::<Obj>(), 64);
+        assert!(std::mem::size_of::<Obj>() <= 64);
     }
 
-    /// The per-slot `Vec` element must be exactly 64B — the mark bit lives in the parallel `marks`
-    /// bitset, not padding the slot. `Option<Obj>` is 64B (Obj's spare-discriminant niche makes
-    /// `None` free), so with `mark` gone the slot is exactly one 64B `Obj` wide, and the mark/sweep
-    /// scan never pulls a payload into cache to read a bool.
+    /// The per-slot `Vec` element must be exactly one `Obj` wide — the mark bit lives in the
+    /// parallel `marks` bitset, not padding the slot. `Option<Obj>` is one `Obj` (Obj's
+    /// spare-discriminant niche makes `None` free), so the mark/sweep scan never pulls a payload
+    /// into cache to read a bool.
     #[test]
-    fn slot_element_is_64b() {
-        assert_eq!(std::mem::size_of::<crate::vm::heap_slab::Slot>(), 64);
+    fn slot_element_is_one_obj() {
+        assert_eq!(
+            std::mem::size_of::<crate::vm::heap_slab::Slot>(),
+            std::mem::size_of::<Obj>()
+        );
     }
 
     /// TICKET-213: the view epoch moves when a viewed object is handed out mutably, and at a new
@@ -1664,9 +1632,8 @@ mod iter_obj_tests {
             "Fields is {}B, must be <= 32B to keep Obj at 64",
             std::mem::size_of::<Fields>()
         );
-        assert_eq!(
-            std::mem::size_of::<Obj>(),
-            64,
+        assert!(
+            std::mem::size_of::<Obj>() <= 64,
             "Fields must not push Obj past 64"
         );
     }
@@ -1806,7 +1773,7 @@ mod iter_obj_tests {
         let b = h.alloc(Obj::FloatBox(3.5));
         assert!(h.children(a).is_empty());
         assert!(h.children(b).is_empty());
-        assert_eq!(std::mem::size_of::<Obj>(), 64); // cap unchanged
+        assert!(std::mem::size_of::<Obj>() <= 64); // within the cap
     }
 
     /// With no cap set (`mem_cap == 0`), `sweep()` never trips `over_cap` regardless of live size.

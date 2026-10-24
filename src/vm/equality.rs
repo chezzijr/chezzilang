@@ -149,7 +149,7 @@ impl Vm {
     #[inline]
     pub(super) fn map_slot(
         &mut self,
-        entries: &[(u64, Value, Value)],
+        entries: &RVec<MapEntry>,
         cands: &[usize],
         key: Value,
         span: Span,
@@ -157,13 +157,13 @@ impl Vm {
         // Keys AND values of the caller's Rust-local `MapData` are in flight — root both (see
         // [`Self::set_slot`]).
         let elems: Vec<Value> = if self.eq_may_reenter() {
-            entries.iter().flat_map(|&(_, k, v)| [k, v]).collect()
+            entries.iter().flat_map(|(_, k, v)| [k, v]).collect()
         } else {
             Vec::new()
         };
         self.with_elem_roots(&elems, &[key], |vm| {
             for &p in cands {
-                if vm.elem_equal(entries[p].1, key, 0, span)? {
+                if vm.elem_equal(entries.get(p).1, key, 0, span)? {
                     return Ok(Some(p));
                 }
             }
@@ -214,8 +214,8 @@ impl Vm {
                 loop {
                     let (p, hs, stored) = match vm.heap.get(mh).as_map() {
                         Some(m) => match m.candidates(hk).get(i) {
-                            Some(&p) => match m.entries.get(p) {
-                                Some(&(h, k, _)) => (p, h, k),
+                            Some(&p) => match m.entries.try_get(p) {
+                                Some((h, k, _)) => (p, h, k),
                                 None => return Ok(None),
                             },
                             None => return Ok(None),
@@ -231,8 +231,8 @@ impl Vm {
                         || match vm.heap.get(mh).as_map() {
                             Some(m) => m
                                 .entries
-                                .get(p)
-                                .is_some_and(|&(h, k, _)| h == hs && k == stored),
+                                .try_get(p)
+                                .is_some_and(|(h, k, _)| h == hs && k == stored),
                             None => unreachable!("map_probe on non-map"),
                         };
                     if !live {
@@ -477,9 +477,9 @@ impl Vm {
                             return Ok(false);
                         }
                         let ae: Vec<(Value, Value)> =
-                            a.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+                            a.entries.iter().map(|(_, k, v)| (k, v)).collect();
                         let be: Vec<(Value, Value)> =
-                            b.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+                            b.entries.iter().map(|(_, k, v)| (k, v)).collect();
                         // Keys AND values are in flight here — flatten both sides for the roots.
                         let flat = |e: &[(Value, Value)]| -> Vec<Value> {
                             e.iter().flat_map(|&(k, v)| [k, v]).collect()

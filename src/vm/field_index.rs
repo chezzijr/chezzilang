@@ -301,7 +301,7 @@ impl Vm {
                             let Obj::Map(m) = self.heap.get(h) else {
                                 unreachable!()
                             };
-                            let v = m.entries[p].2;
+                            let v = m.value_at(p);
                             self.push(v);
                             Ok(())
                         }
@@ -420,7 +420,7 @@ impl Vm {
                         let Obj::Map(m) = self.heap.get(h) else {
                             unreachable!()
                         };
-                        let v = m.entries[p].2;
+                        let v = m.value_at(p);
                         self.push(v);
                         Ok(())
                     }
@@ -639,12 +639,15 @@ impl Vm {
             // `val` is an in-flight Rust local: `map_probe` roots the map + key itself, but a user
             // `eq` on a stored key could otherwise collect the value being written.
             let pos = self.with_roots(&[val], |vm| vm.map_probe(h, hk, key, span))?;
-            let Obj::Map(m) = self.heap.get_mut(h) else {
+            let heap = self.heap.write(h);
+            let Obj::Map(m) = heap.get(h) else {
                 unreachable!()
             };
             match pos {
-                Some(i) => m.entries[i].2 = val,
-                None => m.push(hk, key, val),
+                Some(i) => {
+                    m.set_value(i, val);
+                }
+                None => m.push(heap, hk, key, val),
             }
             return Ok(());
         }
@@ -661,16 +664,17 @@ impl Vm {
                     let Obj::Map(m) = self.heap.get_mut(h) else {
                         unreachable!()
                     };
-                    m.entries[i].2 = val;
+                    m.set_value(i, val);
                 }
                 None => {
                     // Snapshot a struct/enum key on INSERT only (Go value-key model); pure
                     // alloc (no GC), so `h`/`val` stay valid across it and no rooting is needed.
                     let key = self.snapshot_key(key);
-                    let Obj::Map(m) = self.heap.get_mut(h) else {
+                    let heap = self.heap.write(h);
+                    let Obj::Map(m) = heap.get(h) else {
                         unreachable!()
                     };
-                    m.push(hk, key, val);
+                    m.push(heap, hk, key, val);
                 }
             }
             return Ok(());

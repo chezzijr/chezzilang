@@ -1048,7 +1048,7 @@ impl Vm {
                             let Obj::Map(m) = self.heap.get(h) else {
                                 unreachable!()
                             };
-                            m.entries[p].2
+                            m.value_at(p)
                         });
                         match found {
                             Some(v) => Ok(self.alloc_enum("Option", "Some", vec![v])),
@@ -1057,12 +1057,12 @@ impl Vm {
                     }
                     MapMethod::Keys => {
                         self.arity_err("keys", args, 0, span)?;
-                        let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| *k).collect();
+                        let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| k).collect();
                         Ok(Value::obj(self.heap.alloc(Obj::List(keys.into()))))
                     }
                     MapMethod::Values => {
                         self.arity_err("values", args, 0, span)?;
-                        let vals: Vec<Value> = m.entries.iter().map(|(_, _, v)| *v).collect();
+                        let vals: Vec<Value> = m.entries.iter().map(|(_, _, v)| v).collect();
                         Ok(Value::obj(self.heap.alloc(Obj::List(vals.into()))))
                     }
                     MapMethod::Items => {
@@ -1078,13 +1078,13 @@ impl Vm {
                         // snapshotted exactly as merge() does (Go value-key model), so a key reached through the
                         // copy never aliases the original's. snapshot_key is pure alloc: no rooting.
                         self.arity_err("copy", args, 0, span)?;
-                        let mine = m.entries.clone();
-                        let mut out = MapData::default();
-                        for (hk, key, val) in mine {
-                            let key = self.snapshot_key(key);
-                            out.push(hk, key, val);
+                        let mut out = m.entries.to_vec();
+                        for e in &mut out {
+                            e.1 = self.snapshot_key(e.1);
                         }
-                        Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
+                        Ok(Value::obj(
+                            self.heap.alloc(Obj::Map(MapData::from_entries(out))),
+                        ))
                     }
                     MapMethod::Remove => {
                         self.arity_err("remove", args, 1, span)?;
@@ -1093,10 +1093,11 @@ impl Vm {
                         let pos = self.map_probe(h, hk, key, span)?;
                         match pos {
                             Some(i) => {
-                                let Obj::Map(m) = self.heap.get_mut(h) else {
+                                let heap = self.heap.write(h);
+                                let Obj::Map(m) = heap.get(h) else {
                                     unreachable!()
                                 };
-                                let (_, _, v) = m.remove_at(i);
+                                let (_, _, v) = m.remove_at(heap, i);
                                 Ok(self.alloc_enum("Option", "Some", vec![v]))
                             }
                             None => Ok(self.alloc_enum("Option", "None", vec![])),
@@ -1116,7 +1117,7 @@ impl Vm {
                         // Snapshot the incoming entries (with their cached hashes — engine-wide
                         // consistent, so reuse is sound) first; handles `m.merge(m)`/`m.update(m)`.
                         let incoming = match args[0].as_obj().map(|oh| self.heap.get(oh)) {
-                            Some(Obj::Map(o)) => o.entries.clone(),
+                            Some(Obj::Map(o)) => o.entries.to_vec(),
                             _ => {
                                 return Err(self.err(
                                     format!(
@@ -1135,31 +1136,33 @@ impl Vm {
                             // dedup; the argument's entries upsert (last-wins). `snapshot_key` is pure
                             // alloc (no GC), so the local `out`'s contents stay valid across it.
                             let mine = match self.heap.get(h).as_map() {
-                                Some(m) => m.entries.clone(),
+                                Some(m) => m.entries.to_vec(),
                                 None => unreachable!(),
                             };
                             // Root BOTH source maps: `out` is a Rust local and its snapshot keys are
                             // reachable only from it, so the receiver + argument (whose entries every
                             // value in `out` came from) must stay alive across a re-entrant user `eq`.
                             let out = self.with_roots(&[Value::obj(h), args[0]], |vm| {
-                                let mut out = MapData::default();
+                                let out = MapData::default();
                                 for (hk, key, val) in mine {
                                     // A snapshot key is a FRESH object reachable only from the local
                                     // `out`, so root it on the operand stack too (`with_roots` truncates
                                     // back past these on the way out).
                                     let key = vm.snapshot_key(key);
                                     vm.push(key);
-                                    out.push(hk, key, val);
+                                    out.push(&vm.heap, hk, key, val);
                                 }
                                 for (hk, key, val) in incoming {
                                     let pos =
                                         vm.map_slot(&out.entries, out.candidates(hk), key, span)?;
                                     match pos {
-                                        Some(i) => out.entries[i].2 = val,
+                                        Some(i) => {
+                                            out.set_value(i, val);
+                                        }
                                         None => {
                                             let key = vm.snapshot_key(key);
                                             vm.push(key);
-                                            out.push(hk, key, val);
+                                            out.push(&vm.heap, hk, key, val);
                                         }
                                     }
                                 }

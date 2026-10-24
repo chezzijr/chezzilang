@@ -1136,9 +1136,9 @@ impl Vm {
                 let mut out = Vec::with_capacity(m.entries.len());
                 for (hash, k, val) in &m.entries {
                     out.push((
-                        *hash,
-                        self.to_snap_depth(*k, depth + 1, memo)?,
-                        self.to_snap_depth(*val, depth + 1, memo)?,
+                        hash,
+                        self.to_snap_depth(k, depth + 1, memo)?,
+                        self.to_snap_depth(val, depth + 1, memo)?,
                     ));
                 }
                 SnapValue::Map(out)
@@ -1572,12 +1572,12 @@ impl Vm {
                 }
             },
             SnapValue::Map(entries) => {
-                let mut out = MapData::default();
+                let mut out = Vec::with_capacity(entries.len());
                 for (hash, k, val) in entries {
                     let (ck, cv) = (self.replay_snap(k, rb), self.replay_snap(val, rb));
-                    out.push(*hash, ck, cv);
+                    out.push((*hash, ck, cv));
                 }
-                let h = self.heap.alloc(Obj::Map(out));
+                let h = self.heap.alloc(Obj::Map(MapData::from_entries(out)));
                 if self.copy_mark {
                     self.heap.set_copied(h);
                 }

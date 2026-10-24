@@ -1165,10 +1165,16 @@ main()";
 /// the grows retired the old blocks on the run's retire lists, a collection frees them all, and
 /// the container reads back intact (the print, and the same program under gc-stress).
 fn growth_retires_until_collect(src: &str, want: &str) {
+    growth_retires_boxes_until_collect(src, want, 0);
+}
+
+/// [`growth_retires_until_collect`], and at least `min_boxes` of the retired entries are boxes
+/// (a map's or a set's old index table, or an old `Pos::Many` overflow vec).
+fn growth_retires_boxes_until_collect(src: &str, want: &str, min_boxes: usize) {
     use super::rvec::{test_counts, test_serial, test_track};
     let _g = test_serial();
     let owned = src.to_string();
-    let (out, retired, left, freed) = std::thread::Builder::new()
+    let (out, retired, boxes, left, freed) = std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
             test_track();
@@ -1176,11 +1182,12 @@ fn growth_retires_until_collect(src: &str, want: &str) {
             let result = vm.run();
             vm.finish_run(result).expect("runs");
             let (own, core) = vm.heap.retired_len();
+            let boxes = vm.heap.retired_boxes();
             let before = test_counts().1;
             vm.gc_collect();
             let freed = test_counts().1 - before;
             let (own2, core2) = vm.heap.retired_len();
-            (captured(vm.out), own + core, own2 + core2, freed)
+            (captured(vm.out), own + core, boxes, own2 + core2, freed)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -1189,6 +1196,14 @@ fn growth_retires_until_collect(src: &str, want: &str) {
     assert!(
         retired >= 3,
         "each grow retired its old block, got {retired}"
+    );
+    assert!(
+        retired - boxes >= 1,
+        "a grow retired an old entry block, got {retired} entries, {boxes} boxes"
+    );
+    assert!(
+        boxes >= min_boxes,
+        "an index grow retired the old table, got {boxes} < {min_boxes} boxes"
     );
     assert_eq!(left, 0, "the collection freed every retired block");
     assert!(
@@ -1220,4 +1235,18 @@ fn main():
     print(b.len(), b[0], b[50], b[99])
 main()";
     growth_retires_until_collect(src, "100 97 50 99\n");
+}
+
+/// M2.3 — a map insert loop past the capacity retires the old entry blocks AND the old index
+/// tables; a collection frees them, and the map reads back intact.
+#[test]
+fn map_insert_growth_retires_index_and_entries() {
+    let src = "\
+fn main():
+    m: Map[int, int] = {0: 0}
+    for i in 1..100:
+        m[i] = i * 2
+    print(m.len(), m[0], m[50], m[99])
+main()";
+    growth_retires_boxes_until_collect(src, "100 0 100 198\n", 3);
 }
