@@ -98,6 +98,12 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "the caller of the VM thread waits for it and runs no VM code",
     ),
     (
+        "worker_loop.rs",
+        "sched_seed_perturb",
+        "",
+        "seed jitter, bounded 50 us; ops hold popped operands in Rust locals",
+    ),
+    (
         "width.rs",
         "acquire_slot",
         "acquire_slot(",

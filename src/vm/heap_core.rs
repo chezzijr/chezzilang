@@ -169,7 +169,8 @@ impl HeapCore {
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub(super) unsafe fn slot_mut(&self, h: GcRef) -> &mut Slot {
-        // SAFETY: the caller's contract is `Slab::slot_mut`'s.
+        // SAFETY: the caller's contract is `Slab::slot_mut`'s; the gc_coord invariant (no sweep
+        // while another handle runs, `vm/gc_coord.rs`) keeps the collector off the slot.
         unsafe { self.slots.slot_mut(h) }
     }
 
@@ -207,7 +208,8 @@ impl HeapCore {
                 }
             }
         };
-        // SAFETY: `idx` came off the free list or the slab end under `alloc_lock` just now, so no
+        // SAFETY (gc_coord invariant: no sweep while this handle runs, `vm/gc_coord.rs`): `idx`
+        // came off the free list or the slab end under `alloc_lock` just now, so no
         // other handle holds it.
         unsafe { self.reuse(idx, obj) }
     }
@@ -231,7 +233,8 @@ impl HeapCore {
     #[inline]
     pub(super) unsafe fn reuse(&self, idx: u32, obj: Obj) -> GcRef {
         let h = GcRef(idx);
-        // SAFETY: the caller holds the empty slot `idx` alone (the contract above).
+        // SAFETY: the caller holds the empty slot `idx` alone (the contract above), and the gc_coord
+        // invariant keeps a sweep off it while the caller's handle runs (`vm/gc_coord.rs`).
         unsafe { self.slots.slot_mut(h) }.obj = Some(obj);
         // Load first: the bit is almost always clear, and a clear bit needs no write. Only the
         // collector sets marks, and it does not run while a handle allocates.
@@ -348,7 +351,8 @@ impl HeapCore {
         {
             let mut st = lock(&self.alloc_lock);
             let mut spans = lock(&self.err_spans);
-            // SAFETY: the caller's contract above.
+            // SAFETY: the caller's contract above: the gc_coord invariant, every other handle
+            // stopped or detached for the sweep (`vm/gc_coord.rs`).
             for (start, seg) in unsafe { self.slots.segments_mut() } {
                 let marks = self.marks.segment_words(start);
                 for (idx, slot) in (start..).zip(seg.iter_mut()) {

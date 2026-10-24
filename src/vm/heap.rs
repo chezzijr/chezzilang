@@ -923,7 +923,9 @@ impl Heap {
         // too (see `since_gc_bytes`).
         self.charge_own(obj_bytes_shallow(&obj));
         let h = match self.free.pop() {
-            // SAFETY: `idx` is from this handle's own free cache, which `alloc_slot` filled.
+            // SAFETY: `idx` is from this handle's own free cache, which `alloc_slot` filled; the
+            // gc_coord invariant (a sweep runs only with every other handle stopped or detached,
+            // `vm/gc_coord.rs`) keeps the sweep off it while this handle runs.
             Some(idx) => unsafe { self.core.reuse(idx, obj) },
             None => self.core.alloc_slot(&mut self.free, obj),
         };

@@ -531,7 +531,9 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         self.width_release();
         let r = self.demote_block_socket_in_place(fd, interest, deadline, span, attempt);
-        self.width_acquire();
+        // M1.7 — the result is a Rust local across the permit's door: pin it.
+        let pin: Vec<GcRef> = r.iter().filter_map(|v| v.child_gcref()).collect();
+        self.width_acquire_pinned(&pin);
         r
     }
 

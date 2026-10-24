@@ -52,8 +52,14 @@ impl Vm {
     /// TICKET-141 — take a width permit in FIFO order. A no-op for an ungated shell or one that
     /// already holds a permit. M1.5 — a permit that is not free is waited for through the GC door.
     pub(super) fn width_acquire(&mut self) {
+        self.width_acquire_pinned(&[]);
+    }
+
+    /// [`Vm::width_acquire`] for a caller that holds `pins` in Rust locals across the wait: the door
+    /// publishes them with this `Vm`'s roots.
+    pub(super) fn width_acquire_pinned(&mut self, pins: &[GcRef]) {
         if !width::try_acquire() {
-            self.gc_blocking(&[], |_| width::acquire());
+            self.gc_blocking(pins, |_| width::acquire());
         }
     }
 
@@ -140,9 +146,12 @@ impl Vm {
                     std::hint::spin_loop();
                 }
             }
-            4 if worker_count() >= 2 => self.gc_blocking(&[], |_| {
+            // M1.7 — attached, no door: the ops that reach a seed point hold popped operands in
+            // Rust locals, and a detach would let another thread's collection free them. The sleep
+            // is at most 50 us, so a stop waits at most that long (`tests/wait_site_guard.rs`).
+            4 if worker_count() >= 2 => {
                 std::thread::sleep(std::time::Duration::from_micros(1 + (r >> 8) % 50))
-            }),
+            }
             _ => {}
         }
     }
