@@ -108,8 +108,17 @@ impl SharedIndex {
         let t = build(cap.max(pos + 1), old.chain([(h, pos)]));
         self.0.install(heap, t);
     }
-    /// Swap in the index of `hashes`; the old table retires on `heap`.
+    /// The bytes the table owns.
+    fn heap_bytes(&self) -> usize {
+        self.0.capacity() * size_of::<IndexSlot>()
+    }
+    /// Swap in the index of `hashes` (no table when it is empty); the old table retires on
+    /// `heap`.
     fn rebuild(&self, heap: &Heap, hashes: &[u64]) {
+        if hashes.is_empty() {
+            self.0.install(heap, RVec::new());
+            return;
+        }
         self.0
             .install(heap, build(hashes.len(), hashes.iter().copied().zip(0..)));
     }
@@ -190,6 +199,10 @@ impl MapData {
     pub fn candidates(&self, h: u64) -> Candidates<'_> {
         self.index.candidates(h, self.entries.len())
     }
+    /// The bytes the entry block and the index table own (`live_bytes`).
+    pub fn heap_bytes(&self) -> usize {
+        self.entries.capacity() * size_of::<MapEntry>() + self.index.heap_bytes()
+    }
     /// The value of entry `i`.
     #[inline]
     pub fn value_at(&self, i: usize) -> Value {
@@ -244,6 +257,10 @@ impl SetData {
     pub fn candidates(&self, h: u64) -> Candidates<'_> {
         self.index.candidates(h, self.entries.len())
     }
+    /// See [`MapData::heap_bytes`].
+    pub fn heap_bytes(&self) -> usize {
+        self.entries.capacity() * size_of::<SetEntry>() + self.index.heap_bytes()
+    }
     /// See [`MapData::push`].
     #[inline]
     pub fn push(&self, heap: &Heap, h: u64, e: Value) {
@@ -265,9 +282,45 @@ impl SetData {
 #[cfg(test)]
 mod tests {
     use super::MapData;
-    use crate::vm::heap::Heap;
+    use crate::vm::heap::{Fields, Heap, Obj};
     use crate::vm::value::Value;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A remove of the last entry leaves no table, like a map that never held one.
+    #[test]
+    fn removing_the_last_entry_drops_the_index_table() {
+        let _g = crate::vm::rvec::test_serial();
+        let mut heap = Heap::new();
+        let m = MapData::default();
+        m.push(&heap, 1, Value::int(1), Value::int(2));
+        assert_eq!(m.index.0.len(), 8);
+        m.remove_at(&heap, 0);
+        assert_eq!(m.index.0.len(), 0, "an empty map holds no table");
+        heap.sweep();
+    }
+
+    /// A snapshot of a struct key that holds a map builds the copy's blocks once: it retires
+    /// nothing.
+    #[test]
+    fn snapshot_of_a_map_retires_nothing() {
+        let _g = crate::vm::rvec::test_serial();
+        let mut vm = crate::vm::Vm::new(Arc::new(crate::vm::tests::empty_program()));
+        let m = MapData::from_entries(
+            (0..10)
+                .map(|k| (k, Value::int(k as i64), Value::nil()))
+                .collect(),
+        );
+        let mh = vm.heap.alloc(Obj::Map(m));
+        let key = vm.heap.alloc(Obj::Struct {
+            tid: crate::base::op::TID_NONE,
+            fields: Fields::from_vec(vec![Value::obj(mh)]),
+        });
+        let before = vm.heap.retired_len();
+        let snap = vm.snapshot_key(Value::obj(key));
+        assert_ne!(snap, Value::obj(key), "the key is copied");
+        assert_eq!(vm.heap.retired_len(), before, "the copy retired no block");
+    }
 
     /// One thread inserts 50k keys (growing the entry block and the index many times) while
     /// another probes. Every probe reads only live blocks; a hit names the key it was asked for.

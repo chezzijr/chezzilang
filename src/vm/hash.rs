@@ -476,7 +476,8 @@ impl Vm {
             }
             Obj::Map(m) => {
                 let entries = m.entries.to_vec();
-                let nh = self.heap.alloc(Obj::Map(m.clone()));
+                // An empty placeholder for a cycle back to `h`; the copy is built once below.
+                let nh = self.heap.alloc(Obj::Map(MapData::default()));
                 visited.insert(h, nh);
                 let copied: Vec<(u64, Value, Value)> = entries
                     .iter()
@@ -488,24 +489,19 @@ impl Vm {
                         )
                     })
                     .collect();
-                let heap = self.heap.write(nh);
-                if let Obj::Map(dst) = heap.get(nh) {
-                    dst.entries.replace(heap, &copied);
-                }
+                // The placeholder holds no block, so the overwrite frees nothing.
+                *self.heap.get_mut(nh) = Obj::Map(MapData::from_entries(copied));
                 Value::obj(nh)
             }
             Obj::Set(s) => {
                 let entries = s.entries.to_vec();
-                let nh = self.heap.alloc(Obj::Set(s.clone()));
+                let nh = self.heap.alloc(Obj::Set(SetData::default()));
                 visited.insert(h, nh);
                 let copied: Vec<(u64, Value)> = entries
                     .iter()
                     .map(|&(hh, e)| (hh, self.snapshot_value(e, visited, depth + 1)))
                     .collect();
-                let heap = self.heap.write(nh);
-                if let Obj::Set(dst) = heap.get(nh) {
-                    dst.entries.replace(heap, &copied);
-                }
+                *self.heap.get_mut(nh) = Obj::Set(SetData::from_entries(copied));
                 Value::obj(nh)
             }
             // A `bytearray` is mutable + structurally compared but a GC LEAF (raw bytes, no children):

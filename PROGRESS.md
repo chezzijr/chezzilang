@@ -261,7 +261,7 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
   (`vm/map_data.rs`). A grow past half full or a remove builds a new table; each old entry block
   or table retires until the stop-the-world sweep. A racy probe reads only live blocks, at most
   `capacity` slots, and only positions below the entry count; it can miss or see a torn entry
-  (user fault, Go parity). A map or set holds at most `u32::MAX` entries. `Obj` is now under 64 B.
+  (user fault, Go parity). A map or set holds at most `u32::MAX` entries; its live bytes count the index. `Obj` is now 40 B.
   Gates: `map_insert_growth_retires_index_and_entries`, `set_insert_growth_retires_index_and_entries`,
   `constant_hash_growth_retires_old_index`, `racing_insert_and_probe`.
 

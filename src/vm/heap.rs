@@ -544,9 +544,9 @@ fn obj_bytes_shallow(obj: &Obj) -> usize {
         Obj::Enum { payload, .. } => payload.capacity() * std::mem::size_of::<Value>(),
         Obj::Closure { captured, .. } => captured.capacity() * std::mem::size_of::<Value>(),
         Obj::Module(m) => m.slots.capacity() * std::mem::size_of::<Value>(),
-        // Map/Set: entries + the index cost; approximate by entries backing only.
-        Obj::Map(m) => m.entries.capacity() * std::mem::size_of::<(u64, Value, Value)>(),
-        Obj::Set(s) => s.entries.capacity() * std::mem::size_of::<(u64, Value)>(),
+        // Map/Set: the entry block and the index table.
+        Obj::Map(m) => m.heap_bytes(),
+        Obj::Set(s) => s.heap_bytes(),
         Obj::BigInt(_)
         | Obj::FloatBox(_)
         | Obj::Cell(_)
@@ -1497,10 +1497,10 @@ mod iter_obj_tests {
         assert!(Obj::List(RVec::new()).as_enum().is_none());
     }
 
-    /// `Obj::Iter` must stay within the 64B cap (an `RVec` 8B + usize 8B).
+    /// `Obj` is 40B (M2.3: no variant needs more; the cap is 64B). Pinned so a growth shows.
     #[test]
     fn obj_iter_within_size_cap() {
-        assert!(std::mem::size_of::<Obj>() <= 64);
+        assert_eq!(std::mem::size_of::<Obj>(), 40);
     }
 
     /// The per-slot `Vec` element must be exactly one `Obj` wide — the mark bit lives in the
@@ -1600,10 +1600,7 @@ mod iter_obj_tests {
             "Fields is {}B, must be <= 32B to keep Obj at 64",
             std::mem::size_of::<Fields>()
         );
-        assert!(
-            std::mem::size_of::<Obj>() <= 64,
-            "Fields must not push Obj past 64"
-        );
+        assert_eq!(std::mem::size_of::<Obj>(), 40, "Fields must not grow Obj");
     }
 
     /// `Fields` round-trips a ≤3-field vec as `Inline` and a >3-field vec as `Spill`, preserving
@@ -1732,6 +1729,21 @@ mod iter_obj_tests {
         let _ = r;
     }
 
+    /// A map's live bytes count its entry block and its index table (16 B per slot).
+    #[test]
+    fn live_bytes_counts_map_index() {
+        let mut h = Heap::new();
+        let empty = h.live_bytes();
+        let m = MapData::from_entries(
+            (0..100)
+                .map(|k| (k, Value::int(k as i64), Value::nil()))
+                .collect(),
+        );
+        let want = std::mem::size_of::<Obj>() + 100 * 24 + 256 * 16;
+        let _r = h.alloc(Obj::Map(m));
+        assert_eq!(h.live_bytes() - empty, want);
+    }
+
     /// `BigInt`/`FloatBox` are GC LEAVES (`children()` traces nothing, like `Bytes`) and must not
     /// grow `Obj` past the 64B cap.
     #[test]
@@ -1741,7 +1753,7 @@ mod iter_obj_tests {
         let b = h.alloc(Obj::FloatBox(3.5));
         assert!(h.children(a).is_empty());
         assert!(h.children(b).is_empty());
-        assert!(std::mem::size_of::<Obj>() <= 64); // within the cap
+        assert_eq!(std::mem::size_of::<Obj>(), 40); // unchanged
     }
 
     /// With no cap set (`mem_cap == 0`), `sweep()` never trips `over_cap` regardless of live size.

@@ -23,7 +23,8 @@ use std::sync::Arc;
 /// so the overwhelmingly common case is a single candidate — [`Pos::One`] inlines it with **zero
 /// heap allocation** (the old `Vec<usize>` paid one tiny alloc per distinct key). [`Pos::Many`]
 /// holds the overflow for genuine hash collisions only (string `DefaultHasher`, or a user `hash()`
-/// that returns a constant); boxing the `Vec` keeps `Pos` at two words. Probing always confirms a hit with `values_equal`, so a collision is still correct.
+/// that returns a constant); boxing the `Vec` keeps `Pos` at two words. Probing always confirms a
+/// hit with `values_equal`, so a collision is still correct.
 #[derive(Debug, Clone)]
 pub(crate) enum Pos {
     One(usize),
@@ -98,7 +99,8 @@ impl CachedHash for (u64, WireValue) {
 }
 
 /// TICKET-192 — the entries of a wire `Map`/`Set` plus a [`HashIndex`] of their cached hashes,
-/// so a stored `RwShared` map answers `get_key`/`has` in O(1) expected instead of scanning. Insertion order stays the iteration order.
+/// so a stored `RwShared` map answers `get_key`/`has` in O(1) expected instead of scanning.
+/// Insertion order stays the iteration order.
 ///
 /// Read through `Deref` to a slice; there is deliberately no `DerefMut`. Every mutation goes
 /// through a method that keeps `index` in step with `entries`.
