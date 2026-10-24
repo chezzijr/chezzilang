@@ -34,7 +34,7 @@ use core::{
     GUARD_DEMOTE_BUDGET, GuardCycle, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
     SocketCore, WriterCore,
 };
-use heap::{Fields, Heap, Identity, MapData, MapEntry, ModuleData, Obj, SetData};
+use heap::{Fields, Heap, Identity, MapData, MapEntry, ModuleData, Obj, SetData, SetEntry};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use quiesce::RunHalt;
 use std::os::fd::AsRawFd;

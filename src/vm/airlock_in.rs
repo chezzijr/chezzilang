@@ -487,12 +487,13 @@ impl Vm {
                     self.heap.set_copied(h);
                 }
                 rebuild.insert(id, h);
-                let mut out = SetData::default();
-                for (hash, e) in entries.into_entries() {
+                let entries = entries.into_entries();
+                let mut out = Vec::with_capacity(entries.len());
+                for (hash, e) in entries {
                     let ce = self.from_wire_memo(e, rebuild);
-                    out.push(hash, ce);
+                    out.push((hash, ce));
                 }
-                *self.heap.get_mut(h) = Obj::Set(out);
+                *self.heap.get_mut(h) = Obj::Set(SetData::from_entries(out));
                 Value::obj(h)
             }
             WireValue::Struct { id, name, fields } => {

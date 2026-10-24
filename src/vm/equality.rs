@@ -119,7 +119,7 @@ impl Vm {
     #[inline]
     pub(super) fn set_slot(
         &mut self,
-        entries: &[(u64, Value)],
+        entries: &RVec<SetEntry>,
         cands: &[usize],
         key: Value,
         span: Span,
@@ -127,13 +127,13 @@ impl Vm {
         // The local's elements live only in the caller's Rust-local `SetData` — root them across the
         // (re-entrant) compare, exactly as [`Self::seq_slot`] does for a cloned element vec.
         let elems: Vec<Value> = if self.eq_may_reenter() {
-            entries.iter().map(|&(_, e)| e).collect()
+            entries.iter().map(|(_, e)| e).collect()
         } else {
             Vec::new()
         };
         self.with_elem_roots(&elems, &[key], |vm| {
             for &p in cands {
-                if vm.elem_equal(entries[p].1, key, 0, span)? {
+                if vm.elem_equal(entries.get(p).1, key, 0, span)? {
                     return Ok(Some(p));
                 }
             }
@@ -267,8 +267,8 @@ impl Vm {
                 loop {
                     let (p, hs, stored) = match vm.heap.get(sh).as_set() {
                         Some(s) => match s.candidates(he).get(i) {
-                            Some(&p) => match s.entries.get(p) {
-                                Some(&(h, e)) => (p, h, e),
+                            Some(&p) => match s.entries.try_get(p) {
+                                Some((h, e)) => (p, h, e),
                                 None => return Ok(None),
                             },
                             None => return Ok(None),
@@ -280,8 +280,8 @@ impl Vm {
                         || match vm.heap.get(sh).as_set() {
                             Some(s) => s
                                 .entries
-                                .get(p)
-                                .is_some_and(|&(h, e)| h == hs && e == stored),
+                                .try_get(p)
+                                .is_some_and(|(h, e)| h == hs && e == stored),
                             None => unreachable!("set_probe on non-set"),
                         };
                     if !live {
@@ -512,8 +512,8 @@ impl Vm {
                         if a.entries.len() != b.entries.len() {
                             return Ok(false);
                         }
-                        let ae: Vec<Value> = a.entries.iter().map(|(_, x)| *x).collect();
-                        let be: Vec<Value> = b.entries.iter().map(|(_, x)| *x).collect();
+                        let ae: Vec<Value> = a.entries.iter().map(|(_, x)| x).collect();
+                        let be: Vec<Value> = b.entries.iter().map(|(_, x)| x).collect();
                         self.with_elem_roots(&ae, &be, |vm| {
                             for x in &ae {
                                 let mut found = false;

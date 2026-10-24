@@ -451,14 +451,14 @@ impl Vm {
                     let snap = self.snapshot_key(self.stack[at + j]);
                     self.stack[at + j] = snap;
                 }
-                let mut set = SetData::default();
+                let set = SetData::default();
                 for (j, &he) in hashes.iter().enumerate() {
                     let e = self.stack[at + j];
                     if self
                         .set_slot(&set.entries, set.candidates(he), e, span)?
                         .is_none()
                     {
-                        set.push(he, e);
+                        set.push(&self.heap, he, e);
                     }
                 }
                 self.stack.truncate(at);

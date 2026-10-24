@@ -154,7 +154,7 @@ impl Vm {
                     } else {
                         let mut parts = Vec::with_capacity(s.entries.len());
                         for (_, v) in &s.entries {
-                            parts.push(self.display_guarded(*v, depth + 1)?);
+                            parts.push(self.display_guarded(v, depth + 1)?);
                         }
                         Ok(format!("{{{}}}", parts.join(", ")))
                     }
@@ -1007,7 +1007,7 @@ impl Vm {
         &mut self,
         out: &mut String,
         h: GcRef,
-        entries: &[(u64, Value)],
+        entries: &RVec<SetEntry>,
         span: Span,
         depth: usize,
     ) -> Result<(), RuntimeError> {
@@ -1017,7 +1017,7 @@ impl Vm {
             if i > 0 {
                 out.push_str(", ");
             }
-            r = self.stringify_nested_into(out, *e, span, depth + 1);
+            r = self.stringify_nested_into(out, e, span, depth + 1);
             if r.is_err() {
                 break;
             }

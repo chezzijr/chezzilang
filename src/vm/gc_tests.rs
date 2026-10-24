@@ -1250,3 +1250,37 @@ fn main():
 main()";
     growth_retires_boxes_until_collect(src, "100 0 100 198\n", 3);
 }
+
+/// M2.3 — the Set twin of [`map_insert_growth_retires_index_and_entries`].
+#[test]
+fn set_insert_growth_retires_index_and_entries() {
+    let src = "\
+fn main():
+    s: Set[int] = Set([0])
+    for i in 1..100:
+        s.insert(i)
+    print(s.len(), 0 in s, 50 in s, 99 in s, 100 in s)
+main()";
+    growth_retires_boxes_until_collect(src, "100 true true true false\n", 3);
+}
+
+/// M2.3 — keys whose `hash()` is one constant share one index key, so the index table never
+/// grows: every retired box is an old `Pos::Many` overflow vec.
+#[test]
+fn many_overflow_growth_retires_old_vec() {
+    let src = "\
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return 7
+    fn eq(self, o: K) -> bool:
+        return self.n == o.n
+
+fn main():
+    s: Set[K] = Set([K(0)])
+    for i in 1..20:
+        s.insert(K(i))
+    print(s.len(), K(0) in s, K(19) in s, K(20) in s)
+main()";
+    growth_retires_boxes_until_collect(src, "20 true true false\n", 3);
+}

@@ -1146,7 +1146,7 @@ impl Vm {
             Obj::Set(s) => {
                 let mut out = Vec::with_capacity(s.entries.len());
                 for (hash, e) in &s.entries {
-                    out.push((*hash, self.to_snap_depth(*e, depth + 1, memo)?));
+                    out.push((hash, self.to_snap_depth(e, depth + 1, memo)?));
                 }
                 SnapValue::Set(out)
             }
@@ -1584,12 +1584,12 @@ impl Vm {
                 Value::obj(h)
             }
             SnapValue::Set(entries) => {
-                let mut out = SetData::default();
+                let mut out = Vec::with_capacity(entries.len());
                 for (hash, e) in entries {
                     let ce = self.replay_snap(e, rb);
-                    out.push(*hash, ce);
+                    out.push((*hash, ce));
                 }
-                let h = self.heap.alloc(Obj::Set(out));
+                let h = self.heap.alloc(Obj::Set(SetData::from_entries(out)));
                 if self.copy_mark {
                     self.heap.set_copied(h);
                 }

@@ -807,21 +807,21 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let mine = match self.heap.get(ha).as_set() {
-            Some(s) => s.entries.clone(),
+            Some(s) => s.entries.to_vec(),
             None => unreachable!(),
         };
         let other = match self.heap.get(hb).as_set() {
-            Some(s) => s.entries.clone(),
+            Some(s) => s.entries.to_vec(),
             None => unreachable!(),
         };
         // Dedup-insert: propagate a cyclic-key depth fault (`?`) instead of swallowing it — the
         // membership `==` here is the same one `s.add`/`|` are DEFINED by, so it must fault alike.
-        let add = |vm: &mut Vm, set: &mut SetData, he: u64, e: Value| -> Result<(), RuntimeError> {
+        let add = |vm: &mut Vm, set: &SetData, he: u64, e: Value| -> Result<(), RuntimeError> {
             if vm
                 .set_slot(&set.entries, set.candidates(he), e, span)?
                 .is_none()
             {
-                set.push(he, e);
+                set.push(&vm.heap, he, e);
             }
             Ok(())
         };
@@ -843,36 +843,36 @@ impl Vm {
             elems.extend(mine.iter().chain(other.iter()).map(|&(_, e)| e));
         }
         let out = self.with_roots(&elems, |vm| {
-            let mut out = SetData::default();
+            let out = SetData::default();
             match op {
                 SetOp::Union => {
                     for (he, e) in mine.iter().chain(other.iter()) {
-                        add(vm, &mut out, *he, *e)?;
+                        add(vm, &out, *he, *e)?;
                     }
                 }
                 SetOp::Intersection => {
                     for (he, e) in &mine {
                         if in_set(vm, &other, *he, *e)? {
-                            add(vm, &mut out, *he, *e)?;
+                            add(vm, &out, *he, *e)?;
                         }
                     }
                 }
                 SetOp::Difference => {
                     for (he, e) in &mine {
                         if !in_set(vm, &other, *he, *e)? {
-                            add(vm, &mut out, *he, *e)?;
+                            add(vm, &out, *he, *e)?;
                         }
                     }
                 }
                 SetOp::SymmetricDifference => {
                     for (he, e) in &mine {
                         if !in_set(vm, &other, *he, *e)? {
-                            add(vm, &mut out, *he, *e)?;
+                            add(vm, &out, *he, *e)?;
                         }
                     }
                     for (he, e) in &other {
                         if !in_set(vm, &mine, *he, *e)? {
-                            add(vm, &mut out, *he, *e)?;
+                            add(vm, &out, *he, *e)?;
                         }
                     }
                 }

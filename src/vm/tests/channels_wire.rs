@@ -29,9 +29,9 @@ fn wire_roundtrip_preserves_value_equality() {
     m.push(&vm.heap, 10, Value::int(1), Value::int(100));
     m.push(&vm.heap, 20, Value::obj(s), Value::int(200));
     let map = vm.heap.alloc(Obj::Map(m));
-    let mut set = SetData::default();
-    set.push(5, Value::int(1));
-    set.push(6, Value::int(2));
+    let set = SetData::default();
+    set.push(&vm.heap, 5, Value::int(1));
+    set.push(&vm.heap, 6, Value::int(2));
     let setobj = vm.heap.alloc(Obj::Set(set));
     let list = vm.heap.alloc(Obj::List(
         vec![

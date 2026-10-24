@@ -38,9 +38,9 @@ impl CachedHash for (u64, WireValue) {
     }
 }
 
-/// TICKET-192 — the entries of a wire `Map`/`Set` plus the SAME [`HashIndex`] the heap
-/// `MapData`/`SetData` carry, so a stored `RwShared` map answers `get_key`/`has` in O(1) expected
-/// instead of scanning. Insertion order stays the iteration order.
+/// TICKET-192 — the entries of a wire `Map`/`Set` plus the same plain [`HashIndex`] the heap
+/// `MapData`/`SetData` wrap (`vm/map_data.rs`), so a stored `RwShared` map answers
+/// `get_key`/`has` in O(1) expected instead of scanning. Insertion order stays the iteration order.
 ///
 /// Read through `Deref` to a slice; there is deliberately no `DerefMut`. Every mutation goes
 /// through a method that keeps `index` in step with `entries`.

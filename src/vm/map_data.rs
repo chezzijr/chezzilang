@@ -21,6 +21,8 @@ use super::value::Value;
 
 /// A map entry: `(cached hash, key, value)`.
 pub type MapEntry = (u64, Value, Value);
+/// A set entry: `(cached hash, element)`.
+pub type SetEntry = (u64, Value);
 
 /// A single key's position(s) in `entries`. Numeric keys hash injectively (`(n as f64).to_bits()`),
 /// so the overwhelmingly common case is a single candidate — [`Pos::One`] inlines it with **zero
@@ -61,10 +63,6 @@ impl HashIndex {
     #[inline]
     pub(crate) fn insert(&mut self, h: u64, pos: usize) {
         self.insert_with(h, pos, |v, pos| v.push(pos));
-    }
-    #[inline]
-    pub(crate) fn clear(&mut self) {
-        self.0.clear();
     }
     /// [`insert`](HashIndex::insert) for a table racy readers may hold: `push_many` appends to a
     /// `Many` vec.
@@ -228,6 +226,44 @@ impl MapData {
     /// Remove the entry at `i` (preserving order): a new entry block and an index rebuilt from the
     /// cached hashes (pure, no re-hashing) swap in, and the old ones retire on `heap`.
     pub fn remove_at(&self, heap: &Heap, i: usize) -> MapEntry {
+        let mut es = self.entries.to_vec();
+        let removed = es.remove(i);
+        self.entries.replace(heap, &es);
+        self.index.rebuild(heap, es.iter().map(|e| e.0));
+        removed
+    }
+}
+
+/// A hash *set* with the same insertion-order-preserving design as [`MapData`].
+#[derive(Debug, Clone, Default)]
+pub struct SetData {
+    pub entries: RVec<SetEntry>,
+    /// `cached-hash → candidate position(s)` (see [`HashIndex`]).
+    index: SharedIndex,
+}
+
+impl SetData {
+    /// A set of `entries`, which hold distinct elements.
+    pub fn from_entries(entries: Vec<SetEntry>) -> Self {
+        let index = SharedIndex::from_hashes(entries.iter().map(|e| e.0));
+        SetData {
+            entries: entries.into(),
+            index,
+        }
+    }
+    #[inline]
+    pub fn candidates(&self, h: u64) -> &[usize] {
+        self.index.candidates(h)
+    }
+    /// See [`MapData::push`].
+    #[inline]
+    pub fn push(&self, heap: &Heap, h: u64, e: Value) {
+        let pos = self.entries.len();
+        self.entries.push(heap, (h, e));
+        self.index.insert(heap, h, pos);
+    }
+    /// See [`MapData::remove_at`].
+    pub fn remove_at(&self, heap: &Heap, i: usize) -> SetEntry {
         let mut es = self.entries.to_vec();
         let removed = es.remove(i);
         self.entries.replace(heap, &es);

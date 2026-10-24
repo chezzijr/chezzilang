@@ -258,16 +258,17 @@ impl Vm {
                     let sh = st.as_obj().expect("a set is a heap object");
                     let pos = vm.set_probe(sh, qh, a[0], span)?;
                     let e = vm.snapshot_key(a[0]);
-                    let Obj::Set(s) = vm.heap.get_mut(sh) else {
+                    let heap = vm.heap.write(sh);
+                    let Obj::Set(s) = heap.get(sh) else {
                         unreachable!()
                     };
                     match pos {
                         None if add => {
-                            s.push(qh, e);
+                            s.push(heap, qh, e);
                             changed = true;
                         }
                         Some(i) if !add => {
-                            s.remove_at(i);
+                            s.remove_at(heap, i);
                             changed = true;
                         }
                         _ => {}
@@ -399,7 +400,7 @@ impl Vm {
                 }
                 Some(Obj::Set(s)) if on_set => {
                     for &p in s.candidates(qh) {
-                        out.push(vm.box_copy_pieces(ctx, &[s.entries[p].1], span)?);
+                        out.push(vm.box_copy_pieces(ctx, &[s.entries.get(p).1], span)?);
                     }
                 }
                 _ => {

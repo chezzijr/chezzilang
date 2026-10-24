@@ -939,21 +939,21 @@ impl Vm {
                                 // and a scanned `bytearray` of equal content both survive. A bucket hit
                                 // is still confirmed by `elem_equal` — the hash only picks candidates,
                                 // the compare remains the verdict (DEC-014).
-                                let mut seen = SetData::default();
+                                let seen = SetData::default();
                                 for &v in &items {
                                     let hv = vm.scalar_hash(v);
                                     let mut dup = false;
                                     for &p in seen.candidates(hv) {
-                                        if vm.elem_equal(seen.entries[p].1, v, 0, span)? {
+                                        if vm.elem_equal(seen.entries.get(p).1, v, 0, span)? {
                                             dup = true;
                                             break;
                                         }
                                     }
                                     if !dup {
-                                        seen.push(hv, v);
+                                        seen.push(&vm.heap, hv, v);
                                     }
                                 }
-                                out = seen.entries.iter().map(|&(_, v)| v).collect();
+                                out = seen.entries.iter().map(|(_, v)| v).collect();
                             } else {
                                 // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
                                 // Fallback for any non-flat element (container, Struct/Enum,
@@ -1210,10 +1210,11 @@ impl Vm {
                             // later mutation of the caller's live value can't corrupt the set. Pure alloc
                             // (no GC), so no rooting needed before the immediately-following push.
                             let x = self.snapshot_key(x);
-                            let Obj::Set(s) = self.heap.get_mut(h) else {
+                            let heap = self.heap.write(h);
+                            let Obj::Set(s) = heap.get(h) else {
                                 unreachable!()
                             };
-                            s.push(hx, x);
+                            s.push(heap, hx, x);
                         }
                         Ok(Value::bool(!present))
                     }
@@ -1224,10 +1225,11 @@ impl Vm {
                         let pos = self.set_probe(h, hx, x, span)?;
                         match pos {
                             Some(i) => {
-                                let Obj::Set(s) = self.heap.get_mut(h) else {
+                                let heap = self.heap.write(h);
+                                let Obj::Set(s) = heap.get(h) else {
                                     unreachable!()
                                 };
-                                s.remove_at(i);
+                                s.remove_at(heap, i);
                                 Ok(Value::bool(true))
                             }
                             None => Ok(Value::bool(false)),
@@ -1241,12 +1243,12 @@ impl Vm {
                         // `eq` and re-enter the VM; `mine`/`other`/`out` are Rust locals holding elements
                         // reachable only through the two source sets, so both are rooted).
                         let mine = match self.heap.get(h).as_set() {
-                            Some(s) => s.entries.clone(),
+                            Some(s) => s.entries.to_vec(),
                             None => unreachable!(),
                         };
                         let other = self.set_arg(args[0], method, span)?;
                         let add = |vm: &mut Vm,
-                                   set: &mut SetData,
+                                   set: &SetData,
                                    he: u64,
                                    e: Value|
                          -> Result<(), RuntimeError> {
@@ -1254,16 +1256,16 @@ impl Vm {
                                 .set_slot(&set.entries, set.candidates(he), e, span)?
                                 .is_none()
                             {
-                                set.push(he, e);
+                                set.push(&vm.heap, he, e);
                             }
                             Ok(())
                         };
                         let out = self.with_roots(&[Value::obj(h), args[0]], |vm| {
-                            let mut out = SetData::default();
+                            let out = SetData::default();
                             // This arm serves exactly Union, Intersection and Difference.
                             if which == SetMethod::Union {
-                                for (he, e) in mine.iter().chain(other.entries.iter()) {
-                                    add(vm, &mut out, *he, *e)?;
+                                for (he, e) in mine.iter().copied().chain(other.entries.iter()) {
+                                    add(vm, &out, he, e)?;
                                 }
                             } else {
                                 // intersection keeps mine's elements present in other; difference drops them.
@@ -1273,7 +1275,7 @@ impl Vm {
                                         .set_slot(&other.entries, other.candidates(*he), *e, span)?
                                         .is_some();
                                     if in_other == keep_when_present {
-                                        add(vm, &mut out, *he, *e)?;
+                                        add(vm, &out, *he, *e)?;
                                     }
                                 }
                             }
@@ -1284,13 +1286,13 @@ impl Vm {
                     SetMethod::Copy => {
                         // TICKET-160 — insertion order kept; each struct/enum element snapshotted as Set.insert does.
                         self.arity_err("copy", args, 0, span)?;
-                        let mine = s.entries.clone();
-                        let mut out = SetData::default();
-                        for (he, e) in mine {
-                            let e = self.snapshot_key(e);
-                            out.push(he, e);
+                        let mut out = s.entries.to_vec();
+                        for e in &mut out {
+                            e.1 = self.snapshot_key(e.1);
                         }
-                        Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
+                        Ok(Value::obj(
+                            self.heap.alloc(Obj::Set(SetData::from_entries(out))),
+                        ))
                     }
                 }
             }

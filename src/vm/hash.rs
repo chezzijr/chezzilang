@@ -341,7 +341,7 @@ impl Vm {
             Obj::List(items) => items.to_vec(),
             Obj::Tuple(items) => items.to_vec(),
             Obj::Map(m) => m.entries.iter().flat_map(|(_, k, val)| [k, val]).collect(),
-            Obj::Set(s) => s.entries.iter().map(|(_, e)| *e).collect(),
+            Obj::Set(s) => s.entries.iter().map(|(_, e)| e).collect(),
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -495,15 +495,16 @@ impl Vm {
                 Value::obj(nh)
             }
             Obj::Set(s) => {
-                let entries = s.entries.clone();
+                let entries = s.entries.to_vec();
                 let nh = self.heap.alloc(Obj::Set(s.clone()));
                 visited.insert(h, nh);
                 let copied: Vec<(u64, Value)> = entries
                     .iter()
                     .map(|&(hh, e)| (hh, self.snapshot_value(e, visited, depth + 1)))
                     .collect();
-                if let Obj::Set(dst) = self.heap.get_mut(nh) {
-                    dst.entries = copied;
+                let heap = self.heap.write(nh);
+                if let Obj::Set(dst) = heap.get(nh) {
+                    dst.entries.replace(heap, &copied);
                 }
                 Value::obj(nh)
             }

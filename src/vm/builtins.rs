@@ -176,7 +176,7 @@ impl Vm {
     pub(super) fn builtin_items(&mut self, h: GcRef) -> Option<Vec<Value>> {
         match self.heap.get(h) {
             Obj::List(items) => Some(items.to_vec()),
-            Obj::Set(s) => Some(s.entries.iter().map(|(_, e)| *e).collect()),
+            Obj::Set(s) => Some(s.entries.iter().map(|(_, e)| e).collect()),
             Obj::Map(_) => Some(self.map_pairs(h)),
             Obj::Bytes(b) => Some(b.iter().map(|&x| Value::int(x as i64)).collect()),
             Obj::ByteArray(b) => Some(b.iter().map(|x| Value::int(x as i64)).collect()),
@@ -418,7 +418,7 @@ impl Vm {
                 };
                 hashes.push(self.hash_value(v, span)?);
             }
-            let mut set = SetData::default();
+            let set = SetData::default();
             for (i, &he) in hashes.iter().enumerate() {
                 let v = {
                     let Obj::List(b) = self.heap.get(lh) else {
@@ -430,7 +430,7 @@ impl Vm {
                     .set_slot(&set.entries, set.candidates(he), v, span)?
                     .is_none()
                 {
-                    set.push(he, v);
+                    set.push(&self.heap, he, v);
                 }
             }
             Ok(set)

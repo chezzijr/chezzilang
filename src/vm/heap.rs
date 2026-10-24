@@ -11,8 +11,7 @@ use super::core::{
 };
 use super::heap_core::{CopyLog, HeapCore, lock};
 use super::heap_view::ViewState;
-use super::map_data::HashIndex;
-pub use super::map_data::{MapData, MapEntry};
+pub use super::map_data::{MapData, MapEntry, SetData, SetEntry};
 use super::rvec::{RVec, RetireList};
 use super::value::{GcRef, Value};
 use crate::base::op::ProtoId;
@@ -20,38 +19,6 @@ use crate::lexer::Span;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// A hash *set* with the same insertion-order-preserving design as [`MapData`].
-#[derive(Debug, Clone, Default)]
-pub struct SetData {
-    pub entries: Vec<(u64, Value)>,
-    /// `cached-hash → candidate position(s)` (see [`HashIndex`]).
-    index: HashIndex,
-}
-
-impl SetData {
-    #[inline]
-    pub fn candidates(&self, h: u64) -> &[usize] {
-        self.index.candidates(h)
-    }
-    #[inline]
-    pub fn push(&mut self, h: u64, e: Value) {
-        let pos = self.entries.len();
-        self.entries.push((h, e));
-        self.index.insert(h, pos);
-    }
-    pub fn remove_at(&mut self, i: usize) -> (u64, Value) {
-        let removed = self.entries.remove(i);
-        self.rebuild_index();
-        removed
-    }
-    fn rebuild_index(&mut self) {
-        self.index.clear();
-        for (pos, (h, _)) in self.entries.iter().enumerate() {
-            self.index.insert(*h, pos);
-        }
-    }
-}
 
 /// A module namespace's payload — boxed behind [`Obj::Module`] so the rare, cold `Module` variant
 /// doesn't set the `Obj` size cap (mirrors [`Obj::Generator`]'s `Box<GeneratorCore>`). Its name +
@@ -1101,7 +1068,7 @@ impl Heap {
                 push(&k);
                 push(&v);
             }),
-            Obj::Set(s) => s.entries.iter().for_each(|(_, e)| push(e)),
+            Obj::Set(s) => s.entries.iter().for_each(|(_, e)| push(&e)),
             Obj::Struct { fields, .. } => fields.iter().for_each(&mut push),
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
             // A boxed local's cell: the inner value may be a heap object — trace it.
