@@ -16,11 +16,6 @@ enum WriteErr {
     Io(String),
 }
 
-/// W6-1 — re-key an error raised by a core BENEATH the receiver. `writer_method` renders `Closed`
-/// receiver-relatively ("write/flush on a closed writer"), which is a lie when it is the *inner*
-/// handle a `buffered(...)` writer drains into that was closed — the receiver is wide open. Demote it
-/// to `Io` so the message names the right handle AND `close()` (which masks `Closed` for idempotence)
-/// cannot report success for a flush that provably persisted nothing.
 /// What a write to a writer core leaves to do once its lock is released.
 enum Wrote {
     Done,
@@ -30,6 +25,11 @@ enum Wrote {
     Drain(Arc<WriterCore>, Vec<u8>),
 }
 
+/// W6-1 — re-key an error raised by a core BENEATH the receiver. `writer_method` renders `Closed`
+/// receiver-relatively ("write/flush on a closed writer"), which is a lie when it is the *inner*
+/// handle a `buffered(...)` writer drains into that was closed — the receiver is wide open. Demote it
+/// to `Io` so the message names the right handle AND `close()` (which masks `Closed` for idempotence)
+/// cannot report success for a flush that provably persisted nothing.
 fn from_inner(e: WriteErr) -> WriteErr {
     match e {
         WriteErr::Closed => {
@@ -342,31 +342,6 @@ impl Vm {
         }
     }
 
-    /// R2b — `Reader` methods, the input twin of `writer_method`:
-    /// * `read_line() -> Option[str]` — one line, trailing `\n` (and a preceding `\r`) stripped; `None`
-    ///   at EOF. Matches the existing module-level `io.read_line()` shape (anti-drift). An IO error or a
-    ///   non-UTF-8 file is a clean runtime FAULT pointing at `read_bytes` (Option can't carry an Err —
-    ///   mirrors `read_file`'s non-UTF-8 fault); a read on a CLOSED reader is likewise a clean fault.
-    ///   W7-9: the non-UTF-8 fault is NON-DESTRUCTIVE — the refused line's raw bytes stay in
-    ///   [`ReaderCore::carry`], so it is STICKY (a re-read re-faults, never skips) until `read_bytes`
-    ///   drains it or `close` discards it.
-    /// * `read_bytes(n) -> Result[bytes]` — at-most-`n` bytes (exactly-`n` until a short final chunk);
-    ///   empty bytes = EOF; `Err` on closed/IO. `n <= 0` clamps to `Ok(b"")`. The binary + error-
-    ///   distinguishing escape hatch — and the carry drain: a pending carry is served first, without
-    ///   touching the fd (a carry-only short read, the `socket_read_bytes` shape).
-    /// * `close() -> Result[nil]` — idempotent: take + drop the `BufReader` (the fd closes on drop),
-    ///   and discard any carry. Every read arm checks `inner.is_none()` BEFORE serving the carry, so
-    ///   a carry can neither leak past `close` nor resurrect after EOF.
-    ///
-    /// These three are the WHOLE Reader dispatch surface (`call.rs` routes every `Reader` method
-    /// here; an unknown one faults below). The fourth read path, `lines()`, is a BODIED pure-Chezzi
-    /// generator over `read_line` (`std/io.chz`) — it inherits the carry and the stickiness for free.
-    ///
-    /// No netpoller park — file reads block synchronously (regular files are always epoll-ready).
-    ///
-    /// ponytail: an inline blocking read can pin an M:N worker on a slow fifo/pipe — the same accepted
-    /// ceiling `Writer.write` carries; NOT offloaded to the dirty pool (that path is whole-file-only).
-    /// For the intended regular-file use (always ready) the risk is nil; add offload if a fifo use lands.
     /// M1.5 — run `op` under the reader core's two locks. With both locks free and `buffered`
     /// true no syscall can happen, and `op` runs attached; else the locks and the read run through
     /// the GC door (Go `entersyscall` only around a real syscall).
@@ -391,6 +366,33 @@ impl Vm {
         })
     }
 
+    /// R2b — `Reader` methods, the input twin of `writer_method`:
+    /// * `read_line() -> Option[str]` — one line, trailing `\n` (and a preceding `\r`) stripped; `None`
+    ///   at EOF. Matches the existing module-level `io.read_line()` shape (anti-drift). An IO error or a
+    ///   non-UTF-8 file is a clean runtime FAULT pointing at `read_bytes` (Option can't carry an Err —
+    ///   mirrors `read_file`'s non-UTF-8 fault); a read on a CLOSED reader is likewise a clean fault.
+    ///   W7-9: the non-UTF-8 fault is NON-DESTRUCTIVE — the refused line's raw bytes stay in
+    ///   [`ReaderCore::carry`], so it is STICKY (a re-read re-faults, never skips) until `read_bytes`
+    ///   drains it or `close` discards it.
+    /// * `read_bytes(n) -> Result[bytes]` — at-most-`n` bytes (exactly-`n` until a short final chunk);
+    ///   empty bytes = EOF; `Err` on closed/IO. `n <= 0` clamps to `Ok(b"")`. The binary + error-
+    ///   distinguishing escape hatch — and the carry drain: a pending carry is served first, without
+    ///   touching the fd (a carry-only short read, the `socket_read_bytes` shape).
+    /// * `close() -> Result[nil]` — idempotent: take + drop the `BufReader` (the fd closes on drop),
+    ///   and discard any carry. Every read arm checks `inner.is_none()` BEFORE serving the carry, so
+    ///   a carry can neither leak past `close` nor resurrect after EOF.
+    ///
+    /// These three are the WHOLE Reader dispatch surface (`call.rs` routes every `Reader` method
+    /// here; an unknown one faults below). The fourth read path, `lines()`, is a BODIED pure-Chezzi
+    /// generator over `read_line` (`std/io.chz`) — it inherits the carry and the stickiness for free.
+    ///
+    /// No netpoller park — file reads block synchronously (regular files are always epoll-ready).
+    /// M1.5 — a read that can make a syscall runs detached through the GC door
+    /// (`with_reader_locks`), so a slow fifo/pipe read stalls no stop of the world.
+    ///
+    /// ponytail: an inline blocking read can pin an M:N worker on a slow fifo/pipe — the same accepted
+    /// ceiling `Writer.write` carries; NOT offloaded to the dirty pool (that path is whole-file-only).
+    /// For the intended regular-file use (always ready) the risk is nil; add offload if a fifo use lands.
     pub(super) fn reader_method(
         &mut self,
         h: GcRef,

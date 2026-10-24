@@ -153,14 +153,10 @@ impl Vm {
         Ok(())
     }
 
-    /// Dispatch an already-evaluated callable `Value` on evaluated args, *returning* the result
-    /// instead of pushing it. Shared by `do_call` (which pushes) and the higher-order list methods
-    /// (which call it per element while keeping their source/result lists rooted on the stack).
-    /// `args.len()` is the explicit arg count for arity checks.
     /// M1.5 — an extern C call that takes a callback, with this thread still attached: its
     /// trampoline runs Chezzi code inside `ffi_call`, and that code needs the token, so the call
-    /// cannot run through the GC door, and a stop waits for the whole C call. Open: fix round 1
-    /// stops here for the controller's ruling (Go reattaches inside the callback, `cgocallback`).
+    /// cannot run through the GC door, and a stop waits for the whole C call. M1.8: the
+    /// trampoline reattaches for the callback and detaches on return (Go `cgocallback`).
     fn extern_call_attached(
         &mut self,
         cffi: &crate::native::cffi::Cffi,
@@ -169,6 +165,10 @@ impl Vm {
         cffi.call(&mut VmHost { vm: self, args })
     }
 
+    /// Dispatch an already-evaluated callable `Value` on evaluated args, *returning* the result
+    /// instead of pushing it. Shared by `do_call` (which pushes) and the higher-order list methods
+    /// (which call it per element while keeping their source/result lists rooted on the stack).
+    /// `args.len()` is the explicit arg count for arity checks.
     pub(super) fn invoke_value(
         &mut self,
         callee: Value,
