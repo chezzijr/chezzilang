@@ -6,7 +6,11 @@
 //! reach it. Only the stop-the-world collector frees a retired buffer.
 //!
 //! - An `RVec<T>` is one `AtomicPtr` to a [`Header`] block: one allocation, the header and then
-//!   `cap` inline slots. A null pointer is the empty vec with no block.
+//!   `cap` inline `AtomicU64` slots, zeroed at allocation. A null pointer is the empty vec.
+//! - `T` is a [`Word`]: 8 bytes, no padding, `Copy` (`u64`, `i64`, `Value`). Every slot access
+//!   is a `Relaxed` atomic of the word's bits, so a racing read and write on one slot is no data
+//!   race and never tears. `Copy` is also what makes a racy read sound: a reader copies the bits,
+//!   and a copied `T` with a drop would drop twice.
 //! - A read loads the pointer (Acquire), then that block's `len` (Acquire), then a slot below
 //!   `len`. An index at or past `len` panics; the VM's `catch_unwind` turns a racy index into a
 //!   task fault.
@@ -14,42 +18,79 @@
 //!   allocates a block of twice the capacity, copies the elements, and swaps the pointer with a
 //!   `compare_exchange` (AcqRel). The winner retires the old block; a loser frees its own new
 //!   block (no one else saw it) and retries.
-//! - A shrink frees nothing: `truncate` lowers `len`. `T: Copy`, so no element has a drop. The
-//!   bound is also what makes a racy read sound: a reader copies the bits of a slot, and a copied
-//!   `T` with a drop would drop twice.
-//! - Slot access: a `T` of 8 bytes and 8-byte alignment (the VM's `Value`) goes through a
-//!   `Relaxed` `AtomicU64`, so a racing read and write on one slot is no data race and never
-//!   tears. A `T` of another size uses plain reads and writes: such an `RVec` must have one
-//!   accessor at a time.
+//! - A shrink frees nothing: `truncate` lowers `len`, and a `Word` has no drop.
 //!
-//! Retire lists: a retired block goes on a thread-local list ([`retire`]). [`RetireList::adopt_local`]
-//! moves that list to the run's `HeapCore.retired` when the thread stops for a GC
-//! (`Vm::gc_park`), detaches (`Vm::gc_blocking`, `Vm::gc_reenter`), leaves (`Vm::gc_leave`), or
-//! sweeps (`Heap::sweep`). The sweep frees every block on the core's list with the world still
+//! Retire lists: a grow takes the `Heap` handle of its thread (one handle per thread per run) and
+//! puts the old block on the handle's [`RetireList`]. The handle moves its list to the run's
+//! `HeapCore.retired` when its thread stops for a GC (`Vm::gc_park`), detaches
+//! (`Vm::gc_blocking`, `Vm::gc_reenter`), leaves (`Vm::gc_leave`), sweeps (`Heap::sweep`), or
+//! drops (`Heap`'s drop). The sweep frees every block on the core's list with the world still
 //! stopped ([`RetireList::free_all`]). That is sound because a reader holds a block pointer only
 //! between two safepoints: an [`Iter`] or a value read never lives across a poll or a door.
-//! A list a thread still holds when it exits is freed by the thread-local destructor: a thread
-//! that exits holds no block pointer, and every runner thread hands its list to the core when it
-//! leaves the heap.
+//! Nothing else frees a retired block, except the core's own drop, when no handle of the run is
+//! left.
 //!
-//! Pacing: a retired block's bytes count as allocated bytes. They reach the run's byte count at
-//! the handle's next slow trigger check (`Heap::should_collect`, [`take_local_bytes`]) or at the
-//! hand-off ([`RetireList::adopt_local`]), whichever comes first. The sweep that frees the block
-//! also zeroes the run's byte count, which uncharges them.
+//! Pacing: a grow charges the retired block's bytes to its handle (`Heap::charge_bytes`), once.
+//! The hand-off does not charge them again. The sweep that frees the block zeroes the run's byte
+//! count in the same stop, which uncharges them.
 //!
 //! No `as_slice`: a `&[T]` over a block that another thread can write with `set` is not sound.
 //! No API hands out `&mut [T]`. Miri and TSan are not available on this box, so the races here
 //! are tested only by the stress tests below.
 
-use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
-use std::cell::{Cell, RefCell};
+use super::heap::Heap;
+use super::value::Value;
+use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of};
 use std::ptr::{self, NonNull};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
-/// The head of one block. The slots follow it in the same allocation, at `data_offset::<T>()`.
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// An element type of an [`RVec`]: a `Copy` word of 8 bytes with no padding, stored as its bits.
+pub trait Word: Copy + sealed::Sealed {
+    /// Evaluated by every slot access: a `Word` is 8 bytes with 8-byte alignment.
+    const IS_WORD: () = assert!(size_of::<Self>() == 8 && align_of::<Self>() == 8);
+    fn to_bits(self) -> u64;
+    /// `bits` is a value that `to_bits` returned.
+    fn from_bits(bits: u64) -> Self;
+}
+
+impl sealed::Sealed for u64 {}
+impl Word for u64 {
+    fn to_bits(self) -> u64 {
+        self
+    }
+    fn from_bits(bits: u64) -> Self {
+        bits
+    }
+}
+
+impl sealed::Sealed for i64 {}
+impl Word for i64 {
+    fn to_bits(self) -> u64 {
+        self as u64
+    }
+    fn from_bits(bits: u64) -> Self {
+        bits as i64
+    }
+}
+
+impl sealed::Sealed for Value {}
+impl Word for Value {
+    fn to_bits(self) -> u64 {
+        self.to_bits()
+    }
+    fn from_bits(bits: u64) -> Self {
+        Value::from_bits(bits)
+    }
+}
+
+/// The head of one block. The slots follow it in the same allocation, at `data_offset()`.
 #[repr(C)]
 pub(super) struct Header {
     cap: usize,
@@ -57,15 +98,15 @@ pub(super) struct Header {
 }
 
 /// The offset of slot 0 from the block's start (the same for every `cap`).
-fn data_offset<T>() -> usize {
+fn data_offset() -> usize {
     Layout::new::<Header>()
-        .extend(Layout::new::<T>())
+        .extend(Layout::new::<AtomicU64>())
         .expect("an RVec block layout")
         .1
 }
 
-fn block_layout<T>(cap: usize) -> Layout {
-    let data = Layout::array::<T>(cap).expect("an RVec capacity overflows");
+fn block_layout(cap: usize) -> Layout {
+    let data = Layout::array::<AtomicU64>(cap).expect("an RVec capacity overflows");
     Layout::new::<Header>()
         .extend(data)
         .expect("an RVec capacity overflows")
@@ -84,15 +125,23 @@ pub(super) fn test_counts() -> (usize, usize) {
     (ALLOCS.load(Ordering::SeqCst), FREES.load(Ordering::SeqCst))
 }
 
-/// A new block of `cap` slots, `len` 0.
-fn alloc_block<T>(cap: usize) -> *mut Header {
-    let layout = block_layout::<T>(cap);
+/// The block counters are process-wide: the tests that read them hold this lock (tests only).
+#[cfg(test)]
+pub(super) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A new block of `cap` zeroed slots, `len` 0.
+fn alloc_block(cap: usize) -> *mut Header {
+    let layout = block_layout(cap);
     // SAFETY: `layout` has a non-zero size (the header is two words).
-    let p = unsafe { alloc(layout) }.cast::<Header>();
+    let p = unsafe { alloc_zeroed(layout) }.cast::<Header>();
     if p.is_null() {
         handle_alloc_error(layout);
     }
-    // SAFETY: `p` is a fresh allocation with room and alignment for a `Header`.
+    // SAFETY: `p` is a fresh allocation with room and alignment for a `Header`; the zeroed slots
+    // after it are valid `AtomicU64`s.
     unsafe {
         p.write(Header {
             cap,
@@ -120,57 +169,36 @@ unsafe fn free_block(ptr: NonNull<u8>, layout: Layout) {
 ///
 /// # Safety
 ///
-/// `h` is a live block of `T` slots and `i < cap`.
-unsafe fn slot<T>(h: *mut Header, i: usize) -> *mut T {
-    // SAFETY: the caller's contract: the slot lies inside the block's allocation.
-    unsafe { h.cast::<u8>().add(data_offset::<T>()).cast::<T>().add(i) }
-}
-
-/// Whether `T` goes through an `AtomicU64` (see the module doc).
-const fn word_sized<T>() -> bool {
-    size_of::<T>() == 8 && align_of::<T>() == 8
+/// `h` is a live block and `i < cap`; the returned reference does not outlive the block.
+unsafe fn slot<'a>(h: *mut Header, i: usize) -> &'a AtomicU64 {
+    // SAFETY: the caller's contract: the slot lies inside the block's allocation, and
+    // `alloc_block` zeroed it, so it is a valid `AtomicU64`.
+    unsafe { &*h.cast::<u8>().add(data_offset()).cast::<AtomicU64>().add(i) }
 }
 
 /// Read slot `i` of `h`.
 ///
 /// # Safety
 ///
-/// `h` is a live block of `T` slots, and slot `i` was written (`i` is below a `len` that this
-/// thread read with Acquire, or that it wrote).
-unsafe fn load<T: Copy>(h: *mut Header, i: usize) -> T {
+/// As for [`slot`].
+unsafe fn load<T: Word>(h: *mut Header, i: usize) -> T {
+    let () = T::IS_WORD;
     // SAFETY: the caller's contract.
-    let p = unsafe { slot::<T>(h, i) };
-    if word_sized::<T>() {
-        // SAFETY: `p` is valid and 8-byte aligned; every access to a word-sized slot is atomic.
-        let bits = unsafe { AtomicU64::from_ptr(p.cast::<u64>()) }.load(Ordering::Relaxed);
-        // SAFETY: the bits are a whole `T` that a `store` wrote, and `T: Copy`.
-        unsafe { std::mem::transmute_copy::<u64, T>(&bits) }
-    } else {
-        // SAFETY: `p` is valid and written; a non-word `T` has one accessor at a time.
-        unsafe { p.read() }
-    }
+    T::from_bits(unsafe { slot(h, i) }.load(Ordering::Relaxed))
 }
 
 /// Write `v` into slot `i` of `h`.
 ///
 /// # Safety
 ///
-/// `h` is a live block of `T` slots and `i < cap`.
-unsafe fn store<T: Copy>(h: *mut Header, i: usize, v: T) {
+/// As for [`slot`].
+unsafe fn store<T: Word>(h: *mut Header, i: usize, v: T) {
+    let () = T::IS_WORD;
     // SAFETY: the caller's contract.
-    let p = unsafe { slot::<T>(h, i) };
-    if word_sized::<T>() {
-        // SAFETY: `T` is 8 bytes, so its bits fit a `u64`.
-        let bits = unsafe { std::mem::transmute_copy::<T, u64>(&v) };
-        // SAFETY: `p` is valid and 8-byte aligned; every access to a word-sized slot is atomic.
-        unsafe { AtomicU64::from_ptr(p.cast::<u64>()) }.store(bits, Ordering::Relaxed);
-    } else {
-        // SAFETY: `p` is valid; a non-word `T` has one accessor at a time.
-        unsafe { p.write(v) };
-    }
+    unsafe { slot(h, i) }.store(v.to_bits(), Ordering::Relaxed);
 }
 
-/// A block retired by a grow, type-erased: freeing it needs only its layout (`T: Copy`).
+/// A retired block: freeing it needs only its layout (a `Word` has no drop).
 struct RetiredBlock {
     ptr: NonNull<u8>,
     layout: Layout,
@@ -180,45 +208,9 @@ struct RetiredBlock {
 // the only thing that frees it, on whichever thread drains the list.
 unsafe impl Send for RetiredBlock {}
 
-/// This thread's retired blocks, not yet handed to a core. Its drop (thread exit) frees them.
-struct LocalList(Vec<RetiredBlock>);
-
-impl Drop for LocalList {
-    fn drop(&mut self) {
-        for b in self.0.drain(..) {
-            // SAFETY: the thread exits, so it holds no block pointer (see the module doc).
-            unsafe { free_block(b.ptr, b.layout) };
-        }
-    }
-}
-
-thread_local! {
-    static LOCAL: RefCell<LocalList> = const { RefCell::new(LocalList(Vec::new())) };
-    /// Bytes of this thread's retired blocks not yet added to a run's byte count.
-    static LOCAL_BYTES: Cell<usize> = const { Cell::new(0) };
-}
-
-/// Put block `h` (of `T` slots) on this thread's retire list.
-fn retire<T>(h: *mut Header) {
-    // SAFETY: `h` is a live block; its `cap` is never written after `alloc_block`.
-    let layout = block_layout::<T>(unsafe { (*h).cap });
-    let ptr = NonNull::new(h.cast::<u8>()).expect("a retired block is not null");
-    LOCAL.with_borrow_mut(|l| l.0.push(RetiredBlock { ptr, layout }));
-    LOCAL_BYTES.set(LOCAL_BYTES.get().saturating_add(layout.size()));
-}
-
-/// Take this thread's retired bytes that no run's byte count holds yet (see the module doc).
-pub(super) fn take_local_bytes() -> usize {
-    LOCAL_BYTES.take()
-}
-
-/// How many blocks this thread has retired and not yet handed off (tests only).
-#[cfg(test)]
-pub(super) fn local_retired() -> usize {
-    LOCAL.with_borrow(|l| l.0.len())
-}
-
-/// A run's retired blocks (`HeapCore.retired`): the stop-the-world collector frees them.
+/// Retired blocks: a `Heap` handle's own (not yet handed off), or the run's (`HeapCore.retired`),
+/// which the stop-the-world sweep frees. A handle hands its list to the core before it drops, so
+/// only the core's list is ever dropped with blocks on it.
 #[derive(Default)]
 pub(super) struct RetireList(Mutex<Vec<RetiredBlock>>);
 
@@ -233,14 +225,12 @@ impl RetireList {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Move this thread's retired blocks onto this list. Returns their bytes that no run's byte
-    /// count holds yet ([`take_local_bytes`]), for the caller to charge.
-    pub(super) fn adopt_local(&self) -> usize {
-        let blocks = LOCAL.with_borrow_mut(|l| std::mem::take(&mut l.0));
+    /// Move every block of `self` onto `to`.
+    pub(super) fn move_into(&self, to: &RetireList) {
+        let blocks = std::mem::take(&mut *self.lock());
         if !blocks.is_empty() {
-            self.lock().extend(blocks);
+            to.lock().extend(blocks);
         }
-        take_local_bytes()
     }
 
     /// Blocks on this list.
@@ -248,41 +238,47 @@ impl RetireList {
         self.lock().len()
     }
 
-    /// Free every block on this list. Call it only with the world stopped (the sweep of
-    /// `HeapCore::sweep_slots`), or when no thread of the run is left (the core's drop).
-    pub(super) fn free_all(&self) {
+    /// Free every block on this list.
+    ///
+    /// # Safety
+    ///
+    /// The world is stopped (every other handle of the run is parked at a safepoint or
+    /// detached, `vm/gc_coord.rs`), or no handle of the run is left. Either way no reader holds a
+    /// pointer to a block on this list.
+    pub(super) unsafe fn free_all(&self) {
         let blocks = std::mem::take(&mut *self.lock());
         for b in blocks {
-            // SAFETY (gc_coord invariant: every other handle is stopped at a safepoint or
-            // detached, `vm/gc_coord.rs`): a reader holds a block pointer only between two
-            // safepoints, and no `RVec` points to a retired block.
+            // SAFETY: the caller's contract; no `RVec` points to a retired block.
             unsafe { free_block(b.ptr, b.layout) };
         }
     }
 }
 
 impl Drop for RetireList {
+    /// Only the core's list drops with blocks on it (see the type doc): its run has no handle
+    /// left, so no reader is left.
     fn drop(&mut self) {
-        self.free_all();
+        // SAFETY: the type doc: no handle of the run is left.
+        unsafe { self.free_all() };
     }
 }
 
-/// A growable vector of `T: Copy` whose grows retire the old block (see the module doc).
+/// A growable vector of `T: Word` whose grows retire the old block (see the module doc).
 // M2.2: `Obj::List` moves onto `RVec`; until then only the tests use it.
 #[cfg_attr(not(test), allow(dead_code))]
-pub struct RVec<T: Copy> {
+pub struct RVec<T: Word> {
     ptr: AtomicPtr<Header>,
     _t: PhantomData<T>,
 }
 
-impl<T: Copy> Default for RVec<T> {
+impl<T: Word> Default for RVec<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-impl<T: Copy> RVec<T> {
+impl<T: Word> RVec<T> {
     /// An empty vec with no block.
     pub const fn new() -> Self {
         RVec {
@@ -295,7 +291,7 @@ impl<T: Copy> RVec<T> {
         let p = if cap == 0 {
             ptr::null_mut()
         } else {
-            alloc_block::<T>(cap)
+            alloc_block(cap)
         };
         RVec {
             ptr: AtomicPtr::new(p),
@@ -304,7 +300,7 @@ impl<T: Copy> RVec<T> {
     }
 
     /// The current block (null when empty).
-    pub(super) fn block(&self) -> *mut Header {
+    fn block(&self) -> *mut Header {
         self.ptr.load(Ordering::Acquire)
     }
 
@@ -328,7 +324,7 @@ impl<T: Copy> RVec<T> {
     pub fn get(&self, i: usize) -> T {
         let (h, len, _) = self.snapshot();
         assert!(i < len, "RVec index out of range: {i} >= {len}");
-        // SAFETY: `i < len`, read with Acquire from the live block `h`.
+        // SAFETY: `i < len <= cap` in the live block `h`.
         unsafe { load(h, i) }
     }
 
@@ -340,21 +336,23 @@ impl<T: Copy> RVec<T> {
         unsafe { store(h, i, v) };
     }
 
-    /// Replace the block `old` with one of at least `min_cap` slots that holds `old`'s
-    /// elements. Only the thread whose swap wins retires `old`; a loser frees its own block.
+    /// Replace the block `old` (null, or a block this vec pointed to, loaded since the caller's
+    /// last safepoint) with one of at least `min_cap` slots that holds `old`'s elements. Only the
+    /// thread whose swap wins retires `old`, on `heap`'s list; a loser frees its own block.
     /// Either way the caller reloads the pointer.
-    pub(super) fn grow(&self, old: *mut Header, min_cap: usize) {
+    fn grow(&self, heap: &Heap, old: *mut Header, min_cap: usize) {
         let (len, cap) = if old.is_null() {
             (0, 0)
         } else {
-            // SAFETY: `old` is a live block (the caller loaded it before its next safepoint).
+            // SAFETY: the contract above: `old` is live until the next stop.
             let o = unsafe { &*old };
             (o.len.load(Ordering::Acquire), o.cap)
         };
-        let new_cap = (cap * 2).max(min_cap).max(4);
-        let new = alloc_block::<T>(new_cap);
+        let doubled = cap.checked_mul(2).expect("an RVec capacity overflows");
+        let new_cap = doubled.max(min_cap).max(4);
+        let new = alloc_block(new_cap);
         for i in 0..len {
-            // SAFETY: `i < len` of the live block `old`, and `len <= cap < new_cap`.
+            // SAFETY: `i < len <= cap` of the live block `old`, and `len <= cap < new_cap`.
             unsafe { store(new, i, load::<T>(old, i)) };
         }
         // SAFETY: `new` is this thread's own block; no other thread has seen it.
@@ -364,32 +362,37 @@ impl<T: Copy> RVec<T> {
             .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => {
-                if !old.is_null() {
-                    retire::<T>(old);
+                if let Some(p) = NonNull::new(old.cast::<u8>()) {
+                    let layout = block_layout(cap);
+                    heap.retire_list()
+                        .lock()
+                        .push(RetiredBlock { ptr: p, layout });
+                    heap.charge_bytes(layout.size());
                 }
             }
             Err(_) => {
                 let p = NonNull::new(new.cast::<u8>()).expect("a new block is not null");
                 // SAFETY: the swap failed, so no vec points to `new` and no thread saw it.
-                unsafe { free_block(p, block_layout::<T>(new_cap)) };
+                unsafe { free_block(p, block_layout(new_cap)) };
             }
         }
     }
 
     /// A block with room for `extra` more elements, and its `len`.
-    fn reserve(&self, extra: usize) -> (*mut Header, usize) {
+    fn reserve(&self, heap: &Heap, extra: usize) -> (*mut Header, usize) {
         loop {
             let (h, len, cap) = self.snapshot();
             let need = len.checked_add(extra).expect("an RVec capacity overflows");
             if need <= cap {
                 return (h, len);
             }
-            self.grow(h, need);
+            self.grow(heap, h, need);
         }
     }
 
-    pub fn push(&self, v: T) {
-        let (h, len) = self.reserve(1);
+    /// Append `v`; a grow retires the old block on `heap` (this thread's handle).
+    pub fn push(&self, heap: &Heap, v: T) {
+        let (h, len) = self.reserve(heap, 1);
         // SAFETY: `len < cap` in the live block `h`; the Release store publishes the slot.
         unsafe {
             store(h, len, v);
@@ -402,7 +405,7 @@ impl<T: Copy> RVec<T> {
         if len == 0 {
             return None;
         }
-        // SAFETY: `len - 1 < len` in the live block `h`.
+        // SAFETY: `len - 1 < len <= cap` in the live block `h`.
         unsafe {
             let v = load(h, len - 1);
             (*h).len.store(len - 1, Ordering::Release);
@@ -410,12 +413,12 @@ impl<T: Copy> RVec<T> {
         }
     }
 
-    /// Insert `v` at `i`, shifting the tail right. Panics when `i > len`.
-    pub fn insert(&self, i: usize, v: T) {
-        let (h, len) = self.reserve(1);
+    /// Insert `v` at `i`, shifting the tail right. Panics when `i > len`. A grow retires the old
+    /// block on `heap`.
+    pub fn insert(&self, heap: &Heap, i: usize, v: T) {
+        let (h, len) = self.reserve(heap, 1);
         assert!(i <= len, "RVec insert index out of range: {i} > {len}");
-        // SAFETY: every index is at most `len < cap` in the live block `h`, and the slots
-        // below `len` were written.
+        // SAFETY: every index is at most `len < cap` in the live block `h`.
         unsafe {
             for k in (i..len).rev() {
                 store(h, k + 1, load::<T>(h, k));
@@ -429,7 +432,7 @@ impl<T: Copy> RVec<T> {
     pub fn remove(&self, i: usize) -> T {
         let (h, len, _) = self.snapshot();
         assert!(i < len, "RVec index out of range: {i} >= {len}");
-        // SAFETY: every index is below `len` in the live block `h`.
+        // SAFETY: every index is below `len <= cap` in the live block `h`.
         unsafe {
             let v = load(h, i);
             for k in i + 1..len {
@@ -440,7 +443,7 @@ impl<T: Copy> RVec<T> {
         }
     }
 
-    /// Lower `len` to `n`; frees nothing (`T: Copy` has no drop).
+    /// Lower `len` to `n`; frees nothing (a `Word` has no drop).
     pub fn truncate(&self, n: usize) {
         let (h, len, _) = self.snapshot();
         if n < len {
@@ -453,11 +456,12 @@ impl<T: Copy> RVec<T> {
         self.truncate(0);
     }
 
-    pub fn extend_from_slice(&self, xs: &[T]) {
+    /// Append `xs`; a grow retires the old block on `heap`.
+    pub fn extend_from_slice(&self, heap: &Heap, xs: &[T]) {
         if xs.is_empty() {
             return;
         }
-        let (h, len) = self.reserve(xs.len());
+        let (h, len) = self.reserve(heap, xs.len());
         // SAFETY: `len + xs.len() <= cap` in the live block `h`; the Release store publishes
         // the slots.
         unsafe {
@@ -481,7 +485,7 @@ impl<T: Copy> RVec<T> {
     }
 }
 
-impl<T: Copy> Drop for RVec<T> {
+impl<T: Word> Drop for RVec<T> {
     /// The owning heap object is swept (world stopped) or dropped by its only owner: free the
     /// current block at once.
     fn drop(&mut self) {
@@ -489,7 +493,7 @@ impl<T: Copy> Drop for RVec<T> {
         if let Some(p) = NonNull::new(h.cast::<u8>()) {
             // SAFETY: `&mut self`: no reader of this vec is left, and `h` came from
             // `alloc_block`; its `cap` is never written after that.
-            let layout = block_layout::<T>(unsafe { (*h).cap });
+            let layout = block_layout(unsafe { (*h).cap });
             // SAFETY: as above.
             unsafe { free_block(p, layout) };
         }
@@ -497,21 +501,21 @@ impl<T: Copy> Drop for RVec<T> {
 }
 
 /// See [`RVec::iter`].
-pub struct Iter<'a, T: Copy> {
+pub struct Iter<'a, T: Word> {
     h: *mut Header,
     len: usize,
     i: usize,
     _v: PhantomData<&'a RVec<T>>,
 }
 
-impl<T: Copy> Iterator for Iter<'_, T> {
+impl<T: Word> Iterator for Iter<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
         if self.i >= self.len {
             return None;
         }
-        // SAFETY: `i < len` of the snapshot block, live until the next safepoint.
+        // SAFETY: `i < len <= cap` of the snapshot block, live until the next safepoint.
         let v = unsafe { load(self.h, self.i) };
         self.i += 1;
         Some(v)
@@ -520,42 +524,98 @@ impl<T: Copy> Iterator for Iter<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RVec, RetireList, local_retired, test_counts};
+    use super::{RVec, test_counts, test_serial};
+    use crate::vm::heap::Heap;
+    use crate::vm::value::Value;
+    use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Barrier, Mutex, MutexGuard};
 
-    /// The block counters are process-wide: the tests that read them run one at a time.
-    static SERIAL: Mutex<()> = Mutex::new(());
-
-    fn serial() -> MutexGuard<'static, ()> {
-        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// A push past the capacity retires the old block on this thread's list. Nothing frees it
-    /// until a stop moves the list to the core and frees it there.
+    /// A push past the capacity retires the old block on the handle's list. Neither the
+    /// hand-off to the core nor anything else frees it; the next sweep (the stop) does.
     #[test]
     fn grow_retires_old_block_until_stw() {
-        let _g = serial();
-        let list = RetireList::default();
+        let _g = test_serial();
+        let mut heap = Heap::new();
         let v: RVec<u64> = RVec::with_capacity(4);
         for i in 0..5 {
-            v.push(i);
+            v.push(&heap, i);
         }
         let (_, freed) = test_counts();
-        assert_eq!(local_retired(), 1, "the 4-slot block is retired");
+        assert_eq!(
+            heap.retired_len(),
+            (1, 0),
+            "the 4-slot block is on the handle's list"
+        );
         assert_eq!(
             (0..5).map(|i| v.get(i)).collect::<Vec<_>>(),
             [0, 1, 2, 3, 4]
         );
-        let bytes = list.adopt_local();
-        assert!(bytes > 0, "the retired bytes are charged at the hand-off");
-        assert_eq!(local_retired(), 0);
+        heap.adopt_retired();
+        assert_eq!(
+            heap.retired_len(),
+            (0, 1),
+            "the hand-off moves it to the core"
+        );
         assert_eq!(test_counts().1, freed, "the hand-off frees nothing");
-        list.free_all();
+        heap.sweep();
+        assert_eq!(heap.retired_len(), (0, 0));
         assert_eq!(
             test_counts().1,
             freed + 1,
             "the stop frees the retired block"
+        );
+    }
+
+    /// A dropped handle hands its retired blocks to the core and frees none; the next sweep of
+    /// another handle frees them.
+    #[test]
+    fn dropped_handle_hands_off_until_the_next_sweep() {
+        let _g = test_serial();
+        let mut a = Heap::new();
+        // SAFETY: one thread drives both handles, and `a.sweep` runs after `b` is dropped.
+        let b = unsafe { a.attach() };
+        let v: RVec<u64> = RVec::with_capacity(1);
+        v.push(&b, 1);
+        v.push(&b, 2);
+        let (_, freed) = test_counts();
+        drop(b);
+        assert_eq!(
+            a.retired_len(),
+            (0, 1),
+            "the drop handed the block to the core"
+        );
+        assert_eq!(test_counts().1, freed, "the drop frees nothing");
+        a.sweep();
+        assert_eq!(test_counts().1, freed + 1, "the sweep frees it");
+    }
+
+    /// A retired block raises the run's byte count once: the hand-off and the trigger check do
+    /// not charge it again, and the sweep that frees it clears it.
+    #[test]
+    fn retired_bytes_charge_once() {
+        let _g = test_serial();
+        let mut heap = Heap::new();
+        let v: RVec<u64> = RVec::with_capacity(4);
+        for i in 0..4 {
+            v.push(&heap, i);
+        }
+        let before = heap.run_bytes_estimate();
+        v.push(&heap, 4);
+        let charged = heap.run_bytes_estimate() - before;
+        assert_eq!(
+            charged,
+            super::block_layout(4).size(),
+            "the old block's bytes"
+        );
+        heap.should_collect();
+        heap.adopt_retired();
+        heap.should_collect();
+        assert_eq!(heap.run_bytes_estimate() - before, charged, "charged once");
+        heap.sweep();
+        assert_eq!(
+            heap.run_bytes_estimate(),
+            heap.live_bytes(),
+            "the sweep cleared the charge"
         );
     }
 
@@ -564,17 +624,16 @@ mod tests {
     #[test]
     fn racing_push_and_read() {
         const N: u64 = 100_000;
-        let _g = serial();
-        let list = RetireList::default();
+        let _g = test_serial();
+        let mut heap = Heap::new();
         let v: RVec<u64> = RVec::new();
         let done = AtomicBool::new(false);
         let (_, freed) = test_counts();
         let reads = std::thread::scope(|s| {
             s.spawn(|| {
                 for i in 0..N {
-                    v.push(i);
+                    v.push(&heap, i);
                 }
-                list.adopt_local();
                 done.store(true, Ordering::Release);
             });
             s.spawn(|| {
@@ -600,7 +659,7 @@ mod tests {
             "the snapshot iterates every value in order"
         );
         assert_eq!(test_counts().1, freed, "no block is freed before the stop");
-        list.free_all();
+        heap.sweep();
         assert!(
             test_counts().1 > freed + 10,
             "each growth retired one block"
@@ -611,28 +670,31 @@ mod tests {
     /// the old one; the other frees its own block. Every block allocated is freed.
     #[test]
     fn loser_frees_its_own_block() {
-        let _g = serial();
+        let _g = test_serial();
         let (alloc0, freed0) = test_counts();
-        let list = RetireList::default();
+        let mut heap = Heap::new();
         for _ in 0..200 {
             let v: RVec<u64> = RVec::with_capacity(2);
-            v.push(1);
-            v.push(2);
+            v.push(&heap, 1);
+            v.push(&heap, 2);
             let old = v.block() as usize;
             let go = Barrier::new(2);
             std::thread::scope(|s| {
                 for _ in 0..2 {
                     s.spawn(|| {
                         go.wait();
-                        v.grow(old as *mut super::Header, 3);
-                        list.adopt_local();
+                        v.grow(&heap, old as *mut super::Header, 3);
                     });
                 }
             });
-            assert_eq!(list.len(), 1, "exactly one thread retires the old block");
+            assert_eq!(
+                heap.retired_len(),
+                (1, 0),
+                "exactly one thread retires the old block"
+            );
             assert_eq!(v.iter().collect::<Vec<_>>(), [1, 2]);
             drop(v);
-            list.free_all();
+            heap.sweep();
         }
         let (alloc, freed) = test_counts();
         assert_eq!(
@@ -643,36 +705,18 @@ mod tests {
         assert_eq!(freed - freed0, alloc - alloc0, "no block leaks");
     }
 
-    /// A heap sweep (the stop) takes this thread's retired blocks and frees them.
-    #[test]
-    fn heap_sweep_frees_retired_blocks() {
-        let _g = serial();
-        let mut heap = crate::vm::heap::Heap::new();
-        let v: RVec<u64> = RVec::with_capacity(1);
-        v.push(1);
-        v.push(2);
-        let (_, freed) = test_counts();
-        heap.sweep();
-        assert_eq!(local_retired(), 0, "the sweep took the thread's list");
-        assert_eq!(
-            test_counts().1,
-            freed + 1,
-            "the sweep freed the retired block"
-        );
-    }
-
-    /// The edit operations keep the order of a `Vec`.
+    /// The edit operations keep the order of a `Vec`, for `Value` slots too.
     #[test]
     fn edits_match_vec() {
-        let _g = serial();
-        let list = RetireList::default();
-        let v: RVec<u64> = RVec::new();
-        let mut w: Vec<u64> = Vec::new();
-        v.extend_from_slice(&[1, 2, 3]);
+        let _g = test_serial();
+        let mut heap = Heap::new();
+        let v: RVec<i64> = RVec::new();
+        let mut w: Vec<i64> = Vec::new();
+        v.extend_from_slice(&heap, &[1, 2, 3]);
         w.extend_from_slice(&[1, 2, 3]);
-        v.insert(0, 9);
-        w.insert(0, 9);
-        v.insert(4, 8);
+        v.insert(&heap, 0, -9);
+        w.insert(0, -9);
+        v.insert(&heap, 4, 8);
         w.insert(4, 8);
         assert_eq!(v.remove(1), w.remove(1));
         v.set(0, 7);
@@ -683,16 +727,20 @@ mod tests {
         assert_eq!(v.iter().collect::<Vec<_>>(), [7]);
         v.clear();
         assert_eq!((v.len(), v.pop()), (0, None));
-        list.adopt_local();
-        list.free_all();
+        let vals: RVec<Value> = RVec::new();
+        vals.push(&heap, Value::int(-3));
+        vals.push(&heap, Value::nil());
+        assert!(vals.get(0) == Value::int(-3) && vals.get(1) == Value::nil());
+        heap.sweep();
     }
 
     #[test]
     #[should_panic(expected = "index out of range")]
     fn get_past_len_panics() {
-        let _g = serial();
+        let _g = test_serial();
+        let heap = Heap::new();
         let v: RVec<u64> = RVec::with_capacity(4);
-        v.push(1);
+        v.push(&heap, 1);
         v.get(1);
     }
 }

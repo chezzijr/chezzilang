@@ -190,3 +190,41 @@ print(xs.len())
         "{stops} stops for 2000 task starts under a cap that does not trip"
     );
 }
+
+/// M2.1 — a thread that retires an `RVec` block and then waits in the door hands the block to the
+/// run's list before it detaches, so another thread's collection frees it while it waits.
+#[test]
+fn a_door_hands_its_retired_blocks_to_the_stop() {
+    use super::rvec::{RVec, test_counts, test_serial};
+    let _g = test_serial();
+    let freed = within(|| {
+        let mut a = Vm::new(Arc::new(empty_program()));
+        let mut b = a.spawn_worker();
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let waiter = std::thread::spawn(move || {
+            b.gc_attach();
+            let v: RVec<u64> = RVec::with_capacity(1);
+            v.push(&b.heap, 1);
+            v.push(&b.heap, 2);
+            b.gc_blocking(&[], |_| {
+                ready_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+            });
+            b.gc_leave();
+        });
+        ready_rx.recv().unwrap();
+        let before = test_counts().1;
+        a.gc_attach();
+        a.gc_collect();
+        let freed = test_counts().1 - before;
+        go_tx.send(()).unwrap();
+        waiter.join().unwrap();
+        a.gc_leave();
+        freed
+    });
+    assert_eq!(
+        freed, 1,
+        "the stop freed the block the detached thread retired"
+    );
+}

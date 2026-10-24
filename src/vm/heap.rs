@@ -11,6 +11,7 @@ use super::core::{
 };
 use super::heap_core::{CopyLog, HeapCore, lock};
 use super::heap_view::ViewState;
+use super::rvec::RetireList;
 use super::value::{GcRef, Value};
 use super::wire::HashIndex;
 use crate::base::op::ProtoId;
@@ -737,6 +738,9 @@ pub struct Heap {
     /// file: their drop can make a syscall (a buffered writer's flush, a socket's close), so the
     /// collector drops them after it releases the world (`Vm::gc_collect`), not inside the stop.
     graveyard: Vec<Obj>,
+    /// M2: the `RVec` blocks this handle's grows retired, not yet handed to the core
+    /// (`adopt_retired`; `vm/rvec.rs`).
+    retired: RetireList,
 }
 
 /// How many allocations a handle counts before it adds them to the core's run-wide count.
@@ -769,6 +773,8 @@ impl Drop for Heap {
         self.core.flush_allocs(self.since_gc);
         self.core.flush_bytes(*self.since_gc_bytes.get_mut());
         self.core.give_back(&mut self.free);
+        // A retired block is freed only by a stop, never here.
+        self.core.adopt_retired(&self.retired);
         if let Some(log) = &self.copy_log {
             self.core.unregister_copy_log(log);
         }
@@ -793,6 +799,7 @@ impl Heap {
             copy_log: None,
             copy_logging: false,
             graveyard: Vec::new(),
+            retired: RetireList::default(),
         }
     }
 
@@ -996,7 +1003,8 @@ impl Heap {
     /// Charge bytes against the collection trigger (see `since_gc_bytes`). Byte funnel 3 of 3 is
     /// `Vm::to_wire_crossable`, the one helper every cross-heap value store routes through; the other
     /// two callers are [`alloc`](Heap::alloc) and [`get_mut`](Heap::get_mut)'s settle. Only ever
-    /// reached when a `--max-heap` cap is live.
+    /// reached when a `--max-heap` cap is live. An `RVec` grow also charges the block it retires
+    /// (`vm/rvec.rs`), cap or no cap.
     #[inline]
     pub fn charge_bytes(&self, n: usize) {
         let charged = self.since_gc_bytes.load(Ordering::Relaxed);
@@ -1048,10 +1056,9 @@ impl Heap {
         let allocs = self.core.flush_allocs(std::mem::take(&mut self.since_gc));
         let next_gc = self.core.next_gc();
         self.settle_pending_mut();
-        let own = std::mem::take(self.since_gc_bytes.get_mut());
         let bytes = self
             .core
-            .flush_bytes(own.saturating_add(super::rvec::take_local_bytes()));
+            .flush_bytes(std::mem::take(self.since_gc_bytes.get_mut()));
         if allocs >= next_gc || bytes >= self.bytes_gc_threshold() {
             self.gc_check_at = 0;
             return true;
@@ -1273,7 +1280,7 @@ impl Heap {
         // The cached free slots go back on top of the core's stack first, so the core's free list
         // is the whole free list and the next `alloc` reuses the slot it would have reused.
         self.core.give_back(&mut self.free);
-        self.core.adopt_retired();
+        self.core.adopt_retired(&self.retired);
         // SAFETY: the collector protocol of `attach`: `Vm::gc_collect` sweeps with every other
         // handle stopped or detached, or with this handle the core's only one.
         unsafe { self.core.sweep_slots(&mut self.graveyard) };
@@ -1297,9 +1304,20 @@ impl Heap {
             .saturating_add(self.since_gc_bytes.load(Ordering::Relaxed))
     }
 
-    /// Hand this thread's retired `RVec` blocks to the run (`HeapCore::adopt_retired`).
+    /// Hand this handle's retired `RVec` blocks to the run (`HeapCore::adopt_retired`).
     pub(super) fn adopt_retired(&self) {
-        self.core.adopt_retired();
+        self.core.adopt_retired(&self.retired);
+    }
+
+    /// This handle's own retire list: an `RVec` grow puts the old block on it (`vm/rvec.rs`).
+    pub(super) fn retire_list(&self) -> &RetireList {
+        &self.retired
+    }
+
+    /// Blocks on this handle's retire list and on the run's (tests only).
+    #[cfg(test)]
+    pub(super) fn retired_len(&self) -> (usize, usize) {
+        (self.retired.len(), self.core.retired_len())
     }
 
     /// The objects the last sweep freed whose drop the collector runs after the world restarts

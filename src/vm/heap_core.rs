@@ -386,9 +386,10 @@ impl HeapCore {
                 }
             }
         }
-        // Every other thread handed in its retired blocks when it stopped or detached; zeroing
-        // `bytes` below uncharges them.
-        self.retired.free_all();
+        // Every other handle handed in its retired blocks when it stopped, detached or dropped;
+        // zeroing `bytes` below uncharges them.
+        // SAFETY: the caller's contract above: the world is stopped (`vm/gc_coord.rs`).
+        unsafe { self.retired.free_all() };
         self.next_gc
             .store((live * 2).max(MIN_GC_THRESHOLD), Ordering::Relaxed);
         self.allocs.store(0, Ordering::Relaxed);
@@ -398,10 +399,17 @@ impl HeapCore {
         }
     }
 
-    /// Move this thread's retired `RVec` blocks to the run's list and charge their bytes to the
-    /// run's byte count. Called when the thread stops, detaches, leaves or sweeps.
-    pub(super) fn adopt_retired(&self) {
-        self.flush_bytes(self.retired.adopt_local());
+    /// Move a handle's retired `RVec` blocks to the run's list. Called when the handle's thread
+    /// stops, detaches, leaves or sweeps, and when the handle drops. The bytes were charged at
+    /// the retire (`vm/rvec.rs`).
+    pub(super) fn adopt_retired(&self, from: &RetireList) {
+        from.move_into(&self.retired);
+    }
+
+    /// Blocks on the run's retire list (tests only).
+    #[cfg(test)]
+    pub(super) fn retired_len(&self) -> usize {
+        self.retired.len()
     }
 
     /// Record the `live_bytes()` a sweep measured: the last value, the peak and the cap verdict.

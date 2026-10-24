@@ -68,6 +68,16 @@ impl Value {
     pub fn bool(b: bool) -> Value {
         Value(if b { TRUE } else { FALSE })
     }
+    /// The raw word, for `RVec` slot storage (`vm/rvec.rs`).
+    #[inline]
+    pub(super) fn to_bits(self) -> u64 {
+        self.0
+    }
+    /// A word that [`to_bits`](Value::to_bits) returned, back as the value.
+    #[inline]
+    pub(super) fn from_bits(bits: u64) -> Value {
+        Value(bits)
+    }
     #[inline]
     pub fn nil() -> Value {
         Value(NIL)
