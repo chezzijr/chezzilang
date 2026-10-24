@@ -1405,3 +1405,36 @@ fn main():
 main()";
     assert_eq!(run_capture_stress(src), "10 20 3 [2] 50 2\n");
 }
+
+/// The block of an M2.4 fixed buffer: an `RVec` (so the test does not compile on a `Vec`), and
+/// its capacity.
+fn rvec_cap(v: &RVec<Value>) -> usize {
+    v.capacity()
+}
+
+/// M2.4 — a closure's captures live in an exact-length `RVec`: `GetCaptured` reads a slot, and the
+/// captures survive collections (gc-stress).
+#[test]
+fn closure_captures_are_a_fixed_rvec() {
+    let mut heap = Heap::new();
+    let home = heap.alloc(Obj::Str("home".into()));
+    let h = heap.alloc(Obj::Closure {
+        proto: 0,
+        captured: vec![Value::int(1), Value::int(2)].into(),
+        home,
+    });
+    let Obj::Closure { captured, .. } = heap.get(h) else {
+        unreachable!("a closure")
+    };
+    assert_eq!(rvec_cap(captured), 2);
+    let src = "\
+fn mk(a: str, b: int) -> fn() -> str:
+    return fn() -> str: a + str(b)
+
+fn main():
+    f := mk(str(7), 8)
+    junk := [str(1), str(2)]
+    print(f(), f(), junk.len())
+main()";
+    assert_eq!(run_capture_stress(src), "78 78 2\n");
+}

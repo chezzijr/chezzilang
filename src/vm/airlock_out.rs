@@ -718,7 +718,7 @@ impl WalkSrc<'_> {
                         let names = &self.program.protos[*proto].capture_names;
                         let mut wcap = Vec::with_capacity(captured.len());
                         for (i, cv) in captured.iter().enumerate() {
-                            let w = self.to_wire_depth(*cv, depth + 1, memo)?;
+                            let w = self.to_wire_depth(cv, depth + 1, memo)?;
                             let name = names.get(i).cloned().unwrap_or_default();
                             wcap.push((name.into_boxed_str(), w));
                         }
@@ -728,7 +728,7 @@ impl WalkSrc<'_> {
                             proto: *proto,
                             captured: wcap,
                             home: self.home_index(*home),
-                            sole: memo.sole_captures(self.heap, captured),
+                            sole: memo.sole_captures(self.heap, &captured.to_vec()),
                         }
                     }
                 }

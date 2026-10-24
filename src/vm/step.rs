@@ -168,7 +168,7 @@ impl Vm {
                 let frame = self.frames.last().unwrap();
                 let (clo, home) = (frame.closure, frame.home);
                 let v = clo.and_then(|h| match self.heap.get(h) {
-                    Obj::Closure { captured, .. } => captured.get(*slot as usize).copied(),
+                    Obj::Closure { captured, .. } => captured.try_get(*slot as usize),
                     Obj::Str(_)
                     | Obj::Bytes(_)
                     | Obj::ByteArray(_)
@@ -585,7 +585,7 @@ impl Vm {
                         CapSrc::Captured(parent_slot) => enclosing
                             .and_then(|h| match self.heap.get(h) {
                                 Obj::Closure { captured, .. } => {
-                                    captured.get(parent_slot as usize).copied()
+                                    captured.try_get(parent_slot as usize)
                                 }
                                 Obj::Str(_)
                                 | Obj::Bytes(_)
@@ -624,7 +624,7 @@ impl Vm {
                 }
                 let h = self.heap.alloc(Obj::Closure {
                     proto: *proto,
-                    captured,
+                    captured: captured.into(),
                     home,
                 });
                 self.push(Value::obj(h));

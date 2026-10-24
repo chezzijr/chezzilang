@@ -1245,7 +1245,7 @@ fn callable_classifies_every_fn_kind() {
         Obj::Func { proto: 0, home },
         Obj::Closure {
             proto: 0,
-            captured: vec![],
+            captured: RVec::new(),
             home,
         },
         Obj::Native {

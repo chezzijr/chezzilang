@@ -236,7 +236,7 @@ pub enum Obj {
     /// names and no per-read string hash (mirrors positional struct fields, lever #1).
     Closure {
         proto: ProtoId,
-        captured: Vec<Value>,
+        captured: RVec<Value>,
         home: GcRef,
     },
     /// A module namespace: its name + top-level bindings. M19 Phase 2b — globals are stored
@@ -1092,7 +1092,7 @@ impl Heap {
             Obj::Cell(v) => push(v),
             Obj::Func { home, .. } => out.push(*home),
             Obj::Closure { captured, home, .. } => {
-                captured.iter().for_each(&mut push);
+                captured.iter().for_each(|v| push(&v));
                 out.push(*home);
             }
             Obj::Module(m) => m.slots.iter().for_each(&mut push),

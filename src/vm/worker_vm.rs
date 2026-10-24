@@ -354,7 +354,7 @@ impl Vm {
                 // already installed inside `cap` via `from_wire_memo`'s `WireValue::Closure` arm.
                 let callee = Value::obj(self.heap.alloc(Obj::Closure {
                     proto,
-                    captured: cap,
+                    captured: cap.into(),
                     home,
                 }));
                 (ReadyCall::Invoke { callee, args }, span)
@@ -1052,7 +1052,7 @@ impl Vm {
                 let names = &self.program.protos[proto].capture_names;
                 let mut snapped = Vec::with_capacity(captured.len());
                 for (i, cv) in captured.iter().enumerate() {
-                    snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap_depth(*cv, depth + 1, memo)?));
+                    snapped.push((names.get(i).cloned().unwrap_or_default(), self.to_snap_depth(cv, depth + 1, memo)?));
                 }
                 // TICKET-016 (W8-25) review finding — this `SnapValue` form is the PER-TASK whole
                 // module snapshot (`ensure_snapshot`/`fault_module`): `home`'s globals move into the
@@ -1463,7 +1463,7 @@ impl Vm {
                 self.copy_mark = saved_copy_mark;
                 Value::obj(self.heap.alloc(Obj::Closure {
                     proto: *proto,
-                    captured: cap,
+                    captured: cap.into(),
                     home: whome,
                 }))
             }

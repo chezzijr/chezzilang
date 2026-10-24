@@ -228,9 +228,7 @@ impl Vm {
                 CapSrc::Slot(i) => self.stack[base + i],
                 CapSrc::Captured(parent_slot) => enclosing
                     .and_then(|h| match self.heap.get(h) {
-                        Obj::Closure { captured, .. } => {
-                            captured.get(parent_slot as usize).copied()
-                        }
+                        Obj::Closure { captured, .. } => captured.try_get(parent_slot as usize),
                         Obj::Str(_)
                         | Obj::Bytes(_)
                         | Obj::ByteArray(_)
@@ -279,7 +277,7 @@ impl Vm {
         let (captured, cell_ids) = self.deep_clone_all(captured, span)?;
         let h = self.heap.alloc(Obj::Closure {
             proto,
-            captured,
+            captured: captured.into(),
             home,
         });
         self.register_task(

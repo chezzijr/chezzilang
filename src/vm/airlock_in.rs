@@ -671,7 +671,7 @@ impl Vm {
                 let n = captured.len();
                 let h = self.heap.alloc(Obj::Closure {
                     proto,
-                    captured: vec![Value::nil(); n],
+                    captured: vec![Value::nil(); n].into(),
                     home,
                 });
                 rebuild.insert(id, h);
@@ -693,7 +693,9 @@ impl Vm {
                 // globals are whatever module copy the RUNNING task owns (`home` resolved above).
                 match self.heap.get_mut(h) {
                     Obj::Closure { captured, .. } => {
-                        *captured = cap;
+                        for (k, v) in cap.into_iter().enumerate() {
+                            captured.set(k, v);
+                        }
                     }
                     Obj::Str(_)
                     | Obj::Bytes(_)
