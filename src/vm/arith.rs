@@ -743,8 +743,9 @@ impl Vm {
     }
 
     /// `[elem...] * n` — repeat the list `n` times into a fresh list (gap #3). `n <= 0` → empty.
-    /// Guards the allocation against capacity overflow (a giant `n` would otherwise abort the
-    /// process via Vec's panic) — raises a RECOVERABLE fault, mirroring `str.repeat`.
+    /// Sizes the whole block once with `RVec::try_with_capacity`: a total that overflows or a
+    /// block that cannot be allocated raises a RECOVERABLE fault (as `str.repeat` does), not a
+    /// panic or an abort.
     pub(super) fn list_repeat(
         &mut self,
         h: GcRef,
