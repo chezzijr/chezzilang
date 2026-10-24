@@ -17,6 +17,7 @@
 | [3](#3-language-and-tooling-gaps) | REPL, formatter, closed ideas | open / closed |
 | [3b](#3b-test-system-follow-ups) | subtests, skip/xfail, timeout watchdog | open |
 | [4](#4-optimizations-open-levers) | perf levers not yet landed | open |
+| (branch `exp/go-shared-heap`) | Go shared heap experiment: [design](go-shared-heap.md) | M1 done (one heap per run, stop-the-world GC); M2 next |
 
 ---
 

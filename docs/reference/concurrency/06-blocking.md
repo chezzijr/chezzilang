@@ -6,6 +6,12 @@ Every blocking op asks ONE table how to block in the running context: `block::mo
 T=1, T=2 and T=0 against the Go answer. Changing a cell means changing `block::mode`, its unit test and
 this table in one commit.
 
+Every mode other than a plain compute step detaches the thread from the run's one heap before it
+blocks, and reattaches after. The garbage collector stops every attached thread and treats a detached
+thread as stopped. A blocking call that keeps its attachment hangs the next collection. Known limits:
+a CPU-bound native or C loop delays a stop, and an `extern` call keeps its runner permit at
+`CHEZZI_THREADS=1`. The model is in [`01-model.md`](01-model.md).
+
 Contexts:
 
 | context | what it is |

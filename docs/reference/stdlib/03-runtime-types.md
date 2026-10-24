@@ -137,7 +137,7 @@ write to such a value faults `this value is this task's copy` (D4, `concurrency.
 reads the same mark, so std code can choose between writing a value and reading shared state without
 attempting the write. `false` for a value the calling task owns, a value received from a `Channel`,
 and a scalar. Its std caller is `Task.get()` (`std.concurrency`). It is `Kind::Inline`: it reads
-the calling task's own heap, so it never runs off-heap on the blocking pool.
+the run's heap on the calling thread, so it never runs off-heap on the blocking pool.
 
 ```
 fn child(xs: List[int]):

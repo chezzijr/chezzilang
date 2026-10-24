@@ -497,3 +497,29 @@ grid_tests!(MODES x THREADS: [demote, in_place, help, inline_sleep, rendezvous, 
 // that the second fiber keeps inside C, which waits for the first (an extern call keeps its
 // permit), and the print has no third runner to stall.
 grid_tests!(WAIT_MODES x WAIT_THREADS: [extern_callback_blocks, print_busy_reader] x [t2, tdefault] => crate::assert_cell);
+
+/// M1.9: the longest stop on `benches/chz/many_list.chz` is at most 10 ms, and the run counts stops.
+#[test]
+fn heap_stats_report_stw_pause() {
+    let bench = concat!(env!("CARGO_MANIFEST_DIR"), "/benches/chz/many_list.chz");
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("run")
+        .arg(bench)
+        .env("CHEZZI_HEAP_STATS", "1")
+        .env_remove("CHEZZI_GC_STRESS")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run many_list");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "many_list failed\nstderr:\n{err}");
+    let stw = stw_count(&err);
+    assert!(
+        stw.is_some_and(|n| n > 0),
+        "no stop counted (got {stw:?})\nstderr:\n{err}"
+    );
+    let max = stats_field(&err, "stw_max_us=");
+    assert!(
+        max.is_some_and(|us| us < 10_000),
+        "max stop pause is 10 ms or more (stw_max_us={max:?})\nstderr:\n{err}"
+    );
+}

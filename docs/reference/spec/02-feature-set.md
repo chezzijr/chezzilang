@@ -201,7 +201,7 @@ each `spawn` (the one deliberate divergence from Go), so cross-task shared mutat
 
 **A task's write to its airlock copy faults** ([ADR D4](../../design/adr-d4-airlock.md)). A spawned
 task's write to a captured local, a captured container, or a module global (every object the airlock
-copied into the task's own heap) is a recoverable runtime **fault**; three shapes still lose the write
+copied for the task) is a recoverable runtime **fault**; three shapes still lose the write
 silently (see `concurrency.md`'s limits). Direct visible task writes, inferred `self`-writing user
 methods, and capture-writing closures at executing crossings are compile-time errors with the same
 text. A received closure still reads the running task's own module globals; it may not write them. The

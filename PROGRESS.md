@@ -251,6 +251,7 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
   a `recv` wakes senders through the channel core, a `Shared` method roots its receiver; an
   extern C call with a callback runs detached and its callback reattaches (Go `cgocallback`);
   printing a busy `Writer`/`Reader` waits detached. Gate: `tests/gc_blocking_pins.rs`.
+- M1.9: M1 exit gate. `tests/chz` 1853/1853 at T=1, 2, default; stressed `spec` (GC_STRESS, T=2): 140 pass, 0 dangling, 4 timeouts; max stop on `many_list` under 10 ms (`heap_stats_report_stw_pause`). M2 is next.
 
 ## Later
 

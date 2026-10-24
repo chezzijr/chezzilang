@@ -1,7 +1,7 @@
 # Chezzi — Concurrency & Parallelism (`spawn` / `parallel:`)
 
 Chezzi's concurrency is a **shared-nothing actor model** in the lineage of the Erlang/Elixir **BEAM**
-(shared-nothing tasks, per-task heap + GC, message passing) **plus** two borrowings — **Go's
+(shared-nothing tasks, message passing) **plus** two borrowings — **Go's
 first-class channel** and **Rust's move-on-send**. The surface is the **goroutine feel** (`spawn`,
 cheap, no `async` colouring) wrapped in a **structured-concurrency nursery** (`parallel:`) so tasks
 can't leak. The design **never taxes the single-threaded fast path** (`Rc`, per-heap
@@ -60,20 +60,31 @@ touch the same object.
 **Chosen = A + C composed.** The **Go model (Tier D)** would mean `Rc`→`Arc` across every value
 (atomic refcount bumps ~10–30× a normal bump, taxing single-threaded code *forever*) plus a
 thread-safe concurrent GC. That permanently taxes the common case and hands users the entire
-data-race bug class. **Skipped.**
+data-race bug class. **Skipped.** (The branch `exp/go-shared-heap` tests one heap per run; M1 is done, see
+[`go-shared-heap.md`](../../design/go-shared-heap.md).)
 
-### Memory picture — own heaps, channel between
+### Memory picture: one heap per run, channel between
 
 ```
- task 1: [own heap] ──send──┐
- task 2: [own heap] ──send──┼──►  main task [own heap]
- task 3: [own heap] ──send──┘        ┌──────────────────┐
-                                     │ results: [...]    │
-  each heap has its OWN GC           └──────────────────┘
-  (no handshake, no barrier)   values MOVE across the channel, never shared
+ task 1 ──send──┐
+ task 2 ──send──┼──►  main task          all tasks allocate in ONE heap per run
+ task 3 ──send──┘   ┌──────────────────┐
+                    │ results: [...]    │  the GC stops every thread that runs VM code
+                    └──────────────────┘  values still COPY across the channel
 ```
 
-Heaps are share-nothing, but the **process** is one process: a task inherits the parent's `std.os.args`
+A run owns one heap. A collection stops every thread that runs VM code, marks every root (running
+threads, detached threads, parked fibers, `Shared` boxes), then sweeps. A thread that blocks (a
+channel wait, a sleep, a socket or file read, a subprocess wait, an `extern` C call) detaches first,
+as Go's `entersyscall` does, so a blocked thread never delays a stop. Values still cross a task
+boundary by deep copy. Tasks share no object.
+
+Known limits:
+
+- A CPU-bound native fn or C loop that never reaches a safepoint delays a stop until it returns.
+- An `extern` call keeps its runner permit at `CHEZZI_THREADS=1`. This is older than the one-heap change.
+
+Tasks share no object, and the **process** is one process: a task inherits the parent's `std.os.args`
 and env, and **stdin is ONE source every task shares** (Go's `os.Stdin` / Python's `sys.stdin`, not
 entry-task-owned). Any task may `io.read_line()` / `io.input()`; a line goes to **exactly one** task
 (never duplicated, never dropped); **which** task gets it is nondeterministic — order it
