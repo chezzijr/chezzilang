@@ -870,7 +870,7 @@ impl WalkSrc<'_> {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let vals: Vec<Value> = fields.as_slice().to_vec();
+                        let vals: Vec<Value> = fields.to_vec();
                         let mut out = Vec::with_capacity(vals.len());
                         for (i, val) in vals.iter().enumerate() {
                             let k = names

@@ -550,8 +550,8 @@ impl Vm {
                         if ta != tb || fa.len() != fb.len() {
                             return Ok(false);
                         }
-                        let fa: Vec<Value> = fa.as_slice().to_vec();
-                        let fb: Vec<Value> = fb.as_slice().to_vec();
+                        let fa: Vec<Value> = fa.to_vec();
+                        let fb: Vec<Value> = fb.to_vec();
                         self.with_elem_roots(&fa, &fb, |vm| {
                             for (va, vb) in fa.iter().zip(&fb) {
                                 if !vm.elem_equal(*va, *vb, depth + 1, span)? {

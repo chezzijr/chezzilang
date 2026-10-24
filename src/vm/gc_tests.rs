@@ -1333,3 +1333,75 @@ main()"
         2 * N * N
     );
 }
+
+/// M2.4 — a struct of more than 3 fields keeps them in a `Spill` RVec of exactly their count. A
+/// field write is a slot store: the block stays, nothing retires, and after a collection every
+/// field reads back intact (in the heap and in a program under gc-stress).
+#[test]
+fn spill_field_write_is_slot_store() {
+    let _g = super::rvec::test_serial();
+    let mut heap = Heap::new();
+    let kept = heap.alloc(Obj::Str("kept".into()));
+    let h = heap.alloc(Obj::Struct {
+        tid: crate::base::op::TID_NONE,
+        fields: Fields::from_vec((1..=5).map(Value::int).collect()),
+    });
+    for i in 0..5 {
+        let Obj::Struct { fields, .. } = heap.get_mut(h) else {
+            unreachable!("a struct")
+        };
+        let v = if i == 2 {
+            Value::obj(kept)
+        } else {
+            Value::int(i as i64 * 10)
+        };
+        assert!(fields.set(i, v), "field {i} is in range");
+    }
+    let Obj::Struct {
+        fields: Fields::Spill(s),
+        ..
+    } = heap.get(h)
+    else {
+        panic!("5 fields spill")
+    };
+    assert_eq!(s.capacity(), 5, "the spill block holds exactly the fields");
+    assert_eq!(heap.retired_len(), (0, 0), "a field write retires nothing");
+    heap.mark(h);
+    for c in heap.children(h) {
+        heap.mark(c);
+    }
+    heap.sweep();
+    let Obj::Struct { fields, .. } = heap.get(h) else {
+        unreachable!("a struct")
+    };
+    let got: Vec<Value> = fields.iter().collect();
+    assert_eq!(
+        got,
+        [
+            Value::int(0),
+            Value::int(10),
+            Value::obj(kept),
+            Value::int(30),
+            Value::int(40)
+        ]
+    );
+    assert!(matches!(heap.get(kept), Obj::Str(s) if &**s == "kept"));
+    let src = "\
+struct P:
+    a: int
+    b: str
+    c: int
+    d: List[int]
+    e: int
+
+fn main():
+    p := P(a=1, b=\"x\", c=3, d=[4], e=5)
+    p.a = 10
+    p.b = str(20)
+    p.d = [str(40).len()]
+    p.e = 50
+    junk := [str(1), str(2)]
+    print(p.a, p.b, p.c, p.d, p.e, junk.len())
+main()";
+    assert_eq!(run_capture_stress(src), "10 20 3 [2] 50 2\n");
+}

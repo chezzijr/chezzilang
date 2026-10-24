@@ -336,7 +336,7 @@ impl Vm {
             return false; // already fully cleared (shared DAG node)
         }
         let children: Vec<Value> = match self.heap.get(h) {
-            Obj::Struct { fields, .. } => fields.as_slice().to_vec(),
+            Obj::Struct { fields, .. } => fields.to_vec(),
             Obj::Enum { payload, .. } => payload.clone(),
             Obj::List(items) => items.to_vec(),
             Obj::Tuple(items) => items.to_vec(),
@@ -448,7 +448,7 @@ impl Vm {
                 visited.insert(h, nh);
                 let copied: Vec<Value> = fields
                     .iter()
-                    .map(|&f| self.snapshot_value(f, visited, depth + 1))
+                    .map(|f| self.snapshot_value(f, visited, depth + 1))
                     .collect();
                 if let Obj::Struct { fields, .. } = self.heap.get_mut(nh) {
                     *fields = Fields::from_vec(copied);

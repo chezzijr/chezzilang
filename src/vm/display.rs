@@ -164,7 +164,7 @@ impl Vm {
                     // (cold display path). Resolve the type key from `tid`; snapshot values to drop
                     // the heap borrow.
                     let name = self.struct_name_of_tid(*tid);
-                    let vals: Vec<Value> = fields.as_slice().to_vec();
+                    let vals: Vec<Value> = fields.to_vec();
                     // ROOT REDESIGN — render the BARE display name (not the qualified identity key);
                     // `name` is the key the StructDef is stored under. Fall back to stripping the key.
                     let (display, names): (String, Vec<String>) = self
@@ -830,7 +830,7 @@ impl Vm {
                     return Ok(());
                 }
                 let _ = write!(out, "{display}(");
-                self.stringify_open_fields(out, h, def.as_ref(), fields.as_slice(), span, depth)?;
+                self.stringify_open_fields(out, h, def.as_ref(), &fields.to_vec(), span, depth)?;
                 out.push(')');
             }
             Obj::Enum {

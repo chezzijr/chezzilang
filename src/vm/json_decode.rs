@@ -449,7 +449,7 @@ impl Vm {
                         .get(&key)
                         .map(|d| d.fields.clone())
                         .unwrap_or_default();
-                    let field_vals: Vec<Value> = fields.as_slice().to_vec();
+                    let field_vals: Vec<Value> = fields.to_vec();
                     let out = MapData::default();
                     for (fname, fval) in field_names.into_iter().zip(field_vals) {
                         let key_v = self.alloc_str(fname);

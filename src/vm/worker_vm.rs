@@ -1119,7 +1119,7 @@ impl Vm {
                 let mut out = Vec::with_capacity(fields.len());
                 for (i, fv) in fields.iter().enumerate() {
                     let k = names.get(i).cloned().unwrap_or_else(|| i.to_string().into_boxed_str());
-                    out.push((k, self.to_snap_depth(*fv, depth + 1, memo)?));
+                    out.push((k, self.to_snap_depth(fv, depth + 1, memo)?));
                 }
                 SnapValue::Struct { name, fields: out }
             }

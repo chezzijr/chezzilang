@@ -574,8 +574,8 @@ fn struct_positional_layout_no_per_instance_names() {
             let tid = *tid;
             // positional: NOT Vec<(Box<str>, Value)>
             assert_eq!(
-                fields.as_slice(),
-                &[Value::int(1), Value::int(2)],
+                fields.to_vec(),
+                [Value::int(1), Value::int(2)],
                 "fields must be positional in declaration order, no per-instance names"
             );
             // Name is resolved from tid (no per-instance `name` field), not stored on the instance.

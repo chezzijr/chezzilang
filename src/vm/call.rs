@@ -712,9 +712,8 @@ impl Vm {
             Obj::Ptr(a) => Some(N::Ptr(*a)),
             Obj::Str(s) => Some(N::Str(s.to_string())),
             Obj::Struct { fields, .. } => fields
-                .as_slice()
                 .iter()
-                .map(|f| self.c_value_of(*f))
+                .map(|f| self.c_value_of(f))
                 .collect::<Option<Vec<_>>>()
                 .map(N::List),
             Obj::Bytes(_)

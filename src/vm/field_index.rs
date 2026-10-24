@@ -31,7 +31,6 @@ impl Vm {
                 && *tid == cell.tid
                 && let Some(v) = fields.get(cell.idx as usize)
             {
-                let v = *v;
                 self.push(v);
                 return Ok(());
             }
@@ -66,7 +65,7 @@ impl Vm {
                     .structs
                     .get(sname)
                     .and_then(|d| d.fields.iter().position(|f| f == name));
-                let found = idx.and_then(|i| fields.get(i).map(|v| (i, *v)));
+                let found = idx.and_then(|i| fields.get(i).map(|v| (i, v)));
                 match found {
                     Some((i, v)) => {
                         if ic != NO_IC {
@@ -507,9 +506,8 @@ impl Vm {
                 && fits
                 && let Obj::Struct { tid, fields, .. } = self.heap.get_mut(h)
                 && *tid == cell.tid
-                && let Some(slot) = fields.get_mut(cell.idx as usize)
+                && fields.set(cell.idx as usize, val)
             {
-                *slot = val;
                 return Ok(());
             }
         }
@@ -559,9 +557,8 @@ impl Vm {
         match self.heap.get_mut(h) {
             Obj::Struct { tid, fields, .. } => {
                 let tid = *tid;
-                match idx.and_then(|i| fields.get_mut(i).map(|slot| (i, slot))) {
-                    Some((i, slot)) => {
-                        *slot = val;
+                match idx.filter(|&i| fields.set(i, val)) {
+                    Some(i) => {
                         found = (i as u32, tid);
                     }
                     None => {

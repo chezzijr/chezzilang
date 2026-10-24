@@ -31,17 +31,36 @@ pub struct ModuleData {
     pub index: HashMap<Box<str>, u32>,
 }
 
-/// Struct field storage: ≤3 fields inline (no second heap alloc), more spill to a boxed slice.
+/// Struct field storage: ≤3 fields inline (no second heap alloc), more spill to an `RVec`.
 /// Fields are FIXED at construction (positional hidden-class layout; no `.push/insert/resize`
-/// growth sites), so this never needs `Vec`'s capacity slot. `Value` is 8B → `[Value; 3]` is 24B,
-/// and the vast majority of structs (≤3 fields) fold their fields into the `Obj` slot itself — zero
-/// second malloc. `>3` fields spill to a boxed slice. Keeps `Obj` at the 64B cap (M19 lever #1).
+/// growth sites), so a spill block never grows and never retires: a field write is one atomic slot
+/// store (`vm/rvec.rs`). `Value` is 8B → `[Value; 3]` is 24B, and the vast majority of structs
+/// (≤3 fields) fold their fields into the `Obj` slot itself — zero second malloc. Keeps `Obj` at
+/// the 64B cap (M19 lever #1).
 #[derive(Debug, Clone)]
 pub enum Fields {
     /// ≤3 fields folded inline; `vals[len..]` are unused padding holding `Value::nil()`.
     Inline { len: u8, vals: [Value; 3] },
-    /// >3 fields in a heap-allocated exact-length boxed slice (no spare capacity).
-    Spill(Box<[Value]>),
+    /// >3 fields in an exact-length `RVec` block (no spare capacity).
+    Spill(RVec<Value>),
+}
+
+/// The fields of one [`Fields`] read, by value. A `Spill` iterator reads one snapshot of the
+/// block, so do not hold it across a safepoint (see [`RVec::iter`]).
+pub enum FieldsIter<'a> {
+    Inline(std::slice::Iter<'a, Value>),
+    Spill(super::rvec::Iter<'a, Value>),
+}
+
+impl Iterator for FieldsIter<'_> {
+    type Item = Value;
+    #[inline]
+    fn next(&mut self) -> Option<Value> {
+        match self {
+            FieldsIter::Inline(it) => it.next().copied(),
+            FieldsIter::Spill(it) => it.next(),
+        }
+    }
 }
 
 impl Fields {
@@ -56,7 +75,7 @@ impl Fields {
             }
             Fields::Inline { len, vals }
         } else {
-            Fields::Spill(v.into_boxed_slice())
+            Fields::Spill(RVec::from_slice(&v))
         }
     }
 
@@ -74,59 +93,57 @@ impl Fields {
     }
 
     #[inline]
-    pub fn as_slice(&self) -> &[Value] {
+    pub fn iter(&self) -> FieldsIter<'_> {
         match self {
-            Fields::Inline { len, vals } => &vals[..*len as usize],
-            Fields::Spill(s) => s,
+            Fields::Inline { len, vals } => FieldsIter::Inline(vals[..*len as usize].iter()),
+            Fields::Spill(s) => FieldsIter::Spill(s.iter()),
         }
     }
 
+    /// A copy of every field.
+    pub fn to_vec(&self) -> Vec<Value> {
+        self.iter().collect()
+    }
+
+    /// Field `i`, or `None` past the last field.
     #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [Value] {
+    pub fn get(&self, i: usize) -> Option<Value> {
         match self {
-            Fields::Inline { len, vals } => &mut vals[..*len as usize],
-            Fields::Spill(s) => s,
+            Fields::Inline { len, vals } => vals[..*len as usize].get(i).copied(),
+            Fields::Spill(s) => s.try_get(i),
         }
     }
 
+    /// Write field `i`; `false` (and no write) past the last field. A `Spill` write is a slot
+    /// store in the fixed block.
     #[inline]
-    pub fn iter(&self) -> std::slice::Iter<'_, Value> {
-        self.as_slice().iter()
-    }
-
-    #[inline]
-    pub fn get(&self, i: usize) -> Option<&Value> {
-        self.as_slice().get(i)
-    }
-
-    #[inline]
-    pub fn get_mut(&mut self, i: usize) -> Option<&mut Value> {
-        self.as_mut_slice().get_mut(i)
+    pub fn set(&mut self, i: usize, v: Value) -> bool {
+        match self {
+            Fields::Inline { len, vals } => match vals[..*len as usize].get_mut(i) {
+                Some(slot) => {
+                    *slot = v;
+                    true
+                }
+                None => false,
+            },
+            Fields::Spill(s) => {
+                let ok = i < s.len();
+                if ok {
+                    s.set(i, v);
+                }
+                ok
+            }
+        }
     }
 
     /// Owned-backing byte footprint for `live_bytes`: `Inline` folds into the `Obj` slot (0 extra
-    /// heap); `Spill` counts its boxed slice's `len * size_of::<Value>()`.
+    /// heap); `Spill` counts its block's `cap * size_of::<Value>()`.
     #[inline]
     pub fn heap_bytes(&self) -> usize {
         match self {
             Fields::Inline { .. } => 0,
-            Fields::Spill(s) => s.len() * std::mem::size_of::<Value>(),
+            Fields::Spill(s) => s.capacity() * std::mem::size_of::<Value>(),
         }
-    }
-}
-
-impl std::ops::Index<usize> for Fields {
-    type Output = Value;
-    #[inline]
-    fn index(&self, i: usize) -> &Value {
-        &self.as_slice()[i]
-    }
-}
-
-impl std::ops::IndexMut<usize> for Fields {
-    #[inline]
-    fn index_mut(&mut self, i: usize) -> &mut Value {
-        &mut self.as_mut_slice()[i]
     }
 }
 
@@ -1069,7 +1086,7 @@ impl Heap {
                 push(&v);
             }),
             Obj::Set(s) => s.entries.iter().for_each(|(_, e)| push(&e)),
-            Obj::Struct { fields, .. } => fields.iter().for_each(&mut push),
+            Obj::Struct { fields, .. } => fields.iter().for_each(|v| push(&v)),
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
             // A boxed local's cell: the inner value may be a heap object — trace it.
             Obj::Cell(v) => push(v),
@@ -1604,20 +1621,20 @@ mod iter_obj_tests {
     }
 
     /// `Fields` round-trips a ≤3-field vec as `Inline` and a >3-field vec as `Spill`, preserving
-    /// `len`/`as_slice`; `get` bounds-checks; and a `get_mut`/`IndexMut` write lands in the LIVE
-    /// backing for BOTH variants (catches an aliased-temp-copy bug on the inline array or spill box).
+    /// `len`/`to_vec`; `get` and `set` bounds-check; and a `set` lands in the LIVE backing for BOTH
+    /// variants (catches an aliased-temp-copy bug on the inline array or the spill block).
     #[test]
     fn fields_inline_and_spill_roundtrip() {
         // 2 fields → Inline
         let mut inl = Fields::from_vec(vec![Value::int(10), Value::int(20)]);
         assert!(matches!(inl, Fields::Inline { .. }));
         assert_eq!(inl.len(), 2);
-        assert_eq!(inl.as_slice(), &[Value::int(10), Value::int(20)]);
-        assert_eq!(inl.get(1), Some(&Value::int(20)));
+        assert_eq!(inl.to_vec(), [Value::int(10), Value::int(20)]);
+        assert_eq!(inl.get(1), Some(Value::int(20)));
         assert_eq!(inl.get(2), None);
-        *inl.get_mut(0).unwrap() = Value::int(99);
-        inl[1] = Value::int(88);
-        assert_eq!(inl.as_slice(), &[Value::int(99), Value::int(88)]);
+        assert!(inl.set(0, Value::int(99)) && inl.set(1, Value::int(88)));
+        assert!(!inl.set(2, Value::int(1)), "past the last field");
+        assert_eq!(inl.to_vec(), [Value::int(99), Value::int(88)]);
 
         // 4 fields → Spill
         let mut sp = Fields::from_vec(vec![
@@ -1629,16 +1646,16 @@ mod iter_obj_tests {
         assert!(matches!(sp, Fields::Spill(_)));
         assert_eq!(sp.len(), 4);
         assert_eq!(
-            sp.as_slice(),
-            &[Value::int(1), Value::int(2), Value::int(3), Value::int(4)]
+            sp.to_vec(),
+            [Value::int(1), Value::int(2), Value::int(3), Value::int(4)]
         );
-        assert_eq!(sp.get(3), Some(&Value::int(4)));
+        assert_eq!(sp.get(3), Some(Value::int(4)));
         assert_eq!(sp.get(4), None);
-        *sp.get_mut(3).unwrap() = Value::int(77);
-        sp[0] = Value::int(66);
+        assert!(sp.set(3, Value::int(77)) && sp.set(0, Value::int(66)));
+        assert!(!sp.set(4, Value::int(1)), "past the last field");
         assert_eq!(
-            sp.as_slice(),
-            &[Value::int(66), Value::int(2), Value::int(3), Value::int(77)]
+            sp.to_vec(),
+            [Value::int(66), Value::int(2), Value::int(3), Value::int(77)]
         );
     }
 

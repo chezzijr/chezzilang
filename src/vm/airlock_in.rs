@@ -125,7 +125,7 @@ impl Vm {
             Obj::List(xs) => (xs.len(), true),
             Obj::Tuple(xs) => (xs.len(), true),
             Obj::Enum { payload, .. } => (payload.len(), true),
-            Obj::Struct { fields, .. } => (fields.as_slice().len(), true),
+            Obj::Struct { fields, .. } => (fields.len(), true),
             Obj::Map(m) => (m.entries.len(), false),
             Obj::Str(_)
             | Obj::Bytes(_)
@@ -165,7 +165,7 @@ impl Vm {
                 Obj::List(xs) => xs.try_get(i),
                 Obj::Tuple(xs) => xs.get(i).copied(),
                 Obj::Enum { payload, .. } => payload.get(i).copied(),
-                Obj::Struct { fields, .. } => fields.get(i).copied(),
+                Obj::Struct { fields, .. } => fields.get(i),
                 Obj::Map(m) => m.entries.try_get(i).map(|e| e.2),
                 Obj::Str(_)
                 | Obj::Bytes(_)
@@ -218,7 +218,7 @@ impl Vm {
                 Obj::List(xs) => objs(&xs.to_vec()),
                 Obj::Tuple(xs) => objs(xs),
                 Obj::Enum { payload, .. } => objs(payload),
-                Obj::Struct { fields, .. } => objs(fields.as_slice()),
+                Obj::Struct { fields, .. } => objs(&fields.to_vec()),
                 Obj::Set(s) => s.entries.iter().filter_map(|e| e.1.as_obj()).collect(),
                 Obj::Map(m) => m
                     .entries

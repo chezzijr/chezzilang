@@ -788,7 +788,7 @@ impl Vm {
                     .structs
                     .get(name)
                     .and_then(|d| d.fields.iter().position(|f| f == method));
-                if let Some(fval) = fidx.and_then(|i| fields.get(i).copied()) {
+                if let Some(fval) = fidx.and_then(|i| fields.get(i)) {
                     let v = self.invoke_value(fval, args, span)?;
                     if self.paused() {
                         return Ok(()); // B1/D3: the function-field call parked on `recv` or yielded.
