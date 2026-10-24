@@ -164,7 +164,7 @@ impl Vm {
             let child = match self.heap.get(h) {
                 Obj::List(xs) => xs.try_get(i),
                 Obj::Tuple(xs) => xs.get(i).copied(),
-                Obj::Enum { payload, .. } => payload.get(i).copied(),
+                Obj::Enum { payload, .. } => payload.try_get(i),
                 Obj::Struct { fields, .. } => fields.get(i),
                 Obj::Map(m) => m.entries.try_get(i).map(|e| e.2),
                 Obj::Str(_)
@@ -217,7 +217,7 @@ impl Vm {
             let kids = match self.heap.get(h) {
                 Obj::List(xs) => objs(&xs.to_vec()),
                 Obj::Tuple(xs) => objs(xs),
-                Obj::Enum { payload, .. } => objs(payload),
+                Obj::Enum { payload, .. } => objs(&payload.to_vec()),
                 Obj::Struct { fields, .. } => objs(&fields.to_vec()),
                 Obj::Set(s) => s.entries.iter().filter_map(|e| e.1.as_obj()).collect(),
                 Obj::Map(m) => m
@@ -564,14 +564,14 @@ impl Vm {
                 }
                 let h = self.heap.alloc(Obj::Enum {
                     variant_id,
-                    payload: Vec::new(),
+                    payload: RVec::new(),
                 });
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(payload, rebuild, |x| x);
                 // M19 lever #2 — the dense `variant_id` crossed the airlock directly (shared
                 // `Arc<Program>`), so it is replayed as-is — no lossy name re-resolution.
                 match self.heap.get_mut(h) {
-                    Obj::Enum { payload, .. } => *payload = cloned,
+                    Obj::Enum { payload, .. } => *payload = cloned.into(),
                     Obj::Str(_)
                     | Obj::Bytes(_)
                     | Obj::ByteArray(_)

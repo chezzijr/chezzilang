@@ -28,7 +28,7 @@ impl Vm {
         };
         Value::obj(self.heap.alloc(Obj::Enum {
             variant_id,
-            payload,
+            payload: payload.into(),
         }))
     }
 
@@ -86,7 +86,7 @@ impl Vm {
         let (variant_id, payload) = self.heap.get(h).as_enum()?;
         // M19 lever #2 — cold path: resolve the type + variant names from the id.
         let (ty, variant) = self.enum_names(variant_id);
-        Some((ty.to_string(), variant.to_string(), payload.clone()))
+        Some((ty.to_string(), variant.to_string(), payload.to_vec()))
     }
 
     /// Run a missing field's default thunk, as `S(...)` runs it for an omitted field: afresh each
@@ -367,7 +367,7 @@ impl Vm {
             .ok_or_else(|| "json.encode: std.json is not loaded".to_string())?;
         Ok(Value::obj(self.heap.alloc(Obj::Enum {
             variant_id,
-            payload,
+            payload: payload.into(),
         })))
     }
 
@@ -403,7 +403,7 @@ impl Vm {
             if *variant_id != VID_SOME {
                 break;
             }
-            v = payload[0];
+            v = payload.get(0);
         }
         match v.view() {
             ValueView::Nil => self.json_variant("Null", Vec::new()),

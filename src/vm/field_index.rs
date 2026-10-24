@@ -792,7 +792,7 @@ impl Vm {
         // M19 lever #2 — dispatch is a pure-int compare of the instance's stamped `variant_id` against
         // the arm's compile-time id (no variant-name string compare). `variant` is only the cold error.
         let (mut matches, vid, payload) = match self.heap.get(h).as_enum() {
-            Some((vid, payload)) => (vid == variant_id, vid, payload.clone()),
+            Some((vid, payload)) => (vid == variant_id, vid, payload.to_vec()),
             None => unreachable!("scrutinee ensured to be an enum"),
         };
         // SCRUTINEE-DRIVEN fallback on an id MISS. The compile-time `variant_id` can be the WRONG

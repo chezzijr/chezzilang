@@ -347,13 +347,14 @@ impl Vm {
         let v = self.pop();
         // Extract (variant_id, payload-arity, first-payload) up front so the heap borrow is released
         // before we mutate the stack / unwind a frame.
-        let info =
-            match v.view() {
-                ValueView::Obj(h) => self.heap.get(h).as_enum().map(|(variant_id, payload)| {
-                    (variant_id, payload.len(), payload.first().copied())
-                }),
-                ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => None,
-            };
+        let info = match v.view() {
+            ValueView::Obj(h) => self
+                .heap
+                .get(h)
+                .as_enum()
+                .map(|(variant_id, payload)| (variant_id, payload.len(), payload.try_get(0))),
+            ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => None,
+        };
         // M19 lever #2 — gate on the fixed native variant ids (`VID_OK`/`VID_SOME` unwrap, `VID_ERR`/
         // `VID_NONE_VARIANT` propagate), NOT a name compare. A user enum shadowing `Ok`/`Err`/`Some`/
         // `None` gets distinct ids, so it is correctly NOT treated as a Result/Option by `?`.
@@ -628,19 +629,20 @@ impl Vm {
     pub(super) fn carrier_prefix(
         &self,
         variant_id: u32,
-        payload: &[Value],
+        payload: &RVec<Value>,
     ) -> Option<&'static str> {
         Self::carrier_prefix_of(variant_id, || {
-            payload.first().and_then(|v| v.as_obj()).is_some_and(|h| {
-                match self.heap.get(h).as_enum() {
+            payload
+                .try_get(0)
+                .and_then(|v| v.as_obj())
+                .is_some_and(|h| match self.heap.get(h).as_enum() {
                     Some((inner, inner_payload)) => {
                         inner == crate::base::op::VID_NONE_VARIANT
                             || (inner == crate::base::op::VID_SOME
                                 && self.carrier_prefix(inner, inner_payload) == Some("?"))
                     }
                     None => false,
-                }
-            })
+                })
         })
     }
 
@@ -705,7 +707,8 @@ impl Vm {
             ));
         }
         let at = self.stack.len() - argc;
-        let payload: Vec<Value> = self.stack.split_off(at);
+        let payload = RVec::from_slice(&self.stack[at..]);
+        self.stack.truncate(at);
         let h = self.heap.alloc(Obj::Enum {
             variant_id,
             payload,

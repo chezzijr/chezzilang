@@ -1438,3 +1438,41 @@ fn main():
 main()";
     assert_eq!(run_capture_stress(src), "78 78 2\n");
 }
+
+/// M2.4 — an enum payload lives in an exact-length `RVec`, and an empty payload (`None`, every
+/// unit variant) allocates no block at all.
+#[test]
+fn enum_payload_is_a_fixed_rvec_and_empty_allocates_nothing() {
+    use super::rvec::{test_counts, test_serial};
+    let _g = test_serial();
+    let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
+    let (a0, _) = test_counts();
+    let none = vm.alloc_enum("Option", "None", Vec::new());
+    assert_eq!(test_counts().0, a0, "an empty payload allocates no block");
+    let some = vm.alloc_enum("Option", "Some", vec![Value::int(1)]);
+    assert_eq!(test_counts().0, a0 + 1, "a one-value payload is one block");
+    for (v, cap) in [(none, 0), (some, 1)] {
+        let Obj::Enum { payload, .. } = vm.heap.get(v.as_obj().expect("an object")) else {
+            unreachable!("an enum")
+        };
+        assert_eq!(rvec_cap(payload), cap);
+    }
+    let src = "\
+enum Shape:
+    Dot
+    Circle(str, int)
+
+fn main():
+    xs := [Shape.Dot, Shape.Circle(str(3), 4), Shape.Dot]
+    junk := [str(1), str(2)]
+    n := 0
+    for x in xs:
+        match x:
+            Shape.Dot:
+                n += 1
+            Shape.Circle(s, r):
+                print(s, r)
+    print(n, junk.len())
+main()";
+    assert_eq!(run_capture_stress(src), "3 4\n2 2\n");
+}

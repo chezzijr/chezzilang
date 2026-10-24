@@ -217,7 +217,7 @@ pub enum Obj {
     /// not constructible from source). `payload` holds the variant's values (GC-traced as children).
     Enum {
         variant_id: u32,
-        payload: Vec<Value>,
+        payload: RVec<Value>,
     },
     /// A heap-allocated mutable CELL — a single boxed `Value` behind a `GcRef`, the runtime home of a
     /// by-reference-captured local (uniform-capture feature, Task A). Two bindings holding the same
@@ -418,7 +418,7 @@ impl Obj {
     /// The variant id and payload when this object is an enum value. Every other kind answers
     /// `None`.
     #[inline]
-    pub fn as_enum(&self) -> Option<(u32, &Vec<Value>)> {
+    pub fn as_enum(&self) -> Option<(u32, &RVec<Value>)> {
         match self {
             Obj::Enum {
                 variant_id,
@@ -1087,7 +1087,7 @@ impl Heap {
             }),
             Obj::Set(s) => s.entries.iter().for_each(|(_, e)| push(&e)),
             Obj::Struct { fields, .. } => fields.iter().for_each(|v| push(&v)),
-            Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
+            Obj::Enum { payload, .. } => payload.iter().for_each(|v| push(&v)),
             // A boxed local's cell: the inner value may be a heap object — trace it.
             Obj::Cell(v) => push(v),
             Obj::Func { home, .. } => out.push(*home),
@@ -1508,7 +1508,7 @@ mod iter_obj_tests {
     fn as_enum_answers_only_enum_values() {
         let e = Obj::Enum {
             variant_id: 7,
-            payload: Vec::new(),
+            payload: RVec::new(),
         };
         assert_eq!(e.as_enum().map(|(id, p)| (id, p.len())), Some((7, 0)));
         assert!(Obj::List(RVec::new()).as_enum().is_none());

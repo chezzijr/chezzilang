@@ -772,8 +772,8 @@ impl Vm {
         if !unhandled {
             return None;
         }
-        let detail = match payload.first() {
-            Some(p) => self.display(*p),
+        let detail = match payload.try_get(0) {
+            Some(p) => self.display(p),
             None => self.display(v),
         };
         Some(self.err(format!("unhandled error: {detail}"), span))

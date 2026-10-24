@@ -23,7 +23,7 @@ fn wire_roundtrip_preserves_value_equality() {
         // `empty_program` has no variant table, so use the unregistered sentinel (the enum analogue
         // of the struct's `TID_NONE` above) — it round-trips ("?"→VID_NONE→"?") value-equal.
         variant_id: crate::base::op::VID_NONE,
-        payload: vec![Value::int(9)],
+        payload: vec![Value::int(9)].into(),
     });
     let m = MapData::default();
     m.push(&vm.heap, 10, Value::int(1), Value::int(100));

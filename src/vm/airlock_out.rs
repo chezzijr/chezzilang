@@ -898,7 +898,7 @@ impl WalkSrc<'_> {
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(payload.len());
                         for x in payload {
-                            out.push(self.to_wire_depth(*x, depth + 1, memo)?);
+                            out.push(self.to_wire_depth(x, depth + 1, memo)?);
                         }
                         memo.exit(h);
                         // M19 lever #2 — carry the dense `variant_id` directly on the COLD wire path. All

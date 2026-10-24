@@ -337,7 +337,7 @@ impl Vm {
         }
         let children: Vec<Value> = match self.heap.get(h) {
             Obj::Struct { fields, .. } => fields.to_vec(),
-            Obj::Enum { payload, .. } => payload.clone(),
+            Obj::Enum { payload, .. } => payload.to_vec(),
             Obj::List(items) => items.to_vec(),
             Obj::Tuple(items) => items.to_vec(),
             Obj::Map(m) => m.entries.iter().flat_map(|(_, k, val)| [k, val]).collect(),
@@ -459,10 +459,10 @@ impl Vm {
                 variant_id,
                 payload,
             } => {
-                let (variant_id, payload) = (*variant_id, payload.clone());
+                let (variant_id, payload) = (*variant_id, payload.to_vec());
                 let nh = self.heap.alloc(Obj::Enum {
                     variant_id,
-                    payload: payload.clone(),
+                    payload: RVec::from_slice(&payload),
                 });
                 visited.insert(h, nh);
                 let copied: Vec<Value> = payload
@@ -470,7 +470,9 @@ impl Vm {
                     .map(|&p| self.snapshot_value(p, visited, depth + 1))
                     .collect();
                 if let Obj::Enum { payload, .. } = self.heap.get_mut(nh) {
-                    *payload = copied;
+                    for (k, p) in copied.into_iter().enumerate() {
+                        payload.set(k, p);
+                    }
                 }
                 Value::obj(nh)
             }

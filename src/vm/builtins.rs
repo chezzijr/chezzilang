@@ -338,7 +338,7 @@ impl Vm {
                 };
                 match *variant_id {
                     crate::base::op::VID_SOME => {
-                        let item = *payload.first().ok_or_else(|| {
+                        let item = payload.try_get(0).ok_or_else(|| {
                             self.err(
                                 "iterator next() returned a present value with no payload"
                                     .to_string(),

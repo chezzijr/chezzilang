@@ -187,9 +187,9 @@ impl Vm {
                     // A carrier prints its prefix, then its payload in the mode of the position
                     // the carrier itself occupies (top level: bare; nested: repr).
                     if let Some(prefix) = self.carrier_prefix(*variant_id, payload) {
-                        let inner = match payload.first() {
+                        let inner = match payload.try_get(0) {
                             Some(v) => {
-                                self.display_guarded(*v, if depth == 0 { 0 } else { depth + 1 })?
+                                self.display_guarded(v, if depth == 0 { 0 } else { depth + 1 })?
                             }
                             None => Self::NONE_TEXT.to_string(),
                         };
@@ -197,7 +197,7 @@ impl Vm {
                     }
                     // M19 lever #2 — recover the variant name from the id (cold display path).
                     let variant = self.enum_names(*variant_id).1.to_string();
-                    let payload: Vec<Value> = payload.clone();
+                    let payload: Vec<Value> = payload.to_vec();
                     if payload.is_empty() {
                         Ok(variant)
                     } else {
@@ -730,7 +730,7 @@ impl Vm {
             } = self.heap.get(h)
             && let Some(prefix) = self.carrier_prefix(*variant_id, payload)
         {
-            let inner = payload.first().copied();
+            let inner = payload.try_get(0);
             out.push_str(prefix);
             return match inner {
                 Some(p) => self.stringify_nested_into(out, p, span, depth + 1),
@@ -849,8 +849,8 @@ impl Vm {
                 // rendered by `stringify_nested_into` before it reaches here.
                 if let Some(prefix) = self.carrier_prefix(variant_id, &payload) {
                     out.push_str(prefix);
-                    return match payload.first() {
-                        Some(v) => self.stringify_into(out, *v, span, depth),
+                    return match payload.try_get(0) {
+                        Some(v) => self.stringify_into(out, v, span, depth),
                         None => {
                             out.push_str(Self::NONE_TEXT);
                             Ok(())
@@ -861,7 +861,7 @@ impl Vm {
                 out.push_str(self.enum_names(variant_id).1);
                 if !payload.is_empty() {
                     out.push('(');
-                    self.stringify_seq_into(out, &payload, span, depth + 1)?;
+                    self.stringify_seq_into(out, &payload.to_vec(), span, depth + 1)?;
                     out.push(')');
                 }
             }

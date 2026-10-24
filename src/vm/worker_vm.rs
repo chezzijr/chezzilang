@@ -1126,7 +1126,7 @@ impl Vm {
             Obj::Enum { variant_id, payload } => {
                 let mut out = Vec::with_capacity(payload.len());
                 for x in &payload {
-                    out.push(self.to_snap_depth(*x, depth + 1, memo)?);
+                    out.push(self.to_snap_depth(x, depth + 1, memo)?);
                 }
                 // M19 lever #2 — carry the dense `variant_id` directly on the cold snap path (mirrors
                 // `to_wire`); replay reuses it as-is against the shared program.

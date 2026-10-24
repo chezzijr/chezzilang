@@ -622,7 +622,7 @@ fn enum_variant_id_stamped_at_construction() {
                 *variant_id, green_id,
                 "variant_id must be the dense id stamped at construction"
             );
-            let payload: &Vec<Value> = payload; // no per-instance ty/variant Box<str>
+            let payload: &RVec<Value> = payload; // no per-instance ty/variant Box<str>
             assert!(payload.is_empty(), "nullary variant has empty payload");
         }
         _ => panic!("expected Obj::Enum"),

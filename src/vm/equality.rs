@@ -577,8 +577,8 @@ impl Vm {
                         if va != vb || pa.len() != pb.len() {
                             return Ok(false);
                         }
-                        let pa: Vec<Value> = pa.clone();
-                        let pb: Vec<Value> = pb.clone();
+                        let pa: Vec<Value> = pa.to_vec();
+                        let pb: Vec<Value> = pb.to_vec();
                         self.with_elem_roots(&pa, &pb, |vm| {
                             for (x, y) in pa.iter().zip(&pb) {
                                 if !vm.elem_equal(*x, *y, depth + 1, span)? {
