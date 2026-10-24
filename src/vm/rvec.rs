@@ -475,11 +475,13 @@ impl<T: Elem> RVec<T> {
     }
 
     /// The current block (null when empty).
+    #[inline]
     fn block(&self) -> *mut Header {
         self.ptr.load(Ordering::Acquire)
     }
 
     /// The current block, its `len` and its `cap`.
+    #[inline]
     fn snapshot(&self) -> (*mut Header, usize, usize) {
         let h = self.block();
         if h.is_null() {
@@ -491,6 +493,7 @@ impl<T: Elem> RVec<T> {
         (h, hr.len(), hr.cap())
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.snapshot().1
     }
@@ -499,9 +502,15 @@ impl<T: Elem> RVec<T> {
         self.len() == 0
     }
 
-    /// The slots of the current block (`live_bytes` reads it).
+    /// The slots of the current block (`live_bytes` reads it). Reads no `len`.
+    #[inline]
     pub fn capacity(&self) -> usize {
-        self.snapshot().2
+        let h = self.block();
+        if h.is_null() {
+            return 0;
+        }
+        // SAFETY: as in `snapshot`; `cap` is never written after `alloc_block`.
+        unsafe { (*h).cap() }
     }
 
     /// A vec of `n` zeroed elements (a zeroed slot is a valid `T`, see [`Elem`]).
@@ -565,6 +574,7 @@ impl<T: Elem> RVec<T> {
     }
 
     /// Element `i`. Panics when `i` is at or past `len`.
+    #[inline]
     pub fn get(&self, i: usize) -> T {
         let (h, len, _) = self.snapshot();
         assert!(i < len, "RVec index out of range: {i} >= {len}");
@@ -573,6 +583,7 @@ impl<T: Elem> RVec<T> {
     }
 
     /// Element `i`, or `None` when `i` is at or past `len` (one snapshot answers both).
+    #[inline]
     pub fn try_get(&self, i: usize) -> Option<T> {
         let (h, len, _) = self.snapshot();
         // SAFETY: `i < len <= cap` in the live block `h`.
@@ -580,6 +591,7 @@ impl<T: Elem> RVec<T> {
     }
 
     /// Replace element `i`. Panics when `i` is at or past `len`.
+    #[inline]
     pub fn set(&self, i: usize, v: T) {
         let (h, len, _) = self.snapshot();
         assert!(i < len, "RVec index out of range: {i} >= {len}");
@@ -625,6 +637,7 @@ impl<T: Elem> RVec<T> {
     }
 
     /// A block with room for `extra` more elements, and its `len`.
+    #[inline]
     fn reserve(&self, heap: &Heap, extra: usize) -> (*mut Header, usize) {
         loop {
             let (h, len, cap) = self.snapshot();
@@ -637,6 +650,7 @@ impl<T: Elem> RVec<T> {
     }
 
     /// Append `v`; a grow retires the old block on `heap` (this thread's handle).
+    #[inline]
     pub fn push(&self, heap: &Heap, v: T) {
         let (h, len) = self.reserve(heap, 1);
         // SAFETY: `len < cap` in the live block `h`; the Release store publishes the slot.

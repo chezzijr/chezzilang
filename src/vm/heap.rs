@@ -549,6 +549,7 @@ impl Obj {
 /// question. Reaching `core.inner`/`core.q` from inside `get_mut` would re-take a lock the caller may
 /// already hold — `std::sync::Mutex` is not reentrant (a job capturing its own executor hung, rc=124,
 /// under a cap only). Do not add a core arm here.
+#[inline]
 fn obj_bytes_shallow(obj: &Obj) -> usize {
     match obj {
         Obj::Str(s) => s.as_str().len(),
@@ -913,8 +914,11 @@ impl Heap {
         // Byte funnel 2 of 3 (see `since_gc_bytes` / `pending_mut`): the sole write door, and so
         // the sole door for growth INSIDE an existing object. Settle whatever the previous write
         // armed, then arm this one. M1.7: with the cap off too (see `since_gc_bytes`).
-        self.settle_pending_mut();
-        self.pending_mut = Some((h, obj_bytes_shallow(self.get(h))));
+        // One size read serves both halves when the last write armed `h` too (a push loop): it is
+        // the settle's "now" and the new record's "before".
+        let bytes = obj_bytes_shallow(self.get(h));
+        self.settle_knowing(Some((h, bytes)));
+        self.pending_mut = Some((h, bytes));
         // TICKET-213 — the same sole-door argument decides view freshness: a write to an object
         // the cached module snapshot reaches is the only way that view can change in place.
         self.view.touch(h.0 as usize);
@@ -927,8 +931,18 @@ impl Heap {
     /// switch, so a handle never keeps a record of an object another thread may write.
     #[inline]
     pub(super) fn settle_pending_mut(&mut self) {
+        self.settle_knowing(None);
+    }
+
+    /// The settle, given `known`: an object and its size just read. When the armed record is that
+    /// object, its size is not read again.
+    #[inline]
+    fn settle_knowing(&mut self, known: Option<(GcRef, usize)>) {
         if let Some((h, before)) = self.pending_mut.take() {
-            let now = obj_bytes_shallow(self.get(h));
+            let now = match known {
+                Some((k, bytes)) if k == h => bytes,
+                Some(_) | None => obj_bytes_shallow(self.get(h)),
+            };
             self.charge_own(now.saturating_sub(before));
         }
     }
