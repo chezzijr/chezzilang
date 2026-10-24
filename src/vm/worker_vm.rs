@@ -354,7 +354,7 @@ impl Vm {
                 // already installed inside `cap` via `from_wire_memo`'s `WireValue::Closure` arm.
                 let callee = Value::obj(self.heap.alloc(Obj::Closure {
                     proto,
-                    captured: cap,
+                    captured: cap.into(),
                     home,
                 }));
                 (ReadyCall::Invoke { callee, args }, span)
