@@ -1048,9 +1048,10 @@ impl Heap {
         let allocs = self.core.flush_allocs(std::mem::take(&mut self.since_gc));
         let next_gc = self.core.next_gc();
         self.settle_pending_mut();
+        let own = std::mem::take(self.since_gc_bytes.get_mut());
         let bytes = self
             .core
-            .flush_bytes(std::mem::take(self.since_gc_bytes.get_mut()));
+            .flush_bytes(own.saturating_add(super::rvec::take_local_bytes()));
         if allocs >= next_gc || bytes >= self.bytes_gc_threshold() {
             self.gc_check_at = 0;
             return true;
@@ -1272,6 +1273,7 @@ impl Heap {
         // The cached free slots go back on top of the core's stack first, so the core's free list
         // is the whole free list and the next `alloc` reuses the slot it would have reused.
         self.core.give_back(&mut self.free);
+        self.core.adopt_retired();
         // SAFETY: the collector protocol of `attach`: `Vm::gc_collect` sweeps with every other
         // handle stopped or detached, or with this handle the core's only one.
         unsafe { self.core.sweep_slots(&mut self.graveyard) };
@@ -1293,6 +1295,11 @@ impl Heap {
             .last_live_bytes()
             .saturating_add(self.core.charged_bytes())
             .saturating_add(self.since_gc_bytes.load(Ordering::Relaxed))
+    }
+
+    /// Hand this thread's retired `RVec` blocks to the run (`HeapCore::adopt_retired`).
+    pub(super) fn adopt_retired(&self) {
+        self.core.adopt_retired();
     }
 
     /// The objects the last sweep freed whose drop the collector runs after the world restarts

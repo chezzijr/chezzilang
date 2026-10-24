@@ -17,6 +17,7 @@ mod poller;
 mod pool;
 mod quiesce;
 mod root_registry;
+mod rvec;
 use root_registry::{CtxBox, RootRegistry};
 mod runner_cache;
 pub mod sched_seed;

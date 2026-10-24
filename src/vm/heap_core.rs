@@ -24,6 +24,7 @@ use super::boxctx::is_arc_core;
 use super::fxhash::FxHashMap;
 use super::heap::Obj;
 use super::heap_slab::{Slab, SlabAppend, Slot, SlotBits};
+use super::rvec::RetireList;
 use super::value::GcRef;
 use crate::lexer::Span;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -115,6 +116,9 @@ pub struct HeapCore {
     /// The copy log of every handle that has started one (TICKET-246), so `sweep` drops a freed
     /// slot from each.
     copy_logs: Mutex<Vec<CopyLog>>,
+    /// M2: the `RVec` blocks the run's threads retired and handed in (`adopt_retired`). The
+    /// sweep frees them with the world stopped (`vm/rvec.rs`).
+    retired: RetireList,
 }
 
 /// `HeapCore` is shared by every handle of one core; a new `Cell` / `RefCell` in it must fail here.
@@ -150,6 +154,7 @@ impl Default for HeapCore {
             last_live_bytes: AtomicUsize::new(0),
             err_spans: Mutex::new(FxHashMap::default()),
             copy_logs: Mutex::new(Vec::new()),
+            retired: RetireList::default(),
         }
     }
 }
@@ -334,7 +339,8 @@ impl HeapCore {
     /// threshold from the survivors (twice their count) and zero the run's counts. A freed slot's
     /// copy bit and error span go with it, and every handle's copy log drops it: the slot can be
     /// handed to another object before a log is unmarked. The caller (`Heap::sweep`) gave its free
-    /// cache back first and measures the live bytes after.
+    /// cache back first and measures the live bytes after. The run's retired `RVec` blocks are
+    /// freed too.
     ///
     /// The slots in another handle's free cache are empty, so this skips them: it neither counts
     /// them live nor puts them on the free list a second time, and they stay with their handle.
@@ -380,6 +386,9 @@ impl HeapCore {
                 }
             }
         }
+        // Every other thread handed in its retired blocks when it stopped or detached; zeroing
+        // `bytes` below uncharges them.
+        self.retired.free_all();
         self.next_gc
             .store((live * 2).max(MIN_GC_THRESHOLD), Ordering::Relaxed);
         self.allocs.store(0, Ordering::Relaxed);
@@ -387,6 +396,12 @@ impl HeapCore {
         for log in lock(&self.copy_logs).iter() {
             lock(log).retain(|&i| self.slots.get(GcRef(i)).obj.is_some());
         }
+    }
+
+    /// Move this thread's retired `RVec` blocks to the run's list and charge their bytes to the
+    /// run's byte count. Called when the thread stops, detaches, leaves or sweeps.
+    pub(super) fn adopt_retired(&self) {
+        self.flush_bytes(self.retired.adopt_local());
     }
 
     /// Record the `live_bytes()` a sweep measured: the last value, the peak and the cap verdict.

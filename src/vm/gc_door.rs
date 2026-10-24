@@ -110,6 +110,7 @@ impl Vm {
     /// record is settled first, while no sweep can run (`Heap`'s drop does not read it).
     pub(super) fn gc_leave(&mut self) {
         self.heap.settle_pending_mut();
+        self.heap.adopt_retired();
         self.attached = None;
     }
 
@@ -131,6 +132,7 @@ impl Vm {
         if let Some(mut t) = self.attached.take() {
             debug_no_payload_in_flight();
             let roots = self.gc_roots();
+            self.heap.adopt_retired();
             t.get().poll(|| roots);
             self.attached = Some(t);
             self.heap.observe_collection();
@@ -192,6 +194,7 @@ impl Vm {
         debug_no_payload_in_flight();
         let mut roots = self.gc_roots();
         roots.extend_from_slice(pins);
+        self.heap.adopt_retired();
         self.detached = Some(t.detach(roots));
         let r = catch_unwind(AssertUnwindSafe(|| f(self)));
         let ticket = self
@@ -221,6 +224,7 @@ impl Vm {
         debug_no_payload_in_flight();
         let mut roots = self.gc_roots();
         roots.extend_from_slice(pins);
+        self.heap.adopt_retired();
         self.detached = Some(t.detach(roots));
         match r {
             Ok(v) => v,
