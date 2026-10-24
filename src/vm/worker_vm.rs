@@ -9,64 +9,37 @@ use crate::base::crossing::{self, Route};
 
 impl Vm {
     /// B3.2 — construct a fresh worker `Vm` that shares this VM's compiled program by `Arc`
-    /// (read-only) but owns its own empty heap. Execution-shaping flags (`gc_stress`) carry over so a
-    /// worker is exercised under the same GC pressure as the parent; `host` is left inert (B3.2's
-    /// isolation tasks don't touch host I/O — B3.3 threads it through when real workers run user I/O).
-    /// No OS thread yet; the caller drives the returned worker synchronously.
+    /// (read-only). M1.7: it holds a handle on this run's ONE heap core (`Heap::attach`), shared
+    /// the way `exec_registry` is shared below, so every `Vm` of a run (a task's payload `Vm`, a
+    /// runner or joiner shell, a box context) allocates into one heap that one collector sweeps.
+    /// Execution-shaping flags (`gc_stress`) carry over so a worker is exercised under the same GC
+    /// pressure as the parent. No OS thread yet; the caller drives the returned worker
+    /// synchronously.
+    ///
+    /// `chezzi test --max-heap` needs nothing here: the cap and its verdict live in the shared
+    /// core, so a task's growth is part of the run's `live_bytes`, and every sweep, whichever
+    /// thread runs it, measures the whole run. Two mechanisms sample the cap for a task:
+    ///
+    ///   1. [`Vm::sample_mem_cap`], in [`Vm::start_task`], before dispatch: a full collection of
+    ///      the run under a live cap. It was added for a task body running NO bytecode
+    ///      (`spawn blob.len()`, W6-10s residual (a)). Removing it needs its own measurement
+    ///      against `over_memory_trips_on_an_all_native_task_body`.
+    ///   2. The byte pacing: the payload a task's arguments rebuild into is charged by `alloc` to
+    ///      the worker's handle, and the handle adds its counts to the run's trigger when it drops
+    ///      (`Heap`'s `Drop`). The per-worker `request_collect` that was here forced a collection at
+    ///      the task's first instruction, the same point as (1); with one heap (1) samples the run
+    ///      there already, so it went.
+    ///
+    /// WHAT NEITHER COVERS: growth AFTER the sample is paced, not bounded (`Heap::get_mut`'s settle
+    /// charges it). Do not restate any of the above as an unconditional guarantee.
     pub(super) fn spawn_worker(&self) -> Vm {
-        let mut worker = Vm::new(Arc::clone(&self.program));
+        // SAFETY: the gc_coord protocol (`vm/gc_coord.rs`): the worker joins this run's `GcCoord`
+        // (below) and attaches before it runs code on its own thread (`Vm::worker_loop_held`); a
+        // payload `Vm` allocates only on the spawner's attached thread between two of its
+        // safepoints. Every crossing copies, so the worker writes only objects it built.
+        let heap = unsafe { self.heap.attach() };
+        let mut worker = Vm::with_heap(Arc::clone(&self.program), heap);
         worker.gc_stress = self.gc_stress;
-        // `chezzi test --max-heap` — thread the per-test live-heap cap onto the worker's OWN heap, so a
-        // RUNAWAY alloc in a `spawn`/`parallel:` task trips the guard on the M:N engine too (a fresh
-        // `Vm::new` heap defaults to cap-off). This is what gives the cap its cross-engine guarantee: a
-        // real runaway trips on whichever heap runs it. It does NOT make the trip point precisely
-        // predictable for a *near-boundary* concurrent test — each M:N worker's heap is measured alone
-        // (not the whole run's aggregate), so a task's near-cap allocation trips independent of any
-        // sibling's. That per-heap accounting is inherent and documented (`docs/design/roadmap.md §3b`); a
-        // cross-worker aggregate would need non-deterministic global RSS. `0` when the cap is off, so
-        // the common path is untouched.
-        worker.set_max_heap(self.heap.mem_cap());
-        // …and something actually LOOKS at it, but NOT from here. A worker heap is BORN with its
-        // task's payload already rebuilt into it, and `should_collect` counts OBJECTS: a `List[int]`
-        // of any size rebuilds to ONE `Obj`, so a heap holding megabytes after ~7 allocations never
-        // reaches `next_gc`, never sweeps, and `over_cap` — assigned only in `sweep()` — is never
-        // evaluated. The guarantee the comment above states ("a real runaway trips on whichever heap
-        // runs it") was therefore false even for the most ordinary shape there is.
-        //
-        // BOTH DOORS that run a worker built here — `spawn` / `parallel:` and `Executor.submit` —
-        // go through `Vm::spawn_into`: `into_fiber` turns this worker's `ReadyCall` into a
-        // `PendingCall` and [`Vm::start_task`] dispatches it (`ReadyWorker::invoke` is test-only).
-        // Two mechanisms sample the cap there:
-        //
-        //   1. [`Vm::sample_mem_cap`], in `start_task`, before dispatch. It was added for a task
-        //      body running NO bytecode (`spawn blob.len()`, W6-10s residual (a)). Since TICKET-235
-        //      such a body runs behind an entry thunk and has a frame; the sample stays, and
-        //      removing it needs its own measurement against
-        //      `over_memory_trips_on_an_all_native_task_body`.
-        //
-        //   2. The `request_collect` flag below, consumed at the task's first instruction
-        //      boundary.
-        //
-        // What the flag was written to cover: a job heap BORN over the cap in few objects and
-        // few *shallow* bytes — an `Arc`-core capture (`Shared`/`Channel`/`Executor`), where
-        // `obj_bytes_shallow` charges 0 by design and `since_gc` stays under `MIN_GC_THRESHOLD`
-        // (256), but `live_bytes`'s deep walk would report over-cap if a sweep ever ran. No in-tree
-        // witness exists for that class — the producer holds the same core and `live_bytes` charges a
-        // core once per heap by reachability, so the producer trips first — but "no witness built" is
-        // not "unreachable", and three lines is not a price worth arguing over.
-        //
-        // Here, not at a run site, because this is the one place every worker heap is born
-        // (both `ReadyWorker` constructors call it) and the flag survives `into_fiber`. Setting it
-        // BEFORE the payload is rebuilt is fine: `Heap::alloc` never collects, so nothing can consume
-        // it before the first instruction boundary, by which point the payload is fully installed.
-        // Gated on a live cap, so an uncapped run forces no GC at all.
-        //
-        // WHAT NEITHER COVERS: growth AFTER the sample. `xs.push(i)` into an existing list allocates
-        // no `Obj` and rode 77× past the cap until W7-28 charged it in `get_mut`. Bytes are paced,
-        // not bounded — do not restate any of the above as an unconditional guarantee.
-        if self.heap.mem_cap() != 0 {
-            worker.heap.request_collect();
-        }
 
         // `chezzi test --timeout` — thread the SAME absolute deadline onto the worker so a `spawn`/
         // `parallel:` task's loop trips the wall-clock cap on the M:N engine too (a fresh `Vm::new`
@@ -74,7 +47,7 @@ impl Vm {
         worker.set_deadline(self.deadline);
         // …and the raw `timeout_ms` too — the deadline drives the TRIP, but the abort MESSAGE
         // interpolates `timeout_ms`, so a worker left at the `Vm::new` default `0` would render a
-        // spawned-task timeout as "(0ms)" (reads as "off"). Mirror `set_max_heap` above.
+        // spawned-task timeout as "(0ms)" (reads as "off").
         worker.set_timeout(self.timeout_ms);
         // Workers run on the pool too, so a nested `parallel:` inside a task recurses onto threads
         // (and a worker's `recv` blocks on the condvar, not a fiber). B3.3-threads.
@@ -189,10 +162,16 @@ impl Vm {
         //    per task. 3. rebuild the callable/receiver + args into the worker heap (a `home` index
         //    resolves to a pre-alloced empty module that faults on first global read). The actual
         //    invoke is `ReadyWorker::run`.
+        let payload = super::gc_door::PayloadInFlight::new();
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
         let (call, span) = worker.rebuild_ready(lowered, share, &adopt_ids, fresh);
-        Ok(ReadyWorker { worker, call, span })
+        Ok(ReadyWorker {
+            worker,
+            call,
+            span,
+            payload,
+        })
     }
 
     /// PHASE 1 of task preparation — lower a [`PendingCall`] to a heap-independent [`Lowered`] against
@@ -848,7 +827,7 @@ impl Vm {
             ModuleSnapshot {
                 modules,
                 reusable,
-                view: (self.heap.id(), self.heap.view_epoch()),
+                view: self.heap.view_stamp(),
                 #[cfg(test)]
                 replays: std::sync::atomic::AtomicUsize::new(0),
             },

@@ -4,15 +4,16 @@
 //! a suspended generator, a parked fiber) builds a [`RootView`] and calls [`RootView::walk`], so a
 //! root field is added in one place for all of them.
 //!
-//! The registry lists the M:N fiber contexts of one run, so a collection can root the PARKED fibers
-//! too, not only the one live in a `Vm`. `ReadyWorker::into_fiber` builds each fiber context
-//! through [`RootRegistry::register`]; it leaves the registry when its [`CtxBox`] drops or
-//! [`CtxBox::into_inner`] takes it out. M1.7 marks from it.
+//! The registry lists the M:N fiber contexts of one run, so the run's collector
+//! (`Vm::collect_from`) roots the PARKED fibers too, not only the one live in a `Vm`.
+//! `ReadyWorker::into_fiber` builds each fiber context through [`RootRegistry::register`]; it
+//! leaves the registry when its [`CtxBox`] drops or [`CtxBox::into_inner`] takes it out.
 //!
-//! M1.7: two kinds of parked context are NOT listed: a `Shared`/`RwShared` box context
-//! (`Vm::box_new`, `vm/boxctx.rs`, held in the box's slot) and the caller a box call parks
-//! (`BoxFrame::caller`, `vm/boxctx.rs`). Each roots through its own heap today; with one heap
-//! they must reach the collector too.
+//! M1.7: a `Shared`/`RwShared` box context is NOT listed, by one rule: the collector reaches it
+//! through the box object that holds it (`core::SharedState::roots_into`), as Go reaches a value
+//! through its struct, so a dropped box's state dies in the same collection as the box. The caller
+//! a box call parks (`BoxFrame::caller`) is rooted by the `Vm` that runs the call
+//! (`Vm::gc_roots`).
 
 use super::fxhash::FxHashMap;
 use super::*;
@@ -159,9 +160,8 @@ impl FiberCtx {
         }
     }
 
-    /// The GC roots this parked fiber context holds.
-    // M1.7 marks from it (through `RootRegistry::roots`).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The GC roots this parked fiber context holds (the TICKET-125 leaf proof walks from them,
+    /// `SchedCore::provable`).
     pub(super) fn roots(&self) -> Vec<GcRef> {
         let mut out = Vec::new();
         self.root_view().walk(&mut out);
@@ -226,13 +226,12 @@ impl RootRegistry {
     ///    context: `run_one_fiber`'s `swap_task` and `start` take. A thread that is not attached
     ///    writes no registered context: the netpoller sets `poll_timed_out` (an atomic) through
     ///    `&`, and `record_deadlocked` takes the context out with [`CtxBox::into_inner`] first.
-    /// 3. M1.7 calls this only inside a stop-the-world (`GcCoord`, `vm/gc_coord.rs`), where every
-    ///    attached thread is parked at a safepoint, between two such borrows.
+    /// 3. The run's collector (`Vm::collect_from`) calls this only inside a stop of the world
+    ///    (`GcCoord`, `vm/gc_coord.rs`), where every attached thread is parked at a safepoint,
+    ///    between two such borrows, or from a `Vm` whose heap handle is its core's only one (no
+    ///    other thread runs the run's code).
     ///
-    /// Before M1.7 only tests call it, and they own every context. A new mutable use of a parked
-    /// fiber's context from a thread that is not attached breaks point 2.
-    // M1.7 marks from it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// A new mutable use of a parked context from a thread that is not attached breaks point 2.
     pub(super) fn roots(&self) -> Vec<GcRef> {
         let s = super::heap_core::lock(&self.0);
         let mut out = Vec::new();

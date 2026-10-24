@@ -27,10 +27,16 @@ struct Run {
 
 /// Run `chezzi <args>` at `threads` workers (`None` = default); kill it after `secs`.
 fn chezzi(args: &[&str], threads: Option<&str>, secs: u64) -> Run {
+    chezzi_env(args, threads, &[], secs)
+}
+
+/// [`chezzi`] with the extra environment `envs`.
+fn chezzi_env(args: &[&str], threads: Option<&str>, envs: &[(&str, &str)], secs: u64) -> Run {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env_remove("CHEZZI_THREADS")
+        .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -349,4 +355,27 @@ fn a_hundred_thousand_dropped_boxes_do_not_grow_memory() {
             "{kind}: {kb} KB against Atomic {base} KB (bound: +{SLACK_KB} KB)"
         );
     }
+}
+
+/// M1.7 — a box's state lives in the run's one heap, and the run's collector roots it while the
+/// box is parked in its slot. Two tasks on another thread collect at every instruction
+/// (`CHEZZI_GC_STRESS=1`) while `s` and `r` sit idle; the states read back intact. With the box
+/// contexts left out of the root walk, a collection freed the states (a wrong value or a
+/// `dangling GcRef` panic).
+#[test]
+fn box_state_survives_gc_from_another_thread() {
+    let src = "import std.concurrency\n\nfn churn(n: int) -> int:\n    acc := 0\n    for i in 0..n:\n        xs := [i, i + 1, i + 2]\n        acc += xs.len()\n    return acc\n\ns := concurrency.Shared([[1, 2], [3, 4]])\nr := concurrency.RwShared({\"k\": [5, 6]})\ns.update(fn(x): x + [[7]])\nparallel:\n    spawn churn(3000)\n    spawn churn(3000)\nprint(s.get())\nprint(r.get())\n";
+    let path = write_program("box-gc-stress", src);
+    let r = chezzi_env(
+        &["run", path.to_str().unwrap()],
+        Some("2"),
+        &[("CHEZZI_GC_STRESS", "1")],
+        120,
+    );
+    assert_eq!(
+        (r.code, r.stdout.as_str()),
+        (Some(0), "[[1, 2], [3, 4], [7]]\n{'k': [5, 6]}\n"),
+        "stderr: {}",
+        r.stderr
+    );
 }

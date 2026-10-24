@@ -49,11 +49,12 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
     )
 }
 
-/// The worker allocates into its OWN heap, not the parent's: a task that builds a fresh list runs
-/// to completion in the worker, the parent heap's live-object count is unchanged, and the result
-/// crosses back as a `WireValue` that reconstructs (in the parent) to the expected value.
+/// M1.7 — the worker allocates into the run's one heap: a task that builds a fresh list runs to
+/// completion in the worker, its objects are slots of the parent's core (garbage until the next
+/// collection), and the result still crosses back as a `WireValue` (copy semantics) that
+/// reconstructs to the expected value.
 #[test]
-fn worker_runs_in_distinct_heap() {
+fn worker_runs_on_the_runs_one_heap() {
     // () -> [1, 2]
     let (mut vm, task) = worker_fixture(vec![
         Op::ConstInt(1),
@@ -63,10 +64,9 @@ fn worker_runs_in_distinct_heap() {
     ]);
     let before = vm.heap.live();
     let res = vm.run_task_isolated(task).expect("isolated task runs");
-    assert_eq!(
-        vm.heap.live(),
-        before,
-        "worker must not allocate into the parent heap"
+    assert!(
+        vm.heap.live() > before,
+        "the worker's objects are in the run's one heap"
     );
     let got = vm.from_wire(res.value);
     let want = Value::obj(vm.heap.alloc(Obj::List(vec![Value::int(1), Value::int(2)])));

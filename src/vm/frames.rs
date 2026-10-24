@@ -899,9 +899,20 @@ impl Vm {
         Ok(())
     }
 
-    /// Mark-sweep collection. Roots: see [`Vm::gc_roots`]. Everything else is garbage.
+    /// Mark-sweep collection by a `Vm` that collects alone (its handle is its core's only one, see
+    /// `Vm::gc_collect`): this `Vm`'s roots ([`Vm::gc_roots`]) are every attached root of the run.
     pub(super) fn collect(&mut self) {
-        let mut work = self.gc_roots();
+        let roots = self.gc_roots();
+        self.collect_from(roots);
+    }
+
+    /// M1.7 — the collector of the run's one heap. `work` is the union of the attached roots: the
+    /// requester's own, each stopped thread's and each detached thread's (`GcCoord`). This adds the
+    /// parked contexts of the run's registry (fibers and box contexts, `vm/root_registry.rs`),
+    /// marks, and sweeps the whole core. Everything else is garbage. Called with every other
+    /// handle stopped or detached, which is also the registry walk's contract.
+    pub(super) fn collect_from(&mut self, mut work: Vec<GcRef>) {
+        work.extend(self.root_registry.roots());
         while let Some(h) = work.pop() {
             if self.heap.mark(h) {
                 work.extend(self.heap.children(h));
@@ -911,7 +922,7 @@ impl Vm {
     }
 
     /// The GC roots: the live context's fields through the one walker ([`RootView`]), the generator
-    /// hosts parked under a running generator, the running generators, and the running box call.
+    /// hosts parked under a running generator, the running generators, and every open box call.
     pub(super) fn gc_roots(&self) -> Vec<GcRef> {
         let mut work: Vec<GcRef> = Vec::new();
         self.root_view().walk(&mut work);
@@ -924,11 +935,11 @@ impl Vm {
             host.root_view().walk(&mut work);
         }
         work.extend(self.active_generators.iter().copied());
-        // TICKET-246 — the slot-door cache of the box call now running indexes this (box) heap.
-        // The frames below it index parked heaps and are not roots here.
-        // M1.7: one heap — root every `box_chain` frame, not only the last.
-        if let Some(frame) = self.box_chain.last() {
-            work.extend(frame.roots());
+        // TICKET-246 / M1.7 — every open box call, at every depth, and a frame `as_box_caller`
+        // lifted off the chain: its slot-door cache and the generators it parked. The parked
+        // contexts themselves (`BoxFrame::caller`) are registered, so the registry walk roots them.
+        for frame in self.box_chain.iter().chain(&self.box_lifted) {
+            frame.roots(&mut work);
         }
         work
     }

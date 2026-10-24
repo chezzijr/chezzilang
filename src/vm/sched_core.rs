@@ -208,17 +208,14 @@ impl SchedCore {
         }
     }
 
-    /// A job that never starts: its slot is `Cancelled`, its charge returns (DEC-205), and its
-    /// handle settles with the cancel value when `settle` is set.
+    /// A job that never starts: its slot is `Cancelled`, and its handle settles with the cancel
+    /// value when `settle` is set.
     fn drop_job(&mut self, f: Fiber, settle: bool, step: &mut JobStep) {
         let seal = if settle {
             JobSeal::Cancel
         } else {
             JobSeal::Nothing
         };
-        if let Some(charge) = self.slot_charge.remove(&f.task_index) {
-            self.unfinished_bytes -= charge;
-        }
         self.slots[f.task_index] = Some(TaskOutcome::Cancelled {
             out: Vec::new(),
             stderr: Vec::new(),
@@ -342,21 +339,24 @@ impl SchedCore {
     /// must decline (wait, never spin) rather than fault. Otherwise returns `Some(true)` when it fell
     /// back to the sched-wide [`SchedCore::flag_deadlock`] and that latched `terminate`, `Some(false)`
     /// when it faulted leaves only and the sched keeps running.
+    ///
+    /// `heap` is a handle of the run, held by an attached thread (see [`SchedCore::provable`]).
     pub(super) fn flag_deadlock_leaves(
         &mut self,
+        heap: &Heap,
         err: &RuntimeError,
         unproven_ok: bool,
     ) -> Option<bool> {
         let candidates = self.leaf_candidates();
         if candidates.is_empty() {
-            if !unproven_ok && !self.provable(|_| true) {
+            if !unproven_ok && !self.provable(heap, |_| true) {
                 return None;
             }
             return Some(self.flag_deadlock(err));
         }
         let provable: Vec<&Vec<usize>> = candidates
             .iter()
-            .filter(|fam| self.provable(|s| fam.contains(&s)))
+            .filter(|fam| self.provable(heap, |s| fam.contains(&s)))
             .collect();
         if provable.is_empty() && !unproven_ok {
             return None;
@@ -484,25 +484,35 @@ impl SchedCore {
     /// otherwise it asks per joined-leaf family, matching [`SchedCore::flag_deadlock_leaves`]'s own
     /// provable scan. Used by [`MnSched::flag_leaves_and_wake`] to decide whether this sched needs
     /// [`MnSched::may_fault_unproven`]'s license at all, and by that fn's own peer-provable clause.
-    pub(super) fn victims_proven(&self) -> bool {
+    pub(super) fn victims_proven(&self, heap: &Heap) -> bool {
         let cands = self.leaf_candidates();
         if cands.is_empty() {
-            self.provable(|_| true)
+            self.provable(heap, |_| true)
         } else {
-            cands.iter().any(|f| self.provable(|s| f.contains(&s)))
+            cands
+                .iter()
+                .any(|f| self.provable(heap, |s| f.contains(&s)))
         }
     }
 
     /// TICKET-125 (W13-5) — is EVERY holder of the channel(s) `member` waits on visible to this scan?
     /// `member` selects the scope indices to check (a leaf family, or every scope). A `false` answer
     /// means "cannot prove", never "definitely not" — the scan is conservative in the safe direction
-    /// (DEC-101's leaf-policy condition 1): any holder it cannot see (another heap, a `Shared`/
-    /// `RwShared`/`Atomic` box, a buffered `WireValue::Channel`, an Executor job, a module global, an
-    /// FFI value, a generator frame, a timer, a `Waiter`, a `PartyWait`) holds a strong `Arc`,
-    /// which only RAISES `Arc::strong_count` above what the scan counts inside its own heaps — so an
-    /// incomplete scan can only return `false` where a complete one would return `true`, never the
-    /// reverse.
-    fn provable(&self, member: impl Fn(usize) -> bool) -> bool {
+    /// (DEC-101's leaf-policy condition 1): any holder it cannot see (a running fiber, a
+    /// `Shared`/`RwShared`/`Atomic` box, a buffered `WireValue::Channel`, an Executor job, a module
+    /// global, an FFI value, a timer, a `Waiter`, a `PartyWait`) holds a strong `Arc`, which only
+    /// RAISES `Arc::strong_count` above what the scan counts — so an incomplete scan can only return
+    /// `false` where a complete one would return `true`, never the reverse.
+    ///
+    /// M1.7 — every fiber's objects are in the run's one heap, so the scan counts the `Obj::Channel`
+    /// slots REACHABLE from the parked recv fibers' roots ([`reachable_channel_aliases`]), each slot
+    /// once over all of them. Two fibers that reached one slot would otherwise count one holder
+    /// twice, which could prove a leaf that is not one. The walk reads the heap with no stop of the
+    /// world, and it is sound for this reason: `heap` belongs to the calling thread, which is attached
+    /// and not at a safepoint, so no collection can sweep while it runs (the collector waits for this
+    /// thread); and the parked fibers do not run, and every crossing copies (until M3), so no other
+    /// thread writes an object they reach.
+    fn provable(&self, heap: &Heap, member: impl Fn(usize) -> bool) -> bool {
         // A member scope whose body may still `spawn`/`send` is a live feeder this scan cannot see.
         if self.scopes.iter().any(|(i, s)| member(i) && s.body_open) {
             return false;
@@ -543,12 +553,8 @@ impl SchedCore {
             Some([(core, _, false)]) => Some(Arc::clone(core)),
             _ => None,
         };
-        for f in &recv_fibers {
-            // M1.7: this and the count below ask which heap holds each fiber's handles; after one
-            // heap the count reads the run heap.
-            if f.ctx.heap.is_none() || parked_on(f).is_none() {
-                return false;
-            }
+        if recv_fibers.iter().any(|f| parked_on(f).is_none()) {
+            return false;
         }
         let mut cores: Vec<Arc<ChannelCore>> = Vec::new();
         for f in &recv_fibers {
@@ -557,26 +563,56 @@ impl SchedCore {
                 cores.push(core);
             }
         }
-        for core in cores {
-            let inside: usize = recv_fibers
+        let roots: Vec<GcRef> = recv_fibers.iter().flat_map(|f| f.ctx.roots()).collect();
+        let in_heap = reachable_channel_aliases(heap, roots, &cores);
+        for (core, in_heap) in cores.iter().zip(in_heap) {
+            let in_pending: usize = recv_fibers
                 .iter()
                 .map(|f| {
-                    f.ctx.heap.as_ref().unwrap().channel_handles(&core)
-                        + f.pending.as_ref().map_or(0, |op| {
-                            op.at
-                                .iter()
-                                .filter(|(c, _, _)| Arc::ptr_eq(c, &core))
-                                .count()
-                        })
+                    f.pending.as_ref().map_or(0, |op| {
+                        op.at
+                            .iter()
+                            .filter(|(c, _, _)| Arc::ptr_eq(c, core))
+                            .count()
+                    })
                 })
                 .sum();
             // `cores` holds one extra strong reference to each core while this scan runs.
-            if Arc::strong_count(&core) != inside + 1 {
+            if Arc::strong_count(core) != in_heap + in_pending + 1 {
                 return false;
             }
         }
         true
     }
+}
+
+/// TICKET-125 / M1.7 — for each of `cores`, how many `Obj::Channel` slots that hold it are reachable
+/// from `roots`, each slot counted once. The walk does not enter an object that owns an `Arc` core
+/// (a channel, a box, an executor, ...): reading a core's payload takes its lock, and the caller
+/// holds the sched lock. A holder behind a core is then not counted, which only declines a proof.
+/// The caller's contract is [`SchedCore::provable`]'s.
+pub(super) fn reachable_channel_aliases(
+    heap: &Heap,
+    mut work: Vec<GcRef>,
+    cores: &[Arc<ChannelCore>],
+) -> Vec<usize> {
+    let mut seen = fxhash::FxHashSet::<u32>::default();
+    let mut counts = vec![0usize; cores.len()];
+    while let Some(h) = work.pop() {
+        if !seen.insert(h.0) {
+            continue;
+        }
+        let obj = heap.get(h);
+        if let Obj::Channel(a) = obj
+            && let Some(i) = cores.iter().position(|c| Arc::ptr_eq(c, a))
+        {
+            counts[i] += 1;
+        }
+        if !super::boxctx::is_arc_core(obj) {
+            work.extend(heap.children(h));
+        }
+    }
+    counts
 }
 
 /// B3.3-threads — turn a caught panic payload (from `catch_unwind` around a worker task) into a
@@ -609,6 +645,8 @@ pub(super) struct ReadyWorker {
     pub(super) worker: Vm,
     pub(super) call: ReadyCall,
     pub(super) span: Span,
+    /// M1.7 — the rebuilt values are in no root set until `into_fiber` (`vm/gc_door.rs`).
+    pub(super) payload: super::gc_door::PayloadInFlight,
 }
 
 /// How a [`ReadyWorker`]'s task is invoked, with all values already reconstructed in the worker heap.
@@ -649,12 +687,19 @@ impl ReadyWorker {
     }
 
     /// D2b — deconstruct a prepared worker into a lightweight [`Fiber`] for the M:N engine: its
-    /// reconstructed heap + lazy-module roots + executors become the fiber's `FiberCtx` (heap-keyed
-    /// state that travels together — see [`FiberCtx`]), and its `ReadyCall` becomes a `Pending` task
-    /// `start_task` launches on first schedule. The worker `Vm` shell is discarded: under M:N a fiber
-    /// runs on a shared host shell (its module snapshot is re-installed there), not its own `Vm`.
+    /// lazy-module roots, view and executors become the fiber's `FiberCtx` (state that travels
+    /// together — see [`FiberCtx`]), and its `ReadyCall` becomes a `Pending` task `start_task`
+    /// launches on first schedule. The worker `Vm` is discarded with its heap handle (its objects
+    /// are in the run's one heap, rooted through the registered context from here on): under M:N a
+    /// fiber runs on a shared host shell (its module snapshot is re-installed there), not its own
+    /// `Vm`.
     pub(super) fn into_fiber(self, task_index: usize, scope_id: usize) -> Fiber {
-        let ReadyWorker { worker, call, span } = self;
+        let ReadyWorker {
+            mut worker,
+            call,
+            span,
+            payload,
+        } = self;
         let task = match call {
             ReadyCall::Invoke { callee, args } => PendingCall::Call { callee, args, span },
         };
@@ -662,7 +707,8 @@ impl ReadyWorker {
         let ctx = FiberCtx {
             // M1.4 — the task waits in the context so the context alone roots it.
             start: Some(task),
-            heap: Some(worker.heap),
+            // TICKET-213 — the view the worker built its module view in moves with that view.
+            view: worker.heap.take_view(),
             owns_side: true,
             module_objs: worker.module_objs,
             module_faulted: worker.module_faulted,
@@ -671,27 +717,28 @@ impl ReadyWorker {
             // per-nursery now, so the shell's cannot substitute for this fiber's).
             module_snapshot: worker.module_snapshot,
             snapshot_memo: worker.snapshot_memo,
-            // W7-4a — the rebuild map indexes `worker.heap` (which becomes `ctx.heap`) and belongs to
-            // the view above; carry it for the same heap-keyed reason as `str_intern`, so the modules
-            // that fault in later all tie to one cell per binding.
+            // W7-4a — the rebuild map belongs to the view above; carry it, so the modules that fault
+            // in later all tie to one cell per binding.
             snapshot_rebuild: worker.snapshot_rebuild,
             // W7-4c — the registry + its counter travel together (see `FiberCtx::snapshot_cells`).
             snapshot_cells: worker.snapshot_cells,
-            // TICKET-111 — travels with the heap for the same reason as `snapshot_cells`.
+            // TICKET-111 — travels with the view for the same reason as `snapshot_cells`.
             snapshot_nodes: worker.snapshot_nodes,
-            // TICKET-111 — travels with the heap for the same reason as `snapshot_rebuild`.
+            // TICKET-111 — travels with the view for the same reason as `snapshot_rebuild`.
             snapshot_adopt: worker.snapshot_adopt,
             snapshot_next_id: worker.snapshot_next_id,
             executors: worker.executors,
-            // M19 Phase 3 — the intern cache indexes `worker.heap`, which becomes `ctx.heap`; carry it
-            // so the heap-keyed invariant holds (its `GcRef`s stay valid against the heap they travel with).
+            // M19 Phase 3 — the intern cache holds the worker's own strings; they are this fiber's.
             str_intern: worker.str_intern,
             fn_values: worker.fn_values,
             ..FiberCtx::default()
         };
         debug_assert!(ctx.start.is_some(), "a Pending fiber holds its task");
+        let ctx = registry.register(ctx);
+        // The payload is rooted by the registered context from here on.
+        drop(payload);
         Fiber {
-            ctx: registry.register(ctx),
+            ctx,
             state: FiberState::Pending,
             task_index,
             scope_id,

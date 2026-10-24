@@ -1,5 +1,5 @@
-//! VM tests: the GC door — a panic out of a borrowed joiner shell, and a requester that joins a
-//! stop already running.
+//! VM tests: the GC door — a panic out of a borrowed joiner shell, a requester that joins a stop
+//! already running, and the one collection that marks every root source of the run.
 
 use super::*;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -54,12 +54,13 @@ fn a_panic_out_of_a_borrowed_shell_loop_leaves_its_token() {
     });
 }
 
-/// B requests a collection while A's stop is already running, so B joins it as a poller. B's own
-/// heap must still be swept before its `gc_collect` returns: until M1.7 each thread's heap is its
-/// own, and A's collection does not touch it. The order is forced: B is attached and blocked on a
-/// channel with no door, so A's stop waits for B; B is woken only once the stop is requested.
+/// B requests a collection while A's stop is already running, so B joins it as a poller. M1.7:
+/// the run has one heap, so A's collection sweeps B's garbage too and serves B's request: B's
+/// unrooted objects are gone when its `gc_collect` returns. The order is forced: B is attached and
+/// blocked on a channel with no door, so A's stop waits for B; B is woken only once the stop is
+/// requested.
 #[test]
-fn a_requester_that_joins_a_running_stop_still_sweeps_its_own_heap() {
+fn a_requester_that_joins_a_running_stop_is_served_by_it() {
     let left = within(|| {
         let root = Vm::new(Arc::new(empty_program()));
         let coord = Arc::clone(&root.gc_coord);
@@ -96,4 +97,69 @@ fn a_requester_that_joins_a_running_stop_still_sweeps_its_own_heap() {
         left, 0,
         "objects left in B's heap after a gc_collect that joined A's stop"
     );
+}
+
+/// M1.7 — one collection marks the union of the run's roots and sweeps the one heap. Two handles
+/// share one core (`a` and the worker `b`); the roots are split over a thread stopped at a
+/// safepoint (`b`, root `s` on its stack), a detached thread (published root `d`) and a parked
+/// context in the run's registry (root `r`). `a`'s collection keeps all three and frees `u`,
+/// which nothing roots.
+#[test]
+fn one_collection_marks_every_root_source_and_frees_the_rest() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    within(|| {
+        let mut a = Vm::new(Arc::new(empty_program()));
+        let mut b = a.spawn_worker();
+        let coord = Arc::clone(&a.gc_coord);
+        let s = b.heap.alloc(Obj::Str("stopped".into()));
+        b.stack.push(Value::obj(s));
+        let u = b.heap.alloc(Obj::Str("garbage".into()));
+        let d = a.heap.alloc(Obj::Str("detached".into()));
+        let r = a.heap.alloc(Obj::Str("parked".into()));
+        let parked = a.root_registry.register(FiberCtx {
+            module_objs: vec![r],
+            ..FiberCtx::default()
+        });
+        let done = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let stopped = {
+            let (done, ready_tx) = (Arc::clone(&done), ready_tx.clone());
+            std::thread::spawn(move || {
+                b.gc_attach();
+                ready_tx.send(()).unwrap();
+                while !done.load(Ordering::SeqCst) {
+                    b.gc_poll();
+                    std::thread::yield_now();
+                }
+                b.gc_leave();
+            })
+        };
+        let detached = {
+            let (coord, done) = (Arc::clone(&coord), Arc::clone(&done));
+            std::thread::spawn(move || {
+                let ticket = coord.attach().detach(vec![d]);
+                ready_tx.send(()).unwrap();
+                while !done.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                drop(ticket.reattach());
+            })
+        };
+        ready_rx.recv().unwrap();
+        ready_rx.recv().unwrap();
+        a.gc_attach();
+        a.gc_collect();
+        let kept = [s, d, r].map(|h| a.heap.holds(h));
+        let freed = !a.heap.holds(u);
+        done.store(true, Ordering::SeqCst);
+        stopped.join().unwrap();
+        detached.join().unwrap();
+        a.gc_leave();
+        drop(parked);
+        assert_eq!(
+            kept, [true; 3],
+            "the stopped, detached and parked roots survive"
+        );
+        assert!(freed, "the unrooted object is freed");
+    });
 }

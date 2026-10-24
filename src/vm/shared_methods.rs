@@ -40,8 +40,7 @@ impl Vm {
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
                 let mut st = core.state.lock();
-                let bytes = self.box_store(&mut st, w);
-                core.bytes.store(bytes, Ordering::Relaxed);
+                self.box_store(&mut st, w);
                 Ok(Value::nil())
             }
             // `update(f)` runs `f` inside the box on the live state and its result becomes the
@@ -62,8 +61,7 @@ impl Vm {
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
                 let mut st = core.state.lock();
-                let (r, bytes) = self.box_call(&mut st, fw, which == SharedMethod::Update, span);
-                core.bytes.store(bytes, Ordering::Relaxed);
+                let r = self.box_call(&mut st, fw, which == SharedMethod::Update, span);
                 drop(st);
                 Ok(match r? {
                     Some(w) => self.from_wire(w),
@@ -151,8 +149,7 @@ impl Vm {
                     let key = Arc::as_ptr(&core) as usize;
                     let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
                     let mut st = core.state.write();
-                    let bytes = self.box_store(&mut st, w);
-                    core.bytes.store(bytes, Ordering::Relaxed);
+                    self.box_store(&mut st, w);
                     Ok(Value::nil())
                 }
                 // `write(f)` runs `f` inside the box on the live state, exclusive; its result becomes
@@ -163,8 +160,7 @@ impl Vm {
                     let key = Arc::as_ptr(&core) as usize;
                     let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
                     let mut st = core.state.write();
-                    let (r, bytes) = self.box_call(&mut st, fw, true, span);
-                    core.bytes.store(bytes, Ordering::Relaxed);
+                    let r = self.box_call(&mut st, fw, true, span);
                     drop(st);
                     r?;
                     Ok(Value::nil())
@@ -269,13 +265,14 @@ impl Vm {
             }
             RwSharedPrim::Len => {
                 self.arity_err(method, args, 0, span)?;
-                let n =
-                    self.rwshared_read(&core, span, |vm, ctx| match boxctx::state_obj(ctx) {
+                let n = self.rwshared_read(&core, span, |vm, ctx| {
+                    match boxctx::state_obj(&vm.heap, ctx) {
                         Some(Obj::List(items)) => Ok(items.len()),
                         Some(Obj::Map(m)) => Ok(m.entries.len()),
                         Some(Obj::Set(s)) => Ok(s.entries.len()),
                         _ => Err(vm.err("RwShared._len requires a container element".into(), span)),
-                    })?;
+                    }
+                })?;
                 Ok(self.make_int(n as i64))
             }
             // `at(i) -> Option[E]` — out of range is `None`, not a fault (the safe accessor, like
@@ -283,13 +280,14 @@ impl Vm {
             RwSharedPrim::At => {
                 self.arity_err(method, args, 1, span)?;
                 let i = self.int_of(args[0]);
-                let piece =
-                    self.rwshared_read(&core, span, |vm, ctx| match boxctx::state_obj(ctx) {
+                let piece = self.rwshared_read(&core, span, |vm, ctx| {
+                    match boxctx::state_obj(&vm.heap, ctx) {
                         Some(Obj::List(items)) => crate::slice::norm_index(i, items.len())
                             .map(|u| vm.box_copy_pieces(ctx, &[items[u]], span))
                             .transpose(),
                         _ => Err(vm.err("RwShared._at requires a list element".into(), span)),
-                    })?;
+                    }
+                })?;
                 Ok(match piece {
                     Some(ws) => {
                         let v = self.from_wire_pieces(ws);
@@ -307,8 +305,8 @@ impl Vm {
                 let Some(parts) = self.as_range(args[0]) else {
                     return Err(self.err("RwShared._slice requires a Range".into(), span));
                 };
-                let ws =
-                    self.rwshared_read(&core, span, |vm, ctx| match boxctx::state_obj(ctx) {
+                let ws = self.rwshared_read(&core, span, |vm, ctx| {
+                    match boxctx::state_obj(&vm.heap, ctx) {
                         Some(Obj::List(items)) => {
                             let idxs = crate::slice::range_indices(&parts, items.len())
                                 .map_err(|e| vm.err(e.to_string(), span))?;
@@ -316,7 +314,8 @@ impl Vm {
                             vm.box_copy_pieces(ctx, &picked, span)
                         }
                         _ => Err(vm.err("RwShared._slice requires a list element".into(), span)),
-                    })?;
+                    }
+                })?;
                 let items = self.from_wire_pieces(ws);
                 Ok(Value::obj(self.heap.alloc(Obj::List(items))))
             }
@@ -362,7 +361,7 @@ impl Vm {
         let qh = self.hash_value(needle, span)?;
         let cands = self.rwshared_read(core, span, |vm, ctx| {
             let mut out = Vec::new();
-            match boxctx::state_obj(ctx) {
+            match boxctx::state_obj(&vm.heap, ctx) {
                 Some(Obj::Map(m)) if !on_set => {
                     for &p in m.candidates(qh) {
                         let (_, k, v) = m.entries[p];

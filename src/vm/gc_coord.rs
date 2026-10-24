@@ -96,6 +96,8 @@ pub struct DetachTicket {
     /// `None` after a reattach took it, so the drop does not withdraw the roots a second time.
     coord: Option<Arc<GcCoord>>,
     id: u64,
+    /// The collection count at the detach: a reattach that sees it moved reports it.
+    epoch: u64,
 }
 
 impl GcCoord {
@@ -221,6 +223,7 @@ impl Attached {
             .expect("a live token holds its coordinator");
         let mut st = coord.lock();
         let id = st.next_ticket;
+        let epoch = st.gc_epoch;
         st.next_ticket += 1;
         st.detached_roots.push((id, roots));
         // The roots and the leave in one hold: a requester never sees the thread uncounted
@@ -229,12 +232,14 @@ impl Attached {
         DetachTicket {
             coord: Some(coord),
             id,
+            epoch,
         }
     }
 
     /// Stop the world and run `collect` with every root. If another thread already requested a
     /// stop, this thread stops like a poller instead and `collect` does not run: one collection
-    /// serves both. `collect` runs with the lock released (see the module doc).
+    /// serves both (the run has one heap). `collect` runs with the lock released (see the module
+    /// doc).
     pub fn request_collect(&mut self, own_roots: Vec<GcRef>, collect: impl FnOnce(&[GcRef])) {
         let c = self.coord();
         let mut st = c.lock();
@@ -274,8 +279,8 @@ impl Drop for Attached {
 
 impl DetachTicket {
     /// Go `exitsyscall`: wait until no stop is running, withdraw the published roots, count the
-    /// thread again.
-    pub fn reattach(mut self) -> Attached {
+    /// thread again. The flag is whether a collection ran while the thread was detached.
+    pub fn reattach(mut self) -> (Attached, bool) {
         let coord = self
             .coord
             .take()
@@ -283,8 +288,9 @@ impl DetachTicket {
         let mut st = coord.wait_idle(coord.lock());
         withdraw(&mut st, self.id);
         st.attached += 1;
+        let collected = st.gc_epoch != self.epoch;
         drop(st);
-        Attached { coord: Some(coord) }
+        (Attached { coord: Some(coord) }, collected)
     }
 }
 

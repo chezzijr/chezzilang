@@ -1090,7 +1090,7 @@ fn flag_deadlock_leaves_faults_only_the_family_a_blocked_owner_joins() {
     c.scopes[0].owners_blocked = 1;
     c.scopes[s1].joins_blocked = 1;
     let r = c
-        .flag_deadlock_leaves(&s.deadlock_err, true)
+        .flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true)
         .expect("unproven_ok never declines");
     assert!(!r, "a leaf flag must not report a sched-wide stop");
     assert!(!c.terminate, "a leaf flag must not terminate the sched");
@@ -1122,7 +1122,7 @@ fn flag_deadlock_leaves_is_sched_wide_without_a_joined_family() {
     c.blocked_owners = 1;
     c.scopes[0].owners_blocked = 1;
     let r = c
-        .flag_deadlock_leaves(&s.deadlock_err, true)
+        .flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true)
         .expect("unproven_ok never declines");
     assert!(r);
     assert!(c.terminate);
@@ -1142,10 +1142,16 @@ fn flag_deadlock_leaves_declines_an_unproven_sched_wide_flag() {
     let s = mk_sched(1);
     let _ch = park_in_scope(&s, 0, 0);
     let mut c = s.lock();
-    assert_eq!(c.flag_deadlock_leaves(&s.deadlock_err, false), None);
+    assert_eq!(
+        c.flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, false),
+        None
+    );
     assert_eq!(c.parked_n, 1);
     assert!(!c.terminate);
-    assert_eq!(c.flag_deadlock_leaves(&s.deadlock_err, true), Some(true));
+    assert_eq!(
+        c.flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true),
+        Some(true)
+    );
     assert!(c.terminate);
 }
 
@@ -1171,7 +1177,10 @@ fn mnsched_may_fault_unproven_waits_for_a_peer_with_runnable_work() {
     // B keeps its seeded fiber runnable — never taken, so B's own `running`/`runnable` shows work.
     b.seed(vec![mk_fiber(0)]);
 
-    assert!(!a.may_fault_unproven(), "B still has runnable work");
+    assert!(
+        !a.may_fault_unproven(&Heap::new()),
+        "B still has runnable work"
+    );
 }
 
 /// TICKET-129 (W13-5 residual) — when every sched in the run is parked and unproven, the fallback
@@ -1196,7 +1205,10 @@ fn mnsched_may_fault_unproven_when_every_peer_is_parked_and_unproven() {
     let fb = take_run(&b);
     b.park(core_key(&chan), Arc::clone(&chan), fb);
 
-    assert!(a.may_fault_unproven(), "every sched is parked and unproven");
+    assert!(
+        a.may_fault_unproven(&Heap::new()),
+        "every sched is parked and unproven"
+    );
 }
 
 /// TICKET-103 — leaf-ness is a FAMILY property. `s1`'s continuation `c1` holds owner B, blocked
@@ -1217,7 +1229,7 @@ fn flag_deadlock_leaves_reads_leafness_over_the_joined_family() {
     c.scopes[c1].owners_blocked = 1;
     c.scopes[s2].joins_blocked = 1;
     let r = c
-        .flag_deadlock_leaves(&s.deadlock_err, true)
+        .flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true)
         .expect("unproven_ok never declines");
     assert!(!r);
     assert!(
@@ -1250,7 +1262,7 @@ fn flag_deadlock_leaves_faults_every_scope_of_the_joined_family() {
     c.scopes[0].owners_blocked = 1;
     c.scopes[s1].joins_blocked = 1;
     let r = c
-        .flag_deadlock_leaves(&s.deadlock_err, true)
+        .flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true)
         .expect("unproven_ok never declines");
     assert!(!r);
     assert!(matches!(c.slots[2], Some(TaskOutcome::Deadlocked { .. })));
@@ -1502,7 +1514,7 @@ fn flag_deadlock_leaves_wakes_the_join_parked_owner_of_the_faulted_leaf() {
     let _ch = park_join_child(&s, s1);
     let mut c = s.lock();
     let r = s
-        .flag_leaves_and_wake(&mut c)
+        .flag_leaves_and_wake(&Heap::new(), &mut c)
         .expect("an empty registry licenses the fault");
     assert!(!r);
     assert!(matches!(c.slots[1], Some(TaskOutcome::Deadlocked { .. })));
@@ -1877,86 +1889,70 @@ main()
     assert_eq!(run_capture(src).unwrap(), "499500\n"); // sum 0..1000
 }
 
-/// D2a: a fiber with no heap of its own (`heap: None`, test-only today) aliases the
-/// single `Vm::heap` (decision A, share-by-ref). `swap_ctx` must leave `self.heap` untouched, so
-/// this stays byte-identical.
+/// M1.7: every context of a run shares one heap, so `swap_ctx` never moves the heap; it moves the
+/// context's view stamp (`FiberCtx::view`) with the module view it describes.
 #[test]
-fn swap_ctx_leaves_heap_untouched_for_cooperative_fiber() {
+fn swap_ctx_moves_the_view_and_keeps_the_heap() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
+    let (core, host_view) = (vm.heap.id(), vm.heap.view_stamp());
     let mut ctx = FiberCtx::default();
-    assert!(
-        ctx.heap.is_none(),
-        "a default fiber carries no heap of its own"
-    );
+    let fiber_view = ctx.view.stamp();
+    assert_ne!(host_view, fiber_view, "each context has its own view id");
     vm.swap_ctx(&mut ctx);
+    assert_eq!(vm.heap.id(), core);
+    assert_eq!(vm.heap.view_stamp(), fiber_view);
     assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
-    assert!(
-        ctx.heap.is_none(),
-        "swap must not give a heapless fiber a heap"
-    );
+    vm.swap_ctx(&mut ctx);
+    assert_eq!(vm.heap.view_stamp(), host_view);
 }
 
-/// D2a GC canary: a `collect` while an M:N fiber is swapped in must trace the FIBER's heap (via
-/// the swapped-in operand stack) and must NOT touch the parked host heap. After the fiber parks
-/// back out, the host heap and its stack-rooted object are intact. This is the one path the
-/// swap-with-heap logic adds that the goldens can't reach (no runtime site parks a fiber until
-/// D2b), so it guards the moved-heap rooting directly.
+/// M1.7 GC canary: a `collect` while a fiber is swapped in roots the swapped-in fiber through the
+/// live `Vm` fields and the parked host context through the registry (the host's state parks in
+/// the fiber's registered `CtxBox`). After the fiber parks back out, both objects are intact.
 #[test]
-fn collect_under_swapped_in_fiber_heap_preserves_parked_host_object() {
+fn collect_under_swapped_in_fiber_roots_the_parked_host() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
     vm.push(Value::obj(hv)); // keep the host object stack-rooted
-
-    let mut fiber_heap = Heap::new();
-    let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
-    let mut ctx = FiberCtx {
-        heap: Some(fiber_heap),
+    let hf = vm.heap.alloc(Obj::Str("fiber-obj".into()));
+    let mut ctx = vm.root_registry.register(FiberCtx {
         owns_side: true,
         stack: vec![Value::obj(hf)], // the fiber's own stack roots its object
         ..FiberCtx::default()
-    };
+    });
 
-    // Schedule in: host heap + stack park into the ctx; self.{heap,stack} are the fiber's.
+    // Schedule in: the host stack parks into the registered ctx; `self.stack` is the fiber's.
     vm.swap_ctx(&mut ctx);
-    vm.collect(); // roots self.stack (the fiber's) → hf survives in the fiber heap
+    vm.collect();
     assert!(matches!(vm.heap.get(hf), Obj::Str(s) if &s[..] == "fiber-obj"));
+    assert!(vm.heap.holds(hv), "the parked host's object survives");
 
-    // Park back out: the untouched host heap + its object are restored.
+    // Park back out: the host stack and its object are restored.
     vm.swap_ctx(&mut ctx);
     assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
     assert_eq!(vm.pop(), Value::obj(hv));
 }
 
-/// D2a share-nothing lock: a `collect` while an M:N fiber is swapped in must leave the parked
-/// HOST heap fully quiescent — not even sweeping its UNROOTED garbage. An object rooted by
-/// nothing in any context would be swept by a normal host-heap collect; here the collect runs on
-/// the fiber heap, so the host heap is never traced and the garbage survives. This proves the
-/// parked heap is untouched (the positive canary only shows a *stack-rooted* host object
-/// survives; this shows the collect didn't run on the host heap at all) — the guarantee D2b
-/// relies on when parking fibers across worker threads.
+/// M1.7: one heap, one sweep. An object that no context roots is garbage whichever context made
+/// it, so a `collect` while a fiber is swapped in frees the host's unrooted object too.
 #[test]
-fn collect_under_swapped_in_fiber_heap_leaves_parked_host_heap_quiescent() {
+fn collect_under_swapped_in_fiber_sweeps_the_whole_heap() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    // Rooted by nothing — a host-heap collect would sweep it.
     let garbage = vm.heap.alloc(Obj::Str("host-garbage".into()));
-
-    let mut fiber_heap = Heap::new();
-    let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
-    let mut ctx = FiberCtx {
-        heap: Some(fiber_heap),
+    let hf = vm.heap.alloc(Obj::Str("fiber-obj".into()));
+    let mut ctx = vm.root_registry.register(FiberCtx {
         owns_side: true,
         stack: vec![Value::obj(hf)],
         ..FiberCtx::default()
-    };
+    });
 
     vm.swap_ctx(&mut ctx);
-    vm.collect(); // runs on the fiber heap only — the parked host heap is not traced
+    vm.collect();
     vm.swap_ctx(&mut ctx);
 
-    // The unrooted host object is still alive: collect never ran on the host heap. (Were it
-    // swept, `heap.get` would panic on the dangling GcRef.)
-    assert!(matches!(vm.heap.get(garbage), Obj::Str(s) if &s[..] == "host-garbage"));
+    assert!(!vm.heap.holds(garbage), "the unrooted host object is freed");
+    assert!(vm.heap.holds(hf), "the parked fiber's object survives");
 }
 
 /// B3.1: `shut` lives in the shared core, so a `from_wire`'d alias observes a shutdown done through

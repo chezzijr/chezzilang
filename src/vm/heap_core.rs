@@ -1,10 +1,10 @@
 //! The shared half of the GC heap: slots, free list, mark and copy bits, and the GC counters.
 //!
-//! A [`HeapCore`] holds the state that every runner thread of one run will share (M1.7), behind an
-//! `Arc`. `Heap` (`vm/heap.rs`) is the per-`Vm` handle on it: it keeps a small cache of free slots,
-//! the allocation counters that pace its collection, its copy log and the TICKET-213 view state. In
-//! this step each `Vm` still makes its own core, so one core has one handle in production;
-//! `Heap::attach` (tests only, until M1.7) puts a second handle on a core.
+//! A [`HeapCore`] holds the state that every runner thread of one run shares (M1.7), behind an
+//! `Arc`: `Vm::new` makes the run's core, and `Vm::spawn_worker` gives every other `Vm` of the run
+//! a handle on it (`Heap::attach`). `Heap` (`vm/heap.rs`) is the per-`Vm` handle: it keeps a small
+//! cache of free slots, the counts it has not yet added to the run-wide trigger, its copy log and
+//! the live context's TICKET-213 view state.
 //!
 //! The counters are atomics, not fields under a lock: `alloc` reads `mem_cap`, and
 //! `should_collect` (every instruction) reads `next_gc` and `mem_cap` each time its handle's
@@ -12,7 +12,15 @@
 //! `Relaxed` atomic load is a plain load. The free list and the slab append share
 //! one lock (`alloc_lock`). A handle takes it once per refill of its free-slot cache: up to 64
 //! freed slots, or up to 64 new slots (one new slot per lock below slot 64).
+//!
+//! Pacing is run-wide: `allocs` and `bytes` count what every handle allocated and charged since the
+//! last sweep. A handle adds its own count at most every `FLUSH_EVERY` allocations
+//! (`Heap::should_collect`) and when it drops, and asks for a collection when the run's count
+//! reaches `next_gc` (twice the objects the last sweep kept, at least 256), or when the run's
+//! charged bytes reach the byte goal: with the cap off the live bytes of the last sweep, at least
+//! 16 MiB (the shape of Go's GOGC=100), and under a `--max-heap` cap a quarter of the cap.
 
+use super::boxctx::is_arc_core;
 use super::fxhash::FxHashMap;
 use super::heap::Obj;
 use super::heap_slab::{Slab, SlabAppend, Slot, SlotBits};
@@ -79,6 +87,12 @@ pub struct HeapCore {
     /// samples the cap. The next `sweep()` sets the threshold again. (One field, not a separate
     /// `force_collect` flag, so the per-instruction test is one load.)
     next_gc: AtomicUsize,
+    /// Objects every handle allocated since the last sweep, as far as the handles added them
+    /// (`flush_allocs`). The trigger compares it with `next_gc`.
+    allocs: AtomicUsize,
+    /// Bytes every handle charged since the last sweep (`flush_bytes`): the `--max-heap` byte
+    /// trigger's run-wide count.
+    bytes: AtomicUsize,
     /// Peak of `live_bytes()` sampled at each `sweep()`: the memory probe's high-water mark
     /// (reported behind `CHEZZI_HEAP_STATS=1`). The Phase-1 8B-`Value` gate compares this.
     peak_live_bytes: AtomicUsize,
@@ -91,7 +105,7 @@ pub struct HeapCore {
     /// checkpoint (so a runaway `defer` during the abort unwind re-trips it); cleared per test by
     /// `clear_over_cap`.
     over_cap: AtomicBool,
-    /// `live_bytes()` as of the last `sweep()`; half of `Heap::approx_bytes`.
+    /// `live_bytes()` as of the last `sweep()`: the cap-off byte goal (`Heap::bytes_gc_threshold`).
     last_live_bytes: AtomicUsize,
     /// W8-22: the origin span of a caught error, keyed on the RAW SLOT INDEX of the `Err` payload's
     /// `GcRef`. The key is a reused index (`alloc` reuses freed slots), so `sweep()`'s free branch
@@ -128,6 +142,8 @@ impl Default for HeapCore {
             any_copied: AtomicBool::new(false),
             id: NEXT_HEAP_ID.fetch_add(1, Ordering::Relaxed),
             next_gc: AtomicUsize::new(MIN_GC_THRESHOLD),
+            allocs: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
             peak_live_bytes: AtomicUsize::new(0),
             mem_cap: AtomicUsize::new(0),
             over_cap: AtomicBool::new(false),
@@ -163,7 +179,7 @@ impl HeapCore {
     }
 
     /// This core's identity, stamped once at construction. Never reused: a fresh core (one per
-    /// task today) always gets a fresh id, even after the process has torn down other cores.
+    /// run) always gets a fresh id, even after the process has torn down other cores.
     #[inline]
     pub(super) fn id(&self) -> u64 {
         self.id
@@ -241,10 +257,33 @@ impl HeapCore {
     }
 
     /// Force the next `Heap::should_collect` (see `next_gc`) of the handle that calls
-    /// `Heap::request_collect`, which also empties that handle's cached threshold. Another handle
-    /// sees the 0 when its cache next empties (M1.7: a request for every handle must empty theirs).
+    /// `Heap::request_collect`, which also empties that handle's cached threshold. Every other
+    /// handle reads the 0 at its next boundary: a request is made only under a live cap, and under
+    /// a cap no handle caches a threshold (`Heap::should_collect` caches only with the cap off).
     pub(super) fn request_collect(&self) {
         self.next_gc.store(0, Ordering::Relaxed);
+    }
+
+    /// Add `n` allocations of one handle to the run's count; returns the run's count since the
+    /// last sweep.
+    #[inline]
+    pub(super) fn flush_allocs(&self, n: usize) -> usize {
+        if n == 0 {
+            self.allocs.load(Ordering::Relaxed)
+        } else {
+            self.allocs.fetch_add(n, Ordering::Relaxed) + n
+        }
+    }
+
+    /// Add `n` charged bytes of one handle to the run's count; returns the run's count since the
+    /// last sweep.
+    #[inline]
+    pub(super) fn flush_bytes(&self, n: usize) -> usize {
+        if n == 0 {
+            self.bytes.load(Ordering::Relaxed)
+        } else {
+            self.bytes.fetch_add(n, Ordering::Relaxed).saturating_add(n)
+        }
     }
 
     /// Mark slot `i`; returns whether it was unmarked before.
@@ -288,18 +327,23 @@ impl HeapCore {
         lock(&self.err_spans).get(&r.0).copied()
     }
 
-    /// The slot half of a collection: free every unmarked object, clear the marks, and set the
-    /// next threshold from the survivors (twice their count). A freed slot's copy bit and error
-    /// span go with it, and every handle's copy log drops it: the slot can be handed to another
-    /// object before a log is unmarked. The caller (`Heap::sweep`) gave its free cache back first
-    /// and measures the live bytes after.
+    /// The slot half of a collection: free every unmarked object, clear the marks, set the next
+    /// threshold from the survivors (twice their count) and zero the run's counts. A freed slot's
+    /// copy bit and error span go with it, and every handle's copy log drops it: the slot can be
+    /// handed to another object before a log is unmarked. The caller (`Heap::sweep`) gave its free
+    /// cache back first and measures the live bytes after.
+    ///
+    /// The slots in another handle's free cache are empty, so this skips them: it neither counts
+    /// them live nor puts them on the free list a second time, and they stay with their handle.
+    /// A freed object that owns an `Arc` core or a file goes to `graveyard` and is dropped by the
+    /// caller after the world restarts: its drop can make a syscall (a buffered writer flushes).
     ///
     /// # Safety
     ///
     /// As for `Slab::segments_mut`: no other thread touches a slot while this runs. Every other
     /// handle of the core is stopped at a safepoint or detached (`vm/gc_coord.rs`), or the caller's
     /// handle is the core's only one.
-    pub(super) unsafe fn sweep_slots(&self) {
+    pub(super) unsafe fn sweep_slots(&self, graveyard: &mut Vec<Obj>) {
         let mut live = 0usize;
         {
             let mut st = lock(&self.alloc_lock);
@@ -319,7 +363,11 @@ impl HeapCore {
                             live += 1;
                         }
                         Some(_) | None => {
-                            slot.obj = None;
+                            if let Some(obj) = slot.obj.take()
+                                && is_arc_core(&obj)
+                            {
+                                graveyard.push(obj);
+                            }
                             st.free.push(idx as u32);
                             spans.remove(&(idx as u32));
                             self.copied.clear(idx);
@@ -330,12 +378,14 @@ impl HeapCore {
         }
         self.next_gc
             .store((live * 2).max(MIN_GC_THRESHOLD), Ordering::Relaxed);
+        self.allocs.store(0, Ordering::Relaxed);
+        self.bytes.store(0, Ordering::Relaxed);
         for log in lock(&self.copy_logs).iter() {
             lock(log).retain(|&i| self.slots.get(GcRef(i)).obj.is_some());
         }
     }
 
-    /// Record the `live_bytes()` a sweep measured: the peak, the last value and the cap verdict.
+    /// Record the `live_bytes()` a sweep measured: the last value, the peak and the cap verdict.
     pub(super) fn record_live_bytes(&self, lb: usize) {
         self.last_live_bytes.store(lb, Ordering::Relaxed);
         self.peak_live_bytes.fetch_max(lb, Ordering::Relaxed);

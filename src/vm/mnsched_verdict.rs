@@ -26,10 +26,6 @@ impl MnSched {
         debug_assert!(Arc::ptr_eq(&c.left, &self.quiesce.epoch()));
         let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
         c.leave_running();
-        // DEC-205 — a task's submit-time bytes stay charged until it FINISHES.
-        if let Some(charge) = c.slot_charge.remove(&task_index) {
-            c.unfinished_bytes -= charge;
-        }
         // W7-26r — this thread is the only party that can observe the cap for a nursery whose parent
         // is blocked in the join (see `core::halt_over_backlog`). These slots live outside every
         // `Heap`, so `live_bytes` never counted them either: this is the accounting AND the

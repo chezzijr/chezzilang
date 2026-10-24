@@ -133,14 +133,9 @@ impl Vm {
             SpawnTarget::Nursery => self.register_task(task, span, pin, cell_ids, fresh),
             SpawnTarget::Scope { sched, settle } => {
                 let rw = self.prepare_worker(task, pin?, &cell_ids, fresh)?;
-                // W7-26r — the worker heap this start just built is owned by the starter until the
-                // task FINISHES (DEC-205). `own_bytes`, never `live_bytes`: the full walk counts
-                // `Arc`-shared payloads the starter already counts. Under a live cap only.
-                let charge = if self.heap.mem_cap() != 0 {
-                    rw.worker.heap.own_bytes()
-                } else {
-                    0
-                };
+                // W7-26r — M1.7: a job's rebuilt payload is objects of the run's one heap, which
+                // `live_bytes` counts already, so the starter is charged no worker heap of its own
+                // (the submit-time charge went with the per-task heap).
                 let mut fiber = rw.into_fiber(0, 0);
                 // Reserve the slot and claim the runners it needs in ONE core-lock hold. A scope
                 // whose join already closed it takes no new task: that is what makes a submit
@@ -151,7 +146,7 @@ impl Vm {
                         drop(c);
                         return self.refuse_job(settle, super::EXEC_SHUT_MSG);
                     }
-                    sched.reserve_job_slot(&mut c, &mut fiber, charge, settle);
+                    sched.reserve_job_slot(&mut c, &mut fiber, settle);
                     sched.claim_runners(&mut c)
                 };
                 // TICKET-230 — once another runner exists, main hands its permit over at slice
@@ -178,10 +173,10 @@ impl Vm {
                     return Err(self.err(super::EXEC_NO_RUNNER_MSG.to_string(), span));
                 }
                 sched.submit_job(fiber);
-                // W7-26, the sampling half — charge what this Executor retains, and the task just
-                // started, against this heap's GC pacing counter, so a live cap gets sampled.
+                // W7-26, the sampling half — charge what this Executor retains against the run's
+                // GC pacing counter, so a live cap gets sampled.
                 if self.heap.mem_cap() != 0 {
-                    self.heap.charge_bytes(sched.take_charge() + charge);
+                    self.heap.charge_bytes(sched.take_charge());
                 }
                 Ok(())
             }
@@ -306,8 +301,10 @@ impl Vm {
     /// A cached snapshot that is not `reusable` holds a mutable aggregate, which an in-place
     /// mutation (`q.push(1)`, `m[k] = v`, `p.x = 1`) changes with no module-slot write for
     /// `set_global_slot` / `module_define` to see. It is dropped when its `view` stamp is no longer
-    /// this heap's `(id, view_epoch)`: something a global reaches was handed out mutably since the
-    /// build (`Heap::get_mut`), or the snapshot was built from another heap. So a task sees its
+    /// this context's view stamp (`Heap::view_stamp`, `vm/heap_view.rs`): something a global reaches
+    /// was handed out mutably since the build (`Heap::get_mut`), or the snapshot was built in another
+    /// context (M1.7: every context of a run shares one heap, so the stamp names the view, not the
+    /// heap). So a task sees its
     /// globals as of its own start (Go: a goroutine sees the heap as of `go`), and a spawn storm
     /// that mutates nothing shares ONE snapshot (TICKET-213: one per spawn held 2000 copies of a
     /// 100000-item global at one worker). An all-immutable view keeps its one snapshot for the
@@ -320,7 +317,7 @@ impl Vm {
     pub(super) fn fresh_view(&mut self, span: Span) -> Result<Arc<ModuleSnapshot>, RuntimeError> {
         // TICKET-246 — a box context seats its OWN view from its caller before it snapshots.
         self.box_seat_view(span)?;
-        let now = (self.heap.id(), self.heap.view_epoch());
+        let now = self.heap.view_stamp();
         if self
             .snapshot_memo
             .as_ref()

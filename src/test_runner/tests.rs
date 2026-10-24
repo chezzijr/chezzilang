@@ -2296,10 +2296,9 @@ fn over_memory_buckets_across_spawn_on_both_engines() {
 
 #[test]
 fn over_memory_concurrent_under_cap_passes_on_both_engines() {
-    // The cap's guaranteed envelope on the low side: a CONCURRENT test whose tasks each stay well
-    // under a generous cap must PASS — no false trip. (The near-boundary aggregate
-    // case, where per-fiber allocation sums over the cap, is the documented per-heap divergence and
-    // is deliberately NOT asserted here — see `docs/design/roadmap.md §3b`.)
+    // The cap's guaranteed envelope on the low side: a CONCURRENT test whose tasks together stay
+    // well under a generous cap must PASS — no false trip. (M1.7: the cap is run-wide, so the
+    // aggregate over the cap trips: `max_heap_caps_the_run_not_each_task`.)
     let d = TmpDir::new();
     let f = d.write(
         "concpass_test.chz",
@@ -2322,6 +2321,46 @@ fn over_memory_concurrent_under_cap_passes_on_both_engines() {
         );
         assert!(report.text.contains("PASS t"), "report:\n{}", report.text);
     }
+}
+
+/// M1.7 — `--max-heap` caps the whole run: three tasks each hold about 4.2 MB, under a 10 MB cap
+/// alone, and all three are live at once (each waits on `go` until `gate` saw every `ready`). The
+/// sum is over the cap, so the test is OVER-MEMORY. With one heap per task each task was measured
+/// alone and the test passed.
+#[test]
+fn max_heap_caps_the_run_not_each_task() {
+    let d = TmpDir::new();
+    let f = d.write(
+        "runcap_test.chz",
+        "fn work(ready: Channel[int], go: Channel[int]) -> int:\n\
+            \x20   ys: List[int] = []\n\
+            \x20   for j in 0..300000:\n\
+            \x20       ys.push(j)\n\
+            \x20   ready.send(1)\n\
+            \x20   go.recv()\n\
+            \x20   return ys.len()\n\
+             fn gate(ready: Channel[int], go: Channel[int]) -> int:\n\
+            \x20   for _ in 0..3:\n\
+            \x20       ready.recv()\n\
+            \x20   for _ in 0..3:\n\
+            \x20       go.send(1)\n\
+            \x20   return 0\n\
+             test fn t():\n\
+            \x20   ready := Channel[int](3)\n\
+            \x20   go := Channel[int](3)\n\
+            \x20   parallel:\n\
+            \x20       spawn work(ready, go)\n\
+            \x20       spawn work(ready, go)\n\
+            \x20       spawn work(ready, go)\n\
+            \x20       spawn gate(ready, go)\n",
+    );
+    let report = run_tests_capped(&f, 10_000_000);
+    assert!(!report.passed, "report:\n{}", report.text);
+    assert!(
+        report.text.contains("OVER-MEMORY t"),
+        "three live 4.2 MB tasks must trip a 10 MB run-wide cap; report:\n{}",
+        report.text
+    );
 }
 
 #[test]

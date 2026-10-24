@@ -10,13 +10,14 @@ use super::core::{
     SharedCore, SocketCore, WriterCore,
 };
 use super::heap_core::{CopyLog, HeapCore, lock};
+use super::heap_view::ViewState;
 use super::value::{GcRef, Value};
 use super::wire::HashIndex;
 use crate::base::op::ProtoId;
 use crate::lexer::Span;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 /// A real hash table that *also* preserves insertion order. `entries` is the insertion-ordered
 /// store (so iteration, `keys()`, set equality, and GC tracing stay deterministic); `index` maps a
@@ -592,16 +593,15 @@ impl Obj {
 
 /// One object's OWNED BACKING in bytes (`Vec`/`Box` capacities), excluding the fixed
 /// `size_of::<Obj>()` slot cost that every live slot pays alike. The single sizing table for the
-/// heap: `bytes_in` (the `live_bytes`/`own_bytes` walk), `alloc` and `get_mut`'s settle all read it,
+/// heap: `bytes_with` (the `live_bytes` walk), `alloc` and `get_mut`'s settle all read it,
 /// so a new `Obj` variant is sized once instead of drifting between three copies.
 ///
 /// **Core arms deliberately score 0, and take NO lock.** A `Channel`/`Shared`/`RwShared`/`Atomic`/
 /// `Executor` payload lives in an `Arc` outside every heap and is already charged by
-/// `Vm::to_wire_crossable`; `bytes_in` adds its own once-per-`Arc` walk on top for the reachability
+/// `Vm::to_wire_crossable`; `bytes_with` adds its own once-per-`Arc` walk on top for the reachability
 /// question. Reaching `core.inner`/`core.q` from inside `get_mut` would re-take a lock the caller may
-/// already hold — `std::sync::Mutex` is not reentrant, and that exact self-deadlock (a job capturing
-/// its own executor: hang, rc=124, under a cap only) is why `Heap::own_bytes` exists. Do not add a
-/// core arm here.
+/// already hold — `std::sync::Mutex` is not reentrant (a job capturing its own executor hung, rc=124,
+/// under a cap only). Do not add a core arm here.
 fn obj_bytes_shallow(obj: &Obj) -> usize {
     match obj {
         Obj::Str(s) => s.as_str().len(),
@@ -639,9 +639,10 @@ fn obj_bytes_shallow(obj: &Obj) -> usize {
 }
 
 /// The object heap, as one `Vm` sees it: a handle on a [`HeapCore`] (`vm/heap_core.rs`), which holds
-/// the slots, the free list, the mark and copy bits and the shared counters. The handle keeps what
-/// is its own: a cache of free slots, the counters that pace its collection, its copy log and the
-/// TICKET-213 view state.
+/// the slots, the free list, the mark and copy bits and the shared counters. Every `Vm` of one run
+/// holds a handle on the run's one core (`Vm::spawn_worker`). The handle keeps what is its own: a
+/// cache of free slots, the counts it has not yet added to the core's trigger, its copy log and the
+/// live context's TICKET-213 view state.
 ///
 /// The collector itself (root tracing) lives on the VM, which owns the roots; the heap provides
 /// the slot-level primitives: [`mark`](Heap::mark), [`children`](Heap::children),
@@ -654,46 +655,40 @@ pub struct Heap {
     /// Free slots taken from the core in batches (`HeapCore::alloc_slot`), so `alloc` pops one
     /// without a lock. Given back to the core at [`sweep`](Heap::sweep) and on drop.
     free: Vec<u32>,
-    /// TICKET-213 — a side bitset marking every object the cached module snapshot of this heap's
-    /// view reaches (set by `Vm::ensure_snapshot`, through [`Heap::begin_view`] and
-    /// [`Heap::set_viewed`]). [`get_mut`](Heap::get_mut), the sole `&mut Obj` door, moves
-    /// `view_epoch` when it hands out a viewed object, so `Vm::fresh_view` can tell "something a
-    /// global reaches was mutated in place" from "nothing changed" without a slot write to hook.
-    /// `any_viewed` keeps a heap that never built a snapshot of an aggregate at one predictable
-    /// branch, like `HeapCore::is_copied`.
-    ///
-    /// The view state stays on the handle while the handle is per fiber (one per `Vm`); M1.7 moves
-    /// it into `FiberCtx` when the handle becomes per shell.
-    viewed: Vec<u64>,
-    any_viewed: bool,
-    /// TICKET-213 — moves at every `get_mut` of a viewed object and at every `begin_view`. A
-    /// snapshot is stamped with `(heap_id, view_epoch)` at its build and is current exactly while
-    /// both still match.
-    view_epoch: u64,
-    /// Allocations since the last collection — drives the growth-threshold trigger.
+    /// TICKET-213 — the live context's view (`vm/heap_view.rs`): the objects its cached module
+    /// snapshot reaches, set by `Vm::ensure_snapshot` through [`Heap::begin_view`] and
+    /// [`Heap::set_viewed`]. [`get_mut`](Heap::get_mut), the sole `&mut Obj` door, moves its epoch
+    /// when it hands out a viewed object, so `Vm::fresh_view` can tell "something a global reaches
+    /// was mutated in place" from "nothing changed" without a slot write to hook. `Vm::swap_ctx`
+    /// swaps it with the parked context's.
+    pub(super) view: ViewState,
+    /// Allocations not yet added to the core's run-wide count (`HeapCore::flush_allocs`): the
+    /// trigger is run-wide, and a handle adds its count at most every `FLUSH_EVERY` allocations.
     since_gc: usize,
     /// The `since_gc` count below which [`should_collect`](Heap::should_collect) answers `false`
-    /// without reading the core. A cache with one refresh point: `should_collect` sets it to the
-    /// core's `next_gc` when it reads the core with no `--max-heap` cap live. 0 means "read the
-    /// core at the next call": [`sweep`](Heap::sweep), [`request_collect`](Heap::request_collect)
-    /// and [`set_mem_cap`](Heap::set_mem_cap) set it to 0, since each can lower the answer. An
-    /// atomic because `should_collect` holds `&self` and `Heap` must be `Sync`; only the handle's
-    /// owner writes it.
-    gc_check_at: AtomicUsize,
+    /// without reading the core. A cache with one refresh point: `should_collect` sets it to what
+    /// is left of the core's `next_gc` (at most `FLUSH_EVERY`) when it reads the core with no
+    /// `--max-heap` cap live. 0 means "read the core at the next call": [`sweep`](Heap::sweep), a
+    /// collection another handle ran ([`observe_collection`](Heap::observe_collection)),
+    /// [`request_collect`](Heap::request_collect) and [`set_mem_cap`](Heap::set_mem_cap) set it to
+    /// 0, since each can lower the answer.
+    gc_check_at: usize,
     /// BYTES charged since the last collection — the `since_gc` sibling for growth that allocates
     /// (almost) no `Obj`s. A monotonic pacing **HINT**, never accounting: it only decides WHEN to
     /// sample, `live_bytes()` remains the sole measure of what is live (so a replacing store charges,
     /// and a `recv`/`pop` never decrements — under-triggering leaves the `--max-heap` guard failing
-    /// open, over-triggering just costs a sweep). Read by
-    /// [`should_collect`](Heap::should_collect) ONLY when `mem_cap != 0`, so cap-off pacing is
-    /// bit-for-bit the object-count trigger it has always been. An atomic because two of the three
-    /// charge points hold `&self` and a `RwShared` reader borrows the heap from another thread
-    /// (TICKET-246); only the heap's owner writes it, so a `Relaxed` load then store is enough.
+    /// open, over-triggering just costs a sweep). An atomic because two of the three charge points
+    /// hold `&self` and a `RwShared` reader borrows the heap from another thread (TICKET-246); only
+    /// the heap's owner writes it, so a `Relaxed` load then store is enough.
     ///
     /// Every byte a heap gains arrives one of exactly three ways, and each has exactly one funnel:
     /// a NEW object → [`alloc`](Heap::alloc); growth IN PLACE inside an existing one →
     /// [`get_mut`](Heap::get_mut) (see `pending_mut`); an off-heap wire payload →
-    /// `Vm::to_wire_crossable`. All three charge here.
+    /// `Vm::to_wire_crossable`. All three charge here under a live `--max-heap` cap. With the cap
+    /// off the first two charge too (M1.7; the wire charge stays cap-only): a task's garbage now
+    /// waits in the run's one heap for a collection, and a task's copy of a large global is ONE
+    /// object that the decoder fills through `get_mut`, so the object count alone let 2000 such
+    /// copies (1.6 GB, `benches/sched/storm.chz`) pile up before one sweep.
     ///
     /// It has to count BYTES and not events. Instructions, allocations and wire crossings are all
     /// proxies, and each has a shape that adds unbounded bytes without moving it: an instruction tick
@@ -704,8 +699,9 @@ pub struct Heap {
     /// The in-place-growth half of `since_gc_bytes`: the object handed out by the last
     /// [`get_mut`](Heap::get_mut) and its payload size AT THAT MOMENT. The next settle — the next
     /// `get_mut`, or [`should_collect`](Heap::should_collect) — re-measures the same object and
-    /// charges the difference. A `Mutex` because `should_collect` holds `&self` and `Heap` must be
-    /// `Sync` (TICKET-246); it is touched only under a live cap.
+    /// charges the difference. A plain field: every door that reads or writes it holds `&mut self`
+    /// (M1.7 made `should_collect` take `&mut`). Armed with the cap on or off (M1.7: see
+    /// `since_gc_bytes`).
     ///
     /// This is the door for byte growth that allocates NOTHING: `xs.push(i)` /
     /// `m[k] = v` / `s.insert(x)` / `ba.push(b)` / `big.extend(chunk)` all append into the `Vec` behind
@@ -731,13 +727,24 @@ pub struct Heap {
     ///
     /// Sound against a freed slot because `sweep()` — the only thing that frees, and so the only
     /// thing that can make `alloc` re-hand this slot to a different object — clears it.
-    pending_mut: Mutex<Option<(GcRef, usize)>>,
+    pending_mut: Option<(GcRef, usize)>,
     /// TICKET-246 — copy marks recorded for one box call (see `begin_copy_log`), and whether
     /// `set_copied` is recording now. The log is made and registered with the core at the first
     /// `begin_copy_log`, so `sweep` can drop a freed slot from it.
     copy_log: Option<CopyLog>,
     copy_logging: bool,
+    /// The objects this handle's last [`sweep`](Heap::sweep) freed that own an `Arc` core or a
+    /// file: their drop can make a syscall (a buffered writer's flush, a socket's close), so the
+    /// collector drops them after it releases the world (`Vm::gc_collect`), not inside the stop.
+    graveyard: Vec<Obj>,
 }
+
+/// How many allocations a handle counts before it adds them to the core's run-wide count.
+const FLUSH_EVERY: usize = 256;
+
+/// How many charged bytes a handle holds before its next boundary adds them to the run's count
+/// (`Heap::charge_own`): one allocation can carry megabytes.
+const FLUSH_BYTES: usize = 256 * 1024;
 
 /// TICKET-246 — a `RwShared` reader walks a box heap through `&Heap` while other readers do the
 /// same. A new `Cell` / `RefCell` in `Heap` or `Obj` must fail here, never be worked around with
@@ -755,6 +762,16 @@ impl Default for Heap {
 
 impl Drop for Heap {
     fn drop(&mut self) {
+        // A dropped handle's counts still pace the run (a task's payload `Vm` allocates its rebuilt
+        // arguments, fills them through `get_mut`, and is dropped before the task runs). The read
+        // cannot panic: a drop must not.
+        if let Some((h, before)) = self.pending_mut.take()
+            && let Some(obj) = self.core.get(h).obj.as_ref()
+        {
+            self.charge_bytes(obj_bytes_shallow(obj).saturating_sub(before));
+        }
+        self.core.flush_allocs(self.since_gc);
+        self.core.flush_bytes(*self.since_gc_bytes.get_mut());
         self.core.give_back(&mut self.free);
         if let Some(log) = &self.copy_log {
             self.core.unregister_copy_log(log);
@@ -772,15 +789,14 @@ impl Heap {
         Heap {
             core,
             free: Vec::new(),
-            viewed: Vec::new(),
-            any_viewed: false,
-            view_epoch: 0,
+            view: ViewState::default(),
             since_gc: 0,
-            gc_check_at: AtomicUsize::new(0),
+            gc_check_at: 0,
             since_gc_bytes: AtomicUsize::new(0),
-            pending_mut: Mutex::new(None),
+            pending_mut: None,
             copy_log: None,
             copy_logging: false,
+            graveyard: Vec::new(),
         }
     }
 
@@ -796,10 +812,14 @@ impl Heap {
     ///   of the fiber it runs, and every crossing copies (until M3);
     /// - a sweep ([`sweep`](Heap::sweep)) runs only while every other handle is stopped at a
     ///   safepoint or detached, through the run's `GcCoord` (`vm/gc_coord.rs`, `Vm::gc_collect`).
-    // The shared-core switch (`Vm::spawn_worker`) is its production caller.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) unsafe fn attach(&self) -> Heap {
         Heap::on(Arc::clone(&self.core))
+    }
+
+    /// Take the live context's view out of this handle, leaving a fresh one: a payload `Vm`'s
+    /// view moves into the context it builds (`ReadyWorker::into_fiber`, `Vm::box_new`).
+    pub(super) fn take_view(&mut self) -> ViewState {
+        std::mem::take(&mut self.view)
     }
 
     /// Whether this handle is its core's only one: a collection with no stop of the world is
@@ -848,72 +868,41 @@ impl Heap {
         }
     }
 
-    /// An O(1) upper estimate of this heap's bytes: the live bytes at the last sweep plus what
-    /// was charged since. `live_bytes()` scans every slot and is the exact measure.
-    pub fn approx_bytes(&self) -> usize {
-        self.core
-            .last_live_bytes()
-            .saturating_add(self.since_gc_bytes.load(Ordering::Relaxed))
-    }
-
     /// Test whether `h` is an airlock copy (see `HeapCore::is_copied`).
     #[inline]
     pub fn is_copied(&self, h: GcRef) -> bool {
         self.core.is_copied(h.0 as usize)
     }
 
-    /// This heap's identity: its core's (see `HeapCore::id`). It names the core, so the TICKET-213
-    /// view stamp `(id, view_epoch)` is unique only while one handle exists per core; M1.7 must
-    /// give the stamp a per-fiber id when the view state moves to `FiberCtx`.
+    /// This heap's identity: its core's (see `HeapCore::id`), shared by every handle of the run.
+    /// The TICKET-213 view stamp is per context instead ([`view_stamp`](Heap::view_stamp)).
     #[inline]
     pub fn id(&self) -> u64 {
         self.core.id()
     }
 
     /// TICKET-213 — start marking a new view: forget the previous view's objects and move the
-    /// epoch, so a snapshot stamped by any earlier marking of this heap stops being current (two
-    /// parties that share one heap each rebuild rather than trust the other's marks).
+    /// epoch, so a snapshot stamped by any earlier marking of this view stops being current.
     pub fn begin_view(&mut self) {
-        self.viewed.fill(0);
-        self.any_viewed = false;
-        self.view_epoch += 1;
+        self.view.begin();
     }
 
     /// TICKET-213 — mark `h` as reached by the view being built. Returns `false` when it was
     /// already marked in this view (the walk's visited test).
     pub fn set_viewed(&mut self, h: GcRef) -> bool {
-        let i = h.0 as usize;
-        if self.viewed.len() <= i >> 6 {
-            self.viewed.resize((i >> 6) + 1, 0);
-        }
-        let bit = 1u64 << (i & 63);
-        let fresh = self.viewed[i >> 6] & bit == 0;
-        self.viewed[i >> 6] |= bit;
-        self.any_viewed = true;
-        fresh
+        self.view.set(h.0 as usize)
     }
 
+    /// TICKET-213 — the live context's view stamp `(view id, epoch)` (see `vm/heap_view.rs`).
     #[inline]
-    fn is_viewed(&self, i: usize) -> bool {
-        self.viewed
-            .get(i >> 6)
-            .is_some_and(|w| (w >> (i & 63)) & 1 == 1)
+    pub fn view_stamp(&self) -> (u64, u64) {
+        self.view.stamp()
     }
 
-    /// Clear the viewed bit for slot `i` — a reused slot must not inherit a stale mark.
-    #[inline]
-    fn clear_viewed(&mut self, i: usize) {
-        if self.any_viewed
-            && let Some(w) = self.viewed.get_mut(i >> 6)
-        {
-            *w &= !(1u64 << (i & 63));
-        }
-    }
-
-    /// TICKET-213 — the half of a snapshot's stamp that moves: see the `view_epoch` field.
+    /// TICKET-213 — the half of a snapshot's stamp that moves.
     #[inline]
     pub fn view_epoch(&self) -> u64 {
-        self.view_epoch
+        self.view.epoch()
     }
 
     /// D4 (TICKET-240): unmark one object the crossing site built, which no parent binding can
@@ -930,17 +919,16 @@ impl Heap {
         // Byte funnel 1 of 3 (see `since_gc_bytes`): the only constructor. `since_gc` alone paces
         // MANY-small-object growth; this paces FEW-huge-object growth, which it cannot see —
         // `"x".repeat(20000000)` is one allocation carrying 20 MB, and `s = s + s` ×22 is 22 of them
-        // carrying 41 MB, both well under the 256-object threshold.
-        if self.core.mem_cap() != 0 {
-            self.charge_bytes(obj_bytes_shallow(&obj));
-        }
+        // carrying 41 MB, both well under the 256-object threshold. M1.7: charged with the cap off
+        // too (see `since_gc_bytes`).
+        self.charge_own(obj_bytes_shallow(&obj));
         let h = match self.free.pop() {
             // SAFETY: `idx` is from this handle's own free cache, which `alloc_slot` filled.
             Some(idx) => unsafe { self.core.reuse(idx, obj) },
             None => self.core.alloc_slot(&mut self.free, obj),
         };
         // A reused slot must not inherit a stale view mark (a new slot has none).
-        self.clear_viewed(h.0 as usize);
+        self.view.clear(h.0 as usize);
         h
     }
 
@@ -957,20 +945,12 @@ impl Heap {
     pub fn get_mut(&mut self, h: GcRef) -> &mut Obj {
         // Byte funnel 2 of 3 (see `since_gc_bytes` / `pending_mut`): the sole `&mut Obj` door, and so
         // the sole door for growth INSIDE an existing object. Settle whatever the previous `get_mut`
-        // handed out, then arm this one.
-        if self.core.mem_cap() != 0 {
-            self.settle_pending_mut();
-            let armed = Some((h, obj_bytes_shallow(self.get(h))));
-            *self
-                .pending_mut
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner()) = armed;
-        }
+        // handed out, then arm this one. M1.7: with the cap off too (see `since_gc_bytes`).
+        self.settle_pending_mut();
+        self.pending_mut = Some((h, obj_bytes_shallow(self.get(h))));
         // TICKET-213 — the same sole-door argument decides view freshness: a `&mut` to an object
         // the cached module snapshot reaches is the only way that view can change in place.
-        if self.any_viewed && self.is_viewed(h.0 as usize) {
-            self.view_epoch += 1;
-        }
+        self.view.touch(h.0 as usize);
         // SAFETY: `&mut self` excludes this handle's other references, and `attach`'s contract
         // keeps every other handle off an object this handle's fiber owns.
         unsafe { self.core.slot_mut(h) }
@@ -981,17 +961,25 @@ impl Heap {
 
     /// Charge the growth of the object the last [`get_mut`](Heap::get_mut) handed out, and disarm.
     /// A SHRINK charges 0 — monotonic, exactly like the wire counter (`live_bytes()` is what
-    /// measures; this only decides when to look).
+    /// measures; this only decides when to look). M1.7: `Vm::swap_ctx` settles at every context
+    /// switch, so a handle never keeps a record of an object another thread may write.
     #[inline]
-    fn settle_pending_mut(&self) {
-        let pending = self
-            .pending_mut
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some((h, before)) = pending {
+    pub(super) fn settle_pending_mut(&mut self) {
+        if let Some((h, before)) = self.pending_mut.take() {
             let now = obj_bytes_shallow(self.get(h));
-            self.charge_bytes(now.saturating_sub(before));
+            self.charge_own(now.saturating_sub(before));
+        }
+    }
+
+    /// [`charge_bytes`](Heap::charge_bytes) for a door that holds `&mut self` (no atomic access).
+    /// Once this handle holds `FLUSH_BYTES` charged bytes, it empties its cached object threshold,
+    /// so its next boundary adds them to the run's count and reads the byte goal.
+    #[inline(always)]
+    fn charge_own(&mut self, n: usize) {
+        let held = self.since_gc_bytes.get_mut();
+        *held = held.saturating_add(n);
+        if *held >= FLUSH_BYTES {
+            self.gc_check_at = 0;
         }
     }
 
@@ -1018,10 +1006,17 @@ impl Heap {
             .store(charged.saturating_add(n), Ordering::Relaxed);
     }
 
-    /// How many charged bytes force a sweep under a live cap: a quarter of the cap bounds the
-    /// overshoot between samples, and the 64 KB floor stops a tiny cap from GC-ing per store.
+    /// How many charged bytes force a sweep. Under a live cap: a quarter of the cap bounds the
+    /// overshoot between samples, and the 64 KB floor stops a tiny cap from GC-ing per store. With
+    /// the cap off (M1.7, the shape of Go's GOGC=100 goal): the live bytes of the last sweep, at
+    /// least 16 MiB. Measured on `benches/sched/storm.chz` (2000 tasks, each one 800 KB copy, four
+    /// threads): a 4 MiB floor took 230 stops and +4.5% wall time against base, 16 MiB 84 stops
+    /// and +1.5%.
     fn bytes_gc_threshold(&self) -> usize {
-        (self.core.mem_cap() / 4).max(64 * 1024)
+        match self.core.mem_cap() {
+            0 => self.core.last_live_bytes().max(16 << 20),
+            cap => (cap / 4).max(64 * 1024),
+        }
     }
 
     /// Whether enough has been allocated since the last collection to warrant one.
@@ -1035,23 +1030,47 @@ impl Heap {
     /// wire one: see `since_gc_bytes`. The settle here is what makes `get_mut`'s deferred charge
     /// exact at an instruction boundary, which is the only place the cap is read.
     ///
-    /// Gated on `mem_cap != 0`: with no cap `over_cap` is meaningless anyway, and pacing stays
-    /// bit-for-bit the object-count trigger it has always been.
+    /// M1.7 — the trigger is run-wide: this handle adds its counts to the core's
+    /// (`HeapCore::flush_allocs` / `flush_bytes`) and compares the run's totals since the last
+    /// collection with `next_gc` and the byte threshold (`Heap::bytes_gc_threshold`). With the cap
+    /// off the bytes (`alloc` and `get_mut` growth) are read each time the cached object threshold
+    /// is reached, at most `FLUSH_EVERY` allocations apart, and at the next boundary after this
+    /// handle charged `FLUSH_BYTES`.
     #[inline]
-    pub fn should_collect(&self) -> bool {
-        if self.since_gc < self.gc_check_at.load(Ordering::Relaxed) {
+    pub fn should_collect(&mut self) -> bool {
+        if self.since_gc < self.gc_check_at {
             return false;
         }
+        self.should_collect_slow()
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn should_collect_slow(&mut self) -> bool {
+        let allocs = self.core.flush_allocs(std::mem::take(&mut self.since_gc));
         let next_gc = self.core.next_gc();
-        if self.since_gc >= next_gc {
+        self.settle_pending_mut();
+        let bytes = self
+            .core
+            .flush_bytes(std::mem::take(self.since_gc_bytes.get_mut()));
+        if allocs >= next_gc || bytes >= self.bytes_gc_threshold() {
+            self.gc_check_at = 0;
             return true;
         }
         if self.core.mem_cap() == 0 {
-            self.gc_check_at.store(next_gc, Ordering::Relaxed);
-            return false;
+            self.gc_check_at = (next_gc - allocs).min(FLUSH_EVERY);
         }
-        self.settle_pending_mut();
-        self.since_gc_bytes.load(Ordering::Relaxed) >= self.bytes_gc_threshold()
+        false
+    }
+
+    /// Another handle's collection ran while this one was stopped or detached: zero the counts it
+    /// already fed and the cache it read, and disarm `get_mut`'s record, whose slot that sweep can
+    /// have freed (a settle would then read a dead slot).
+    pub(super) fn observe_collection(&mut self) {
+        self.since_gc = 0;
+        self.gc_check_at = 0;
+        *self.since_gc_bytes.get_mut() = 0;
+        self.pending_mut = None;
     }
 
     /// W6-10s — force the next [`should_collect`](Heap::should_collect), so a heap that was HANDED a
@@ -1066,7 +1085,7 @@ impl Heap {
     /// `Vm::sample_mem_cap` in `Vm::start_task` — see the note in `Vm::spawn_worker`.
     pub fn request_collect(&mut self) {
         self.core.request_collect();
-        *self.gc_check_at.get_mut() = 0;
+        self.gc_check_at = 0;
     }
 
     /// Mark one object reachable. Returns `true` if it was *newly* marked (caller should then
@@ -1154,11 +1173,11 @@ impl Heap {
                 }
                 crate::vm::core::drain_pending_cores(&mut out, &mut seen, &mut pending);
             }
-            // TICKET-246 — a `Shared` holds no handle into THIS heap: its value lives in the box's
-            // own heap, rooted there. Nothing to trace, and no lock (the state lock is held
-            // across user code, where a collection can start).
-            Obj::Shared(_) => {}
-            Obj::RwShared(_) => {}
+            // M1.7 — a box's state is objects of this one heap: trace the parked context. The
+            // walk only tries the state lock (it is held across user code, where a collection can
+            // start; `core::SharedState::roots_into`).
+            Obj::Shared(core) => core.state.roots_into(&mut out),
+            Obj::RwShared(core) => core.state.roots_into(&mut out),
             Obj::Atomic(core) => {
                 let (mut seen, mut pending) = {
                     let g = core.v.lock().unwrap();
@@ -1257,79 +1276,43 @@ impl Heap {
         self.core.give_back(&mut self.free);
         // SAFETY: the collector protocol of `attach`: `Vm::gc_collect` sweeps with every other
         // handle stopped or detached, or with this handle the core's only one.
-        unsafe { self.core.sweep_slots() };
+        unsafe { self.core.sweep_slots(&mut self.graveyard) };
         self.since_gc = 0;
-        *self.gc_check_at.get_mut() = 0;
+        self.gc_check_at = 0;
         *self.since_gc_bytes.get_mut() = 0;
         // Drop the armed `get_mut` record: this is the ONLY thing that frees a slot, so it is also
         // the only thing that could leave the record pointing at a slot `alloc` then re-hands to a
         // different object. Clearing it here is what makes the settle sound.
-        *self
-            .pending_mut
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        self.pending_mut = None;
         let lb = self.live_bytes();
         self.core.record_live_bytes(lb);
+    }
+
+    /// The objects the last sweep freed whose drop the collector runs after the world restarts
+    /// (see `graveyard`).
+    pub(super) fn take_graveyard(&mut self) -> Vec<Obj> {
+        std::mem::take(&mut self.graveyard)
     }
 
     /// Approximate live heap footprint in bytes: each live slot's `Obj` plus the owned backing
     /// storage (Vec/Box capacities) of the container variants. For the Phase-1 8B-`Value` memory
     /// gate — not precise allocator accounting (Map/Set count entries backing only, not the index),
-    /// but stable enough to compare before/after on a fixed workload.
+    /// but stable enough to compare before/after on a fixed workload. M1.7: the walk covers the
+    /// run's one heap, so this is the whole run's live footprint (`--max-heap` caps it).
     pub fn live_bytes(&self) -> usize {
-        self.bytes_in(true)
-    }
-
-    /// W7-26r sibling — this heap's OWN allocation: [`live_bytes`](Heap::live_bytes) minus every
-    /// `Arc`-shared core payload. Used to charge a queued job's freshly built worker heap to its
-    /// submitter, where the full walk would be wrong twice over.
-    ///
-    /// **Aliasing.** A `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` crosses the airlock as a
-    /// SHARED `Arc`, not a copy — so a captured `Shared` holding 1 MB is one allocation that the
-    /// submitter's own `live_bytes` already counts. Charging it again per queued job made 60 jobs
-    /// report 60 MB against a true 3.8 MB (a false OVER-MEMORY at a 20 MB cap; found by adversarial
-    /// review). What a submit really ADDS is the deep-copied plain data, which is exactly what this
-    /// counts.
-    ///
-    /// **Locks.** Taking none is also what makes this callable from the submit path at all: the core
-    /// arms of the full walk take `core.inner` / `core.q`, and `Vm::executor_method` reaches this
-    /// while holding `core.inner` — `std::sync::Mutex` is not reentrant, so a job capturing its own
-    /// executor self-deadlocked (measured: hang, rc=124, under a cap only). The call site is off the
-    /// lock now as well; this is the belt to that braces.
-    pub fn own_bytes(&self) -> usize {
-        self.bytes_in(false)
-    }
-
-    /// TICKET-125 — the in-heap half of the provable-leaf handle count: how many of `slots` hold
-    /// `Some(Obj::Channel(a))` with `Arc::ptr_eq(a, core)`. Counts UNSWEPT GARBAGE slots too (no mark
-    /// check) — counting garbage too can only make a leaf LESS provable, never more, so it is safe on
-    /// the side that matters (an over-count of holders only declines to fault, never faults wrongly).
-    pub fn channel_handles(&self, core: &Arc<ChannelCore>) -> usize {
-        self.core
-            .iter()
-            .filter(|s| matches!(&s.obj, Some(Obj::Channel(a)) if Arc::ptr_eq(a, core)))
-            .count()
-    }
-
-    /// The shared body of [`live_bytes`](Heap::live_bytes) / [`own_bytes`](Heap::own_bytes):
-    /// `include_cores` decides whether an `Arc`-shared core's payload is charged to this heap (the
-    /// reachability question) or skipped entirely (the "what does this heap itself own" question).
-    fn bytes_in(&self, include_cores: bool) -> usize {
         let mut cores: super::fxhash::FxHashSet<usize> = Default::default();
         let mut pending = Vec::new();
-        let own = self.bytes_with(include_cores, &mut cores, &mut pending);
+        let own = self.bytes_with(&mut cores, &mut pending);
         // Every guard `bytes_with` took is dropped by now: the drain locks one nested core at a
         // time (`core::drain_pending_core_bytes`).
         own + crate::vm::core::drain_pending_core_bytes(&mut cores, &mut pending)
     }
 
-    /// The slot walk of [`bytes_in`](Heap::bytes_in), for this heap or for a box heap met by the
-    /// drain. It shares the caller's `cores` set, so a core is charged once however it is met, and
-    /// it QUEUES every nested core into `pending` instead of draining: the caller drains, after
-    /// this walk's guards are gone.
-    pub(super) fn bytes_with(
+    /// The slot walk of [`live_bytes`](Heap::live_bytes). It charges each core once (the `cores`
+    /// set), and it QUEUES every nested core into `pending` instead of draining: the caller drains,
+    /// after this walk's guards are gone.
+    fn bytes_with(
         &self,
-        include_cores: bool,
         cores: &mut super::fxhash::FxHashSet<usize>,
         pending: &mut Vec<super::wire::WireValue>,
     ) -> usize {
@@ -1370,7 +1353,7 @@ impl Heap {
                 // W6-10r — under a cap the charge also RECURSES into the cores nested in this one's
                 // payload, sharing the same `cores` set so a nested core that *also* has an alias
                 // slot here is still charged exactly once, whichever way it is met first.
-                Obj::Channel(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
+                Obj::Channel(core) if cores.insert(Arc::as_ptr(core) as usize) => {
                     // Guard SCOPED, drain AFTER — same rule as `children`'s arms: holding this
                     // core's guard while the drain locks a nested one is the ABBA window that
                     // hung `--max-heap` on a cyclic core graph (`core::drain_pending_core_bytes`).
@@ -1408,9 +1391,7 @@ impl Heap {
                 // Rooting is deliberately NOT mirrored: a job's return value crossed by value with
                 // no parent-heap `GcRef` (B3.2, enforced by `ensure_crossable` and fenced by a
                 // `debug_assert` in `outcome_summary`), which is why `children` has no `eager` arm.
-                Obj::Executor(core)
-                    if include_cores && cores.insert(Arc::as_ptr(core) as usize) =>
-                {
+                Obj::Executor(core) if cores.insert(Arc::as_ptr(core) as usize) => {
                     let queued = {
                         let g = core.inner.lock().unwrap();
                         if deep {
@@ -1431,30 +1412,7 @@ impl Heap {
                     // job finishes, TICKET-205). One facade, `ExecutorCore::held_bytes`.
                     queued + core.held_bytes()
                 }
-                // TICKET-246 — the box's values live in its own heap. With no cap this is one
-                // atomic read; under a cap the box heap is walked (`core::box_bytes`), because a
-                // core held only inside the box grows without the box being written.
-                Obj::Shared(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
-                    if deep {
-                        let g = core.state.0.try_lock().ok();
-                        let ctx = g.as_ref().and_then(|g| g.as_deref());
-                        crate::vm::core::box_bytes(ctx, &core.bytes, cores, pending)
-                    } else {
-                        core.bytes.load(Ordering::Relaxed)
-                    }
-                }
-                Obj::RwShared(core)
-                    if include_cores && cores.insert(Arc::as_ptr(core) as usize) =>
-                {
-                    if deep {
-                        let g = core.state.try_read();
-                        let ctx = g.as_ref().and_then(|g| g.as_deref());
-                        crate::vm::core::box_bytes(ctx, &core.bytes, cores, pending)
-                    } else {
-                        core.bytes.load(Ordering::Relaxed)
-                    }
-                }
-                Obj::Atomic(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
+                Obj::Atomic(core) if cores.insert(Arc::as_ptr(core) as usize) => {
                     if deep {
                         // Guard scoped, drain after (see the `Obj::Channel` arm above).
                         {
@@ -1472,8 +1430,9 @@ impl Heap {
                 }
                 // Every non-core variant — the plain owned backing, sized in ONE place so a new
                 // `Obj` variant cannot be counted here and forgotten at the `alloc`/`get_mut`
-                // charges. A core arm whose guard above failed (already counted for this heap, or
-                // `include_cores == false`) lands here too and correctly scores 0.
+                // charges. A core arm whose guard above failed (already counted for this heap)
+                // lands here too and correctly scores 0. M1.7: a `Shared` / `RwShared` box scores
+                // 0 here as well: its state is objects of this one heap, which this walk counts.
                 other @ Obj::Str(_)
                 | other @ Obj::Bytes(_)
                 | other @ Obj::ByteArray(_)
@@ -1519,16 +1478,13 @@ impl Heap {
     /// prior `over_cap` latch so a new test starts clean.
     pub fn set_mem_cap(&mut self, cap: usize) {
         self.core.set_mem_cap(cap);
-        *self.gc_check_at.get_mut() = 0;
+        self.gc_check_at = 0;
         // Disarm `get_mut`'s pending record along with the cap. Cap-off never arms it, so a
         // cap→0→cap toggle is the one way a record could outlive the `sweep()` that freed its slot
         // and be settled against a slot `alloc` re-handed to a different object. Production sets the
         // cap exactly once per `Vm`, so this is belt-and-braces — but it makes the settle's soundness
         // a local property of this file instead of an argument about every caller.
-        *self
-            .pending_mut
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        self.pending_mut = None;
     }
 
     /// The configured `--max-heap` cap in bytes (`0` = OFF) — for the abort message.
@@ -1875,10 +1831,14 @@ mod iter_obj_tests {
     /// off-heap growth can overshoot; `sweep()` must reset the counter like `since_gc`.
     #[test]
     fn wire_bytes_pace_a_sweep_only_under_a_cap() {
-        // (a) cap OFF: any amount of charged off-heap growth must NOT force a collection.
-        let h = Heap::new();
-        h.charge_bytes(64 * 1024 * 1024);
-        assert!(!h.should_collect(), "cap-off pacing must ignore wire bytes");
+        // (a) cap OFF: production charges no wire bytes (`Vm::charge_wire` is gated on the cap);
+        // a charge below the cap-off byte goal (16 MiB with nothing live) does not collect.
+        let mut h = Heap::new();
+        h.charge_bytes(1024 * 1024);
+        assert!(
+            !h.should_collect(),
+            "1 MiB is under the 16 MiB cap-off goal"
+        );
 
         // (b) cap ON: sub-threshold does not collect, threshold does. cap/4 = 2 MB here.
         let mut h = Heap::new();
@@ -1914,19 +1874,27 @@ mod iter_obj_tests {
     fn alloc_and_in_place_growth_pace_a_sweep_only_under_a_cap() {
         let big = |n: usize| Obj::List(Vec::with_capacity(n));
 
-        // (a) cap OFF must charge NOTHING — and this phase can actually FAIL: it does the growth
-        // cap-off, THEN turns the cap on. A charge that leaked past the `mem_cap` gate would have
-        // banked > cap/4 already and the very next `should_collect` would fire.
+        // (a) M1.7 — cap OFF, both funnels pace by bytes against the cap-off goal (the last
+        // sweep's live bytes, at least 16 MiB): one 20 MB object collects, though it is one
+        // object, and so does a 20 MB in-place growth of a small one (the wire decoder fills a
+        // copy that way). Below the goal neither collects. A charge of `FLUSH_BYTES` or more
+        // empties the handle's cached object threshold, so the next call reads the bytes.
         let mut h = Heap::new();
-        let r = h.alloc(big(1_000_000)); // 8 MB of backing, cap off
-        if let Obj::List(v) = h.get_mut(r) {
-            v.extend((0..1_000_000).map(Value::int)); // in-place bulk growth, cap off
-        }
-        assert!(!h.should_collect(), "cap-off pacing must ignore bytes");
-        h.set_mem_cap(8_000_000); // cap/4 = 2 MB
+        h.alloc(big(1_000_000)); // 8 MB of backing
+        assert!(!h.should_collect(), "8 MB is under the 16 MiB cap-off goal");
+        h.alloc(big(2_500_000)); // +20 MB
         assert!(
-            !h.should_collect(),
-            "cap-off calls must have accumulated nothing"
+            h.should_collect(),
+            "a 20 MB allocation passes the cap-off goal"
+        );
+        let mut h = Heap::new();
+        let r = h.alloc(big(1_000)); // 8 KB of backing
+        if let Obj::List(v) = h.get_mut(r) {
+            v.extend((0..2_500_000).map(Value::int)); // in-place bulk growth, cap off
+        }
+        assert!(
+            h.should_collect(),
+            "20 MB of in-place growth passes the cap-off goal"
         );
 
         // (b) cap ON, funnel 1 — `alloc` charges the new object's own backing. Sub-threshold does
@@ -2407,20 +2375,6 @@ mod tests {
             sc.spawn(|| shared.charge_bytes(2));
         });
         assert_eq!(shared.since_gc_bytes.load(Ordering::Relaxed), 42);
-    }
-
-    /// TICKET-125 — `channel_handles` counts every slot holding the given core, by `Arc` pointer
-    /// identity, and none holding a different core.
-    #[test]
-    fn channel_handles_counts_every_slot_holding_the_core() {
-        let mut h = Heap::new();
-        let a = Arc::new(ChannelCore::default());
-        let b = Arc::new(ChannelCore::default());
-        h.alloc(Obj::Channel(Arc::clone(&a)));
-        h.alloc(Obj::Channel(Arc::clone(&a)));
-        h.alloc(Obj::Channel(Arc::clone(&b)));
-        assert_eq!(h.channel_handles(&a), 2);
-        assert_eq!(h.channel_handles(&b), 1);
     }
 
     /// W8-22: a swept slot's stamped span must not leak to whatever `alloc` reuses the index for.

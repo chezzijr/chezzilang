@@ -45,8 +45,8 @@ FLAGS:
                      is stdout's FIRST line, followed by the program's own output
     --parallel       Accepted no-op alias (`run` only) — the engine is the default already
     --threads=N      Worker threads for the engine (0 = all cores; env: CHEZZI_THREADS)
-    --max-heap=N     (`test`) Hard-abort any test whose live heap exceeds N bytes — a runaway-alloc
-                     guard, bucketed OVER-MEMORY (0/omitted = off)
+    --max-heap=N     (`test`) Hard-abort any test whose live heap (all its tasks together) exceeds
+                     N bytes — a runaway-alloc guard, bucketed OVER-MEMORY (0/omitted = off)
     --timeout=N      (`test`) Hard-abort any test running longer than N ms — a wall-clock guard,
                      bucketed TIMED-OUT (0/omitted = off)
 

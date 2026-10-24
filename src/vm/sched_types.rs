@@ -103,15 +103,14 @@ pub(super) struct FiberCtx {
     pub(super) eager_scheds: Vec<Option<EagerScope>>,
     pub(super) fault_trace: Option<Vec<TraceFrame>>,
     pub(super) fault_trace_depth: usize,
-    /// D2a — an M:N fiber carries its OWN heap (share-nothing): `swap_ctx` swaps it with the host
-    /// `Vm::heap` when this fiber schedules in, and back out when it parks. `None` for a fiber with
-    /// no heap of its own, which aliases the single `Vm::heap` instead (decision A — share-by-ref),
-    /// so its swap leaves the heap untouched. No production path builds a `None` fiber today
-    /// ([`Vm::into_fiber`] always passes `Some(worker.heap)`); only tests do.
-    pub(super) heap: Option<Heap>,
+    /// TICKET-213 / M1.7 — this context's view stamp state (`vm/heap_view.rs`). Every context of a
+    /// run shares one heap, so the view, and not the heap, names the snapshot a context built.
+    /// [`Vm::swap_ctx`] swaps it with the live `Heap::view`, like the module view it describes.
+    pub(super) view: super::heap_view::ViewState,
     /// M1.6 — this context owns its own per-fiber side state (`executors`, `str_intern`,
     /// `fn_values` and the in-flight socket-op state below), so [`Vm::swap_ctx`] swaps it. `false`
-    /// for a context that aliases the shell's. Until M1.7 deletes `heap`, it equals `heap.is_some()`.
+    /// for a context that aliases the shell's (tests only: every fiber and box context owns its
+    /// side state).
     pub(super) owns_side: bool,
     /// D2b — per-task output buffers (Decision F: each task's stdout/stderr flushes in task order at
     /// join, never interleaved live). A task owns its output stream, so only a task switch
@@ -120,8 +119,8 @@ pub(super) struct FiberCtx {
     pub(super) out: Vec<u8>,
     pub(super) stderr: Vec<u8>,
     /// D2b / Task 1 — the fiber's module-namespace objects + lazy-fault flags (D1). Each is a `GcRef`
-    /// into the fiber's OWN heap (travels via `heap` above), so a spawned task mutates its private copy
-    /// of every module global. These roots swap per-fiber (`swap_ctx` swaps them UNCONDITIONALLY).
+    /// to the fiber's OWN copy (every crossing copies until M3), so a spawned task mutates its private
+    /// copy of every module global. These roots swap per-fiber (`swap_ctx` swaps them UNCONDITIONALLY).
     pub(super) module_objs: Vec<GcRef>,
     pub(super) module_faulted: Vec<bool>,
     /// W6-2 — the snapshot this fiber's `module_objs` fault in from, and the cache of the snapshot of
@@ -132,11 +131,10 @@ pub(super) struct FiberCtx {
     pub(super) module_snapshot: Option<Arc<ModuleSnapshot>>,
     pub(super) snapshot_memo: Option<Arc<ModuleSnapshot>>,
     /// W7-4a — the fiber's snapshot rebuild map (see [`Vm::snapshot_rebuild`]). UNLIKE the two above
-    /// it IS heap-keyed. A fiber's own heap is never traced while parked, and its map travels with the
-    /// heap here.
+    /// it holds `GcRef`s: the registry walk roots them while the fiber is parked.
     pub(super) snapshot_rebuild: fxhash::FxHashMap<u32, GcRef>,
-    /// W7-4c — the fiber's snapshot cell registry (see [`Vm::snapshot_cells`]). Heap-keyed like
-    /// `snapshot_rebuild`, and travels with the heap for the same reason.
+    /// W7-4c — the fiber's snapshot cell registry (see [`Vm::snapshot_cells`]). It holds `GcRef`s like
+    /// `snapshot_rebuild`, and travels with the fiber for the same reason.
     ///
     /// `snapshot_next_id` travels WITH it, and must: the "ids are monotonic, so a stale one MISSES"
     /// guarantee is only true while the counter is at least as high as every id in the registry. Every
@@ -144,19 +142,19 @@ pub(super) struct FiberCtx {
     /// scopes, so a registry numbered on shell A resuming on shell B would mint ids that COLLIDE with
     /// its own entries — two unrelated bindings merged into one cell, silently.
     pub(super) snapshot_cells: Arc<fxhash::FxHashMap<GcRef, u32>>,
-    /// TICKET-111 — the fiber's snapshot node registry (see [`Vm::snapshot_nodes`]). Heap-keyed and
-    /// travels with the heap, for the same reason as `snapshot_cells`.
+    /// TICKET-111 — the fiber's snapshot node registry (see [`Vm::snapshot_nodes`]). It holds `GcRef`s
+    /// and travels with the fiber, for the same reason as `snapshot_cells`.
     pub(super) snapshot_nodes: Arc<fxhash::FxHashMap<GcRef, u32>>,
-    /// TICKET-111 — the fiber's pending adoption captures (see [`Vm::snapshot_adopt`]). Heap-keyed
-    /// (its values are `GcRef`s into the heap the fiber owns) and travels with the heap for the same
-    /// reason as `snapshot_rebuild`. `adopt_active` is NOT here — it is true only for the duration of
+    /// TICKET-111 — the fiber's pending adoption captures (see [`Vm::snapshot_adopt`]). Its values are
+    /// `GcRef`s to the fiber's own copies, and it travels with the fiber for the same reason as
+    /// `snapshot_rebuild`. `adopt_active` is NOT here — it is true only for the duration of
     /// one `fault_module` call on the currently-running view, never a state a parked fiber holds.
     pub(super) snapshot_adopt: fxhash::FxHashMap<u32, GcRef>,
     pub(super) snapshot_next_id: u32,
-    /// D2b — the fiber's `Executor` handles (GC roots into its own heap). Per fiber: swapped by
+    /// D2b — the fiber's `Executor` handles (GC roots). Per fiber: swapped by
     /// [`Vm::swap_ctx`] when `owns_side`. Empty for a context that does not own side state.
     pub(super) executors: Vec<GcRef>,
-    /// M19 Phase 3 — the fiber's `ConstStr` intern cache (GC roots into its own heap). Per fiber:
+    /// M19 Phase 3 — the fiber's `ConstStr` intern cache (GC roots). Per fiber:
     /// swapped by [`Vm::swap_ctx`] when `owns_side`. Empty for a context that does not own side
     /// state (it aliases the shell's cache).
     pub(super) str_intern: fxhash::FxHashMap<usize, GcRef>,
@@ -289,12 +287,9 @@ pub(super) fn open_nurseries(
     })
 }
 
-// D2a — a `Fiber` now carries its own `Heap` (via `FiberCtx::heap`), and D2b parks fibers across
-// worker threads (parked on one worker, requeued by a `send` on another, resumed on a third). That
-// requires `Fiber: Send`. `Heap` is already `Send` (a plain `Vec` of `Obj`, no `Rc`/`RefCell`; a
-// whole `Vm`/`Heap` already crosses the pool boundary via `ReadyWorker`), so this holds today — the
-// guard makes a future non-`Send` field on `Fiber`/`FiberCtx` a loud compile error, not a D2b
-// surprise.
+// D2b parks fibers across worker threads (parked on one worker, requeued by a `send` on another,
+// resumed on a third). That requires `Fiber: Send`; the guard makes a future non-`Send` field on
+// `Fiber`/`FiberCtx` a loud compile error, not a D2b surprise.
 const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<Fiber>();
@@ -398,11 +393,12 @@ pub(super) struct ModuleSnapshot {
     /// ([`Vm::fresh_view`]). A WHITELIST, so a future `Obj` variant defaults to "check the stamp"
     /// (slower, never unsound).
     pub(super) reusable: bool,
-    /// TICKET-213 — the stamp of the build: `(Heap::id, Heap::view_epoch)` of the heap it was read
-    /// from, taken after every object the globals reach was marked viewed. The snapshot still
-    /// describes the view exactly while the current heap's pair equals it: `Heap::get_mut` moves the
-    /// epoch at any in-place mutation of a marked object, and another heap (a worker seeded with its
-    /// starter's snapshot) never matches the id.
+    /// TICKET-213 — the stamp of the build: `Heap::view_stamp` (view id, epoch) of the context it
+    /// was read in, taken after every object the globals reach was marked viewed. The snapshot
+    /// still describes the view exactly while the live context's stamp equals it: `Heap::get_mut`
+    /// moves the epoch at any in-place mutation of a marked object, and another context (a worker
+    /// seeded with its starter's snapshot) never matches the id. M1.7: the id is per context, not
+    /// per heap, since every context of a run shares one heap.
     pub(super) view: (u64, u64),
     /// TICKET-233 — module replays every worker made from this snapshot; drained into
     /// [`MODULE_REPLAYS`] at the outermost nursery join.
@@ -1411,10 +1407,6 @@ pub(super) struct SchedCore {
     /// A deadlocked fiber of this sched is reported at its own blocking op. True for a detached
     /// sched (an `Executor`) alone: a nursery sched reports at the nursery.
     pub(super) leaf_site: bool,
-    /// Task index to submit-time bytes, an entry only for a nonzero charge (DEC-205).
-    pub(super) slot_charge: fxhash::FxHashMap<usize, usize>,
-    /// The sum of `slot_charge`: bytes of tasks reserved and not yet finished.
-    pub(super) unfinished_bytes: usize,
     /// How much of the scopes' retained-output `bytes` [`MnSched::take_charge`] already reported.
     pub(super) charged: usize,
     /// TICKET-286 — the run deadline whose [`MnSched::deadline_drain`] job is already armed.

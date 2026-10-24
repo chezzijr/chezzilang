@@ -242,6 +242,12 @@ To do a perf task:
 Do not trust the expected payoff of a lever before you measure it. Several levers moved a different
 bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/design/roadmap.md) §4.
 
+## Experiment: Go shared heap (branch `exp/go-shared-heap`)
+
+- M1.7: one heap per run, collected with the world stopped from every root source (attached
+  threads, detached threads, parked fibers, box contexts); crossings still copy; `--max-heap` caps
+  the whole run. Design: [`docs/design/go-shared-heap.md`](docs/design/go-shared-heap.md).
+
 ## Later
 
 - **M25, killable subprocesses** (design written 2026-08-12, not implemented). Cancellation is

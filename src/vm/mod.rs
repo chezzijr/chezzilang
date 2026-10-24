@@ -12,6 +12,7 @@ mod gc_door;
 pub mod heap;
 mod heap_core;
 mod heap_slab;
+mod heap_view;
 mod poller;
 mod pool;
 mod quiesce;
@@ -1017,6 +1018,9 @@ pub struct Vm {
     /// `boxctx.rs`). A `Vm` field, NOT a `FiberCtx` field, and `swap_ctx` does not move it: a box
     /// closure runs under `Vm::reentered`, where no other fiber runs on this stack (DEC-245).
     box_chain: Vec<boxctx::BoxFrame>,
+    /// M1.7 — the frames [`Vm::as_box_caller`] lifted off `box_chain` while the caller's code runs
+    /// (innermost last), so `Vm::gc_roots` still roots their slot-door caches and generators.
+    box_lifted: Vec<boxctx::BoxFrame>,
     /// A fault from seating the caller's view at a site that cannot return one
     /// (`ensure_module_faulted`). `read_slot` raises it; `with_box` clears it.
     box_view_err: Option<RuntimeError>,

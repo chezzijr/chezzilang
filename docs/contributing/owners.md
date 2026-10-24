@@ -99,6 +99,9 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Bytecode | `Op` (`base/op.rs`) | |
 | `==` between values | `values_equal_guarded` (`vm/equality.rs`) | |
 | May this op block here, and how | `mode` (`vm/block.rs`), `block_ctx` (`vm/block.rs`) | TICKET-181 |
+| What the run's collector marks | `Vm::collect_from` (`vm/frames.rs`) | M1.7: the union of the attached roots (`Attached::request_collect`, `vm/gc_coord.rs`), the registry's parked fibers, and every open box call (`Vm::gc_roots`); one sweep of the run's one core |
+| When the run collects | `Heap::should_collect` (`vm/heap.rs`) | M1.7: run-wide counts, `HeapCore::flush_allocs` and `HeapCore::flush_bytes` (`vm/heap_core.rs`) |
+| Is a cached module snapshot current (TICKET-213) | `ViewState` (`vm/heap_view.rs`) | M1.7: one view per context, swapped by `Vm::swap_ctx`; the core id names the run |
 | May a thread wait while it holds a GC token | `Vm::gc_blocking` (`vm/gc_door.rs`) | M1.5: every wait of an attached thread runs in its closure; `tests/wait_site_guard.rs` scans `src/vm` for each wait and lists the waits of threads that hold no token |
 | May an abort of a fiber-owned nursery park this fiber | `park_abort_origin` (`vm/nursery.rs`) | TICKET-287: read by the `return`/`?` escape park, the fault unwind, the cancel funnel and the catching `recover:`; a fault carries its state in `Fiber::fault_park` (`FaultPark`, `vm/frames.rs`) |
 | CPU width / runner permits | `RUNNERS` (`vm/width.rs`) | TICKET-205/230 |
@@ -126,7 +129,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | `WireValue` walks | `WireValue::visit` (`vm/wire.rs`): the children of each variant, and whether it is a handle or a nested core | `has_handle` (`vm/wire.rs`), `wire_summary`, `collect_gcrefs_structural` and `nested_core_bytes_structural` (`vm/core.rs`) read it; grid `wire::walk_grid`. TICKET-267 |
 | `to_wire`/`to_snap` depth budget | `MAX_STRUCTURAL_DEPTH` (`base/words.rs`) | `to_snap_depth` (`vm/worker_vm.rs`) passes its `depth` to `to_wire_depth` (`vm/airlock_out.rs`). Both walk `Value`, not `WireValue`, so neither reads `WireValue::visit` |
 | Hook calls | `invoke_hook` (`vm/method_call.rs`) | DUPLICATE: direct `run_proto` (`vm/frames.rs`) calls in `vm/call.rs`, `vm/method_call.rs` and `vm/step.rs`; waits on Family D |
-| Shared/RwShared box heap | `vm/boxctx.rs` | |
+| Shared/RwShared box context | `vm/boxctx.rs` | M1.7: the state's objects are in the run's one heap; the collector reaches them through the box, `roots_into` (`vm/core.rs`) |
 | Range value at run time | `as_range` (`vm/range.rs`) | |
 | Runtime key of the `Range` struct `a..b` builds | `range_key` (`resolver/mod.rs`) | read by the checker's `range_ty` and `Program::range_key` |
 | The std fns a program does not reach (TICKET-265) | `unreached_std_fns` → `ModuleGraph::skipped_fns` (`resolver/mod.rs`); the skip test is `SkippedFns::skips` | desugar's range gate, the checker's `skips_body` (`checker/graph_pass.rs`) and the compiler's top-level loop take their module's set from `ModuleGraph::fn_skips` and call `SkippedFns::skips`; `JSON_DECODE_PARSE` is the one fn the compiler calls by name |
@@ -176,7 +179,8 @@ file at 2,500 lines and a test file at 3,500.
 | Compiler | `compiler/mod.rs` (entry, `Compiler`, keys, globals), `compiler/fn_body.rs`, `compiler/stmt.rs`, `compiler/assign.rs`, `compiler/loops.rs`, `compiler/pattern.rs`, `compiler/expr.rs`, `compiler/witness.rs`, `compiler/call.rs`, `compiler/capture.rs` (free variables), `compiler/fncomp.rs`, `compiler/peephole.rs`, `compiler/run_for_tests.rs` (compile and run, for the front end's tests), `compiler/tests/` |
 | VM: core | `vm/mod.rs` (types, errors, traces, module declarations), `vm/value.rs`, `vm/heap.rs`, `vm/chzstr.rs`, `vm/entry.rs` (`run_built`, test run helpers), `vm/host.rs` |
 | VM: heap slot storage | `vm/heap_slab.rs` (the segmented slab: `GcRef` to segment and offset, segments that never move; `SlotBits`, the per-slot bitsets) |
-| VM: shared heap state | `vm/heap_core.rs` (`HeapCore`: the slab, the free list, the mark and copy bits, the GC counters, shared by every `Heap` handle on it) |
+| VM: shared heap state | `vm/heap_core.rs` (`HeapCore`: the slab, the free list, the mark and copy bits, the run-wide GC counters, shared by every `Heap` handle of one run) |
+| VM: view stamp | `vm/heap_view.rs` (`ViewState`: the TICKET-213 view of one execution context, its stamp and its per-slot bits) |
 | VM: GC roots | `vm/root_registry.rs` (`RootView`, the one root walk of an execution context that `Vm::gc_roots`, `GeneratorCore::gc_roots` and `FiberCtx::roots` call; `RootRegistry`, the run's list of boxed fiber contexts, each a `CtxBox`) |
 | VM: stop-the-world GC coordinator | `vm/gc_coord.rs` (`GcCoord`, and the `Attached` and `DetachTicket` tokens: attach, leave, detach and reattach, safepoint polls, one collection per stop, the root hand-off) |
 | VM: GC door | `vm/gc_door.rs` (each thread's GC token on the `Vm` it drives: attach and leave, the safepoint poll, the GC entry `Vm::gc_collect`, and `Vm::gc_blocking`, the one door each wait of an attached thread runs in) |

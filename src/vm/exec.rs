@@ -120,7 +120,14 @@ impl Vm {
         }
     }
 
+    /// A root `Vm`: it makes its run's heap core. Every other `Vm` of the run is built by
+    /// [`Vm::spawn_worker`], on a handle of that core.
     pub(super) fn new(program: Arc<Program>) -> Self {
+        Vm::with_heap(program, Heap::new())
+    }
+
+    /// A `Vm` over the heap handle `heap`.
+    pub(super) fn with_heap(program: Arc<Program>, heap: Heap) -> Self {
         let field_ic = vec![IcCell::EMPTY; program.field_ic_sites as usize];
         let method_ic = vec![MethodIcSite::EMPTY; program.method_ic_sites as usize];
         // M19 Tier-2 quickening: prefix-sum the per-proto code lengths into `quicken_base`, and size
@@ -135,7 +142,7 @@ impl Vm {
         let quicken = vec![Q_COLD; acc as usize];
         Vm {
             program,
-            heap: Heap::new(),
+            heap,
             stack: Vec::new(),
             frames: Vec::new(),
             out: Vec::new(),
@@ -154,6 +161,7 @@ impl Vm {
             pending_exit: None,
             exit_origin: false,
             box_chain: Vec::new(),
+            box_lifted: Vec::new(),
             box_view_err: None,
             fault_trace: None,
             fault_trace_depth: 0,
@@ -253,7 +261,20 @@ impl Vm {
     /// M1.6 — a task switch: [`Vm::swap_ctx`] plus the task's output stream. A task owns its
     /// `out` / `stderr` (Decision F), so only a task switch moves them; a box call runs in its
     /// caller's stream and swaps with `swap_ctx` alone.
+    ///
+    /// M1.7 (brief item 4) — the running generators, their parked hosts and the open box calls
+    /// are `Vm` fields that `FiberCtx` does not carry, so a task switch asserts they are empty: a
+    /// generator body and a box closure run under [`Vm::reentered`], where a blocking op demotes
+    /// instead of parking, so no fiber parks with any of them open. `Vm::gc_roots` roots them
+    /// while they are open.
     pub(super) fn swap_task(&mut self, ctx: &mut FiberCtx) {
+        assert!(
+            self.gen_host_ctx.is_empty()
+                && self.active_generators.is_empty()
+                && self.box_chain.is_empty()
+                && self.box_lifted.is_empty(),
+            "a task switch with a generator or a box call open"
+        );
         self.swap_ctx(ctx);
         std::mem::swap(&mut self.out, &mut ctx.out);
         std::mem::swap(&mut self.stderr, &mut ctx.stderr);
@@ -264,12 +285,10 @@ impl Vm {
     /// back into the fiber), and by a box call. The fields [`FiberCtx`] holds, except the output
     /// stream ([`Vm::swap_task`]) and `start` — `pending_exit` stays global.
     pub(super) fn swap_ctx(&mut self, ctx: &mut FiberCtx) {
-        // M1.7: deleting `heap` deletes this check.
-        assert_eq!(
-            ctx.owns_side,
-            ctx.heap.is_some(),
-            "owns_side must equal heap.is_some() until M1.7"
-        );
+        // M1.7 — the handle's `get_mut` record names an object of the context that leaves: settle
+        // it now. The context can resume on another shell (or a box on another caller's thread)
+        // and write that object while this handle would read it.
+        self.heap.settle_pending_mut();
         std::mem::swap(&mut self.frames, &mut ctx.frames);
         std::mem::swap(&mut self.stack, &mut ctx.stack);
         std::mem::swap(&mut self.call_depth, &mut ctx.call_depth);
@@ -288,9 +307,9 @@ impl Vm {
         // stdin is NOT swapped: it is ONE source every task shares (Go/Python) — see `Stdin` and
         // `spawn_worker`, which hands the M:N worker the same shared handle.
         //
-        // Task 1 — the fiber's module-globals view swaps for EVERY fiber; those `GcRef`s index the
-        // fiber's own heap, swapped just below, so they travel WITH the fiber. The parent's REAL
-        // modules move into `ctx.module_objs` on its swap-out. W6-2 — `module_snapshot` + `snapshot_memo` swap WITH them: a snapshot describes a
+        // Task 1 — the fiber's module-globals view swaps for EVERY fiber: those `GcRef`s are the
+        // fiber's own copies (in the run's one heap), so they travel WITH the fiber. The parent's
+        // REAL modules move into `ctx.module_objs` on its swap-out. W6-2 — `module_snapshot` + `snapshot_memo` swap WITH them: a snapshot describes a
         // module VIEW, and one shell drains fibers holding DIFFERENT views, so each must fault in (and
         // re-snapshot) from its OWN. They carry no `GcRef` (heap-independent `SnapValue`), so GC
         // rooting is unaffected.
@@ -299,9 +318,8 @@ impl Vm {
         std::mem::swap(&mut self.module_snapshot, &mut ctx.module_snapshot);
         std::mem::swap(&mut self.snapshot_memo, &mut ctx.snapshot_memo);
         // W7-4a — the snapshot rebuild map describes the SAME view, so it travels with it. Unlike the
-        // two `Arc<ModuleSnapshot>`s above it IS heap-keyed (`GcRef` values), exactly like
-        // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a fiber
-        // with no heap of its own the shared heap. Either way it moves atomically with its view.
+        // two `Arc<ModuleSnapshot>`s above it holds `GcRef`s, exactly like `module_objs` just
+        // above, and it moves atomically with its view.
         std::mem::swap(&mut self.snapshot_rebuild, &mut ctx.snapshot_rebuild);
         // W7-4c — the snapshot cell registry is heap-keyed too (its KEYS are `GcRef`s into the heap the
         // snapshot was built from), so it travels with the same view for the same reason.
@@ -314,27 +332,22 @@ impl Vm {
         // Split them and a fiber resuming on a fresher shell re-mints ids its own registry already
         // uses, merging two unrelated bindings.
         std::mem::swap(&mut self.snapshot_next_id, &mut ctx.snapshot_next_id);
-        // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A fiber with no heap of
-        // its own (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched.
-        // GC: a swapped-OUT `module_objs` needs no pin — it parks in `ctx` together with the heap it
-        // indexes, and `collect()` only ever walks the LIVE `self.heap`.
-        // M1.7: one heap per run deletes this swap.
-        if let Some(ctx_heap) = ctx.heap.as_mut() {
-            std::mem::swap(&mut self.heap, ctx_heap);
-        }
+        // TICKET-213 / M1.7 — the view state describes the module view above, so it travels with
+        // it: a context's snapshot stamp names its own view, never the heap (which every context of
+        // the run shares). GC: a swapped-OUT `module_objs` needs no pin — `ctx` is registered with
+        // the run's `RootRegistry`, which the collector walks.
+        std::mem::swap(&mut self.heap.view, &mut ctx.view);
         // D2b — a context that owns its side state swaps it here: each field below belongs to ONE
         // fiber (or one box context), so a shell that runs many in turn must not leave it behind
         // for the next. A context that does not own side state aliases the shell's.
         if ctx.owns_side {
-            // D2b — the fiber's `Executor` handles; its GcRefs index this context's heap.
-            // M1.7: after one heap the handle list can be per run.
+            // D2b — the fiber's `Executor` handles: the GC roots of the executors it made.
             std::mem::swap(&mut self.executors, &mut ctx.executors);
-            // M19 Phase 3 — the fiber's intern cache; its GcRefs index this context's heap, so a
-            // cache left on the shell would hand the next fiber refs into a heap it does not own.
-            // M1.7: after one heap the cache can be per run.
+            // M19 Phase 3 — the fiber's intern cache. Its strings are this context's objects: a
+            // cache left on the shell would hand the next fiber an object it may then write
+            // (every crossing copies until M3, so no two fibers share one).
             std::mem::swap(&mut self.str_intern, &mut ctx.str_intern);
-            // TICKET-215 — the fn-value memo; its GcRefs index this context's heap, as above.
-            // M1.7: after one heap the memo can be per run.
+            // TICKET-215 — the fn-value memo; this context's objects, as above.
             std::mem::swap(&mut self.fn_values, &mut ctx.fn_values);
             // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
             // connecting fd that the netpoller is watching; it must not be left on the shell where the

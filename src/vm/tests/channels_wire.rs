@@ -1054,38 +1054,10 @@ main()
     assert_eq!(run_capture(src).expect("parallel run"), expected);
 }
 
-/// D2a: an M:N fiber carries its OWN heap (share-nothing). `swap_ctx` swaps that heap with the
-/// host `Vm`'s when the fiber is scheduled in, and back out when it parks — the prerequisite for
-/// D2b parking a fiber across worker threads. Round-trip: a fiber heap holding `"fiber-obj"` and
-/// a host heap holding `"vm-obj"` exchange on swap-in and restore on swap-out.
-#[test]
-fn swap_ctx_round_trips_an_mn_fiber_heap() {
-    let mut vm = Vm::new(Arc::new(empty_program()));
-    let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
-
-    let mut fiber_heap = Heap::new();
-    let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
-    let mut ctx = FiberCtx {
-        heap: Some(fiber_heap),
-        owns_side: true,
-        ..FiberCtx::default()
-    };
-
-    // Swap the fiber in: self.heap becomes the fiber's heap; the host heap parks in the ctx.
-    vm.swap_ctx(&mut ctx);
-    assert!(matches!(vm.heap.get(hf), Obj::Str(s) if &s[..] == "fiber-obj"));
-    assert!(matches!(ctx.heap.as_ref().unwrap().get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
-
-    // Swap back out: the host heap is restored, the fiber keeps its own heap.
-    vm.swap_ctx(&mut ctx);
-    assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
-    assert!(matches!(ctx.heap.as_ref().unwrap().get(hf), Obj::Str(s) if &s[..] == "fiber-obj"));
-}
-
 /// D2b: an M:N fiber carries its own per-task SIDE state too — `out`/`stderr` (Decision-F output
-/// buffers) and the heap-keyed roots `module_objs`/`module_faulted`/`executors` (each a `GcRef`
-/// into the fiber's own heap). A task switch (`swap_task`) round-trips all of them alongside the
-/// heap for a context with `owns_side`. A task owns its output stream, so `swap_task` moves
+/// buffers) and the roots `module_objs`/`module_faulted`/`executors` (each a `GcRef` to the
+/// fiber's own copy in the run's one heap). A task switch (`swap_task`) round-trips all of them
+/// for a context with `owns_side`. A task owns its output stream, so `swap_task` moves
 /// `out`/`stderr` for every task context, `owns_side` or not; the `owns_side: false` side state is
 /// [`swap_ctx_leaves_side_state_on_the_shell_without_owns_side`].
 #[test]
@@ -1098,20 +1070,18 @@ fn swap_task_round_trips_output_and_owns_side_state() {
     vm.module_objs = vec![host_mod];
     vm.module_faulted = vec![true];
     vm.executors = vec![host_exec];
-    // M19 Phase 3 — the intern cache is heap-keyed too; it must round-trip with the heap.
+    // M19 Phase 3 — the intern cache holds the context's own strings; it must round-trip.
     let host_str = vm.heap.alloc(Obj::Str("host-str".into()));
     vm.str_intern.insert(0x10, host_str);
-    // TICKET-215 — the fn-value memo is heap-keyed the same way.
+    // TICKET-215 — the fn-value memo the same way.
     let host_fn = vm.heap.alloc(Obj::Str("host-fn".into()));
     vm.fn_values.insert(FnKey::Proto(0), host_fn);
 
-    let mut fiber_heap = Heap::new();
-    let fib_mod = fiber_heap.alloc(Obj::Str("fiber-mod".into()));
-    let fib_exec = fiber_heap.alloc(Obj::Str("fiber-exec".into()));
-    let fib_str = fiber_heap.alloc(Obj::Str("fiber-str".into()));
-    let fib_fn = fiber_heap.alloc(Obj::Str("fiber-fn".into()));
+    let fib_mod = vm.heap.alloc(Obj::Str("fiber-mod".into()));
+    let fib_exec = vm.heap.alloc(Obj::Str("fiber-exec".into()));
+    let fib_str = vm.heap.alloc(Obj::Str("fiber-str".into()));
+    let fib_fn = vm.heap.alloc(Obj::Str("fiber-fn".into()));
     let mut ctx = FiberCtx {
-        heap: Some(fiber_heap),
         owns_side: true,
         out: b"fiber-out".to_vec(),
         stderr: b"fiber-err".to_vec(),
@@ -1236,7 +1206,7 @@ fn swap_ctx_moves_module_objs_but_not_out_without_owns_side() {
     assert_eq!(ctx.module_objs, vec![host_mod]);
 }
 
-/// M1.6 — a context with `owns_side: false` (and `heap: None`) owns no side state, so `swap_ctx`
+/// M1.6 — a context with `owns_side: false` owns no side state, so `swap_ctx`
 /// leaves the shell's `executors`, `str_intern`, `fn_values`, `pending_connect` and `poll_*`
 /// fields on the shell, and the context's own fields stay empty.
 #[test]
@@ -1262,7 +1232,7 @@ fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
     vm.poll_partial = Some(2);
     vm.poll_written = Some(3);
     let mut ctx = FiberCtx::default();
-    assert!(!ctx.owns_side && ctx.heap.is_none());
+    assert!(!ctx.owns_side);
     for _ in 0..2 {
         vm.swap_ctx(&mut ctx);
         assert_eq!(vm.executors, vec![host_exec]);

@@ -817,23 +817,21 @@ impl Drop for PendingOp {
 /// registry's length-1 wait-for cycle and FAULTS; a cross-task contender BLOCKS until the guard
 /// frees; a genuine cross-box wait-for cycle (AB-BA) FAULTS instead of hanging.
 ///
-/// TICKET-246: the value is no longer an encoded copy. It lives in the box's PRIVATE heap, at
-/// `stack[0]` of the box's own context (`state`), which that heap's GC roots. Every method takes
-/// the update guard first and then locks `state`, so user code never contends on the `Mutex`; the
-/// closure of `update` / `read` runs under it, inside the box heap (`Vm::with_box`). GC and byte
-/// accounting of an OUTER heap take no lock here: the box's values are roots of its own heap and
-/// an outer walk reads `bytes`.
+/// TICKET-246: the value is no longer an encoded copy. It lives at `stack[0]` of the box's own
+/// context (`state`). Every method takes the update guard first and then locks `state`, so user
+/// code never contends on the `Mutex`; the closure of `update` / `read` runs under it, inside the
+/// box context (`Vm::with_box`). M1.7: the context's objects are in the run's one heap. The
+/// collector reaches them through the box ([`SharedState::roots_into`]); the byte walk takes no
+/// lock here, since `live_bytes` counts the state's slots.
 #[derive(Debug, Default)]
 pub struct SharedCore {
     pub state: SharedState,
-    /// `Heap::approx_bytes()` of the box heap after the last write: an O(1) upper estimate.
-    pub bytes: AtomicUsize,
 }
 
-/// The context of a `Shared` box: its heap, its module view and the state at `stack[0]`. `None`
-/// only while a call has taken it out (`Vm::with_box`), under the lock.
+/// The context of a `Shared` box: its module view and the state at `stack[0]`. `None` only while a
+/// call has taken it out (`Vm::with_box`), under the lock.
 #[derive(Default)]
-pub struct SharedState(pub(super) Mutex<Option<Box<super::FiberCtx>>>);
+pub struct SharedState(pub(super) Mutex<BoxSlot>);
 
 impl std::fmt::Debug for SharedState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -842,16 +840,29 @@ impl std::fmt::Debug for SharedState {
 }
 
 impl SharedState {
+    /// M1.7 — the collector's walk into a parked box context: append the roots of the context in
+    /// the slot. It never blocks: in a stop of the world the lock is free, or a stopped thread holds
+    /// it inside `Vm::with_box`, which took the context out (the slot is `None`), and that thread's
+    /// `Vm` roots the context then. A thread holds the lock with the context in the slot only to
+    /// copy it out, which reaches no safepoint and no blocking door.
+    pub(super) fn roots_into(&self, out: &mut Vec<GcRef>) {
+        if let Ok(g) = self.0.try_lock()
+            && let Some(ctx) = g.as_ref()
+        {
+            ctx.root_view().walk(out);
+        }
+    }
+
     /// Lock the state. A panic inside a box closure unwinds through the guard; `with_box` has put
     /// the context back by then, so a poisoned lock still holds a whole state.
-    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Option<Box<super::FiberCtx>>> {
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, BoxSlot> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
 /// `RwShared[T]` core: the read-write counterpart to [`SharedCore`], on the same box core. The
-/// value lives in the box's PRIVATE heap, at `stack[0]` of the box's own context (`state`), behind
-/// a `RwLock`: MANY readers copy out of the live heap at once, or ONE writer runs inside it.
+/// value lives at `stack[0]` of the box's own context (`state`), behind a `RwLock`: MANY readers
+/// copy out of the box's objects at once, or ONE writer runs inside the context.
 ///
 /// - `write(f)` / `set` and the single-entry writers take the box's update guard (TICKET-016 /
 ///   W8-3, [`super::core::acquire_update_guard`]) and then the write lock; the closure runs under
@@ -862,14 +873,12 @@ impl SharedState {
 ///   `write` closure faults (`already holds the update guard`) instead of deadlocking.
 /// - No user code runs under the read lock: a reader copies with `WalkSrc`, drops the lock and
 ///   only then decodes, compares keys or runs its closure. So `write` nested in `read` is legal.
-/// - The box heap is written, and collected, only under the write lock.
+/// - The box's objects are written only under the write lock.
 ///
-/// GC and byte accounting of an OUTER heap never wait here: see [`SharedCore`].
+/// GC and byte accounting never wait here: see [`SharedCore`].
 #[derive(Debug, Default)]
 pub struct RwSharedCore {
     pub state: RwSharedState,
-    /// `Heap::approx_bytes()` of the box heap after the last write: an O(1) upper estimate.
-    pub bytes: AtomicUsize,
 }
 
 /// The context of a `RwShared` box. `None` only while a writer has taken it out
@@ -887,6 +896,17 @@ impl std::fmt::Debug for RwSharedState {
 pub(super) type BoxSlot = Option<Box<super::FiberCtx>>;
 
 impl RwSharedState {
+    /// M1.7 — [`SharedState::roots_into`] for a `RwShared`: the read lock fails only while a writer
+    /// holds the state inside `Vm::with_box` (the slot is `None`), or waits for it, which no
+    /// stopped thread does.
+    pub(super) fn roots_into(&self, out: &mut Vec<GcRef>) {
+        if let Some(g) = self.try_read()
+            && let Some(ctx) = g.as_ref()
+        {
+            ctx.root_view().walk(out);
+        }
+    }
+
     /// The read lock when no writer holds or waits for the state; never blocks. A poisoned lock
     /// still holds a whole state (see [`SharedState::lock`]).
     pub(super) fn try_read(&self) -> Option<std::sync::RwLockReadGuard<'_, BoxSlot>> {
@@ -1536,9 +1556,9 @@ pub fn drain_pending_cores(
                     collect_gcrefs_structural(w, out, seen, pending);
                 }
             }
-            // TICKET-246 — a `Shared` holds its value in its own heap: no handle to collect, no lock.
-            WireValue::Shared(_) => {}
-            WireValue::RwShared(_) => {}
+            // M1.7 — a box's state is objects of the run's one heap, reached through the box.
+            WireValue::Shared(c) => c.state.roots_into(out),
+            WireValue::RwShared(c) => c.state.roots_into(out),
             WireValue::Atomic(c) => {
                 let v = c.v.lock().unwrap();
                 collect_gcrefs_structural(&v, out, seen, pending);
@@ -1730,24 +1750,6 @@ pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usiz
     acc + drain_pending_core_bytes(seen, &mut pending)
 }
 
-/// TICKET-246 — the bytes reachable through one box under a live cap. `ctx` is the box context
-/// when the caller got the state lock WITHOUT waiting (`try_lock` / `try_read`): the box heap is
-/// then walked with the caller's `seen` set and its nested cores are queued into `pending`. When
-/// the lock is busy (a closure is running in the box) the walk declines and reads `fallback`, the
-/// figure the box stored at its last settle. Never take the state lock blocking from an accounting
-/// walk: it is held across user code, and a collection can start inside that code.
-pub(super) fn box_bytes(
-    ctx: Option<&super::FiberCtx>,
-    fallback: &AtomicUsize,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    match ctx.and_then(|c| c.heap.as_ref()) {
-        Some(heap) => heap.bytes_with(true, seen, pending),
-        None => fallback.load(Ordering::Relaxed),
-    }
-}
-
 /// Bytes owned by the cores queued by the structural byte walk, locking exactly ONE at a time.
 ///
 /// **Call with NO core guard held**, for the same reason as [`drain_pending_cores`]: this walk is the
@@ -1780,16 +1782,8 @@ pub fn drain_pending_core_bytes(
                 };
                 acc += queued + c.held_bytes();
             }
-            WireValue::Shared(c) => {
-                let g = c.state.0.try_lock().ok();
-                let ctx = g.as_ref().and_then(|g| g.as_deref());
-                acc += box_bytes(ctx, &c.bytes, seen, pending);
-            }
-            WireValue::RwShared(c) => {
-                let g = c.state.try_read();
-                let ctx = g.as_ref().and_then(|g| g.as_deref());
-                acc += box_bytes(ctx, &c.bytes, seen, pending);
-            }
+            // M1.7 — a box's state is objects of the run's one heap, which the slot walk counts.
+            WireValue::Shared(_) | WireValue::RwShared(_) => {}
             WireValue::Atomic(c) => {
                 let g = c.v.lock().unwrap();
                 acc += value_core_bytes_structural(&c.summary, &g, seen, pending);

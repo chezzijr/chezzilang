@@ -1,5 +1,10 @@
-//! TICKET-246 — a `Shared` / `RwShared` box keeps its value in a private heap. This module owns
-//! the three things that make a closure run inside that heap:
+//! TICKET-246 — a `Shared` / `RwShared` box keeps its value in its own context (`stack[0]` of a
+//! `FiberCtx`, with its own module view). M1.7: the context's objects live in the run's one heap.
+//! The collector reaches them through the box, as Go reaches a value through the struct that holds
+//! it: marking an `Obj::Shared` (or a `WireValue::Shared` in a core's payload) walks the parked
+//! context (`core::SharedState::roots_into`). The caller a box call parks is rooted by the `Vm`
+//! that runs the call (`BoxFrame::roots`). A box crossing still copies, into that one heap. This
+//! module owns the three things that make a closure run inside a box context:
 //!
 //! - [`Vm::with_box`], the ONE swap into a box context (and its undo, on return and on unwind);
 //! - `Vm::box_chain` with [`Vm::as_box_caller`], the ONE definition of "the caller of this box
@@ -13,23 +18,29 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 /// parks the root task. A box call made from inside a box closure pushes one more frame.
 pub(super) struct BoxFrame {
     /// The parked caller while the call runs. Inside [`Vm::swap_frame`]'s second half (the `Vm`
-    /// acts as the caller) it holds the box context instead.
+    /// acts as the caller) it holds the box context instead. `BoxFrame::roots` roots whichever of
+    /// the two it holds.
     caller: Box<FiberCtx>,
-    /// The caller's running generators and their parked hosts. They index the caller's heap and
-    /// `FiberCtx` does not carry them, so they park here.
+    /// The caller's running generators and their parked hosts. `FiberCtx` does not carry them,
+    /// so they park here, and `Vm::gc_roots` roots them.
     gens: Vec<GcRef>,
     gen_hosts: Vec<GenCtx>,
     /// This call already asked its caller for a fresh view (see [`Vm::box_seat_view`]).
     view_checked: bool,
-    /// Globals this call read through the slot door. The values index the LIVE (box) heap, so the
-    /// last frame's are GC roots; a frame below the last indexes a parked heap and is not.
+    /// Globals this call read through the slot door: GC roots (`Vm::gc_roots`).
     slots: fxhash::FxHashMap<(u32, u32), Value>,
 }
 
 impl BoxFrame {
-    /// GC roots of the call now running.
-    pub(super) fn roots(&self) -> impl Iterator<Item = GcRef> + '_ {
-        self.slots.values().filter_map(|v| v.child_gcref())
+    /// Append the GC roots this frame holds: the parked context, the slot-door cache and the
+    /// parked generators.
+    pub(super) fn roots(&self, out: &mut Vec<GcRef>) {
+        self.caller.root_view().walk(out);
+        out.extend(self.slots.values().filter_map(|v| v.child_gcref()));
+        out.extend(self.gens.iter().copied());
+        for host in &self.gen_hosts {
+            host.root_view().walk(out);
+        }
     }
 }
 
@@ -94,7 +105,7 @@ pub(super) fn fixed_after_build(o: &Obj) -> Option<Fixed> {
 
 /// Whether `o` is a handle on an `Arc` core: its state lives outside every heap, so a copy of
 /// the handle shares it.
-fn is_arc_core(o: &Obj) -> bool {
+pub(super) fn is_arc_core(o: &Obj) -> bool {
     match o {
         Obj::Cffi(_)
         | Obj::Channel(_)
@@ -137,21 +148,20 @@ pub(super) struct BoxPieces {
     ws: Vec<WireValue>,
 }
 
-/// The state object of a parked box context, when the state is a heap value.
-pub(super) fn state_obj(ctx: &FiberCtx) -> Option<&Obj> {
-    // M1.7: this asks which heap holds the state; after one heap it reads the run heap.
-    let heap = ctx.heap.as_ref().expect("a box context owns its heap");
+/// The state object of a parked box context, when the state is a heap value. `heap` is any
+/// handle of the run: the state lives in the run's one heap.
+pub(super) fn state_obj<'a>(heap: &'a Heap, ctx: &FiberCtx) -> Option<&'a Obj> {
     ctx.stack[0].as_obj().map(|h| heap.get(h))
 }
 
 impl Vm {
-    /// A fresh box context: its own heap, an EMPTY module view (seated lazily, per call, from the
-    /// caller — see [`Vm::box_global`]) and the state slot `stack[0]`, which that heap's own GC
-    /// roots.
+    /// A fresh box context: an EMPTY module view (seated lazily, per call, from the caller — see
+    /// [`Vm::box_global`]), its own view stamp, and the state slot `stack[0]`, which the collector
+    /// reaches through the box.
     pub(super) fn box_new(&mut self) -> Box<FiberCtx> {
-        let worker = self.spawn_worker();
+        let mut worker = self.spawn_worker();
         Box::new(FiberCtx {
-            heap: Some(worker.heap),
+            view: worker.heap.take_view(),
             owns_side: true,
             stack: vec![Value::nil()],
             module_objs: worker.module_objs,
@@ -171,8 +181,8 @@ impl Vm {
     }
 
     /// Swap the live context with `frame.caller`, in either direction. `swap_ctx` moves what
-    /// `FiberCtx` holds; this adds the rest of the rule "swap what indexes a heap": the running
-    /// generators travel with their heap. `out` / `stderr` do not move (`swap_ctx` leaves them to
+    /// `FiberCtx` holds; this adds the running generators, which belong to the context that runs
+    /// them. `out` / `stderr` do not move (`swap_ctx` leaves them to
     /// [`Vm::swap_task`]): a box context owns no output stream, so a `print` inside a box closure
     /// is the caller's output.
     fn swap_frame(&mut self, frame: &mut BoxFrame) {
@@ -186,7 +196,7 @@ impl Vm {
     /// leaves the `Vm` on the caller's heap, the context back in `slot` and the chain as it was.
     pub(super) fn with_box<R>(
         &mut self,
-        slot: &mut Option<Box<FiberCtx>>,
+        slot: &mut core::BoxSlot,
         f: impl FnOnce(&mut Vm) -> R,
     ) -> R {
         let ctx = slot
@@ -242,12 +252,17 @@ impl Vm {
     /// `box_chain` is the caller's own chain while `f` runs. The ONE way to reach the caller; a
     /// caller that is itself a box context answers through its own chain, so a nested call has no
     /// second code path. Undone on return and on unwind.
+    /// While `f` runs, the frame waits on `box_lifted`, where `Vm::gc_roots` still roots it.
     pub(super) fn as_box_caller<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
         let mut frame = self.box_chain.pop().expect("a box call is running");
         let depth = self.box_chain.len();
         self.swap_frame(&mut frame);
+        let lifted = self.box_lifted.len();
+        self.box_lifted.push(frame);
         let r = catch_unwind(AssertUnwindSafe(|| f(self)));
         self.box_chain.truncate(depth);
+        self.box_lifted.truncate(lifted + 1);
+        let mut frame = self.box_lifted.pop().expect("this call's lifted frame");
         self.swap_frame(&mut frame);
         self.box_chain.push(frame);
         match r {
@@ -256,19 +271,17 @@ impl Vm {
         }
     }
 
-    /// A new `Shared` core holding `init`, decoded into the box's own heap.
+    /// A new `Shared` core holding `init`, decoded into the box's context.
     pub(super) fn new_shared_core(&mut self, init: WireValue) -> Arc<SharedCore> {
         let mut slot = Some(self.box_new());
-        let bytes = self.box_store(&mut slot, init);
+        self.box_store(&mut slot, init);
         Arc::new(SharedCore {
             state: core::SharedState(Mutex::new(slot)),
-            bytes: std::sync::atomic::AtomicUsize::new(bytes),
         })
     }
 
-    /// Replace the state of the box in `slot` with `w` (construction, `set`). Returns the box
-    /// heap's byte estimate for the core's `bytes`.
-    pub(super) fn box_store(&mut self, slot: &mut Option<Box<FiberCtx>>, w: WireValue) -> usize {
+    /// Replace the state of the box in `slot` with `w` (construction, `set`).
+    pub(super) fn box_store(&mut self, slot: &mut core::BoxSlot, w: WireValue) {
         self.with_box(slot, |vm| {
             // A value stored into the box is handed to it: the box owns the copy, so the marks
             // the rebuild makes for a closure from another heap are cleared at once.
@@ -280,15 +293,14 @@ impl Vm {
         })
     }
 
-    /// Runs INSIDE a box, at the end of a write: collect when the box heap is due (a box whose
-    /// users only `set` runs no bytecode of its own, so nothing else would), then report its
-    /// bytes. The box heap is collected only here and in the closure's own dispatch loop, both
-    /// under the exclusive lock.
-    fn box_settle(&mut self) -> usize {
+    /// Runs INSIDE a box, at the end of a write: collect when the run is due (a box whose users
+    /// only `set` run no bytecode of the box, so its dispatch loop would not check). M1.7: the
+    /// collection is the run's, with the world stopped; the box state is live in this `Vm`, and
+    /// its objects count in the run's `live_bytes`.
+    fn box_settle(&mut self) {
         if self.heap.should_collect() {
             self.gc_collect();
         }
-        self.heap.approx_bytes()
     }
 
     /// Run the encoded closure `fw` inside the box in `slot`, on the live state. With
@@ -301,11 +313,11 @@ impl Vm {
     /// state is the box's own value from then on.
     pub(super) fn box_call(
         &mut self,
-        slot: &mut Option<Box<FiberCtx>>,
+        slot: &mut core::BoxSlot,
         fw: WireValue,
         write_back: bool,
         span: Span,
-    ) -> (Result<Option<WireValue>, RuntimeError>, usize) {
+    ) -> Result<Option<WireValue>, RuntimeError> {
         self.with_box(slot, |vm| {
             vm.heap.begin_copy_log();
             let f = vm.from_wire(fw);
@@ -336,18 +348,19 @@ impl Vm {
                 }
             });
             vm.heap.unmark_copy_log();
-            (r, vm.box_settle())
+            vm.box_settle();
+            r
         })
     }
 
-    /// Copy the state out of a parked box context, for this `Vm`'s heap. The walk only borrows
-    /// the box heap; the reader charges its OWN heap.
+    /// Copy the state out of a parked box context, for this `Vm`'s handle. The walk only reads
+    /// the box's objects; the reader charges its OWN handle.
     pub(super) fn box_copy_out(
         &self,
         ctx: &FiberCtx,
         span: Span,
     ) -> Result<WireValue, RuntimeError> {
-        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.program, self.walk_base);
+        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.heap, &self.program, self.walk_base);
         let w =
             src.to_wire_crossable_memo(ctx.stack[0], span, &mut airlock_out::WireMemo::default())?;
         self.charge_wire(&w);
@@ -398,13 +411,12 @@ impl Vm {
         self.to_wire_crossable(f, span)
     }
 
-    /// A new `RwShared` core holding `init`, decoded into the box's own heap.
+    /// A new `RwShared` core holding `init`, decoded into the box's context.
     pub(super) fn new_rwshared_core(&mut self, init: WireValue) -> Arc<RwSharedCore> {
         let mut slot = Some(self.box_new());
-        let bytes = self.box_store(&mut slot, init);
+        self.box_store(&mut slot, init);
         Arc::new(RwSharedCore {
             state: core::RwSharedState(std::sync::RwLock::new(slot)),
-            bytes: std::sync::atomic::AtomicUsize::new(bytes),
         })
     }
 
@@ -453,7 +465,7 @@ impl Vm {
         let key = Arc::as_ptr(core) as usize;
         let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
         let mut st = core.state.write();
-        let (r, bytes) = self.with_box(&mut st, |vm| {
+        self.with_box(&mut st, |vm| {
             // Handed to the box: it owns these copies (see `box_store`).
             vm.heap.begin_copy_log();
             let vals = vm.from_wire_pieces(BoxPieces { prelude: false, ws });
@@ -471,11 +483,9 @@ impl Vm {
                 })
                 .transpose()
             });
-            (r, vm.box_settle())
-        });
-        core.bytes
-            .store(bytes, std::sync::atomic::Ordering::Relaxed);
-        r
+            vm.box_settle();
+            r
+        })
     }
 
     /// Copy `vals` (values of the parked box context `ctx`) out for this `Vm`'s heap, as ONE
@@ -491,7 +501,7 @@ impl Vm {
         vals: &[Value],
         span: Span,
     ) -> Result<BoxPieces, RuntimeError> {
-        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.program, self.walk_base);
+        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.heap, &self.program, self.walk_base);
         let encode = |prelude: Option<Value>| -> Result<BoxPieces, RuntimeError> {
             let mut memo = airlock_out::WireMemo::default();
             let mut ws = Vec::with_capacity(vals.len() + 1);

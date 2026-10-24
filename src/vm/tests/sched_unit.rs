@@ -1580,7 +1580,6 @@ fn fiber_roots_equal_vm_roots_after_swap() {
         }
     }
     let mut ctx = FiberCtx {
-        heap: Some(Heap::new()),
         owns_side: true,
         ..FiberCtx::default()
     };
@@ -1698,6 +1697,7 @@ fn pending_fiber_roots_its_start() {
             args: vec![Value::obj(arg), Value::int(1), Value::float_ref(fl)],
         },
         span: Span::RUNTIME,
+        payload: crate::vm::gc_door::PayloadInFlight::new(),
     }
     .into_fiber(0, 0);
     assert!(fiber.ctx.start.is_some(), "the task waits in the context");

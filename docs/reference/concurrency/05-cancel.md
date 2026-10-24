@@ -178,14 +178,18 @@ Resource caps, measured:
   `connect`) registers with the sooner of the op's own `timeout_ms` and the run deadline: the op's own
   deadline stays a catchable `!"timeout"`, the run's is a hard abort. A socket op's `timeout_ms` is
   unaffected when the cap is off or unexpired.
+- **`--max-heap` caps the whole run.** Every task of a test allocates into one heap, and each
+  collection, on any thread, measures that heap's live bytes. Three tasks that each hold 4.2 MB
+  are OVER-MEMORY together under a 10 MB cap, though each one alone is under it.
 - **`--max-heap` reaches a sleeper only through the cancel arm** — when the over-allocating task is a
-  nursery/`Executor` sibling sharing its cancel scope (measured 365 ms). A sleeping top-level `main`
-  has no cancel flag and its own heap is not the one growing, so it sleeps out (3005 ms) before the
-  OVER-MEMORY verdict lands. `--max-heap` is a per-heap cap, not a process-wide signal.
-- **`--max-heap` charges an `Executor` job's submit-time bytes to the submitter until the job
-  finishes.** Measured, 300 jobs capturing ~1 MB each under an 8 MB cap: peak RSS 18 MB at
-  `CHEZZI_THREADS` 1, 2 and default, each run `OVER-MEMORY`. A test whose unfinished jobs together
-  exceed the cap trips, sleeping jobs included.
+  nursery/`Executor` sibling sharing its cancel scope (measured 365 ms, before the one-heap change).
+  The task that runs the collection reads the verdict; a sleeping top-level `main` has no cancel
+  flag, so it sleeps out (measured 3005 ms) before the OVER-MEMORY verdict lands.
+- **`--max-heap` counts an `Executor` job's captured payload while the job is queued or runs.** The
+  payload is objects of the run's one heap. Measured on the per-task heaps, 300 jobs capturing
+  ~1 MB each under an 8 MB cap: peak RSS 18 MB at `CHEZZI_THREADS` 1, 2 and default, each run
+  `OVER-MEMORY`. A test whose unfinished jobs together exceed the cap trips, sleeping jobs
+  included.
 
 **Where a cancel is NOT delivered — pure CPU with no back-edge.** **Deep recursion is not a
 checkpoint**: a recursive function emits only `Call`/`Return`, never a backward jump, so a cancelled

@@ -241,9 +241,9 @@ fn mnsched_take_charge_reports_growth_only() {
     );
 }
 
-/// W7-26 / DEC-205 (TICKET-208: one facade) — `Heap::live_bytes` counts what an Executor holds
-/// outside every heap: its finished tasks' retained output and its unfinished tasks' submit-time
-/// bytes. Fails if `held_bytes` omits either half, or if a reduced Executor stays charged.
+/// W7-26 (TICKET-208: one facade) — `Heap::live_bytes` counts what an Executor holds outside every
+/// heap: its finished tasks' retained output (M1.7: an unfinished task's payload is in the one heap
+/// and counted as its slots). Fails if `held_bytes` omits it, or if a reduced Executor stays charged.
 #[test]
 fn live_bytes_counts_an_executors_held_bytes() {
     use crate::vm::heap::{Heap, Obj};
@@ -261,15 +261,6 @@ fn live_bytes_counts_an_executors_held_bytes() {
     assert!(
         with_results >= base + 40_000,
         "ten finished tasks' output must register: {base} -> {with_results}"
-    );
-    {
-        let mut f = mk_pending_fiber(10);
-        let mut c = sched.lock();
-        sched.reserve_slot(&mut c, &mut f, 0, 5000);
-    }
-    assert!(
-        h.live_bytes() >= with_results + 5000,
-        "an unfinished task's submit-time bytes must register"
     );
     *core.scope.lock().unwrap() = None;
     assert_eq!(h.live_bytes(), base, "a reduced Executor holds nothing");
@@ -730,9 +721,22 @@ fn walk_src_copies_out_of_a_heap_it_only_borrows() {
     assert_eq!(reader.display(copy), "[[1, 2], 's']");
 }
 
+/// M1.7 — one heap core per run: two `Vm::new` roots are two runs with two cores (above), and a
+/// worker built in a run (a task's payload `Vm`, a runner or joiner shell, a box context) is a
+/// handle on its root's core.
+#[test]
+fn a_worker_shares_its_roots_heap_core() {
+    let root = Vm::new(Arc::new(empty_program()));
+    let worker = root.spawn_worker();
+    let nested = worker.spawn_worker();
+    assert_eq!(worker.heap.id(), root.heap.id());
+    assert_eq!(nested.heap.id(), root.heap.id());
+}
+
 /// TICKET-246 — `with_box` undoes its swap on unwind, not only on return: after a Rust panic
-/// inside the closure the `Vm` runs on the caller's heap again, the box context is back in its
-/// slot and no caller frame is left on the chain. The second half panics two boxes deep, inside
+/// inside the closure the `Vm` runs in the caller's context again (M1.7: the caller's view; the
+/// heap is the run's one heap throughout), the box context is back in its slot and no caller frame
+/// is left on the chain or lifted off it. The second half panics two boxes deep, inside
 /// `as_box_caller`.
 #[test]
 fn with_box_restores_the_context_when_the_closure_panics() {
@@ -741,24 +745,20 @@ fn with_box_restores_the_context_when_the_closure_panics() {
     vm.out.extend_from_slice(b"caller");
     let mut outer = Some(vm.box_new());
     let mut inner = Some(vm.box_new());
-    let (heap_id, stack_len) = (vm.heap.id(), vm.stack.len());
+    let (view, stack_len) = (vm.heap.view_stamp(), vm.stack.len());
 
-    let seen_inside = std::cell::Cell::new(0);
+    let seen_inside = std::cell::Cell::new((0, 0));
     let r = catch_unwind(AssertUnwindSafe(|| {
         vm.with_box(&mut outer, |vm| {
-            seen_inside.set(vm.heap.id());
+            seen_inside.set(vm.heap.view_stamp());
             assert_eq!(vm.out, b"caller", "out stays the caller's inside a box");
             vm.stack.push(Value::int(7));
             panic!("boom");
         })
     }));
     assert!(r.is_err());
-    assert_ne!(
-        seen_inside.get(),
-        heap_id,
-        "the closure ran on the box heap"
-    );
-    assert_eq!(vm.heap.id(), heap_id);
+    assert_ne!(seen_inside.get(), view, "the closure ran in the box's view");
+    assert_eq!(vm.heap.view_stamp(), view);
     assert_eq!(vm.stack.len(), stack_len);
     assert_eq!(vm.out, b"caller");
     assert!(vm.box_chain.is_empty());
@@ -770,10 +770,10 @@ fn with_box_restores_the_context_when_the_closure_panics() {
         })
     }));
     assert!(r.is_err());
-    assert_eq!(vm.heap.id(), heap_id);
+    assert_eq!(vm.heap.view_stamp(), view);
     assert_eq!(vm.stack.len(), stack_len);
     assert_eq!(vm.out, b"caller");
-    assert!(vm.box_chain.is_empty());
+    assert!(vm.box_chain.is_empty() && vm.box_lifted.is_empty());
     assert!(outer.is_some() && inner.is_some());
     // The box contexts still work after both unwinds.
     assert_eq!(vm.with_box(&mut outer, |vm| vm.stack.len()), 1);
@@ -869,19 +869,6 @@ main()
         assert_eq!(out, want_out, "stdout at workers={workers}");
         assert_eq!(err, want_err, "stderr at workers={workers}");
     }
-}
-
-/// M1.6 — until M1.7 deletes `FiberCtx::heap`, a context owns its side state exactly when it owns
-/// a heap. `swap_ctx` checks it, so a builder that sets one and not the other fails at once.
-#[test]
-#[should_panic(expected = "owns_side")]
-fn swap_ctx_rejects_owns_side_out_of_step_with_heap() {
-    let mut vm = Vm::new(Arc::new(empty_program()));
-    let mut ctx = FiberCtx {
-        owns_side: true,
-        ..FiberCtx::default()
-    };
-    vm.swap_ctx(&mut ctx);
 }
 
 /// TICKET-246 (F1) — every renderer terminates on every box cycle, with the container cycle

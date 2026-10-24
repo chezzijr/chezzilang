@@ -12,6 +12,13 @@
 //! A `Vm` with no token (a test fixture that never ran `Vm::run`, a worker `Vm` that only rebuilds
 //! a task's payload) polls nothing and blocks with no door. It collects alone only while its
 //! handle is its heap core's only one: a sweep of a core that other handles use needs a stop.
+//!
+//! M1.7 — a task's payload `Vm` (`Vm::prepare_worker`) allocates into the run's heap on the
+//! spawner's thread, under the spawner's token, and its values are in no root set until
+//! `ReadyWorker::into_fiber` registers the fiber's context. It never collects (it has no token and
+//! is not its core's only handle), and the spawner reaches no safepoint, collection or door in
+//! between, so no stop can complete while those values are unrooted: the stop waits for the
+//! spawner. [`PayloadInFlight`] checks the second half in debug builds.
 
 use super::gc_coord::{Attached, DetachTicket};
 use super::*;
@@ -20,6 +27,37 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 thread_local! {
     /// The GC tokens this OS thread holds: 0 or 1.
     static TOKENS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The task payloads this thread rebuilt that are not yet in a registered context.
+    static PAYLOADS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A rebuilt task payload in flight on this thread (see the module doc): from the payload `Vm`'s
+/// first allocation to `ReadyWorker::into_fiber`. While one lives, this thread must not stop,
+/// collect or detach: its values are in no root set.
+pub(super) struct PayloadInFlight(());
+
+impl PayloadInFlight {
+    pub(super) fn new() -> Self {
+        PAYLOADS.with(|p| p.set(p.get() + 1));
+        PayloadInFlight(())
+    }
+}
+
+impl Drop for PayloadInFlight {
+    fn drop(&mut self) {
+        PAYLOADS.with(|p| p.set(p.get().saturating_sub(1)));
+    }
+}
+
+/// The debug check of [`PayloadInFlight`]'s rule, at each place a thread with a token can let a
+/// collection run.
+#[inline]
+fn debug_no_payload_in_flight() {
+    debug_assert_eq!(
+        PAYLOADS.with(|p| p.get()),
+        0,
+        "M1.7: a stop, a collection or a door while a task payload is in no root set"
+    );
 }
 
 /// An [`Attached`] token of this OS thread. It counts the thread's tokens, so a second one fails a
@@ -82,45 +120,51 @@ impl Vm {
         }
     }
 
+    /// The slow half of a safepoint. The poll parks only while a stop runs, and a stale `stw`
+    /// read finds the stop just ended, so either way a collection ran: the handle zeroes its
+    /// pacing counts ([`Heap::observe_collection`]).
     #[cold]
     #[inline(never)]
     fn gc_park(&mut self) {
         if let Some(mut t) = self.attached.take() {
+            debug_no_payload_in_flight();
             let roots = self.gc_roots();
             t.get().poll(|| roots);
             self.attached = Some(t);
+            self.heap.observe_collection();
         }
     }
 
-    /// THE GC entry: stop the world, then collect. With no token, collect alone, and only on a
-    /// core with no other handle (see the module doc).
+    /// THE GC entry: stop the world, then collect the run's one heap from the union of its roots
+    /// ([`Vm::collect_from`]). With no token, collect alone, and only on a core with no other
+    /// handle (see the module doc).
     ///
-    /// A request that finds another thread's stop running joins it as a poller, and that
-    /// collection does not sweep this heap: until M1.7 each fiber's heap is its own. So the entry
-    /// requests again after the joined stop ends, until a stop runs this `Vm`'s own collection
-    /// (`sample_mem_cap` and the `--max-heap` check read that sweep). A fresh request, and not a
-    /// sweep with the world running, keeps the M1.7 shape: every collection is a stop.
+    /// A request that finds another thread's stop running joins it as a poller: that collection
+    /// swept the one heap, so it serves this request too (`sample_mem_cap` and the `--max-heap`
+    /// check read the core's verdict of that sweep). The freed objects whose drop can make a
+    /// syscall are dropped here, after the world restarts (`Heap::take_graveyard`).
     pub(super) fn gc_collect(&mut self) {
         let Some(mut t) = self.attached.take() else {
             if self.heap.is_sole_handle() {
                 self.collect();
+                drop(self.heap.take_graveyard());
             }
             return;
         };
+        debug_no_payload_in_flight();
+        let mut ran = false;
         let r = catch_unwind(AssertUnwindSafe(|| {
-            let mut swept = false;
-            while !swept {
-                let roots = self.gc_roots();
-                // M1.7: collect the run's one heap from the union of the roots. Until then each
-                // fiber has its own heap, the union holds refs into other heaps, and this collects
-                // only its own.
-                t.get().request_collect(roots, |_union| {
-                    self.collect();
-                    swept = true;
-                });
-            }
+            let roots = self.gc_roots();
+            t.get().request_collect(roots, |union| {
+                self.collect_from(union.to_vec());
+                ran = true;
+            });
         }));
         self.attached = Some(t);
+        if !ran {
+            self.heap.observe_collection();
+        }
+        drop(self.heap.take_graveyard());
         if let Err(p) = r {
             resume_unwind(p);
         }
@@ -141,11 +185,16 @@ impl Vm {
         let Some(t) = self.attached.take() else {
             return f(self);
         };
+        debug_no_payload_in_flight();
         let mut roots = self.gc_roots();
         roots.extend_from_slice(pins);
         let ticket = t.detach(roots);
         let r = catch_unwind(AssertUnwindSafe(|| f(self)));
-        self.attached = Some(ThreadToken::new(ticket.reattach()));
+        let (a, collected) = ticket.reattach();
+        self.attached = Some(ThreadToken::new(a));
+        if collected {
+            self.heap.observe_collection();
+        }
         match r {
             Ok(v) => v,
             Err(p) => resume_unwind(p),
