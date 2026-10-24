@@ -125,6 +125,17 @@ pub struct Candidates<'a> {
     limit: usize,
 }
 
+#[cfg(test)]
+thread_local! {
+    static SLOT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Index slots this thread's probes read so far (tests only).
+#[cfg(test)]
+pub(super) fn slot_reads() -> usize {
+    SLOT_READS.with(|c| c.get())
+}
+
 impl Iterator for Candidates<'_> {
     type Item = usize;
 
@@ -133,6 +144,8 @@ impl Iterator for Candidates<'_> {
         let mask = self.v.len().wrapping_sub(1);
         while self.left > 0 {
             let (sh, sp) = self.v.get(self.i);
+            #[cfg(test)]
+            SLOT_READS.with(|c| c.set(c.get() + 1));
             self.i = (self.i + 1) & mask;
             self.left -= 1;
             if sp == 0 {

@@ -1273,8 +1273,8 @@ struct K:
     n: int
     fn hash(self) -> int:
         return 7
-    fn eq(self, o: K) -> bool:
-        return self.n == o.n
+    fn eq(self, other: K) -> bool:
+        return self.n == other.n
 
 fn main():
     s: Set[K] = Set([K(0)])
@@ -1283,4 +1283,53 @@ fn main():
     print(s.len(), K(0) in s, K(19) in s, K(20) in s)
 main()";
     growth_retires_index_until_collect(src, "20 true true false\n", 3);
+}
+
+/// M2.3 — a heap probe walks its candidates once per restart: inserting and finding `N` keys
+/// whose `hash()` is one constant reads O(N^2) index slots in all, not O(N^3). The user `eq` makes
+/// every compare re-entrant, so this is the rooted, re-validating probe path.
+#[test]
+fn constant_hash_probe_reads_each_candidate_once() {
+    const N: usize = 300;
+    let src = format!(
+        "\
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return 7
+    fn eq(self, other: K) -> bool:
+        return self.n == other.n
+
+fn main():
+    s: Set[K] = Set([K(0)])
+    for i in 1..{N}:
+        s.insert(K(i))
+    found := 0
+    for i in 0..{N}:
+        if K(i) in s:
+            found += 1
+    print(s.len(), found)
+main()"
+    );
+    let (out, reads) = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let before = super::map_data::slot_reads();
+            let mut vm = Vm::new(Arc::new(test_program(&src).expect("compiles")));
+            assert!(vm.eq_may_reenter(), "the user eq is the hook");
+            let result = vm.run();
+            vm.finish_run(result).expect("runs");
+            (captured(vm.out), super::map_data::slot_reads() - before)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked");
+    assert_eq!(out, format!("{N} {N}\n"));
+    // Each of the 2N probes walks the one N-slot cluster about once: at most 2 N^2 reads. A
+    // re-walk per compare step costs about N^3 / 3 (9.1M at N = 300).
+    assert!(
+        reads <= 2 * N * N,
+        "{reads} slot reads for {N} keys, over {}",
+        2 * N * N
+    );
 }

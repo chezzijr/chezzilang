@@ -210,10 +210,12 @@ impl Vm {
         let roots: &[Value] = if reenter { &held } else { &[] };
         self.with_roots(roots, |vm| {
             'restart: loop {
+                // The candidates past the first, read once per restart (see `next_candidate`).
+                let mut rest = None;
                 let mut i = 0;
                 loop {
                     let (p, hs, stored) = match vm.heap.get(mh).as_map() {
-                        Some(m) => match m.candidates(hk).nth(i) {
+                        Some(m) => match next_candidate(i, &mut rest, || m.candidates(hk)) {
                             Some(p) => match m.entries.try_get(p) {
                                 Some((h, k, _)) => (p, h, k),
                                 None => return Ok(None),
@@ -263,10 +265,11 @@ impl Vm {
         let roots: &[Value] = if reenter { &held } else { &[] };
         self.with_roots(roots, |vm| {
             'restart: loop {
+                let mut rest = None;
                 let mut i = 0;
                 loop {
                     let (p, hs, stored) = match vm.heap.get(sh).as_set() {
-                        Some(s) => match s.candidates(he).nth(i) {
+                        Some(s) => match next_candidate(i, &mut rest, || s.candidates(he)) {
                             Some(p) => match s.entries.try_get(p) {
                                 Some((h, e)) => (p, h, e),
                                 None => return Ok(None),
@@ -656,4 +659,21 @@ impl Vm {
     }
 
     // ----- calls -----
+}
+
+/// Candidate `i` of a heap probe. A probe cannot hold the table across a compare (a user `eq` can
+/// reach a safepoint), so step 0 reads the first candidate alone (no allocation: the common hit),
+/// and step 1 copies the rest into `rest` once; later steps index it. A mutation that moves the
+/// positions makes the caller restart with a fresh `rest`.
+fn next_candidate<I: Iterator<Item = usize>>(
+    i: usize,
+    rest: &mut Option<Vec<usize>>,
+    fresh: impl FnOnce() -> I,
+) -> Option<usize> {
+    if i == 0 {
+        return fresh().next();
+    }
+    rest.get_or_insert_with(|| fresh().skip(1).collect())
+        .get(i - 1)
+        .copied()
 }
