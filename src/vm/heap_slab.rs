@@ -15,11 +15,12 @@
 //! most 2x `len` slots once `len` is past the first segment.
 //!
 //! The slab is shared by every handle of one `HeapCore` (`vm/heap_core.rs`), so it works through
-//! `&self`: the table entries and `len` are atomics, published with `Release` and read with
-//! `Acquire` (a slot lookup reads its table entry `Relaxed` after an `Acquire` load of `len`). An
-//! append needs the [`SlabAppend`] token, which the core keeps under its allocation lock, so
-//! appends are serialized. A slot is read and written in place through `&self`: keeping
-//! two handles off one slot is the caller's duty (see [`Slab::slot_mut`]).
+//! `&self`: the table entries and `len` are atomics, and `len` is published with `Release` and
+//! read with `Acquire` (a slot lookup reads its table entry `Relaxed` after an `Acquire` load of
+//! `len`). An append needs the slab's own [`SlabAppend`] token, which the core keeps under its
+//! allocation lock, so appends are serialized. A slot is read and written in place through
+//! `&self`: keeping two handles off one slot is the caller's duty, so the two writable views
+//! ([`Slab::slot_mut`], [`Slab::segments_mut`]) are `unsafe fn`.
 //!
 //! [`SlotBits`] is a bitset with one bit per slot, segmented like the slab, for the core's mark and
 //! copy bits. The bits of segments 0 to 4 (slots `[0, 64)`) are one inline word, so a heap of fewer
@@ -32,6 +33,9 @@ use std::mem::MaybeUninit;
 use std::ops::Range;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+
+/// Process-wide source for a slab's identity, which ties each [`SlabAppend`] to its slab.
+static NEXT_SLAB_ID: AtomicU64 = AtomicU64::new(1);
 
 /// One heap slot: the object, or a hole for swept/free slots. Exactly 64B (`Option<Obj>` niche-packs
 /// `None` free). The GC mark bit is NOT here — it lives in `HeapCore::marks`, a dense parallel
@@ -77,15 +81,19 @@ pub(super) struct Slab {
     /// Slots ever appended. Every slot below it is initialized (a swept slot holds `obj: None`).
     /// Written only by [`push`](Slab::push), under the [`SlabAppend`] token.
     len: AtomicUsize,
+    /// This slab's identity; its one [`SlabAppend`] holds the same number.
+    id: u64,
     /// The slab owns its `Slot`s: this keeps `Slab`'s `Send`/`Sync` equal to `Slot`'s.
     _owns: PhantomData<Slot>,
 }
 
-/// The right to append to a slab. [`Slab::new`] makes exactly one per slab, and `HeapCore` keeps it
-/// under its allocation lock, so `&mut SlabAppend` proves that no other append runs.
+/// The right to append to ONE slab. [`Slab::new`] makes exactly one per slab, and `HeapCore` keeps
+/// it under its allocation lock, so `&mut SlabAppend` proves that no other append to that slab
+/// runs. It holds its slab's id, and [`Slab::push_holes`] refuses a token of another slab: two
+/// appends to one slab under two tokens would race on `len`.
 #[derive(Debug)]
 pub(super) struct SlabAppend {
-    _only_slab_new: (),
+    slab: u64,
 }
 
 impl std::fmt::Debug for Slab {
@@ -105,12 +113,14 @@ fn out_of_range(i: usize, len: usize) -> ! {
 impl Slab {
     /// An empty slab (it allocates nothing) and its one append token.
     pub(super) fn new() -> (Slab, SlabAppend) {
+        let id = NEXT_SLAB_ID.fetch_add(1, Ordering::Relaxed);
         let slab = Slab {
             segs: [const { AtomicPtr::new(null_mut()) }; SEGS],
             len: AtomicUsize::new(0),
+            id,
             _owns: PhantomData,
         };
-        (slab, SlabAppend { _only_slab_new: () })
+        (slab, SlabAppend { slab: id })
     }
 
     /// Slots ever appended.
@@ -148,14 +158,16 @@ impl Slab {
 
     /// Slot `h`, writable through `&self`: every handle of one core writes its slots in place.
     ///
-    /// Contract (the caller's duty, as in Go): while the returned `&mut` lives, no other reference
-    /// to slot `h` exists. Today each `Vm` has its own core, so its `Heap` handle (behind `&mut`)
-    /// is the only user; `Heap::attach`'s handles allocate disjoint slots. When tasks share objects
-    /// (M3), a race on one object is the user's bug, and the collector runs with the world stopped.
+    /// # Safety
+    ///
+    /// While the returned `&mut` lives, no other reference to slot `h` exists (the caller's duty,
+    /// as in Go). The run's handles keep it: a handle writes a slot it took from the free list, or
+    /// an object of the fiber it runs (every crossing copies until M3), and the collector writes
+    /// slots only while every other handle is stopped or detached (`vm/gc_coord.rs`).
     #[inline]
     #[allow(clippy::mut_from_ref)]
-    pub(super) fn slot_mut(&self, h: GcRef) -> &mut Slot {
-        // SAFETY: as in `get`; exclusive use of the slot is the contract above.
+    pub(super) unsafe fn slot_mut(&self, h: GcRef) -> &mut Slot {
+        // SAFETY: as in `get`; exclusive use of the slot is the caller's contract above.
         unsafe { &mut *self.slot_ptr(h) }
     }
 
@@ -163,7 +175,8 @@ impl Slab {
     #[cfg(test)]
     pub(super) fn push(&self, slot: Slot, append: &mut SlabAppend) -> GcRef {
         let h = GcRef(self.push_holes(1, append).start as u32);
-        self.slot_mut(h).obj = slot.obj;
+        // SAFETY: `h` was appended just now; only this call knows it.
+        unsafe { self.slot_mut(h) }.obj = slot.obj;
         h
     }
 
@@ -171,7 +184,8 @@ impl Slab {
     /// most `max`, and return their dense numbers. They fill storage the segment already holds;
     /// only a first slot of a segment allocates the segment, which never moves. Below 64 slots it
     /// appends one slot, so a small heap's caller caches nothing. The token serializes appends.
-    pub(super) fn push_holes(&self, max: usize, _append: &mut SlabAppend) -> Range<usize> {
+    pub(super) fn push_holes(&self, max: usize, append: &mut SlabAppend) -> Range<usize> {
+        assert_eq!(append.slab, self.id, "a SlabAppend token of another slab");
         let start = self.len.load(Ordering::Relaxed);
         assert!(start <= u32::MAX as usize, "heap slab full ({start} slots)");
         let (k, off) = locate(start);
@@ -184,7 +198,9 @@ impl Slab {
         let seg = if off == 0 {
             let seg: *mut MaybeUninit<Slot> =
                 Box::into_raw(Box::<[Slot]>::new_uninit_slice(seg_cap(k))).cast();
-            self.segs[k].store(seg.wrapping_sub(seg_start(k)), Ordering::Release);
+            // `Relaxed`: the `Release` store of `len` below publishes this entry together with the
+            // slots, and every reader loads `len` with `Acquire` before it loads an entry.
+            self.segs[k].store(seg.wrapping_sub(seg_start(k)), Ordering::Relaxed);
             seg
         } else {
             self.seg_base(k)
@@ -223,12 +239,18 @@ impl Slab {
     }
 
     /// Every segment's initialized slots with the dense number of its first slot, in index order,
-    /// writable through `&self` for the sweep. Contract: as for [`slot_mut`](Slab::slot_mut), for
-    /// every slot (the collector is the only user while it runs).
-    pub(super) fn segments_mut(&self) -> impl Iterator<Item = (usize, &mut [Slot])> {
+    /// writable through `&self` for the sweep.
+    ///
+    /// # Safety
+    ///
+    /// As for [`slot_mut`](Slab::slot_mut), for every slot while the iterator or a slice it gave
+    /// lives: no other thread reads or writes any slot. The collector holds it: it sweeps only
+    /// while every other handle of the run is stopped at a safepoint or detached
+    /// (`vm/gc_coord.rs`), and a detached thread does not touch the heap.
+    pub(super) unsafe fn segments_mut(&self) -> impl Iterator<Item = (usize, &mut [Slot])> {
         let len = self.len();
-        // SAFETY: as in `iter`; the segments are disjoint, and the contract excludes every other
-        // reference to their slots.
+        // SAFETY: as in `iter`; the segments are disjoint, and the caller's contract excludes
+        // every other reference to their slots.
         (0..seg_count(len)).map(move |k| (seg_start(k), unsafe { &mut *self.seg_raw(k, len) }))
     }
 }
@@ -493,6 +515,25 @@ mod tests {
         assert_eq!(slab.iter().count(), 10_001);
     }
 
+    /// A `GcRef` one past the last slot (`i == len`) panics, as a `Vec` index does; the check is
+    /// out of line (`out_of_range`), so this pins that it still fires at the boundary.
+    #[test]
+    #[should_panic(expected = "GcRef 1 out of range (slab len 1)")]
+    fn get_at_len_panics() {
+        let (slab, mut append) = Slab::new();
+        slab.push(Slot { obj: None }, &mut append);
+        let _ = slab.get(GcRef(1));
+    }
+
+    /// An append with the token of another slab panics before it touches `len`.
+    #[test]
+    #[should_panic(expected = "a SlabAppend token of another slab")]
+    fn push_with_a_foreign_token_panics() {
+        let (slab, _own) = Slab::new();
+        let (_other, mut foreign) = Slab::new();
+        slab.push_holes(1, &mut foreign);
+    }
+
     #[test]
     fn segment_layout_is_geometric() {
         // Segment 0 holds 4 slots; segment k >= 1 holds [4 << (k-1), 4 << k).
@@ -532,8 +573,8 @@ mod tests {
             assert_eq!(big(&slab, refs[i]), i as i64);
         }
         assert_eq!(slab.iter().count(), 4097);
-        let seen: Vec<i64> = slab
-            .segments_mut()
+        // SAFETY: this test is the slab's only user.
+        let seen: Vec<i64> = unsafe { slab.segments_mut() }
             .flat_map(|(start, seg)| {
                 seg.iter()
                     .enumerate()

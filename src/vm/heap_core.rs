@@ -145,11 +145,16 @@ impl HeapCore {
         self.slots.get(h)
     }
 
-    /// Slot `h`, writable (see `Slab::slot_mut` for the contract).
+    /// Slot `h`, writable.
+    ///
+    /// # Safety
+    ///
+    /// As for `Slab::slot_mut`: while the `&mut` lives, no other reference to slot `h` exists.
     #[inline]
     #[allow(clippy::mut_from_ref)]
-    pub(super) fn slot_mut(&self, h: GcRef) -> &mut Slot {
-        self.slots.slot_mut(h)
+    pub(super) unsafe fn slot_mut(&self, h: GcRef) -> &mut Slot {
+        // SAFETY: the caller's contract is `Slab::slot_mut`'s.
+        unsafe { self.slots.slot_mut(h) }
     }
 
     /// Every slot, in index order (see `Slab::iter`).
@@ -186,7 +191,9 @@ impl HeapCore {
                 }
             }
         };
-        self.reuse(idx, obj)
+        // SAFETY: `idx` came off the free list or the slab end under `alloc_lock` just now, so no
+        // other handle holds it.
+        unsafe { self.reuse(idx, obj) }
     }
 
     /// Put a handle's cached free slots back on top of the core's stack, in order.
@@ -200,10 +207,16 @@ impl HeapCore {
     /// bit so the new object does not inherit them. The mark is 0 after a normal sweep, but a
     /// collection that marks a dangling ref and then panics in `children` (caught by `boxctx.rs` or
     /// `call.rs`) leaves a mark on a free slot, which `sweep_slots` never visits.
+    ///
+    /// # Safety
+    ///
+    /// `idx` is an empty slot the caller took from the core (`alloc_slot`'s refill of its cache)
+    /// and holds alone: no other handle reuses it and no reference to it is live.
     #[inline]
-    pub(super) fn reuse(&self, idx: u32, obj: Obj) -> GcRef {
+    pub(super) unsafe fn reuse(&self, idx: u32, obj: Obj) -> GcRef {
         let h = GcRef(idx);
-        self.slots.slot_mut(h).obj = Some(obj);
+        // SAFETY: the caller holds the empty slot `idx` alone (the contract above).
+        unsafe { self.slots.slot_mut(h) }.obj = Some(obj);
         // Load first: the bit is almost always clear, and a clear bit needs no write. Only the
         // collector sets marks, and it does not run while a handle allocates.
         if self.marks.get(idx as usize) {
@@ -280,12 +293,19 @@ impl HeapCore {
     /// span go with it, and every handle's copy log drops it: the slot can be handed to another
     /// object before a log is unmarked. The caller (`Heap::sweep`) gave its free cache back first
     /// and measures the live bytes after.
-    pub(super) fn sweep_slots(&self) {
+    ///
+    /// # Safety
+    ///
+    /// As for `Slab::segments_mut`: no other thread touches a slot while this runs. Every other
+    /// handle of the core is stopped at a safepoint or detached (`vm/gc_coord.rs`), or the caller's
+    /// handle is the core's only one.
+    pub(super) unsafe fn sweep_slots(&self) {
         let mut live = 0usize;
         {
             let mut st = lock(&self.alloc_lock);
             let mut spans = lock(&self.err_spans);
-            for (start, seg) in self.slots.segments_mut() {
+            // SAFETY: the caller's contract above.
+            for (start, seg) in unsafe { self.slots.segments_mut() } {
                 let marks = self.marks.segment_words(start);
                 for (idx, slot) in (start..).zip(seg.iter_mut()) {
                     if slot.obj.is_none() {
@@ -366,7 +386,8 @@ mod tests {
     fn two_handles_alloc_disjoint_slots_concurrently() {
         const N: i64 = 100_000;
         let first = Heap::new();
-        let second = first.attach();
+        // SAFETY: each handle allocates its own slots and reads only after both threads joined.
+        let second = unsafe { first.attach() };
         let run = |mut heap: Heap, tid: i64| {
             std::thread::spawn(move || {
                 let refs: Vec<GcRef> = (0..N)
@@ -397,7 +418,8 @@ mod tests {
     #[test]
     fn copy_log_retain_spans_handles() {
         let mut a = Heap::new();
-        let mut b = a.attach();
+        // SAFETY: one thread drives both handles, and `a.sweep` runs with `b` idle.
+        let mut b = unsafe { a.attach() };
         let x = a.alloc(Obj::List(Vec::new()));
         let y = b.alloc(Obj::List(Vec::new()));
         let z = a.alloc(Obj::List(Vec::new()));
@@ -460,7 +482,9 @@ mod tests {
                     for _ in 0..ROUNDS {
                         start.wait();
                         for idx in (64 + parity..128).step_by(2) {
-                            core.reuse(idx, Obj::BigInt(idx as i64));
+                            // SAFETY: the two threads reuse disjoint slots (even and odd), and
+                            // the main thread reads only the marks between the barriers.
+                            unsafe { core.reuse(idx, Obj::BigInt(idx as i64)) };
                         }
                         done.wait();
                     }

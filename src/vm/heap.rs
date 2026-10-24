@@ -785,14 +785,27 @@ impl Heap {
     }
 
     /// A new handle on this heap's core: it allocates slots no other handle holds and reads every
-    /// object of the core. Tests only: two handles can reach one slot through safe code (a `get`
-    /// on one while the other's `get_mut` grows the object is a use-after-free).
+    /// object of the core. Two handles can reach one slot through safe code (a `get` on one while
+    /// the other's `get_mut` grows the object is a use-after-free), so the protocol below is the
+    /// caller's.
     ///
-    /// M1.7 turns this into `pub(super) unsafe fn attach` with a `# Safety` section: no two handles
-    /// reach one slot, and sweep runs only while every other handle is stopped or detached.
-    #[cfg(test)]
-    pub(super) fn attach(&self) -> Heap {
+    /// # Safety
+    ///
+    /// For the life of both handles:
+    /// - no two handles reach one object while one of them writes it: a handle writes the objects
+    ///   of the fiber it runs, and every crossing copies (until M3);
+    /// - a sweep ([`sweep`](Heap::sweep)) runs only while every other handle is stopped at a
+    ///   safepoint or detached, through the run's `GcCoord` (`vm/gc_coord.rs`, `Vm::gc_collect`).
+    // The shared-core switch (`Vm::spawn_worker`) is its production caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) unsafe fn attach(&self) -> Heap {
         Heap::on(Arc::clone(&self.core))
+    }
+
+    /// Whether this handle is its core's only one: a collection with no stop of the world is
+    /// sound only then (`Vm::gc_collect` with no token).
+    pub(super) fn is_sole_handle(&self) -> bool {
+        Arc::strong_count(&self.core) == 1
     }
 
     /// Mark `h` as an airlock copy (D4 layer C, TICKET-169), and record it while a copy log is on.
@@ -922,7 +935,8 @@ impl Heap {
             self.charge_bytes(obj_bytes_shallow(&obj));
         }
         let h = match self.free.pop() {
-            Some(idx) => self.core.reuse(idx, obj),
+            // SAFETY: `idx` is from this handle's own free cache, which `alloc_slot` filled.
+            Some(idx) => unsafe { self.core.reuse(idx, obj) },
             None => self.core.alloc_slot(&mut self.free, obj),
         };
         // A reused slot must not inherit a stale view mark (a new slot has none).
@@ -957,8 +971,9 @@ impl Heap {
         if self.any_viewed && self.is_viewed(h.0 as usize) {
             self.view_epoch += 1;
         }
-        self.core
-            .slot_mut(h)
+        // SAFETY: `&mut self` excludes this handle's other references, and `attach`'s contract
+        // keeps every other handle off an object this handle's fiber owns.
+        unsafe { self.core.slot_mut(h) }
             .obj
             .as_mut()
             .expect("dangling GcRef (object was collected while still reachable)")
@@ -984,6 +999,12 @@ impl Heap {
     #[cfg(test)]
     pub fn live(&self) -> usize {
         self.core.live()
+    }
+
+    /// Whether slot `h` holds an object (tests: a freed slot holds none).
+    #[cfg(test)]
+    pub fn holds(&self, h: GcRef) -> bool {
+        self.core.get(h).obj.is_some()
     }
 
     /// Charge bytes against the collection trigger (see `since_gc_bytes`). Byte funnel 3 of 3 is
@@ -1234,7 +1255,9 @@ impl Heap {
         // The cached free slots go back on top of the core's stack first, so the core's free list
         // is the whole free list and the next `alloc` reuses the slot it would have reused.
         self.core.give_back(&mut self.free);
-        self.core.sweep_slots();
+        // SAFETY: the collector protocol of `attach`: `Vm::gc_collect` sweeps with every other
+        // handle stopped or detached, or with this handle the core's only one.
+        unsafe { self.core.sweep_slots() };
         self.since_gc = 0;
         *self.gc_check_at.get_mut() = 0;
         *self.since_gc_bytes.get_mut() = 0;

@@ -10,7 +10,8 @@
 //!   token on one thread fails a debug assertion ([`ThreadToken`]).
 //!
 //! A `Vm` with no token (a test fixture that never ran `Vm::run`, a worker `Vm` that only rebuilds
-//! a task's payload) collects alone, polls nothing and blocks with no door.
+//! a task's payload) polls nothing and blocks with no door. It collects alone only while its
+//! handle is its heap core's only one: a sweep of a core that other handles use needs a stop.
 
 use super::gc_coord::{Attached, DetachTicket};
 use super::*;
@@ -91,7 +92,8 @@ impl Vm {
         }
     }
 
-    /// THE GC entry: stop the world, then collect. With no token, collect alone.
+    /// THE GC entry: stop the world, then collect. With no token, collect alone, and only on a
+    /// core with no other handle (see the module doc).
     ///
     /// A request that finds another thread's stop running joins it as a poller, and that
     /// collection does not sweep this heap: until M1.7 each fiber's heap is its own. So the entry
@@ -100,7 +102,9 @@ impl Vm {
     /// sweep with the world running, keeps the M1.7 shape: every collection is a stop.
     pub(super) fn gc_collect(&mut self) {
         let Some(mut t) = self.attached.take() else {
-            self.collect();
+            if self.heap.is_sole_handle() {
+                self.collect();
+            }
             return;
         };
         let r = catch_unwind(AssertUnwindSafe(|| {
