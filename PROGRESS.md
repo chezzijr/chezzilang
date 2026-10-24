@@ -247,6 +247,10 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
 - M1.7: one heap per run, collected with the world stopped from every root source (attached
   threads, detached threads, parked fibers, box contexts); crossings still copy; `--max-heap` caps
   the whole run. Design: [`docs/design/go-shared-heap.md`](docs/design/go-shared-heap.md).
+- M1.8: a value held in a Rust local across a blocking door survives another thread's sweep:
+  a `recv` wakes senders through the channel core, a `Shared` method roots its receiver; an
+  extern C call with a callback runs detached and its callback reattaches (Go `cgocallback`);
+  printing a busy `Writer`/`Reader` waits detached. Gate: `tests/gc_blocking_pins.rs`.
 
 ## Later
 

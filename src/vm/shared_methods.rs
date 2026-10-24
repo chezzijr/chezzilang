@@ -9,9 +9,36 @@ use crate::base::builtin_method::{
 
 impl Vm {
     /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
-    /// via the re-entrant call path). The box is re-rooted on
-    /// the operand stack across `update`'s nested call (the receiver was popped in `do_method_call`).
+    /// via the re-entrant call path). The receiver and the arguments are popped by the dispatcher,
+    /// so they are rooted on the operand stack ([`Vm::with_method_rooted`]) across the update
+    /// guard's wait and `update`'s nested call.
     pub(super) fn shared_method(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        self.with_method_rooted(h, args, |vm| vm.shared_method_rooted(h, method, args, span))
+    }
+
+    /// Run a box method `f` with its popped receiver `h` and `args` rooted on the operand stack.
+    /// M1.8 — the receiver is a box's root: the box state is reachable through its handles only
+    /// (`SharedState::roots_into`), so a method that waits for the update guard detached
+    /// (`Vm::gc_blocking`) keeps its handle in this `Vm`'s published roots.
+    fn with_method_rooted<T>(
+        &mut self,
+        h: GcRef,
+        args: &[Value],
+        f: impl FnOnce(&mut Vm) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let mut roots = Vec::with_capacity(args.len() + 1);
+        roots.push(Value::obj(h));
+        roots.extend_from_slice(args);
+        self.with_roots(&roots, f)
+    }
+
+    fn shared_method_rooted(
         &mut self,
         h: GcRef,
         method: &str,
@@ -92,10 +119,7 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let mut roots = Vec::with_capacity(args.len() + 1);
-        roots.push(Value::obj(h));
-        roots.extend_from_slice(args);
-        self.with_roots(&roots, |vm| {
+        self.with_method_rooted(h, args, |vm| {
             vm.rwshared_method_rooted(h, method, args, span)
         })
     }

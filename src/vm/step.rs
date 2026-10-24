@@ -740,14 +740,8 @@ impl Vm {
                     return Err(self.err("`for` over a non-channel value".to_string(), span));
                 };
                 match self.recv_step_or_demote(h, span)? {
-                    RecvStep::Got(w) => {
-                        self.wake_senders(h); // `for v in ch:` freed a slot — wake a parked bounded sender
-                        let val = self.from_wire(w);
-                        let opt = self.alloc_enum("Option", "Some", vec![val]);
-                        self.push(opt);
-                    }
-                    // A `give` filled this receiver's own slot: it committed no sender.
-                    RecvStep::Filled(w) => {
+                    // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
+                    RecvStep::Got(w) | RecvStep::Filled(w) => {
                         let val = self.from_wire(w);
                         let opt = self.alloc_enum("Option", "Some", vec![val]);
                         self.push(opt);

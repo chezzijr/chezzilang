@@ -252,16 +252,17 @@ impl crate::native::Host for VmHost<'_> {
                 message: format!("callback argument {arg_index} is missing"),
             })?;
         let span = Span::default();
-        // Lower the C scalar args to engine `Value`s (allocations happen here, at the boundary).
-        let vals: Vec<Value> = args
-            .iter()
-            .map(|a| self.vm.lower_native(a.clone()))
-            .collect();
-        let result = self
-            .vm
-            .guarded(|vm| vm.invoke_value(callee, vals, span))
-            .map_err(|e| crate::native::HostError { message: e.message })?;
-        Ok(self.vm.value_to_native_ret(result))
+        // M1.8 — the extern call waits in the GC door: the callback runs attached
+        // (`Vm::gc_reenter`, Go `cgocallback`), and the call's args stay pinned after it.
+        let pins: Vec<GcRef> = self.args.iter().filter_map(|v| v.child_gcref()).collect();
+        self.vm.gc_reenter(&pins, |vm| {
+            // Lower the C scalar args to engine `Value`s (allocations happen here, at the boundary).
+            let vals: Vec<Value> = args.iter().map(|a| vm.lower_native(a.clone())).collect();
+            let result = vm
+                .guarded(|vm| vm.invoke_value(callee, vals, span))
+                .map_err(|e| crate::native::HostError { message: e.message })?;
+            Ok(vm.value_to_native_ret(result))
+        })
     }
     fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
         let Some(v) = self.args.get(i).copied() else {

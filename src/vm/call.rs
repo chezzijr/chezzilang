@@ -153,18 +153,6 @@ impl Vm {
         Ok(())
     }
 
-    /// M1.5 — an extern C call that takes a callback, with this thread still attached: its
-    /// trampoline runs Chezzi code inside `ffi_call`, and that code needs the token, so the call
-    /// cannot run through the GC door, and a stop waits for the whole C call. M1.8: the
-    /// trampoline reattaches for the callback and detaches on return (Go `cgocallback`).
-    fn extern_call_attached(
-        &mut self,
-        cffi: &crate::native::cffi::Cffi,
-        args: Vec<Value>,
-    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
-        cffi.call(&mut VmHost { vm: self, args })
-    }
-
     /// Dispatch an already-evaluated callable `Value` on evaluated args, *returning* the result
     /// instead of pushing it. Shared by `do_call` (which pushes) and the higher-order list methods
     /// (which call it per element while keeping their source/result lists rooted on the stack).
@@ -279,14 +267,12 @@ impl Vm {
                         span,
                     ));
                 }
-                let ret = if cffi.has_callback_param() {
-                    self.extern_call_attached(&cffi, args)
-                } else {
-                    // M1.5 — Go `cgocall`: a C call runs detached, through the GC door. It reads
-                    // its (pinned) args and returns an off-heap `NativeRet`; nothing allocates.
-                    let pins: Vec<GcRef> = args.iter().filter_map(|v| v.child_gcref()).collect();
-                    self.gc_blocking(&pins, |vm| cffi.call(&mut VmHost { vm, args }))
-                };
+                // M1.5 — Go `cgocall`: a C call runs detached, through the GC door. It reads its
+                // (pinned) args and returns an off-heap `NativeRet`; nothing allocates. M1.8 — a
+                // callback that C calls meanwhile runs attached (`VmHost::invoke_callback`, Go
+                // `cgocallback`).
+                let pins: Vec<GcRef> = args.iter().filter_map(|v| v.child_gcref()).collect();
+                let ret = self.gc_blocking(&pins, |vm| cffi.call(&mut VmHost { vm, args }));
                 let ret = ret.map_err(|e| RuntimeError {
                     message: e.message,
                     span,

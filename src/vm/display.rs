@@ -6,7 +6,44 @@ use super::stmt::BoxSnaps;
 use super::*;
 use crate::base::hooks::Hook;
 
+/// `Writer(open)` / `Reader(closed)`: an I/O handle's text, without its fd.
+fn io_handle_text(label: &str, open: bool) -> String {
+    format!("{label}({})", if open { "open" } else { "closed" })
+}
+
+/// M1.8 — whether an I/O handle's `inner` slot is open, with no wait: `None` while another thread
+/// holds the lock. A read or a write holds it while it waits in the GC door.
+fn io_state<T>(inner: &std::sync::Mutex<Option<T>>) -> Option<bool> {
+    match inner.try_lock() {
+        Ok(g) => Some(g.is_some()),
+        Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner().is_some()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
+/// [`io_state`] for a `&self` render (error text, a box's contents), which cannot take the GC
+/// door: a short spin, then `open`. A holder that stays longer waits on a syscall, and only an
+/// open handle makes one (an op on a closed slot returns at once).
+fn io_state_now<T>(inner: &std::sync::Mutex<Option<T>>) -> bool {
+    for _ in 0..64 {
+        if let Some(open) = io_state(inner) {
+            return open;
+        }
+        std::thread::yield_now();
+    }
+    true
+}
+
 impl Vm {
+    /// [`io_state`] for the print path: a busy handle is waited for through the GC door.
+    fn io_state_door<T>(&mut self, inner: &std::sync::Mutex<Option<T>>) -> bool {
+        io_state(inner).unwrap_or_else(|| {
+            self.gc_blocking(&[], |_| {
+                inner.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+            })
+        })
+    }
+
     pub(super) fn type_name(&self, v: Value) -> &'static str {
         // A boxed float is Float-tagged → `view` yields `Obj(h)` → the `Obj::FloatBox => "float"` arm
         // below names it (a boxed `BigInt` likewise → "int").
@@ -225,23 +262,9 @@ impl Vm {
                     }
                 )),
                 // R2: render open/closed without exposing the fd (mirrors the socket handles).
-                Obj::Writer(core) => Ok(format!(
-                    "Writer({})",
-                    if core.inner.lock().unwrap().is_some() {
-                        "open"
-                    } else {
-                        "closed"
-                    }
-                )),
+                Obj::Writer(core) => Ok(io_handle_text("Writer", io_state_now(&core.inner))),
                 // R2b: render open/closed without exposing the fd (mirrors the Writer handle).
-                Obj::Reader(core) => Ok(format!(
-                    "Reader({})",
-                    if core.inner.lock().unwrap().is_some() {
-                        "open"
-                    } else {
-                        "closed"
-                    }
-                )),
+                Obj::Reader(core) => Ok(io_handle_text("Reader", io_state_now(&core.inner))),
                 Obj::Generator(_) => Ok("<generator>".to_string()),
                 // A cell is a transparent by-reference box (never a user-visible operand — reads
                 // `CellLoad` first); defensively display its inner value.
@@ -488,27 +511,9 @@ impl Vm {
                 )
             }
             // R2: render open/closed without exposing the fd (mirrors the heap `Display`).
-            WireValue::Writer(core) => {
-                format!(
-                    "Writer({})",
-                    if core.inner.lock().unwrap().is_some() {
-                        "open"
-                    } else {
-                        "closed"
-                    }
-                )
-            }
+            WireValue::Writer(core) => io_handle_text("Writer", io_state_now(&core.inner)),
             // R2b: render open/closed without exposing the fd (mirrors the heap `Display`).
-            WireValue::Reader(core) => {
-                format!(
-                    "Reader({})",
-                    if core.inner.lock().unwrap().is_some() {
-                        "open"
-                    } else {
-                        "closed"
-                    }
-                )
-            }
+            WireValue::Reader(core) => io_handle_text("Reader", io_state_now(&core.inner)),
             // An opaque `ptr` renders like its heap counterpart (`Obj::Ptr` → "<ptr null>"/"<ptr>");
             // never the raw address (non-deterministic across engines).
             WireValue::Ptr(a) => {
@@ -883,10 +888,19 @@ impl Vm {
             | Obj::Executor(_)
             | Obj::Socket(_)
             | Obj::Listener(_)
-            | Obj::Writer(_)
-            | Obj::Reader(_)
             | Obj::Ptr(_) => {
                 out.push_str(&self.display_guarded(Value::obj(h), depth)?);
+            }
+            // M1.8 — the print path waits for a busy handle through the GC door: a read or write
+            // can hold the lock while it waits detached (a FIFO read), and a stop must not wait
+            // for this thread meanwhile.
+            Obj::Writer(core) => {
+                let open = self.io_state_door(&core.inner);
+                out.push_str(&io_handle_text("Writer", open));
+            }
+            Obj::Reader(core) => {
+                let open = self.io_state_door(&core.inner);
+                out.push_str(&io_handle_text("Reader", open));
             }
             // TICKET-246 — the print path snapshots the box and every box nested in it first
             // (it may wait there), then renders with no lock held.

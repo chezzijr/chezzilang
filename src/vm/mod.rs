@@ -1493,6 +1493,9 @@ pub struct Vm {
     gc_coord: Arc<gc_coord::GcCoord>,
     /// M1.5 — this thread's GC token while it drives this `Vm` (`gc_door.rs`).
     attached: Option<gc_door::ThreadToken>,
+    /// M1.8 — the ticket of the open `Vm::gc_blocking` door while its closure runs; a re-entry
+    /// (`Vm::gc_reenter`) takes it for the span of a callback.
+    detached: Option<gc_coord::DetachTicket>,
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its

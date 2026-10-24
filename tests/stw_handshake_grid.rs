@@ -265,6 +265,79 @@ main()
 ",
             "allocer done\nsleeper done\n",
         ),
+        // M1.8 — Go `cgocallback`. Two fibers call `pthread_once` on one control word: the first
+        // runs `slow_init`, a callback that sleeps 1.5 s; the second blocks inside C until that
+        // init returns. A sibling allocates meanwhile. A C call with a callback param that keeps
+        // its GC token stalls every stop until the init returns, and the callback's reattach
+        // after its sleep waits for that stop: the run hangs.
+        "extern_callback_blocks" => (
+            "import std.ffi\nimport std.time\n",
+            "extern \"libc\":
+    fn pthread_once(once: ffi.ptr, init: fn() -> None) -> int
+fn slow_init():
+    time.sleep_ms(1500)
+fn fast_init():
+    pass
+fn first(once: ffi.ptr, out: Channel[str]):
+    _ := pthread_once(once, slow_init)
+    out.send(\"first done\")
+fn second(once: ffi.ptr, out: Channel[str]):
+    time.sleep_ms(200)
+    _ := pthread_once(once, fast_init)
+    out.send(\"second done\")
+fn allocer(fin: Channel[str], out: Channel[str]):
+    while fin.len() < 1:
+        _ := busy(1)
+    out.send(\"allocer done\")
+fn main():
+    once := ffi.alloc(8)
+    ffi.store_int64_at(once, 0, 0)
+    a := Channel[str](1)
+    b := Channel[str](1)
+    c := Channel[str](1)
+    parallel:
+        spawn first(once, a)
+        spawn second(once, b)
+        spawn allocer(b, c)
+    print(c.recv())
+    print(a.recv())
+    print(b.recv())
+main()
+",
+            "allocer done\nfirst done\nsecond done\n",
+        ),
+        // M1.8 — a fiber reads a line from a FIFO whose writer is silent for 2 s, so the read
+        // holds the Reader's lock while it waits detached. A sibling prints the Reader; another
+        // allocates until the print lands. A print that waits for the lock attached holds each
+        // stop for about 1.7 s. With 2 workers the allocer gets no runner while both others
+        // wait, so only the default thread count measures the stall.
+        "print_busy_reader" => (
+            "import std.io as io\nimport std.time\n",
+            "fn reader(r: io.Reader, out: Channel[str]):
+    out.send(\"{r.read_line()}\")
+fn printer(r: io.Reader, out: Channel[str]):
+    time.sleep_ms(300)
+    out.send(str(r))
+fn allocer(fin: Channel[str], out: Channel[str]):
+    while fin.len() < 1:
+        _ := busy(1)
+    out.send(\"allocer done\")
+fn main():
+    r := must(io.open(\"@FIFO_SLOW@\"))
+    a := Channel[str](1)
+    b := Channel[str](1)
+    c := Channel[str](1)
+    parallel:
+        spawn reader(r, a)
+        spawn printer(r, b)
+        spawn allocer(b, c)
+    print(c.recv())
+    print(b.recv())
+    print(a.recv())
+main()
+",
+            "allocer done\nReader(open)\nhi\n",
+        ),
         other => panic!("unknown mode {other}"),
     };
     (format!("{imports}{MUST}{BUSY}{body}"), want)
@@ -292,9 +365,28 @@ fn run_stressed(name: &str, src: &str, threads: Option<&str>) -> Option<(i32, St
             .spawn()
             .expect("spawn the far end")
     });
+    // A FIFO whose far end opens at once and writes one line 2 s later.
+    let fifo_slow = dir.join("fifo_slow");
+    let slow_end = src.contains("@FIFO_SLOW@").then(|| {
+        let made = Command::new("mkfifo")
+            .arg(&fifo_slow)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo {}", fifo_slow.display());
+        let script = format!(
+            "exec 3> '{}'; sleep 2; printf 'hi\\n' >&3",
+            fifo_slow.display()
+        );
+        Command::new("sh")
+            .args(["-c", &script])
+            .spawn()
+            .expect("spawn the slow far end")
+    });
+    let far_end = far_end.or(slow_end);
     let src = src
         .replace("@FIFO_IN@", &fifo_in.to_string_lossy())
-        .replace("@FIFO_OUT@", &fifo_out.to_string_lossy());
+        .replace("@FIFO_OUT@", &fifo_out.to_string_lossy())
+        .replace("@FIFO_SLOW@", &fifo_slow.to_string_lossy());
     std::fs::write(&path, src).expect("write program");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run")
@@ -382,7 +474,10 @@ fn assert_cell(mode: &str, threads: &str) {
     // A blocking syscall that keeps its token holds a stop for the whole block (>= 1 s here).
     if matches!(
         mode,
-        "fifo_open_rendezvous" | "extern_sleep_does_not_stall_stop"
+        "fifo_open_rendezvous"
+            | "extern_sleep_does_not_stall_stop"
+            | "extern_callback_blocks"
+            | "print_busy_reader"
     ) {
         let max = stats_field(&err, "stw_max_us=");
         assert!(
@@ -398,3 +493,7 @@ fn assert_cell(mode: &str, threads: &str) {
 }
 
 grid_tests!(MODES x THREADS: [demote, in_place, help, inline_sleep, rendezvous, executor_join, nursery_join, socket_park, socket_in_place, fifo_open_rendezvous, extern_sleep_does_not_stall_stop] x [t1, t2, tdefault] => crate::assert_cell);
+// M1.8 — no `t1` cell: at one worker the first fiber's demoted sleep waits for the runner permit
+// that the second fiber keeps inside C, which waits for the first (an extern call keeps its
+// permit), and the print has no third runner to stall.
+grid_tests!(WAIT_MODES x WAIT_THREADS: [extern_callback_blocks, print_busy_reader] x [t2, tdefault] => crate::assert_cell);

@@ -177,12 +177,14 @@ impl Vm {
     /// (Go `entersyscall`), runs `f`, and reattaches (Go `exitsyscall`), which waits out a running
     /// collection. With no token it only runs `f`.
     ///
-    /// `f` must not allocate on or write to this `Vm`'s heap (it may read the published roots).
-    /// The rule does not cover another `Vm` that `f` drives: a nursery join's `f` runs a joiner
-    /// shell's worker loop, and that shell attaches its own token before it runs code. `f` must
-    /// release every lock it took before it returns: the reattach can wait for a stop, and a stop
-    /// waits for each attached thread, also for one blocked on that lock. A panic in `f`
-    /// reattaches before it unwinds on.
+    /// `f` must not allocate on or write to this `Vm`'s heap (it may read the published roots),
+    /// except inside [`Vm::gc_reenter`]. The rule does not cover another `Vm` that `f` drives: a
+    /// nursery join's `f` runs a joiner shell's worker loop, and that shell attaches its own token
+    /// before it runs code. `f` must release every lock it took before it returns: the reattach
+    /// can wait for a stop, and a stop waits for each attached thread, also for one blocked on
+    /// that lock. A panic in `f` reattaches before it unwinds on.
+    ///
+    /// The ticket waits in `Vm::detached` while `f` runs, so a re-entry from `f` can take it.
     pub(super) fn gc_blocking<R>(&mut self, pins: &[GcRef], f: impl FnOnce(&mut Vm) -> R) -> R {
         let Some(t) = self.attached.take() else {
             return f(self);
@@ -190,16 +192,49 @@ impl Vm {
         debug_no_payload_in_flight();
         let mut roots = self.gc_roots();
         roots.extend_from_slice(pins);
-        let ticket = t.detach(roots);
+        self.detached = Some(t.detach(roots));
         let r = catch_unwind(AssertUnwindSafe(|| f(self)));
+        let ticket = self
+            .detached
+            .take()
+            .expect("a door's re-entry puts its ticket back");
+        self.reattach(ticket);
+        match r {
+            Ok(v) => v,
+            Err(p) => resume_unwind(p),
+        }
+    }
+
+    /// M1.8 — Go `cgocallback`: run `f` attached from inside the `f` of [`Vm::gc_blocking`], then
+    /// detach again with this `Vm`'s roots plus `pins` (the door's own pins are not kept, so the
+    /// caller passes what it still holds in Rust locals). An extern C call runs in the door; C
+    /// calls a Chezzi callback through the trampoline, and the callback runs here. With no
+    /// ticket (the thread is attached, or holds no token) it only runs `f`. A panic in `f`
+    /// detaches before it unwinds on.
+    pub(super) fn gc_reenter<R>(&mut self, pins: &[GcRef], f: impl FnOnce(&mut Vm) -> R) -> R {
+        let Some(ticket) = self.detached.take() else {
+            return f(self);
+        };
+        self.reattach(ticket);
+        let r = catch_unwind(AssertUnwindSafe(|| f(self)));
+        let t = self.attached.take().expect("a re-entry returns attached");
+        debug_no_payload_in_flight();
+        let mut roots = self.gc_roots();
+        roots.extend_from_slice(pins);
+        self.detached = Some(t.detach(roots));
+        match r {
+            Ok(v) => v,
+            Err(p) => resume_unwind(p),
+        }
+    }
+
+    /// Go `exitsyscall`: wait out a running collection, take the token back, and zero the pacing
+    /// counts if a collection ran while this thread was detached.
+    fn reattach(&mut self, ticket: DetachTicket) {
         let (a, collected) = ticket.reattach();
         self.attached = Some(ThreadToken::new(a));
         if collected {
             self.heap.observe_collection();
-        }
-        match r {
-            Ok(v) => v,
-            Err(p) => resume_unwind(p),
         }
     }
 }

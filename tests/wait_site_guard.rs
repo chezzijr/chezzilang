@@ -22,7 +22,10 @@
 //!   `Kind::Inline` native's syscalls must stay short, such as `getcwd` or `getrandom`);
 //! - a `Mutex::lock` held by a thread that waits detached (the rule is in `Vm::gc_blocking`'s doc);
 //! - a `Drop` that makes a syscall (`WriterCore::drop` flushes a buffered writer);
-//! - a row is keyed by file and function name, so a new wait in an allowed function passes.
+//! - a row is keyed by file and function name, so a new wait in an allowed function passes;
+//! - a value the door must carry: a `GcRef` held in a Rust local across a door must be in the
+//!   door's `pins` or on the VM stack. `tests/gc_blocking_pins.rs` checks that under GC stress,
+//!   one program per door kind; this scan does not.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -258,12 +261,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "drop",
         "",
         "`WriterCore::drop` flushes a buffered writer where the last handle drops, with no Vm (a sweep can drop it); open for M1.7",
-    ),
-    (
-        "call.rs",
-        "extern_call_attached",
-        "",
-        "a C call with a callback param re-enters the VM through its trampoline, which needs the token; open (fix round 1 STOP)",
     ),
     (
         "core.rs",

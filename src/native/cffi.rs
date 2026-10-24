@@ -1522,13 +1522,6 @@ impl Cffi {
         s
     }
 
-    /// Does a parameter take a callback, so the C function can call back into the engine?
-    pub fn has_callback_param(&self) -> bool {
-        self.params
-            .iter()
-            .any(|p| matches!(p, CType::Callback { .. }))
-    }
-
     /// The declared parameter types (used by the engines to bounds-check arity before the call).
     pub fn param_count(&self) -> usize {
         self.params.len()

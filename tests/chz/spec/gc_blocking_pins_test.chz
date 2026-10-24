@@ -1,0 +1,237 @@
+# M1.8 — a value that a blocking door holds in a Rust local survives a collection on another
+# thread. One block per door kind; each asserts the value it got back. `tests/gc_blocking_pins.rs`
+# runs this file under CHEZZI_GC_STRESS=1 at two workers and five scheduler seeds.
+#
+# `box.get()` decodes a FRESH handle (a channel, a box, a listener): the receiver of the call is a
+# popped temporary that only the native op holds while it waits.
+import Executor, Shared from std.concurrency
+import std.ffi
+import std.io as io
+import std.net
+
+extern "libc":
+    fn qsort(base: ffi.ptr, n: int, size: int, cmp: fn(ffi.ptr, ffi.ptr) -> int)
+
+fn busy(n: int) -> int:
+    s := 0
+    i := 0
+    while i < 200:
+        s = s + i * n
+        i = i + 1
+    return s
+
+fn must[T](r: T!) -> T:
+    match r:
+        ?v: return v
+        !e: panic(e.message())
+
+fn feed(ch: Channel[List[int]], n: int):
+    for i in 1..n + 1:
+        _ := busy(i)
+        ch.send([i, i * 10])
+
+fn send_fresh(box: Shared[Channel[List[int]]], x: int) -> int:
+    box.get().send([x, x * 10])
+    return x
+
+fn drain_sum(ch: Channel[List[int]], n: int) -> int:
+    s := 0
+    for _ in 0..n:
+        _ := busy(1)
+        s = s + ch.recv()[1]
+    return s
+
+fn wait_fresh(box: Shared[Channel[List[int]]], other: Channel[List[int]], x: int) -> int:
+    wait:
+        v := box.get().recv():
+            return v[1] + x
+        w := other.recv():
+            return w[0]
+
+fn add_slowly(xs: List[int]) -> List[int]:
+    _ := busy(5)
+    return xs + [1]
+
+# Two handles of one fresh box, and no other: each receiver holds the only root of its box state.
+fn post_twice(ch: Channel[Shared[List[int]]]):
+    b := Shared([0])
+    ch.send(b)
+    ch.send(b)
+
+fn same(xs: List[int]) -> List[int]:
+    return xs
+
+fn dial_write(addr: str) -> int:
+    _ := busy(2)
+    c := must(net.connect(addr))
+    return must(c.write("hey"))
+
+fn make_strs() -> List[str]:
+    _ := busy(4)
+    return ["a", "b", str(busy(1))]
+
+fn by_value(a: ffi.ptr, b: ffi.ptr) -> int:
+    x := ffi.load_int64(a)
+    y := ffi.load_int64(b)
+    # Allocates on every call: a callback runs attached.
+    pair := str([x, y])
+    if pair.len() == 0:
+        return 0
+    if x < y:
+        return -1
+    if x > y:
+        return 1
+    return 0
+
+test fn a_demoted_recv_on_a_fresh_handle_gets_its_list():
+    ch := Channel[List[int]](1)
+    box := Shared(ch)
+    out := Shared([0])
+    parallel:
+        spawn:
+            out.set([1, 2, 3].map(fn(x: int) -> int: box.get().recv()[1] + x))
+        spawn feed(ch, 3)
+    assert out.get() == [11, 22, 33]
+
+test fn a_demoted_send_on_a_fresh_handle_delivers_its_list():
+    ch := Channel[List[int]](0)
+    box := Shared(ch)
+    got := Shared([0])
+    parallel:
+        spawn:
+            _ := [1, 2, 3].map(fn(x: int) -> int: send_fresh(box, x))
+        spawn:
+            got.set([drain_sum(ch, 3)])
+    assert got.get() == [60]
+
+test fn main_recv_in_place_on_a_fresh_handle_gets_its_list():
+    ch := Channel[List[int]](1)
+    box := Shared(ch)
+    ex := Executor()
+    _ := ex.submit(fn(): feed(ch, 2))
+    assert box.get().recv() == [1, 10]
+    assert box.get().recv() == [2, 20]
+    ex.shutdown()
+
+test fn a_demoted_wait_with_arms_gets_its_list():
+    ch := Channel[List[int]](1)
+    other := Channel[List[int]](1)
+    box := Shared(ch)
+    out := Shared([0])
+    parallel:
+        spawn:
+            out.set([1, 2].map(fn(x: int) -> int: wait_fresh(box, other, x)))
+        spawn feed(ch, 2)
+    assert out.get() == [11, 22]
+
+test fn a_guard_wait_on_a_fresh_box_handle_updates_its_list():
+    inner := Shared([0])
+    outer := Shared(inner)
+    parallel:
+        spawn:
+            inner.update(add_slowly)
+        spawn:
+            _ := busy(1)
+            outer.get().update(fn(xs: List[int]) -> List[int]: xs + [2])
+    got := inner.get()
+    assert got.len() == 3
+    assert got.contains(1) and got.contains(2)
+
+test fn a_guard_wait_holds_the_only_handle_of_its_box():
+    ch := Channel[Shared[List[int]]](2)
+    post_twice(ch)
+    out := Shared([0])
+    parallel:
+        spawn:
+            ch.recv().update(add_slowly)
+        spawn:
+            _ := busy(1)
+            out.set(ch.recv().read(same))
+    assert out.get() == [0, 1]
+
+test fn main_send_in_place_on_a_fresh_handle_delivers_its_list():
+    ch := Channel[List[int]](0)
+    box := Shared(ch)
+    ex := Executor()
+    t := ex.submit(fn() -> int: drain_sum(ch, 2))
+    box.get().send([1, 10])
+    box.get().send([2, 20])
+    ex.shutdown()
+    assert must(t.get()) == 30
+
+test fn an_executor_join_returns_a_fresh_list():
+    ex := Executor()
+    t := ex.submit(make_strs)
+    u := ex.submit(fn() -> List[int]: [busy(2), 7])
+    ex.shutdown()
+    assert must(t.get()) == ["a", "b", "19900"]
+    assert must(u.get()) == [39800, 7]
+
+test fn a_socket_read_over_loopback_gets_its_text():
+    ln := must(net.listen("127.0.0.1:0"))
+    addr := must(ln.addr())
+    box := Shared(ln)
+    out := Shared([""])
+    parallel:
+        spawn:
+            peer := must(box.get().accept())
+            out.set([must(peer.read(5))])
+        spawn:
+            _ := busy(1)
+            c := must(net.connect(addr))
+            _ := busy(2)
+            _ := c.write("hello")
+    assert out.get() == ["hello"]
+
+test fn main_accept_in_place_on_a_fresh_listener_gets_its_peer():
+    ln := must(net.listen("127.0.0.1:0"))
+    addr := must(ln.addr())
+    box := Shared(ln)
+    ex := Executor()
+    t := ex.submit(fn() -> int: dial_write(addr))
+    peer := must(box.get().accept())
+    assert must(peer.read(3)) == "hey"
+    ex.shutdown()
+    assert must(t.get()) == 3
+
+# `main` joins its `parallel:` in the Help mode: it waits detached and runs the fibers on a
+# joiner shell. Its own values are in the roots it published.
+test fn a_helping_join_keeps_the_joiners_values():
+    keep := [str(busy(1)), "k"]
+    out := Channel[List[str]](2)
+    parallel:
+        spawn:
+            out.send([str(busy(2))])
+        spawn:
+            out.send([str(busy(3))])
+    got := [out.recv()[0], out.recv()[0]]
+    assert keep == ["19900", "k"]
+    assert got.contains("39800") and got.contains("59700")
+
+test fn an_extern_callback_that_allocates_sorts_its_buffer():
+    data := [5, 2, 9, 1, 7]
+    n := data.len()
+    buf := ffi.alloc(n * 8)
+    defer ffi.free(buf)
+    for i in 0..n:
+        ffi.store_int64_at(buf, i * 8, data[i])
+    parallel:
+        spawn qsort(buf, n, 8, by_value)
+        spawn:
+            _ := busy(3)
+    out: List[int] = []
+    for i in 0..n:
+        out.push(ffi.load_int64_at(buf, i * 8))
+    assert out == [1, 2, 5, 7, 9]
+
+test fn a_print_of_a_writer_in_use_reads_open():
+    w := Shared(io.stdout())
+    out := Shared([""])
+    parallel:
+        spawn:
+            for _ in 0..3:
+                _ := w.get().write("")
+        spawn:
+            _ := busy(1)
+            out.set([str(w.get())])
+    assert out.get() == ["Writer(open)"]

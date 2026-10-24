@@ -309,11 +309,8 @@ impl Vm {
                     // so no `ip` rewind replays the surrounding `List(...)` call (DEC-181).
                     Step::Channel => {
                         let w = match self.guarded(|vm| vm.recv_step_or_demote(h, span))? {
-                            RecvStep::Got(w) => {
-                                self.wake_senders(h); // freed a slot — wake a parked bounded sender
-                                w
-                            }
-                            RecvStep::Filled(w) => w,
+                            // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
+                            RecvStep::Got(w) | RecvStep::Filled(w) => w,
                             RecvStep::ClosedEmpty => break,
                             RecvStep::Parked => unreachable!("a re-entered recv never parks"),
                         };

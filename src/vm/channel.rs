@@ -81,12 +81,8 @@ impl Vm {
                 // (Go's `handoffp`). `demote_recv_block` is itself closed-aware (a `close` faults the
                 // demoted recv).
                 match self.recv_step_or_demote(h, span)? {
-                    RecvStep::Got(w) => {
-                        self.wake_senders(h); // freed a slot — wake a parked bounded sender
-                        Ok(self.from_wire(w))
-                    }
-                    // A `give` filled this receiver's own slot: it committed no sender.
-                    RecvStep::Filled(w) => Ok(self.from_wire(w)),
+                    // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
+                    RecvStep::Got(w) | RecvStep::Filled(w) => Ok(self.from_wire(w)),
                     // `chan_recv_step` already re-rooted the receiver + set `suspend`; the sentinel is
                     // never observed (`do_method_call` gates the result-push on `suspend`).
                     RecvStep::Parked => Ok(Value::nil()),
@@ -389,22 +385,32 @@ impl Vm {
     /// (block in place, spin a replacement worker) instead of faulting. A `timer(ms)` channel is
     /// excluded: it has no sibling sender, and [`Vm::chan_recv_step`] synthesises its value at any
     /// re-entry. A new site that calls `chan_recv_step` directly brings W14-16 back.
+    ///
+    /// A `Got` value freed a slot: this fn wakes a parked bounded sender. M1.8 — it wakes through
+    /// the core it read before the wait, never through `h`: the receiver may be a popped
+    /// temporary, which is no GC root while the wait is detached (`Vm::gc_blocking`).
     pub(super) fn recv_step_or_demote(
         &mut self,
         h: GcRef,
         span: Span,
     ) -> Result<RecvStep, RuntimeError> {
-        let spec = if self.channel_core(h).timer.is_some() {
+        let core = self.channel_core(h);
+        let spec = if core.timer.is_some() {
             WaitSpec::Timer
         } else {
             WaitSpec::Recv
         };
         // A timer's Demote cell is served inside `chan_recv_step`: its value is synthesised at the
         // deadline, never queued, so `demote_recv_block`'s pop loop cannot serve it.
-        if spec == WaitSpec::Recv && self.block_mode(spec) == BlockMode::Demote {
-            return self.demote_recv_block(h, span);
+        let step = if spec == WaitSpec::Recv && self.block_mode(spec) == BlockMode::Demote {
+            self.demote_recv_block(h, span)
+        } else {
+            self.chan_recv_step(h, span)
+        };
+        if let Ok(RecvStep::Got(_)) = step {
+            self.wake_senders_core(&core);
         }
-        self.chan_recv_step(h, span)
+        step
     }
 
     /// One blocking-`recv` step on the snapshot-park / block-in-place / fault paths (NOT the

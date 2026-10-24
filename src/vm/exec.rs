@@ -180,6 +180,7 @@ impl Vm {
             root_registry: RootRegistry::default(),           // M1.4
             gc_coord: Arc::new(gc_coord::GcCoord::new()),     // M1.5
             attached: None,
+            detached: None,
             suspend: None,
             join_suspend: None,
             wait_suspend: None,
