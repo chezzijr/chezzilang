@@ -70,7 +70,8 @@ struct State {
     next_ticket: u64,
     /// Stops that reached `Collecting` (`CHEZZI_HEAP_STATS`).
     stops: u64,
-    /// The longest time from a request entering `Requested` to `Collecting`.
+    /// The longest stop: from a request entering `Requested` until its collection ends (the
+    /// world restarts right after).
     max_stop: Duration,
 }
 
@@ -147,7 +148,7 @@ impl GcCoord {
         self.stw.load(Ordering::Relaxed)
     }
 
-    /// The stops so far and the longest wait of a requester for the world to stop.
+    /// The stops so far and the longest stop (request to restart, the collection included).
     pub fn stop_stats(&self) -> (u64, Duration) {
         let st = self.lock();
         (st.stops, st.max_stop)
@@ -255,7 +256,6 @@ impl Attached {
         }
         st.phase = Phase::Collecting;
         st.stops += 1;
-        st.max_stop = st.max_stop.max(asked.elapsed());
         let mut roots = own_roots;
         roots.append(&mut st.stopped_roots);
         for (_, r) in &st.detached_roots {
@@ -263,7 +263,7 @@ impl Attached {
         }
         drop(st);
         // Release the world even if `collect` panics, so no stopped thread waits forever.
-        let _release = Release(c);
+        let _release = Release(c, asked);
         collect(&roots);
     }
 }
@@ -310,13 +310,15 @@ fn withdraw(st: &mut State, id: u64) {
         .swap_remove(at.expect("a live DetachTicket has published roots"));
 }
 
-/// Ends a stop: epoch + 1, `stw` cleared, every stopped thread released.
-struct Release<'a>(&'a GcCoord);
+/// Ends a stop: the stop length recorded (from the request, `.1`), epoch + 1, `stw` cleared, every
+/// stopped thread released.
+struct Release<'a>(&'a GcCoord, Instant);
 
 impl Drop for Release<'_> {
     fn drop(&mut self) {
         let c = self.0;
         let mut st = c.lock();
+        st.max_stop = st.max_stop.max(self.1.elapsed());
         st.gc_epoch += 1;
         st.stopped = 0;
         // The requester drained them, and no thread can park after that: every other attached
@@ -629,6 +631,22 @@ mod tests {
             drop(ticket);
             me.request_collect(vec![GcRef(1)], |roots| runs.push(sorted(roots)));
             assert_eq!(runs, vec![vec![1, 9], vec![1]]);
+        });
+    }
+
+    /// The longest stop covers its collection: from the request until the world restarts, so a
+    /// lone thread's collection (no wait for others) still reads its own length.
+    #[test]
+    fn stop_stats_time_the_whole_stop() {
+        within(|| {
+            let c = Arc::new(GcCoord::new());
+            let mut me = c.attach();
+            me.request_collect(vec![], |_| std::thread::sleep(Duration::from_millis(5)));
+            assert!(
+                c.stop_stats().1 >= Duration::from_millis(5),
+                "max stop {:?} misses the collection",
+                c.stop_stats().1
+            );
         });
     }
 
