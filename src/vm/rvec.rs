@@ -7,8 +7,13 @@
 //!
 //! - An `RVec<T>` is one `AtomicPtr` to a [`Header`] block: one allocation, the header and then
 //!   `cap` inline atomic slots, zeroed at allocation. A null pointer is the empty vec. The
-//!   header's `cap` and `len` are `u32`s, so a vec holds at most `u32::MAX` elements; a larger
-//!   capacity panics (a task fault).
+//!   header's `cap` and `len` are `u64`s, as a Go slice's length is an `int`: a vec holds as
+//!   many elements as a block of at most `isize::MAX` bytes has room for (`max_cap`).
+//! - Allocation failure: [`RVec::try_with_capacity`] and [`RVec::try_zeroed`] return
+//!   [`AllocFailed`] when the block's byte size passes `isize::MAX` or the allocator returns
+//!   null, so an op that sizes a buffer from a user int (`bytearray(n)`, `[x] * n`) reports a
+//!   clean fault. Every other allocation (a push, an insert, an extend) goes through the same
+//!   path and panics on that error, or aborts on a null allocation, as a `Vec` does.
 //! - `T` is an [`Elem`]: `Copy`, no padding, in an atomic slot of its own size (`u64`, `i64`
 //!   and `Value` in an `AtomicU64`, `u8` in an `AtomicU8`, so bytes pack one per byte; a map or
 //!   set entry in one `AtomicU64` per field, so a racy reader can see it torn). Every slot
@@ -16,8 +21,9 @@
 //!   race and never tears. `Copy` is also what makes a racy read sound: a reader copies the bits,
 //!   and a copied `T` with a drop would drop twice.
 //! - A read loads the pointer (Acquire), then that block's `len` (Acquire), then a slot below
-//!   `len`. An index at or past `len` panics; the VM's `catch_unwind` turns a racy index into a
-//!   task fault.
+//!   `len`. An index at or past `len` panics. In a spawned task the panic is a fault of the task
+//!   ("internal error: a parallel task panicked"); in the entry task it ends the process (exit
+//!   101).
 //! - A push into spare capacity writes the slot, then stores `len + 1` (Release). A grow
 //!   allocates a block of twice the capacity, copies the elements, and swaps the pointer with a
 //!   `compare_exchange` (AcqRel). The winner retires the old block; a loser frees its own new
@@ -152,12 +158,11 @@ impl Elem for u8 {
 
 /// The head of one block. The slots follow it in the same allocation, at `data_offset()`.
 ///
-/// The header is 8 bytes (`u32` fields), so a block of two slots is 24 bytes, the allocator's
-/// smallest class, like a `Vec` of two: a list literal costs no more memory than before.
+/// The header is 16 bytes (`u64` fields), so a block of two 8-byte slots is 32 bytes.
 #[repr(C)]
 pub(super) struct Header {
-    cap: u32,
-    len: AtomicU32,
+    cap: u64,
+    len: AtomicU64,
 }
 
 impl Header {
@@ -169,10 +174,9 @@ impl Header {
         self.len.load(Ordering::Acquire) as usize
     }
 
-    /// Publish `n` elements (Release: the slots below `n` are written first). `n <= cap`, so it
-    /// fits the `u32`.
+    /// Publish `n` elements (Release: the slots below `n` are written first).
     fn set_len(&self, n: usize) {
-        self.len.store(n as u32, Ordering::Release);
+        self.len.store(n as u64, Ordering::Release);
     }
 }
 
@@ -184,14 +188,27 @@ fn data_offset<T: Elem>() -> usize {
         .1
 }
 
-fn block_layout<T: Elem>(cap: usize) -> Layout {
-    let data = Layout::array::<T::Slot>(cap).expect("an RVec capacity overflows");
-    Layout::new::<Header>()
-        .extend(data)
-        .expect("an RVec capacity overflows")
-        .0
-        .pad_to_align()
+/// The layout of a block of `cap` slots, or `None` when its byte size passes `isize::MAX`.
+fn try_block_layout<T: Elem>(cap: usize) -> Option<Layout> {
+    let data = Layout::array::<T::Slot>(cap).ok()?;
+    Some(Layout::new::<Header>().extend(data).ok()?.0.pad_to_align())
 }
+
+/// The layout of a block that `alloc_block` allocated, so its size fits.
+fn block_layout<T: Elem>(cap: usize) -> Layout {
+    try_block_layout::<T>(cap).expect("an RVec capacity overflows")
+}
+
+/// The largest capacity whose block fits `isize::MAX` bytes, after the header and the padding
+/// to the header's alignment.
+fn max_cap<T: Elem>() -> usize {
+    (isize::MAX as usize - data_offset::<T>() - (align_of::<Header>() - 1)) / size_of::<T::Slot>()
+}
+
+/// A block of `cap` slots could not be allocated: its byte size passes `isize::MAX`, or the
+/// allocator returned null.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocFailed;
 
 #[cfg(test)]
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -234,26 +251,34 @@ pub(super) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
     g
 }
 
-/// A new block of `cap` zeroed slots, `len` 0.
-fn alloc_block<T: Elem>(cap: usize) -> *mut Header {
-    let cap32 = u32::try_from(cap).expect("an RVec capacity overflows");
-    let layout = block_layout::<T>(cap);
-    // SAFETY: `layout` has a non-zero size (the header is 8 bytes).
+/// A new block of `cap` zeroed slots, `len` 0, or [`AllocFailed`] (the one allocation path).
+fn try_alloc_block<T: Elem>(cap: usize) -> Result<*mut Header, AllocFailed> {
+    let layout = try_block_layout::<T>(cap).ok_or(AllocFailed)?;
+    // SAFETY: `layout` has a non-zero size (the header is 16 bytes).
     let p = unsafe { alloc_zeroed(layout) }.cast::<Header>();
     if p.is_null() {
-        handle_alloc_error(layout);
+        return Err(AllocFailed);
     }
     // SAFETY: `p` is a fresh allocation with room and alignment for a `Header`; the zeroed slots
     // after it are valid `T::Slot`s.
     unsafe {
         p.write(Header {
-            cap: cap32,
-            len: AtomicU32::new(0),
+            cap: cap as u64,
+            len: AtomicU64::new(0),
         })
     };
     #[cfg(test)]
     count(&ALLOCS);
-    p
+    Ok(p)
+}
+
+/// A new block of `cap` zeroed slots, `len` 0. A size past `isize::MAX` panics; a null
+/// allocation aborts, as for a `Vec`.
+fn alloc_block<T: Elem>(cap: usize) -> *mut Header {
+    try_alloc_block::<T>(cap).unwrap_or_else(|AllocFailed| match try_block_layout::<T>(cap) {
+        Some(layout) => handle_alloc_error(layout),
+        None => panic!("an RVec capacity overflows"),
+    })
 }
 
 /// Free a block that no thread can read any more.
@@ -396,9 +421,9 @@ impl Drop for RetireList {
 }
 
 /// The capacity a grow from `cap` slots to at least `min_cap` allocates: twice `cap`, at least 4,
-/// clamped to the header's `u32` limit (a `min_cap` past it still panics in `alloc_block`).
-fn grown_cap(cap: usize, min_cap: usize) -> usize {
-    let doubled = cap.saturating_mul(2).min(u32::MAX as usize);
+/// clamped to [`max_cap`] (a `min_cap` past it still panics in `alloc_block`).
+fn grown_cap<T: Elem>(cap: usize, min_cap: usize) -> usize {
+    let doubled = cap.saturating_mul(2).min(max_cap::<T>());
     doubled.max(min_cap).max(4)
 }
 
@@ -435,6 +460,20 @@ impl<T: Elem> RVec<T> {
         }
     }
 
+    /// An empty vec with room for `cap` elements, or [`AllocFailed`] when that block cannot be
+    /// allocated (see the module doc).
+    pub fn try_with_capacity(cap: usize) -> Result<Self, AllocFailed> {
+        let p = if cap == 0 {
+            ptr::null_mut()
+        } else {
+            try_alloc_block::<T>(cap)?
+        };
+        Ok(RVec {
+            ptr: AtomicPtr::new(p),
+            _t: PhantomData,
+        })
+    }
+
     /// The current block (null when empty).
     fn block(&self) -> *mut Header {
         self.ptr.load(Ordering::Acquire)
@@ -467,7 +506,16 @@ impl<T: Elem> RVec<T> {
 
     /// A vec of `n` zeroed elements (a zeroed slot is a valid `T`, see [`Elem`]).
     pub fn zeroed(n: usize) -> Self {
-        let v = Self::with_capacity(n);
+        Self::fill_zeroed(Self::with_capacity(n), n)
+    }
+
+    /// [`zeroed`](RVec::zeroed), or [`AllocFailed`] when the block cannot be allocated.
+    pub fn try_zeroed(n: usize) -> Result<Self, AllocFailed> {
+        Ok(Self::fill_zeroed(Self::try_with_capacity(n)?, n))
+    }
+
+    /// Publish the `n` zeroed slots of `v`, a new vec with a block of exactly `n` slots.
+    fn fill_zeroed(v: Self, n: usize) -> Self {
         let (h, _, _) = v.snapshot();
         if !h.is_null() {
             // SAFETY: `h` is this vec's own new block of `n` zeroed slots.
@@ -551,7 +599,7 @@ impl<T: Elem> RVec<T> {
             let o = unsafe { &*old };
             (o.len(), o.cap())
         };
-        let new_cap = grown_cap(cap, min_cap);
+        let new_cap = grown_cap::<T>(cap, min_cap);
         let new = alloc_block::<T>(new_cap);
         for i in 0..len {
             // SAFETY: `i < len <= cap` of the live block `old`, and `len <= cap < new_cap`.
@@ -1126,12 +1174,12 @@ mod tests {
         heap.sweep();
     }
 
-    /// Bytes pack one per byte after the 8-byte header, and edit like a `Vec<u8>`.
+    /// Bytes pack one per byte after the 16-byte header, and edit like a `Vec<u8>`.
     #[test]
     fn bytes_pack_one_per_byte() {
         let _g = test_serial();
         let mut heap = Heap::new();
-        assert_eq!(super::block_layout::<u8>(16).size(), 8 + 16);
+        assert_eq!(super::block_layout::<u8>(16).size(), 16 + 16);
         let v: RVec<u8> = RVec::from_slice(b"ab");
         v.extend_from_slice(&heap, b"cdef");
         v.set(0, b'z');
@@ -1141,19 +1189,43 @@ mod tests {
         heap.sweep();
     }
 
-    /// The header's `u32` capacity: a larger one panics before any allocation.
+    /// A length past `u32::MAX` fits the 64-bit header (Go's slice `int`). The block is zeroed by
+    /// the allocator, so only the page of the last byte is touched.
     #[test]
-    #[should_panic(expected = "capacity overflows")]
-    fn capacity_past_u32_panics() {
-        let _ = RVec::<u64>::with_capacity(u32::MAX as usize + 1);
+    fn lengths_past_u32_fit_the_header() {
+        let n = u32::MAX as usize + 2;
+        let v = RVec::<u8>::zeroed(n);
+        v.set(n - 1, 7);
+        assert_eq!((v.len(), v.capacity(), v.get(n - 1)), (n, n, 7));
     }
 
-    /// A grow near the `u32` limit stops at `u32::MAX` slots instead of doubling past it.
+    /// `max_cap` is the last capacity whose block fits `isize::MAX` bytes, for a byte slot and a
+    /// 24-byte map entry; a doubling clamps to it, and a doubling past `u32::MAX` is not clamped.
     #[test]
-    fn growth_clamps_to_the_u32_limit() {
-        let half = 1usize << 31;
-        assert_eq!(super::grown_cap(half, half + 1), u32::MAX as usize);
-        assert_eq!(super::grown_cap(4, 5), 8);
+    fn growth_clamps_to_the_largest_block() {
+        fn edge<T: super::Elem>() {
+            let m = super::max_cap::<T>();
+            assert!(super::try_block_layout::<T>(m).is_some());
+            assert!(super::try_block_layout::<T>(m + 1).is_none());
+            assert_eq!(super::grown_cap::<T>(m - 1, m), m);
+            assert_eq!(
+                RVec::<T>::try_with_capacity(m + 1).err(),
+                Some(super::AllocFailed)
+            );
+        }
+        edge::<u8>();
+        edge::<(u64, Value, Value)>();
+        let big = u32::MAX as usize;
+        assert_eq!(super::grown_cap::<u8>(big, big + 1), 2 * big);
+        assert_eq!(super::grown_cap::<u64>(4, 5), 8);
+    }
+
+    /// A size that fits a layout but not the allocator is an error, not an abort.
+    #[test]
+    fn a_failed_allocation_is_an_error() {
+        let n = 1usize << 61;
+        assert_eq!(RVec::<u8>::try_zeroed(n).err(), Some(super::AllocFailed));
+        assert_eq!(RVec::<u64>::try_zeroed(2).map(|v| v.len()), Ok(2));
     }
 
     /// A whole-vec rewrite (sort, reverse) retires the old block like a grow; the stop frees it.

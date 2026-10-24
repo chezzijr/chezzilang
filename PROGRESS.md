@@ -254,19 +254,19 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
 - M1.9: M1 exit gate. `tests/chz` 1853/1853 at T=1, 2, default; stressed `spec` (GC_STRESS, T=2): 140 pass, 0 dangling, 4 timeouts; max stop on `many_list` under 10 ms (`heap_stats_report_stw_pause`). M2 is next.
 - M2.2: `List`, a cursor's `Iter.items` and `bytearray` live on an `RVec` (`vm/rvec.rs`; bytes
   pack one per byte): a grow, sort or reverse retires the old block, and only the stop-the-world
-  sweep frees it. A list or a `bytearray` holds at most `u32::MAX` elements (the block header is
-  two `u32`s). Gates: `list_growth_retires_until_collect`, `bytearray_growth_retires_until_collect`.
+  sweep frees it. Gates: `list_growth_retires_until_collect`, `bytearray_growth_retires_until_collect`.
 - M2.3: `Map`/`Set` entries live on an `RVec`, and their hash index is an open-addressing table
   on an `RVec` of atomic `(hash, position + 1)` slots, linear probing, at most half full
   (`vm/map_data.rs`). A grow past half full or a remove builds a new table; each old entry block
   or table retires until the stop-the-world sweep. A racy probe reads only live blocks, at most
   `capacity` slots, and only positions below the entry count; it can miss or see a torn entry
-  (user fault, Go parity). A map or set holds at most `u32::MAX` entries; its live bytes count the index. `Obj` is now 40 B.
+  (user fault, Go parity). Its live bytes count the index. `Obj` is now 40 B.
   Gates: `map_insert_growth_retires_index_and_entries`, `set_insert_growth_retires_index_and_entries`,
   `constant_hash_growth_retires_old_index`, `racing_insert_and_probe`.
 - M2.4: a struct's spilled fields, a closure's captures, an enum payload and a module's global slots live in fixed `RVec` blocks (a write is one atomic slot store; an empty payload allocates nothing; a new global's append retires the outgrown block). A parked generator sits behind one atomic owner pointer (`rvec::AtomicBox`): a resume from a second thread faults "generator already running" instead of tearing its frames; reads of a parked generator (GC trace, a crossing copy) run at once and never fault each other, and a Rust panic inside a resume leaves the generator done. `Obj` stays 40 B. Gates: `spill_field_write_is_slot_store`, `generator_ctx_take_is_exclusive`, `generator_next_from_two_tasks_faults_cleanly`, `tests/chz/spec/generator_shared_read_test.chz`.
 - M2.5: two threads that race on one list and one map (10,000 ops each, plain and `CHEZZI_GC_STRESS=1`) give racy values or faults and never read freed memory (Go's rule, [`01-model.md`](docs/reference/concurrency/01-model.md) §Data races). `Value` is one 8-byte aligned word (a const assert). Gate: `two_vms_race_on_one_list_and_map_without_uaf`; the test helper `share_handle` keeps the root's roots published while workers run.
 - M2.6 fix 1: a map or set probe restarts when a user `eq` pushes or removes (a per-table version count), so an `eq` that removes another key no longer hides a present key (`tests/chz/spec/probe_eq_mutation_test.chz`); `AtomicBox<T>` is `Sync` only for `T: Send + Sync`; 01-model.md lists the four shared-heap holes open before M3.
+- M2.7: an `RVec` length is 64-bit (the block header is a `u64` cap and an `AtomicU64` len, 16 B), as a Go slice's `int`: `bytearray(4294967296)` works again, in the entry task and in a spawned task. One allocation path (`try_alloc_block`) returns `AllocFailed` past `isize::MAX` bytes or on a null allocation; `bytearray(n)` and `[x] * n` turn it into their clean fault, every other grow panics as a `Vec` does. `bytearray(n)` no longer writes its zeros (the allocator zeroes the block). Gate: `tests/chz/spec/alloc_fault_grid_test.chz`.
 
 ## Later
 

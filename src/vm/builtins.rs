@@ -587,8 +587,8 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let bytes: Vec<u8> = match args {
-            [] => Vec::new(),
+        let bytes: RVec<u8> = match args {
+            [] => RVec::new(),
             [one] if self.int_val(*one).is_some() => {
                 let n = self.int_val(*one).unwrap();
                 if n < 0 {
@@ -596,22 +596,21 @@ impl Vm {
                         self.err(format!("bytearray() size {n} must be non-negative"), span)
                     );
                 }
-                // Bound the eager zero-fill: an unguarded `vec![0u8; n]` for a huge n aborts the
-                // process (SIGABRT), uncatchable by `recover:`. `try_reserve` turns OOM into a
-                // recoverable fault, matching range()/format-width's "never a giant abort" rule —
-                // without a hard cap, so legitimately large buffers still work.
+                // Bound the zero-fill: a block that cannot be allocated is a recoverable fault
+                // (`RVec::try_zeroed`), not an abort, with no hard cap, so legitimately large
+                // buffers still work. The allocator zeroes the block, so no page is touched here.
                 let n = n as usize;
-                let mut buf: Vec<u8> = Vec::new();
-                if buf.try_reserve_exact(n).is_err() {
-                    return Err(self.err(
-                        format!("bytearray() size {n} is too large to allocate"),
-                        span,
-                    ));
+                match RVec::try_zeroed(n) {
+                    Ok(buf) => buf,
+                    Err(AllocFailed) => {
+                        return Err(self.err(
+                            format!("bytearray() size {n} is too large to allocate"),
+                            span,
+                        ));
+                    }
                 }
-                buf.resize(n, 0u8);
-                buf
             }
-            [one] => self.collect_bytes_arg("bytearray", *one, span)?,
+            [one] => self.collect_bytes_arg("bytearray", *one, span)?.into(),
             _ => {
                 return Err(self.err(
                     format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()),
@@ -619,7 +618,7 @@ impl Vm {
                 ));
             }
         };
-        Ok(Value::obj(self.heap.alloc(Obj::ByteArray(bytes.into()))))
+        Ok(Value::obj(self.heap.alloc(Obj::ByteArray(bytes))))
     }
 
     /// `bytes(b)` → copy; `bytes(ba)` → immutable SNAPSHOT of a `bytearray`; `bytes([ints])` → from a

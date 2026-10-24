@@ -765,33 +765,25 @@ impl Vm {
         if items.is_empty() {
             return Ok(Value::obj(self.heap.alloc(Obj::List(RVec::new()))));
         }
-        // Guard the allocation: a giant `n` would abort the process via `Vec`'s capacity panic.
-        // Bound the BYTE size (`count * size_of::<Value>()`) by `isize::MAX`, matching `Vec`'s own
-        // limit — `str.repeat` does the same on its byte length (vm:7514). Recoverable fault.
-        match items
+        // Guard the allocation: a total that overflows, or a block that cannot be allocated
+        // (`RVec::try_with_capacity`: past `isize::MAX` bytes, or a null from the allocator), is
+        // a recoverable fault, not an abort.
+        let src = items.to_vec();
+        let out = match src
             .len()
             .checked_mul(n)
-            .and_then(|t| t.checked_mul(std::mem::size_of::<Value>()))
-            .filter(|&bytes| bytes <= isize::MAX as usize)
+            .map(RVec::<Value>::try_with_capacity)
         {
-            Some(_) => {
-                let src = items.clone();
-                let total = src.len() * n;
-                // The outer guard only bounds the byte size by `isize::MAX`; a huge-but-representable
-                // total (e.g. 1e17) still passes it yet cannot actually be allocated, and
-                // `Vec::with_capacity` would ABORT the process. `try_reserve_exact` converts that
-                // into the same recoverable fault.
-                let mut out: Vec<Value> = Vec::new();
-                if out.try_reserve_exact(total).is_err() {
-                    return Err(self.err("list repeat capacity overflow".to_string(), span));
-                }
-                for _ in 0..n {
-                    out.extend(src.iter());
-                }
-                Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
+            Some(Ok(out)) => out,
+            Some(Err(AllocFailed)) | None => {
+                return Err(self.err("list repeat capacity overflow".to_string(), span));
             }
-            None => Err(self.err("list repeat capacity overflow".to_string(), span)),
+        };
+        // The block holds every copy, so no extend below grows it.
+        for _ in 0..n {
+            out.extend_from_slice(&self.heap, &src);
         }
+        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
     }
 
     /// Set algebra for the operator forms `| & - ^` (gap #3). Mirrors the

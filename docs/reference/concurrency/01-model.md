@@ -93,7 +93,8 @@ the heap stays memory-safe. Two threads that race on one list or one map can see
 - a torn read of a multi-word entry (a map entry is three words; a `Value` is one aligned word),
 - a missed map hit,
 - a task fault (an index out of range). A racy read past a buffer's length is a Rust panic in the
-  VM today; the race test catches and counts it as the fault Go would raise.
+  VM today; the race test catches and counts it as the fault Go would raise. In a spawned task
+  the panic is a fault of the task; in the entry task it ends the process (exit 101).
 
 A race never reads freed memory. A list, map or set buffer that grows, or that a sort or a remove
 replaces, retires; only the stop-the-world GC frees it, when no thread holds a pointer into it.
