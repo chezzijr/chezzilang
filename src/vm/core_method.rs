@@ -371,12 +371,12 @@ impl Vm {
                             .split(sep.as_str())
                             .map(|p| self.alloc_str(p.to_string()))
                             .collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(parts))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(parts.into()))))
                     }
                     StrMethod::Chars => {
                         self.arity_err("chars", args, 0, span)?;
                         let cs: Vec<Value> = s.chars().map(|c| self.alloc_char(c)).collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(cs))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(cs.into()))))
                     }
                     // `encode() -> bytes`: UTF-8 encode (str is UTF-8 internally; copy the bytes out
                     // into a new immutable `bytes`). Always succeeds — no fault path. UTF-8 only.
@@ -406,12 +406,12 @@ impl Vm {
                             ));
                         };
                         let mut out = String::new();
-                        for (i, item) in items.clone().iter().enumerate() {
+                        for (i, item) in items.to_vec().into_iter().enumerate() {
                             let Some(ih) = item.as_obj() else {
                                 return Err(self.err(
                                     format!(
                                         "join() expects a list of str, got an element of type {}",
-                                        self.type_name(*item)
+                                        self.type_name(item)
                                     ),
                                     span,
                                 ));
@@ -420,7 +420,7 @@ impl Vm {
                                 return Err(self.err(
                                     format!(
                                         "join() expects a list of str, got an element of type {}",
-                                        self.type_name(*item)
+                                        self.type_name(item)
                                     ),
                                     span,
                                 ));
@@ -596,7 +596,7 @@ impl Vm {
                         }
                         let parts: Vec<Value> =
                             lines.into_iter().map(|p| self.alloc_str(p)).collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(parts))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(parts.into()))))
                     }
                     // `strip` is a trim alias.
                     StrMethod::Strip => {
@@ -673,10 +673,11 @@ impl Vm {
                     ListMethod::Push => {
                         self.arity_err("push", args, 1, span)?;
                         let v = args[0];
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
-                        items.push(v);
+                        items.push(heap, v);
                         Ok(Value::nil())
                     }
                     ListMethod::Pop => {
@@ -694,10 +695,13 @@ impl Vm {
                     }
                     ListMethod::Reverse => {
                         self.arity_err("reverse", args, 0, span)?;
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
-                        items.reverse();
+                        let mut elems = items.to_vec();
+                        elems.reverse();
+                        items.replace(heap, &elems);
                         Ok(Value::nil())
                     }
                     ListMethod::Sort => {
@@ -709,17 +713,18 @@ impl Vm {
                         // hold a struct. Primitives use the faster `value_order`. Str elements live on
                         // the heap, so `value_order` needs `&self.heap` — clone the elements out, sort
                         // (no alloc/closure → no GC for the primitive path), then write back.
-                        let user_compare = matches!(items.first().and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. } | Obj::Enum { .. } | Obj::Tuple(_) | Obj::List(_)));
+                        let user_compare = matches!(items.try_get(0).and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. } | Obj::Enum { .. } | Obj::Tuple(_) | Obj::List(_)));
                         if user_compare {
                             // A user compare (struct or enum) re-enters the VM (may GC) → rooted, index-based sort.
                             return self.list_sort_structs(h, span);
                         }
-                        let mut elems = items.clone();
+                        let mut elems = items.to_vec();
                         elems.sort_by(|a, b| self.value_order(*a, *b));
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
-                        *items = elems;
+                        items.replace(heap, &elems);
                         Ok(Value::nil())
                     }
                     // `elems` is a Rust-local clone and `target` came off the stack at dispatch, so
@@ -727,7 +732,7 @@ impl Vm {
                     ListMethod::Contains => {
                         self.arity_err("contains", args, 1, span)?;
                         let target = args[0];
-                        let elems = items.clone();
+                        let elems = items.to_vec();
                         let found = self
                             .with_roots(&[Value::obj(h), target], |vm| {
                                 vm.seq_slot(&elems, target, span)
@@ -738,7 +743,7 @@ impl Vm {
                     ListMethod::IndexOf => {
                         self.arity_err("index_of", args, 1, span)?;
                         let target = args[0];
-                        let elems = items.clone();
+                        let elems = items.to_vec();
                         let idx = self.with_roots(&[Value::obj(h), target], |vm| {
                             vm.seq_slot(&elems, target, span)
                         })?;
@@ -746,19 +751,20 @@ impl Vm {
                     }
                     ListMethod::Concat => {
                         self.arity_err("concat", args, 1, span)?;
-                        let mut out = items.clone();
+                        let mut out = items.to_vec();
                         out.extend(self.expect_list_obj("concat", args[0], span)?);
                         // `out` is fully built and moved into the new Obj before any GC can run.
-                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
                     }
                     ListMethod::Extend => {
                         self.arity_err("extend", args, 1, span)?;
                         // Snapshot the other side first so `xs.extend(xs)` (self-extend) terminates.
                         let appended = self.expect_list_obj("extend", args[0], span)?;
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
-                        items.extend(appended);
+                        items.extend_from_slice(heap, &appended);
                         Ok(Value::nil())
                     }
                     ListMethod::Sum => {
@@ -775,7 +781,7 @@ impl Vm {
                         };
                         // Clone out so `make_int`/`box_float` (which mutate the heap) don't collide with
                         // the `items` heap borrow.
-                        let elems = items.clone();
+                        let elems = items.to_vec();
                         let any_float = seed_is_float || elems.iter().any(|v| v.is_float());
                         if any_float {
                             // CPython 3.12+ `sum`: Neumaier-compensated, ints included. A non-finite
@@ -821,9 +827,9 @@ impl Vm {
                             unreachable!()
                         };
                         let picked = if which == ListMethod::First {
-                            items.first().copied()
+                            items.try_get(0)
                         } else {
-                            items.last().copied()
+                            items.len().checked_sub(1).and_then(|i| items.try_get(i))
                         };
                         Ok(match picked {
                             Some(v) => self.alloc_enum("Option", "Some", vec![v]),
@@ -836,9 +842,9 @@ impl Vm {
                         let Obj::List(items) = self.heap.get(h) else {
                             unreachable!()
                         };
-                        let mut out = items.clone();
+                        let mut out = items.to_vec();
                         out.reverse();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
                     }
                     ListMethod::Map
                     | ListMethod::Filter
@@ -868,12 +874,13 @@ impl Vm {
                             unreachable!()
                         };
                         let x = args[1];
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
                         let len = items.len() as i64;
                         let idx = if i < 0 { (i + len).max(0) } else { i.min(len) } as usize;
-                        items.insert(idx, x);
+                        items.insert(heap, idx, x);
                         Ok(Value::nil())
                     }
                     ListMethod::Remove => {
@@ -909,7 +916,7 @@ impl Vm {
                         let Obj::List(items) = self.heap.get(h) else {
                             unreachable!()
                         };
-                        let items = items.clone();
+                        let items = items.to_vec();
                         let out = self.with_elem_roots(&[Value::obj(h)], &items, |vm| {
                             let mut out: Vec<Value> = Vec::new();
                             if which == ListMethod::Dedup {
@@ -959,7 +966,7 @@ impl Vm {
                             }
                             Ok(out)
                         })?;
-                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
                     }
                     // chunk/windows build a `List[List[T]]`. Each inner-list alloc may GC, so the outer
                     // list is ROOTED on the operand stack and every inner handle is pushed into it
@@ -983,27 +990,32 @@ impl Vm {
                         let Obj::List(items) = self.heap.get(h) else {
                             unreachable!()
                         };
-                        let items = items.clone();
+                        let items = items.to_vec();
                         let len = items.len();
-                        let outer = self.heap.alloc(Obj::List(Vec::new()));
+                        let outer = self.heap.alloc(Obj::List(RVec::new()));
                         self.push(Value::obj(outer)); // ROOT the outer list across inner allocs
                         if which == ListMethod::Chunk {
                             let mut start = 0;
                             while start < len {
                                 let end = (start + n).min(len);
-                                let inner = self.heap.alloc(Obj::List(items[start..end].to_vec()));
-                                if let Obj::List(o) = self.heap.get_mut(outer) {
-                                    o.push(Value::obj(inner));
+                                let inner = self
+                                    .heap
+                                    .alloc(Obj::List(RVec::from_slice(&items[start..end])));
+                                let heap = self.heap.write(outer);
+                                if let Obj::List(o) = heap.get(outer) {
+                                    o.push(heap, Value::obj(inner));
                                 }
                                 start = end;
                             }
                         } else if n <= len {
                             // windows: `n > len` → no windows → empty outer list (loop skipped).
                             for start in 0..=len - n {
-                                let inner =
-                                    self.heap.alloc(Obj::List(items[start..start + n].to_vec()));
-                                if let Obj::List(o) = self.heap.get_mut(outer) {
-                                    o.push(Value::obj(inner));
+                                let inner = self
+                                    .heap
+                                    .alloc(Obj::List(RVec::from_slice(&items[start..start + n])));
+                                let heap = self.heap.write(outer);
+                                if let Obj::List(o) = heap.get(outer) {
+                                    o.push(heap, Value::obj(inner));
                                 }
                             }
                         }
@@ -1046,12 +1058,12 @@ impl Vm {
                     MapMethod::Keys => {
                         self.arity_err("keys", args, 0, span)?;
                         let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| *k).collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(keys))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(keys.into()))))
                     }
                     MapMethod::Values => {
                         self.arity_err("values", args, 0, span)?;
                         let vals: Vec<Value> = m.entries.iter().map(|(_, _, v)| *v).collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(vals))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(vals.into()))))
                     }
                     MapMethod::Items => {
                         // TICKET-160 — one (k, v) tuple per entry in m.entries order, the SAME order keys() reads,
@@ -1059,7 +1071,7 @@ impl Vm {
                         // before the list alloc.
                         self.arity_err("items", args, 0, span)?;
                         let out = self.map_pairs(h);
-                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
                     }
                     MapMethod::Copy => {
                         // TICKET-160 — shallow in the VALUES (Python dict.copy()); each struct/enum KEY is

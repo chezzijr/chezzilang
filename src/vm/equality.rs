@@ -446,7 +446,7 @@ impl Vm {
                         if a.len() != b.len() {
                             return Ok(false);
                         }
-                        let (a, b): (Vec<Value>, Vec<Value>) = (a.clone(), b.clone());
+                        let (a, b): (Vec<Value>, Vec<Value>) = (a.to_vec(), b.to_vec());
                         self.with_elem_roots(&a, &b, |vm| {
                             for (x, y) in a.iter().zip(&b) {
                                 if !vm.elem_equal(*x, *y, depth + 1, span)? {

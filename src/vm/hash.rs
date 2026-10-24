@@ -338,7 +338,8 @@ impl Vm {
         let children: Vec<Value> = match self.heap.get(h) {
             Obj::Struct { fields, .. } => fields.as_slice().to_vec(),
             Obj::Enum { payload, .. } => payload.clone(),
-            Obj::List(items) | Obj::Tuple(items) => items.clone(),
+            Obj::List(items) => items.to_vec(),
+            Obj::Tuple(items) => items.to_vec(),
             Obj::Map(m) => m
                 .entries
                 .iter()
@@ -416,15 +417,16 @@ impl Vm {
         }
         match self.heap.get(h) {
             Obj::List(items) => {
-                let items = items.clone();
-                let nh = self.heap.alloc(Obj::List(items.clone()));
+                let items = items.to_vec();
+                let nh = self.heap.alloc(Obj::List(RVec::from_slice(&items)));
                 visited.insert(h, nh);
                 let copied: Vec<Value> = items
                     .iter()
                     .map(|&x| self.snapshot_value(x, visited, depth + 1))
                     .collect();
+                // `nh` is this snapshot's own new list: no other thread can hold its block.
                 if let Obj::List(dst) = self.heap.get_mut(nh) {
-                    *dst = copied;
+                    *dst = copied.into();
                 }
                 Value::obj(nh)
             }
@@ -583,11 +585,12 @@ impl Vm {
         }
         // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
         let reordered: Vec<Value> = match self.heap.get(snap_h).as_list() {
-            Some(v) => order.iter().map(|&i| v[i]).collect(),
+            Some(v) => order.iter().map(|&i| v.get(i)).collect(),
             None => unreachable!(),
         };
-        if let Obj::List(v) = self.heap.get_mut(src_h) {
-            *v = reordered;
+        let heap = self.heap.write(src_h);
+        if let Obj::List(v) = heap.get(src_h) {
+            v.replace(heap, &reordered);
         }
         self.pop(); // unroot snapshot
         self.pop(); // unroot source
@@ -622,11 +625,11 @@ impl Vm {
         let (mut li, mut ri) = (0, 0);
         while li < left.len() && ri < right.len() {
             let a = match self.heap.get(src_h).as_list() {
-                Some(v) => v[left[li]],
+                Some(v) => v.get(left[li]),
                 None => unreachable!(),
             };
             let b = match self.heap.get(src_h).as_list() {
-                Some(v) => v[right[ri]],
+                Some(v) => v.get(right[ri]),
                 None => unreachable!(),
             };
             // `<= Equal` keeps the left element first on ties → stable.

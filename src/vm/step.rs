@@ -392,7 +392,8 @@ impl Vm {
             }
             Op::NewList(n) => {
                 let at = self.stack.len() - *n;
-                let items: Vec<Value> = self.stack.split_off(at);
+                let items = RVec::from_slice(&self.stack[at..]);
+                self.stack.truncate(at);
                 let h = self.heap.alloc(Obj::List(items));
                 self.push(Value::obj(h));
             }
@@ -673,7 +674,7 @@ impl Vm {
                         self.err(format!("cannot iterate over {}", self.type_name(v)), span)
                     );
                 };
-                let nh = self.heap.alloc(Obj::List(items));
+                let nh = self.heap.alloc(Obj::List(items.into()));
                 self.push(Value::obj(nh));
             }
             Op::ArrLen => {

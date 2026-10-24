@@ -903,7 +903,7 @@ fn a_crossed_container_rebuilds_at_exact_capacity() {
 
     // A list and a tuple — two of the eight arms now sharing one rebuild helper.
     let items: Vec<Value> = (0..N as i64).map(Value::int).collect();
-    let list = Value::obj(src.heap.alloc(Obj::List(items.clone())));
+    let list = Value::obj(src.heap.alloc(Obj::List(items.clone().into())));
     let tuple = Value::obj(src.heap.alloc(Obj::Tuple(items)));
 
     let iter = Value::obj(src.heap.alloc(Obj::Iter {
@@ -917,9 +917,8 @@ fn a_crossed_container_rebuilds_at_exact_capacity() {
         let rebuilt = dst.from_wire(w);
         let h = rebuilt.as_obj().expect("rebuilds to a heap object");
         let (len, cap) = match dst.heap.get(h) {
-            Obj::List(xs) | Obj::Tuple(xs) | Obj::Iter { items: xs, .. } => {
-                (xs.len(), xs.capacity())
-            }
+            Obj::List(xs) => (xs.len(), xs.capacity()),
+            Obj::Tuple(xs) | Obj::Iter { items: xs, .. } => (xs.len(), xs.capacity()),
             other => panic!("{label} rebuilt as the wrong object: {other:?}"),
         };
         assert_eq!(len, N, "{label}: every element must survive the crossing");
@@ -1160,4 +1159,53 @@ main()";
         run_capture_stress(src),
         "['0', '11', '21']\n['22', '22']\n['1', '2']\n"
     );
+}
+
+/// M2.2 — run `src` (a push loop past a container's capacity, then a print of it) and check:
+/// the grows retired the old blocks on the run's retire lists, a collection frees them all, and
+/// the container reads back intact (the print, and the same program under gc-stress).
+fn growth_retires_until_collect(src: &str, want: &str) {
+    use super::rvec::{test_counts, test_serial, test_track};
+    let _g = test_serial();
+    let owned = src.to_string();
+    let (out, retired, left, freed) = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            test_track();
+            let mut vm = Vm::new(Arc::new(test_program(&owned).expect("compiles")));
+            let result = vm.run();
+            vm.finish_run(result).expect("runs");
+            let (own, core) = vm.heap.retired_len();
+            let before = test_counts().1;
+            vm.gc_collect();
+            let freed = test_counts().1 - before;
+            let (own2, core2) = vm.heap.retired_len();
+            (captured(vm.out), own + core, own2 + core2, freed)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked");
+    assert_eq!(out, want);
+    assert!(
+        retired >= 3,
+        "each grow retired its old block, got {retired}"
+    );
+    assert_eq!(left, 0, "the collection freed every retired block");
+    assert!(
+        freed >= retired,
+        "the collection freed {freed} < {retired} blocks"
+    );
+    assert_eq!(run_capture_stress(src), want);
+}
+
+#[test]
+fn list_growth_retires_until_collect() {
+    let src = "\
+fn main():
+    xs: List[int] = [0]
+    for i in 1..100:
+        xs.push(i)
+    print(xs.len(), xs[0], xs[50], xs[99])
+main()";
+    growth_retires_until_collect(src, "100 0 50 99\n");
 }

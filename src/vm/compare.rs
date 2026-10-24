@@ -56,7 +56,7 @@ impl Vm {
                 Obj::List(items) => {
                     // Root the list and the needle: `elems` is a clone held only in a Rust local, and
                     // a user `eq` on an element re-enters the VM (and can collect).
-                    let elems = items.clone();
+                    let elems = items.to_vec();
                     self.with_roots(&[Value::obj(h), needle], |vm| {
                         vm.seq_slot(&elems, needle, span)
                     })?
@@ -795,7 +795,8 @@ impl Vm {
     /// Length of the tuple/list `v` and its `i`th element, read fresh from the heap.
     fn seq_elem(&self, v: Value, i: usize) -> (usize, Option<Value>) {
         match v.as_obj().map(|h| self.heap.get(h)) {
-            Some(Obj::Tuple(xs) | Obj::List(xs)) => (xs.len(), xs.get(i).copied()),
+            Some(Obj::Tuple(xs)) => (xs.len(), xs.get(i).copied()),
+            Some(Obj::List(xs)) => (xs.len(), xs.try_get(i)),
             _ => (0, None),
         }
     }

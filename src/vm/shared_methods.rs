@@ -279,10 +279,11 @@ impl Vm {
                 self.rwshared_mutate(&core, args, span, |vm, st, a| {
                     want_elem(vm, vm.elem_kind(st), "list")?;
                     let lh = st.as_obj().expect("a list is a heap object");
-                    let Obj::List(items) = vm.heap.get_mut(lh) else {
+                    let heap = vm.heap.write(lh);
+                    let Obj::List(items) = heap.get(lh) else {
                         unreachable!()
                     };
-                    items.push(a[0]);
+                    items.push(heap, a[0]);
                     Ok(None)
                 })?;
                 Ok(Value::nil())
@@ -307,7 +308,7 @@ impl Vm {
                 let piece = self.rwshared_read(&core, span, |vm, ctx| {
                     match boxctx::state_obj(&vm.heap, ctx) {
                         Some(Obj::List(items)) => crate::slice::norm_index(i, items.len())
-                            .map(|u| vm.box_copy_pieces(ctx, &[items[u]], span))
+                            .map(|u| vm.box_copy_pieces(ctx, &[items.get(u)], span))
                             .transpose(),
                         _ => Err(vm.err("RwShared._at requires a list element".into(), span)),
                     }
@@ -334,14 +335,15 @@ impl Vm {
                         Some(Obj::List(items)) => {
                             let idxs = crate::slice::range_indices(&parts, items.len())
                                 .map_err(|e| vm.err(e.to_string(), span))?;
-                            let picked: Vec<Value> = idxs.into_iter().map(|i| items[i]).collect();
+                            let picked: Vec<Value> =
+                                idxs.into_iter().map(|i| items.get(i)).collect();
                             vm.box_copy_pieces(ctx, &picked, span)
                         }
                         _ => Err(vm.err("RwShared._slice requires a list element".into(), span)),
                     }
                 })?;
                 let items = self.from_wire_pieces(ws);
-                Ok(Value::obj(self.heap.alloc(Obj::List(items))))
+                Ok(Value::obj(self.heap.alloc(Obj::List(items.into()))))
             }
             RwSharedPrim::Contains => {
                 self.arity_err(method, args, 1, span)?;

@@ -194,7 +194,7 @@ impl Vm {
                     self.push(v);
                 }
                 let out = self.stack.split_off(child_base);
-                Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
             }
             D::Tuple(elems) => {
                 if variant != "Arr" {
@@ -368,6 +368,17 @@ impl Vm {
         })))
     }
 
+    /// The `Arr` node of a list's or a tuple's elements, one bracket level down.
+    fn json_arr(&mut self, items: Vec<Value>, depth: usize) -> Result<Value, String> {
+        let inner = Self::json_enter(depth)?;
+        let mut out = Vec::with_capacity(items.len());
+        for it in items {
+            out.push(self.json_of(it, inner)?);
+        }
+        let lv = Value::obj(self.heap.alloc(Obj::List(out.into())));
+        self.json_variant("Arr", vec![lv])
+    }
+
     /// The runtime walk behind `json.encode`: a `Value` -> the `Json` tree that mirrors its shape.
     /// Accumulates children into a plain `Vec<Value>`/`MapData`, same allocation idiom as
     /// `coerce_json` (no new rooting scheme).
@@ -408,15 +419,8 @@ impl Vm {
                     let sv = self.alloc_str(s.to_string());
                     self.json_variant("Str", vec![sv])
                 }
-                Obj::List(items) | Obj::Tuple(items) => {
-                    let inner = Self::json_enter(depth)?;
-                    let mut out = Vec::with_capacity(items.len());
-                    for it in items {
-                        out.push(self.json_of(it, inner)?);
-                    }
-                    let lv = Value::obj(self.heap.alloc(Obj::List(out)));
-                    self.json_variant("Arr", vec![lv])
-                }
+                Obj::List(items) => self.json_arr(items.to_vec(), depth),
+                Obj::Tuple(items) => self.json_arr(items, depth),
                 Obj::Map(m) => {
                     let inner = Self::json_enter(depth)?;
                     let mut out = MapData::default();

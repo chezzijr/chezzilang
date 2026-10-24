@@ -44,7 +44,7 @@ pub fn run_program_bytes(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
 /// Compile a test program through the module graph, as `chezzi run` does; a front-end error is
 /// the run's error.
 #[cfg(test)]
-fn test_program(src: &str) -> Result<Program, RuntimeError> {
+pub(super) fn test_program(src: &str) -> Result<Program, RuntimeError> {
     crate::compiler::compile_source(src).map_err(|e| RuntimeError {
         message: e.message,
         span: e.span,

@@ -69,7 +69,10 @@ fn worker_runs_on_the_runs_one_heap() {
         "the worker's objects are in the run's one heap"
     );
     let got = vm.from_wire(res.value);
-    let want = Value::obj(vm.heap.alloc(Obj::List(vec![Value::int(1), Value::int(2)])));
+    let want = Value::obj(
+        vm.heap
+            .alloc(Obj::List(vec![Value::int(1), Value::int(2)].into())),
+    );
     assert!(
         vm.values_equal(got, want),
         "result must round-trip back to [1, 2]"

@@ -33,15 +33,18 @@ fn wire_roundtrip_preserves_value_equality() {
     set.push(5, Value::int(1));
     set.push(6, Value::int(2));
     let setobj = vm.heap.alloc(Obj::Set(set));
-    let list = vm.heap.alloc(Obj::List(vec![
-        Value::int(1),
-        Value::obj(s),
-        Value::obj(tup),
-        Value::obj(st),
-        Value::obj(en),
-        Value::obj(map),
-        Value::obj(setobj),
-    ]));
+    let list = vm.heap.alloc(Obj::List(
+        vec![
+            Value::int(1),
+            Value::obj(s),
+            Value::obj(tup),
+            Value::obj(st),
+            Value::obj(en),
+            Value::obj(map),
+            Value::obj(setobj),
+        ]
+        .into(),
+    ));
     let v = Value::obj(list);
 
     let w = vm

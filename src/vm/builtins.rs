@@ -175,7 +175,7 @@ impl Vm {
     /// builtin `.iter()` all read it.
     pub(super) fn builtin_items(&mut self, h: GcRef) -> Option<Vec<Value>> {
         match self.heap.get(h) {
-            Obj::List(items) => Some(items.clone()),
+            Obj::List(items) => Some(items.to_vec()),
             Obj::Set(s) => Some(s.entries.iter().map(|(_, e)| *e).collect()),
             Obj::Map(_) => Some(self.map_pairs(h)),
             Obj::Bytes(b) => Some(b.iter().map(|&x| Value::int(x as i64)).collect()),
@@ -298,7 +298,7 @@ impl Vm {
             }
         };
         // Root the source + the growing accumulator list across the re-entrant calls.
-        let acc = self.heap.alloc(Obj::List(Vec::new()));
+        let acc = self.heap.alloc(Obj::List(RVec::new()));
         self.push(v);
         self.push(Value::obj(acc));
         let result = (|| {
@@ -315,10 +315,11 @@ impl Vm {
                             RecvStep::Parked => unreachable!("a re-entered recv never parks"),
                         };
                         let item = self.from_wire(w);
-                        let Obj::List(buf) = self.heap.get_mut(acc) else {
+                        let heap = self.heap.write(acc);
+                        let Obj::List(buf) = heap.get(acc) else {
                             unreachable!()
                         };
-                        buf.push(item);
+                        buf.push(heap, item);
                         continue;
                     }
                     Step::Generator => self.generator_next(h, span)?,
@@ -345,10 +346,11 @@ impl Vm {
                                 span,
                             )
                         })?;
-                        let Obj::List(buf) = self.heap.get_mut(acc) else {
+                        let heap = self.heap.write(acc);
+                        let Obj::List(buf) = heap.get(acc) else {
                             unreachable!()
                         };
-                        buf.push(item);
+                        buf.push(heap, item);
                     }
                     crate::base::op::VID_NONE_VARIANT => break,
                     _ => {
@@ -363,7 +365,7 @@ impl Vm {
         let Obj::List(buf) = self.heap.get(acc) else {
             unreachable!()
         };
-        let out = buf.clone();
+        let out = buf.to_vec();
         self.pop(); // unroot accumulator
         self.pop(); // unroot source
         Ok(out)
@@ -391,7 +393,7 @@ impl Vm {
         // can't corrupt the set); the list is ours, so overwriting is safe, and rooting the
         // snapshots there keeps them alive across the phase-1 re-entrant hashes. Then hash (phase 1)
         // and build GC-free (phase 2), reading the snapshots from the list.
-        let lh = self.heap.alloc(Obj::List(src.clone()));
+        let lh = self.heap.alloc(Obj::List(src.clone().into()));
         self.push(Value::obj(lh));
         let n = src.len();
         let built = (|| {
@@ -400,11 +402,11 @@ impl Vm {
                     let Obj::List(b) = self.heap.get(lh) else {
                         unreachable!()
                     };
-                    b[i]
+                    b.get(i)
                 };
                 let snap = self.snapshot_key(orig);
                 if let Obj::List(b) = self.heap.get_mut(lh) {
-                    b[i] = snap;
+                    b.set(i, snap);
                 }
             }
             let mut hashes = Vec::with_capacity(n);
@@ -413,7 +415,7 @@ impl Vm {
                     let Obj::List(b) = self.heap.get(lh) else {
                         unreachable!()
                     };
-                    b[i]
+                    b.get(i)
                 };
                 hashes.push(self.hash_value(v, span)?);
             }
@@ -423,7 +425,7 @@ impl Vm {
                     let Obj::List(b) = self.heap.get(lh) else {
                         unreachable!()
                     };
-                    b[i]
+                    b.get(i)
                 };
                 if self
                     .set_slot(&set.entries, set.candidates(he), v, span)?
@@ -455,7 +457,7 @@ impl Vm {
                 ));
             }
         };
-        Ok(Value::obj(self.heap.alloc(Obj::List(items))))
+        Ok(Value::obj(self.heap.alloc(Obj::List(items.into()))))
     }
 
     /// `Map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys, like the
@@ -488,7 +490,7 @@ impl Vm {
         }
         let drained = self.drain_iterable(it, span)?;
         // Root the drained elements (as a fresh heap list) across the re-entrant hash() calls.
-        let src_obj = Value::obj(self.heap.alloc(Obj::List(drained.clone())));
+        let src_obj = Value::obj(self.heap.alloc(Obj::List(drained.clone().into())));
         self.push(src_obj);
         // Snapshot keys are rooted by pushing them onto the operand stack (the drained tuples may
         // ALIAS caller-held tuples, so they cannot be mutated in place). Everything above this base
@@ -545,7 +547,7 @@ impl Vm {
             Some(Obj::List(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for e in items {
-                    match self.int_val(*e) {
+                    match self.int_val(e) {
                         Some(n) if (0..=255).contains(&n) => out.push(n as u8),
                         Some(n) => {
                             return Err(self.err(
@@ -557,7 +559,7 @@ impl Vm {
                             return Err(self.err(
                                 format!(
                                     "{what}() expects a list of int, got an element of type {}",
-                                    self.type_name(*e)
+                                    self.type_name(e)
                                 ),
                                 span,
                             ));

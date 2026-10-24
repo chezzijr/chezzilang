@@ -125,7 +125,7 @@ impl Vm {
                 Obj::List(items) => {
                     let mut parts = Vec::with_capacity(items.len());
                     for v in items {
-                        parts.push(self.display_guarded(*v, depth + 1)?);
+                        parts.push(self.display_guarded(v, depth + 1)?);
                     }
                     Ok(format!("[{}]", parts.join(", ")))
                 }
@@ -768,7 +768,7 @@ impl Vm {
                     return Ok(());
                 }
                 out.push('[');
-                self.stringify_open_seq(out, h, &items, span, depth)?;
+                self.stringify_open_seq(out, h, &items.to_vec(), span, depth)?;
                 out.push(']');
             }
             Obj::Tuple(items) => {

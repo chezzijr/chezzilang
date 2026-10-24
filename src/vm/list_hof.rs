@@ -59,13 +59,13 @@ impl Vm {
                 let f = args.swap_remove(0);
                 let is_filter = method == "filter";
                 // ROOT the result list too.
-                let res_h = self.heap.alloc(Obj::List(Vec::new()));
+                let res_h = self.heap.alloc(Obj::List(RVec::new()));
                 self.push(Value::obj(res_h));
                 for i in 0..n {
                     // Read from the rooted SNAPSHOT, not the live receiver: a callback that shrinks
                     // the receiver must not affect this index (stays valid, no OOB).
                     let elem = match self.heap.get(snap_h).as_list() {
-                        Some(v) => v[i],
+                        Some(v) => v.get(i),
                         None => unreachable!(),
                     };
                     // May GC; source, snapshot, and result lists are rooted, so elements survive.
@@ -73,8 +73,9 @@ impl Vm {
                     if is_filter {
                         match out.as_bool() {
                             Some(true) => {
-                                if let Obj::List(items) = self.heap.get_mut(res_h) {
-                                    items.push(elem);
+                                let heap = self.heap.write(res_h);
+                                if let Obj::List(items) = heap.get(res_h) {
+                                    items.push(heap, elem);
                                 }
                             }
                             Some(false) => {}
@@ -91,8 +92,11 @@ impl Vm {
                                 ));
                             }
                         }
-                    } else if let Obj::List(items) = self.heap.get_mut(res_h) {
-                        items.push(out);
+                    } else {
+                        let heap = self.heap.write(res_h);
+                        if let Obj::List(items) = heap.get(res_h) {
+                            items.push(heap, out);
+                        }
                     }
                 }
                 self.pop(); // unroot result
@@ -120,7 +124,7 @@ impl Vm {
                     // Read from the rooted SNAPSHOT (see map/filter): OOB-safe under a shrinking
                     // callback.
                     let elem = match self.heap.get(snap_h).as_list() {
-                        Some(v) => v[i],
+                        Some(v) => v.get(i),
                         None => unreachable!(),
                     };
                     let acc = self.stack[acc_slot];
@@ -145,19 +149,22 @@ impl Vm {
                 }
                 let f = args.swap_remove(0);
                 let is_drop = method == "drop_while";
-                let res_h = self.heap.alloc(Obj::List(Vec::new()));
+                let res_h = self.heap.alloc(Obj::List(RVec::new()));
                 self.push(Value::obj(res_h)); // ROOT the result list
                 let mut cut = n; // first index where pred is false (n = all-true)
                 for i in 0..n {
                     let elem = match self.heap.get(snap_h).as_list() {
-                        Some(v) => v[i],
+                        Some(v) => v.get(i),
                         None => unreachable!(),
                     };
                     let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
                     match out.as_bool() {
                         Some(true) => {
-                            if !is_drop && let Obj::List(items) = self.heap.get_mut(res_h) {
-                                items.push(elem);
+                            if !is_drop {
+                                let heap = self.heap.write(res_h);
+                                if let Obj::List(items) = heap.get(res_h) {
+                                    items.push(heap, elem);
+                                }
                             }
                         }
                         Some(false) => {
@@ -182,11 +189,12 @@ impl Vm {
                     // Collect the snapshot suffix from the first non-matching index.
                     for i in cut..n {
                         let elem = match self.heap.get(snap_h).as_list() {
-                            Some(v) => v[i],
+                            Some(v) => v.get(i),
                             None => unreachable!(),
                         };
-                        if let Obj::List(items) = self.heap.get_mut(res_h) {
-                            items.push(elem);
+                        let heap = self.heap.write(res_h);
+                        if let Obj::List(items) = heap.get(res_h) {
+                            items.push(heap, elem);
                         }
                     }
                 }
@@ -212,7 +220,7 @@ impl Vm {
                 let mut found: Option<usize> = None;
                 for i in 0..n {
                     let elem = match self.heap.get(snap_h).as_list() {
-                        Some(v) => v[i],
+                        Some(v) => v.get(i),
                         None => unreachable!(),
                     };
                     let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
@@ -267,7 +275,7 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         let changed = match (self.heap.get(src_h), self.heap.get(snap_h)) {
-            (Obj::List(cur), Obj::List(snap)) => cur != snap,
+            (Obj::List(cur), Obj::List(snap)) => cur.iter().ne(snap.iter()),
             _ => true,
         };
         if changed {
@@ -335,11 +343,12 @@ impl Vm {
         }
         // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
         let reordered: Vec<Value> = match self.heap.get(snap_h).as_list() {
-            Some(v) => order.iter().map(|&i| v[i]).collect(),
+            Some(v) => order.iter().map(|&i| v.get(i)).collect(),
             None => unreachable!(),
         };
-        if let Obj::List(v) = self.heap.get_mut(src_h) {
-            *v = reordered;
+        let heap = self.heap.write(src_h);
+        if let Obj::List(v) = heap.get(src_h) {
+            v.replace(heap, &reordered);
         }
         self.pop(); // unroot snapshot
         self.pop(); // unroot source
@@ -367,11 +376,11 @@ impl Vm {
         let (mut li, mut ri) = (0, 0);
         while li < left.len() && ri < right.len() {
             let a = match self.heap.get(src_h).as_list() {
-                Some(v) => v[left[li]],
+                Some(v) => v.get(left[li]),
                 None => unreachable!(),
             };
             let b = match self.heap.get(src_h).as_list() {
-                Some(v) => v[right[ri]],
+                Some(v) => v.get(right[ri]),
                 None => unreachable!(),
             };
             // `<= 0` keeps the left element first on ties → stable.
@@ -442,17 +451,18 @@ impl Vm {
         };
         // Compute keys once per element into a rooted list. Each `invoke_value` may GC; already-pushed
         // keys survive because `keys_h` is rooted (a `Vec::push` into it does not itself GC).
-        let keys_h = self.heap.alloc(Obj::List(Vec::with_capacity(n)));
+        let keys_h = self.heap.alloc(Obj::List(RVec::with_capacity(n)));
         self.push(Value::obj(keys_h)); // ROOT the keys
         for i in 0..n {
             let e = match self.heap.get(snap_h).as_list() {
-                Some(v) => v[i],
+                Some(v) => v.get(i),
                 None => unreachable!(),
             };
             match self.guarded(|vm| vm.invoke_value(f, vec![e], span)) {
                 Ok(k) => {
-                    if let Obj::List(v) = self.heap.get_mut(keys_h) {
-                        v.push(k);
+                    let heap = self.heap.write(keys_h);
+                    if let Obj::List(v) = heap.get(keys_h) {
+                        v.push(heap, k);
                     }
                 }
                 Err(err) => {
@@ -480,11 +490,12 @@ impl Vm {
         }
         // No extractor/compare calls remain, so no GC: reorder the snapshot and write back.
         let reordered: Vec<Value> = match self.heap.get(snap_h).as_list() {
-            Some(v) => order.iter().map(|&i| v[i]).collect(),
+            Some(v) => order.iter().map(|&i| v.get(i)).collect(),
             None => unreachable!(),
         };
-        if let Obj::List(v) = self.heap.get_mut(src_h) {
-            *v = reordered;
+        let heap = self.heap.write(src_h);
+        if let Obj::List(v) = heap.get(src_h) {
+            v.replace(heap, &reordered);
         }
         self.pop(); // unroot keys
         self.pop(); // unroot snapshot
@@ -529,7 +540,7 @@ impl Vm {
         let mut err = None;
         for i in 1..n {
             let (cur, best_v) = match self.heap.get(snap_h).as_list() {
-                Some(v) => (v[i], v[best]),
+                Some(v) => (v.get(i), v.get(best)),
                 None => unreachable!(),
             };
             match self.order_key(cur, best_v, span) {
@@ -546,7 +557,7 @@ impl Vm {
             }
         }
         let result = match self.heap.get(snap_h).as_list() {
-            Some(v) => v[best],
+            Some(v) => v.get(best),
             None => unreachable!(),
         };
         if let Some(e) = err {
@@ -605,17 +616,18 @@ impl Vm {
             self.heap.alloc(Obj::List(elems))
         };
         self.push(Value::obj(snap_h)); // ROOT the snapshot
-        let keys_h = self.heap.alloc(Obj::List(Vec::with_capacity(n)));
+        let keys_h = self.heap.alloc(Obj::List(RVec::with_capacity(n)));
         self.push(Value::obj(keys_h)); // ROOT the keys
         for i in 0..n {
             let e = match self.heap.get(snap_h).as_list() {
-                Some(v) => v[i],
+                Some(v) => v.get(i),
                 None => unreachable!(),
             };
             match self.guarded(|vm| vm.invoke_value(f, vec![e], span)) {
                 Ok(k) => {
-                    if let Obj::List(v) = self.heap.get_mut(keys_h) {
-                        v.push(k);
+                    let heap = self.heap.write(keys_h);
+                    if let Obj::List(v) = heap.get(keys_h) {
+                        v.push(heap, k);
                     }
                 }
                 Err(err) => {
@@ -631,7 +643,7 @@ impl Vm {
         let mut err = None;
         for i in 1..n {
             let (cur, best_k) = match self.heap.get(keys_h).as_list() {
-                Some(v) => (v[i], v[best]),
+                Some(v) => (v.get(i), v.get(best)),
                 None => unreachable!(),
             };
             match self.order_key(cur, best_k, span) {
@@ -647,7 +659,7 @@ impl Vm {
             }
         }
         let result = match self.heap.get(snap_h).as_list() {
-            Some(v) => v[best],
+            Some(v) => v.get(best),
             None => unreachable!(),
         };
         if let Some(e) = err {
@@ -685,11 +697,11 @@ impl Vm {
         let (mut li, mut ri) = (0, 0);
         while li < left.len() && ri < right.len() {
             let a = match self.heap.get(keys_h).as_list() {
-                Some(v) => v[left[li]],
+                Some(v) => v.get(left[li]),
                 None => unreachable!(),
             };
             let b = match self.heap.get(keys_h).as_list() {
-                Some(v) => v[right[ri]],
+                Some(v) => v.get(right[ri]),
                 None => unreachable!(),
             };
             // `<= Equal` keeps the left element first on ties → stable.
@@ -771,7 +783,7 @@ impl Vm {
         span: Span,
     ) -> Result<Vec<Value>, RuntimeError> {
         match arg.as_obj().map(|ah| self.heap.get(ah)) {
-            Some(Obj::List(items)) => Ok(items.clone()),
+            Some(Obj::List(items)) => Ok(items.to_vec()),
             _ => Err(self.err(
                 format!(
                     "{method}() expects a list argument, got {}",

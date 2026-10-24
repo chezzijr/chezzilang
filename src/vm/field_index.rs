@@ -151,7 +151,7 @@ impl Vm {
             Obj::List(items) => {
                 let idxs = crate::slice::range_indices(&parts, items.len())
                     .map_err(|m| self.err(m.to_string(), span))?;
-                Sliced::List(idxs.iter().map(|&i| items[i]).collect())
+                Sliced::List(idxs.iter().map(|&i| items.get(i)).collect())
             }
             // ASCII arm: a byte index IS a codepoint index. The `None` arm stays O(n) per slice for
             // non-ASCII text (DEC-072).
@@ -214,7 +214,7 @@ impl Vm {
                 // Root the source across the alloc: the new list shares its element handles, which
                 // are otherwise unreachable (the source was popped) and could be collected by a GC.
                 self.push(obj);
-                let nh = self.heap.alloc(Obj::List(slice));
+                let nh = self.heap.alloc(Obj::List(slice.into()));
                 self.pop();
                 self.push(Value::obj(nh));
             }
@@ -258,7 +258,7 @@ impl Vm {
         if let Some(n) = key.as_int_inline() {
             match self.heap.get(h) {
                 Obj::List(items) => {
-                    return match crate::slice::norm_index(n, items.len()).map(|i| items[i]) {
+                    return match crate::slice::norm_index(n, items.len()).map(|i| items.get(i)) {
                         Some(v) => {
                             self.push(v);
                             Ok(())
@@ -349,7 +349,7 @@ impl Vm {
         match self.heap.get(h) {
             Obj::List(items) => {
                 let idx = int_idx(self)?;
-                let v = crate::slice::norm_index(idx, items.len()).map(|i| items[i]);
+                let v = crate::slice::norm_index(idx, items.len()).map(|i| items.get(i));
                 match v {
                     Some(v) => {
                         self.push(v);
@@ -728,7 +728,7 @@ impl Vm {
         match self.heap.get_mut(h) {
             Obj::List(items) => match crate::slice::norm_index(idx, items.len()) {
                 Some(i) => {
-                    items[i] = val;
+                    items.set(i, val);
                     Ok(())
                 }
                 None => {

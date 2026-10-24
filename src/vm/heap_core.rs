@@ -460,6 +460,7 @@ impl HeapCore {
 #[cfg(test)]
 mod tests {
     use crate::vm::heap::{Heap, Obj};
+    use crate::vm::rvec::RVec;
     use crate::vm::value::GcRef;
     use std::collections::HashSet;
 
@@ -503,9 +504,9 @@ mod tests {
         let mut a = Heap::new();
         // SAFETY: one thread drives both handles, and `a.sweep` runs with `b` idle.
         let mut b = unsafe { a.attach() };
-        let x = a.alloc(Obj::List(Vec::new()));
-        let y = b.alloc(Obj::List(Vec::new()));
-        let z = a.alloc(Obj::List(Vec::new()));
+        let x = a.alloc(Obj::List(RVec::new()));
+        let y = b.alloc(Obj::List(RVec::new()));
+        let z = a.alloc(Obj::List(RVec::new()));
         a.begin_copy_log();
         a.set_copied(x);
         a.set_copied(y);
@@ -517,7 +518,7 @@ mod tests {
         a.mark(y);
         a.mark(z);
         a.sweep();
-        let w = a.alloc(Obj::List(Vec::new()));
+        let w = a.alloc(Obj::List(RVec::new()));
         assert_eq!(w, x, "the freed slot is reused");
         a.set_copied(w);
         a.unmark_copy_log();
@@ -535,10 +536,10 @@ mod tests {
     #[test]
     fn reused_slot_drops_a_stale_mark() {
         let mut heap = Heap::new();
-        let x = heap.alloc(Obj::List(Vec::new()));
+        let x = heap.alloc(Obj::List(RVec::new()));
         heap.sweep();
         assert!(heap.mark(x), "the freed slot takes a stray mark");
-        let y = heap.alloc(Obj::List(Vec::new()));
+        let y = heap.alloc(Obj::List(RVec::new()));
         assert_eq!(y, x, "the freed slot is reused");
         assert!(heap.mark(y), "the new object starts unmarked");
     }

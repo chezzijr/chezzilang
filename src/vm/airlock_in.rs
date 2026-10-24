@@ -122,7 +122,8 @@ impl Vm {
         };
         self.heap.unset_copied(h);
         let (len, positional) = match self.heap.get(h) {
-            Obj::List(xs) | Obj::Tuple(xs) => (xs.len(), true),
+            Obj::List(xs) => (xs.len(), true),
+            Obj::Tuple(xs) => (xs.len(), true),
             Obj::Enum { payload, .. } => (payload.len(), true),
             Obj::Struct { fields, .. } => (fields.as_slice().len(), true),
             Obj::Map(m) => (m.entries.len(), false),
@@ -161,7 +162,8 @@ impl Vm {
                 Kids::At(_) => return,
             };
             let child = match self.heap.get(h) {
-                Obj::List(xs) | Obj::Tuple(xs) => xs.get(i).copied(),
+                Obj::List(xs) => xs.try_get(i),
+                Obj::Tuple(xs) => xs.get(i).copied(),
                 Obj::Enum { payload, .. } => payload.get(i).copied(),
                 Obj::Struct { fields, .. } => fields.get(i).copied(),
                 Obj::Map(m) => m.entries.get(i).map(|e| e.2),
@@ -213,7 +215,8 @@ impl Vm {
             }
             let objs = |vs: &[Value]| vs.iter().filter_map(|v| v.as_obj()).collect::<Vec<_>>();
             let kids = match self.heap.get(h) {
-                Obj::List(xs) | Obj::Tuple(xs) => objs(xs),
+                Obj::List(xs) => objs(&xs.to_vec()),
+                Obj::Tuple(xs) => objs(xs),
                 Obj::Enum { payload, .. } => objs(payload),
                 Obj::Struct { fields, .. } => objs(fields.as_slice()),
                 Obj::Set(s) => s.entries.iter().filter_map(|e| e.1.as_obj()).collect(),
@@ -371,13 +374,13 @@ impl Vm {
                     }
                     return Value::obj(h);
                 }
-                let h = self.heap.alloc(Obj::List(Vec::new()));
+                let h = self.heap.alloc(Obj::List(RVec::new()));
                 if self.copy_mark {
                     self.heap.set_copied(h);
                 }
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
-                *self.heap.get_mut(h) = Obj::List(cloned);
+                *self.heap.get_mut(h) = Obj::List(cloned.into());
                 Value::obj(h)
             }
             WireValue::Tuple { id, items } => {

@@ -788,7 +788,7 @@ impl WalkSrc<'_> {
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(items.len());
                         for x in items {
-                            out.push(self.to_wire_depth(*x, depth + 1, memo)?);
+                            out.push(self.to_wire_depth(x, depth + 1, memo)?);
                         }
                         memo.exit(h);
                         WireValue::List { id, items: out }

@@ -11,7 +11,7 @@ use super::core::{
 };
 use super::heap_core::{CopyLog, HeapCore, lock};
 use super::heap_view::ViewState;
-use super::rvec::RetireList;
+use super::rvec::{RVec, RetireList};
 use super::value::{GcRef, Value};
 use super::wire::HashIndex;
 use crate::base::op::ProtoId;
@@ -239,7 +239,10 @@ pub enum Obj {
         items: Vec<Value>,
         pos: usize,
     },
-    List(Vec<Value>),
+    /// `[a, b, …]` — a growable list on a retiring vector (`vm/rvec.rs`): a grow retires the old
+    /// block, and only the stop-the-world sweep frees it. A write reads the list with
+    /// [`Heap::write`] and calls the `RVec` mutator with that handle.
+    List(RVec<Value>),
     /// `(a, b, …)` — a fixed-arity, immutable tuple. Elements may be heap objects, so they are
     /// traced as GC children (same as `List`).
     Tuple(Vec<Value>),
@@ -395,7 +398,7 @@ pub struct CoreKey(std::mem::Discriminant<Obj>, usize);
 impl Obj {
     /// The elements when this object is a list. Every other kind answers `None`.
     #[inline]
-    pub fn as_list(&self) -> Option<&Vec<Value>> {
+    pub fn as_list(&self) -> Option<&RVec<Value>> {
         match self {
             Obj::List(v) => Some(v),
             Obj::Str(_)
@@ -609,7 +612,8 @@ fn obj_bytes_shallow(obj: &Obj) -> usize {
         Obj::Bytes(b) => b.len(),
         Obj::ByteArray(b) => b.capacity(),
         Obj::Iter { items, .. } => items.capacity() * std::mem::size_of::<Value>(),
-        Obj::List(v) | Obj::Tuple(v) => v.capacity() * std::mem::size_of::<Value>(),
+        Obj::List(v) => v.capacity() * std::mem::size_of::<Value>(),
+        Obj::Tuple(v) => v.capacity() * std::mem::size_of::<Value>(),
         Obj::Struct { fields, .. } => fields.heap_bytes(),
         Obj::Enum { payload, .. } => payload.capacity() * std::mem::size_of::<Value>(),
         Obj::Closure { captured, .. } => captured.capacity() * std::mem::size_of::<Value>(),
@@ -948,20 +952,30 @@ impl Heap {
 
     #[inline]
     pub fn get_mut(&mut self, h: GcRef) -> &mut Obj {
-        // Byte funnel 2 of 3 (see `since_gc_bytes` / `pending_mut`): the sole `&mut Obj` door, and so
-        // the sole door for growth INSIDE an existing object. Settle whatever the previous `get_mut`
-        // handed out, then arm this one. M1.7: with the cap off too (see `since_gc_bytes`).
-        self.settle_pending_mut();
-        self.pending_mut = Some((h, obj_bytes_shallow(self.get(h))));
-        // TICKET-213 — the same sole-door argument decides view freshness: a `&mut` to an object
-        // the cached module snapshot reaches is the only way that view can change in place.
-        self.view.touch(h.0 as usize);
+        self.write(h);
         // SAFETY: `&mut self` excludes this handle's other references, and `attach`'s contract
         // keeps every other handle off an object this handle's fiber owns.
         unsafe { self.core.slot_mut(h) }
             .obj
             .as_mut()
             .expect("dangling GcRef (object was collected while still reachable)")
+    }
+
+    /// Arm a write of `h` and hand back this handle shared: the door for an object whose
+    /// mutators take `&self` (an `RVec`, `vm/rvec.rs`), and the bookkeeping half of
+    /// [`get_mut`](Heap::get_mut). A list write is `let heap = heap.write(h);` then
+    /// `heap.get(h)` and `list.push(heap, v)`.
+    #[inline]
+    pub fn write(&mut self, h: GcRef) -> &Heap {
+        // Byte funnel 2 of 3 (see `since_gc_bytes` / `pending_mut`): the sole write door, and so
+        // the sole door for growth INSIDE an existing object. Settle whatever the previous write
+        // armed, then arm this one. M1.7: with the cap off too (see `since_gc_bytes`).
+        self.settle_pending_mut();
+        self.pending_mut = Some((h, obj_bytes_shallow(self.get(h))));
+        // TICKET-213 — the same sole-door argument decides view freshness: a write to an object
+        // the cached module snapshot reaches is the only way that view can change in place.
+        self.view.touch(h.0 as usize);
+        self
     }
 
     /// Charge the growth of the object the last [`get_mut`](Heap::get_mut) handed out, and disarm.
@@ -1122,7 +1136,7 @@ impl Heap {
             // NON-LEAF: the cursor's snapshot may hold heap `GcRef`s, which must stay alive while the
             // cursor is reachable (a not-yet-consumed element is still owned by the cursor).
             Obj::Iter { items, .. } => items.iter().for_each(&mut push),
-            Obj::List(items) => items.iter().for_each(&mut push),
+            Obj::List(items) => items.iter().for_each(|v| push(&v)),
             Obj::Tuple(items) => items.iter().for_each(&mut push),
             Obj::Map(m) => m.entries.iter().for_each(|(_, k, v)| {
                 push(k);
@@ -1546,7 +1560,7 @@ mod iter_obj_tests {
             payload: Vec::new(),
         };
         assert_eq!(e.as_enum().map(|(id, p)| (id, p.len())), Some((7, 0)));
-        assert!(Obj::List(Vec::new()).as_enum().is_none());
+        assert!(Obj::List(RVec::new()).as_enum().is_none());
     }
 
     /// `Obj::Iter` must stay within the 64B cap (Vec 24B + usize 8B = 32B; `MapData`/`SetData` at
@@ -1570,8 +1584,8 @@ mod iter_obj_tests {
     #[test]
     fn view_epoch_moves_only_for_a_viewed_object() {
         let mut heap = Heap::new();
-        let a = heap.alloc(Obj::List(Vec::new()));
-        let b = heap.alloc(Obj::List(Vec::new()));
+        let a = heap.alloc(Obj::List(RVec::new()));
+        let b = heap.alloc(Obj::List(RVec::new()));
         heap.begin_view();
         assert!(heap.set_viewed(a), "first mark of `a` is fresh");
         assert!(
@@ -1581,7 +1595,7 @@ mod iter_obj_tests {
         let e = heap.view_epoch();
         let _ = heap.get(a);
         let _ = heap.get_mut(b);
-        let x = heap.alloc(Obj::List(Vec::new()));
+        let x = heap.alloc(Obj::List(RVec::new()));
         assert_eq!(
             heap.view_epoch(),
             e,
@@ -1608,7 +1622,7 @@ mod iter_obj_tests {
         heap.mark(b);
         heap.mark(x);
         heap.sweep();
-        let c = heap.alloc(Obj::List(Vec::new()));
+        let c = heap.alloc(Obj::List(RVec::new()));
         assert_eq!(c, a, "the freed slot is reused");
         let e = heap.view_epoch();
         let _ = heap.get_mut(c);
@@ -1619,16 +1633,16 @@ mod iter_obj_tests {
     #[test]
     fn copied_bit_is_per_slot_and_cleared_on_reuse() {
         let mut heap = Heap::new();
-        let a = heap.alloc(Obj::List(Vec::new()));
-        let b = heap.alloc(Obj::List(Vec::new()));
+        let a = heap.alloc(Obj::List(RVec::new()));
+        let b = heap.alloc(Obj::List(RVec::new()));
         heap.set_copied(a);
         assert!(heap.is_copied(a));
         assert!(!heap.is_copied(b));
         // Neither GC-marked: sweep frees both. `free` is LIFO (pushed in index order 0,1), so the
         // first re-alloc reuses `b`'s slot and the second reuses `a`'s — the one that was marked.
         heap.sweep();
-        let _reuse_b = heap.alloc(Obj::List(Vec::new()));
-        let c = heap.alloc(Obj::List(Vec::new()));
+        let _reuse_b = heap.alloc(Obj::List(RVec::new()));
+        let c = heap.alloc(Obj::List(RVec::new()));
         assert_eq!(
             c, a,
             "the freed slot must be reused for this test to prove anything"
@@ -1774,7 +1788,9 @@ mod iter_obj_tests {
     fn live_bytes_counts_list_backing() {
         let mut h = Heap::new();
         let empty = h.live_bytes();
-        let r = h.alloc(Obj::List(vec![Value::int(1), Value::int(2), Value::int(3)]));
+        let r = h.alloc(Obj::List(
+            vec![Value::int(1), Value::int(2), Value::int(3)].into(),
+        ));
         let grown = h.live_bytes();
         // one slot (size_of::<Obj>) + the Vec's 3*size_of::<Value>() backing must register
         assert!(grown > empty + std::mem::size_of::<Obj>());
@@ -1824,7 +1840,7 @@ mod iter_obj_tests {
     #[test]
     fn should_collect_sees_each_threshold_change() {
         let mut h = Heap::new();
-        let live: Vec<GcRef> = (0..300).map(|_| h.alloc(Obj::List(Vec::new()))).collect();
+        let live: Vec<GcRef> = (0..300).map(|_| h.alloc(Obj::List(RVec::new()))).collect();
         assert!(h.should_collect(), "300 allocations pass the 256 floor");
         for &r in &live {
             h.mark(r);
@@ -1836,7 +1852,7 @@ mod iter_obj_tests {
         );
         h.sweep();
         for _ in 0..256 {
-            h.alloc(Obj::List(Vec::new()));
+            h.alloc(Obj::List(RVec::new()));
         }
         assert!(
             h.should_collect(),
@@ -1902,7 +1918,7 @@ mod iter_obj_tests {
     /// in-place appends into an existing object that allocate nothing at all.
     #[test]
     fn alloc_and_in_place_growth_pace_a_sweep_only_under_a_cap() {
-        let big = |n: usize| Obj::List(Vec::with_capacity(n));
+        let big = |n: usize| Obj::List(RVec::with_capacity(n));
 
         // (a) M1.7 — cap OFF, both funnels pace by bytes against the cap-off goal (the last
         // sweep's live bytes, at least 16 MiB): one 20 MB object collects, though it is one
@@ -1919,8 +1935,10 @@ mod iter_obj_tests {
         );
         let mut h = Heap::new();
         let r = h.alloc(big(1_000)); // 8 KB of backing
-        if let Obj::List(v) = h.get_mut(r) {
-            v.extend((0..2_500_000).map(Value::int)); // in-place bulk growth, cap off
+        let heap = h.write(r);
+        if let Obj::List(v) = heap.get(r) {
+            let xs: Vec<Value> = (0..2_500_000).map(Value::int).collect();
+            v.extend_from_slice(heap, &xs); // in-place bulk growth, cap off
         }
         assert!(
             h.should_collect(),
@@ -1941,10 +1959,12 @@ mod iter_obj_tests {
         // unbounded bytes in a single instruction, which no instruction tick can bound.
         let mut h = Heap::new();
         h.set_mem_cap(8_000_000);
-        let r = h.alloc(Obj::List(Vec::new()));
+        let r = h.alloc(Obj::List(RVec::new()));
         assert!(!h.should_collect(), "an empty list must not collect");
-        if let Obj::List(v) = h.get_mut(r) {
-            v.extend((0..400_000).map(Value::int)); // 3.2 MB in one call
+        let heap = h.write(r);
+        if let Obj::List(v) = heap.get(r) {
+            let xs: Vec<Value> = (0..400_000).map(Value::int).collect();
+            v.extend_from_slice(heap, &xs); // 3.2 MB in one call
         }
         assert!(
             h.should_collect(),
@@ -1959,7 +1979,6 @@ mod iter_obj_tests {
         assert!(!h.should_collect(), "sweep must reset the byte counter");
         if let Obj::List(v) = h.get_mut(r) {
             v.clear();
-            v.shrink_to_fit();
         }
         assert!(!h.should_collect(), "a shrink must charge 0, not underflow");
 
@@ -1967,13 +1986,17 @@ mod iter_obj_tests {
         // `get_mut` charges the first one's growth rather than losing it.
         let mut h = Heap::new();
         h.set_mem_cap(8_000_000);
-        let a = h.alloc(Obj::List(Vec::new()));
-        let b = h.alloc(Obj::List(Vec::new()));
-        if let Obj::List(v) = h.get_mut(a) {
-            v.extend((0..150_000).map(Value::int)); // 1.2 MB, never settled by should_collect
+        let a = h.alloc(Obj::List(RVec::new()));
+        let b = h.alloc(Obj::List(RVec::new()));
+        let heap = h.write(a);
+        if let Obj::List(v) = heap.get(a) {
+            let xs: Vec<Value> = (0..150_000).map(Value::int).collect();
+            v.extend_from_slice(heap, &xs); // 1.2 MB, never settled by should_collect
         }
-        if let Obj::List(v) = h.get_mut(b) {
-            v.extend((0..150_000).map(Value::int)); // +1.2 MB = 2.4 MB > cap/4
+        let heap = h.write(b);
+        if let Obj::List(v) = heap.get(b) {
+            let xs: Vec<Value> = (0..150_000).map(Value::int).collect();
+            v.extend_from_slice(heap, &xs); // +1.2 MB = 2.4 MB > cap/4
         }
         assert!(
             h.should_collect(),

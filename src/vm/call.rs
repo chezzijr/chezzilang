@@ -219,7 +219,7 @@ impl Vm {
                     let items: Vec<Value> = args
                         .first()
                         .and_then(|v| v.as_obj())
-                        .and_then(|h| self.heap.get(h).as_list().cloned())
+                        .and_then(|h| self.heap.get(h).as_list().map(RVec::to_vec))
                         .unwrap_or_default();
                     // ROOT the items on the operand stack while they stringify. `args` was
                     // `split_off` the stack (do_call slow path), so it is NOT a GC root; a
@@ -763,7 +763,7 @@ impl Vm {
                 for x in items {
                     vs.push(self.lower_native(x));
                 }
-                Value::obj(self.heap.alloc(Obj::List(vs)))
+                Value::obj(self.heap.alloc(Obj::List(vs.into())))
             }
             N::Struct { name, fields } => {
                 // Positional layout: lower the named native fields, then place them into a flat Vec

@@ -72,7 +72,7 @@ fn a_requester_that_joins_a_running_stop_is_served_by_it() {
             b.gc_collect();
             let base = b.heap.live();
             for _ in 0..8 {
-                b.heap.alloc(Obj::List(Vec::new()));
+                b.heap.alloc(Obj::List(RVec::new()));
             }
             ready_tx.send(()).unwrap();
             // Attached and not at a safepoint: A's stop cannot finish before B joins it.
@@ -195,9 +195,10 @@ print(xs.len())
 /// run's list before it detaches, so another thread's collection frees it while it waits.
 #[test]
 fn a_door_hands_its_retired_blocks_to_the_stop() {
-    use super::rvec::{RVec, test_counts, test_serial};
+    use super::rvec::{RVec, test_counts, test_serial, test_track};
     let _g = test_serial();
     let freed = within(|| {
+        test_track();
         let mut a = Vm::new(Arc::new(empty_program()));
         let mut b = a.spawn_worker();
         let (ready_tx, ready_rx) = mpsc::channel::<()>();

@@ -697,10 +697,10 @@ fn walk_src_copies_out_of_a_heap_it_only_borrows() {
     let s = owner.heap.alloc(Obj::Str("s".into()));
     let inner = owner
         .heap
-        .alloc(Obj::List(vec![Value::int(1), Value::int(2)]));
+        .alloc(Obj::List(vec![Value::int(1), Value::int(2)].into()));
     let outer = owner
         .heap
-        .alloc(Obj::List(vec![Value::obj(inner), Value::obj(s)]));
+        .alloc(Obj::List(vec![Value::obj(inner), Value::obj(s)].into()));
     let src = super::airlock_out::WalkSrc {
         heap: &owner.heap,
         module_objs: &owner.module_objs,

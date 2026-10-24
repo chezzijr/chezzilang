@@ -650,9 +650,9 @@ impl Vm {
                         }
                         // List concat (gap #3): `[1,2] + [3,4]` — identical to `.concat` (vm:7688).
                         (Obj::List(a), Obj::List(b)) => {
-                            let mut out = a.clone();
-                            out.extend(b.iter().copied());
-                            Value::obj(self.heap.alloc(Obj::List(out)))
+                            let mut out = a.to_vec();
+                            out.extend(b.iter());
+                            Value::obj(self.heap.alloc(Obj::List(out.into())))
                         }
                         _ => {
                             return Err(self.err(
@@ -755,7 +755,7 @@ impl Vm {
             unreachable!("list_repeat receiver is a list")
         };
         if n <= 0 {
-            return Ok(Value::obj(self.heap.alloc(Obj::List(Vec::new()))));
+            return Ok(Value::obj(self.heap.alloc(Obj::List(RVec::new()))));
         }
         let n = n as usize;
         // An empty source repeats to `[]` in constant time for any `n`: `total` below is 0
@@ -763,7 +763,7 @@ impl Vm {
         // iterate `n` times extending nothing (W13-10). CPython's `len([] * (2**63-1))` is `0`
         // instantly.
         if items.is_empty() {
-            return Ok(Value::obj(self.heap.alloc(Obj::List(Vec::new()))));
+            return Ok(Value::obj(self.heap.alloc(Obj::List(RVec::new()))));
         }
         // Guard the allocation: a giant `n` would abort the process via `Vec`'s capacity panic.
         // Bound the BYTE size (`count * size_of::<Value>()`) by `isize::MAX`, matching `Vec`'s own
@@ -786,9 +786,9 @@ impl Vm {
                     return Err(self.err("list repeat capacity overflow".to_string(), span));
                 }
                 for _ in 0..n {
-                    out.extend(src.iter().copied());
+                    out.extend(src.iter());
                 }
-                Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
             }
             None => Err(self.err("list repeat capacity overflow".to_string(), span)),
         }

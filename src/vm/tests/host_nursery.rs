@@ -111,7 +111,7 @@ fn extract_native_args_snapshots_str_list() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let a = vm.alloc_str("echo".to_string());
     let b = vm.alloc_str("hi".to_string());
-    let list = Value::obj(vm.heap.alloc(Obj::List(vec![a, b])));
+    let list = Value::obj(vm.heap.alloc(Obj::List(vec![a, b].into())));
     let got = vm.extract_native_args(&[list]).expect("str list extracts");
     assert_eq!(
         got,
@@ -122,7 +122,7 @@ fn extract_native_args_snapshots_str_list() {
     );
     // A list with a non-str element is not snapshottable → None (safe inline fallback).
     let s = vm.alloc_str("x".to_string());
-    let bad = Value::obj(vm.heap.alloc(Obj::List(vec![s, Value::int(7)])));
+    let bad = Value::obj(vm.heap.alloc(Obj::List(vec![s, Value::int(7)].into())));
     assert_eq!(vm.extract_native_args(&[bad]), None);
 }
 
@@ -133,9 +133,9 @@ fn vm_host_arg_str_list_reads_live_list() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let a = vm.alloc_str("one".to_string());
     let b = vm.alloc_str("two".to_string());
-    let list = Value::obj(vm.heap.alloc(Obj::List(vec![a, b])));
+    let list = Value::obj(vm.heap.alloc(Obj::List(vec![a, b].into())));
     let s = vm.alloc_str("z".to_string());
-    let bad = Value::obj(vm.heap.alloc(Obj::List(vec![s, Value::int(3)])));
+    let bad = Value::obj(vm.heap.alloc(Obj::List(vec![s, Value::int(3)].into())));
     let mut host = VmHost {
         vm: &mut vm,
         args: vec![list, bad, Value::int(9)],
