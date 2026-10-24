@@ -1067,6 +1067,7 @@ fn swap_ctx_round_trips_an_mn_fiber_heap() {
     let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
     let mut ctx = FiberCtx {
         heap: Some(fiber_heap),
+        owns_side: true,
         ..FiberCtx::default()
     };
 
@@ -1083,9 +1084,9 @@ fn swap_ctx_round_trips_an_mn_fiber_heap() {
 
 /// D2b: an M:N fiber carries its own per-task SIDE state too — `out`/`stderr` (Decision-F output
 /// buffers) and the heap-keyed roots `module_objs`/`module_faulted`/`executors` (each a `GcRef`
-/// into the fiber's own heap, so they MUST travel atomically with that heap). `swap_ctx` round-
-/// trips all of them alongside the heap, gated on `heap.is_some()` so a cooperative fiber
-/// (`heap: None`) leaves the shell's side state untouched (byte-identical, asserted separately).
+/// into the fiber's own heap). A task switch (`swap_task`) round-trips all of them alongside the
+/// heap; the side state is gated on `owns_side`, so a cooperative fiber (`owns_side: false`)
+/// leaves the shell's untouched (asserted separately).
 #[test]
 fn mn_swap_ctx_round_trips_fiber_side_state() {
     let mut vm = Vm::new(Arc::new(empty_program()));
@@ -1110,6 +1111,7 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
     let fib_fn = fiber_heap.alloc(Obj::Str("fiber-fn".into()));
     let mut ctx = FiberCtx {
         heap: Some(fiber_heap),
+        owns_side: true,
         out: b"fiber-out".to_vec(),
         stderr: b"fiber-err".to_vec(),
         module_objs: vec![fib_mod],
@@ -1121,7 +1123,7 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
     };
 
     // Schedule in: the fiber's side state becomes live; the shell's parks into the ctx.
-    vm.swap_ctx(&mut ctx);
+    vm.swap_task(&mut ctx);
     assert_eq!(vm.out, b"fiber-out");
     assert_eq!(vm.stderr, b"fiber-err");
     assert_eq!(vm.module_objs, vec![fib_mod]);
@@ -1137,7 +1139,7 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
     assert_eq!(ctx.fn_values.get(&FnKey::Proto(0)), Some(&host_fn));
 
     // Park out: the shell's side state is restored; the fiber keeps its own.
-    vm.swap_ctx(&mut ctx);
+    vm.swap_task(&mut ctx);
     assert_eq!(vm.out, b"host-out");
     assert_eq!(vm.stderr, b"host-err");
     assert_eq!(vm.module_objs, vec![host_mod]);
@@ -1208,7 +1210,8 @@ fn eager_scope_round_trips_with_fiber_ctx() {
 }
 
 /// D2b / Task 1 companion to [`swap_ctx_leaves_heap_untouched_for_cooperative_fiber`]: a fiber with
-/// no heap of its own (`heap: None`) still leaves the shell's HEAP-GATED side state (`out`/`executors`) untouched —
+/// no side state of its own (`owns_side: false`) leaves the shell's side state untouched, and
+/// `swap_ctx` never moves `out` (only a task switch does) —
 /// but `module_objs`/`module_faulted` now swap UNCONDITIONALLY (Task 1: a child carries its own
 /// deep-copied module view). So swapping in a child with an empty view parks the host's REAL modules
 /// into the ctx.
@@ -1220,11 +1223,11 @@ fn mn_swap_ctx_swaps_module_objs_but_not_heap_gated_state_for_cooperative_fiber(
     vm.module_objs = vec![host_mod];
     let mut ctx = FiberCtx::default();
     vm.swap_ctx(&mut ctx);
-    // Heap-gated state (out) stays on the shell for a fiber with no heap of its own.
+    // `out` stays on the shell: `swap_ctx` does not move the output stream.
     assert_eq!(vm.out, b"host-out");
     assert!(
         ctx.out.is_empty(),
-        "swap must not give a heapless fiber heap-gated side state"
+        "swap_ctx must not move the output stream"
     );
     // Task 1 — module_objs swaps: the host's real modules parked into the ctx, the shell now holds the
     // child's (empty) view.

@@ -1912,6 +1912,7 @@ fn collect_under_swapped_in_fiber_heap_preserves_parked_host_object() {
     let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
     let mut ctx = FiberCtx {
         heap: Some(fiber_heap),
+        owns_side: true,
         stack: vec![Value::obj(hf)], // the fiber's own stack roots its object
         ..FiberCtx::default()
     };
@@ -1944,6 +1945,7 @@ fn collect_under_swapped_in_fiber_heap_leaves_parked_host_heap_quiescent() {
     let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
     let mut ctx = FiberCtx {
         heap: Some(fiber_heap),
+        owns_side: true,
         stack: vec![Value::obj(hf)],
         ..FiberCtx::default()
     };

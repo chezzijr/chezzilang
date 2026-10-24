@@ -779,6 +779,111 @@ fn with_box_restores_the_context_when_the_closure_panics() {
     assert_eq!(vm.with_box(&mut outer, |vm| vm.stack.len()), 1);
 }
 
+/// M1.6 — a `print` / `eprint` inside a box call lands in its caller's stream, at the place of the
+/// call: for the root task, for each spawned sibling (flushed in task order at the join), and for a
+/// box call made from inside another box call. `t1` parks on a channel with output already
+/// buffered, so `t2` runs on the same shell while `t1`'s buffer is parked. The box contexts set
+/// `owns_side`, so this pins that the side-state flag never carries the output stream into a box.
+#[test]
+fn box_print_goes_to_caller_with_owns_side() {
+    let src = r#"import Shared from std.concurrency
+import eprint from std.io
+
+fn note(tag: str, x: int) -> int:
+    print(tag + " inside")
+    eprint(tag + " err inside")
+    return x + 1
+
+fn nested(t: Shared[int], tag: str, x: int) -> int:
+    print(tag + " outer before")
+    t.update(fn(y): note(tag + " nested", y))
+    print(tag + " outer after")
+    return x + 1
+
+fn bump(s: Shared[int], t: Shared[int], tag: str, ch: Channel[int], waits: bool):
+    print(tag + " before")
+    eprint(tag + " err before")
+    s.update(fn(x): note(tag, x))
+    if waits:
+        _ := ch.recv()
+    else:
+        ch.send(1)
+    print(tag + " between")
+    s.update(fn(x): nested(t, tag, x))
+    print(tag + " after")
+    eprint(tag + " err after")
+
+fn main():
+    s := Shared[int](0)
+    t := Shared[int](0)
+    ch := Channel[int]()
+    print("main before")
+    s.update(fn(x): note("main", x))
+    parallel:
+        spawn bump(s, t, "t1", ch, true)
+        spawn bump(s, t, "t2", ch, false)
+    s.update(fn(x): nested(t, "main2", x))
+    print("main after")
+
+main()
+"#;
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    let task = |t: &str| {
+        format!(
+            "{t} before\n{t} inside\n{t} between\n{t} outer before\n{t} nested inside\n\
+             {t} outer after\n{t} after\n"
+        )
+    };
+    let want_out = format!(
+        "main before\nmain inside\n{}{}main2 outer before\nmain2 nested inside\n\
+         main2 outer after\nmain after\n",
+        task("t1"),
+        task("t2")
+    );
+    let task_err =
+        |t: &str| format!("{t} err before\n{t} err inside\n{t} nested err inside\n{t} err after\n");
+    let want_err = format!(
+        "main err inside\n{}{}main2 nested err inside\n",
+        task_err("t1"),
+        task_err("t2")
+    );
+    for workers in [1, 2, crate::vm::test_baseline_worker_count()] {
+        crate::vm::set_worker_count(workers);
+        let path = write_temp_chz("m16_box_print", src);
+        let (out, err, res, code) = run_file_with(&path, crate::native::HostConfig::default());
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            res.is_ok() && code.is_none(),
+            "workers={workers}: {res:?} {err}"
+        );
+        assert_eq!(out, want_out, "stdout at workers={workers}");
+        assert_eq!(err, want_err, "stderr at workers={workers}");
+    }
+}
+
+/// M1.6 — until M1.7 deletes `FiberCtx::heap`, a context owns its side state exactly when it owns
+/// a heap. `swap_ctx` checks it, so a builder that sets one and not the other fails at once.
+#[test]
+#[should_panic(expected = "owns_side")]
+fn swap_ctx_rejects_owns_side_out_of_step_with_heap() {
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let mut ctx = FiberCtx {
+        owns_side: true,
+        ..FiberCtx::default()
+    };
+    vm.swap_ctx(&mut ctx);
+}
+
 /// TICKET-246 (F1) — every renderer terminates on every box cycle, with the container cycle
 /// marker. Grid: renderer {`Vm::display`, `Vm::display_wire`, `stringify`} x box {Shared,
 /// RwShared, Atomic} x shape {no cycle, holds itself, through a `List`, through a struct, two

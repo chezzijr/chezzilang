@@ -575,7 +575,7 @@ impl Vm {
     /// reads), then swap the context back out. The run is panic-guarded so a worker-VM panic becomes a
     /// task `Fault` (keeps the loop alive + the slot filled — the join can't hang).
     pub(super) fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span, slice: Slice) -> Disp {
-        self.swap_ctx(&mut fiber.ctx);
+        self.swap_task(&mut fiber.ctx);
         // Cross-nursery flat scheduler — RE-POINT the shell's `self.cancel` to THIS fiber's SCOPE cancel
         // on every swap-in. One shell runs fibers from MULTIPLE scopes off the global queue; the
         // back-edge cancel check (`run_until`), `trip_cancel` (on this fiber's fault/exit), the demote
@@ -801,7 +801,7 @@ impl Vm {
         // A fiber that parks carries its site; one that runs on carries `None`.
         fiber.park_site = self.park_site.take();
         fiber.park_deadline = self.deadline;
-        self.swap_ctx(&mut fiber.ctx);
+        self.swap_task(&mut fiber.ctx);
         disp
     }
 

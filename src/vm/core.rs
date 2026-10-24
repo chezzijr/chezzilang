@@ -1405,12 +1405,12 @@ impl std::fmt::Debug for ExecutorCore {
 /// walks (decision D1: an executor is detached, and the program waits for its work at exit).
 ///
 /// **Why this exists alongside `Vm.executors`** (W7-5b). `Vm.executors` is a `Vec<GcRef>`: heap-keyed,
-/// so it is swapped per fiber with its heap (`swap_ctx`) and an executor created INSIDE an M:N task
+/// so it is swapped per fiber (`swap_ctx`, under `owns_side`) and an executor created INSIDE an M:N task
 /// lands in that task's throwaway worker list, which is dropped when the task finishes. The top-level
 /// join therefore never saw it, and its work was silently lost. An `ExecutorCore` lives OUTSIDE every
 /// heap (B3.1), so a list of `Arc`s is heap-independent by construction: `spawn_worker` hands the SAME
 /// list to every worker, and an executor created anywhere in the run is visible to the one join.
-/// That is why closing W7-5b needs no change to `swap_ctx`'s heap-only gate — the change that a
+/// That is why closing W7-5b needs no change to `swap_ctx`'s `owns_side` gate — the change that a
 /// previous attempt stopped at because it drags in GC rooting for a parked parent ctx.
 ///
 /// Strong `Arc`s, not `Weak`: the whole point is to join work whose creating heap is already gone, so

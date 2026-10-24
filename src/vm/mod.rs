@@ -965,11 +965,11 @@ pub struct Vm {
     /// immutable `Arc<Program>`). A `ConstStr` push reuses the cached `Obj::Str` instead of
     /// alloc+clone+box every time — strings are never mutated in place, and there is no identity
     /// operator, so aliasing is unobservable. The cached `GcRef`s are GC roots (see [`Vm::collect`])
-    /// so they're never swept; the cache is heap-keyed, so an M:N fiber swaps it WITH its heap in
-    /// [`Vm::swap_ctx`] (like `module_objs`/`executors`).
+    /// so they're never swept; the cache is per fiber, so a context that owns side state swaps it in
+    /// [`Vm::swap_ctx`] (like `executors`).
     str_intern: fxhash::FxHashMap<usize, GcRef>,
     /// TICKET-215 — the one fn object per [`FnKey`] in this heap (see [`Vm::fn_value`]). GC roots,
-    /// heap-keyed like `str_intern`, swapped with the heap in [`Vm::swap_ctx`].
+    /// per fiber like `str_intern`, swapped in [`Vm::swap_ctx`].
     fn_values: fxhash::FxHashMap<FnKey, GcRef>,
     /// M19 Phase 4 — per-call-site struct-field inline caches, indexed by the `ic` id baked into
     /// `GetField`/`SetField` ops (dense `0..program.field_ic_sites`). Holds field indices, not

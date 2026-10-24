@@ -1581,6 +1581,7 @@ fn fiber_roots_equal_vm_roots_after_swap() {
     }
     let mut ctx = FiberCtx {
         heap: Some(Heap::new()),
+        owns_side: true,
         ..FiberCtx::default()
     };
     vm.swap_ctx(&mut ctx);

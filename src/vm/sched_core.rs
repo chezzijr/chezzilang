@@ -9,7 +9,7 @@ impl SchedCore {
     /// registered (called under the lock). Returns whether `terminate` latched. Correct because the
     /// global predicate firing means nothing can progress anywhere. A `Wait` token sits in N buckets
     /// but is ONE fiber — claim-once (the wake CAS) dedups it so the flat slot is faulted and the fiber's SCOPE's `done` bumped exactly once.
-    /// Each parked fiber's OWN buffered stdout/stderr (moved into `f.ctx.out`/`stderr` by `swap_ctx`
+    /// Each parked fiber's OWN buffered stdout/stderr (moved into `f.ctx.out`/`stderr` by `swap_task`
     /// when it parked) is carried into its `Deadlocked` slot, so `reduce_task_slots` flushes EVERY
     /// parked buffer at its task-order slot — matching what a strictly sequential run would have
     /// printed live before the deadlock returned. A distinct `Deadlocked` outcome (not `Fault`) is what lets
@@ -69,7 +69,7 @@ impl SchedCore {
     /// `flag_deadlock` and `flag_deadlock_leaves`.
     fn record_deadlocked(&mut self, f: Fiber, err: &RuntimeError) {
         // Carry the parked fiber's OWN buffered stdout/stderr into its Deadlocked slot (not an empty
-        // buffer). `swap_ctx` moved this fiber's live prints into `f.ctx.out` when it parked; the
+        // buffer). `swap_task` moved this fiber's live prints into `f.ctx.out` when it parked; the
         // downstream `reduce_task_slots` flushes EVERY Deadlocked slot's buffer at its task-order slot
         // (not just the lowest-index one, as with a real Fault), so with two-or-more parked fibers a
         // higher-index printer's output is preserved byte-identically to a strictly sequential run.
@@ -544,6 +544,8 @@ impl SchedCore {
             _ => None,
         };
         for f in &recv_fibers {
+            // M1.7: this and the count below ask which heap holds each fiber's handles; after one
+            // heap the count reads the run heap.
             if f.ctx.heap.is_none() || parked_on(f).is_none() {
                 return false;
             }
@@ -661,6 +663,7 @@ impl ReadyWorker {
             // M1.4 — the task waits in the context so the context alone roots it.
             start: Some(task),
             heap: Some(worker.heap),
+            owns_side: true,
             module_objs: worker.module_objs,
             module_faulted: worker.module_faulted,
             // W6-2 — carry the snapshot the modules above fault in from (it used to be DROPPED here,

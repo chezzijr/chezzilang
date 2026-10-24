@@ -250,10 +250,25 @@ impl Vm {
         }
     }
 
+    /// M1.6 — a task switch: [`Vm::swap_ctx`] plus the task's output stream. A task owns its
+    /// `out` / `stderr` (Decision F), so only a task switch moves them; a box call runs in its
+    /// caller's stream and swaps with `swap_ctx` alone.
+    pub(super) fn swap_task(&mut self, ctx: &mut FiberCtx) {
+        self.swap_ctx(ctx);
+        std::mem::swap(&mut self.out, &mut ctx.out);
+        std::mem::swap(&mut self.stderr, &mut ctx.stderr);
+    }
+
     /// Swap the live per-execution `Vm` fields with `ctx` (B1). Used by the nursery scheduler to
     /// schedule a fiber in (its saved context becomes live) or out (the running context is parked
-    /// back into the fiber). Exactly the fields [`FiberCtx`] holds — `pending_exit` stays global.
+    /// back into the fiber), and by a box call. The fields [`FiberCtx`] holds, except the output
+    /// stream ([`Vm::swap_task`]) and `start` — `pending_exit` stays global.
     pub(super) fn swap_ctx(&mut self, ctx: &mut FiberCtx) {
+        debug_assert_eq!(
+            ctx.owns_side,
+            ctx.heap.is_some(),
+            "owns_side must equal heap.is_some() until M1.7"
+        );
         std::mem::swap(&mut self.frames, &mut ctx.frames);
         std::mem::swap(&mut self.stack, &mut ctx.stack);
         std::mem::swap(&mut self.call_depth, &mut ctx.call_depth);
@@ -300,21 +315,25 @@ impl Vm {
         std::mem::swap(&mut self.snapshot_next_id, &mut ctx.snapshot_next_id);
         // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A fiber with no heap of
         // its own (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched.
-        // D2b — the same `Some` gate carries the fiber's remaining heap-keyed side state
-        // (out/stderr/executors/intern), so they move atomically WITH the heap their `GcRef`s index.
-        // A fiber with no heap of its own swaps none of that.
-        // GC: this atomicity is why a swapped-OUT `module_objs` needs no pin — it parks in `ctx`
-        // together with the heap it indexes, and `collect()` only ever walks the LIVE `self.heap`.
-        // The one production `FiberCtx` (`ReadyWorker::into_fiber`) always carries `heap: Some`.
+        // GC: a swapped-OUT `module_objs` needs no pin — it parks in `ctx` together with the heap it
+        // indexes, and `collect()` only ever walks the LIVE `self.heap`.
+        // M1.7: one heap per run deletes this swap.
         if let Some(ctx_heap) = ctx.heap.as_mut() {
             std::mem::swap(&mut self.heap, ctx_heap);
-            std::mem::swap(&mut self.out, &mut ctx.out);
-            std::mem::swap(&mut self.stderr, &mut ctx.stderr);
+        }
+        // D2b — a context that owns its side state swaps it here: each field below belongs to ONE
+        // fiber (or one box context), so a shell that runs many in turn must not leave it behind
+        // for the next. A context that does not own side state aliases the shell's.
+        if ctx.owns_side {
+            // D2b — the fiber's `Executor` handles; its GcRefs index this context's heap.
+            // M1.7: after one heap the handle list can be per run.
             std::mem::swap(&mut self.executors, &mut ctx.executors);
-            // M19 Phase 3 — the intern cache's `GcRef`s index this fiber's OWN heap, so it MUST travel
-            // atomically with the heap (same heap-keyed argument as `module_objs`). A fiber with no
-            // heap of its own (`heap: None`) never reaches here and keeps aliasing the shell's cache.
+            // M19 Phase 3 — the fiber's intern cache; its GcRefs index this context's heap, so a
+            // cache left on the shell would hand the next fiber refs into a heap it does not own.
+            // M1.7: after one heap the cache can be per run.
             std::mem::swap(&mut self.str_intern, &mut ctx.str_intern);
+            // TICKET-215 — the fn-value memo; its GcRefs index this context's heap, as above.
+            // M1.7: after one heap the memo can be per run.
             std::mem::swap(&mut self.fn_values, &mut ctx.fn_values);
             // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
             // connecting fd that the netpoller is watching; it must not be left on the shell where the

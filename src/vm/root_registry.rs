@@ -223,7 +223,7 @@ impl RootRegistry {
     /// 1. `CtxBox` owns its context through a raw pointer, so a `&mut Fiber` is no `&mut FiberCtx`.
     ///    One exists only for the length of a `CtxBox::deref_mut` borrow.
     /// 2. Only a fiber's runner thread (attached to the GC) calls `deref_mut` on a registered
-    ///    context: `run_one_fiber`'s `swap_ctx` and `start` take. A thread that is not attached
+    ///    context: `run_one_fiber`'s `swap_task` and `start` take. A thread that is not attached
     ///    writes no registered context: the netpoller sets `poll_timed_out` (an atomic) through
     ///    `&`, and `record_deadlocked` takes the context out with [`CtxBox::into_inner`] first.
     /// 3. M1.7 calls this only inside a stop-the-world (`GcCoord`, `vm/gc_coord.rs`), where every

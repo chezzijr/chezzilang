@@ -107,14 +107,16 @@ pub(super) struct FiberCtx {
     /// `Vm::heap` when this fiber schedules in, and back out when it parks. `None` for a fiber with
     /// no heap of its own, which aliases the single `Vm::heap` instead (decision A — share-by-ref),
     /// so its swap leaves the heap untouched. No production path builds a `None` fiber today
-    /// ([`Vm::into_fiber`] always passes `Some(worker.heap)`); only tests do. The `Some`/`None`
-    /// discriminant also gates every D2b side-state swap below.
+    /// ([`Vm::into_fiber`] always passes `Some(worker.heap)`); only tests do.
     pub(super) heap: Option<Heap>,
+    /// M1.6 — this context owns its own per-fiber side state (`executors`, `str_intern`,
+    /// `fn_values` and the in-flight socket-op state below), so [`Vm::swap_ctx`] swaps it. `false`
+    /// for a context that aliases the shell's. Until M1.7 deletes `heap`, it equals `heap.is_some()`.
+    pub(super) owns_side: bool,
     /// D2b — per-task output buffers (Decision F: each task's stdout/stderr flushes in task order at
-    /// join, never interleaved live). An M:N worker shell runs many fibers in turn, so these MUST
-    /// travel with the fiber rather than living on the shell `Vm`. Swapped only for M:N fibers
-    /// (`heap.is_some()`); a fiber with no heap of its own keeps `Vec::new()` and aliases the shell's
-    /// buffers.
+    /// join, never interleaved live). A task owns its output stream, so only a task switch
+    /// ([`Vm::swap_task`]) moves these. A box context never owns one: a `print` inside a box call
+    /// lands in its caller's stream, so a box context's buffers stay empty.
     pub(super) out: Vec<u8>,
     pub(super) stderr: Vec<u8>,
     /// D2b / Task 1 — the fiber's module-namespace objects + lazy-fault flags (D1). Each is a `GcRef`
@@ -151,14 +153,14 @@ pub(super) struct FiberCtx {
     /// one `fault_module` call on the currently-running view, never a state a parked fiber holds.
     pub(super) snapshot_adopt: fxhash::FxHashMap<u32, GcRef>,
     pub(super) snapshot_next_id: u32,
-    /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
-    /// `module_objs`). Empty for a fiber with no heap of its own.
+    /// D2b — the fiber's `Executor` handles (GC roots into its own heap). Per fiber: swapped by
+    /// [`Vm::swap_ctx`] when `owns_side`. Empty for a context that does not own side state.
     pub(super) executors: Vec<GcRef>,
-    /// M19 Phase 3 — the fiber's `ConstStr` intern cache (GC roots into its own heap; same heap-keyed
-    /// argument as `module_objs`). Travels with `heap` across [`Vm::swap_ctx`]. Empty for a fiber
-    /// with no heap of its own (it aliases the shell's cache).
+    /// M19 Phase 3 — the fiber's `ConstStr` intern cache (GC roots into its own heap). Per fiber:
+    /// swapped by [`Vm::swap_ctx`] when `owns_side`. Empty for a context that does not own side
+    /// state (it aliases the shell's cache).
     pub(super) str_intern: fxhash::FxHashMap<usize, GcRef>,
-    /// TICKET-215 — travels with heap, like str_intern.
+    /// TICKET-215 — the fiber's fn-value memo; per fiber, like `str_intern`.
     pub(super) fn_values: fxhash::FxHashMap<FnKey, GcRef>,
     /// D6b — a non-blocking `connect` parked on writability (see [`ConnectInProgress`]). Non-heap, so
     /// it carries no `GcRef` and needs no GC rooting; but it MUST travel with the fiber across the

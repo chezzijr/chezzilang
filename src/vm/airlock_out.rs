@@ -545,6 +545,7 @@ impl<'a> WalkSrc<'a> {
     /// The source for a parked context (a box state): its heap and its module table. Nothing runs
     /// in a parked context, so no generator of its heap is mid-resume.
     pub(super) fn of_ctx(ctx: &'a FiberCtx, program: &'a Program, walk_base: usize) -> Self {
+        // M1.7: this asks which heap the walk reads; after one heap it reads the run heap.
         WalkSrc {
             heap: ctx.heap.as_ref().expect("a box context owns its heap"),
             module_objs: &ctx.module_objs,

@@ -139,6 +139,7 @@ pub(super) struct BoxPieces {
 
 /// The state object of a parked box context, when the state is a heap value.
 pub(super) fn state_obj(ctx: &FiberCtx) -> Option<&Obj> {
+    // M1.7: this asks which heap holds the state; after one heap it reads the run heap.
     let heap = ctx.heap.as_ref().expect("a box context owns its heap");
     ctx.stack[0].as_obj().map(|h| heap.get(h))
 }
@@ -151,6 +152,7 @@ impl Vm {
         let worker = self.spawn_worker();
         Box::new(FiberCtx {
             heap: Some(worker.heap),
+            owns_side: true,
             stack: vec![Value::nil()],
             module_objs: worker.module_objs,
             module_faulted: worker.module_faulted,
@@ -170,12 +172,11 @@ impl Vm {
 
     /// Swap the live context with `frame.caller`, in either direction. `swap_ctx` moves what
     /// `FiberCtx` holds; this adds the rest of the rule "swap what indexes a heap": the running
-    /// generators travel with their heap, and `out` / `stderr` swap BACK, because a `print`
-    /// inside a box closure is the caller's output.
+    /// generators travel with their heap. `out` / `stderr` do not move (`swap_ctx` leaves them to
+    /// [`Vm::swap_task`]): a box context owns no output stream, so a `print` inside a box closure
+    /// is the caller's output.
     fn swap_frame(&mut self, frame: &mut BoxFrame) {
         self.swap_ctx(&mut frame.caller);
-        std::mem::swap(&mut self.out, &mut frame.caller.out);
-        std::mem::swap(&mut self.stderr, &mut frame.caller.stderr);
         std::mem::swap(&mut self.active_generators, &mut frame.gens);
         std::mem::swap(&mut self.gen_host_ctx, &mut frame.gen_hosts);
     }
