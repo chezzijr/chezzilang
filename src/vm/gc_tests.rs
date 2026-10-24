@@ -1561,6 +1561,78 @@ fn generator_ctx_take_is_exclusive() {
     vm.gen_put(h, third);
 }
 
+/// Share the module globals `names` of `src` by handle between `n` worker `Vm`s on one heap. A
+/// root `Vm` runs `src`, then waits detached with its roots published; each worker
+/// (`spawn_worker`) runs on its own `VM_STACK_BYTES` thread: it attaches, roots the handles on its
+/// stack, waits at one barrier with the others, runs `body(i, worker, handles)` and leaves. After
+/// the join the root, attached again, returns `check(root, handles, results)`, the results in
+/// worker order.
+fn share_handle<T: Send + 'static, R: Send + 'static>(
+    src: String,
+    names: &'static [&'static str],
+    n: usize,
+    body: impl Fn(usize, &mut Vm, &[GcRef]) -> T + Send + Sync + 'static,
+    check: impl FnOnce(&mut Vm, &[GcRef], Vec<T>) -> R + Send + 'static,
+) -> R {
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let mut root = Vm::new(Arc::new(test_program(&src).expect("compiles")));
+            let result = root.run();
+            root.finish_run(result).expect("runs");
+            let handles: Arc<[GcRef]> = names
+                .iter()
+                .map(|name| {
+                    root.module_objs
+                        .iter()
+                        .find_map(|&m| match root.heap.get(m) {
+                            Obj::Module(md) => {
+                                md.index.get(*name).map(|&i| md.slots.get(i as usize))
+                            }
+                            _ => None,
+                        })
+                        .and_then(|v| v.as_obj())
+                        .unwrap_or_else(|| panic!("the module global {name}"))
+                })
+                .collect();
+            root.gc_attach();
+            let go = Arc::new(std::sync::Barrier::new(n));
+            let body = Arc::new(body);
+            let workers: Vec<Vm> = (0..n).map(|_| root.spawn_worker()).collect();
+            // The root waits on the join in the blocking door, so its roots (the module that
+            // holds the globals) stay published while the workers collect.
+            let results = root.gc_blocking(&[], |_| {
+                let threads: Vec<_> = workers
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mut w)| {
+                        let (go, body, handles) =
+                            (Arc::clone(&go), Arc::clone(&body), Arc::clone(&handles));
+                        std::thread::Builder::new()
+                            .stack_size(VM_STACK_BYTES)
+                            .spawn(move || {
+                                w.gc_attach();
+                                w.stack.extend(handles.iter().map(|&h| Value::obj(h)));
+                                go.wait();
+                                let out = body(i, &mut w, &handles);
+                                w.gc_leave();
+                                out
+                            })
+                            .expect("spawn a worker")
+                    })
+                    .collect();
+                threads
+                    .into_iter()
+                    .map(|t| t.join().expect("a worker panicked"))
+                    .collect()
+            });
+            check(&mut root, &handles, results)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked")
+}
+
 /// M2.4 — two threads drive one generator through two `Vm` handles on one heap. Each `.next()`
 /// gives a value, `None`, or the "generator already running" fault; no call crashes, every value
 /// goes to exactly one caller, in order, and `None` comes only after the last value (a resume
@@ -1582,76 +1654,48 @@ fn main():
     pass
 main()"
     );
-    let (got, faults, last_val, first_none) = std::thread::Builder::new()
-        .stack_size(VM_STACK_BYTES)
-        .spawn(move || {
-            let mut root = Vm::new(Arc::new(test_program(&src).expect("compiles")));
-            let result = root.run();
-            root.finish_run(result).expect("runs");
-            let g = root
-                .module_objs
-                .iter()
-                .find_map(|&m| match root.heap.get(m) {
-                    Obj::Module(md) => md.index.get("G").map(|&i| md.slots.get(i as usize)),
-                    _ => None,
-                })
-                .and_then(|v| v.as_obj())
-                .expect("the module global G");
-            if root.attached.is_some() {
-                root.gc_leave();
+    let clock = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (got, faults, last_val, first_none) = share_handle(
+        src,
+        &["G"],
+        2,
+        move |_, w, h| {
+            let g = h[0];
+            let (mut vals, mut faults, mut none) = (Vec::new(), 0usize, None);
+            let tick = || clock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            for _ in 0..10_000_000 {
+                // The loop's back edge: a safepoint, as a bytecode loop has.
+                w.gc_poll();
+                match w.generator_next(g, Span::RUNTIME) {
+                    Ok(r) => match w.heap.get(r.as_obj().expect("an Option")) {
+                        Obj::Enum {
+                            variant_id,
+                            payload,
+                        } if *variant_id == crate::base::op::VID_SOME => {
+                            vals.push((tick(), payload.get(0).as_int()))
+                        }
+                        _ => {
+                            none = Some(tick());
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        assert!(
+                            e.message.contains("generator already running"),
+                            "{}",
+                            e.message
+                        );
+                        faults += 1;
+                        std::thread::yield_now();
+                    }
+                }
             }
-            let go = Arc::new(std::sync::Barrier::new(2));
-            let clock = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let drivers: Vec<_> = (0..2)
-                .map(|_| {
-                    let mut w = root.spawn_worker();
-                    let go = Arc::clone(&go);
-                    let clock = Arc::clone(&clock);
-                    std::thread::Builder::new()
-                        .stack_size(VM_STACK_BYTES)
-                        .spawn(move || {
-                            w.gc_attach();
-                            w.stack.push(Value::obj(g));
-                            go.wait();
-                            let (mut vals, mut faults, mut none) = (Vec::new(), 0usize, None);
-                            let tick = || clock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            for _ in 0..10_000_000 {
-                                // The loop's back edge: a safepoint, as a bytecode loop has.
-                                w.gc_poll();
-                                match w.generator_next(g, Span::RUNTIME) {
-                                    Ok(r) => match w.heap.get(r.as_obj().expect("an Option")) {
-                                        Obj::Enum {
-                                            variant_id,
-                                            payload,
-                                        } if *variant_id == crate::base::op::VID_SOME => {
-                                            vals.push((tick(), payload.get(0).as_int()))
-                                        }
-                                        _ => {
-                                            none = Some(tick());
-                                            break;
-                                        }
-                                    },
-                                    Err(e) => {
-                                        assert!(
-                                            e.message.contains("generator already running"),
-                                            "{}",
-                                            e.message
-                                        );
-                                        faults += 1;
-                                        std::thread::yield_now();
-                                    }
-                                }
-                            }
-                            w.gc_leave();
-                            (vals, faults, none)
-                        })
-                        .expect("spawn a driver")
-                })
-                .collect();
+            (vals, faults, none)
+        },
+        |_, _, drivers| {
             let (mut got, mut faults, mut last_val, mut first_none) =
                 (Vec::new(), 0, 0, usize::MAX);
-            for d in drivers {
-                let (vals, f, none) = d.join().expect("a driver panicked");
+            for (vals, f, none) in drivers {
                 assert!(vals.is_sorted(), "one caller sees the values in order");
                 last_val = vals
                     .iter()
@@ -1665,10 +1709,8 @@ main()"
             }
             got.sort();
             (got, faults, last_val, first_none)
-        })
-        .expect("failed to spawn VM thread")
-        .join()
-        .expect("VM thread panicked");
+        },
+    );
     assert_eq!(
         got,
         (0..N).collect::<Vec<_>>(),
@@ -1697,4 +1739,163 @@ fn a_panic_inside_a_resume_leaves_the_generator_done() {
         panic!("the panic put the box back")
     };
     assert!(matches!(parked.state, GenState::Done));
+}
+
+/// M2.5 — two threads race on one list `L` and one map `M` through two `Vm` handles on one heap,
+/// by the paths a Chezzi program takes (`core_method`, `get_index`, `drain_iterable`). Thread A
+/// pushes, inserts, removes every 7th op (an index rebuild and an entry block retire) and sorts
+/// every 500th (`replace`); thread B reads `L[i]`, `L.len()`, probes `M` and iterates `M`. A racy
+/// wrong value or a fault is the user's bug (Go parity); a read of freed memory is not: every read
+/// gives a value of its element type, and after a collection `L` and `M` are sane. Run under
+/// `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn two_vms_race_on_one_list_and_map_without_uaf() {
+    const OPS: i64 = 10_000;
+    const READS: u32 = 16;
+    let src = "\
+L: List[int] = []
+M: Map[int, str] = {}
+
+fn main():
+    pass
+main()"
+        .to_string();
+    // One op of one thread: `Ok(true)` when every value it read has its element type.
+    fn writer_op(w: &mut Vm, l: GcRef, m: GcRef, k: i64) -> Result<bool, RuntimeError> {
+        let sp = Span::RUNTIME;
+        w.core_method(l, "push", &[Value::int(k)], sp)?;
+        let s = w.alloc_str(k.to_string());
+        w.core_method(m, "insert", &[Value::int(k), s], sp)?;
+        if k > 0 && k % 7 == 0 {
+            w.core_method(m, "remove", &[Value::int(k - 3)], sp)?;
+        }
+        if k > 0 && k % 500 == 0 {
+            w.core_method(l, "sort", &[], sp)?;
+        }
+        Ok(true)
+    }
+    fn is_str(w: &Vm, v: Value) -> bool {
+        matches!(v.as_obj().map(|h| w.heap.get(h)), Some(Obj::Str(_)))
+    }
+    fn reader_op(w: &mut Vm, l: GcRef, m: GcRef, k: i64, r: u64) -> Result<bool, RuntimeError> {
+        let sp = Span::RUNTIME;
+        let mut sane = true;
+        // A burst of reads per op, so a read overlaps the writer's grow under stress too (each
+        // op starts with a stop there).
+        for j in 0..READS {
+            let x = r.rotate_left(j * 7) ^ u64::from(j);
+            let len = w.core_method(l, "len", &[], sp)?.as_int();
+            if len > 0 {
+                w.push(Value::obj(l));
+                w.push(Value::int((x % len as u64) as i64));
+                w.get_index(sp)?;
+                let v = w.pop();
+                sane &= v.as_int_inline().is_some_and(|x| (0..OPS).contains(&x));
+            }
+            let got = w.core_method(m, "get", &[Value::int((x >> 20) as i64 % OPS)], sp)?;
+            sane &= match w.heap.get(got.as_obj().expect("an Option")) {
+                Obj::Enum {
+                    variant_id,
+                    payload,
+                } if *variant_id == crate::base::op::VID_SOME => is_str(w, payload.get(0)),
+                Obj::Enum { .. } => true,
+                _ => false,
+            };
+        }
+        if k % 100 == 0 {
+            for pair in w.drain_iterable(Value::obj(m), sp)? {
+                sane &= match pair.as_obj().map(|h| w.heap.get(h)) {
+                    Some(Obj::Tuple(kv)) => match kv[..] {
+                        [k, v] => k.as_int_inline().is_some() && is_str(w, v),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+            }
+        }
+        Ok(sane)
+    }
+    let (faults, garbage) = share_handle(
+        src,
+        &["L", "M"],
+        2,
+        |i, w, g| {
+            let (l, m) = (g[0], g[1]);
+            let (mut faults, mut garbage) = (0usize, 0usize);
+            let mut r = 0x9E37_79B9_7F4A_7C15u64;
+            for k in 0..OPS {
+                // The loop's back edge, as `run_until` has: a collection when one is due, else a
+                // safepoint. Under stress only the reader asks for one per op: a stop that both
+                // threads ask for each op runs their ops one at a time (each asker waits out the
+                // other's op), and a race needs them to overlap.
+                if (w.gc_stress && i == 0) || w.heap.should_collect() {
+                    w.gc_collect();
+                }
+                w.gc_poll();
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                let op = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if i == 0 {
+                        writer_op(w, l, m, k)
+                    } else {
+                        reader_op(w, l, m, k, r)
+                    }
+                }));
+                match op {
+                    Ok(Ok(true)) => {}
+                    Ok(Ok(false)) => garbage += 1,
+                    // A racy fault is the user's bug: count it and go on.
+                    Ok(Err(_)) => faults += 1,
+                    Err(p) => {
+                        let msg = p
+                            .downcast_ref::<String>()
+                            .map(String::as_str)
+                            .or_else(|| p.downcast_ref::<&str>().copied())
+                            .unwrap_or("");
+                        assert!(msg.contains("index out of range"), "a panic: {msg}");
+                        faults += 1;
+                    }
+                }
+            }
+            (faults, garbage)
+        },
+        |root, g, results| {
+            let (l, m) = (g[0], g[1]);
+            // The race freed retired blocks: collections ran while the threads raced.
+            assert!(root.gc_coord.epoch() > 0, "no collection ran in the race");
+            root.collect();
+            let Obj::List(items) = root.heap.get(l) else {
+                panic!("L is a list")
+            };
+            let mut xs: Vec<i64> = items.iter().map(|v| v.as_int()).collect();
+            xs.sort();
+            assert_eq!(xs, (0..OPS).collect::<Vec<_>>(), "L holds each push once");
+            let removed = |k: i64| k >= 4 && k % 7 == 4 && k + 3 < OPS;
+            let want: Vec<i64> = (0..OPS).filter(|&k| !removed(k)).collect();
+            let entries = match root.heap.get(m) {
+                Obj::Map(md) => md.entries.to_vec(),
+                _ => panic!("M is a map"),
+            };
+            let mut keys: Vec<i64> = entries.iter().map(|e| e.1.as_int()).collect();
+            keys.sort();
+            assert_eq!(keys, want, "M holds each live key once");
+            for (p, (_, k, v)) in entries.into_iter().enumerate() {
+                let hk = root.scalar_hash(k);
+                let at = root.map_probe(m, hk, k, Span::RUNTIME).expect("a probe");
+                assert_eq!(at, Some(p), "key {} probes to its own entry", k.as_int());
+                let Obj::Str(s) = root.heap.get(v.as_obj().expect("a str")) else {
+                    panic!("a str value")
+                };
+                assert_eq!(s.to_string(), k.as_int().to_string());
+            }
+            let faults: usize = results.iter().map(|r| r.0).sum();
+            let garbage: usize = results.iter().map(|r| r.1).sum();
+            (faults, garbage)
+        },
+    );
+    assert_eq!(
+        garbage, 0,
+        "a read gave a value outside its type ({faults} faults)"
+    );
 }
