@@ -84,15 +84,16 @@ Known limits:
 - A CPU-bound native fn or C loop that never reaches a safepoint delays a stop until it returns.
 - An `extern` call keeps its runner permit at `CHEZZI_THREADS=1`. This is older than the one-heap change.
 
-### Data races (branch `exp/go-shared-heap`)
+### Data races
 
-The branch takes Go's rule. A data race is the user's bug, and the heap stays memory-safe. Two
-threads that race on one list or one map can see:
+The shared heap (branch `exp/go-shared-heap`) takes Go's rule. A data race is the user's bug, and
+the heap stays memory-safe. Two threads that race on one list or one map can see:
 
 - a wrong value (an old one, or one from another entry),
 - a torn read of a multi-word entry (a map entry is three words; a `Value` is one aligned word),
 - a missed map hit,
-- a task fault (an index out of range).
+- a task fault (an index out of range). A racy read past a buffer's length is a Rust panic in the
+  VM today; the race test catches and counts it as the fault Go would raise.
 
 A race never reads freed memory. A list, map or set buffer that grows, or that a sort or a remove
 replaces, retires; only the stop-the-world GC frees it, when no thread holds a pointer into it.
@@ -102,7 +103,10 @@ Gate: `two_vms_race_on_one_list_and_map_without_uaf` (two threads, 10,000 ops ea
 Known limits:
 
 - A racy map probe can give a wrong or a missing hit.
-- A long C FFI call or a native loop with no safepoint delays a stop of the world.
+- A stop of the world waits for a native loop or C call (the limit above).
+- `CHEZZI_GC_STRESS=1` with two or more threads runs them one at a time: each thread asks for a
+  stop at each instruction and waits out the other thread. Stress hides races; the race test asks
+  for a stop from one thread only.
 - Miri and TSan cannot run on the development box, so no sanitizer checks the race test.
 
 Tasks share no object, and the **process** is one process: a task inherits the parent's `std.os.args`

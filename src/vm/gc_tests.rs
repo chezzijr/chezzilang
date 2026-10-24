@@ -1777,7 +1777,15 @@ main()"
     fn is_str(w: &Vm, v: Value) -> bool {
         matches!(v.as_obj().map(|h| w.heap.get(h)), Some(Obj::Str(_)))
     }
-    fn reader_op(w: &mut Vm, l: GcRef, m: GcRef, k: i64, r: u64) -> Result<bool, RuntimeError> {
+    /// `seen` counts the reads that found data: an in-range `L[i]` and a `Some` probe hit.
+    fn reader_op(
+        w: &mut Vm,
+        l: GcRef,
+        m: GcRef,
+        k: i64,
+        r: u64,
+        seen: &mut (usize, usize),
+    ) -> Result<bool, RuntimeError> {
         let sp = Span::RUNTIME;
         let mut sane = true;
         // A burst of reads per op, so a read overlaps the writer's grow under stress too (each
@@ -1790,14 +1798,20 @@ main()"
                 w.push(Value::int((x % len as u64) as i64));
                 w.get_index(sp)?;
                 let v = w.pop();
-                sane &= v.as_int_inline().is_some_and(|x| (0..OPS).contains(&x));
+                let good = v.as_int_inline().is_some_and(|x| (0..OPS).contains(&x));
+                seen.0 += usize::from(good);
+                sane &= good;
             }
             let got = w.core_method(m, "get", &[Value::int((x >> 20) as i64 % OPS)], sp)?;
             sane &= match w.heap.get(got.as_obj().expect("an Option")) {
                 Obj::Enum {
                     variant_id,
                     payload,
-                } if *variant_id == crate::base::op::VID_SOME => is_str(w, payload.get(0)),
+                } if *variant_id == crate::base::op::VID_SOME => {
+                    let good = is_str(w, payload.get(0));
+                    seen.1 += usize::from(good);
+                    good
+                }
                 Obj::Enum { .. } => true,
                 _ => false,
             };
@@ -1815,19 +1829,19 @@ main()"
         }
         Ok(sane)
     }
-    let (faults, garbage) = share_handle(
+    let (faults, garbage, (reads, hits)) = share_handle(
         src,
         &["L", "M"],
         2,
         |i, w, g| {
             let (l, m) = (g[0], g[1]);
-            let (mut faults, mut garbage) = (0usize, 0usize);
+            let (mut faults, mut garbage, mut seen) = (0usize, 0usize, (0usize, 0usize));
             let mut r = 0x9E37_79B9_7F4A_7C15u64;
             for k in 0..OPS {
-                // The loop's back edge, as `run_until` has: a collection when one is due, else a
-                // safepoint. Under stress only the reader asks for one per op: a stop that both
-                // threads ask for each op runs their ops one at a time (each asker waits out the
-                // other's op), and a race needs them to overlap.
+                // The loop's back edge: a collection when one is due, else a safepoint, as
+                // `run_until` does per instruction. Under stress only the writer asks for one per
+                // op: a stop that both threads ask for each op runs their ops one at a time (each
+                // asker waits out the other's op), and a race needs them to overlap.
                 if (w.gc_stress && i == 0) || w.heap.should_collect() {
                     w.gc_collect();
                 }
@@ -1839,7 +1853,7 @@ main()"
                     if i == 0 {
                         writer_op(w, l, m, k)
                     } else {
-                        reader_op(w, l, m, k, r)
+                        reader_op(w, l, m, k, r, &mut seen)
                     }
                 }));
                 match op {
@@ -1858,7 +1872,7 @@ main()"
                     }
                 }
             }
-            (faults, garbage)
+            (faults, garbage, seen)
         },
         |root, g, results| {
             let (l, m) = (g[0], g[1]);
@@ -1891,11 +1905,24 @@ main()"
             }
             let faults: usize = results.iter().map(|r| r.0).sum();
             let garbage: usize = results.iter().map(|r| r.1).sum();
-            (faults, garbage)
+            let seen = results
+                .iter()
+                .fold((0, 0), |a, r| (a.0 + r.2.0, a.1 + r.2.1));
+            (faults, garbage, seen)
         },
     );
     assert_eq!(
         garbage, 0,
         "a read gave a value outside its type ({faults} faults)"
+    );
+    // The reader raced real data: it read `L` while it held elements and hit `M`'s keys.
+    assert!(
+        reads > 0 && hits > 0,
+        "the reader found no data: {reads} L[i] reads, {hits} M hits"
+    );
+    // A racy fault is rare: at most 1% of one thread's ops (0 seen in the M2.5 runs).
+    assert!(
+        faults <= OPS as usize / 100,
+        "{faults} faults in {OPS} ops a thread"
     );
 }
