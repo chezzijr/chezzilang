@@ -40,7 +40,7 @@ never blocking. Port Go's `make(chan T)` to `Channel[T](0)`.
 ### `Shared[T]` — cross-task shared cell
 `get() -> T` · `set(x: T) -> None` · `update(f: fn(T) -> T) -> None` · `read(f: fn(T) -> R) -> R`.
 
-**Where the value lives.** A `Shared[T]` keeps its value in a private heap of its own.
+**Where the value lives.** A `Shared[T]` owns its value; only the box reaches it.
 `update(f)` runs `f` **inside the box, on the live value, in place**: `s.update(fn(t): hit(t))`
 with `hit` doing `t.hits += 1` and returning `t` copies nothing, however large `t` is. The value `f`
 returns is the new state. `Shared.read(f)` runs `f` inside the box too and copies only its **result**
@@ -97,7 +97,7 @@ container through [`std.concurrency.collection`](08-pure-concurrency-utils.md#st
 (`ConcurrentList`, `ConcurrentMap`, `ConcurrentSet`, `ConcurrentCounter`), which owns the per-entry
 readers and the single-entry writers.
 
-How the collections read: the container is a live `List` / `Map` / `Set` in the box's private heap.
+How the collections read: the container is a live `List` / `Map` / `Set` that the box owns.
 - The single-entry readers (`len`, `at`, `slice`, `get`, `contains`) copy only what they return, under
   the shared read lock, and run a key's `hash` / `eq` in the caller after the lock is dropped.
 - The walks (`for_each`, `fold`, `for_each_entry`, `fold_entries`) copy the collection **once**

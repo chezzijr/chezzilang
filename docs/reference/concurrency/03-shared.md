@@ -66,8 +66,8 @@ task* but is **not** sendable (copy-on-spawn gives each task its own copy); `Sha
 
 ### Where the value lives
 
-A `Shared[T]` owns a private heap and its value lives there. `update(f)` and `read(f)` run `f` inside
-that heap, on the live value:
+A `Shared[T]` owns its value: the value lives in the run's heap, and only the box reaches it.
+`update(f)` and `read(f)` run `f` inside the box, on the live value:
 
 ```chezzi
 s := Shared(Table(keys, 0))            # keys: 100000 items
@@ -297,8 +297,8 @@ fn total(r: RwShared[Map[str, int]]) -> int:
 lock), so concurrent writers can't lose each other's updates — a `set` racing an in-flight `write`
 **blocks** behind the guard and lands; it is never silently overwritten.
 
-**Where the value lives.** As with `Shared`, the value lives in the box's private heap. `write(f)`
-runs `f` **inside** that heap on the live value, under the exclusive lock: no copy out and back, the
+**Where the value lives.** As with `Shared`, the box owns its value. `write(f)`
+runs `f` **inside** the box on the live value, under the exclusive lock: no copy out and back, the
 closure rule of §6 applies (captures are copies, globals are the caller's as of the call), and a fault
 inside `f` leaves the state as `f` left it. A reader (`get`, `read`, a collection read, `print`)
 **copies** what it returns out of the live heap under the shared lock, drops the lock, and only then
