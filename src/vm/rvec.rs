@@ -334,6 +334,13 @@ impl Drop for RetireList {
     }
 }
 
+/// The capacity a grow from `cap` slots to at least `min_cap` allocates: twice `cap`, at least 4,
+/// clamped to the header's `u32` limit (a `min_cap` past it still panics in `alloc_block`).
+fn grown_cap(cap: usize, min_cap: usize) -> usize {
+    let doubled = cap.saturating_mul(2).min(u32::MAX as usize);
+    doubled.max(min_cap).max(4)
+}
+
 /// A growable vector of `T: Elem` whose grows retire the old block (see the module doc).
 pub struct RVec<T: Elem> {
     ptr: AtomicPtr<Header>,
@@ -467,8 +474,7 @@ impl<T: Elem> RVec<T> {
             let o = unsafe { &*old };
             (o.len(), o.cap())
         };
-        let doubled = cap.checked_mul(2).expect("an RVec capacity overflows");
-        let new_cap = doubled.max(min_cap).max(4);
+        let new_cap = grown_cap(cap, min_cap);
         let new = alloc_block::<T>(new_cap);
         for i in 0..len {
             // SAFETY: `i < len <= cap` of the live block `old`, and `len <= cap < new_cap`.
@@ -905,6 +911,32 @@ mod tests {
     #[should_panic(expected = "capacity overflows")]
     fn capacity_past_u32_panics() {
         let _ = RVec::<u64>::with_capacity(u32::MAX as usize + 1);
+    }
+
+    /// A grow near the `u32` limit stops at `u32::MAX` slots instead of doubling past it.
+    #[test]
+    fn growth_clamps_to_the_u32_limit() {
+        let half = 1usize << 31;
+        assert_eq!(super::grown_cap(half, half + 1), u32::MAX as usize);
+        assert_eq!(super::grown_cap(4, 5), 8);
+    }
+
+    /// A whole-vec rewrite (sort, reverse) retires the old block like a grow; the stop frees it.
+    #[test]
+    fn replace_retires_old_block() {
+        let _g = test_serial();
+        let mut heap = Heap::new();
+        let v: RVec<u64> = RVec::from_slice(&[3, 1, 2]);
+        let (_, freed) = test_counts();
+        v.replace(&heap, &[1, 2, 3]);
+        assert_eq!(
+            heap.retired_len(),
+            (1, 0),
+            "the old block is on the handle's list"
+        );
+        assert_eq!(v.to_vec(), [1, 2, 3]);
+        heap.sweep();
+        assert_eq!(test_counts().1, freed + 1, "the stop frees the old block");
     }
 
     #[test]
