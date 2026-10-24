@@ -704,7 +704,6 @@ fn walk_src_copies_out_of_a_heap_it_only_borrows() {
     let src = super::airlock_out::WalkSrc {
         heap: &owner.heap,
         module_objs: &owner.module_objs,
-        active_generators: &owner.active_generators,
         program: &owner.program,
         walk_base: 0,
     };

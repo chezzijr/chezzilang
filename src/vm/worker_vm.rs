@@ -1205,7 +1205,7 @@ impl Vm {
                 match self.try_wire_speculative(v, depth, memo, |w| !w.has_handle()) {
                     Some(w) => w,
                     None => {
-                        let msg = if self.active_generators.contains(&h) {
+                        let msg = if g.is_running() {
                             "a module-global generator that was running when this task was spawned has no copy in the task; send its values through a Channel"
                         } else {
                             "a module-global generator holding a value that cannot cross tasks has no copy in the task; send its values through a Channel"

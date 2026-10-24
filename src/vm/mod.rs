@@ -637,7 +637,7 @@ struct GenCtx {
 enum GenState {
     /// Created but not yet started: holds the call args until the first `.next()` builds the frame.
     Pending(Vec<Value>),
-    /// Started and suspended at a `yield`; its frames/stack live in [`GeneratorCore::ctx`].
+    /// Started and suspended at a `yield`; its frames/stack live in [`Parked::ctx`].
     Suspended,
     /// Body returned / fell off the end (or faulted). Every further `.next()` yields `None`.
     Done,
@@ -645,6 +645,14 @@ enum GenState {
     /// spawn, or held a value that cannot cross tasks). Inert until driven; any `.next()` faults with
     /// this message instead of reading as `nil` or as exhausted.
     Unsendable(Box<str>),
+}
+
+/// Experimental generators — the half of a generator that a resume takes: its lifecycle state and
+/// its suspended context. See [`GeneratorCore::parked`].
+#[derive(Clone)]
+pub(crate) struct Parked {
+    state: GenState,
+    ctx: GenCtx,
 }
 
 /// Experimental generators — the heap payload of an `Obj::Generator`. A one-shot coroutine driven
@@ -657,8 +665,11 @@ pub(crate) struct GeneratorCore {
     proto: ProtoId,
     home: GcRef,
     closure: Option<GcRef>,
-    state: GenState,
-    ctx: GenCtx,
+    /// M2.4 — the parked state and context behind one atomic owner pointer (`vm/rvec.rs`). A
+    /// resume takes the box (`Vm::gen_take`) and puts it back when the body suspends or ends; a
+    /// null pointer means a run holds the generator, so a second resume, on this thread or
+    /// another, faults "generator already running" and never writes the frames twice.
+    parked: rvec::AtomicBox<Parked>,
     /// TICKET-190, TICKET-240: the creating call's verdict for each PARAM slot, two bits per param
     /// (layout `crossing::stamp_mask`), set only by `Op::StampGen`. A marking crossing reads it
     /// through `crossing::frame_slot`; a local slot reads the proto's own masks there.
@@ -669,16 +680,22 @@ pub(crate) struct GeneratorCore {
 // record free of an unused derive); prints lifecycle + frame count, not the whole parked stack.
 impl std::fmt::Debug for GeneratorCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = match &self.state {
-            GenState::Pending(_) => "Pending",
-            GenState::Suspended => "Suspended",
-            GenState::Done => "Done",
-            GenState::Unsendable(_) => "Unsendable",
-        };
+        let (state, frames) = self.parked.with(|p| match p {
+            Some(p) => (
+                match &p.state {
+                    GenState::Pending(_) => "Pending",
+                    GenState::Suspended => "Suspended",
+                    GenState::Done => "Done",
+                    GenState::Unsendable(_) => "Unsendable",
+                },
+                p.ctx.frames.len(),
+            ),
+            None => ("Running", 0),
+        });
         f.debug_struct("GeneratorCore")
             .field("proto", &self.proto)
             .field("state", &state)
-            .field("parked_frames", &self.ctx.frames.len())
+            .field("parked_frames", &frames)
             .finish()
     }
 }
@@ -687,19 +704,28 @@ impl GeneratorCore {
     /// GC roots held while the generator is suspended: its home + backing closure, every object on
     /// its parked stack, each parked frame's home/closure/deferred roots, and any not-yet-consumed
     /// `Pending` call args. Reachable only through the generator object, so missing one is a
-    /// use-after-free. (When the generator is running, `ctx` is empty — its frames/stack are the
-    /// live `Vm` roots — so this returns just home/closure + nothing from the empty ctx.)
+    /// use-after-free. (When the generator is running, a run holds the parked box — its
+    /// frames/stack are the live `Vm` roots — so this returns just home/closure.)
     fn gc_roots(&self) -> Vec<GcRef> {
         let mut out = vec![self.home];
         if let Some(c) = self.closure {
             out.push(c);
         }
-        if let GenState::Pending(args) = &self.state {
-            // `child_gcref` roots boxed floats (Float tag) too, not just true `Obj`s.
-            out.extend(args.iter().filter_map(|v| v.child_gcref()));
-        }
-        self.ctx.root_view().walk(&mut out);
+        self.parked.with(|p| {
+            if let Some(p) = p {
+                if let GenState::Pending(args) = &p.state {
+                    // `child_gcref` roots boxed floats (Float tag) too, not just true `Obj`s.
+                    out.extend(args.iter().filter_map(|v| v.child_gcref()));
+                }
+                p.ctx.root_view().walk(&mut out);
+            }
+        });
         out
+    }
+
+    /// A run holds the parked box (see [`GeneratorCore::parked`]).
+    fn is_running(&self) -> bool {
+        self.parked.with(|p| p.is_none())
     }
 }
 

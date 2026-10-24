@@ -46,7 +46,13 @@ impl Vm {
             Op::StampGen(m) => {
                 if let Some(h) = self.stack.last().and_then(|v| v.as_obj())
                     && let Obj::Generator(g) = self.heap.get_mut(h)
-                    && matches!(g.state, GenState::Pending(_))
+                    && matches!(
+                        g.parked.get_mut(),
+                        Some(Parked {
+                            state: GenState::Pending(_),
+                            ..
+                        })
+                    )
                 {
                     let p = &self.program.protos[g.proto];
                     g.stamp |= m & crate::base::crossing::param_stamp(

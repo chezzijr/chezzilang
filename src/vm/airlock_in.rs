@@ -797,8 +797,10 @@ impl Vm {
                             proto,
                             home,
                             closure,
-                            state,
-                            ctx: GenCtx::default(),
+                            parked: super::rvec::AtomicBox::new(Parked {
+                                state,
+                                ctx: GenCtx::default(),
+                            }),
                             stamp: 0,
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
@@ -843,8 +845,10 @@ impl Vm {
                             proto,
                             home,
                             closure,
-                            state: GenState::Suspended,
-                            ctx,
+                            parked: super::rvec::AtomicBox::new(Parked {
+                                state: GenState::Suspended,
+                                ctx,
+                            }),
                             stamp,
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))

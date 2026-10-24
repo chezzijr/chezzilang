@@ -1520,3 +1520,152 @@ main()";
     assert_eq!(retired, 0, "a global write retires nothing");
     assert_eq!(run_capture_stress(src), "['7'] 190 2\n");
 }
+
+/// M2.4 — a parked generator sits behind one atomic owner pointer. The first take owns it; a
+/// second take, before the put-back, sees it running and faults; after the put-back a take
+/// succeeds again.
+#[test]
+fn generator_ctx_take_is_exclusive() {
+    let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
+    let home = vm.heap.alloc(Obj::Str("home".into()));
+    let g = vm.alloc_generator(0, home, None, vec![Value::int(1)]);
+    let h = g.as_obj().expect("a generator object");
+    let span = Span::RUNTIME;
+    let first = vm
+        .gen_take(h, span)
+        .expect("the first take owns the parked context");
+    let second = vm
+        .gen_take(h, span)
+        .err()
+        .expect("a second take sees it running");
+    assert!(
+        second.message.contains("generator already running"),
+        "{}",
+        second.message
+    );
+    vm.gen_put(h, first);
+    let third = vm
+        .gen_take(h, span)
+        .expect("a take after the put-back succeeds");
+    assert!(matches!(third.state, GenState::Pending(ref a) if a.len() == 1));
+    vm.gen_put(h, third);
+}
+
+/// M2.4 — two threads drive one generator through two `Vm` handles on one heap. Each `.next()`
+/// gives a value, `None`, or the "generator already running" fault; no call crashes, every value
+/// goes to exactly one caller, in order, and `None` comes only after the last value (a resume
+/// that raced a running generator never reads it as exhausted). Run under `CHEZZI_GC_STRESS=1`
+/// too.
+#[test]
+fn generator_next_from_two_tasks_faults_cleanly() {
+    const N: i64 = 300;
+    let src = format!(
+        "\
+fn count(n: int) -> Iterator[int]:
+    for i in 0..n:
+        s := [str(i)]
+        yield i + s.len() - 1
+
+G := count({N})
+
+fn main():
+    pass
+main()"
+    );
+    let (got, faults, last_val, first_none) = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let mut root = Vm::new(Arc::new(test_program(&src).expect("compiles")));
+            let result = root.run();
+            root.finish_run(result).expect("runs");
+            let g = root
+                .module_objs
+                .iter()
+                .find_map(|&m| match root.heap.get(m) {
+                    Obj::Module(md) => md.index.get("G").map(|&i| md.slots.get(i as usize)),
+                    _ => None,
+                })
+                .and_then(|v| v.as_obj())
+                .expect("the module global G");
+            if root.attached.is_some() {
+                root.gc_leave();
+            }
+            let go = Arc::new(std::sync::Barrier::new(2));
+            let clock = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let drivers: Vec<_> = (0..2)
+                .map(|_| {
+                    let mut w = root.spawn_worker();
+                    let go = Arc::clone(&go);
+                    let clock = Arc::clone(&clock);
+                    std::thread::Builder::new()
+                        .stack_size(VM_STACK_BYTES)
+                        .spawn(move || {
+                            w.gc_attach();
+                            w.stack.push(Value::obj(g));
+                            go.wait();
+                            let (mut vals, mut faults, mut none) = (Vec::new(), 0usize, None);
+                            let tick = || clock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            for _ in 0..10_000_000 {
+                                // The loop's back edge: a safepoint, as a bytecode loop has.
+                                w.gc_poll();
+                                match w.generator_next(g, Span::RUNTIME) {
+                                    Ok(r) => match w.heap.get(r.as_obj().expect("an Option")) {
+                                        Obj::Enum {
+                                            variant_id,
+                                            payload,
+                                        } if *variant_id == crate::base::op::VID_SOME => {
+                                            vals.push((tick(), payload.get(0).as_int()))
+                                        }
+                                        _ => {
+                                            none = Some(tick());
+                                            break;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        assert!(
+                                            e.message.contains("generator already running"),
+                                            "{}",
+                                            e.message
+                                        );
+                                        faults += 1;
+                                        std::thread::yield_now();
+                                    }
+                                }
+                            }
+                            w.gc_leave();
+                            (vals, faults, none)
+                        })
+                        .expect("spawn a driver")
+                })
+                .collect();
+            let (mut got, mut faults, mut last_val, mut first_none) =
+                (Vec::new(), 0, 0, usize::MAX);
+            for d in drivers {
+                let (vals, f, none) = d.join().expect("a driver panicked");
+                assert!(vals.is_sorted(), "one caller sees the values in order");
+                last_val = vals
+                    .iter()
+                    .map(|&(t, _)| t)
+                    .max()
+                    .unwrap_or(0)
+                    .max(last_val);
+                first_none = first_none.min(none.expect("each caller ends on None"));
+                got.extend(vals.into_iter().map(|(_, v)| v));
+                faults += f;
+            }
+            got.sort();
+            (got, faults, last_val, first_none)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked");
+    assert_eq!(
+        got,
+        (0..N).collect::<Vec<_>>(),
+        "each value goes to one caller ({faults} faults)"
+    );
+    assert!(
+        first_none > last_val,
+        "a None at tick {first_none} came before the last value at tick {last_val}"
+    );
+}

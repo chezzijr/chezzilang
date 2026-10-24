@@ -600,11 +600,34 @@ impl Vm {
             proto,
             home,
             closure,
-            state: GenState::Pending(args),
-            ctx: GenCtx::default(),
+            parked: rvec::AtomicBox::new(Parked {
+                state: GenState::Pending(args),
+                ctx: GenCtx::default(),
+            }),
             stamp: 0,
         };
         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
+    }
+
+    /// M2.4 — take generator `h`'s parked box for a resume (see [`GeneratorCore::parked`]). A
+    /// null pointer means a run holds it: a re-entrant resume from inside its own body, or a
+    /// resume on another thread. Python: `ValueError: generator already executing`.
+    pub(super) fn gen_take(&mut self, h: GcRef, span: Span) -> Result<Box<Parked>, RuntimeError> {
+        let heap = self.heap.write(h);
+        let Obj::Generator(g) = heap.get(h) else {
+            return Err(self.err("`.next()` on a non-generator value".to_string(), span));
+        };
+        g.parked
+            .take()
+            .ok_or_else(|| self.err("generator already running".to_string(), span))
+    }
+
+    /// Put the parked box `b` back into generator `h` (a suspend, an end, or a fault).
+    pub(super) fn gen_put(&mut self, h: GcRef, b: Box<Parked>) {
+        let heap = self.heap.write(h);
+        if let Obj::Generator(g) = heap.get(h) {
+            g.parked.put(b);
+        }
     }
 
     /// Resume a generator until its next `yield` (→ `Some(v)`) or until its body ends (→ `None`,
@@ -614,40 +637,31 @@ impl Vm {
     /// generator faults `deadlock` rather than parking the host.
     pub(super) fn generator_next(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
         // A RE-ENTRANT resume — `.next()` (or a `for`) on a generator that is already running, from
-        // inside its own body — is a fault, not an answer. This MUST come before the state take
-        // below: while a generator runs, its heap `state` is parked as the `Done` placeholder, so a
-        // re-entrant call would otherwise hit the `Done` short-circuit and silently report a live
-        // generator as EXHAUSTED (`None`). `active_generators` is the resume path's own root list,
-        // pushed/popped around the run, so it is self-clearing on every unwind path (yield,
-        // exhaustion, an early consumer `break`, a fault in the body, a fault caught by `recover:`)
-        // — a generator can never get poisoned as permanently "running". Python: `ValueError:
-        // generator already executing`.
-        if self.active_generators.contains(&h) {
-            return Err(self.err("generator already running".to_string(), span));
-        }
+        // inside its own body — is a fault, not an answer. The take sees the null owner pointer a
+        // running generator leaves, so it faults before any state read; the same take faults a
+        // resume from another thread. The box comes back on every return below (yield,
+        // exhaustion, a fault in the body, a fault caught by `recover:`), so a generator never
+        // stays "running". Python: `ValueError: generator already executing`.
+        let mut parked = self.gen_take(h, span)?;
         // TICKET-137 — a module-global generator the task's snapshot could not copy: fault with the
-        // recorded cause. Before the state take below, whose `Done` short-circuit would read it as
-        // exhausted.
-        if let Obj::Generator(g) = self.heap.get(h)
-            && let GenState::Unsendable(msg) = &g.state
-        {
+        // recorded cause, not the `Done` short-circuit below, which would read it as exhausted.
+        if let GenState::Unsendable(msg) = &parked.state {
             let msg = msg.to_string();
+            self.gen_put(h, parked);
             return Err(self.err(msg, span));
         }
-        // Take the generator's lifecycle state + parked context out of the heap object. `state` is
-        // left as `Done` and `ctx` as empty; the real state is written back after the run. An
-        // already-`Done` generator short-circuits to `None`.
-        let (proto, home, closure, mut gen_ctx, state) = {
-            let Obj::Generator(g) = self.heap.get_mut(h) else {
-                return Err(self.err("`.next()` on a non-generator value".to_string(), span));
-            };
-            if matches!(g.state, GenState::Done) {
-                return Ok(self.alloc_enum("Option", "None", Vec::new()));
-            }
-            let state = std::mem::replace(&mut g.state, GenState::Done);
-            let ctx = std::mem::take(&mut g.ctx);
-            (g.proto, g.home, g.closure, ctx, state)
+        if matches!(parked.state, GenState::Done) {
+            self.gen_put(h, parked);
+            return Ok(self.alloc_enum("Option", "None", Vec::new()));
+        }
+        // Take the lifecycle state + parked context out of the box, which holds `Done` and an
+        // empty ctx while this run owns it; the real state goes back after the run.
+        let state = std::mem::replace(&mut parked.state, GenState::Done);
+        let mut gen_ctx = std::mem::take(&mut parked.ctx);
+        let Obj::Generator(g) = self.heap.get(h) else {
+            unreachable!("gen_take checked a generator")
         };
+        let (proto, home, closure) = (g.proto, g.home, g.closure);
 
         // Park the host context (rooted via `gen_host_ctx`) and install the generator's private
         // context into the live `Vm`. Two swaps: host out to a temp, then the generator in.
@@ -729,8 +743,12 @@ impl Vm {
             self.gen_fault_prefix = gen_trace.unwrap_or_default();
         }
 
-        // A fault inside the generator: leave it `Done` (already set) with an empty ctx, propagate.
-        run?;
+        // A fault inside the generator: put it back `Done` (already set) with an empty ctx,
+        // propagate.
+        if let Err(e) = run {
+            self.gen_put(h, parked);
+            return Err(e);
+        }
 
         if yielded {
             // The yielded value sits on the generator's private stack top. Park the rest to resume.
@@ -738,17 +756,14 @@ impl Vm {
                 .stack
                 .pop()
                 .expect("yielded value on the generator stack");
-            if let Obj::Generator(g) = self.heap.get_mut(h) {
-                g.ctx = new_ctx;
-                g.state = GenState::Suspended;
-            }
+            parked.ctx = new_ctx;
+            parked.state = GenState::Suspended;
+            self.gen_put(h, parked);
             Ok(self.alloc_enum("Option", "Some", vec![v]))
         } else {
-            // Body returned / fell off → exhausted. Drop the (drained) context.
-            if let Obj::Generator(g) = self.heap.get_mut(h) {
-                g.ctx = GenCtx::default();
-                g.state = GenState::Done;
-            }
+            // Body returned / fell off → exhausted: the box keeps `Done` and an empty ctx, and the
+            // drained context drops.
+            self.gen_put(h, parked);
             Ok(self.alloc_enum("Option", "None", Vec::new()))
         }
     }

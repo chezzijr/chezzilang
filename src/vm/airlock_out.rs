@@ -10,7 +10,6 @@ impl Vm {
         WalkSrc {
             heap: &self.heap,
             module_objs: &self.module_objs,
-            active_generators: &self.active_generators,
             program: &self.program,
             walk_base: self.walk_base,
         }
@@ -536,7 +535,6 @@ impl WireMemo {
 pub(super) struct WalkSrc<'a> {
     pub(super) heap: &'a Heap,
     pub(super) module_objs: &'a [GcRef],
-    pub(super) active_generators: &'a [GcRef],
     pub(super) program: &'a Program,
     pub(super) walk_base: usize,
 }
@@ -554,7 +552,6 @@ impl<'a> WalkSrc<'a> {
         WalkSrc {
             heap,
             module_objs: &ctx.module_objs,
-            active_generators: &[],
             program,
             walk_base,
         }
@@ -930,12 +927,14 @@ impl WalkSrc<'_> {
                     // already applies (`src/vm/exec.rs:497`, "generator already running"). CPython
                     // agrees — `copy.deepcopy(gen)` on a running generator raises
                     // `TypeError: cannot pickle 'generator' object` (measured 2026-09-03).
-                    if self.active_generators.contains(&h) {
+                    // M2.4 — a run holds the parked box while the generator runs (on this thread
+                    // or another); the copy below is what this crossing serializes.
+                    let Some(parked) = g.parked.with(|p| p.cloned()) else {
                         return Err(self.err(
                             "a running generator cannot be sent across tasks".to_string(),
                             Span::default(),
                         ));
-                    }
+                    };
                     // A cycle re-entering THIS generator on the DFS stack closes a value cycle through a
                     // node whose parked frame cannot be a mid-rebuild `Backref` target → reject cleanly
                     // (re-serializing it would silently DUPLICATE the generator, the e8dcad7
@@ -968,7 +967,7 @@ impl WalkSrc<'_> {
                         )?)),
                         None => None,
                     };
-                    let state = match &g.state {
+                    let state = match &parked.state {
                         GenState::Pending(args) => {
                             let mut wargs = Vec::with_capacity(args.len());
                             for a in args {
@@ -989,13 +988,13 @@ impl WalkSrc<'_> {
                             //  - pending `defer` (c): `defer` is banned inside a generator body.
                             // A mid-`recover:` suspension (arm b) is NO LONGER rejected — a live
                             // handler stack is pure plain-data and now serialized below.
-                            if g.ctx.frames.len() != 1 {
+                            if parked.ctx.frames.len() != 1 {
                                 return Err(self.err(
                                     "a generator suspended across more than one call frame cannot be sent across tasks".to_string(),
                                     Span::default(),
                                 ));
                             }
-                            let frame = &g.ctx.frames[0];
+                            let frame = &parked.ctx.frames[0];
                             if !frame.deferred.is_empty() {
                                 return Err(self.err(
                                     "a generator suspended with a pending `defer` cannot be sent across tasks".to_string(),
@@ -1011,8 +1010,8 @@ impl WalkSrc<'_> {
                                     Span::default(),
                                 ));
                             }
-                            let mut wstack = Vec::with_capacity(g.ctx.stack.len());
-                            for v in &g.ctx.stack {
+                            let mut wstack = Vec::with_capacity(parked.ctx.stack.len());
+                            for v in &parked.ctx.stack {
                                 wstack.push(self.to_wire_depth(*v, depth + 1, memo)?);
                             }
                             // Backlog arm (b): carry the live `recover:` handlers. Each `Handler` is
@@ -1033,9 +1032,9 @@ impl WalkSrc<'_> {
                                     argc: frame.argc,
                                 }),
                                 stack: wstack,
-                                call_depth: g.ctx.call_depth,
-                                cur_base: g.ctx.cur_base,
-                                handlers: g.ctx.handlers.clone(),
+                                call_depth: parked.ctx.call_depth,
+                                cur_base: parked.ctx.cur_base,
+                                handlers: parked.ctx.handlers.clone(),
                                 stamp: g.stamp,
                             }
                         }

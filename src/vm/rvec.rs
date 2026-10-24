@@ -43,6 +43,9 @@
 //! No `as_slice`: a `&[T]` over a block that another thread can write with `set` is not sound.
 //! No API hands out `&mut [T]`. Miri and TSan are not available on this box, so the races here
 //! are tested only by the stress tests below.
+//!
+//! [`AtomicBox`] is the owner-pointer sibling for a value that a thread takes whole (a parked
+//! generator): a take swaps the pointer to null, so a second taker sees the value held.
 
 use super::heap::Heap;
 use super::value::Value;
@@ -785,6 +788,86 @@ impl<T: Elem> Iterator for Iter<'_, T> {
         let v = unsafe { load(self.h, self.i) };
         self.i += 1;
         Some(v)
+    }
+}
+
+/// One boxed `T` behind an atomic owner pointer: a thread takes the box whole, or sees that
+/// another thread holds it (a null pointer). A parked generator lives here (`vm/exec.rs`), so two
+/// threads that resume one generator never both write its frames.
+///
+/// No reader borrows the box in place. Every access takes it ([`take`](AtomicBox::take), or
+/// [`with`](AtomicBox::with) for a read) and puts it back, so the taker owns it alone, and the
+/// put that swaps a box out may drop it: nothing retires.
+pub struct AtomicBox<T> {
+    ptr: AtomicPtr<T>,
+    /// `Send` and `Sync` as a `Mutex<T>`: a take hands the `T` to the taking thread.
+    _t: PhantomData<Mutex<T>>,
+}
+
+impl<T> AtomicBox<T> {
+    pub fn new(v: T) -> Self {
+        AtomicBox {
+            ptr: AtomicPtr::new(Box::into_raw(Box::new(v))),
+            _t: PhantomData,
+        }
+    }
+
+    /// Take the box, or `None` when another take holds it.
+    pub fn take(&self) -> Option<Box<T>> {
+        let p = self.ptr.swap(ptr::null_mut(), Ordering::AcqRel);
+        // SAFETY: a non-null pointer came from `Box::into_raw`, and the swap made this thread its
+        // only owner.
+        (!p.is_null()).then(|| unsafe { Box::from_raw(p) })
+    }
+
+    /// Put `b` in. A box that was there (a put with no take before it) is dropped: the swap made
+    /// this thread its only owner.
+    pub fn put(&self, b: Box<T>) {
+        let old = self.ptr.swap(Box::into_raw(b), Ordering::AcqRel);
+        if !old.is_null() {
+            // SAFETY: as for `take`.
+            drop(unsafe { Box::from_raw(old) });
+        }
+    }
+
+    /// Run `f` on the box while this thread holds it (`None` when another take holds it), then
+    /// put it back.
+    pub fn with<R>(&self, f: impl FnOnce(Option<&T>) -> R) -> R {
+        let b = self.take();
+        let r = f(b.as_deref());
+        if let Some(b) = b {
+            self.put(b);
+        }
+        r
+    }
+
+    /// The box, through `&mut self` (no other thread can reach it).
+    pub fn get_mut(&mut self) -> Option<&mut T> {
+        // SAFETY: `&mut self` excludes every take; a non-null pointer came from `Box::into_raw`.
+        unsafe { self.ptr.get_mut().as_mut() }
+    }
+}
+
+impl<T: Clone> Clone for AtomicBox<T> {
+    /// A copy of the box, or an empty one while another take holds it.
+    fn clone(&self) -> Self {
+        let p = self
+            .with(|b| b.map(|v| Box::into_raw(Box::new(v.clone()))))
+            .unwrap_or(ptr::null_mut());
+        AtomicBox {
+            ptr: AtomicPtr::new(p),
+            _t: PhantomData,
+        }
+    }
+}
+
+impl<T> Drop for AtomicBox<T> {
+    fn drop(&mut self) {
+        let p = *self.ptr.get_mut();
+        if !p.is_null() {
+            // SAFETY: `&mut self`; the pointer came from `Box::into_raw`.
+            drop(unsafe { Box::from_raw(p) });
+        }
     }
 }
 
