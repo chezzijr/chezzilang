@@ -468,7 +468,7 @@ impl Vm {
                         unreachable!()
                     };
                     let item = if *pos < items.len() {
-                        let item = items[*pos];
+                        let item = items.get(*pos);
                         *pos += 1;
                         Some(item)
                     } else {
@@ -621,7 +621,10 @@ impl Vm {
             };
             self.pop(); // unroot receiver
             if let Some(items) = items {
-                let cursor = self.heap.alloc(Obj::Iter { items, pos: 0 });
+                let cursor = self.heap.alloc(Obj::Iter {
+                    items: items.into(),
+                    pos: 0,
+                });
                 self.push(Value::obj(cursor));
                 return Ok(());
             }

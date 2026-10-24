@@ -1107,7 +1107,7 @@ impl WalkSrc<'_> {
                         let id = memo.mint_node(h);
                         memo.enter(h, id);
                         let pos = *pos;
-                        let items = items.clone();
+                        let items = items.to_vec();
                         let mut out = Vec::with_capacity(items.len());
                         for x in items {
                             out.push(self.to_wire_depth(x, depth + 1, memo)?);

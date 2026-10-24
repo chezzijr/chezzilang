@@ -402,13 +402,13 @@ impl Vm {
                     return Value::obj(h);
                 }
                 let h = self.heap.alloc(Obj::Iter {
-                    items: Vec::new(),
+                    items: RVec::new(),
                     pos,
                 });
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
                 match self.heap.get_mut(h) {
-                    Obj::Iter { items, .. } => *items = cloned,
+                    Obj::Iter { items, .. } => *items = cloned.into(),
                     Obj::Str(_)
                     | Obj::Bytes(_)
                     | Obj::ByteArray(_)

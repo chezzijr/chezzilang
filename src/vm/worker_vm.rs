@@ -1264,7 +1264,7 @@ impl Vm {
             Obj::Iter { items, pos } => {
                 let mut out = Vec::with_capacity(items.len());
                 for x in &items {
-                    out.push(self.to_snap_depth(*x, depth + 1, memo)?);
+                    out.push(self.to_snap_depth(x, depth + 1, memo)?);
                 }
                 SnapValue::Iter { items: out, pos }
             }

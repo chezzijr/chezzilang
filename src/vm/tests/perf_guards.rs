@@ -1346,7 +1346,7 @@ fn cursor_crosses_airlock_by_deep_copy() {
     // from interp; a cursor is plain data — a snapshot Vec + index — so it crosses by value.)
     let mut vm = Vm::new(Arc::new(empty_program()));
     let cursor = Value::obj(vm.heap.alloc(Obj::Iter {
-        items: vec![Value::int(7), Value::int(8)],
+        items: vec![Value::int(7), Value::int(8)].into(),
         pos: 1,
     }));
     let wire = vm
@@ -1368,7 +1368,7 @@ fn cursor_crosses_airlock_by_deep_copy() {
     match vm.heap.get(h) {
         Obj::Iter { items, pos } => {
             assert_eq!(*pos, 1);
-            assert_eq!(items, &vec![Value::int(7), Value::int(8)]);
+            assert_eq!(items.to_vec(), vec![Value::int(7), Value::int(8)]);
         }
         _ => panic!("expected a rebuilt Obj::Iter"),
     }

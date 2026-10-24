@@ -236,7 +236,7 @@ pub enum Obj {
     /// or the snapshot's elements get collected out from under a live cursor. `Vec<Value>`(24) +
     /// `usize`(8) = 32B, within the 64B `Obj` cap (`MapData`/`SetData` set the cap).
     Iter {
-        items: Vec<Value>,
+        items: RVec<Value>,
         pos: usize,
     },
     /// `[a, b, …]` — a growable list on a retiring vector (`vm/rvec.rs`): a grow retires the old
@@ -1135,7 +1135,7 @@ impl Heap {
             Obj::FloatBox(_) => {}
             // NON-LEAF: the cursor's snapshot may hold heap `GcRef`s, which must stay alive while the
             // cursor is reachable (a not-yet-consumed element is still owned by the cursor).
-            Obj::Iter { items, .. } => items.iter().for_each(&mut push),
+            Obj::Iter { items, .. } => items.iter().for_each(|v| push(&v)),
             Obj::List(items) => items.iter().for_each(|v| push(&v)),
             Obj::Tuple(items) => items.iter().for_each(&mut push),
             Obj::Map(m) => m.entries.iter().for_each(|(_, k, v)| {
@@ -1766,7 +1766,7 @@ mod iter_obj_tests {
         // A heap element the cursor must keep alive.
         let elem = heap.alloc(Obj::Str("kept".into()));
         let cursor = heap.alloc(Obj::Iter {
-            items: vec![Value::obj(elem), Value::int(7)],
+            items: vec![Value::obj(elem), Value::int(7)].into(),
             pos: 0,
         });
         let kids = heap.children(cursor);

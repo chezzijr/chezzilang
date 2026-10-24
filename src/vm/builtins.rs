@@ -184,7 +184,7 @@ impl Vm {
                 let chars: Vec<char> = s.chars().collect();
                 Some(chars.into_iter().map(|c| self.alloc_char(c)).collect())
             }
-            Obj::Iter { items, pos } => Some(items[(*pos).min(items.len())..].to_vec()),
+            Obj::Iter { items, pos } => Some(items.iter().skip(*pos).collect()),
             Obj::BigInt(_)
             | Obj::FloatBox(_)
             | Obj::Tuple(_)
@@ -240,8 +240,7 @@ impl Vm {
             let Obj::Iter { items, pos } = self.heap.get_mut(h) else {
                 unreachable!()
             };
-            let start = (*pos).min(items.len());
-            let drained = items[start..].to_vec();
+            let drained = items.iter().skip(*pos).collect();
             *pos = items.len();
             return Ok(drained);
         }

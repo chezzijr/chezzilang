@@ -917,8 +917,8 @@ fn a_crossed_container_rebuilds_at_exact_capacity() {
         let rebuilt = dst.from_wire(w);
         let h = rebuilt.as_obj().expect("rebuilds to a heap object");
         let (len, cap) = match dst.heap.get(h) {
-            Obj::List(xs) => (xs.len(), xs.capacity()),
-            Obj::Tuple(xs) | Obj::Iter { items: xs, .. } => (xs.len(), xs.capacity()),
+            Obj::List(xs) | Obj::Iter { items: xs, .. } => (xs.len(), xs.capacity()),
+            Obj::Tuple(xs) => (xs.len(), xs.capacity()),
             other => panic!("{label} rebuilt as the wrong object: {other:?}"),
         };
         assert_eq!(len, N, "{label}: every element must survive the crossing");
