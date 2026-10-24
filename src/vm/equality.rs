@@ -31,9 +31,9 @@ impl Vm {
                     // `bytes`/`bytearray` order lexicographically by byte (Python parity), including
                     // cross-type (Python `b"a" < bytearray(b"b")` compares by content).
                     (Obj::Bytes(a), Obj::Bytes(b)) => Some(a.cmp(b)),
-                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Some(a.cmp(b)),
-                    (Obj::Bytes(a), Obj::ByteArray(b)) => Some(a.as_ref().cmp(b.as_slice())),
-                    (Obj::ByteArray(a), Obj::Bytes(b)) => Some(a.as_slice().cmp(b.as_ref())),
+                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Some(a.iter().cmp(b.iter())),
+                    (Obj::Bytes(a), Obj::ByteArray(b)) => Some(a.iter().copied().cmp(b.iter())),
+                    (Obj::ByteArray(a), Obj::Bytes(b)) => Some(a.iter().cmp(b.iter().copied())),
                     _ => None,
                 }
             }
@@ -439,9 +439,9 @@ impl Vm {
                     (Obj::Bytes(a), Obj::Bytes(b)) => Ok(a == b),
                     // `bytearray` equality is structural byte-equality. Cross-type `bytes ==
                     // bytearray` is content-equal (Python parity: `b"a" == bytearray(b"a")` is true).
-                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Ok(a == b),
-                    (Obj::Bytes(a), Obj::ByteArray(b)) => Ok(a.as_ref() == b.as_slice()),
-                    (Obj::ByteArray(a), Obj::Bytes(b)) => Ok(a.as_slice() == b.as_ref()),
+                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Ok(a.iter().eq(b.iter())),
+                    (Obj::Bytes(a), Obj::ByteArray(b)) => Ok(a.iter().copied().eq(b.iter())),
+                    (Obj::ByteArray(a), Obj::Bytes(b)) => Ok(a.iter().eq(b.iter().copied())),
                     (Obj::List(a), Obj::List(b)) => {
                         if a.len() != b.len() {
                             return Ok(false);

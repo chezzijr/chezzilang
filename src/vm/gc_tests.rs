@@ -1209,3 +1209,15 @@ fn main():
 main()";
     growth_retires_until_collect(src, "100 0 50 99\n");
 }
+
+#[test]
+fn bytearray_growth_retires_until_collect() {
+    let src = "\
+fn main():
+    b := bytearray(b\"a\")
+    for i in 1..100:
+        b.push(i)
+    print(b.len(), b[0], b[50], b[99])
+main()";
+    growth_retires_until_collect(src, "100 97 50 99\n");
+}

@@ -11,7 +11,7 @@ impl Vm {
         if let Obj::Bytes(b) = self.heap.get(h) {
             Some(b.to_vec())
         } else if let Obj::ByteArray(b) = self.heap.get(h) {
-            Some(b.clone())
+            Some(b.to_vec())
         } else {
             None
         }

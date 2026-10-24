@@ -178,7 +178,7 @@ impl Vm {
             Obj::ByteArray(b) => {
                 let idxs = crate::slice::range_indices(&parts, b.len())
                     .map_err(|m| self.err(m.to_string(), span))?;
-                Sliced::ByteArray(idxs.iter().map(|&i| b[i]).collect())
+                Sliced::ByteArray(idxs.iter().map(|&i| b.get(i)).collect())
             }
             Obj::Struct { .. } | Obj::Enum { .. } => Sliced::Struct,
             Obj::BigInt(_)
@@ -227,7 +227,7 @@ impl Vm {
                 self.push(Value::obj(nh));
             }
             Sliced::ByteArray(sub) => {
-                let nh = self.heap.alloc(Obj::ByteArray(sub));
+                let nh = self.heap.alloc(Obj::ByteArray(sub.into()));
                 self.push(Value::obj(nh));
             }
             Sliced::Struct => {
@@ -283,7 +283,7 @@ impl Vm {
                     };
                 }
                 Obj::ByteArray(b) => {
-                    return match crate::slice::norm_index(n, b.len()).map(|i| b[i] as i64) {
+                    return match crate::slice::norm_index(n, b.len()).map(|i| b.get(i) as i64) {
                         Some(v) => {
                             self.push(Value::int(v));
                             Ok(())
@@ -403,7 +403,7 @@ impl Vm {
             }
             Obj::ByteArray(b) => {
                 let idx = int_idx(self)?;
-                match crate::slice::norm_index(idx, b.len()).map(|i| b[i] as i64) {
+                match crate::slice::norm_index(idx, b.len()).map(|i| b.get(i) as i64) {
                     Some(v) => {
                         self.push(Value::int(v));
                         Ok(())
@@ -716,7 +716,7 @@ impl Vm {
             };
             return match crate::slice::norm_index(idx, b.len()) {
                 Some(i) => {
-                    b[i] = byte;
+                    b.set(i, byte);
                     Ok(())
                 }
                 None => {

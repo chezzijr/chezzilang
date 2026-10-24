@@ -606,7 +606,7 @@ mod tests {
         for i in 0..n {
             let obj = match i % 3 {
                 0 => Some(Obj::AtomicInt(Arc::clone(&core))),
-                1 => Some(Obj::ByteArray(vec![7; 100 + i])),
+                1 => Some(Obj::ByteArray(vec![7; 100 + i].into())),
                 _ => None,
             };
             slab.push(Slot { obj }, &mut append);

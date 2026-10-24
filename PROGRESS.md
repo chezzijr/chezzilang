@@ -252,9 +252,10 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
   extern C call with a callback runs detached and its callback reattaches (Go `cgocallback`);
   printing a busy `Writer`/`Reader` waits detached. Gate: `tests/gc_blocking_pins.rs`.
 - M1.9: M1 exit gate. `tests/chz` 1853/1853 at T=1, 2, default; stressed `spec` (GC_STRESS, T=2): 140 pass, 0 dangling, 4 timeouts; max stop on `many_list` under 10 ms (`heap_stats_report_stw_pause`). M2 is next.
-- M2.2: `List` and a cursor's `Iter.items` live on an `RVec` (`vm/rvec.rs`): a grow, sort or
-  reverse retires the old block, and only the stop-the-world sweep frees it. A list holds at most
-  `u32::MAX` elements (the block header is two `u32`s). Gate: `list_growth_retires_until_collect`.
+- M2.2: `List`, a cursor's `Iter.items` and `bytearray` live on an `RVec` (`vm/rvec.rs`; bytes
+  pack one per byte): a grow, sort or reverse retires the old block, and only the stop-the-world
+  sweep frees it. A list or a `bytearray` holds at most `u32::MAX` elements (the block header is
+  two `u32`s). Gates: `list_growth_retires_until_collect`, `bytearray_growth_retires_until_collect`.
 
 ## Later
 

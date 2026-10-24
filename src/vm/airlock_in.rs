@@ -315,7 +315,7 @@ impl Vm {
             // Rebuild a FRESH, independent heap `bytearray` from the owned raw bytes (deep copy across
             // the airlock, like `list`) — the other side never shares this VM's buffer.
             WireValue::ByteArray(b) => {
-                let h = self.heap.alloc(Obj::ByteArray(b.into_vec()));
+                let h = self.heap.alloc(Obj::ByteArray(RVec::from_slice(&b)));
                 if self.copy_mark {
                     self.heap.set_copied(h);
                 }

@@ -155,7 +155,7 @@ impl Vm {
                 let raw: Vec<u8> = match self.heap.get(h) {
                     Obj::Str(s) => s.as_bytes().to_vec(),
                     Obj::Bytes(_) => return Ok(Some(recv)),
-                    Obj::ByteArray(b) => b.clone(),
+                    Obj::ByteArray(b) => b.to_vec(),
                     Obj::BigInt(_)
                     | Obj::FloatBox(_)
                     | Obj::Iter { .. }
@@ -1364,10 +1364,11 @@ impl Vm {
                         ));
                     }
                 };
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                let heap = self.heap.write(h);
+                let Obj::ByteArray(b) = heap.get(h) else {
                     unreachable!()
                 };
-                b.push(byte);
+                b.push(heap, byte);
                 Ok(Value::nil())
             }
             BytearrayMethod::Pop => {
@@ -1386,10 +1387,11 @@ impl Vm {
                 // Snapshot the other side first (so `ba.extend(ba)` terminates) — also validates
                 // ints 0..=255 / element types up front, mirroring the constructor.
                 let appended = self.collect_bytes_arg("extend", args[0], span)?;
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                let heap = self.heap.write(h);
+                let Obj::ByteArray(b) = heap.get(h) else {
                     unreachable!()
                 };
-                b.extend_from_slice(&appended);
+                b.extend_from_slice(heap, &appended);
                 Ok(Value::nil())
             }
             // `decode() -> str`: UTF-8 decode the current buffer. Invalid UTF-8 is a RECOVERABLE
@@ -1399,17 +1401,20 @@ impl Vm {
                 let Obj::ByteArray(b) = self.heap.get(h) else {
                     unreachable!()
                 };
-                let bytes = b.clone();
+                let bytes = b.to_vec();
                 self.decode_utf8(&bytes, span)
             }
             // `reverse() -> None` reverses in place, `reversed() -> bytearray` returns a NEW buffer
             // (Python `bytearray.reverse()`, `bytearray(reversed(b))`).
             BytearrayMethod::Reverse => {
                 self.arity_err("reverse", args, 0, span)?;
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                let heap = self.heap.write(h);
+                let Obj::ByteArray(b) = heap.get(h) else {
                     unreachable!()
                 };
-                b.reverse();
+                let mut bytes = b.to_vec();
+                bytes.reverse();
+                b.replace(heap, &bytes);
                 Ok(Value::nil())
             }
             BytearrayMethod::Reversed => {
@@ -1417,9 +1422,9 @@ impl Vm {
                 let Obj::ByteArray(b) = self.heap.get(h) else {
                     unreachable!()
                 };
-                let mut dup = b.clone();
+                let mut dup = b.to_vec();
                 dup.reverse();
-                Ok(Value::obj(self.heap.alloc(Obj::ByteArray(dup))))
+                Ok(Value::obj(self.heap.alloc(Obj::ByteArray(dup.into()))))
             }
             // `copy() -> bytearray`: a new buffer with the same bytes (Python `bytearray.copy()`).
             BytearrayMethod::Copy => {

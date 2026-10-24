@@ -179,7 +179,7 @@ impl Vm {
             Obj::Set(s) => Some(s.entries.iter().map(|(_, e)| *e).collect()),
             Obj::Map(_) => Some(self.map_pairs(h)),
             Obj::Bytes(b) => Some(b.iter().map(|&x| Value::int(x as i64)).collect()),
-            Obj::ByteArray(b) => Some(b.iter().map(|&x| Value::int(x as i64)).collect()),
+            Obj::ByteArray(b) => Some(b.iter().map(|x| Value::int(x as i64)).collect()),
             Obj::Str(s) => {
                 let chars: Vec<char> = s.chars().collect();
                 Some(chars.into_iter().map(|c| self.alloc_char(c)).collect())
@@ -542,7 +542,7 @@ impl Vm {
     ) -> Result<Vec<u8>, RuntimeError> {
         match v.as_obj().map(|h| self.heap.get(h)) {
             Some(Obj::Bytes(b)) => Ok(b.to_vec()),
-            Some(Obj::ByteArray(b)) => Ok(b.clone()),
+            Some(Obj::ByteArray(b)) => Ok(b.to_vec()),
             Some(Obj::List(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for e in items {
@@ -617,7 +617,7 @@ impl Vm {
                 ));
             }
         };
-        Ok(Value::obj(self.heap.alloc(Obj::ByteArray(bytes))))
+        Ok(Value::obj(self.heap.alloc(Obj::ByteArray(bytes.into()))))
     }
 
     /// `bytes(b)` → copy; `bytes(ba)` → immutable SNAPSHOT of a `bytearray`; `bytes([ints])` → from a

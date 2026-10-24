@@ -684,7 +684,7 @@ impl WalkSrc<'_> {
                 // `bytearray` crosses by value as a DEEP COPY (a fresh independent buffer on the other
                 // side, like `list`) — never a shared mutable view. `from_wire` rebuilds a new heap
                 // `bytearray`, so cross-thread mutation never aliases.
-                Obj::ByteArray(b) => WireValue::ByteArray(b.clone().into_boxed_slice()),
+                Obj::ByteArray(b) => WireValue::ByteArray(b.to_vec().into_boxed_slice()),
                 // A first-class builtin fn crosses the airlock BY VALUE (its name) — pure code, no
                 // `GcRef` and no captured heap state, so it genuinely crosses an OS-thread boundary
                 // (unlike a `Func`/`Closure` handle). `from_wire` re-allocs a fresh `Obj::Builtin`;

@@ -121,7 +121,7 @@ impl Vm {
                 // Python `bytes` repr `b'...'` — shared with the interp via `slice::bytes_repr`.
                 Obj::Bytes(b) => Ok(crate::slice::bytes_repr(b)),
                 // Python `bytearray` repr `bytearray(b'...')` — shared via `slice::bytearray_repr`.
-                Obj::ByteArray(b) => Ok(crate::slice::bytearray_repr(b)),
+                Obj::ByteArray(b) => Ok(crate::slice::bytearray_repr(&b.to_vec())),
                 Obj::List(items) => {
                     let mut parts = Vec::with_capacity(items.len());
                     for v in items {
@@ -760,7 +760,7 @@ impl Vm {
             // `bytes` interpolates/prints as its Python `b'...'` repr (shared helper).
             Obj::Bytes(b) => out.push_str(&crate::slice::bytes_repr(&b)),
             // `bytearray` interpolates/prints as `bytearray(b'...')` (shared helper).
-            Obj::ByteArray(b) => out.push_str(&crate::slice::bytearray_repr(&b)),
+            Obj::ByteArray(b) => out.push_str(&crate::slice::bytearray_repr(&b.to_vec())),
             Obj::List(items) => {
                 // W14-35c: a list met again while its own render is open is a back edge.
                 if self.repr_active.contains(&h) {

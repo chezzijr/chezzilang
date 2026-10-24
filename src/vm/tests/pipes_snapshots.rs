@@ -215,7 +215,7 @@ fn extract_native_args_carries_bytes() {
     );
     // A `bytearray` is NOT a seam arg (the checker rejects it at a `bytes` param): extraction bails
     // to `None` → the call would run inline, never off-heap with a stale copy of a mutable buffer.
-    let ba = Value::obj(vm.heap.alloc(Obj::ByteArray(vec![1u8, 2])));
+    let ba = Value::obj(vm.heap.alloc(Obj::ByteArray(vec![1u8, 2].into())));
     assert_eq!(vm.extract_native_args(&[ba]), None);
 }
 

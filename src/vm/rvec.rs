@@ -6,11 +6,12 @@
 //! reach it. Only the stop-the-world collector frees a retired buffer.
 //!
 //! - An `RVec<T>` is one `AtomicPtr` to a [`Header`] block: one allocation, the header and then
-//!   `cap` inline `AtomicU64` slots, zeroed at allocation. A null pointer is the empty vec. The
+//!   `cap` inline atomic slots, zeroed at allocation. A null pointer is the empty vec. The
 //!   header's `cap` and `len` are `u32`s, so a vec holds at most `u32::MAX` elements; a larger
 //!   capacity panics (a task fault).
-//! - `T` is a [`Word`]: 8 bytes, no padding, `Copy` (`u64`, `i64`, `Value`). Every slot access
-//!   is a `Relaxed` atomic of the word's bits, so a racing read and write on one slot is no data
+//! - `T` is an [`Elem`]: `Copy`, no padding, in an atomic slot of its own size (`u64`, `i64`
+//!   and `Value` in an `AtomicU64`, `u8` in an `AtomicU8`, so bytes pack one per byte). Every slot
+//!   access is a `Relaxed` atomic of the element, so a racing read and write on one slot is no data
 //!   race and never tears. `Copy` is also what makes a racy read sound: a reader copies the bits,
 //!   and a copied `T` with a drop would drop twice.
 //! - A read loads the pointer (Acquire), then that block's `len` (Acquire), then a slot below
@@ -20,7 +21,7 @@
 //!   allocates a block of twice the capacity, copies the elements, and swaps the pointer with a
 //!   `compare_exchange` (AcqRel). The winner retires the old block; a loser frees its own new
 //!   block (no one else saw it) and retries.
-//! - A shrink frees nothing: `truncate` lowers `len`, and a `Word` has no drop.
+//! - A shrink frees nothing: `truncate` lowers `len`, and an `Elem` has no drop.
 //! - A whole-vec rewrite (sort, reverse) builds a new block and swaps it in with
 //!   [`RVec::replace`]; the old block retires like a grown one.
 //!
@@ -51,48 +52,55 @@ use std::ptr::{self, NonNull};
 use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 mod sealed {
     pub trait Sealed {}
 }
 
-/// An element type of an [`RVec`]: a `Copy` word of 8 bytes with no padding, stored as its bits.
-pub trait Word: Copy + sealed::Sealed {
-    /// Evaluated by every slot access: a `Word` is 8 bytes with 8-byte alignment.
-    const IS_WORD: () = assert!(size_of::<Self>() == 8 && align_of::<Self>() == 8);
-    fn to_bits(self) -> u64;
-    /// `bits` is a value that `to_bits` returned.
-    fn from_bits(bits: u64) -> Self;
+/// An element type of an [`RVec`]: a `Copy` value with no padding, stored in an atomic slot of
+/// its own size (`AtomicU64` for the 8-byte words, `AtomicU8` for a byte).
+pub trait Elem: Copy + sealed::Sealed {
+    /// The atomic slot one element lives in. A zeroed slot is a valid one.
+    type Slot;
+    /// Evaluated by every slot access: an element is exactly its slot's size, and needs no more
+    /// alignment than the slot has.
+    const FITS_SLOT: () = assert!(
+        size_of::<Self>() == size_of::<Self::Slot>()
+            && align_of::<Self>() <= align_of::<Self::Slot>()
+    );
+    fn load(slot: &Self::Slot) -> Self;
+    fn store(slot: &Self::Slot, v: Self);
 }
 
-impl sealed::Sealed for u64 {}
-impl Word for u64 {
-    fn to_bits(self) -> u64 {
-        self
-    }
-    fn from_bits(bits: u64) -> Self {
-        bits
-    }
+/// An 8-byte word in an `AtomicU64`, as its bits (`$to` and `$from` convert).
+macro_rules! word_elem {
+    ($t:ty, $to:expr, $from:expr) => {
+        impl sealed::Sealed for $t {}
+        impl Elem for $t {
+            type Slot = AtomicU64;
+            fn load(slot: &AtomicU64) -> Self {
+                $from(slot.load(Ordering::Relaxed))
+            }
+            fn store(slot: &AtomicU64, v: Self) {
+                slot.store($to(v), Ordering::Relaxed);
+            }
+        }
+    };
 }
 
-impl sealed::Sealed for i64 {}
-impl Word for i64 {
-    fn to_bits(self) -> u64 {
-        self as u64
-    }
-    fn from_bits(bits: u64) -> Self {
-        bits as i64
-    }
-}
+word_elem!(u64, |v: u64| v, |b: u64| b);
+word_elem!(i64, |v: i64| v as u64, |b: u64| b as i64);
+word_elem!(Value, Value::to_bits, Value::from_bits);
 
-impl sealed::Sealed for Value {}
-impl Word for Value {
-    fn to_bits(self) -> u64 {
-        self.to_bits()
+impl sealed::Sealed for u8 {}
+impl Elem for u8 {
+    type Slot = AtomicU8;
+    fn load(slot: &AtomicU8) -> Self {
+        slot.load(Ordering::Relaxed)
     }
-    fn from_bits(bits: u64) -> Self {
-        Value::from_bits(bits)
+    fn store(slot: &AtomicU8, v: Self) {
+        slot.store(v, Ordering::Relaxed);
     }
 }
 
@@ -123,15 +131,15 @@ impl Header {
 }
 
 /// The offset of slot 0 from the block's start (the same for every `cap`).
-fn data_offset() -> usize {
+fn data_offset<T: Elem>() -> usize {
     Layout::new::<Header>()
-        .extend(Layout::new::<AtomicU64>())
+        .extend(Layout::new::<T::Slot>())
         .expect("an RVec block layout")
         .1
 }
 
-fn block_layout(cap: usize) -> Layout {
-    let data = Layout::array::<AtomicU64>(cap).expect("an RVec capacity overflows");
+fn block_layout<T: Elem>(cap: usize) -> Layout {
+    let data = Layout::array::<T::Slot>(cap).expect("an RVec capacity overflows");
     Layout::new::<Header>()
         .extend(data)
         .expect("an RVec capacity overflows")
@@ -181,16 +189,16 @@ pub(super) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// A new block of `cap` zeroed slots, `len` 0.
-fn alloc_block(cap: usize) -> *mut Header {
+fn alloc_block<T: Elem>(cap: usize) -> *mut Header {
     let cap32 = u32::try_from(cap).expect("an RVec capacity overflows");
-    let layout = block_layout(cap);
-    // SAFETY: `layout` has a non-zero size (the header is two words).
+    let layout = block_layout::<T>(cap);
+    // SAFETY: `layout` has a non-zero size (the header is 8 bytes).
     let p = unsafe { alloc_zeroed(layout) }.cast::<Header>();
     if p.is_null() {
         handle_alloc_error(layout);
     }
     // SAFETY: `p` is a fresh allocation with room and alignment for a `Header`; the zeroed slots
-    // after it are valid `AtomicU64`s.
+    // after it are valid `T::Slot`s.
     unsafe {
         p.write(Header {
             cap: cap32,
@@ -214,15 +222,20 @@ unsafe fn free_block(ptr: NonNull<u8>, layout: Layout) {
     count(&FREES);
 }
 
-/// Slot `i` of block `h`.
+/// Slot `i` of block `h`, a block of `T`s.
 ///
 /// # Safety
 ///
-/// `h` is a live block and `i < cap`; the returned reference does not outlive the block.
-unsafe fn slot<'a>(h: *mut Header, i: usize) -> &'a AtomicU64 {
+/// `h` is a live block of `T`s and `i < cap`; the returned reference does not outlive the block.
+unsafe fn slot<'a, T: Elem>(h: *mut Header, i: usize) -> &'a T::Slot {
     // SAFETY: the caller's contract: the slot lies inside the block's allocation, and
-    // `alloc_block` zeroed it, so it is a valid `AtomicU64`.
-    unsafe { &*h.cast::<u8>().add(data_offset()).cast::<AtomicU64>().add(i) }
+    // `alloc_block` zeroed it, so it is a valid `T::Slot`.
+    unsafe {
+        &*h.cast::<u8>()
+            .add(data_offset::<T>())
+            .cast::<T::Slot>()
+            .add(i)
+    }
 }
 
 /// Read slot `i` of `h`.
@@ -230,10 +243,10 @@ unsafe fn slot<'a>(h: *mut Header, i: usize) -> &'a AtomicU64 {
 /// # Safety
 ///
 /// As for [`slot`].
-unsafe fn load<T: Word>(h: *mut Header, i: usize) -> T {
-    let () = T::IS_WORD;
+unsafe fn load<T: Elem>(h: *mut Header, i: usize) -> T {
+    let () = T::FITS_SLOT;
     // SAFETY: the caller's contract.
-    T::from_bits(unsafe { slot(h, i) }.load(Ordering::Relaxed))
+    T::load(unsafe { slot::<T>(h, i) })
 }
 
 /// Write `v` into slot `i` of `h`.
@@ -241,22 +254,22 @@ unsafe fn load<T: Word>(h: *mut Header, i: usize) -> T {
 /// # Safety
 ///
 /// As for [`slot`].
-unsafe fn store<T: Word>(h: *mut Header, i: usize, v: T) {
-    let () = T::IS_WORD;
+unsafe fn store<T: Elem>(h: *mut Header, i: usize, v: T) {
+    let () = T::FITS_SLOT;
     // SAFETY: the caller's contract.
-    unsafe { slot(h, i) }.store(v.to_bits(), Ordering::Relaxed);
+    T::store(unsafe { slot::<T>(h, i) }, v);
 }
 
 /// Put the block `old` of `cap` slots, which no vec points to any more, on `heap`'s retire list,
 /// and charge its bytes to `heap` (once; see the module doc's pacing).
-fn retire(heap: &Heap, old: *mut Header, cap: usize) {
+fn retire<T: Elem>(heap: &Heap, old: *mut Header, cap: usize) {
     let ptr = NonNull::new(old.cast::<u8>()).expect("a retired block is not null");
-    let layout = block_layout(cap);
+    let layout = block_layout::<T>(cap);
     heap.retire_list().lock().push(RetiredBlock { ptr, layout });
     heap.charge_bytes(layout.size());
 }
 
-/// A retired block: freeing it needs only its layout (a `Word` has no drop).
+/// A retired block: freeing it needs only its layout (an `Elem` has no drop).
 struct RetiredBlock {
     ptr: NonNull<u8>,
     layout: Layout,
@@ -321,19 +334,19 @@ impl Drop for RetireList {
     }
 }
 
-/// A growable vector of `T: Word` whose grows retire the old block (see the module doc).
-pub struct RVec<T: Word> {
+/// A growable vector of `T: Elem` whose grows retire the old block (see the module doc).
+pub struct RVec<T: Elem> {
     ptr: AtomicPtr<Header>,
     _t: PhantomData<T>,
 }
 
-impl<T: Word> Default for RVec<T> {
+impl<T: Elem> Default for RVec<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Word> RVec<T> {
+impl<T: Elem> RVec<T> {
     /// An empty vec with no block.
     pub const fn new() -> Self {
         RVec {
@@ -346,7 +359,7 @@ impl<T: Word> RVec<T> {
         let p = if cap == 0 {
             ptr::null_mut()
         } else {
-            alloc_block(cap)
+            alloc_block::<T>(cap)
         };
         RVec {
             ptr: AtomicPtr::new(p),
@@ -415,7 +428,7 @@ impl<T: Word> RVec<T> {
         let old = self.ptr.swap(p, Ordering::AcqRel);
         if !old.is_null() {
             // SAFETY: `old` came from `alloc_block`; its `cap` is never written after that.
-            retire(heap, old, unsafe { (*old).cap() });
+            retire::<T>(heap, old, unsafe { (*old).cap() });
         }
     }
 
@@ -456,7 +469,7 @@ impl<T: Word> RVec<T> {
         };
         let doubled = cap.checked_mul(2).expect("an RVec capacity overflows");
         let new_cap = doubled.max(min_cap).max(4);
-        let new = alloc_block(new_cap);
+        let new = alloc_block::<T>(new_cap);
         for i in 0..len {
             // SAFETY: `i < len <= cap` of the live block `old`, and `len <= cap < new_cap`.
             unsafe { store(new, i, load::<T>(old, i)) };
@@ -469,13 +482,13 @@ impl<T: Word> RVec<T> {
         {
             Ok(_) => {
                 if !old.is_null() {
-                    retire(heap, old, cap);
+                    retire::<T>(heap, old, cap);
                 }
             }
             Err(_) => {
                 let p = NonNull::new(new.cast::<u8>()).expect("a new block is not null");
                 // SAFETY: the swap failed, so no vec points to `new` and no thread saw it.
-                unsafe { free_block(p, block_layout(new_cap)) };
+                unsafe { free_block(p, block_layout::<T>(new_cap)) };
             }
         }
     }
@@ -545,7 +558,7 @@ impl<T: Word> RVec<T> {
         }
     }
 
-    /// Lower `len` to `n`; frees nothing (a `Word` has no drop).
+    /// Lower `len` to `n`; frees nothing (an `Elem` has no drop).
     pub fn truncate(&self, n: usize) {
         let (h, len, _) = self.snapshot();
         if n < len {
@@ -587,32 +600,32 @@ impl<T: Word> RVec<T> {
     }
 }
 
-impl<T: Word> Clone for RVec<T> {
+impl<T: Elem> Clone for RVec<T> {
     /// A new block at exactly the snapshot's length.
     fn clone(&self) -> Self {
         Self::from_slice(&self.to_vec())
     }
 }
 
-impl<T: Word + std::fmt::Debug> std::fmt::Debug for RVec<T> {
+impl<T: Elem + std::fmt::Debug> std::fmt::Debug for RVec<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
 }
 
-impl<T: Word> From<Vec<T>> for RVec<T> {
+impl<T: Elem> From<Vec<T>> for RVec<T> {
     fn from(v: Vec<T>) -> Self {
         Self::from_slice(&v)
     }
 }
 
-impl<T: Word> FromIterator<T> for RVec<T> {
+impl<T: Elem> FromIterator<T> for RVec<T> {
     fn from_iter<I: IntoIterator<Item = T>>(it: I) -> Self {
         Self::from_slice(&it.into_iter().collect::<Vec<T>>())
     }
 }
 
-impl<'a, T: Word> IntoIterator for &'a RVec<T> {
+impl<'a, T: Elem> IntoIterator for &'a RVec<T> {
     type Item = T;
     type IntoIter = Iter<'a, T>;
     /// See [`RVec::iter`].
@@ -621,7 +634,7 @@ impl<'a, T: Word> IntoIterator for &'a RVec<T> {
     }
 }
 
-impl<T: Word> Drop for RVec<T> {
+impl<T: Elem> Drop for RVec<T> {
     /// The owning heap object is swept (world stopped) or dropped by its only owner: free the
     /// current block at once.
     fn drop(&mut self) {
@@ -629,7 +642,7 @@ impl<T: Word> Drop for RVec<T> {
         if let Some(p) = NonNull::new(h.cast::<u8>()) {
             // SAFETY: `&mut self`: no reader of this vec is left, and `h` came from
             // `alloc_block`; its `cap` is never written after that.
-            let layout = block_layout(unsafe { (*h).cap() });
+            let layout = block_layout::<T>(unsafe { (*h).cap() });
             // SAFETY: as above.
             unsafe { free_block(p, layout) };
         }
@@ -637,14 +650,14 @@ impl<T: Word> Drop for RVec<T> {
 }
 
 /// See [`RVec::iter`].
-pub struct Iter<'a, T: Word> {
+pub struct Iter<'a, T: Elem> {
     h: *mut Header,
     len: usize,
     i: usize,
     _v: PhantomData<&'a RVec<T>>,
 }
 
-impl<T: Word> Iterator for Iter<'_, T> {
+impl<T: Elem> Iterator for Iter<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
@@ -740,7 +753,7 @@ mod tests {
         let charged = heap.run_bytes_estimate() - before;
         assert_eq!(
             charged,
-            super::block_layout(4).size(),
+            super::block_layout::<u64>(4).size(),
             "the old block's bytes"
         );
         heap.should_collect();
@@ -869,6 +882,21 @@ mod tests {
         vals.push(&heap, Value::int(-3));
         vals.push(&heap, Value::nil());
         assert!(vals.get(0) == Value::int(-3) && vals.get(1) == Value::nil());
+        heap.sweep();
+    }
+
+    /// Bytes pack one per byte after the 8-byte header, and edit like a `Vec<u8>`.
+    #[test]
+    fn bytes_pack_one_per_byte() {
+        let _g = test_serial();
+        let mut heap = Heap::new();
+        assert_eq!(super::block_layout::<u8>(16).size(), 8 + 16);
+        let v: RVec<u8> = RVec::from_slice(b"ab");
+        v.extend_from_slice(&heap, b"cdef");
+        v.set(0, b'z');
+        v.insert(&heap, 1, b'-');
+        assert_eq!(v.pop(), Some(b'f'));
+        assert_eq!(v.to_vec(), b"z-bcde");
         heap.sweep();
     }
 

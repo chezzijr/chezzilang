@@ -212,12 +212,12 @@ pub enum Obj {
     /// raw `u8`s (no `GcRef`s), so `children()` returns nothing — it is marked reachable but traces
     /// no children, exactly like `Str`/`Native`. `Box<[u8]>` is 16B, well within the 64B `Obj` cap.
     Bytes(Box<[u8]>),
-    /// `bytearray` — the MUTABLE sibling of `bytes` (Python `bytearray` model). Storage is a `Vec<u8>`
-    /// mutated IN PLACE through the `GcRef` heap slot (`heap.get_mut`), exactly like [`List`](Obj::List),
-    /// so two bindings to the same `bytearray` observe each other's writes. Still a GC LEAF — raw `u8`s,
-    /// no `GcRef`s — so `children()` traces nothing (the difference vs `Bytes` is the mutability of the
-    /// slot, not GC reachability). `Vec<u8>` is 24B (= `List`'s `Vec<Value>`), within the 64B `Obj` cap.
-    ByteArray(Vec<u8>),
+    /// `bytearray` — the MUTABLE sibling of `bytes` (Python `bytearray` model). Storage is an
+    /// `RVec<u8>` (one byte per slot, `vm/rvec.rs`) mutated IN PLACE through the `GcRef` heap slot,
+    /// exactly like [`List`](Obj::List), so two bindings to the same `bytearray` observe each
+    /// other's writes. Still a GC LEAF — raw `u8`s, no `GcRef`s — so `children()` traces nothing
+    /// (the difference vs `Bytes` is the mutability of the slot, not GC reachability).
+    ByteArray(RVec<u8>),
     /// A heap-boxed `i64` outside the ±2^62 inline-`Value` range (8B-`Value` milestone). A GC LEAF:
     /// holds one raw `i64`, no `GcRef`s, so `children()` traces nothing (like `Bytes`). Immutable, so
     /// aliasing two `Value`s to one box is invisible. UNUSED until the 8B-`Value` swap (Phase 1); the
@@ -233,8 +233,8 @@ pub enum Obj {
     /// instant `.iter()` was called, plus a read `pos`. `.next()` returns `Some(items[pos])` and
     /// advances; `None` (idempotent) past the end. NON-LEAF (unlike `Bytes`/`ByteArray`): `items` may
     /// hold heap `GcRef`s (a list of structs, a set of strings, …), so `children()` MUST trace them
-    /// or the snapshot's elements get collected out from under a live cursor. `Vec<Value>`(24) +
-    /// `usize`(8) = 32B, within the 64B `Obj` cap (`MapData`/`SetData` set the cap).
+    /// or the snapshot's elements get collected out from under a live cursor. `RVec<Value>`(8) +
+    /// `usize`(8) = 16B, within the 64B `Obj` cap (`MapData`/`SetData` set the cap).
     Iter {
         items: RVec<Value>,
         pos: usize,

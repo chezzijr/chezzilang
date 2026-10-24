@@ -637,15 +637,15 @@ impl Vm {
                             Value::obj(self.heap.alloc(Obj::Bytes(out)))
                         }
                         (Obj::ByteArray(a), Obj::ByteArray(b)) => {
-                            let out: Vec<u8> = a.iter().chain(b.iter()).copied().collect();
+                            let out: RVec<u8> = a.iter().chain(b.iter()).collect();
                             Value::obj(self.heap.alloc(Obj::ByteArray(out)))
                         }
                         (Obj::ByteArray(a), Obj::Bytes(b)) => {
-                            let out: Vec<u8> = a.iter().chain(b.iter()).copied().collect();
+                            let out: RVec<u8> = a.iter().chain(b.iter().copied()).collect();
                             Value::obj(self.heap.alloc(Obj::ByteArray(out)))
                         }
                         (Obj::Bytes(a), Obj::ByteArray(b)) => {
-                            let out: Box<[u8]> = a.iter().chain(b.iter()).copied().collect();
+                            let out: Box<[u8]> = a.iter().copied().chain(b.iter()).collect();
                             Value::obj(self.heap.alloc(Obj::Bytes(out)))
                         }
                         // List concat (gap #3): `[1,2] + [3,4]` — identical to `.concat` (vm:7688).
