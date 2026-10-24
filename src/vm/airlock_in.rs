@@ -91,20 +91,21 @@ impl Vm {
     /// `Obj::Closure { captured }`, so `spawn` with a capturing closure still leaked 22–24×, under a
     /// doc comment claiming captures were fixed. Adversarial review caught it; the suite did not.
     ///
-    /// Pre-sizing and pushing keeps the exact-capacity guarantee at the cost of one extra live
-    /// buffer while the source drains, which the wire copy was already paying.
-    pub(super) fn rebuild_items<T>(
+    /// The rebuilt items are collected straight into the caller's container `C` (a `Vec`, or a
+    /// heap object's `RVec`): the source's exact length sizes it once, which keeps the
+    /// exact-capacity guarantee, and a list's block is written in place with no temporary `Vec`.
+    /// The collect reads through `&mut`: a `Vec` target would otherwise take std's in-place
+    /// collect and keep the wire buffer's allocation (the regression above).
+    pub(super) fn rebuild_items<T, C: FromIterator<Value>>(
         &mut self,
         items: Vec<T>,
         rebuild: &mut super::fxhash::FxHashMap<u32, GcRef>,
         pick: impl Fn(T) -> WireValue,
-    ) -> Vec<Value> {
-        let mut out = Vec::with_capacity(items.len());
-        for it in items {
-            let v = self.from_wire_memo(pick(it), rebuild);
-            out.push(v);
-        }
-        out
+    ) -> C {
+        let mut items = items.into_iter();
+        (&mut items)
+            .map(|it| self.from_wire_memo(pick(it), rebuild))
+            .collect()
     }
 
     /// TICKET-240 Rule W: unmark exactly the objects `shape` says the crossing site built, in the
@@ -270,7 +271,7 @@ impl Vm {
         proto: ProtoId,
         stamp: u64,
     ) -> Vec<Value> {
-        let out = self.rebuild_items(slots, rebuild, |w| w);
+        let out: Vec<Value> = self.rebuild_items(slots, rebuild, |w| w);
         if self.copy_mark {
             let p = &self.program.protos[proto];
             let (private, deep, arity) = (p.private_slots, p.deep_slots, p.arity);
@@ -368,7 +369,7 @@ impl Vm {
                 // adopted handle instead of a fresh one.
                 if let Some(h) = self.adopt_node(id) {
                     rebuild.insert(id, h);
-                    self.rebuild_items(items, rebuild, |x| x);
+                    self.rebuild_items::<_, Vec<Value>>(items, rebuild, |x| x);
                     if self.copy_mark {
                         self.heap.set_copied(h);
                     }
@@ -380,13 +381,13 @@ impl Vm {
                 }
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
-                *self.heap.get_mut(h) = Obj::List(cloned.into());
+                *self.heap.get_mut(h) = Obj::List(cloned);
                 Value::obj(h)
             }
             WireValue::Tuple { id, items } => {
                 if let Some(h) = self.adopt_node(id) {
                     rebuild.insert(id, h);
-                    self.rebuild_items(items, rebuild, |x| x);
+                    self.rebuild_items::<_, Vec<Value>>(items, rebuild, |x| x);
                     return Value::obj(h);
                 }
                 let h = self.heap.alloc(Obj::Tuple(Vec::new()));
@@ -398,7 +399,7 @@ impl Vm {
             WireValue::Iter { id, items, pos } => {
                 if let Some(h) = self.adopt_node(id) {
                     rebuild.insert(id, h);
-                    self.rebuild_items(items, rebuild, |x| x);
+                    self.rebuild_items::<_, Vec<Value>>(items, rebuild, |x| x);
                     return Value::obj(h);
                 }
                 let h = self.heap.alloc(Obj::Iter {
@@ -408,7 +409,7 @@ impl Vm {
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
                 match self.heap.get_mut(h) {
-                    Obj::Iter { items, .. } => *items = cloned.into(),
+                    Obj::Iter { items, .. } => *items = cloned,
                     Obj::Str(_)
                     | Obj::Bytes(_)
                     | Obj::ByteArray(_)
@@ -499,7 +500,7 @@ impl Vm {
             WireValue::Struct { id, name, fields } => {
                 if let Some(h) = self.adopt_node(id) {
                     rebuild.insert(id, h);
-                    self.rebuild_items(fields, rebuild, |(_, val)| val);
+                    self.rebuild_items::<_, Vec<Value>>(fields, rebuild, |(_, val)| val);
                     if self.copy_mark {
                         self.heap.set_copied(h);
                     }
@@ -559,7 +560,7 @@ impl Vm {
             } => {
                 if let Some(h) = self.adopt_node(id) {
                     rebuild.insert(id, h);
-                    self.rebuild_items(payload, rebuild, |x| x);
+                    self.rebuild_items::<_, Vec<Value>>(payload, rebuild, |x| x);
                     return Value::obj(h);
                 }
                 let h = self.heap.alloc(Obj::Enum {
@@ -571,7 +572,7 @@ impl Vm {
                 // M19 lever #2 — the dense `variant_id` crossed the airlock directly (shared
                 // `Arc<Program>`), so it is replayed as-is — no lossy name re-resolution.
                 match self.heap.get_mut(h) {
-                    Obj::Enum { payload, .. } => *payload = cloned.into(),
+                    Obj::Enum { payload, .. } => *payload = cloned,
                     Obj::Str(_)
                     | Obj::Bytes(_)
                     | Obj::ByteArray(_)
@@ -760,10 +761,10 @@ impl Vm {
                     }
                     match state {
                         WireGenState::Pending(wargs, _) => {
-                            self.rebuild_items(wargs, rebuild, |w| w);
+                            self.rebuild_items::<_, Vec<Value>>(wargs, rebuild, |w| w);
                         }
                         WireGenState::Suspended { stack, .. } => {
-                            self.rebuild_items(stack, rebuild, |w| w);
+                            self.rebuild_items::<_, Vec<Value>>(stack, rebuild, |w| w);
                         }
                         WireGenState::Done | WireGenState::Unsendable(_) => {}
                     }

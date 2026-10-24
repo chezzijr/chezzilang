@@ -172,12 +172,13 @@ impl Vm {
     /// `(key, value)` pairs, a str's 1-char strs, a bytes' or bytearray's ints (0-255), and a
     /// cursor's remaining items (not advanced). `None` for every other object. The one runtime row
     /// table: the `for` lowering (`Op::ListClone`), [`drain_iterable`](Self::drain_iterable) and the
-    /// builtin `.iter()` all read it.
-    pub(super) fn builtin_items(&mut self, h: GcRef) -> Option<Vec<Value>> {
+    /// builtin `.iter()` all read it. Collected straight into the caller's container `C` (a
+    /// `Vec` or a heap object's `RVec`), so a big list is copied once, not through a temporary.
+    pub(super) fn builtin_items<C: FromIterator<Value>>(&mut self, h: GcRef) -> Option<C> {
         match self.heap.get(h) {
-            Obj::List(items) => Some(items.to_vec()),
+            Obj::List(items) => Some(items.iter().collect()),
             Obj::Set(s) => Some(s.entries.iter().map(|(_, e)| e).collect()),
-            Obj::Map(_) => Some(self.map_pairs(h)),
+            Obj::Map(_) => Some(self.map_pairs(h).into_iter().collect()),
             Obj::Bytes(b) => Some(b.iter().map(|&x| Value::int(x as i64)).collect()),
             Obj::ByteArray(b) => Some(b.iter().map(|x| Value::int(x as i64)).collect()),
             Obj::Str(s) => {

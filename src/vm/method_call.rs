@@ -614,17 +614,14 @@ impl Vm {
         if method == "iter" && args.is_empty() {
             // Both readers may alloc (str per-char); root the receiver across the call.
             self.push(recv);
-            let items = if matches!(self.heap.get(h), Obj::Channel(_)) {
-                Some(self.drain_iterable(recv, span)?)
+            let items: Option<RVec<Value>> = if matches!(self.heap.get(h), Obj::Channel(_)) {
+                Some(self.drain_iterable(recv, span)?.into())
             } else {
                 self.builtin_items(h)
             };
             self.pop(); // unroot receiver
             if let Some(items) = items {
-                let cursor = self.heap.alloc(Obj::Iter {
-                    items: items.into(),
-                    pos: 0,
-                });
+                let cursor = self.heap.alloc(Obj::Iter { items, pos: 0 });
                 self.push(Value::obj(cursor));
                 return Ok(());
             }

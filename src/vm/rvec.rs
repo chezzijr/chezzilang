@@ -757,9 +757,9 @@ impl<T: Elem> RVec<T> {
 }
 
 impl<T: Elem> Clone for RVec<T> {
-    /// A new block at exactly the snapshot's length.
+    /// A new block at exactly the snapshot's length, copied block to block (no temporary).
     fn clone(&self) -> Self {
-        Self::from_slice(&self.to_vec())
+        self.iter().collect()
     }
 }
 
@@ -776,8 +776,31 @@ impl<T: Elem> From<Vec<T>> for RVec<T> {
 }
 
 impl<T: Elem> FromIterator<T> for RVec<T> {
+    /// An iterator that reports an exact size (`size_hint` lower == upper) is written straight
+    /// into a block of that size, with no temporary `Vec` (a closure's captures, `MakeClosure`).
+    /// The hint is not trusted: at most that many elements are taken, and `len` is the count
+    /// actually written.
     fn from_iter<I: IntoIterator<Item = T>>(it: I) -> Self {
-        Self::from_slice(&it.into_iter().collect::<Vec<T>>())
+        let it = it.into_iter();
+        match it.size_hint() {
+            (lo, Some(hi)) if lo == hi => {
+                let v = Self::with_capacity(lo);
+                let (h, _, _) = v.snapshot();
+                let mut n = 0;
+                for x in it.take(lo) {
+                    // SAFETY: `n < lo`, the capacity of this vec's own new block `h`; no other
+                    // thread has seen it.
+                    unsafe { store(h, n, x) };
+                    n += 1;
+                }
+                if !h.is_null() {
+                    // SAFETY: as above; the slots below `n` are written.
+                    unsafe { (*h).set_len(n) };
+                }
+                v
+            }
+            _ => Self::from_slice(&it.collect::<Vec<T>>()),
+        }
     }
 }
 
@@ -852,7 +875,15 @@ impl<T: Elem> Iterator for Iter<'_, T> {
         self.i += 1;
         Some(v)
     }
+
+    /// Exact: the snapshot's `len` is fixed, so a collect sizes its block once.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.len - self.i;
+        (n, Some(n))
+    }
 }
+
+impl<T: Elem> ExactSizeIterator for Iter<'_, T> {}
 
 /// One boxed `T` behind an atomic owner pointer, with two kinds of access. A parked generator
 /// lives here (`vm/exec.rs`), so two threads that resume one generator never both write its
@@ -981,6 +1012,42 @@ mod tests {
     use crate::vm::value::Value;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// An iterator whose size hint is exact is collected straight into one block of that size.
+    /// The hint is not trusted: a short iterator publishes only what it wrote, and a long one
+    /// stops at the hint.
+    #[test]
+    fn collect_sizes_one_block_from_an_exact_hint() {
+        struct Lying(std::ops::Range<u64>, usize);
+        impl Iterator for Lying {
+            type Item = u64;
+            fn next(&mut self) -> Option<u64> {
+                self.0.next()
+            }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (self.1, Some(self.1))
+            }
+        }
+        let _g = test_serial();
+        let (allocs, _) = test_counts();
+        let v: RVec<u64> = (0..5).collect();
+        assert_eq!(test_counts().0 - allocs, 1, "one block, no temporary");
+        assert_eq!(
+            (v.len(), v.capacity(), v.to_vec()),
+            (5, 5, vec![0, 1, 2, 3, 4])
+        );
+        let short: RVec<u64> = Lying(0..3, 5).collect();
+        assert_eq!((short.len(), short.to_vec()), (3, vec![0, 1, 2]));
+        let long: RVec<u64> = Lying(0..9, 2).collect();
+        assert_eq!((long.len(), long.to_vec()), (2, vec![0, 1]));
+        let copy = v.clone();
+        assert_eq!(
+            (copy.len(), copy.capacity(), copy.to_vec()),
+            (5, 5, v.to_vec())
+        );
+        let empty: RVec<u64> = std::iter::empty().collect();
+        assert_eq!((empty.len(), empty.capacity()), (0, 0));
+    }
 
     /// A push past the capacity retires the old block on the handle's list. Neither the
     /// hand-off to the core nor anything else frees it; the next sweep (the stop) does.

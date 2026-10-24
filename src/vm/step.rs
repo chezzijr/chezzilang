@@ -584,9 +584,9 @@ impl Vm {
                 // the enclosing closure's value by its positional `parent_slot`.
                 let frame = self.frames.last().unwrap();
                 let (base, home, enclosing) = (frame.base, frame.home, frame.closure);
-                let mut captured = Vec::with_capacity(entries.len());
-                for e in entries {
-                    let v = match e.src {
+                let captured: RVec<Value> = entries
+                    .iter()
+                    .map(|e| match e.src {
                         CapSrc::Slot(i) => self.stack[base + i],
                         CapSrc::Captured(parent_slot) => enclosing
                             .and_then(|h| match self.heap.get(h) {
@@ -625,12 +625,11 @@ impl Vm {
                                 | Obj::Generator(_) => None,
                             })
                             .unwrap_or(Value::nil()),
-                    };
-                    captured.push(v);
-                }
+                    })
+                    .collect();
                 let h = self.heap.alloc(Obj::Closure {
                     proto: *proto,
-                    captured: captured.into(),
+                    captured,
                     home,
                 });
                 self.push(Value::obj(h));
@@ -677,12 +676,15 @@ impl Vm {
                 // Snapshot a `for` iterand into an index-iterable list (a body that mutates the
                 // source does not disturb iteration). `builtin_items` holds the rows.
                 let v = self.pop();
-                let Some(items) = v.as_obj().and_then(|h| self.builtin_items(h)) else {
+                let Some(items) = v
+                    .as_obj()
+                    .and_then(|h| self.builtin_items::<RVec<Value>>(h))
+                else {
                     return Err(
                         self.err(format!("cannot iterate over {}", self.type_name(v)), span)
                     );
                 };
-                let nh = self.heap.alloc(Obj::List(items.into()));
+                let nh = self.heap.alloc(Obj::List(items));
                 self.push(Value::obj(nh));
             }
             Op::ArrLen => {
