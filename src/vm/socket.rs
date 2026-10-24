@@ -204,7 +204,11 @@ impl Vm {
             return Err(self.err(format!("std.net.{name} expects an address string"), span));
         };
         match name {
-            "connect" => match crate::native::net::connect_nonblocking(&addr) {
+            // M1.5 — name resolution (`getaddrinfo`) blocks: connect and listen run through the
+            // GC door.
+            "connect" => match self
+                .gc_blocking(&[], |_| crate::native::net::connect_nonblocking(&addr))
+            {
                 // Connected synchronously — wrap + return at once. RARE, and this comment used to
                 // claim it was "the common loopback case", which is measured false on Linux: a
                 // non-blocking `connect` reports `EINPROGRESS` even to a LIVE loopback listener
@@ -305,19 +309,21 @@ impl Vm {
                 }
                 Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
             },
-            "listen" => match crate::native::net::listen_nonblocking(&addr) {
-                Ok(listener) => {
-                    let core = Arc::new(ListenerCore {
-                        listener: Mutex::new(Some(listener)),
-                        key: core::next_poll_key(),
-                        in_flight: core::new_in_flight(),
-                        closed: core::new_closed(),
-                    });
-                    let v = Value::obj(self.heap.alloc(Obj::Listener(core)));
-                    Ok(self.sock_ok(v))
+            "listen" => {
+                match self.gc_blocking(&[], |_| crate::native::net::listen_nonblocking(&addr)) {
+                    Ok(listener) => {
+                        let core = Arc::new(ListenerCore {
+                            listener: Mutex::new(Some(listener)),
+                            key: core::next_poll_key(),
+                            in_flight: core::new_in_flight(),
+                            closed: core::new_closed(),
+                        });
+                        let v = Value::obj(self.heap.alloc(Obj::Listener(core)));
+                        Ok(self.sock_ok(v))
+                    }
+                    Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
                 }
-                Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
-            },
+            }
             _ => unreachable!("net_connect_or_listen on '{name}'"),
         }
     }

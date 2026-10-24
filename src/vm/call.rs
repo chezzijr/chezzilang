@@ -157,6 +157,18 @@ impl Vm {
     /// instead of pushing it. Shared by `do_call` (which pushes) and the higher-order list methods
     /// (which call it per element while keeping their source/result lists rooted on the stack).
     /// `args.len()` is the explicit arg count for arity checks.
+    /// M1.5 — an extern C call that takes a callback, with this thread still attached: its
+    /// trampoline runs Chezzi code inside `ffi_call`, and that code needs the token, so the call
+    /// cannot run through the GC door, and a stop waits for the whole C call. Open: fix round 1
+    /// stops here for the controller's ruling (Go reattaches inside the callback, `cgocallback`).
+    fn extern_call_attached(
+        &mut self,
+        cffi: &crate::native::cffi::Cffi,
+        args: Vec<Value>,
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        cffi.call(&mut VmHost { vm: self, args })
+    }
+
     pub(super) fn invoke_value(
         &mut self,
         callee: Value,
@@ -267,8 +279,15 @@ impl Vm {
                         span,
                     ));
                 }
-                let mut host = VmHost { vm: self, args };
-                let ret = cffi.call(&mut host).map_err(|e| RuntimeError {
+                let ret = if cffi.has_callback_param() {
+                    self.extern_call_attached(&cffi, args)
+                } else {
+                    // M1.5 — Go `cgocall`: a C call runs detached, through the GC door. It reads
+                    // its (pinned) args and returns an off-heap `NativeRet`; nothing allocates.
+                    let pins: Vec<GcRef> = args.iter().filter_map(|v| v.child_gcref()).collect();
+                    self.gc_blocking(&pins, |vm| cffi.call(&mut VmHost { vm, args }))
+                };
+                let ret = ret.map_err(|e| RuntimeError {
                     message: e.message,
                     span,
                     is_assert: false,
@@ -524,7 +543,7 @@ impl Vm {
             self.width_release();
             // M1.5 — a native that holds its host thread waits detached. It reads its arguments
             // (pinned) and returns an off-heap `NativeRet`: it allocates nothing on the heap.
-            let pins: Vec<GcRef> = args.iter().filter_map(|v| v.as_obj()).collect();
+            let pins: Vec<GcRef> = args.iter().filter_map(|v| v.child_gcref()).collect();
             let raw = self.gc_blocking(&pins, |vm| func(&mut VmHost { vm, args }));
             self.width_acquire();
             raw

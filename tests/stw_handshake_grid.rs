@@ -202,6 +202,69 @@ main()
 ",
             "hello\n",
         ),
+        // One fiber opens a FIFO and reads it, one opens another FIFO and writes it; an outside
+        // `sh` process is the other end of both, 2 s late. A sibling allocates meanwhile, so each
+        // collection stops the world while an open or a read blocks in the kernel. A thread that
+        // keeps its GC token through a blocking syscall holds that stop for about 2 s
+        // (Go `entersyscall` detaches around each syscall).
+        "fifo_open_rendezvous" => (
+            "import std.io as io\n",
+            "fn reader(out: Channel[str], fin: Channel[int]):
+    r := must(io.open(\"@FIFO_IN@\"))
+    out.send(\"{r.read_line()}\")
+    fin.send(1)
+fn writer(fin: Channel[int]):
+    w := must(io.create(\"@FIFO_OUT@\"))
+    _ := w.write(\"bye\\n\")
+    _ := w.flush()
+    _ := w.close()
+    fin.send(1)
+fn allocer(fin: Channel[int], done: Channel[str]):
+    while fin.len() < 2:
+        _ := busy(1)
+    done.send(\"allocer done\")
+fn main():
+    out := Channel[str](1)
+    fin := Channel[int](2)
+    done := Channel[str](1)
+    parallel:
+        spawn reader(out, fin)
+        spawn writer(fin)
+        spawn allocer(fin, done)
+    print(out.recv())
+    print(done.recv())
+main()
+",
+            "hi\nallocer done\n",
+        ),
+        // A fiber sleeps 1.5 s inside an extern C call while a sibling allocates. A C call that
+        // keeps its GC token holds each stop for the whole call (`stw_max_us` >= 1.5 s).
+        "extern_sleep_does_not_stall_stop" => (
+            "",
+            "extern \"libc\":
+    fn usleep(us: int) -> int
+fn sleeper(out: Channel[str]):
+    _ := usleep(1500000)
+    out.send(\"sleeper done\")
+fn allocer(out: Channel[str]):
+    i := 0
+    xs: List[str] = []
+    while i < 200:
+        xs.push(str(i))
+        i += 1
+    out.send(\"allocer done\")
+fn main():
+    a := Channel[str](1)
+    b := Channel[str](1)
+    parallel:
+        spawn sleeper(a)
+        spawn allocer(b)
+    print(b.recv())
+    print(a.recv())
+main()
+",
+            "allocer done\nsleeper done\n",
+        ),
         other => panic!("unknown mode {other}"),
     };
     (format!("{imports}{MUST}{BUSY}{body}"), want)
@@ -212,6 +275,26 @@ fn run_stressed(name: &str, src: &str, threads: Option<&str>) -> Option<(i32, St
     let dir = std::env::temp_dir().join(format!("chz-stw-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("main.chz");
+    let (fifo_in, fifo_out) = (dir.join("fifo_in"), dir.join("fifo_out"));
+    // The far end of both FIFOs: an outside process that opens them 2 s after it starts.
+    let far_end = src.contains("@FIFO_IN@").then(|| {
+        for f in [&fifo_in, &fifo_out] {
+            let made = Command::new("mkfifo").arg(f).status().expect("run mkfifo");
+            assert!(made.success(), "mkfifo {}", f.display());
+        }
+        let script = format!(
+            "sleep 2; printf 'hi\\n' > '{}'; cat '{}' > /dev/null",
+            fifo_in.display(),
+            fifo_out.display()
+        );
+        Command::new("sh")
+            .args(["-c", &script])
+            .spawn()
+            .expect("spawn the far end")
+    });
+    let src = src
+        .replace("@FIFO_IN@", &fifo_in.to_string_lossy())
+        .replace("@FIFO_OUT@", &fifo_out.to_string_lossy());
     std::fs::write(&path, src).expect("write program");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run")
@@ -242,7 +325,13 @@ fn run_stressed(name: &str, src: &str, threads: Option<&str>) -> Option<(i32, St
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let status = status?;
+    let Some(status) = status else {
+        if let Some(mut far) = far_end {
+            let _ = far.kill();
+            let _ = far.wait();
+        }
+        return None;
+    };
     let (mut out, mut err) = (String::new(), String::new());
     if let Some(mut o) = child.stdout.take() {
         let _ = o.read_to_string(&mut out);
@@ -250,14 +339,23 @@ fn run_stressed(name: &str, src: &str, threads: Option<&str>) -> Option<(i32, St
     if let Some(mut e) = child.stderr.take() {
         let _ = e.read_to_string(&mut err);
     }
+    if let Some(mut far) = far_end {
+        let _ = far.kill();
+        let _ = far.wait();
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Some((status.code().unwrap_or(-1), out, err))
 }
 
 /// The stop count from the `[heap-stats]` line, `None` when the line has no `stw=`.
 fn stw_count(stderr: &str) -> Option<u64> {
+    stats_field(stderr, " stw=")
+}
+
+/// The number after `key` on the `[heap-stats]` line.
+fn stats_field(stderr: &str, key: &str) -> Option<u64> {
     let line = stderr.lines().find(|l| l.starts_with("[heap-stats]"))?;
-    let at = line.find("stw=")? + "stw=".len();
+    let at = line.find(key)? + key.len();
     let digits: String = line[at..]
         .chars()
         .take_while(|c| c.is_ascii_digit())
@@ -281,6 +379,17 @@ fn assert_cell(mode: &str, threads: &str) {
     };
     assert_eq!(code, 0, "{name}: exit code\nstdout:\n{out}\nstderr:\n{err}");
     assert_eq!(out, want, "{name}: stdout\nstderr:\n{err}");
+    // A blocking syscall that keeps its token holds a stop for the whole block (>= 1 s here).
+    if matches!(
+        mode,
+        "fifo_open_rendezvous" | "extern_sleep_does_not_stall_stop"
+    ) {
+        let max = stats_field(&err, "stw_max_us=");
+        assert!(
+            max.is_some_and(|us| us < 1_000_000),
+            "{name}: a stop waited for a blocking syscall (stw_max_us={max:?})\nstderr:\n{err}"
+        );
+    }
     let stw = stw_count(&err);
     assert!(
         stw.is_some_and(|n| n > 0),
@@ -288,4 +397,4 @@ fn assert_cell(mode: &str, threads: &str) {
     );
 }
 
-grid_tests!(MODES x THREADS: [demote, in_place, help, inline_sleep, rendezvous, executor_join, nursery_join, socket_park, socket_in_place] x [t1, t2, tdefault] => crate::assert_cell);
+grid_tests!(MODES x THREADS: [demote, in_place, help, inline_sleep, rendezvous, executor_join, nursery_join, socket_park, socket_in_place, fifo_open_rendezvous, extern_sleep_does_not_stall_stop] x [t1, t2, tdefault] => crate::assert_cell);

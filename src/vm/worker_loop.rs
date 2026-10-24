@@ -12,6 +12,12 @@ use super::sched::poke_live_scheds;
 use super::sched::spawn_worker_thread;
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    /// M1.5 — test-only: the next worker loop on this thread panics at its first iteration.
+    pub(super) static PANIC_AT_LOOP_TOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// TICKET-289 — test-only: arms [`Vm::finish_drain_window_hook`] once per run, through that run's
 /// own `HostConfig.env` (the seam `OWNER_FAULT_WINDOW_ENV` uses).
 #[cfg(test)]
@@ -329,9 +335,16 @@ impl Vm {
         // M1.5 — the thread that runs this loop joins the run's heap for its span. On a thread that
         // already drives a `Vm`, the caller detached first (`Vm::gc_blocking`).
         let fresh = self.gc_attach();
-        self.mn_worker_loop_inner(sched, wid, owner_scope, boundary_stop);
+        // The leave also runs on a panic: a joiner that only borrows this shell reattaches its own
+        // `Vm` while the unwind is caught, and the thread must hold one token then.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.mn_worker_loop_inner(sched, wid, owner_scope, boundary_stop)
+        }));
         if fresh {
             self.gc_leave();
+        }
+        if let Err(p) = r {
+            std::panic::resume_unwind(p);
         }
         if held {
             self.width_acquire();
@@ -359,6 +372,10 @@ impl Vm {
         let mut tick: u64 = 0;
         let mut kept: Option<Fiber> = None;
         loop {
+            #[cfg(test)]
+            if PANIC_AT_LOOP_TOP.with(|p| p.replace(false)) {
+                panic!("test: a panic out of the worker loop");
+            }
             // M1.5 — the fiber boundary is a safepoint: no fiber is swapped in.
             self.gc_poll();
             // TICKET-287 (E1) — an inline owner stops at the first fiber boundary after its family

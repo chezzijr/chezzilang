@@ -263,6 +263,7 @@ mod defaults_witness;
 mod executor_cut;
 mod executor_deadlock;
 mod extern_mnsched;
+mod gc_door;
 mod goldens_display;
 mod host_nursery;
 mod lang_basics;

@@ -238,7 +238,7 @@ pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, u
                 Err(e) => return (Err(e), 0),
             };
             let mut vm = Vm::new(Arc::new(program));
-            vm.gc_stress = stress;
+            vm.gc_stress |= stress;
             let result = vm.run();
             let result = vm.finish_run(result);
             let live = vm.heap.live();

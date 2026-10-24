@@ -84,26 +84,37 @@ impl Vm {
     #[cold]
     #[inline(never)]
     fn gc_park(&mut self) {
-        if self.attached.is_none() {
-            return;
-        }
-        let roots = self.gc_roots();
-        if let Some(t) = self.attached.as_mut() {
+        if let Some(mut t) = self.attached.take() {
+            let roots = self.gc_roots();
             t.get().poll(|| roots);
+            self.attached = Some(t);
         }
     }
 
     /// THE GC entry: stop the world, then collect. With no token, collect alone.
+    ///
+    /// A request that finds another thread's stop running joins it as a poller, and that
+    /// collection does not sweep this heap: until M1.7 each fiber's heap is its own. So the entry
+    /// requests again after the joined stop ends, until a stop runs this `Vm`'s own collection
+    /// (`sample_mem_cap` and the `--max-heap` check read that sweep). A fresh request, and not a
+    /// sweep with the world running, keeps the M1.7 shape: every collection is a stop.
     pub(super) fn gc_collect(&mut self) {
         let Some(mut t) = self.attached.take() else {
             self.collect();
             return;
         };
-        let roots = self.gc_roots();
-        // M1.7: collect the run's one heap from the union of the roots. Until then each fiber has
-        // its own heap, the union holds refs into other heaps, and this collects only its own.
         let r = catch_unwind(AssertUnwindSafe(|| {
-            t.get().request_collect(roots, |_union| self.collect())
+            let mut swept = false;
+            while !swept {
+                let roots = self.gc_roots();
+                // M1.7: collect the run's one heap from the union of the roots. Until then each
+                // fiber has its own heap, the union holds refs into other heaps, and this collects
+                // only its own.
+                t.get().request_collect(roots, |_union| {
+                    self.collect();
+                    swept = true;
+                });
+            }
         }));
         self.attached = Some(t);
         if let Err(p) = r {
@@ -116,7 +127,9 @@ impl Vm {
     /// (Go `entersyscall`), runs `f`, and reattaches (Go `exitsyscall`), which waits out a running
     /// collection. With no token it only runs `f`.
     ///
-    /// `f` must not allocate on or write to the heap (it may read the published roots), and it must
+    /// `f` must not allocate on or write to this `Vm`'s heap (it may read the published roots).
+    /// The rule does not cover another `Vm` that `f` drives: a nursery join's `f` runs a joiner
+    /// shell's worker loop, and that shell attaches its own token before it runs code. `f` must
     /// release every lock it took before it returns: the reattach can wait for a stop, and a stop
     /// waits for each attached thread, also for one blocked on that lock. A panic in `f`
     /// reattaches before it unwinds on.

@@ -11,6 +11,18 @@
 //!
 //! A row with a call spelling is a WRAPPER: a function that blocks for its caller. Each call of it
 //! is then a hit too, so the door moves to its callers and the scan follows it there.
+//!
+//! The scan also finds the raw blocking syscalls of `src/vm` (Go runs `entersyscall` around each):
+//! a file open, read, write and flush, a name resolution (`connect_nonblocking`,
+//! `listen_nonblocking`), and an extern C call (`cffi.call`).
+//!
+//! What the scan cannot see, so do not trust it as complete:
+//! - a syscall behind a spelling it does not list, or one inside `src/native` that a native reaches
+//!   (an in-place `Kind::Blocking`/`Kind::HostWait` native runs inside the door at `call.rs`; a
+//!   `Kind::Inline` native's syscalls must stay short, such as `getcwd` or `getrandom`);
+//! - a `Mutex::lock` held by a thread that waits detached (the rule is in `Vm::gc_blocking`'s doc);
+//! - a `Drop` that makes a syscall (`WriterCore::drop` flushes a buffered writer);
+//! - a row is keyed by file and function name, so a new wait in an allowed function passes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,6 +39,17 @@ const WAITS: &[&str] = &[
     ".recv_timeout(",
     ".join()",
     "libc::poll(",
+    "File::open(",
+    "File::create(",
+    "OpenOptions::new(",
+    ".write_all(",
+    ".flush(",
+    "read_until(",
+    "read_to_end(",
+    "Read::read(",
+    "connect_nonblocking(",
+    "listen_nonblocking(",
+    "cffi.call(",
 ];
 
 /// (file under `src/vm`, enclosing function or `*` for the whole file, call spelling of a wrapper
@@ -181,6 +204,60 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "hold_run_end_window",
         "",
         "a test-only 300 ms hold of a fault window: it ends on its own, so a stop waits at most that",
+    ),
+    (
+        "fileio.rs",
+        "write_locked",
+        "",
+        "runs only in `with_writer_lock`: in the door, or attached when `writes_are_buffered` says it makes no syscall",
+    ),
+    (
+        "fileio.rs",
+        "flush_locked",
+        "",
+        "runs only in `with_writer_lock`: in the door, or attached when `flush_is_local` says it makes no syscall",
+    ),
+    (
+        "fileio.rs",
+        "read_line_locked",
+        "",
+        "runs only in `with_reader_locks`: in the door, or attached when `line_is_buffered` says it makes no syscall",
+    ),
+    (
+        "fileio.rs",
+        "read_bytes_locked",
+        "",
+        "runs only in `with_reader_locks`: in the door, or attached when `bytes_are_buffered` says it makes no syscall",
+    ),
+    (
+        "socket.rs",
+        "socket_read_bytes",
+        "",
+        "a non-blocking socket fd: a read that would block returns WouldBlock and parks",
+    ),
+    (
+        "socket.rs",
+        "socket_read",
+        "",
+        "a non-blocking socket fd: a read that would block returns WouldBlock and parks",
+    ),
+    (
+        "stream.rs",
+        "spawn_writer",
+        "",
+        "the stdout/stderr writer thread never attaches",
+    ),
+    (
+        "core.rs",
+        "drop",
+        "",
+        "`WriterCore::drop` flushes a buffered writer where the last handle drops, with no Vm (a sweep can drop it); open for M1.7",
+    ),
+    (
+        "call.rs",
+        "extern_call_attached",
+        "",
+        "a C call with a callback param re-enters the VM through its trampoline, which needs the token; open (fix round 1 STOP)",
     ),
     (
         "core.rs",
