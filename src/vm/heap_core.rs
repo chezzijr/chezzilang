@@ -373,10 +373,12 @@ impl HeapCore {
                             live += 1;
                         }
                         Some(_) | None => {
-                            if let Some(obj) = slot.obj.take()
-                                && is_arc_core(&obj)
-                            {
-                                graveyard.push(obj);
+                            // Drop a plain object in place: moving every dead `Obj` out to the
+                            // stack first cost a store-forwarding stall per slot (M2.8 profile).
+                            if slot.obj.as_ref().is_some_and(is_arc_core) {
+                                graveyard.extend(slot.obj.take());
+                            } else {
+                                slot.obj = None;
                             }
                             st.free.push(idx as u32);
                             spans.remove(&(idx as u32));
