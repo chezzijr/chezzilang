@@ -38,6 +38,9 @@ pub struct GcRef(pub u32);
 #[derive(Clone, Copy, PartialEq)]
 pub struct Value(u64);
 
+// One aligned word, so a racy read or write of a slot never tears (Go parity, M2.5).
+const _: () = assert!(size_of::<Value>() == 8 && align_of::<Value>() == 8);
+
 const TAG_INT_BIT: u64 = 1;
 const TAG_MASK: u64 = 0b111;
 const TAG_OBJ: u64 = 0b000;
