@@ -1131,6 +1131,11 @@ pub struct Vm {
     /// field just holds it while the fiber is swapped in. The resumed `net.connect` re-run takes it to
     /// finish the connect. `None` whenever no connect is mid-flight.
     pending_connect: Option<ConnectInProgress>,
+    /// M3.3 — the `RwShared` boxes (their `BoxLock` addresses) this task holds the read guard on,
+    /// innermost last. A reader is anonymous in the lock word, so a failed acquire reads this list
+    /// to find a same-task re-entry (`Vm::guard_reentry`). A `Vm` field, NOT a `FiberCtx` field: a
+    /// box closure runs under `Vm::reentered`, where no other fiber runs on this stack.
+    held_reads: Vec<usize>,
     /// D4 layer C (TICKET-169): true while `from_wire_memo` is running an airlock
     /// copying walk (`rebuild_ready`'s captures/args/receiver, or a crossing
     /// `Closure`/`Generator`'s captures). Every object allocated while this is set gets

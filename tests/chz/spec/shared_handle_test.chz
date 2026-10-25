@@ -5,7 +5,9 @@
 # `blocking_update 7`, `holder_waits_on_channel 30`, `memoize_one_object 2`,
 # `task_get_one_object 2`, `broadcast_shares 2 2`. `reenter/main.go` (Lock in Lock) and
 # `readwrite/main.go` (Lock in RLock) end `fatal error: all goroutines are asleep - deadlock!`:
-# the same certain deadlock is a fault here, with the re-entry text.
+# the same certain deadlock is a fault here, with the re-entry text. Fix round 1: `rv33/gopref`
+# (a reader that arrives after a waiting writer) prints `r 10`; `nestedread/main.go` (a nested RLock
+# past a waiting writer) ends `fatal error: all goroutines are asleep - deadlock!`.
 import Executor, RwShared, Shared, Task from std.concurrency
 import Broadcast from std.concurrency.broadcast
 import memoize1 from std.memoize
@@ -188,3 +190,66 @@ test fn broadcast_gives_every_receiver_the_one_value():
         ?m: assert m.len() == 2
         !_: assert false
     assert v.len() == 2
+
+fn hold_read(go: Channel[bool], n: int) -> int:
+    go.send(true)
+    time.sleep_ms(80)
+    return n
+
+fn writer_after(r: RwShared[int], go: Channel[bool], wsig: Channel[bool]):
+    _ := go.recv()
+    wsig.send(true)
+    r.write(fn(n): n * 10)
+
+fn reader_after(r: RwShared[int], wsig: Channel[bool], seen: Channel[int]):
+    _ := wsig.recv()
+    time.sleep_ms(30)
+    seen.send(r.read(fn(n): n))
+
+# Go writer preference: a reader that arrives while a writer waits behind a held read reads after
+# that writer (Go `rv33/gopref`: `r 10`). The writer counts as waiting from its first failed acquire
+# to its take, so no reader slips in at the handoff.
+test fn a_reader_behind_a_waiting_writer_reads_after_it():
+    r := RwShared(1)
+    go := Channel[bool](1)
+    wsig := Channel[bool](2)
+    seen := Channel[int](1)
+    parallel:
+        spawn:
+            _ := r.read(fn(n): hold_read(go, n))
+        spawn writer_after(r, go, wsig)
+        spawn reader_after(r, wsig, seen)
+    assert seen.recv() == 10
+    assert r.get() == 10
+
+fn read_again(r: RwShared[int], go: Channel[bool], wsig: Channel[bool], n: int) -> int:
+    go.send(true)
+    _ := wsig.recv()
+    time.sleep_ms(30)
+    return n + r.read(fn(m): m)
+
+fn writer_signal(r: RwShared[int], go: Channel[bool], wsig: Channel[bool]):
+    _ := go.recv()
+    wsig.send(true)
+    r.write(fn(n): n * 10)
+
+fn outcome_of(r: int!Error) -> str:
+    match r:
+        ?_: return "ok"
+        !e: return e.message()
+
+# A nested read past a waiting writer that waits for this task's outer read is a certain cycle
+# (Go `nestedread/main.go`: `fatal error: all goroutines are asleep - deadlock!`): it faults at once.
+test fn a_nested_read_past_a_waiting_writer_faults():
+    r := RwShared(1)
+    go := Channel[bool](1)
+    wsig := Channel[bool](1)
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            res := recover: r.read(fn(n): read_again(r, go, wsig, n))
+            out.send(outcome_of(res))
+        spawn writer_signal(r, go, wsig)
+    got := out.recv()
+    assert got.contains("a lock cycle"), got
+    assert r.get() == 10

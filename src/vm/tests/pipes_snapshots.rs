@@ -1514,28 +1514,36 @@ main()
     assert_eq!(out, "3\n", "captured-local write now faults: {out:?}");
 }
 
-/// TICKET-016 — a bounded acquire returns `Ok(None)` on timeout instead of blocking, still detects
-/// self-held re-entry, and hands the guard over once it is free.
+/// A box lock for the guard unit tests below.
+fn test_lock() -> Arc<crate::vm::core::BoxLock> {
+    Arc::new(crate::vm::core::BoxLock::new("RwShared"))
+}
+
+/// TICKET-016 — a bounded acquire returns `Ok(None)` on timeout instead of blocking, and hands the
+/// guard over once it is free. (M3.3: a same-task re-entry is the `Vm`'s check, `guard_reentry`;
+/// its rows are in `tests/chz/spec/shared_handle_test.chz`.)
 #[test]
 fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
+    let lock = test_lock();
     let key = GuardKey {
-        addr: usize::MAX - 9001,
+        lock: &lock,
         mode: GuardMode::Write,
     };
-    let budget = Some(std::time::Duration::from_millis(5));
+    let budget = std::time::Duration::from_millis(5);
     let held = acquire_update_guard_within(key, u64::MAX - 1, budget)
         .expect("a free box must not report a cycle")
         .expect("a free box must hand the guard over");
-    assert!(matches!(
-        acquire_update_guard_within(key, u64::MAX - 1, budget),
-        Err(GuardCycle::SelfHeld)
-    ));
+    assert_eq!(lock.writer(), u64::MAX - 1);
     let t0 = std::time::Instant::now();
     assert!(matches!(
         acquire_update_guard_within(key, u64::MAX - 2, budget),
         Ok(None)
     ));
     assert!(t0.elapsed() < std::time::Duration::from_millis(500));
+    assert!(
+        !lock.writer_waits(),
+        "a writer that gave up leaves the waiting count"
+    );
     drop(held);
     assert!(matches!(
         acquire_update_guard_within(key, u64::MAX - 2, budget),
@@ -1543,76 +1551,75 @@ fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
     ));
 }
 
-/// M3.3 — the two-mode guard (Go `sync.RWMutex`), one row per pair of (held mode, wanted mode, same
-/// task or not): readers share; a writer waits for readers and readers for a writer; a nested read
-/// by a reader is granted; a write by a task that reads is `ReadHeld`, a read or write by the
-/// writer is `SelfHeld`; a waiting writer keeps a new reader out, and a read-write cycle across two
-/// boxes is a `Cycle`.
+/// M3.3 — the two-mode lock (Go `sync.RWMutex`): readers share; a writer waits for readers and
+/// readers for a writer; a waiting writer (a live `WaitTicket`) keeps a new reader out until it
+/// takes or leaves; a cycle through two write guards is a `Cycle`.
 #[test]
 fn m3_3_guard_modes_grid() {
-    use crate::vm::core::{GuardKey, GuardMode, try_update_guard};
-    let rd = |addr| GuardKey {
-        addr,
+    use crate::vm::core::{WaitTicket, try_update_guard};
+    let (lx, ly) = (test_lock(), test_lock());
+    let rd = |l| GuardKey {
+        lock: l,
         mode: GuardMode::Read,
     };
-    let wr = |addr| GuardKey {
-        addr,
+    let wr = |l| GuardKey {
+        lock: l,
         mode: GuardMode::Write,
     };
-    let (x, y) = (usize::MAX - 9101, usize::MAX - 9102);
     let (a, b, c) = (u64::MAX - 31, u64::MAX - 32, u64::MAX - 33);
-    let take = |k, t| try_update_guard(k, t);
-    // Readers share; a second read by the same reader is granted.
-    let ra = take(rd(x), a).unwrap().expect("a free read");
-    let rb = take(rd(x), b).unwrap().expect("readers share");
-    let ra2 = take(rd(x), a).unwrap().expect("a nested read");
-    // A writer waits for readers; a reader that writes is ReadHeld.
-    assert!(matches!(take(wr(x), c), Ok(None)));
-    assert!(matches!(take(wr(x), a), Err(GuardCycle::ReadHeld)));
-    drop((ra, rb, ra2));
-    // A writer excludes readers; the writer's own read or write is SelfHeld.
-    let wc = take(wr(x), c).unwrap().expect("a free write");
-    assert!(matches!(take(rd(x), a), Ok(None)));
-    assert!(matches!(take(rd(x), c), Err(GuardCycle::SelfHeld)));
-    assert!(matches!(take(wr(x), c), Err(GuardCycle::SelfHeld)));
+    // Readers share; a writer waits for them.
+    let ra = try_update_guard(rd(&lx), a).expect("a free read");
+    let rb = try_update_guard(rd(&lx), b).expect("readers share");
+    assert!(try_update_guard(wr(&lx), c).is_none());
+    drop((ra, rb));
+    // A writer excludes readers and writers.
+    let wc = try_update_guard(wr(&lx), c).expect("a free write");
+    assert!(try_update_guard(rd(&lx), a).is_none());
+    assert!(try_update_guard(wr(&lx), a).is_none());
     drop(wc);
-    // Writer preference: while `c` waits to write, a new reader `b` waits too.
-    let ra = take(rd(x), a).unwrap().expect("a free read");
-    let waiter = std::thread::spawn(move || {
-        acquire_update_guard_within(wr(x), c, Some(std::time::Duration::from_secs(5)))
-            .map(|g| g.is_some())
-    });
-    // A counted probe: poll until the writer is registered; then a new reader is kept out.
-    let mut probes = 0u32;
-    loop {
-        match take(rd(x), b) {
-            Ok(None) => break,
-            Ok(Some(g)) => drop(g),
-            Err(e) => panic!("a new reader: {e:?}"),
-        }
-        probes += 1;
-        assert!(probes < 50_000_000, "the writer never waited");
-        std::thread::yield_now();
-    }
-    let ra2 = take(rd(x), a)
-        .unwrap()
-        .expect("a reader's nested read passes a waiting writer");
-    drop((ra, ra2));
-    assert_eq!(waiter.join().unwrap(), Ok(true));
-    // A cycle through a read guard: `a` reads x and waits to write y; `b` writes y and wants x.
-    let ra = take(rd(x), a).unwrap().expect("a free read");
-    let wb = take(wr(y), b).unwrap().expect("a free write");
+    // Writer preference: while `c` waits to write, a new reader waits; the waiting writer takes
+    // once the reader it waited for leaves; a ticket dropped untaken lets readers in again.
+    let ra = try_update_guard(rd(&lx), a).expect("a free read");
+    let mut ticket = WaitTicket::new(wr(&lx));
+    assert!(lx.writer_waits());
+    assert!(
+        try_update_guard(rd(&lx), b).is_none(),
+        "a waiting writer keeps a new reader out"
+    );
+    assert!(
+        ticket.try_take(c).is_none(),
+        "the writer waits for the reader"
+    );
+    drop(ra);
+    let wc = ticket.try_take(c).expect("the waiting writer takes first");
+    assert!(!lx.writer_waits());
+    drop(wc);
+    let t2 = WaitTicket::new(wr(&lx));
+    assert!(try_update_guard(rd(&lx), b).is_none());
+    drop(t2);
+    assert!(
+        try_update_guard(rd(&lx), b).is_some(),
+        "a writer that left lets readers in"
+    );
+    // AB-BA through two write guards: `a` writes x and waits for y; `b` writes y and wants x.
+    let wa = try_update_guard(wr(&lx), a).expect("a free write");
+    let wb = try_update_guard(wr(&ly), b).expect("a free write");
+    let ly2 = Arc::clone(&ly);
     let cyc = std::thread::spawn(move || {
-        acquire_update_guard_within(wr(y), a, Some(std::time::Duration::from_secs(5)))
-            .map(|g| g.is_some())
+        let key = GuardKey {
+            lock: &ly2,
+            mode: GuardMode::Write,
+        };
+        acquire_update_guard_within(key, a, std::time::Duration::from_secs(5)).map(|g| g.is_some())
     });
-    // A counted probe: poll until `a` waits; then `b`'s write of x closes the cycle and faults.
+    // A counted probe: poll until `a` waits; then `b`'s wait for x closes the cycle at once.
     let mut probes = 0u32;
     loop {
-        match take(wr(x), b) {
+        match crate::vm::core::await_update_guard_free(wr(&lx), b, Some(std::time::Duration::ZERO))
+        {
             Err(GuardCycle::Cycle) => break,
-            Ok(None) => {}
-            other => panic!("b's write of x: {:?}", other.map(|g| g.is_some())),
+            Ok(false) => {}
+            other => panic!("b's wait for x: {other:?}"),
         }
         probes += 1;
         assert!(probes < 50_000_000, "a never waited");
@@ -1620,61 +1627,54 @@ fn m3_3_guard_modes_grid() {
     }
     drop(wb);
     assert_eq!(cyc.join().unwrap(), Ok(true));
-    drop(ra);
+    drop(wa);
 }
 
-/// TICKET-063 — `guard_wait_satisfiable` answers the same three outcomes `acquire_update_guard_within`
-/// would, without acquiring.
+/// TICKET-063 — `guard_wait_satisfiable` answers whether an acquire issued now would not block.
 #[test]
 fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {
+    let lock = test_lock();
+    let owned = crate::vm::core::GuardWait {
+        lock: Arc::clone(&lock),
+        mode: GuardMode::Write,
+        taking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let (holder, other) = (u64::MAX - 11, u64::MAX - 12);
+    assert!(
+        crate::vm::core::guard_wait_satisfiable(&owned, other),
+        "an unowned box must be satisfiable"
+    );
     let key = GuardKey {
-        addr: usize::MAX - 9002,
+        lock: &lock,
         mode: GuardMode::Write,
     };
-    let holder = u64::MAX - 11;
-    let other = u64::MAX - 12;
+    let held = crate::vm::core::try_update_guard(key, holder).expect("a free box");
     assert!(
-        crate::vm::core::guard_wait_satisfiable(key, holder),
-        "an unowned key must be satisfiable"
-    );
-    let held = acquire_update_guard_within(key, holder, Some(std::time::Duration::from_millis(5)))
-        .expect("a free box must not report a cycle")
-        .expect("a free box must hand the guard over");
-    assert!(
-        crate::vm::core::guard_wait_satisfiable(key, holder),
-        "the holder itself must be satisfiable"
-    );
-    assert!(
-        !crate::vm::core::guard_wait_satisfiable(key, other),
+        !crate::vm::core::guard_wait_satisfiable(&owned, other),
         "another task must not be satisfiable while the holder holds it"
     );
     drop(held);
     assert!(
-        crate::vm::core::guard_wait_satisfiable(key, other),
+        crate::vm::core::guard_wait_satisfiable(&owned, other),
         "once the held guard is dropped the other task must be satisfiable again"
     );
 }
 
-/// TICKET-193 — `await_update_guard_free` reports a free guard without taking it, times out on a
-/// held one, and still faults a self-held re-entry.
+/// TICKET-193 — `await_update_guard_free` reports a free guard without taking it and times out on
+/// a held one.
 #[test]
 fn ticket_193_await_update_guard_free_never_takes_the_guard() {
     use crate::vm::core::await_update_guard_free;
+    let lock = test_lock();
     let key = GuardKey {
-        addr: usize::MAX - 9003,
+        lock: &lock,
         mode: GuardMode::Write,
     };
     let (waiter, holder) = (u64::MAX - 13, u64::MAX - 14);
     let budget = Some(std::time::Duration::from_millis(5));
     assert_eq!(await_update_guard_free(key, waiter, budget), Ok(true));
-    let held = acquire_update_guard_within(key, holder, Some(std::time::Duration::ZERO))
-        .expect("a free box must not report a cycle")
-        .expect("await must not have taken the guard");
+    let held = crate::vm::core::try_update_guard(key, holder).expect("await did not take it");
     assert_eq!(await_update_guard_free(key, waiter, budget), Ok(false));
-    assert_eq!(
-        await_update_guard_free(key, holder, budget),
-        Err(GuardCycle::SelfHeld)
-    );
     drop(held);
     assert_eq!(await_update_guard_free(key, waiter, budget), Ok(true));
 }

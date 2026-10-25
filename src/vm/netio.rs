@@ -242,23 +242,28 @@ impl Vm {
     /// reaches `wait_halt`. Stage 1 (bounded by `GUARD_DEMOTE_BUDGET`, in place, DEC-016) then waits
     /// holding no permit (DEC-141), the same order as `guard_wait_block` ([`Vm::guard_free_then_take`]).
     /// Stage 1 reads the halts when the guard comes free (TICKET-200).
-    pub(super) fn take_update_guard(
+    pub(super) fn take_update_guard<'a>(
         &mut self,
-        key: GuardKey,
+        key: GuardKey<'a>,
         what: &str,
         span: Span,
-    ) -> Result<core::UpdateGuard, RuntimeError> {
-        let result = match core::try_update_guard(key, self.guard_token) {
-            Ok(Some(guard)) => Ok(guard),
-            Err(cycle) => Err(cycle),
-            Ok(None) => {
+    ) -> Result<core::UpdateGuard<'a>, RuntimeError> {
+        if let Some(guard) = core::try_update_guard(key, self.guard_token) {
+            return Ok(guard);
+        }
+        let result = match self.guard_reentry(key) {
+            Some(cycle) => Err(cycle),
+            None => {
+                // M3.3 — the ticket keeps a waiting writer counted from here to its take or its
+                // exit, across both stages and the permit handoff (Go writer preference).
+                let mut ticket = core::WaitTicket::new(key);
                 self.wait_halt(span)?;
                 let until = std::time::Instant::now() + GUARD_DEMOTE_BUDGET;
                 self.width_release();
                 let staged = loop {
                     let left = until.saturating_duration_since(std::time::Instant::now());
                     // No `?` in this loop: a halt must still reach `width_acquire` below.
-                    match self.guard_free_then_take(key, left, span) {
+                    match self.guard_free_then_take(key, &mut ticket, None, left, span) {
                         Err(halt) => break Some(Err(halt)),
                         Ok(Ok(Some(g))) => break Some(Ok(Ok(g))),
                         Ok(Err(c)) => break Some(Ok(Err(c))),
@@ -269,18 +274,17 @@ impl Vm {
                 self.width_acquire();
                 match staged {
                     Some(r) => r?,
-                    None => self.guard_wait_block(key, what, span)?,
+                    None => self.guard_wait_block(key, &mut ticket, what, span)?,
                 }
             }
         };
+        let kind = key.lock.kind;
         result.map_err(|cycle| match cycle {
             GuardCycle::SelfHeld => self.err(
-                reentry_text("update", "Shared", "set/update/write", "update/write"),
+                reentry_text("update", kind, "set/update/write", "update/write"),
                 span,
             ),
-            GuardCycle::ReadHeld => {
-                self.err(reentry_text("read", "RwShared", "set/write", "read"), span)
-            }
+            GuardCycle::ReadHeld => self.err(reentry_text("read", kind, "set/write", "read"), span),
             GuardCycle::Cycle => self.err(
                 "deadlock: two or more tasks each hold a Shared/RwShared update guard the \
                  other is waiting for (a lock cycle)"
@@ -290,22 +294,41 @@ impl Vm {
         })
     }
 
+    /// M3.3 — a failed fast acquire of `key` that is this task's own re-entry, the one wait that is
+    /// certain never to end: the task holds the write guard (`SelfHeld`), writes a box it reads
+    /// (`ReadHeld`, Q2), or reads again a box it reads while a writer waits for that outer read
+    /// (`Cycle`: the writer waits for this task, this task for the writer). A fast acquire fails on
+    /// a box the task reads only when a writer waits, so the third case needs no second load.
+    fn guard_reentry(&self, key: GuardKey<'_>) -> Option<GuardCycle> {
+        if key.lock.writer() == self.guard_token {
+            return Some(GuardCycle::SelfHeld);
+        }
+        let reads = self.held_reads.contains(&(Arc::as_ptr(key.lock) as usize));
+        match key.mode {
+            GuardMode::Write if reads => Some(GuardCycle::ReadHeld),
+            GuardMode::Read if reads => Some(GuardCycle::Cycle),
+            GuardMode::Write | GuardMode::Read => None,
+        }
+    }
+
     /// TICKET-193/194 — THE guard order: wait for the guard to look free holding NO width permit
-    /// (DEC-141), take the permit, then take the guard with a zero budget. The caller holds no
-    /// permit. `Ok(Some)` and `Err` return holding the permit; `Ok(None)` (still held after
-    /// `budget`, or lost the race) returns without it. Stage 1 of [`Vm::take_update_guard`] and
-    /// [`Vm::guard_wait_block`] both call it.
+    /// (DEC-141), take the permit, then take the guard with no wait. The caller holds no permit.
+    /// `Ok(Some)` and `Err` return holding the permit; `Ok(None)` (still held after `budget`, or
+    /// lost the race) returns without it. Stage 1 of [`Vm::take_update_guard`] and
+    /// [`Vm::guard_wait_block`] both call it. The `ticket` stays live across the permit handoff.
     ///
     /// TICKET-200 — a wait that ends because the guard came free reads the halts
     /// ([`Vm::block_halts`]) before it takes the guard, because the free may be the halt's own cut
     /// of the holder (an `os.exit` or a cancel unwinding the holder's `update`). A halt returns
     /// `Err` holding no permit, like `Ok(None)`.
-    fn guard_free_then_take(
+    fn guard_free_then_take<'a>(
         &mut self,
-        key: GuardKey,
+        key: GuardKey<'a>,
+        ticket: &mut core::WaitTicket<'a>,
+        taking: Option<&std::sync::atomic::AtomicBool>,
         budget: std::time::Duration,
         span: Span,
-    ) -> Result<Result<Option<core::UpdateGuard>, GuardCycle>, RuntimeError> {
+    ) -> Result<Result<Option<core::UpdateGuard<'a>>, GuardCycle>, RuntimeError> {
         let me = self.guard_token;
         match self.gc_blocking(&[], |_| {
             core::await_update_guard_free(key, me, Some(budget))
@@ -316,13 +339,21 @@ impl Vm {
         }
         self.block_halts(span)?;
         self.width_acquire();
-        Ok(match core::try_update_guard(key, self.guard_token) {
-            Ok(None) => {
-                self.width_release();
-                Ok(None)
+        // A registered waiter marks its take before it tries (`core::GuardWait::taking`).
+        let mark = |on: bool| {
+            if let Some(t) = taking {
+                t.store(on, std::sync::atomic::Ordering::SeqCst);
             }
-            r => r,
-        })
+        };
+        mark(true);
+        Ok(Ok(match ticket.try_take(me) {
+            None => {
+                mark(false);
+                self.width_release();
+                None
+            }
+            g => g,
+        }))
     }
 
     /// TICKET-063 — the unbounded half of [`Vm::take_update_guard`], reached once the 5 ms bounded
@@ -332,19 +363,26 @@ impl Vm {
     /// [`Vm::block_halt_check`] every [`super::DEMOTE_POLL_BACKOFF`] so `--timeout`, cancel and
     /// `os.exit` reach a guard waiter exactly like every other blocking-in-place site. The counters
     /// are un-accounted via `guard_wait_exit` on every exit path (no `?` before that call).
-    fn guard_wait_block(
+    fn guard_wait_block<'a>(
         &mut self,
-        key: GuardKey,
+        key: GuardKey<'a>,
+        ticket: &mut core::WaitTicket<'a>,
         what: &str,
         span: Span,
-    ) -> Result<Result<core::UpdateGuard, GuardCycle>, RuntimeError> {
-        let reg = self.guard_wait_enter(key, what, span)?;
+    ) -> Result<Result<core::UpdateGuard<'a>, GuardCycle>, RuntimeError> {
+        let owned = core::GuardWait {
+            lock: Arc::clone(key.lock),
+            mode: key.mode,
+            taking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let taking = Arc::clone(&owned.taking);
+        let reg = self.guard_wait_enter(owned.clone(), what, span)?;
         // TICKET-141 — the holder of this guard may be a preempted `update` closure on a gated
         // sibling thread; hold no width permit while the guard is busy. TICKET-193 — take the
         // permit back BEFORE the guard (the loop below).
         self.width_release();
         let _party = self.block_party_guard(
-            quiesce::PartyWait::Guard(key, self.guard_token),
+            quiesce::PartyWait::Guard(owned, self.guard_token),
             Some((GUARD_DEADLOCK, span)),
         );
         let out = loop {
@@ -352,7 +390,13 @@ impl Vm {
             // take the permit, then take the guard without waiting. Taking the guard first parks
             // its OWNER behind permit holders that wait in place for that same guard, so every
             // handoff cost one GUARD_DEMOTE_BUDGET (T=2: 7172 timeouts, 18.9 s).
-            match self.guard_free_then_take(key, super::DEMOTE_POLL_BACKOFF, span) {
+            match self.guard_free_then_take(
+                key,
+                ticket,
+                Some(&taking),
+                super::DEMOTE_POLL_BACKOFF,
+                span,
+            ) {
                 Ok(Ok(Some(g))) => break Ok(Ok(g)),
                 Ok(Err(cycle)) => break Ok(Err(cycle)),
                 Err(e) => break Err(e),

@@ -944,13 +944,12 @@ fn display_box_grid_terminates_on_every_cycle() {
             let hs = vm.heap.alloc(Obj::Shared(Arc::clone(&shared)));
             let hr = vm.heap.alloc(Obj::RwShared(Arc::clone(&rw)));
             let mut shown = Vec::new();
-            for (addr, mode) in [
-                (Arc::as_ptr(&shared) as usize, GuardMode::Write),
-                (Arc::as_ptr(&rw) as usize, GuardMode::Write),
-                (Arc::as_ptr(&rw) as usize, GuardMode::Read),
+            for (lock, mode) in [
+                (&shared.lock, GuardMode::Write),
+                (&rw.lock, GuardMode::Write),
+                (&rw.lock, GuardMode::Read),
             ] {
-                let held = super::core::try_update_guard(GuardKey { addr, mode }, u64::MAX - 77)
-                    .expect("no cycle")
+                let held = super::core::try_update_guard(GuardKey { lock, mode }, u64::MAX - 77)
                     .expect("a free guard");
                 shown.push(vm.display(Value::obj(hs)));
                 shown.push(vm.display(Value::obj(hr)));

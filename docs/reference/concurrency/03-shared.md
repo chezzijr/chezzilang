@@ -260,7 +260,12 @@ lock), so concurrent writers can't lose each other's updates — a `set` racing 
 collection read) takes the read guard; `read`'s closure, and a key's `eq`, run on the live value under
 it, so readers run in parallel and a mutation inside a `read` closure reaches the box (a race with the
 other readers is the user's bug). A reader waits while a writer holds the box, or waits for it (Go
-writer preference); a nested `read` by a reader is granted. A `print` takes no guard.
+writer preference: a writer counts as waiting from its first failed acquire to its take, so no
+reader slips in at the handoff). A nested `read` by a reader is granted while no writer waits; with
+a writer waiting for the outer read it is a certain cycle (Go deadlocks) and faults with the lock
+cycle text. A `print` takes no guard. The fast path is one atomic operation on the box's lock word;
+the wait-for graph is read only on a contended acquire, so a cycle that passes through a read guard
+(readers are anonymous in the lock word) is left to the run's deadlock verdict.
 
 > **Reentrancy fault (same class as `Shared.update`):** a closure passed to `write` (or `set`) that
 > re-acquires the **same** `RwShared`'s update guard — `write` or `set` inside `write` — is a
@@ -270,7 +275,8 @@ writer preference); a nested `read` by a reader is granted. A `print` takes no g
 > cycle and complete normally. `get` / `read` of the box from inside its **own `write`** closure fault
 > the same way. M3.3 (Q2): `write` or `set` nested in the same task's **`read`** waits for that read,
 > a certain deadlock (Go `RLock(); Lock()`), so it faults with `already holds the read guard on this
-> RwShared box`. `get` / `read` nested in `read` are legal.
+> RwShared box`. `get` / `read` nested in `read` are legal while no writer waits; past a waiting
+> writer they fault (`a lock cycle`). The re-entry text names the box kind (`Shared` or `RwShared`).
 
 > **A guard wait does not cost an OS thread unless it is long.** A contended `set`/`update`/`write`
 > waits in place on its worker for up to 5 ms (`GUARD_DEMOTE_BUDGET`) before it demotes the worker

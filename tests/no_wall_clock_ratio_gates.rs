@@ -537,7 +537,7 @@ fn no_new_rust_test_sleeps_to_order_two_events() {
 /// nothing else can express the wait: a parked rendezvous sender or a job that must be INSIDE the
 /// sleep when cancelled has no Chezzi-visible predicate, and one entry asserts a window a value must
 /// NOT change across, which is a legitimate clock use, not a happens-before guess (TICKET-059/060).
-const CHZ_SLEEP_SITES: [(&str, &str); 11] = [
+const CHZ_SLEEP_SITES: [(&str, &str); 13] = [
     // M3.2: the sleep lets the print reach its GC door before the swap, so the row covers the race
     // it pins. It orders no result: the assertion accepts the print from either order, and a
     // handshake cannot signal from inside the print path, which runs no user code.
@@ -577,6 +577,11 @@ const CHZ_SLEEP_SITES: [(&str, &str); 11] = [
     // M3.3: the sleep lets a guard waiter reach its wait before the guard holder's channel gets
     // its value; `held` orders the holder first, so the assert (30) holds at any timing.
     ("tests/chz/spec/shared_handle_test.chz", "time.sleep_ms(20)"),
+    // M3.3 fix 1: the 80 ms holds a read while a writer and then a reader reach their waits; the
+    // 30 ms lets the writer (signalled by `wsig`) reach its wait first. A holder that releases early
+    // lets the writer in first too, so the asserts hold unless the writer is 30 ms late.
+    ("tests/chz/spec/shared_handle_test.chz", "time.sleep_ms(80)"),
+    ("tests/chz/spec/shared_handle_test.chz", "time.sleep_ms(30)"),
 ];
 
 /// Every `path:line: text` under `tests/chz` that calls `time.sleep_ms(` and is not one of

@@ -12,46 +12,134 @@ use super::value::Value;
 use crate::lexer::Span;
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-/// TICKET-016 (W8-3) — the process-global wait-for graph behind every `Shared`/`RwShared` guard.
-/// M3.3: the guard IS the box's lock (Go `sync.Mutex` / `sync.RWMutex`): a box method or closure
-/// runs in the caller's task on the live value while its task holds the guard. `writer` maps a box's
-/// stable identity (`Arc::as_ptr(..) as usize`) to the task token that holds it exclusively;
-/// `readers` maps it to the tokens that hold it shared (one entry per hold, so a nested read pushes
-/// again); `waiting` maps a blocked task's token to the guard it wants. A guard acquire walks
-/// `waiting` -> holders -> `waiting` from the requester: a walk that returns to the requester is a
-/// wait-for cycle (self-held is the length-1 case), which faults instead of blocking.
+/// M3.3 — the lock of one `Shared` / `RwShared` box (Go `sync.RWMutex`). One atomic word owns the
+/// uncontended path: an acquire and a release are one CAS or one `fetch_*`, with no registry, no
+/// allocation and no syscall.
+///
+/// `state` bits: [`WRITER`] (a writer holds the box), the count of writers that wait
+/// ([`WW_ONE`] units, Go writer preference: while it is not zero a new reader waits), and the
+/// count of readers that hold the box (the low 32 bits). `writer` is the task token of the writer
+/// (0 = none), read only on a failed acquire to find a same-task re-entry. A reader is anonymous
+/// here; the task that reads keeps its own list (`Vm::held_reads`). `sleepers` counts the tasks that
+/// wait on the registry condvar for this box, so a release wakes them only when one exists.
+#[derive(Debug)]
+pub struct BoxLock {
+    state: AtomicU64,
+    writer: AtomicU64,
+    sleepers: AtomicU32,
+    /// `"Shared"` or `"RwShared"`: the ONE owner of the box kind a fault text names.
+    pub kind: &'static str,
+}
+
+const WRITER: u64 = 1 << 63;
+const WW_ONE: u64 = 1 << 32;
+const WW_MASK: u64 = 0x7fff_ffff << 32;
+const R_MASK: u64 = 0xffff_ffff;
+
+impl BoxLock {
+    pub fn new(kind: &'static str) -> Self {
+        BoxLock {
+            state: AtomicU64::new(0),
+            writer: AtomicU64::new(0),
+            sleepers: AtomicU32::new(0),
+            kind,
+        }
+    }
+
+    /// The task token of the writer that holds the box, 0 when none does.
+    pub fn writer(&self) -> u64 {
+        self.writer.load(Ordering::Acquire)
+    }
+
+    /// Whether a writer waits for the box (a new reader must wait behind it).
+    pub fn writer_waits(&self) -> bool {
+        self.state.load(Ordering::Acquire) & WW_MASK != 0
+    }
+
+    /// One acquire attempt with no wait. `counted`: this writer is one of the waiting writers
+    /// (it holds a [`WaitTicket`]), so the waiting count does not keep it out and the take moves it
+    /// from waiting to holding.
+    fn try_take(&self, mode: GuardMode, me: u64, counted: bool) -> bool {
+        let mut s = self.state.load(Ordering::Relaxed);
+        loop {
+            let next = match mode {
+                GuardMode::Write if s & (WRITER | R_MASK) == 0 => {
+                    let ww = if counted { WW_ONE } else { 0 };
+                    if !counted && s & WW_MASK != 0 {
+                        return false;
+                    }
+                    (s - ww) | WRITER
+                }
+                GuardMode::Read if s & (WRITER | WW_MASK) == 0 && s & R_MASK != R_MASK => s + 1,
+                GuardMode::Write | GuardMode::Read => return false,
+            };
+            match self
+                .state
+                .compare_exchange_weak(s, next, Ordering::Acquire, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    if mode == GuardMode::Write {
+                        self.writer.store(me, Ordering::Release);
+                    }
+                    return true;
+                }
+                Err(now) => s = now,
+            }
+        }
+    }
+
+    /// Whether an acquire in `mode` by a (counted) waiter could succeed now.
+    fn looks_free(&self, mode: GuardMode) -> bool {
+        let s = self.state.load(Ordering::Acquire);
+        match mode {
+            GuardMode::Write => s & (WRITER | R_MASK) == 0,
+            GuardMode::Read => s & (WRITER | WW_MASK) == 0,
+        }
+    }
+
+    /// Wake the tasks that wait for this box, if any.
+    fn wake(&self) {
+        if self.sleepers.load(Ordering::SeqCst) > 0 {
+            let (mtx, cv) = guard_registry();
+            drop(mtx.lock().unwrap_or_else(|e| e.into_inner()));
+            cv.notify_all();
+        }
+    }
+}
+
+/// TICKET-016 (W8-3) — the process-global wait-for graph, read only on the slow path (a contended
+/// acquire). `waiting` maps a blocked task's token to the box and mode it wants. A walk from the
+/// requester follows `waiting` -> the box's writer (`BoxLock::writer`) or a writer that waits for
+/// it -> `waiting`: a walk that returns to the requester is a wait-for cycle, which faults instead
+/// of blocking. A reader is anonymous ([`BoxLock`]), so a cycle that passes through a read guard is
+/// left to the run's deadlock verdict (Go: `fatal error: all goroutines are asleep - deadlock!`).
 ///
 /// No std lock here lives across user code or a fiber park: the registry `Mutex` is held only for
 /// the map reads and writes below (and released by the `Condvar` wait).
 #[derive(Default)]
 struct GuardGraph {
-    writer: HashMap<usize, u64>,
-    readers: HashMap<usize, Vec<u64>>,
-    waiting: HashMap<u64, GuardKey>,
+    waiting: HashMap<u64, (Arc<BoxLock>, GuardMode)>,
 }
 
 impl GuardGraph {
-    /// The tasks a wait for `want` by `me` waits on: the writer, the readers for a write, and (Go
-    /// writer preference) a waiting writer for a read.
-    fn blockers(&self, want: GuardKey, me: u64) -> Vec<u64> {
-        let mut out: Vec<u64> = self.writer.get(&want.addr).copied().into_iter().collect();
-        match want.mode {
-            GuardMode::Write => {
-                out.extend(self.readers.get(&want.addr).into_iter().flatten().copied());
-            }
-            GuardMode::Read => out.extend(
-                self.waiting
-                    .iter()
-                    .filter(|(_, k)| k.addr == want.addr && k.mode == GuardMode::Write)
-                    .map(|(t, _)| *t),
-            ),
+    /// The tasks a wait for `(lock, mode)` by `me` waits on: the writer, and for a read a writer
+    /// that waits for the same box.
+    fn blockers(&self, lock: &Arc<BoxLock>, mode: GuardMode, me: u64, out: &mut Vec<u64>) {
+        let w = lock.writer();
+        if w != 0 && w != me {
+            out.push(w);
         }
-        out.retain(|&t| t != me);
-        out
+        if mode == GuardMode::Read {
+            for (t, (l, m)) in &self.waiting {
+                if *t != me && *m == GuardMode::Write && Arc::ptr_eq(l, lock) {
+                    out.push(*t);
+                }
+            }
+        }
     }
 }
 
@@ -68,18 +156,19 @@ pub enum GuardMode {
     Read,
 }
 
-/// One guard: a box (its core's `Arc` address) in one mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GuardKey {
-    pub addr: usize,
+/// One guard: a box's lock in one mode. Borrowed: the method that takes it holds the box core.
+#[derive(Debug, Clone, Copy)]
+pub struct GuardKey<'a> {
+    pub lock: &'a Arc<BoxLock>,
     pub mode: GuardMode,
 }
 
 /// Why a guard acquire refused to block: a wait-for cycle exists. `SelfHeld` is the length-1 case
 /// (the requester already holds the box's write guard, e.g. a nested `set`/`update`/`write`, or a
 /// read, on the same box inside its own closure); `ReadHeld` is a write by a task that holds the
-/// box's read guard (M3.3, Q2: Go `RLock(); Lock()`); `Cycle` is a longer cross-task/cross-box
-/// cycle (e.g. AB-BA).
+/// box's read guard (M3.3, Q2: Go `RLock(); Lock()`); `Cycle` is a longer cycle: a cross-task or
+/// cross-box one (e.g. AB-BA), or a nested read past a waiting writer that waits for this task's
+/// outer read (Go: a recursive `RLock` with a writer queued deadlocks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardCycle {
     SelfHeld,
@@ -87,17 +176,66 @@ pub enum GuardCycle {
     Cycle,
 }
 
-/// RAII handle for a held guard (TICKET-016 / W8-3): dropping it releases the hold and wakes every
-/// task waiting on the registry, so a cycle formed after registration is still found. It belongs
-/// to the task (`me`), not to a thread or a lock guard, so it may live across a park.
-pub struct UpdateGuard {
-    key: GuardKey,
-    me: u64,
+/// RAII handle for a held guard (TICKET-016 / W8-3): dropping it releases the hold and wakes the
+/// tasks that wait for the box, if any. It belongs to the task, not to a thread or a lock guard,
+/// so it may live across a park.
+pub struct UpdateGuard<'a> {
+    lock: &'a BoxLock,
+    mode: GuardMode,
 }
 
-impl Drop for UpdateGuard {
+impl Drop for UpdateGuard<'_> {
     fn drop(&mut self) {
-        release_update_guard(self.key, self.me);
+        match self.mode {
+            GuardMode::Write => {
+                self.lock.writer.store(0, Ordering::Relaxed);
+                self.lock.state.fetch_and(!WRITER, Ordering::SeqCst);
+            }
+            GuardMode::Read => {
+                self.lock.state.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.lock.wake();
+    }
+}
+
+/// M3.3 — a writer's place in the waiting count of a box, from its first failed acquire to its
+/// take or its exit. While it lives a new reader waits (Go writer preference), across every stage
+/// of the wait and the width-permit handoff. A reader's ticket counts nothing.
+pub struct WaitTicket<'a> {
+    key: GuardKey<'a>,
+    live: bool,
+}
+
+impl<'a> WaitTicket<'a> {
+    pub fn new(key: GuardKey<'a>) -> Self {
+        let live = key.mode == GuardMode::Write;
+        if live {
+            key.lock.state.fetch_add(WW_ONE, Ordering::SeqCst);
+        }
+        WaitTicket { key, live }
+    }
+
+    /// The guard, when this waiter can take it now (no wait).
+    pub fn try_take(&mut self, me: u64) -> Option<UpdateGuard<'a>> {
+        if self.key.lock.try_take(self.key.mode, me, self.live) {
+            // A counted writer's take moved it from waiting to holding.
+            self.live = false;
+            return Some(UpdateGuard {
+                lock: self.key.lock,
+                mode: self.key.mode,
+            });
+        }
+        None
+    }
+}
+
+impl Drop for WaitTicket<'_> {
+    fn drop(&mut self) {
+        if self.live {
+            self.key.lock.state.fetch_sub(WW_ONE, Ordering::SeqCst);
+            self.key.lock.wake();
+        }
     }
 }
 
@@ -108,158 +246,79 @@ impl Drop for UpdateGuard {
 /// (`TasksMax=32768`): 0 ms still peaks at 1091 threads, 1 ms at 35, 5 ms at 19.
 pub const GUARD_DEMOTE_BUDGET: Duration = Duration::from_millis(5);
 
-/// Take the guard `key` as task `me`. Blocks while another healthy task holds it; returns `Err`
-/// immediately when the wait-for walk from `me` finds a cycle (never blocks into a cycle it can
-/// already see).
-pub fn acquire_update_guard(key: GuardKey, me: u64) -> Result<UpdateGuard, GuardCycle> {
-    match acquire_update_guard_within(key, me, None) {
-        Ok(Some(g)) => Ok(g),
-        Ok(None) => unreachable!("an unbounded update-guard acquire cannot time out"),
-        Err(cycle) => Err(cycle),
-    }
-}
-
-/// Bounded/unbounded acquire of the guard `key`, as task `me`. With `budget: None` this blocks
-/// exactly like [`acquire_update_guard`]. With `budget: Some(d)`, once `d` has elapsed without
-/// acquiring the guard it returns `Ok(None)` instead of continuing to block, so the caller can pay for
-/// a worker demotion only when the wait is actually long.
-pub fn acquire_update_guard_within(
-    key: GuardKey,
-    me: u64,
-    budget: Option<Duration>,
-) -> Result<Option<UpdateGuard>, GuardCycle> {
-    match wait_update_guard(key, me, budget, true)? {
-        GuardWait::Taken(g) => Ok(Some(g)),
-        GuardWait::TimedOut => Ok(None),
-        GuardWait::Free => unreachable!("a taking wait never reports Free"),
-    }
-}
-
-/// M1.5 — take the guard `key` as task `me` only if no wait is needed: a zero budget, so it
-/// returns at once. `Ok(None)`: another task holds it.
-pub fn try_update_guard(key: GuardKey, me: u64) -> Result<Option<UpdateGuard>, GuardCycle> {
-    acquire_update_guard_within(key, me, Some(Duration::ZERO))
-}
-
-/// TICKET-193 — what an acquire of `key` by task `me` would do right now. The ONE decider: the wait
-/// loop ([`wait_update_guard`]) and the deadlock verdict ([`guard_wait_satisfiable`]) both read it.
-/// The cycle walk starts at `waiting[me]`, so a caller that wants the cycle answer registers first.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum GuardState {
-    Free,
-    Held(GuardCycle),
-    Busy,
-}
-
-fn guard_state(g: &GuardGraph, key: GuardKey, me: u64) -> GuardState {
-    let readers = g.readers.get(&key.addr);
-    let reads = readers.is_some_and(|r| r.contains(&me));
-    if g.writer.get(&key.addr) == Some(&me) {
-        return GuardState::Held(GuardCycle::SelfHeld);
-    }
-    match key.mode {
-        GuardMode::Write if reads => return GuardState::Held(GuardCycle::ReadHeld),
-        // A nested read of a box this task reads already: Go's recursive `RLock`, granted even past
-        // a waiting writer (that writer waits for this task, so waiting here would be a cycle).
-        GuardMode::Read if reads => return GuardState::Free,
-        GuardMode::Write | GuardMode::Read => {}
-    }
-    if g.blockers(key, me).is_empty() {
-        GuardState::Free
-    } else if wait_for_cycle(g, me) {
-        GuardState::Held(GuardCycle::Cycle)
+/// The fast path: take the guard `key` as task `me` with one CAS, or `None`. A `None` caller checks
+/// a same-task re-entry, then waits through a [`WaitTicket`].
+pub fn try_update_guard<'a>(key: GuardKey<'a>, me: u64) -> Option<UpdateGuard<'a>> {
+    // Not `then_some`: its argument is built eagerly, and a dropped guard releases a hold.
+    if key.lock.try_take(key.mode, me, false) {
+        Some(UpdateGuard {
+            lock: key.lock,
+            mode: key.mode,
+        })
     } else {
-        GuardState::Busy
+        None
     }
 }
 
-/// How a [`wait_update_guard`] ended without a cycle.
-enum GuardWait {
-    Taken(UpdateGuard),
-    Free,
-    TimedOut,
-}
-
-/// The one guard wait loop. `take` = take the guard once free; else report `Free` and leave it.
-/// Clears `waiting[me]` on every return (DEC-016).
-fn wait_update_guard(
-    key: GuardKey,
-    me: u64,
-    budget: Option<Duration>,
-    take: bool,
-) -> Result<GuardWait, GuardCycle> {
-    let deadline = budget.map(|d| std::time::Instant::now() + d);
-    let (mtx, cv) = guard_registry();
-    let mut g = mtx.lock().unwrap();
-    let mut waited = false;
-    loop {
-        g.waiting.insert(me, key);
-        let state = guard_state(&g, key, me);
-        if state != GuardState::Busy {
-            g.waiting.remove(&me);
-            // A writer that waited kept new readers out (`GuardGraph::blockers`): wake them.
-            if waited && key.mode == GuardMode::Write {
-                cv.notify_all();
-            }
-        }
-        let left = match state {
-            GuardState::Free if take => {
-                match key.mode {
-                    GuardMode::Write => {
-                        g.writer.insert(key.addr, me);
-                    }
-                    GuardMode::Read => g.readers.entry(key.addr).or_default().push(me),
-                }
-                return Ok(GuardWait::Taken(UpdateGuard { key, me }));
-            }
-            GuardState::Free => return Ok(GuardWait::Free),
-            GuardState::Held(cycle) => return Err(cycle),
-            GuardState::Busy => match deadline {
-                None => Duration::from_millis(50),
-                Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
-                    None => {
-                        g.waiting.remove(&me);
-                        // A waiting writer that leaves may unblock readers behind it.
-                        if waited && key.mode == GuardMode::Write {
-                            cv.notify_all();
-                        }
-                        return Ok(GuardWait::TimedOut);
-                    }
-                    Some(l) => l.min(Duration::from_millis(50)),
-                },
-            },
-        };
-        g = cv.wait_timeout(g, left).unwrap().0;
-        waited = true;
-    }
-}
-
-/// TICKET-193 — wait until `key` is free WITHOUT taking it: `Ok(true)` free, `Ok(false)` budget spent,
-/// `Err` a cycle. `Vm::guard_wait_block` waits here holding no width permit, then takes the permit,
-/// then the guard (permit before guard; DEC-141).
+/// TICKET-193 — wait until `key` looks free for this waiter WITHOUT taking it: `Ok(true)` free,
+/// `Ok(false)` budget spent (`None` = no limit), `Err` a wait-for cycle. `Vm::guard_wait_block`
+/// waits here holding no width permit, then takes the permit, then the guard (permit before
+/// guard; DEC-141). The waiter's [`WaitTicket`] stays live across the gap, so no new reader gets in.
 pub fn await_update_guard_free(
-    key: GuardKey,
+    key: GuardKey<'_>,
     me: u64,
     budget: Option<Duration>,
 ) -> Result<bool, GuardCycle> {
-    match wait_update_guard(key, me, budget, false)? {
-        GuardWait::Free => Ok(true),
-        GuardWait::TimedOut => Ok(false),
-        GuardWait::Taken(_) => unreachable!("a non-taking wait never takes the guard"),
-    }
+    let deadline = budget.map(|d| std::time::Instant::now() + d);
+    let (mtx, cv) = guard_registry();
+    let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+    key.lock.sleepers.fetch_add(1, Ordering::SeqCst);
+    g.waiting.insert(me, (Arc::clone(key.lock), key.mode));
+    let out = loop {
+        if key.lock.looks_free(key.mode) {
+            break Ok(true);
+        }
+        if wait_for_cycle(&g, me) {
+            break Err(GuardCycle::Cycle);
+        }
+        let left = match deadline {
+            None => Duration::from_millis(50),
+            Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
+                None => break Ok(false),
+                Some(l) => l.min(Duration::from_millis(50)),
+            },
+        };
+        g = cv
+            .wait_timeout(g, left)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    };
+    g.waiting.remove(&me);
+    key.lock.sleepers.fetch_sub(1, Ordering::SeqCst);
+    out
 }
 
-/// TICKET-063 — would an acquire of `key` by `me`, issued now, NOT block? Reads [`guard_state`].
-///
-/// The cycle arm answers `false` between polls, not `true`: `acquire_update_guard_within` removes
-/// `me` from `waiting` before it returns `Ok(None)` (see its deadline arm above), so once a bounded
-/// acquire has given up, `wait_for_cycle` finds no entry for `me` and this fn reports "not
-/// satisfiable" even on a real cycle. That is the safe direction — the nursery deadlock judge then
-/// reports `deadlock` where a `GuardCycle` fault was one poll away, never the reverse.
-pub fn guard_wait_satisfiable(key: GuardKey, me: u64) -> bool {
+/// TICKET-063 — a registered guard wait (`PartyWait::Guard`): the box's lock, the mode, and
+/// `taking`, which the waiter sets before each take attempt and clears when the attempt fails. A
+/// waiter that has just taken the guard stays registered until it leaves its wait loop, and its own
+/// hold is no wait: `taking` says so (a lock word cannot name an anonymous reader).
+#[derive(Debug, Clone)]
+pub struct GuardWait {
+    pub lock: Arc<BoxLock>,
+    pub mode: GuardMode,
+    pub taking: Arc<AtomicBool>,
+}
+
+/// TICKET-063 — would an acquire of `w` by `me`, issued now, NOT block? `true` too when the wait
+/// is a cycle (the acquire faults at once), and while the waiter takes the guard. Deliberately
+/// generous: a false `true` only vetoes the verdict.
+pub fn guard_wait_satisfiable(w: &GuardWait, me: u64) -> bool {
+    if w.taking.load(Ordering::SeqCst) || w.lock.looks_free(w.mode) || w.lock.writer() == me {
+        return true;
+    }
     let (mtx, _cv) = guard_registry();
-    let g = mtx.lock().unwrap();
-    guard_state(&g, key, me) != GuardState::Busy
+    let g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+    wait_for_cycle(&g, me)
 }
 
 /// Walk `waiting` -> blockers -> `waiting` -> ... from `start`, each task once: a walk that reaches
@@ -267,11 +326,14 @@ pub fn guard_wait_satisfiable(key: GuardKey, me: u64) -> bool {
 fn wait_for_cycle(g: &GuardGraph, start: u64) -> bool {
     let mut seen = std::collections::HashSet::new();
     let mut work = vec![start];
+    let mut next = Vec::new();
     while let Some(cur) = work.pop() {
-        let Some(&want) = g.waiting.get(&cur) else {
+        let Some((lock, mode)) = g.waiting.get(&cur) else {
             continue;
         };
-        for t in g.blockers(want, cur) {
+        next.clear();
+        g.blockers(lock, *mode, cur, &mut next);
+        for &t in &next {
             if t == start {
                 return true;
             }
@@ -283,28 +345,30 @@ fn wait_for_cycle(g: &GuardGraph, start: u64) -> bool {
     false
 }
 
-/// Release one hold of `key` by `me` and wake every waiter, so a cycle that formed after this
-/// registration (or the newly-freed key) is re-checked.
-pub fn release_update_guard(key: GuardKey, me: u64) {
-    let (mtx, cv) = guard_registry();
-    let mut g = mtx.lock().unwrap();
-    match key.mode {
-        GuardMode::Write => {
-            g.writer.remove(&key.addr);
+/// Test-only blocking acquire: the fast path, then a [`WaitTicket`] wait of at most `budget`.
+/// The engine path is `Vm::take_update_guard` (re-entry checks, halts, width permit, parties).
+#[cfg(test)]
+pub fn acquire_update_guard_within<'a>(
+    key: GuardKey<'a>,
+    me: u64,
+    budget: Duration,
+) -> Result<Option<UpdateGuard<'a>>, GuardCycle> {
+    if let Some(g) = try_update_guard(key, me) {
+        return Ok(Some(g));
+    }
+    let deadline = std::time::Instant::now() + budget;
+    let mut ticket = WaitTicket::new(key);
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if await_update_guard_free(key, me, Some(left))?
+            && let Some(g) = ticket.try_take(me)
+        {
+            return Ok(Some(g));
         }
-        GuardMode::Read => {
-            if let Some(r) = g.readers.get_mut(&key.addr) {
-                if let Some(i) = r.iter().rposition(|&t| t == me) {
-                    r.swap_remove(i);
-                }
-                if r.is_empty() {
-                    g.readers.remove(&key.addr);
-                }
-            }
+        if left.is_zero() {
+            return Ok(None);
         }
     }
-    drop(g);
-    cv.notify_all();
 }
 
 /// `Channel[T]` core (B3.1): the shared mailbox, a FIFO of wire-form messages. `send` locks +
@@ -834,16 +898,20 @@ impl Drop for PendingOp {
 /// wait-for cycle (AB-BA) faults.
 ///
 /// The slot is read with no lock (Acquire), so the collector and a `&self` render never wait for a
-/// holder; a write stores with Release. No std lock is held across user code.
+/// holder; a write stores with Release. No std lock is held across user code. The guard is the
+/// box's [`BoxLock`]: one CAS when free.
 #[derive(Debug)]
 pub struct SharedCore {
     pub v: super::rvec::RCell<Value>,
+    /// The box's lock ([`BoxLock`]): an `Arc` so a slow-path waiter can name it in the registry.
+    pub lock: Arc<BoxLock>,
 }
 
 impl SharedCore {
     pub fn new(v: Value) -> Self {
         SharedCore {
             v: super::rvec::RCell::new(v),
+            lock: Arc::new(BoxLock::new("Shared")),
         }
     }
 }
@@ -857,17 +925,21 @@ impl Default for SharedCore {
 /// `RwShared[T]` core: the read-write counterpart to [`SharedCore`] (Go `sync.RWMutex`). The same
 /// one slot; the guard has two modes ([`GuardMode`]): MANY readers (`get`, `read`, the `_` read
 /// views) hold it at once, or ONE writer (`write`, `set`, the single-entry writers). A writer that
-/// waits keeps new readers out (Go writer preference); a nested read by a reader is granted. A write
-/// inside the same task's read is a certain deadlock and faults (`ReadHeld`).
+/// waits keeps new readers out (Go writer preference); a nested read by a reader is granted unless a
+/// writer waits (then it faults, a certain cycle). A write inside the same task's read is a certain
+/// deadlock and faults (`ReadHeld`).
 #[derive(Debug)]
 pub struct RwSharedCore {
     pub v: super::rvec::RCell<Value>,
+    /// The box's lock ([`BoxLock`]): an `Arc` so a slow-path waiter can name it in the registry.
+    pub lock: Arc<BoxLock>,
 }
 
 impl RwSharedCore {
     pub fn new(v: Value) -> Self {
         RwSharedCore {
             v: super::rvec::RCell::new(v),
+            lock: Arc::new(BoxLock::new("RwShared")),
         }
     }
 }

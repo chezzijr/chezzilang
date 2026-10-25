@@ -70,7 +70,7 @@ against other tasks (a `get`-then-`set` races). `set` and `get` take the same gu
 | `s.get()` / `s.read(g)` / `s.set(x)` / `s.update(g)` — same `Shared` box | **faults**: `"deadlock: this task already holds the update guard on this Shared box ..."` (Go: `Lock` in `Lock` deadlocks) |
 | `rw.get()` / `rw.read(g)` / `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `write` | **faults** the same way |
 | `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `read` | **faults**: `"deadlock: this task already holds the read guard on this RwShared box ..."` (Go: `Lock` in `RLock` deadlocks) |
-| `rw.get()` / `rw.read(g)` — same `RwShared`, inside its `read` | legal (Go's recursive `RLock`) |
+| `rw.get()` / `rw.read(g)` — same `RwShared`, inside its `read` | legal while no writer waits; past a waiting writer **faults** with `a lock cycle` (Go: a recursive `RLock` with a writer queued deadlocks) |
 | `print(s)` | legal: a print takes no guard and shows the value as it is |
 
 A cross-task `set`/`update`/`write` on the SAME box from a *different*, healthy task BLOCKS behind the

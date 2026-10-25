@@ -132,18 +132,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "core.rs",
-        "wait_update_guard",
-        "wait_update_guard(",
-        "the update-guard wait; its callers in core.rs are rows",
-    ),
-    (
-        "core.rs",
-        "acquire_update_guard",
-        "acquire_update_guard(",
-        "takes an update guard; each call is in a door",
-    ),
-    (
-        "core.rs",
         "acquire_update_guard_within",
         "acquire_update_guard_within(",
         "takes an update guard; each call is in a door",
@@ -261,12 +249,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "drop",
         "",
         "`WriterCore::drop` flushes a buffered writer where the last handle drops, with no Vm (a sweep can drop it); open for M1.7",
-    ),
-    (
-        "core.rs",
-        "try_update_guard",
-        "",
-        "a zero budget: it returns at once",
     ),
     (
         "entry.rs",

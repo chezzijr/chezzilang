@@ -126,13 +126,11 @@ pub(super) enum PartyWait {
     /// itself, e.g. `main` running `s.update(f)` where `f` runs `parallel: spawn: s.update(...)`; the
     /// M:N-worker-side guard wait is registered separately, on `SchedCore::waiters`.
     ///
-    /// The key's `addr` is the box core's `Arc` address — aliasing-safe because the party holding this wait
-    /// also holds a live handle to that box (a `GcRef`/task token pinning it) for the whole lifetime of
-    /// the wait, so the address cannot be reused underneath it.
+    /// The key holds the box's lock by its own `Arc` (M3.3), so it stays valid for the whole wait.
     ///
     /// Lock order: P (this registry) then G (the guard registry, `core::guard_wait_satisfiable`'s own
     /// lock) — below `SchedCore` (A) exactly like every other arm here, and G is a leaf so no ABBA.
-    Guard(super::core::GuardKey, u64),
+    Guard(super::core::GuardWait, u64),
 }
 
 impl PartyWait {
@@ -199,7 +197,7 @@ impl PartyWait {
                 !c.any_scope_incomplete() || sched.can_still_move(&c, !c.only_blocked_owners())
             }
             // TICKET-063 — mirrors `SchedCore::waiters`' veto in `local_quiesced`.
-            PartyWait::Guard(key, me) => super::core::guard_wait_satisfiable(*key, *me),
+            PartyWait::Guard(key, me) => super::core::guard_wait_satisfiable(key, *me),
         }
     }
 }

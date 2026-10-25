@@ -39,18 +39,18 @@ impl Vm {
         self.with_roots(&roots, f)
     }
 
-    /// Take the guard of the box core at `addr` in `mode`, as this task.
-    fn box_guard(
+    /// Take the guard `lock` in `mode`, as this task.
+    fn box_guard<'a>(
         &mut self,
-        addr: usize,
+        lock: &'a Arc<core::BoxLock>,
         mode: GuardMode,
         span: Span,
-    ) -> Result<core::UpdateGuard, RuntimeError> {
+    ) -> Result<core::UpdateGuard<'a>, RuntimeError> {
         let what = match mode {
             GuardMode::Write => "a Shared/RwShared write guard",
             GuardMode::Read => "a RwShared read guard",
         };
-        self.take_update_guard(GuardKey { addr, mode }, what, span)
+        self.take_update_guard(GuardKey { lock, mode }, what, span)
     }
 
     /// Run the closure `f` of a box method on the live value `cur`, in this task, under the guard
@@ -71,19 +71,19 @@ impl Vm {
             return Err(self.err(format!("type Shared has no method '{method}'"), span));
         };
         let core = self.shared_core(h);
-        let addr = Arc::as_ptr(&core) as usize;
+        let lock = &core.lock;
         // EVERY arm takes the guard first (TICKET-016 / W8-3, the process-global wait-for graph),
         // so a same-box re-entry from the box's own closure FAULTS (the length-1 cycle) for `get` /
         // `read` / `set` / `update` alike, and a cross-box wait cycle faults.
         match which {
             SharedMethod::Get => {
                 self.arity_err("get", args, 0, span)?;
-                let _guard = self.box_guard(addr, GuardMode::Write, span)?;
+                let _guard = self.box_guard(lock, GuardMode::Write, span)?;
                 Ok(core.v.get())
             }
             SharedMethod::Set => {
                 self.arity_err("set", args, 1, span)?;
-                let _guard = self.box_guard(addr, GuardMode::Write, span)?;
+                let _guard = self.box_guard(lock, GuardMode::Write, span)?;
                 core.v.set(args[0]);
                 Ok(Value::nil())
             }
@@ -91,7 +91,7 @@ impl Vm {
             // value as `f` left it.
             SharedMethod::Update | SharedMethod::Read => {
                 self.arity_err(method, args, 1, span)?;
-                let _guard = self.box_guard(addr, GuardMode::Write, span)?;
+                let _guard = self.box_guard(lock, GuardMode::Write, span)?;
                 let r = self.box_closure(args[0], core.v.get(), span)?;
                 if which == SharedMethod::Update {
                     core.v.set(r);
@@ -142,9 +142,14 @@ impl Vm {
         span: Span,
         pick: impl FnOnce(&mut Vm, Value) -> Result<R, RuntimeError>,
     ) -> Result<R, RuntimeError> {
-        let _guard = self.box_guard(Arc::as_ptr(core) as usize, GuardMode::Read, span)?;
+        let _guard = self.box_guard(&core.lock, GuardMode::Read, span)?;
         let cur = core.v.get();
-        pick(self, cur)
+        // The reader's own list (`Vm::held_reads`), read on a failed acquire to find a re-entry.
+        let held = self.held_reads.len();
+        self.held_reads.push(Arc::as_ptr(&core.lock) as usize);
+        let r = pick(self, cur);
+        self.held_reads.truncate(held);
+        r
     }
 
     /// The ONE single-entry writer of a `RwShared` container: run `op` on the live value under the
@@ -155,7 +160,7 @@ impl Vm {
         span: Span,
         op: impl FnOnce(&mut Vm, Value) -> Result<R, RuntimeError>,
     ) -> Result<R, RuntimeError> {
-        let _guard = self.box_guard(Arc::as_ptr(core) as usize, GuardMode::Write, span)?;
+        let _guard = self.box_guard(&core.lock, GuardMode::Write, span)?;
         let cur = core.v.get();
         op(self, cur)
     }

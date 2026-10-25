@@ -189,6 +189,7 @@ impl Vm {
             offload: None,
             poll_park: None,
             pending_connect: None,
+            held_reads: Vec::new(),
             copy_mark: false,
             poll_timed_out: false,
             poll_deadline: None,
@@ -256,8 +257,10 @@ impl Vm {
     /// with one open. `Vm::gc_roots` roots them while they are open.
     pub(super) fn swap_task(&mut self, ctx: &mut FiberCtx) {
         assert!(
-            self.gen_host_ctx.is_empty() && self.active_generators.is_empty(),
-            "a task switch with a generator open"
+            self.gen_host_ctx.is_empty()
+                && self.active_generators.is_empty()
+                && self.held_reads.is_empty(),
+            "a task switch with a generator or a box read open"
         );
         self.swap_ctx(ctx);
         std::mem::swap(&mut self.out, &mut ctx.out);
