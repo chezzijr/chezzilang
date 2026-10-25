@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 18] = [
+const CLOCK_READING_TESTS: [&str; 19] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault",
     "a_slow_but_healthy_job_at_the_exit_drain_is_untouched",
@@ -94,6 +94,9 @@ const CLOCK_READING_TESTS: [&str; 18] = [
     // TICKET-151: the same liveness deadline for a DIRECT `io.input` (no callback, no spin); the
     // clock starts at spawn because the fixture prints nothing before the read.
     "sibling_runs_while_a_direct_stdin_read_blocks",
+    // M2.9 (vm/gc_coord.rs): the test checks the stop timer itself. It spins until the clock
+    // moves and asserts an order (the spin <= the recorded stop <= the whole call), not a bound.
+    "stop_stats_time_the_whole_stop",
     // M2.4 fix 1 (vm/rvec.rs): the clock only holds a read open for 50 ms so the take must wait;
     // the assert is the order (`read_done` before the take returns), not a time.
     "take_waits_for_a_read_in_progress",

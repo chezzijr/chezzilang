@@ -636,22 +636,34 @@ mod tests {
 
     /// The longest stop covers its collection: it is recorded when the world restarts, after the
     /// collection, so a lone thread's stop (no wait for others) still reads its own length. While
-    /// the first collection runs, no stop is recorded yet.
+    /// the first collection runs, no stop is recorded yet. The collection spins until the clock
+    /// moves (no sleep), so the stop it times is longer than zero by construction, and the one stop
+    /// is at least that spin and at most the whole call.
     #[test]
     fn stop_stats_time_the_whole_stop() {
         within(|| {
             let c = Arc::new(GcCoord::new());
             let mut me = c.attach();
             let mut during = None;
-            me.request_collect(vec![], |_| during = Some(c.stop_stats().1));
+            let mut spun = Duration::ZERO;
+            let call = Instant::now();
+            me.request_collect(vec![], |_| {
+                during = Some(c.stop_stats());
+                let t = Instant::now();
+                while t.elapsed() == Duration::ZERO {}
+                spun = t.elapsed();
+            });
+            let whole = call.elapsed();
             assert_eq!(
                 during,
-                Some(Duration::ZERO),
-                "recorded before the collection ended"
+                Some((1, Duration::ZERO)),
+                "counted, but recorded before the collection ended"
             );
+            let (stops, max) = c.stop_stats();
+            assert_eq!(stops, 1, "one stop");
             assert!(
-                c.stop_stats().1 > Duration::ZERO,
-                "the stop was not recorded"
+                spun > Duration::ZERO && spun <= max && max <= whole,
+                "the stop {max:?} covers the collection's {spun:?} and fits the call's {whole:?}"
             );
         });
     }
