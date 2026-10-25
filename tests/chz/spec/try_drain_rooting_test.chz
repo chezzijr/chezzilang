@@ -5,6 +5,9 @@
 # defers. Each drain can collect the run's one heap (a defer runs code; a wait detaches this
 # thread, and another thread collects). The carried value must be a root during each drain.
 # Run under `CHEZZI_GC_STRESS=1` at `CHEZZI_THREADS=1` and `2` (`tests/try_drain_rooting.rs`).
+# The four caught-error rows failed on the base binary (`do_try`). The ok row and the two return
+# rows passed there too. They guard the family, but they are not regression proof for the
+# `do_return` and `run_invoke` pushes: those reclaims have nothing left to drain today.
 
 fn bad() -> int!str:
     return !"q boom"

@@ -4,7 +4,7 @@
 //! killed and FAILS. It is never retried. Include it with
 //! `#[path = "support/stressed_chz.rs"] mod stressed_chz;`.
 
-use std::io::Read as _;
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,29 @@ pub fn assert_stressed_pass(file: &str, threads: &str, seed: Option<&str>) {
         }
     }
     let mut child = cmd.spawn().expect("spawn chezzi");
+    // Drain both pipes while the child runs: a child that fills a pipe buffer blocks on its write
+    // and would look like a hang.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_string(&mut s);
+            }
+            s
+        })
+    };
+    let out_reader = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err_reader = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
     let deadline = Instant::now() + LIMIT;
     let status = loop {
         if let Some(st) = child.try_wait().expect("try_wait") {
@@ -44,13 +67,8 @@ pub fn assert_stressed_pass(file: &str, threads: &str, seed: Option<&str>) {
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let (mut out, mut err) = (String::new(), String::new());
-    if let Some(mut o) = child.stdout.take() {
-        let _ = o.read_to_string(&mut out);
-    }
-    if let Some(mut e) = child.stderr.take() {
-        let _ = e.read_to_string(&mut err);
-    }
+    let out = out_reader.join().expect("stdout reader");
+    let err = err_reader.join().expect("stderr reader");
     assert!(
         status.success() && out.contains(" 0 failed, 0 errored") && !out.contains("file error"),
         "{label}: exit {status}\nstdout:\n{out}\nstderr:\n{err}"
