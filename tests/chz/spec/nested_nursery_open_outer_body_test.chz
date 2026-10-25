@@ -5,11 +5,12 @@
 # burn(1500000), measured at CHEZZI_THREADS=2 and 8). The bound is one absolute wall-clock ceiling
 # with headroom between the two, never a quotient of two samples.
 #
-# The ceiling only discriminates on an OPTIMIZED build: one `burn(1500000)` takes ~0.2 s on the
-# release binary and ~1.8-2.1 s on the debug binary `cargo test` runs this suite with, where even the
-# outer-closed shape takes ~7.9 s. `can_fan_out()` times one solo burn and each test returns
-# early (passes without asserting) when that is 1000 ms or more, so the debug gates stay green and
-# the release run (`chezzi test` on the release binary, the ticket's declared command) asserts.
+# The ceiling only discriminates on a RELEASE build: one `burn(1500000)` takes ~0.2 s on the
+# release binary and ~0.5 s on the debug binary `cargo test` runs this suite with (chezzi-vm at
+# opt-level 1; ~2 s at opt-level 0). `can_fan_out()` reads the build mode from the binary
+# (`os.debug_build()`), and each test returns early (passes without asserting) on a debug build, so
+# the debug gates stay green and the release run (`chezzi test` on the release binary, the ticket's
+# declared command) asserts.
 # The fan-out also needs two workers: at `CHEZZI_THREADS=1` the 8 children run one after another
 # (~1.7 s on release), so `can_fan_out()` returns early there too.
 import std.concurrency
@@ -27,9 +28,7 @@ fn burn(n: int) -> int:
 fn can_fan_out() -> bool:
     if (os.env("CHEZZI_THREADS") ?? "") == "1":
         return false
-    t0 := time.monotonic()
-    burn(1500000)
-    return (time.monotonic() - t0) * 1000.0 < 1000.0
+    return not os.debug_build()
 
 fn fan_open() -> int:
     ch := Channel[int](0)

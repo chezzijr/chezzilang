@@ -35,6 +35,9 @@ fn getcwd() -> path.Path!:
 # indistinguishable from a real, if absurd, hostname.
 native fn getpid() -> int
 native fn platform() -> str
+# `debug_build()` is `true` for a dev/test-profile binary (Rust `cfg!(debug_assertions)`), `false`
+# for a `--release` build.
+native fn debug_build() -> bool
 native fn hostname() -> str?
 native fn home_dir() -> str?
 # `temp_dir()` hands back a `path.Path` for the same reason `getcwd()` does (W7-8): `$TMPDIR` is raw

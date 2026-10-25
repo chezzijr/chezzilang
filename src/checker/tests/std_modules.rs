@@ -868,6 +868,7 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     // gaps §6 system query + mutation fns.
     assert_eq!(os.certain_fn("getpid").unwrap().ret, Ty::Int);
     assert_eq!(os.certain_fn("platform").unwrap().ret, Ty::Str);
+    assert_eq!(os.certain_fn("debug_build").unwrap().ret, Ty::Bool);
     assert_eq!(os.certain_fn("hostname").unwrap().ret, Ty::option(Ty::Str));
     assert_eq!(os.certain_fn("home_dir").unwrap().ret, Ty::option(Ty::Str));
     // W7-8 (review) — `temp_dir` hands back a `path.Path` too: `$TMPDIR` is raw OS bytes, and
@@ -884,8 +885,8 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(setenv.params, vec![Ty::Str, Ty::Str]);
     assert_eq!(setenv.ret, Ty::Nil);
     assert_eq!(os.certain_fn("chdir").unwrap().ret, Ty::result(Ty::Nil));
-    // 12 public fns; the 3 `_` byte-seam natives are internal to std and not exported (TICKET-243).
-    assert_eq!(os.fns().count(), 12);
+    // 13 public fns; the 3 `_` byte-seam natives are internal to std and not exported (TICKET-243).
+    assert_eq!(os.fns().count(), 13);
 
     let rand = native_module_sig_via_graph("rand");
     let ri = rand.certain_fn("int").expect("rand.int");
@@ -971,8 +972,8 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     // read_char (R2 grab-bag stdin twins) + 3 isatty TTY-detection variants (gaps §6) = 20.
     assert_eq!(crate::native::native_members("std.io").len(), 20);
     // std.os: 4 original (args/env/getcwd/exit) + gaps §6's 8 system fns
-    // (getpid/platform/hostname/home_dir/temp_dir/environ/setenv/chdir) = 12.
-    assert_eq!(crate::native::native_members("std.os").len(), 12);
+    // (getpid/platform/hostname/home_dir/temp_dir/environ/setenv/chdir) + M3.1b's debug_build = 13.
+    assert_eq!(crate::native::native_members("std.os").len(), 13);
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
     // --- fs.stat/fs.walk (gaps §6): 15 original + stat + walk = 17 runtime members.
     assert_eq!(crate::native::native_members("std.fs").len(), 17);
