@@ -500,7 +500,8 @@ grid_tests!(WAIT_MODES x WAIT_THREADS: [extern_callback_blocks, print_busy_reade
 
 /// The longest stop on `benches/chz/many_list.chz` is under 100 ms, and the run counts stops.
 /// M2.9: the bound was 10 ms (M1.9), but the stage-2 collector marks and sweeps the whole heap
-/// with the world stopped (about 45 ms release, 0.5 s at opt-level 0, for 128 MB live). Concurrent
+/// with the world stopped (about 45 ms release, 69-80 ms in the opt-level 1 test build, for 128 MB
+/// live; a loaded box can come near the bound). Concurrent
 /// mark (design stage 5, `docs/design/go-shared-heap.md`) is the fix that lets it go back to 10 ms.
 #[test]
 fn heap_stats_report_stw_pause() {
