@@ -506,7 +506,6 @@ impl Vm {
     }
 }
 
-/// Is `read_line` served with no syscall: a closed reader, a carry, or a whole line in the buffer?
 /// Close an I/O handle's `inner` slot: take its backing out under the lock, then drop it (a file
 /// closes, a `BufWriter` flushes) after the lock is released. M3.0a C7 — so a thread holds the
 /// lock for long only for an op on an OPEN slot, which is what a render that cannot wait reads
@@ -516,6 +515,7 @@ pub(super) fn close_slot<T>(inner: &std::sync::Mutex<Option<T>>) {
     drop(backing);
 }
 
+/// Is `read_line` served with no syscall: a closed reader, a carry, or a whole line in the buffer?
 fn line_is_buffered(
     carry: &core::ReaderCarry,
     guard: &Option<std::io::BufReader<std::fs::File>>,

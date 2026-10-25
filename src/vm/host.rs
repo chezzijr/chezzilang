@@ -119,7 +119,8 @@ enum ArgShape {
     List(Option<Vec<String>>),
     /// A map: its `(key, value)` strs in insertion order, or `None` when one is not a str.
     Map(Option<Vec<(String, String)>>),
-    /// A struct: its C value ([`Vm::c_value_of`]), or `None` when a field has no C shape.
+    /// A struct: its fields' C values in declaration order ([`ArgCopy::c_form`] of each), or
+    /// `None` when a field has no C shape.
     Struct(Option<crate::native::NativeRet>),
     /// Any other value: nil, a tuple, a closure, a handle.
     Other,
@@ -180,19 +181,23 @@ impl ArgCopy {
         Err(crate::native::HostError::arg_type(i, "bytes", self.ty))
     }
     fn c_value(self, i: usize) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        let ty = self.ty;
+        self.c_form()
+            .ok_or_else(|| crate::native::HostError::arg_type(i, "C value", ty))
+    }
+    /// The arg as a C-marshallable value for the FFI seam (`Host::arg_c_value`): a scalar
+    /// (`int`/`float`/`bool`/`ptr`/`str`) as itself, a struct as a `NativeRet::List` of its
+    /// fields. `None` for anything else. The one owner of that mapping.
+    fn c_form(self) -> Option<crate::native::NativeRet> {
         use crate::native::NativeRet as N;
         match self.shape {
-            ArgShape::Int(n) => Ok(N::Int(n)),
-            ArgShape::Float(f) => Ok(N::Float(f)),
-            ArgShape::Bool(b) => Ok(N::Bool(b)),
-            ArgShape::Ptr(a) => Ok(N::Ptr(a)),
-            ArgShape::Str(s) => Ok(N::Str(s)),
-            ArgShape::Struct(Some(c)) => Ok(c),
-            ArgShape::Struct(None)
-            | ArgShape::Bytes(_)
-            | ArgShape::List(_)
-            | ArgShape::Map(_)
-            | ArgShape::Other => Err(self.wrong(i, "C value")),
+            ArgShape::Int(n) => Some(N::Int(n)),
+            ArgShape::Float(f) => Some(N::Float(f)),
+            ArgShape::Bool(b) => Some(N::Bool(b)),
+            ArgShape::Ptr(a) => Some(N::Ptr(a)),
+            ArgShape::Str(s) => Some(N::Str(s)),
+            ArgShape::Struct(c) => c,
+            ArgShape::Bytes(_) | ArgShape::List(_) | ArgShape::Map(_) | ArgShape::Other => None,
         }
     }
     /// In list order (it IS the argv). Every element must be a str.
@@ -276,7 +281,13 @@ impl Vm {
                         .map(|(_, k, mv)| Some((str_of(k)?, str_of(mv)?)))
                         .collect(),
                 ),
-                Obj::Struct { .. } => ArgShape::Struct(self.c_value_of(v)),
+                Obj::Struct { fields, .. } => ArgShape::Struct(
+                    fields
+                        .iter()
+                        .map(|f| self.copy_arg(f).c_form())
+                        .collect::<Option<Vec<_>>>()
+                        .map(crate::native::NativeRet::List),
+                ),
                 Obj::ByteArray(_)
                 | Obj::BigInt(_)
                 | Obj::FloatBox(_)

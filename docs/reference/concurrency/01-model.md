@@ -121,6 +121,10 @@ names; the other reads them; 10,000 rounds, also under `CHEZZI_GC_STRESS=1`).
 Known limits:
 
 - A racy map probe can give a wrong or a missing hit.
+- A racy map upsert (`m[k] = v`, `m.insert(k, v)`, `m.merge(o)`, `m.update(o)`) can write over
+  another key's value or insert a duplicate key: two threads probe, then one moves the entries
+  before the other writes. The map stays memory-safe and gives no panic. Go's runtime reports
+  "concurrent map writes" and stops; Chezzi gives a wrong map.
 - Two threads that step one cursor can both get the same item or skip one.
 - A stop of the world waits for a native loop or C call (the limit above).
 - `CHEZZI_GC_STRESS=1` with two or more threads runs them one at a time: each thread asks for a
