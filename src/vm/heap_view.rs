@@ -3,8 +3,8 @@
 //!
 //! A [`ViewState`] belongs to ONE execution context (a fiber, a box context, a shell), not to a heap:
 //! every handle of a run shares one heap core (M1.7), so the core's id cannot name a view. The live
-//! context's view sits on its `Vm`'s heap handle (`Heap::view`), because `Heap::get_mut`, the sole
-//! `&mut Obj` door, moves the epoch. `Vm::swap_ctx` swaps it with the parked context's
+//! context's view sits on its `Vm`'s heap handle (`Heap::view`), because `Heap::write`, the sole
+//! write door, moves the epoch. `Vm::swap_ctx` swaps it with the parked context's
 //! (`FiberCtx::view`), like the module table it describes.
 //!
 //! A snapshot is stamped with `(id, epoch)` at its build and is current exactly while both still
@@ -24,7 +24,7 @@ pub(super) struct ViewState {
     /// One bit per heap slot: the object is reached by the snapshot of this view.
     viewed: Vec<u64>,
     /// Some bit of `viewed` is set: a view that never marked an aggregate stays at one predictable
-    /// branch in `get_mut`.
+    /// branch in `write`.
     any: bool,
 }
 
@@ -70,7 +70,7 @@ impl ViewState {
         fresh
     }
 
-    /// The `get_mut` hook: a `&mut` to a viewed slot `i` moves the epoch.
+    /// The `write` hook: a write to a viewed slot `i` moves the epoch.
     #[inline]
     pub(super) fn touch(&mut self, i: usize) {
         if self.any && self.is_set(i) {

@@ -974,7 +974,7 @@ impl WalkSrc<'_> {
                                 wargs.push(self.to_wire_depth(*a, depth + 1, memo)?);
                             }
                             // TICKET-190: the creation stamp rides along; the rebuild arm reads it.
-                            WireGenState::Pending(wargs, g.stamp)
+                            WireGenState::Pending(wargs, g.stamp.get())
                         }
                         GenState::Done => WireGenState::Done,
                         GenState::Unsendable(m) => WireGenState::Unsendable(m.clone()),
@@ -1035,7 +1035,7 @@ impl WalkSrc<'_> {
                                 call_depth: parked.ctx.call_depth,
                                 cur_base: parked.ctx.cur_base,
                                 handlers: parked.ctx.handlers.clone(),
-                                stamp: g.stamp,
+                                stamp: g.stamp.get(),
                             }
                         }
                     };
@@ -1086,7 +1086,7 @@ impl WalkSrc<'_> {
                             memo.emit_undo.push(id);
                         }
                         memo.emitted.insert(id);
-                        let inner = self.to_wire_depth(*v, depth + 1, memo)?;
+                        let inner = self.to_wire_depth(v.get(), depth + 1, memo)?;
                         WireValue::Cell {
                             id,
                             inner: Box::new(inner),
@@ -1105,7 +1105,7 @@ impl WalkSrc<'_> {
                     } else {
                         let id = memo.mint_node(h);
                         memo.enter(h, id);
-                        let pos = *pos;
+                        let pos = pos.get();
                         let items = items.to_vec();
                         let mut out = Vec::with_capacity(items.len());
                         for x in items {

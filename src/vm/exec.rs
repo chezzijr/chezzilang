@@ -286,7 +286,7 @@ impl Vm {
     /// back into the fiber), and by a box call. The fields [`FiberCtx`] holds, except the output
     /// stream ([`Vm::swap_task`]) and `start` — `pending_exit` stays global.
     pub(super) fn swap_ctx(&mut self, ctx: &mut FiberCtx) {
-        // M1.7 — the handle's `get_mut` record names an object of the context that leaves: settle
+        // M1.7 — the handle's `write` record names an object of the context that leaves: settle
         // it now. The context can resume on another shell (or a box on another caller's thread)
         // and write that object while this handle would read it.
         self.heap.settle_pending_mut();
@@ -604,7 +604,7 @@ impl Vm {
                 state: GenState::Pending(args),
                 ctx: GenCtx::default(),
             }),
-            stamp: 0,
+            stamp: RCell::new(0),
         };
         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
     }
@@ -1167,18 +1167,19 @@ impl Vm {
             .enumerate()
             .map(|(i, n)| (n.as_str().into(), i as u32))
             .collect();
-        let mod_obj = self.heap.alloc(Obj::Module(Box::new(ModuleData {
-            name: m.label.clone().into_boxed_str(),
-            // TICKET-183: a let-created slot starts uninitialized (its line rides in the marker), so a
-            // read before the let runs faults; a hoisted slot starts nil until its binding runs.
-            slots: (0..m.global_slots.len())
-                .map(|i| match m.let_lines.get(i).copied().unwrap_or(0) {
-                    0 => Value::nil(),
-                    line => Value::uninit(line),
-                })
-                .collect(),
+        // TICKET-183: a let-created slot starts uninitialized (its line rides in the marker), so a
+        // read before the let runs faults; a hoisted slot starts nil until its binding runs.
+        let slots = (0..m.global_slots.len())
+            .map(|i| match m.let_lines.get(i).copied().unwrap_or(0) {
+                0 => Value::nil(),
+                line => Value::uninit(line),
+            })
+            .collect();
+        let mod_obj = self.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+            m.label.clone().into_boxed_str(),
+            slots,
             index,
-        })));
+        ))));
         debug_assert_eq!(self.module_objs.len(), idx);
         self.module_objs.push(mod_obj);
 

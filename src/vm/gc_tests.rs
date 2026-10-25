@@ -908,7 +908,7 @@ fn a_crossed_container_rebuilds_at_exact_capacity() {
 
     let iter = Value::obj(src.heap.alloc(Obj::Iter {
         items: (0..N as i64).map(Value::int).collect(),
-        pos: 0,
+        pos: RCell::new(0),
     }));
 
     let mut dst = Vm::new(Arc::clone(&src.program));
@@ -1388,7 +1388,7 @@ fn spill_field_write_is_slot_store() {
         fields: Fields::from_vec((1..=5).map(Value::int).collect()),
     });
     for i in 0..5 {
-        let Obj::Struct { fields, .. } = heap.get_mut(h) else {
+        let Obj::Struct { fields, .. } = heap.write(h).get(h) else {
             unreachable!("a struct")
         };
         let v = if i == 2 {
@@ -1544,8 +1544,9 @@ main()";
                 .module_objs
                 .iter()
                 .find_map(|&m| match vm.heap.get(m) {
-                    Obj::Module(md) if md.index.contains_key("K") => {
-                        let mut names: Vec<&str> = md.index.keys().map(|k| &**k).collect();
+                    Obj::Module(md) if md.names().index.contains_key("K") => {
+                        let names = md.names();
+                        let mut names: Vec<&str> = names.index.keys().map(|k| &**k).collect();
                         names.sort();
                         Some((rvec_cap(&md.slots), md.slots.len(), names.join(",")))
                     }
@@ -1624,7 +1625,8 @@ fn share_handle<T: Send + 'static, R: Send + 'static>(
                         .iter()
                         .find_map(|&m| match root.heap.get(m) {
                             Obj::Module(md) => {
-                                md.index.get(*name).map(|&i| md.slots.get(i as usize))
+                                let slot = md.names().index.get(*name).copied();
+                                slot.map(|i| md.slots.get(i as usize))
                             }
                             _ => None,
                         })
@@ -2354,20 +2356,7 @@ C := BIG.iter()"
                     w.gc_collect();
                 }
                 w.gc_poll();
-                let run = |w: &mut Vm,
-                           name: &'static str,
-                           op: &dyn Fn(&mut Vm) -> Result<(), RuntimeError>,
-                           panics: &mut Vec<(&'static str, String)>| {
-                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(w)));
-                    if let Err(p) = r {
-                        let msg = p
-                            .downcast_ref::<String>()
-                            .cloned()
-                            .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-                            .unwrap_or_default();
-                        panics.push((name, msg));
-                    }
-                };
+                let run = run_catching;
                 if i == 0 {
                     // Shrink to empty and regrow, so a read meets a `len` that just dropped.
                     run(
@@ -2422,6 +2411,31 @@ C := BIG.iter()"
         },
         |_, _, results| results.into_iter().flatten().collect::<Vec<_>>(),
     );
+    let by_op = panics_by_op(panics);
+    assert!(by_op.is_empty(), "panics by op (of {names:?}): {by_op:#?}");
+}
+
+/// Run `op` on `w` under `catch_unwind`; a panic is recorded in `panics` under `name`, with its
+/// message. The racy-op grids use it, so one op's panic does not end the round.
+fn run_catching(
+    w: &mut Vm,
+    name: &'static str,
+    op: &dyn Fn(&mut Vm) -> Result<(), RuntimeError>,
+    panics: &mut Vec<(&'static str, String)>,
+) {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(w)));
+    if let Err(p) = r {
+        let msg = p
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        panics.push((name, msg));
+    }
+}
+
+/// The recorded panics, one row per op: its name, its count, and its first message.
+fn panics_by_op(panics: Vec<(&'static str, String)>) -> Vec<(&'static str, usize, String)> {
     let mut by_op: Vec<(&str, usize, String)> = Vec::new();
     for (name, msg) in panics {
         match by_op.iter_mut().find(|e| e.0 == name) {
@@ -2429,5 +2443,179 @@ C := BIG.iter()"
             None => by_op.push((name, 1, msg)),
         }
     }
+    by_op
+}
+
+/// M3.0b — a shared object's in-place fields are atomic slots, so a racing reader never sees a
+/// torn header, a freed buffer or a VM panic (Go parity: a race gives a wrong value or a fault).
+/// The grid, one row per field family that an op mutates in place: thread A writes each family
+/// (a field of the inline struct `SP` and of the spilled struct `SQ`, a fresh `str` into each, the
+/// cursor `C`'s position, the captured cell behind `CT`, and a new name in the module the globals
+/// live in), while thread B reads the same objects (field get, `str`, `==`, hash, `next`, a
+/// drain of `C`, a module member read), 10,000 rounds, each op under `catch_unwind`. Run under
+/// `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn shared_object_mutation_grid() {
+    const OPS: i64 = 10_000;
+    let src = "\
+struct P:
+    a: int
+    b: str
+
+struct Q:
+    a: int
+    b: int
+    c: int
+    d: str
+
+struct Ctr:
+    inc: fn() -> None
+    get: fn() -> int
+
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+
+SP := P(1, \"x\")
+SQ := Q(1, 2, 3, \"y\")
+CT := make()
+F := make
+BIG: List[int] = []
+
+fn main():
+    for i in 0..100000:
+        BIG.push(i)
+main()
+C := BIG.iter()"
+        .to_string();
+    type Op = fn(&mut Vm, &[GcRef], i64) -> Result<(), RuntimeError>;
+    const SP: usize = 0;
+    const SQ: usize = 1;
+    const CT: usize = 2;
+    const F: usize = 3;
+    const C: usize = 4;
+    fn field(w: &mut Vm, h: GcRef, name: &str) -> Result<Value, RuntimeError> {
+        w.push(Value::obj(h));
+        w.get_field(name, NO_IC, Span::RUNTIME)?;
+        Ok(w.pop())
+    }
+    fn set(w: &mut Vm, h: GcRef, name: &str, v: Value) -> Result<(), RuntimeError> {
+        w.push(Value::obj(h));
+        w.push(v);
+        w.set_field(name, NO_IC, Span::RUNTIME)
+    }
+    /// A fresh `str`, published by the field store that follows.
+    fn fresh(w: &mut Vm, k: i64) -> Value {
+        Value::obj(w.heap.alloc(Obj::Str(format!("s{k}").as_str().into())))
+    }
+    fn call_field(w: &mut Vm, h: GcRef, name: &str) -> Result<(), RuntimeError> {
+        let f = field(w, h, name)?;
+        w.invoke_value(f, vec![], Span::RUNTIME).map(|_| ())
+    }
+    fn step(w: &mut Vm, c: GcRef) -> Result<(), RuntimeError> {
+        w.push(Value::obj(c));
+        w.do_method_call("next", 0, NO_IC, Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    fn render(w: &mut Vm, h: GcRef) -> Result<(), RuntimeError> {
+        w.stringify(Value::obj(h), Span::RUNTIME, 0).map(|_| ())
+    }
+    /// The module the globals live in: the home of the global fn `F`.
+    fn home(w: &Vm, g: &[GcRef]) -> GcRef {
+        match w.heap.get(g[F]) {
+            Obj::Func { home, .. } => *home,
+            _ => unreachable!("F is a fn"),
+        }
+    }
+    let reads: Vec<(&'static str, Op)> = vec![
+        ("SP.a", |w, g, _| field(w, g[SP], "a").map(|_| ())),
+        ("SP.b", |w, g, _| field(w, g[SP], "b").map(|_| ())),
+        ("SQ.a", |w, g, _| field(w, g[SQ], "a").map(|_| ())),
+        ("SQ.d", |w, g, _| field(w, g[SQ], "d").map(|_| ())),
+        ("str(SP)", |w, g, _| render(w, g[SP])),
+        ("str(SQ)", |w, g, _| render(w, g[SQ])),
+        ("SP == SP", |w, g, _| {
+            w.values_equal(Value::obj(g[SP]), Value::obj(g[SP]));
+            Ok(())
+        }),
+        ("SQ == SQ", |w, g, _| {
+            w.values_equal(Value::obj(g[SQ]), Value::obj(g[SQ]));
+            Ok(())
+        }),
+        ("hash(SP)", |w, g, _| {
+            w.hash_value(Value::obj(g[SP]), Span::RUNTIME).map(|_| ())
+        }),
+        ("hash(SQ)", |w, g, _| {
+            w.hash_value(Value::obj(g[SQ]), Span::RUNTIME).map(|_| ())
+        }),
+        ("CT.get()", |w, g, _| call_field(w, g[CT], "get")),
+        ("str(CT)", |w, g, _| render(w, g[CT])),
+        ("C.next", |w, g, _| step(w, g[C])),
+        ("str(C)", |w, g, _| render(w, g[C])),
+        ("for x in C", |w, g, k| {
+            if k == OPS / 2 {
+                w.drain_iterable(Value::obj(g[C]), Span::RUNTIME)?;
+            }
+            Ok(())
+        }),
+        ("mod.F", |w, g, _| {
+            let m = home(w, g);
+            field(w, m, "F").map(|_| ())
+        }),
+        ("str(mod)", |w, g, _| {
+            let m = home(w, g);
+            render(w, m)
+        }),
+    ];
+    let reads = Arc::new(reads);
+    let names: Vec<&'static str> = reads.iter().map(|(n, _)| *n).collect();
+    let panics = share_handle(
+        src,
+        &["SP", "SQ", "CT", "F", "C"],
+        2,
+        move |i, w, g| {
+            let mut panics: Vec<(&'static str, String)> = Vec::new();
+            for k in 0..OPS {
+                if (w.gc_stress && i == 0) || w.heap.should_collect() {
+                    w.gc_collect();
+                }
+                w.gc_poll();
+                if i == 0 {
+                    run_catching(
+                        w,
+                        "A",
+                        &|w| {
+                            set(w, g[SP], "a", Value::int(k))?;
+                            let s = fresh(w, k);
+                            set(w, g[SP], "b", s)?;
+                            set(w, g[SQ], "a", Value::int(k))?;
+                            let s = fresh(w, k);
+                            set(w, g[SQ], "d", s)?;
+                            for _ in 0..4 {
+                                step(w, g[C])?;
+                            }
+                            call_field(w, g[CT], "inc")?;
+                            let m = home(w, g);
+                            w.module_define(m, &format!("n{k}"), Value::int(k));
+                            Ok(())
+                        },
+                        &mut panics,
+                    );
+                } else {
+                    for (name, op) in reads.iter() {
+                        run_catching(w, name, &|w| op(w, g, k).or(Ok(())), &mut panics);
+                    }
+                }
+            }
+            panics
+        },
+        |_, _, results| results.into_iter().flatten().collect::<Vec<_>>(),
+    );
+    let by_op = panics_by_op(panics);
     assert!(by_op.is_empty(), "panics by op (of {names:?}): {by_op:#?}");
 }

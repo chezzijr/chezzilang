@@ -736,7 +736,7 @@ impl ReadyWorker {
         debug_assert!(ctx.start.is_some(), "a Pending fiber holds its task");
         let ctx = registry.register(ctx);
         // The payload is rooted by the registered context from here on. Settle the payload `Vm`'s
-        // `get_mut` record (its fill of a rebuilt container) while the spawner is attached.
+        // `write` record (its fill of a rebuilt container) while the spawner is attached.
         worker.heap.settle_pending_mut();
         drop(payload);
         Fiber {

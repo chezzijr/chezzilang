@@ -14,13 +14,14 @@ mod heap_core;
 mod heap_slab;
 mod heap_view;
 mod map_data;
+mod module_data;
 mod poller;
 mod pool;
 mod quiesce;
 mod root_registry;
 mod rvec;
 use root_registry::{CtxBox, RootRegistry};
-use rvec::{AllocFailed, RVec};
+use rvec::{AllocFailed, RCell, RVec};
 mod runner_cache;
 pub mod sched_seed;
 mod timer;
@@ -679,8 +680,9 @@ pub(crate) struct GeneratorCore {
     parked: rvec::AtomicBox<Parked>,
     /// TICKET-190, TICKET-240: the creating call's verdict for each PARAM slot, two bits per param
     /// (layout `crossing::stamp_mask`), set only by `Op::StampGen`. A marking crossing reads it
-    /// through `crossing::frame_slot`; a local slot reads the proto's own masks there.
-    stamp: u64,
+    /// through `crossing::frame_slot`; a local slot reads the proto's own masks there. An
+    /// [`RCell`], so the stamp store takes `&self`.
+    stamp: RCell<u64>,
 }
 
 // Hand-rolled so `CallFrame`/`Handler`/`Deferred` need not derive `Debug` (keeps the hot call
@@ -1363,7 +1365,7 @@ pub struct Vm {
     /// 1. a module-slot write — `set_global_slot`/`module_define`, the only two slot mutators;
     /// 2. a task start ([`Vm::fresh_view`]), iff the cached snapshot is NOT `reusable` — some global
     ///    holds a mutable aggregate, which can be mutated IN PLACE (`q.push(1)`) with no slot write
-    ///    for rule 1 to see — AND its `view` stamp is stale: `Heap::get_mut` handed out an object
+    ///    for rule 1 to see — AND its `view` stamp is stale: `Heap::write` armed a write of an object
     ///    the snapshot reaches since the build (TICKET-213). An unmutated view and an all-immutable
     ///    view keep one snapshot.
     ///

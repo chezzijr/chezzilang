@@ -1,8 +1,12 @@
 //! The GC-managed heap (M5).
 //!
-//! M5a: `alloc` only inserts (the slot/free-list machinery is in place; the mark-sweep collector
-//! lands in M5b). Objects are addressed by [`GcRef`] (a slot index), so handle copies alias one
-//! object. The VM owns the heap and mutates objects through `&mut heap[h]` — no `RefCell` needed.
+//! Objects are addressed by [`GcRef`] (a slot index), so handle copies alias one object. One heap
+//! serves a run, and another thread can read any object it can reach, so an op never holds a
+//! `&mut Obj` over a reachable object (M3.0b): it arms the write with [`Heap::write`] and mutates
+//! through `&self` methods whose stores are atomic slot stores (an `RVec` slot, an `RCell`, a
+//! map entry, `vm/rvec.rs`) or go through a lock (a module's names). A race on one gives a wrong
+//! value, never a torn header. [`Heap::init_mut`] is the one `&mut Obj` door, for an object this
+//! call built and has not published yet.
 
 use super::chzstr::ChzStr;
 use super::core::{
@@ -12,35 +16,25 @@ use super::core::{
 use super::heap_core::{CopyLog, HeapCore, lock};
 use super::heap_view::ViewState;
 pub use super::map_data::{MapData, MapEntry, SetData, SetEntry};
-use super::rvec::{RVec, RetireList};
+pub use super::module_data::{ModuleData, ModuleNames};
+use super::rvec::{RCell, RVec, RetireList};
 use super::value::{GcRef, Value};
 use crate::base::op::ProtoId;
 use crate::lexer::Span;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// A module namespace's payload — boxed behind [`Obj::Module`] so the rare, cold `Module` variant
-/// doesn't set the `Obj` size cap (mirrors [`Obj::Generator`]'s `Box<GeneratorCore>`). Its name +
-/// slot-indexed top-level bindings (`slots[i]` for compile-time slot `i`) + the `index` (name → slot)
-/// that backs `module.member` reads, imports, native population, and errors. See [`Obj::Module`].
-#[derive(Debug, Clone)]
-pub struct ModuleData {
-    pub name: Box<str>,
-    pub slots: RVec<Value>,
-    pub index: HashMap<Box<str>, u32>,
-}
 
 /// Struct field storage: ≤3 fields inline (no second heap alloc), more spill to an `RVec`.
 /// Fields are FIXED at construction (positional hidden-class layout; no `.push/insert/resize`
 /// growth sites), so a spill block never grows and never retires: a field write is one atomic slot
-/// store (`vm/rvec.rs`). `Value` is 8B → `[Value; 3]` is 24B, and the vast majority of structs
+/// store, inline in an [`RCell`] or in the spill block (`vm/rvec.rs`), and takes `&self`. A
+/// `Value` slot is 8B → `[RCell<Value>; 3]` is 24B, and the vast majority of structs
 /// (≤3 fields) fold their fields into the `Obj` slot itself — zero second malloc. Keeps `Obj` at
 /// the 64B cap (M19 lever #1).
 #[derive(Debug, Clone)]
 pub enum Fields {
     /// ≤3 fields folded inline; `vals[len..]` are unused padding holding `Value::nil()`.
-    Inline { len: u8, vals: [Value; 3] },
+    Inline { len: u8, vals: [RCell<Value>; 3] },
     /// >3 fields in an exact-length `RVec` block (no spare capacity).
     Spill(RVec<Value>),
 }
@@ -48,7 +42,7 @@ pub enum Fields {
 /// The fields of one [`Fields`] read, by value. A `Spill` iterator reads one snapshot of the
 /// block, so do not hold it across a safepoint (see [`RVec::iter`]).
 pub enum FieldsIter<'a> {
-    Inline(std::slice::Iter<'a, Value>),
+    Inline(std::slice::Iter<'a, RCell<Value>>),
     Spill(super::rvec::Iter<'a, Value>),
 }
 
@@ -57,7 +51,7 @@ impl Iterator for FieldsIter<'_> {
     #[inline]
     fn next(&mut self) -> Option<Value> {
         match self {
-            FieldsIter::Inline(it) => it.next().copied(),
+            FieldsIter::Inline(it) => it.next().map(RCell::get),
             FieldsIter::Spill(it) => it.next(),
         }
     }
@@ -69,10 +63,8 @@ impl Fields {
     pub fn from_vec(v: Vec<Value>) -> Self {
         if v.len() <= 3 {
             let len = v.len() as u8;
-            let mut vals = [Value::nil(); 3];
-            for (i, x) in v.into_iter().enumerate() {
-                vals[i] = x;
-            }
+            let vals =
+                std::array::from_fn(|i| RCell::new(v.get(i).copied().unwrap_or(Value::nil())));
             Fields::Inline { len, vals }
         } else {
             Fields::Spill(RVec::from_slice(&v))
@@ -109,19 +101,19 @@ impl Fields {
     #[inline]
     pub fn get(&self, i: usize) -> Option<Value> {
         match self {
-            Fields::Inline { len, vals } => vals[..*len as usize].get(i).copied(),
+            Fields::Inline { len, vals } => vals[..*len as usize].get(i).map(RCell::get),
             Fields::Spill(s) => s.try_get(i),
         }
     }
 
-    /// Write field `i`; `false` (and no write) past the last field. A `Spill` write is a slot
-    /// store in the fixed block.
+    /// Write field `i`; `false` (and no write) past the last field. Either way a write is one
+    /// slot store: an `Inline` cell or a slot of the fixed `Spill` block.
     #[inline]
-    pub fn set(&mut self, i: usize, v: Value) -> bool {
+    pub fn set(&self, i: usize, v: Value) -> bool {
         match self {
-            Fields::Inline { len, vals } => match vals[..*len as usize].get_mut(i) {
+            Fields::Inline { len, vals } => match vals[..*len as usize].get(i) {
                 Some(slot) => {
-                    *slot = v;
+                    slot.set(v);
                     true
                 }
                 None => false,
@@ -180,7 +172,8 @@ pub enum Obj {
     /// `usize`(8) = 16B, within the 64B `Obj` cap (`MapData`/`SetData` set the cap).
     Iter {
         items: RVec<Value>,
-        pos: usize,
+        /// The read position, advanced in place (`&self`), so two threads can step one cursor.
+        pos: RCell<usize>,
     },
     /// `[a, b, …]` — a growable list on a retiring vector (`vm/rvec.rs`): a grow retires the old
     /// block, and only the stop-the-world sweep frees it. A write reads the list with
@@ -223,8 +216,8 @@ pub enum Obj {
     /// by-reference-captured local (uniform-capture feature, Task A). Two bindings holding the same
     /// cell handle observe each other's writes (`CellStore`), exactly like `List`/`bytearray` mutate
     /// through the shared slot. NON-LEAF: the inner value may be a heap object, so `children()` traces
-    /// it. `Value` is 16B, well within the 64B `Obj` cap.
-    Cell(Value),
+    /// it. The value sits in an [`RCell`] (8B), so a store takes `&self`.
+    Cell(RCell<Value>),
     /// A named function (top-level `fn` / method) + the module globals it resolves against.
     Func {
         proto: ProtoId,
@@ -540,13 +533,13 @@ impl Obj {
 
 /// One object's OWNED BACKING in bytes (`Vec`/`Box` capacities), excluding the fixed
 /// `size_of::<Obj>()` slot cost that every live slot pays alike. The single sizing table for the
-/// heap: `bytes_with` (the `live_bytes` walk), `alloc` and `get_mut`'s settle all read it,
+/// heap: `bytes_with` (the `live_bytes` walk), `alloc` and `write`'s settle all read it,
 /// so a new `Obj` variant is sized once instead of drifting between three copies.
 ///
 /// **Core arms deliberately score 0, and take NO lock.** A `Channel`/`Shared`/`RwShared`/`Atomic`/
 /// `Executor` payload lives in an `Arc` outside every heap and is already charged by
 /// `Vm::to_wire_crossable`; `bytes_with` adds its own once-per-`Arc` walk on top for the reachability
-/// question. Reaching `core.inner`/`core.q` from inside `get_mut` would re-take a lock the caller may
+/// question. Reaching `core.inner`/`core.q` from inside `write` would re-take a lock the caller may
 /// already hold — `std::sync::Mutex` is not reentrant (a job capturing its own executor hung, rc=124,
 /// under a cap only). Do not add a core arm here.
 #[inline]
@@ -606,7 +599,7 @@ pub struct Heap {
     free: Vec<u32>,
     /// TICKET-213 — the live context's view (`vm/heap_view.rs`): the objects its cached module
     /// snapshot reaches, set by `Vm::ensure_snapshot` through [`Heap::begin_view`] and
-    /// [`Heap::set_viewed`]. [`get_mut`](Heap::get_mut), the sole `&mut Obj` door, moves its epoch
+    /// [`Heap::set_viewed`]. [`write`](Heap::write), the sole write door, moves its epoch
     /// when it hands out a viewed object, so `Vm::fresh_view` can tell "something a global reaches
     /// was mutated in place" from "nothing changed" without a slot write to hook. `Vm::swap_ctx`
     /// swaps it with the parked context's.
@@ -632,11 +625,11 @@ pub struct Heap {
     ///
     /// Every byte a heap gains arrives one of exactly three ways, and each has exactly one funnel:
     /// a NEW object → [`alloc`](Heap::alloc); growth IN PLACE inside an existing one →
-    /// [`get_mut`](Heap::get_mut) (see `pending_mut`); an off-heap wire payload →
+    /// [`write`](Heap::write) (see `pending_mut`); an off-heap wire payload →
     /// `Vm::to_wire_crossable`. All three charge here under a live `--max-heap` cap. With the cap
     /// off the first two charge too (M1.7; the wire charge stays cap-only): a task's garbage now
     /// waits in the run's one heap for a collection, and a task's copy of a large global is ONE
-    /// object that the decoder fills through `get_mut`, so the object count alone let 2000 such
+    /// object that the decoder fills through `write`, so the object count alone let 2000 such
     /// copies (1.6 GB, `benches/sched/storm.chz`) pile up before one sweep.
     ///
     /// It has to count BYTES and not events. Instructions, allocations and wire crossings are all
@@ -646,8 +639,8 @@ pub struct Heap {
     /// `"x".repeat(20000000)` (20 MB in ONE).
     since_gc_bytes: AtomicUsize,
     /// The in-place-growth half of `since_gc_bytes`: the object handed out by the last
-    /// [`get_mut`](Heap::get_mut) and its payload size AT THAT MOMENT. The next settle — the next
-    /// `get_mut`, or [`should_collect`](Heap::should_collect) — re-measures the same object and
+    /// [`write`](Heap::write) and its payload size AT THAT MOMENT. The next settle — the next
+    /// `write`, or [`should_collect`](Heap::should_collect) — re-measures the same object and
     /// charges the difference. A plain field: every door that reads or writes it holds `&mut self`
     /// (M1.7 made `should_collect` take `&mut`). Armed with the cap on or off (M1.7: see
     /// `since_gc_bytes`).
@@ -662,14 +655,14 @@ pub struct Heap {
     ///
     /// Why here and not at each growth site: `push`/`insert`/`add`/`extend`/the map index-store/… is
     /// an open N-way set, and charging some arms of it is the mistake this repo has already been
-    /// bitten by twice (`docs/contributing/gaps.md` W7-22). `get_mut` is the SOLE `&mut Obj` door:
+    /// bitten by twice (`docs/contributing/gaps.md` W7-22). `write` is the SOLE write door (`init_mut` calls it):
     /// `Slot.obj` is `pub(super)` in `vm/heap_slab.rs`, but the slab is reachable only through the
     /// private `Heap.core` field, so no code outside this file can reach a slot (`vm/heap_core.rs`
     /// writes a slot only to allocate or free it). A charge here cannot be forgotten by a new
     /// container method — the same forget-proof argument that put the wire charge in
     /// `Vm::to_wire_crossable`.
     ///
-    /// Why deferred rather than measured on both sides of the call: `get_mut` HANDS OUT the `&mut`,
+    /// Why deferred rather than measured on both sides of the call: `write` HANDS OUT the handle the mutator runs on,
     /// so the "after" size does not exist until the caller is done with it. Settling at the next door
     /// (or at the next `should_collect`, which is every instruction) is what makes it exact without a
     /// wrapper at 65 call sites.
@@ -718,7 +711,7 @@ impl Default for Heap {
 impl Drop for Heap {
     fn drop(&mut self) {
         // A dropped handle's counts still pace the run (a task's payload `Vm` allocates its rebuilt
-        // arguments and is dropped before the task runs). The `get_mut` record is NOT read here:
+        // arguments and is dropped before the task runs). The `write` record is NOT read here:
         // the thread may have left the run's heap, and a sweep may run. It was settled while the
         // thread was attached (`Vm::gc_leave`, `ReadyWorker::into_fiber`).
         self.core.flush_allocs(self.since_gc);
@@ -756,7 +749,7 @@ impl Heap {
 
     /// A new handle on this heap's core: it allocates slots no other handle holds and reads every
     /// object of the core. Two handles can reach one slot through safe code (a `get` on one while
-    /// the other's `get_mut` grows the object is a use-after-free), so the protocol below is the
+    /// the other's `write` grows the object reads a retired buffer, `vm/rvec.rs`), so the protocol below is the
     /// caller's.
     ///
     /// # Safety
@@ -897,21 +890,26 @@ impl Heap {
             .expect("dangling GcRef (object was collected while still reachable)")
     }
 
+    /// The `&mut Obj` of an object that this call allocated and has not published: no other
+    /// thread holds its `GcRef` yet (it is in no object, global, stack or channel another thread
+    /// reads). The airlock and key-snapshot rebuilds use it to fill or replace a placeholder they
+    /// built. Every other write goes through [`write`](Heap::write) and a `&self` mutator. No
+    /// cheap check proves "unpublished" (it is a reachability fact), so none is asserted.
     #[inline]
-    pub fn get_mut(&mut self, h: GcRef) -> &mut Obj {
+    pub fn init_mut(&mut self, h: GcRef) -> &mut Obj {
         self.write(h);
-        // SAFETY: `&mut self` excludes this handle's other references, and `attach`'s contract
-        // keeps every other handle off an object this handle's fiber owns.
+        // SAFETY: `&mut self` excludes this handle's other references, and the caller's contract
+        // above keeps every other thread off `h`: no other handle has its `GcRef`.
         unsafe { self.core.slot_mut(h) }
             .obj
             .as_mut()
             .expect("dangling GcRef (object was collected while still reachable)")
     }
 
-    /// Arm a write of `h` and hand back this handle shared: the door for an object whose
-    /// mutators take `&self` (an `RVec`, `vm/rvec.rs`), and the bookkeeping half of
-    /// [`get_mut`](Heap::get_mut). A list write is `let heap = heap.write(h);` then
-    /// `heap.get(h)` and `list.push(heap, v)`.
+    /// Arm a write of `h` and hand back this handle shared: the door for every write to an object
+    /// another thread can read. Its mutators take `&self` and store through atomic slots (an
+    /// `RVec`, an `RCell`, a map entry, `vm/rvec.rs`) or a lock (a module's names). A list write
+    /// is `let heap = heap.write(h);` then `heap.get(h)` and `list.push(heap, v)`.
     #[inline]
     pub fn write(&mut self, h: GcRef) -> &Heap {
         // Byte funnel 2 of 3 (see `since_gc_bytes` / `pending_mut`): the sole write door, and so
@@ -928,7 +926,7 @@ impl Heap {
         self
     }
 
-    /// Charge the growth of the object the last [`get_mut`](Heap::get_mut) handed out, and disarm.
+    /// Charge the growth of the object the last [`write`](Heap::write) handed out, and disarm.
     /// A SHRINK charges 0 — monotonic, exactly like the wire counter (`live_bytes()` is what
     /// measures; this only decides when to look). M1.7: `Vm::swap_ctx` settles at every context
     /// switch, so a handle never keeps a record of an object another thread may write.
@@ -976,7 +974,7 @@ impl Heap {
 
     /// Charge bytes against the collection trigger (see `since_gc_bytes`). Byte funnel 3 of 3 is
     /// `Vm::to_wire_crossable`, the one helper every cross-heap value store routes through; the other
-    /// two callers are [`alloc`](Heap::alloc) and [`get_mut`](Heap::get_mut)'s settle. Only ever
+    /// two callers are [`alloc`](Heap::alloc) and [`write`](Heap::write)'s settle. Only ever
     /// reached when a `--max-heap` cap is live. An `RVec` grow also charges the block it retires
     /// (`vm/rvec.rs`), cap or no cap.
     #[inline]
@@ -1020,13 +1018,13 @@ impl Heap {
     /// fails OPEN (counting the bytes correctly in `live_bytes` does nothing if nobody ever looks).
     ///
     /// W7-28 — the byte counter now covers ALL THREE ways a heap gains bytes, not just the off-heap
-    /// wire one: see `since_gc_bytes`. The settle here is what makes `get_mut`'s deferred charge
+    /// wire one: see `since_gc_bytes`. The settle here is what makes `write`'s deferred charge
     /// exact at an instruction boundary, which is the only place the cap is read.
     ///
     /// M1.7 — the trigger is run-wide: this handle adds its counts to the core's
     /// (`HeapCore::flush_allocs` / `flush_bytes`) and compares the run's totals since the last
     /// collection with `next_gc` and the byte threshold (`Heap::bytes_gc_threshold`). With the cap
-    /// off the bytes (`alloc` and `get_mut` growth) are read each time the cached object threshold
+    /// off the bytes (`alloc` and `write` growth) are read each time the cached object threshold
     /// is reached, at most `FLUSH_EVERY` allocations apart, and at the next boundary after this
     /// handle charged `FLUSH_BYTES`.
     #[inline]
@@ -1060,7 +1058,7 @@ impl Heap {
     }
 
     /// Another handle's collection ran while this one was stopped or detached: zero the counts it
-    /// already fed and the cache it read, and disarm `get_mut`'s record, whose slot that sweep can
+    /// already fed and the cache it read, and disarm `write`'s record, whose slot that sweep can
     /// have freed (a settle would then read a dead slot).
     pub(super) fn observe_collection(&mut self) {
         self.since_gc = 0;
@@ -1122,7 +1120,7 @@ impl Heap {
             Obj::Struct { fields, .. } => fields.iter().for_each(|v| push(&v)),
             Obj::Enum { payload, .. } => payload.iter().for_each(|v| push(&v)),
             // A boxed local's cell: the inner value may be a heap object — trace it.
-            Obj::Cell(v) => push(v),
+            Obj::Cell(v) => push(&v.get()),
             Obj::Func { home, .. } => out.push(*home),
             Obj::Closure { captured, home, .. } => {
                 captured.iter().for_each(|v| push(&v));
@@ -1278,7 +1276,7 @@ impl Heap {
         self.since_gc = 0;
         self.gc_check_at = 0;
         *self.since_gc_bytes.get_mut() = 0;
-        // Drop the armed `get_mut` record: this is the ONLY thing that frees a slot, so it is also
+        // Drop the armed `write` record: this is the ONLY thing that frees a slot, so it is also
         // the only thing that could leave the record pointing at a slot `alloc` then re-hands to a
         // different object. Clearing it here is what makes the settle sound.
         self.pending_mut = None;
@@ -1464,7 +1462,7 @@ impl Heap {
                     }
                 }
                 // Every non-core variant — the plain owned backing, sized in ONE place so a new
-                // `Obj` variant cannot be counted here and forgotten at the `alloc`/`get_mut`
+                // `Obj` variant cannot be counted here and forgotten at the `alloc`/`write`
                 // charges. A core arm whose guard above failed (already counted for this heap)
                 // lands here too and correctly scores 0. M1.7: a `Shared` / `RwShared` box scores
                 // 0 here as well: its state is objects of this one heap, which this walk counts.
@@ -1514,7 +1512,7 @@ impl Heap {
     pub fn set_mem_cap(&mut self, cap: usize) {
         self.core.set_mem_cap(cap);
         self.gc_check_at = 0;
-        // Disarm `get_mut`'s pending record along with the cap. Cap-off never arms it, so a
+        // Disarm `write`'s pending record along with the cap. Cap-off never arms it, so a
         // cap→0→cap toggle is the one way a record could outlive the `sweep()` that freed its slot
         // and be settled against a slot `alloc` re-handed to a different object. Production sets the
         // cap exactly once per `Vm`, so this is belt-and-braces — but it makes the settle's soundness
@@ -1587,24 +1585,20 @@ mod iter_obj_tests {
         );
         let e = heap.view_epoch();
         let _ = heap.get(a);
-        let _ = heap.get_mut(b);
+        let _ = heap.write(b);
         let x = heap.alloc(Obj::List(RVec::new()));
         assert_eq!(
             heap.view_epoch(),
             e,
             "a read, an unviewed write and an alloc do not move it"
         );
-        let _ = heap.get_mut(a);
-        assert_ne!(
-            heap.view_epoch(),
-            e,
-            "a mutable borrow of a viewed object moves it"
-        );
+        let _ = heap.write(a);
+        assert_ne!(heap.view_epoch(), e, "a write of a viewed object moves it");
         let e = heap.view_epoch();
         heap.begin_view();
         assert_ne!(heap.view_epoch(), e, "a new view moves it");
         let e = heap.view_epoch();
-        let _ = heap.get_mut(a);
+        let _ = heap.write(a);
         assert_eq!(
             heap.view_epoch(),
             e,
@@ -1618,7 +1612,7 @@ mod iter_obj_tests {
         let c = heap.alloc(Obj::List(RVec::new()));
         assert_eq!(c, a, "the freed slot is reused");
         let e = heap.view_epoch();
-        let _ = heap.get_mut(c);
+        let _ = heap.write(c);
         assert_eq!(heap.view_epoch(), e, "a reused slot is not viewed");
     }
 
@@ -1666,7 +1660,7 @@ mod iter_obj_tests {
     #[test]
     fn fields_inline_and_spill_roundtrip() {
         // 2 fields → Inline
-        let mut inl = Fields::from_vec(vec![Value::int(10), Value::int(20)]);
+        let inl = Fields::from_vec(vec![Value::int(10), Value::int(20)]);
         assert!(matches!(inl, Fields::Inline { .. }));
         assert_eq!(inl.len(), 2);
         assert_eq!(inl.to_vec(), [Value::int(10), Value::int(20)]);
@@ -1677,7 +1671,7 @@ mod iter_obj_tests {
         assert_eq!(inl.to_vec(), [Value::int(99), Value::int(88)]);
 
         // 4 fields → Spill
-        let mut sp = Fields::from_vec(vec![
+        let sp = Fields::from_vec(vec![
             Value::int(1),
             Value::int(2),
             Value::int(3),
@@ -1756,7 +1750,7 @@ mod iter_obj_tests {
         let elem = heap.alloc(Obj::Str("kept".into()));
         let cursor = heap.alloc(Obj::Iter {
             items: vec![Value::obj(elem), Value::int(7)].into(),
-            pos: 0,
+            pos: RCell::new(0),
         });
         let kids = heap.children(cursor);
         assert!(
@@ -1917,7 +1911,7 @@ mod iter_obj_tests {
         assert!(h.should_collect());
     }
 
-    /// W7-28 — the OTHER two byte funnels (`alloc` and `get_mut`), same contract as the wire-byte
+    /// W7-28 — the OTHER two byte funnels (`alloc` and `write`), same contract as the wire-byte
     /// sibling above. These are the growth the object count cannot see: FEW-huge allocations, and
     /// in-place appends into an existing object that allocate nothing at all.
     #[test]
@@ -1959,7 +1953,7 @@ mod iter_obj_tests {
         h.alloc(big(200_000)); // +1.6 MB = 2.4 MB
         assert!(h.should_collect(), "cap/4 of allocated bytes must collect");
 
-        // (c) cap ON, funnel 2 — ONE `get_mut` that appends in bulk. This is `big.extend(chunk)`:
+        // (c) cap ON, funnel 2 — ONE `write` that appends in bulk. This is `big.extend(chunk)`:
         // unbounded bytes in a single instruction, which no instruction tick can bound.
         let mut h = Heap::new();
         h.set_mem_cap(8_000_000);
@@ -1981,13 +1975,14 @@ mod iter_obj_tests {
         h.mark(r);
         h.sweep();
         assert!(!h.should_collect(), "sweep must reset the byte counter");
-        if let Obj::List(v) = h.get_mut(r) {
+        let heap = h.write(r);
+        if let Obj::List(v) = heap.get(r) {
             v.clear();
         }
         assert!(!h.should_collect(), "a shrink must charge 0, not underflow");
 
-        // (e) the settle is armed by `get_mut` and disarmed by whoever settles first, so a second
-        // `get_mut` charges the first one's growth rather than losing it.
+        // (e) the settle is armed by `write` and disarmed by whoever settles first, so a second
+        // `write` charges the first one's growth rather than losing it.
         let mut h = Heap::new();
         h.set_mem_cap(8_000_000);
         let a = h.alloc(Obj::List(RVec::new()));
@@ -2004,7 +1999,7 @@ mod iter_obj_tests {
         }
         assert!(
             h.should_collect(),
-            "a second get_mut must settle the first's growth, not drop it"
+            "a second write must settle the first's growth, not drop it"
         );
 
         // (f) the 64 KB floor survives a tiny cap (shared with the wire threshold).

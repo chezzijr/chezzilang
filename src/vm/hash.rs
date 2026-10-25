@@ -421,7 +421,7 @@ impl Vm {
                     .map(|&x| self.snapshot_value(x, visited, depth + 1))
                     .collect();
                 // `nh` is this snapshot's own new list: slot stores into its one block.
-                if let Obj::List(dst) = self.heap.get_mut(nh) {
+                if let Obj::List(dst) = self.heap.write(nh).get(nh) {
                     for (k, x) in copied.into_iter().enumerate() {
                         dst.set(k, x);
                     }
@@ -436,7 +436,8 @@ impl Vm {
                     .iter()
                     .map(|&x| self.snapshot_value(x, visited, depth + 1))
                     .collect();
-                if let Obj::Tuple(dst) = self.heap.get_mut(nh) {
+                // `nh` is this snapshot's own new tuple, unpublished: an in-place fill.
+                if let Obj::Tuple(dst) = self.heap.init_mut(nh) {
                     *dst = copied;
                 }
                 Value::obj(nh)
@@ -453,7 +454,7 @@ impl Vm {
                     .map(|&f| self.snapshot_value(f, visited, depth + 1))
                     .collect();
                 // `nh` is this snapshot's own new struct: slot stores into its one block.
-                if let Obj::Struct { fields, .. } = self.heap.get_mut(nh) {
+                if let Obj::Struct { fields, .. } = self.heap.write(nh).get(nh) {
                     for (k, f) in copied.into_iter().enumerate() {
                         fields.set(k, f);
                     }
@@ -474,7 +475,7 @@ impl Vm {
                     .iter()
                     .map(|&p| self.snapshot_value(p, visited, depth + 1))
                     .collect();
-                if let Obj::Enum { payload, .. } = self.heap.get_mut(nh) {
+                if let Obj::Enum { payload, .. } = self.heap.write(nh).get(nh) {
                     for (k, p) in copied.into_iter().enumerate() {
                         payload.set(k, p);
                     }
@@ -497,7 +498,7 @@ impl Vm {
                     })
                     .collect();
                 // The placeholder holds no block, so the overwrite frees nothing.
-                *self.heap.get_mut(nh) = Obj::Map(MapData::from_entries(copied));
+                *self.heap.init_mut(nh) = Obj::Map(MapData::from_entries(copied));
                 Value::obj(nh)
             }
             Obj::Set(s) => {
@@ -508,7 +509,7 @@ impl Vm {
                     .iter()
                     .map(|&(hh, e)| (hh, self.snapshot_value(e, visited, depth + 1)))
                     .collect();
-                *self.heap.get_mut(nh) = Obj::Set(SetData::from_entries(copied));
+                *self.heap.init_mut(nh) = Obj::Set(SetData::from_entries(copied));
                 Value::obj(nh)
             }
             // A `bytearray` is mutable + structurally compared but a GC LEAF (raw bytes, no children):

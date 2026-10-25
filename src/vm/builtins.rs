@@ -185,7 +185,7 @@ impl Vm {
                 let chars: Vec<char> = s.chars().collect();
                 Some(chars.into_iter().map(|c| self.alloc_char(c)).collect())
             }
-            Obj::Iter { items, pos } => Some(items.iter().skip(*pos).collect()),
+            Obj::Iter { items, pos } => Some(items.iter().skip(pos.get()).collect()),
             Obj::BigInt(_)
             | Obj::FloatBox(_)
             | Obj::Tuple(_)
@@ -234,15 +234,15 @@ impl Vm {
         // then advance `pos` to the end so the same cursor yields nothing on a second drain — keeping
         // `List(it)`/`Set(it)`/`for` consistent with `.next()` (which also advances the shared cursor)
         // and with the docs ("reusing one exhausted cursor yields nothing on a second pass"). Lifted
-        // OUT of the immutable-borrow `match self.heap.get(h)` below so `get_mut` can advance `pos`.
+        // OUT of the `match self.heap.get(h)` below so the write door arms the `pos` store.
         if let Some(h) = v.as_obj()
             && matches!(self.heap.get(h), Obj::Iter { .. })
         {
-            let Obj::Iter { items, pos } = self.heap.get_mut(h) else {
+            let Obj::Iter { items, pos } = self.heap.write(h).get(h) else {
                 unreachable!()
             };
-            let drained = items.iter().skip(*pos).collect();
-            *pos = items.len();
+            let drained = items.iter().skip(pos.get()).collect();
+            pos.set(items.len());
             return Ok(drained);
         }
         // Built-in collections: copy directly, no re-entry.
@@ -405,7 +405,7 @@ impl Vm {
                     b.get(i)
                 };
                 let snap = self.snapshot_key(orig);
-                if let Obj::List(b) = self.heap.get_mut(lh) {
+                if let Obj::List(b) = self.heap.write(lh).get(lh) {
                     b.set(i, snap);
                 }
             }

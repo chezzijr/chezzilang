@@ -214,11 +214,11 @@ impl Vm {
         // The box addresses the caller's modules by index, so its table is as long as theirs. A
         // module object stays for the box's life: the state can hold a closure whose home it is.
         while self.module_objs.len() < n_mods {
-            let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData {
-                name: "".into(),
-                slots: RVec::new(),
-                index: std::collections::HashMap::new(),
-            })));
+            let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+                "".into(),
+                RVec::new(),
+                std::collections::HashMap::new(),
+            ))));
             self.module_objs.push(wm);
             self.module_faulted.push(false);
         }
@@ -739,11 +739,12 @@ impl Vm {
         }
         for i in 0..self.module_objs.len() {
             let m = self.module_objs[i];
-            if let Obj::Module(md) = self.heap.get_mut(m) {
+            if let Obj::Module(md) = self.heap.write(m).get(m) {
+                let mut names = md.names_mut();
                 md.slots.clear();
-                md.index.clear();
+                names.index.clear();
                 if let Some(sm) = snap.modules.get(i) {
-                    md.name = sm.name.clone();
+                    names.name = sm.name.clone();
                 }
             }
         }

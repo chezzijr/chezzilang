@@ -818,7 +818,7 @@ impl Vm {
         // root `val` across the probe — `map_probe` roots the target map and the key itself.
         let pos = self.with_roots(&[val], |vm| vm.map_probe(h, hk, key, span))?;
         if let Some(i) = pos {
-            let Obj::Map(m) = self.heap.get_mut(h) else {
+            let Obj::Map(m) = self.heap.write(h).get(h) else {
                 unreachable!()
             };
             // M3.0a — `None`: another thread removed the entry after the probe, an insert.

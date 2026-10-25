@@ -290,7 +290,7 @@ impl Vm {
     /// map, a mixed struct+closure cycle) round-trips. Every identity-preserved arm (`Cell`/`Closure`
     /// AND every container) TIES THE KNOT: alloc a placeholder object FIRST, register its `id` in
     /// `rebuild`, recurse the children (a nested `Backref(id)` resolves to the placeholder), then
-    /// `heap.get_mut`-patch the placeholder with the reconstructed children. Memory-safe: `Heap::alloc`
+    /// `heap.init_mut`-patch the placeholder with the reconstructed children. Memory-safe: `Heap::alloc`
     /// never collects (heap.rs), so no GC fires between placeholder-alloc and the patch, and `GcRef` is
     /// a GC-traced index (never a raw pointer) — the placeholder can never dangle or alias.
     #[allow(clippy::wrong_self_convention)]
@@ -359,7 +359,7 @@ impl Vm {
             // TIE THE KNOT (see the `Cell`/`Closure` arms): alloc an empty placeholder container
             // FIRST, register its `id` in `rebuild` BEFORE recursing children, so a nested
             // `Backref(id)` (a self-referential list/struct/map) resolves to this exact handle; then
-            // `heap.get_mut`-patch the placeholder with the reconstructed children. `Heap::alloc` never
+            // `heap.init_mut`-patch the placeholder with the reconstructed children. `Heap::alloc` never
             // collects, so no GC runs between the placeholder and the patch. (Nothing READS the
             // placeholder's contents mid-reconstruction — only its handle identity is observed.)
             WireValue::List { id, items } => {
@@ -380,7 +380,7 @@ impl Vm {
                 }
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
-                *self.heap.get_mut(h) = Obj::List(cloned.into());
+                *self.heap.init_mut(h) = Obj::List(cloned.into());
                 Value::obj(h)
             }
             WireValue::Tuple { id, items } => {
@@ -392,7 +392,7 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Tuple(Vec::new()));
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
-                *self.heap.get_mut(h) = Obj::Tuple(cloned);
+                *self.heap.init_mut(h) = Obj::Tuple(cloned);
                 Value::obj(h)
             }
             WireValue::Iter { id, items, pos } => {
@@ -403,11 +403,11 @@ impl Vm {
                 }
                 let h = self.heap.alloc(Obj::Iter {
                     items: RVec::new(),
-                    pos,
+                    pos: RCell::new(pos),
                 });
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
-                match self.heap.get_mut(h) {
+                match self.heap.init_mut(h) {
                     Obj::Iter { items, .. } => *items = cloned.into(),
                     Obj::Str(_)
                     | Obj::Bytes(_)
@@ -468,7 +468,7 @@ impl Vm {
                     let cv = self.from_wire_memo(val, rebuild);
                     out.push((hash, ck, cv));
                 }
-                *self.heap.get_mut(h) = Obj::Map(MapData::from_entries(out));
+                *self.heap.init_mut(h) = Obj::Map(MapData::from_entries(out));
                 Value::obj(h)
             }
             WireValue::Set { id, entries } => {
@@ -493,7 +493,7 @@ impl Vm {
                     let ce = self.from_wire_memo(e, rebuild);
                     out.push((hash, ce));
                 }
-                *self.heap.get_mut(h) = Obj::Set(SetData::from_entries(out));
+                *self.heap.init_mut(h) = Obj::Set(SetData::from_entries(out));
                 Value::obj(h)
             }
             WireValue::Struct { id, name, fields } => {
@@ -517,7 +517,7 @@ impl Vm {
                 }
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(fields, rebuild, |(_, val)| val);
-                match self.heap.get_mut(h) {
+                match self.heap.init_mut(h) {
                     Obj::Struct { fields, .. } => *fields = Fields::from_vec(cloned),
                     Obj::Str(_)
                     | Obj::Bytes(_)
@@ -570,7 +570,7 @@ impl Vm {
                 let cloned = self.rebuild_items(payload, rebuild, |x| x);
                 // M19 lever #2 — the dense `variant_id` crossed the airlock directly (shared
                 // `Arc<Program>`), so it is replayed as-is — no lossy name re-resolution.
-                match self.heap.get_mut(h) {
+                match self.heap.init_mut(h) {
                     Obj::Enum { payload, .. } => *payload = cloned.into(),
                     Obj::Str(_)
                     | Obj::Bytes(_)
@@ -642,13 +642,15 @@ impl Vm {
                 if let Some(&prev) = rebuild.get(&id) {
                     return Value::obj(prev);
                 }
-                let h = self.heap.alloc(Obj::Cell(Value::nil()));
+                let h = self.heap.alloc(Obj::Cell(RCell::new(Value::nil())));
                 if self.copy_mark {
                     self.heap.set_copied(h);
                 }
                 rebuild.insert(id, h);
                 let inner = self.from_wire_memo(*inner, rebuild);
-                *self.heap.get_mut(h) = Obj::Cell(inner);
+                if let Obj::Cell(c) = self.heap.write(h).get(h) {
+                    c.set(inner);
+                }
                 Value::obj(h)
             }
             // B3.6: rebuild a submitted closure by value over the worker's reconstructed home module
@@ -691,7 +693,7 @@ impl Vm {
                 self.copy_mark = saved_copy_mark;
                 // Owner decision D2 (TICKET-137): a crossing carries captures only. The closure's
                 // globals are whatever module copy the RUNNING task owns (`home` resolved above).
-                match self.heap.get_mut(h) {
+                match self.heap.write(h).get(h) {
                     Obj::Closure { captured, .. } => {
                         for (k, v) in cap.into_iter().enumerate() {
                             captured.set(k, v);
@@ -780,9 +782,9 @@ impl Vm {
                         let args = self.rebuild_frame_slots(wargs, rebuild, proto, stamp);
                         let g = self.alloc_generator(proto, home, closure, args);
                         if let Some(h) = g.as_obj()
-                            && let Obj::Generator(core) = self.heap.get_mut(h)
+                            && let Obj::Generator(core) = self.heap.write(h).get(h)
                         {
-                            core.stamp = stamp;
+                            core.stamp.set(stamp);
                         }
                         g
                     }
@@ -801,7 +803,7 @@ impl Vm {
                                 state,
                                 ctx: GenCtx::default(),
                             }),
-                            stamp: 0,
+                            stamp: RCell::new(0),
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
                     }
@@ -849,7 +851,7 @@ impl Vm {
                                 state: GenState::Suspended,
                                 ctx,
                             }),
-                            stamp,
+                            stamp: RCell::new(stamp),
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
                     }

@@ -682,7 +682,7 @@ impl Vm {
                     }
                     ListMethod::Pop => {
                         self.arity_err("pop", args, 0, span)?;
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let Obj::List(items) = self.heap.write(h).get(h) else {
                             unreachable!()
                         };
                         let popped = items.pop();
@@ -889,7 +889,7 @@ impl Vm {
                         let Some(i) = self.int_val(args[0]) else {
                             unreachable!()
                         };
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let Obj::List(items) = self.heap.write(h).get(h) else {
                             unreachable!()
                         };
                         let len = items.len();
@@ -1327,7 +1327,7 @@ impl Vm {
     /// `pop() -> Option[int]`, `extend(bytes|bytearray|List[int])`. Mirrors the checker's file-backed
     /// `native struct bytearray` method table in `std/prelude.chz` (the retired `bytearray_method_sig`) —
     /// keep them in lockstep.
-    /// Mutators write IN PLACE through the heap slot (`get_mut`), exactly like the `list` methods, so a
+    /// Mutators write IN PLACE through the heap slot (`Heap::write`), exactly like the `list` methods, so a
     /// second binding to the same `bytearray` observes the change.
     pub(super) fn bytearray_method(
         &mut self,
@@ -1373,7 +1373,7 @@ impl Vm {
             }
             BytearrayMethod::Pop => {
                 self.arity_err("pop", args, 0, span)?;
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                let Obj::ByteArray(b) = self.heap.write(h).get(h) else {
                     unreachable!()
                 };
                 let popped = b.pop();

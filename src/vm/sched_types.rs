@@ -395,7 +395,7 @@ pub(super) struct ModuleSnapshot {
     pub(super) reusable: bool,
     /// TICKET-213 — the stamp of the build: `Heap::view_stamp` (view id, epoch) of the context it
     /// was read in, taken after every object the globals reach was marked viewed. The snapshot
-    /// still describes the view exactly while the live context's stamp equals it: `Heap::get_mut`
+    /// still describes the view exactly while the live context's stamp equals it: `Heap::write`
     /// moves the epoch at any in-place mutation of a marked object, and another context (a worker
     /// seeded with its starter's snapshot) never matches the id. M1.7: the id is per context, not
     /// per heap, since every context of a run shares one heap.

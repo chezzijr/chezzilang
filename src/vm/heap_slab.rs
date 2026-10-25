@@ -160,10 +160,12 @@ impl Slab {
     ///
     /// # Safety
     ///
-    /// While the returned `&mut` lives, no other reference to slot `h` exists (the caller's duty,
-    /// as in Go). The run's handles keep it: a handle writes a slot it took from the free list, or
-    /// an object of the fiber it runs (every crossing copies until M3), and the collector writes
-    /// slots only while every other handle is stopped or detached (`vm/gc_coord.rs`).
+    /// While the returned `&mut` lives, no other reference to slot `h` exists. M3.0b: three
+    /// callers keep it. A handle writes a slot it took from the free list (`HeapCore::reuse`), or
+    /// an object it built and has not published (`Heap::init_mut`: no other thread has the
+    /// `GcRef`), and the collector writes slots only while every other handle is stopped or
+    /// detached (`vm/gc_coord.rs`). Every other write to a live object takes `&Obj` and stores
+    /// through an atomic slot or a lock (`Heap::write`).
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub(super) unsafe fn slot_mut(&self, h: GcRef) -> &mut Slot {

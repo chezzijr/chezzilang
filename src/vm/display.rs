@@ -91,7 +91,7 @@ impl Vm {
                 Obj::Generator(_) => "generator",
                 // A cell is a transparent by-reference box (never a user-visible operand — reads
                 // `CellLoad` first); defensively report its inner value's type.
-                Obj::Cell(v) => self.type_name(*v),
+                Obj::Cell(v) => self.type_name(v.get()),
                 Obj::Iter { .. } => "iterator",
             },
         }
@@ -220,7 +220,7 @@ impl Vm {
                 // override is honored by `stringify` (the path print/`str()` actually use).
                 Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[*proto].name)),
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
-                Obj::Module(m) => Ok(format!("<module {}>", m.name)),
+                Obj::Module(m) => Ok(format!("<module {}>", m.names().name)),
                 Obj::Native { name, .. } => Ok(format!("<native fn {name}>")),
                 Obj::Builtin(b) => Ok(format!("<builtin fn {}>", b.name())),
                 Obj::Cffi(c) => Ok(format!("<extern fn {}>", c.name())),
@@ -276,7 +276,7 @@ impl Vm {
                 Obj::Generator(_) => Ok("<generator>".to_string()),
                 // A cell is a transparent by-reference box (never a user-visible operand — reads
                 // `CellLoad` first); defensively display its inner value.
-                Obj::Cell(v) => self.display_guarded(*v, depth),
+                Obj::Cell(v) => self.display_guarded(v.get(), depth),
                 Obj::Iter { .. } => Ok("<iterator>".to_string()),
             },
         }
@@ -878,7 +878,7 @@ impl Vm {
             }
             Obj::Closure { .. } => out.push_str("<closure>"),
             Obj::Module(m) => {
-                let _ = write!(out, "<module {}>", m.name);
+                let _ = write!(out, "<module {}>", m.names().name);
             }
             Obj::Native { name, .. } => {
                 let _ = write!(out, "<native fn {name}>");
@@ -954,7 +954,7 @@ impl Vm {
             Obj::Generator(_) => out.push_str("<generator>"),
             // A cell is a transparent by-reference box (never a user-visible operand — reads
             // `CellLoad` first); defensively stringify its inner value.
-            Obj::Cell(v) => self.stringify_into(out, v, span, depth)?,
+            Obj::Cell(v) => self.stringify_into(out, v.get(), span, depth)?,
             Obj::Iter { .. } => out.push_str("<iterator>"),
         }
         Ok(())

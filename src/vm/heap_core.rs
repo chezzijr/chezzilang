@@ -173,7 +173,8 @@ impl HeapCore {
     ///
     /// # Safety
     ///
-    /// As for `Slab::slot_mut`: while the `&mut` lives, no other reference to slot `h` exists.
+    /// As for `Slab::slot_mut`: while the `&mut` lives, no other reference to slot `h` exists (a
+    /// slot from the free list, an unpublished object, or a stopped world).
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub(super) unsafe fn slot_mut(&self, h: GcRef) -> &mut Slot {

@@ -45,21 +45,32 @@ impl Vm {
             }
             Op::StampGen(m) => {
                 if let Some(h) = self.stack.last().and_then(|v| v.as_obj())
-                    && let Obj::Generator(g) = self.heap.get_mut(h)
-                    && matches!(
-                        g.parked.get_mut(),
-                        Some(Parked {
-                            state: GenState::Pending(_),
-                            ..
-                        })
-                    )
+                    && matches!(self.heap.get(h), Obj::Generator(_))
                 {
-                    let p = &self.program.protos[g.proto];
-                    g.stamp |= m & crate::base::crossing::param_stamp(
-                        p.private_slots,
-                        p.deep_slots,
-                        p.arity,
-                    );
+                    let heap = self.heap.write(h);
+                    let Obj::Generator(g) = heap.get(h) else {
+                        unreachable!()
+                    };
+                    let pending = g.parked.with(|p| {
+                        matches!(
+                            p,
+                            Some(Parked {
+                                state: GenState::Pending(_),
+                                ..
+                            })
+                        )
+                    });
+                    if pending {
+                        let p = &self.program.protos[g.proto];
+                        g.stamp.set(
+                            g.stamp.get()
+                                | m & crate::base::crossing::param_stamp(
+                                    p.private_slots,
+                                    p.deep_slots,
+                                    p.arity,
+                                ),
+                        );
+                    }
                 }
             }
             Op::Assert { has_msg, cmp } => {
@@ -474,7 +485,7 @@ impl Vm {
             Op::NewCell => {
                 // `v` moves straight into the `Obj` (no rooting window — alloc never GCs mid-op).
                 let v = self.pop();
-                let h = self.heap.alloc(Obj::Cell(v));
+                let h = self.heap.alloc(Obj::Cell(RCell::new(v)));
                 self.push(Value::obj(h));
             }
             Op::CellLoad => {
@@ -485,7 +496,7 @@ impl Vm {
                 let Obj::Cell(v) = self.heap.get(h) else {
                     unreachable!("CellLoad on a non-cell object");
                 };
-                let v = *v;
+                let v = v.get();
                 self.push(v);
             }
             Op::CellStore => {
@@ -500,8 +511,8 @@ impl Vm {
                 if self.heap.is_copied(h) {
                     return Err(self.copied_write_err(None, span));
                 }
-                if let Obj::Cell(slot) = self.heap.get_mut(h) {
-                    *slot = v;
+                if let Obj::Cell(slot) = self.heap.write(h).get(h) {
+                    slot.set(v);
                 } else {
                     unreachable!("CellStore on a non-cell object");
                 }

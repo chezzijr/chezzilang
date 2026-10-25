@@ -11,7 +11,7 @@ impl Vm {
     /// module and spuriously fail to resolve.
     pub(super) fn slot_index(&self, module: GcRef, name: &str) -> Option<u32> {
         match self.heap.get(module) {
-            Obj::Module(m) => m.index.get(name).copied(),
+            Obj::Module(m) => m.names().index.get(name).copied(),
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -105,6 +105,7 @@ impl Vm {
     pub(super) fn global_slot_name(&self, module: GcRef, slot: u32) -> Option<String> {
         match self.heap.get(module) {
             Obj::Module(m) => m
+                .names()
                 .index
                 .iter()
                 .find(|&(_, &i)| i == slot)
@@ -180,7 +181,7 @@ impl Vm {
         self.snapshot_cells = std::sync::Arc::new(super::fxhash::FxHashMap::default());
         // TICKET-111 — the node registry describes the same snapshot; drop it too.
         self.snapshot_nodes = std::sync::Arc::new(super::fxhash::FxHashMap::default());
-        if let Obj::Module(m) = self.heap.get_mut(module) {
+        if let Obj::Module(m) = self.heap.write(module).get(module) {
             m.slots.set(slot as usize, value);
         }
     }
@@ -200,29 +201,24 @@ impl Vm {
         // TICKET-111 — the node registry describes the same snapshot; drop it too.
         self.snapshot_nodes = std::sync::Arc::new(super::fxhash::FxHashMap::default());
         // A new name appends a slot: a push that outgrows the block retires it (`vm/rvec.rs`),
-        // so a racy reader of the old block never reads freed memory. The index takes `&mut`, the
-        // push takes the shared heap, so the append is two lookups (a cold path).
-        let mut append = false;
-        if let Obj::Module(m) = self.heap.get_mut(module) {
-            match m.index.get(name) {
+        // so a racy reader of the old block never reads freed memory. The index insert and the
+        // push run under one write lock, so a locked reader sees them in lockstep.
+        let heap = self.heap.write(module);
+        if let Obj::Module(m) = heap.get(module) {
+            let mut names = m.names_mut();
+            match names.index.get(name) {
                 Some(&i) => m.slots.set(i as usize, value),
                 None => {
-                    m.index.insert(name.into(), m.slots.len() as u32);
-                    append = true;
+                    names.index.insert(name.into(), m.slots.len() as u32);
+                    m.slots.push(heap, value);
                 }
-            }
-        }
-        if append {
-            let heap = self.heap.write(module);
-            if let Obj::Module(m) = heap.get(module) {
-                m.slots.push(heap, value);
             }
         }
     }
 
     pub(super) fn module_name(&self, module: GcRef) -> String {
         match self.heap.get(module) {
-            Obj::Module(m) => m.name.to_string(),
+            Obj::Module(m) => m.names().name.to_string(),
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)

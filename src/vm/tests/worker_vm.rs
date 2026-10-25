@@ -29,11 +29,11 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         ..empty_program()
     };
     let mut vm = Vm::new(Arc::new(program));
-    let home = vm.heap.alloc(Obj::Module(Box::new(ModuleData {
-        name: "<test>".into(),
-        slots: RVec::new(),
-        index: Default::default(),
-    })));
+    let home = vm.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+        "<test>".into(),
+        RVec::new(),
+        Default::default(),
+    ))));
     let clo = vm.heap.alloc(Obj::Closure {
         proto: 0,
         captured: Default::default(),

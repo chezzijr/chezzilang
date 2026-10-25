@@ -1182,7 +1182,7 @@ fn over_memory_trips_on_an_all_native_task_body() {
 ///
 /// The accounting was always right (`obj_bytes_shallow` charges `Vec::capacity()`); nobody ever
 /// looked. The fix charges bytes at the three funnels every byte must pass through — `alloc`,
-/// `get_mut`, `to_wire_crossable` — so the shape of the growth stops mattering.
+/// `write`, `to_wire_crossable` — so the shape of the growth stops mattering.
 ///
 /// `while`, not `for i in range(...)`: `range()` materialises its own `List[int]`, which would
 /// trip the cap by itself and confound what this proves.

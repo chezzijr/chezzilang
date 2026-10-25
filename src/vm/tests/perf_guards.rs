@@ -1347,7 +1347,7 @@ fn cursor_crosses_airlock_by_deep_copy() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let cursor = Value::obj(vm.heap.alloc(Obj::Iter {
         items: vec![Value::int(7), Value::int(8)].into(),
-        pos: 1,
+        pos: RCell::new(1),
     }));
     let wire = vm
         .to_wire(cursor)
@@ -1367,7 +1367,7 @@ fn cursor_crosses_airlock_by_deep_copy() {
     };
     match vm.heap.get(h) {
         Obj::Iter { items, pos } => {
-            assert_eq!(*pos, 1);
+            assert_eq!(pos.get(), 1);
             assert_eq!(items.to_vec(), vec![Value::int(7), Value::int(8)]);
         }
         _ => panic!("expected a rebuilt Obj::Iter"),

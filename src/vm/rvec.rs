@@ -21,9 +21,9 @@
 //!   access is an atomic of the element, so a racing read and write on one slot is no data race
 //!   and never tears. A `Value` slot stores with Release and loads with Acquire ([`VALUE_STORE`]):
 //!   it is how a `GcRef` reaches another thread, and the reader must see the object it names. A
-//!   byte or a `u64`/`i64` word is Relaxed: no reader derives a pointer from it. `Copy` is also
-//!   what makes a racy read sound: a reader copies the bits, and a copied `T` with a drop would
-//!   drop twice.
+//!   byte or a `u64`/`i64`/`usize` word is Relaxed: no reader derives a pointer from it. `Copy`
+//!   is also what makes a racy read sound: a reader copies the bits, and a copied `T` with a drop
+//!   would drop twice.
 //! - A read loads the pointer (Acquire), then that block's `len` (Acquire), then a slot below
 //!   `len`. [`get`](RVec::get) and [`set`](RVec::set) panic on an index at or past `len`, and a
 //!   panic is no fault `recover:` catches (in a spawned task it is "internal error: a parallel
@@ -60,6 +60,9 @@
 //! No API hands out `&mut [T]`. Miri and TSan are not available on this box, so the races here
 //! are tested only by the stress tests below.
 //!
+//! [`RCell`] is the one-slot sibling for an object field written in place (a struct's inline
+//! field, a cell, a cursor's position).
+//!
 //! [`AtomicBox`] is the owner-pointer sibling for a value that a run takes whole (a parked
 //! generator): a take swaps the pointer to a RUNNING sentinel and waits out the readers, so a
 //! second taker sees it running, and reads never block each other.
@@ -90,6 +93,8 @@ pub trait Elem: Copy + sealed::Sealed {
     );
     fn load(slot: &Self::Slot) -> Self;
     fn store(slot: &Self::Slot, v: Self);
+    /// A new slot that holds `v`.
+    fn new_slot(v: Self) -> Self::Slot;
 }
 
 /// An 8-byte word in an `AtomicU64`, as its bits (`$to` and `$from` convert), with the
@@ -107,6 +112,10 @@ macro_rules! word_elem {
             fn store(slot: &AtomicU64, v: Self) {
                 slot.store($to(v), $store);
             }
+            #[inline(always)]
+            fn new_slot(v: Self) -> AtomicU64 {
+                AtomicU64::new($to(v))
+            }
         }
     };
 }
@@ -119,8 +128,8 @@ macro_rules! word_elem {
 pub(super) const VALUE_LOAD: Ordering = Ordering::Acquire;
 pub(super) const VALUE_STORE: Ordering = Ordering::Release;
 
-// A `u64` or `i64` slot holds user data or a position, never a pointer that a reader follows, so
-// it stays Relaxed (Go parity: a racy int read gives a wrong value).
+// A `u64`, `i64` or `usize` slot holds user data or a position, never a pointer that a reader
+// follows, so it stays Relaxed (Go parity: a racy int read gives a wrong value).
 word_elem!(
     u64,
     |v: u64| v,
@@ -132,6 +141,13 @@ word_elem!(
     i64,
     |v: i64| v as u64,
     |b: u64| b as i64,
+    Ordering::Relaxed,
+    Ordering::Relaxed
+);
+word_elem!(
+    usize,
+    |v: usize| v as u64,
+    |b: u64| b as usize,
     Ordering::Relaxed,
     Ordering::Relaxed
 );
@@ -158,6 +174,10 @@ impl Elem for (u64, Value, Value) {
         Value::store(k, ek);
         Value::store(v, ev);
     }
+    #[inline(always)]
+    fn new_slot((h, k, v): Self) -> [AtomicU64; 3] {
+        [u64::new_slot(h), Value::new_slot(k), Value::new_slot(v)]
+    }
 }
 
 /// A set entry, `(cached hash, element)`, as a map entry without the value.
@@ -172,6 +192,10 @@ impl Elem for (u64, Value) {
     fn store([h, e]: &[AtomicU64; 2], (eh, ee): Self) {
         u64::store(h, eh);
         Value::store(e, ee);
+    }
+    #[inline(always)]
+    fn new_slot((h, e): Self) -> [AtomicU64; 2] {
+        [u64::new_slot(h), Value::new_slot(e)]
     }
 }
 
@@ -205,6 +229,45 @@ impl Elem for u8 {
     #[inline(always)]
     fn store(slot: &AtomicU8, v: Self) {
         slot.store(v, Ordering::Relaxed);
+    }
+    #[inline(always)]
+    fn new_slot(v: Self) -> AtomicU8 {
+        AtomicU8::new(v)
+    }
+}
+
+/// One element in one atomic slot: the single-word sibling of an [`RVec`], for an object field
+/// that an op writes in place while another thread can read it (a struct's inline field, a cell,
+/// a cursor's position). A read and a write take `&self` and go through the element's own
+/// [`Elem`] load and store, so a `Value` cell publishes with Release as an `RVec` slot does.
+pub struct RCell<T: Elem>(T::Slot);
+
+impl<T: Elem> RCell<T> {
+    #[inline(always)]
+    pub fn new(v: T) -> Self {
+        RCell(T::new_slot(v))
+    }
+
+    #[inline(always)]
+    pub fn get(&self) -> T {
+        T::load(&self.0)
+    }
+
+    #[inline(always)]
+    pub fn set(&self, v: T) {
+        T::store(&self.0, v)
+    }
+}
+
+impl<T: Elem> Clone for RCell<T> {
+    fn clone(&self) -> Self {
+        RCell::new(self.get())
+    }
+}
+
+impl<T: Elem + std::fmt::Debug> std::fmt::Debug for RCell<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.get().fmt(f)
     }
 }
 
@@ -1089,13 +1152,6 @@ impl<T> AtomicBox<T> {
         // put frees or mutates it before `_g` drops (the type doc).
         f(unsafe { p.as_ref() })
     }
-
-    /// The box, through `&mut self` (no other thread can reach it).
-    pub fn get_mut(&mut self) -> Option<&mut T> {
-        // SAFETY: `&mut self` excludes every take and read; a non-null pointer came from
-        // `Box::into_raw`.
-        unsafe { self.ptr.get_mut().as_mut() }
-    }
 }
 
 impl<T: Clone> Clone for AtomicBox<T> {
@@ -1133,21 +1189,23 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// M3.0b (C4) — a `Value` slot publishes a `GcRef` with Release and reads it with Acquire, in
-    /// an `RVec` block and a map entry alike: both go through `<Value as Elem>`. x86 orders a
-    /// Relaxed store the same, so no runtime race test shows the bug there; an ARM build would.
-    /// This pins the orderings and reads a stored value back.
+    /// an `RVec` block, a map entry and an [`RCell`](super::RCell) alike: all go through
+    /// `<Value as Elem>`. x86 orders a Relaxed store the same, so no runtime race test shows the
+    /// bug there; an ARM build would. This pins the orderings and reads a stored value back.
     #[test]
     fn value_slots_publish_with_release_and_read_with_acquire() {
-        use super::{Elem, VALUE_LOAD, VALUE_STORE};
-        use std::sync::atomic::AtomicU64;
+        use super::{Elem, RCell, VALUE_LOAD, VALUE_STORE};
         assert_eq!(VALUE_STORE, Ordering::Release);
         assert_eq!(VALUE_LOAD, Ordering::Acquire);
         let v = Value::int(7);
-        let slot = AtomicU64::new(0);
+        let slot = <Value as Elem>::new_slot(Value::nil());
         <Value as Elem>::store(&slot, v);
         assert_eq!(<Value as Elem>::load(&slot).to_bits(), v.to_bits());
-        let entry = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
-        <(u64, Value, Value) as Elem>::store(&entry, (1, v, v));
+        let cell = RCell::new(Value::nil());
+        cell.set(v);
+        assert_eq!(cell.get().to_bits(), v.to_bits());
+        assert_eq!(cell.clone().get().to_bits(), v.to_bits());
+        let entry = <(u64, Value, Value) as Elem>::new_slot((1, v, v));
         let (h, k, x) = <(u64, Value, Value) as Elem>::load(&entry);
         assert_eq!((h, k.to_bits(), x.to_bits()), (1, v.to_bits(), v.to_bits()));
     }

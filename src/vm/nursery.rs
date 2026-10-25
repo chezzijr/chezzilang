@@ -300,7 +300,7 @@ impl Vm {
     /// mutation (`q.push(1)`, `m[k] = v`, `p.x = 1`) changes with no module-slot write for
     /// `set_global_slot` / `module_define` to see. It is dropped when its `view` stamp is no longer
     /// this context's view stamp (`Heap::view_stamp`, `vm/heap_view.rs`): something a global reaches
-    /// was handed out mutably since the build (`Heap::get_mut`), or the snapshot was built in another
+    /// was written in place since the build (`Heap::write`), or the snapshot was built in another
     /// context (M1.7: every context of a run shares one heap, so the stamp names the view, not the
     /// heap). So a task sees its
     /// globals as of its own start (Go: a goroutine sees the heap as of `go`), and a spawn storm

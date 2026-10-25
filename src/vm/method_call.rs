@@ -464,14 +464,15 @@ impl Vm {
             match method {
                 "iter" => self.push(recv), // idempotent: iter() on a cursor returns self
                 "next" => {
-                    let Obj::Iter { items, pos } = self.heap.get_mut(h) else {
+                    let Obj::Iter { items, pos } = self.heap.write(h).get(h) else {
                         unreachable!()
                     };
                     // M3.0a — one read answers the bound and the element: two threads can step
-                    // one shared cursor.
-                    let item = items.try_get(*pos);
+                    // one shared cursor (a racy step can repeat or skip an item, as in Go).
+                    let at = pos.get();
+                    let item = items.try_get(at);
                     if item.is_some() {
-                        *pos += 1;
+                        pos.set(at + 1);
                     }
                     let result = match item {
                         Some(v) => self.alloc_enum("Option", "Some", &[v]),
@@ -620,7 +621,10 @@ impl Vm {
             };
             self.pop(); // unroot receiver
             if let Some(items) = items {
-                let cursor = self.heap.alloc(Obj::Iter { items, pos: 0 });
+                let cursor = self.heap.alloc(Obj::Iter {
+                    items,
+                    pos: RCell::new(0),
+                });
                 self.push(Value::obj(cursor));
                 return Ok(());
             }
@@ -630,7 +634,7 @@ impl Vm {
         //   `str`/`list`/`map`/`set` → `core_method` (M6),
         //   `bytes`                  → `bytes_method` (immutable: only `decode() -> str`),
         //   `bytearray`              → `bytearray_method` (`len`/`push`/`pop`/`extend`/`decode`;
-        //                              separate from `core_method`, same in-place `get_mut` discipline).
+        //                              separate from `core_method`, same in-place `write` discipline).
         enum Container {
             Core,
             Bytes,
@@ -684,7 +688,7 @@ impl Vm {
             Obj::Module(m) => {
                 let idx = self.slot_index(h, method).ok_or_else(|| {
                     self.err(
-                        format!("module '{}' has no member '{method}'", m.name),
+                        format!("module '{}' has no member '{method}'", m.names().name),
                         span,
                     )
                 })?;

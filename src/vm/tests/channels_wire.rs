@@ -99,11 +99,11 @@ fn wire_preserves_map_hashes_and_order() {
 #[test]
 fn wire_passes_by_reference_objects_as_same_handle() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let m = vm.heap.alloc(Obj::Module(Box::new(ModuleData {
-        name: "m".into(),
-        slots: RVec::new(),
-        index: Default::default(),
-    })));
+    let m = vm.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+        "m".into(),
+        RVec::new(),
+        Default::default(),
+    ))));
     let v = Value::obj(m);
     let w = vm.to_wire(v).expect("by-ref object should serialize");
     assert_eq!(

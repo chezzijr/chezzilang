@@ -30,7 +30,7 @@ impl Vm {
     ///      the task's first instruction, the same point as (1); with one heap (1) samples the run
     ///      there already, so it went.
     ///
-    /// WHAT NEITHER COVERS: growth AFTER the sample is paced, not bounded (`Heap::get_mut`'s settle
+    /// WHAT NEITHER COVERS: growth AFTER the sample is paced, not bounded (`Heap::write`'s settle
     /// charges it). Do not restate any of the above as an unconditional guarantee.
     pub(super) fn spawn_worker(&self) -> Vm {
         // SAFETY: the gc_coord protocol (`vm/gc_coord.rs`): the worker joins this run's `GcCoord`
@@ -621,11 +621,11 @@ impl Vm {
     /// cross heaps; used as the fallback when the task's home is not a real `module_objs` entry (the
     /// hand-built unit-test fixtures) — real spawns resolve a reconstructed module (see `worker_home`).
     pub(super) fn fresh_worker_home(&mut self) -> GcRef {
-        self.heap.alloc(Obj::Module(Box::new(ModuleData {
-            name: "<worker>".into(),
-            slots: RVec::new(),
-            index: Default::default(),
-        })))
+        self.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+            "<worker>".into(),
+            RVec::new(),
+            Default::default(),
+        ))))
     }
 
     /// B3.3c — the index of a `home` module `GcRef` in this VM's `module_objs`, so the worker can
@@ -698,7 +698,7 @@ impl Vm {
     }
 
     /// TICKET-213 — mark every object this view's module globals reach as viewed, so
-    /// `Heap::get_mut` moves the view epoch when one of them is mutated in place. Runs right before
+    /// `Heap::write` moves the view epoch when one of them is mutated in place. Runs right before
     /// the build that stamps the snapshot; nothing mutates the heap between the two. The module
     /// objects themselves stay unmarked: a slot write already drops the cache
     /// (`set_global_slot` / `module_define`), and a worker's lazy fault replay writes slots.
@@ -751,7 +751,13 @@ impl Vm {
             // worker replays them into matching slots; the shared `Arc<Program>` slot map makes
             // parent and worker agree on slot↔name regardless of any hash ordering.
             let (name, globals): (Box<str>, Vec<(String, Value)>) = match self.heap.get(pm) {
-                Obj::Module(m) => (m.name.clone(), module_slot_pairs(&m.slots, &m.index)),
+                Obj::Module(m) => {
+                    let names = m.names();
+                    (
+                        names.name.clone(),
+                        module_slot_pairs(&m.slots, &names.index),
+                    )
+                }
                 Obj::Str(_)
                 | Obj::Bytes(_)
                 | Obj::ByteArray(_)
@@ -852,7 +858,7 @@ impl Vm {
     /// "rebuild" (slower, never stale).
     ///
     /// TICKET-213 — a non-reusable snapshot is still cached while nothing it reaches was mutated:
-    /// `Heap::get_mut`, the sole `&mut Obj` door, moves the view epoch the snapshot is stamped with
+    /// `Heap::write`, the sole write door, moves the view epoch the snapshot is stamped with
     /// (`ModuleSnapshot::view`, read by [`Vm::fresh_view`]). No mutating intrinsic is hooked.
     fn slot_snapshot_reusable(&self, v: Value) -> bool {
         // The leaf list has one owner (`boxctx::slot_is_leaf`); the box slot door reads it too.
@@ -1069,13 +1075,12 @@ impl Vm {
                 // A module not in `module_objs` (shouldn't occur for a bound import) — encode inline,
                 // in slot order so replay rebuilds matching slots.
                 None => {
-                    let ModuleData {
-                        name,
-                        slots,
-                        index,
-                    } = *m;
+                    let (name, pairs) = {
+                        let names = m.names();
+                        (names.name.clone(), module_slot_pairs(&m.slots, &names.index))
+                    };
                     let mut globals = Vec::new();
-                    for (k, mv) in module_slot_pairs(&slots, &index) {
+                    for (k, mv) in pairs {
                         globals.push((k, self.to_snap_depth(mv, depth + 1, memo)?));
                     }
                     SnapValue::ModuleInline { name, globals }
@@ -1255,7 +1260,7 @@ impl Vm {
                     memo.emitted.insert(id);
                     SnapValue::Cell {
                         id,
-                        inner: Box::new(self.to_snap_depth(v, depth + 1, memo)?),
+                        inner: Box::new(self.to_snap_depth(v.get(), depth + 1, memo)?),
                     }
                 }
             }
@@ -1266,7 +1271,10 @@ impl Vm {
                 for x in &items {
                     out.push(self.to_snap_depth(x, depth + 1, memo)?);
                 }
-                SnapValue::Iter { items: out, pos }
+                SnapValue::Iter {
+                    items: out,
+                    pos: pos.get(),
+                }
             }
         })
     }
@@ -1290,11 +1298,11 @@ impl Vm {
             "install_snapshot expects a fresh worker"
         );
         for m in &snap.modules {
-            let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData {
-                name: m.name.clone(),
-                slots: RVec::new(),
-                index: std::collections::HashMap::new(),
-            })));
+            let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+                m.name.clone(),
+                RVec::new(),
+                std::collections::HashMap::new(),
+            ))));
             self.module_objs.push(wm);
         }
         self.module_faulted = vec![false; snap.modules.len()];
@@ -1469,11 +1477,11 @@ impl Vm {
             }
             SnapValue::ModuleAlias(idx) => Value::obj(self.module_objs[*idx]),
             SnapValue::ModuleInline { name, globals } => {
-                let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData {
-                    name: name.clone(),
-                    slots: RVec::new(),
-                    index: std::collections::HashMap::new(),
-                })));
+                let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+                    name.clone(),
+                    RVec::new(),
+                    std::collections::HashMap::new(),
+                ))));
                 for (k, gv) in globals {
                     let val = self.replay_snap(gv, rb);
                     self.module_define(wm, k, val);
@@ -1508,7 +1516,7 @@ impl Vm {
                 let v = items.iter().map(|x| self.replay_snap(x, rb)).collect();
                 Value::obj(self.heap.alloc(Obj::Iter {
                     items: v,
-                    pos: *pos,
+                    pos: RCell::new(*pos),
                 }))
             }
             SnapValue::Tuple(xs) => {
@@ -1553,13 +1561,15 @@ impl Vm {
                 if let Some(&prev) = rb.get(id) {
                     return Value::obj(prev);
                 }
-                let h = self.heap.alloc(Obj::Cell(Value::nil()));
+                let h = self.heap.alloc(Obj::Cell(RCell::new(Value::nil())));
                 rb.insert(*id, h);
                 if self.copy_mark {
                     self.heap.set_copied(h);
                 }
                 let inner = self.replay_snap(inner, rb);
-                *self.heap.get_mut(h) = Obj::Cell(inner);
+                if let Obj::Cell(c) = self.heap.write(h).get(h) {
+                    c.set(inner);
+                }
                 Value::obj(h)
             }
             // W7-4b — the far side of a second reach. A miss is a memo-scope bug, not a program error:

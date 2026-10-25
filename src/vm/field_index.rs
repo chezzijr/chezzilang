@@ -80,14 +80,20 @@ impl Vm {
                     }
                 }
             }
-            Obj::Module(m) => match m.index.get(name).copied() {
-                Some(i) => {
-                    let v = self.read_slot(h, i, span)?;
-                    self.push(v);
-                    Ok(())
+            Obj::Module(m) => {
+                let slot = m.names().index.get(name).copied();
+                match slot {
+                    Some(i) => {
+                        let v = self.read_slot(h, i, span)?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    None => {
+                        let msg = format!("module '{}' has no member '{name}'", m.names().name);
+                        Err(self.err(msg, span))
+                    }
                 }
-                None => Err(self.err(format!("module '{}' has no member '{name}'", m.name), span)),
-            },
+            }
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -503,7 +509,7 @@ impl Vm {
                 cell.tid == TID_NONE || self.field_fits(cell.tid, cell.idx as usize, val).is_ok();
             if cell.tid != TID_NONE
                 && fits
-                && let Obj::Struct { tid, fields, .. } = self.heap.get_mut(h)
+                && let Obj::Struct { tid, fields, .. } = self.heap.write(h).get(h)
                 && *tid == cell.tid
                 && fields.set(cell.idx as usize, val)
             {
@@ -553,7 +559,7 @@ impl Vm {
             self.field_fits(t, i, val).map_err(|m| self.err(m, span))?;
         }
         let found;
-        match self.heap.get_mut(h) {
+        match self.heap.write(h).get(h) {
             Obj::Struct { tid, fields, .. } => {
                 let tid = *tid;
                 match idx.filter(|&i| fields.set(i, val)) {
@@ -656,7 +662,7 @@ impl Vm {
             // stored key and pays no clone. `snapshot_key` is pure alloc (no GC), so no rooting.
             // M3.0a — a position the entry block no longer holds is a miss (see above).
             let updated = pos.and_then(|i| {
-                let Obj::Map(m) = self.heap.get_mut(h) else {
+                let Obj::Map(m) = self.heap.write(h).get(h) else {
                     unreachable!()
                 };
                 m.set_value(i, val)
@@ -692,8 +698,8 @@ impl Vm {
         // `bytearray[i] = x` — the NEW mutable capability `bytes` lacks. The value must be an `int`
         // in 0..=255 (validated BEFORE the in-place write); the index must be in range. Both are
         // distinct recoverable faults. Mutation flows through the heap slot, so two bindings to the
-        // same `bytearray` observe it (like `list`). Validate the value up front (`&self` borrow)
-        // before the `&mut self` `get_mut` below.
+        // same `bytearray` observe it (like `list`). Validate the value up front, before the
+        // write door below.
         if matches!(self.heap.get(h), Obj::ByteArray(_)) {
             let byte = match self.int_val(val) {
                 Some(n) if (0..=255).contains(&n) => n as u8,
@@ -709,7 +715,7 @@ impl Vm {
                     );
                 }
             };
-            let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+            let Obj::ByteArray(b) = self.heap.write(h).get(h) else {
                 unreachable!()
             };
             // M3.0a — one snapshot answers the bound and the store (see `slice_range`).
@@ -723,7 +729,7 @@ impl Vm {
                 None => Err(self.err(format!("index {idx} out of bounds (len {len})"), span)),
             };
         }
-        match self.heap.get_mut(h) {
+        match self.heap.write(h).get(h) {
             Obj::List(items) => {
                 let s = items.view();
                 let len = s.len();
