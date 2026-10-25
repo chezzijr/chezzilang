@@ -117,7 +117,6 @@ must close before tasks share a value by handle:
 - A fresh object is published with a Relaxed store, with no Release barrier (Go's
   `publicationBarrier`), so a reader on another core can see its slot before its contents.
 - `get_mut` makes a `&mut Obj` over an object that another thread can read.
-- `print` opens a stop window while its walk holds unrooted elements.
 
 Tasks share no object, and the **process** is one process: a task inherits the parent's `std.os.args`
 and env, and **stdin is ONE source every task shares** (Go's `os.Stdin` / Python's `sys.stdin`, not

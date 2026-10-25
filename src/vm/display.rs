@@ -6,6 +6,12 @@ use super::stmt::BoxSnaps;
 use super::*;
 use crate::base::hooks::Hook;
 
+/// The heap values of a print walk's element copy, the ones it roots (M3.0a C6): an inline int,
+/// bool or nil needs no root, so a list of them pushes nothing.
+fn walk_roots(vals: impl Iterator<Item = Value>) -> Vec<Value> {
+    vals.filter(|v| v.child_gcref().is_some()).collect()
+}
+
 /// `Writer(open)` / `Reader(closed)`: an I/O handle's text, without its fd.
 fn io_handle_text(label: &str, open: bool) -> String {
     format!("{label}({})", if open { "open" } else { "closed" })
@@ -22,8 +28,10 @@ fn io_state<T>(inner: &std::sync::Mutex<Option<T>>) -> Option<bool> {
 }
 
 /// [`io_state`] for a `&self` render (error text, a box's contents), which cannot take the GC
-/// door: a short spin, then `open`. A holder that stays longer waits on a syscall, and only an
-/// open handle makes one (an op on a closed slot returns at once).
+/// door: a short spin, then `open`. That is the true state: a holder that stays longer waits on a
+/// syscall, and only an op on an open slot makes one. An op on a closed slot returns at once, and
+/// a close drops the backing (a flush that can block) after it released the lock
+/// (`fileio::close_slot`, M3.0a C7).
 fn io_state_now<T>(inner: &std::sync::Mutex<Option<T>>) -> bool {
     for _ in 0..64 {
         if let Some(open) = io_state(inner) {
@@ -953,7 +961,10 @@ impl Vm {
     }
 
     // W14-35c — the four open-render helpers below hold `repr_active` open around one container's
-    // element walk and close it on the `Ok` AND the `Err` path. They are `#[inline(never)]` so the
+    // element walk and close it on the `Ok` AND the `Err` path. M3.0a C6 — each walks a Rust copy
+    // of the container's elements, so it roots them for the walk (`Vm::with_roots`): the walk can
+    // wait in the GC door (a busy `Writer`) or run a `str` hook, and a collection meanwhile must not
+    // free an element that another task unlinked from the container. They are `#[inline(never)]` so the
     // `Result` temporaries they need stay out of `stringify_obj_into`'s frame: a `str` hook that
     // re-enters `str(self)` recurses through that frame, and a bigger frame would trip the native
     // stack before the call-depth cap (`self_referential_stringable_hits_depth_limit`).
@@ -975,6 +986,20 @@ impl Vm {
 
     #[inline(never)]
     fn stringify_open_map(
+        &mut self,
+        out: &mut String,
+        h: GcRef,
+        entries: &RVec<MapEntry>,
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        let roots = walk_roots(entries.iter().flat_map(|(_, k, mv)| [k, mv]));
+        self.with_roots(&roots, |vm| {
+            vm.stringify_map_entries(out, h, entries, span, depth)
+        })
+    }
+
+    fn stringify_map_entries(
         &mut self,
         out: &mut String,
         h: GcRef,
@@ -1011,6 +1036,20 @@ impl Vm {
         span: Span,
         depth: usize,
     ) -> Result<(), RuntimeError> {
+        let roots = walk_roots(entries.iter().map(|(_, e)| e));
+        self.with_roots(&roots, |vm| {
+            vm.stringify_set_entries(out, h, entries, span, depth)
+        })
+    }
+
+    fn stringify_set_entries(
+        &mut self,
+        out: &mut String,
+        h: GcRef,
+        entries: &RVec<SetEntry>,
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
         self.repr_active.push(h);
         let mut r = Ok(());
         for (i, (_, e)) in entries.iter().enumerate() {
@@ -1028,6 +1067,21 @@ impl Vm {
 
     #[inline(never)]
     fn stringify_open_fields(
+        &mut self,
+        out: &mut String,
+        h: GcRef,
+        def: Option<&crate::base::op::StructDef>,
+        fields: &[Value],
+        span: Span,
+        depth: usize,
+    ) -> Result<(), RuntimeError> {
+        let roots = walk_roots(fields.iter().copied());
+        self.with_roots(&roots, |vm| {
+            vm.stringify_fields(out, h, def, fields, span, depth)
+        })
+    }
+
+    fn stringify_fields(
         &mut self,
         out: &mut String,
         h: GcRef,
@@ -1060,6 +1114,9 @@ impl Vm {
         r
     }
 
+    /// Render `elems`, a Rust copy of a sequence's elements, rooted for the walk (M3.0a C6, see
+    /// the open-render helpers above).
+    #[inline(never)]
     pub(super) fn stringify_seq_into(
         &mut self,
         out: &mut String,
@@ -1067,12 +1124,55 @@ impl Vm {
         span: Span,
         depth: usize,
     ) -> Result<(), RuntimeError> {
-        for (i, e) in elems.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
+        let roots = walk_roots(elems.iter().copied());
+        self.with_roots(&roots, |vm| {
+            for (i, e) in elems.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                vm.stringify_nested_into(out, *e, span, depth)?;
             }
-            self.stringify_nested_into(out, *e, span, depth)?;
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod io_state_tests {
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+
+    /// A backing whose drop blocks until the test lets it go, as a `BufWriter`'s drop flush
+    /// blocks on a full FIFO.
+    struct SlowDrop {
+        entered: Sender<()>,
+        release: Receiver<()>,
+    }
+
+    impl Drop for SlowDrop {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
         }
-        Ok(())
+    }
+
+    /// M3.0a C7 — a render of a handle that another thread is closing reads its true state,
+    /// `closed`, as base main did by waiting on the lock: the close takes the backing out under
+    /// the lock, and its drop (a flush that can block on a FIFO) runs after the lock is released.
+    #[test]
+    fn a_render_during_a_close_reads_closed() {
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let inner = Mutex::new(Some(SlowDrop {
+            entered: entered_tx,
+            release: release_rx,
+        }));
+        std::thread::scope(|s| {
+            s.spawn(|| super::super::fileio::close_slot(&inner));
+            entered_rx.recv().expect("the close drops the backing");
+            let open = super::io_state_now(&inner);
+            release_tx.send(()).expect("release the drop");
+            assert!(!open, "a handle in its close renders as open");
+        });
     }
 }

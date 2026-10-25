@@ -2052,3 +2052,134 @@ main()"
         "a detached read gave a value that is not an s<n> str"
     );
 }
+
+/// M3.0a C6 — the print walk waits for a busy `Writer` through the GC door while it holds the
+/// elements of the list it renders in a Rust copy. Thread A sets `outer[1]` to a new list `xs`
+/// and prints `outer = [W, xs]` while a plain thread holds `W`'s lock in bursts (a write in
+/// progress), so the walk opens the door before it reaches `xs`; thread B sets `outer[1] = 0`
+/// (`xs` is unlinked), allocates junk strs and collects. The walk roots every element it holds,
+/// so it prints `xs` or `0`, never freed memory. Run under `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn the_print_walk_roots_what_it_holds_across_a_door() {
+    const PRINTS: usize = 100;
+    let src = "\
+import std.io
+W := io.stdout()
+
+fn main():
+    pass
+main()"
+        .to_string();
+    let outer_ref = Arc::new(Mutex::new(None::<GcRef>));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // B's collections and A's finished prints: the lock holder's handshake.
+    let collects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let printed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (bad, doors) = share_handle(
+        src,
+        &["W"],
+        2,
+        move |i, w, g| {
+            let sp = Span::RUNTIME;
+            let ordering = std::sync::atomic::Ordering::SeqCst;
+            let (mut bad, mut doors) = (Vec::new(), 0usize);
+            if i == 0 {
+                let Obj::Writer(core) = w.heap.get(g[0]) else {
+                    panic!("W is a Writer")
+                };
+                let core = Arc::clone(core);
+                let outer = w.heap.alloc(Obj::List(RVec::from_slice(&[
+                    Value::obj(g[0]),
+                    Value::int(0),
+                ])));
+                w.push(Value::obj(outer));
+                *outer_ref.lock().unwrap() = Some(outer);
+                // Ends the other two loops on a panic too, so a failed print fails the test.
+                struct Done<'a>(&'a std::sync::atomic::AtomicBool);
+                impl Drop for Done<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _done = Done(&done);
+                std::thread::scope(|s| {
+                    // A write in progress: hold the lock until B collected 3 times, then let
+                    // the print that waits on it finish before the next hold. The walk finds the
+                    // lock busy and waits in the door while B unlinks and collects.
+                    s.spawn(|| {
+                        while !done.load(ordering) {
+                            let g = core.inner.lock().unwrap();
+                            let c0 = collects.load(ordering);
+                            while !done.load(ordering) && collects.load(ordering) < c0 + 3 {
+                                std::hint::spin_loop();
+                            }
+                            drop(g);
+                            let p0 = printed.load(ordering);
+                            while !done.load(ordering) && printed.load(ordering) == p0 {
+                                std::hint::spin_loop();
+                            }
+                        }
+                    });
+                    // Until enough prints met a collection.
+                    for p in 0..PRINTS * 1000 {
+                        if doors >= PRINTS {
+                            break;
+                        }
+                        w.gc_poll();
+                        let xs = w
+                            .heap
+                            .alloc(Obj::List(RVec::from_slice(&[Value::int(p as i64 + 1); 3])));
+                        w.push(Value::obj(outer));
+                        w.push(Value::int(1));
+                        w.push(Value::obj(xs));
+                        w.set_index(sp).expect("a store");
+                        let before = w.gc_coord.epoch();
+                        let text = w.stringify(Value::obj(outer), sp, 0).expect("a print");
+                        printed.fetch_add(1, ordering);
+                        doors += usize::from(w.gc_coord.epoch() != before);
+                        let n = p + 1;
+                        if text != format!("[Writer(open), [{n}, {n}, {n}]]")
+                            && text != "[Writer(open), 0]"
+                        {
+                            bad.push(text);
+                        }
+                    }
+                    drop(_done);
+                });
+            } else {
+                let outer = loop {
+                    if let Some(o) = *outer_ref.lock().unwrap() {
+                        break o;
+                    }
+                    w.gc_poll();
+                    std::thread::yield_now();
+                };
+                while !done.load(ordering) {
+                    w.push(Value::obj(outer));
+                    w.push(Value::int(1));
+                    w.push(Value::int(0));
+                    w.set_index(sp).expect("a store");
+                    // Junk that a freed slot of the unlinked list can be reused for.
+                    for _ in 0..8 {
+                        w.alloc_str("junk".to_string());
+                    }
+                    w.gc_collect();
+                    collects.fetch_add(1, ordering);
+                }
+            }
+            (bad, doors)
+        },
+        |_, _, results| {
+            let doors = results.iter().map(|r| r.1).sum::<usize>();
+            let bad: Vec<String> = results.into_iter().flat_map(|r| r.0).collect();
+            (bad, doors)
+        },
+    );
+    assert!(doors >= PRINTS, "{doors} prints met a collection");
+    assert!(
+        bad.is_empty(),
+        "{} prints gave wrong text: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(3)]
+    );
+}

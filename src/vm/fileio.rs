@@ -195,9 +195,7 @@ impl Vm {
                 // close still surfaces, but the backing is dropped regardless (no leaked fd).
                 let flushed = self.flush_core(&core);
                 // M1.5 — the drop closes the fd (a `BufWriter` drop also flushes), through the door.
-                self.gc_blocking(&[], |_| {
-                    *core.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                });
+                self.gc_blocking(&[], |_| close_slot(&core.inner));
                 match flushed {
                     Ok(()) | Err(WriteErr::Closed) => Ok(self.sock_ok(Value::nil())),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
@@ -452,7 +450,7 @@ impl Vm {
                 // M1.5 — the locks can wait for a read in progress: through the GC door.
                 self.gc_blocking(&[], |_| {
                     let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
-                    *core.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    close_slot(&core.inner);
                     carry.reset();
                 });
                 Ok(self.sock_ok(Value::nil()))
@@ -509,6 +507,15 @@ impl Vm {
 }
 
 /// Is `read_line` served with no syscall: a closed reader, a carry, or a whole line in the buffer?
+/// Close an I/O handle's `inner` slot: take its backing out under the lock, then drop it (a file
+/// closes, a `BufWriter` flushes) after the lock is released. M3.0a C7 — so a thread holds the
+/// lock for long only for an op on an OPEN slot, which is what a render that cannot wait reads
+/// (`io_state_now`, `vm/display.rs`): a drop's flush can block on a FIFO.
+pub(super) fn close_slot<T>(inner: &std::sync::Mutex<Option<T>>) {
+    let backing = inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(backing);
+}
+
 fn line_is_buffered(
     carry: &core::ReaderCarry,
     guard: &Option<std::io::BufReader<std::fs::File>>,
