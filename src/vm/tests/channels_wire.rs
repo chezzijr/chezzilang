@@ -1243,16 +1243,24 @@ fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
     }
 }
 
-/// M3.2 — a core holds the sent value itself, so a value whose only holders are cores survives
+/// M3.2 — a core holds the sent value itself, so a value whose only holder is a core survives
 /// a stop of the world (`CHEZZI_GC_STRESS`: a collection at every instruction boundary, on every
-/// thread). One row per holder: a channel queue, an `Atomic`, the slot of a parked receiver, the
-/// offer of a parked sender, a sealed Task channel, and the slot of a receiver blocked in place on
-/// a popped temporary (`box.get().recv()`: the receiver handle is a pin of the GC door). Each row
-/// writes through one holder and reads through another, so a copy prints `1` (Go prints `2`:
-/// `core_handle.go`, M3.2 report).
+/// thread). One row per holder, each value reachable from that holder alone while `churn` runs:
+/// - `queue`: a channel buffer (the sender's frame is gone);
+/// - `atomic`: an `Atomic`;
+/// - `slot`: the slot of a parked receiver (the giver's frame is gone, the receiver is parked);
+/// - `sealed`: a sealed Task channel, read by `t.get()` only after the churn;
+/// - `door`: the slot of a receiver blocked in place on a popped temporary
+///   (`cc.recv().recv()`): the GC door's pin of that handle is the only root, once the job's own
+///   frame is gone. A job that sends before `main` waits parks with an offer instead, and its
+///   frame then roots the value: the row covers the pin only on the slot path.
+/// - `offer`: the offer of a parked sender. On the M:N path the offer cannot be the only root:
+///   `park_send` keeps the value on the parked fiber's stack. The row covers the hand-off only.
+/// Rows that write through one holder and read through another print `1` with a copy (Go prints
+/// `2`: `core_handle.go`, M3.2 report).
 #[test]
 fn a_value_held_only_by_a_core_survives_a_stop() {
-    let src = r#"import Atomic, Executor, Shared from std.concurrency
+    let src = r#"import Atomic, Executor from std.concurrency
 
 fn churn() -> int:
     s := 0
@@ -1301,10 +1309,26 @@ fn take_offer(rv: Channel[Map[str, int]], ready: Channel[int], done: Channel[int
     r["b"] = 2
     done.send(1)
 
-fn job_value(side: Channel[Map[str, int]]) -> Map[str, int]:
+fn big() -> Map[str, int]:
     m := {"a": 1}
-    side.send(m)
+    for i in 0..50:
+        m["k{i}"] = i
     return m
+
+fn job_value() -> Map[str, int]:
+    return big()
+
+fn send_chan(cc: Channel[Channel[Map[str, int]]]):
+    rv := Channel[Map[str, int]](0)
+    cc.send(rv)
+    _ := churn()
+    rv.send(big())
+
+fn door_job(cc: Channel[Channel[Map[str, int]]], gate: Channel[int]) -> int:
+    send_chan(cc)
+    _ := churn()
+    gate.send(1)
+    return 0
 
 fn main():
     ch := Channel[Map[str, int]](1)
@@ -1331,22 +1355,20 @@ fn main():
         spawn take_offer(rv2, ready, done)
     print("offer", out2.recv())
     ex := Executor()
-    side := Channel[Map[str, int]](1)
-    t := ex.submit(fn(): job_value(side))
+    t := ex.submit(fn(): job_value())
     ex.shutdown()
     _ := churn()
     match t.get():
-        ?m: m["b"] = 2
+        ?m: print("sealed", m.len(), m["k49"])
         !e: print(e.message())
-    print("sealed", side.recv().len())
-    rv3 := Channel[Map[str, int]](0)
-    gate3 := Channel[int](1)
-    box := Shared(rv3)
+    cc := Channel[Channel[Map[str, int]]](1)
+    gate := Channel[int](1)
     ex2 := Executor()
-    _t2 := ex2.submit(fn(): give_then_open(rv3, gate3))
-    r3 := box.get().recv()
-    _ := gate3.recv()
-    print("door", r3.len())
+    _t2 := ex2.submit(fn(): door_job(cc, gate))
+    r3 := cc.recv().recv()
+    _ := gate.recv()
+    _ := churn()
+    print("door", r3.len(), r3["k49"])
     ex2.shutdown()
 
 main()
@@ -1354,6 +1376,6 @@ main()
     let (out, _) = run_with_cfg(src, true);
     assert_eq!(
         out.unwrap_or_else(|e| panic!("runtime error under GC stress: {e}")),
-        "queue 2\natomic 2\nslot 2\noffer 2\nsealed 2\ndoor 2\n"
+        "queue 2\natomic 2\nslot 2\noffer 2\nsealed 51 49\ndoor 51 49\n"
     );
 }
