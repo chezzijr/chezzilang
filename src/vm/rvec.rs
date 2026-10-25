@@ -16,7 +16,8 @@
 //!   path and panics on that error, or aborts on a null allocation, as a `Vec` does.
 //! - `T` is an [`Elem`]: `Copy`, no padding, in an atomic slot of its own size (`u64`, `i64`
 //!   and `Value` in an `AtomicU64`, `u8` in an `AtomicU8`, so bytes pack one per byte; a map or
-//!   set entry in one `AtomicU64` per field, so a racy reader can see it torn). Every slot
+//!   set entry in one `AtomicU64` per field, so a racy reader can see it torn; a map's index
+//!   slot is one `u64` word, so it never tears, `vm/map_data.rs`). Every slot
 //!   access is a `Relaxed` atomic of the element, so a racing read and write on one slot is no data
 //!   race and never tears. `Copy` is also what makes a racy read sound: a reader copies the bits,
 //!   and a copied `T` with a drop would drop twice.
@@ -123,21 +124,6 @@ impl Elem for (u64, Value, Value) {
     }
 }
 
-/// An index slot of a map or a set, `(cached hash, position + 1)` (`vm/map_data.rs`).
-impl sealed::Sealed for (u64, u64) {}
-impl Elem for (u64, u64) {
-    type Slot = [AtomicU64; 2];
-    #[inline(always)]
-    fn load([h, p]: &[AtomicU64; 2]) -> Self {
-        (u64::load(h), u64::load(p))
-    }
-    #[inline(always)]
-    fn store([h, p]: &[AtomicU64; 2], (eh, ep): Self) {
-        u64::store(h, eh);
-        u64::store(p, ep);
-    }
-}
-
 /// A set entry, `(cached hash, element)`, as a map entry without the value.
 impl sealed::Sealed for (u64, Value) {}
 impl Elem for (u64, Value) {
@@ -150,6 +136,26 @@ impl Elem for (u64, Value) {
     fn store([h, e]: &[AtomicU64; 2], (eh, ee): Self) {
         u64::store(h, eh);
         Value::store(e, ee);
+    }
+}
+
+/// An entry that caches its key's hash in its first word (a map or set entry): a probe reads that
+/// word alone ([`View::hash`], `vm/map_data.rs`).
+pub trait CachedHash: Elem {
+    fn load_hash(slot: &Self::Slot) -> u64;
+}
+
+impl CachedHash for (u64, Value, Value) {
+    #[inline(always)]
+    fn load_hash([h, _, _]: &[AtomicU64; 3]) -> u64 {
+        u64::load(h)
+    }
+}
+
+impl CachedHash for (u64, Value) {
+    #[inline(always)]
+    fn load_hash([h, _]: &[AtomicU64; 2]) -> u64 {
+        u64::load(h)
     }
 }
 
@@ -209,7 +215,14 @@ fn try_block_layout<T: Elem>(cap: usize) -> Option<Layout> {
 
 /// The layout of a block that `alloc_block` allocated, so its size fits.
 fn block_layout<T: Elem>(cap: usize) -> Layout {
-    try_block_layout::<T>(cap).expect("an RVec capacity overflows")
+    try_block_layout::<T>(cap).unwrap_or_else(|| capacity_overflow())
+}
+
+/// The fault of a vec that cannot hold one more element (a size past `isize::MAX` bytes, or a
+/// map's index past its position field, `vm/map_data.rs`): a panic, as for a `Vec`.
+#[cold]
+pub(super) fn capacity_overflow() -> ! {
+    panic!("an RVec capacity overflows")
 }
 
 /// The largest capacity whose block fits `isize::MAX` bytes, after the header and the padding
@@ -290,7 +303,7 @@ fn try_alloc_block<T: Elem>(cap: usize) -> Result<*mut Header, AllocFailed> {
 fn alloc_block<T: Elem>(cap: usize) -> *mut Header {
     try_alloc_block::<T>(cap).unwrap_or_else(|AllocFailed| match try_block_layout::<T>(cap) {
         Some(layout) => handle_alloc_error(layout),
-        None => panic!("an RVec capacity overflows"),
+        None => capacity_overflow(),
     })
 }
 
@@ -657,7 +670,9 @@ impl<T: Elem> RVec<T> {
     fn reserve(&self, heap: &Heap, extra: usize) -> (*mut Header, usize) {
         loop {
             let (h, len, cap) = self.snapshot();
-            let need = len.checked_add(extra).expect("an RVec capacity overflows");
+            let need = len
+                .checked_add(extra)
+                .unwrap_or_else(|| capacity_overflow());
             if need <= cap {
                 return (h, len);
             }
@@ -868,6 +883,18 @@ impl<T: Elem> View<'_, T> {
         assert!(i < self.len, "RVec index out of range: {i} >= {}", self.len);
         // SAFETY: as for `get`.
         unsafe { store(self.h, i, v) };
+    }
+}
+
+impl<T: CachedHash> View<'_, T> {
+    /// The cached hash of element `i` of the snapshot (its first word only). Panics when `i` is
+    /// at or past its `len`.
+    #[inline(always)]
+    pub fn hash(&self, i: usize) -> u64 {
+        assert!(i < self.len, "RVec index out of range: {i} >= {}", self.len);
+        let () = T::FITS_SLOT;
+        // SAFETY: `i < len <= cap` of the snapshot block, live until the next safepoint.
+        T::load_hash(unsafe { slot::<T>(self.h, i) })
     }
 }
 

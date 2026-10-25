@@ -1760,7 +1760,7 @@ mod iter_obj_tests {
         let _ = r;
     }
 
-    /// A map's live bytes count its entry block and its index table (16 B per slot).
+    /// A map's live bytes count its entry block and its index table (8 B per slot).
     #[test]
     fn live_bytes_counts_map_index() {
         let mut h = Heap::new();
@@ -1770,7 +1770,7 @@ mod iter_obj_tests {
                 .map(|k| (k, Value::int(k as i64), Value::nil()))
                 .collect(),
         );
-        let want = std::mem::size_of::<Obj>() + 100 * 24 + 256 * 16;
+        let want = std::mem::size_of::<Obj>() + 100 * 24 + 256 * 8;
         let _r = h.alloc(Obj::Map(m));
         assert_eq!(h.live_bytes() - empty, want);
     }

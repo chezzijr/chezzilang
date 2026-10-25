@@ -90,7 +90,8 @@ The shared heap (branch `exp/go-shared-heap`) takes Go's rule. A data race is th
 the heap stays memory-safe. Two threads that race on one list or one map can see:
 
 - a wrong value (an old one, or one from another entry),
-- a torn read of a multi-word entry (a map entry is three words; a `Value` is one aligned word),
+- a torn read of a multi-word entry (a map entry is three words; a `Value` and a map index slot
+  are one aligned word each, so they never tear),
 - a missed map hit,
 - a task fault (an index out of range). A racy read past a buffer's length is a Rust panic in the
   VM today; the race test catches and counts it as the fault Go would raise. In a spawned task

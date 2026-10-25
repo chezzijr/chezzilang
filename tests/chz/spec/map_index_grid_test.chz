@@ -1,0 +1,174 @@
+# tests/chz/spec/map_index_grid_test.chz — every Map / Set op that reads or writes the hash index,
+# over four key shapes, at sizes that grow the index table many times (M2.9: the index slot is one
+# word, a tag plus a position; a tag hit is checked against the entry's full hash).
+#
+# Key shapes: int, str, a struct whose hash() is one constant (one probe cluster), and a struct
+# whose hash() takes 7 values (clusters of distinct full hashes). Run: `cargo run -- test tests/chz/`.
+
+struct C:
+    n: int
+    fn hash(self) -> int:
+        return 7
+    fn eq(self, other: C) -> bool:
+        return self.n == other.n
+
+struct M:
+    n: int
+    fn hash(self) -> int:
+        return self.n % 7
+    fn eq(self, other: M) -> bool:
+        return self.n == other.n
+
+fn ik(i: int) -> int:
+    return i * 1000003
+
+fn sk(i: int) -> str:
+    return "k" + str(i)
+
+# ---- Map: index store, read, contains, get, update, remove, comprehension, equality ----
+
+test fn map_int_keys():
+    n := 1000
+    m: Map[int, int] = {}
+    for i in 0..n:
+        m[ik(i)] = i
+    assert m.len() == n
+    for i in 0..n:
+        assert m[ik(i)] == i
+        assert m.contains(ik(i))
+        assert not m.contains(ik(i) + 1)
+    m[ik(5)] = -5
+    assert m.len() == n, "an update adds no entry"
+    match m.get(ik(5)):
+        ?v: assert v == -5
+        None: assert false, "present"
+    for i in 0..n:
+        if i % 2 == 0:
+            match m.remove(ik(i)):
+                ?_: assert true
+                None: assert false, "present"
+    assert m.len() == n / 2
+    for i in 0..n:
+        assert m.contains(ik(i)) == (i % 2 == 1)
+    c := {ik(i): i for i in 0..n}
+    d := {ik(i): i for i in 0..n}
+    assert c == d
+    d[ik(0)] = 99
+    assert c != d
+
+test fn map_str_keys():
+    n := 1000
+    m: Map[str, int] = {}
+    for i in 0..n:
+        m[sk(i)] = i
+    for i in 0..n:
+        assert m[sk(i)] == i
+    assert not m.contains("nope")
+    match m.remove(sk(3)):
+        ?v: assert v == 3
+        None: assert false, "present"
+    assert not m.contains(sk(3))
+    assert m.len() == n - 1
+    assert {sk(i): i for i in 0..n} == {sk(i): i for i in 0..n}
+
+test fn map_constant_hash_keys():
+    n := 150
+    m: Map[C, int] = {}
+    for i in 0..n:
+        m[C(i)] = i
+    assert m.len() == n
+    for i in 0..n:
+        assert m[C(i)] == i
+    assert not m.contains(C(n))
+    match m.remove(C(0)):
+        ?v: assert v == 0
+        None: assert false, "present"
+    assert m.len() == n - 1
+    assert m[C(n - 1)] == n - 1
+
+test fn map_seven_hash_keys():
+    n := 500
+    m: Map[M, int] = {}
+    for i in 0..n:
+        m[M(i)] = i
+    for i in 0..n:
+        assert m[M(i)] == i
+    assert not m.contains(M(n + 7))
+    a := {M(i): i for i in 0..n}
+    assert a == m
+
+# ---- Set: Set(list), literal, insert, contains, remove, algebra, comprehension, unique ----
+
+test fn set_int_keys():
+    n := 1000
+    xs: List[int] = []
+    for i in 0..n:
+        xs.push(ik(i))
+        xs.push(ik(i))
+    s := Set(xs)
+    assert s.len() == n, "Set(list) dedupes"
+    t: Set[int] = Set([])
+    for i in 0..n:
+        t.insert(ik(i))
+        t.insert(ik(i))
+    assert t.len() == n
+    assert s == t
+    for i in 0..n:
+        assert ik(i) in s
+        assert not (ik(i) + 1 in s)
+    odd: Set[int] = {ik(i) for i in 0..n if i % 2 == 1}
+    assert (s - odd).len() == n / 2
+    assert (s & odd) == odd
+    assert (s | odd) == s
+    assert (s ^ odd).len() == n / 2
+    assert s.union(odd).len() == n
+    assert s.intersection(odd).len() == n / 2
+    assert s.difference(odd).len() == n / 2
+    for i in 0..n:
+        if i % 2 == 1:
+            t.remove(ik(i))
+    assert t == s - odd
+    assert xs.unique().len() == n, "unique keeps each first occurrence"
+    assert xs.unique()[1] == ik(1)
+    assert {1, 2, 2, 3} == Set([3, 2, 1])
+
+test fn set_str_keys():
+    n := 1000
+    s: Set[str] = {sk(i) for i in 0..n}
+    assert s.len() == n
+    for i in 0..n:
+        assert s.contains(sk(i))
+    assert not s.contains("nope")
+    s.remove(sk(0))
+    assert s.len() == n - 1
+    assert not (sk(0) in s)
+
+test fn set_constant_hash_keys():
+    n := 150
+    s: Set[C] = Set([])
+    for i in 0..n:
+        s.insert(C(i))
+        s.insert(C(i))
+    assert s.len() == n
+    for i in 0..n:
+        assert C(i) in s
+    assert not (C(n) in s)
+    half: Set[C] = Set([])
+    for i in 0..n / 2:
+        half.insert(C(i))
+    assert (s - half).len() == n - n / 2
+    assert s.intersection(half) == half
+
+test fn set_seven_hash_keys():
+    n := 500
+    xs: List[M] = []
+    for i in 0..n:
+        xs.push(M(i))
+    s := Set(xs)
+    assert s.len() == n
+    for i in 0..n:
+        assert M(i) in s
+    assert not (M(n) in s)
+    s.remove(M(3))
+    assert not (M(3) in s)
+    assert M(10) in s
