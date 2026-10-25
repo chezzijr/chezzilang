@@ -1256,8 +1256,9 @@ fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
 ///   frame then roots the value: the row covers the pin only on the slot path.
 /// - `offer`: the offer of a parked sender. On the M:N path the offer cannot be the only root:
 ///   `park_send` keeps the value on the parked fiber's stack. The row covers the hand-off only.
-/// Rows that write through one holder and read through another print `1` with a copy (Go prints
-/// `2`: `core_handle.go`, M3.2 report).
+/// Each row reads a size AND a key of a 51-key map, so a swept slot that a `churn` list reused
+/// cannot pass. Fix round 1 checked each row RED with its one walk disabled (Channel arm of
+/// `Heap::children`: queue, slot, sealed; Atomic arm: atomic; the door pin: door, at T=2).
 #[test]
 fn a_value_held_only_by_a_core_survives_a_stop() {
     let src = r#"import Atomic, Executor from std.concurrency
@@ -1269,18 +1270,24 @@ fn churn() -> int:
         s = s + xs[1]
     return s
 
-fn fill(ch: Channel[Map[str, int]]):
+fn big() -> Map[str, int]:
     m := {"a": 1}
+    for i in 0..50:
+        m["k{i}"] = i
+    return m
+
+fn fill(ch: Channel[Map[str, int]]):
+    m := big()
     ch.send(m)
     m["b"] = 2
 
 fn put(a: Atomic[Map[str, int]]):
-    m := {"a": 1}
+    m := big()
     a.store(m)
     m["b"] = 2
 
 fn give(rv: Channel[Map[str, int]]):
-    m := {"a": 1}
+    m := big()
     rv.send(m)
     m["b"] = 2
 
@@ -1293,7 +1300,7 @@ fn give_then_open(rv: Channel[Map[str, int]], gate: Channel[int]) -> int:
 fn take(rv: Channel[Map[str, int]], gate: Channel[int], out: Channel[int]):
     r := rv.recv()
     _ := gate.recv()
-    out.send(r.len())
+    out.send(r.len() * 100 + r["k49"])
 
 fn offer(rv: Channel[Map[str, int]], ready: Channel[int], done: Channel[int], out: Channel[int]):
     m := {"a": 1}
@@ -1308,12 +1315,6 @@ fn take_offer(rv: Channel[Map[str, int]], ready: Channel[int], done: Channel[int
     r := rv.recv()
     r["b"] = 2
     done.send(1)
-
-fn big() -> Map[str, int]:
-    m := {"a": 1}
-    for i in 0..50:
-        m["k{i}"] = i
-    return m
 
 fn job_value() -> Map[str, int]:
     return big()
@@ -1334,11 +1335,13 @@ fn main():
     ch := Channel[Map[str, int]](1)
     fill(ch)
     _ := churn()
-    print("queue", ch.recv().len())
+    q := ch.recv()
+    print("queue", q.len(), q["k49"])
     a := Atomic({"z": 0})
     put(a)
     _ := churn()
-    print("atomic", a.load().len())
+    l := a.load()
+    print("atomic", l.len(), l["k49"])
     rv := Channel[Map[str, int]](0)
     gate := Channel[int](1)
     out := Channel[int](1)
@@ -1376,6 +1379,6 @@ main()
     let (out, _) = run_with_cfg(src, true);
     assert_eq!(
         out.unwrap_or_else(|e| panic!("runtime error under GC stress: {e}")),
-        "queue 2\natomic 2\nslot 2\noffer 2\nsealed 51 49\ndoor 51 49\n"
+        "queue 52 49\natomic 52 49\nslot 5249\noffer 2\nsealed 51 49\ndoor 51 49\n"
     );
 }
