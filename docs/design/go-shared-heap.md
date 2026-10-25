@@ -267,7 +267,7 @@ Each object kind needs one of these rules:
 
 | Object kind | Rule options | What ancestors do |
 |---|---|---|
-| One-word slot (struct field, local cell, global) | Store the `Value` in an `AtomicU64` and use `Relaxed` load/store. On x86-64 and ARM64 the cost is the same as a plain load/store. | Go: a word-sized racy read sees a value that some write stored (`go:doc/go_mem.html:244-253`). Java: the same for references. |
+| One-word slot (struct field, local cell, global) | Store the `Value` in an `AtomicU64` with a Release store and an Acquire load (M3.0b: a reader that loads a `GcRef` must see the object's contents, Go's `publicationBarrier`). On x86-64 both are plain moves; ARM64 uses `stlr`/`ldar`. A byte or an int word stays `Relaxed`. | Go: a word-sized racy read sees a value that some write stored (`go:doc/go_mem.html:244-253`). Java: the same for references. |
 | Growable container (`list`, `dict`, `set`, `str` builder) | (a) A lock per object. (b) Copy-on-grow with deferred free of the old buffer (QSBR/epoch). (c) A lock for writers plus lock-free readers with deferred free. | CPython 3.13 free-threaded build (PEP 703): a lock per object for `list`/`dict`, lock-free reads with deferred free. Go: no protection (memory unsafe). Java: `ArrayList` is racy but memory safe, because the array object has a fixed length and the JVM checks bounds. |
 | Immutable kind (`Str`, `Bytes`, `BigInt`, `Tuple`, `Enum`, the `fixed_after_build` list in `src/vm/boxctx.rs:56-93`) | Share with no lock after construction. Publish with `Release` and read with `Acquire`. | All three: immutable values are free to share. |
 
@@ -315,7 +315,7 @@ into the heap. The compiler emits stores as opcodes, so the barrier lives in the
 The D4 sites (§4 item 5) are not enough. A generator suspend writes a whole stack of `Value`s into
 `Obj::Generator` (`src/vm/exec.rs:700-706`) with no D4 site. Two places need the barrier:
 
-1. `Heap::get_mut`, which is the sole `&mut Obj` door (`src/vm/heap.rs:678-680`). This one place covers each
+1. `Heap::write`, which is the sole write door (`Heap::init_mut` calls it, `src/vm/heap.rs`). This one place covers each
    object store, the generator suspend included.
 2. Each store into a channel queue, a `Shared` box or an `Atomic` cell.
 
@@ -380,7 +380,7 @@ Each phase ends with numbers or a pass/fail result. Stop at a phase whose number
 | Phase | Work | Exit check |
 |---|---|---|
 | 0. Baseline | Run `docs/contributing/benchmarks.md` single-thread and spawn/channel benches on `main`. Add a bench that sends a large list on a channel and one that spawns 10k tasks with large captures. | Numbers recorded, n ≥ 5 runs per side. |
-| 1. Atomic slots | Store struct fields, cells and list elements as `AtomicU64` (`Relaxed`). No other change. This covers a one-word slot only. It does not make a `Vec` that grows safe (§5.1). | Single-thread benches within noise of phase 0. |
+| 1. Atomic slots | Store struct fields, cells and list elements as `AtomicU64` (a `Value` is Release/Acquire since M3.0b). No other change. This covers a one-word slot only. It does not make a `Vec` that grows safe (§5.1). | Single-thread benches within noise of phase 0. |
 | 2. Shared heap, STW GC | Segmented slab, per-worker alloc chunks, one root set over all fibers, and a GC that stops each worker (§5.3 stage 1, with the "stopped" state for a thread that blocks in place). Keep the crossing deep copy, so no object is reachable from two fibers yet. | `cargo test` passes. GC pause recorded. |
 | 3. Container safety | Pick option (a), (b) or (c) from §5.1 and implement it for `list`, `dict`, `set`. | A stress test with N writers and M readers on one list runs clean under Miri or TSan. |
 | 4. Delete the copy machinery | Remove the parts in §5.4. Channels carry `Value`. Globals are shared. | Large-send and spawn benches beat phase 0. New goldens for the spec grids. |

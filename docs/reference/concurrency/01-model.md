@@ -105,21 +105,28 @@ replaces, retires; only the stop-the-world GC frees it, when no thread holds a p
 Gate: `two_vms_race_on_one_list_and_map_without_uaf` (two threads, 10,000 ops each, also under
 `CHEZZI_GC_STRESS=1`).
 
+A race never sees an object before its contents (the publish rule). A `Value` slot (a list or
+map slot, a struct field, a cell, a module global) stores with Release and loads with Acquire, so
+a thread that reads a `GcRef` also sees the object it names, as Go's `publicationBarrier` after a
+malloc gives. A lock or a channel gives the same order. A byte or an int word stays Relaxed: no
+pointer comes from it, so a race on it gives a wrong value only.
+
+A race never sees a torn header (the mutation rule). An op that changes a live object writes
+through atomic slots (a struct field, a cell, a cursor position, a buffer slot) or under a lock
+(a module's name table), never through a `&mut` over the whole object, and never replaces the
+whole object. Only an object that a call built and has not published yet takes a `&mut`. Gate:
+`shared_object_mutation_grid` (one thread writes struct fields, a cursor, a cell and a module's
+names; the other reads them; 10,000 rounds, also under `CHEZZI_GC_STRESS=1`).
+
 Known limits:
 
 - A racy map probe can give a wrong or a missing hit.
+- Two threads that step one cursor can both get the same item or skip one.
 - A stop of the world waits for a native loop or C call (the limit above).
 - `CHEZZI_GC_STRESS=1` with two or more threads runs them one at a time: each thread asks for a
   stop at each instruction and waits out the other thread. Stress hides races; the race test asks
   for a stop from one thread only.
 - Miri and TSan cannot run on the development box, so no sanitizer checks the race test.
-
-Open before M3. M2 still copies every crossing, so no user program reaches these today; each one
-must close before tasks share a value by handle:
-
-- A fresh object is published with a Relaxed store, with no Release barrier (Go's
-  `publicationBarrier`), so a reader on another core can see its slot before its contents.
-- `get_mut` makes a `&mut Obj` over an object that another thread can read.
 
 Tasks share no object, and the **process** is one process: a task inherits the parent's `std.os.args`
 and env, and **stdin is ONE source every task shares** (Go's `os.Stdin` / Python's `sys.stdin`, not
