@@ -452,11 +452,10 @@ fn over_memory_counts_offheap_wire_payload() {
         "test fn backlog():\n    ch := Channel[List[int]](200000)\n    \
              for i in 0..200000:\n        ch.send([i, i, i, i, i, i, i, i])\n",
     );
-    // The sibling single-value path: data parked in `Shared` boxes. TICKET-246 — a box keeps
-    // its value in its own heap (8 bytes per `int`, not a wire value), so the 150000-item list
-    // this test used to park is 1.2 MB and no longer near the cap. Three boxes of ~3.6 MB each
-    // are: no single heap exceeds the cap (`one` below PASSes), only the caller's walk over
-    // the three box heaps does.
+    // The sibling single-value path: data parked in `Shared` boxes. A 150000-item list is 1.2
+    // MB. M3.3: a box holds what it is given by handle, so each `update` parks its own copy
+    // (`xs.copy()`, Go: `append(acc, slices.Clone(xs))`) and a box holds ~3.6 MB: one box is under
+    // the cap (`one` below PASSes), three are over it (the slot walk reaches each box's value).
     const BOXES: &str = "import Shared from std.concurrency\n\n\
              fn keep(acc: List[List[int]], xs: List[int]) -> List[List[int]]:\n    \
              acc.push(xs)\n    return acc\n\n\
@@ -464,7 +463,7 @@ fn over_memory_counts_offheap_wire_payload() {
              xs: List[int] = []\n    for i in 0..150000:\n        xs.push(i)\n    \
              boxes: List[Shared[List[List[int]]]] = []\n    for _b in 0..n:\n        \
              s: Shared[List[List[int]]] = Shared([])\n        for _k in 0..3:\n            \
-             s.update(fn(acc): keep(acc, xs))\n        boxes.push(s)\n    return boxes\n\n";
+             s.update(fn(acc): keep(acc, xs.copy()))\n        boxes.push(s)\n    return boxes\n\n";
     let parked = d2.write(
         "parked_test.chz",
         &format!(
@@ -489,7 +488,7 @@ fn over_memory_counts_offheap_wire_payload() {
         report.text
     );
     // TICKET-246 — the `RwShared` twins: the same programs, `write` for `update`. Three
-    // boxes trip the cap only when the accounting walk reads each box heap (`try_read`).
+    // boxes trip the cap only when the accounting walk reads each box's value.
     for (n, want) in [(3, "OVER-MEMORY rw"), (1, "PASS rw")] {
         let d = TmpDir::new();
         let src = format!(
@@ -828,7 +827,7 @@ fn over_memory_counts_a_nested_core_backlog() {
         );
     }
     // TICKET-246 — the `RwShared` twin: a channel held only inside the box grows through
-    // `s.get().send(..)` with no write to the box, so only the walk of the box heap sees it.
+    // `s.get().send(..)` with no write to the box, so only the walk of the box's value sees it.
     let d = TmpDir::new();
     let src = std::fs::read_to_string(&nested)
         .unwrap()

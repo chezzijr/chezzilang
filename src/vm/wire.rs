@@ -256,11 +256,6 @@ pub enum WireValue {
     /// reference semantics (`b := a` means the same thing inside a task as outside) and CPython's
     /// `copy.deepcopy` (memoizes by source identity).
     ///
-    /// TICKET-154: the `RwShared` stores follow this rule too, so a stored wire may carry a `Backref`
-    /// into a SIBLING depth-1 piece. The piecewise read views resolve it on the REBUILD side
-    /// (`Vm::box_copy_pieces` for the looping views, `Vm::from_wire_pieces`'s whole-root
-    /// fallback for a single piece), never by re-emitting definitions in the store.
-    ///
     /// `from_wire` resolves a `Backref` to the placeholder registered under that `id`, tying the knot.
     /// Holds no `GcRef` and terminates the walk, so `has_handle` leaves it `false`.
     Backref(u32),
@@ -349,11 +344,6 @@ pub enum WireValue {
         proto: ProtoId,
         captured: Vec<(Box<str>, WireValue)>,
         home: Option<usize>,
-        /// D4 layer C (TICKET-291): bit `k` set = capture `k` is the only live copy of its binding
-        /// (`WireMemo::sole_captures`), so its rebuild keeps the enclosing mark; every other
-        /// capture is marked (`crossing::Route::ClosureCaptures`). A capture at slot 64 or above
-        /// is never sole (a false fault, never a lost write).
-        sole: u64,
     },
     /// B3.3 — a BARE function (`Obj::Func`) carried across the airlock **by value**: its `proto`
     /// (shared via `Arc<Program>`) + its `home` index (as [`Closure`](WireValue::Closure)), no
@@ -569,6 +559,7 @@ impl WireValue {
     /// The approximate bytes this wire graph owns, for the `--max-heap` pacing charge of a crossing
     /// (`Vm::charge_wire`): each node, plus what a [`Data`](WireNode::Data) node owns beyond it. A
     /// nested core owns nothing here: what it holds is objects of the run's one heap.
+    #[cfg(test)]
     pub fn owned_bytes(&self) -> usize {
         let mut acc = std::mem::size_of::<WireValue>();
         match self.visit(|x| acc += x.owned_bytes()) {
@@ -772,7 +763,6 @@ mod walk_grid {
                 proto: 0,
                 captured: vec![("x".into(), c())],
                 home: None,
-                sole: 0,
             },
             WireValue::Func {
                 proto: 0,

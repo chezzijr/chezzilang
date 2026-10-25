@@ -582,12 +582,6 @@ impl crate::native::Host for VmHost<'_> {
     fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
         self.arg(i)?.str_map(i)
     }
-    fn arg_is_task_copy(&self, i: usize) -> Result<bool, crate::native::HostError> {
-        match self.args.get(i).copied() {
-            Some(v) => Ok(v.as_obj().is_some_and(|h| self.vm.heap.is_copied(h))),
-            None => Err(crate::native::HostError::missing_arg(i)),
-        }
-    }
     fn arg_settle_channel(&mut self, ch: usize, v: usize) -> Result<(), crate::native::HostError> {
         let h = self.arg_channel(ch)?;
         let Some(val) = self.args.get(v).copied() else {

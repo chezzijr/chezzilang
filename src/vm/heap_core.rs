@@ -23,7 +23,6 @@
 //! it fires when they reach the live bytes of the last sweep, at least 1 MiB, so a grow loop that
 //! allocates no object frees its old blocks long before the byte goal.
 
-use super::boxctx::is_arc_core;
 use super::fxhash::FxHashMap;
 use super::heap::Obj;
 use super::heap_slab::{Slab, SlabAppend, Slot, SlotBits};
@@ -32,6 +31,44 @@ use super::value::GcRef;
 use crate::lexer::Span;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Whether `o` is a handle on an `Arc` core: its state lives outside every heap, so dropping the
+/// handle can drop the core (and run its destructor), which the sweep defers to its graveyard.
+fn is_arc_core(o: &Obj) -> bool {
+    match o {
+        Obj::Cffi(_)
+        | Obj::Channel(_)
+        | Obj::Shared(_)
+        | Obj::RwShared(_)
+        | Obj::Atomic(_)
+        | Obj::AtomicInt(_)
+        | Obj::Executor(_)
+        | Obj::Socket(_)
+        | Obj::Listener(_)
+        | Obj::Writer(_)
+        | Obj::Reader(_) => true,
+        Obj::Str(_)
+        | Obj::Bytes(_)
+        | Obj::BigInt(_)
+        | Obj::FloatBox(_)
+        | Obj::Ptr(_)
+        | Obj::Func { .. }
+        | Obj::Native { .. }
+        | Obj::Builtin(_)
+        | Obj::Tuple(_)
+        | Obj::Enum { .. }
+        | Obj::ByteArray(_)
+        | Obj::Iter { .. }
+        | Obj::List(_)
+        | Obj::Map(_)
+        | Obj::Set(_)
+        | Obj::Struct { .. }
+        | Obj::Cell(_)
+        | Obj::Closure { .. }
+        | Obj::Module(_)
+        | Obj::Generator(_) => false,
+    }
+}
 
 /// Smallest GC threshold — don't collect until at least this many objects have been allocated
 /// since the last collection (avoids thrashing on tiny programs).
@@ -232,7 +269,7 @@ impl HeapCore {
 
     /// Put `obj` into the empty slot `idx` from a handle's cache, clearing the slot's mark and copy
     /// bit so the new object does not inherit them. The mark is 0 after a normal sweep, but a
-    /// collection that marks a dangling ref and then panics in `children` (caught by `boxctx.rs` or
+    /// collection that marks a dangling ref and then panics in `children` (caught by
     /// `call.rs`) leaves a mark on a free slot, which `sweep_slots` never visits.
     ///
     /// # Safety

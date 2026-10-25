@@ -1296,8 +1296,8 @@ print(s.get())
 }
 
 /// TICKET-246 — the `RwShared` twin of the test above: `get` (and `read`) inside the box's own
-/// `write` closure fault with the guard text. `read` nested in `read` and `write` nested in
-/// `read` stay legal, because the reader closure runs after its lock dropped.
+/// `write` closure fault with the guard text. `read` nested in `read` is legal (Go's recursive
+/// `RLock`); M3.3 (Q2): `write` nested in `read` faults with the read-guard text.
 #[test]
 fn ticket_246_rwshared_get_inside_its_own_write_faults() {
     let src = "\
@@ -1318,33 +1318,44 @@ for f in [peek, peek_read]:
         !e: print(e.message().contains(\"already holds the update guard\"))
 print(s.get())
 print(s.read(fn(x): x + s.get()))
-print(s.read(bump), s.get())
+r := recover: s.read(bump)
+match r:
+    ?_: print(\"no fault\")
+    !e: print(e.message().contains(\"already holds the read guard\"), s.get())
 ";
     let entry = write_temp_chz("ticket246_rwshared_get_inside_write", src);
     let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
-    assert_eq!(out, "true\ntrue\n10\n20\n10 20\n", "got: {out:?}");
+    assert_eq!(out, "true\ntrue\n10\n20\ntrue 10\n", "got: {out:?}");
 }
 
-/// TICKET-016 / W8-3 — `write` nested in `read` is the one legal `RwShared` crossing and must still
-/// persist.
+/// TICKET-016 / W8-3 — M3.3 (Q2): `write` nested in the same task's `read` waits for that read, a
+/// certain deadlock (Go `RLock(); Lock()`: `fatal error: all goroutines are asleep - deadlock!`), so
+/// it faults with the read-guard text and the value stays.
 #[test]
-fn ticket_016_rwshared_write_inside_read_still_persists() {
+fn ticket_016_rwshared_write_inside_read_faults() {
     let src = "\
 import RwShared from std.concurrency
 r := RwShared(5)
 fn peek(v: int) -> int:
     r.write(fn(y: int) -> int: y + 100)
     return v
-print(r.read(peek))
+res := recover: r.read(peek)
+match res:
+    ?_: print(\"no fault\")
+    !e: print(e.message())
 print(r.read(fn(v: int) -> int: v))
 ";
     let entry = write_temp_chz("ticket016_rwshared_write_in_read", src);
     let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
-    assert_eq!(out, "5\n105\n", "expected 5 then 105: {out:?}");
+    assert_eq!(
+        out,
+        "deadlock: this task already holds the read guard on this RwShared box — a nested set/write on the same box inside its own read closure\n5\n",
+        "got: {out:?}"
+    );
 }
 
 /// TICKET-016 / W8-25 — the module-global closure crossing INTO a `spawn:` (the `Lowered::Closure`
@@ -1507,7 +1518,10 @@ main()
 /// self-held re-entry, and hands the guard over once it is free.
 #[test]
 fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
-    let key = usize::MAX - 9001;
+    let key = GuardKey {
+        addr: usize::MAX - 9001,
+        mode: GuardMode::Write,
+    };
     let budget = Some(std::time::Duration::from_millis(5));
     let held = acquire_update_guard_within(key, u64::MAX - 1, budget)
         .expect("a free box must not report a cycle")
@@ -1529,11 +1543,94 @@ fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
     ));
 }
 
+/// M3.3 — the two-mode guard (Go `sync.RWMutex`), one row per pair of (held mode, wanted mode, same
+/// task or not): readers share; a writer waits for readers and readers for a writer; a nested read
+/// by a reader is granted; a write by a task that reads is `ReadHeld`, a read or write by the
+/// writer is `SelfHeld`; a waiting writer keeps a new reader out, and a read-write cycle across two
+/// boxes is a `Cycle`.
+#[test]
+fn m3_3_guard_modes_grid() {
+    use crate::vm::core::{GuardKey, GuardMode, try_update_guard};
+    let rd = |addr| GuardKey {
+        addr,
+        mode: GuardMode::Read,
+    };
+    let wr = |addr| GuardKey {
+        addr,
+        mode: GuardMode::Write,
+    };
+    let (x, y) = (usize::MAX - 9101, usize::MAX - 9102);
+    let (a, b, c) = (u64::MAX - 31, u64::MAX - 32, u64::MAX - 33);
+    let take = |k, t| try_update_guard(k, t);
+    // Readers share; a second read by the same reader is granted.
+    let ra = take(rd(x), a).unwrap().expect("a free read");
+    let rb = take(rd(x), b).unwrap().expect("readers share");
+    let ra2 = take(rd(x), a).unwrap().expect("a nested read");
+    // A writer waits for readers; a reader that writes is ReadHeld.
+    assert!(matches!(take(wr(x), c), Ok(None)));
+    assert!(matches!(take(wr(x), a), Err(GuardCycle::ReadHeld)));
+    drop((ra, rb, ra2));
+    // A writer excludes readers; the writer's own read or write is SelfHeld.
+    let wc = take(wr(x), c).unwrap().expect("a free write");
+    assert!(matches!(take(rd(x), a), Ok(None)));
+    assert!(matches!(take(rd(x), c), Err(GuardCycle::SelfHeld)));
+    assert!(matches!(take(wr(x), c), Err(GuardCycle::SelfHeld)));
+    drop(wc);
+    // Writer preference: while `c` waits to write, a new reader `b` waits too.
+    let ra = take(rd(x), a).unwrap().expect("a free read");
+    let waiter = std::thread::spawn(move || {
+        acquire_update_guard_within(wr(x), c, Some(std::time::Duration::from_secs(5)))
+            .map(|g| g.is_some())
+    });
+    // A counted probe: poll until the writer is registered; then a new reader is kept out.
+    let mut probes = 0u32;
+    loop {
+        match take(rd(x), b) {
+            Ok(None) => break,
+            Ok(Some(g)) => drop(g),
+            Err(e) => panic!("a new reader: {e:?}"),
+        }
+        probes += 1;
+        assert!(probes < 50_000_000, "the writer never waited");
+        std::thread::yield_now();
+    }
+    let ra2 = take(rd(x), a)
+        .unwrap()
+        .expect("a reader's nested read passes a waiting writer");
+    drop((ra, ra2));
+    assert_eq!(waiter.join().unwrap(), Ok(true));
+    // A cycle through a read guard: `a` reads x and waits to write y; `b` writes y and wants x.
+    let ra = take(rd(x), a).unwrap().expect("a free read");
+    let wb = take(wr(y), b).unwrap().expect("a free write");
+    let cyc = std::thread::spawn(move || {
+        acquire_update_guard_within(wr(y), a, Some(std::time::Duration::from_secs(5)))
+            .map(|g| g.is_some())
+    });
+    // A counted probe: poll until `a` waits; then `b`'s write of x closes the cycle and faults.
+    let mut probes = 0u32;
+    loop {
+        match take(wr(x), b) {
+            Err(GuardCycle::Cycle) => break,
+            Ok(None) => {}
+            other => panic!("b's write of x: {:?}", other.map(|g| g.is_some())),
+        }
+        probes += 1;
+        assert!(probes < 50_000_000, "a never waited");
+        std::thread::yield_now();
+    }
+    drop(wb);
+    assert_eq!(cyc.join().unwrap(), Ok(true));
+    drop(ra);
+}
+
 /// TICKET-063 — `guard_wait_satisfiable` answers the same three outcomes `acquire_update_guard_within`
 /// would, without acquiring.
 #[test]
 fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {
-    let key = usize::MAX - 9002;
+    let key = GuardKey {
+        addr: usize::MAX - 9002,
+        mode: GuardMode::Write,
+    };
     let holder = u64::MAX - 11;
     let other = u64::MAX - 12;
     assert!(
@@ -1563,7 +1660,10 @@ fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {
 #[test]
 fn ticket_193_await_update_guard_free_never_takes_the_guard() {
     use crate::vm::core::await_update_guard_free;
-    let key = usize::MAX - 9003;
+    let key = GuardKey {
+        addr: usize::MAX - 9003,
+        mode: GuardMode::Write,
+    };
     let (waiter, holder) = (u64::MAX - 13, u64::MAX - 14);
     let budget = Some(std::time::Duration::from_millis(5));
     assert_eq!(await_update_guard_free(key, waiter, budget), Ok(true));
@@ -1784,35 +1884,32 @@ main()
 /// `Lock` are O(1) per lookup. Pinned with a COUNT of the wire nodes rebuilt (TICKET-233): a key and
 /// a value per lookup, against every stored entry per lookup for a scan.
 ///
-/// TICKET-246: the box decodes its initial map ONCE into its own heap (2000 keys + 2000 values),
-/// so the count is that plus two per lookup: 8001. A scan would be 4 000 000.
+/// M3.3: the box holds the map by handle and a lookup is the map's own hash probe, so no wire node
+/// is rebuilt at all (before: 8001; a scan would be 4 000 000).
 #[test]
 fn rwshared_map_get_key_is_not_linear() {
     let src = "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := ConcurrentMap(concurrency.RwShared(m))\n    s := 0\n    i = 0\n    while i < n:\n        match box.get(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n");
-    assert!(
-        (4000..=8100).contains(&touches),
-        "2000 ConcurrentMap.get on a 2000-entry map rebuilt {touches} wire nodes (want 4000..=8100) -- O(n) per lookup"
+    assert_eq!(
+        touches, 0,
+        "2000 ConcurrentMap.get on a 2000-entry map rebuilt {touches} wire nodes (M3.3: none)"
     );
 }
 
 /// TICKET-192: `RwShared[Map].set_key` writes one entry in place instead of re-encoding the whole map
 /// (what `write` does). 2000 inserts then 2000 overwrites on one box, pinned with the same count.
 ///
-/// TICKET-246: a writer decodes its key and its value into the box heap and touches nothing else,
-/// so 4000 writes rebuild 8000 nodes (plus the final `get`). A re-encode would be millions.
-///
-/// TICKET-278: `insert` returns the replaced `V?`, so each overwrite also decodes its `?old` result:
-/// about one more node per overwrite: 10003 in all against 8001 before. Still O(1) per write.
+/// M3.3: a writer stores its key and its value by handle, so no wire node is rebuilt (before:
+/// 10003; a re-encode would be millions).
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
     let src = "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(concurrency.RwShared(m))\n    i := 0\n    while i < n:\n        _ := box.insert(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        _ := box.insert(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n2000\n");
-    assert!(
-        (4000..=10100).contains(&touches),
-        "2000 ConcurrentMap.insert inserts + 2000 overwrites rebuilt {touches} wire nodes (want 4000..=10100) -- O(n) per write"
+    assert_eq!(
+        touches, 0,
+        "2000 ConcurrentMap.insert inserts + 2000 overwrites rebuilt {touches} wire nodes (M3.3: none)"
     );
 }
 

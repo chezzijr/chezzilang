@@ -1047,11 +1047,11 @@ main()";
     );
 }
 
-/// TICKET-246 — the `RwShared` twin under gc-stress: a state built across three `write`s inside
-/// the box heap, then every reader copy (`get`, `read`, display, the collection views and
-/// writers) taken while the READER's heap collects at each safepoint. A copy decoded into the
-/// reader's heap is rooted only by what the reader does next, so a missing root here is a freed
-/// slot read back as a wrong value.
+/// TICKET-246 — the `RwShared` twin under gc-stress: a value built across three `write`s, then
+/// every read (`get`, `read`, display, the collection views and writers) taken while the heap
+/// collects at each safepoint. M3.3: a read returns the box's value by handle; a value is rooted
+/// only by the box and by what the reader does next, so a missing root here is a freed slot read
+/// back as a wrong value.
 #[test]
 fn rwshared_state_and_reader_copies_survive_collections() {
     let src = "\
@@ -1107,10 +1107,9 @@ main()";
     );
 }
 
-/// TICKET-246 — a global read through the box's slot door is cached for the call, and the cache
-/// is a GC root of the box heap (`BoxFrame::roots`). The closure reads one heap-allocated `str`
-/// global twice with nothing else holding it and allocations in between. Without the root the
-/// first copy is swept, its slot is re-handed, and the second read returns another object.
+/// TICKET-246 — a box closure reads one heap-allocated `str` global twice with nothing else holding
+/// it and allocations in between. M3.3: the closure runs in the caller's context, so the global is
+/// rooted by the run's module table; a missing root would sweep it and re-hand its slot.
 #[test]
 fn box_slot_door_cache_is_rooted_across_collections() {
     let src = "\

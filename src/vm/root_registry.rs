@@ -9,11 +9,9 @@
 //! `ReadyWorker::into_fiber` builds each fiber context through [`RootRegistry::register`]; it
 //! leaves the registry when its [`CtxBox`] drops or [`CtxBox::into_inner`] takes it out.
 //!
-//! M1.7: a `Shared`/`RwShared` box context is NOT listed, by one rule: the collector reaches it
-//! through the box object that holds it (`core::SharedState::roots_into`), as Go reaches a value
-//! through its struct, so a dropped box's state dies in the same collection as the box. The caller
-//! a box call parks (`BoxFrame::caller`) is rooted by the `Vm` that runs the call
-//! (`Vm::gc_roots`).
+//! M3.3: a `Shared`/`RwShared` value is NOT listed, by one rule: the collector reaches it through
+//! the box object that holds it (`Heap::children` reads the box's slot), as Go reaches a value
+//! through its struct, so a dropped box's value dies in the same collection as the box.
 
 use super::fxhash::FxHashMap;
 use super::*;

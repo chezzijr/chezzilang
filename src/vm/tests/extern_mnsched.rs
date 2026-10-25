@@ -1132,8 +1132,8 @@ fn flag_deadlock_leaves_is_sched_wide_without_a_joined_family() {
 }
 
 /// TICKET-129 (W13-5 residual) — an unproven sched-wide flag must DECLINE (`None`) when
-/// `unproven_ok` is false, and only fault (`Some(true)`) when licensed. A `mk_fiber` has no heap,
-/// so its leaf is never provable.
+/// `unproven_ok` is false, and only fault (`Some(true)`) when licensed. M3.2 deleted the leaf proof
+/// (a strong count no longer proves one holder), so every sched-wide flag is unproven.
 #[test]
 fn flag_deadlock_leaves_declines_an_unproven_sched_wide_flag() {
     let s = mk_sched(1);
@@ -2000,13 +2000,12 @@ fn executor_core_shut_is_shared_across_handles() {
 }
 
 /// B3.1: `display` of a `Shared` box renders its contents through `display_wire` (a boxed `str`
-/// renders from its owned bytes — B3.3a), since `display` is `&self` and can't `from_wire`.
+/// renders from its owned bytes — B3.3a). M3.3: the box holds the `str` itself, by handle.
 #[test]
 fn display_shared_renders_contents() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let s = vm.heap.alloc(Obj::Str("hi".into()));
-    let boxed = vm.to_wire(Value::obj(s)).unwrap();
-    let core = vm.new_shared_core(boxed);
+    let core = Arc::new(SharedCore::new(Value::obj(s)));
     let sh = vm.heap.alloc(Obj::Shared(core));
     // The payload sits INSIDE `Shared(…)`, i.e. nested — so it renders as its `repr` (W7-25),
     // matching `print(s.get())` on the same box.

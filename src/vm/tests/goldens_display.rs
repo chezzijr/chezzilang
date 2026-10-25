@@ -845,9 +845,9 @@ main()
 /// ENTIRE stored container once PER ELEMENT, so `for_each`/`fold`/`at` over a container of closures
 /// sharing one binding went quadratic (measured on the pre-fix release binary: n=4000 → 3.7s, n=12000
 /// → 34s, versus 0.02s before W7-4). Since TICKET-154 the looping views share ONE rebuild map over an
-/// aliased store (`box_copy_pieces`), so no looping view re-materializes the whole per
-/// element. Pinned with a COUNT of the wire nodes the view rebuilt (TICKET-233): about one per
-/// element when the walk shares one map, about n per element when it does not.
+/// aliased store, so no looping view re-materializes the whole per element. Pinned with a COUNT of
+/// the wire nodes the view rebuilt (TICKET-233). M3.3: a view reads the live container by handle,
+/// so it rebuilds no wire node at all.
 #[test]
 fn rwshared_view_over_shared_bindings_is_not_quadratic() {
     let src = "\
@@ -871,19 +871,15 @@ main()
 ";
     let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "3001\n");
-    let want = 3001..=4 * 3001;
-    assert!(
-        want.contains(&nodes),
-        "import RwShared from std.concurrency
-RwShared.for_each over 3001 sibling-binding closures rebuilt {nodes} wire nodes (want {want:?}) — the view is materializing \
-         the whole container per element again"
+    assert_eq!(
+        nodes, 0,
+        "RwShared.for_each over 3001 sibling-binding closures rebuilt {nodes} wire nodes (M3.3: none)"
     );
 }
 
 /// TICKET-154 (W11-15) -- the CONTAINER twin of the cell test above. One `inner` list pushed three
 /// thousand times into the stored list is an aliased store, so every element after the first is a
-/// bare back-ref. `for_each` must take ONE shared rebuild map for the whole walk; if it fell back
-/// to a whole-root rebuild per element this goes quadratic. Same counted measure as its sibling.
+/// bare back-ref. Same counted measure as its sibling; M3.3: the walk rebuilds no wire node.
 #[test]
 fn rwshared_for_each_over_a_dag_alias_is_not_quadratic() {
     let src = "\
@@ -904,19 +900,15 @@ main()
 ";
     let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "3001\n");
-    let want = 3001..=4 * 3001;
-    assert!(
-        want.contains(&nodes),
-        "import RwShared from std.concurrency
-RwShared.for_each over 3001 aliases of one list rebuilt {nodes} wire nodes (want {want:?}) -- the view is materializing \
-         the whole container per element again"
+    assert_eq!(
+        nodes, 0,
+        "RwShared.for_each over 3001 aliases of one list rebuilt {nodes} wire nodes (M3.3: none)"
     );
 }
 
-/// TICKET-154 (W11-15) -- the widened single-piece cost. On an aliased store `at(1)` is a bare
-/// back-ref, so it takes `from_wire_pieces`'s whole-root fallback: the ROOT once per CALL instead of
-/// the element. This bounds the wire nodes rebuilt (TICKET-233; the root is 45011 nodes, so five
-/// calls rebuild 225055) so it cannot become the root twice per call, or per ELEMENT.
+/// TICKET-154 (W11-15) -- the single-piece cost on an aliased store. Before M3.3 `at(1)` rebuilt the
+/// whole root once per call (225055 wire nodes for five calls). M3.3: `at` returns the live element
+/// by handle and rebuilds no wire node.
 #[test]
 fn rwshared_at_over_an_aliased_store_stays_under_its_ceiling() {
     let src = "\
@@ -938,12 +930,9 @@ main()
 ";
     let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "25000\n");
-    let want = 5 * 5000..=5 * 60000;
-    assert!(
-        want.contains(&nodes),
-        "import RwShared from std.concurrency
-5 RwShared.at(1) calls over an aliased store rebuilt {nodes} wire nodes (want {want:?}) -- the whole-root fallback is running per \
-         element instead of per call"
+    assert_eq!(
+        nodes, 0,
+        "5 RwShared.at(1) calls over an aliased store rebuilt {nodes} wire nodes (M3.3: none)"
     );
 }
 

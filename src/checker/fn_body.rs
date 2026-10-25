@@ -2,7 +2,6 @@
 //! discarded-carrier warning.
 //! Split out of `src/checker/sig.rs`. `super::*` is the parent module.
 
-use super::sig::TempWrite;
 use super::*;
 
 impl Checker {
@@ -345,24 +344,20 @@ impl Checker {
         // by the value-`match`/`if` tails; a `recover:` block ends in an ordinary statement). `?`/`??`/`?.` already yield
         // the UNWRAPPED payload, so they are not carriers here.
         let t = self.infer(e);
-        // TICKET-089 — a bare mutating call on a `Shared`/`RwShared`/`Atomic` read temporary
-        // mutates a deep copy and drops it: the write is lost. Returns BEFORE the carrier
-        // match — `s.get().remove(k)` / `.pop()` also return a carrier, and the lost-write
-        // message is the more actionable one, so one statement never carries both.
+        // TICKET-254 — a bare mutating call on a temporary copy (`xs.copy().push(1)`) drops the
+        // write. Returns BEFORE the carrier match — `xs.copy().pop()` also returns a carrier, and
+        // the lost-write message is the more actionable one, so one statement never carries both.
         if let Some((obj, method)) = fn_writes::method_call_parts(e)
-            && let Some(temp) = self.temporary_write(obj)
+            && self.temporary_write(obj)
         {
             let recv = self.probe_ty(obj);
             if mutates_receiver(&recv, method) {
-                let text = match temp {
-                    TempWrite::BoxRead { name, reader, fix } => format!(
-                        "'{method}' mutates the copy returned by '{name}.{reader}()', so the write is discarded — write through '{name}.{fix}(…)' instead"
-                    ),
-                    TempWrite::Copy => format!(
+                self.warn(
+                    e.span,
+                    format!(
                         "'{method}' changes a temporary copy; the result is dropped: bind the value to a name first, or call '{method}' on the source"
                     ),
-                };
-                self.warn(e.span, text);
+                );
                 return;
             }
         }

@@ -77,10 +77,9 @@ impl Vm {
     ///
     /// **Scope invariant** (the loud failure mode): a serialize memo's lifetime must equal its rebuild
     /// map's. A `Backref` minted under memo A but reconstructed under a fresh rebuild map resolves to
-    /// nothing — caught by the `debug_assert` in [`from_wire`](Vm::from_wire) (it used to be an
-    /// `.expect` that aborted the host; W7-11). Both passes here are local to this call, so they match
-    /// by construction. A caller that genuinely CANNOT match them (a piecewise drain) must use
-    /// [`from_wire_pieces`](Vm::from_wire_pieces) instead.
+    /// nothing — loud in a debug build (the `Backref` arm of `from_wire_memo`; it used to be an
+    /// `.expect` that aborted the host; W7-11). Both passes here are local to this call, so they
+    /// match by construction.
     pub(super) fn deep_clone_all(
         &mut self,
         vs: Vec<Value>,
@@ -116,59 +115,6 @@ impl Vm {
     #[cfg(test)]
     pub(super) fn to_wire_at(&self, v: Value, span: Span) -> Result<WireValue, RuntimeError> {
         self.to_wire(v).map_err(|e| self.err(e.message, span))
-    }
-
-    /// `to_wire_at` PLUS the [`ensure_crossable`](Vm::ensure_crossable) handle-reject backstop — the
-    /// serialize step used at every cross-heap VALUE-STORE site (`Shared`/`RwShared`
-    /// construct/set/update/…; M3.2: a channel and an `Atomic` hold the value itself). The spawn-arg / capture /
-    /// `submit` paths pair `to_wire_at` with `ensure_crossable` by hand; the value-store paths route
-    /// through this single helper so a NEW store path physically can't forget the guard (a module /
-    /// native / FFI handle silently crossing a channel was serial≠M:N + cross-heap corruption). Legit
-    /// `Channel`/`Shared`/`Executor`/socket handles map to shared-`Arc` wire arms (`has_handle()` ==
-    /// false), so they still cross unchanged.
-    ///
-    /// TICKET-154: one serialize rule for EVERY cross-heap store, the three `RwShared` stores
-    /// included. An off-stack DAG alias (container or cell) crosses as ONE object; an `RwShared`
-    /// read view that drains the stored wire piecewise takes ONE shared rebuild map wherever a piece
-    /// is not self-contained (see `Vm::box_copy_pieces`, W11-15). Includes the three
-    /// `RwShared` stores.
-    pub(super) fn to_wire_crossable(
-        &self,
-        v: Value,
-        span: Span,
-    ) -> Result<WireValue, RuntimeError> {
-        self.to_wire_crossable_memo(v, span, &mut WireMemo::default())
-    }
-
-    /// [`to_wire_crossable`](Self::to_wire_crossable) through the caller's memo (TICKET-192: a
-    /// [`WireMemo::seeded`] one for an entry spliced into a stored map).
-    pub(super) fn to_wire_crossable_memo(
-        &self,
-        v: Value,
-        span: Span,
-        memo: &mut WireMemo,
-    ) -> Result<WireValue, RuntimeError> {
-        let w = self.walk_src().to_wire_crossable_memo(v, span, memo)?;
-        // W6-10 (sampling half) — charge the payload's off-heap bytes against the GC trigger so a
-        // live `--max-heap` cap actually gets SAMPLED. `over_cap` is only evaluated in `sweep()`,
-        // and `sweep()` only runs when `should_collect()` fires; a store loop that pushes megabytes
-        // across the airlock while allocating ~2 `Obj`s per iteration never reached the object-count
-        // threshold, so the cap failed OPEN. This is the one helper every cross-heap value store
-        // routes through, so a new store path can't forget the charge (same argument as the
-        // `ensure_crossable` guard above). GATED on a live cap: a cap-off run (every `chezzi run`,
-        // every bench, the two-worker-count `tests/chz` gate) pays one `!= 0` branch and zero extra
-        // walks. Monotonic pacing HINT, not
-        // accounting (`live_bytes()` stays the sole measure): a replacing store charges too and a
-        // `recv` never decrements, because under-triggering means a guard that fails open.
-        self.charge_wire(&w);
-        Ok(w)
-    }
-
-    /// Charge an encoded payload's bytes against THIS heap's GC trigger, under a live cap only.
-    pub(super) fn charge_wire(&self, w: &WireValue) {
-        if self.heap.mem_cap() != 0 {
-            self.heap.charge_bytes(w.owned_bytes());
-        }
     }
 
     /// B3.0 — serialize a value into its [`WireValue`] form (the airlock's outbound half). A
@@ -230,16 +176,9 @@ impl Vm {
 /// the crossing holds ONE copy with the alias intact. An acyclic parked slot too deep still trips the
 /// depth cap.
 ///
-/// **TICKET-154 — the three `RwShared` stores serialize by this same rule.** An `RwShared` read view
-/// drains ONE stored wire through independent `from_wire` rebuilds, so a depth-1 element that
-/// back-references a node defined in a SIBLING element (an aliased container or cell) or in the root
-/// itself (a cycle) is not self-contained. The rebuild side handles that, never the store: the four
-/// looping views (`for_each`/`fold`/`for_each_entry`/`fold_entries`) rebuild the whole wire ONCE into
-/// one map and materialize every piece from it (`Vm::box_copy_pieces`), and the single-piece
-/// views fall back to a whole-root rebuild per call ([`Vm::from_wire_pieces`]). Two separate single-piece
-/// calls stay two crossings, as two separate `copy.deepcopy`s are. Do NOT re-emit container or cell
-/// definitions per depth-1 subtree to make pieces self-contained: that is O(n²) wire size, the cliff
-/// `rwshared_view_over_shared_bindings_is_not_quadratic` exists to catch.
+/// TICKET-154 — do NOT re-emit container or cell definitions per depth-1 subtree to make pieces
+/// self-contained: that is O(n²) wire size. (M3.3: the `RwShared` views read the live value by
+/// handle and encode nothing.)
 #[derive(Default)]
 pub(super) struct WireMemo {
     /// GcRef of an identity-preserved node (`Closure`/container) currently on the serialize DFS
@@ -265,69 +204,9 @@ pub(super) struct WireMemo {
     /// duplicate). Removed on DFS exit. An OFF-stack revisit is a `Backref` through `nodes`
     /// (TICKET-137), not a reject.
     pub(super) gens_on_stack: super::fxhash::FxHashSet<GcRef>,
-    /// TICKET-291 — set only for a box call's result: the GC roots of the box heap when the call
-    /// returned (state, the call's own closure, globals). The objects they reach (computed on the
-    /// first closure capture) are what the box keeps; see [`sole_captures`](WireMemo::sole_captures).
-    pub(super) kept_roots: Option<Vec<GcRef>>,
-    pub(super) kept: Option<super::fxhash::FxHashSet<GcRef>>,
 }
 
 impl WireMemo {
-    /// The memo for a box call's result: `roots` are the box heap's GC roots after the call.
-    pub(super) fn box_result(roots: Vec<GcRef>) -> Self {
-        WireMemo {
-            kept_roots: Some(roots),
-            ..WireMemo::default()
-        }
-    }
-
-    /// D4 layer C (TICKET-291), the ONE answer to "is this capture the only live copy of its
-    /// binding": bit `k` is set when capture `k` reaches no copy-marked object and no object the
-    /// source heap keeps that a write can change (`boxctx::fixed_after_build`). One memo carries a
-    /// kept set: a box call's result (`box_result`). Every other crossing answers 0, so every
-    /// capture is marked.
-    pub(super) fn sole_captures(&mut self, heap: &Heap, captured: &[Value]) -> u64 {
-        let Some(roots) = &self.kept_roots else {
-            return 0;
-        };
-        let kept = self.kept.get_or_insert_with(|| {
-            let mut seen = super::fxhash::FxHashSet::default();
-            let mut work = roots.clone();
-            while let Some(h) = work.pop() {
-                if seen.insert(h) {
-                    work.extend(heap.children(h));
-                }
-            }
-            seen
-        });
-        let sole = |v: &Value| {
-            let mut seen = super::fxhash::FxHashSet::default();
-            let mut work: Vec<GcRef> = v.child_gcref().into_iter().collect();
-            while let Some(h) = work.pop() {
-                // A leaf no write can reach (`slot_is_leaf`), and a closure's `home`, which is
-                // code rather than a binding the capture writes (D2), cannot lose a write.
-                if !seen.insert(h)
-                    || super::boxctx::slot_is_leaf(heap, Value::obj(h))
-                    || matches!(heap.get(h), Obj::Module(_))
-                {
-                    continue;
-                }
-                // A kept object no write changes in place (a tuple) loses no write; a mutable
-                // object below it is kept too, so the walk still finds it (TICKET-295).
-                if heap.is_copied(h)
-                    || (kept.contains(&h)
-                        && super::boxctx::fixed_after_build(heap.get(h)).is_none())
-                {
-                    return false;
-                }
-                work.extend(heap.children(h));
-            }
-            true
-        };
-        let claims: Vec<bool> = captured.iter().map(sole).collect();
-        crate::base::crossing::slot_bits(&claims)
-    }
-
     /// TICKET-100 — the id `h` already crosses under: an on-stack back-edge (`path`) first, else an
     /// off-stack DAG alias already seen this crossing (`nodes`).
     fn seen(&self, h: GcRef) -> Option<u32> {
@@ -357,10 +236,8 @@ impl WireMemo {
     }
 }
 
-/// TICKET-246 — everything the copy walk reads, borrowed. The walk is `&self` over these five
-/// fields and nothing else, so one body serves a `Vm` encoding out of its own heap
-/// ([`Vm::walk_src`]) and a `RwShared` reader encoding out of a box heap it only borrows
-/// (TICKET-246 step 5). It never charges a heap: the caller charges its OWN.
+/// TICKET-246 — everything the copy walk reads, borrowed. The walk is `&self` over these fields and
+/// nothing else ([`Vm::walk_src`]). It never charges a heap.
 pub(super) struct WalkSrc<'a> {
     pub(super) heap: &'a Heap,
     pub(super) module_objs: &'a super::module_table::ModuleTable,
@@ -369,23 +246,6 @@ pub(super) struct WalkSrc<'a> {
 }
 
 impl<'a> WalkSrc<'a> {
-    /// The source for a parked context (a box state): the run's one heap, through the reader's
-    /// handle `heap`, and the context's module table. Nothing runs in a parked context, so none of
-    /// its generators is mid-resume.
-    pub(super) fn of_ctx(
-        ctx: &'a FiberCtx,
-        heap: &'a Heap,
-        program: &'a Program,
-        walk_base: usize,
-    ) -> Self {
-        WalkSrc {
-            heap,
-            module_objs: &ctx.module_objs,
-            program,
-            walk_base,
-        }
-    }
-
     fn err(&self, message: String, span: Span) -> RuntimeError {
         super::exec::plain_err(message, span)
     }
@@ -408,24 +268,9 @@ impl<'a> WalkSrc<'a> {
             .get(tid as usize)
             .map_or("?", |s| s)
     }
-
-    /// Encode `v` for another heap, with the [`ensure_crossable`](Vm::ensure_crossable)
-    /// handle-reject backstop. A fault carries `span`.
-    pub(super) fn to_wire_crossable_memo(
-        &self,
-        v: Value,
-        span: Span,
-        memo: &mut WireMemo,
-    ) -> Result<WireValue, RuntimeError> {
-        let w = self
-            .to_wire_depth(v, 0, memo)
-            .map_err(|e| self.err(e.message, span))?;
-        ensure_crossable_wire(&w, span)?;
-        Ok(w)
-    }
 }
 
-/// The handle-reject backstop behind [`Vm::ensure_crossable`] and [`WalkSrc`].
+/// The handle-reject backstop behind [`Vm::ensure_crossable`].
 pub(super) fn ensure_crossable_wire(w: &WireValue, span: Span) -> Result<(), RuntimeError> {
     if w.has_handle() {
         return Err(super::exec::plain_err(
@@ -520,7 +365,6 @@ impl WalkSrc<'_> {
                             proto: *proto,
                             captured: wcap,
                             home: self.home_index(*home),
-                            sole: memo.sole_captures(self.heap, &captured.to_vec()),
                         }
                     }
                 }

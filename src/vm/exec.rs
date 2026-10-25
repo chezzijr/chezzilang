@@ -161,7 +161,6 @@ impl Vm {
             handlers: Vec::new(),
             pending_exit: None,
             exit_origin: false,
-            box_chain: Vec::new(),
             fault_trace: None,
             fault_trace_depth: 0,
             gc_stress: gc_door::gc_stress_env(),
@@ -190,7 +189,6 @@ impl Vm {
             offload: None,
             poll_park: None,
             pending_connect: None,
-            wire_backref_missing: false, // W7-11
             copy_mark: false,
             poll_timed_out: false,
             poll_deadline: None,
@@ -252,17 +250,14 @@ impl Vm {
     /// `out` / `stderr` (Decision F), so only a task switch moves them; a box call runs in its
     /// caller's stream and swaps with `swap_ctx` alone.
     ///
-    /// M1.7 (brief item 4) — the running generators, their parked hosts and the open box calls
-    /// are `Vm` fields that `FiberCtx` does not carry, so a task switch asserts they are empty: a
-    /// generator body and a box closure run under [`Vm::reentered`], where a blocking op demotes
-    /// instead of parking, so no fiber parks with any of them open. `Vm::gc_roots` roots them
-    /// while they are open.
+    /// M1.7 (brief item 4) — the running generators and their parked hosts are `Vm` fields that
+    /// `FiberCtx` does not carry, so a task switch asserts they are empty: a generator body runs
+    /// under [`Vm::reentered`], where a blocking op demotes instead of parking, so no fiber parks
+    /// with one open. `Vm::gc_roots` roots them while they are open.
     pub(super) fn swap_task(&mut self, ctx: &mut FiberCtx) {
         assert!(
-            self.gen_host_ctx.is_empty()
-                && self.active_generators.is_empty()
-                && self.box_chain.is_empty(),
-            "a task switch with a generator or a box call open"
+            self.gen_host_ctx.is_empty() && self.active_generators.is_empty(),
+            "a task switch with a generator open"
         );
         self.swap_ctx(ctx);
         std::mem::swap(&mut self.out, &mut ctx.out);

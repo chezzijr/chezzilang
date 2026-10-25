@@ -429,19 +429,9 @@ pub trait Host {
             message: "this host does not support list arguments".into(),
         })
     }
-    /// Whether `args[i]` is an airlock copy in this task: the one predicate D4's write check reads
-    /// (`Heap::is_copied`). A non-heap value is never a copy. Used by `std.concurrency.is_task_copy`.
-    /// The default errors so a host with no heap (the off-heap host, the test fixtures) needn't
-    /// implement it.
-    fn arg_is_task_copy(&self, i: usize) -> Result<bool, HostError> {
-        let _ = i;
-        Err(HostError {
-            message: "this host does not support airlock-copy queries".into(),
-        })
-    }
     /// TICKET-219 — seal the channel `args[ch]` with `args[v]` (`std.concurrency._settle`) and wake
     /// its receivers when this seal was the first. The default errors, as
-    /// [`Host::arg_is_task_copy`]'s does.
+    /// [`Host::arg_str_list`]'s does.
     fn arg_settle_channel(&mut self, ch: usize, v: usize) -> Result<(), HostError> {
         let _ = (ch, v);
         Err(HostError {
@@ -449,7 +439,7 @@ pub trait Host {
         })
     }
     /// TICKET-289 — cancel the one job of the Executor `args[ex]` whose Task channel is `args[ch]`
-    /// (`std.concurrency._cancel_job`). The default errors, as [`Host::arg_is_task_copy`]'s does.
+    /// (`std.concurrency._cancel_job`). The default errors, as [`Host::arg_str_list`]'s does.
     fn arg_cancel_job(&mut self, ex: usize, ch: usize) -> Result<(), HostError> {
         let _ = (ex, ch);
         Err(HostError {
@@ -457,7 +447,7 @@ pub trait Host {
         })
     }
     /// TICKET-219 — whether the channel `args[i]` is sealed (`std.concurrency.is_settled`). The
-    /// default errors, as [`Host::arg_is_task_copy`]'s does.
+    /// default errors, as [`Host::arg_str_list`]'s does.
     fn arg_channel_settled(&self, i: usize) -> Result<bool, HostError> {
         let _ = i;
         Err(HostError {
@@ -582,10 +572,6 @@ pub enum Kind {
     /// `read_line` is `unreachable!`); instead the engine demotes the worker around the call and
     /// gives its width slot back, so a runnable sibling is not starved (`Vm::invoke_native`).
     HostWait,
-    /// TICKET-220 -- `std.concurrency.task_copy_of`. It returns a heap value rebuilt under
-    /// `Route::CopyRead`, which a `NativeRet` cannot carry, so the engine runs it
-    /// (`Vm::airlock_native`) and the registered `concurrency::intercepted` placeholder never executes.
-    InterceptAirlock,
     /// `std.time.timer`. It returns a heap `Channel[bool]` whose delivery the scheduler owns, which a
     /// `NativeRet` cannot carry, so the engine runs it (`Vm::new_timer`) and the registered
     /// `time::intercepted` placeholder never executes.
@@ -608,7 +594,6 @@ impl Kind {
             | Kind::HostWait
             | Kind::InterceptIo
             | Kind::InterceptNet
-            | Kind::InterceptAirlock
             | Kind::InterceptTimer => false,
         }
     }
@@ -627,7 +612,6 @@ impl Kind {
             | Kind::TimedWait
             | Kind::InterceptIo
             | Kind::InterceptNet
-            | Kind::InterceptAirlock
             | Kind::InterceptTimer => false,
         }
     }
@@ -689,7 +673,7 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "crypto" => Some("std.crypto"),
             "uuid" => Some("std.uuid"),
             // `std.concurrency` is a FILE-BACKED native module (phase 4c-concurrency): its
-            // callable members are `is_task_copy` (TICKET-191), `_settle` / `is_settled` (TICKET-219) and `task_copy_of` (TICKET-220); otherwise it declares the four runtime concurrency TYPE/ctor names
+            // callable members are `_settle` / `is_settled` (TICKET-219) and `_cancel_job` (TICKET-289); otherwise it declares the four runtime concurrency TYPE/ctor names
             // (`Shared`/`RwShared`/`Atomic`/`Executor`) as `native struct`s in `std/concurrency.chz`,
             // harvested for their sigs + method tables (the ctors still lower via the compiler's
             // name→opcode dispatch, not a bound module member). Only the len-2 path is the native module
@@ -759,7 +743,7 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)]
         "std.encoding" => encoding::MEMBERS,
         "std.crypto" => crypto::MEMBERS,
         "std.uuid" => uuid::MEMBERS,
-        // Callable members is_task_copy (TICKET-191), _settle / is_settled (TICKET-219) and task_copy_of (TICKET-220); the four concurrency TYPE names have no
+        // Callable members _settle / is_settled (TICKET-219) and _cancel_job (TICKET-289); the four concurrency TYPE names have no
         // runtime value -- they lower via the compiler name→opcode path.
         "std.concurrency" => concurrency::MEMBERS,
         _ => &[],
@@ -1054,16 +1038,14 @@ mod tests {
             native_name(&["std".into(), "concurrency".into()]),
             Some("std.concurrency")
         );
-        // ...and its callable members are is_task_copy (TICKET-191), the handle-channel pair
-        // _settle / is_settled (TICKET-219), _cancel_job (TICKET-289), and task_copy_of (TICKET-220).
+        // ...and its callable members are the handle-channel pair _settle / is_settled
+        // (TICKET-219) and _cancel_job (TICKET-289).
         assert_eq!(
             kinds("std.concurrency"),
             [
-                ("is_task_copy", Kind::Inline),
                 ("_settle", Kind::Inline),
                 ("_cancel_job", Kind::Inline),
                 ("is_settled", Kind::Inline),
-                ("task_copy_of", Kind::InterceptAirlock)
             ]
         );
         // The len-3 `std.concurrency.collection` is the REAL file — NOT native (no collision).
@@ -1093,7 +1075,6 @@ mod tests {
         assert!(!Kind::InterceptNet.blocks());
         // TICKET-151: a stdin read waits on the host but must NOT reach the offload gate.
         assert!(!Kind::HostWait.blocks());
-        assert!(!Kind::InterceptAirlock.blocks());
         assert!(!Kind::InterceptTimer.blocks());
     }
 
@@ -1107,7 +1088,6 @@ mod tests {
         assert!(!Kind::TimedWait.holds_host_thread());
         assert!(!Kind::InterceptIo.holds_host_thread());
         assert!(!Kind::InterceptNet.holds_host_thread());
-        assert!(!Kind::InterceptAirlock.holds_host_thread());
         assert!(!Kind::InterceptTimer.holds_host_thread());
     }
 
@@ -1262,9 +1242,6 @@ mod tests {
                 match kind {
                     Kind::InterceptIo => assert_eq!(*module, "std.io", "{module}.{name}"),
                     Kind::InterceptNet => assert_eq!(*module, "std.net", "{module}.{name}"),
-                    Kind::InterceptAirlock => {
-                        assert_eq!(*module, "std.concurrency", "{module}.{name}")
-                    }
                     Kind::InterceptTimer => assert_eq!(*module, "std.time", "{module}.{name}"),
                     _ => {}
                 }

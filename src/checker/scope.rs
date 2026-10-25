@@ -328,39 +328,6 @@ impl Checker {
         self.owning_scope(name)
             .map(|i| self.scopes[i][name].clone())
     }
-    /// TICKET-089 — `e` is a NULLARY read of a `Shared`/`RwShared`/`Atomic` box bound to a bare name
-    /// (`s.get()`, `r.get()`, `a.load()`): the value it returns is a deep copy, so a write to it is
-    /// thrown away (`docs/reference/concurrency/` §6). Returns `(box name, reader, payload type, write-through
-    /// method)`. Bare-`Ident` receivers only, so the box type comes from `lookup` with no re-inference
-    /// (which would double-report the receiver's diagnostics) — `boxes[0].get()` stays a ceiling.
-    /// `RwShared.read(f)` takes a closure, so it is not this shape.
-    pub(super) fn read_temporary_of_box(
-        &self,
-        e: &Expr,
-    ) -> Option<(String, &'static str, Ty, &'static str)> {
-        let ExprKind::Call { callee, args, .. } = &e.kind else {
-            return None;
-        };
-        let ExprKind::Field {
-            obj, name: reader, ..
-        } = &callee.kind
-        else {
-            return None;
-        };
-        let ExprKind::Ident(name) = &obj.kind else {
-            return None;
-        };
-        if !args.is_empty() {
-            return None;
-        }
-        let (reader, fix, payload) = match (self.lookup(name)?, reader.as_str()) {
-            (Ty::Shared(p), "get") => ("get", "update", *p),
-            (Ty::RwShared(p), "get") => ("get", "write", *p),
-            (Ty::Atomic(p), "load") => ("load", "store", *p),
-            _ => return None,
-        };
-        Some((name.clone(), reader, payload, fix))
-    }
     /// Does scope `i` hold a binding of `name` visible from here? The ONE raw membership test over
     /// `scopes` (TICKET-183). A module global seeded before any body is walked
     /// (`seed_module_globals`) is visible in every fn/closure body, but a top-level statement sees

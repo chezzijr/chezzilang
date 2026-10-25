@@ -223,7 +223,9 @@ test fn generator_route_grid():
         row := ",".join(got)
         want := if route == "channel" or route == "shared" or route == "rwshared" or route == "atomic": handoff else: marking
         assert row == want, "{route}: {row}"
-        if route == "channel" or route == "atomic":
+        # M3.2 / M3.3: a channel, an `Atomic` and a box hold the generator itself, so the task
+        # drives the one generator (CPython `gen_routes.py`, M3.2 report: `[[1, 2]] * 4`, `[[1]]`).
+        if route == "channel" or route == "atomic" or route == "shared" or route == "rwshared":
             assert named == [[1, 2], [1, 2], [1, 2], [1, 2]], "{route}: named {named}"
             assert sink == [[1]], "{route}: sink {sink}"
         else:
@@ -394,7 +396,8 @@ test fn task_get_copy_of_frame_local_generator_runs():
     assert out.recv() == "2"
 
 # TICKET-220: a copy's memoize1 cache HIT (a key another task filled) runs the frame-local
-# generator too. The first spawn fills key 0; the second reads it back from the shared cache.
+# generator too. The first spawn fills key 0 and drains the generator; M3.3: the second reads back
+# the one generator, already drained (CPython `memo_gen.py`, M3.3 report: `memoize_copy_hit 2,0`).
 test fn memoize_copy_hit_of_frame_local_generator_runs():
     m := memoize1(fn(k: int) -> Iterator[int]: t220_started())
     got: List[str] = []
@@ -403,4 +406,4 @@ test fn memoize_copy_hit_of_frame_local_generator_runs():
         parallel:
             spawn: out.send(t190_cell(m(0)))
         got.push(out.recv())
-    assert ",".join(got) == "2,2"
+    assert ",".join(got) == "2,0"

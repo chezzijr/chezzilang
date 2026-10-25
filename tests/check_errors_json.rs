@@ -579,14 +579,17 @@ fn severity_key_is_additive_and_the_clean_case_is_unchanged() {
     assert!(stdout.ends_with("}]"), "got: {stdout}");
 }
 
-/// TICKET-089: a mutating call on a `Shared` read temporary is a WARNING — `"severity":"warning"` in
-/// `--errors=json`, naming the working spelling, and `check` still exits 0.
+/// TICKET-254: a mutating call on a temporary copy is a WARNING — `"severity":"warning"` in
+/// `--errors=json`, and `check` still exits 0. (M3.3 deleted the TICKET-089 box-read row: a write
+/// to `s.get()` lands in the box.)
 #[test]
-fn read_temporary_warning_is_a_warning_in_json_and_check_still_exits_zero() {
+fn temporary_copy_warning_is_a_warning_in_json_and_check_still_exits_zero() {
     let t = TmpDir::new();
     let src = t.write(
         "lost.chz",
-        "import Shared from std.concurrency\ns := Shared[List[int]]([])\ns.get().push(1)\n",
+        "xs: List[int] = []
+xs.copy().push(1)
+",
     );
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .args(["check", src.to_str().unwrap(), "--errors=json"])
@@ -598,7 +601,7 @@ fn read_temporary_warning_is_a_warning_in_json_and_check_still_exits_zero() {
         "a warning must not fail check, got: {stdout}"
     );
     assert!(stdout.contains("\"severity\":\"warning\""), "got: {stdout}");
-    assert!(stdout.contains("s.update("), "got: {stdout}");
+    assert!(stdout.contains("temporary copy"), "got: {stdout}");
 }
 
 /// TICKET-090: a local binding that is never read is a WARNING — `"severity":"warning"` in

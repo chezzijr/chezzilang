@@ -23,18 +23,17 @@
 # of its return, so `f` is declared UNANNOTATED and retyped to `fn() -> ?`. `Atomic.add`/`sub` exist
 # only for a numeric `T` — a dispatch-time constraint the `Ty::Atomic` arm keeps as a residual gate.
 
-# `Shared[T]` keeps its value in a private heap of its own (TICKET-246), one user at a time.
-#   - `update(f)` runs `f` INSIDE the box, on the live value, in place: `fn(t): t.hits += 1` then
-#     returning `t` copies nothing. The value `f` returns is the new state.
-#   - `read(f)` runs `f` inside the box too and copies only its RESULT out (`read(fn(T) -> R) -> R`,
-#     `f` declared unannotated and retyped like `RwShared.read`). It runs on the live value: a
-#     mutation `f` makes persists.
-#   - `get()` copies the whole value out; `set(v)` copies `v` in.
-# A closure given to `update` / `read` runs like the body of a spawned task: its captures are
-# copies (a write to one is the task-copy error or fault, never a silent lost write) and it sees
-# module globals as the caller has them at the call. `get` / `read` / `set` / `update` / printing of
-# a box from inside that box's own `update` / `read` closure fault with
-# `already holds the update guard`. A slow closure blocks every other user of the box.
+# `Shared[T]` holds ONE value by handle behind one guard (Go `struct { mu sync.Mutex; v T }`), one
+# user at a time (M3.3). Every method runs in the caller's task on the live value.
+#   - `update(f)` runs `f` on the live value under the guard: `fn(t): t.hits += 1` then returning
+#     `t` copies nothing. The value `f` returns is the new value.
+#   - `read(f)` runs `f` under the guard and returns its result (`read(fn(T) -> R) -> R`, `f`
+#     declared unannotated and retyped like `RwShared.read`). A mutation `f` makes persists.
+#   - `get()` returns the live value; write it only inside `update`. `set(v)` stores `v`.
+# A closure given to `update` / `read` is an ordinary call in the caller's task: its captures are
+# the caller's bindings. It may block (a channel wait, a sleep); the guard stays with the task.
+# `get` / `read` / `set` / `update` of a box from inside that box's own `update` / `read` closure
+# fault with `already holds the update guard`. A slow closure blocks every other user of the box.
 # `StructuralEq` -- the SEALED bound an `Atomic[T]` payload parameter must carry (TICKET-250). A type
 # satisfies it only when `==` on it is structural: it reaches no type that has the `eq` hook. The
 # checker answers that itself, so the body is empty. `Atomic.cas` compares stored values
@@ -105,7 +104,7 @@ native struct Executor:
     fn submit[T](self, f: fn() -> T) -> Task[T]:
         ch := Channel[T!](1)
         self._submit_settled(fn(): _run_outcome(f, ch), ch)
-        return Task(_ch=ch, _cached=None, _ex=self)
+        return Task(_ch=ch, _ex=self)
 
 # Chezzi closures are single-expression only, so a multi-statement job body must be a named
 # top-level fn the lambda calls.
@@ -128,18 +127,6 @@ fn _run_outcome[T](f: fn() -> T, out: Channel[T!]):
     r := recover: f()
     _settle(out, r)
 
-# True when `v` is an airlock copy in the calling task: a write to it would fault `this value is
-# this task's copy`. Reads the same predicate as that write check (`Heap::is_copied`), so std code
-# can pick write-or-share without attempting the write. A scalar is never a copy (TICKET-191).
-native fn is_task_copy(v) -> bool
-
-# Returns `v` rebuilt as this task's copy (`Route::CopyRead`): the rebuild every crossing runs, so
-# a write to it faults instead of vanishing, a function inside it leaves its module's globals
-# unmarked, and a generator's private frame slots stay writable (TICKET-190). For std code reading
-# a shared core on behalf of a handle its owner aliases (`Task.get`, a `memoize1` wrapper). Not for
-# a general read path: a plain `Shared.get()` or `ch.recv()` is a handoff, and the receiver owns it.
-native fn task_copy_of[T](v: T) -> T
-
 # A std internal (TICKET-219): seal the handle channel `ch` with the outcome `v`. The first seal
 # wins; a later one changes nothing. Called only by `_run_outcome`.
 native fn _settle(ch, v) -> None
@@ -156,8 +143,8 @@ native fn is_settled(ch) -> bool
 
 # A future handle for one `Executor.submit` job.
 # `get()` is the ONLY place a job's fault or cancel appears; `shutdown()`, the run end and a test end
-# raise none. `_ch` is the sealed cap-1 channel that holds the outcome; `_cached` holds the owner's
-# outcome object; `_ex` is the submitting Executor (for `cancel()`). The `_` fields are std internals:
+# raise none. `_ch` is the sealed cap-1 channel that holds the outcome; `_ex` is the submitting
+# Executor (for `cancel()`). The `_` fields are std internals:
 # user code cannot read or write them.
 #
 # MODEL (TICKET-219): the channel is written once by a seal: the job body seals the value of
@@ -171,27 +158,16 @@ native fn is_settled(ch) -> bool
 # DETERMINISM: a Task's VALUE is `f()`; only when it runs varies. Await the tasks in a fixed
 # (submission) order. There is deliberately no select-on-completion API.
 #
-# IDENTITY: the task that holds the original handle caches the value in `_cached`, so its repeated
-# `get()` returns the SAME object. A copy of the handle (a spawned task's, an Executor job's) carries
-# `_cached` as it was at the crossing; a write to it faults (D4), as for any captured value. A copy
-# whose owner had not called `get()` reads a fresh copy from the channel (`task_copy_of`), so a
-# write to it faults too. `is_task_copy(self)` picks between that copy and the `_cached` write.
+# IDENTITY: the outcome is one object (M3.3): every `get()`, in every task that holds the handle,
+# returns it (CPython `Future.result()`).
 struct Task[T]:
     _ch: Channel[T!]
-    _cached: (T!)?
     _ex: Executor
 
     # Block until the outcome is available, then return it: `?value`, or `!message` when the job
     # faulted or `cancel()` cut it (a `T!E` in place of a raise). Idempotent.
     fn get(self) -> T!:
-        match self._cached:
-            ?r: return r
-            None: pass
-        r := self._ch.recv()
-        if is_task_copy(self):
-            return task_copy_of(r)
-        self._cached = ?r
-        return r
+        return self._ch.recv()
 
     # True once the job has finished, faulted or been cancelled. Never blocks, and never reads
     # false after true.

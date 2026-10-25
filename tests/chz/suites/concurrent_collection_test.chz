@@ -121,9 +121,8 @@ struct CKey:
     fn eq(self, other: CKey) -> bool:
         return self.n == other.n
 
-# The first push after a whole store re-encodes the list; the later ones splice. Every pushed row
-# lands once, in order, and is a separate object on a whole `snapshot()`. Red when the re-encode
-# path drops its element: `[[1], [2], [4], [5, 6]]`.
+# Every pushed row lands once, in order. Red when a push drops its element:
+# `[[1], [2], [4], [5, 6]]`. M3.3: `snapshot()` is a shallow copy, so its rows are the live ones.
 test fn list_push_keeps_nested_elements_apart():
     c := collection.ConcurrentList(concurrency.RwShared([[1], [2]]))
     c.push([3])
@@ -133,7 +132,7 @@ test fn list_push_keeps_nested_elements_apart():
     assert snap == [[1], [2], [3], [4], [5, 6]]
     snap[3].push(9)
     assert snap == [[1], [2], [3], [4, 9], [5, 6]]
-    assert c.at(3) == ?[4]
+    assert c.at(3) == ?[4, 9]
     assert c.len() == 5
 
 # A whole `set` / `write` on the box replaces the list; the next push must still land after it.
@@ -153,15 +152,16 @@ test fn list_push_after_a_whole_store():
     snap[1].push(0)
     assert snap[2] == [12]
 
-# The same object pushed twice is two copies (each push crosses the airlock by value).
-test fn list_push_copies_its_argument():
+# M3.3: a push stores its argument by handle, so the same object pushed three times is one object
+# (Go: `append` of one pointer three times).
+test fn list_push_holds_its_argument_by_handle():
     a := [1]
     c := collection.ConcurrentList[List[int]].new()
     c.push(a)
     c.push(a)
     a.push(2)
     c.push(a)
-    assert c.snapshot() == [[1], [1], [1, 2]]
+    assert c.snapshot() == [[1, 2], [1, 2], [1, 2]]
 
 test fn list_push_on_empty_and_readers():
     c := collection.ConcurrentList[str].new()

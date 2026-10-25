@@ -355,8 +355,7 @@ with a name and a statement body.
   (`m[0..3].push(9)`) is an index, so it is a place. A user `slice` hook may alias the receiver, so its
   result is never a temporary.
 
-  **A mutating call on a temporary.** The checker warns (as for the `Shared` read temporary,
-  [`concurrency.md`](../concurrency/01-model.md) §6) when a mutating builtin call (`push`, `extend`, `sort`,
+  **A mutating call on a temporary.** The checker warns when a mutating builtin call (`push`, `extend`, `sort`,
   `insert`, `remove`, `update`, ...) or a field/index store lands on a value no name holds:
   - a slice of a builtin (`g[0..2]`, `g[r]`), `.reversed()`, `.copy()`, or another native
     `List`/`Map`/`Set`/`bytearray` method that returns a container

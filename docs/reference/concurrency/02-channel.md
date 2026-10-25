@@ -198,7 +198,7 @@ over `Channel`, `Shared` and `AtomicInt`; the runtime has no broadcast code.
 |---|---|---|
 | `Broadcast[T].new(cap)` | `new(cap: int) -> Broadcast[T]` | Each receiver holds at most `cap` values. A `cap` below 1 faults `Broadcast capacity must be at least 1, got <cap>` |
 | `subscribe` | `subscribe(self) -> Receiver[T]` | A receiver for every value sent after this call, in send order. After `close` it is closed and empty |
-| `send` | `send(self, v: T) -> None` | Does not wait for receivers; it waits only while another `send`, `subscribe` or `close` holds the hub guard. Every receiver gets its own copy of `v`. A full mailbox drops its oldest value. With no receiver the value is dropped. After `close` it faults `send on a closed Broadcast` |
+| `send` | `send(self, v: T) -> None` | Does not wait for receivers; it waits only while another `send`, `subscribe` or `close` holds the hub guard. Every receiver gets `v` itself, by handle (M3.3), as from a channel. A full mailbox drops its oldest value. With no receiver the value is dropped. After `close` it faults `send on a closed Broadcast` |
 | `close` | `close(self) -> None` | Idempotent. Every receiver's `for` ends after the values already sent |
 | `Receiver.recv` | `recv(self) -> T!Lagged` | Blocks. `?v`, or `!Lagged(missed)` when the broadcast dropped `missed` values before the next one. On a closed and drained broadcast it faults `receive on a closed channel` |
 | `Receiver.try_recv` | `try_recv(self) -> (T!Lagged)?` | Never blocks. `None` when no value waits, when another task is inside a receive on this receiver, or when the broadcast is closed and drained |

@@ -7,11 +7,11 @@ to std. `import std.concurrency.collection` (or `as col`), or
 `import ConcurrentList from std.concurrency.collection`. The dotted path resolves to
 `std/concurrency/collection.chz` (a nested std module, with no special-casing).
 
-**Why over raw `RwShared`:** `get`/`read` copy the whole container on every access, raw `read`/`write`
-closures are verbose, and the **compound** mutations (insert-if-absent, increment a count) MUST happen
+**Why over raw `RwShared`:** raw `read`/`write` closures are verbose, a walk of `get()`'s live value
+races the writers, and the **compound** mutations (insert-if-absent, increment a count) MUST happen
 inside a **single** `write` lock or they race. The collections' keyed reads and writes touch ONE entry
-and build in the correct single-lock idiom. A walk (`for_each_entry`, `fold_entries`) copies the
-collection once.
+and build in the correct single-lock idiom. A walk (`for_each_entry`, `fold_entries`) takes one
+shallow copy under the read guard.
 
 **Airlock sharing:** a struct whose only field is an `RwShared` crosses the `spawn`/`parallel:` airlock
 as a **shared `Arc` handle, NOT a deep copy**, so the parent sees a spawned task's mutation after the
@@ -21,8 +21,8 @@ join. (`RwShared` is sendable and shares; a struct of all-sendable fields is too
 **`ConcurrentMap[str, int].new()`**, **`ConcurrentSet[int].new()`**, **`ConcurrentCounter[str].new()`**)
 or let an annotation give them (`m: ConcurrentMap[str, int] = ConcurrentMap.new()`). To wrap existing
 data use the field constructor over a box: `ConcurrentList(RwShared(xs))`, `ConcurrentMap(RwShared({}))`;
-`c.inner` is the box, so `c.inner.get()`, `c.inner.set(v)` and `c.inner.write(f)` still replace or copy
-the whole value. With an empty literal and no annotation, `K`/`V` are open and the binding is an error
+`c.inner` is the box, so `c.inner.get()` returns the live value and `c.inner.set(v)` /
+`c.inner.write(f)` replace it. With an empty literal and no annotation, `K`/`V` are open and the binding is an error
 on that line (``cannot infer the type arguments of `m` ``); prefer `new()`. A use-site `RwShared({})`
 means user code also imports `RwShared` from `std.concurrency` (`import RwShared from std.concurrency`);
 `import std.concurrency.collection` binds only that submodule.
@@ -38,13 +38,13 @@ atomic snapshot.
 
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
-| `.push(item)` | `(E) -> None` | **update guard**. Appends one element without copying the list (a plain list push inside the box heap). |
+| `.push(item)` | `(E) -> None` | **write guard**. Appends `item` by handle; a plain list push on the box's live list. |
 | `.len()` | `() -> int` | **concurrent read**. |
 | `.at(i)` | `(int) -> E?` | **concurrent read**, constant time. Out of range is `None`, never a fault; a negative `i` counts from the end, as `xs[i]`. |
-| `.slice(r)` / `c[a..b]` | `(Range) -> List[E]` | **concurrent read**; a copy of the elements the `Range` selects, resolved as `xs[r]` resolves it on a `List` (negative bound, inclusive end, clamping, step). |
+| `.slice(r)` / `c[a..b]` | `(Range) -> List[E]` | **concurrent read**; a new list of the elements (by handle) the `Range` selects, resolved as `xs[r]` resolves it on a `List` (negative bound, inclusive end, clamping, step). |
 | `.for_each(f)` | `(fn(E) -> R) -> None` | Calls `f` once per element, in order, one element in the caller's heap at a time. |
 | `.fold(init, f)` | `(R, fn(R, E) -> R) -> R` | Reduces in order; `R` is inferred from `init`. |
-| `.snapshot()` | `() -> List[E]` | **concurrent read** returning a **copy** of the whole list. |
+| `.snapshot()` | `() -> List[E]` | **concurrent read** returning a shallow **copy** of the whole list (the elements by handle). |
 
 **`ConcurrentMap[K: Hashable, V]`**: thread-safe map over `RwShared[Map[K, V]]`. No method copies
 the whole map except `snapshot`. `get`/`contains`/`len`/`snapshot` are **concurrent reads**;
@@ -62,19 +62,19 @@ and inserts are O(1) expected (the stored map keeps the heap map's hash index). 
 | `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the probe and the insert run under ONE update guard with no user closure, so a concurrent `remove` cannot slip between them. Returns the existing value, or `default` if it was absent. |
 | `.for_each_entry(f)` | `(fn(K, V) -> R) -> None` | Calls `f` once per entry present when the walk starts. The walk copies the whole map once (one snapshot), so a change `f` makes is not visited. |
 | `.fold_entries(init, f)` | `(R, fn(R, K, V) -> R) -> R` | Reduces the entries; `R` is inferred from `init`. |
-| `.snapshot()` | `() -> Map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
+| `.snapshot()` | `() -> Map[K, V]` | **concurrent read** returning a shallow **copy**: later inserts and removes do not change it; its values are the live ones. |
 
 **`ConcurrentSet[E: Hashable]`**: thread-safe set over `RwShared[Set[E]]`.
 
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
-| `.insert(item)` | `(E) -> bool` | **update guard**. Inserts one element without copying the set; `true` when new, `false` if present. O(1) expected. |
+| `.insert(item)` | `(E) -> bool` | **write guard**. Inserts one element without copying the set; `true` when new, `false` if present. O(1) expected. |
 | `.remove(item)` | `(E) -> bool` | **update guard**. `true` when the element was present. O(n), as `Set.remove`. |
 | `.contains(item)` | `(E) -> bool` | **concurrent read**, O(1) expected. |
 | `.len()` | `() -> int` | **concurrent read**. |
 | `.for_each(f)` | `(fn(E) -> R) -> None` | Calls `f` once per element, in insertion order. |
 | `.fold(init, f)` | `(R, fn(R, E) -> R) -> R` | Reduces in insertion order; `R` is inferred from `init`. |
-| `.snapshot()` | `() -> Set[E]` | **concurrent read** returning a **copy** of the whole set. |
+| `.snapshot()` | `() -> Set[E]` | **concurrent read** returning a shallow **copy** of the whole set. |
 
 A writer called from a user `hash`/`eq` that re-enters the same box faults like `write` does: each
 writer takes the update guard that `set`/`write` take.
@@ -123,14 +123,9 @@ a spawned task or an Executor job holding a copy gets the same answer as the par
 | `Task.cancel` | `cancel(self) -> None` | Drop the job when it is held, cut it at its next cancellation point when it runs. A job that already returned keeps its value. |
 
 `Task.get` identity:
-- In the task that holds the original handle, every call returns the same object, so
-  `a := t.get(); a.push(3)` shows in the next `t.get()` (CPython `fut.result() is fut.result()`).
-- A task holding an airlock copy of the handle gets the value as of the crossing: the owner's object as
-  copied with the handle, including the owner's writes before the spawn. A write to it faults
-  `this value is this task's copy` (D4), as for any captured value.
-- A copy whose owner had not called `get()` before the crossing gets a fresh snapshot from the channel
-  on each call, marked as the task's copy, so a write to it faults too. `.copy()` gives a writable
-  value.
+- Every call, in every task that holds the handle, returns the same object (M3.3: the sealed channel
+  holds the outcome by handle), so `a := t.get(); a.push(3)` shows in the next `t.get()`, in any task
+  (CPython `fut.result() is fut.result()`).
 - A task that `cancel()` cancelled and a held job that `cancel()` dropped return `task cancelled: cancel() stopped it before it finished` at
   once (CPython: `CancelledError`).
 
@@ -186,13 +181,11 @@ result cached (`K: Hashable`; `Hashable` embeds `Eq`, so it is a map key).
 - The cache is an `RwShared[Map[K, V]]`, so the wrapper works from any task: a call in a spawned task or
   an Executor job reads and fills the same cache as its creator, as CPython `functools.cache` does from
   any thread. Lookups and inserts are O(1) expected.
-- The task holding the original wrapper gets the **same object** on every call (CPython
-  `f(1) is f(1)`; a mutation of the result stays visible), through a private alias map.
-- A task copy of the wrapper reads that alias map as copied at the crossing: it sees the value as of the
-  crossing, and its write to that value faults (D4). A key the owner had not cached gives the copy a
-  snapshot of the shared cache's value, marked as the task's copy, so a write to it faults too
-  (`concurrency.task_copy_of`). `.copy()` gives a writable value.
-- Two tasks that miss one key at the same moment may both run `f`, as with CPython's `functools.cache`.
+- The cache holds each result by handle (M3.3), so every call with an equal argument, in every task,
+  returns the **same object** (CPython `f(1) is f(1)`; a mutation of the result is visible to every
+  caller).
+- Two tasks that miss one key at the same moment may both run `f`, as with CPython's `functools.cache`;
+  the first insert wins and both get it.
 
 **Limit:** single-argument only. A tuple of Hashable args is a valid map key, so you can write an N-arg
 wrapper that keys a `Map[(A, B), V]`; or curry, or pack the args into a struct with `hash` and `eq` and memoize

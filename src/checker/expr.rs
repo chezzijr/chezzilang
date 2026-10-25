@@ -1419,34 +1419,12 @@ fn type_apply_param_head(obj: &Expr) -> Option<String> {
 }
 
 impl Checker {
-    /// Check the arguments of the native handle method `owner.method`. When the pair is a row of
-    /// [`crate::base::crossing::CROSSING_CLOSURE_METHODS`] its closure argument crosses into another heap
-    /// (an `Executor` job, a `Shared` / `RwShared` box closure), exactly like a `spawn` task's:
-    ///
-    /// 1. a capture floor at the current scope depth surrounds the argument check, so the closure's
-    ///    own params and locals are task-local and an outer binding it reads is a capture;
-    /// 2. a direct write to a captured local is the D4 error (`COPY_WRITE_TAIL`), for a literal
-    ///    closure and for a closure value alike.
-    ///
-    /// Known ceiling (measured, TICKET-246): a write through a callee is not seen here; it is the
-    /// run-time D4 fault.
-    pub(super) fn check_crossing_closure_call(
-        &mut self,
-        owner: &str,
-        method: &str,
-        params: &[Ty],
-        min_params: usize,
-        args: &[Expr],
-        span: Span,
-    ) {
-        self.with_crossing_floor(owner, method, args, |c| {
-            c.check_args_range(method, params, min_params, args, span);
-        });
-    }
-
-    /// Run `f`, the check of the arguments of `owner.method`, under the capture floor of a
-    /// crossing closure call (see [`Checker::check_crossing_closure_call`]), then report a direct
-    /// write of `args[0]`. A pair that is no row of `CROSSING_CLOSURE_METHODS` runs `f` bare.
+    /// Run `f`, the check of the arguments of the native handle method `owner.method`. When the
+    /// pair is a row of [`crate::base::crossing::CROSSING_CLOSURE_METHODS`] its closure argument
+    /// crosses into another heap (an `Executor` job), exactly like a `spawn` task's: a capture
+    /// floor at the current scope depth surrounds the check, so the closure's own params and
+    /// locals are task-local and an outer binding it reads is a capture; then a direct write to a
+    /// captured local is the D4 error (`COPY_WRITE_TAIL`). A pair that is no row runs `f` bare.
     /// TICKET-289 — `Executor.submit` is a bodied generic, so its caller wraps the whole method
     /// resolution here and no `Concrete` arm sees the closure.
     pub(super) fn with_crossing_floor<R>(

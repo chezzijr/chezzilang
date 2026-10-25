@@ -574,9 +574,9 @@ const CHZ_SLEEP_SITES: [(&str, &str); 11] = [
     // TICKET-246: the sleep IS the wait under test -- a timed wait inside a box closure. The
     // `recv` beside it blocks until the `send` that follows the sleep, so the sleep orders nothing.
     ("tests/chz/suites/box_rules_test.chz", "time.sleep_ms(5)"),
-    // TICKET-246: the writer holds the box in this sleep; `started` orders the events. A reader
-    // that arrives after the sleep still sees the new value, so the assert holds at any timing.
-    ("tests/chz/suites/box_rules_test.chz", "time.sleep_ms(150)"),
+    // M3.3: the sleep lets a guard waiter reach its wait before the guard holder's channel gets
+    // its value; `held` orders the holder first, so the assert (30) holds at any timing.
+    ("tests/chz/spec/shared_handle_test.chz", "time.sleep_ms(20)"),
 ];
 
 /// Every `path:line: text` under `tests/chz` that calls `time.sleep_ms(` and is not one of

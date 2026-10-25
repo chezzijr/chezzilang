@@ -5,14 +5,10 @@
 # or an Executor job reads and fills the SAME cache as its creator, as CPython `functools.cache` does
 # from any thread. Lookups and single-entry inserts on it are O(1) expected.
 #
-# Identity (DEC-191, TICKET-203): the task that holds the original wrapper also keeps a private alias
-# map, so it gets the SAME object on every call (CPython `f(1) is f(1)`; a mutation of the result stays
-# visible). A task copy of the wrapper carries that map as it was at the crossing and reads it first,
-# so it sees the value as of the crossing, like every other captured value; a write to it there faults
-# (D4). A copy never writes the alias (`concurrency.is_task_copy`); a key the owner had not cached
-# reads a snapshot from the shared cache, rebuilt as the task's copy (`concurrency.task_copy_of`, TICKET-213), so a write to it
-# faults too. Two tasks missing one key at the same moment may both
-# run `f`; CPython's `functools.cache` does the same.
+# Identity (M3.3): the cache holds each result by handle, so every call with an equal argument, in
+# every task, returns the SAME object (CPython `f(1) is f(1)`; a mutation of the result is visible to
+# every caller). Two tasks missing one key at the same moment may both run `f`; the first insert wins
+# and both return it. CPython's `functools.cache` also runs `f` twice there.
 #
 # ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable`;
 # Hashable embeds Eq, so it is a Map key). A
@@ -24,46 +20,16 @@ import std.concurrency
 
 # Cache lookup-or-compute, split out because a closure body is a single expression: the returned
 # wrapper delegates here so it can do the `T?` match + compute + store.
-fn _memo_get[K: Hashable, V](shared: concurrency.RwShared[Map[K, V]], own: Map[K, V], f: fn(K) -> V, k: K) -> V:
-    match own.get(k):
+fn _memo_get[K: Hashable, V](shared: concurrency.RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
+    match shared._get_key(k):
         ?v:
             return v
         None:
             pass
-    if concurrency.is_task_copy(own):
-        return _memo_copy_read(shared, f, k)
-    v := match shared._get_key(k):
-        ?x: x
-        None: _memo_fill(shared, f, k)
-    own[k] = v
-    return v
-
-# A copy's read is a snapshot of the shared cache, rebuilt as the task's copy
-# (`concurrency.task_copy_of`); on a miss it fills the
-# cache once and reads it back once, because `_memo_fill` returns the caller's own object and marking
-# that would mark what the task owns; a key that never equals itself is not found by the read-back,
-# and the fill's own value is returned unmarked (no recursion: `f` runs once per call, as on base).
-fn _memo_copy_read[K: Hashable, V](shared: concurrency.RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
-    match shared._get_key(k):
-        ?x:
-            return concurrency.task_copy_of(x)
-        None:
-            pass
-    v := _memo_fill(shared, f, k)
-    match shared._get_key(k):
-        ?x:
-            return concurrency.task_copy_of(x)
-        None:
-            return v
-
-fn _memo_fill[K: Hashable, V](shared: concurrency.RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
-    v := f(k)
-    _ := shared._set_key(k, v)
-    return v
+    return shared._get_or_insert(k, f(k))
 
 # Wrap `f` so each distinct argument is computed once and cached. Returns a fn with the same
 # signature as `f`.
 fn memoize1[K: Hashable, V](f: fn(K) -> V) -> fn(K) -> V:
     shared: concurrency.RwShared[Map[K, V]] = concurrency.RwShared({})
-    own: Map[K, V] = {}
-    return fn(k: K) -> V: _memo_get(shared, own, f, k)
+    return fn(k: K) -> V: _memo_get(shared, f, k)

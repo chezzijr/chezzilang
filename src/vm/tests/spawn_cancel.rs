@@ -1196,10 +1196,10 @@ fn shared_update_read_modify_write() {
 }
 
 #[test]
-fn shared_get_does_not_alias_box() {
-    // `get` copies out: mutating the returned list must not change what the box holds.
+fn shared_get_returns_the_live_value() {
+    // M3.3: `get` returns the value the box holds (Go `handle/main.go`: `shared_get_write 2`).
     let src = "import Shared from std.concurrency\nfn main():\n    s := Shared([1, 2])\n    xs := s.get()\n    xs.push(3)\n    print(s.get())\nmain()\n";
-    assert_eq!(run(src), "[1, 2]\n");
+    assert_eq!(run(src), "[1, 2, 3]\n");
 }
 
 #[test]
@@ -1218,10 +1218,10 @@ fn vm_rwshared_read_returns_closure_result_no_writeback() {
 }
 
 #[test]
-fn vm_rwshared_get_does_not_alias_box() {
-    // `get`/`read` copy out: mutating the returned list must not change what the box holds.
+fn vm_rwshared_get_returns_the_live_value() {
+    // M3.3: `get` returns the value the box holds (Go `handle/main.go`: `rwshared_get_write 2`).
     let src = "import RwShared from std.concurrency\nfn main():\n    r := RwShared([1, 2])\n    xs := r.get()\n    xs.push(3)\n    print(r.get())\nmain()\n";
-    assert_eq!(run(src), "[1, 2]\n");
+    assert_eq!(run(src), "[1, 2, 3]\n");
 }
 
 #[test]

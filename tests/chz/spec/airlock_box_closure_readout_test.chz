@@ -1,23 +1,21 @@
-# TICKET-285 — D4 layer C: a closure another task reads out of Shared/RwShared marks its
-# captures exactly as the Channel route does, so a write through a capture FAULTS.
-#
-# Grid: closure x readout route x capture kind. Every route a closure can be read out of is one
-# `route` row: the four box readout sites (`box_copy_out`, `box_copy_pieces`, the `box_call` result,
-# the `rwshared_mutate` result), the Task route and the two handle routes (Channel, Atomic). A
-# reader task faults on a write to a captured list (`silent_routes`). M3.1: a module global is the
-# run's one copy, so a write to it lands on every route and in every reader (Go: a closure that
-# appends to a package `var` runs in any goroutine). M3.2: a Channel and an Atomic hold the closure
-# itself, so a write through its captures lands on the one binding, in any reader (Go
-# `closures.go`, M3.2 report: `channel_recv_route 2`, `atomic_load_route 2`, `relay 2`). The task
-# that stored the closure faults too when it reads it back through a copying route (TICKET-291: a
-# same-task round trip is a crossing).
+# TICKET-285 — D4 layer C: a closure read out of a route. Grid: closure x readout route x capture
+# kind. Every route a closure can be read out of is one `route` row: the box routes (`Shared.get`,
+# `Shared.read`, `RwShared.get`, `RwShared.read`, the ConcurrentList / ConcurrentMap read views and
+# `remove`), the Task route and the two handle routes (Channel, Atomic). M3.1: a module global is
+# the run's one copy, so a write to it lands on every route and in every reader. M3.2: a Channel and
+# an Atomic hold the closure itself. M3.3: a box holds the closure itself too, and a box closure
+# runs in its caller's task, so a write through a capture lands on the one binding, in any reader
+# (Go `closures.go`, M3.3 report: `box_route_other_task 2`, `box_route_same_task 3`,
+# `box_built_closure [1 9]`, `job_closure_over_box [0 1]`). Only `Task.get` still copies: an
+# Executor job's closure crosses as a copy (D4 until M3.4), so a closure it returns over a capture
+# of its submitter faults.
 import Shared, RwShared, Atomic, Executor from std.concurrency
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
 
 COPY_TAIL := "is this task's copy: a write to it would be lost at the join"
 ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get", "ConcurrentMap.remove", "Channel.recv", "Atomic.load", "Task.get"]
 BOX_ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get"]
-HANDLE_ROUTES := ["Channel.recv", "Atomic.load"]
+HANDLE_ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get", "ConcurrentMap.remove", "Channel.recv", "Atomic.load"]
 G := [1]
 
 fn some(o: (fn() -> None)?) -> fn() -> None:
@@ -101,31 +99,31 @@ fn silent_routes(make: fn() -> fn() -> None) -> List[str]:
             out.push(name)
     return out
 
-test fn shared_get_closure_capture_write_faults():
-    assert in_task(route("Shared.get", list_writer())).contains(COPY_TAIL)
+test fn shared_get_closure_capture_write_lands():
+    assert in_task(route("Shared.get", list_writer())) == "no-fault"
 
-test fn rwshared_get_closure_capture_write_faults():
-    assert in_task(route("RwShared.get", list_writer())).contains(COPY_TAIL)
+test fn rwshared_get_closure_capture_write_lands():
+    assert in_task(route("RwShared.get", list_writer())) == "no-fault"
 
-test fn shared_read_result_closure_capture_write_faults():
-    assert in_task(route("Shared.read", list_writer())).contains(COPY_TAIL)
+test fn shared_read_result_closure_capture_write_lands():
+    assert in_task(route("Shared.read", list_writer())) == "no-fault"
 
-test fn rwshared_read_closure_capture_write_faults():
-    assert in_task(route("RwShared.read", list_writer())).contains(COPY_TAIL)
+test fn rwshared_read_closure_capture_write_lands():
+    assert in_task(route("RwShared.read", list_writer())) == "no-fault"
 
-test fn concurrent_list_at_closure_capture_write_faults():
-    assert in_task(route("ConcurrentList.at", list_writer())).contains(COPY_TAIL)
+test fn concurrent_list_at_closure_capture_write_lands():
+    assert in_task(route("ConcurrentList.at", list_writer())) == "no-fault"
 
-test fn concurrent_map_get_closure_capture_write_faults():
-    assert in_task(route("ConcurrentMap.get", list_writer())).contains(COPY_TAIL)
+test fn concurrent_map_get_closure_capture_write_lands():
+    assert in_task(route("ConcurrentMap.get", list_writer())) == "no-fault"
 
-test fn concurrent_map_remove_closure_capture_write_faults():
-    assert in_task(route("ConcurrentMap.remove", list_writer())).contains(COPY_TAIL)
+test fn concurrent_map_remove_closure_capture_write_lands():
+    assert in_task(route("ConcurrentMap.remove", list_writer())) == "no-fault"
 
 test fn channel_recv_closure_capture_write_lands():
     assert in_task(route("Channel.recv", list_writer())) == "no-fault"
 
-test fn list_capture_write_faults_on_every_copying_route():
+test fn list_capture_write_faults_only_on_the_task_route():
     assert silent_routes(list_writer) == HANDLE_ROUTES
 
 test fn global_write_lands_on_every_route():
@@ -133,52 +131,52 @@ test fn global_write_lands_on_every_route():
     assert silent_routes(global_writer) == ROUTES
     assert G.len() == before + ROUTES.len(), "a route lost a global write: {G.len() - before}"
 
-# The task that stored the closure reads it back: the read rebuilt the captures as copies (TICKET-291).
-test fn self_read_back_faults_on_every_box_route():
+# The task that stored the closure reads it back: it is the closure itself.
+test fn self_read_back_lands_on_every_box_route():
     for name in BOX_ROUTES:
-        assert outcome(route(name, list_writer())()).contains(COPY_TAIL), name
+        assert outcome(route(name, list_writer())()) == "no-fault", name
 
-test fn a_task_reads_back_its_own_stored_closure_and_faults():
+test fn a_task_reads_back_its_own_stored_closure_and_the_write_lands():
     r := Channel[str](1)
     parallel:
         spawn:
             r.send(outcome(route("Shared.get", list_writer())()))
-    assert r.recv().contains(COPY_TAIL)
+    assert r.recv() == "no-fault"
 
-# A closure a task built and stored, read by main after the join: the Channel twin faults.
-test fn task_built_closure_read_by_main_faults():
+# A closure a task built and stored, read by main after the join.
+test fn task_built_closure_read_by_main_lands():
     b := Shared[List[fn() -> None]]([])
     parallel:
         spawn:
             b.set([list_writer()])
-    assert outcome(b.get()[0]).contains(COPY_TAIL)
+    assert outcome(b.get()[0]) == "no-fault"
 
-# `update` stores a captured closure: every reader faults, the updating task included.
-test fn update_stored_closure_read_by_task_faults():
+# `update` stores a captured closure: every reader calls that closure, the updating task included.
+test fn update_stored_closure_read_by_task_lands():
     g := list_writer()
     b := Shared[List[fn() -> None]]([])
     b.update(fn(s): s + [g])
-    assert outcome(b.get()[0]).contains(COPY_TAIL)
-    assert in_task(fn(): b.get()[0]).contains(COPY_TAIL)
+    assert outcome(b.get()[0]) == "no-fault"
+    assert in_task(fn(): b.get()[0]) == "no-fault"
 
-# A closure built inside the box captures the box's own state; the write would be lost, so it faults.
-test fn box_built_closure_capture_write_faults():
+# A closure built inside `read` captures the box's own live value, so its write lands in the box
+# (Go `box_built_closure [1 9]`).
+test fn box_built_closure_capture_write_lands_in_the_box():
     b := Shared([1])
     built := b.read(fn(s): fn(): s.push(9))
-    assert outcome(built).contains(COPY_TAIL)
-    assert b.get() == [1]
+    assert outcome(built) == "no-fault"
+    assert b.get() == [1, 9]
 
-# TICKET-291 C1: a same-task round trip is a crossing too, so the write faults on every copying
-# route; a handle route returns the closure itself.
-test fn same_task_round_trip_faults_on_every_copying_route():
+# TICKET-291 C1: a same-task round trip faults only on the copying route.
+test fn same_task_round_trip_faults_only_on_the_task_route():
     silent: List[str] = []
     for name in ROUTES:
         if not outcome(route(name, list_writer())()).contains(COPY_TAIL):
             silent.push(name)
     assert silent == HANDLE_ROUTES
 
-# C2: a relay task re-stores the closure; the re-store must keep the mark.
-test fn relay_restore_through_shared_keeps_the_mark():
+# C2: a relay task re-stores the closure; it is still the one closure.
+test fn relay_restore_through_shared_is_the_one_closure():
     g := list_writer()
     c := Shared([g])
     r := Channel[str](1)
@@ -187,7 +185,7 @@ test fn relay_restore_through_shared_keeps_the_mark():
             h := c.get()[0]
             c.set([h])
             r.send(outcome(c.get()[0]))
-    assert r.recv().contains(COPY_TAIL)
+    assert r.recv() == "no-fault"
 
 # M3.2: a relay through two channels hands on the one closure (Go `closures.go`: `relay 2`).
 test fn relay_through_channels_is_the_one_closure():
@@ -199,8 +197,8 @@ test fn relay_through_channels_is_the_one_closure():
     ch2.send(h)
     assert outcome(ch2.recv()) == "no-fault"
 
-# C4: a closure received inside a box closure is stamped with the storing task, not the sender.
-test fn recv_inside_box_closure_stamps_the_storing_task():
+# C4: a closure received inside a box closure is the sender's closure.
+test fn recv_inside_box_closure_is_the_senders_closure():
     ch := Channel[fn() -> None](1)
     b := Shared[List[fn() -> None]]([])
     r := Channel[str](1)
@@ -213,7 +211,7 @@ test fn recv_inside_box_closure_stamps_the_storing_task():
             r.send(outcome(b.get()[0]))
         spawn:
             b.update(fn(s): s + [ch.recv()])
-    assert r.recv().contains(COPY_TAIL)
+    assert r.recv() == "no-fault"
 
 # C3: a closure the box closure builds over FRESH state loses no write, so it must not fault.
 fn make_logger() -> fn() -> None:
@@ -224,11 +222,9 @@ test fn box_built_closure_over_fresh_state_does_not_fault():
     c := Shared([1]).read(fn(s): make_logger())
     assert outcome(c) == "no-fault"
 
-# TICKET-291 grid: route x reader x capture kind. Every cell faults except a module-global write:
-# M3.1 makes the global the run's one copy, so that write lands for every reader (`G` grows by one).
-# Go: the closure appends to the package `var` in whichever goroutine runs it. M3.2: on a handle
-# route the reader gets the closure itself, so only a closure that already holds a copy (over box
-# state) faults there.
+# TICKET-291 grid: route x reader x capture kind. Every cell lands except the `Task.get` route,
+# whose job closure is a copy (D4 until M3.4): there every capture but a module global faults. A
+# module-global write lands for every reader (`G` grows by one).
 READERS := ["same task", "other task", "relay task"]
 CAPTURES := ["captured list", "module global", "fresh box state", "box state"]
 
@@ -264,7 +260,7 @@ fn cell(name: str, reader: str, capture: str) -> str:
             return relay(name, read)
         _: panic("no reader {reader}")
 
-test fn closure_capture_grid_faults_except_a_global_write():
+test fn closure_capture_grid_faults_only_on_the_task_route():
     wrong: List[str] = []
     for name in ROUTES:
         for reader in READERS:
@@ -274,7 +270,7 @@ test fn closure_capture_grid_faults_except_a_global_write():
                 if capture == "module global":
                     if got != "no-fault" or G.len() != before + 1:
                         wrong.push("{name}/{reader}/{capture}")
-                elif HANDLE_ROUTES.contains(name) and capture != "box state":
+                elif HANDLE_ROUTES.contains(name):
                     if got != "no-fault":
                         wrong.push("{name}/{reader}/{capture}")
                 elif not got.contains(COPY_TAIL):
@@ -293,12 +289,10 @@ fn over_state(s: List[int]) -> fn() -> None:
     log := [s]
     return fn(): log[0].push(5)
 
-# C3 row: the closure a box call builds and returns. Over fresh state the caller holds the only
-# live copy, so the write runs and a sibling closure over the same binding sees it. Over the box's
-# state, or fresh state that holds it, the write would be lost, so it faults. `RwShared.read` runs
-# its closure in the reader's heap over the reader's copy of the state (`03-shared.md`), so that
-# write is the reader's own.
-test fn box_call_result_marks_only_what_the_box_keeps():
+# C3 row: the closure a box call builds and returns runs on what it captured, by handle: a write
+# over fresh state is seen by a sibling closure over the same binding, and a write over the box's
+# live value lands in the box (Go `box_built_closure [1 9]`).
+test fn box_call_result_closure_writes_land():
     p := Shared([1]).read(fn(s): make_pair())
     assert outcome(p.put) == "no-fault"
     assert p.size() == 2
@@ -306,12 +300,12 @@ test fn box_call_result_marks_only_what_the_box_keeps():
     assert outcome(q.put) == "no-fault"
     assert q.size() == 2
     b := Shared([1])
-    assert outcome(b.read(fn(s): fn(): s.push(9))).contains(COPY_TAIL)
-    assert outcome(b.read(fn(s): over_state(s))).contains(COPY_TAIL)
-    assert b.get() == [1]
+    assert outcome(b.read(fn(s): fn(): s.push(9))) == "no-fault"
+    assert outcome(b.read(fn(s): over_state(s))) == "no-fault"
+    assert b.get() == [1, 9, 5]
     rw := RwShared([1])
     assert outcome(rw.read(fn(s): fn(): s.push(9))) == "no-fault"
-    assert rw.get() == [1]
+    assert rw.get() == [1, 9]
 
 fn first_pair(s: List[(int, int)]) -> fn() -> None:
     xs := [s[0]]
@@ -334,10 +328,10 @@ test fn box_call_fresh_capture_over_kept_immutable_does_not_fault():
     assert outcome(b.read(fn(s): first_pair(s))) == "no-fault"
     assert b.get() == [(1, 2)]
 
-# F1 negative: a fresh capture that holds a MUTABLE kept object still faults.
-test fn box_call_fresh_capture_over_kept_mutable_faults():
+# F1: a fresh capture that holds a MUTABLE object of the box lands too: the box holds it by handle.
+test fn box_call_fresh_capture_over_kept_mutable_lands():
     b := Shared([[1]])
-    assert outcome(b.read(fn(s): first_holder(s))).contains(COPY_TAIL)
+    assert outcome(b.read(fn(s): first_holder(s))) == "no-fault"
 
 # F2: a job result closure over fresh state: the job heap ends with the job, so the caller holds the only copy.
 test fn task_result_closure_over_fresh_state_does_not_fault():
@@ -346,16 +340,18 @@ test fn task_result_closure_over_fresh_state_does_not_fault():
     ex.shutdown()
     assert outcome(ok(t.get())) == "no-fault"
 
-# F2 negative: a job result closure over state the job stored in a Shared it shares still faults.
-test fn task_result_closure_over_shared_stored_state_faults():
+# F2: a job result closure over the live state of a Shared the job shares: the write lands in the
+# box (Go `job_closure_over_box [0 1]`).
+test fn task_result_closure_over_shared_state_lands():
     box := Shared[List[int]]([0])
     ex := Executor(1)
     t := ex.submit(fn(): shared_logger(box))
     ex.shutdown()
-    assert outcome(ok(t.get())).contains(COPY_TAIL)
+    assert outcome(ok(t.get())) == "no-fault"
+    assert box.get() == [0, 1]
 
-# TICKET-295 grid: one cell per kind of kept element that a fresh capture holds. The write
-# faults exactly when a write could change the kept element or an object below it.
+# TICKET-295 grid: one cell per kind of box element that a fresh capture holds. M3.3: the box holds
+# each by handle, so no cell faults.
 struct Pt:
     x: int
 
@@ -379,12 +375,12 @@ test fn fresh_capture_over_a_kept_element_grid():
     wrong.extend(miss("tuple of ints", outcome(Shared([(1, 2)]).read(fn(s): hold_first(s))), false))
     wrong.extend(miss("option of tuple", outcome(Shared[List[(int, int)?]]([?(1, 2)]).read(fn(s): hold_first(s))), false))
     wrong.extend(miss("enum of int", outcome(Shared([Hold.Num(1)]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("tuple holding a list", outcome(Shared([(1, [2])]).read(fn(s): hold_first(s))), true))
-    wrong.extend(miss("option of list", outcome(Shared[List[List[int]?]]([?[2]]).read(fn(s): hold_first(s))), true))
-    wrong.extend(miss("enum holding a list", outcome(Shared([Hold.Items([2])]).read(fn(s): hold_first(s))), true))
-    wrong.extend(miss("struct", outcome(Shared([Pt(1)]).read(fn(s): hold_first(s))), true))
-    wrong.extend(miss("list", outcome(Shared([[1]]).read(fn(s): hold_first(s))), true))
-    wrong.extend(miss("map", outcome(Shared([{1: 2}]).read(fn(s): hold_first(s))), true))
+    wrong.extend(miss("tuple holding a list", outcome(Shared([(1, [2])]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("option of list", outcome(Shared[List[List[int]?]]([?[2]]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("enum holding a list", outcome(Shared([Hold.Items([2])]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("struct", outcome(Shared([Pt(1)]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("list", outcome(Shared([[1]]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("map", outcome(Shared([{1: 2}]).read(fn(s): hold_first(s))), false))
     assert wrong == []
 
 fn list_capture(l: List[int]) -> fn() -> None:
@@ -397,7 +393,8 @@ fn job_closure(f: fn() -> fn() -> None) -> str:
     ex.shutdown()
     return outcome(ok(t.get()))
 
-# TICKET-295 grid: a job result closure faults exactly when a capture reaches a copy.
+# TICKET-295 grid: a job result closure faults exactly when a capture reaches a copy: the job's
+# copy of a submitter local (D4 until M3.4). Box state is the box's live value (M3.3).
 test fn task_result_closure_capture_grid():
     xs := [1]
     box := Shared[List[int]]([0])
@@ -405,5 +402,5 @@ test fn task_result_closure_capture_grid():
     wrong.extend(miss("fresh state", job_closure(fresh_logger), false))
     wrong.extend(miss("module global", job_closure(global_writer), false))
     wrong.extend(miss("submitter local", job_closure(fn(): list_capture(xs)), true))
-    wrong.extend(miss("box state", job_closure(fn(): shared_logger(box)), true))
+    wrong.extend(miss("box state", job_closure(fn(): shared_logger(box)), false))
     assert wrong == []

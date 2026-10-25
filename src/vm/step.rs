@@ -847,26 +847,19 @@ impl Vm {
                 })));
                 self.push(Value::obj(h));
             }
+            // M3.3 — a box holds its init by handle (Go `&Shared{v: x}`).
             Op::NewShared => {
                 let init = self.pop();
-                // The box holds the wire form (single serialization == the old deep_clone-in). A
-                // non-sendable init (a frame-holding generator / module/native/FFI handle) faults
-                // gracefully with this Op's span — the box is a shared cross-thread cell.
-                let init = self.to_wire_crossable(init, span)?;
-                // TICKET-246: the value is decoded into the box's own heap and lives there.
-                let core = self.new_shared_core(init);
-                let h = self.heap.alloc(Obj::Shared(core));
+                let h = self
+                    .heap
+                    .alloc(Obj::Shared(Arc::new(SharedCore::new(init))));
                 self.push(Value::obj(h));
             }
             Op::NewRwShared => {
                 let init = self.pop();
-                // The box holds the wire form (single serialization == the old deep_clone-in). A
-                // non-sendable init (a frame-holding generator / module/native/FFI handle) faults
-                // gracefully with this Op's span — the box is a shared cross-thread cell.
-                // TICKET-154: an `RwShared` store serializes like every other cross-heap store (one object per alias).
-                let init = self.to_wire_crossable(init, span)?;
-                let core = self.new_rwshared_core(init);
-                let h = self.heap.alloc(Obj::RwShared(core));
+                let h = self
+                    .heap
+                    .alloc(Obj::RwShared(Arc::new(RwSharedCore::new(init))));
                 self.push(Value::obj(h));
             }
             // `NewAtomic`/`NewAtomicInt` delegate to `#[inline(never)]` helpers so their locals do NOT

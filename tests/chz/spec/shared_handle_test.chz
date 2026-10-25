@@ -1,0 +1,190 @@
+# M3.3 — a `Shared` / `RwShared` box holds ONE value by handle, behind one guard, and its closure
+# runs in the caller's task on the live value (Go `mu.Lock(); f(v); mu.Unlock()`). `get()` returns
+# the live value. Goldens: the Go programs in the M3.3 report (go1.27.0): `handle/main.go` prints
+# `shared_get_write 2`, `rwshared_get_write 2`, `rwshared_read_live 3 3`, `two_updates 2`,
+# `blocking_update 7`, `holder_waits_on_channel 30`, `memoize_one_object 2`,
+# `task_get_one_object 2`, `broadcast_shares 2 2`. `reenter/main.go` (Lock in Lock) and
+# `readwrite/main.go` (Lock in RLock) end `fatal error: all goroutines are asleep - deadlock!`:
+# the same certain deadlock is a fault here, with the re-entry text.
+import Executor, RwShared, Shared, Task from std.concurrency
+import Broadcast from std.concurrency.broadcast
+import memoize1 from std.memoize
+import std.time as time
+
+fn msg_of[T](r: T!Error, where_: str) -> str:
+    match r:
+        ?_: assert false, where_ + " must fault"
+        !e: return e.message()
+    return ""
+
+test fn shared_get_then_a_write_is_seen_by_the_box():
+    s := Shared({"k": 0})
+    x := s.get()
+    x["z"] = 1
+    assert s.get().len() == 2
+
+test fn rwshared_get_then_a_write_is_seen_by_the_box():
+    r := RwShared({"k": 0})
+    y := r.get()
+    y["z"] = 1
+    assert r.get().len() == 2
+
+fn add_w(m: Map[str, int]) -> int:
+    m["w"] = 2
+    return m.len()
+
+test fn rwshared_read_runs_on_the_live_value():
+    r := RwShared({"k": 0, "z": 1})
+    assert r.read(add_w) == 3
+    assert r.get().len() == 3
+
+fn keep(log: List[int], x: int) -> int:
+    log.push(x)
+    return x + 1
+
+test fn an_update_closure_writes_its_captures():
+    s := Shared(1)
+    log: List[int] = []
+    s.update(fn(x): keep(log, x))
+    assert log == [1]
+    assert s.get() == 2
+
+fn inc(n: int) -> int:
+    return n + 1
+
+fn bump(s: Shared[int]):
+    s.update(inc)
+
+test fn two_tasks_update_one_box():
+    s := Shared(0)
+    parallel:
+        spawn bump(s)
+        spawn bump(s)
+    assert s.get() == 2
+
+fn hold_and_wait(s: Shared[int], held: Channel[bool], ch: Channel[int]):
+    s.update(fn(n): signal_then_take(held, ch, n))
+
+# Q1: a closure that blocks is legal; the guard stays with its task. The send follows the
+# closure's own signal, so the closure waits in its `recv`.
+test fn a_blocking_update_closure_waits():
+    s := Shared(0)
+    held := Channel[bool](1)
+    ch := Channel[int](0)
+    parallel:
+        spawn hold_and_wait(s, held, ch)
+        spawn:
+            _ := held.recv()
+            ch.send(7)
+    assert s.get() == 7
+
+fn times_ten(n: int) -> int:
+    return n * 10
+
+fn wait_for_guard(s: Shared[int]):
+    s.update(times_ten)
+
+fn signal_then_take(held: Channel[bool], ch: Channel[int], n: int) -> int:
+    held.send(true)
+    return n + ch.recv()
+
+# A guard holder that waits on a channel another task sends to later is no deadlock: the guard
+# waiter is blocked, the sender is not.
+test fn a_guard_waiter_behind_a_holder_that_waits_on_a_channel_is_no_deadlock():
+    s := Shared(0)
+    held := Channel[bool](1)
+    ch := Channel[int](0)
+    parallel:
+        spawn hold_and_wait(s, held, ch)
+        spawn:
+            _ := held.recv()
+            parallel:
+                spawn wait_for_guard(s)
+                spawn:
+                    time.sleep_ms(20)
+                    ch.send(3)
+    assert s.get() == 30
+
+fn reenter(s: Shared[int], x: int) -> int:
+    s.update(inc)
+    return x
+
+test fn a_same_box_reentry_faults_with_the_update_guard_text():
+    s := Shared(1)
+    r := recover: s.update(fn(x): reenter(s, x))
+    fault := msg_of(r, "re-entry")
+    assert fault.contains("already holds the update guard on this Shared box"), fault
+    assert s.get() == 1
+
+fn write_inside(r: RwShared[int], x: int) -> int:
+    r.write(inc)
+    return x
+
+# Q2: a write inside the same task's read waits for that read: a certain deadlock, a fault.
+test fn a_write_inside_a_read_of_the_same_box_faults():
+    r := RwShared(1)
+    res := recover: r.read(fn(x): write_inside(r, x))
+    fault := msg_of(res, "write in read")
+    assert fault.contains("already holds the read guard on this RwShared box"), fault
+    assert r.get() == 1
+
+fn read_inside(r: RwShared[int], x: int) -> int:
+    return x + r.read(fn(y): y)
+
+test fn a_read_inside_a_read_of_the_same_box_is_legal():
+    r := RwShared(4)
+    assert r.read(fn(x): read_inside(r, x)) == 8
+
+fn one_map(k: int) -> Map[str, int]:
+    return {"k": k}
+
+fn write_memo(f: fn(int) -> Map[str, int], done: Channel[bool]):
+    m := f(1)
+    m["z"] = 9
+    done.send(true)
+
+test fn a_memoize_result_is_one_object_across_two_tasks():
+    f := memoize1(one_map)
+    a := f(1)
+    done := Channel[bool](1)
+    parallel:
+        spawn write_memo(f, done)
+    _ := done.recv()
+    assert a.len() == 2
+    assert f(1).len() == 2
+
+fn result_map() -> Map[str, int]:
+    return {"r": 1}
+
+fn write_task_result(t: Task[Map[str, int]]):
+    match t.get():
+        ?m: m["w"] = 2
+        !_: pass
+
+test fn task_get_is_one_object_in_the_owner_and_a_spawned_task():
+    ex := Executor(1)
+    t := ex.submit(result_map)
+    ex.shutdown()
+    parallel:
+        spawn write_task_result(t)
+    match t.get():
+        ?m: assert m.len() == 2
+        !e: assert false, e.message()
+
+fn add_b(m: Map[str, int]) -> int:
+    m["b"] = 2
+    return m.len()
+
+test fn broadcast_gives_every_receiver_the_one_value():
+    b := Broadcast[Map[str, int]].new(4)
+    r1 := b.subscribe()
+    r2 := b.subscribe()
+    v := {"a": 1}
+    b.send(v)
+    match r1.recv():
+        ?m: _ := add_b(m)
+        !_: assert false
+    match r2.recv():
+        ?m: assert m.len() == 2
+        !_: assert false
+    assert v.len() == 2

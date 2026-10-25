@@ -858,14 +858,7 @@ impl Checker {
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
-                        self.check_crossing_closure_call(
-                            "Shared",
-                            method,
-                            &sig.params,
-                            sig.min_params,
-                            args,
-                            span,
-                        );
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
                         if method == "read" {
                             return self.recover_read_ret(args);
                         }
@@ -1078,14 +1071,7 @@ impl Checker {
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
-                        self.check_crossing_closure_call(
-                            "RwShared",
-                            method,
-                            &sig.params,
-                            sig.min_params,
-                            args,
-                            span,
-                        );
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
                         if method == "read" {
                             return self.recover_read_ret(args);
                         }

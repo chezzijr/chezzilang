@@ -383,7 +383,6 @@ impl Vm {
                 return self.net_connect_or_listen(name, args, span);
             }
             Kind::InterceptIo => return self.io_native(name, args, span),
-            Kind::InterceptAirlock => return self.airlock_native(name, args, span),
             Kind::InterceptTimer => return self.new_timer(&args, span),
             Kind::Inline | Kind::Blocking | Kind::TimedWait | Kind::HostWait => {}
         }
@@ -450,7 +449,6 @@ impl Vm {
                 | Kind::InterceptIo
                 | Kind::InterceptNet
                 | Kind::HostWait
-                | Kind::InterceptAirlock
                 | Kind::InterceptTimer => Some(OffloadReq {
                     func,
                     args: nargs,

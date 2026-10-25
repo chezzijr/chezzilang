@@ -607,13 +607,10 @@ impl Vm {
         // fault that was neither caught nor propagated cannot bypass an unrelated later handler.
         // This makes the delivery happen ONCE — the owner aborts at the first delivery instead of
         // catching and re-reading the recorded fault at every later checkpoint.
-        // `n` is task-wide (`Vm::owned_nurseries`): inside a box call a nursery of a parked caller
-        // sits below `base`, so every handler of this context is inside it.
-        let base = self.nursery_base();
         let owner_bypass = matches!(
             (self.cut, self.handlers.last()),
             (Some(Cut::Delivered { floor: Some(n) }), Some(h))
-                if caught_here && n < base + self.nurseries.len() && base + h.nursery_len > n
+                if caught_here && n < self.nurseries.len() && h.nursery_len > n
         );
         if cancel_bypass || owner_bypass || rte.is_over_memory || rte.is_timed_out {
             let over_mem = rte.is_over_memory;
@@ -935,11 +932,6 @@ impl Vm {
             host.root_view().walk(&mut work);
         }
         work.extend(self.active_generators.iter().copied());
-        // TICKET-246 / M1.7 — every open box call, at every depth: its parked context
-        // (`BoxFrame::caller`) and the generators it parked (`BoxFrame::roots`).
-        for frame in &self.box_chain {
-            frame.roots(&mut work);
-        }
         // TICKET-215 / M3.1 — the run's fn-value table.
         work.extend(
             self.fn_values

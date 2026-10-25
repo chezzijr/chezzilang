@@ -8,10 +8,11 @@ use crate::base::builtin_method::{
 };
 
 impl Vm {
-    /// `Shared[T]` methods (C3/C4): `get` (copies out), `set` (copies in), `update` (read-modify-write
-    /// via the re-entrant call path). The receiver and the arguments are popped by the dispatcher,
-    /// so they are rooted on the operand stack ([`Vm::with_method_rooted`]) across the update
-    /// guard's wait and `update`'s nested call.
+    /// `Shared[T]` methods: `get`, `set`, `update(f)`, `read(f)`. M3.3: the box holds ONE value by
+    /// handle; every method takes the box's guard (its lock, [`Vm::take_update_guard`]) and works
+    /// on the live value in this task. The receiver and the arguments are popped by the dispatcher,
+    /// so they are rooted on the operand stack ([`Vm::with_method_rooted`]) across the guard's wait
+    /// and the closure call.
     pub(super) fn shared_method(
         &mut self,
         h: GcRef,
@@ -23,9 +24,9 @@ impl Vm {
     }
 
     /// Run a box method `f` with its popped receiver `h` and `args` rooted on the operand stack.
-    /// M1.8 — the receiver is a box's root: the box state is reachable through its handles only
-    /// (`SharedState::roots_into`), so a method that waits for the update guard detached
-    /// (`Vm::gc_blocking`) keeps its handle in this `Vm`'s published roots.
+    /// M1.8 — the receiver is a box's root: the box value is reachable through its handles only
+    /// (`Heap::children`), so a method that waits for the guard detached (`Vm::gc_blocking`) keeps
+    /// its handle in this `Vm`'s published roots.
     fn with_method_rooted<T>(
         &mut self,
         h: GcRef,
@@ -38,6 +39,27 @@ impl Vm {
         self.with_roots(&roots, f)
     }
 
+    /// Take the guard of the box core at `addr` in `mode`, as this task.
+    fn box_guard(
+        &mut self,
+        addr: usize,
+        mode: GuardMode,
+        span: Span,
+    ) -> Result<core::UpdateGuard, RuntimeError> {
+        let what = match mode {
+            GuardMode::Write => "a Shared/RwShared write guard",
+            GuardMode::Read => "a RwShared read guard",
+        };
+        self.take_update_guard(GuardKey { addr, mode }, what, span)
+    }
+
+    /// Run the closure `f` of a box method on the live value `cur`, in this task, under the guard
+    /// the caller holds. A blocking op inside `f` demotes the worker (`Vm::reentered`), so the
+    /// guard stays with this task until `f` returns.
+    fn box_closure(&mut self, f: Value, cur: Value, span: Span) -> Result<Value, RuntimeError> {
+        self.reentered(|vm| vm.invoke_value(f, vec![cur], span))
+    }
+
     fn shared_method_rooted(
         &mut self,
         h: GcRef,
@@ -48,70 +70,50 @@ impl Vm {
         let Some(which) = SharedMethod::from_name(method) else {
             return Err(self.err(format!("type Shared has no method '{method}'"), span));
         };
+        let core = self.shared_core(h);
+        let addr = Arc::as_ptr(&core) as usize;
+        // EVERY arm takes the guard first (TICKET-016 / W8-3, the process-global wait-for graph),
+        // so a same-box re-entry from the box's own closure FAULTS (the length-1 cycle) for `get` /
+        // `read` / `set` / `update` alike, and a cross-box wait cycle faults.
         match which {
-            // TICKET-246: the value lives in the box's private heap. EVERY arm takes the update
-            // guard first (TICKET-016 / W8-3, the process-global wait-for graph) and only then the
-            // state lock, so a same-box re-entry from the box's own closure FAULTS (the length-1
-            // cycle) for `get` / `read` / `set` / `update` alike, a cross-box wait cycle faults, and
-            // user code never waits on the state lock itself.
             SharedMethod::Get => {
                 self.arity_err("get", args, 0, span)?;
-                let core = self.shared_core(h);
-                let w = self.shared_copy_out(&core, span)?;
-                Ok(self.from_wire(w))
+                let _guard = self.box_guard(addr, GuardMode::Write, span)?;
+                Ok(core.v.get())
             }
             SharedMethod::Set => {
                 self.arity_err("set", args, 1, span)?;
-                let w = self.to_wire_crossable(args[0], span)?;
-                let core = self.shared_core(h);
-                let key = Arc::as_ptr(&core) as usize;
-                let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
-                let mut st = core.state.lock();
-                self.box_store(&mut st, w);
+                let _guard = self.box_guard(addr, GuardMode::Write, span)?;
+                core.v.set(args[0]);
                 Ok(Value::nil())
             }
-            // `update(f)` runs `f` inside the box on the live state and its result becomes the
-            // state; `read(f)` does the same with no write-back and copies the result out.
+            // `update(f)`: `f`'s result becomes the value; `read(f)` returns it. A fault leaves the
+            // value as `f` left it.
             SharedMethod::Update | SharedMethod::Read => {
                 self.arity_err(method, args, 1, span)?;
-                let fw = self.cross_closure(
-                    "Shared",
-                    if which == SharedMethod::Update {
-                        "update"
-                    } else {
-                        "read"
-                    },
-                    args[0],
-                    span,
-                )?;
-                let core = self.shared_core(h);
-                let key = Arc::as_ptr(&core) as usize;
-                let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
-                let mut st = core.state.lock();
-                let r = self.box_call(&mut st, fw, which == SharedMethod::Update, span);
-                drop(st);
-                Ok(match r? {
-                    Some(w) => self.from_wire(w),
-                    None => Value::nil(),
-                })
+                let _guard = self.box_guard(addr, GuardMode::Write, span)?;
+                let r = self.box_closure(args[0], core.v.get(), span)?;
+                if which == SharedMethod::Update {
+                    core.v.set(r);
+                    return Ok(Value::nil());
+                }
+                Ok(r)
             }
         }
     }
 
-    /// `RwShared[T]` methods (TICKET-246: the value lives in the box's private heap).
+    /// `RwShared[T]` methods. M3.3: one value by handle, behind a two-mode guard.
     ///
     /// - `write(f)` / `set` and the single-entry writers (`_set_key`, `_remove_key`,
-    ///   `_get_or_insert`, `_add`, `_remove`, `_push`) take the update guard, then the write lock,
-    ///   and run inside the box heap on the live value ([`Vm::rwshared_mutate`]): a writer is the
-    ///   plain `Map` / `Set` / `List` operation, with no copy of the container.
+    ///   `_get_or_insert`, `_add`, `_remove`, `_push`) take the WRITE guard and work on the live
+    ///   value ([`Vm::rwshared_mutate`]): a writer is the plain `Map` / `Set` / `List` operation.
     /// - `get`, `read(f)` and the read views (`_len`, `_at`, `_slice`, `_contains`, `_has`,
-    ///   `_get_key`) copy what they return out of the live heap under the read lock
-    ///   ([`Vm::rwshared_read`]) and decode it after the lock dropped. `read`'s closure, and a
-    ///   key's `eq`, run in the READER's heap with no lock held, so `write` nested in `read` is
-    ///   legal and no user code runs under the read lock.
+    ///   `_get_key`) take the READ guard ([`Vm::rwshared_read`]) and return values by handle.
+    ///   `read`'s closure, and a key's `eq`, run under it: a `write` nested inside them faults
+    ///   (`already holds the read guard`).
     ///
     /// The receiver and the arguments are popped by the dispatcher, so they are rooted here across
-    /// every user call (`hash`, `eq`, the `read` closure).
+    /// every user call (`hash`, `eq`, the closure).
     pub(super) fn rwshared_method(
         &mut self,
         h: GcRef,
@@ -124,15 +126,47 @@ impl Vm {
         })
     }
 
-    /// The `Option` value a RwShared map primitive returns for the wire value it took out of the box
-    /// (`_set_key` the value it replaced, `_remove_key` the value it removed).
-    fn wire_option(&mut self, w: Option<WireValue>) -> Value {
-        match w {
-            Some(w) => {
-                let v = self.from_wire(w);
-                self.alloc_enum("Option", "Some", &[v])
-            }
+    /// The `Option` value a RwShared map primitive returns (`_set_key` the value it replaced,
+    /// `_remove_key` the value it removed, `_at` / `_get_key` the value found).
+    fn option_of(&mut self, v: Option<Value>) -> Value {
+        match v {
+            Some(v) => self.alloc_enum("Option", "Some", &[v]),
             None => self.alloc_enum("Option", "None", &[]),
+        }
+    }
+
+    /// The ONE reader of a `RwShared` value: run `pick` on the live value under the read guard.
+    fn rwshared_read<R>(
+        &mut self,
+        core: &Arc<RwSharedCore>,
+        span: Span,
+        pick: impl FnOnce(&mut Vm, Value) -> Result<R, RuntimeError>,
+    ) -> Result<R, RuntimeError> {
+        let _guard = self.box_guard(Arc::as_ptr(core) as usize, GuardMode::Read, span)?;
+        let cur = core.v.get();
+        pick(self, cur)
+    }
+
+    /// The ONE single-entry writer of a `RwShared` container: run `op` on the live value under the
+    /// write guard. `op` is the plain `Map` / `Set` / `List` operation.
+    fn rwshared_mutate<R>(
+        &mut self,
+        core: &Arc<RwSharedCore>,
+        span: Span,
+        op: impl FnOnce(&mut Vm, Value) -> Result<R, RuntimeError>,
+    ) -> Result<R, RuntimeError> {
+        let _guard = self.box_guard(Arc::as_ptr(core) as usize, GuardMode::Write, span)?;
+        let cur = core.v.get();
+        op(self, cur)
+    }
+
+    /// `"list"` / `"map"` / `"set"` for a container value, else `""`.
+    fn elem_kind(&self, v: Value) -> &'static str {
+        match v.as_obj().map(|h| self.heap.get(h)) {
+            Some(Obj::List(_)) => "list",
+            Some(Obj::Map(_)) => "map",
+            Some(Obj::Set(_)) => "set",
+            _ => "",
         }
     }
 
@@ -144,9 +178,9 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let core = self.rwshared_core(h);
-        let want_elem = |vm: &Vm, got: &str, want: &'static str| {
-            if got == want {
-                Ok(())
+        let want_elem = |vm: &Vm, st: Value, want: &'static str| {
+            if vm.elem_kind(st) == want {
+                Ok(st.as_obj().expect("a container is a heap object"))
             } else {
                 Err(vm.err(format!("RwShared.{method} requires a {want} element"), span))
             }
@@ -155,39 +189,27 @@ impl Vm {
             return match which {
                 RwSharedMethod::Get => {
                     self.arity_err("get", args, 0, span)?;
-                    let w =
-                        self.rwshared_read(&core, span, |vm, ctx| vm.box_copy_out(ctx, span))?;
-                    Ok(self.from_wire(w))
+                    self.rwshared_read(&core, span, |_, cur| Ok(cur))
                 }
                 RwSharedMethod::Read => {
                     self.arity_err("read", args, 1, span)?;
-                    let w =
-                        self.rwshared_read(&core, span, |vm, ctx| vm.box_copy_out(ctx, span))?;
-                    // The lock is dropped: `f` runs on the reader's own copy, in the reader's heap.
-                    let cur = self.from_wire(w);
-                    self.reentered(|vm| vm.invoke_value(args[0], vec![cur], span))
+                    self.rwshared_read(&core, span, |vm, cur| vm.box_closure(args[0], cur, span))
                 }
                 RwSharedMethod::Set => {
                     self.arity_err("set", args, 1, span)?;
-                    let w = self.to_wire_crossable(args[0], span)?;
-                    let key = Arc::as_ptr(&core) as usize;
-                    let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
-                    let mut st = core.state.write();
-                    self.box_store(&mut st, w);
-                    Ok(Value::nil())
+                    self.rwshared_mutate(&core, span, |_, _| {
+                        core.v.set(args[0]);
+                        Ok(Value::nil())
+                    })
                 }
-                // `write(f)` runs `f` inside the box on the live state, exclusive; its result becomes
-                // the state. Exactly `Shared.update` under the write lock.
+                // `write(f)` runs `f` on the live value, exclusive; its result becomes the value.
                 RwSharedMethod::Write => {
                     self.arity_err("write", args, 1, span)?;
-                    let fw = self.cross_closure("RwShared", "write", args[0], span)?;
-                    let key = Arc::as_ptr(&core) as usize;
-                    let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
-                    let mut st = core.state.write();
-                    let r = self.box_call(&mut st, fw, true, span);
-                    drop(st);
-                    r?;
-                    Ok(Value::nil())
+                    self.rwshared_mutate(&core, span, |vm, cur| {
+                        let r = vm.box_closure(args[0], cur, span)?;
+                        core.v.set(r);
+                        Ok(Value::nil())
+                    })
                 }
             };
         }
@@ -198,20 +220,18 @@ impl Vm {
             RwSharedPrim::SetKey => {
                 self.arity_err(method, args, 2, span)?;
                 let qh = self.hash_value(args[0], span)?;
-                let replaced = self.rwshared_mutate(&core, args, span, |vm, st, a| {
-                    want_elem(vm, vm.elem_kind(st), "map")?;
-                    let mh = st.as_obj().expect("a map is a heap object");
-                    vm.map_upsert_in_heap(mh, qh, a[0], a[1], span)
+                let replaced = self.rwshared_mutate(&core, span, |vm, st| {
+                    let mh = want_elem(vm, st, "map")?;
+                    vm.map_upsert_in_heap(mh, qh, args[0], args[1], span)
                 })?;
-                Ok(self.wire_option(replaced))
+                Ok(self.option_of(replaced))
             }
             RwSharedPrim::RemoveKey => {
                 self.arity_err(method, args, 1, span)?;
                 let qh = self.hash_value(args[0], span)?;
-                let removed = self.rwshared_mutate(&core, args, span, |vm, st, a| {
-                    want_elem(vm, vm.elem_kind(st), "map")?;
-                    let mh = st.as_obj().expect("a map is a heap object");
-                    let Some(i) = vm.map_probe(mh, qh, a[0], span)? else {
+                let removed = self.rwshared_mutate(&core, span, |vm, st| {
+                    let mh = want_elem(vm, st, "map")?;
+                    let Some(i) = vm.map_probe(mh, qh, args[0], span)? else {
                         return Ok(None);
                     };
                     let heap = vm.heap.write(mh);
@@ -220,77 +240,66 @@ impl Vm {
                     };
                     Ok(m.remove_at(heap, i).map(|e| e.2))
                 })?;
-                Ok(self.wire_option(removed))
+                Ok(self.option_of(removed))
             }
-            // Compound-atomic: the probe and the insert run under ONE exclusive lock.
+            // Compound-atomic: the probe and the insert run under ONE write guard.
             RwSharedPrim::GetOrInsert => {
                 self.arity_err(method, args, 2, span)?;
                 let qh = self.hash_value(args[0], span)?;
-                let present = self.rwshared_mutate(&core, args, span, |vm, st, a| {
-                    want_elem(vm, vm.elem_kind(st), "map")?;
-                    let mh = st.as_obj().expect("a map is a heap object");
-                    if let Some(v) = vm.map_lookup(mh, qh, a[0], span)? {
-                        return Ok(Some(v));
+                self.rwshared_mutate(&core, span, |vm, st| {
+                    let mh = want_elem(vm, st, "map")?;
+                    if let Some(v) = vm.map_lookup(mh, qh, args[0], span)? {
+                        return Ok(v);
                     }
-                    let k = vm.snapshot_key(a[0]);
+                    let k = vm.snapshot_key(args[0]);
                     let heap = vm.heap.write(mh);
                     let Obj::Map(m) = heap.get(mh) else {
                         unreachable!()
                     };
-                    m.push(heap, qh, k, a[1]);
-                    Ok(None)
-                })?;
-                Ok(match present {
-                    Some(w) => self.from_wire(w),
-                    None => args[1],
+                    m.push(heap, qh, k, args[1]);
+                    Ok(args[1])
                 })
             }
             RwSharedPrim::Add | RwSharedPrim::Remove => {
                 self.arity_err(method, args, 1, span)?;
                 let qh = self.hash_value(args[0], span)?;
                 let add = prim == RwSharedPrim::Add;
-                let mut changed = false;
-                self.rwshared_mutate(&core, args, span, |vm, st, a| {
-                    want_elem(vm, vm.elem_kind(st), "set")?;
-                    let sh = st.as_obj().expect("a set is a heap object");
-                    let pos = vm.set_probe(sh, qh, a[0], span)?;
-                    let e = vm.snapshot_key(a[0]);
+                let changed = self.rwshared_mutate(&core, span, |vm, st| {
+                    let sh = want_elem(vm, st, "set")?;
+                    let pos = vm.set_probe(sh, qh, args[0], span)?;
+                    let e = vm.snapshot_key(args[0]);
                     let heap = vm.heap.write(sh);
                     let Obj::Set(s) = heap.get(sh) else {
                         unreachable!()
                     };
-                    match pos {
+                    Ok(match pos {
                         None if add => {
                             s.push(heap, qh, e);
-                            changed = true;
+                            true
                         }
-                        Some(i) if !add => {
-                            changed = s.remove_at(heap, i).is_some();
-                        }
-                        _ => {}
-                    }
-                    Ok(None)
+                        Some(i) if !add => s.remove_at(heap, i).is_some(),
+                        _ => false,
+                    })
                 })?;
                 Ok(Value::bool(changed))
             }
             RwSharedPrim::Push => {
                 self.arity_err(method, args, 1, span)?;
-                self.rwshared_mutate(&core, args, span, |vm, st, a| {
-                    want_elem(vm, vm.elem_kind(st), "list")?;
-                    let lh = st.as_obj().expect("a list is a heap object");
+                self.rwshared_mutate(&core, span, |vm, st| {
+                    let lh = want_elem(vm, st, "list")?;
                     let heap = vm.heap.write(lh);
                     let Obj::List(items) = heap.get(lh) else {
                         unreachable!()
                     };
-                    items.push(heap, a[0]);
-                    Ok(None)
+                    items.push(heap, args[0]);
+                    Ok(())
                 })?;
                 Ok(Value::nil())
             }
             RwSharedPrim::Len => {
                 self.arity_err(method, args, 0, span)?;
-                let n = self.rwshared_read(&core, span, |vm, ctx| {
-                    match boxctx::state_obj(&vm.heap, ctx) {
+                let n = self.rwshared_read(&core, span, |vm, st| {
+                    match st.as_obj().map(|h| vm.heap.get(h)) {
                         Some(Obj::List(items)) => Ok(items.len()),
                         Some(Obj::Map(m)) => Ok(m.entries.len()),
                         Some(Obj::Set(s)) => Ok(s.entries.len()),
@@ -304,121 +313,70 @@ impl Vm {
             RwSharedPrim::At => {
                 self.arity_err(method, args, 1, span)?;
                 let i = self.int_of(args[0]);
-                let piece = self.rwshared_read(&core, span, |vm, ctx| {
-                    match boxctx::state_obj(&vm.heap, ctx) {
-                        Some(Obj::List(items)) => crate::slice::norm_index(i, items.len())
-                            .map(|u| vm.box_copy_pieces(ctx, &[items.get(u)], span))
-                            .transpose(),
+                let got = self.rwshared_read(&core, span, |vm, st| {
+                    match st.as_obj().map(|h| vm.heap.get(h)) {
+                        Some(Obj::List(items)) => {
+                            Ok(crate::slice::norm_index(i, items.len()).map(|u| items.get(u)))
+                        }
                         _ => Err(vm.err("RwShared._at requires a list element".into(), span)),
                     }
                 })?;
-                Ok(match piece {
-                    Some(ws) => {
-                        let v = self.from_wire_pieces(ws);
-                        self.alloc_enum("Option", "Some", &v)
-                    }
-                    None => self.alloc_enum("Option", "None", &[]),
-                })
+                Ok(self.option_of(got))
             }
-            // `slice(r)` is ONE crossing that returns a container, like `get`: the elements
-            // are encoded with one memo, so two that alias one node land on one object. The `Range`
-            // is read before the lock and resolved against the length INSIDE the read, with the same
-            // `range_indices` every other slice site calls.
+            // `slice(r)` returns a new list of the selected elements, by handle. The `Range` is
+            // resolved against the length under the guard, with the same `range_indices` every
+            // other slice site calls.
             RwSharedPrim::Slice => {
                 self.arity_err(method, args, 1, span)?;
                 let Some(parts) = self.as_range(args[0]) else {
                     return Err(self.err("RwShared._slice requires a Range".into(), span));
                 };
-                let ws = self.rwshared_read(&core, span, |vm, ctx| {
-                    match boxctx::state_obj(&vm.heap, ctx) {
+                self.rwshared_read(&core, span, |vm, st| {
+                    let picked: Vec<Value> = match st.as_obj().map(|h| vm.heap.get(h)) {
                         Some(Obj::List(items)) => {
                             let idxs = crate::slice::range_indices(&parts, items.len())
                                 .map_err(|e| vm.err(e.to_string(), span))?;
-                            let picked: Vec<Value> =
-                                idxs.into_iter().map(|i| items.get(i)).collect();
-                            vm.box_copy_pieces(ctx, &picked, span)
+                            idxs.into_iter().map(|i| items.get(i)).collect()
                         }
-                        _ => Err(vm.err("RwShared._slice requires a list element".into(), span)),
-                    }
-                })?;
-                let items = self.from_wire_pieces(ws);
-                Ok(Value::obj(self.heap.alloc(Obj::List(items.into()))))
+                        _ => {
+                            return Err(
+                                vm.err("RwShared._slice requires a list element".into(), span)
+                            );
+                        }
+                    };
+                    Ok(Value::obj(vm.heap.alloc(Obj::List(picked.into()))))
+                })
             }
+            // The probes: the hash runs first, then the one heap probe under the read guard (a
+            // user `eq` runs there, as under Go's `RLock`).
             RwSharedPrim::Contains => {
                 self.arity_err(method, args, 1, span)?;
-                let hit = self.rwshared_find(&core, prim, args[0], false, span)?;
+                let qh = self.hash_value(args[0], span)?;
+                let hit = self.rwshared_read(&core, span, |vm, st| {
+                    let sh = want_elem(vm, st, "set")?;
+                    vm.set_probe(sh, qh, args[0], span)
+                })?;
                 Ok(Value::bool(hit.is_some()))
             }
             RwSharedPrim::Has => {
                 self.arity_err(method, args, 1, span)?;
-                let hit = self.rwshared_find(&core, prim, args[0], false, span)?;
+                let qh = self.hash_value(args[0], span)?;
+                let hit = self.rwshared_read(&core, span, |vm, st| {
+                    let mh = want_elem(vm, st, "map")?;
+                    vm.map_probe(mh, qh, args[0], span)
+                })?;
                 Ok(Value::bool(hit.is_some()))
             }
             RwSharedPrim::GetKey => {
                 self.arity_err(method, args, 1, span)?;
-                Ok(
-                    match self.rwshared_find(&core, prim, args[0], true, span)? {
-                        Some(v) => self.alloc_enum("Option", "Some", &[v]),
-                        None => self.alloc_enum("Option", "None", &[]),
-                    },
-                )
+                let qh = self.hash_value(args[0], span)?;
+                let got = self.rwshared_read(&core, span, |vm, st| {
+                    let mh = want_elem(vm, st, "map")?;
+                    vm.map_lookup(mh, qh, args[0], span)
+                })?;
+                Ok(self.option_of(got))
             }
         }
-    }
-
-    /// The ONE probe of a `RwShared` `Map` / `Set` by a reader: is a key equal to `needle`
-    /// stored, and (`with_value`) what does it map to? O(1) expected.
-    ///
-    /// The hash runs in the caller first. Under the read lock the candidates of that hash are
-    /// copied out (one memo per entry, so a value that aliases its key decodes as one object);
-    /// the lock is dropped; then each candidate is decoded and compared in the CALLER's heap. So
-    /// a user `hash` / `eq` never runs under the lock, and the candidates are one consistent
-    /// view: a hit was present, and a miss was absent, as of that one lock.
-    fn rwshared_find(
-        &mut self,
-        core: &Arc<RwSharedCore>,
-        prim: RwSharedPrim,
-        needle: Value,
-        with_value: bool,
-        span: Span,
-    ) -> Result<Option<Value>, RuntimeError> {
-        let on_set = prim == RwSharedPrim::Contains;
-        let qh = self.hash_value(needle, span)?;
-        let cands = self.rwshared_read(core, span, |vm, ctx| {
-            let mut out = Vec::new();
-            match boxctx::state_obj(&vm.heap, ctx) {
-                Some(Obj::Map(m)) if !on_set => {
-                    for p in m.candidates(qh) {
-                        let (_, k, v) = m.entries.get(p);
-                        let picked = if with_value { vec![k, v] } else { vec![k] };
-                        out.push(vm.box_copy_pieces(ctx, &picked, span)?);
-                    }
-                }
-                Some(Obj::Set(s)) if on_set => {
-                    for p in s.candidates(qh) {
-                        out.push(vm.box_copy_pieces(ctx, &[s.entries.get(p).1], span)?);
-                    }
-                }
-                _ => {
-                    let want = if on_set { "set" } else { "map" };
-                    return Err(vm.err(
-                        format!("RwShared.{} requires a {want} element", prim.name()),
-                        span,
-                    ));
-                }
-            }
-            Ok(out)
-        })?;
-        for ws in cands {
-            let vals = self.from_wire_pieces(ws);
-            let k = vals[0];
-            let v = vals.get(1).copied().unwrap_or_else(Value::nil);
-            // Root the fresh rebuilds across the possibly re-entrant `eq`.
-            if self.with_roots(&[k, v], |vm| vm.values_equal_guarded(k, needle, 0, span))? {
-                return Ok(Some(v));
-            }
-        }
-        Ok(None)
     }
 
     /// `Atomic[T]` methods: `load`, `store`, `exchange` (swap, returns old), `cas(expected, new) ->

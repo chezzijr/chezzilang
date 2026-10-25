@@ -8,23 +8,51 @@
 //! A `Condvar` (for real blocking `recv`) was added at B3.3; a `closed` flag (for `Channel.close()`)
 //! lives alongside the queue under [`ChannelCore::q`]'s lock (see [`ChanState`]).
 
-use super::value::{GcRef, Value};
+use super::value::Value;
 use crate::lexer::Span;
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-/// TICKET-016 (W8-3) — the process-global wait-for graph behind every `Shared`/`RwShared` update
-/// guard. `owner` maps a box's stable identity (`Arc::as_ptr(..) as usize`) to the task token
-/// currently holding its guard; `waiting` maps a blocked task's token to the key it wants. A guard
-/// acquire walks `waiting`/`owner` alternately from the requester: a walk that returns to the
-/// requester is a wait-for cycle (self-held is the length-1 case), which faults instead of blocking.
+/// TICKET-016 (W8-3) — the process-global wait-for graph behind every `Shared`/`RwShared` guard.
+/// M3.3: the guard IS the box's lock (Go `sync.Mutex` / `sync.RWMutex`): a box method or closure
+/// runs in the caller's task on the live value while its task holds the guard. `writer` maps a box's
+/// stable identity (`Arc::as_ptr(..) as usize`) to the task token that holds it exclusively;
+/// `readers` maps it to the tokens that hold it shared (one entry per hold, so a nested read pushes
+/// again); `waiting` maps a blocked task's token to the guard it wants. A guard acquire walks
+/// `waiting` -> holders -> `waiting` from the requester: a walk that returns to the requester is a
+/// wait-for cycle (self-held is the length-1 case), which faults instead of blocking.
+///
+/// No std lock here lives across user code or a fiber park: the registry `Mutex` is held only for
+/// the map reads and writes below (and released by the `Condvar` wait).
 #[derive(Default)]
 struct GuardGraph {
-    owner: HashMap<usize, u64>,
-    waiting: HashMap<u64, usize>,
+    writer: HashMap<usize, u64>,
+    readers: HashMap<usize, Vec<u64>>,
+    waiting: HashMap<u64, GuardKey>,
+}
+
+impl GuardGraph {
+    /// The tasks a wait for `want` by `me` waits on: the writer, the readers for a write, and (Go
+    /// writer preference) a waiting writer for a read.
+    fn blockers(&self, want: GuardKey, me: u64) -> Vec<u64> {
+        let mut out: Vec<u64> = self.writer.get(&want.addr).copied().into_iter().collect();
+        match want.mode {
+            GuardMode::Write => {
+                out.extend(self.readers.get(&want.addr).into_iter().flatten().copied());
+            }
+            GuardMode::Read => out.extend(
+                self.waiting
+                    .iter()
+                    .filter(|(_, k)| k.addr == want.addr && k.mode == GuardMode::Write)
+                    .map(|(t, _)| *t),
+            ),
+        }
+        out.retain(|&t| t != me);
+        out
+    }
 }
 
 fn guard_registry() -> &'static (Mutex<GuardGraph>, Condvar) {
@@ -32,24 +60,44 @@ fn guard_registry() -> &'static (Mutex<GuardGraph>, Condvar) {
     REGISTRY.get_or_init(|| (Mutex::new(GuardGraph::default()), Condvar::new()))
 }
 
+/// M3.3 — how a box method holds its box: `Write` exclusive (`Shared` always; `RwShared.write`,
+/// `set` and the single-entry writers), `Read` shared (`RwShared.get`, `read` and the read views).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardMode {
+    Write,
+    Read,
+}
+
+/// One guard: a box (its core's `Arc` address) in one mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuardKey {
+    pub addr: usize,
+    pub mode: GuardMode,
+}
+
 /// Why a guard acquire refused to block: a wait-for cycle exists. `SelfHeld` is the length-1 case
-/// (the requester already owns `key`, e.g. a nested `set`/`update`/`write` on the same box inside its
-/// own closure); `Cycle` is a longer cross-task/cross-box cycle (e.g. AB-BA).
+/// (the requester already holds the box's write guard, e.g. a nested `set`/`update`/`write`, or a
+/// read, on the same box inside its own closure); `ReadHeld` is a write by a task that holds the
+/// box's read guard (M3.3, Q2: Go `RLock(); Lock()`); `Cycle` is a longer cross-task/cross-box
+/// cycle (e.g. AB-BA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardCycle {
     SelfHeld,
+    ReadHeld,
     Cycle,
 }
 
-/// RAII handle for a held update guard (TICKET-016 / W8-3): dropping it releases the box's guard and
-/// wakes every task waiting on the registry, so a cycle formed after registration is still found.
+/// RAII handle for a held guard (TICKET-016 / W8-3): dropping it releases the hold and wakes every
+/// task waiting on the registry, so a cycle formed after registration is still found. It belongs
+/// to the task (`me`), not to a thread or a lock guard, so it may live across a park.
 pub struct UpdateGuard {
-    key: usize,
+    key: GuardKey,
+    me: u64,
 }
 
 impl Drop for UpdateGuard {
     fn drop(&mut self) {
-        release_update_guard(self.key);
+        release_update_guard(self.key, self.me);
     }
 }
 
@@ -60,10 +108,10 @@ impl Drop for UpdateGuard {
 /// (`TasksMax=32768`): 0 ms still peaks at 1091 threads, 1 ms at 35, 5 ms at 19.
 pub const GUARD_DEMOTE_BUDGET: Duration = Duration::from_millis(5);
 
-/// Take the update guard for the `Shared`/`RwShared` box identified by `key`, as task `me`. Blocks
-/// while the box is held by a healthy other task; returns `Err` immediately when the wait-for walk
-/// from `me` finds a cycle (never blocks into a cycle it can already see).
-pub fn acquire_update_guard(key: usize, me: u64) -> Result<UpdateGuard, GuardCycle> {
+/// Take the guard `key` as task `me`. Blocks while another healthy task holds it; returns `Err`
+/// immediately when the wait-for walk from `me` finds a cycle (never blocks into a cycle it can
+/// already see).
+pub fn acquire_update_guard(key: GuardKey, me: u64) -> Result<UpdateGuard, GuardCycle> {
     match acquire_update_guard_within(key, me, None) {
         Ok(Some(g)) => Ok(g),
         Ok(None) => unreachable!("an unbounded update-guard acquire cannot time out"),
@@ -71,12 +119,12 @@ pub fn acquire_update_guard(key: usize, me: u64) -> Result<UpdateGuard, GuardCyc
     }
 }
 
-/// Bounded/unbounded acquire of the update guard for `key`, as task `me`. With `budget: None` this
-/// blocks exactly like [`acquire_update_guard`]. With `budget: Some(d)`, once `d` has elapsed without
+/// Bounded/unbounded acquire of the guard `key`, as task `me`. With `budget: None` this blocks
+/// exactly like [`acquire_update_guard`]. With `budget: Some(d)`, once `d` has elapsed without
 /// acquiring the guard it returns `Ok(None)` instead of continuing to block, so the caller can pay for
 /// a worker demotion only when the wait is actually long.
 pub fn acquire_update_guard_within(
-    key: usize,
+    key: GuardKey,
     me: u64,
     budget: Option<Duration>,
 ) -> Result<Option<UpdateGuard>, GuardCycle> {
@@ -87,9 +135,9 @@ pub fn acquire_update_guard_within(
     }
 }
 
-/// M1.5 — take the update guard for `key` as task `me` only if no wait is needed: a zero budget,
-/// so it returns at once. `Ok(None)`: another task holds it.
-pub fn try_update_guard(key: usize, me: u64) -> Result<Option<UpdateGuard>, GuardCycle> {
+/// M1.5 — take the guard `key` as task `me` only if no wait is needed: a zero budget, so it
+/// returns at once. `Ok(None)`: another task holds it.
+pub fn try_update_guard(key: GuardKey, me: u64) -> Result<Option<UpdateGuard>, GuardCycle> {
     acquire_update_guard_within(key, me, Some(Duration::ZERO))
 }
 
@@ -99,17 +147,29 @@ pub fn try_update_guard(key: usize, me: u64) -> Result<Option<UpdateGuard>, Guar
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GuardState {
     Free,
-    SelfHeld,
-    Cycle,
+    Held(GuardCycle),
     Busy,
 }
 
-fn guard_state(g: &GuardGraph, key: usize, me: u64) -> GuardState {
-    match g.owner.get(&key) {
-        None => GuardState::Free,
-        Some(&o) if o == me => GuardState::SelfHeld,
-        Some(_) if wait_for_cycle(g, me) => GuardState::Cycle,
-        Some(_) => GuardState::Busy,
+fn guard_state(g: &GuardGraph, key: GuardKey, me: u64) -> GuardState {
+    let readers = g.readers.get(&key.addr);
+    let reads = readers.is_some_and(|r| r.contains(&me));
+    if g.writer.get(&key.addr) == Some(&me) {
+        return GuardState::Held(GuardCycle::SelfHeld);
+    }
+    match key.mode {
+        GuardMode::Write if reads => return GuardState::Held(GuardCycle::ReadHeld),
+        // A nested read of a box this task reads already: Go's recursive `RLock`, granted even past
+        // a waiting writer (that writer waits for this task, so waiting here would be a cycle).
+        GuardMode::Read if reads => return GuardState::Free,
+        GuardMode::Write | GuardMode::Read => {}
+    }
+    if g.blockers(key, me).is_empty() {
+        GuardState::Free
+    } else if wait_for_cycle(g, me) {
+        GuardState::Held(GuardCycle::Cycle)
+    } else {
+        GuardState::Busy
     }
 }
 
@@ -123,7 +183,7 @@ enum GuardWait {
 /// The one guard wait loop. `take` = take the guard once free; else report `Free` and leave it.
 /// Clears `waiting[me]` on every return (DEC-016).
 fn wait_update_guard(
-    key: usize,
+    key: GuardKey,
     me: u64,
     budget: Option<Duration>,
     take: bool,
@@ -131,25 +191,38 @@ fn wait_update_guard(
     let deadline = budget.map(|d| std::time::Instant::now() + d);
     let (mtx, cv) = guard_registry();
     let mut g = mtx.lock().unwrap();
+    let mut waited = false;
     loop {
         g.waiting.insert(me, key);
         let state = guard_state(&g, key, me);
         if state != GuardState::Busy {
             g.waiting.remove(&me);
+            // A writer that waited kept new readers out (`GuardGraph::blockers`): wake them.
+            if waited && key.mode == GuardMode::Write {
+                cv.notify_all();
+            }
         }
         let left = match state {
             GuardState::Free if take => {
-                g.owner.insert(key, me);
-                return Ok(GuardWait::Taken(UpdateGuard { key }));
+                match key.mode {
+                    GuardMode::Write => {
+                        g.writer.insert(key.addr, me);
+                    }
+                    GuardMode::Read => g.readers.entry(key.addr).or_default().push(me),
+                }
+                return Ok(GuardWait::Taken(UpdateGuard { key, me }));
             }
             GuardState::Free => return Ok(GuardWait::Free),
-            GuardState::SelfHeld => return Err(GuardCycle::SelfHeld),
-            GuardState::Cycle => return Err(GuardCycle::Cycle),
+            GuardState::Held(cycle) => return Err(cycle),
             GuardState::Busy => match deadline {
                 None => Duration::from_millis(50),
                 Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
                     None => {
                         g.waiting.remove(&me);
+                        // A waiting writer that leaves may unblock readers behind it.
+                        if waited && key.mode == GuardMode::Write {
+                            cv.notify_all();
+                        }
                         return Ok(GuardWait::TimedOut);
                     }
                     Some(l) => l.min(Duration::from_millis(50)),
@@ -157,6 +230,7 @@ fn wait_update_guard(
             },
         };
         g = cv.wait_timeout(g, left).unwrap().0;
+        waited = true;
     }
 }
 
@@ -164,7 +238,7 @@ fn wait_update_guard(
 /// `Err` a cycle. `Vm::guard_wait_block` waits here holding no width permit, then takes the permit,
 /// then the guard (permit before guard; DEC-141).
 pub fn await_update_guard_free(
-    key: usize,
+    key: GuardKey,
     me: u64,
     budget: Option<Duration>,
 ) -> Result<bool, GuardCycle> {
@@ -182,38 +256,53 @@ pub fn await_update_guard_free(
 /// acquire has given up, `wait_for_cycle` finds no entry for `me` and this fn reports "not
 /// satisfiable" even on a real cycle. That is the safe direction — the nursery deadlock judge then
 /// reports `deadlock` where a `GuardCycle` fault was one poll away, never the reverse.
-pub fn guard_wait_satisfiable(key: usize, me: u64) -> bool {
+pub fn guard_wait_satisfiable(key: GuardKey, me: u64) -> bool {
     let (mtx, _cv) = guard_registry();
     let g = mtx.lock().unwrap();
     guard_state(&g, key, me) != GuardState::Busy
 }
 
-/// Walk `waiting` -> `owner` -> `waiting` -> ... from `start`, bounded by the number of owned boxes
-/// plus one hop: a walk that revisits `start` is a wait-for cycle.
+/// Walk `waiting` -> blockers -> `waiting` -> ... from `start`, each task once: a walk that reaches
+/// `start` again is a wait-for cycle.
 fn wait_for_cycle(g: &GuardGraph, start: u64) -> bool {
-    let mut cur = start;
-    let max_hops = g.owner.len() + 1;
-    for _ in 0..max_hops {
+    let mut seen = std::collections::HashSet::new();
+    let mut work = vec![start];
+    while let Some(cur) = work.pop() {
         let Some(&want) = g.waiting.get(&cur) else {
-            return false;
+            continue;
         };
-        let Some(&owner) = g.owner.get(&want) else {
-            return false;
-        };
-        if owner == start {
-            return true;
+        for t in g.blockers(want, cur) {
+            if t == start {
+                return true;
+            }
+            if seen.insert(t) {
+                work.push(t);
+            }
         }
-        cur = owner;
     }
     false
 }
 
-/// Release the update guard held on `key` and wake every waiter, so a cycle that formed after this
+/// Release one hold of `key` by `me` and wake every waiter, so a cycle that formed after this
 /// registration (or the newly-freed key) is re-checked.
-pub fn release_update_guard(key: usize) {
+pub fn release_update_guard(key: GuardKey, me: u64) {
     let (mtx, cv) = guard_registry();
     let mut g = mtx.lock().unwrap();
-    g.owner.remove(&key);
+    match key.mode {
+        GuardMode::Write => {
+            g.writer.remove(&key.addr);
+        }
+        GuardMode::Read => {
+            if let Some(r) = g.readers.get_mut(&key.addr) {
+                if let Some(i) = r.iter().rposition(|&t| t == me) {
+                    r.swap_remove(i);
+                }
+                if r.is_empty() {
+                    g.readers.remove(&key.addr);
+                }
+            }
+        }
+    }
     drop(g);
     cv.notify_all();
 }
@@ -736,130 +825,56 @@ impl Drop for PendingOp {
     }
 }
 
-/// `Shared[T]` core (B3.1): the one box every task reaches. `get` locks + clones out; `set` and
-/// `update` each take the box's process-global update guard (TICKET-016 / W8-3,
-/// [`super::core::acquire_update_guard`]) before touching `v`.
+/// `Shared[T]` core: the one box every task reaches (Go `struct { mu sync.Mutex; v T }`). M3.3: it
+/// holds ONE [`Value`] of the run's one heap, by handle, in an atomic slot. Every method takes the
+/// box's guard ([`acquire_update_guard`], the lock) and then works on the live value in the
+/// caller's task: `get` returns the value itself, `set` stores one word, and the closure of `update`
+/// / `read` runs on the live value while its task holds the guard. A same-box re-entry inside that
+/// closure is the guard's length-1 cycle and FAULTS; a cross-task contender waits; a cross-box
+/// wait-for cycle (AB-BA) faults.
 ///
-/// B3.3-threads: `update`'s read-modify-write must be **atomic across threads** — that is the entire
-/// promise of `Shared[T]` ("the single owner serialises writes, so the torn-write race is
-/// unrepresentable"), and `set` must not be able to silently clobber a write an in-flight `update`'s
-/// closure made — so `set` takes the SAME guard `update` does. The value lock `v` cannot be held
-/// across the user closure (it would deadlock a closure that re-enters `get` on the same box —
-/// `Mutex` is not reentrant), so the update guard — not `v` — is what serialises the whole RMW: held
-/// for the entire operation, while `v` is still locked only for the brief read and the brief
-/// write-back. A same-box `set`/`update` re-entry inside `update`'s own closure is the guard
-/// registry's length-1 wait-for cycle and FAULTS; a cross-task contender BLOCKS until the guard
-/// frees; a genuine cross-box wait-for cycle (AB-BA) FAULTS instead of hanging.
-///
-/// TICKET-246: the value is no longer an encoded copy. It lives at `stack[0]` of the box's own
-/// context (`state`). Every method takes the update guard first and then locks `state`, so user
-/// code never contends on the `Mutex`; the closure of `update` / `read` runs under it, inside the
-/// box context (`Vm::with_box`). M1.7: the context's objects are in the run's one heap. The
-/// collector reaches them through the box ([`SharedState::roots_into`]); the byte walk takes no
-/// lock here, since `live_bytes` counts the state's slots.
-#[derive(Debug, Default)]
+/// The slot is read with no lock (Acquire), so the collector and a `&self` render never wait for a
+/// holder; a write stores with Release. No std lock is held across user code.
+#[derive(Debug)]
 pub struct SharedCore {
-    pub state: SharedState,
+    pub v: super::rvec::RCell<Value>,
 }
 
-/// The context of a `Shared` box: its module view and the state at `stack[0]`. `None` only while a
-/// call has taken it out (`Vm::with_box`), under the lock.
-#[derive(Default)]
-pub struct SharedState(pub(super) Mutex<BoxSlot>);
-
-impl std::fmt::Debug for SharedState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SharedState")
-    }
-}
-
-impl SharedState {
-    /// M1.7 — the collector's walk into a parked box context: append the roots of the context in
-    /// the slot. It never blocks: in a stop of the world the lock is free, or a stopped thread holds
-    /// it inside `Vm::with_box`, which took the context out (the slot is `None`), and that thread's
-    /// `Vm` roots the context then. A thread holds the lock with the context in the slot only to
-    /// copy it out, which reaches no safepoint and no blocking door.
-    pub(super) fn roots_into(&self, out: &mut Vec<GcRef>) {
-        if let Ok(g) = self.0.try_lock()
-            && let Some(ctx) = g.as_ref()
-        {
-            ctx.root_view().walk(out);
+impl SharedCore {
+    pub fn new(v: Value) -> Self {
+        SharedCore {
+            v: super::rvec::RCell::new(v),
         }
     }
+}
 
-    /// Lock the state. A panic inside a box closure unwinds through the guard; `with_box` has put
-    /// the context back by then, so a poisoned lock still holds a whole state.
-    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, BoxSlot> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+impl Default for SharedCore {
+    fn default() -> Self {
+        SharedCore::new(Value::nil())
     }
 }
 
-/// `RwShared[T]` core: the read-write counterpart to [`SharedCore`], on the same box core. The
-/// value lives at `stack[0]` of the box's own context (`state`), behind a `RwLock`: MANY readers
-/// copy out of the box's objects at once, or ONE writer runs inside the context.
-///
-/// - `write(f)` / `set` and the single-entry writers take the box's update guard (TICKET-016 /
-///   W8-3, [`super::core::acquire_update_guard`]) and then the write lock; the closure runs under
-///   it, inside the box heap (`Vm::with_box`), exactly like `Shared.update`.
-/// - A reader (`get`, `read`, the `_` read views, display) tries the read lock with no registry
-///   lock. Only when a writer holds or waits for the state does it take the update guard and then
-///   the read lock, so its wait is a registered guard wait, and a reader inside the box's OWN
-///   `write` closure faults (`already holds the update guard`) instead of deadlocking.
-/// - No user code runs under the read lock: a reader copies with `WalkSrc`, drops the lock and
-///   only then decodes, compares keys or runs its closure. So `write` nested in `read` is legal.
-/// - The box's objects are written only under the write lock.
-///
-/// GC and byte accounting never wait here: see [`SharedCore`].
-#[derive(Debug, Default)]
+/// `RwShared[T]` core: the read-write counterpart to [`SharedCore`] (Go `sync.RWMutex`). The same
+/// one slot; the guard has two modes ([`GuardMode`]): MANY readers (`get`, `read`, the `_` read
+/// views) hold it at once, or ONE writer (`write`, `set`, the single-entry writers). A writer that
+/// waits keeps new readers out (Go writer preference); a nested read by a reader is granted. A write
+/// inside the same task's read is a certain deadlock and faults (`ReadHeld`).
+#[derive(Debug)]
 pub struct RwSharedCore {
-    pub state: RwSharedState,
+    pub v: super::rvec::RCell<Value>,
 }
 
-/// The context of a `RwShared` box. `None` only while a writer has taken it out
-/// (`Vm::with_box`), under the write lock, so a reader never sees `None`.
-#[derive(Default)]
-pub struct RwSharedState(pub(super) RwLock<BoxSlot>);
-
-impl std::fmt::Debug for RwSharedState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("RwSharedState")
+impl RwSharedCore {
+    pub fn new(v: Value) -> Self {
+        RwSharedCore {
+            v: super::rvec::RCell::new(v),
+        }
     }
 }
 
-/// Where a box context sits behind its lock.
-pub(super) type BoxSlot = Option<Box<super::FiberCtx>>;
-
-impl RwSharedState {
-    /// M1.7 — [`SharedState::roots_into`] for a `RwShared`: the read lock fails only while a writer
-    /// holds the state inside `Vm::with_box` (the slot is `None`), or waits for it, which no
-    /// stopped thread does.
-    pub(super) fn roots_into(&self, out: &mut Vec<GcRef>) {
-        if let Some(g) = self.try_read()
-            && let Some(ctx) = g.as_ref()
-        {
-            ctx.root_view().walk(out);
-        }
-    }
-
-    /// The read lock when no writer holds or waits for the state; never blocks. A poisoned lock
-    /// still holds a whole state (see [`SharedState::lock`]).
-    pub(super) fn try_read(&self) -> Option<std::sync::RwLockReadGuard<'_, BoxSlot>> {
-        match self.0.try_read() {
-            Ok(g) => Some(g),
-            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-        }
-    }
-
-    /// The read lock, blocking. Only for a reader that holds the update guard: its only possible
-    /// wait is then another reader's Rust copy.
-    pub(super) fn read(&self) -> std::sync::RwLockReadGuard<'_, BoxSlot> {
-        self.0.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// The write lock, blocking. Only for a writer that holds the update guard.
-    pub(super) fn write(&self) -> std::sync::RwLockWriteGuard<'_, BoxSlot> {
-        self.0.write().unwrap_or_else(|e| e.into_inner())
+impl Default for RwSharedCore {
+    fn default() -> Self {
+        RwSharedCore::new(Value::nil())
     }
 }
 

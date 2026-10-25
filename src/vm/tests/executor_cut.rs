@@ -685,10 +685,10 @@ fn the_settle_internals_reject_a_non_channel() {
     assert!(e.message.contains("requires a Channel"), "{}", e.message);
 }
 
-/// TICKET-246 — the copy walk reads a heap it only borrows: `WalkSrc` holds `&Heap` and the
-/// module table of ANOTHER `Vm`, and the value decodes into this one.
+/// TICKET-246 — the copy walk only reads its source heap: a value encoded in one run decodes into
+/// another run's heap.
 #[test]
-fn walk_src_copies_out_of_a_heap_it_only_borrows() {
+fn a_wire_copy_decodes_into_another_runs_heap() {
     let mut owner = Vm::new(Arc::new(empty_program()));
     let s = owner.heap.alloc(Obj::Str("s".into()));
     let inner = owner
@@ -697,14 +697,8 @@ fn walk_src_copies_out_of_a_heap_it_only_borrows() {
     let outer = owner
         .heap
         .alloc(Obj::List(vec![Value::obj(inner), Value::obj(s)].into()));
-    let src = super::airlock_out::WalkSrc {
-        heap: &owner.heap,
-        module_objs: &owner.module_objs,
-        program: &owner.program,
-        walk_base: 0,
-    };
-    let wire = src
-        .to_wire_crossable_memo(
+    let wire = owner
+        .to_wire_memo_at(
             Value::obj(outer),
             Span::default(),
             &mut super::airlock_out::WireMemo::default(),
@@ -726,45 +720,6 @@ fn a_worker_shares_its_roots_heap_core() {
     let nested = worker.spawn_worker();
     assert_eq!(worker.heap.id(), root.heap.id());
     assert_eq!(nested.heap.id(), root.heap.id());
-}
-
-/// TICKET-246 — `with_box` undoes its swap on unwind, not only on return: after a Rust panic
-/// inside the closure the `Vm` runs in the caller's context again (the heap is the run's one heap
-/// throughout), the box context is back in its slot and no caller frame is left on the chain. The
-/// second half panics two boxes deep.
-#[test]
-fn with_box_restores_the_context_when_the_closure_panics() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-    let mut vm = Vm::new(Arc::new(empty_program()));
-    vm.out.extend_from_slice(b"caller");
-    let mut outer = Some(vm.box_new());
-    let mut inner = Some(vm.box_new());
-    let stack_len = vm.stack.len();
-
-    let r = catch_unwind(AssertUnwindSafe(|| {
-        vm.with_box(&mut outer, |vm| {
-            assert_eq!(vm.box_chain.len(), 1, "the closure runs in the box context");
-            assert_eq!(vm.out, b"caller", "out stays the caller's inside a box");
-            vm.stack.push(Value::int(7));
-            panic!("boom");
-        })
-    }));
-    assert!(r.is_err());
-    assert_eq!(vm.stack.len(), stack_len);
-    assert_eq!(vm.out, b"caller");
-    assert!(vm.box_chain.is_empty());
-    assert!(outer.is_some());
-
-    let r = catch_unwind(AssertUnwindSafe(|| {
-        vm.with_box(&mut outer, |vm| vm.with_box(&mut inner, |_| panic!("deep")))
-    }));
-    assert!(r.is_err());
-    assert_eq!(vm.stack.len(), stack_len);
-    assert_eq!(vm.out, b"caller");
-    assert!(vm.box_chain.is_empty());
-    assert!(outer.is_some() && inner.is_some());
-    // The box contexts still work after both unwinds.
-    assert_eq!(vm.with_box(&mut outer, |vm| vm.stack.len()), 1);
 }
 
 /// M1.6 — a `print` / `eprint` inside a box call lands in its caller's stream, at the place of the
@@ -888,27 +843,19 @@ fn display_box_grid_terminates_on_every_cycle() {
         Stringify,
     }
     // A box of `kind` as a wire handle, plus the way to set what it holds.
-    fn new_box(vm: &mut Vm, kind: Kind) -> WireValue {
+    fn new_box(_vm: &mut Vm, kind: Kind) -> WireValue {
         match kind {
-            Kind::Shared => WireValue::Shared(vm.new_shared_core(WireValue::Nil)),
-            Kind::RwShared => WireValue::RwShared(vm.new_rwshared_core(WireValue::Nil)),
+            Kind::Shared => WireValue::Shared(Arc::new(SharedCore::default())),
+            Kind::RwShared => WireValue::RwShared(Arc::new(RwSharedCore::default())),
             Kind::Atomic => WireValue::Atomic(Arc::new(AtomicCore::new(Value::nil()))),
         }
     }
     fn set(vm: &mut Vm, b: &WireValue, held: WireValue) {
+        let v = vm.from_wire(held);
         match b {
-            WireValue::Shared(c) => {
-                let mut st = c.state.lock();
-                vm.box_store(&mut st, held);
-            }
-            WireValue::RwShared(c) => {
-                let mut st = c.state.write();
-                vm.box_store(&mut st, held);
-            }
-            WireValue::Atomic(c) => {
-                let v = vm.from_wire(held);
-                c.store(v);
-            }
+            WireValue::Shared(c) => c.v.set(v),
+            WireValue::RwShared(c) => c.v.set(v),
+            WireValue::Atomic(c) => c.store(v),
             _ => unreachable!(),
         }
     }
@@ -959,8 +906,7 @@ fn display_box_grid_terminates_on_every_cycle() {
             (Shape::NoCycle, format!("{l}(1)")),
             (Shape::Itself, format!("{l}({l}(...))")),
             (Shape::ThroughList, format!("{l}([{l}(...)])")),
-            // Every box decodes what it holds into the heap (M3.2: an `Atomic` holds the value
-            // itself), and this fixture's empty program declares no struct `N`, so the struct
+            // Every box holds the value itself (M3.2 / M3.3), and this fixture's empty program declares no struct `N`, so the struct
             // prints with no name. The cell's subject is the cycle marker;
             // `tests/chz/suites/box_grid_test.chz` runs the same shape with a declared struct.
             (Shape::ThroughStruct, format!("{l}(?(0={l}(...)))")),
@@ -985,68 +931,38 @@ fn display_box_grid_terminates_on_every_cycle() {
             }
         }
     }
-    // Shape "state lock held by another thread" (a writer sits in a slow closure): the `&self`
-    // renderer builds fault messages and must not wait, so it shows `<locked>`.
+    // Shape "guard held by another task" (a writer sits in a slow closure, or readers read): the
+    // `&self` renderer builds fault messages and must not wait. M3.3: it reads the box's one slot
+    // and takes no guard, so it shows the value at once, for every mode a holder can be in.
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
             let mut vm = Vm::new(Arc::new(empty_program()));
-            let core = vm.new_shared_core(WireValue::Int(1));
-            let (held_tx, held_rx) = mpsc::channel();
-            let (done_tx, done_rx) = mpsc::channel::<()>();
-            let holder_core = Arc::clone(&core);
-            let holder = std::thread::spawn(move || {
-                let _st = holder_core.state.lock();
-                held_tx.send(()).unwrap();
-                let _ = done_rx.recv();
-            });
-            held_rx.recv().unwrap();
-            let h = vm.heap.alloc(Obj::Shared(Arc::clone(&core)));
-            let shown = vm.display(Value::obj(h));
-            done_tx.send(()).unwrap();
-            holder.join().unwrap();
-            let _ = tx.send((shown, vm.display(Value::obj(h))));
-        })
-        .unwrap();
-    let (busy, free) = rx
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("Vm::display waited for a held Shared state");
-    assert_eq!(busy, "Shared(<locked>)");
-    assert_eq!(free, "Shared(1)");
-    // The same shape for `RwShared`: a writer holds the write lock. A reader beside it (the read
-    // lock held by another thread) does NOT block the render: readers share.
-    let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .stack_size(VM_STACK_BYTES)
-        .spawn(move || {
-            let mut vm = Vm::new(Arc::new(empty_program()));
-            let core = vm.new_rwshared_core(WireValue::Int(1));
-            let h = vm.heap.alloc(Obj::RwShared(Arc::clone(&core)));
+            let shared = Arc::new(SharedCore::new(Value::int(1)));
+            let rw = Arc::new(RwSharedCore::new(Value::int(1)));
+            let hs = vm.heap.alloc(Obj::Shared(Arc::clone(&shared)));
+            let hr = vm.heap.alloc(Obj::RwShared(Arc::clone(&rw)));
             let mut shown = Vec::new();
-            for write in [true, false] {
-                let (held_tx, held_rx) = mpsc::channel();
-                let (done_tx, done_rx) = mpsc::channel::<()>();
-                let holder_core = Arc::clone(&core);
-                let holder = std::thread::spawn(move || {
-                    let _w = write.then(|| holder_core.state.write());
-                    let _r = (!write).then(|| holder_core.state.read());
-                    held_tx.send(()).unwrap();
-                    let _ = done_rx.recv();
-                });
-                held_rx.recv().unwrap();
-                shown.push(vm.display(Value::obj(h)));
-                done_tx.send(()).unwrap();
-                holder.join().unwrap();
+            for (addr, mode) in [
+                (Arc::as_ptr(&shared) as usize, GuardMode::Write),
+                (Arc::as_ptr(&rw) as usize, GuardMode::Write),
+                (Arc::as_ptr(&rw) as usize, GuardMode::Read),
+            ] {
+                let held = super::core::try_update_guard(GuardKey { addr, mode }, u64::MAX - 77)
+                    .expect("no cycle")
+                    .expect("a free guard");
+                shown.push(vm.display(Value::obj(hs)));
+                shown.push(vm.display(Value::obj(hr)));
+                drop(held);
             }
-            shown.push(vm.display(Value::obj(h)));
             let _ = tx.send(shown);
         })
         .unwrap();
     let shown = rx
         .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("Vm::display waited for a held RwShared state");
-    assert_eq!(shown, ["RwShared(<locked>)", "RwShared(1)", "RwShared(1)"]);
+        .expect("Vm::display waited for a held box guard");
+    assert_eq!(shown, ["Shared(1)", "RwShared(1)"].repeat(3));
 }
 
 /// TICKET-248 — a missing-method fault and an operand fault name a carrier value by its kind in

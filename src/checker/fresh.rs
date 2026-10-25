@@ -2,7 +2,6 @@
 //! generator frames, call crossing.
 //! Split out of `src/checker/sig.rs`. `super::*` is the parent module.
 
-use super::sig::TempWrite;
 use super::*;
 
 impl Checker {
@@ -54,27 +53,20 @@ impl Checker {
     }
 
     /// TICKET-254 — the one decider of "a write to `written` changes a value no name holds": the
-    /// warning on a mutating call and on a store read it, with the box read as one of its rows.
+    /// warning on a mutating call and on a store read it.
     /// `written` is the object the mutating call or the store lands on. Peel its place links
     /// ([`fn_writes::place_base`]): with none, the object itself is the base and any fresh shape
     /// loses the write; with one or more, the write lands on a part of the base, so only a base
     /// that is fresh at every level (`Fresh::All`) loses it (`xs.copy()[0].push(1)` writes an
     /// element `xs` shares).
-    pub(super) fn temporary_write(&mut self, written: &Expr) -> Option<TempWrite> {
+    pub(super) fn temporary_write(&mut self, written: &Expr) -> bool {
         let (base, links) = fn_writes::place_base(written, &|span| self.is_fresh_subscript(span));
         let shape = self.fresh_shape(base, 0, true);
-        let fresh = if links == 0 {
+        if links == 0 {
             !shape.is_marked()
         } else {
             shape.is_all()
-        };
-        if !fresh {
-            return None;
         }
-        Some(match self.read_temporary_of_box(base) {
-            Some((name, reader, _, fix)) => TempWrite::BoxRead { name, reader, fix },
-            None => TempWrite::Copy,
-        })
     }
 
     /// D4 (TICKET-240): what a crossing leaves marked in the value graph `e` builds. The one
@@ -181,7 +173,6 @@ impl Checker {
                 named,
                 ..
             } => match &callee.kind {
-                ExprKind::Field { .. } if self.read_temporary_of_box(e).is_some() => Fresh::All,
                 ExprKind::Field { obj, name, .. }
                     if live && self.native_method_returns_container(obj, name) =>
                 {

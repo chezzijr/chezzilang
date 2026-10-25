@@ -4,18 +4,6 @@
 use super::proto::HookMiss;
 use super::*;
 
-/// TICKET-254 — what [`Checker::temporary_write`] found: the text of the warning follows.
-pub(super) enum TempWrite {
-    /// The write lands on the deep copy a `Shared`/`RwShared`/`Atomic` read returns (TICKET-089).
-    BoxRead {
-        name: String,
-        reader: &'static str,
-        fix: &'static str,
-    },
-    /// The write lands on any other fresh value.
-    Copy,
-}
-
 /// Where a spelled type sits: `None` ("returns nothing") is a type only in a `Void` position.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum TypePos {

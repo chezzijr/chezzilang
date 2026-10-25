@@ -1,6 +1,6 @@
-# TICKET-246 — the rules of a box closure, one test per rule. A closure given to
-# `Shared.update` / `Shared.read` / `RwShared.write` runs inside the box heap, like the body of a
-# spawned task. Each rule here is RUN; `tests/box_private_heap_grid.rs` runs this file at
+# TICKET-246 — the rules of a box closure, one test per rule. M3.3: a closure given to
+# `Shared.update` / `Shared.read` / `RwShared.write` / `RwShared.read` runs in the caller's task on
+# the live value, while the task holds the box's guard. Each rule here is RUN; `tests/box_private_heap_grid.rs` runs this file at
 # CHEZZI_THREADS 1, 2 and default, on the debug binary.
 
 import Iterator from std.iter
@@ -205,33 +205,38 @@ fn put_bad(m: Map[BadKey, int], k: int) -> Map[BadKey, int]:
 
 # ---- rule 10: a slow closure blocks every user of the box ----
 
-fn slow_inc(started: Channel[int], x: int) -> int:
+fn slow_inc(started: Channel[int], gate: Channel[int], x: int) -> int:
     started.send(1)
-    time.sleep_ms(150)
+    _ := gate.recv()
     return x + 1
 
-fn slow_writer(s: Shared[int], started: Channel[int]):
-    s.update(fn(x): slow_inc(started, x))
+fn slow_writer(s: Shared[int], started: Channel[int], gate: Channel[int]):
+    s.update(fn(x): slow_inc(started, gate, x))
 
-fn slow_rw_writer(w: RwShared[int], started: Channel[int]):
-    w.write(fn(x): slow_inc(started, x))
+fn slow_rw_writer(w: RwShared[int], started: Channel[int], gate: Channel[int]):
+    w.write(fn(x): slow_inc(started, gate, x))
 
-# A reader and a `str` beside a slow writer WAIT and then see the new value; user output never
-# shows `<locked>`.
-test fn a_reader_and_a_print_wait_for_a_slow_writer():
+# A reader beside a slow writer WAITS and then sees the new value. M3.3: a `str` takes no guard (Go's
+# `fmt` takes no lock): it shows the box's slot as it is, the old value while the writer's closure
+# runs (Go `print/main.go`: `print_beside_writer 0`, `locked_read_waits 1`).
+test fn a_reader_waits_for_a_slow_writer_and_a_print_does_not():
     s := Shared(0)
     w := RwShared(0)
     started := Channel[int](2)
+    gate := Channel[int](2)
     shown := Channel[List[str]](1)
     parallel:
-        spawn slow_writer(s, started)
-        spawn slow_rw_writer(w, started)
+        spawn slow_writer(s, started, gate)
+        spawn slow_rw_writer(w, started, gate)
         spawn:
             _ := started.recv()
             _ := started.recv()
-            shown.send([str(s), str(w), str(s.get()), str(w.get()), str(w.read(fn(x): x))])
+            before := [str(s), str(w)]
+            gate.send(1)
+            gate.send(1)
+            shown.send(before + [str(s.get()), str(w.get()), str(w.read(fn(x): x))])
     got := shown.recv()
-    assert got == ["Shared(1)", "RwShared(1)", "1", "1", "1"], str(got)
+    assert got == ["Shared(0)", "RwShared(0)", "1", "1", "1"], str(got)
 
 struct Pair:
     other: Shared[Pair?]
@@ -247,7 +252,7 @@ test fn two_boxes_that_hold_each_other_print_with_a_cycle_marker():
 
 # ---- rule 5: a socket wait inside a box closure (loopback only) ----
 # The closure accepts, then reads one byte the sibling writes only after the accept: both the
-# accept and the read are socket waits made inside the box heap. The listener and the channel
+# accept and the read are socket waits made inside the box closure. The listener and the channel
 # cross into the box as captures (handles keep their identity).
 
 fn feed_one(addr: str, go: Channel[int]):

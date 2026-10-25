@@ -486,13 +486,14 @@ test fn grid_policy_r49_channel_task_to_parent():
 
 # ---- Shared / RwShared / Atomic (a read is never marked) ----
 
+# M3.3: a box holds the list itself, as an `Atomic` does (Go `policy.go`: `r51 ok 2 [1 3]`).
 test fn grid_policy_r21_shared_get():
     s := concurrency.Shared[List[int]]([1])
     out := Channel[str](4)
     parallel:
         spawn: out.send(t189_try(s.get()))
     assert out.recv() == "ok 2"
-    assert s.get() == [1]
+    assert s.get() == [1, 3]
 
 test fn grid_policy_r50_rwshared_get():
     s := concurrency.RwShared[List[int]]([1])
@@ -500,7 +501,7 @@ test fn grid_policy_r50_rwshared_get():
     parallel:
         spawn: out.send(t189_try(s.get()))
     assert out.recv() == "ok 2"
-    assert s.get() == [1]
+    assert s.get() == [1, 3]
 
 # M3.2: an `Atomic` holds the list itself (Go `policy.go`: `r51 ok 2 [1 3]`).
 test fn grid_policy_r51_atomic_load():

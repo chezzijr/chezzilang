@@ -3,7 +3,6 @@
 //! Split out of `src/checker/sig.rs`. `super::*` is the parent module.
 
 use super::setup::BindSite;
-use super::sig::TempWrite;
 use super::sig::TypePos;
 use super::sig::method_binders;
 use super::*;
@@ -226,19 +225,16 @@ impl Checker {
                     }
                 }
                 self.check_assign(target, *op, val_ty, Some(value), span);
-                // TICKET-089 / TICKET-254 — `b.get().v = 9`, `xs.copy()[0] = 9`, `g[0..2][0] = v`
-                // store into a value no name holds, so the store is dropped.
+                // TICKET-254 — `xs.copy()[0] = 9`, `g[0..2][0] = v` store into a value no name
+                // holds, so the store is dropped.
                 if let Some((obj, is_index)) = fn_writes::place_parent(target)
                     && self.store_is_native(obj, is_index)
-                    && let Some(temp) = self.temporary_write(obj)
+                    && self.temporary_write(obj)
                 {
-                    let text = match temp {
-                        TempWrite::BoxRead { name, reader, fix } => format!(
-                            "this write lands on the copy returned by '{name}.{reader}()', so it is discarded — write through '{name}.{fix}(…)' instead"
-                        ),
-                        TempWrite::Copy => "this write changes a temporary copy; the result is dropped: bind the value to a name first, or write to the source".to_string(),
-                    };
-                    self.warn(target.span, text);
+                    self.warn(
+                        target.span,
+                        "this write changes a temporary copy; the result is dropped: bind the value to a name first, or write to the source".to_string(),
+                    );
                 }
             }
             StmtKind::Fn(decl) => {

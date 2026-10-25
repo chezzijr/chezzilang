@@ -1489,3 +1489,27 @@ impl Vm {
         shell
     }
 }
+
+impl Vm {
+    /// TICKET-188 — does this party own an open nursery? The gate of the owned halt read. Every
+    /// `Vm` reader that asks "which nurseries does this task have open" reads this party's
+    /// `eager_scheds` through [`Vm::owned_nurseries`], [`Vm::owned_eager_scopes`] or this fn. The
+    /// other uses of `eager_scheds` push, pop or index it in lockstep with `nurseries` (enter,
+    /// join, abort, `spawn` into the innermost nursery). M3.3: a box closure runs in its caller's
+    /// context, so a nursery it opens is one of these.
+    #[inline]
+    pub(super) fn owns_nursery(&self) -> bool {
+        !self.eager_scheds.is_empty()
+    }
+
+    /// TICKET-188 — THE open nurseries of this party, outermost first.
+    pub(super) fn owned_nurseries(&self) -> impl DoubleEndedIterator<Item = block::OwnedRef<'_>> {
+        super::open_nurseries(&self.eager_scheds)
+    }
+
+    /// The eager scopes behind [`Vm::owned_nurseries`], outermost first: the bodies a block of
+    /// this thread marks blocked, and the enclosing sched a nested `parallel:` joins.
+    pub(super) fn owned_eager_scopes(&self) -> impl DoubleEndedIterator<Item = &super::EagerScope> {
+        self.eager_scheds.iter().flatten()
+    }
+}

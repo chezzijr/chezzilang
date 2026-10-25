@@ -1886,8 +1886,8 @@ fn one_line_if_statement_branches_need_not_join() {
         "returned by 'po' is discarded",
     );
     entry_warns(
-        "import Shared from std.concurrency\nfn main():\n    c := true\n    s := Shared[List[int]]([])\n    if c: s.get().push(1) else: print(0)\nmain()\n",
-        "update",
+        "fn main():\n    c := true\n    xs: List[int] = []\n    if c: xs.copy().push(1) else: print(0)\nmain()\n",
+        "temporary copy",
     );
 }
 

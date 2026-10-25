@@ -1,85 +1,37 @@
-//! Checker tests: Shared temporaries (TICKET-089), unused `:=` (TICKET-090), qualified protocol
+//! Checker tests: box reads (TICKET-089, deleted in M3.3), unused `:=` (TICKET-090), qualified protocol
 //! bounds (TICKET-173), argument binding (TICKET-182).
 //! Split out of `src/checker/tests.rs`. `super::*` is the parent module.
 
 use super::*;
 
-// ===== TICKET-089: a mutating call on a Shared/RwShared/Atomic read temporary =====
+// ===== TICKET-089 (deleted in M3.3): a write to a box read is a real write =====
 
-/// `s.get().push(1)` as a bare statement mutates a copy and discards it (`docs/reference/concurrency/` §6).
-/// The warning must name the working spelling, `update`.
+/// M3.3 (Q4): `s.get()`, `r.get()` and `a.load()` return the live value, so a mutating call or a
+/// store on one lands in the box, and no warning fires (Go `vet` has no such check). One row per
+/// shape the deleted TICKET-089 warning covered: each method family, a field and an index store, the
+/// top level and a `spawn:` body. `remove` returns an `Option`, so only the carrier warning is left.
 #[test]
-fn mutating_call_on_a_shared_read_temporary_warns() {
-    entry_warns(
+fn a_write_to_a_box_read_is_not_warned() {
+    for src in [
         "import Shared from std.concurrency\nfn main():\n    s := Shared[List[int]]([])\n    s.get().push(1)\nmain()\n",
-        "update",
-    );
-}
-
-/// Without the bytearray mutator entry, this lost write emits no DEC-089 warning.
-#[test]
-fn shared_read_temp_bytearray_extend_warns() {
-    entry_warns(
         "import Shared from std.concurrency\nfn main():\n    s := Shared(bytearray(b\"a\"))\n    s.get().extend(b\"b\")\nmain()\n",
-        "update",
-    );
-}
-
-/// The `RwShared` and `Atomic` twins name their OWN write-through spelling. The needle is the full
-/// `r.write(…)` / `a.store(…)`: the bare word "write" appears in every message of this rule.
-#[test]
-fn mutating_call_on_an_rwshared_or_atomic_read_temporary_warns() {
-    entry_warns(
         "import RwShared from std.concurrency\nfn main():\n    r := RwShared[List[int]]([])\n    r.get().push(1)\nmain()\n",
-        "r.write(…)",
-    );
-    entry_warns(
         "import Atomic from std.concurrency\nfn main():\n    a := Atomic[List[int]]([])\n    a.load().push(1)\nmain()\n",
-        "a.store(…)",
-    );
-}
-
-/// A field or index assignment through the read temporary loses the write the same way.
-#[test]
-fn an_assign_through_a_read_temporary_warns_for_a_field_and_an_index() {
-    entry_warns(
         "import Shared from std.concurrency\nstruct P:\n    v: int\nfn main():\n    b := Shared(P(0))\n    b.get().v = 9\nmain()\n",
-        "update(…)",
-    );
-    entry_warns(
         "import Shared from std.concurrency\nfn main():\n    s := Shared([7])\n    s.get()[0] = 9\nmain()\n",
-        "update(…)",
-    );
-}
-
-/// The write is lost in every proto: module top level and a `spawn:` block body.
-#[test]
-fn the_read_temporary_warning_fires_at_top_level_and_inside_a_spawn_block() {
-    entry_warns(
         "import Shared from std.concurrency\ns := Shared[List[int]]([])\ns.get().push(1)\n",
-        "update(…)",
-    );
-    entry_warns(
         "import Shared from std.concurrency\nfn main():\n    s := Shared[List[int]]([])\n    parallel:\n        spawn:\n            s.get().push(1)\nmain()\n",
-        "update(…)",
-    );
-}
-
-/// `remove` on a `Map` payload also returns an `Option`, so W8-2 would fire too: the new rule must
-/// return before the carrier match, leaving ONE warning.
-#[test]
-fn a_set_or_map_payload_mutator_on_a_read_temporary_warns_exactly_once() {
-    entry_warns_once(
         "import Shared from std.concurrency\nfn main():\n    s := Shared[Set[int]](Set[int]())\n    s.get().insert(1)\nmain()\n",
-        "s.update(…)",
-    );
+    ] {
+        entry_no_warn(src);
+    }
     entry_warns_once(
         "import Shared from std.concurrency\nfn main():\n    s := Shared[Map[str, int]]({\"a\": 1})\n    s.get().remove(\"a\")\nmain()\n",
-        "s.update(…)",
+        "discarded",
     );
 }
 
-/// A bound temporary or a value-used read is deliberately silent: the binding names a snapshot.
+/// A bound box read or a value-used read is silent.
 #[test]
 fn a_used_or_bound_read_temporary_is_not_warned() {
     entry_no_warn(
@@ -107,8 +59,8 @@ fn a_correct_write_through_spelling_and_a_plain_local_are_not_warned() {
     );
 }
 
-/// Deliberate ceilings, each measured to lose the write at runtime (DEC-097 for the struct method):
-/// a user struct method, a non-mutating bare call, and a `defer` (its own statement arm).
+/// A user struct method, a non-mutating bare call and a `defer` on a box read: silent (M3.3: each
+/// write lands in the box).
 #[test]
 fn a_struct_method_a_nonmutating_call_and_a_defer_on_a_read_temporary_are_not_warned() {
     entry_no_warn(

@@ -247,7 +247,7 @@ impl Vm {
         // D4 layer C (TICKET-169): everything this call rebuilds — a spawned callee's captures, a
         // `spawn f(args)`'s arguments, a `spawn obj.m()`'s receiver — follows `Route::Spawn`.
         let saved_copy_mark = self.copy_mark;
-        self.copy_mark = crossing::marks(Route::Spawn, saved_copy_mark);
+        self.copy_mark = crossing::marks(Route::Spawn);
         let rb = &mut super::fxhash::FxHashMap::default();
         let out = match lowered {
             Lowered::Closure {

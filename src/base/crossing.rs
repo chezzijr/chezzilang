@@ -201,27 +201,18 @@ pub enum Route {
     /// rebuilt object is a copy (what an operand's [`Fresh`] shape names is then unmarked).
     Spawn,
     /// A crossing closure's captures: a capture is a by-reference binding of its creator, so its
-    /// rebuild is a copy in every heap, the one it left included (TICKET-291). `sole` is true for
-    /// a capture that is the only live copy of its binding (a box call or an Executor job built
-    /// it, and nothing writable that the source heap keeps reaches it, `WireMemo::sole_captures`);
-    /// it keeps the enclosing mark.
-    ClosureCaptures { sole: bool },
-    /// A Channel/Shared/RwShared/Atomic read or an Executor job root: the sender gave the value
-    /// away, so the receiver owns it (DEC-179 item 6).
-    /// A closure inside the value still marks its captures by `ClosureCaptures`.
+    /// rebuild is a copy in every heap, the one it left included (TICKET-291).
+    ClosureCaptures,
+    /// A hand-off rebuild (an Executor job root): the sender gave the value away, so the receiver
+    /// owns it (DEC-179 item 6). A closure inside the value still marks its captures by
+    /// `ClosureCaptures`.
     Handoff,
-    /// A value a task copy read through a handle whose owner aliases it: `Task.get`, a
-    /// `memoize1` wrapper (TICKET-213). `std.concurrency.task_copy_of` rebuilds it through
-    /// `from_wire_memo` (`Vm::airlock_native`, TICKET-220), so it takes every marking rule a
-    /// rebuild has, the generator frame mask included.
-    CopyRead,
 }
 
-/// Whether a rebuild on `route` marks what it allocates, given the `enclosing` mark in force.
-pub fn marks(route: Route, enclosing: bool) -> bool {
+/// Whether a rebuild on `route` marks what it allocates.
+pub fn marks(route: Route) -> bool {
     match route {
-        Route::Spawn | Route::CopyRead | Route::ClosureCaptures { sole: false } => true,
-        Route::ClosureCaptures { sole: true } => enclosing,
+        Route::Spawn | Route::ClosureCaptures => true,
         Route::Handoff => false,
     }
 }
@@ -229,22 +220,15 @@ pub fn marks(route: Route, enclosing: bool) -> bool {
 /// The ONE list of native methods whose closure argument CROSSES: it is encoded and runs in
 /// another heap, so its captures are copies (D4). Two readers, one fact:
 ///
-/// - the checker (`Checker::check_crossing_closure_call`) puts the capture floor on these calls,
-///   so a direct write to a captured local is the D4 error at check time;
-/// - the run time ([`Vm::cross_closure`]) encodes the closure of exactly these methods, and
-///   asserts the row in a debug build.
+/// - the checker (`Checker::with_crossing_floor`) puts the capture floor on these calls, so a
+///   direct write to a captured local is the D4 error at check time;
+/// - the run time (`Vm::executor_submit`) asserts the row in a debug build.
 ///
-/// A new method that runs its closure in another heap gets a row here and encodes through
-/// `cross_closure`; never an `if method == ..` clause. `RwShared.read` has no row: its closure
-/// runs in the reader's heap.
-pub const CROSSING_CLOSURE_METHODS: &[(&str, &str)] = &[
-    ("Executor", "submit"),
-    ("Executor", "_submit_settled"),
-    ("Shared", "update"),
-    ("Shared", "read"),
-    ("RwShared", "write"),
-];
-
+/// A new method that runs its closure in another heap gets a row here; never an
+/// `if method == ..` clause. M3.3: a `Shared` / `RwShared` closure runs in its caller's task, so
+/// those methods have no row.
+pub const CROSSING_CLOSURE_METHODS: &[(&str, &str)] =
+    &[("Executor", "submit"), ("Executor", "_submit_settled")];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,15 +329,8 @@ mod tests {
 
     #[test]
     fn every_route_marks_as_documented() {
-        for enclosing in [false, true] {
-            assert!(marks(Route::Spawn, enclosing));
-            assert!(marks(Route::CopyRead, enclosing));
-            assert!(marks(Route::ClosureCaptures { sole: false }, enclosing));
-            assert_eq!(
-                marks(Route::ClosureCaptures { sole: true }, enclosing),
-                enclosing
-            );
-            assert!(!marks(Route::Handoff, enclosing));
-        }
+        assert!(marks(Route::Spawn));
+        assert!(marks(Route::ClosureCaptures));
+        assert!(!marks(Route::Handoff));
     }
 }

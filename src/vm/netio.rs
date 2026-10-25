@@ -178,6 +178,15 @@ pub(super) enum Decoded {
     NeedMore,
 }
 
+/// M3.3 — THE text of a same-task re-entry fault on a box guard (Q1, Q2): `guard` is the guard the
+/// task holds, `kind` the box, `nested` the calls that re-enter, `closure` the closure they run in.
+fn reentry_text(guard: &str, kind: &str, nested: &str, closure: &str) -> String {
+    format!(
+        "deadlock: this task already holds the {guard} guard on this {kind} box — a nested \
+         {nested} on the same box inside its own {closure} closure"
+    )
+}
+
 impl Vm {
     /// B3.1 — clone out the shared `Arc<ChannelCore>` behind a `Channel` handle (refcount bump). The
     /// `Arc` is held only for the duration of the calling method, so locking it does not borrow the
@@ -235,7 +244,7 @@ impl Vm {
     /// Stage 1 reads the halts when the guard comes free (TICKET-200).
     pub(super) fn take_update_guard(
         &mut self,
-        key: usize,
+        key: GuardKey,
         what: &str,
         span: Span,
     ) -> Result<core::UpdateGuard, RuntimeError> {
@@ -266,11 +275,12 @@ impl Vm {
         };
         result.map_err(|cycle| match cycle {
             GuardCycle::SelfHeld => self.err(
-                "deadlock: this task already holds the update guard on this Shared box — a \
-                 nested set/update/write on the same box inside its own update/write closure"
-                    .to_string(),
+                reentry_text("update", "Shared", "set/update/write", "update/write"),
                 span,
             ),
+            GuardCycle::ReadHeld => {
+                self.err(reentry_text("read", "RwShared", "set/write", "read"), span)
+            }
             GuardCycle::Cycle => self.err(
                 "deadlock: two or more tasks each hold a Shared/RwShared update guard the \
                  other is waiting for (a lock cycle)"
@@ -292,7 +302,7 @@ impl Vm {
     /// `Err` holding no permit, like `Ok(None)`.
     fn guard_free_then_take(
         &mut self,
-        key: usize,
+        key: GuardKey,
         budget: std::time::Duration,
         span: Span,
     ) -> Result<Result<Option<core::UpdateGuard>, GuardCycle>, RuntimeError> {
@@ -324,7 +334,7 @@ impl Vm {
     /// are un-accounted via `guard_wait_exit` on every exit path (no `?` before that call).
     fn guard_wait_block(
         &mut self,
-        key: usize,
+        key: GuardKey,
         what: &str,
         span: Span,
     ) -> Result<Result<core::UpdateGuard, GuardCycle>, RuntimeError> {

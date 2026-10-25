@@ -82,6 +82,9 @@ enum T254Expect {
     /// field): no warning, no error, and the run follows `t254_control_faults`: the D4 fault, never
     /// a silent lost write.
     Declined,
+    /// M3.3 — a write to the box's live value (`g.get()`): no warning, no error in any context,
+    /// and the run ends clean (the write lands in the box; a `sort` of the sorted root is a no-op).
+    Lands,
 }
 
 const T254_COPY_TEXT: T254Expect =
@@ -446,7 +449,8 @@ const T254_SHAPES: &[T254Shape] = &[
             &["@[0] = $"],
         )],
     },
-    // A `Shared` read is a deep copy (TICKET-089): the box rows are rows of the same rule.
+    // M3.3: a `Shared` read returns the live value, so a write through it lands in the box in every
+    // context (the box handle is shared by every task) and no warning fires (TICKET-089 deleted).
     T254Shape {
         name: "box",
         decls: "import std.concurrency\n",
@@ -458,10 +462,7 @@ const T254_SHAPES: &[T254Shape] = &[
             "box_read",
             "g.get()",
             "9",
-            T254Expect::Warns(
-                "mutates the copy returned by",
-                "this write lands on the copy returned by",
-            ),
+            T254Expect::Lands,
             "List",
             &["@[0] = $"],
         )],
@@ -556,11 +557,7 @@ fn t254_last_line(src: &str) -> String {
 }
 
 fn t254_any_temporary_warning(warns: &[String]) -> bool {
-    warns.iter().any(|w| {
-        w.contains("temporary copy")
-            || w.contains("mutates the copy returned by")
-            || w.contains("lands on the copy returned by")
-    })
+    warns.iter().any(|w| w.contains("temporary copy"))
 }
 
 #[test]
@@ -592,7 +589,9 @@ fn fresh_temporary_grid() {
                             let text = if *is_call { call } else { store };
                             (Some(text), false)
                         }
-                        T254Expect::Silent | T254Expect::Declined => (None, false),
+                        T254Expect::Silent | T254Expect::Declined | T254Expect::Lands => {
+                            (None, false)
+                        }
                         T254Expect::Control => (None, t254_control_errors(ctx)),
                     };
                     let warned = match want_warn {
@@ -605,6 +604,7 @@ fn fresh_temporary_grid() {
                         .then(|| t254_last_line(&main));
                     let run_bad = match (&ran, row.expect) {
                         (Some(got), T254Expect::Warns(..) | T254Expect::Silent) => *got != baseline,
+                        (Some(got), T254Expect::Lands) => got.starts_with("fault:"),
                         (Some(got), T254Expect::Control | T254Expect::Declined) => {
                             let d4 = got.starts_with("fault:") && got.contains("this task's copy");
                             let other_fault = got.starts_with("fault:") && !d4;

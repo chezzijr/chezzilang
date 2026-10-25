@@ -273,7 +273,7 @@ pub enum Obj {
     /// [`Channel`](Obj::Channel) for the handle/core split.
     Shared(Arc<SharedCore>),
     /// `RwShared[T]` — a *handle* to the cross-task read-write box [`RwSharedCore`]. Same handle/core
-    /// split as [`Shared`](Obj::Shared); the core holds one boxed wire value behind a `RwLock`.
+    /// split as [`Shared`](Obj::Shared); the core holds one value by handle (M3.3).
     RwShared(Arc<RwSharedCore>),
     /// `Atomic[T]` — a *handle* to the cross-task atomic box [`AtomicCore`]. Same handle/core split as
     /// [`Shared`](Obj::Shared); the core holds one boxed wire value behind a `Mutex`.
@@ -615,9 +615,9 @@ pub struct Heap {
     ///
     /// Every byte a heap gains arrives one of exactly three ways, and each has exactly one funnel:
     /// a NEW object → [`alloc`](Heap::alloc); growth IN PLACE inside an existing one →
-    /// [`write`](Heap::write) (see `pending_mut`); an off-heap wire payload →
-    /// `Vm::to_wire_crossable`. All three charge here under a live `--max-heap` cap. With the cap
-    /// off the first two charge too (M1.7; the wire charge stays cap-only): a task's garbage now
+    /// [`write`](Heap::write) (see `pending_mut`); a retired `RVec` block or a nursery's charge →
+    /// [`charge_bytes`](Heap::charge_bytes). All three charge here, with the cap on or off (M1.7;
+    /// M3.3 deleted the cap-only wire charge with the box copies): a task's garbage now
     /// waits in the run's one heap for a collection, and a task's copy of a large global is ONE
     /// object that the decoder fills through `write`, so the object count alone let 2000 such
     /// copies (1.6 GB, `benches/sched/storm.chz`) pile up before one sweep.
@@ -649,8 +649,7 @@ pub struct Heap {
     /// `Slot.obj` is `pub(super)` in `vm/heap_slab.rs`, but the slab is reachable only through the
     /// private `Heap.core` field, so no code outside this file can reach a slot (`vm/heap_core.rs`
     /// writes a slot only to allocate or free it). A charge here cannot be forgotten by a new
-    /// container method — the same forget-proof argument that put the wire charge in
-    /// `Vm::to_wire_crossable`.
+    /// container method.
     ///
     /// Why deferred rather than measured on both sides of the call: `write` HANDS OUT the handle the mutator runs on,
     /// so the "after" size does not exist until the caller is done with it. Settling at the next door
@@ -684,8 +683,8 @@ const FLUSH_BYTES: usize = 256 * 1024;
 /// The smallest retired-bytes goal (`Heap::retired_gc_threshold`).
 const MIN_RETIRED_GOAL: usize = 1 << 20;
 
-/// TICKET-246 — a `RwShared` reader walks a box heap through `&Heap` while other readers do the
-/// same. A new `Cell` / `RefCell` in `Heap` or `Obj` must fail here, never be worked around with
+/// TICKET-246 / M3.3 — tasks on other threads read the run's one heap through `&Heap` at once (a
+/// box's value is shared by handle). A new `Cell` / `RefCell` in `Heap` or `Obj` must fail here, never be worked around with
 /// `unsafe impl Sync`.
 const _: fn() = || {
     fn s<T: Sync + Send>() {}
@@ -926,11 +925,9 @@ impl Heap {
         self.core.get(h).obj.is_some()
     }
 
-    /// Charge bytes against the collection trigger (see `since_gc_bytes`). Byte funnel 3 of 3 is
-    /// `Vm::to_wire_crossable`, the one helper every cross-heap value store routes through; the other
-    /// two callers are [`alloc`](Heap::alloc) and [`write`](Heap::write)'s settle. Only ever
-    /// reached when a `--max-heap` cap is live. An `RVec` grow also charges the block it retires
-    /// (`vm/rvec.rs`), cap or no cap.
+    /// Charge bytes against the collection trigger (see `since_gc_bytes`): byte funnel 3 of 3. An
+    /// `RVec` grow charges the block it retires (`vm/rvec.rs`) and a nursery its scheduler's
+    /// charge, cap or no cap.
     #[inline]
     pub fn charge_bytes(&self, n: usize) {
         let charged = self.since_gc_bytes.load(Ordering::Relaxed);
@@ -1095,11 +1092,10 @@ impl Heap {
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
                 .for_each(|v| push(&v)),
-            // M1.7 — a box's state is objects of this one heap: trace the parked context. The
-            // walk only tries the state lock (it is held across user code, where a collection can
-            // start; `core::SharedState::roots_into`).
-            Obj::Shared(core) => core.state.roots_into(&mut out),
-            Obj::RwShared(core) => core.state.roots_into(&mut out),
+            // M3.3 — a box holds one value of this heap in an atomic slot: read with no lock, so
+            // a holder stopped inside its closure never blocks the mark.
+            Obj::Shared(core) => push(&core.v.get()),
+            Obj::RwShared(core) => push(&core.v.get()),
             Obj::Atomic(core) => push(&core.load()),
             // `AtomicInt` holds a plain i64 — no heap refs to trace.
             Obj::AtomicInt(_) => {}
@@ -1595,8 +1591,8 @@ mod iter_obj_tests {
     /// off-heap growth can overshoot; `sweep()` must reset the counter like `since_gc`.
     #[test]
     fn wire_bytes_pace_a_sweep_only_under_a_cap() {
-        // (a) cap OFF: production charges no wire bytes (`Vm::charge_wire` is gated on the cap);
-        // a charge below the cap-off byte goal (16 MiB with nothing live) does not collect.
+        // (a) cap OFF: a charge below the cap-off byte goal (16 MiB with nothing live) does not
+        // collect.
         let mut h = Heap::new();
         h.charge_bytes(1024 * 1024);
         assert!(

@@ -29,11 +29,11 @@ pub mod value;
 mod width;
 pub mod wire;
 
-use crate::base::{crossing, op};
+use crate::base::op;
 use core::{
     AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore,
-    GUARD_DEMOTE_BUDGET, GuardCycle, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
-    SocketCore, WriterCore,
+    GUARD_DEMOTE_BUDGET, GuardCycle, GuardKey, GuardMode, ListenerCore, ReaderCore, RwSharedCore,
+    SharedCore, SocketCore, WriterCore,
 };
 use heap::{Fields, Heap, Identity, MapData, MapEntry, ModuleData, Obj, SetData, SetEntry};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
@@ -1009,10 +1009,6 @@ pub struct Vm {
     /// `Vm::adopt_exit_output` on a fiber that took exit output out of a slot while `pending_exit`
     /// is set; that fiber also unwinds without parking.
     exit_origin: bool,
-    /// TICKET-246 — the open box calls of the task running on this `Vm`, innermost last (see
-    /// `boxctx.rs`). A `Vm` field, NOT a `FiberCtx` field, and `swap_ctx` does not move it: a box
-    /// closure runs under `Vm::reentered`, where no other fiber runs on this stack (DEC-245).
-    box_chain: Vec<boxctx::BoxFrame>,
     /// The stack trace of the uncaught fault that propagates, captured before frames unwind. The
     /// **deepest** fault wins (`fault_trace_depth` = frame count at capture): the original fault site
     /// captures first; a `defer`red call that itself faults runs while its owning frame is still on
@@ -1135,16 +1131,6 @@ pub struct Vm {
     /// field just holds it while the fiber is swapped in. The resumed `net.connect` re-run takes it to
     /// finish the connect. `None` whenever no connect is mid-flight.
     pending_connect: Option<ConnectInProgress>,
-    /// W7-11 — set by [`Vm::from_wire_memo`] when a `WireValue::Backref` targets an id that is NOT in
-    /// the rebuild map. That is only legitimate for a PIECEWISE drain (`RwShared`'s copy-out views take
-    /// one depth-1 element of a stored wire at a time, each with its own rebuild map, so a piece whose
-    /// cycle closes through the ROOT container cannot be self-contained); every other caller pairs the
-    /// serialize memo's scope with the rebuild map's by construction, so a trip there is a BUG (see the
-    /// `debug_assert` in [`Vm::from_wire`]). [`Vm::from_wire_pieces`] clears it before each attempt and
-    /// re-rebuilds the whole container when it trips. This used to be a `.expect` that ABORTED THE HOST
-    /// on a legal program. Pure scratch — cleared and read inside one helper call, never across a park,
-    /// so it is a `Vm` field and NOT part of [`FiberCtx`].
-    wire_backref_missing: bool,
     /// D4 layer C (TICKET-169): true while `from_wire_memo` is running an airlock
     /// copying walk (`rebuild_ready`'s captures/args/receiver, or a crossing
     /// `Closure`/`Generator`'s captures). Every object allocated while this is set gets
@@ -1434,7 +1420,6 @@ const EXEC_RUNNER_LINGER: std::time::Duration = std::time::Duration::from_millis
 
 mod arith;
 mod block;
-mod boxctx;
 mod compare;
 mod equality;
 mod hash;

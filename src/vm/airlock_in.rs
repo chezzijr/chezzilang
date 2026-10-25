@@ -1,7 +1,6 @@
 //! VM: the airlock inbound: `from_wire`, rebuild, unmark.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
-use super::airlock_out::WireMemo;
 use super::*;
 use crate::base::crossing::{self, Fresh, Kids, Route};
 
@@ -15,55 +14,21 @@ impl Vm {
     /// so no intermediate is lost mid-reconstruction.
     // `&mut self` is intentional: `from_wire` reconstructs *into* this VM's heap (it allocates),
     // so it is not the usual ownership-less `from_*` constructor the lint expects.
+    #[cfg(test)]
     #[allow(clippy::wrong_self_convention)]
     pub(super) fn from_wire(&mut self, w: WireValue) -> Value {
-        self.from_wire_on(Route::Handoff, w)
-    }
-
-    /// [`from_wire`](Vm::from_wire) on `route`: the one place a whole-value rebuild sets the mark.
-    #[allow(clippy::wrong_self_convention)]
-    pub(super) fn from_wire_on(&mut self, route: Route, w: WireValue) -> Value {
         // Fresh rebuild memo per root: it maps each identity-preserved wire `id` (a `Cell`/`Closure` or
         // a container) to the heap `GcRef` of its placeholder, so a `WireValue::Backref(id)` nested
         // inside resolves to the already-alloc'd (and about-to-be-patched) node — tying a serialized
         // value cycle back together.
         let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        // TICKET-189: the caller names the route and `crossing::marks` decides the mark. Every
-        // `from_wire` caller is a hand-off read (Channel/Shared/RwShared/Atomic, an Executor job
-        // root), which it never marks; `airlock_native` rebuilds under `Route::CopyRead` (TICKET-220).
+        // TICKET-189: the caller names the route and `crossing::marks` decides the mark. A
+        // `from_wire` caller is a hand-off read, which it never marks.
         let saved_copy_mark = self.copy_mark;
-        self.copy_mark = crossing::marks(route, saved_copy_mark);
+        self.copy_mark = crossing::marks(Route::Handoff);
         let v = self.from_wire_memo(w, &mut rebuild);
         self.copy_mark = saved_copy_mark;
-        // W7-11 — every caller of `from_wire` rebuilds a WHOLE crossing, so its rebuild map spans the
-        // same scope the serialize memo did and a `Backref` can never dangle. A piecewise drain goes
-        // through [`from_wire_pieces`](Vm::from_wire_pieces) instead. Keep the invariant loud where it is
-        // genuinely a bug; in release a dangling ref degrades to `nil` rather than aborting the host.
-        debug_assert!(
-            !self.wire_backref_missing,
-            "from_wire: a whole-value rebuild hit a dangling Backref — memo scope != rebuild scope \
-             (a piecewise drain must call from_wire_pieces)"
-        );
         v
-    }
-
-    /// TICKET-220 — the engine half of `std.concurrency.task_copy_of` (`Kind::InterceptAirlock`):
-    /// serialize the value and rebuild it under `Route::CopyRead`, so a task copy's read takes every
-    /// rule the rebuild has (the generator frame mask, the module stop) with no second walker.
-    pub(super) fn airlock_native(
-        &mut self,
-        name: &str,
-        args: Vec<Value>,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        match name {
-            "task_copy_of" => {
-                let v = args.first().copied().unwrap_or_else(Value::nil);
-                let w = self.to_wire_memo_at(v, span, &mut WireMemo::default())?;
-                Ok(self.from_wire_on(Route::CopyRead, w))
-            }
-            _ => unreachable!("airlock_native on '{name}'"),
-        }
     }
 
     /// Rebuild a wire item list into heap `Value`s **at exact capacity**. `pick` pulls the
@@ -205,11 +170,10 @@ impl Vm {
     fn unmark_graph(&mut self, v: Value) {
         let mut stack: Vec<GcRef> = v.as_obj().into_iter().collect();
         while let Some(h) = stack.pop() {
-            // A holder no write changes (a tuple, an enum value: `boxctx::fixed_after_build`)
-            // carries no mark and cannot form a cycle on its own, so it is always entered. Every
-            // other data kind is entered once: its mark is the guard.
-            let unmarked_kind = super::boxctx::fixed_after_build(self.heap.get(h))
-                == Some(super::boxctx::Fixed::Holder);
+            // A holder no write changes (a tuple, an enum value) carries no mark and cannot form a
+            // cycle on its own, so it is always entered. Every other data kind is entered once: its
+            // mark is the guard.
+            let unmarked_kind = matches!(self.heap.get(h), Obj::Tuple(_) | Obj::Enum { .. });
             if !unmarked_kind && !self.heap.is_copied(h) {
                 continue;
             }
@@ -555,21 +519,19 @@ impl Vm {
             // `id`. Present whenever the rebuild map spans the SAME scope the serialize memo did —
             // `to_wire` emits the defining node before any `Backref` to it, and `from_wire_memo`
             // registers the placeholder BEFORE recursing children. Keeping those two scopes equal is
-            // the caller's job (see [`deep_clone_all`](Vm::deep_clone_all)); a wire drained PIECEWISE
-            // (`RwShared`'s read views) may hold a piece that back-references a sibling piece or the
-            // ROOT container, so those views rebuild the whole wire into ONE map first
-            // ([`Vm::from_wire_pieces`], `Vm::box_copy_pieces`, TICKET-154).
+            // the caller's job (see [`deep_clone_all`](Vm::deep_clone_all)).
             //
-            // W7-11 — that last case used to `.expect` here and ABORT THE HOST on a legal program
-            // (`a.next = xs; RwShared(xs).at(0)`). It now flags the miss and hands back an inert
-            // placeholder; [`from_wire_pieces`](Vm::from_wire_pieces) sees the flag and re-does the
-            // rebuild over the WHOLE container, which defines the id. The placeholder is never
-            // observable: the only caller that can legitimately trip the flag discards this whole
-            // result, and every other caller is `debug_assert`ed in [`from_wire`](Vm::from_wire).
+            // W7-11 — a miss is a bug (M3.3 deleted the piecewise `RwShared` drain, the one caller
+            // whose scopes could differ): loud in a debug build; in release it degrades to `nil`
+            // rather than aborting the host.
             WireValue::Backref(id) => match rebuild.get(&id) {
                 Some(&h) => Value::obj(h),
                 None => {
-                    self.wire_backref_missing = true;
+                    if cfg!(debug_assertions) {
+                        panic!(
+                            "from_wire_memo: a Backref hit no rebuilt node — memo scope != rebuild scope"
+                        );
+                    }
                     Value::nil()
                 }
             },
@@ -579,9 +541,9 @@ impl Vm {
             // `Backref(id)` (the self-cell a recursive local `fn` closes) resolves to this exact
             // handle; then patch the placeholder with the reconstructed inner. `Heap::alloc` never
             // collects, so no GC runs between the placeholder and the patch. W7-4: a rebuild map
-            // that spans several wires (`Vm::box_copy_pieces`) can meet the SAME cell definition
-            // more than once — the first rebuild wins and every later definition of that id
-            // resolves to it, exactly like a `Backref`.
+            // that spans several wires can meet the SAME cell definition more than once — the
+            // first rebuild wins and every later definition of that id resolves to it, exactly like
+            // a `Backref`.
             WireValue::Cell { id, inner } => {
                 if let Some(&prev) = rebuild.get(&id) {
                     return Value::obj(prev);
@@ -610,7 +572,6 @@ impl Vm {
                 proto,
                 captured,
                 home,
-                sole,
             } => {
                 let home = self.worker_home(home);
                 let n = captured.len();
@@ -624,13 +585,11 @@ impl Vm {
                 // carried names (they live in `proto.capture_names`). `to_wire` emits in slot order.
                 // D4 layer C (TICKET-291): each capture follows `Route::ClosureCaptures`. It is a
                 // copy of its creator's binding in every heap, the one it left included, so it is
-                // marked unless the wire says it is the only live copy (`sole`).
+                // marked.
                 let saved_copy_mark = self.copy_mark;
+                self.copy_mark = crossing::marks(Route::ClosureCaptures);
                 let mut cap = Vec::with_capacity(n);
-                for (k, (_name, w)) in captured.into_iter().enumerate() {
-                    let sole = sole.checked_shr(k as u32).is_some_and(|m| m & 1 == 1);
-                    self.copy_mark =
-                        crossing::marks(Route::ClosureCaptures { sole }, saved_copy_mark);
+                for (_name, w) in captured {
                     cap.push(self.from_wire_memo(w, rebuild));
                 }
                 self.copy_mark = saved_copy_mark;

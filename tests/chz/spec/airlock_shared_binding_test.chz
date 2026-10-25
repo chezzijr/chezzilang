@@ -146,14 +146,14 @@ test fn cursor_keeps_one_binding():
     gs[0]()
     assert gs[1]() == 2
 
-# A `Shared` box is a cross-heap VALUE STORE (its own airlock arm).
-# Same-task round-trip — see the owner decision above `channel_send_keeps_one_binding`.
+# M3.3: a `Shared` box holds the closures themselves, so `get` hands out the one binding (Go
+# `closures.go`, M3.3 report: `box_route_same_task 3`).
 test fn shared_keeps_one_binding():
     box := concurrency.Shared(make())
     d := box.get()
-    assert copy_fault(d.inc)
-    assert d.get() == 0
-    assert box.read(fn(c): c.get()) == 0
+    assert not copy_fault(d.inc)
+    assert d.get() == 1
+    assert box.read(fn(c): c.get()) == 1
 
 # The cross-task counterpart: M3.2 moves the closures into the other task by handle, so the
 # receiving task's write lands on the sender's binding (Go `closures.go`: `other_task no-fault 1`).
@@ -293,17 +293,10 @@ test fn module_global_plus_local_capture_shares_its_binding():
     read := r.recv()
     assert read == "{before + 1}", "read after the write saw {read}"
 
-# W7-4 REGRESSION — `RwShared`'s zero-copy read views DRAIN one stored wire through many independent
-# `from_wire` rebuilds, so the persistent cell memo made a `Backref` reach across sibling elements for
-# the first time and every one of these methods hit a host PANIC (`a wire Backref always targets an
-# already-reconstructed node id`), not a catchable fault. A whole-container `get()` is ONE crossing and
-# still shares the binding; a per-element copy-out view is an independent copy, EXCEPT that a looping
-# view (`for_each`/`fold`) now takes one snapshot under one map, so siblings share within one walk
-# (CPython 3.14.7 and Go 1.27 both fold to 2; TICKET-154). Two `at()` calls are two crossings and can
-# never share, and `slice` — one call returning a container — shares within itself.
-# Owner decision 2026-10-22 (TICKET-291): every one of these views is a same-task round trip, and
-# a round trip is a crossing, so a write through any view's `inc` copy faults and `n` stays 0. The
-# W7-4 regression this guards was a host PANIC: each view must still decode, and fault cleanly.
+# W7-4 REGRESSION — the `RwShared` read views once drained one stored wire through many rebuilds and
+# hit a host PANIC; each view must still return its closure. M3.3: every view returns the closures
+# themselves, by handle, so a write through `inc` lands on the one `n`, view after view (Go: a
+# closure read out of a guarded slice is the closure itself).
 test fn rwshared_views_over_sibling_closures():
     n := 0
     fn inc() -> int:
@@ -312,31 +305,31 @@ test fn rwshared_views_over_sibling_closures():
     fn get() -> int:
         return n
     s := ConcurrentList(concurrency.RwShared([inc, get]))
-    both := s.inner.get()          # whole container, one crossing
-    assert copy_fault_int(both[0])
-    assert both[1]() == 0
+    both := s.inner.get()          # the live container
+    assert not copy_fault_int(both[0])
+    assert both[1]() == 1
     # per-element view (`at` is the SAFE index: `E?`)
     match s.at(1):
-        ?f: assert f() == 0
+        ?f: assert f() == 1
         None: assert false, "at(1) on a 2-element list must be Some"
     sl := s[0..2]      # one call, one container
-    assert copy_fault_int(sl[0])
-    assert sl[1]() == 0
+    assert not copy_fault_int(sl[0])
+    assert sl[1]() == 2
     calls := 0
     fn tick(f: fn() -> int):
         calls = calls + 1
     s.for_each(tick)
     assert calls == 2
-    # one walk: the `inc` copy faults inside the fold.
-    assert copy_fault_int(fn() -> int: s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()))
+    # one walk: `inc` runs inside the fold and its write lands.
+    assert not copy_fault_int(fn() -> int: s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()))
     m := ConcurrentMap(concurrency.RwShared({"i": inc, "g": get}))
     assert m.contains("i")
     match m.get("g"):
-        ?f: assert f() == 0
+        ?f: assert f() == 3
         None: assert false
-    assert copy_fault(fn(): m.for_each_entry(fn(k: str, f: fn() -> int): f()))
+    assert not copy_fault(fn(): m.for_each_entry(fn(k: str, f: fn() -> int): f()))
     assert m.fold_entries(0, fn(a: int, k: str, f: fn() -> int) -> int: a + 1) == 2
-    assert n == 0
+    assert n == 4
     # (`contains` shares the code path but is unreachable with closures — a `fn` is not Hashable, so a
     # Set can never hold two sibling closures.)
 

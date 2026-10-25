@@ -217,7 +217,7 @@ impl Vm {
     /// keeps DEC-052's immediate `yield_pool_slot(None)`.
     pub(super) fn guard_wait_enter(
         &mut self,
-        key: usize,
+        key: GuardKey,
         what: &str,
         span: Span,
     ) -> Result<DemoteReg, RuntimeError> {

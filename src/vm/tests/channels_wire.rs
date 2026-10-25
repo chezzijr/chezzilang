@@ -1259,7 +1259,9 @@ fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
 ///
 /// Each row reads a size AND a key of a 51-key map, so a swept slot that a `churn` list reused
 /// cannot pass. Fix round 1 checked each row RED with its one walk disabled (Channel arm of
-/// `Heap::children`: queue, slot, sealed; Atomic arm: atomic; the door pin: door, at T=2).
+/// `Heap::children`: queue, slot, sealed; Atomic arm: atomic; the door pin: door, at T=2). The
+/// `door` and `slot` rows reach RED only on some runs with their pin off: the collection must land
+/// in the window where the pin is the only root.
 #[test]
 fn a_value_held_only_by_a_core_survives_a_stop() {
     let src = r#"import Atomic, Executor from std.concurrency

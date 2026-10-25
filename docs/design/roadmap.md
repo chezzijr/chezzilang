@@ -124,9 +124,11 @@ subset stuck while the rest of the program runs. Go cannot report that.
 
 ### Remaining steps
 
-1. **`Arc::strong_count` sole-handle rule.** If a blocked receiver holds the only live handle to the
-   `ChannelCore`, no party can send. Sound, O(1), no graph. It misses the common case where `main`
-   also holds the channel as a module global.
+1. **`Arc::strong_count` sole-handle rule: not sound since M3.1/M3.2.** A strong count counts heap
+   slots, not holders: two tasks that share one `Obj::Channel` slot (a module global, a value sent
+   by handle, a box's value) count once, so a count of one proves nothing (the M3.2 leaf proof
+   was deleted for this bug). A sound version needs a reachability walk from every non-blocked
+   party's roots.
 2. **Unify the blocked-party registry with the scheduler's parties** (nursery fibers and demoted
    workers, which step 0 left out). Overlaps
    [`cross-nursery-flat-scheduler.md`](../history/designs/cross-nursery-flat-scheduler.md).

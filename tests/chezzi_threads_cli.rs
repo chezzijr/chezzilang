@@ -1568,8 +1568,8 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_thread_one_sampled() {
 
 /// W13-5 (TICKET-125) residual, T>=2 — CLOSED by TICKET-129. TICKET-135 (D1): the recovered shapes now abort. `SchedCore::flag_deadlock_leaves` now
 /// DECLINES an unproven verdict (`unproven_ok: bool`, `Option<bool>` return) unless
-/// `MnSched::may_fault_unproven` licenses it — no live peer sched can still move or prove its own
-/// victims, matching Go's all-goroutines-parked rule. TICKET-125's own cross-sched deferral
+/// `MnSched::may_fault_unproven` licenses it — no live peer sched can still move (M3.2 deleted the
+/// proven-victims clause with the leaf proof), matching Go's all-goroutines-parked rule. TICKET-125's own cross-sched deferral
 /// (`defer_to_provable_peer`) had cut the false-fault rate (~3/5 -> ~1/20 at T=4 on `d2a`) without
 /// reaching 0 and was reverted; TICKET-129 measured 0 false faults of 60 runs per worker count on
 /// `d2a`/`d2d`/`g3` (debug binary) before closing `docs/contributing/gaps.md`'s W13-5 row.
@@ -1610,8 +1610,8 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_every_worker_count() {
 }
 
 /// TICKET-125 — a GENUINE two-leaf deadlock on a channel created in `main` must still fault at every
-/// worker count: the non-provable fallback (fault the lowest-index leaf, then re-judge) must retire
-/// BOTH leaves rather than decline forever.
+/// worker count: the licensed fallback (fault the lowest-index leaf, then re-judge; since M3.2 the
+/// only path, as no leaf is proven) must retire BOTH leaves rather than decline forever.
 const TWO_LEAF_DEADLOCK_ON_A_MAIN_CHANNEL: &str = "fn main():
     ch := Channel[int](0)
     parallel:

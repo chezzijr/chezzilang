@@ -14,55 +14,7 @@ pub(super) enum BoxCore<'a> {
 }
 
 impl<'a> BoxCore<'a> {
-    /// The box behind a wire handle; `None` for every other wire value.
-    pub(super) fn of_wire(w: &'a WireValue) -> Option<Self> {
-        match w {
-            WireValue::Shared(c) => Some(BoxCore::Shared(c)),
-            WireValue::RwShared(c) => Some(BoxCore::RwShared(c)),
-            WireValue::Atomic(c) => Some(BoxCore::Atomic(c)),
-            WireValue::Int(_)
-            | WireValue::Float(_)
-            | WireValue::Bool(_)
-            | WireValue::Nil
-            | WireValue::List { .. }
-            | WireValue::Tuple { .. }
-            | WireValue::Map { .. }
-            | WireValue::Set { .. }
-            | WireValue::Str(_)
-            | WireValue::Bytes(_)
-            | WireValue::ByteArray(_)
-            | WireValue::Iter { .. }
-            | WireValue::Struct { .. }
-            | WireValue::Enum { .. }
-            | WireValue::Cell { .. }
-            | WireValue::Backref(_)
-            | WireValue::Handle(_)
-            | WireValue::Channel(_)
-            | WireValue::AtomicInt(_)
-            | WireValue::Executor(_)
-            | WireValue::Socket(_)
-            | WireValue::Listener(_)
-            | WireValue::Writer(_)
-            | WireValue::Reader(_)
-            | WireValue::Ptr(_)
-            | WireValue::Builtin(_)
-            | WireValue::Native { .. }
-            | WireValue::Cffi(_)
-            | WireValue::Closure { .. }
-            | WireValue::Func { .. }
-            | WireValue::Generator { .. } => None,
-        }
-    }
-
-    pub(super) fn to_wire(self) -> WireValue {
-        match self {
-            BoxCore::Shared(c) => WireValue::Shared(Arc::clone(c)),
-            BoxCore::RwShared(c) => WireValue::RwShared(Arc::clone(c)),
-            BoxCore::Atomic(c) => WireValue::Atomic(Arc::clone(c)),
-        }
-    }
-
-    /// The core's identity: what the `seen` stack and the snapshot map are keyed on.
+    /// The core's identity: what the `seen` stack is keyed on.
     pub(super) fn addr(self) -> usize {
         match self {
             BoxCore::Shared(c) => Arc::as_ptr(c) as usize,
@@ -79,9 +31,6 @@ impl<'a> BoxCore<'a> {
         }
     }
 }
-
-/// Box snapshots taken before a render, keyed on [`BoxCore::addr`].
-pub(super) type BoxSnaps = fxhash::FxHashMap<usize, WireValue>;
 
 impl Vm {
     /// Build the D4 layer-C fault for a write to an airlock copy (a cell, a field, an index or a
