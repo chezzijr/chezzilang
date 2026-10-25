@@ -520,11 +520,8 @@ impl Vm {
                 let hk = self.hash_key_rooted(k, &[v], span)?;
                 // last-wins upsert (mirrors the map literal + interp `map_upsert`).
                 let pos = self.map_slot(&map.entries, map.candidates(hk), k, span)?;
-                match pos {
-                    Some(p) => {
-                        map.set_value(p, v);
-                    }
-                    None => map.push(&self.heap, hk, k, v),
+                if pos.and_then(|p| map.set_value(p, v)).is_none() {
+                    map.push(&self.heap, hk, k, v);
                 }
             }
             Ok(map)

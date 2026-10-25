@@ -147,10 +147,13 @@ impl Vm {
             Struct,
         }
         let sliced = match self.heap.get(h) {
+            // M3.0a — one snapshot of the block answers both the bounds and the reads: another
+            // thread can shrink a shared list between two.
             Obj::List(items) => {
-                let idxs = crate::slice::range_indices(&parts, items.len())
+                let v = items.view();
+                let idxs = crate::slice::range_indices(&parts, v.len())
                     .map_err(|m| self.err(m.to_string(), span))?;
-                Sliced::List(idxs.iter().map(|&i| items.get(i)).collect())
+                Sliced::List(idxs.iter().map(|&i| v.get(i)).collect())
             }
             // ASCII arm: a byte index IS a codepoint index. The `None` arm stays O(n) per slice for
             // non-ASCII text (DEC-072).
@@ -175,9 +178,10 @@ impl Vm {
             }
             // `bytearray[r]` slices over BYTE offsets and yields a NEW `bytearray` (mutable copy).
             Obj::ByteArray(b) => {
-                let idxs = crate::slice::range_indices(&parts, b.len())
+                let v = b.view();
+                let idxs = crate::slice::range_indices(&parts, v.len())
                     .map_err(|m| self.err(m.to_string(), span))?;
-                Sliced::ByteArray(idxs.iter().map(|&i| b.get(i)).collect())
+                Sliced::ByteArray(idxs.iter().map(|&i| v.get(i)).collect())
             }
             Obj::Struct { .. } | Obj::Enum { .. } => Sliced::Struct,
             Obj::BigInt(_)
@@ -256,16 +260,18 @@ impl Vm {
         // key. `Str`/`Struct` (and any non-Int key) fall through to the general match below.
         if let Some(n) = key.as_int_inline() {
             match self.heap.get(h) {
+                // M3.0a — one snapshot answers the bound and the read (see `slice_range`).
                 Obj::List(items) => {
-                    return match crate::slice::norm_index(n, items.len()).map(|i| items.get(i)) {
+                    let s = items.view();
+                    return match crate::slice::norm_index(n, s.len()).map(|i| s.get(i)) {
                         Some(v) => {
                             self.push(v);
                             Ok(())
                         }
-                        None => Err(self.err(
-                            format!("index {n} out of bounds (len {})", items.len()),
-                            span,
-                        )),
+                        None => {
+                            Err(self
+                                .err(format!("index {n} out of bounds (len {})", s.len()), span))
+                        }
                     };
                 }
                 // `bytes[i]`/`bytearray[i]` → `int` (0–255); out-of-range faults recoverably.
@@ -282,25 +288,22 @@ impl Vm {
                     };
                 }
                 Obj::ByteArray(b) => {
-                    return match crate::slice::norm_index(n, b.len()).map(|i| b.get(i) as i64) {
+                    let s = b.view();
+                    return match crate::slice::norm_index(n, s.len()).map(|i| s.get(i) as i64) {
                         Some(v) => {
                             self.push(Value::int(v));
                             Ok(())
                         }
                         None => {
                             Err(self
-                                .err(format!("index {n} out of bounds (len {})", b.len()), span))
+                                .err(format!("index {n} out of bounds (len {})", s.len()), span))
                         }
                     };
                 }
                 Obj::Map(_) => {
                     let hk = self.scalar_hash(key);
-                    return match self.map_probe(h, hk, key, span)? {
-                        Some(p) => {
-                            let Obj::Map(m) = self.heap.get(h) else {
-                                unreachable!()
-                            };
-                            let v = m.value_at(p);
+                    return match self.map_lookup(h, hk, key, span)? {
+                        Some(v) => {
                             self.push(v);
                             Ok(())
                         }
@@ -348,16 +351,15 @@ impl Vm {
         match self.heap.get(h) {
             Obj::List(items) => {
                 let idx = int_idx(self)?;
-                let v = crate::slice::norm_index(idx, items.len()).map(|i| items.get(i));
-                match v {
+                let s = items.view();
+                match crate::slice::norm_index(idx, s.len()).map(|i| s.get(i)) {
                     Some(v) => {
                         self.push(v);
                         Ok(())
                     }
-                    None => Err(self.err(
-                        format!("index {idx} out of bounds (len {})", items.len()),
-                        span,
-                    )),
+                    None => {
+                        Err(self.err(format!("index {idx} out of bounds (len {})", s.len()), span))
+                    }
                 }
             }
             Obj::Str(s) => {
@@ -402,24 +404,21 @@ impl Vm {
             }
             Obj::ByteArray(b) => {
                 let idx = int_idx(self)?;
-                match crate::slice::norm_index(idx, b.len()).map(|i| b.get(i) as i64) {
+                let s = b.view();
+                match crate::slice::norm_index(idx, s.len()).map(|i| s.get(i) as i64) {
                     Some(v) => {
                         self.push(Value::int(v));
                         Ok(())
                     }
                     None => {
-                        Err(self.err(format!("index {idx} out of bounds (len {})", b.len()), span))
+                        Err(self.err(format!("index {idx} out of bounds (len {})", s.len()), span))
                     }
                 }
             }
             Obj::Map(_) => {
                 let hk = self.hash_key_rooted(key, &[obj, key], span)?;
-                match self.map_probe(h, hk, key, span)? {
-                    Some(p) => {
-                        let Obj::Map(m) = self.heap.get(h) else {
-                            unreachable!()
-                        };
-                        let v = m.value_at(p);
+                match self.map_lookup(h, hk, key, span)? {
+                    Some(v) => {
                         self.push(v);
                         Ok(())
                     }
@@ -640,11 +639,10 @@ impl Vm {
             let Obj::Map(m) = heap.get(h) else {
                 unreachable!()
             };
-            match pos {
-                Some(i) => {
-                    m.set_value(i, val);
-                }
-                None => m.push(heap, hk, key, val),
+            // M3.0a — a position the entry block no longer holds (another thread removed entries
+            // after the probe) is a miss: the key is inserted.
+            if pos.and_then(|i| m.set_value(i, val)).is_none() {
+                m.push(heap, hk, key, val);
             }
             return Ok(());
         }
@@ -656,23 +654,22 @@ impl Vm {
             // On INSERT only, snapshot a struct/enum key so a later mutation of the
             // caller's live value can't corrupt the map (Go value-key model). An UPDATE reuses the
             // stored key and pays no clone. `snapshot_key` is pure alloc (no GC), so no rooting.
-            match pos {
-                Some(i) => {
-                    let Obj::Map(m) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    m.set_value(i, val);
-                }
-                None => {
-                    // Snapshot a struct/enum key on INSERT only (Go value-key model); pure
-                    // alloc (no GC), so `h`/`val` stay valid across it and no rooting is needed.
-                    let key = self.snapshot_key(key);
-                    let heap = self.heap.write(h);
-                    let Obj::Map(m) = heap.get(h) else {
-                        unreachable!()
-                    };
-                    m.push(heap, hk, key, val);
-                }
+            // M3.0a — a position the entry block no longer holds is a miss (see above).
+            let updated = pos.and_then(|i| {
+                let Obj::Map(m) = self.heap.get_mut(h) else {
+                    unreachable!()
+                };
+                m.set_value(i, val)
+            });
+            if updated.is_none() {
+                // Snapshot a struct/enum key on INSERT only (Go value-key model); pure
+                // alloc (no GC), so `h`/`val` stay valid across it and no rooting is needed.
+                let key = self.snapshot_key(key);
+                let heap = self.heap.write(h);
+                let Obj::Map(m) = heap.get(h) else {
+                    unreachable!()
+                };
+                m.push(heap, hk, key, val);
             }
             return Ok(());
         }
@@ -715,28 +712,29 @@ impl Vm {
             let Obj::ByteArray(b) = self.heap.get_mut(h) else {
                 unreachable!()
             };
-            return match crate::slice::norm_index(idx, b.len()) {
+            // M3.0a — one snapshot answers the bound and the store (see `slice_range`).
+            let s = b.view();
+            let len = s.len();
+            return match crate::slice::norm_index(idx, len) {
                 Some(i) => {
-                    b.set(i, byte);
+                    s.set(i, byte);
                     Ok(())
                 }
-                None => {
-                    let len = b.len();
-                    Err(self.err(format!("index {idx} out of bounds (len {len})"), span))
-                }
+                None => Err(self.err(format!("index {idx} out of bounds (len {len})"), span)),
             };
         }
         match self.heap.get_mut(h) {
-            Obj::List(items) => match crate::slice::norm_index(idx, items.len()) {
-                Some(i) => {
-                    items.set(i, val);
-                    Ok(())
+            Obj::List(items) => {
+                let s = items.view();
+                let len = s.len();
+                match crate::slice::norm_index(idx, len) {
+                    Some(i) => {
+                        s.set(i, val);
+                        Ok(())
+                    }
+                    None => Err(self.err(format!("index {idx} out of bounds (len {len})"), span)),
                 }
-                None => {
-                    let len = items.len();
-                    Err(self.err(format!("index {idx} out of bounds (len {len})"), span))
-                }
-            },
+            }
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)

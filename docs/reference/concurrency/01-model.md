@@ -93,9 +93,12 @@ the heap stays memory-safe. Two threads that race on one list or one map can see
 - a torn read of a multi-word entry (a map entry is three words; a `Value` and a map index slot
   are one aligned word each, so they never tear),
 - a missed map hit,
-- a task fault (an index out of range). A racy read past a buffer's length is a Rust panic in the
-  VM today; the race test catches and counts it as the fault Go would raise. In a spawned task
-  the panic is a fault of the task; in the entry task it ends the process (exit 101).
+- a task fault: the op's own out-of-range error (`index 3 out of bounds (len 2)`), which
+  `recover:` catches, as Go's index panic is one `recover()` catches. A racy op reads one
+  snapshot of the buffer and checks its index against that snapshot's length, so it never
+  panics the VM; a probe whose entry another thread removed is a miss. Gate:
+  `racy_container_ops_never_panic` (a grid of every container read and write op against a
+  shrinking thread, 10,000 rounds, also under `CHEZZI_GC_STRESS=1`).
 
 A race never reads freed memory. A list, map or set buffer that grows, or that a sort or a remove
 replaces, retires; only the stop-the-world GC frees it, when no thread holds a pointer into it.

@@ -467,13 +467,12 @@ impl Vm {
                     let Obj::Iter { items, pos } = self.heap.get_mut(h) else {
                         unreachable!()
                     };
-                    let item = if *pos < items.len() {
-                        let item = items.get(*pos);
+                    // M3.0a — one read answers the bound and the element: two threads can step
+                    // one shared cursor.
+                    let item = items.try_get(*pos);
+                    if item.is_some() {
                         *pos += 1;
-                        Some(item)
-                    } else {
-                        None
-                    };
+                    }
                     let result = match item {
                         Some(v) => self.alloc_enum("Option", "Some", &[v]),
                         None => self.alloc_enum("Option", "None", &[]),

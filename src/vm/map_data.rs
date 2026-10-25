@@ -266,17 +266,25 @@ impl MapData {
     pub fn heap_bytes(&self) -> usize {
         self.entries.capacity() * size_of::<MapEntry>() + self.index.heap_bytes()
     }
-    /// The value of entry `i`.
+    /// The value of entry `i`, or `None` when the entry block holds no entry `i`. M3.0a — a
+    /// probe's position names the entry snapshot the probe read, and another thread can remove
+    /// entries after it: the caller reads `None` as a miss.
     #[inline]
-    pub fn value_at(&self, i: usize) -> Value {
-        self.entries.get(i).2
+    pub fn value_at(&self, i: usize) -> Option<Value> {
+        self.entries.try_get(i).map(|e| e.2)
     }
-    /// Replace the value of entry `i` (its key and position stay); returns the old value.
+    /// Replace the value of entry `i` (its key and position stay); returns the old value, or
+    /// `None` (and writes nothing) when the entry block holds no entry `i` (see `value_at`).
     #[inline]
-    pub fn set_value(&self, i: usize, v: Value) -> Value {
-        let (h, k, old) = self.entries.get(i);
-        self.entries.set(i, (h, k, v));
-        old
+    #[must_use = "`None` means no entry `i`: the caller inserts the key"]
+    pub fn set_value(&self, i: usize, v: Value) -> Option<Value> {
+        let es = self.entries.view();
+        if i >= es.len() {
+            return None;
+        }
+        let (h, k, old) = es.get(i);
+        es.set(i, (h, k, v));
+        Some(old)
     }
     /// Append a fresh entry (caller has confirmed the key is absent), updating the index. A grow
     /// retires on `heap`.
@@ -288,15 +296,19 @@ impl MapData {
         self.version.bump();
     }
     /// Remove the entry at `i` (preserving order): a new entry block and an index rebuilt from the
-    /// cached hashes (pure, no re-hashing) swap in, and the old ones retire on `heap`.
-    pub fn remove_at(&self, heap: &Heap, i: usize) -> MapEntry {
+    /// cached hashes (pure, no re-hashing) swap in, and the old ones retire on `heap`. `None`
+    /// (and no change) when the entry block holds no entry `i` (see `value_at`).
+    pub fn remove_at(&self, heap: &Heap, i: usize) -> Option<MapEntry> {
         let mut es = self.entries.to_vec();
+        if i >= es.len() {
+            return None;
+        }
         let removed = es.remove(i);
         self.entries.replace(heap, &es);
         let hashes: Vec<u64> = es.iter().map(|e| e.0).collect();
         self.index.rebuild(heap, &hashes);
         self.version.bump();
-        removed
+        Some(removed)
     }
 }
 
@@ -342,14 +354,17 @@ impl SetData {
         self.version.bump();
     }
     /// See [`MapData::remove_at`].
-    pub fn remove_at(&self, heap: &Heap, i: usize) -> SetEntry {
+    pub fn remove_at(&self, heap: &Heap, i: usize) -> Option<SetEntry> {
         let mut es = self.entries.to_vec();
+        if i >= es.len() {
+            return None;
+        }
         let removed = es.remove(i);
         self.entries.replace(heap, &es);
         let hashes: Vec<u64> = es.iter().map(|e| e.0).collect();
         self.index.rebuild(heap, &hashes);
         self.version.bump();
-        removed
+        Some(removed)
     }
 }
 
@@ -504,7 +519,7 @@ mod tests {
         for k in 0..N {
             let hits: Vec<usize> = m.candidates(k).collect();
             assert_eq!(hits, [k as usize], "key {k}");
-            assert_eq!(m.value_at(hits[0]), Value::int(-(k as i64)));
+            assert_eq!(m.value_at(hits[0]), Some(Value::int(-(k as i64))));
         }
         heap.sweep();
     }

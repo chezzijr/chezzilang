@@ -22,9 +22,13 @@
 //!   race and never tears. `Copy` is also what makes a racy read sound: a reader copies the bits,
 //!   and a copied `T` with a drop would drop twice.
 //! - A read loads the pointer (Acquire), then that block's `len` (Acquire), then a slot below
-//!   `len`. An index at or past `len` panics. In a spawned task the panic is a fault of the task
-//!   ("internal error: a parallel task panicked"); in the entry task it ends the process (exit
-//!   101).
+//!   `len`. [`get`](RVec::get) and [`set`](RVec::set) panic on an index at or past `len`, and a
+//!   panic is no fault `recover:` catches (in a spawned task it is "internal error: a parallel
+//!   task panicked"; in the entry task it ends the process). M3.0a — so they serve only a vec
+//!   whose `len` no other thread can lower (a private snapshot, a fixed block); an op on a vec
+//!   that another thread can shrink checks its index against the one snapshot it reads
+//!   ([`view`](RVec::view), [`try_get`](RVec::try_get), [`remove`](RVec::remove)) and gives its
+//!   own out-of-range fault.
 //! - A push into spare capacity writes the slot, then stores `len + 1` (Release). A grow
 //!   allocates a block of twice the capacity, copies the elements, and swaps the pointer with a
 //!   `compare_exchange` (AcqRel). The winner retires the old block; a loser frees its own new
@@ -739,11 +743,12 @@ impl<T: Elem> RVec<T> {
         }
     }
 
-    /// Insert `v` at `i`, shifting the tail right. Panics when `i > len`. A grow retires the old
-    /// block on `heap`.
+    /// Insert `v` at `i`, shifting the tail right; an `i` past `len` inserts at `len`, as
+    /// Python's `insert` clamps (a caller clamps to the `len` it read, and another thread can
+    /// shrink the vec after that read). A grow retires the old block on `heap`.
     pub fn insert(&self, heap: &Heap, i: usize, v: T) {
         let (h, len) = self.reserve(heap, 1);
-        assert!(i <= len, "RVec insert index out of range: {i} > {len}");
+        let i = i.min(len);
         // SAFETY: every index is at most `len < cap` in the live block `h`.
         unsafe {
             for k in (i..len).rev() {
@@ -754,10 +759,13 @@ impl<T: Elem> RVec<T> {
         }
     }
 
-    /// Remove and return element `i`, shifting the tail left. Panics when `i >= len`.
-    pub fn remove(&self, i: usize) -> T {
+    /// Remove and return element `i`, shifting the tail left, or `None` when `i` is at or past
+    /// `len` (one snapshot answers both).
+    pub fn remove(&self, i: usize) -> Option<T> {
         let (h, len, _) = self.snapshot();
-        assert!(i < len, "RVec index out of range: {i} >= {len}");
+        if i >= len {
+            return None;
+        }
         // SAFETY: every index is below `len <= cap` in the live block `h`.
         unsafe {
             let v = load(h, i);
@@ -765,7 +773,7 @@ impl<T: Elem> RVec<T> {
                 store(h, k - 1, load::<T>(h, k));
             }
             (*h).set_len(len - 1);
-            v
+            Some(v)
         }
     }
 
@@ -1365,7 +1373,10 @@ mod tests {
         w.insert(0, -9);
         v.insert(&heap, 4, 8);
         w.insert(4, 8);
-        assert_eq!(v.remove(1), w.remove(1));
+        assert_eq!(v.remove(1), Some(w.remove(1)));
+        assert_eq!(v.remove(4), None, "past len");
+        v.insert(&heap, 9, 5);
+        w.insert(4, 5);
         v.set(0, 7);
         w[0] = 7;
         assert_eq!(v.pop(), w.pop());

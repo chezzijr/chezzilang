@@ -245,6 +245,26 @@ impl Vm {
         })
     }
 
+    /// The value of `key` (pre-hashed to `hk`) in the HEAP map at `mh`, or `None`: [`Self::map_probe`],
+    /// then the entry it found. M3.0a — another thread can remove entries between the two reads, so
+    /// a position the entry block no longer holds is a miss ([`MapData::value_at`]).
+    #[inline]
+    pub(super) fn map_lookup(
+        &mut self,
+        mh: GcRef,
+        hk: u64,
+        key: Value,
+        span: Span,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let Some(p) = self.map_probe(mh, hk, key, span)? else {
+            return Ok(None);
+        };
+        match self.heap.get(mh).as_map() {
+            Some(m) => Ok(m.value_at(p)),
+            None => unreachable!("map_lookup on non-map"),
+        }
+    }
+
     /// The Set twin of [`Self::map_probe`] — probe the HEAP set at `sh` for `elem` (pre-hashed to
     /// `he`), rooting `sh`/`elem` across the (re-entrant) equality and re-checking the set's
     /// structural version after every compare (see [`Self::map_probe`] for why).

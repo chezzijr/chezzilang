@@ -218,7 +218,7 @@ impl Vm {
                     let Obj::Map(m) = heap.get(mh) else {
                         unreachable!()
                     };
-                    Ok(Some(m.remove_at(heap, i).2))
+                    Ok(m.remove_at(heap, i).map(|e| e.2))
                 })?;
                 Ok(self.wire_option(removed))
             }
@@ -229,11 +229,8 @@ impl Vm {
                 let present = self.rwshared_mutate(&core, args, span, |vm, st, a| {
                     want_elem(vm, vm.elem_kind(st), "map")?;
                     let mh = st.as_obj().expect("a map is a heap object");
-                    if let Some(i) = vm.map_probe(mh, qh, a[0], span)? {
-                        let Obj::Map(m) = vm.heap.get(mh) else {
-                            unreachable!()
-                        };
-                        return Ok(Some(m.value_at(i)));
+                    if let Some(v) = vm.map_lookup(mh, qh, a[0], span)? {
+                        return Ok(Some(v));
                     }
                     let k = vm.snapshot_key(a[0]);
                     let heap = vm.heap.write(mh);
@@ -268,8 +265,7 @@ impl Vm {
                             changed = true;
                         }
                         Some(i) if !add => {
-                            s.remove_at(heap, i);
-                            changed = true;
+                            changed = s.remove_at(heap, i).is_some();
                         }
                         _ => {}
                     }

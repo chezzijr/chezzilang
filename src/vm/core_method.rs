@@ -893,8 +893,10 @@ impl Vm {
                             unreachable!()
                         };
                         let len = items.len();
-                        match crate::slice::norm_index(i, len) {
-                            Some(idx) => Ok(items.remove(idx)),
+                        // M3.0a — `remove` checks `idx` against its own snapshot: another thread
+                        // can shrink the list after `len` was read.
+                        match crate::slice::norm_index(i, len).and_then(|idx| items.remove(idx)) {
+                            Some(v) => Ok(v),
                             None => {
                                 Err(self.err(format!("index {i} out of bounds (len {len})"), span))
                             }
@@ -1044,13 +1046,7 @@ impl Vm {
                         self.arity_err("get", args, 1, span)?;
                         let key = args[0];
                         let hk = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
-                        let found = self.map_probe(h, hk, key, span)?.map(|p| {
-                            let Obj::Map(m) = self.heap.get(h) else {
-                                unreachable!()
-                            };
-                            m.value_at(p)
-                        });
-                        match found {
+                        match self.map_lookup(h, hk, key, span)? {
                             Some(v) => Ok(self.alloc_enum("Option", "Some", &[v])),
                             None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
@@ -1097,8 +1093,12 @@ impl Vm {
                                 let Obj::Map(m) = heap.get(h) else {
                                     unreachable!()
                                 };
-                                let (_, _, v) = m.remove_at(heap, i);
-                                Ok(self.alloc_enum("Option", "Some", &[v]))
+                                // M3.0a — `None`: another thread removed the entry after the
+                                // probe, a miss.
+                                match m.remove_at(heap, i) {
+                                    Some((_, _, v)) => Ok(self.alloc_enum("Option", "Some", &[v])),
+                                    None => Ok(self.alloc_enum("Option", "None", &[])),
+                                }
                             }
                             None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
@@ -1155,15 +1155,10 @@ impl Vm {
                                 for (hk, key, val) in incoming {
                                     let pos =
                                         vm.map_slot(&out.entries, out.candidates(hk), key, span)?;
-                                    match pos {
-                                        Some(i) => {
-                                            out.set_value(i, val);
-                                        }
-                                        None => {
-                                            let key = vm.snapshot_key(key);
-                                            vm.push(key);
-                                            out.push(&vm.heap, hk, key, val);
-                                        }
+                                    if pos.and_then(|i| out.set_value(i, val)).is_none() {
+                                        let key = vm.snapshot_key(key);
+                                        vm.push(key);
+                                        out.push(&vm.heap, hk, key, val);
                                     }
                                 }
                                 Ok(out)
@@ -1229,8 +1224,8 @@ impl Vm {
                                 let Obj::Set(s) = heap.get(h) else {
                                     unreachable!()
                                 };
-                                s.remove_at(heap, i);
-                                Ok(Value::bool(true))
+                                // M3.0a — `None` is a miss (see `MapMethod::Remove`).
+                                Ok(Value::bool(s.remove_at(heap, i).is_some()))
                             }
                             None => Ok(Value::bool(false)),
                         }

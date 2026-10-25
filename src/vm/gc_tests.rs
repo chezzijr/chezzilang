@@ -1898,14 +1898,15 @@ main()"
                     Ok(Ok(false)) => garbage += 1,
                     // A racy fault is the user's bug: count it and go on.
                     Ok(Err(_)) => faults += 1,
+                    // M3.0a — a racy op gives its own fault, never a panic
+                    // (`racy_container_ops_never_panic`).
                     Err(p) => {
                         let msg = p
                             .downcast_ref::<String>()
                             .map(String::as_str)
                             .or_else(|| p.downcast_ref::<&str>().copied())
                             .unwrap_or("");
-                        assert!(msg.contains("index out of range"), "a panic: {msg}");
-                        faults += 1;
+                        panic!("a racy op panicked: {msg}");
                     }
                 }
             }
@@ -2182,4 +2183,251 @@ main()"
         bad.len(),
         &bad[..bad.len().min(3)]
     );
+}
+
+/// M3.0a — a racy container op never panics (Go: an index out of range is a panic that `recover`
+/// catches; here it is the op's own `RuntimeError`). The grid: thread A shrinks and regrows the
+/// shared `L`, `M`, `S` and `BA` (pop, remove, sort, reverse, map and set remove, bytearray pop
+/// and reverse) while thread B runs each read or write op of the family on them, 10,000 rounds,
+/// each op under `catch_unwind`. Every op gives a value or a `RuntimeError`, never a Rust panic.
+/// Run under `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn racy_container_ops_never_panic() {
+    const OPS: i64 = 10_000;
+    let src = "\
+L: List[int] = [1, 2, 3]
+M: Map[int, int] = {1: 1, 2: 2}
+S: Set[int] = Set([1, 2])
+BA := bytearray(b\"abc\")
+R := 1..3
+BIG: List[int] = []
+
+fn main():
+    for i in 0..100000:
+        BIG.push(i)
+main()
+C := BIG.iter()"
+        .to_string();
+    type Op = fn(&mut Vm, &[GcRef], i64) -> Result<(), RuntimeError>;
+    fn method(w: &mut Vm, h: GcRef, m: &str, args: &[Value]) -> Result<Value, RuntimeError> {
+        if matches!(w.heap.get(h), Obj::ByteArray(_)) {
+            w.bytearray_method(h, m, args, Span::RUNTIME)
+        } else {
+            w.core_method(h, m, args, Span::RUNTIME)
+        }
+    }
+    fn len_of(w: &mut Vm, h: GcRef) -> Result<i64, RuntimeError> {
+        Ok(method(w, h, "len", &[])?.as_int())
+    }
+    fn index(w: &mut Vm, h: GcRef, k: Value) -> Result<(), RuntimeError> {
+        w.push(Value::obj(h));
+        w.push(k);
+        w.get_index(Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    fn store(w: &mut Vm, h: GcRef, k: Value, v: Value) -> Result<(), RuntimeError> {
+        w.push(Value::obj(h));
+        w.push(k);
+        w.push(v);
+        w.set_index(Span::RUNTIME)
+    }
+    fn slice(w: &mut Vm, h: GcRef, r: GcRef) -> Result<(), RuntimeError> {
+        w.push(Value::obj(h));
+        w.push(Value::obj(r));
+        w.slice_range(Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    fn contains(w: &mut Vm, h: GcRef, x: Value) -> Result<(), RuntimeError> {
+        w.push(x);
+        w.push(Value::obj(h));
+        w.op_contains(Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    fn call(w: &mut Vm, h: GcRef, m: &str, args: &[Value]) -> Result<(), RuntimeError> {
+        method(w, h, m, args).map(|_| ())
+    }
+    fn iterate(w: &mut Vm, h: GcRef) -> Result<(), RuntimeError> {
+        w.drain_iterable(Value::obj(h), Span::RUNTIME).map(|_| ())
+    }
+    /// `c.next()` on the shared cursor `c`.
+    fn step(w: &mut Vm, c: GcRef) -> Result<(), RuntimeError> {
+        w.push(Value::obj(c));
+        w.do_method_call("next", 0, NO_IC, Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    let (l, m, s, ba, r) = (0, 1, 2, 3, 4);
+    let reads: Vec<(&'static str, Op)> = vec![
+        ("L[len-1]", |w, g, _| {
+            let n = len_of(w, g[0])?;
+            index(w, g[0], Value::int(n - 1))
+        }),
+        ("L[-1]", |w, g, _| index(w, g[0], Value::int(-1))),
+        ("L[R]", |w, g, _| slice(w, g[0], g[4])),
+        ("for x in L", |w, g, _| iterate(w, g[0])),
+        ("x in L", |w, g, k| contains(w, g[0], Value::int(k % 4))),
+        ("L.index_of", |w, g, k| {
+            call(w, g[0], "index_of", &[Value::int(k % 4)])
+        }),
+        ("L.first", |w, g, _| call(w, g[0], "first", &[])),
+        ("L.last", |w, g, _| call(w, g[0], "last", &[])),
+        ("L.min", |w, g, _| call(w, g[0], "min", &[])),
+        ("L.max", |w, g, _| call(w, g[0], "max", &[])),
+        ("L.sum", |w, g, _| call(w, g[0], "sum", &[])),
+        ("L.copy", |w, g, _| call(w, g[0], "copy", &[])),
+        ("L.unique", |w, g, _| call(w, g[0], "unique", &[])),
+        ("L.dedup", |w, g, _| call(w, g[0], "dedup", &[])),
+        ("L.reversed", |w, g, _| call(w, g[0], "reversed", &[])),
+        ("L.chunk", |w, g, _| {
+            call(w, g[0], "chunk", &[Value::int(2)])
+        }),
+        ("L.windows", |w, g, _| {
+            call(w, g[0], "windows", &[Value::int(2)])
+        }),
+        ("L[len-1] = v", |w, g, k| {
+            let n = len_of(w, g[0])?;
+            store(w, g[0], Value::int(n - 1), Value::int(k % 4))
+        }),
+        ("L.remove(len-1)", |w, g, _| {
+            let n = len_of(w, g[0])?;
+            call(w, g[0], "remove", &[Value::int(n - 1)])
+        }),
+        ("L.insert(len)", |w, g, k| {
+            let n = len_of(w, g[0])?;
+            call(w, g[0], "insert", &[Value::int(n), Value::int(k % 4)])
+        }),
+        ("M.get", |w, g, k| {
+            call(w, g[1], "get", &[Value::int(k % 8)])
+        }),
+        ("M[k]", |w, g, k| index(w, g[1], Value::int(k % 8))),
+        ("M[k] = v", |w, g, k| {
+            store(w, g[1], Value::int(k % 8), Value::int(k))
+        }),
+        ("k in M", |w, g, k| contains(w, g[1], Value::int(k % 8))),
+        ("M.remove", |w, g, k| {
+            call(w, g[1], "remove", &[Value::int(k % 8)])
+        }),
+        ("M.items", |w, g, _| call(w, g[1], "items", &[])),
+        ("M.copy", |w, g, _| call(w, g[1], "copy", &[])),
+        ("for k in M", |w, g, _| iterate(w, g[1])),
+        ("S.contains", |w, g, k| {
+            call(w, g[2], "contains", &[Value::int(k % 8)])
+        }),
+        ("x in S", |w, g, k| contains(w, g[2], Value::int(k % 8))),
+        ("S.remove", |w, g, k| {
+            call(w, g[2], "remove", &[Value::int(k % 8)])
+        }),
+        ("S.insert", |w, g, k| {
+            call(w, g[2], "insert", &[Value::int(k % 8)])
+        }),
+        ("for x in S", |w, g, _| iterate(w, g[2])),
+        ("BA[len-1]", |w, g, _| {
+            let n = len_of(w, g[3])?;
+            index(w, g[3], Value::int(n - 1))
+        }),
+        ("BA[R]", |w, g, _| slice(w, g[3], g[4])),
+        ("BA[len-1] = b", |w, g, k| {
+            let n = len_of(w, g[3])?;
+            store(w, g[3], Value::int(n - 1), Value::int(k % 128))
+        }),
+        ("b in BA", |w, g, k| contains(w, g[3], Value::int(k % 128))),
+        ("for b in BA", |w, g, _| iterate(w, g[3])),
+        ("BA.copy", |w, g, _| call(w, g[3], "copy", &[])),
+        ("BA.reversed", |w, g, _| call(w, g[3], "reversed", &[])),
+        ("C.next", |w, g, _| step(w, g[5])),
+    ];
+    let reads = Arc::new(reads);
+    let names: Vec<&'static str> = reads.iter().map(|(n, _)| *n).collect();
+    let panics = share_handle(
+        src,
+        &["L", "M", "S", "BA", "R", "C"],
+        2,
+        move |i, w, g| {
+            let _ = (l, m, s, ba, r);
+            let mut panics: Vec<(&'static str, String)> = Vec::new();
+            let sp = Span::RUNTIME;
+            for k in 0..OPS {
+                if (w.gc_stress && i == 0) || w.heap.should_collect() {
+                    w.gc_collect();
+                }
+                w.gc_poll();
+                let run = |w: &mut Vm,
+                           name: &'static str,
+                           op: &dyn Fn(&mut Vm) -> Result<(), RuntimeError>,
+                           panics: &mut Vec<(&'static str, String)>| {
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(w)));
+                    if let Err(p) = r {
+                        let msg = p
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        panics.push((name, msg));
+                    }
+                };
+                if i == 0 {
+                    // Shrink to empty and regrow, so a read meets a `len` that just dropped.
+                    run(
+                        w,
+                        "A",
+                        &|w| {
+                            for x in 0..4 {
+                                call(w, g[0], "push", &[Value::int(x)])?;
+                                call(w, g[1], "insert", &[Value::int(x + k % 4), Value::int(x)])?;
+                                call(w, g[2], "insert", &[Value::int(x + k % 4)])?;
+                                call(w, g[3], "push", &[Value::int(x + 97)])?;
+                            }
+                            match k % 4 {
+                                0 => call(w, g[0], "sort", &[])?,
+                                1 => call(w, g[0], "reverse", &[])?,
+                                2 => call(w, g[3], "reverse", &[])?,
+                                _ => {
+                                    let _ = call(w, g[0], "remove", &[Value::int(0)]);
+                                }
+                            }
+                            while len_of(w, g[0])? > 0 {
+                                call(w, g[0], "pop", &[])?;
+                            }
+                            for x in 0..8 {
+                                call(w, g[1], "remove", &[Value::int(x)])?;
+                                call(w, g[2], "remove", &[Value::int(x)])?;
+                            }
+                            while len_of(w, g[3])? > 0 {
+                                call(w, g[3], "pop", &[])?;
+                            }
+                            // Two threads step one cursor.
+                            for _ in 0..4 {
+                                step(w, g[5])?;
+                            }
+                            Ok(())
+                        },
+                        &mut panics,
+                    );
+                } else {
+                    for (name, op) in reads.iter() {
+                        run(
+                            w,
+                            name,
+                            &|w| op(w, g, k).map(|_| ()).or(Ok(())),
+                            &mut panics,
+                        );
+                    }
+                }
+                let _ = sp;
+            }
+            panics
+        },
+        |_, _, results| results.into_iter().flatten().collect::<Vec<_>>(),
+    );
+    let mut by_op: Vec<(&str, usize, String)> = Vec::new();
+    for (name, msg) in panics {
+        match by_op.iter_mut().find(|e| e.0 == name) {
+            Some(e) => e.1 += 1,
+            None => by_op.push((name, 1, msg)),
+        }
+    }
+    assert!(by_op.is_empty(), "panics by op (of {names:?}): {by_op:#?}");
 }

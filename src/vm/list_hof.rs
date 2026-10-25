@@ -516,26 +516,29 @@ impl Vm {
         is_max: bool,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let n = match self.heap.get(src_h).as_list() {
-            Some(v) => v.len(),
-            None => unreachable!("list_reduce_extreme on non-list"),
-        };
-        if n == 0 {
-            return Ok(self.alloc_enum("Option", "None", &[]));
-        }
         // A Comparable-struct element's `compare` re-enters user code, which may MUTATE (shrink) the
         // source list, so scan an immutable SNAPSHOT (mirrors `list_sort_by_key`/`list_min_max_by`) —
         // indexing the live source post-user-code would panic out of bounds. GC-rooted so its elements
-        // survive `order_key`'s struct-compare allocations.
+        // survive `order_key`'s struct-compare allocations. M3.0a — `n` is the snapshot's length:
+        // another thread can shrink the source after a read of its length.
         self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
             let elems = match self.heap.get(src_h).as_list() {
                 Some(v) => v.clone(),
-                None => unreachable!(),
+                None => unreachable!("list_reduce_extreme on non-list"),
             };
             self.heap.alloc(Obj::List(elems))
         };
         self.push(Value::obj(snap_h)); // ROOT the snapshot
+        let n = match self.heap.get(snap_h).as_list() {
+            Some(v) => v.len(),
+            None => unreachable!(),
+        };
+        if n == 0 {
+            self.pop(); // unroot snapshot
+            self.pop(); // unroot source
+            return Ok(self.alloc_enum("Option", "None", &[]));
+        }
         let mut best = 0usize;
         let mut err = None;
         for i in 1..n {
@@ -600,22 +603,25 @@ impl Vm {
             ));
         }
         let f = args.swap_remove(0);
-        let n = match self.heap.get(src_h).as_list() {
-            Some(v) => v.len(),
-            None => unreachable!("list_min_max_by on non-list"),
-        };
-        if n == 0 {
-            return Ok(self.alloc_enum("Option", "None", &[]));
-        }
+        // M3.0a — `n` is the snapshot's length (see `list_reduce_extreme`).
         self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
             let elems = match self.heap.get(src_h).as_list() {
                 Some(v) => v.clone(),
-                None => unreachable!(),
+                None => unreachable!("list_min_max_by on non-list"),
             };
             self.heap.alloc(Obj::List(elems))
         };
         self.push(Value::obj(snap_h)); // ROOT the snapshot
+        let n = match self.heap.get(snap_h).as_list() {
+            Some(v) => v.len(),
+            None => unreachable!(),
+        };
+        if n == 0 {
+            self.pop(); // unroot snapshot
+            self.pop(); // unroot source
+            return Ok(self.alloc_enum("Option", "None", &[]));
+        }
         let keys_h = self.heap.alloc(Obj::List(RVec::with_capacity(n)));
         self.push(Value::obj(keys_h)); // ROOT the keys
         for i in 0..n {
@@ -811,23 +817,22 @@ impl Vm {
         // `key`/`val` are in-flight Rust locals here (the source map's entries were cloned out), so
         // root `val` across the probe — `map_probe` roots the target map and the key itself.
         let pos = self.with_roots(&[val], |vm| vm.map_probe(h, hk, key, span))?;
-        match pos {
-            Some(i) => {
-                let Obj::Map(m) = self.heap.get_mut(h) else {
-                    unreachable!()
-                };
-                Ok(Some(m.set_value(i, val)))
-            }
-            None => {
-                let key = self.snapshot_key(key);
-                let heap = self.heap.write(h);
-                let Obj::Map(m) = heap.get(h) else {
-                    unreachable!()
-                };
-                m.push(heap, hk, key, val);
-                Ok(None)
+        if let Some(i) = pos {
+            let Obj::Map(m) = self.heap.get_mut(h) else {
+                unreachable!()
+            };
+            // M3.0a — `None`: another thread removed the entry after the probe, an insert.
+            if let Some(old) = m.set_value(i, val) {
+                return Ok(Some(old));
             }
         }
+        let key = self.snapshot_key(key);
+        let heap = self.heap.write(h);
+        let Obj::Map(m) = heap.get(h) else {
+            unreachable!()
+        };
+        m.push(heap, hk, key, val);
+        Ok(None)
     }
 
     /// An `int` method-argument, with a uniform type error matching the interp.

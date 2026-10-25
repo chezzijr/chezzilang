@@ -432,11 +432,9 @@ impl Vm {
                 let map = MapData::default();
                 for (j, &hk) in hashes.iter().enumerate() {
                     let (k, v) = (self.stack[at + 2 * j], self.stack[at + 2 * j + 1]);
-                    match self.map_slot(&map.entries, map.candidates(hk), k, span)? {
-                        Some(p) => {
-                            map.set_value(p, v);
-                        }
-                        None => map.push(&self.heap, hk, k, v),
+                    let pos = self.map_slot(&map.entries, map.candidates(hk), k, span)?;
+                    if pos.and_then(|p| map.set_value(p, v)).is_none() {
+                        map.push(&self.heap, hk, k, v);
                     }
                 }
                 self.stack.truncate(at);
