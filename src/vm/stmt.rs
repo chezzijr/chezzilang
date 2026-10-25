@@ -4,10 +4,6 @@
 use super::block::Cut;
 use super::*;
 
-/// TICKET-246 — appended to the D4 fault when the write happens inside a `Shared` / `RwShared`
-/// closure.
-pub(crate) const BOX_COPY_WRITE_NOTE: &str = " (inside a Shared/RwShared closure this value is a copy of a capture or of a module global; if the box holds a module global's copy, store its .copy() in the box instead)";
-
 /// TICKET-246 — one of the three boxes that render what they hold, borrowed from a heap object
 /// or from a wire handle. [`Vm::display_box`] is its only renderer.
 #[derive(Clone, Copy)]
@@ -88,23 +84,10 @@ impl<'a> BoxCore<'a> {
 pub(super) type BoxSnaps = fxhash::FxHashMap<usize, WireValue>;
 
 impl Vm {
-    /// Build the D4 layer-C fault for a write to an airlock copy. `name` is the binding name when
-    /// the write site knows it (a global slot store); every other site passes `None` and gets the
-    /// generic `this value` subject.
-    pub(super) fn copied_write_err(&self, name: Option<&str>, span: Span) -> RuntimeError {
-        let subject = match name {
-            Some(n) => format!("'{n}'"),
-            None => "this value".to_string(),
-        };
-        // TICKET-246 — inside a box closure a marked value is a capture's copy or a module
-        // global's copy. The second can be held by the box state (`s.update(fn(_): DEFAULTS)`),
-        // where "lost at the join" alone would mislead, so the fault names that case and its fix.
-        let in_box = if self.box_chain.is_empty() {
-            ""
-        } else {
-            BOX_COPY_WRITE_NOTE
-        };
-        self.err(format!("{subject} {COPY_WRITE_TAIL}{in_box}"), span)
+    /// Build the D4 layer-C fault for a write to an airlock copy (a cell, a field, an index or a
+    /// mutating method on a marked object).
+    pub(super) fn copied_write_err(&self, span: Span) -> RuntimeError {
+        self.err(format!("this value {COPY_WRITE_TAIL}"), span)
     }
 
     /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's

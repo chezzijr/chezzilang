@@ -391,41 +391,35 @@ test fn shared_update_nested_in_read_persists_in_the_other_box():
     assert a.get() == 1
     assert b.get() == 9
 
-# Owner note 1 (2026-10-11): a module global's copy stored into the state, as the whole result and
-# nested inside it, then written in place by a later call.
-#
-# Base binary (encoded store, commit 7e4421e4): no fault; the state reads `[5, 6, 1]` (nested:
-# `[[5, 6, 1]]`) and the global stays `[5, 6]`.
-# Now: the stored value is still the box view's copy of the global, so the in-place write faults.
-# The fault names this case and its fix (`.copy()`); it is never a silent lost write. The exact
-# fix (unmark the result root) was declined: the view's module slot would keep aliasing the state,
-# and a later read of the global inside the box would silently see the box's writes.
-test fn shared_global_copy_stored_as_the_state_faults_on_an_in_place_write():
-    s: Shared[List[int]] = Shared([])
-    s.update(fn(_): DEFAULTS)
-    r := recover: s.update(fn(xs): push_one(xs))
-    fault := msg_of(r, "write to a stored global copy")
-    assert fault.starts_with("this value is this task's copy:"), fault
-    assert fault.contains("if the box holds a module global's copy, store its .copy()"), fault
-    assert s.get() == [5, 6]
-    assert DEFAULTS == [5, 6]
+# Owner note 1 (2026-10-11): a module global stored into the state, as the whole result and
+# nested inside it, then written in place by a later call. M3.1: the box closure reads the run's
+# one copy of the global, so the stored state IS the global and the write lands in both (Go: a
+# locked update that returns a package `var` map shares it). Each row owns its global.
+DEF_A: List[int] = [5, 6]
+DEF_B: List[int] = [5, 6]
+DEF_C: List[int] = [5, 6]
 
-test fn shared_global_copy_stored_nested_in_the_state_faults_on_an_in_place_write():
-    s: Shared[List[List[int]]] = Shared([])
-    s.update(fn(_): [DEFAULTS])
-    r := recover: s.update(fn(xss): push_first(xss))
-    fault := msg_of(r, "write to a nested stored global copy")
-    assert fault.contains("if the box holds a module global's copy, store its .copy()"), fault
-    assert s.get() == [[5, 6]]
-    assert DEFAULTS == [5, 6]
-
-# The documented way out: store the box's own copy.
-test fn shared_global_copy_stored_with_copy_is_the_boxes_own_value():
+test fn shared_global_stored_as_the_state_is_the_global():
     s: Shared[List[int]] = Shared([])
-    s.update(fn(_): DEFAULTS.copy())
+    s.update(fn(_): DEF_A)
     s.update(fn(xs): push_one(xs))
     assert s.get() == [5, 6, 1]
-    assert DEFAULTS == [5, 6]
+    assert DEF_A == [5, 6, 1]
+
+test fn shared_global_stored_nested_in_the_state_is_the_global():
+    s: Shared[List[List[int]]] = Shared([])
+    s.update(fn(_): [DEF_B])
+    s.update(fn(xss): push_first(xss))
+    assert s.get() == [[5, 6, 1]]
+    assert DEF_B == [5, 6, 1]
+
+# The way to keep the box's own value: store a copy.
+test fn shared_global_copy_stored_with_copy_is_the_boxes_own_value():
+    s: Shared[List[int]] = Shared([])
+    s.update(fn(_): DEF_C.copy())
+    s.update(fn(xs): push_one(xs))
+    assert s.get() == [5, 6, 1]
+    assert DEF_C == [5, 6]
 
 # A CAPTURE stored into the state is the box's own value once the call ends: its copy mark is
 # cleared with the call.

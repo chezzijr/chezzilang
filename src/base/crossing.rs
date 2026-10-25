@@ -206,8 +206,6 @@ pub enum Route {
     /// it, and nothing writable that the source heap keeps reaches it, `WireMemo::sole_captures`);
     /// it keeps the enclosing mark.
     ClosureCaptures { sole: bool },
-    /// The spawn's module snapshot: the parent keeps its globals.
-    ModuleSnapshot,
     /// A Channel/Shared/RwShared/Atomic read or an Executor job root: the sender gave the value
     /// away, so the receiver owns it (DEC-179 item 6).
     /// A closure inside the value still marks its captures by `ClosureCaptures`.
@@ -222,10 +220,7 @@ pub enum Route {
 /// Whether a rebuild on `route` marks what it allocates, given the `enclosing` mark in force.
 pub fn marks(route: Route, enclosing: bool) -> bool {
     match route {
-        Route::Spawn
-        | Route::CopyRead
-        | Route::ModuleSnapshot
-        | Route::ClosureCaptures { sole: false } => true,
+        Route::Spawn | Route::CopyRead | Route::ClosureCaptures { sole: false } => true,
         Route::ClosureCaptures { sole: true } => enclosing,
         Route::Handoff => false,
     }
@@ -352,7 +347,6 @@ mod tests {
     fn every_route_marks_as_documented() {
         for enclosing in [false, true] {
             assert!(marks(Route::Spawn, enclosing));
-            assert!(marks(Route::ModuleSnapshot, enclosing));
             assert!(marks(Route::CopyRead, enclosing));
             assert!(marks(Route::ClosureCaptures { sole: false }, enclosing));
             assert_eq!(

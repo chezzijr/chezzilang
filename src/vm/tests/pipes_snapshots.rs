@@ -1,4 +1,4 @@
-//! VM tests: pipe chains, snapshot cache, cross-module witness defer, TICKET-063 guards.
+//! VM tests: pipe chains, cross-module witness defer, TICKET-063 guards.
 //! Split out of `src/vm/tests.rs`. `super::*` is the parent module.
 
 use super::*;
@@ -790,132 +790,6 @@ fn intrinsic_grants_all_have_vm_arms() {
     }
 }
 
-/// W6-2 — compile + run `src` on the VM and report how many module-global SNAPSHOTS it built
-/// (`snapshot_builds`, bumped on every `ensure_snapshot` cache MISS). Reaches a private counter, so it
-/// lives here rather than in a Chezzi test; a timing bench can only hint at what this counts exactly.
-fn snapshot_builds_for(src: &str) -> usize {
-    let tokens = crate::lexer::tokenize(src).expect("lex");
-    let module = crate::parser::parse(tokens).expect("parse");
-    let program = crate::compiler::compile_module_standalone(&module).expect("compile");
-    let mut vm = Vm::new(Arc::new(program));
-    vm.run().expect("run");
-    vm.snapshot_builds
-}
-
-/// W6-2 / TICKET-208 / TICKET-213 — the snapshot cache short-circuits only where that is correct.
-/// A task sees its globals as of its own start, and [`Vm::fresh_view`] rebuilds the view only when
-/// it CHANGED since the cached build:
-///
-/// * all-immutable globals (`reusable`) → ONE build for the whole run, however many nurseries;
-/// * a mutable aggregate global nobody mutates → ONE build too: the heap's view epoch
-///   (`Heap::view_epoch`) did not move, so every spawn shares the snapshot (TICKET-208 built one
-///   per spawn: 2000 spawns over a 100000-item global held 2000 copies at one worker);
-/// * an in-place mutation of anything a global reaches → one build per mutate-then-spawn;
-/// * a global ASSIGNMENT between spawns → one build per assignment-then-spawn.
-#[test]
-fn snapshot_cache_short_circuits_per_epoch_not_per_spawn() {
-    let three_nurseries = "\nfor i in 0..3:\n    parallel:\n        spawn: pass\n";
-    assert_eq!(
-        snapshot_builds_for(&format!("n: int = 1\ns := \"x\"{three_nurseries}")),
-        1,
-        "all-immutable globals: 3 nurseries must share ONE build"
-    );
-    assert_eq!(
-        snapshot_builds_for(&format!("n: int = 1\nq: List[int] = [1]{three_nurseries}")),
-        1,
-        "an unmutated aggregate global: 3 nurseries share ONE build"
-    );
-    assert_eq!(
-        snapshot_builds_for(
-            "q: List[int] = [1]\nparallel:\n    for i in 0..50:\n        spawn: pass\n"
-        ),
-        1,
-        "50 spawns over an unmutated aggregate global: ONE build"
-    );
-    assert_eq!(
-        snapshot_builds_for(
-            "q: List[int] = [1]\nxs: List[int] = [1, 2, 3]\nparallel:\n    for x in xs:\n        spawn: pass\n"
-        ),
-        1,
-        "walking a global list between spawns mutates nothing a global reaches: ONE build"
-    );
-    assert_eq!(
-        snapshot_builds_for("g: int = 0\nparallel:\n    spawn: pass\n    g = 1\n    spawn: pass\n"),
-        2,
-        "a global assignment between two spawns must refresh the view (one build each)"
-    );
-}
-
-/// TICKET-213 — every in-place mutation of something a global reaches refreshes the view: one row
-/// per mutating door, at the root and nested. Each program spawns, mutates, then spawns twice: the
-/// mutation costs exactly one rebuild and the third spawn reuses it.
-#[test]
-fn an_in_place_mutation_between_spawns_refreshes_the_view_once() {
-    let decls = "struct P:\n    x: int\n    ys: List[int]\nq: List[int] = [1]\nqq: List[List[int]] = [[1]]\nmp: Map[str, int] = {\"a\": 1}\nst: Set[int] = {1}\np := P(1, [1])\nps: List[P] = [P(1, [1])]\n";
-    for mutation in [
-        "q.push(2)",
-        "q[0] = 5",
-        "q.pop()",
-        "qq[0].push(2)",
-        "mp[\"b\"] = 2",
-        "st.insert(2)",
-        "p.x = 2",
-        "p.ys.push(2)",
-        "ps[0].x = 2",
-        "ps[0].ys.push(2)",
-    ] {
-        assert_eq!(
-            snapshot_builds_for(&format!(
-                "{decls}parallel:\n    spawn: pass\n    {mutation}\n    spawn: pass\n    spawn: pass\n"
-            )),
-            2,
-            "`{mutation}` between two spawns: one rebuild, and the third spawn reuses it"
-        );
-    }
-}
-
-/// W6-2 — a snapshot BUILD failure is CARRIED on the queued task and raised where the task is PREPARED
-/// (its nursery's join), never at the `spawn`: that is what keeps a nursery whose tasks are all cancelled
-/// (`break` out of `parallel:`) faultless, and what keeps the `parallel:` body's own output ahead of the
-/// fault. White-box because the only program-level trigger is a module global deeper than
-/// `MAX_STRUCTURAL_DEPTH`, and `to_snap`'s slow arm is O(n^2) on such a chain (~5100 links) — minutes in a
-/// debug build, on `main` as much as here, so it cannot live in the test suite.
-#[test]
-fn a_carried_snapshot_build_error_is_raised_at_task_preparation() {
-    let program = crate::compiler::compile_module_standalone(
-        &crate::parser::parse(crate::lexer::tokenize("x := 1\n").expect("lex")).expect("parse"),
-    )
-    .expect("compile");
-    let mut vm = Vm::new(Arc::new(program));
-    let span = Span {
-        line: 7,
-        col: 3,
-        file: 0,
-    };
-    let carried = vm.err("simulated snapshot build failure".to_string(), span);
-    // Open a nursery by hand (`Op::EnterNursery`'s lockstep stacks) and queue a task whose pin FAILED.
-    vm.nurseries.push(Vec::new());
-    vm.mn_scopes.push(None);
-    vm.nursery_defer_floors.push(0);
-    vm.nursery_spans.push(span);
-    vm.eager_scheds.push(None);
-    vm.nurseries[0].push(QueuedTask {
-        call: PendingCall::Call {
-            callee: Value::nil(),
-            args: Vec::new(),
-            span,
-        },
-        snap: Err(carried.clone()),
-        cell_ids: Vec::new(),
-        fresh: 0,
-    });
-    let raised = vm
-        .join_nursery()
-        .expect_err("the carried build error must surface at the join, which prepares the task");
-    assert_eq!(raised.message, carried.message);
-    assert_eq!(raised.span, span, "the error keeps its spawn-site span");
-}
-
 /// W7-21 — a module GLOBAL holding a fn VALUE, CALLED through the module (`l.BARE()`). The checker
 /// used to reject this (it read only `ModuleSig::functions`) while the runtime always supported it:
 /// `Op::CallMethod` on an `Obj::Module` looks the member up in the slot table and calls whatever
@@ -1492,13 +1366,9 @@ parallel:
     assert_eq!(out, "300\n", "expected 300: {out:?}");
 }
 
-/// TICKET-016 / W8-25 review finding — a spawned task's OWN write to a module global must stay
-/// visible to a module-level closure it calls, when that closure never crosses a channel or spawn
-/// boundary at all (it existed before the `parallel:` block and is called from inside the same
-/// task that wrote the global). The per-task module snapshot (`ensure_snapshot`/`fault_module`)
-/// replicates every module global — including `f` — into the task's own module copy; `f` must keep
-/// doing a live `Op::GetGlobalSlot` read against that copy, not a value installed frozen at the
-/// snapshot's pre-write state.
+/// TICKET-016 / W8-25 review finding — a spawned task's OWN write to a module global is visible to
+/// a module-level closure it calls (one that never crosses a boundary): `f` does a live
+/// `Op::GetGlobalSlot` read of the run's one `n` (M3.1). Go (go1.27.0, `m31go/rust`): `300`.
 #[test]
 fn ticket_016_spawned_task_own_write_visible_to_module_closure_it_calls() {
     let src = "\
@@ -1507,24 +1377,22 @@ n := 1
 f := fn(x: int) -> int: x * n
 parallel:
     spawn:
-        recover:
-            n = 100
+        n = 100
         print(f(3))
 ";
     let entry = write_temp_chz("ticket016_spawn_own_write_visible", src);
     let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
-    // TICKET-169 (D4 layer C): `n = 100` above now faults, so `f` reads the receiver's unwritten
-    // `n` (`1`).
     assert_eq!(
-        out, "3\n",
-        "expected f to read the receiver's unwritten n (3), got {out:?}"
+        out, "300\n",
+        "expected f to read the task's write (300), got {out:?}"
     );
 }
 
-/// TICKET-016 / W8-25 — a crossed closure that READS AND WRITES the same module global reads its
-/// own late load of the RUNNING task's copy, so its own write is always visible to its next read.
+/// TICKET-016 / W8-25 — a crossed closure that READS AND WRITES the same module global does a late
+/// load of the run's one `n` (M3.1): the task's `n = 100`, then `n + 3`. Go (go1.27.0,
+/// `m31go/rust`): `103`.
 #[test]
 fn ticket_016_closure_over_module_global_written_by_closure_stays_late() {
     let src = "\
@@ -1538,8 +1406,7 @@ fn outer() -> fn(int) -> int:
     return f
 parallel:
     spawn:
-        recover:
-            n = 100
+        n = 100
         ch.send(outer())
 g := ch.recv()
 print(g(3))
@@ -1549,15 +1416,13 @@ print(g(3))
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
     assert_eq!(
-        out, "4\n",
-        "expected 4 (late load, not the snapshot 103): {out:?}"
+        out, "103\n",
+        "expected 103 (a late load of the run's one `n`): {out:?}"
     );
 }
 
-/// TICKET-016 / W8-25, reversed by owner decision D2 (TICKET-137) — a closure NESTED inside a crossed
-/// closure reads the module globals of the task that RUNS it, exactly like the crossed closure does:
-/// the sender's `n = 100` lands in the sender's copy, so `g(3)` prints `3`. Go/CPython print `300`
-/// (one live global); the divergence is the deliberate per-task rule — share with `Shared`/`Channel`.
+/// TICKET-016 / W8-25 — a closure NESTED inside a crossed closure reads the run's one `n` too
+/// (M3.1). Go (go1.27.0, `m31go/rust`) and CPython: `300`.
 #[test]
 fn ticket_016_closure_over_module_global_read_by_nested_closure() {
     let src = "\
@@ -1566,8 +1431,7 @@ n := 1
 ch := Channel[fn(int) -> int]()
 parallel:
     spawn:
-        recover:
-            n = 100
+        n = 100
         ch.send(fn(x: int) -> int: x * (fn() -> int: n)())
 g := ch.recv()
 print(g(3))
@@ -1577,21 +1441,16 @@ print(g(3))
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
     assert_eq!(
-        out, "3\n",
-        "a nested closure must read the receiving task's own copy of `n` (D2): {out:?}"
+        out, "300\n",
+        "a nested closure must read the run's one copy of `n`: {out:?}"
     );
 }
 
-/// TICKET-016 / W8-25, reversed by owner decision D2 (TICKET-137) — a closure's reference to a
-/// MODULE GLOBAL is a late global load, not a capture, so it is neither moved nor copied at the
-/// `parallel:`/`spawn:` airlock: it reads the module globals of the task that RUNS it. At module
-/// scope the closure crossed through the `Channel` sees the RECEIVER's un-mutated global (`n=1`),
-/// not the sender's write (`n=100`), so `f(3)` prints `3`. This is deliberate (each task owns a copy
-/// of every module global); Go/CPython print `300` (one live global). The identical body inside
-/// `fn main()` (over a LOCAL, which the airlock does copy) prints `300` — see
-/// `ticket_016_closure_over_local_in_fn_crosses_airlock_correctly` for the contrast.
+/// TICKET-016 / W8-25 — a closure's reference to a MODULE GLOBAL is a late global load, not a
+/// capture. M3.1: the run has one `n`, so the closure the task sends reads its `n = 100`. Go
+/// (go1.27.0, `m31go/rust`) and CPython: `300`.
 #[test]
-fn ticket_016_closure_over_module_global_loses_value_at_airlock() {
+fn ticket_016_closure_over_module_global_reads_the_senders_write() {
     let src = "\
 import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 
@@ -1599,8 +1458,7 @@ n := 1
 ch := Channel[fn(int) -> int]()
 parallel:
     spawn:
-        recover:
-            n = 100
+        n = 100
         ch.send(fn(x: int) -> int: x * n)
 f := ch.recv()
 print(f(3))
@@ -1610,9 +1468,8 @@ print(f(3))
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?}");
     assert_eq!(
-        out, "3\n",
-        "a closure's module-global reference must read the receiving task's own copy (D2, `3`; \
-         Go/CPython print 300), got {out:?}"
+        out, "300\n",
+        "a closure's module-global reference must read the run's one copy (Go/CPython: 300), got {out:?}"
     );
 }
 

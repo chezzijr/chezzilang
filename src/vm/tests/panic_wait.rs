@@ -654,18 +654,13 @@ main()
     assert_eq!(run_capture(src).expect("vm run"), "203\n");
 }
 
-/// D1 (lazy module snapshot): many trivial `--parallel` spawns no longer pay a full
-/// per-task module-graph rebuild. Correctness gate — every one of N tasks reaches the same
-/// `Shared` box, so the serialised count is exactly N. The cost is a COUNT, not a clock
-/// (TICKET-233): a task that reads no module global replays no module, where the eager per-task
-/// rebuild replayed every module for every task.
+/// Many trivial `--parallel` spawns, with and without a module-global read in the task body.
+/// Correctness gate — every one of N tasks reaches the same `Shared` box, so the serialised count
+/// is exactly N. M3.1: a task reads the run's module objects, so nothing is rebuilt per task.
 #[test]
 fn parallel_many_spawns_cheap_and_correct() {
     const N: usize = 2000;
     let program = |n: usize, step: &str| {
-        // TICKET-246 (plan step 9): the global read sits in the TASK body, outside the box
-        // closure, so the replay count stays a property of `spawn`. A box closure reads a scalar
-        // global through the box's slot door, which replays no module.
         let mut src = format!(
             "import Shared from std.concurrency\nstep: int = 1\nfn bump(s: Shared[int]):\n    k := {step}\n    s.update(fn(x): x + k)\nfn main():\n    s := Shared(0)\n    parallel:\n"
         );
@@ -675,19 +670,13 @@ fn parallel_many_spawns_cheap_and_correct() {
         src.push_str("    print(s.get())\nmain()\n");
         src
     };
-    let (out, replays) = run_capture_counting(&program(N, "1"), &MODULE_REPLAYS);
-    assert_eq!(out.expect("parallel run"), format!("{N}\n"));
     assert_eq!(
-        replays, 0,
-        "{N} spawns that read no module global replayed {replays} modules (want 0) -- a task is \
-         rebuilding a module it never reads"
+        run_capture(&program(N, "1")).expect("parallel run"),
+        format!("{N}\n")
     );
-    // The control: a task that reads one module global replays that one module, so the count is live.
-    let (out, replays) = run_capture_counting(&program(50, "step"), &MODULE_REPLAYS);
-    assert_eq!(out.expect("parallel run"), "50\n");
     assert_eq!(
-        replays, 50,
-        "50 spawns that each read one module global replayed {replays} modules (want 50)"
+        run_capture(&program(N, "step")).expect("parallel run"),
+        format!("{N}\n")
     );
 }
 

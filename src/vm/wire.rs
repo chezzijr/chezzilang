@@ -230,15 +230,16 @@ pub enum WireValue {
         payload: Vec<WireValue>,
     },
     /// An `Obj::Cell` (a by-reference-captured local's heap box) crossing the airlock by value as a
-    /// DEEP COPY: `from_wire` rebuilds a FRESH independent cell wrapping the wired inner value, so a
-    /// plain captured local sent into a `spawn` task is an isolated per-task copy — never a shared
-    /// mutable box across an OS-thread boundary (the memory-safety line, design §4 F1). `has_handle`
-    /// follows the inner value, so a cell over pure data rides the cheap snapshot fast path.
+    /// DEEP COPY: `from_wire` rebuilds a FRESH independent cell wrapping the wired inner value, so
+    /// a plain captured local sent into a `spawn` task is an isolated per-task copy — never a
+    /// shared mutable box across an OS-thread boundary (the memory-safety line, design §4 F1).
+    /// `has_handle` follows the inner value.
     ///
-    /// The `id` is a per-serialization identity assigned on first visit (see [`WireValue::Backref`]),
-    /// so a `Cell`/`Closure` cycle — the letrec self-cell a recursive local `fn` produces — round-trips
-    /// instead of overflowing the depth cap. On reconstruction the `id` is registered BEFORE recursing
-    /// `inner`, so a `Backref(id)` nested inside resolves to the already-alloc'd placeholder cell.
+    /// The `id` is a per-serialization identity assigned on first visit (see
+    /// [`WireValue::Backref`]), so a `Cell`/`Closure` cycle — the letrec self-cell a recursive
+    /// local `fn` produces — round-trips instead of overflowing the depth cap. On reconstruction
+    /// the `id` is registered BEFORE recursing `inner`, so a `Backref(id)` nested inside resolves
+    /// to the already-alloc'd placeholder cell.
     Cell {
         id: u32,
         inner: Box<WireValue>,
@@ -304,11 +305,10 @@ pub enum WireValue {
     /// against one shared Reader is unspecified (two tasks race the file offset), but each read is one
     /// Mutex critical section.
     Reader(Arc<ReaderCore>),
-    /// An opaque C-ABI `ptr` handle crossing the airlock **by value** (the raw `usize` address). A C
-    /// `void*` is heap-independent — the same address is meaningful in any worker's heap — so
-    /// `from_wire` allocates a fresh `Obj::Ptr` wrapping the identical address. Holds no `GcRef`, so it
-    /// is cross-safe (`has_handle` leaves it `false`) and works on the M:N snapshot
-    /// fast path too.
+    /// An opaque C-ABI `ptr` handle crossing the airlock **by value** (the raw `usize` address). A
+    /// C `void*` is heap-independent — the same address is meaningful in any worker's heap — so
+    /// `from_wire` allocates a fresh `Obj::Ptr` wrapping the identical address. Holds no `GcRef`,
+    /// so it is cross-safe (`has_handle` leaves it `false`).
     Ptr(usize),
     /// A first-class UNIVERSE builtin fn (`print`/`ord`/`chr`/`panic`) crossing the airlock **by
     /// value** — it is pure code identified only by its id (no `GcRef`, no captured heap state), so
@@ -317,31 +317,31 @@ pub enum WireValue {
     /// OS-thread boundary — cross-safe (`has_handle` leaves it `false`), so a builtin
     /// captured into a spawned task works correctly on the M:N engine.
     Builtin(crate::base::builtin::Builtin),
-    /// A native fn (`Obj::Native`, e.g. `math.sqrt`) carried across the airlock **by value** — it is
-    /// pure code: a `fn` pointer (`Copy`, so heap-independent — the same code address is valid in any
-    /// worker of this process) plus its name, no `GcRef` and no captured heap state. Like
-    /// [`Builtin`](WireValue::Builtin), it genuinely crosses an OS-thread boundary; `from_wire` re-allocs
-    /// a fresh `Obj::Native` with the same name/pointer/[`kind`](crate::native::Kind). Cross-safe
-    /// (`has_handle` leaves it `false`) — the same value the SNAPSHOT path already ships
-    /// across M:N workers ([`SnapValue::Native`](super::sched)).
+    /// A native fn (`Obj::Native`, e.g. `math.sqrt`) carried across the airlock **by value** — it
+    /// is pure code: a `fn` pointer (`Copy`, so heap-independent — the same code address is valid
+    /// in any worker of this process) plus its name, no `GcRef` and no captured heap state. Like
+    /// [`Builtin`](WireValue::Builtin), it genuinely crosses an OS-thread boundary; `from_wire`
+    /// re-allocs a fresh `Obj::Native` with the same name/pointer/[`kind`](crate::native::Kind).
+    /// Cross-safe (`has_handle` leaves it `false`).
     Native {
         name: Box<str>,
         func: crate::native::NativeFn,
         kind: crate::native::Kind,
     },
     /// An FFI fn (`Obj::Cffi`, `extern "lib":`) carried across the airlock as its shared
-    /// `Arc<Cffi>` — the `dlopen`'d library + resolved symbol behind an `Arc`, so a worker sharing this
-    /// process's address space reaches the same code with no re-`dlopen`. Like [`Native`](WireValue::Native)
-    /// it holds no `GcRef`, so it is cross-safe (`has_handle` leaves it `false`) — the same `Arc` the
-    /// SNAPSHOT path already shares across M:N workers ([`SnapValue::Cffi`](super::sched)).
+    /// `Arc<Cffi>` — the `dlopen`'d library + resolved symbol behind an `Arc`, so a worker sharing
+    /// this process's address space reaches the same code with no re-`dlopen`. Like
+    /// [`Native`](WireValue::Native) it holds no `GcRef`, so it is cross-safe (`has_handle` leaves
+    /// it `false`).
     Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
-    /// B3.6 / B3.3 — a closure carried across the airlock **by value**: its `proto` (which lives in the
-    /// shared `Arc<Program>`, so it is meaningful in any worker), its captures wired recursively, and
-    /// its `home` as an index into the parent's `module_objs` (resolved via `Vm::home_index` at wire
-    /// time, `None` for a home not in the table) — never a heap-local `GcRef`. As of B3.3 the GENERIC
-    /// `to_wire` also produces this arm (not just `Executor.submit`), so a closure crosses as data the
-    /// same way on every airlock (spawn args/callees, Channel/Shared, module snapshot).
-    /// `from_wire` rebuilds the closure over the worker's reconstructed home module.
+    /// B3.6 / B3.3 — a closure carried across the airlock **by value**: its `proto` (which lives in
+    /// the shared `Arc<Program>`, so it is meaningful in any worker), its captures wired
+    /// recursively, and its `home` as an index into the parent's `module_objs` (resolved via
+    /// `Vm::home_index` at wire time, `None` for a home not in the table) — never a heap-local
+    /// `GcRef`. As of B3.3 the GENERIC `to_wire` also produces this arm (not just
+    /// `Executor.submit`), so a closure crosses as data the same way on every airlock (spawn
+    /// args/callees, Channel/Shared). `from_wire` rebuilds the closure over its home module (the
+    /// run's, M3.1).
     Closure {
         /// Per-serialization identity (see [`WireValue::Backref`]) — a self-capturing recursive closure
         /// back-references this `id` from a nested `Cell`, so the cycle round-trips.
@@ -356,29 +356,29 @@ pub enum WireValue {
         sole: u64,
     },
     /// B3.3 — a BARE function (`Obj::Func`) carried across the airlock **by value**: its `proto`
-    /// (shared via `Arc<Program>`) + its `home` index (as [`Closure`](WireValue::Closure)), no captures.
-    /// Kept DISTINCT from `Closure` on purpose — a bare fn and a closure are observationally different
-    /// (`str(func)` renders `<fn NAME>`, `str(closure)` renders `<closure>`), so collapsing a func into
-    /// an empty-capture `Closure` would wrongly render `<closure>` on the M:N snapshot rebuild path,
-    /// where an uncrossed `Obj::Func` renders `<fn NAME>`. Holds no `GcRef`
+    /// (shared via `Arc<Program>`) + its `home` index (as [`Closure`](WireValue::Closure)), no
+    /// captures. Kept DISTINCT from `Closure` on purpose — a bare fn and a closure are
+    /// observationally different (`str(func)` renders `<fn NAME>`, `str(closure)` renders
+    /// `<closure>`), so collapsing a func into an empty-capture `Closure` would wrongly render
+    /// `<closure>` where an uncrossed `Obj::Func` renders `<fn NAME>`. Holds no `GcRef`
     /// (`has_handle` leaves it `false`), so a bare fn crosses an OS-thread boundary cleanly.
     Func {
         proto: ProtoId,
         home: Option<usize>,
     },
-    /// A frame-holding generator carried across the airlock **by value** as a DEEP COPY — whether held
-    /// in a frame LOCAL (F3 path C) or a MODULE GLOBAL (backlog item B, via `to_snap`). Unlike a cursor
-    /// (plain snapshot data), a generator is frozen VM execution state; this arm serializes exactly that:
+    /// A frame-holding generator carried across the airlock **by value** as a DEEP COPY — whether
+    /// held in a frame LOCAL (F3 path C) or reached from a crossed value. Unlike a cursor (plain
+    /// snapshot data), a generator is frozen VM execution state; this arm serializes exactly that:
     /// its `proto` (shared via `Arc<Program>`), its `home` index (like
     /// [`Closure`](WireValue::Closure)), its backing closure (if any, wired recursively), and its
     /// lifecycle `state`. Every parked `Value` (a `Pending` call arg or a `Suspended` operand-stack
-    /// slot) is wired recursively, so a non-sendable parked slot rejects AT SERIALIZE TIME exactly as a
-    /// list of that value would. `from_wire`
-    /// rebuilds a FRESH independent `GeneratorCore` on the receiving heap (deep-copy independence, like
-    /// `Cell`/`Iter`). A generator suspended mid-`recover:` also crosses — its live handler stack is
-    /// pure plain-data (carried on `WireGenState::Suspended`). A generator with a pending `defer` or
-    /// more than one parked frame is a HARD ARM (`to_wire` rejects cleanly) — but both are
-    /// checker-unreachable, so the reject is only a defensive guard against the type-blind compiler.
+    /// slot) is wired recursively, so a non-sendable parked slot rejects AT SERIALIZE TIME exactly
+    /// as a list of that value would. `from_wire` rebuilds a FRESH independent `GeneratorCore` on
+    /// the receiving heap (deep-copy independence, like `Cell`/`Iter`). A generator suspended
+    /// mid-`recover:` also crosses — its live handler stack is pure plain-data (carried on
+    /// `WireGenState::Suspended`). A generator with a pending `defer` or more than one parked frame
+    /// is a HARD ARM (`to_wire` rejects cleanly) — but both are checker-unreachable, so the reject
+    /// is only a defensive guard against the type-blind compiler.
     Generator {
         /// TICKET-111 — adoption id only: a second reach inside one crossing is still rejected
         /// (DEC-100), so no Backref ever targets it.
@@ -420,9 +420,6 @@ pub enum WireGenState {
     },
     /// Body returned / fell off the end: no parked context at all.
     Done,
-    /// TICKET-137 — a module-global generator the snapshot could not copy; rebuilt as
-    /// `GenState::Unsendable`, which faults with this message when driven.
-    Unsendable(Box<str>),
 }
 
 /// F3 path C — the plain-data (Send, `GcRef`-free) fields of a suspended generator's single parked
@@ -529,7 +526,7 @@ impl WireValue {
                 match state {
                     WireGenState::Pending(args, _) => args.iter().for_each(f),
                     WireGenState::Suspended { stack, .. } => stack.iter().for_each(f),
-                    WireGenState::Done | WireGenState::Unsendable(_) => {}
+                    WireGenState::Done => {}
                 }
                 WireNode::Data { bytes: 0 }
             }

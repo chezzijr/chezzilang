@@ -4,7 +4,9 @@
 # Grid: closure x readout route x capture kind. Every route a closure can be read out of is one
 # `route` row: the four box readout sites (`box_copy_out`, `box_copy_pieces`, the `box_call` result,
 # the `rwshared_mutate` result) and the three wire-stored routes (Channel, Atomic, Task). A reader
-# task faults on a write to a captured list and to a module global (`silent_routes`). The task that
+# task faults on a write to a captured list (`silent_routes`). M3.1: a module global is the run's
+# one copy, so a write to it lands on every route and in every reader (Go: a closure that appends
+# to a package `var` runs in any goroutine). The task that
 # stored the closure faults too when it reads it back (TICKET-291: a same-task round trip is a crossing).
 import Shared, RwShared, Atomic, Executor from std.concurrency
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
@@ -122,8 +124,10 @@ test fn channel_recv_closure_capture_write_faults():
 test fn list_capture_write_faults_on_every_route():
     assert silent_routes(list_writer) == []
 
-test fn global_write_faults_on_every_route():
-    assert silent_routes(global_writer) == []
+test fn global_write_lands_on_every_route():
+    before := G.len()
+    assert silent_routes(global_writer) == ROUTES
+    assert G.len() == before + ROUTES.len(), "a route lost a global write: {G.len() - before}"
 
 # The task that stored the closure reads it back: the read rebuilt the captures as copies (TICKET-291).
 test fn self_read_back_faults_on_every_box_route():
@@ -214,9 +218,9 @@ test fn box_built_closure_over_fresh_state_does_not_fault():
     c := Shared([1]).read(fn(s): make_logger())
     assert outcome(c) == "no-fault"
 
-# TICKET-291 grid: route x reader x capture kind. Every cell faults except a module-global write
-# by the task that stored the closure: a closure reads the globals of the task that runs it (D2),
-# so that write is the owner's own and lands (`G` grows by one).
+# TICKET-291 grid: route x reader x capture kind. Every cell faults except a module-global write:
+# M3.1 makes the global the run's one copy, so that write lands for every reader (`G` grows by one).
+# Go: the closure appends to the package `var` in whichever goroutine runs it.
 READERS := ["same task", "other task", "relay task"]
 CAPTURES := ["captured list", "module global", "fresh box state", "box state"]
 
@@ -252,14 +256,14 @@ fn cell(name: str, reader: str, capture: str) -> str:
             return relay(name, read)
         _: panic("no reader {reader}")
 
-test fn closure_capture_grid_faults_except_the_owners_global_write():
+test fn closure_capture_grid_faults_except_a_global_write():
     wrong: List[str] = []
     for name in ROUTES:
         for reader in READERS:
             for capture in CAPTURES:
                 before := G.len()
                 got := cell(name, reader, capture)
-                if reader == "same task" and capture == "module global":
+                if capture == "module global":
                     if got != "no-fault" or G.len() != before + 1:
                         wrong.push("{name}/{reader}/{capture}")
                 elif not got.contains(COPY_TAIL):

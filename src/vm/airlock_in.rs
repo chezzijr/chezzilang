@@ -345,14 +345,14 @@ impl Vm {
             WireValue::Ptr(a) => Value::obj(self.heap.alloc(Obj::Ptr(a))),
             // The heap's one `Obj::Builtin` for this id ([`Vm::fn_value`], TICKET-226).
             WireValue::Builtin(b) => self.fn_value(FnKey::Builtin(b), || Obj::Builtin(b)),
-            // The heap's one `Obj::Native` for this fn ([`Vm::fn_value`], TICKET-215), from the name +
-            // fn pointer carried by value (pure code) — same as the `SnapValue::Native` rebuild.
+            // The heap's one `Obj::Native` for this fn ([`Vm::fn_value`], TICKET-215), from the
+            // name + fn pointer carried by value (pure code).
             WireValue::Native { name, func, kind } => {
                 let key = FnKey::Native(name.clone(), func as usize);
                 self.fn_value(key, || Obj::Native { name, func, kind })
             }
-            // The heap's one `Obj::Cffi` for this fn ([`Vm::fn_value`], TICKET-215), sharing the SAME
-            // `Arc<Cffi>` (no re-dlopen) — same as the `SnapValue::Cffi` rebuild.
+            // The heap's one `Obj::Cffi` for this fn ([`Vm::fn_value`], TICKET-215), sharing the
+            // SAME `Arc<Cffi>` (no re-dlopen).
             WireValue::Cffi(c) => {
                 self.fn_value(FnKey::Cffi(Arc::as_ptr(&c) as usize), || Obj::Cffi(c))
             }
@@ -363,17 +363,6 @@ impl Vm {
             // collects, so no GC runs between the placeholder and the patch. (Nothing READS the
             // placeholder's contents mid-reconstruction — only its handle identity is observed.)
             WireValue::List { id, items } => {
-                // TICKET-111 — adopted: this capture IS the module global's object. Still discard-
-                // rebuild the children so every id they define registers (gotcha 2), then return the
-                // adopted handle instead of a fresh one.
-                if let Some(h) = self.adopt_node(id) {
-                    rebuild.insert(id, h);
-                    self.rebuild_items(items, rebuild, |x| x);
-                    if self.copy_mark {
-                        self.heap.set_copied(h);
-                    }
-                    return Value::obj(h);
-                }
                 let h = self.heap.alloc(Obj::List(RVec::new()));
                 if self.copy_mark {
                     self.heap.set_copied(h);
@@ -384,11 +373,6 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Tuple { id, items } => {
-                if let Some(h) = self.adopt_node(id) {
-                    rebuild.insert(id, h);
-                    self.rebuild_items(items, rebuild, |x| x);
-                    return Value::obj(h);
-                }
                 let h = self.heap.alloc(Obj::Tuple(Vec::new()));
                 rebuild.insert(id, h);
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
@@ -396,11 +380,6 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Iter { id, items, pos } => {
-                if let Some(h) = self.adopt_node(id) {
-                    rebuild.insert(id, h);
-                    self.rebuild_items(items, rebuild, |x| x);
-                    return Value::obj(h);
-                }
                 let h = self.heap.alloc(Obj::Iter {
                     items: RVec::new(),
                     pos: RCell::new(pos),
@@ -443,17 +422,6 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Map { id, entries } => {
-                if let Some(h) = self.adopt_node(id) {
-                    rebuild.insert(id, h);
-                    for (_, k, val) in entries.into_entries() {
-                        self.from_wire_memo(k, rebuild);
-                        self.from_wire_memo(val, rebuild);
-                    }
-                    if self.copy_mark {
-                        self.heap.set_copied(h);
-                    }
-                    return Value::obj(h);
-                }
                 let h = self.heap.alloc(Obj::Map(MapData::default()));
                 if self.copy_mark {
                     self.heap.set_copied(h);
@@ -472,16 +440,6 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Set { id, entries } => {
-                if let Some(h) = self.adopt_node(id) {
-                    rebuild.insert(id, h);
-                    for (_, e) in entries.into_entries() {
-                        self.from_wire_memo(e, rebuild);
-                    }
-                    if self.copy_mark {
-                        self.heap.set_copied(h);
-                    }
-                    return Value::obj(h);
-                }
                 let h = self.heap.alloc(Obj::Set(SetData::default()));
                 if self.copy_mark {
                     self.heap.set_copied(h);
@@ -497,14 +455,6 @@ impl Vm {
                 Value::obj(h)
             }
             WireValue::Struct { id, name, fields } => {
-                if let Some(h) = self.adopt_node(id) {
-                    rebuild.insert(id, h);
-                    self.rebuild_items(fields, rebuild, |(_, val)| val);
-                    if self.copy_mark {
-                        self.heap.set_copied(h);
-                    }
-                    return Value::obj(h);
-                }
                 // Positional layout: the wire fields arrive in declaration order (to_wire emits
                 // them so), so rebuild positionally — the carried names are discarded.
                 let tid = self.struct_tid(&name);
@@ -557,11 +507,6 @@ impl Vm {
                 variant_id,
                 payload,
             } => {
-                if let Some(h) = self.adopt_node(id) {
-                    rebuild.insert(id, h);
-                    self.rebuild_items(payload, rebuild, |x| x);
-                    return Value::obj(h);
-                }
                 let h = self.heap.alloc(Obj::Enum {
                     variant_id,
                     payload: RVec::new(),
@@ -628,16 +573,15 @@ impl Vm {
                     Value::nil()
                 }
             },
-            // Rebuild a FRESH, independent `Obj::Cell` on this side (deep copy, never a shared box) —
-            // the receiving task owns its own cell (design §4 F1). TIE THE KNOT: alloc a placeholder
-            // `Cell(Nil)` and register its `id` BEFORE recursing `inner`, so a nested `Backref(id)`
-            // (the self-cell a recursive local `fn` closes) resolves to this exact handle; then patch
-            // the placeholder with the reconstructed inner. `Heap::alloc` never collects, so no GC runs
-            // between the placeholder and the patch.
-            // W7-4: a wire may carry the SAME cell definition more than once (`snapshot_modules`
-            // re-emits it per module so each is self-contained) — the first rebuild wins and every later
-            // definition of that id resolves to it, exactly like a `Backref`. That is what keeps
-            // `Channel.recv`/`Shared.get`/`RwShared.get` on ONE cell per binding.
+            // Rebuild a FRESH, independent `Obj::Cell` on this side (deep copy, never a shared box)
+            // — the receiving task owns its own cell (design §4 F1). TIE THE KNOT: alloc a
+            // placeholder `Cell(Nil)` and register its `id` BEFORE recursing `inner`, so a nested
+            // `Backref(id)` (the self-cell a recursive local `fn` closes) resolves to this exact
+            // handle; then patch the placeholder with the reconstructed inner. `Heap::alloc` never
+            // collects, so no GC runs between the placeholder and the patch. W7-4: a rebuild map
+            // that spans several wires (`Vm::box_copy_pieces`) can meet the SAME cell definition
+            // more than once — the first rebuild wins and every later definition of that id
+            // resolves to it, exactly like a `Backref`.
             WireValue::Cell { id, inner } => {
                 if let Some(&prev) = rebuild.get(&id) {
                     return Value::obj(prev);
@@ -653,15 +597,14 @@ impl Vm {
                 }
                 Value::obj(h)
             }
-            // B3.6: rebuild a submitted closure by value over the worker's reconstructed home module
-            // (the `proto` is shared via `Arc<Program>`; captures reconstruct bottom-up into this heap).
-            // `worker_home` resolves the home index against this VM's `module_objs` (the rebuilt graph
-            // in a pool worker, or the live graph directly when running with no heap of its own).
-            // TIE THE KNOT like
-            // the `Cell` arm: resolve `home` and alloc a placeholder `Closure` with `Nil` captures,
-            // register its `id`, THEN recurse the captures (a nested `Backref(id)` resolves to this
-            // handle), and patch the captured slots. `worker_home`/`from_wire_memo` may `alloc` but never
-            // collect, so the placeholder cannot be lost mid-reconstruction.
+            // B3.6: rebuild a submitted closure by value over its home module (the `proto` is
+            // shared via `Arc<Program>`; captures reconstruct bottom-up into this heap).
+            // `worker_home` resolves the home index against this VM's `module_objs`, the run's
+            // module objects. TIE THE KNOT like the `Cell` arm: resolve `home` and alloc a
+            // placeholder `Closure` with `Nil` captures, register its `id`, THEN recurse the
+            // captures (a nested `Backref(id)` resolves to this handle), and patch the captured
+            // slots. `worker_home`/`from_wire_memo` may `alloc` but never collect, so the
+            // placeholder cannot be lost mid-reconstruction.
             WireValue::Closure {
                 id,
                 proto,
@@ -692,7 +635,7 @@ impl Vm {
                 }
                 self.copy_mark = saved_copy_mark;
                 // Owner decision D2 (TICKET-137): a crossing carries captures only. The closure's
-                // globals are whatever module copy the RUNNING task owns (`home` resolved above).
+                // globals are the run's one copy (`home` resolved above, M3.1).
                 match self.heap.write(h).get(h) {
                     Obj::Closure { captured, .. } => {
                         for (k, v) in cap.into_iter().enumerate() {
@@ -732,8 +675,8 @@ impl Vm {
                 }
                 Value::obj(h)
             }
-            // B3.3: rebuild a bare fn by value over the worker's reconstructed home module (the `proto`
-            // is shared via `Arc<Program>`; `worker_home` resolves the home index like the Closure arm).
+            // B3.3: rebuild a bare fn by value over its home module (the `proto` is shared via
+            // `Arc<Program>`; `worker_home` resolves the home index like the Closure arm).
             WireValue::Func { proto, home } => {
                 let home = self.worker_home(home);
                 self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home })
@@ -751,26 +694,6 @@ impl Vm {
                 closure,
                 state,
             } => {
-                // TICKET-111 — adopted: this capture IS the module global's object. Still rebuild the
-                // closure/parked children so every id their subtree defines registers (gotcha 2 — a
-                // later global's Backref into this discarded subtree must still resolve), then discard
-                // the result and return the adopted handle.
-                if let Some(h) = self.adopt_node(id) {
-                    rebuild.insert(id, h);
-                    if let Some(c) = closure {
-                        self.from_wire_memo(*c, rebuild);
-                    }
-                    match state {
-                        WireGenState::Pending(wargs, _) => {
-                            self.rebuild_items(wargs, rebuild, |w| w);
-                        }
-                        WireGenState::Suspended { stack, .. } => {
-                            self.rebuild_items(stack, rebuild, |w| w);
-                        }
-                        WireGenState::Done | WireGenState::Unsendable(_) => {}
-                    }
-                    return Value::obj(h);
-                }
                 let home = self.worker_home(home);
                 let closure = closure.map(|c| {
                     self.from_wire_memo(*c, rebuild)
@@ -788,19 +711,13 @@ impl Vm {
                         }
                         g
                     }
-                    WireGenState::Done | WireGenState::Unsendable(_) => {
-                        let state = match state {
-                            WireGenState::Unsendable(m) => GenState::Unsendable(m),
-                            WireGenState::Pending(..)
-                            | WireGenState::Suspended { .. }
-                            | WireGenState::Done => GenState::Done,
-                        };
+                    WireGenState::Done => {
                         let core = GeneratorCore {
                             proto,
                             home,
                             closure,
                             parked: super::rvec::AtomicBox::new(Parked {
-                                state,
+                                state: GenState::Done,
                                 ctx: GenCtx::default(),
                             }),
                             stamp: RCell::new(0),
@@ -856,26 +773,11 @@ impl Vm {
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
                     }
                 };
-                // TICKET-111 — a generator's id is adoption-only (never a `Backref` target, DEC-100),
-                // but `rebuild_ready` still needs its rebuilt handle to seed `snapshot_adopt`.
+                // TICKET-137 — registered so a later OFF-stack `Backref` to this generator
+                // resolves.
                 rebuild.insert(id, g.as_obj().expect("generator rebuilds to a heap object"));
                 g
             }
         }
-    }
-}
-
-impl Vm {
-    /// TICKET-111 — the pending adoption capture for `id`, if this is `fault_module`'s own replay
-    /// (`adopt_active`) and this task's `snapshot_adopt` still holds one. Consuming (`remove`), so a
-    /// second reach of the same id within the same replay mints/rebuilds fresh instead of re-adopting
-    /// an already-claimed handle. `None` on EVERY other path that reaches `from_wire_memo` — a Channel
-    /// message's ids are a separate id space that must never be checked against this map (gotcha 1,
-    /// `airlock_adoption_is_scoped_to_the_snapshot_replay`).
-    fn adopt_node(&mut self, id: u32) -> Option<GcRef> {
-        if !self.adopt_active {
-            return None;
-        }
-        self.snapshot_adopt.remove(&id)
     }
 }

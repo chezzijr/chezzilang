@@ -273,25 +273,25 @@ non-sendable value in scope (another closure, a live generator) does not block a
    - `.copy()` of a copy is unmarked: `ys := xs.copy(); ys.push(v)` in a task is a task-local write.
 
 **The checker rejects visible writes before the program runs.** A direct write inside a `spawn:` task
-to a captured binding or module global is a compile-time error with the runtime fault's message. This
+to a captured local binding is a compile-time error with the runtime fault's message (a module global
+is the run's one copy, M3.1, so a write to it is legal). This
 covers reassignment, compound assignment, field/index stores, and mutating native methods on the
 binding or a declared-type projection. A `defer:` inside the task is inside the task. The checker
 infers, to a fixed point, which user methods store through `self` or call such a method, so
 `spawn: counter.bump()` is rejected when `bump` writes `self`.
 
 ```chezzi
-results: List[str] = []
-parallel:
-    spawn:
-        results = ["ok", "ok"]     # compile error: 'results' is this task's copy: ...
-for r in results:
-    assert r == "ok"
+fn collect():
+    results: List[str] = []
+    parallel:
+        spawn:
+            results = ["ok", "ok"]     # compile error: 'results' is this task's copy: ...
 ```
 
 - The checker also rejects a closure known to write a capture when a task runs it: a captured call
   in `spawn:`, `spawn g()`, or `Executor.submit(g)` / an inline literal.
 - It reports proven writes by a directly called named function (nested `fn`, or through another named
-  function), through a parameter, a capture or a module global. The error points at the task-side call
+  function), through a parameter or a capture. The error points at the task-side call
   and names the write in help.
 - `spawn run(g)` arguments and `Channel.send(g)` are not execution (the receiver may never call `g`).
 - Calls through function values, unresolved projections and protocol/generic receivers rely on the
@@ -321,8 +321,8 @@ with a name and a statement body.
 - **By-reference capture,** as for any closure. Its statement body can reassign a captured local
   (`fn bump(): x = x + 1`). Across `spawn` / `parallel:` the two rules above apply
   ([`adr-d4-airlock.md`](../../design/adr-d4-airlock.md)): `x = x + 1` on a captured local, a
-  `.push`/index/field store on a captured container, and a write to a module global fault in the task
-  with `'<name>' is this task's copy: ...`. Three shapes still lose the write silently (see the
+  `.push`/index/field store on a captured container fault in the task with
+  `'<name>' is this task's copy: ...`; a write to a module global lands (M3.1). Three shapes still lose the write silently (see the
   ceilings in [`concurrency.md`](../concurrency/01-model.md)).
 - **Fresh values are the task's own.** A value no parent binding can reach is writable in the task: a
   fresh `spawn` operand (`spawn work([], out)`, a comprehension, `xs.copy()`), every object its

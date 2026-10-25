@@ -1,0 +1,120 @@
+# Module globals are shared (M3.1, Go model): one copy of each global for the run. A task reads
+# and writes the live value, through every op that reaches a global. Goldens: the equivalent Go
+# program (`var` globals, goroutines + `sync.WaitGroup`), go1.27.0. A race is the user's bug, so
+# every row orders its access with a channel or a join.
+import Executor, Shared from std.concurrency
+import shared_globals_lib as lib
+
+G := {"a": 1}
+S := 1
+N := 0
+Q: List[int] = []
+
+fn bump():
+    N += 1
+
+fn run(f: fn() -> None):
+    f()
+
+fn set_n_add(v: int) -> int:
+    N = 40
+    return v + N
+
+# A task reads a global map after the parent writes it in place. Go: 2.
+test fn r01_task_reads_a_parent_write_in_place():
+    ch := Channel[int]()
+    got := Shared(0)
+    parallel:
+        spawn:
+            ch.recv()
+            got.set(G.len())
+        G["b"] = 2
+        ch.send(0)
+    assert got.get() == 2, "task saw {got.get()}"
+
+# A task reads a scalar global after the parent rebinds it. Go: 9.
+test fn r02_task_reads_a_parent_rebind():
+    ch := Channel[int]()
+    got := Shared(0)
+    parallel:
+        spawn:
+            ch.recv()
+            got.set(S)
+        S = 9
+        ch.send(0)
+    assert got.get() == 9, "task saw {got.get()}"
+
+# A direct write in a task lands. Go: 5.
+test fn r03_direct_write():
+    N = 0
+    parallel:
+        spawn:
+            N = 5
+    assert N == 5, "N is {N}"
+
+# A write through a callee the task reaches as a fn value lands. Go: 1.
+test fn r04_write_through_a_fn_value():
+    N = 0
+    parallel:
+        spawn run(bump)
+    assert N == 1, "N is {N}"
+
+# A named callee spawned directly, then called inside a block. Go: 1, 2.
+test fn r05_write_through_a_named_callee():
+    N = 0
+    parallel:
+        spawn bump()
+    assert N == 1, "N is {N}"
+    parallel:
+        spawn:
+            bump()
+    assert N == 2, "N is {N}"
+
+# A task reads a qualified global after the parent's call writes it, then a qualified callee
+# spawned directly writes it. Go: 1, 2.
+test fn r06_qualified_read_and_callee():
+    lib.bump_x()
+    got := Shared(0)
+    parallel:
+        spawn:
+            got.set(lib.X)
+    assert got.get() == 1, "task saw {got.get()}"
+    parallel:
+        spawn lib.bump_x()
+    assert lib.X == 2, "lib.X is {lib.X}"
+
+# A task's in-place push to a global list lands. Go: 1.
+test fn r07_in_place_push():
+    parallel:
+        spawn:
+            Q.push(1)
+    assert Q.len() == 1, "Q is {Q}"
+
+# A task's own nested task writes the global. Go: 9.
+test fn r08_nested_task_write():
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    N = 9
+    assert N == 9, "N is {N}"
+
+# An Executor job writes the global. Go: 1.
+test fn r09_executor_job_write():
+    N = 0
+    ex := Executor()
+    _ := ex.submit(bump)
+    ex.shutdown()
+    assert N == 1, "N is {N}"
+
+# A box closure writes the global and reads the live value back. Go: N 40, box 40.
+test fn r10_box_closure_write():
+    N = 0
+    s := Shared(0)
+    s.update(set_n_add)
+    assert N == 40, "N is {N}"
+    assert s.get() == 40, "box is {s.get()}"
+
+# A module whose own top-level `parallel:` writes its global while it initializes. Go: 7.
+test fn r11_late_module_init_write():
+    assert lib.L == 7, "lib.L is {lib.L}"

@@ -511,7 +511,7 @@ test fn grid_policy_r52_shared_store():
         spawn: s.set([1])
     assert t189_try(s.get()) == "ok 2"
 
-# ---- module global (the spawn snapshot is always a copy) ----
+# ---- module global (M3.1: the run's one copy, so a task's push lands; Go: `ok 2`, `[1 3]`) ----
 
 t189_g: List[int] = [1]
 
@@ -523,8 +523,8 @@ test fn grid_policy_r22_module_global():
     out := Channel[str](4)
     parallel:
         spawn h(out)
-    assert out.recv() == "fault"
-    assert t189_g == [1]
+    assert out.recv() == "ok 2"
+    assert t189_g == [1, 3]
 
 # ---- closure capture (a copy across heaps, the enclosing mark in the same heap) ----
 

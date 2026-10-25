@@ -185,7 +185,8 @@ match g.next():            # 0
 - An un-inferable element (`yield []` alone, or an int-then-float mix; no int->float coercion at a
   `yield`) is rejected.
 - A generator crosses a task boundary by value, as a deep copy of its execution state (also when it is
-  suspended in `recover:`, and also when it is a module global). A value in its frame is a task copy
+  suspended in `recover:`). A module-global generator does not cross: a task drives the run's one
+  generator (M3.1). A value in a crossed generator's frame is a task copy
   only when the parent can still reach it: a frame-local list the parent never saw stays writable in
   the task; a list the generator yielded and the parent holds faults on write.
 - Examples: [`examples/generators.chz`](../../../examples/generators.chz),

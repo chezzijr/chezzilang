@@ -160,7 +160,7 @@ generator usable anywhere an `Iterator[T]` is (`for` loops, `Iterator[T]` bounds
   global** holds it: it is passed/captured into a `spawn`, stored in a `Channel`/`Shared`/`RwShared`/
   `Atomic`, submitted to an `Executor`, or reached through a module global. The receiver gets an
   **independent deep copy** (its parked frame rebuilt; advancing one copy never affects the other).
-  Two tasks that reach the same module-global generator each drive their **own** copy.
+  A module-global generator does not cross: two tasks that reach it drive the run's one generator (M3.1).
 - A suspension **inside a `recover:`** is sendable too (its handlers are rebuilt with it).
 - These reject cleanly with a catchable `... cannot be sent across tasks` error, never a panic: a
   non-sendable parked slot (a `Module` handle, or an acyclic nest past the depth cap) and a value cycle
@@ -195,16 +195,16 @@ composable cursor); `Iterator[T]` also promises `.next()`, so every `Iterator` I
 **Capture is by reference.** Closure/`defer:`/`spawn:` capture is **uniformly by reference**: a
 capturing frame shares the closest binding of a captured name, and reads and writes are live. A
 captured **loop variable** gets a fresh cell per iteration (Go ≥1.22). At the **task boundary**, a
-captured local and every module global are copied into an independent per-task view, taken fresh at
-each `spawn` (the one deliberate divergence from Go), so cross-task shared mutation requires
-`Shared[T]` and its siblings. See `syntax.md` "Closure capture".
+captured local is copied into an independent per-task view, taken fresh at each `spawn` (the one
+deliberate divergence from Go), so cross-task shared mutation of a local requires `Shared[T]` and its
+siblings. A module global is the run's one copy (M3.1): every task reads and writes it live (Go). See `syntax.md` "Closure capture".
 
 **A task's write to its airlock copy faults** ([ADR D4](../../design/adr-d4-airlock.md)). A spawned
-task's write to a captured local, a captured container, or a module global (every object the airlock
-copied for the task) is a recoverable runtime **fault**; three shapes still lose the write
+task's write to a captured local or a captured container (every object the airlock copied for the
+task) is a recoverable runtime **fault**; three shapes still lose the write
 silently (see `concurrency.md`'s limits). Direct visible task writes, inferred `self`-writing user
 methods, and capture-writing closures at executing crossings are compile-time errors with the same
-text. A received closure still reads the running task's own module globals; it may not write them. The
+text. A received closure reads and writes the run's module globals (M3.1). The
 parent's original object is never marked, and a write through a real handle (`Shared`/`RwShared`/
 `Atomic*`/`Channel`) is unaffected.
 

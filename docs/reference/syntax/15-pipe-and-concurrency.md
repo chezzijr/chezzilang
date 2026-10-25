@@ -121,8 +121,9 @@ fn fetch_all(urls: List[str]):
   [`examples/wait_select.chz`](../../../examples/wait_select.chz) and
   [`examples/wait_send.chz`](../../../examples/wait_send.chz).
 
-**Sendability.** A captured local and every module global cross into a task as an independent per-task
-copy; a write to either in the task is a runtime fault (§3, "Closure capture"). Sendable: scalars,
+**Sendability.** A captured local crosses into a task as an independent per-task copy; a write to it
+in the task is a runtime fault (§3, "Closure capture"). A module global is the run's one copy (M3.1):
+a task reads and writes it live, as a goroutine does a package `var`. Sendable: scalars,
 `str`, containers and structs of sendable values, `Channel`, `Atomic`, `AtomicInt`, `Shared`,
 `RwShared`, a `std.cancel` `Token`, closures and protocol existentials. A native handle (or a witness
 that carries one) is not sendable. `Shared`/`Atomic`/`Channel` cross as shared handles, so a task's

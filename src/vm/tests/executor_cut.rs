@@ -733,10 +733,9 @@ fn a_worker_shares_its_roots_heap_core() {
 }
 
 /// TICKET-246 — `with_box` undoes its swap on unwind, not only on return: after a Rust panic
-/// inside the closure the `Vm` runs in the caller's context again (M1.7: the caller's view; the
-/// heap is the run's one heap throughout), the box context is back in its slot and no caller frame
-/// is left on the chain or lifted off it. The second half panics two boxes deep, inside
-/// `as_box_caller`.
+/// inside the closure the `Vm` runs in the caller's context again (the heap is the run's one heap
+/// throughout), the box context is back in its slot and no caller frame is left on the chain. The
+/// second half panics two boxes deep.
 #[test]
 fn with_box_restores_the_context_when_the_closure_panics() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -744,35 +743,29 @@ fn with_box_restores_the_context_when_the_closure_panics() {
     vm.out.extend_from_slice(b"caller");
     let mut outer = Some(vm.box_new());
     let mut inner = Some(vm.box_new());
-    let (view, stack_len) = (vm.heap.view_stamp(), vm.stack.len());
+    let stack_len = vm.stack.len();
 
-    let seen_inside = std::cell::Cell::new((0, 0));
     let r = catch_unwind(AssertUnwindSafe(|| {
         vm.with_box(&mut outer, |vm| {
-            seen_inside.set(vm.heap.view_stamp());
+            assert_eq!(vm.box_chain.len(), 1, "the closure runs in the box context");
             assert_eq!(vm.out, b"caller", "out stays the caller's inside a box");
             vm.stack.push(Value::int(7));
             panic!("boom");
         })
     }));
     assert!(r.is_err());
-    assert_ne!(seen_inside.get(), view, "the closure ran in the box's view");
-    assert_eq!(vm.heap.view_stamp(), view);
     assert_eq!(vm.stack.len(), stack_len);
     assert_eq!(vm.out, b"caller");
     assert!(vm.box_chain.is_empty());
     assert!(outer.is_some());
 
     let r = catch_unwind(AssertUnwindSafe(|| {
-        vm.with_box(&mut outer, |vm| {
-            vm.with_box(&mut inner, |vm| vm.as_box_caller(|_| panic!("deep")))
-        })
+        vm.with_box(&mut outer, |vm| vm.with_box(&mut inner, |_| panic!("deep")))
     }));
     assert!(r.is_err());
-    assert_eq!(vm.heap.view_stamp(), view);
     assert_eq!(vm.stack.len(), stack_len);
     assert_eq!(vm.out, b"caller");
-    assert!(vm.box_chain.is_empty() && vm.box_lifted.is_empty());
+    assert!(vm.box_chain.is_empty());
     assert!(outer.is_some() && inner.is_some());
     // The box contexts still work after both unwinds.
     assert_eq!(vm.with_box(&mut outer, |vm| vm.stack.len()), 1);

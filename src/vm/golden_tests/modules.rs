@@ -963,34 +963,25 @@ fn executor_submit_mutating_closure_isolated_parity() {
 }
 
 #[test]
-fn executor_submit_module_global_inplace_mutation_isolates_parity() {
-    // Task 1 (Executor path) — a submitted closure mutating a MODULE-GLOBAL aggregate in place must
-    // isolate, exactly like the nursery path: the M:N drain (`drain_executor_on_pool` →
-    // `install_snapshot`) snapshots the module globals per task, so the parent's post-shutdown read
-    // sees the PRE-task value. Before the fix the since-removed cooperative engine's inline drain ran
-    // the task against the LIVE shell globals (leaked → serial=4) while M:N isolated (→ 3).
-    // TICKET-169 (D4 layer C): the job's own copy of the module global `xs` is marked, so
-    // `xs.push(99)` now faults instead of mutating it — the parent's read was always going to see
-    // its own (unaffected) `3` regardless.
+fn executor_submit_module_global_inplace_mutation_lands_parity() {
+    // Task 1 (Executor path) — a submitted closure that mutates a MODULE-GLOBAL aggregate in place
+    // writes the run's one `xs` (M3.1). Go (go1.27.0, `m31go/rust`): `4`.
     let out = golden_entry(
-        "import Executor from std.concurrency\nxs := [1, 2, 3]\nfn bump_xs():\n    recover: xs.push(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump_xs())\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
+        "import Executor from std.concurrency\nxs := [1, 2, 3]\nfn bump_xs():\n    xs.push(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump_xs())\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
     );
-    assert_eq!(out, "3\n");
+    assert_eq!(out, "4\n");
 }
 
 #[test]
-fn executor_submit_module_global_callee_reassign_isolates_parity() {
+fn executor_submit_module_global_callee_reassign_lands_parity() {
     // Task 1 (Executor path) — a submitted closure whose free-fn callee REASSIGNS a module global
-    // (`bump()` does `count = count + 1`). Pre-dated the diff and still diverged (serial=2 / M:N=0)
-    // because the since-removed cooperative Executor drain aliased the shell globals. Now each
-    // submitted task runs against its own module-global copy → the parent reads the frozen 0.
-    // TICKET-169 (D4 layer C): each job's own copy of the module global `count` is marked, so
-    // `count = count + 1` now faults instead of reassigning it — the parent's read was always
-    // going to see its own frozen `0` regardless.
+    // (`bump()` does `count = count + 1`). M3.1: both jobs write the run's one `count`;
+    // `Executor(1)` runs them one after the other, so they never race. Go (go1.27.0, `m31go/rust`):
+    // `2`.
     let out = golden_entry(
-        "import Executor from std.concurrency\ncount := 0\nfn bump():\n    recover:\n        count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
+        "import Executor from std.concurrency\ncount := 0\nfn bump():\n    count = count + 1\nfn main():\n    ex := Executor(1)\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
     );
-    assert_eq!(out, "0\n");
+    assert_eq!(out, "2\n");
 }
 
 #[test]

@@ -1236,7 +1236,7 @@ fn builtin_value_equality_both_engines() {
 }
 
 /// Bug 3: all four first-class builtins are SENDABLE — a builtin bound to a local and CAPTURED
-/// into a spawned task crosses the airlock (the `SnapValue::Builtin` path) and runs. Byte-identical
+/// into a spawned task crosses the airlock (`WireValue::Builtin`) and runs. Byte-identical
 /// on the VM and the M:N engine.
 #[test]
 fn builtin_value_sendable_across_airlock_both_engines() {

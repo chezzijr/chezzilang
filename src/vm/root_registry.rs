@@ -31,7 +31,7 @@ pub(super) struct RootView<'a> {
     pub(super) nurseries: &'a [Vec<QueuedTask>],
     /// A not-yet-started fiber's task, launched on its first schedule.
     pub(super) start: Option<&'a PendingCall>,
-    /// The module namespace objects.
+    /// The module namespace objects (the run's, M3.1): every context roots them.
     pub(super) module_objs: &'a [GcRef],
     /// Live executors (C5 / A2): their queued work must survive to the program-exit auto-drain
     /// even when no in-program handle remains.
@@ -43,11 +43,6 @@ pub(super) struct RootView<'a> {
 /// The heap-keyed caches of a context whose `GcRef`s are roots.
 pub(super) struct HeapCaches<'a> {
     pub(super) str_intern: &'a FxHashMap<usize, GcRef>,
-    pub(super) fn_values: &'a FxHashMap<FnKey, GcRef>,
-    pub(super) snapshot_rebuild: &'a FxHashMap<u32, GcRef>,
-    pub(super) snapshot_cells: &'a FxHashMap<GcRef, u32>,
-    pub(super) snapshot_nodes: &'a FxHashMap<GcRef, u32>,
-    pub(super) snapshot_adopt: &'a FxHashMap<u32, GcRef>,
 }
 
 impl RootView<'_> {
@@ -81,27 +76,6 @@ impl RootView<'_> {
         // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
         // roots the cache for the heap this context indexes.
         out.extend(c.str_intern.values().copied());
-        out.extend(c.fn_values.values().copied());
-        // W7-4a — the snapshot rebuild map's cells, heap-keyed like `str_intern`. BELT AND BRACES
-        // today, and deliberately kept: every entry is currently also reachable from the module
-        // global it was just `module_define`d into, and MEASURED —
-        // `airlock_cross_module_shared_binding_is_one_cell` still passes with this line deleted. The
-        // map now outlives a single fault, though, so the moment any entry enters it before something
-        // else roots it, this is the only thing holding it. Cheap; do not "clean it up".
-        out.extend(c.snapshot_rebuild.values().copied());
-        // W7-4c — the snapshot cell registry's KEYS. Unlike the map above this root is required: an
-        // unrooted key could be swept and its slot recycled to a different cell, which the seeding
-        // in `deep_clone_all`/`lower_task` would then identify with the dead cell's id and merge into
-        // the wrong binding. A rooted key is never swept, so never recycled.
-        out.extend(c.snapshot_cells.keys().copied());
-        // TICKET-111 — the snapshot node registry's KEYS, required for the same reason as
-        // `snapshot_cells` above: an unrooted key could be swept and its slot recycled, and adoption
-        // would then identify the wrong node with a live global's id.
-        out.extend(c.snapshot_nodes.keys().copied());
-        // TICKET-111 — the pending-adoption captures' VALUES (the capture's own rebuilt handle, not a
-        // module-global key), required the same way, so a capture waiting to be adopted by a module
-        // the task has not read yet is never swept out from under it.
-        out.extend(c.snapshot_adopt.values().copied());
     }
 }
 
@@ -117,11 +91,6 @@ impl Vm {
             executors: &self.executors,
             caches: Some(HeapCaches {
                 str_intern: &self.str_intern,
-                fn_values: &self.fn_values,
-                snapshot_rebuild: &self.snapshot_rebuild,
-                snapshot_cells: &self.snapshot_cells,
-                snapshot_nodes: &self.snapshot_nodes,
-                snapshot_adopt: &self.snapshot_adopt,
             }),
         }
     }
@@ -151,11 +120,6 @@ impl FiberCtx {
             executors: &self.executors,
             caches: Some(HeapCaches {
                 str_intern: &self.str_intern,
-                fn_values: &self.fn_values,
-                snapshot_rebuild: &self.snapshot_rebuild,
-                snapshot_cells: &self.snapshot_cells,
-                snapshot_nodes: &self.snapshot_nodes,
-                snapshot_adopt: &self.snapshot_adopt,
             }),
         }
     }

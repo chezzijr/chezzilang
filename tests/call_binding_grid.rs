@@ -929,7 +929,9 @@ fn n3_cells() -> Vec<Cell> {
             &format!(
                 "count := 0\nfn f() -> int:\n    count = count + 1\n    return 1\n{run_spawn}run()\nprint(count)\n"
             ),
-            Expect::Rejects("is this task's copy"),
+            // M3.1: `count` is a module global, the run's one copy, so the task's write lands
+            // (Go, go1.27.0: `1`).
+            prints("1"),
         ),
         cell(
             "n3/turbofish/body_above_redeclared",

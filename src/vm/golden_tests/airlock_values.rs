@@ -480,18 +480,16 @@ main()";
     assert_golden_out(src, "3\n");
 }
 
-// ----- Backlog item B: a MODULE-GLOBAL live generator crosses the airlock BY VALUE (deep copy) -----
-// The reach-gate + Option-B poison→Nil model is RETIRED. A module-global generator reached by a spawned
-// task now crosses BY VALUE exactly like a frame-local one (F3 path C): each task gets its own frozen
-// per-task snapshot (F1) whose generator arm deep-copies via `to_wire`/`from_wire` into the worker heap.
-// A genuinely non-sendable parked slot (deep acyclic nest) or a reference cycle still REJECTS at
-// serialize time — the direct `to_wire` reject, NOT a silent poison→Nil.
+// ----- A MODULE-GLOBAL live generator is the run's one generator (M3.1) ----- A task reads the
+// run's module globals, so a task that reaches a module-global generator drives the one generator
+// the parent holds, as a CPython thread drives a module-global generator. Goldens: CPython
+// (`m31go/py/gen_globals.py`). A generator that CROSSES (a capture, an arg, a Channel) is still a
+// deep copy until M3.4.
 
-/// A module-global PENDING generator reached by a spawned task crosses by value and drives fully; the
-/// parent's own `g` is an INDEPENDENT copy (drives the full sequence after the join). Was the reach-gate
-/// fault (`a generator cannot be sent across tasks`); now crosses. Byte-identical.
+/// A module-global PENDING generator reached by a spawned task drives fully; the parent then finds
+/// the one generator exhausted. CPython: `[1, 2, 3]`, then `[]`.
 #[test]
-fn generator_module_global_reached_crosses_both() {
+fn generator_module_global_reached_is_the_one_generator() {
     let src = "\
 fn gen() -> Iterator[int]:
     yield 1
@@ -511,12 +509,12 @@ fn main():
     for x in g:
         print(x)
 main()";
-    let expect = "1\n2\n3\nparent:\n1\n2\n3\n";
+    let expect = "1\n2\n3\nparent:\n";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
-/// A module-global generator driven ONCE at top level (suspended, one parked frame) then reached by a
-/// spawned task crosses by value and RESUMES from its parked position. Byte-identical.
+/// A module-global generator driven ONCE at top level (suspended, one parked frame) then reached by
+/// a spawned task RESUMES from its parked position.
 #[test]
 fn generator_module_global_suspended_reached_resumes_both() {
     let src = "\
@@ -539,12 +537,12 @@ main()";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
-/// ISOLATION (adversarial, parity-blind, the memory-safety witness): TWO tasks each reach the SAME
-/// module-global generator and each gets an INDEPENDENT copy — both see the full `1,2,3`, and the
-/// parent's own `g` is likewise independent (full `1,2,3` after the join). A shared `GcRef` would show
-/// split/interleaved consumption instead. Byte-identical.
+/// TWO tasks reach the SAME module-global generator, one nursery after the other (two tasks that
+/// drive one generator at once race, and the loser faults `generator already running`, CPython's
+/// `ValueError: generator already executing`). The first drains it; the second and the parent find
+/// it exhausted. CPython: `[1, 2, 3]`, `[]`, `[]`.
 #[test]
-fn generator_module_global_two_tasks_independent_copies_both() {
+fn generator_module_global_two_tasks_share_the_one_generator() {
     let src = "\
 fn gen() -> Iterator[int]:
     yield 1
@@ -552,12 +550,13 @@ fn gen() -> Iterator[int]:
     yield 3
 g := gen()
 fn main():
-    a := Channel[int]()
-    b := Channel[int]()
+    a := Channel[int](3)
+    b := Channel[int](3)
     parallel:
         spawn:
             for x in g:
                 a.send(x)
+    parallel:
         spawn:
             for x in g:
                 b.send(x)
@@ -565,27 +564,20 @@ fn main():
     print(a.recv())
     print(a.recv())
     print(a.recv())
-    print(\"b:\")
-    print(b.recv())
-    print(b.recv())
-    print(b.recv())
+    print(\"b: {b.len()}\")
     print(\"parent:\")
     for x in g:
         print(x)
 main()";
-    let expect = "a:\n1\n2\n3\nb:\n1\n2\n3\nparent:\n1\n2\n3\n";
+    let expect = "a:\n1\n2\n3\nb: 0\nparent:\n";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
-/// A module-global generator carrying a genuinely NON-SENDABLE parked slot (a >10000-deep acyclic nest,
-/// tripping `MAX_STRUCTURAL_DEPTH`) is snapshotted as an inert `Unsendable` generator (the `to_snap`
-/// slow arm no longer eager-faults the whole snapshot — that regressed any module merely *holding* such
-/// a generator). A task that REACHES it therefore faults recoverably AT THE USE SITE with a message
-/// naming the cause (TICKET-137: it used to read as `nil`, "cannot iterate over nil"), NOT a crash, NOT
-/// a silent skip. Byte-identical. (The unreached case runs clean —
-/// see `generator_module_global_unreached_nonsendable_runs_clean_both`.)
+/// A module-global generator whose parked slot is a >10000-deep acyclic nest (past
+/// `MAX_STRUCTURAL_DEPTH`): nothing crosses, so a task that reaches it resumes the one generator.
+/// It used to fault (the snapshot could not copy it). CPython: `[1]`.
 #[test]
-fn generator_module_global_parked_slot_nonsendable_rejects_both() {
+fn generator_module_global_parked_slot_too_deep_to_copy_resumes_in_a_task() {
     let src = "\
 fn gen() -> Iterator[int]:
     keep: List[int] = []
@@ -597,25 +589,19 @@ fn gen() -> Iterator[int]:
 g := gen()
 started := g.next()
 fn main():
-    out := Channel[int]()
+    out := Channel[int](2)
     parallel:
         spawn:
             for x in g:
                 out.send(x)
+    print(out.recv())
 main()";
-    let ve = vm_outcome(src).expect_err("reached non-sendable generator must fault");
-    assert!(
-        ve.contains("holding a value that cannot cross tasks") && !ve.contains("None"),
-        "{ve}"
-    );
+    assert_eq!(vm_outcome(src).expect("program should run"), "1\n");
 }
 
-/// TICKET-137 — a module-global generator in a reference CYCLE through `box` now crosses as ONE
-/// copy. The snapshot walks global `box` first: `box -> g -> box` closes on `box`'s own id (a list
-/// `Backref`, not a generator cycle), and the later global `g` is a second off-stack reach of the
-/// generator, so it is a `Backref` to the copy inside `box` (it used to hit `gens_seen`'s reject and
-/// degrade to `Nil`). The task drives its own copy: `box.len()` is `1` there. (A cycle that
-/// re-enters the generator ON the DFS stack still rejects: `generator_in_data_cycle_rejects_both`.)
+/// TICKET-137 — a module-global generator in a reference CYCLE through `box`: the task drives the
+/// run's one generator (M3.1), so `box.len()` is `1`. (A cycle that re-enters the generator ON the
+/// serialize stack of a crossing still rejects: `generator_in_data_cycle_rejects_both`.)
 #[test]
 fn generator_module_global_in_data_cycle_crosses_as_one_copy() {
     let src = "\
@@ -633,13 +619,10 @@ main()";
     assert_eq!(vm_outcome(src).expect("program should run"), "got 1\n");
 }
 
-/// REGRESSION LOCK (backlog item B remediation): a module that merely HOLDS a non-sendable
-/// module-global generator (here a parked slot nested past `MAX_STRUCTURAL_DEPTH`) but whose spawned
-/// task NEVER reaches it must run CLEAN — the `to_snap` slow arm snapshots the untouched generator as
-/// an inert `Unsendable` one, so `snapshot_modules` (which walks EVERY global once at the first spawn)
-/// no longer eager-faults the whole program. Byte-identical against the golden. (Reached-behaviour is
-/// covered by `generator_module_global_parked_slot_nonsendable_rejects_both`; TICKET-137 replaced the
-/// old reference-cycle shape here, which now crosses as one copy.)
+/// REGRESSION LOCK (backlog item B remediation): a module that merely HOLDS a module-global
+/// generator with a parked slot nested past `MAX_STRUCTURAL_DEPTH`, and whose spawned task never
+/// reaches it, runs CLEAN (M3.1: a spawn copies no module global). Reached-behaviour:
+/// `generator_module_global_parked_slot_too_deep_to_copy_resumes_in_a_task`.
 #[test]
 fn generator_module_global_unreached_nonsendable_runs_clean_both() {
     let src = "\
@@ -663,8 +646,8 @@ main()";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
-/// The deleted `gate_executor_queue` path: a module-global generator reached inside an `Executor.submit`
-/// job now crosses by value and drives (was the executor reach-gate fault).
+/// The deleted `gate_executor_queue` path: a module-global generator reached inside an
+/// `Executor.submit` job drives the run's one generator (M3.1).
 #[test]
 fn generator_module_global_via_executor_crosses_both() {
     let src = "import Executor from std.concurrency\n\

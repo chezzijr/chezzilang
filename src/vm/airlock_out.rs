@@ -85,71 +85,14 @@ impl Vm {
         &mut self,
         vs: Vec<Value>,
         span: Span,
-    ) -> Result<(Vec<Value>, super::CellIds), RuntimeError> {
-        // W7-4c — SEED from this view's snapshot registry, so a cell that a module global also reaches
-        // serializes under the id the snapshot already gave it. `emitted` stays empty, so this walk
-        // writes the cell's FULL definition rather than a `Backref` into a serialization the far side
-        // has not replayed (and may replay later, or never — modules fault lazily); `from_wire_memo`
-        // dedupes a repeated definition by id.
-        let seed_ceiling = self.snapshot_next_id;
-        // W7-4c — the whole "a stale id MISSES, never collides" guarantee rests on this. It holds only
-        // while the counter travels with the registry it numbered (`FiberCtx` swaps both); split them
-        // and a fiber resuming on a fresher shell re-mints ids its own registry already uses.
-        debug_assert!(
-            self.snapshot_cells.values().all(|&id| id < seed_ceiling),
-            "snapshot registry holds an id at or above the mint counter — the counter and the \
-             registry have been separated (see FiberCtx::snapshot_cells)"
-        );
-        // No registry ⇒ no snapshot id to agree with, so skip the `Arc` bump and the base lookup
-        // entirely — that is every program whose module globals hold no closure over a captured local.
-        let base_cells =
-            (!self.snapshot_cells.is_empty()).then(|| Arc::clone(&self.snapshot_cells));
-        // TICKET-111 — same idea for data nodes: a spawn-crossed alias of a module global mints the
-        // registry's id, so `rebuild_ready` can later adopt it as the global's own object.
-        let base_nodes =
-            (!self.snapshot_nodes.is_empty()).then(|| Arc::clone(&self.snapshot_nodes));
-        let mut memo = WireMemo {
-            base_cells,
-            base_nodes,
-            next_id: seed_ceiling,
-            ..WireMemo::default()
-        };
+    ) -> Result<Vec<Value>, RuntimeError> {
+        let mut memo = WireMemo::default();
         let mut ws = Vec::with_capacity(vs.len());
         for &v in &vs {
             ws.push(self.to_wire_memo_at(v, span, &mut memo)?);
         }
         let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        let out = self.rebuild_items(ws, &mut rebuild, |w| w);
-        // W7-4c — hand the CLONE cells' ids back so `lower_task` can serialize them under the same id
-        // (the clone is a different `GcRef` than the original the registry knows). Cells only: a
-        // container's id lives in the memo's `path`, which pops on DFS exit, so it can never be
-        // back-referenced from the separate `lower_task` walk. Never folded into `self.snapshot_cells`
-        // — that would grow it once per spawn and pin every clone for the view's life.
-        //
-        // FAST PATH: with no registry there is no snapshot id to agree with, so there is nothing to
-        // report and the scan is skipped outright — that is the overwhelmingly common shape (no module
-        // global holds a closure over a captured local), and it keeps `spawn` off this path entirely.
-        // Otherwise report only ids BELOW the seed ceiling: those are the registry's, the only ones the
-        // snapshot can also use. Ids this walk minted are above every snapshot id (the counter is
-        // monotonic), so they can never collide and carrying them would just cost.
-        // TICKET-111 — containers and generators now report too, alongside cells: `lower_task` splits
-        // this list back apart by kind, so a data-node id also ties this crossing to the module
-        // snapshot's replay (adoption), the same way a cell id always has.
-        let cell_ids: super::CellIds = if self.snapshot_cells.is_empty()
-            && self.snapshot_nodes.is_empty()
-        {
-            Vec::new()
-        } else {
-            rebuild
-                .iter()
-                .filter(|&(&id, &h)| {
-                    id < seed_ceiling
-                        && (matches!(self.heap.get(h), Obj::Cell(_)) || self.is_adoptable_node(h))
-                })
-                .map(|(&id, &h)| (h, id))
-                .collect()
-        };
-        Ok((out, cell_ids))
+        Ok(self.rebuild_items(ws, &mut rebuild, |w| w))
     }
 
     /// [`to_wire_at`](Vm::to_wire_at) against a CALLER-OWNED [`WireMemo`], so several roots that cross
@@ -230,45 +173,27 @@ impl Vm {
         }
     }
 
-    /// TICKET-111 — true iff `h` is a data node kind eligible for the snapshot node registry / adoption:
-    /// every identity-preserved container plus `Generator`, EXCLUDING `Cell` (tied separately via
-    /// `snapshot_cells`, W7-4c) and `Closure` (never adopted — a closure's identity is its own binding,
-    /// not a spawn-crossed alias target).
-    pub(super) fn is_adoptable_node(&self, h: GcRef) -> bool {
-        matches!(
-            self.heap.get(h),
-            Obj::List(_)
-                | Obj::Tuple(_)
-                | Obj::Map(_)
-                | Obj::Set(_)
-                | Obj::Struct { .. }
-                | Obj::Enum { .. }
-                | Obj::Iter { .. }
-                | Obj::Generator(_)
-        )
-    }
-
     /// B3.0 — serialize a value into its [`WireValue`] form (the airlock's outbound half). A
     /// read-only walk of the heap, structurally identical to `deep_clone`'s old recursion but
     /// allocating nothing. Data (list/tuple/map/set/struct/enum) recurses; immutable / by-reference
     /// objects (`Str`, callables, modules, `Channel`/`Shared`/`Executor`) cross as
-    /// [`WireValue::Handle`] (the existing handle, same heap in B3.0). `Map`/`Set` carry their cached
-    /// hashes through so reconstruction never re-hashes.
+    /// [`WireValue::Handle`] (the existing handle, same heap in B3.0). `Map`/`Set` carry their
+    /// cached hashes through so reconstruction never re-hashes.
     ///
     /// Every `Value` and every `Obj` variant maps to a wire arm — by-reference objects (callables,
     /// modules, `Channel`/`Shared`/`Executor`) cross as `Handle`. The ONE fallible arm is a
     /// frame-holding **generator** (`Obj::Generator`): its parked frames reference this heap, so it
     /// is not sendable and returns a graceful `a generator cannot be sent across tasks` error here
     /// (carrying a placeholder `Span{0,0}` that airlock callers re-stamp with the real site via
-    /// `to_wire_at`/`deep_clone`/`ensure_snapshot`). Every other arm is infallible (the `?` only
-    /// forwards the generator error up through container recursion).
+    /// `to_wire_at`/`deep_clone`). Every other arm is infallible (the `?` only forwards the
+    /// generator error up through container recursion).
     pub(super) fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
-        // Fresh memo per root — correct for a SINGLE-root crossing (`Channel.send`, a `Shared` store).
-        // A crossing whose roots belong together (a `spawn`'s args, a `spawn:` block's captures, one
-        // module's globals) must instead share one memo via `to_wire_memo_at`/`deep_clone_all`, or two
-        // sibling closures over the same local arrive as two cells (W7-4). TICKET-100: within a memo,
-        // containers, closures and cells are ALL preserved for the whole crossing — one source object
-        // produces one copy per crossing (see [`WireMemo`]).
+        // Fresh memo per root — correct for a SINGLE-root crossing (`Channel.send`, a `Shared`
+        // store). A crossing whose roots belong together (a `spawn`'s args, a `spawn:` block's
+        // captures) must instead share one memo via `to_wire_memo_at`/`deep_clone_all`, or two
+        // sibling closures over the same local arrive as two cells (W7-4). TICKET-100: within a
+        // memo, containers, closures and cells are ALL preserved for the whole crossing — one
+        // source object produces one copy per crossing (see [`WireMemo`]).
         let mut memo = WireMemo::default();
         self.to_wire_depth(v, 0, &mut memo)
     }
@@ -320,9 +245,9 @@ impl Vm {
 #[derive(Default)]
 pub(super) struct WireMemo {
     /// GcRef of an identity-preserved node (`Closure`/container) currently on the serialize DFS
-    /// stack → the `id` assigned on its first visit. A revisit while still in `path` is a true back-edge
-    /// → `Backref(id)`. Popped on DFS exit (`WireMemo::exit`) because `try_wire_speculative` asserts
-    /// it is empty at entry — the off-stack case is now covered by `nodes` below, not by `path` itself.
+    /// stack → the `id` assigned on its first visit. A revisit while still in `path` is a true
+    /// back-edge → `Backref(id)`. Popped on DFS exit (`WireMemo::exit`); the off-stack case is
+    /// covered by `nodes` below, not by `path` itself.
     pub(super) path: super::fxhash::FxHashMap<GcRef, u32>,
     /// TICKET-100 — GcRef of every identity-preserved node (`Closure`/container) seen ANYWHERE in this
     /// crossing → its `id`. NEVER popped, so an off-stack DAG alias also back-references: one source
@@ -336,57 +261,12 @@ pub(super) struct WireMemo {
     /// its `from_wire_memo` rebuild map's, or a `Backref` minted under one memo hits the other's
     /// `.expect` — see [`Vm::to_wire_memo_at`].
     pub(super) cells: super::fxhash::FxHashMap<GcRef, u32>,
-    /// W7-4c — a READ-ONLY base consulted on a `cells` miss: this view's snapshot cell registry
-    /// ([`Vm::snapshot_cells`]), shared by `Arc` rather than copied. Every `spawn` seeds a memo from
-    /// it, so copying would put an O(module-global cells) clone on the spawn path — the same O(M·K)
-    /// shape W7-4 already rejected for `to_snap`'s speculative rollback. Never written: new ids go to
-    /// `cells`, which shadows it, so `try_wire_speculative`'s rollback stays exact.
-    pub(super) base_cells: Option<Arc<super::fxhash::FxHashMap<GcRef, u32>>>,
-    /// TICKET-111 — read-only snapshot node registry consulted when a data node is first reached;
-    /// never written, never set on a memo that speculates.
-    pub(super) base_nodes: Option<Arc<super::fxhash::FxHashMap<GcRef, u32>>>,
-    /// Ids from `cells` already EMITTED as a full `WireValue::Cell`. `memo.emitted.clear()` at the
-    /// per-module re-emit (`snapshot_modules`) is what keeps this a set apart from `cells`' id set.
-    pub(super) emitted: super::fxhash::FxHashSet<u32>,
-    /// W7-4a — undo journal for [`emitted`](WireMemo::emitted) while a SPECULATIVE attempt is in
-    /// flight: the ids it newly inserted. `try_wire_speculative`'s rollback used to be complete
-    /// with `emitted.retain(|id, _| *id < mint_from)`, because every id in the memo had been minted by
-    /// the current module's own walk — so "id below the watermark" meant "really emitted". Once the
-    /// memo spans MODULES (`snapshot_modules`) that stopped holding: a discarded attempt can mark an
-    /// id minted in an EARLIER module, `retain` keeps it as if it were real, and the module's kept
-    /// encoding then emits a `Backref` whose definition it never wrote — a dangling ref that rebuilds
-    /// a closure over `nil` and trips `CellLoad on a non-handle value`. Recorded only while
-    /// `speculating`, so the non-speculative paths pay nothing.
-    pub(super) emit_undo: Vec<u32>,
-    /// True for the duration of one [`Vm::try_wire_speculative`] attempt. Never nests — the only
-    /// callers are `to_snap_depth`'s two speculative sites, and the attempt runs `to_wire_depth`,
-    /// which never re-enters `to_snap_depth` (asserted by the empty-`path` `debug_assert` at entry).
-    pub(super) speculating: bool,
     pub(super) next_id: u32,
     /// GcRefs of `Obj::Generator`s currently on the serialize DFS stack. Re-entering one still on the
     /// stack is a cycle through a node whose parked frame is mid-serialization → reject (never
     /// duplicate). Removed on DFS exit. An OFF-stack revisit is a `Backref` through `nodes`
     /// (TICKET-137), not a reject.
     pub(super) gens_on_stack: super::fxhash::FxHashSet<GcRef>,
-    /// TICKET-119 — set by `to_wire_depth_inner`'s depth guard, cleared at each speculative attempt's
-    /// entry. No arm swallows an error, so it classifies the one `Err` that leaves the attempt.
-    pub(super) depth_tripped: bool,
-    /// TICKET-119 — `next_id` at the in-flight attempt's latest SHORTCUT (a `Backref` return, or a
-    /// cell whose id already existed). A frame entered at or before it records nothing.
-    pub(super) shortcut_at: Option<u32>,
-    /// TICKET-119 — `(node, enter stamp, depth)` of each untainted frame a depth-tripped attempt
-    /// unwound through; moved into `doom` when that attempt is discarded.
-    pub(super) doom_pending: Vec<(GcRef, u32, usize)>,
-    /// TICKET-119 — the LATEST depth-tripped attempt's records: node -> (enter stamp, depth). While a
-    /// record is valid, an attempt rooted at that node at `depth >= d0` replays the recorded walk
-    /// exactly and trips no later, so `to_snap_depth` skips it. See `docs/reference/concurrency/`'s
-    /// depth-guard paragraph and `WireMemo::doomed`.
-    pub(super) doom: super::fxhash::FxHashMap<GcRef, (u32, usize)>,
-    /// TICKET-119 — every node/cell that attempt minted -> its id there, which is its enter stamp.
-    pub(super) doom_ids: super::fxhash::FxHashMap<GcRef, u32>,
-    /// TICKET-119 — highest `doom_ids` stamp touched since the recording; a record is valid only
-    /// while its enter stamp is above it.
-    pub(super) doom_invalid_upto: Option<u32>,
     /// TICKET-291 — set only for a box call's result: the GC roots of the box heap when the call
     /// returned (state, the call's own closure, globals). The objects they reach (computed on the
     /// first closure capture) are what the box keeps; see [`sole_captures`](WireMemo::sole_captures).
@@ -459,37 +339,6 @@ impl WireMemo {
         crate::base::crossing::slot_bits(&claims)
     }
 
-    /// TICKET-119 — `h` may be about to become a `Backref` target: invalidate every `doom` record
-    /// whose recorded sub-walk contains it.
-    pub(super) fn doom_touch(&mut self, h: GcRef) {
-        if self.doom_ids.is_empty() {
-            return;
-        }
-        if let Some(&s) = self.doom_ids.get(&h) {
-            self.doom_invalid_upto = Some(self.doom_invalid_upto.map_or(s, |u| u.max(s)));
-        }
-    }
-
-    /// TICKET-119 — true iff a depth-tripped attempt already proved, by an exact-replay argument,
-    /// that a walk from `h` at `depth` or deeper trips no later than it did: a `doom` record exists
-    /// for `h`, `depth` is at or below the recorded depth's cap-ward direction (`depth >= d0`), and
-    /// nothing has invalidated the record since (`enter > doom_invalid_upto`). `to_snap_depth` skips
-    /// the speculative attempt when this is true. See `docs/reference/concurrency/`'s depth-guard paragraph.
-    pub(super) fn doomed(&self, h: GcRef, depth: usize) -> bool {
-        self.doom.get(&h).is_some_and(|&(enter, d0)| {
-            depth >= d0 && self.doom_invalid_upto.is_none_or(|u| enter > u)
-        })
-    }
-
-    /// W7-4c — the id this cell already crosses under, from the overlay or the shared base.
-    pub(super) fn cell_id(&self, h: GcRef) -> Option<u32> {
-        self.cells.get(&h).copied().or_else(|| {
-            self.base_cells
-                .as_ref()
-                .and_then(|base| base.get(&h).copied())
-        })
-    }
-
     /// TICKET-100 — the id `h` already crosses under: an on-stack back-edge (`path`) first, else an
     /// off-stack DAG alias already seen this crossing (`nodes`).
     fn seen(&self, h: GcRef) -> Option<u32> {
@@ -511,17 +360,8 @@ impl WireMemo {
         self.path.remove(&h);
     }
 
-    /// TICKET-111 — the id to mint for a data node's FIRST reach this crossing: the snapshot
-    /// registry's id for `h` if it holds one (ties this crossing to the module snapshot's
-    /// replay, W12-5 adoption), else a fresh id.
-    fn mint_node(&mut self, h: GcRef) -> u32 {
-        if let Some(id) = self
-            .base_nodes
-            .as_ref()
-            .and_then(|base| base.get(&h).copied())
-        {
-            return id;
-        }
+    /// The id to mint for a node's FIRST reach this crossing.
+    fn mint_node(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -617,8 +457,6 @@ impl WalkSrc<'_> {
     /// recurse on the HOST stack and `SIGABRT`, uncatchable) — the SAME `MAX_STRUCTURAL_DEPTH` limit
     /// and message the display / `==` paths use (`stmt.rs` / `arith.rs`), turned into a recoverable
     /// `RuntimeError` (placeholder `Span{0,0}`, re-stamped with the real airlock site by `to_wire_at`).
-    /// `to_snap_depth` passes its `depth` to this walk on its fast path, so both trip at the one `MAX_STRUCTURAL_DEPTH`.
-    #[inline(always)]
     fn to_wire_depth(
         &self,
         v: Value,
@@ -627,37 +465,7 @@ impl WalkSrc<'_> {
     ) -> Result<WireValue, RuntimeError> {
         #[cfg(test)]
         super::WIRE_ENCODE_NODES.with(|c| c.set(c.get() + 1));
-        if !memo.speculating {
-            return self.to_wire_depth_inner(v, depth, memo);
-        }
-        let enter = memo.next_id;
-        if let Some(h) = v.as_obj() {
-            memo.doom_touch(h);
-        }
-        let r = self.to_wire_depth_inner(v, depth, memo);
-        match &r {
-            Ok(WireValue::Backref(_)) => memo.shortcut_at = Some(memo.next_id),
-            Err(_) if memo.depth_tripped => {
-                if let Some(h) = v.as_obj()
-                    && memo.shortcut_at.is_none_or(|s| enter > s)
-                {
-                    memo.doom_pending.push((h, enter, depth));
-                }
-            }
-            _ => {}
-        }
-        r
-    }
-
-    /// TICKET-119 — the walk itself, wrapped by `to_wire_depth` for doomed-attempt bookkeeping.
-    fn to_wire_depth_inner(
-        &self,
-        v: Value,
-        depth: usize,
-        memo: &mut WireMemo,
-    ) -> Result<WireValue, RuntimeError> {
         if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
-            memo.depth_tripped = true;
             return Err(self.depth_exceeded_err(Span::default()));
         }
         Ok(match v.view() {
@@ -685,22 +493,20 @@ impl WalkSrc<'_> {
                 // A first-class builtin fn crosses the airlock BY VALUE (its name) — pure code, no
                 // `GcRef` and no captured heap state, so it genuinely crosses an OS-thread boundary
                 // (unlike a `Func`/`Closure` handle). `from_wire` re-allocs a fresh `Obj::Builtin`;
-                // builtins are name-compared, so that is observationally identical. Works the same way
-                // on this airlock-cross path and on the separate module-snapshot replay path
-                // (`SnapValue::Builtin`).
+                // builtins are name-compared, so that is observationally identical.
                 Obj::Builtin(b) => WireValue::Builtin(*b),
-                // B3.3: a closure crosses the airlock BY VALUE — its `proto` (shared via `Arc<Program>`),
-                // its captures wired recursively in slot order (paired with the proto's `capture_names`),
-                // and its `home` as an index into `module_objs` — never a heap-local `GcRef`. Mirrors the
-                // slot-order/home logic in `to_snap_depth`'s Closure arm and the old `wire_callable`.
+                // B3.3: a closure crosses the airlock BY VALUE — its `proto` (shared via
+                // `Arc<Program>`), its captures wired recursively in slot order (paired with the
+                // proto's `capture_names`), and its `home` as an index into `module_objs` — never a
+                // heap-local `GcRef`.
                 //
-                // Identity preservation: a recursive local `fn`'s letrec self-cell makes this closure's
-                // capture graph cyclic (`Closure h -> captured[Cell] -> Cell.inner = h`, or the
-                // `Closure_f -> Cell_g -> Closure_g -> Cell_f` mutual-recursion loop). We assign `h` an
-                // `id` and record it via `memo.enter` BEFORE recursing captures; a nested revisit of `h`
-                // (the back-edge) emits `WireValue::Backref(id)` and stops — `from_wire` ties the knot
-                // back. TICKET-100: `h` is popped off `path` on exit but kept in `nodes`, so an off-stack
-                // alias also back-references.
+                // Identity preservation: a recursive local `fn`'s letrec self-cell makes this
+                // closure's capture graph cyclic (`Closure h -> captured[Cell] -> Cell.inner = h`,
+                // or the `Closure_f -> Cell_g -> Closure_g -> Cell_f` mutual-recursion loop). We
+                // assign `h` an `id` and record it via `memo.enter` BEFORE recursing captures; a
+                // nested revisit of `h` (the back-edge) emits `WireValue::Backref(id)` and stops —
+                // `from_wire` ties the knot back. TICKET-100: `h` is popped off `path` on exit but
+                // kept in `nodes`, so an off-stack alias also back-references.
                 Obj::Closure {
                     proto,
                     captured,
@@ -729,9 +535,9 @@ impl WalkSrc<'_> {
                         }
                     }
                 }
-                // B3.3: a bare fn crosses BY VALUE as its own distinct `Func` arm (NOT an empty-capture
-                // `Closure`), so it keeps rendering `<fn NAME>` after a round-trip (a `Closure` renders
-                // `<closure>` — collapsing them would diverge the M:N snapshot rebuild from serial).
+                // B3.3: a bare fn crosses BY VALUE as its own distinct `Func` arm (NOT an
+                // empty-capture `Closure`), so it keeps rendering `<fn NAME>` after a round-trip (a
+                // `Closure` renders `<closure>`).
                 Obj::Func { proto, home } => WireValue::Func {
                     proto: *proto,
                     home: self.home_index(*home),
@@ -740,10 +546,9 @@ impl WalkSrc<'_> {
                 // `GcRef` is meaningless on the receiver heap — so it stays a by-reference `Handle`
                 // (the worker airlock rejects it; source-unreachable, defensive only).
                 Obj::Module(_) => WireValue::Handle(h),
-                // A native fn is pure code (fn ptr + name, no `GcRef`) and a Cffi is a shared `Arc` —
-                // both cross BY VALUE like `Builtin`, exactly as the SNAPSHOT path
-                // (`SnapValue::Native`/`Cffi`) already ships them across M:N workers. `has_handle`
-                // leaves both `false`, so the worker airlock accepts them.
+                // A native fn is pure code (fn ptr + name, no `GcRef`) and a Cffi is a shared `Arc`
+                // — both cross BY VALUE like `Builtin`. `has_handle` leaves both `false`, so the
+                // worker airlock accepts them.
                 Obj::Native { name, func, kind } => WireValue::Native {
                     name: name.clone(),
                     func: *func,
@@ -781,7 +586,7 @@ impl WalkSrc<'_> {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.mint_node(h);
+                        let id = memo.mint_node();
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(items.len());
                         for x in items {
@@ -795,7 +600,7 @@ impl WalkSrc<'_> {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.mint_node(h);
+                        let id = memo.mint_node();
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(items.len());
                         for x in items {
@@ -809,7 +614,7 @@ impl WalkSrc<'_> {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.mint_node(h);
+                        let id = memo.mint_node();
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(m.entries.len());
                         for (hash, k, val) in &m.entries {
@@ -830,7 +635,7 @@ impl WalkSrc<'_> {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.mint_node(h);
+                        let id = memo.mint_node();
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(s.entries.len());
                         for (hash, e) in &s.entries {
@@ -849,7 +654,7 @@ impl WalkSrc<'_> {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.mint_node(h);
+                        let id = memo.mint_node();
                         memo.enter(h, id);
                         // Positional layout: recover the declaration-order field names from the
                         // StructDef (cold cross-task path) so the WireValue encoding is unchanged.
@@ -891,7 +696,7 @@ impl WalkSrc<'_> {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.mint_node(h);
+                        let id = memo.mint_node();
                         memo.enter(h, id);
                         let mut out = Vec::with_capacity(payload.len());
                         for x in payload {
@@ -956,7 +761,7 @@ impl WalkSrc<'_> {
                         return Ok(WireValue::Backref(id));
                     }
                     memo.gens_on_stack.insert(h);
-                    let id = memo.mint_node(h);
+                    let id = memo.mint_node();
                     memo.nodes.insert(h, id);
                     let home = self.home_index(g.home);
                     let closure = match g.closure {
@@ -977,7 +782,6 @@ impl WalkSrc<'_> {
                             WireGenState::Pending(wargs, g.stamp.get())
                         }
                         GenState::Done => WireGenState::Done,
-                        GenState::Unsendable(m) => WireGenState::Unsendable(m.clone()),
                         GenState::Suspended => {
                             // CHECKER-UNREACHABLE HARD ARMS — reject cleanly rather than silently
                             // mis-serialize. Neither shape can arise from checker-valid source; these
@@ -1050,42 +854,25 @@ impl WalkSrc<'_> {
                     }
                 }
                 // A `Cell` (a by-reference-captured local's box) crosses the airlock by value as a
-                // DEEP COPY: wire its inner value; `from_wire` rebuilds a FRESH independent cell, so a
-                // plain captured local sent into a task is an isolated copy (design §4 F1) — ONE fresh
-                // cell per BINDING, not per reference.
+                // DEEP COPY: wire its inner value; `from_wire` rebuilds a FRESH independent cell,
+                // so a plain captured local sent into a task is an isolated copy (design §4 F1) —
+                // ONE fresh cell per BINDING, not per reference.
                 //
-                // W7-4: unlike every other arm this uses `memo.cells`, which is never popped. A cell is
-                // a binding's identity, so ANY later reach (an off-stack sibling closure — `Ctr(inc,
-                // get)` over one local `n` — as well as an on-stack letrec/mutual-recursion back-edge)
-                // emits `Backref(id)` and the far side ties both references to the one rebuilt cell.
-                // TICKET-100: data containers now keep identity the same way, via the separate `nodes`
-                // map (see [`WireMemo`]) — a cell and a container are two cases of one rule. The `id`
-                // is stable per cell for the whole serialization; `emitted` decides
-                // definition-vs-`Backref`.
+                // W7-4: unlike every other arm this uses `memo.cells`, which is never popped. A
+                // cell is a binding's identity, so ANY later reach (an off-stack sibling closure —
+                // `Ctr(inc, get)` over one local `n` — as well as an on-stack
+                // letrec/mutual-recursion back-edge) emits `Backref(id)` and the far side ties both
+                // references to the one rebuilt cell. TICKET-100: data containers now keep identity
+                // the same way, via the separate `nodes` map (see [`WireMemo`]) — a cell and a
+                // container are two cases of one rule. The `id` is stable per cell for the whole
+                // serialization: its first reach writes the definition, every later reach a
+                // `Backref`.
                 Obj::Cell(v) => {
-                    let id = match memo.cell_id(h) {
-                        Some(id) => {
-                            if memo.speculating {
-                                memo.shortcut_at = Some(memo.next_id);
-                            }
-                            id
-                        }
-                        None => {
-                            let id = memo.next_id;
-                            memo.next_id += 1;
-                            memo.cells.insert(h, id);
-                            id
-                        }
-                    };
-                    if memo.emitted.contains(&id) {
+                    if let Some(&id) = memo.cells.get(&h) {
                         WireValue::Backref(id)
                     } else {
-                        // W7-4a — journal the id we are about to insert so a DISCARDED speculative
-                        // attempt removes it again (see `try_wire_speculative`).
-                        if memo.speculating {
-                            memo.emit_undo.push(id);
-                        }
-                        memo.emitted.insert(id);
+                        let id = memo.mint_node();
+                        memo.cells.insert(h, id);
                         let inner = self.to_wire_depth(v.get(), depth + 1, memo)?;
                         WireValue::Cell {
                             id,
@@ -1103,7 +890,7 @@ impl WalkSrc<'_> {
                     if let Some(id) = memo.seen(h) {
                         WireValue::Backref(id)
                     } else {
-                        let id = memo.mint_node(h);
+                        let id = memo.mint_node();
                         memo.enter(h, id);
                         let pos = pos.get();
                         let items = items.to_vec();
@@ -1121,30 +908,5 @@ impl WalkSrc<'_> {
                 }
             },
         })
-    }
-}
-
-#[cfg(test)]
-mod doomed_tests {
-    use super::*;
-
-    /// TICKET-119 — the program-level lock
-    /// (`airlock_module_global_skip_honours_the_depth_the_doom_was_recorded_at` in `src/vm/tests.rs`)
-    /// stayed green with `depth >= d0` deleted from `WireMemo::doomed`, because that program's
-    /// invalidation masked the term's effect. This proves the term directly, against the predicate
-    /// itself, so the mutation cannot hide behind a program-level side effect.
-    #[test]
-    fn doomed_requires_depth_at_or_above_the_recorded_depth() {
-        let h = GcRef(1);
-        let mut memo = WireMemo {
-            doom: [(h, (7, 10))].into_iter().collect(),
-            ..Default::default()
-        };
-        assert!(!memo.doomed(h, 9), "depth below d0 must not be doomed");
-        assert!(memo.doomed(h, 10), "depth at d0 must be doomed");
-        assert!(memo.doomed(h, 11), "depth above d0 must be doomed");
-
-        memo.doom.clear();
-        assert!(!memo.doomed(h, 10), "no record at all must not be doomed");
     }
 }

@@ -1,15 +1,12 @@
 //! TICKET-246 — a `Shared` / `RwShared` box keeps its value in its own context (`stack[0]` of a
-//! `FiberCtx`, with its own module view). M1.7: the context's objects live in the run's one heap.
-//! The collector reaches them through the box, as Go reaches a value through the struct that holds
+//! `FiberCtx`). A box closure reads the run's module objects (M3.1), as its caller does. M1.7:
+//! the context's objects live in the run's one heap. The collector reaches them through the box, as
+//! Go reaches a value through the struct that holds
 //! it: marking an `Obj::Shared` (or a `WireValue::Shared` in a core's payload) walks the parked
 //! context (`core::SharedState::roots_into`). The caller a box call parks is rooted by the `Vm`
 //! that runs the call (`BoxFrame::roots`). A box crossing still copies, into that one heap. This
-//! module owns the three things that make a closure run inside a box context:
-//!
-//! - [`Vm::with_box`], the ONE swap into a box context (and its undo, on return and on unwind);
-//! - `Vm::box_chain` with [`Vm::as_box_caller`], the ONE definition of "the caller of this box
-//!   call", at any nesting depth;
-//! - [`Vm::box_global`], the ONE door a box closure reads a module global through.
+//! module owns [`Vm::with_box`], the ONE swap into a box context (and its undo, on return and on
+//! unwind); `Vm::box_chain` holds the parked callers, at any nesting depth.
 
 use super::*;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -17,26 +14,18 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 /// One open box call. The LAST frame of `Vm::box_chain` describes the call now running; frame 0
 /// parks the root task. A box call made from inside a box closure pushes one more frame.
 pub(super) struct BoxFrame {
-    /// The parked caller while the call runs. Inside [`Vm::swap_frame`]'s second half (the `Vm`
-    /// acts as the caller) it holds the box context instead. `BoxFrame::roots` roots whichever of
-    /// the two it holds.
+    /// The parked caller while the call runs. `BoxFrame::roots` roots it.
     caller: Box<FiberCtx>,
     /// The caller's running generators and their parked hosts. `FiberCtx` does not carry them,
     /// so they park here, and `Vm::gc_roots` roots them.
     gens: Vec<GcRef>,
     gen_hosts: Vec<GenCtx>,
-    /// This call already asked its caller for a fresh view (see [`Vm::box_seat_view`]).
-    view_checked: bool,
-    /// Globals this call read through the slot door: GC roots (`Vm::gc_roots`).
-    slots: fxhash::FxHashMap<(u32, u32), Value>,
 }
 
 impl BoxFrame {
-    /// Append the GC roots this frame holds: the parked context, the slot-door cache and the
-    /// parked generators.
+    /// Append the GC roots this frame holds: the parked context and the parked generators.
     pub(super) fn roots(&self, out: &mut Vec<GcRef>) {
         self.caller.root_view().walk(out);
-        out.extend(self.slots.values().filter_map(|v| v.child_gcref()));
         out.extend(self.gens.iter().copied());
         for host in &self.gen_hosts {
             host.root_view().walk(out);
@@ -44,9 +33,8 @@ impl BoxFrame {
     }
 }
 
-/// The values a module slot can hand to another heap alone, with no view: an immutable leaf
-/// (`Fixed::Leaf`), a `fn` item or an `Arc` core. `Vm::slot_snapshot_reusable` reads the same
-/// list, so "safe to reuse without a rebuild" and "safe to copy without a view" cannot drift.
+/// The values no write can change: an immutable leaf (`Fixed::Leaf`), a `fn` item or an `Arc`
+/// core. `WireMemo::sole_captures` reads it.
 pub(super) fn slot_is_leaf(heap: &Heap, v: Value) -> bool {
     let Some(h) = v.as_obj() else {
         return true; // inline scalar (int/bool/nil) — immutable
@@ -155,27 +143,17 @@ pub(super) fn state_obj<'a>(heap: &'a Heap, ctx: &FiberCtx) -> Option<&'a Obj> {
 }
 
 impl Vm {
-    /// A fresh box context: an EMPTY module view (seated lazily, per call, from the caller — see
-    /// [`Vm::box_global`]), its own view stamp, and the state slot `stack[0]`, which the collector
-    /// reaches through the box.
+    /// A fresh box context: the run's module objects (each call re-seats its caller's table, see
+    /// [`Vm::with_box`]) and the state slot `stack[0]`, which the collector reaches through the
+    /// box.
     pub(super) fn box_new(&mut self) -> Box<FiberCtx> {
-        let mut worker = self.spawn_worker();
+        let worker = self.spawn_worker();
         Box::new(FiberCtx {
-            view: worker.heap.take_view(),
             owns_side: true,
             stack: vec![Value::nil()],
-            module_objs: worker.module_objs,
-            module_faulted: worker.module_faulted,
-            module_snapshot: worker.module_snapshot,
-            snapshot_memo: worker.snapshot_memo,
-            snapshot_rebuild: worker.snapshot_rebuild,
-            snapshot_cells: worker.snapshot_cells,
-            snapshot_nodes: worker.snapshot_nodes,
-            snapshot_adopt: worker.snapshot_adopt,
-            snapshot_next_id: worker.snapshot_next_id,
+            module_objs: self.module_objs.clone(),
             executors: worker.executors,
             str_intern: worker.str_intern,
-            fn_values: worker.fn_values,
             ..Default::default()
         })
     }
@@ -202,26 +180,15 @@ impl Vm {
         let ctx = slot
             .take()
             .expect("a box context is in its slot under the box lock");
-        let n_mods = self.module_objs.len();
         let mut frame = BoxFrame {
             caller: ctx,
             gens: Vec::new(),
             gen_hosts: Vec::new(),
-            view_checked: false,
-            slots: fxhash::FxHashMap::default(),
         };
         self.swap_frame(&mut frame);
-        // The box addresses the caller's modules by index, so its table is as long as theirs. A
-        // module object stays for the box's life: the state can hold a closure whose home it is.
-        while self.module_objs.len() < n_mods {
-            let wm = self.heap.alloc(Obj::Module(Box::new(ModuleData::new(
-                "".into(),
-                RVec::new(),
-                std::collections::HashMap::new(),
-            ))));
-            self.module_objs.push(wm);
-            self.module_faulted.push(false);
-        }
+        // M3.1: the box closure reads the run's module objects, through its caller's table (a
+        // caller started after a late module init holds a longer one than the box was built with).
+        self.module_objs.clone_from(&frame.caller.module_objs);
         let depth = self.box_chain.len();
         let entry = (
             self.frames.len(),
@@ -237,34 +204,10 @@ impl Vm {
         self.call_depth = entry.2;
         self.cur_base = entry.3;
         self.handlers.truncate(entry.4);
-        self.box_view_err = None;
         self.box_chain.truncate(depth + 1);
         let mut frame = self.box_chain.pop().expect("this call's frame");
         self.swap_frame(&mut frame);
         *slot = Some(frame.caller);
-        match r {
-            Ok(v) => v,
-            Err(p) => resume_unwind(p),
-        }
-    }
-
-    /// Run `f` AS the caller of the box call now running: the `Vm` is the caller's context and
-    /// `box_chain` is the caller's own chain while `f` runs. The ONE way to reach the caller; a
-    /// caller that is itself a box context answers through its own chain, so a nested call has no
-    /// second code path. Undone on return and on unwind.
-    /// While `f` runs, the frame waits on `box_lifted`, where `Vm::gc_roots` still roots it.
-    pub(super) fn as_box_caller<R>(&mut self, f: impl FnOnce(&mut Vm) -> R) -> R {
-        let mut frame = self.box_chain.pop().expect("a box call is running");
-        let depth = self.box_chain.len();
-        self.swap_frame(&mut frame);
-        let lifted = self.box_lifted.len();
-        self.box_lifted.push(frame);
-        let r = catch_unwind(AssertUnwindSafe(|| f(self)));
-        self.box_chain.truncate(depth);
-        self.box_lifted.truncate(lifted + 1);
-        let mut frame = self.box_lifted.pop().expect("this call's lifted frame");
-        self.swap_frame(&mut frame);
-        self.box_chain.push(frame);
         match r {
             Ok(v) => v,
             Err(p) => resume_unwind(p),
@@ -325,12 +268,6 @@ impl Vm {
             vm.stack.push(f);
             let state = vm.stack[0];
             let r = vm.reentered(|vm| vm.invoke_value(f, vec![state], span));
-            // A view that could not be seated at a site with no fault channel surfaces here at
-            // the latest.
-            let r = match (r, vm.box_view_err.take()) {
-                (Ok(_), Some(e)) => Err(e),
-                (r, _) => r,
-            };
             let r = r.and_then(|v| {
                 if write_back {
                     vm.stack[0] = v;
@@ -608,158 +545,5 @@ impl Vm {
     pub(super) fn owned_eager_scopes(&self) -> impl DoubleEndedIterator<Item = &super::EagerScope> {
         self.eager_stacks()
             .flat_map(|(_, eager)| eager.iter().flatten())
-    }
-
-    /// "Is this view a task's copy?" — a write to a module global faults there (D4). True for a
-    /// spawned task and inside a box closure.
-    pub(super) fn is_task_view(&self) -> bool {
-        self.module_snapshot.is_some() || !self.box_chain.is_empty()
-    }
-
-    /// The one door a box closure reads a module global through. A no-op (`Ok(None)`) outside a
-    /// box call and for a `home` that is not a module of this view.
-    ///
-    /// Slot half (`slot` given): a slot holding a [`slot_is_leaf`] value is copied alone from the
-    /// caller, with no view, and returned. View half (otherwise): the caller's `fresh_view` is
-    /// seated once per call and `Ok(None)` tells the reader to fault the module in as usual.
-    pub(super) fn box_global(
-        &mut self,
-        home: GcRef,
-        slot: Option<u32>,
-        span: Span,
-    ) -> Result<Option<Value>, RuntimeError> {
-        if self.box_chain.is_empty() {
-            return Ok(None);
-        }
-        let Some(idx) = self.home_index(home) else {
-            return Ok(None);
-        };
-        if let Some(slot) = slot
-            && let Some(v) = self.box_slot(idx, slot, span)
-        {
-            return Ok(Some(v));
-        }
-        self.box_seat_view(span)?;
-        Ok(None)
-    }
-
-    /// The slot half of [`box_global`](Vm::box_global), cached per call.
-    fn box_slot(&mut self, idx: usize, slot: u32, span: Span) -> Option<Value> {
-        let key = (idx as u32, slot);
-        let frame = self.box_chain.last()?;
-        if let Some(&v) = frame.slots.get(&key) {
-            return Some(v);
-        }
-        let w = self.as_box_caller(|vm| vm.box_slot_here(idx, slot, span))?;
-        let v = self.from_wire(w);
-        if let Some(frame) = self.box_chain.last_mut() {
-            frame.slots.insert(key, v);
-        }
-        Some(v)
-    }
-
-    /// Runs IN the caller: global `(idx, slot)` encoded for the box, when it is a leaf. A caller
-    /// that is itself a box context trusts its own module copy only once THIS call of it seated
-    /// its view; before that the copy can be an earlier call's, so the read resolves through that
-    /// context's own caller first, at any depth, and ends at the root task's live slot.
-    fn box_slot_here(&mut self, idx: usize, slot: u32, span: Span) -> Option<WireValue> {
-        let m = *self.module_objs.get(idx)?;
-        let own_is_current = self.box_chain.last().is_none_or(|f| f.view_checked);
-        let direct = match self.heap.get(m) {
-            Obj::Module(md) if own_is_current => {
-                md.slots.try_get(slot as usize).filter(|v| !v.is_uninit())
-            }
-            Obj::Str(_)
-            | Obj::Bytes(_)
-            | Obj::ByteArray(_)
-            | Obj::BigInt(_)
-            | Obj::FloatBox(_)
-            | Obj::Iter { .. }
-            | Obj::List(_)
-            | Obj::Tuple(_)
-            | Obj::Map(_)
-            | Obj::Set(_)
-            | Obj::Struct { .. }
-            | Obj::Enum { .. }
-            | Obj::Cell(_)
-            | Obj::Func { .. }
-            | Obj::Closure { .. }
-            | Obj::Module(_)
-            | Obj::Native { .. }
-            | Obj::Builtin(_)
-            | Obj::Cffi(_)
-            | Obj::Ptr(_)
-            | Obj::Channel(_)
-            | Obj::Shared(_)
-            | Obj::RwShared(_)
-            | Obj::Atomic(_)
-            | Obj::AtomicInt(_)
-            | Obj::Executor(_)
-            | Obj::Socket(_)
-            | Obj::Listener(_)
-            | Obj::Writer(_)
-            | Obj::Reader(_)
-            | Obj::Generator(_) => None,
-        };
-        let v = match direct {
-            Some(v) => v,
-            None => self.box_slot(idx, slot, span)?,
-        };
-        if !slot_is_leaf(&self.heap, v) {
-            return None;
-        }
-        self.to_wire_crossable(v, span).ok()
-    }
-
-    /// The view half of [`box_global`](Vm::box_global): once per box call, ask the caller for its
-    /// `fresh_view` and, when it is not the view this box already holds, re-seat it IN PLACE. A
-    /// no-op outside a box call. `fresh_view` itself begins with this, so a caller that is a box
-    /// context seats its OWN view from ITS caller before it snapshots.
-    pub(super) fn box_seat_view(&mut self, span: Span) -> Result<(), RuntimeError> {
-        match self.box_chain.last_mut() {
-            Some(frame) if !frame.view_checked => frame.view_checked = true,
-            _ => return Ok(()),
-        }
-        let snap = match self.as_box_caller(|vm| vm.fresh_view(span)) {
-            Ok(snap) => snap,
-            Err(e) => {
-                // Not seated: the next read asks again and raises the same fault.
-                if let Some(frame) = self.box_chain.last_mut() {
-                    frame.view_checked = false;
-                }
-                return Err(e);
-            }
-        };
-        if self
-            .module_snapshot
-            .as_ref()
-            .is_some_and(|m| Arc::ptr_eq(m, &snap))
-        {
-            return Ok(());
-        }
-        for i in 0..self.module_objs.len() {
-            let m = self.module_objs[i];
-            if let Obj::Module(md) = self.heap.write(m).get(m) {
-                let mut names = md.names_mut();
-                md.slots.clear();
-                names.index.clear();
-                if let Some(sm) = snap.modules.get(i) {
-                    names.name = sm.name.clone();
-                }
-            }
-        }
-        self.module_faulted = vec![false; self.module_objs.len()];
-        self.snapshot_rebuild.clear();
-        self.snapshot_cells = Arc::new(fxhash::FxHashMap::default());
-        self.snapshot_nodes = Arc::new(fxhash::FxHashMap::default());
-        self.snapshot_adopt.clear();
-        // A cached `Func` has the old view's home; a slot-door value may be one.
-        self.fn_values.clear();
-        if let Some(frame) = self.box_chain.last_mut() {
-            frame.slots.clear();
-        }
-        self.snapshot_memo = Some(Arc::clone(&snap));
-        self.module_snapshot = Some(snap);
-        Ok(())
     }
 }

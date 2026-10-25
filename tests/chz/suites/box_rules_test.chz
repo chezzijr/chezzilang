@@ -166,9 +166,10 @@ fn bump_global_cell(x: int) -> int:
     GLOBAL_CTR.inc()
     return x
 
-# A closure whose cell a module global also holds: the box closure READS the caller's value as
-# of the call, and a WRITE through it is the D4 fault, never a silent lost write.
-test fn a_cell_a_module_global_also_holds_reads_fresh_and_a_write_faults():
+# A closure whose cell a module global also holds: the box closure reads and writes the run's one
+# copy (M3.1), so its read is fresh and its write lands. Go: a locked update that calls a package
+# `var`'s method sees and changes the one counter.
+test fn a_cell_a_module_global_also_holds_reads_fresh_and_a_write_lands():
     GLOBAL_CTR.inc()
     before := GLOBAL_CTR.get()
     s := Shared(0)
@@ -178,10 +179,8 @@ test fn a_cell_a_module_global_also_holds_reads_fresh_and_a_write_faults():
     s.set(0)
     s.update(read_global_cell)
     assert s.get() == before + 1
-    r := recover: s.update(bump_global_cell)
-    fault := msg_of(r, "write to a global's cell")
-    assert fault.contains("this task's copy"), fault
-    assert GLOBAL_CTR.get() == before + 1
+    s.update(bump_global_cell)
+    assert GLOBAL_CTR.get() == before + 2
 
 # ---- rule 2 for RwShared collections: a fault in a writer leaves the box serving ----
 

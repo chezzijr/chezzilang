@@ -1,0 +1,11 @@
+# The module `shared_globals_test.chz` imports: a qualified global, a fn that writes it, and a
+# global its own top-level `parallel:` writes while the module is still initializing.
+X := 0
+
+fn bump_x():
+    X += 1
+
+L := 0
+parallel:
+    spawn:
+        L = 7

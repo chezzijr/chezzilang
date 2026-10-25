@@ -18,7 +18,6 @@ impl Vm {
                 span,
             ));
         };
-        self.ensure_module_faulted(h); // D1: `module.member` on a not-yet-faulted worker module
         // M19 Phase 5b — inline-cache fast path: a hit collapses the struct name-probe to one pure-int
         // `tid` compare (the struct's layout id). Same `tid` ⇒ same field order ⇒ the cached `idx` is
         // the right slot, so the field-name re-verify is unnecessary. `cell.tid == TID_NONE` (empty or
@@ -496,7 +495,7 @@ impl Vm {
         };
         // D4 layer C (TICKET-169): a field store on an airlock copy is a lost write, not a race.
         if self.heap.is_copied(h) {
-            return Err(self.copied_write_err(None, span));
+            return Err(self.copied_write_err(span));
         }
         // M19 Phase 5b — IC fast path (see [`Vm::get_field`]): a hit on the `tid` guard writes straight
         // to the cached index (no field-name re-verify); a miss falls through to the probe + cache-fill.
@@ -630,7 +629,7 @@ impl Vm {
         // only through a `Shared`/`RwShared` field (real sharing); that write is checked at
         // `set_field`/`do_method_call`, not here.
         if self.heap.is_copied(h) && !matches!(self.heap.get(h), Obj::Struct { .. }) {
-            return Err(self.copied_write_err(None, span));
+            return Err(self.copied_write_err(span));
         }
         // M19 Tier-2 — Int-key fast path for a Map write: `scalar_hash` on an int needs no rooting
         // (it can't GC or re-enter, unlike a struct key's `hash()`), so skip `hash_key_rooted`. Same

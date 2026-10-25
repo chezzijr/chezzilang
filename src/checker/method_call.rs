@@ -69,14 +69,12 @@ impl Checker {
         if self.call_writes_receiver(&obj_ty, method) {
             self.note_projected_task_write(obj);
         }
-        // Task 1 — a captured module-global aggregate mutated in a task (`xs.push(v)`, …) is no longer
-        // a compile error: spawning deep-copies module globals per task, so the write hits the task's
-        // OWN copy — invisible to the parent. The old frozen-module-global gate is deleted (`Shared`/`Channel` remain the escape
-        // hatch for genuinely-shared cross-task state; they cross by shared Arc via `to_snap`).
-        // A member-level turbofish (`obj.method[A, B](...)`) is only valid on a USER method that
-        // declares its OWN `[U]` type params. On a builtin (`xs.len[int]()`, `xs.iter[int]()`) or a
-        // non-generic user method it is an arity error — checked BEFORE the `.iter` fast-path below
-        // so `xs.iter[int]()` is rejected like `xs.len[int]()` (it was silently swallowed otherwise).
+        // M3.1 — a module-global aggregate mutated in a task (`xs.push(v)`, …) is legal: the task
+        // writes the run's one copy (Go). A member-level turbofish (`obj.method[A, B](...)`) is
+        // only valid on a USER method that declares its OWN `[U]` type params. On a builtin
+        // (`xs.len[int]()`, `xs.iter[int]()`) or a non-generic user method it is an arity error —
+        // checked BEFORE the `.iter` fast-path below so `xs.iter[int]()` is rejected like
+        // `xs.len[int]()` (it was silently swallowed otherwise).
         if !type_args.is_empty() && self.member_own_type_params(&obj_ty, method) == Some(false) {
             self.infer_all(args);
             self.error(

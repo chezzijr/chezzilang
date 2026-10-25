@@ -99,9 +99,9 @@ thread_local! {
     pub(crate) static RUN_PICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// TICKET-233 — costs of the current test's own run, counted instead of timed so CPU load
     /// cannot move them. Each is read by [`run_capture_counting`] and counts only work done on the
-    /// thread that runs the program's top level, except [`MODULE_REPLAYS`].
+    /// thread that runs the program's top level.
     ///
-    /// Wire nodes `Vm::to_wire_depth` visited (every airlock serialize, speculative ones included).
+    /// Wire nodes `Vm::to_wire_depth` visited (every airlock serialize).
     pub(crate) static WIRE_ENCODE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Wire nodes `Vm::from_wire_memo` rebuilt (every airlock deserialize).
     pub(crate) static WIRE_DECODE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -112,9 +112,6 @@ thread_local! {
     /// Receiver bytes `Vm::core_method` cloned before dispatching a `str` method.
     pub(crate) static STR_RECV_CLONED_BYTES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
-    /// Module replays (`Vm::fault_module` past its guard) by every task of the run, summed from
-    /// `ModuleSnapshot::replays` at the outermost nursery join.
-    pub(crate) static MODULE_REPLAYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// TICKET-211 — `(peak runner threads, runner slot denials, runner thread spawns, peak runner
     /// permit holders)` of the current test's own run, set by `run_file_inner` from the run's
     /// `QuiesceState`; read by [`run_file_counting_runners`]. The fourth is TICKET-230's.
@@ -352,9 +349,8 @@ pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) ->
     to_str_output(run_file_engine(entry, cfg, None, None, false))
 }
 
-/// W7-4a — a MULTI-FILE run under GC stress (collect at every safepoint). The single-source
-/// `run_capture_stress` cannot reach the lazy per-module fault path, which is exactly where a cell
-/// now sits parked in `Vm::snapshot_rebuild` across real safepoints between two modules' faults.
+/// W7-4a — a MULTI-FILE run under GC stress (collect at every safepoint), for what the
+/// single-source `run_capture_stress` cannot reach: globals of several modules.
 #[cfg(test)]
 pub fn run_file_stress(entry: &std::path::Path) -> RunOutput {
     to_str_output(run_file_engine(

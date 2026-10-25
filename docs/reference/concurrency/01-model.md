@@ -154,27 +154,37 @@ parallel:
                                     # layer C faults at runtime if static checking is bypassed.
 ```
 
-**Module globals isolate per task, and a task's write to its copy faults (D4).** A `spawn`ed task
-gets its own deep copy of every module global (and of every captured local). Mutating one inside a
-task never propagates out, and the write itself is a recoverable runtime fault:
+**Module globals are shared (M3.1, the Go rule).** A run has one copy of each module global. A
+`spawn`ed task, an `Executor` job and a box closure read and write the live value, as a goroutine
+reads and writes a package-level `var`:
+
+```chezzi
+N := 0
+parallel:
+    spawn:
+        N = 5
+print(N)    # 5
+```
+
+A closure or generator, wherever it was created, reads the run's globals, so a closure received
+over a `Channel` sees the sender's global writes. Two tasks that write one global without a
+`Channel`, a join or a box between them race, and a race is the program's bug (Go). A captured
+LOCAL is still a crossing copy, and a write to it is the D4 fault:
 
 ```
 '<name>' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()
 ```
 
-A closure or generator, wherever it was created, reads the module globals of the task that RUNS it,
-so a closure received over a `Channel` never sees the sender's global writes. To share, use
-`Shared`/`Channel` ([§7](07-sendability.md#7-sendability)). The decision record is
-[`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
+The decision record is [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
 
 **The checker rejects writes it can prove will be lost (D4 layer A).** The diagnostic is
 byte-identical to the runtime fault.
 
-- It rejects direct task writes to captured bindings or module globals, including compound/projected
-  writes and known mutating native or user methods.
+- It rejects direct task writes to captured local bindings, including compound/projected writes and
+  known mutating native or user methods. A write to a module global is legal (M3.1).
 - It rejects a capture-writing closure executed by `spawn g()`, by a call inside `spawn:`, or by
   `Executor.submit`.
-- Named function calls carry proven writes through parameters, captures and globals, including
+- Named function calls carry proven writes through parameters and captures, including
   transitive and recursive calls. A direct call inside `spawn:`, a direct `spawn f(args)`, or an
   `Executor.submit` job reports the write at its task-side call, with the mutating operation in help.
   `spawn f(args)` evaluates `args` in the parent.
@@ -207,26 +217,13 @@ Two ceilings stay, each pinned by `tests/chz/spec/airlock_crossing_policy_grid_t
 
 Full rules: [`syntax.md` §capture](../syntax/01-lexical-and-literals.md) and [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
 
-**The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
-when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
-So a global first initialized *after* an earlier nursery is visible, a mutation by ordinary sequential
-code (the root task, outside any `spawn`) *between* two nurseries is visible to the second nursery's
-tasks, and two spawns straddling such a root-task global assignment see the old and the new value
-respectively. A spawned task's own attempt to mutate a global — in-place (`q.push(x)`, `m[k] = v`,
-`p.x = 1`) or by reassignment — faults (D4) before any nested nursery is reached. An `Executor` job has
-no nursery, so it sees the globals as of the instant it **starts**, which is its **`submit`**. Reading
-a global that is mutated between the `submit` and the `shutdown()` is racing a running job, not
-observing a defined state. The view is identical at every `--threads`.
-
-**Within one nursery** the same rule holds: a task's view is refreshed by a global *assignment*
-(`g = …`, `q = […]`) and by an in-place mutation alike. So if a `spawn` is followed by
-`q.push(x)` and then another `spawn` into the SAME nursery — with no assignment in between — the second
-task sees the post-`push` `q` too. Every task's view is a single coherent instant (never a mix of old
-and new values): its own `spawn` / `submit`. The runtime rebuilds the view only when something a
-global reaches was mutated since the last build, so a spawn storm that mutates nothing shares one
-snapshot. To **share** mutable cross-task state, use `Shared[T]` / `RwShared[T]` / `Atomic[T]`
-([03-shared.md](03-shared.md)) or a `Channel[T]` — those cross by shared handle, not by copy, so a
-task-side write IS visible to the parent.
+**A task reads the live global — at every depth.** There is no per-task view: a global first
+initialized *after* an earlier nursery is visible, a write by the root task between two spawns is
+visible to the second task, and a task's own write (in-place, `q.push(x)`, `m[k] = v`, `p.x = 1`, or
+by reassignment) is visible to the parent and to every other task once the two are ordered by a
+`Channel`, a join or a box. An `Executor` job reads the same globals. To share mutable state that
+two tasks write concurrently, use `Shared[T]` / `RwShared[T]` / `Atomic[T]`
+([03-shared.md](03-shared.md)) or a `Channel[T]`.
 
 **The trade in one line:** Tier D lets you share → fast sends, but races are your problem. A+C
 forbids sharing → the race cannot be expressed. For a scripting language that is a *good*

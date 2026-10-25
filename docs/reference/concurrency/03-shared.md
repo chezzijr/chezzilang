@@ -90,20 +90,12 @@ Read a part of a big value with `Shared.read(f)`. Every cell:
 [`benchmarks.md`](../../contributing/benchmarks.md).
 
 **The closure runs like the body of a spawned task.** Its captures are copies, so a write to one is
-the D4 error or fault, never a silent lost write. It sees module globals as the caller has them **at
-the call**. Reading a scalar, a `str`, a `fn` or a box handle from a global costs nothing extra.
-Reading a mutable aggregate global (`List`, `Map`, a struct) takes the caller's module snapshot, and
-when the caller also mutates such a global between calls the snapshot is rebuilt per call: 13493 ms
-for 2000 calls on a 100000-item global, about 6.7 ms per call, the price `spawn` pays (15 ms per call
-when the read sits two boxes deep). Capture what the closure needs instead (`n := G.len()` outside,
-`fn(x): x + n` inside): 8 ms for the same 2000 calls.
-
-A box closure never reads a stale global. Measured at `CHEZZI_THREADS` 1, 2 and default, with the
-closure reading `G.len()` of a mutable `List` global while the caller pushes to `G` between calls or
-does not: every position reads the current value — a literal closure, a named `fn`, a method called
-from the closure, a read beside a qualified module call, a closure nested in another box's closure, a
-`RwShared.write` closure and a `Shared.read` closure. A "stale global" checker warning would be false
-wherever it fired, so it is declined.
+the D4 error or fault, never a silent lost write. It reads and writes the run's one copy of each
+module global (M3.1), so reading a global costs nothing extra and a write to one lands, at every
+position: a literal closure, a named `fn`, a method called from the closure, a closure nested in
+another box's closure, a `RwShared.write` closure and a `Shared.read` closure. A closure that stores a
+global into the state (`s.update(fn(_): G)`) makes the state that global; store `G.copy()` to keep the
+box's own value.
 
 **Re-entry and faults.**
 
@@ -299,7 +291,7 @@ lock), so concurrent writers can't lose each other's updates — a `set` racing 
 
 **Where the value lives.** As with `Shared`, the box owns its value. `write(f)`
 runs `f` **inside** the box on the live value, under the exclusive lock: no copy out and back, the
-closure rule of §6 applies (captures are copies, globals are the caller's as of the call), and a fault
+closure rule of §6 applies (captures are copies, globals are the run's one copy), and a fault
 inside `f` leaves the state as `f` left it. A reader (`get`, `read`, a collection read, `print`)
 **copies** what it returns out of the live heap under the shared lock, drops the lock, and only then
 decodes it; `read`'s closure runs on that copy in the **reader's** heap. So no user code runs under

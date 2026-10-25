@@ -687,12 +687,11 @@ impl ReadyWorker {
     }
 
     /// D2b — deconstruct a prepared worker into a lightweight [`Fiber`] for the M:N engine: its
-    /// lazy-module roots, view and executors become the fiber's `FiberCtx` (state that travels
+    /// module roots and executors become the fiber's `FiberCtx` (state that travels
     /// together — see [`FiberCtx`]), and its `ReadyCall` becomes a `Pending` task `start_task`
     /// launches on first schedule. The worker `Vm` is discarded with its heap handle (its objects
     /// are in the run's one heap, rooted through the registered context from here on): under M:N a
-    /// fiber runs on a shared host shell (its module snapshot is re-installed there), not its own
-    /// `Vm`.
+    /// fiber runs on a shared host shell, not its own `Vm`.
     pub(super) fn into_fiber(self, task_index: usize, scope_id: usize) -> Fiber {
         let ReadyWorker {
             mut worker,
@@ -707,30 +706,11 @@ impl ReadyWorker {
         let ctx = FiberCtx {
             // M1.4 — the task waits in the context so the context alone roots it.
             start: Some(task),
-            // TICKET-213 — the view the worker built its module view in moves with that view.
-            view: worker.heap.take_view(),
             owns_side: true,
             module_objs: worker.module_objs,
-            module_faulted: worker.module_faulted,
-            // W6-2 — carry the snapshot the modules above fault in from (it used to be DROPPED here,
-            // which only worked while every snapshot was the same frozen `Arc`; snapshots are
-            // per-nursery now, so the shell's cannot substitute for this fiber's).
-            module_snapshot: worker.module_snapshot,
-            snapshot_memo: worker.snapshot_memo,
-            // W7-4a — the rebuild map belongs to the view above; carry it, so the modules that fault
-            // in later all tie to one cell per binding.
-            snapshot_rebuild: worker.snapshot_rebuild,
-            // W7-4c — the registry + its counter travel together (see `FiberCtx::snapshot_cells`).
-            snapshot_cells: worker.snapshot_cells,
-            // TICKET-111 — travels with the view for the same reason as `snapshot_cells`.
-            snapshot_nodes: worker.snapshot_nodes,
-            // TICKET-111 — travels with the view for the same reason as `snapshot_rebuild`.
-            snapshot_adopt: worker.snapshot_adopt,
-            snapshot_next_id: worker.snapshot_next_id,
             executors: worker.executors,
             // M19 Phase 3 — the intern cache holds the worker's own strings; they are this fiber's.
             str_intern: worker.str_intern,
-            fn_values: worker.fn_values,
             ..FiberCtx::default()
         };
         debug_assert!(ctx.start.is_some(), "a Pending fiber holds its task");

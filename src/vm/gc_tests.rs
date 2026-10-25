@@ -947,7 +947,7 @@ fn deep_clone_all_rebuilds_at_exact_capacity() {
     let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
     let vs: Vec<Value> = (0..N as i64).map(Value::int).collect();
 
-    let (out, _cells) = vm.deep_clone_all(vs, span).expect("scalars deep-clone");
+    let out = vm.deep_clone_all(vs, span).expect("scalars deep-clone");
 
     assert_eq!(out.len(), N, "every value must survive the clone");
     assert_eq!(

@@ -935,12 +935,19 @@ impl Vm {
             host.root_view().walk(&mut work);
         }
         work.extend(self.active_generators.iter().copied());
-        // TICKET-246 / M1.7 — every open box call, at every depth, and a frame `as_box_caller`
-        // lifted off the chain: its parked context (`BoxFrame::caller`), its slot-door cache and the
-        // generators it parked (`BoxFrame::roots`).
-        for frame in self.box_chain.iter().chain(&self.box_lifted) {
+        // TICKET-246 / M1.7 — every open box call, at every depth: its parked context
+        // (`BoxFrame::caller`) and the generators it parked (`BoxFrame::roots`).
+        for frame in &self.box_chain {
             frame.roots(&mut work);
         }
+        // TICKET-215 / M3.1 — the run's fn-value table.
+        work.extend(
+            self.fn_values
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .copied(),
+        );
         work
     }
 

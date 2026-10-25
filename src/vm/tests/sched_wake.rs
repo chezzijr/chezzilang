@@ -1781,9 +1781,9 @@ main()
     }
 }
 
-/// C-ABI FFI under the M:N engine: an extern fn called INSIDE a `spawn:` block exercises the
-/// `SnapValue::Cffi` snapshot path (the worker re-allocs `Obj::Cffi` from the shared `Arc` — no
-/// re-dlopen, same address space). Must produce deterministic output.
+/// C-ABI FFI under the M:N engine: an extern fn called INSIDE a `spawn:` block reads the run's
+/// module global that holds it (M3.1; one `Obj::Cffi` over the shared `Arc` — no re-dlopen, same
+/// address space). Must produce deterministic output.
 /// Linux-only (needs libm.so.6). This is the hard proof from the FFI plan.
 #[test]
 #[cfg(target_os = "linux")]

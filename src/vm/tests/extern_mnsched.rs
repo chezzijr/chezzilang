@@ -1889,22 +1889,18 @@ main()
     assert_eq!(run_capture(src).unwrap(), "499500\n"); // sum 0..1000
 }
 
-/// M1.7: every context of a run shares one heap, so `swap_ctx` never moves the heap; it moves the
-/// context's view stamp (`FiberCtx::view`) with the module view it describes.
+/// M1.7: every context of a run shares one heap, so `swap_ctx` never moves the heap.
 #[test]
-fn swap_ctx_moves_the_view_and_keeps_the_heap() {
+fn swap_ctx_keeps_the_heap() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
-    let (core, host_view) = (vm.heap.id(), vm.heap.view_stamp());
+    let core = vm.heap.id();
     let mut ctx = FiberCtx::default();
-    let fiber_view = ctx.view.stamp();
-    assert_ne!(host_view, fiber_view, "each context has its own view id");
     vm.swap_ctx(&mut ctx);
     assert_eq!(vm.heap.id(), core);
-    assert_eq!(vm.heap.view_stamp(), fiber_view);
     assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
     vm.swap_ctx(&mut ctx);
-    assert_eq!(vm.heap.view_stamp(), host_view);
+    assert_eq!(vm.heap.id(), core);
 }
 
 /// M1.7 GC canary: a `collect` while a fiber is swapped in roots the swapped-in fiber through the

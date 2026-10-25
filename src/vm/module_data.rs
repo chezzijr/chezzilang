@@ -11,8 +11,8 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[derive(Debug)]
 pub struct ModuleData {
     pub slots: RVec<Value>,
-    /// M3.0b — behind a lock: a define or a view re-seat rewrites the map while another thread
-    /// can read the module (a `HashMap` that grows frees its old table).
+    /// M3.0b — behind a lock: a define rewrites the map while another thread can read the module
+    /// (a `HashMap` that grows frees its old table). M3.1: every task of a run shares the module.
     names: RwLock<ModuleNames>,
 }
 
@@ -46,11 +46,13 @@ impl ModuleData {
 }
 
 impl Clone for ModuleData {
+    /// `Obj: Clone` needs it. The slots are copied under the names read lock, so the copy holds
+    /// `slots` and `index` in lockstep while another task appends a global.
     fn clone(&self) -> Self {
-        let names = self.names().clone();
+        let names = self.names();
         ModuleData {
             slots: self.slots.clone(),
-            names: RwLock::new(names),
+            names: RwLock::new(names.clone()),
         }
     }
 }

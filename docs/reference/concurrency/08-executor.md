@@ -66,7 +66,7 @@ fn main():
 `submit` **starts the job immediately** and `shutdown()` **waits** for the submitted work — the
 `ThreadPoolExecutor` / `ExecutorService` model.
 
-- **A job is a spawned task.** It starts the way `spawn` does, copies its globals at the `submit`,
+- **A job is a spawned task.** It starts the way `spawn` does, reads and writes the run's globals,
   inherits its creator's cancel chain, and parks like any fiber. **Captures cross by value**: `submit`
   wires the closure through the same airlock `spawn` uses, so a mutation of a captured collection after
   the `submit` is NOT observed by the job, and a non-sendable capture faults at submit.

@@ -139,24 +139,9 @@ impl Vm {
             }
             Op::GetGlobalSlot(slot) => {
                 let home = self.frames.last().unwrap().home;
-                // TICKET-051: one module global denotes one object inside one task. A crossing
-                // closure's free globals are installed into the RECEIVING view's own module copy at
-                // the airlock (`from_wire_memo`'s `WireValue::Closure` arm), so a plain live read
-                // always agrees with a closure's read of the same slot.
-                // TICKET-246: inside a box closure the global is the caller's, through the one door.
-                let door = if self.box_chain.is_empty() {
-                    None
-                } else {
-                    self.box_global(home, Some(*slot), span)?
-                };
-                let v = match door {
-                    Some(v) => v,
-                    None => {
-                        // D1: lazily reconstruct the worker's home module
-                        self.ensure_module_faulted(home);
-                        self.read_slot(home, *slot, span)?
-                    }
-                };
+                // M3.1: one module global denotes one object for the whole run. Every context,
+                // a task's and a box closure's included, reads the run's module objects.
+                let v = self.read_slot(home, *slot, span)?;
                 self.push(v);
             }
             Op::DefineGlobalSlot(slot) => {
@@ -167,14 +152,6 @@ impl Vm {
             Op::SetGlobalSlot(slot) => {
                 let v = self.pop();
                 let home = self.frames.last().unwrap().home;
-                // D4 layer C (TICKET-169): a spawned task's write to its module-global copy is a
-                // fault, never a silent lost write (owner decision D4 supersedes DEC-137's write
-                // half). The root task (not a task view) writes its globals freely.
-                if self.is_task_view() {
-                    self.ensure_module_faulted(home);
-                    let name = self.global_slot_name(home, *slot);
-                    return Err(self.copied_write_err(name.as_deref(), span));
-                }
                 self.set_global_slot(home, *slot, v);
             }
             Op::GetCaptured(slot) => {
@@ -220,9 +197,8 @@ impl Vm {
                 match v {
                     Some(v) => self.push(v),
                     None => {
-                        // Cold path: not a closure frame, or slot out of range. Recover the name from
-                        // the proto's capture_names and fall back to a home global (D1 lazy fault).
-                        self.ensure_module_faulted(home);
+                        // Cold path: not a closure frame, or slot out of range. Recover the name
+                        // from the proto's capture_names and fall back to a home global.
                         let proto = self.frames.last().unwrap().proto;
                         let name = self.program.protos[proto]
                             .capture_names
@@ -509,7 +485,7 @@ impl Vm {
                 // D4 layer C (TICKET-169): a captured local reassigned inside a spawned task is a
                 // fault, never a silent lost write.
                 if self.heap.is_copied(h) {
-                    return Err(self.copied_write_err(None, span));
+                    return Err(self.copied_write_err(span));
                 }
                 if let Obj::Cell(slot) = self.heap.write(h).get(h) {
                     slot.set(v);
@@ -529,14 +505,14 @@ impl Vm {
                 self.push(v);
             }
             // A default-argument provider declared in a module this one does not import — see
-            // [`Op::MakeFuncIn`]. `home` comes from the DEFINER's module index, not this frame's, so
-            // the default resolves in its own namespace with no import edge.
+            // [`Op::MakeFuncIn`]. `home` comes from the DEFINER's module index, not this frame's,
+            // so the default resolves in its own namespace with no import edge.
             //
-            // `.get()` rather than `[]`: `module_objs` grows as modules RUN (and a worker's copy holds
-            // only the modules that had run when it was snapshotted), so a not-yet-initialized definer
-            // must be a clean `RuntimeError`, never an index panic on a pool thread.
-            // The module's globals themselves fault in lazily — the provider's own `GetGlobalSlot`
-            // calls `ensure_module_faulted` — so nothing is forced here.
+            // `.get()` rather than `[]`: `module_objs` grows as modules RUN (and a task's table
+            // holds only the modules that had started when it was spawned), so a
+            // not-yet-initialized definer must be a clean `RuntimeError`, never an index panic on a
+            // pool thread.
+            //
             // Callee-side default fill: the argument WAS supplied, so skip the compiled default.
             // Falling through runs it and stores it into the slot.
             Op::JumpIfProvided(slot, target) => {

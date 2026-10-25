@@ -1,6 +1,7 @@
-# TICKET-169 — D4 layer C: a spawned task's write to an airlock copy (a captured local, a
-# module-global, or a struct/list it did not itself create) must FAULT at the write, not be
-# silently lost at the join. Currently these all still print the pre-spawn value at rc=0; this
+# TICKET-169 — D4 layer C: a spawned task's write to an airlock copy (a captured local, or a
+# struct/list it did not itself create) must FAULT at the write, not be silently lost at the join.
+# M3.1: a module global is not a copy (Go model), so the global rows below assert the write LANDS
+# (goldens from the equivalent Go program, go1.27.0). Currently these all still print the pre-spawn value at rc=0; this
 # suite pins the fault D4 requires. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
 
@@ -65,7 +66,7 @@ r3_n := 1
 fn r3_bump():
     r3_n = 5
 
-test fn module_global_slot_store_in_a_task_faults():
+test fn module_global_slot_store_in_a_task_lands():
     r := Channel[str](1)
     parallel:
         spawn:
@@ -76,14 +77,15 @@ test fn module_global_slot_store_in_a_task_faults():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
     got := r.recv()
-    assert got == "'r3_n' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()", got
+    assert got == "no-fault", got
+    assert r3_n == 5, "the task's write is lost: {r3_n}"
 
 r4_xs := [1]
 
 fn r4_bump():
     r4_xs.push(2)
 
-test fn module_global_list_push_in_a_task_faults():
+test fn module_global_list_push_in_a_task_lands():
     r := Channel[str](1)
     parallel:
         spawn:
@@ -94,14 +96,15 @@ test fn module_global_list_push_in_a_task_faults():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert r4_xs == [1, 2], "the task's push is lost: {r4_xs}"
 
 r1_g := 1
 
 fn d4_set_r1_g():
     r1_g = 5
 
-test fn a_top_level_binding_written_in_spawn_faults():
+test fn a_top_level_binding_written_in_spawn_lands():
     r := Channel[str](1)
     parallel:
         spawn:
@@ -112,7 +115,8 @@ test fn a_top_level_binding_written_in_spawn_faults():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
     got := r.recv()
-    assert got.starts_with("'r1_g' is this task's copy:"), got
+    assert got == "no-fault", got
+    assert r1_g == 5, "the task's write is lost: {r1_g}"
 
 test fn a_captured_closure_that_pushes_faults():
     xs := [1]
@@ -279,7 +283,7 @@ r_hl := [Channel[int](1)]
 fn r_hl_bump():
     r_hl.push(Channel[int](1))
 
-test fn a_handle_holding_global_list_push_in_a_task_faults():
+test fn a_handle_holding_global_list_push_in_a_task_lands():
     r := Channel[str](1)
     parallel:
         spawn:
@@ -290,7 +294,8 @@ test fn a_handle_holding_global_list_push_in_a_task_faults():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert r_hl.len() == 2, "the task's push is lost: {r_hl.len()}"
 
 struct HandleBox:
     ch: Channel[int]
@@ -301,7 +306,7 @@ r_hs := HandleBox(Channel[int](1), 1)
 fn r_hs_bump():
     r_hs.n = 2
 
-test fn a_handle_holding_global_struct_field_write_in_a_task_faults():
+test fn a_handle_holding_global_struct_field_write_in_a_task_lands():
     r := Channel[str](1)
     parallel:
         spawn:
@@ -312,7 +317,8 @@ test fn a_handle_holding_global_struct_field_write_in_a_task_faults():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert r_hs.n == 2, "the task's write is lost: {r_hs.n}"
 
 # Memo-order pin (docs/reference/concurrency/ ceiling 1): a tuple (f, xs), f capturing xs, sent in ONE
 # crossing over a Channel — the closure is visited FIRST, so both f()'s push and the direct write

@@ -12,7 +12,6 @@ mod gc_door;
 pub mod heap;
 mod heap_core;
 mod heap_slab;
-mod heap_view;
 mod map_data;
 mod module_data;
 mod poller;
@@ -642,10 +641,6 @@ enum GenState {
     Suspended,
     /// Body returned / fell off the end (or faulted). Every further `.next()` yields `None`.
     Done,
-    /// TICKET-137 — a module-global generator the task's snapshot could not copy (it was running at the
-    /// spawn, or held a value that cannot cross tasks). Inert until driven; any `.next()` faults with
-    /// this message instead of reading as `nil` or as exhausted.
-    Unsendable(Box<str>),
 }
 
 /// Experimental generators — the half of a generator that a resume takes: its lifecycle state and
@@ -695,7 +690,6 @@ impl std::fmt::Debug for GeneratorCore {
                     GenState::Pending(_) => "Pending",
                     GenState::Suspended => "Suspended",
                     GenState::Done => "Done",
-                    GenState::Unsendable(_) => "Unsendable",
                 },
                 p.ctx.frames.len(),
             ),
@@ -730,11 +724,6 @@ impl GeneratorCore {
             }
         });
         out
-    }
-
-    /// A run holds the parked box (see [`GeneratorCore::parked`]).
-    fn is_running(&self) -> bool {
-        self.parked.with(|p| p.is_none())
     }
 }
 
@@ -816,49 +805,11 @@ impl PendingCall {
     }
 }
 
-/// A task queued on a nursery: the call itself plus the [`ModuleSnapshot`] PINNED at its `spawn`.
-///
-/// W6-2 — the pin is per TASK, resolved EAGERLY in [`Vm::register_task`] (never deferred to a later
-/// hook), and replayed when the task is prepared (at its nursery's join, OR at a nested nursery's
-/// `early_enlist_outer`). Resolving it at the `spawn` is deliberate: `spawn` is a single source
-/// position every task reaches, while "the next module-slot write, else the join" is not — the M:N
-/// per-connection EAGER nursery prepares a task the moment it is spawned, so a deferred pin gave a
-/// different snapshot depending on worker count (diverged between `--threads=1` and higher counts).
-///
-/// The snapshot itself comes from [`Vm::ensure_snapshot`]'s cache, so consecutive spawns with no
-/// intervening cache invalidation (a global (re)binding, or a nursery open when the view holds a
-/// mutable aggregate) share ONE build — that is what keeps a spawn storm O(1) per spawn instead of
-/// O(all module globals).
-///
-/// `Err` = the snapshot BUILD failed at the spawn (an over-deep/cyclic global, a frame-holding
-/// generator). The error is CARRIED, not raised there: preparing a task is where that fault belongs,
-/// so a nursery whose tasks are all cancelled without ever being prepared (`break`/`return` out of
-/// `parallel:`) stays faultless, exactly as before W6-2, and the body's output still precedes it.
-/// W7-4c — a crossed cell's `GcRef` paired with the wire id its BINDING travels under. Produced by
-/// `deep_clone_all`, consumed by `lower_task`, so the two crossings a task makes agree on identity.
-type CellIds = Vec<(GcRef, u32)>;
-
-/// W7-4c — what one `snapshot_modules` build yields: the snapshot, the cell registry keyed by the
-/// heap it was built from, the TICKET-111 data-node registry (same keying), and the next free id
-/// (monotonic across builds).
-type SnapshotBuild = (
-    ModuleSnapshot,
-    Arc<fxhash::FxHashMap<GcRef, u32>>,
-    Arc<fxhash::FxHashMap<GcRef, u32>>,
-    u32,
-);
-
+/// A task queued on a nursery: the call and the spawn op's freshness bits. It reads the run's
+/// module globals live (M3.1), so nothing about the module view is pinned at the `spawn`.
 #[derive(Clone)]
 struct QueuedTask {
     call: PendingCall,
-    snap: Result<Arc<ModuleSnapshot>, RuntimeError>,
-    /// W7-4c — the wire ids the spawn-time `deep_clone_all` gave this task's CLONE cells, so
-    /// `lower_task` serializes them under the id `snap` already uses for the same binding and the
-    /// worker rebuilds ONE cell for both. Every `GcRef` here is reachable from `call` (the clone lives
-    /// inside a crossed value), so `roots()` already keeps it alive and its slot can never be
-    /// recycled out from under the mapping. Empty when nothing crossed, or when no snapshot was
-    /// pinned yet.
-    cell_ids: CellIds,
     /// D4 (TICKET-179) — the spawn op's freshness bitmask, passed to [`Vm::rebuild_ready`]: bit 0 = the
     /// receiver, bit `i + 1` = arg `i`. `0` for a `spawn:` block.
     fresh: u32,
@@ -1007,9 +958,11 @@ pub struct Vm {
     /// so they're never swept; the cache is per fiber, so a context that owns side state swaps it in
     /// [`Vm::swap_ctx`] (like `executors`).
     str_intern: fxhash::FxHashMap<usize, GcRef>,
-    /// TICKET-215 — the one fn object per [`FnKey`] in this heap (see [`Vm::fn_value`]). GC roots,
-    /// per fiber like `str_intern`, swapped in [`Vm::swap_ctx`].
-    fn_values: fxhash::FxHashMap<FnKey, GcRef>,
+    /// TICKET-215 / M3.1 — the one fn object per [`FnKey`] for the whole run (see
+    /// [`Vm::fn_value`]): every `Vm` of a run holds this one table (`Vm::spawn_worker`), as it
+    /// holds the run's module objects, so a fn a task reads from a global and one it received by
+    /// copy are one value. GC roots (`Vm::gc_roots`); never swapped.
+    fn_values: Arc<std::sync::Mutex<fxhash::FxHashMap<FnKey, GcRef>>>,
     /// M19 Phase 4 — per-call-site struct-field inline caches, indexed by the `ic` id baked into
     /// `GetField`/`SetField` ops (dense `0..program.field_ic_sites`). Holds field indices, not
     /// `GcRef`s, so it carries no heap state: never snapshotted, never swapped in [`Vm::swap_ctx`].
@@ -1056,12 +1009,6 @@ pub struct Vm {
     /// `boxctx.rs`). A `Vm` field, NOT a `FiberCtx` field, and `swap_ctx` does not move it: a box
     /// closure runs under `Vm::reentered`, where no other fiber runs on this stack (DEC-245).
     box_chain: Vec<boxctx::BoxFrame>,
-    /// M1.7 — the frames [`Vm::as_box_caller`] lifted off `box_chain` while the caller's code runs
-    /// (innermost last), so `Vm::gc_roots` still roots their slot-door caches and generators.
-    box_lifted: Vec<boxctx::BoxFrame>,
-    /// A fault from seating the caller's view at a site that cannot return one
-    /// (`ensure_module_faulted`). `read_slot` raises it; `with_box` clears it.
-    box_view_err: Option<RuntimeError>,
     /// The stack trace of the uncaught fault that propagates, captured before frames unwind. The
     /// **deepest** fault wins (`fault_trace_depth` = frame count at capture): the original fault site
     /// captures first; a `defer`red call that itself faults runs while its owning frame is still on
@@ -1194,9 +1141,9 @@ pub struct Vm {
     /// on a legal program. Pure scratch — cleared and read inside one helper call, never across a park,
     /// so it is a `Vm` field and NOT part of [`FiberCtx`].
     wire_backref_missing: bool,
-    /// D4 layer C (TICKET-169): true while `from_wire_memo`/`replay_snap` is running an airlock
-    /// copying walk (`rebuild_ready`'s captures/args/receiver, `fault_module`'s global snapshot, or
-    /// a crossing `Closure`/`Generator`'s captures). Every object allocated while this is set gets
+    /// D4 layer C (TICKET-169): true while `from_wire_memo` is running an airlock
+    /// copying walk (`rebuild_ready`'s captures/args/receiver, or a crossing
+    /// `Closure`/`Generator`'s captures). Every object allocated while this is set gets
     /// `Heap::set_copied`, so a later write to it faults. Pure scratch, toggled and restored around
     /// one call — never part of [`FiberCtx`].
     pub(super) copy_mark: bool,
@@ -1345,95 +1292,6 @@ pub struct Vm {
     /// without this counter the first checkpoint inside the first deferred call would eat it.
     /// See [`Vm::halt_requested`].
     deferring: usize,
-    /// D1 — on a `--parallel` **worker** fiber, the read-only [`ModuleSnapshot`] its `module_objs` were
-    /// built from and fault into its own heap lazily, one module at a time, on first global access
-    /// ([`Vm::fault_module`]). `None` on the top-level VM, a fiber with no heap of its own, and a
-    /// worker SHELL (which runs no code of its own — every fiber brings its own view).
-    ///
-    /// W6-2 — part of the [`FiberCtx`] swap group with `module_objs`/`module_faulted`: snapshots are
-    /// per-TASK now, so a shell draining the global run queue can hold fibers from different scopes
-    /// built from DIFFERENT snapshots. Faulting a fiber's modules from another scope's snapshot would
-    /// replay the wrong values, so the snapshot travels WITH the fiber.
-    module_snapshot: Option<Arc<ModuleSnapshot>>,
-    /// D1 — parallel to `module_objs` on a worker VM: whether module `i` has been faulted in yet
-    /// (its globals replayed from `module_snapshot`). Empty on the top-level VM and a fiber with no
-    /// heap of its own.
-    module_faulted: Vec<bool>,
-    /// W6-2 — CACHE of the snapshot of THIS view's module graph, so consecutive `spawn`s (and repeated
-    /// nurseries in a mutation-free program) build exactly one. Invalidated by exactly two rules:
-    ///
-    /// 1. a module-slot write — `set_global_slot`/`module_define`, the only two slot mutators;
-    /// 2. a task start ([`Vm::fresh_view`]), iff the cached snapshot is NOT `reusable` — some global
-    ///    holds a mutable aggregate, which can be mutated IN PLACE (`q.push(1)`) with no slot write
-    ///    for rule 1 to see — AND its `view` stamp is stale: `Heap::write` armed a write of an object
-    ///    the snapshot reaches since the build (TICKET-213). An unmutated view and an all-immutable
-    ///    view keep one snapshot.
-    ///
-    /// Swapped per fiber with `module_snapshot`: it describes the swapped-in view, not the VM. See
-    /// [`Vm::ensure_snapshot`].
-    snapshot_memo: Option<Arc<ModuleSnapshot>>,
-    /// W7-4a — the ONE rebuild map for this view's whole snapshot replay: wire `id` → the `Obj::Cell`
-    /// already built for it. `snapshot_modules` serializes every module under ONE [`WireMemo`], so a
-    /// cell reached from globals in TWO DIFFERENT modules carries ONE id; the modules fault in lazily
-    /// and independently ([`Vm::fault_module`]), so the map has to outlive any single fault for both
-    /// to tie to one cell. Reset by `install_snapshot` (a fresh view rebuilds from scratch).
-    ///
-    /// Heap-keyed, like `module_objs`: its `GcRef`s index whatever heap is current while this view is
-    /// (the M:N fiber's own heap), so it swaps WITH `module_snapshot`/`module_faulted` and is a GC
-    /// root in `collect`.
-    ///
-    /// **Cells ONLY.** `from_wire_memo` registers every identity-preserved node it rebuilds
-    /// (List/Map/Set/Struct/Tuple/Closure too), but only a cell can be back-referenced from a LATER
-    /// module — containers live in the memo's `path`, which pops on DFS exit, so one reached again in
-    /// another module is serialized fresh under a NEW id. `fault_module` therefore prunes to cells at
-    /// the end of each module: retaining the rest would make the whole module-global object graph
-    /// immortal for the fiber's life, since this map is `Vm`-lived AND a GC root (a task that
-    /// reassigns a big global would keep the original rooted — a `--max-heap` regression).
-    snapshot_rebuild: fxhash::FxHashMap<u32, GcRef>,
-    /// W7-4c — the identity registry for THIS view's snapshot: every `Obj::Cell` the cached
-    /// `ModuleSnapshot` gave an id to, keyed by its `GcRef` in the heap the snapshot was BUILT from.
-    /// `deep_clone_all` and `lower_task` seed their memos from it, so a cell a task reaches through
-    /// its OWN captures serializes under the id the module snapshot already uses for the same binding
-    /// — the two crossings then rebuild ONE cell instead of two.
-    ///
-    /// Dropped wherever `snapshot_memo` is (it describes that exact snapshot). **Its keys are GC
-    /// roots**, and that is load-bearing, not hygiene: an unrooted key could be swept and its slot
-    /// recycled to a DIFFERENT cell, which would then be silently identified with the dead cell's id
-    /// and merged into the wrong binding. Bounded by the module globals' cell count — clone cells go
-    /// on the task (`QueuedTask::cell_ids`), never in here, so a spawn storm does not grow it.
-    snapshot_cells: Arc<fxhash::FxHashMap<GcRef, u32>>,
-    /// TICKET-111 — the same registry as `snapshot_cells`, but for adoptable DATA nodes
-    /// (`Vm::is_adoptable_node`): every data node a module global reached in THIS view's snapshot,
-    /// keyed by its `GcRef` in the heap the snapshot was built from. Seeds `WireMemo::base_nodes` so a
-    /// spawn-crossed alias of the same node mints the SAME id, and `snapshot_adopt` then ties the two
-    /// crossings to one object during `fault_module`'s replay only. Reset alongside `snapshot_cells`
-    /// everywhere that field is.
-    snapshot_nodes: Arc<fxhash::FxHashMap<GcRef, u32>>,
-    /// TICKET-111 — this task's spawn-crossed captures, keyed by their adoption id, waiting to be
-    /// installed as the module global's own object the first time `fault_module` replays that
-    /// global. `rebuild_ready` populates it (`prepare_worker`'s adopt ids); `fault_module`'s
-    /// container/generator arms consult it ONLY while `adopt_active`, and each entry is removed once
-    /// consumed. GC-rooted (its VALUES): a module the task never reads keeps its entries alive for the
-    /// task's whole life, bounded by what the task's own captures held at spawn. Cleared in
-    /// `install_snapshot`.
-    snapshot_adopt: fxhash::FxHashMap<u32, GcRef>,
-    /// TICKET-111 — true ONLY for the duration of `fault_module`'s own globals-replay loop. Adoption
-    /// must be scoped this tightly: `RwShared.slice` (`src/vm/netio.rs`) relies on `from_wire_memo`'s
-    /// container arms NOT deduping on any other path, and a `Channel` message's ids are a separate id
-    /// space that could otherwise collide with an adopt id (see `airlock_adoption_is_scoped_to_the_snapshot_replay`).
-    adopt_active: bool,
-    /// W7-4c — MONOTONIC id counter across every snapshot this VM builds; never reset, unlike the
-    /// per-build `WireMemo::next_id` it seeds. A task pins the snapshot live at its own `spawn`, but a
-    /// module-slot write can drop the cache and renumber before the task is prepared. With a monotonic
-    /// counter a stale id simply MISSES against the new snapshot (that task degrades to two bindings,
-    /// the pre-W7-4c behavior); restarting from zero would make it COLLIDE and merge two unrelated
-    /// bindings — a wrong answer instead of a missed optimisation.
-    snapshot_next_id: u32,
-    /// W6-2 — how many snapshots this VM has BUILT (cache misses). A `usize` bump on a cold path, and the
-    /// only direct probe that the cache short-circuits: a timing bench can hint, this counts. Read by
-    /// `vm::tests::snapshot_cache_*`. NOT swapped per fiber — it is a per-VM statistic, not part of the
-    /// module view.
-    snapshot_builds: usize,
     /// D2b — set on an M:N **worker shell** to the scheduler of the `parallel:` nursery it is draining.
     /// `Some` flips the `recv`/`send` arms onto the park/wake protocol ([`MnSched`]) instead of the
     /// legacy condvar-block; `None` on the top-level VM, the inline outermost-`parallel:` builder VM

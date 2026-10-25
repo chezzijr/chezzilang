@@ -1058,8 +1058,8 @@ main()
 }
 
 /// D2b: an M:N fiber carries its own per-task SIDE state too — `out`/`stderr` (Decision-F output
-/// buffers) and the roots `module_objs`/`module_faulted`/`executors` (each a `GcRef` to the
-/// fiber's own copy in the run's one heap). A task switch (`swap_task`) round-trips all of them
+/// buffers) and the roots `module_objs`/`executors` (each a `GcRef` in the run's one heap). A task
+/// switch (`swap_task`) round-trips all of them
 /// for a context with `owns_side`. A task owns its output stream, so `swap_task` moves
 /// `out`/`stderr` for every task context, `owns_side` or not; the `owns_side: false` side state is
 /// [`swap_ctx_leaves_side_state_on_the_shell_without_owns_side`].
@@ -1071,28 +1071,27 @@ fn swap_task_round_trips_output_and_owns_side_state() {
     let host_mod = vm.heap.alloc(Obj::Str("host-mod".into()));
     let host_exec = vm.heap.alloc(Obj::Str("host-exec".into()));
     vm.module_objs = vec![host_mod];
-    vm.module_faulted = vec![true];
     vm.executors = vec![host_exec];
     // M19 Phase 3 — the intern cache holds the context's own strings; it must round-trip.
     let host_str = vm.heap.alloc(Obj::Str("host-str".into()));
     vm.str_intern.insert(0x10, host_str);
-    // TICKET-215 — the fn-value memo the same way.
+    // M3.1 — the fn-value table is the run's, so it does NOT travel with a context.
     let host_fn = vm.heap.alloc(Obj::Str("host-fn".into()));
-    vm.fn_values.insert(FnKey::Proto(0), host_fn);
+    vm.fn_values
+        .lock()
+        .unwrap()
+        .insert(FnKey::Proto(0), host_fn);
 
     let fib_mod = vm.heap.alloc(Obj::Str("fiber-mod".into()));
     let fib_exec = vm.heap.alloc(Obj::Str("fiber-exec".into()));
     let fib_str = vm.heap.alloc(Obj::Str("fiber-str".into()));
-    let fib_fn = vm.heap.alloc(Obj::Str("fiber-fn".into()));
     let mut ctx = FiberCtx {
         owns_side: true,
         out: b"fiber-out".to_vec(),
         stderr: b"fiber-err".to_vec(),
         module_objs: vec![fib_mod],
-        module_faulted: vec![false],
         executors: vec![fib_exec],
         str_intern: fxhash::FxHashMap::from_iter([(0x20usize, fib_str)]),
-        fn_values: fxhash::FxHashMap::from_iter([(FnKey::Proto(1), fib_fn)]),
         ..FiberCtx::default()
     };
 
@@ -1101,30 +1100,31 @@ fn swap_task_round_trips_output_and_owns_side_state() {
     assert_eq!(vm.out, b"fiber-out");
     assert_eq!(vm.stderr, b"fiber-err");
     assert_eq!(vm.module_objs, vec![fib_mod]);
-    assert_eq!(vm.module_faulted, vec![false]);
     assert_eq!(vm.executors, vec![fib_exec]);
     assert_eq!(vm.str_intern.get(&0x20), Some(&fib_str));
     assert_eq!(vm.str_intern.get(&0x10), None);
     assert_eq!(ctx.out, b"host-out");
     assert_eq!(ctx.module_objs, vec![host_mod]);
     assert_eq!(ctx.str_intern.get(&0x10), Some(&host_str));
-    assert_eq!(vm.fn_values.get(&FnKey::Proto(1)), Some(&fib_fn));
-    assert_eq!(vm.fn_values.get(&FnKey::Proto(0)), None);
-    assert_eq!(ctx.fn_values.get(&FnKey::Proto(0)), Some(&host_fn));
+    assert_eq!(
+        vm.fn_values.lock().unwrap().get(&FnKey::Proto(0)),
+        Some(&host_fn)
+    );
 
     // Park out: the shell's side state is restored; the fiber keeps its own.
     vm.swap_task(&mut ctx);
     assert_eq!(vm.out, b"host-out");
     assert_eq!(vm.stderr, b"host-err");
     assert_eq!(vm.module_objs, vec![host_mod]);
-    assert_eq!(vm.module_faulted, vec![true]);
     assert_eq!(vm.executors, vec![host_exec]);
     assert_eq!(vm.str_intern.get(&0x10), Some(&host_str));
     assert_eq!(ctx.out, b"fiber-out");
     assert_eq!(ctx.module_objs, vec![fib_mod]);
     assert_eq!(ctx.str_intern.get(&0x20), Some(&fib_str));
-    assert_eq!(vm.fn_values.get(&FnKey::Proto(0)), Some(&host_fn));
-    assert_eq!(ctx.fn_values.get(&FnKey::Proto(1)), Some(&fib_fn));
+    assert_eq!(
+        vm.fn_values.lock().unwrap().get(&FnKey::Proto(0)),
+        Some(&host_fn)
+    );
 }
 
 /// Per-connection spawn: a fiber running an eager `parallel:` body can PARK (its acceptor blocks
@@ -1185,9 +1185,9 @@ fn eager_scope_round_trips_with_fiber_ctx() {
 
 /// D2b / Task 1 companion to [`swap_ctx_leaves_heap_untouched_for_cooperative_fiber`]: `swap_ctx`
 /// never moves `out` (only a task switch, `swap_task`, does), for any context. But
-/// `module_objs`/`module_faulted` swap UNCONDITIONALLY, `owns_side` or not (Task 1: a child carries
-/// its own deep-copied module view). So swapping in a child with an empty view parks the host's REAL
-/// modules into the ctx. The `owns_side: false` side state is
+/// `module_objs` swaps UNCONDITIONALLY, `owns_side` or not (a context started before a module
+/// finished its init holds a shorter table). So swapping in a child with an empty table parks the
+/// host's modules into the ctx. The `owns_side: false` side state is
 /// [`swap_ctx_leaves_side_state_on_the_shell_without_owns_side`].
 #[test]
 fn swap_ctx_moves_module_objs_but_not_out_without_owns_side() {
@@ -1210,7 +1210,7 @@ fn swap_ctx_moves_module_objs_but_not_out_without_owns_side() {
 }
 
 /// M1.6 — a context with `owns_side: false` owns no side state, so `swap_ctx`
-/// leaves the shell's `executors`, `str_intern`, `fn_values`, `pending_connect` and `poll_*`
+/// leaves the shell's `executors`, `str_intern`, `pending_connect` and `poll_*`
 /// fields on the shell, and the context's own fields stay empty.
 #[test]
 fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
@@ -1219,10 +1219,8 @@ fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let host_exec = vm.heap.alloc(Obj::Str("host-exec".into()));
     let host_str = vm.heap.alloc(Obj::Str("host-str".into()));
-    let host_fn = vm.heap.alloc(Obj::Str("host-fn".into()));
     vm.executors = vec![host_exec];
     vm.str_intern.insert(0x10, host_str);
-    vm.fn_values.insert(FnKey::Proto(0), host_fn);
     vm.pending_connect = Some(ConnectInProgress {
         stream,
         key: 7,
@@ -1240,13 +1238,12 @@ fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
         vm.swap_ctx(&mut ctx);
         assert_eq!(vm.executors, vec![host_exec]);
         assert_eq!(vm.str_intern.get(&0x10), Some(&host_str));
-        assert_eq!(vm.fn_values.get(&FnKey::Proto(0)), Some(&host_fn));
         assert_eq!(vm.pending_connect.as_ref().map(|c| c.key), Some(7));
         assert!(vm.poll_timed_out);
         assert_eq!(vm.poll_deadline, Some(deadline));
         assert_eq!(vm.poll_partial, Some(2));
         assert_eq!(vm.poll_written, Some(3));
-        assert!(ctx.executors.is_empty() && ctx.str_intern.is_empty() && ctx.fn_values.is_empty());
+        assert!(ctx.executors.is_empty() && ctx.str_intern.is_empty());
         assert!(ctx.pending_connect.is_none());
         assert!(!ctx.poll_timed_out.load(Ordering::Relaxed));
         assert!(ctx.poll_deadline.is_none() && ctx.poll_partial.is_none());

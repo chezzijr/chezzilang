@@ -303,13 +303,16 @@ fn check(state: State, stop: Stop, stopper: Stopper, kind: Kind, g: &Got) -> Opt
             .then(|| "the self-wait must end the run with a deadlock fault".to_string());
     }
     // Exception 1 — nothing orders the stopper's `shut` write after main's `shut` read, so the
-    // target's submit may fault. That is a refusal the submitter sees. The silent drop (exit
-    // status zero without `T ran`) stays red through the rule below.
+    // target's submit may be refused. That is a refusal the submitter sees: the submit settles its
+    // Task with the fault (TICKET-289, `Vm::refuse_job`), so `h.get()` reads it and the run ends
+    // clean, with no `T ran`. The silent drop (exit status zero, no `got` line) stays red through
+    // the rule below. M3.1 made a job start sooner (no module snapshot), so the stopper now wins
+    // this race at T=2 in a few runs of 20.
     if state == State::Dispatched
         && stopper == Stopper::SameJob
-        && g.code == Some(1)
-        && g.err.contains(SUBMIT_FAULT)
-        && silent
+        && g.code == Some(0)
+        && g.got_lines() == [format!("got !{SUBMIT_FAULT}").as_str()]
+        && !g.ran()
     {
         return None;
     }

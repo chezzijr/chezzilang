@@ -88,7 +88,7 @@ impl Value {
     /// The marker a top-level `let` slot holds until its statement runs (TICKET-183). The payload
     /// is the let's source line, so a read-before-initialization fault names it with no lookup. It
     /// never leaves a module slot: `Op::GetGlobalSlot` and the `GetCaptured` home fallback fault on
-    /// it, and a spawn snapshot copies it as `SnapValue::Uninit`.
+    /// it, and a task reads the run's one slot (M3.1), so it faults there too.
     #[inline]
     pub fn uninit(line: u32) -> Value {
         Value(((line as u64) << 5) | UNINIT)

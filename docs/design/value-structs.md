@@ -53,7 +53,7 @@ default). A value escapes if it is:
 2. stored into a heap object: a `List`/`Map`/`Set`, another struct's field, an escaping tuple, a
    `Channel`, a `Shared` or cell;
 3. captured by a closure that escapes (capture is by reference);
-4. sent across the airlock (`spawn`/`Channel`/`Shared` deep-copy via `WireValue`/`SnapValue`);
+4. sent across the airlock (`spawn`/`Channel`/`Shared` deep-copy via `WireValue`);
 5. aliased out: bound to another name, or read out of a container and mutated so that the mutation
    is shared with a longer-lived binding.
 
@@ -80,7 +80,7 @@ the field layout). The second mirrors Go's `[]P` and is the target for (ii).
   `children()` (`src/vm/heap.rs`) gets a case for typed containers. A missed trace collects a live
   object. Gate: the `*_gc_stress` tests (`src/vm/gc_tests.rs`).
 - **Airlock.** The frame arena is thread-local. Rule 4 forbids unboxing anything that crosses, so the
-  crossing paths (`WireValue::Struct`, `SnapValue::Struct`) stay as they are; the analysis must not
+  crossing path (`WireValue::Struct`) stays as it is; the analysis must not
   under-approximate what reaches them.
 - **Mutation through a view.** `y := xs[0]; y.x = 7` must mutate `xs[0]`. When `y` escapes, `xs` must
   fall back to boxed, or the view dangles. This is why (ii) is stage 3.

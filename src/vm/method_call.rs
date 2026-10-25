@@ -377,7 +377,7 @@ impl Vm {
         };
         // D4 layer C (TICKET-169): a mutating native call on an airlock copy is a lost write.
         if self.heap.is_copied(h) && is_mutating_native(self.heap.get(h), method) {
-            return Err(self.copied_write_err(None, span));
+            return Err(self.copied_write_err(span));
         }
         // M19 Phase 6 / N-way poly — method-call inline-cache fast path (struct methods only). Scan
         // the site's ways for a way whose cached `tid` matches the receiver layout: a hit collapses the
@@ -682,34 +682,34 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
-        self.ensure_module_faulted(h); // D1: `module.fn(...)` on a not-yet-faulted worker module
-        match self.heap.get(h).clone() {
-            // `module.fn(args)` — plain call on the looked-up member, no `self`.
-            Obj::Module(m) => {
-                let idx = self.slot_index(h, method).ok_or_else(|| {
-                    self.err(
-                        format!("module '{}' has no member '{method}'", m.names().name),
-                        span,
-                    )
-                })?;
-                let member = self.read_slot(h, idx, span)?;
-                // W7-8 — a module member can now be a BODIED Chezzi fn (`std.fs`'s `PathLike`
-                // wrappers), not only an `Obj::Native`. `do_call` FLATTENS such a callee (installs the
-                // frame for the *running* `run_until` to execute), which is only correct on the real
-                // dispatch-loop path. A re-entrant caller passes `NO_IC` (`defer fs.remove_file(p)`
-                // runs during frame teardown, with no loop to hand the frame to) — it must use the
-                // synchronous `invoke_value`, exactly like the struct/enum arms below. Before this the
-                // arm was unconditional and safe only because every module member was a native.
-                if ic != NO_IC {
-                    self.stack.push(member);
-                    self.stack.extend(args);
-                    self.do_call(argc, span)
-                } else {
-                    let v = self.invoke_value(member, args, span)?;
-                    self.push(v);
-                    Ok(())
-                }
+        // `module.fn(args)` — plain call on the looked-up member, no `self`. Read in place: every
+        // task of the run shares the module (M3.1), so a clone would copy its slots per call.
+        if matches!(self.heap.get(h), Obj::Module(_)) {
+            let idx = self.slot_index(h, method).ok_or_else(|| {
+                self.err(
+                    format!("module '{}' has no member '{method}'", self.module_name(h)),
+                    span,
+                )
+            })?;
+            let member = self.read_slot(h, idx, span)?;
+            // W7-8 — a module member can now be a BODIED Chezzi fn (`std.fs`'s `PathLike`
+            // wrappers), not only an `Obj::Native`. `do_call` FLATTENS such a callee (installs the
+            // frame for the *running* `run_until` to execute), which is only correct on the real
+            // dispatch-loop path. A re-entrant caller passes `NO_IC` (`defer fs.remove_file(p)`
+            // runs during frame teardown, with no loop to hand the frame to) — it must use the
+            // synchronous `invoke_value`, exactly like the struct/enum arms below. Before this the
+            // arm was unconditional and safe only because every module member was a native.
+            if ic != NO_IC {
+                self.stack.push(member);
+                self.stack.extend(args);
+                return self.do_call(argc, span);
             }
+            let v = self.invoke_value(member, args, span)?;
+            self.push(v);
+            return Ok(());
+        }
+        match self.heap.get(h).clone() {
+            Obj::Module(_) => unreachable!("a module receiver returned above"),
             Obj::Struct { tid, fields, .. } => {
                 // Resolve the type IDENTITY KEY from the instance's dense `tid` (O(1) index) — the
                 // instance no longer carries a per-instance `name`. Warm method-dispatch path.
@@ -938,17 +938,20 @@ impl Vm {
             .map(|&p| (p, self.enum_home_module(type_key)))
     }
 
-    /// The one fn object for `key` in this heap (TICKET-215), and the only allocator of `Obj::Func`,
-    /// `Obj::Native`, `Obj::Cffi` and `Obj::Builtin`: a fn read twice, in two modules, or after a
-    /// crossing is one value. A proto is keyed alone: one heap has one module view, so a user
-    /// proto's home is fixed, and a synthesized proto's home is fixed too (it reads no global, or,
-    /// for `json.decode[T]`, is homed in std.json by `Op::MakeFuncIn`, TICKET-226).
+    /// The one fn object for `key` in this run (TICKET-215, M3.1), and the only allocator of
+    /// `Obj::Func`, `Obj::Native`, `Obj::Cffi` and `Obj::Builtin`: a fn read twice, in two modules,
+    /// in two tasks, or after a crossing is one value. A proto is keyed alone: a run has one module
+    /// view, so a user proto's home is fixed, and a synthesized proto's home is fixed too (it reads
+    /// no global, or, for `json.decode[T]`, is homed in std.json by `Op::MakeFuncIn`, TICKET-226).
+    /// The miss allocates under the table lock, so two tasks never make two objects for one key;
+    /// `Heap::alloc` never collects, so no safepoint is reached while the lock is held.
     pub(super) fn fn_value(&mut self, key: FnKey, make: impl FnOnce() -> Obj) -> Value {
-        if let Some(&h) = self.fn_values.get(&key) {
+        let mut table = self.fn_values.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&h) = table.get(&key) {
             return Value::obj(h);
         }
         let h = self.heap.alloc(make());
-        self.fn_values.insert(key, h);
+        table.insert(key, h);
         Value::obj(h)
     }
 

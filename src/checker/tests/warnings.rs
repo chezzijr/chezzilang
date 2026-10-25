@@ -538,13 +538,12 @@ fn d4_nested_named_capture_write() {
     );
 }
 
+/// M3.1: a named callee's write to a module global is legal (the run's one copy, Go); an imported
+/// callee's write to a captured local's copy is the D4 error.
 #[test]
 fn d4_named_global_and_imported_writes() {
-    rejects_help_at(
+    ok(
         "xs := [1]\nfn bump():\n    xs.push(2)\nfn main():\n    parallel:\n        spawn:\n            bump()\nmain()\n",
-        "'xs' is this task's copy: a write to it would be lost at the join",
-        "push",
-        7,
     );
     files_reject(
         &[
@@ -656,11 +655,6 @@ fn d4_rule1_every_task_body_write_form_is_an_error() {
             "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            defer:\n                xs.push(2)\nf()\n",
             "xs",
         ),
-        ("n := 0\nparallel:\n    spawn:\n        n = 5\n", "n"),
-        (
-            "n := 0\nfn main():\n    parallel:\n        spawn:\n            n = 5\nmain()\n",
-            "n",
-        ),
         (
             "fn f():\n    ch := Channel[int](1)\n    parallel:\n        spawn:\n            ch = Channel[int](2)\nf()\n",
             "ch",
@@ -685,6 +679,9 @@ fn d4_rule1_every_task_body_write_form_is_an_error() {
     for (src, name) in rows {
         rejects(src, &format!("'{name}' is this task's copy"));
     }
+    // M3.1: a module global is the run's one copy, so a task's write to it is legal.
+    ok("n := 0\nparallel:\n    spawn:\n        n = 5\n");
+    ok("n := 0\nfn main():\n    parallel:\n        spawn:\n            n = 5\nmain()\n");
 }
 
 /// Each row is either not a lost write or uses a declared-type link D4 cannot prove. Tightening any
@@ -796,10 +793,8 @@ fn d4_rule3_writing_closure_crossing_a_task_is_an_error() {
         "import Executor from std.concurrency\nfn f():\n    xs := [1]\n    g := fn(): xs.push(3)\n    ex := Executor()\n    ex.submit(g)\n    ex.shutdown()\nf()\n",
         "'xs' is this task's copy",
     );
-    rejects(
-        "G := [1]\ng := fn(): G.push(2)\nparallel:\n    spawn:\n        g()\n",
-        "'G' is this task's copy",
-    );
+    // M3.1: a closure that writes a module global writes the run's one copy, so it is legal.
+    ok("G := [1]\ng := fn(): G.push(2)\nparallel:\n    spawn:\n        g()\n");
     rejects(
         "fn f():\n    xs := [1]\n    parallel:\n        spawn (fn(): xs.push(2))()\nf()\n",
         "'xs' is this task's copy",
@@ -825,19 +820,13 @@ fn d4_rule3_declines() {
     );
 }
 
-/// TICKET-137 (W14-25, owner decision D2) — the warning is TRUE by construction for a MODULE GLOBAL
-/// too. A `spawn:` write to a global lands in the task's own copy, and a closure sent back over a
-/// `Channel` reads the RECEIVER's copy, so neither the closure nor the later read sees the write —
-/// exactly what the warning says. Pinned on the ticket's own repro shape (a global pushed inside a
-/// task, a closure over it sent out, both read after the join); the runtime side is
-/// `tests/chz/spec/airlock_received_closure_globals_test.chz::received_closure_reads_the_receivers_in_place_copy`,
-/// which asserts the pair prints `[1] [1]`. If the runtime ever installs the sender's value again,
-/// that test fails; if the warning stops firing here, this one does.
+/// TICKET-137 (W14-25) repro shape: a global pushed inside a task, a closure over it sent out, both
+/// read after the join. M3.1: the global is the run's one copy, so the program is legal and prints
+/// `[1, 2] [1, 2]` (`airlock_received_closure_globals_test.chz`; Go and CPython agree).
 #[test]
-fn a_module_global_written_in_a_task_warns_where_a_received_closure_reads_the_receivers_copy() {
-    rejects(
+fn a_module_global_written_in_a_task_is_legal_where_a_received_closure_reads_it() {
+    ok(
         "import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency\ng: List[int] = [1]\nfn main():\n    c := Channel[fn() -> str](1)\n    parallel:\n        spawn:\n            g.push(2)\n            c.send(fn() -> str: \"{g}\")\n    f := c.recv()\n    print(\"{f()} {g}\")\nmain()\n",
-        "'g' is this task's copy",
     );
 }
 
@@ -1066,21 +1055,19 @@ fn a_mutator_on_a_projected_receiver_is_a_task_write() {
     );
 }
 
-/// TICKET-165: the warning fires at every position a task write can occur — module top level, a
-/// nested `parallel:`, and a `spawn:` inside a loop — for both a whole-field write (P1-P3) and a
-/// projected-mutator write on a list element (P4-P5).
+/// TICKET-165: the warning fires at every position a task write to a captured LOCAL can occur — a
+/// nested `parallel:` and a `spawn:` inside a loop — for both a whole-field write (P2-P3) and a
+/// projected-mutator write on a list element (P5). At module top level the binding is a module
+/// global, the run's one copy (M3.1), so the task write is legal there (P1, P4).
 #[test]
 fn a_projected_task_write_warns_at_every_position() {
     const PRE: &str =
         "struct T:\n    v: int\nstruct S:\n    v: int\n    w: int\n    xs: List[int]\n    t: T\n";
     const MK: &str = "    s := S(1, 5, [1], T(1))\n";
-    // P1 — module top level.
-    rejects(
-        &format!(
-            "{PRE}s := S(1, 5, [1], T(1))\nparallel:\n    spawn:\n        s.v = 2\nprint(s.v)\n"
-        ),
-        "'s' is this task's copy",
-    );
+    // P1 — module top level: a module global.
+    ok(&format!(
+        "{PRE}s := S(1, 5, [1], T(1))\nparallel:\n    spawn:\n        s.v = 2\nprint(s.v)\n"
+    ));
     // P2 — nested parallel:/spawn:.
     rejects(
         &format!(
@@ -1095,11 +1082,8 @@ fn a_projected_task_write_warns_at_every_position() {
         ),
         "'s' is this task's copy",
     );
-    // P4 — module top level, projected mutator on a list element.
-    rejects(
-        "xs := [[1]]\nparallel:\n    spawn:\n        xs[0].push(2)\nprint(xs[0])\n",
-        "'xs' is this task's copy",
-    );
+    // P4 — module top level, projected mutator on a list element of a module global.
+    ok("xs := [[1]]\nparallel:\n    spawn:\n        xs[0].push(2)\nprint(xs[0])\n");
     // P5 — spawn: inside a loop, projected mutator.
     rejects(
         "fn main():\n    xs := [[1]]\n    for _ in 0..2:\n        spawn:\n            xs[0].push(2)\n    print(xs)\nmain()\n",
@@ -1219,19 +1203,15 @@ fn a_projected_write_through_a_handle_a_task_local_or_before_the_nursery_stays_s
     ));
 }
 
-/// At MODULE TOP LEVEL the binding is scope 0, and this is exactly where the sibling W8-2 rule stays
-/// silent because the runtime backstops it. There is NO backstop here — measured, the program prints
-/// 0 and exits 0 with nothing reported — so the rule uses `is_captured` (which includes scope 0)
-/// rather than `is_local_capture`. Same for a module global captured by a task inside a fn.
+/// At MODULE TOP LEVEL the binding is scope 0, a module global: M3.1 makes it the run's one copy,
+/// so a task-side write to it lands (Go: `1`, `1`) and is legal, at top level and inside a fn.
 #[test]
-fn a_task_side_write_warns_at_module_top_level_and_on_a_module_global() {
-    rejects(
+fn a_task_side_write_at_module_top_level_and_on_a_module_global_is_legal() {
+    ok(
         "results: List[int] = []\nparallel:\n    spawn:\n        results.push(1)\nprint(results.len())\n",
-        "'results' is this task's copy",
     );
-    rejects(
+    ok(
         "g: List[int] = []\nfn f():\n    parallel:\n        spawn:\n            g.push(1)\n    print(g.len())\nf()\n",
-        "'g' is this task's copy",
     );
 }
 

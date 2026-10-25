@@ -151,7 +151,7 @@ impl Vm {
             call_depth: 0,
             module_objs: Vec::new(),
             str_intern: fxhash::FxHashMap::default(),
-            fn_values: fxhash::FxHashMap::default(),
+            fn_values: Arc::default(),
             field_ic,
             method_ic,
             quicken,
@@ -161,8 +161,6 @@ impl Vm {
             pending_exit: None,
             exit_origin: false,
             box_chain: Vec::new(),
-            box_lifted: Vec::new(),
-            box_view_err: None,
             fault_trace: None,
             fault_trace_depth: 0,
             gc_stress: gc_door::gc_stress_env(),
@@ -226,16 +224,6 @@ impl Vm {
             deadline: None,
             back_edge_tick: 0,
             deferring: 0,
-            module_snapshot: None,
-            module_faulted: Vec::new(),
-            snapshot_memo: None,
-            snapshot_rebuild: super::fxhash::FxHashMap::default(),
-            snapshot_cells: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
-            snapshot_nodes: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
-            snapshot_adopt: super::fxhash::FxHashMap::default(),
-            adopt_active: false,
-            snapshot_next_id: 0,
-            snapshot_builds: 0,
             mn: None,
         }
     }
@@ -272,8 +260,7 @@ impl Vm {
         assert!(
             self.gen_host_ctx.is_empty()
                 && self.active_generators.is_empty()
-                && self.box_chain.is_empty()
-                && self.box_lifted.is_empty(),
+                && self.box_chain.is_empty(),
             "a task switch with a generator or a box call open"
         );
         self.swap_ctx(ctx);
@@ -308,36 +295,12 @@ impl Vm {
         // stdin is NOT swapped: it is ONE source every task shares (Go/Python) — see `Stdin` and
         // `spawn_worker`, which hands the M:N worker the same shared handle.
         //
-        // Task 1 — the fiber's module-globals view swaps for EVERY fiber: those `GcRef`s are the
-        // fiber's own copies (in the run's one heap), so they travel WITH the fiber. The parent's
-        // REAL modules move into `ctx.module_objs` on its swap-out. W6-2 — `module_snapshot` + `snapshot_memo` swap WITH them: a snapshot describes a
-        // module VIEW, and one shell drains fibers holding DIFFERENT views, so each must fault in (and
-        // re-snapshot) from its OWN. They carry no `GcRef` (heap-independent `SnapValue`), so GC
-        // rooting is unaffected.
+        // M3.1 — the fiber's module table swaps for EVERY fiber. Its `GcRef`s are the run's module
+        // objects (every context holds the same ones), but a context started before a module
+        // finished its init holds a shorter table, so the table travels WITH the fiber. GC: a
+        // swapped-OUT `module_objs` needs no pin — `ctx` is registered with the run's
+        // `RootRegistry`, which the collector walks.
         std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
-        std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
-        std::mem::swap(&mut self.module_snapshot, &mut ctx.module_snapshot);
-        std::mem::swap(&mut self.snapshot_memo, &mut ctx.snapshot_memo);
-        // W7-4a — the snapshot rebuild map describes the SAME view, so it travels with it. Unlike the
-        // two `Arc<ModuleSnapshot>`s above it holds `GcRef`s, exactly like `module_objs` just
-        // above, and it moves atomically with its view.
-        std::mem::swap(&mut self.snapshot_rebuild, &mut ctx.snapshot_rebuild);
-        // W7-4c — the snapshot cell registry is heap-keyed too (its KEYS are `GcRef`s into the heap the
-        // snapshot was built from), so it travels with the same view for the same reason.
-        std::mem::swap(&mut self.snapshot_cells, &mut ctx.snapshot_cells);
-        // TICKET-111 — the snapshot node registry is heap-keyed too, for the same reason.
-        std::mem::swap(&mut self.snapshot_nodes, &mut ctx.snapshot_nodes);
-        // TICKET-111 — pending adoption captures are heap-keyed too, for the same reason.
-        std::mem::swap(&mut self.snapshot_adopt, &mut ctx.snapshot_adopt);
-        // W7-4c — the counter travels WITH the registry it numbers; see `FiberCtx::snapshot_cells`.
-        // Split them and a fiber resuming on a fresher shell re-mints ids its own registry already
-        // uses, merging two unrelated bindings.
-        std::mem::swap(&mut self.snapshot_next_id, &mut ctx.snapshot_next_id);
-        // TICKET-213 / M1.7 — the view state describes the module view above, so it travels with
-        // it: a context's snapshot stamp names its own view, never the heap (which every context of
-        // the run shares). GC: a swapped-OUT `module_objs` needs no pin — `ctx` is registered with
-        // the run's `RootRegistry`, which the collector walks.
-        std::mem::swap(&mut self.heap.view, &mut ctx.view);
         // D2b — a context that owns its side state swaps it here: each field below belongs to ONE
         // fiber (or one box context), so a shell that runs many in turn must not leave it behind
         // for the next. A context that does not own side state aliases the shell's.
@@ -348,8 +311,6 @@ impl Vm {
             // cache left on the shell would hand the next fiber an object it may then write
             // (every crossing copies until M3, so no two fibers share one).
             std::mem::swap(&mut self.str_intern, &mut ctx.str_intern);
-            // TICKET-215 — the fn-value memo; this context's objects, as above.
-            std::mem::swap(&mut self.fn_values, &mut ctx.fn_values);
             // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
             // connecting fd that the netpoller is watching; it must not be left on the shell where the
             // next fiber would inherit or drop it).
@@ -643,13 +604,6 @@ impl Vm {
         // exhaustion, a fault in the body, a fault caught by `recover:`), so a generator never
         // stays "running". Python: `ValueError: generator already executing`.
         let mut parked = self.gen_take(h, span)?;
-        // TICKET-137 — a module-global generator the task's snapshot could not copy: fault with the
-        // recorded cause, not the `Done` short-circuit below, which would read it as exhausted.
-        if let GenState::Unsendable(msg) = &parked.state {
-            let msg = msg.to_string();
-            self.gen_put(h, parked);
-            return Err(self.err(msg, span));
-        }
         if matches!(parked.state, GenState::Done) {
             self.gen_put(h, parked);
             return Ok(self.alloc_enum("Option", "None", &[]));

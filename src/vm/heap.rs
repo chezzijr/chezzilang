@@ -14,7 +14,6 @@ use super::core::{
     SharedCore, SocketCore, WriterCore,
 };
 use super::heap_core::{CopyLog, HeapCore, lock};
-use super::heap_view::ViewState;
 pub use super::map_data::{MapData, MapEntry, SetData, SetEntry};
 pub use super::module_data::{ModuleData, ModuleNames};
 use super::rvec::{RCell, RVec, RetireList};
@@ -580,14 +579,14 @@ fn obj_bytes_shallow(obj: &Obj) -> usize {
     }
 }
 
-/// The object heap, as one `Vm` sees it: a handle on a [`HeapCore`] (`vm/heap_core.rs`), which holds
-/// the slots, the free list, the mark and copy bits and the shared counters. Every `Vm` of one run
-/// holds a handle on the run's one core (`Vm::spawn_worker`). The handle keeps what is its own: a
-/// cache of free slots, the counts it has not yet added to the core's trigger, its copy log and the
-/// live context's TICKET-213 view state.
+/// The object heap, as one `Vm` sees it: a handle on a [`HeapCore`] (`vm/heap_core.rs`), which
+/// holds the slots, the free list, the mark and copy bits and the shared counters. Every `Vm` of
+/// one run holds a handle on the run's one core (`Vm::spawn_worker`). The handle keeps what is its
+/// own: a cache of free slots, the counts it has not yet added to the core's trigger and its copy
+/// log.
 ///
-/// The collector itself (root tracing) lives on the VM, which owns the roots; the heap provides
-/// the slot-level primitives: [`mark`](Heap::mark), [`children`](Heap::children),
+/// The collector itself (root tracing) lives on the VM, which owns the roots; the heap provides the
+/// slot-level primitives: [`mark`](Heap::mark), [`children`](Heap::children),
 /// [`sweep`](Heap::sweep), and the allocation-driven [`should_collect`](Heap::should_collect)
 /// trigger. Collection runs only at instruction boundaries (see `Vm::run_until`), so every live
 /// value is reachable from the VM roots — there are no mid-opcode temporaries to miss.
@@ -597,13 +596,6 @@ pub struct Heap {
     /// Free slots taken from the core in batches (`HeapCore::alloc_slot`), so `alloc` pops one
     /// without a lock. Given back to the core at [`sweep`](Heap::sweep) and on drop.
     free: Vec<u32>,
-    /// TICKET-213 — the live context's view (`vm/heap_view.rs`): the objects its cached module
-    /// snapshot reaches, set by `Vm::ensure_snapshot` through [`Heap::begin_view`] and
-    /// [`Heap::set_viewed`]. [`write`](Heap::write), the sole write door, moves its epoch
-    /// when it hands out a viewed object, so `Vm::fresh_view` can tell "something a global reaches
-    /// was mutated in place" from "nothing changed" without a slot write to hook. `Vm::swap_ctx`
-    /// swaps it with the parked context's.
-    pub(super) view: ViewState,
     /// Allocations not yet added to the core's run-wide count (`HeapCore::flush_allocs`): the
     /// trigger is run-wide, and a handle adds its count at most every `FLUSH_EVERY` allocations.
     since_gc: usize,
@@ -735,7 +727,6 @@ impl Heap {
         Heap {
             core,
             free: Vec::new(),
-            view: ViewState::default(),
             since_gc: 0,
             gc_check_at: 0,
             since_gc_bytes: AtomicUsize::new(0),
@@ -749,24 +740,20 @@ impl Heap {
 
     /// A new handle on this heap's core: it allocates slots no other handle holds and reads every
     /// object of the core. Two handles can reach one slot through safe code (a `get` on one while
-    /// the other's `write` grows the object reads a retired buffer, `vm/rvec.rs`), so the protocol below is the
-    /// caller's.
+    /// the other's `write` grows the object reads a retired buffer, `vm/rvec.rs`), so the protocol
+    /// below is the caller's.
     ///
     /// # Safety
     ///
     /// For the life of both handles:
-    /// - no two handles reach one object while one of them writes it: a handle writes the objects
-    ///   of the fiber it runs, and every crossing copies (until M3);
+    /// - a handle writes the objects of the fiber it runs, and the run's module objects and what
+    ///   their globals reach (M3.1), which every handle shares: each such write stores through an
+    ///   atomic slot or a lock ([`write`](Heap::write)), and a race between two of them is the
+    ///   program's bug, as in Go;
     /// - a sweep ([`sweep`](Heap::sweep)) runs only while every other handle is stopped at a
     ///   safepoint or detached, through the run's `GcCoord` (`vm/gc_coord.rs`, `Vm::gc_collect`).
     pub(super) unsafe fn attach(&self) -> Heap {
         Heap::on(Arc::clone(&self.core))
-    }
-
-    /// Take the live context's view out of this handle, leaving a fresh one: a payload `Vm`'s
-    /// view moves into the context it builds (`ReadyWorker::into_fiber`, `Vm::box_new`).
-    pub(super) fn take_view(&mut self) -> ViewState {
-        std::mem::take(&mut self.view)
     }
 
     /// Whether this handle is its core's only one: a collection with no stop of the world is
@@ -822,34 +809,9 @@ impl Heap {
     }
 
     /// This heap's identity: its core's (see `HeapCore::id`), shared by every handle of the run.
-    /// The TICKET-213 view stamp is per context instead ([`view_stamp`](Heap::view_stamp)).
     #[inline]
     pub fn id(&self) -> u64 {
         self.core.id()
-    }
-
-    /// TICKET-213 — start marking a new view: forget the previous view's objects and move the
-    /// epoch, so a snapshot stamped by any earlier marking of this view stops being current.
-    pub fn begin_view(&mut self) {
-        self.view.begin();
-    }
-
-    /// TICKET-213 — mark `h` as reached by the view being built. Returns `false` when it was
-    /// already marked in this view (the walk's visited test).
-    pub fn set_viewed(&mut self, h: GcRef) -> bool {
-        self.view.set(h.0 as usize)
-    }
-
-    /// TICKET-213 — the live context's view stamp `(view id, epoch)` (see `vm/heap_view.rs`).
-    #[inline]
-    pub fn view_stamp(&self) -> (u64, u64) {
-        self.view.stamp()
-    }
-
-    /// TICKET-213 — the half of a snapshot's stamp that moves.
-    #[inline]
-    pub fn view_epoch(&self) -> u64 {
-        self.view.epoch()
     }
 
     /// D4 (TICKET-240): unmark one object the crossing site built, which no parent binding can
@@ -869,16 +831,13 @@ impl Heap {
         // carrying 41 MB, both well under the 256-object threshold. M1.7: charged with the cap off
         // too (see `since_gc_bytes`).
         self.charge_own(obj_bytes_shallow(&obj));
-        let h = match self.free.pop() {
+        match self.free.pop() {
             // SAFETY: `idx` is from this handle's own free cache, which `alloc_slot` filled; the
             // gc_coord invariant (a sweep runs only with every other handle stopped or detached,
             // `vm/gc_coord.rs`) keeps the sweep off it while this handle runs.
             Some(idx) => unsafe { self.core.reuse(idx, obj) },
             None => self.core.alloc_slot(&mut self.free, obj),
-        };
-        // A reused slot must not inherit a stale view mark (a new slot has none).
-        self.view.clear(h.0 as usize);
-        h
+        }
     }
 
     #[inline]
@@ -920,9 +879,6 @@ impl Heap {
         let bytes = obj_bytes_shallow(self.get(h));
         self.settle_knowing(Some((h, bytes)));
         self.pending_mut = Some((h, bytes));
-        // TICKET-213 — the same sole-door argument decides view freshness: a write to an object
-        // the cached module snapshot reaches is the only way that view can change in place.
-        self.view.touch(h.0 as usize);
         self
     }
 
@@ -1568,52 +1524,6 @@ mod iter_obj_tests {
             std::mem::size_of::<crate::vm::heap_slab::Slot>(),
             std::mem::size_of::<Obj>()
         );
-    }
-
-    /// TICKET-213: the view epoch moves when a viewed object is handed out mutably, and at a new
-    /// view; a read, an unviewed object, a fresh allocation and a reused slot leave it alone.
-    #[test]
-    fn view_epoch_moves_only_for_a_viewed_object() {
-        let mut heap = Heap::new();
-        let a = heap.alloc(Obj::List(RVec::new()));
-        let b = heap.alloc(Obj::List(RVec::new()));
-        heap.begin_view();
-        assert!(heap.set_viewed(a), "first mark of `a` is fresh");
-        assert!(
-            !heap.set_viewed(a),
-            "second mark of `a` is the visited answer"
-        );
-        let e = heap.view_epoch();
-        let _ = heap.get(a);
-        let _ = heap.write(b);
-        let x = heap.alloc(Obj::List(RVec::new()));
-        assert_eq!(
-            heap.view_epoch(),
-            e,
-            "a read, an unviewed write and an alloc do not move it"
-        );
-        let _ = heap.write(a);
-        assert_ne!(heap.view_epoch(), e, "a write of a viewed object moves it");
-        let e = heap.view_epoch();
-        heap.begin_view();
-        assert_ne!(heap.view_epoch(), e, "a new view moves it");
-        let e = heap.view_epoch();
-        let _ = heap.write(a);
-        assert_eq!(
-            heap.view_epoch(),
-            e,
-            "the new view forgot the old view's objects"
-        );
-        // A swept slot handed to a new object carries no stale mark.
-        assert!(heap.set_viewed(a));
-        heap.mark(b);
-        heap.mark(x);
-        heap.sweep();
-        let c = heap.alloc(Obj::List(RVec::new()));
-        assert_eq!(c, a, "the freed slot is reused");
-        let e = heap.view_epoch();
-        let _ = heap.write(c);
-        assert_eq!(heap.view_epoch(), e, "a reused slot is not viewed");
     }
 
     /// D4 layer C (TICKET-169): the copy mark is per-slot and cleared when the slot is reused.

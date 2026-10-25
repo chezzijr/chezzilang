@@ -18,21 +18,12 @@ impl Checker {
         self.owning_scope(name)
             .is_some_and(|i| self.loop_vars[i].contains(name))
     }
-    /// Is `name` a binding **captured** by an enclosing `spawn:` task — i.e. defined in a local
-    /// scope below the innermost task's floor? Such bindings are read-only inside the task body
-    /// (the airlock: a task gets its own copy, so reassigning the capture can't leak out). A
-    /// task-local binding (declared inside the task) and a global/function are not captures.
-    pub(super) fn is_captured(&self, name: &str) -> bool {
-        let Some(&floor) = self.capture_floors.last() else {
-            return false;
-        };
-        self.owning_scope(name).is_some_and(|i| i < floor)
-    }
-    /// Like [`is_captured`], but excludes module-level (scope 0) bindings — imports and top-level
-    /// declarations are globals resolvable identically in every task (like free functions), not
-    /// per-task value captures. Used by the *read* sendability gate so reading an imported module or
-    /// a top-level closure inside a `spawn:` block isn't flagged; the *reassign* gate keeps the
-    /// broader [`is_captured`] (writing a copy of any capture, global or not, can't leak out).
+    /// Is `name` a LOCAL binding **captured** by an enclosing `spawn:` task — defined in a local
+    /// scope below the innermost task's floor? A task gets its own copy of such a binding, so a
+    /// write to it is the D4 error, and a non-sendable one is the read gate's. A task-local binding
+    /// (declared inside the task) is not a capture, and neither is a module-level (scope 0)
+    /// binding: M3.1 shares module globals across tasks (Go), so a task reads and writes the live
+    /// value.
     pub(super) fn is_local_capture(&self, name: &str) -> bool {
         let Some(&floor) = self.capture_floors.last() else {
             return false;
@@ -83,7 +74,7 @@ impl Checker {
                 }
             }
         }
-        if self.in_spawn_block && self.is_captured(name) {
+        if self.in_spawn_block && self.is_local_capture(name) {
             self.error(
                 span,
                 format!("'{name}' {}", crate::base::words::COPY_WRITE_TAIL),
@@ -155,15 +146,16 @@ impl Checker {
                     let Some((name, path)) = fn_writes::chain(arg) else {
                         continue;
                     };
-                    let copied = force_task || self.is_captured(&name);
+                    let copied = force_task || self.is_local_capture(&name);
                     (name, path, copied)
                 }
                 fn_writes::WriteRoot::Capture(name) => (
                     name.clone(),
                     Vec::new(),
-                    force_task || self.is_captured(name),
+                    force_task || self.is_local_capture(name),
                 ),
-                fn_writes::WriteRoot::Global(name) => (name.clone(), Vec::new(), true),
+                // M3.1: a module global is the run's one copy, so a callee's write to it lands.
+                fn_writes::WriteRoot::Global(_) => continue,
             };
             if !copied || reported.contains(&name) {
                 continue;

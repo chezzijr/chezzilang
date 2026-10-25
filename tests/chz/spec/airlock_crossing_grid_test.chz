@@ -95,13 +95,15 @@ test fn grid_spawn_receiver_fresh():
             spawn [1].push(9)
     assert t179_outcome(r) == "ok"
 
+# M3.1: a module global is the run's one copy, so every write a task makes to it runs and the
+# parent observes it (`+=` rebinds the task's own parameter only). Go: `[9 9]`.
 test fn grid_module_global():
     out := Channel[str](1)
     parallel:
         spawn:
             t179_row(t179_glist, T179G(x=1), out)
-    assert out.recv() == "ok,fault,fault,ok,ok"
-    assert t179_glist == [1]
+    assert out.recv() == "ok,ok,ok,ok,ok"
+    assert t179_glist == [9, 9]
 
 fn t179_call(f: fn() -> None, out: Channel[str]):
     res := recover:

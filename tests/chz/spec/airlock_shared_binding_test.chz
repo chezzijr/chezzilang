@@ -207,10 +207,12 @@ test fn spawn_block_two_captures_keeps_one_binding():
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
-# The module-GLOBAL snapshot serializer (`to_snap`): two globals over one factory-local cell — same
-# fault (the task's copy of the module-global closure crossed the airlock and is marked).
+# M3.1: two module globals over one factory-local cell are the run's closures, so a task's write
+# through one lands and the other reads it, in the task and in the parent. Go: +1 both ways.
 test fn module_global_snapshot_keeps_one_binding():
+    before := _w74g()
     r := Channel[str](1)
+    seen := Channel[int](1)
     parallel:
         spawn:
             res := recover:
@@ -218,13 +220,14 @@ test fn module_global_snapshot_keeps_one_binding():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
+            seen.send(_w74g())
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert seen.recv() == before + 1, "the sibling global closure missed the write"
+    assert _w74g() == before + 1, "the parent missed the task's write"
 
-# W7-4 — the per-module snapshot memo is SHARED across globals, so a global whose speculative `to_wire`
-# is DISCARDED must roll its minted cell ids back out of it (see `_w74mk` above). The cycle-parked
-# generator crosses as an inert Nil and only faults when reached; the sibling closure over the same
-# local must still snapshot cleanly.
+# W7-4 — a module global beside a cycle-parked generator (see `_w74mk` above): the task calls the
+# sibling closure over the same local, which reads the run's one copy (M3.1).
 test fn discarded_snapshot_walk_rolls_back_its_cell_ids():
     r := Channel[int](1)
     parallel:
@@ -269,20 +272,16 @@ test fn separate_tasks_each_get_their_own_binding():
     assert r2.recv() == 0
     assert c.get() == 0
 
-# W7-4c (FIXED 2026-08-06) — ONE TASK reached through TWO serializations now gets ONE binding. A
-# `spawn:` block's captures and the module-global snapshot are still two separate serializations,
-# rebuilt at different times (the snapshot faults in LAZILY on first module access), but they now agree
-# on the cell's ID: the snapshot is pinned BEFORE the spawn-time clone, the clone carries the
-# snapshot's id forward on the task, and `rebuild_ready` + `fault_module` drain ONE rebuild map. So the
-# task's `_w74i()` writes and its `gg()` reads the same cell.
-# TICKET-169: the write now faults (both crossed the airlock and are marked), so it can no longer
-# demonstrate the shared-binding rule for a write — `discarded_snapshot_walk_rolls_back_its_cell_ids`
-# above still covers that the snapshot/spawn memos share one rebuild map for a READ.
+# W7-4c — a task-local binding of a module global's closure and the global itself are one
+# binding: the task's `_w74i()` writes and its `gg()` reads the same cell (M3.1: the run's). The
+# alias is made in the task; a parent-made alias the task captures is a crossing copy until M3.4.
+# Go: the read sees the write.
 test fn module_global_plus_local_capture_shares_its_binding():
-    gg := _w74c.get
+    before := _w74g()
     r := Channel[str](2)
     parallel:
         spawn:
+            gg := _w74c.get
             res := recover:
                 _w74i()
             match res:
@@ -290,9 +289,9 @@ test fn module_global_plus_local_capture_shares_its_binding():
                 !e: r.send(e.message())
             r.send("{gg()}")
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
     read := r.recv()
-    assert read == "0", "read after the failed write saw {read}"
+    assert read == "{before + 1}", "read after the write saw {read}"
 
 # W7-4 REGRESSION — `RwShared`'s zero-copy read views DRAIN one stored wire through many independent
 # `from_wire` rebuilds, so the persistent cell memo made a `Backref` reach across sibling elements for

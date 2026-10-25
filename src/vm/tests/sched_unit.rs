@@ -1550,24 +1550,12 @@ fn fiber_roots_equal_vm_roots_after_swap() {
             args: vec![Value::obj(t_arg)],
             span: Span::RUNTIME,
         },
-        snap: Err(dl_err()),
-        cell_ids: Vec::new(),
         fresh: 0,
     }]);
     vm.module_objs = vec![obj(&mut vm, "module")];
     vm.executors = vec![obj(&mut vm, "executor")];
     let interned = obj(&mut vm, "interned");
     vm.str_intern.insert(1, interned);
-    let fn_value = obj(&mut vm, "fn-value");
-    vm.fn_values.insert(FnKey::Proto(0), fn_value);
-    let rebuilt = obj(&mut vm, "rebuilt");
-    vm.snapshot_rebuild.insert(1, rebuilt);
-    let cell = obj(&mut vm, "cell");
-    vm.snapshot_cells = Arc::new(fxhash::FxHashMap::from_iter([(cell, 1)]));
-    let node = obj(&mut vm, "node");
-    vm.snapshot_nodes = Arc::new(fxhash::FxHashMap::from_iter([(node, 2)]));
-    let adopt = obj(&mut vm, "adopt");
-    vm.snapshot_adopt.insert(3, adopt);
 
     let before = sorted_roots(vm.gc_roots());
     let live = roots_per_field(&vm.root_view());
@@ -1610,14 +1598,7 @@ fn roots_per_field(v: &super::root_registry::RootView) -> Vec<(&'static str, Vec
         executors,
         caches,
     } = v;
-    let HeapCaches {
-        str_intern,
-        fn_values,
-        snapshot_rebuild,
-        snapshot_cells,
-        snapshot_nodes,
-        snapshot_adopt,
-    } = caches.as_ref().expect("a Vm or fiber view has caches");
+    let HeapCaches { str_intern } = caches.as_ref().expect("a Vm or fiber view has caches");
     let walk = |one: RootView| {
         let mut out = Vec::new();
         one.walk(&mut out);
@@ -1657,26 +1638,6 @@ fn roots_per_field(v: &super::root_registry::RootView) -> Vec<(&'static str, Vec
         (
             "str_intern",
             sorted_roots(str_intern.values().copied().collect()),
-        ),
-        (
-            "fn_values",
-            sorted_roots(fn_values.values().copied().collect()),
-        ),
-        (
-            "snapshot_rebuild",
-            sorted_roots(snapshot_rebuild.values().copied().collect()),
-        ),
-        (
-            "snapshot_cells",
-            sorted_roots(snapshot_cells.keys().copied().collect()),
-        ),
-        (
-            "snapshot_nodes",
-            sorted_roots(snapshot_nodes.keys().copied().collect()),
-        ),
-        (
-            "snapshot_adopt",
-            sorted_roots(snapshot_adopt.values().copied().collect()),
         ),
     ]
 }

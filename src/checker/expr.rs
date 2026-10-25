@@ -181,7 +181,7 @@ impl Checker {
         let expected = expected.as_ref();
         if self.in_spawn_block
             && let ExprKind::Ident(name) = &callee.kind
-            && self.is_captured(name)
+            && self.is_local_capture(name)
             && let Some(written) = self.value_writes(callee).first()
         {
             self.error(

@@ -511,25 +511,35 @@ fn t254_program(
 }
 
 /// Does a D4 error ("this task's copy") belong to a plain-name or plain-index write in `ctx`?
-/// Measured on the base binary with `T254_DUMP`: a spawned fn, a `spawn:` block and a fn of another
-/// module are errors; a plain call, the top level, a box closure and an `Executor` job are not.
+/// Measured with `T254_DUMP`: a spawned fn and a fn of another module write their ARGUMENT, a
+/// crossing copy, so they are errors. A `spawn:` block writes the root itself, a module global,
+/// which every task shares (M3.1), so it is not; nor are a plain call, the top level, a box closure
+/// and an `Executor` job.
 fn t254_control_errors(ctx: T254Ctx) -> bool {
     match ctx {
-        T254Ctx::SpawnedFn | T254Ctx::SpawnBlock | T254Ctx::ImportedFn => true,
-        T254Ctx::Top | T254Ctx::Fn | T254Ctx::ExecutorJob | T254Ctx::BoxClosure => false,
+        T254Ctx::SpawnedFn | T254Ctx::ImportedFn => true,
+        T254Ctx::Top
+        | T254Ctx::Fn
+        | T254Ctx::SpawnBlock
+        | T254Ctx::ExecutorJob
+        | T254Ctx::BoxClosure => false,
     }
 }
 
-/// A write that reaches the root, run in `ctx` where the program checks clean: the top level and a
-/// plain call write the root; a task and a box closure run on a copy, and the run ends with the D4
-/// fault `this value is this task's copy`. An `Executor` job also runs on a copy, but its fault lives
-/// only in its `Task` (TICKET-289), which this program discards: the run ends clean, root unchanged.
+/// A write that reaches the root, run in `ctx` where the program checks clean: the top level, a
+/// plain call, a `spawn:` block and a box closure write the root, a module global (M3.1: the run's
+/// one copy, so the write lands). A spawned fn receives the root as an argument, a crossing copy,
+/// and the run ends with the D4 fault `this value is this task's copy`. An `Executor` job also runs
+/// on a copy of its argument, but its fault lives only in its `Task` (TICKET-289), which this
+/// program discards: the run ends clean, root unchanged.
 fn t254_control_faults(ctx: T254Ctx) -> bool {
     match ctx {
-        T254Ctx::Top | T254Ctx::Fn | T254Ctx::ExecutorJob => false,
-        T254Ctx::SpawnedFn | T254Ctx::SpawnBlock | T254Ctx::BoxClosure | T254Ctx::ImportedFn => {
-            true
-        }
+        T254Ctx::Top
+        | T254Ctx::Fn
+        | T254Ctx::SpawnBlock
+        | T254Ctx::ExecutorJob
+        | T254Ctx::BoxClosure => false,
+        T254Ctx::SpawnedFn | T254Ctx::ImportedFn => true,
     }
 }
 
