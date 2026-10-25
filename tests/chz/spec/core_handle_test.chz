@@ -160,3 +160,30 @@ test fn a_print_snapshots_an_atomic_before_it_waits():
     old := "Shared(M32Pair(a=Atomic(['x7']), b=Shared(1)))"
     new := "Shared(M32Pair(a=Atomic(['new']), b=Shared(1)))"
     assert got == old or got == new, got
+
+# M3.2 fix 1: two tasks reach the SAME channel slot through one list received by handle. The
+# receiver's leaf nursery parks while its sibling still computes, then sends: no deadlock verdict
+# may fire (Go prints `5`: a goroutine parked on a channel another goroutine still holds).
+fn m32_leaf(lc: Channel[List[Channel[int]]], out: Channel[int]):
+    parallel:
+        spawn:
+            c := lc.recv()[0]
+            out.send(c.recv())
+
+fn m32_feed(lc: Channel[List[Channel[int]]]):
+    xs := lc.recv()
+    n := 0
+    for i in 0..200000:
+        n = n + i % 7
+    xs[0].send(5)
+
+test fn a_shared_channel_slot_is_no_deadlock():
+    lc := Channel[List[Channel[int]]](2)
+    xs := [Channel[int]()]
+    lc.send(xs)
+    lc.send(xs)
+    out := Channel[int](1)
+    parallel:
+        spawn m32_leaf(lc, out)
+        spawn m32_feed(lc)
+    assert out.recv() == 5

@@ -194,8 +194,8 @@ pub(super) struct Fiber {
     /// blocking-pool completion and the fiber's next schedule-in.
     pub(super) resume_native: Option<Result<crate::native::NativeRet, RuntimeError>>,
     /// TICKET-185 — this fiber's carried [`Vm::pending`] while it is not the running fiber. A
-    /// parked `recv` holds its channel here even without a slot, which [`SchedCore::provable`]
-    /// counts. Dropping a parked fiber settles it, so none of its entries outlive it.
+    /// parked `recv` holds its channel here even without a slot. Dropping a parked fiber settles
+    /// it, so none of its entries outlive it.
     pub(super) pending: Option<crate::vm::core::PendingOp>,
     /// TICKET-208 — the site this fiber parked at ([`Vm::park_site`]); `None` while it runs on.
     /// A deadlocked `Executor` job is reported there (see [`SchedCore::record_deadlocked`]).
@@ -693,7 +693,7 @@ impl ParkedEntry {
     /// names through the one pair of answers every blocked thing uses
     /// ([`quiesce::recv_satisfiable`], [`quiesce::wait_satisfiable`]). A fiber with nothing to
     /// ask (no `pending`, no channel, already claimed) answers `true`, which only declines the
-    /// verdict. Borrows each core: a cloned `Arc` would change [`SchedCore::provable`] (DEC-129).
+    /// verdict.
     pub(super) fn satisfiable(&self) -> bool {
         match self {
             ParkedEntry::Recv(f) => f.pending.as_ref().is_none_or(|op| {

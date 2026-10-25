@@ -280,10 +280,7 @@ impl MnSched {
                 // TICKET-236 — the licence is the one `flag_leaves_and_wake` cuts under. `None`
                 // is a declined licence or a moved epoch: wait (timed), never spin on it.
                 drop(c);
-                let heap = &vm.heap;
-                let Some(relocked) = self
-                    .latch_own_verdict(|c| c.victims_proven(heap) || self.may_fault_unproven(heap))
-                else {
+                let Some(relocked) = self.latch_own_verdict(|_| self.may_fault_unproven()) else {
                     vm.gc_blocking(&[], |_| {
                         let (guard, _) = self
                             .cv
@@ -301,7 +298,7 @@ impl MnSched {
                 // TICKET-129 (W13-5 residual) — `None` means the verdict is unproven and no peer
                 // licenses it yet: wait (timed — `judged = false` so the next pass re-derives the
                 // W7-58 verdict too), never spin on the same declined judgement.
-                let Some(done) = self.flag_leaves_and_wake(&vm.heap, &mut c) else {
+                let Some(done) = self.flag_leaves_and_wake(&mut c) else {
                     vm.gc_blocking(&[], |_| {
                         let (guard, _) = self
                             .cv
@@ -360,7 +357,7 @@ impl MnSched {
                 if verdict && self.is_deadlocked_ignoring_jobs(&c) && self.quiesce.left() == e0 {
                     // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict
                     // wait as above.
-                    let Some(done) = self.flag_leaves_and_wake(&vm.heap, &mut c) else {
+                    let Some(done) = self.flag_leaves_and_wake(&mut c) else {
                         vm.gc_blocking(&[], |_| {
                             let (guard, _) = self
                                 .cv
@@ -552,15 +549,13 @@ impl MnSched {
     /// TICKET-103 — [`SchedCore::flag_deadlock_leaves`], then wake the owners of the families it
     /// completed. The sched-wide fallback (`Some(true)`) records join-parked owners itself.
     ///
-    /// TICKET-129 (W13-5 residual) — `unproven_ok` is licensed either by this sched's own leaves
-    /// already being provable ([`SchedCore::victims_proven`], no peer question needed) or by
-    /// [`MnSched::may_fault_unproven`]. Returns `None` when the flag declined: the caller must wait,
-    /// never spin (a bare `continue` here would busy-loop on the same unproven verdict).
-    /// `heap` is the calling worker's handle (see [`SchedCore::provable`]).
-    pub(super) fn flag_leaves_and_wake(&self, heap: &Heap, c: &mut SchedCore) -> Option<bool> {
-        let ok = c.victims_proven(heap) || self.may_fault_unproven(heap);
+    /// TICKET-129 (W13-5 residual) — `unproven_ok` is licensed by [`MnSched::may_fault_unproven`].
+    /// Returns `None` when the flag declined: the caller must wait, never spin (a bare `continue`
+    /// here would busy-loop on the same verdict).
+    pub(super) fn flag_leaves_and_wake(&self, c: &mut SchedCore) -> Option<bool> {
+        let ok = self.may_fault_unproven();
         let err = self.verdict_err();
-        let done = c.flag_deadlock_leaves(heap, &err, ok)?;
+        let done = c.flag_deadlock_leaves(&err, ok)?;
         if !done {
             self.wake_completed_joins(c);
         }
@@ -573,22 +568,19 @@ impl MnSched {
     /// already held — `try_lock`s the registry and each peer's core, reading contention as "a peer can
     /// move" (never blocks, matches [`MnSched::any_peer_can_move`]'s discipline).
     ///
-    /// Four clauses per peer (Digest gotchas 2-4, measured on the planning spike):
+    /// Three clauses per peer (Digest gotchas 2-4, measured on the planning spike):
     /// 1. no incomplete scope and no open body — the peer has FINISHED but its owner thread has not
-    ///    yet dropped its `BlockedOwnerGuard` (`Disp::Park`'s Arc-drop-under-lock in [`MnSched::park`]
-    ///    only closes the analogous window for `provable`, not this one). Faulting in that gap drops a
-    ///    live feeder (`g3`, `d2a`): decline.
+    ///    yet dropped its `BlockedOwnerGuard`. Faulting in that gap drops a live feeder (`g3`,
+    ///    `d2a`): decline.
     /// 2. no incomplete scope but an OPEN body — a finished-looking peer whose body is still open is
     ///    NOT that window; treating it as a veto hung `j2.chz` at every run. Skip it (matches
     ///    [`MnSched::peer_can_move`]'s own first clause).
     /// 3. [`MnSched::can_still_move`] — the peer still has live work and may yet feed this sched's
-    ///    candidate: decline.
-    /// 4. the peer's own state is ALREADY a provable genuine deadlock
-    ///    (`cross_sched_blocked_owners == 0 && !body_held_by_fiber && local_quiesced && victims_proven`):
-    ///    decline, and let that peer resolve itself first rather than racing it.
+    ///    candidate: decline. (M3.2 fix 1 deleted clause 4, "the peer's own victims are proven": a
+    ///    holder-count proof is unsound once a channel slot can be shared.)
     ///
     /// Only when every live peer clears every clause does this return `true`.
-    pub(super) fn may_fault_unproven(&self, heap: &Heap) -> bool {
+    pub(super) fn may_fault_unproven(&self) -> bool {
         let g = match self.sched_registry.try_lock() {
             Ok(g) => g,
             Err(std::sync::TryLockError::WouldBlock) => return false,
@@ -613,13 +605,6 @@ impl MnSched {
             }
             if s.can_still_move(&c, false) {
                 return false; // clause 3 — peer may still move
-            }
-            if c.cross_sched_blocked_owners == 0
-                && !s.body_held_by_fiber(&c)
-                && s.local_quiesced(&c)
-                && c.victims_proven(heap)
-            {
-                return false; // clause 4 — peer will resolve its own provable deadlock first
             }
         }
         true

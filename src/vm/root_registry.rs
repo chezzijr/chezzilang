@@ -126,8 +126,8 @@ impl FiberCtx {
         }
     }
 
-    /// The GC roots this parked fiber context holds (the TICKET-125 leaf proof walks from them,
-    /// `SchedCore::provable`).
+    /// The GC roots this parked fiber context holds (tests read them).
+    #[cfg(test)]
     pub(super) fn roots(&self) -> Vec<GcRef> {
         let mut out = Vec::new();
         self.root_view().walk(&mut out);

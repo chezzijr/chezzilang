@@ -327,47 +327,35 @@ impl SchedCore {
     ///
     /// TICKET-125 (W13-5) — with two OR MORE parked leaves, faulting all of them at once can be
     /// wrong: one leaf's owner may feed a COUSIN leaf once its `recover:` returns
-    /// (`leaf_cousin`/`d2a`), so faulting the cousin too drops a live receiver. [`SchedCore::provable`]
-    /// answers "is every holder of this leaf's channel(s) visible?" — fault only the PROVABLE parked
-    /// leaves; when none is provable, fault the single lowest-index parked leaf alone, but ONLY when
-    /// `unproven_ok` licenses it (TICKET-129 — [`MnSched::may_fault_unproven`] is that license: a
-    /// private sched judging its own leaf in isolation cannot tell "genuinely stuck" from "a cousin on
-    /// another sched is about to feed me", so an unproven fault must wait for that peer to either move
-    /// or itself go quiet, matching Go's all-goroutines-parked rule instead of a per-subgroup guess).
+    /// (`leaf_cousin`/`d2a`), so faulting the cousin too drops a live receiver. So it faults the
+    /// single lowest-index parked leaf alone, and ONLY when `unproven_ok` licenses it (TICKET-129 —
+    /// [`MnSched::may_fault_unproven`] is that license: a private sched judging its own leaf in
+    /// isolation cannot tell "genuinely stuck" from "a cousin on another sched is about to feed
+    /// me", so a fault waits for that peer to either move or itself go quiet, matching Go's
+    /// all-goroutines-parked rule instead of a per-subgroup guess). The next verdict judges the next
+    /// leaf.
     ///
-    /// Returns `None` when the scan found nothing PROVEN and `unproven_ok` is `false` — the caller
-    /// must decline (wait, never spin) rather than fault. Otherwise returns `Some(true)` when it fell
-    /// back to the sched-wide [`SchedCore::flag_deadlock`] and that latched `terminate`, `Some(false)`
-    /// when it faulted leaves only and the sched keeps running.
+    /// M3.2 fix 1 — there is no holder-count proof any more: a channel slot can be shared by two
+    /// tasks (a module global, a value received by handle), and one slot holds one `Arc`, so no
+    /// count of `Arc` holders shows that no other task holds the channel.
     ///
-    /// `heap` is a handle of the run, held by an attached thread (see [`SchedCore::provable`]).
+    /// Returns `None` when `unproven_ok` is `false` — the caller must decline (wait, never spin)
+    /// rather than fault. Otherwise returns `Some(true)` when it fell back to the sched-wide
+    /// [`SchedCore::flag_deadlock`] and that latched `terminate`, `Some(false)` when it faulted
+    /// leaves only and the sched keeps running.
     pub(super) fn flag_deadlock_leaves(
         &mut self,
-        heap: &Heap,
         err: &RuntimeError,
         unproven_ok: bool,
     ) -> Option<bool> {
-        let candidates = self.leaf_candidates();
-        if candidates.is_empty() {
-            if !unproven_ok && !self.provable(heap, |_| true) {
-                return None;
-            }
-            return Some(self.flag_deadlock(err));
-        }
-        let provable: Vec<&Vec<usize>> = candidates
-            .iter()
-            .filter(|fam| self.provable(heap, |s| fam.contains(&s)))
-            .collect();
-        if provable.is_empty() && !unproven_ok {
+        if !unproven_ok {
             return None;
         }
-        let chosen: Vec<&Vec<usize>> = if provable.is_empty() {
-            vec![&candidates[0]]
-        } else {
-            provable
-        };
-        let target: std::collections::HashSet<usize> =
-            chosen.into_iter().flatten().copied().collect();
+        let candidates = self.leaf_candidates();
+        if candidates.is_empty() {
+            return Some(self.flag_deadlock(err));
+        }
+        let target: std::collections::HashSet<usize> = candidates[0].iter().copied().collect();
         let buckets: Vec<(usize, Vec<ParkedEntry>)> = self.parked.drain().collect();
         let mut flagged = 0usize;
         for (key, v) in buckets {
@@ -433,8 +421,7 @@ impl SchedCore {
     }
 
     /// TICKET-129 (W13-5 residual) — the distinct joined-leaf families with at least one parked
-    /// member, exactly [`SchedCore::flag_deadlock_leaves`]'s pre-TICKET-129 `candidates` computation,
-    /// split out so [`SchedCore::victims_proven`] can ask the same question without flagging anything.
+    /// member, ordered by each family's lowest scope index ([`SchedCore::flag_deadlock_leaves`]).
     fn leaf_candidates(&self) -> Vec<Vec<usize>> {
         // Distinct joined-leaf families, keyed (and so de-duplicated + ordered) by each family's
         // lowest scope index.
@@ -478,143 +465,6 @@ impl SchedCore {
             .filter(|fam| fam.iter().any(|s| parked_scopes.contains(s)))
             .collect()
     }
-
-    /// TICKET-129 (W13-5 residual) — are this sched's own deadlock-leaf victims PROVEN? Empty
-    /// candidates means the sched-wide fallback would apply, so it asks `provable` over every scope;
-    /// otherwise it asks per joined-leaf family, matching [`SchedCore::flag_deadlock_leaves`]'s own
-    /// provable scan. Used by [`MnSched::flag_leaves_and_wake`] to decide whether this sched needs
-    /// [`MnSched::may_fault_unproven`]'s license at all, and by that fn's own peer-provable clause.
-    pub(super) fn victims_proven(&self, heap: &Heap) -> bool {
-        let cands = self.leaf_candidates();
-        if cands.is_empty() {
-            self.provable(heap, |_| true)
-        } else {
-            cands
-                .iter()
-                .any(|f| self.provable(heap, |s| f.contains(&s)))
-        }
-    }
-
-    /// TICKET-125 (W13-5) — is EVERY holder of the channel(s) `member` waits on visible to this scan?
-    /// `member` selects the scope indices to check (a leaf family, or every scope). A `false` answer
-    /// means "cannot prove", never "definitely not" — the scan is conservative in the safe direction
-    /// (DEC-101's leaf-policy condition 1): any holder it cannot see (a running fiber, a
-    /// `Shared`/`RwShared`/`Atomic` box, a channel buffered in a channel, an Executor job, a module
-    /// global, an FFI value, a timer, a `Waiter`, a `PartyWait`) holds a strong `Arc`, which only
-    /// RAISES `Arc::strong_count` above what the scan counts — so an incomplete scan can only return
-    /// `false` where a complete one would return `true`, never the reverse.
-    ///
-    /// M1.7 — every fiber's objects are in the run's one heap, so the scan counts the `Obj::Channel`
-    /// slots REACHABLE from the parked recv fibers' roots ([`reachable_channel_aliases`]), each slot
-    /// once over all of them. Two fibers that reached one slot would otherwise count one holder
-    /// twice, which could prove a leaf that is not one. The walk reads the heap with no stop of the
-    /// world, and it is memory-safe for this reason: `heap` belongs to the calling thread, which is
-    /// attached and not at a safepoint, so no collection can sweep while it runs (the collector
-    /// waits for this thread); and a racy read of an object another thread writes reads no freed
-    /// memory (`vm/rvec.rs`). M3.1 / M3.2: a module global and a value received by handle are the
-    /// SAME slot in two tasks, so a running task can hold a slot this scan reaches; the strong count
-    /// then counts that slot once for both holders.
-    fn provable(&self, heap: &Heap, member: impl Fn(usize) -> bool) -> bool {
-        // A member scope whose body may still `spawn`/`send` is a live feeder this scan cannot see.
-        if self.scopes.iter().any(|(i, s)| member(i) && s.body_open) {
-            return false;
-        }
-        let mut recv_fibers: Vec<&Fiber> = Vec::new();
-        for entry in self.parked.values().flatten() {
-            match entry {
-                ParkedEntry::Send(f) if member(f.scope_id) => return false,
-                ParkedEntry::Wait(wp) => {
-                    let scope = wp
-                        .fiber
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .as_ref()
-                        .map(|f| f.scope_id);
-                    if scope.is_some_and(&member) {
-                        return false;
-                    }
-                }
-                ParkedEntry::Recv(f) if member(f.scope_id) => recv_fibers.push(f),
-                ParkedEntry::Recv(_) | ParkedEntry::Send(_) => {}
-            }
-        }
-        // Every member scope's undone tasks must be accounted for by a PARKED RECV fiber of that
-        // scope: a member fiber blocked some other way (join, native, cancelled) is invisible to the
-        // handle scan below, so its channel's true holder count could be anything.
-        for (i, s) in self.scopes.iter() {
-            if !member(i) {
-                continue;
-            }
-            let recv_of_scope = recv_fibers.iter().filter(|f| f.scope_id == i).count();
-            if recv_of_scope != s.total - s.done {
-                return false;
-            }
-        }
-        // TICKET-185 — a parked `recv` fiber's `pending` holds exactly its one channel.
-        let parked_on = |f: &Fiber| match f.pending.as_ref().map(|op| op.at.as_slice()) {
-            Some([(core, _, false)]) => Some(Arc::clone(core)),
-            _ => None,
-        };
-        if recv_fibers.iter().any(|f| parked_on(f).is_none()) {
-            return false;
-        }
-        let mut cores: Vec<Arc<ChannelCore>> = Vec::new();
-        for f in &recv_fibers {
-            let core = parked_on(f).unwrap();
-            if !cores.iter().any(|c| Arc::ptr_eq(c, &core)) {
-                cores.push(core);
-            }
-        }
-        let roots: Vec<GcRef> = recv_fibers.iter().flat_map(|f| f.ctx.roots()).collect();
-        let in_heap = reachable_channel_aliases(heap, roots, &cores);
-        for (core, in_heap) in cores.iter().zip(in_heap) {
-            let in_pending: usize = recv_fibers
-                .iter()
-                .map(|f| {
-                    f.pending.as_ref().map_or(0, |op| {
-                        op.at
-                            .iter()
-                            .filter(|(c, _, _)| Arc::ptr_eq(c, core))
-                            .count()
-                    })
-                })
-                .sum();
-            // `cores` holds one extra strong reference to each core while this scan runs.
-            if Arc::strong_count(core) != in_heap + in_pending + 1 {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-/// TICKET-125 / M1.7 — for each of `cores`, how many `Obj::Channel` slots that hold it are reachable
-/// from `roots`, each slot counted once. The walk does not enter an object that owns an `Arc` core
-/// (a channel, a box, an executor, ...): reading a core's payload takes its lock, and the caller
-/// holds the sched lock. A holder behind a core is then not counted, which only declines a proof.
-/// The caller's contract is [`SchedCore::provable`]'s.
-pub(super) fn reachable_channel_aliases(
-    heap: &Heap,
-    mut work: Vec<GcRef>,
-    cores: &[Arc<ChannelCore>],
-) -> Vec<usize> {
-    let mut seen = fxhash::FxHashSet::<u32>::default();
-    let mut counts = vec![0usize; cores.len()];
-    while let Some(h) = work.pop() {
-        if !seen.insert(h.0) {
-            continue;
-        }
-        let obj = heap.get(h);
-        if let Obj::Channel(a) = obj
-            && let Some(i) = cores.iter().position(|c| Arc::ptr_eq(c, a))
-        {
-            counts[i] += 1;
-        }
-        if !super::boxctx::is_arc_core(obj) {
-            work.extend(heap.children(h));
-        }
-    }
-    counts
 }
 
 /// B3.3-threads — turn a caught panic payload (from `catch_unwind` around a worker task) into a

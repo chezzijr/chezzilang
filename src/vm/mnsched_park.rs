@@ -24,11 +24,6 @@ impl MnSched {
     ///
     /// TICKET-129 (W13-5 residual) — takes `core` BY VALUE and moves it into the fiber's
     /// [`PendingOp`] under the core lock, rather than leaving it live on the caller's stack.
-    /// [`SchedCore::provable`] compares `Arc::strong_count` against the handles it can see in-heap
-    /// plus the parked fibers' `pending` entries; a stack-held Arc outliving the park is an extra
-    /// holder invisible to that scan, so a genuinely provable leaf read as unprovable (measured 5/20
-    /// false faults on `d2a` at `CHEZZI_THREADS=2` before that fix). Never reintroduce a stack-held
-    /// channel Arc that outlives this fn's lock hold.
     pub(super) fn park(&self, key: usize, core: Arc<ChannelCore>, mut fiber: Fiber) {
         // Allocated BEFORE the sched lock: this critical section serializes every fiber's park.
         let p = crate::vm::core::Pending::new();

@@ -1087,7 +1087,7 @@ fn flag_deadlock_leaves_faults_only_the_family_a_blocked_owner_joins() {
     c.scopes[0].owners_blocked = 1;
     c.scopes[s1].joins_blocked = 1;
     let r = c
-        .flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true)
+        .flag_deadlock_leaves(&s.deadlock_err, true)
         .expect("unproven_ok never declines");
     assert!(!r, "a leaf flag must not report a sched-wide stop");
     assert!(!c.terminate, "a leaf flag must not terminate the sched");
@@ -1119,7 +1119,7 @@ fn flag_deadlock_leaves_is_sched_wide_without_a_joined_family() {
     c.blocked_owners = 1;
     c.scopes[0].owners_blocked = 1;
     let r = c
-        .flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true)
+        .flag_deadlock_leaves(&s.deadlock_err, true)
         .expect("unproven_ok never declines");
     assert!(r);
     assert!(c.terminate);
@@ -1139,17 +1139,42 @@ fn flag_deadlock_leaves_declines_an_unproven_sched_wide_flag() {
     let s = mk_sched(1);
     let _ch = park_in_scope(&s, 0, 0);
     let mut c = s.lock();
+    assert_eq!(c.flag_deadlock_leaves(&s.deadlock_err, false), None);
+    assert_eq!(c.parked_n, 1);
+    assert!(!c.terminate);
+    assert_eq!(c.flag_deadlock_leaves(&s.deadlock_err, true), Some(true));
+    assert!(c.terminate);
+}
+
+/// M3.2 fix 1 — a channel slot can be shared: a value received by handle or a module global is
+/// the SAME `Obj::Channel` slot in two tasks, and one slot holds one `Arc`. Here the parked fiber's
+/// stack reaches the slot, and `held` stands for a running task that holds the same slot and can
+/// still send. No count of `Arc` holders can see that second holder, so an unlicensed verdict must
+/// decline; only `may_fault_unproven` (every peer parked) may license it.
+#[test]
+fn a_shared_channel_slot_never_proves_a_deadlock() {
+    let s = mk_sched(1);
+    let mut heap = Heap::new();
+    let ch = empty_core();
+    let key = core_key(&ch);
+    let held = heap.alloc(Obj::Channel(Arc::clone(&ch)));
+    let mut f = mk_fiber(0);
+    f.ctx = CtxBox::unlisted(FiberCtx {
+        stack: vec![Value::obj(held)],
+        ..FiberCtx::default()
+    });
+    s.seed(vec![f]);
+    let f = take_run(&s);
+    s.park(key, ch, f);
+    let mut c = s.lock();
     assert_eq!(
-        c.flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, false),
-        None
+        c.flag_deadlock_leaves(&s.deadlock_err, false),
+        None,
+        "a slot another task may hold proves nothing"
     );
     assert_eq!(c.parked_n, 1);
     assert!(!c.terminate);
-    assert_eq!(
-        c.flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true),
-        Some(true)
-    );
-    assert!(c.terminate);
+    let _ = held;
 }
 
 /// TICKET-129 (W13-5 residual) — `may_fault_unproven` must decline while a peer sched still has
@@ -1174,10 +1199,7 @@ fn mnsched_may_fault_unproven_waits_for_a_peer_with_runnable_work() {
     // B keeps its seeded fiber runnable — never taken, so B's own `running`/`runnable` shows work.
     b.seed(vec![mk_fiber(0)]);
 
-    assert!(
-        !a.may_fault_unproven(&Heap::new()),
-        "B still has runnable work"
-    );
+    assert!(!a.may_fault_unproven(), "B still has runnable work");
 }
 
 /// TICKET-129 (W13-5 residual) — when every sched in the run is parked and unproven, the fallback
@@ -1202,10 +1224,7 @@ fn mnsched_may_fault_unproven_when_every_peer_is_parked_and_unproven() {
     let fb = take_run(&b);
     b.park(core_key(&chan), Arc::clone(&chan), fb);
 
-    assert!(
-        a.may_fault_unproven(&Heap::new()),
-        "every sched is parked and unproven"
-    );
+    assert!(a.may_fault_unproven(), "every sched is parked and unproven");
 }
 
 /// TICKET-103 — leaf-ness is a FAMILY property. `s1`'s continuation `c1` holds owner B, blocked
@@ -1226,7 +1245,7 @@ fn flag_deadlock_leaves_reads_leafness_over_the_joined_family() {
     c.scopes[c1].owners_blocked = 1;
     c.scopes[s2].joins_blocked = 1;
     let r = c
-        .flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true)
+        .flag_deadlock_leaves(&s.deadlock_err, true)
         .expect("unproven_ok never declines");
     assert!(!r);
     assert!(
@@ -1259,7 +1278,7 @@ fn flag_deadlock_leaves_faults_every_scope_of_the_joined_family() {
     c.scopes[0].owners_blocked = 1;
     c.scopes[s1].joins_blocked = 1;
     let r = c
-        .flag_deadlock_leaves(&Heap::new(), &s.deadlock_err, true)
+        .flag_deadlock_leaves(&s.deadlock_err, true)
         .expect("unproven_ok never declines");
     assert!(!r);
     assert!(matches!(c.slots[2], Some(TaskOutcome::Deadlocked { .. })));
@@ -1511,7 +1530,7 @@ fn flag_deadlock_leaves_wakes_the_join_parked_owner_of_the_faulted_leaf() {
     let _ch = park_join_child(&s, s1);
     let mut c = s.lock();
     let r = s
-        .flag_leaves_and_wake(&Heap::new(), &mut c)
+        .flag_leaves_and_wake(&mut c)
         .expect("an empty registry licenses the fault");
     assert!(!r);
     assert!(matches!(c.slots[1], Some(TaskOutcome::Deadlocked { .. })));
