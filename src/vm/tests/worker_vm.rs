@@ -123,7 +123,7 @@ fn worker_shares_the_one_stdin_source() {
     );
 }
 
-/// A worker's stdout is captured in ITS `out` and returned on the `WorkerResult` (decision F:
+/// A worker's stdout is captured in ITS `out` and returned on the `IsolatedRun` (decision F:
 /// buffer-per-worker), and never leaks into the parent's `out`. The return value crosses back too.
 #[test]
 fn worker_returns_value_and_out() {

@@ -1,23 +1,18 @@
 //! B3.1 — the shared cores for `Channel` / `Shared` / `Executor`, lifted OUT of the GC heap.
 //!
-//! Before B3.1 a `Channel`'s queue (etc.) lived *inside* a heap [`Obj`](super::heap::Obj) and held
-//! [`Value`](super::value::Value)s (i.e. `GcRef`s into that one heap), so it could never be shared
-//! across threads. B3.1 moves the data into an `Arc<…Core>` that lives outside every heap and holds
-//! [`WireValue`](super::wire::WireValue) (the serialized airlock form). The heap keeps only a
-//! *handle* — `Obj::Channel(Arc<ChannelCore>)` — and two handles (e.g. one per task) can point at the
-//! same core. This is the structural move that lets B3.3 share a core across real OS threads; at B3.1
-//! everything is still single-thread and cooperative, so the `Mutex` never actually contends.
+//! The heap keeps only a *handle* — `Obj::Channel(Arc<ChannelCore>)` — and two handles (e.g. one
+//! per task) can point at the same core, across OS threads. M3.2: a channel queue and an `Atomic`
+//! hold [`Value`]s of the run's one heap, so a send or a store copies one word; the collector
+//! walks a core's values under its lock (`Heap::children`).
 //!
 //! A `Condvar` (for real blocking `recv`) was added at B3.3; a `closed` flag (for `Channel.close()`)
-//! lives alongside the queue under [`ChannelCore::q`]'s lock (see [`ChanState`]). Cooperative `recv`
-//! parks the *fiber* (it does not block on a primitive), so the condvar is dead on that engine.
+//! lives alongside the queue under [`ChannelCore::q`]'s lock (see [`ChanState`]).
 
-use super::value::GcRef;
-use super::wire::{WireNode, WireValue};
+use super::value::{GcRef, Value};
 use crate::lexer::Span;
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -363,8 +358,7 @@ fn is_me(p: &Arc<Pending>, me: Option<&Arc<Pending>>) -> bool {
 struct Offer {
     p: Arc<Pending>,
     arm: u32,
-    sum: usize,
-    w: WireValue,
+    v: Value,
 }
 
 /// A blocked rendezvous receiver's place (TICKET-185): a sender that finds it commits it and
@@ -373,13 +367,13 @@ struct Offer {
 struct Slot {
     p: Arc<Pending>,
     arm: u32,
-    got: Option<(usize, WireValue)>,
+    got: Option<Value>,
 }
 
-/// TICKET-194 — what a `recv` on a channel gets WITHOUT waiting ([`ChannelCore::recv_ready`]).
+/// TICKET-194 — what a `recv` on a channel gets WITHOUT waiting (`Vm::recv_ready`).
 pub enum RecvReady {
     /// A buffered value or a live sender's offer, taken.
-    Value(WireValue),
+    Value(Value),
     /// A tripped `done()` latch or a fired `timer(ms)`: the receive yields `true`.
     Fired,
     /// Closed and drained.
@@ -400,23 +394,6 @@ impl ChannelCore {
         }
         self.cv.notify_all();
     }
-
-    /// TICKET-194 — THE ready decision of a channel receive, made in the caller's `core.q` hold `q`:
-    /// a value > a tripped latch > a fired timer > closed.
-    pub fn recv_ready(&self, q: &mut ChanState) -> RecvReady {
-        if let Some(w) = q.pop() {
-            return RecvReady::Value(w);
-        }
-        if self.done_latch.load(Ordering::Relaxed)
-            || self.timer.is_some_and(|d| std::time::Instant::now() >= d)
-        {
-            return RecvReady::Fired;
-        }
-        if q.closed {
-            return RecvReady::Closed;
-        }
-        RecvReady::Wait
-    }
 }
 
 /// What one `send` attempt did ([`ChanState::send`]).
@@ -430,70 +407,69 @@ pub enum SendOutcome {
     Closed,
 }
 
+/// The locked interior of a [`ChannelCore`]: the buffer, the offers, the slots and the `closed`
+/// flag. M3.2: every message is a [`Value`] of the run's one heap. The collector reads them all
+/// under this lock (`Heap::children`, [`iter`](Self::iter)); no thread holds the lock across a
+/// safepoint, a GC door or a user call, so a collection that waits for it never waits for a
+/// stopped thread.
 #[derive(Debug, Default)]
 pub struct ChanState {
-    /// PRIVATE on purpose (W6-7/W6-10): every mutation must go through the methods below so the
-    /// cached GC summary (`bytes`/`dirty`) can never go stale. A stale `dirty == false` would stop
-    /// the GC tracing a live handle queued in this channel — a use-after-free. Rust module privacy
-    /// is what makes "did I catch every push site?" a compile error instead of a code review.
-    ///
-    /// Each message carries its own [`wire_summary`] byte count so `pop` is O(1): these queues are
-    /// popped under the GLOBAL `MnSched` lock (`sched.rs` demote paths), and re-deriving the count
-    /// on removal would put an O(payload) walk in that critical section.
-    queue: VecDeque<(usize, WireValue)>,
+    queue: VecDeque<Value>,
     /// TICKET-185 — offers of blocked senders (a cap-0 channel, or a FULL bounded one).
     sendq: VecDeque<Offer>,
     /// TICKET-185 — slots of blocked cap-0 receivers.
     recvq: VecDeque<Slot>,
-    /// Approximate owned bytes of every value held here (buffer, offers, filled slots — see
-    /// [`wire_summary`]) — the off-heap storage `Heap::live_bytes` could not see before W6-10.
-    bytes: usize,
-    /// True while ANY held value can root a heap object (a `Handle` or a nested core). Cleared
-    /// only when all three queues empty, so it is conservative (over-walk = safe) and self-healing.
-    dirty: bool,
     pub closed: bool,
     /// TICKET-219 — set by [`seal`](Self::seal): the last buffered value is the handle's outcome.
     sealed: bool,
+    /// M3.2 — the `Err` text of a Task outcome sealed by a party with no heap at hand (the job
+    /// transition under the sched lock, [`seal_err`](Self::seal_err)). The first receive builds
+    /// it into the sealed value (`Vm::recv_ready`), so every reader then shares one object.
+    unbuilt: Option<Box<str>>,
 }
 
 impl ChanState {
-    fn add(&mut self, sum: (usize, bool)) {
-        self.bytes += sum.0;
-        self.dirty |= sum.1;
+    /// Buffer a message.
+    pub fn push(&mut self, v: Value) {
+        self.queue.push_back(v);
     }
 
-    fn sub(&mut self, b: usize) {
-        self.bytes = self.bytes.saturating_sub(b);
-        if self.queue.is_empty() && self.sendq.is_empty() && self.recvq.is_empty() {
-            self.bytes = 0;
-            self.dirty = false;
-        }
-    }
-
-    /// Buffer a message with its PRE-COMPUTED [`wire_summary`].
-    ///
-    /// The summary MUST be computed by the caller **before taking any lock**: `send_commit` holds
-    /// `MnSched::core` — the process-wide lock that serializes every fiber's park/wake/finish —
-    /// across this call, and `wire_summary` is O(payload). Global-lock hold time must not scale
-    /// with user payload size.
-    pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
-        self.add(sum);
-        self.queue.push_back((sum.0, w));
-    }
-
-    /// TICKET-219 — write a handle job's one outcome: buffer `w` as the last value and close the
+    /// TICKET-219 — write a handle job's one outcome: buffer `v` as the last value and close the
     /// channel. The first writer wins under `core.q`: a second seal returns `false` and changes
-    /// nothing. Every receive of a sealed channel copies `w` and takes nothing
-    /// ([`pop_for`](Self::pop_for)), so `len()` stays 1 and every reader sees the same outcome.
-    pub fn seal(&mut self, sum: (usize, bool), w: WireValue) -> bool {
+    /// nothing. Every receive of a sealed channel reads `v` and takes nothing
+    /// ([`pop_for`](Self::pop_for)), so `len()` stays 1 and every reader shares the one outcome.
+    pub fn seal(&mut self, v: Value) -> bool {
         if self.sealed {
             return false;
         }
-        self.add(sum);
-        self.queue.push_back((sum.0, w));
+        self.queue.push_back(v);
         self.sealed = true;
         self.closed = true;
         true
+    }
+
+    /// [`seal`](Self::seal) with the outcome `Err(msg)`, written as text: the caller holds no
+    /// heap. The first receive builds the value ([`build_outcome`](Self::build_outcome)).
+    pub fn seal_err(&mut self, msg: &str) -> bool {
+        if self.sealed {
+            return false;
+        }
+        self.unbuilt = Some(msg.into());
+        self.sealed = true;
+        self.closed = true;
+        true
+    }
+
+    /// The `Err` text of a sealed outcome that no receive built yet.
+    pub fn unbuilt_outcome(&self) -> Option<&str> {
+        self.unbuilt.as_deref()
+    }
+
+    /// Store `v`, built from [`unbuilt_outcome`](Self::unbuilt_outcome), as the sealed outcome.
+    pub fn build_outcome(&mut self, v: Value) {
+        if self.unbuilt.take().is_some() {
+            self.queue.push_back(v);
+        }
     }
 
     pub fn is_sealed(&self) -> bool {
@@ -501,13 +477,11 @@ impl ChanState {
     }
 
     /// Publish a blocked sender's value as `p`'s offer on `arm`.
-    pub fn offer(&mut self, p: &Arc<Pending>, arm: u32, sum: (usize, bool), w: WireValue) {
-        self.add(sum);
+    pub fn offer(&mut self, p: &Arc<Pending>, arm: u32, v: Value) {
         self.sendq.push_back(Offer {
             p: Arc::clone(p),
             arm,
-            sum: sum.0,
-            w,
+            v,
         });
     }
 
@@ -520,14 +494,9 @@ impl ChanState {
         });
     }
 
-    /// Hand `w` to the first live, unfilled slot that is not `me`'s, committing it. Dead slots are
-    /// dropped on the way. `Err(w)` when no such slot exists.
-    pub fn give(
-        &mut self,
-        sum: (usize, bool),
-        w: WireValue,
-        me: Option<&Arc<Pending>>,
-    ) -> Result<(), WireValue> {
+    /// Hand `v` to the first live, unfilled slot that is not `me`'s, committing it. Dead slots are
+    /// dropped on the way. `false` when no such slot exists.
+    pub fn give(&mut self, v: Value, me: Option<&Arc<Pending>>) -> bool {
         let mut i = 0;
         while i < self.recvq.len() {
             let s = &self.recvq[i];
@@ -536,13 +505,12 @@ impl ChanState {
                 continue;
             }
             if s.p.try_commit(s.arm) {
-                self.recvq[i].got = Some((sum.0, w));
-                self.add(sum);
-                return Ok(());
+                self.recvq[i].got = Some(v);
+                return true;
             }
             self.recvq.remove(i);
         }
-        Err(w)
+        false
     }
 
     /// THE send decision (TICKET-185), made in one `core.q` hold. In order: closed; unbounded
@@ -551,31 +519,31 @@ impl ChanState {
     pub fn send(
         &mut self,
         cap: Option<usize>,
-        sum: (usize, bool),
-        w: WireValue,
+        v: Value,
         offer: Option<(&Arc<Pending>, u32)>,
     ) -> SendOutcome {
         if self.closed {
             return SendOutcome::Closed;
         }
-        let w = match cap {
+        match cap {
             None => {
-                self.push(sum, w);
+                self.push(v);
                 return SendOutcome::Sent;
             }
-            Some(0) => match self.give(sum, w, offer.map(|(p, _)| p)) {
-                Ok(()) => return SendOutcome::Sent,
-                Err(w) => w,
-            },
+            Some(0) => {
+                if self.give(v, offer.map(|(p, _)| p)) {
+                    return SendOutcome::Sent;
+                }
+            }
             Some(n) if self.queue.len() < n => {
-                self.push(sum, w);
+                self.push(v);
                 return SendOutcome::Sent;
             }
-            Some(_) => w,
-        };
+            Some(_) => {}
+        }
         match offer {
             Some((p, arm)) => {
-                self.offer(p, arm, sum, w);
+                self.offer(p, arm, v);
                 SendOutcome::Offered
             }
             None => SendOutcome::Full,
@@ -585,25 +553,21 @@ impl ChanState {
     /// Take the next value: the buffer front (then move the first live offer into the freed
     /// place — Go's recv refill), else the first live offer that is not `me`'s. Each offer taken
     /// is committed by CAS; dead offers are dropped on the way.
-    pub fn pop_for(&mut self, me: Option<&Arc<Pending>>) -> Option<WireValue> {
+    pub fn pop_for(&mut self, me: Option<&Arc<Pending>>) -> Option<Value> {
         if self.sealed {
-            return self.queue.back().map(|(_, w)| w.clone());
+            return self.queue.back().copied();
         }
-        if let Some((b, w)) = self.queue.pop_front() {
-            self.bytes = self.bytes.saturating_sub(b);
-            if let Some((sum, ow)) = self.take_offer(me) {
-                self.queue.push_back((sum, ow));
+        if let Some(v) = self.queue.pop_front() {
+            if let Some(ov) = self.take_offer(me) {
+                self.queue.push_back(ov);
             }
-            self.sub(0);
-            return Some(w);
+            return Some(v);
         }
-        let (sum, w) = self.take_offer(me)?;
-        self.sub(sum);
-        Some(w)
+        self.take_offer(me)
     }
 
     /// Commit and remove the first live offer that is not `me`'s; dead offers are dropped.
-    fn take_offer(&mut self, me: Option<&Arc<Pending>>) -> Option<(usize, WireValue)> {
+    fn take_offer(&mut self, me: Option<&Arc<Pending>>) -> Option<Value> {
         let mut i = 0;
         while i < self.sendq.len() {
             if is_me(&self.sendq[i].p, me) {
@@ -612,46 +576,29 @@ impl ChanState {
             }
             let o = self.sendq.remove(i).unwrap();
             if o.p.try_commit(o.arm) {
-                return Some((o.sum, o.w));
+                return Some(o.v);
             }
-            self.bytes = self.bytes.saturating_sub(o.sum);
         }
         None
     }
 
-    pub fn pop(&mut self) -> Option<WireValue> {
+    pub fn pop(&mut self) -> Option<Value> {
         self.pop_for(None)
     }
 
     /// Remove `p`'s filled slot and return its value.
-    pub fn take(&mut self, p: &Arc<Pending>) -> Option<WireValue> {
+    pub fn take(&mut self, p: &Arc<Pending>) -> Option<Value> {
         let i = self
             .recvq
             .iter()
             .position(|s| s.got.is_some() && Arc::ptr_eq(&s.p, p))?;
-        let (b, w) = self.recvq.remove(i)?.got?;
-        self.sub(b);
-        Some(w)
+        self.recvq.remove(i)?.got
     }
 
     /// Remove every offer and slot of `p`.
     pub fn withdraw(&mut self, p: &Arc<Pending>) {
-        let mut freed = 0;
-        self.sendq.retain(|o| {
-            let mine = Arc::ptr_eq(&o.p, p);
-            if mine {
-                freed += o.sum;
-            }
-            !mine
-        });
-        self.recvq.retain(|s| {
-            let mine = Arc::ptr_eq(&s.p, p);
-            if mine && let Some((b, _)) = &s.got {
-                freed += b;
-            }
-            !mine
-        });
-        self.sub(freed);
+        self.sendq.retain(|o| !Arc::ptr_eq(&o.p, p));
+        self.recvq.retain(|s| !Arc::ptr_eq(&s.p, p));
     }
 
     /// `close()` (TICKET-185): in this one hold, set `closed`, close every offer (each such sender
@@ -659,21 +606,10 @@ impl ChanState {
     /// value was delivered before the close.
     pub fn close(&mut self) {
         self.closed = true;
-        let mut freed = 0;
         for o in self.sendq.drain(..) {
             o.p.try_close();
-            freed += o.sum;
         }
         self.recvq.retain(|s| s.got.is_some());
-        self.sub(freed);
-    }
-
-    pub fn clear(&mut self) {
-        self.queue.clear();
-        self.sendq.clear();
-        self.recvq.clear();
-        self.bytes = 0;
-        self.dirty = false;
     }
 
     /// The buffered message count — Go's `len`: offers and slots never count.
@@ -686,27 +622,25 @@ impl ChanState {
         self.queue.is_empty()
     }
 
-    /// Every value held here — buffer, offers and filled slots — for the GC trace.
-    pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
+    /// Every value held here — buffer, offers and filled slots — for the collector.
+    pub fn iter(&self) -> impl Iterator<Item = Value> + '_ {
         self.queue
             .iter()
-            .map(|(_, w)| w)
-            .chain(self.sendq.iter().map(|o| &o.w))
-            .chain(
-                self.recvq
-                    .iter()
-                    .filter_map(|s| s.got.as_ref().map(|(_, w)| w)),
-            )
+            .copied()
+            .chain(self.sendq.iter().map(|o| o.v))
+            .chain(self.recvq.iter().filter_map(|s| s.got))
     }
 
-    /// Cached GC summary of the held values: `(approximate owned bytes, can-root-a-heap-object)`.
-    pub fn summary(&self) -> (usize, bool) {
-        (self.bytes, self.dirty)
+    /// The bytes this state holds beside the heap objects of its values: one word per value.
+    pub fn held_bytes(&self) -> usize {
+        (self.queue.capacity() + self.sendq.len() + self.recvq.len()) * std::mem::size_of::<Value>()
     }
 
-    /// Would a `recv` by `me` take a value now? A buffered value, or a live offer of another party.
+    /// Would a `recv` by `me` take a value now? A buffered value, a sealed outcome, or a live
+    /// offer of another party.
     pub fn recv_ready_for(&self, me: Option<&Arc<Pending>>) -> bool {
         !self.queue.is_empty()
+            || self.sealed
             || self
                 .sendq
                 .iter()
@@ -737,7 +671,7 @@ pub enum Settled {
     /// Its offer on this arm was taken.
     Sent(u32),
     /// Its slot on this arm was filled with this value.
-    Got(u32, WireValue),
+    Got(u32, Value),
 }
 
 /// TICKET-185 — a blocked party's [`Pending`] and every channel it has entries on, as
@@ -929,44 +863,38 @@ impl RwSharedState {
     }
 }
 
-/// `Atomic[T]` core: the cross-task atomic box. Like [`SharedCore`] (one boxed wire value behind a
-/// `Mutex`, reachable across threads via the `Arc` handle), but presents atomic-operation methods —
+/// `Atomic[T]` core: the cross-task atomic box. One [`Value`] of the run's one heap behind a
+/// `Mutex`, reachable across threads via the `Arc` handle, with atomic-operation methods —
 /// `load`/`store`/`exchange`/`cas` and (numeric `T`) `add`/`sub`. Each method is a single
 /// lock-op-unlock, so the read-modify-write of `add`/`sub`/`exchange`/`cas` is atomic across threads
 /// without a separate `update_lock` (no user closure runs under the lock, unlike `Shared.update`).
-#[derive(Debug, Default)]
+/// M3.2: a store copies one word (Go `atomic.Value`); the collector reads `v` under the lock.
+#[derive(Debug)]
 pub struct AtomicCore {
-    pub v: Mutex<WireValue>,
-    /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s lock by every store.
-    pub summary: WireSummary,
+    pub v: Mutex<Value>,
 }
 
 impl AtomicCore {
-    /// Replace the payload AND refresh the cached GC summary under the same lock — see
-    /// [`SharedCore::store`] (the walk is hoisted OFF the lock for the same reason).
-    pub fn store(&self, w: WireValue) {
-        let sum = wire_summary(&w);
-        let mut g = self.v.lock().unwrap();
-        self.summary.store(sum.0, sum.1);
-        *g = w;
+    pub fn new(v: Value) -> Self {
+        AtomicCore { v: Mutex::new(v) }
     }
 
-    /// Replace the payload through an ALREADY-held guard (the `exchange` / `cas` / `add`|`sub`
-    /// read-modify-write paths, which must not drop the lock between compare and swap), returning
-    /// the previous value. Refreshes the summary in the same critical section.
-    ///
-    /// `sum` is the caller's PRE-COMPUTED [`wire_summary`] of `w` — passed in, not derived here, so
-    /// the O(payload) walk can sit OUTSIDE the lock wherever the new value is known before it is
-    /// taken (`exchange`). The two RMW paths that genuinely build their value under the lock
-    /// (`cas`'s `to_wire` is already O(payload) under it; `add`/`sub` are scalars) compute it inline.
-    pub fn store_guarded(&self, g: &mut WireValue, w: WireValue, sum: (usize, bool)) -> WireValue {
-        self.summary.store(sum.0, sum.1);
-        std::mem::replace(g, w)
+    /// Lock the value. No thread holds it across a safepoint, a GC door or a user call.
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, Value> {
+        self.v.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn load(&self) -> Value {
+        *self.lock()
+    }
+
+    pub fn store(&self, v: Value) {
+        *self.lock() = v;
     }
 }
 
 /// `AtomicInt` core: the monomorphic, LOCK-FREE int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
-/// Go `atomic.Int64` style). Unlike [`AtomicCore`] (a `Mutex<WireValue>` holding an arbitrary sendable
+/// Go `atomic.Int64` style). Unlike [`AtomicCore`] (a `Mutex<Value>` holding an arbitrary
 /// value), the value is statically int, so it can be a raw `std::sync::atomic::AtomicI64` — no lock, no
 /// runtime type-sniffing, no wider-T hole. `SeqCst` on every op preserves the sequential consistency the
 /// Mutex gave — every op still appears to happen in some single global order. `add`/`sub` use a
@@ -1176,91 +1104,32 @@ impl Drop for WriterCore {
     }
 }
 
-/// The mutable inside of an [`ExecutorCore`]: the pending-task FIFO + the shut flag, behind one lock
-/// (one `Mutex` for both, so `submit`/`shutdown` see a consistent view and to avoid a `Mutex<bool>`).
+/// The mutable inside of an [`ExecutorCore`]: the shut flag. `submit` starts every job at once
+/// (decision D3), so the Executor holds no queue of its own.
 #[derive(Debug, Default)]
 pub struct ExecState {
-    /// PRIVATE on purpose — see [`ChanState::queue`].
-    queue: VecDeque<(usize, WireValue)>,
-    bytes: usize,
-    dirty: bool,
     pub shut: bool,
 }
 
-impl ExecState {
-    /// The eager (M:N) engine dispatches at `submit` rather than filling this queue (decision D3),
-    /// so it is permanently empty — but `len`/`iter`/`summary`/`clear` below are still live: the
-    /// `Executor` `Display` impl, the GC live-bytes walk and rooting pass, and `cancel` all
-    /// read or reset it unconditionally rather than special-case an executor that could — in a build
-    /// with a queueing decision — actually hold work. `push`/`pop`/`take_all` had no such reader left
-    /// once the queue-at-submit path was removed and are deleted; `is_empty` is kept as a trivial
-    /// wrapper purely for `clippy::len_without_is_empty` — it has no caller of its own.
-    pub fn clear(&mut self) {
-        self.queue.clear();
-        self.bytes = 0;
-        self.dirty = false;
-    }
-
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
-        self.queue.iter().map(|(_, w)| w)
-    }
-
-    /// Cached GC summary of the queued tasks: `(approximate owned bytes, can-root-a-heap-object)`.
-    pub fn summary(&self) -> (usize, bool) {
-        (self.bytes, self.dirty)
-    }
-}
-
-/// W7-26 — one finished job's `(owned bytes, holds a nested core)`, the [`wire_summary`] of a
-/// [`TaskOutcome`](super::TaskOutcome). Every variant owns two buffered-output `Vec<u8>`s (W7-5c
-/// flushes them at the slot's task-order position, so they are retained until `shutdown`); only
-/// `Done` also owns a return value.
+/// W7-26 — the bytes one finished job's [`TaskOutcome`](super::TaskOutcome) holds outside every
+/// heap: two buffered-output `Vec<u8>`s (W7-5c flushes them at the slot's task-order position, so
+/// they are retained until `shutdown`). A job's return value is no part of it: `_run_outcome`
+/// seals it into the Task channel, a heap value (M3.2).
 ///
-/// Charged UNCONDITIONALLY, unlike the `mem_cap != 0` gates on `Vm::to_wire_crossable`'s pacing
-/// charge and `live_bytes`'s nested-core recursion. Those fire per-store / per-sweep; this fires
-/// once per finished job, beside a thread handoff and a condvar notify, right after that job's own
-/// `O(payload)` `to_wire` — so gating it would buy nothing and would make `live_bytes` mean two
-/// different things depending on a flag (both ancestors keep accounting live and the *limit*
-/// separate: Go's `runtime.MemStats` vs `GOMEMLIMIT`). [`ChanState::push`] charges unconditionally
-/// for the same reason.
-///
-/// Called OFF the `eager` lock (see [`the Executor's sched::finish`]) — the walk is O(result).
-pub(super) fn outcome_summary(o: &super::TaskOutcome) -> (usize, bool) {
+/// Charged UNCONDITIONALLY: both ancestors keep accounting live and the *limit* separate (Go's
+/// `runtime.MemStats` vs `GOMEMLIMIT`). Called OFF the `eager` lock (see the Executor's
+/// `sched::finish`).
+pub(super) fn outcome_summary(o: &super::TaskOutcome) -> usize {
     use super::TaskOutcome as T;
-    let (out, stderr, value) = match o {
-        T::Done(r) => (&r.out, &r.stderr, Some(&r.value)),
+    let (out, stderr) = match o {
+        T::Done(r) => (&r.out, &r.stderr),
         T::Cancelled { out, stderr }
         | T::CancelledFault { out, stderr, .. }
         | T::Exit { out, stderr, .. }
         | T::Fault { out, stderr, .. }
-        | T::Deadlocked { out, stderr, .. } => (out, stderr, None),
+        | T::Deadlocked { out, stderr, .. } => (out, stderr),
     };
-    let mut acc = (
-        std::mem::size_of::<super::TaskOutcome>() + out.capacity() + stderr.capacity(),
-        false,
-    );
-    if let Some(w) = value {
-        // The "no `Heap::children` eager arm" claim is an INVARIANT, not luck: a job's return value
-        // crossed via `to_wire_crossable`, whose `ensure_crossable` rejects a `Handle`. Fenced here
-        // rather than merely reasoned about in a comment — if this ever fires, the eager half can
-        // root a parent-heap object and `children` needs the arm `live_bytes` just gained.
-        debug_assert!(
-            !w.has_handle(),
-            "an eager job result carries a parent-heap Handle — Heap::children needs an eager arm"
-        );
-        let (b, d) = wire_summary(w);
-        acc.0 += b;
-        acc.1 |= d;
-    }
-    acc
+    std::mem::size_of::<super::TaskOutcome>() + out.capacity() + stderr.capacity()
 }
 
 /// W7-26r — the `--max-heap` verdict a finished task's own thread reaches when the RETAINED backlog
@@ -1337,7 +1206,7 @@ pub(super) fn halt_over_backlog(
 
 /// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. `submit` runs EAGERLY
 /// (the job goes straight to the pool, matching Python's `ThreadPoolExecutor` / Java's
-/// `ExecutorService`) and [`ExecState::queue`] stays empty — the pending work lives in `eager`.
+/// `ExecutorService`); the pending work lives in its scope's sched.
 /// `shut` lives in the **shared** core, so any handle aliasing this core sees the same shutdown state
 /// (this is what prevents a `from_wire`'d alias from being drained twice at program exit).
 #[derive(Default)]
@@ -1439,519 +1308,42 @@ impl std::fmt::Debug for ExecutorCore {
 /// "reap only those alive at exit" snapshot has always been push-only too.
 pub type ExecRegistry = Arc<Mutex<Vec<Arc<ExecutorCore>>>>;
 
-/// A core's `Arc` pointer identity, for the mark walk's visited-core set. `PartialEq`/`Hash` are
-/// hand-written rather than derived so the `#[cfg(test)]` probe counter in each has exactly one place
-/// to live (TICKET-049) — see [`SeenCores`].
-#[derive(Clone, Copy, Eq, Debug)]
-pub struct CoreId(pub usize);
-
-impl PartialEq for CoreId {
-    fn eq(&self, other: &Self) -> bool {
-        // TICKET-049 — charging the probe HERE, in the key type, means every dedup implementation
-        // (`contains`, `iter().any()`, a hand-written loop) is charged alike; a counter bumped only
-        // inside `SeenCores::insert` would stay green through a revert to a linear scan.
-        #[cfg(test)]
-        CORE_PROBES.with(|c| c.set(c.get() + 1));
-        self.0 == other.0
-    }
-}
-
-impl std::hash::Hash for CoreId {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        // TICKET-049 — see the comment on `eq`: charging here too means a hash-set dedup is charged
-        // once per insert attempt, matching a linear scan's once-per-comparison charge.
-        #[cfg(test)]
-        CORE_PROBES.with(|c| c.set(c.get() + 1));
-        self.0.hash(h);
-    }
-}
-
-/// The mark walk's visited-core set. The ONE membership operation (`insert`) lives at this single
-/// site so a linear-scan revert — deliberately measured at TICKET-049 step 7 — is a one-line edit
-/// here, not a six-site rewrite across every `WireValue` core arm.
-#[derive(Default, Debug)]
-pub struct SeenCores(super::fxhash::FxHashSet<CoreId>);
-
-impl SeenCores {
-    /// Build a set already containing `ptr` (the mark walk's own core, seeded before it walks its
-    /// payload).
-    pub fn with(ptr: usize) -> Self {
-        let mut s = Self::default();
-        s.insert(ptr);
-        s
-    }
-
-    /// Insert `ptr`; `true` iff it was not already present (same contract as `HashSet::insert`).
-    pub fn insert(&mut self, ptr: usize) -> bool {
-        self.0.insert(CoreId(ptr))
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// TICKET-049 — count of `CoreId::eq`/`CoreId::hash` calls, i.e. identity-comparison probes the
-    /// mark walk's dedup performs. Thread-local because `cargo test --lib` runs ~4 448 tests
-    /// concurrently at `RUST_TEST_THREADS=4`, and a process-global counter would be polluted by any
-    /// other test marking a core on another thread at the same time.
-    static CORE_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub fn probe_reset() {
-    CORE_PROBES.with(|c| c.set(0));
-}
-
-#[cfg(test)]
-pub fn probes() -> u64 {
-    CORE_PROBES.with(|c| c.get())
-}
-
-/// B3.1 GC support — collect every `GcRef` reachable from a core's wire contents into `out`, so the
-/// heap's `children()` can keep those heap objects rooted. A core's `WireValue`s can still carry
-/// `Handle(GcRef)`s into the live heap (an `Executor` queues `Closure` handles — closures can't cross
-/// by value until B3.3/G1; a `Channel[str]` now queues owned bytes (B3.3a), rooting nothing).
-///
-/// It **recurses into nested cores** (a `Channel` stored inside a `Shared`, etc.): a nested core may
-/// be reachable *only* through its parent core (its own heap handle already swept), so its embedded
-/// handles would dangle if we stopped at the boundary. `seen` (core identities by `Arc` pointer)
-/// breaks the `Arc` reference cycles decision E warns about — a cycle is walked once, not forever.
-pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut SeenCores) {
-    // ONE core lock at a time — see the ABBA note on `collect_gcrefs_structural`. Callers that
-    // already hold a core's guard must NOT use this entry point: they call
-    // `collect_gcrefs_structural` under their guard, drop it, then `drain_pending_cores`.
-    let mut pending: Vec<WireValue> = Vec::new();
-    collect_gcrefs_structural(w, out, seen, &mut pending);
-    drain_pending_cores(out, seen, &mut pending);
-}
-
-/// Drain the nested cores queued by [`collect_gcrefs_structural`], locking exactly ONE at a time.
-///
-/// **Call this with NO core guard held.** `Heap::children` locks a core to read its payload, so if it
-/// drained while still holding that guard it would hold two core locks at once and the ABBA window
-/// stays open — which is exactly what a first attempt at this fix measured: unchanged at 8/40 hangs.
-///
-/// **Why dropping the guard between cores cannot UNDER-ROOT.** Splitting the walk means core X and a
-/// nested core Y are no longer read under one atomic pair of locks, so in principle a store could move
-/// a `Handle` from Y to X after X was walked and before Y is — invisible to both halves. That cannot
-/// happen for a handle belonging to the heap being marked: heaps are **per-fiber/per-worker**
-/// (`Vm::heap`, swapped by `Vm::swap_ctx`) and a collection runs **synchronously on the owning worker**
-/// from its own instruction loop (`Vm::collect` at `exec.rs`'s `should_collect()` check), so while this
-/// heap is marking, the fiber that owns it is not running user code and cannot be mid-move. Another
-/// worker concurrently moving handles is moving handles of ITS heap, which this mark does not root.
-/// What the old code bought with the second lock was cross-core atomicity that this invariant already
-/// provides — at the cost of the deadlock above. Probed as well as argued: a 400-node cyclic graph
-/// under 60k allocations, a diamond (one node reachable by two paths), and handles moved between cores
-/// under concurrent mutation all report 0 corruption on both profiles at 2/4/8 workers, with the
-/// `debug_assert` in `Heap::mark_core_payload` re-deriving the verdict on every debug-build pass.
-pub fn drain_pending_cores(
-    out: &mut Vec<GcRef>,
-    seen: &mut SeenCores,
-    pending: &mut Vec<WireValue>,
-) {
-    while let Some(core) = pending.pop() {
-        match &core {
-            WireValue::Channel(c) => {
-                let q = c.q.lock().unwrap();
-                for w in q.iter() {
-                    collect_gcrefs_structural(w, out, seen, pending);
-                }
-            }
-            // M1.7 — a box's state is objects of the run's one heap, reached through the box.
-            WireValue::Shared(c) => c.state.roots_into(out),
-            WireValue::RwShared(c) => c.state.roots_into(out),
-            WireValue::Atomic(c) => {
-                let v = c.v.lock().unwrap();
-                collect_gcrefs_structural(&v, out, seen, pending);
-            }
-            WireValue::Executor(c) => {
-                let q = c.inner.lock().unwrap();
-                for w in q.iter() {
-                    collect_gcrefs_structural(w, out, seen, pending);
-                }
-            }
-            // `pending` only ever receives the five core variants above.
-            WireValue::Int(_)
-            | WireValue::Float(_)
-            | WireValue::Bool(_)
-            | WireValue::Nil
-            | WireValue::List { .. }
-            | WireValue::Tuple { .. }
-            | WireValue::Map { .. }
-            | WireValue::Set { .. }
-            | WireValue::Str(_)
-            | WireValue::Bytes(_)
-            | WireValue::ByteArray(_)
-            | WireValue::Iter { .. }
-            | WireValue::Struct { .. }
-            | WireValue::Enum { .. }
-            | WireValue::Cell { .. }
-            | WireValue::Backref(_)
-            | WireValue::Handle(_)
-            | WireValue::AtomicInt(_)
-            | WireValue::Socket(_)
-            | WireValue::Listener(_)
-            | WireValue::Writer(_)
-            | WireValue::Reader(_)
-            | WireValue::Ptr(_)
-            | WireValue::Builtin(_)
-            | WireValue::Native { .. }
-            | WireValue::Cffi(_)
-            | WireValue::Closure { .. }
-            | WireValue::Func { .. }
-            | WireValue::Generator { .. } => {}
-        }
-        // The guard above is dropped HERE, before the next core is locked. That is the whole fix.
-    }
-}
-
-/// The lock-free half of [`collect_core_gcrefs`]: walk one already-locked `WireValue` structurally,
-/// pushing `Handle`s into `out` and QUEUEING any nested core into `pending` instead of locking it.
-///
-/// **Never lock a core from in here.** This function runs with a core's payload guard held, and the
-/// walk used to recurse straight into a nested core's lock while holding it. With a CYCLIC core graph
-/// two workers marking concurrently then took the same two locks in opposite orders — a textbook ABBA
-/// deadlock: every thread parked in `futex_do_wait` at 0% CPU, no deadlock report, unkillable by
-/// `--timeout`. Measured on the fixture in `docs/contributing/benchmarks.md` (a `Channel` whose queued struct
-/// reaches back to it): ~20% of runs at `CHEZZI_THREADS>=2`, 0% at `=1`, 0% with the cycle removed,
-/// 0% with allocation (hence GC) removed.
-pub fn collect_gcrefs_structural(
-    w: &WireValue,
-    out: &mut Vec<GcRef>,
-    seen: &mut SeenCores,
-    pending: &mut Vec<WireValue>,
-) {
-    match w.visit(|x| collect_gcrefs_structural(x, out, seen, pending)) {
-        WireNode::Handle(g) => out.push(g),
-        // A nested core is QUEUED, never locked here — `seen` keeps each one queued at most once,
-        // which is also what terminates a cyclic core graph. Cloning the variant is an `Arc` refcount
-        // bump, and it is what keeps the core alive between the queue and the drain.
-        WireNode::Core(id) => {
-            if seen.insert(id) {
-                pending.push(w.clone());
-            }
-        }
-        // A data node's children were walked above. A `Backref` has none: its target is walked
-        // elsewhere in the same graph, which also ends the walk on a cyclic wire graph.
-        WireNode::Data { .. } => {}
-    }
-}
-
-/// [`WireSummary`] state: never walked (or invalidated) — the GC must walk and then memoize. This is
-/// the `Default`, so any core built without going through a store path degrades to today's behaviour
-/// (a full walk) rather than to an under-rooted heap.
-pub const WS_UNKNOWN: u8 = 0;
-/// [`WireSummary`] state: the payload provably holds no `Handle` and no nested core — the GC skips it.
-pub const WS_CLEAN: u8 = 1;
-/// [`WireSummary`] state: the payload may root a heap object — walk it, every pass, never memoize.
-pub const WS_DIRTY: u8 = 2;
-
-/// W6-7/W6-10 — the cached GC summary of a single-value core's payload (`Shared`/`RwShared`/`Atomic`).
-///
-/// `state` answers "can the GC skip this subtree?" and `bytes` feeds `--max-heap` (an airlocked
-/// `WireValue` lives in an `Arc` **outside** every [`Heap`](super::heap::Heap), so `live_bytes` used to
-/// count it nowhere). Both are computed by ONE [`wire_summary`] walk at STORE time — the payload of
-/// these cores is *replaced*, not mutated in place, so every write path must call [`set`](Self::set)
-/// **while holding the same value lock as the write**: a stale `CLEAN` would stop the GC tracing a live
-/// handle. A `debug_assert` in `Heap::children` re-verifies the memo on every debug-build GC pass.
-#[derive(Debug, Default)]
-pub struct WireSummary {
-    state: AtomicU8,
-    bytes: AtomicUsize,
-}
-
-impl WireSummary {
-    pub fn state(&self) -> u8 {
-        self.state.load(Ordering::Relaxed)
-    }
-
-    pub fn bytes(&self) -> usize {
-        self.bytes.load(Ordering::Relaxed)
-    }
-
-    /// Record the summary of a payload that has just been stored (absolute, not incremental).
-    pub fn set(&self, w: &WireValue) {
-        let (b, dirty) = wire_summary(w);
-        self.store(b, dirty);
-    }
-
-    /// Record an already-computed summary (the lazy GC fill path).
-    pub fn store(&self, bytes: usize, dirty: bool) {
-        self.bytes.store(bytes, Ordering::Relaxed);
-        self.state
-            .store(if dirty { WS_DIRTY } else { WS_CLEAN }, Ordering::Relaxed);
-    }
-}
-
-/// W6-7/W6-10 — ONE walk of a stored wire payload yielding both GC facts: `(approximate owned bytes,
-/// can-root-a-heap-object)`.
-///
-/// **This is NOT [`WireValue::has_handle`]**, and the two must never be merged. `has_handle` answers an
-/// *airlock* question ("may this value cross?") and deliberately returns `false` for the nested
-/// `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` arms — those cross by shared `Arc`. [`collect_core_gcrefs`]
-/// (right above) *recurses into* them, because a nested core may be reachable only through its parent and
-/// its embedded handles would dangle otherwise. So a cached `has_handle` verdict would be a use-after-free.
-/// Here a nested core is therefore **always dirty**, and the walk STOPS at that boundary.
-///
-/// The byte half of that stop is completed by [`nested_core_bytes`] (gaps.md `W6-10r`, FIXED
-/// 2026-08-06), NOT by this function: a nested core's bytes belong to that core's own summary, and
-/// `Heap::live_bytes` used to reach them only through its `Obj::*` alias slot — so a nested core
-/// whose last alias slot had been swept was counted NOWHERE. `live_bytes` now runs the cross-core
-/// byte recursion (`Arc`-de-duped, under a live `--max-heap` only); the walk here still stops.
-/// That closed `W6-10r`, not the cap in general — an `Executor`'s eager half followed in `W7-26`
-/// (FIXED 2026-08-06, both here and in `nested_core_bytes`). The inline-scalar escape
-/// (`future.md §1b`) and the join-window sampling residual (`W7-26r`) are FIXED too — `W7-28`
-/// 2026-08-07 and `W7-26r` 2026-08-06 — as is `W6-10s` residual (a) (a task whose whole body is one
-/// native call reached no instruction boundary), fixed by `W7-29` 2026-08-07: `Vm::start_task`
-/// samples the cap before dispatch, with the pending call's operands rooted on the operand stack.
-/// (Since TICKET-235 such a task runs behind an entry thunk and has a frame; the sample stays.)
-///
-/// The children and the per-node bytes come from [`WireValue::visit`], the one owner of what a variant holds.
-pub fn wire_summary(w: &WireValue) -> (usize, bool) {
-    let mut acc = (std::mem::size_of::<WireValue>(), false);
-    match w.visit(|x| {
-        let (b, d) = wire_summary(x);
-        acc.0 += b;
-        acc.1 |= d;
-    }) {
-        WireNode::Handle(_) => acc.1 = true,
-        // A nested core: conservatively dirty (a store on the INNER core can introduce a handle
-        // without ever touching this one's cache), and the walk stops here.
-        WireNode::Core(_) => acc.1 = true,
-        WireNode::Data { bytes } => acc.0 += bytes,
-    }
-    acc
-}
-
-/// W6-10r — the BYTE mirror of [`collect_core_gcrefs`]: sum the cached byte counts of every core
-/// nested inside `w`, so `--max-heap` sees a payload that is reachable ONLY through another core.
-///
-/// [`wire_summary`] deliberately stops at a nested-core boundary (those bytes belong to that core's
-/// own summary), and [`Heap::live_bytes`](super::heap::Heap::live_bytes) reaches a core's summary
-/// only through its `Obj::*` alias slot. A nested core whose last alias slot has been swept — it
-/// survives inside this payload's `Arc` — therefore used to be counted **nowhere**: a `Channel`
-/// parked in a `Shared` backlogged 304 MB past an 8 MB cap and PASSED. Rooting was never affected
-/// ([`collect_core_gcrefs`] does recurse); only the byte walk stopped.
-///
-/// `seen` is the caller's per-heap `Arc`-identity set, SHARED with `live_bytes`'s own per-slot
-/// de-dup: a nested core that also has an alias slot in this heap is charged exactly once, whichever
-/// way it is met first. It also terminates `Arc` cycles (the reason [`visit_core`] exists).
-///
-/// Only entered under a live `mem_cap` (see `live_bytes`) — with no cap `over_cap` is meaningless and
-/// this walk is pure cost.
-///
-/// The children come from [`WireValue::visit`], which [`collect_core_gcrefs`] and [`wire_summary`] read too.
-///
-/// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
-/// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
-/// A caller that already holds a guard calls the `_structural` half under it, drops it, then drains.
-pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usize>) -> usize {
-    let mut pending: Vec<WireValue> = Vec::new();
-    let acc = nested_core_bytes_structural(w, seen, &mut pending);
-    acc + drain_pending_core_bytes(seen, &mut pending)
-}
-
-/// Bytes owned by the cores queued by the structural byte walk, locking exactly ONE at a time.
-///
-/// **Call with NO core guard held**, for the same reason as [`drain_pending_cores`]: this walk is the
-/// byte-accounting twin of the rooting walk and had the identical ABBA shape — a parent core's guard
-/// held while a child's lock was taken. It is reached through `--max-heap` (`Heap::live_bytes`'s
-/// `deep` branch), so before this split a cyclic core graph could hang the very mechanism whose job is
-/// to abort a runaway run. Measured pre-split: `chezzi test --max-heap=100000000` on a cyclic-core
-/// fixture at `CHEZZI_THREADS=4` hung 1/40 runs, versus 0/20 for the same program without the cap.
-pub fn drain_pending_core_bytes(
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    let mut acc = 0usize;
-    while let Some(core) = pending.pop() {
-        match &core {
-            WireValue::Channel(c) => {
-                let g = c.q.lock().unwrap();
-                acc += queue_bytes_structural(g.summary(), g.iter(), seen, pending);
-            }
-            // W7-26 — the queue half under its own scoped guard, then `ExecutorCore::held_bytes` (the
-            // one facade `Heap::live_bytes`'s `Obj::Executor` arm reads too), never both held at once.
-            // Both halves are charged here because `seen` is SHARED with `live_bytes`: whichever walk
-            // meets a core first is the only one that charges it. Measured during W7-26 review: an
-            // executor holding 880 400 bytes of eager results, reached through an `Obj::Shared`
-            // payload, was counted as 240 when this arm read one half.
-            WireValue::Executor(c) => {
-                let queued = {
-                    let g = c.inner.lock().unwrap();
-                    queue_bytes_structural(g.summary(), g.iter(), seen, pending)
-                };
-                acc += queued + c.held_bytes();
-            }
-            // M1.7 — a box's state is objects of the run's one heap, which the slot walk counts.
-            WireValue::Shared(_) | WireValue::RwShared(_) => {}
-            WireValue::Atomic(c) => {
-                let g = c.v.lock().unwrap();
-                acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
-            }
-            // `pending` only ever receives the five core variants above.
-            WireValue::Int(_)
-            | WireValue::Float(_)
-            | WireValue::Bool(_)
-            | WireValue::Nil
-            | WireValue::List { .. }
-            | WireValue::Tuple { .. }
-            | WireValue::Map { .. }
-            | WireValue::Set { .. }
-            | WireValue::Str(_)
-            | WireValue::Bytes(_)
-            | WireValue::ByteArray(_)
-            | WireValue::Iter { .. }
-            | WireValue::Struct { .. }
-            | WireValue::Enum { .. }
-            | WireValue::Cell { .. }
-            | WireValue::Backref(_)
-            | WireValue::Handle(_)
-            | WireValue::AtomicInt(_)
-            | WireValue::Socket(_)
-            | WireValue::Listener(_)
-            | WireValue::Writer(_)
-            | WireValue::Reader(_)
-            | WireValue::Ptr(_)
-            | WireValue::Builtin(_)
-            | WireValue::Native { .. }
-            | WireValue::Cffi(_)
-            | WireValue::Closure { .. }
-            | WireValue::Func { .. }
-            | WireValue::Generator { .. } => {}
-        }
-        // Guard dropped HERE, before the next core is locked.
-    }
-    acc
-}
-
-/// The lock-free half of [`nested_core_bytes`]: walk one already-locked payload, QUEUEING nested cores
-/// into `pending` instead of locking them. **Never lock a core from in here.**
-fn nested_core_bytes_structural(
-    w: &WireValue,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    let mut acc = 0usize;
-    match w.visit(|x| acc += nested_core_bytes_structural(x, seen, pending)) {
-        // A nested core: queue it, so `drain_pending_core_bytes` charges its payload ONCE per heap
-        // and keeps recursing (a core nested two deep is just as invisible as one nested once).
-        WireNode::Core(id) => {
-            if seen.insert(id) {
-                pending.push(w.clone());
-            }
-        }
-        // A handle owns no nested core; a data node's children were walked above.
-        WireNode::Handle(_) | WireNode::Data { .. } => {}
-    }
-    acc
-}
-
-/// W6-10r — a queue core's own bytes PLUS every core nested in its messages. Takes the summary and
-/// the messages rather than the state, so the identically-shaped [`ChanState`] and [`ExecState`]
-/// share one implementation.
-///
-/// The `(bytes, dirty)` summary is maintained incrementally by `push`/`pop`, so the walk is skipped
-/// outright for a clean queue.
-///
-/// `dirty` is conservative for this purpose: it is also set by a bare `Handle`, so a queue of plain
-/// heap references is walked and finds nothing.
-/// `ponytail: one bit conflates "has a handle" with "has a nested core"` — splitting them means a
-/// third field threaded through `WireSummary` and `ChanState::push`'s tuple at every call site; do it
-/// only if a profile says this walk matters.
-///
-/// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
-/// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
-/// A caller that already holds a guard calls the `_structural` half under it, drops it, then drains.
-pub fn queue_bytes_deep<'a>(
-    summary: (usize, bool),
-    msgs: impl Iterator<Item = &'a WireValue>,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-) -> usize {
-    let mut pending: Vec<WireValue> = Vec::new();
-    let acc = queue_bytes_structural(summary, msgs, seen, &mut pending);
-    acc + drain_pending_core_bytes(seen, &mut pending)
-}
-
-/// The lock-free half of [`queue_bytes_deep`] — call it under the queue's guard, then drop the guard
-/// and call [`drain_pending_core_bytes`].
-pub fn queue_bytes_structural<'a>(
-    summary: (usize, bool),
-    msgs: impl Iterator<Item = &'a WireValue>,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    let (bytes, dirty) = summary;
-    if !dirty {
-        return bytes;
-    }
-    bytes
-        + msgs
-            .map(|w| nested_core_bytes_structural(w, seen, pending))
-            .sum::<usize>()
-}
-
-/// W6-10r — a single-value core's own bytes PLUS every core nested in its payload. Call with the
-/// payload lock held.
-///
-/// A `WS_UNKNOWN` summary is filled here (exactly as [`Heap::children`](super::heap::Heap::children)
-/// fills it during marking): every core CONSTRUCTOR leaves it `UNKNOWN`, and a core reachable only
-/// through a parent is never marked through an alias slot of its own — so without this fill it would
-/// report 0 bytes forever, which is the very hole being closed.
-///
-/// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
-/// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
-/// A caller that already holds a guard calls the `_structural` half under it, drops it, then drains.
-pub fn value_core_bytes_deep(
-    summary: &WireSummary,
-    w: &WireValue,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-) -> usize {
-    let mut pending: Vec<WireValue> = Vec::new();
-    let acc = value_core_bytes_structural(summary, w, seen, &mut pending);
-    acc + drain_pending_core_bytes(seen, &mut pending)
-}
-
-/// The lock-free half of [`value_core_bytes_deep`] — call it under the payload guard, then drop the
-/// guard and call [`drain_pending_core_bytes`].
-pub fn value_core_bytes_structural(
-    summary: &WireSummary,
-    w: &WireValue,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    if summary.state() == WS_UNKNOWN {
-        summary.set(w);
-    }
-    let bytes = summary.bytes();
-    if summary.state() == WS_DIRTY {
-        bytes + nested_core_bytes_structural(w, seen, pending)
-    } else {
-        bytes
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
 
-    /// TICKET-219 — a sealed channel is a handle's one outcome record: every receive copies the
-    /// value and takes nothing, `len()` stays 1, the first seal wins, and a `send` faults closed.
+    /// TICKET-219 / M3.2 — a sealed channel is a handle's one outcome record: every receive reads
+    /// the one value and takes nothing, `len()` stays 1, the first seal wins, and a `send` faults
+    /// closed. A text seal stays unbuilt until a receive builds it; then it is that one value.
     #[test]
-    fn sealed_channel_receive_copies_and_refuses_a_second_seal() {
+    fn sealed_channel_receive_shares_and_refuses_a_second_seal() {
         let mut q = ChanState::default();
-        assert!(q.seal((8, false), WireValue::Int(7)));
+        assert!(q.seal(Value::int(7)));
         assert!(q.is_sealed());
-        assert!(matches!(q.pop(), Some(WireValue::Int(7))));
-        assert!(matches!(q.pop(), Some(WireValue::Int(7))));
+        assert_eq!(q.pop(), Some(Value::int(7)));
+        assert_eq!(q.pop(), Some(Value::int(7)));
         assert_eq!(q.len(), 1);
         assert!(q.recv_ready_for(None));
-        assert!(!q.seal((8, false), WireValue::Int(9)));
-        assert!(matches!(q.pop(), Some(WireValue::Int(7))));
+        assert!(!q.seal(Value::int(9)));
+        assert!(!q.seal_err("late"));
+        assert_eq!(q.pop(), Some(Value::int(7)));
         assert!(matches!(
-            q.send(Some(1), (8, false), WireValue::Int(1), None),
+            q.send(Some(1), Value::int(1), None),
             SendOutcome::Closed
         ));
+
+        let mut e = ChanState::default();
+        assert!(e.seal_err("task cancelled"));
+        assert!(e.recv_ready_for(None), "an unbuilt outcome is ready");
+        assert_eq!(e.pop(), None);
+        assert_eq!(e.unbuilt_outcome(), Some("task cancelled"));
+        assert!(!e.seal(Value::int(1)), "the text seal won");
+        e.build_outcome(Value::int(3));
+        e.build_outcome(Value::int(4));
+        assert_eq!(e.unbuilt_outcome(), None);
+        assert_eq!(e.pop(), Some(Value::int(3)));
+        assert_eq!(e.len(), 1);
     }
 
     /// D6 — every `SocketCore`/`ListenerCore` gets a fresh, distinct poll key (the ABA-avoiding
@@ -2020,113 +1412,5 @@ mod tests {
         let got = std::fs::read(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(got, b"abc", "a nested buffered chain must drop-flush");
-    }
-
-    /// TICKET-049 — the mark walk's dedup cost must scale linearly with rooted core depth, never
-    /// quadratically: charge one probe per `CoreId` comparison (`CoreId::eq`/`hash`), never a
-    /// wall-clock sample. Doubling depth must not more than double the probe count; a linear-scan
-    /// dedup (measured ratio ~4.0) would fail this, a hash-set dedup (measured ratio ~2.0) passes.
-    #[test]
-    fn mark_walk_dedup_is_linear_in_core_chain_depth() {
-        fn chain(depth: usize) -> WireValue {
-            let mut w = WireValue::Nil;
-            for _ in 0..depth {
-                let core: Arc<ChannelCore> = Arc::new(ChannelCore::default());
-                let sum = wire_summary(&w);
-                core.q.lock().unwrap().push(sum, w);
-                w = WireValue::Channel(core);
-            }
-            w
-        }
-
-        fn probe_cost(depth: usize) -> u64 {
-            let w = chain(depth);
-            probe_reset();
-            let mut out = Vec::new();
-            let mut seen = SeenCores::default();
-            collect_core_gcrefs(&w, &mut out, &mut seen);
-            probes()
-        }
-
-        let shallow = probe_cost(1000);
-        let deep = probe_cost(2000);
-        assert!(
-            shallow > 0,
-            "the dedup must charge a probe per visited core"
-        );
-        assert!(
-            deep * 10 < shallow * 28,
-            "doubling rooted core depth must not more than double the mark walk's dedup cost (a \
-             linear scan is ~4.0, the hash set ~2.0): got {shallow} probes -> {deep} probes"
-        );
-    }
-}
-
-#[cfg(test)]
-mod summary_tests {
-    use super::*;
-
-    fn list(items: Vec<WireValue>) -> WireValue {
-        WireValue::List { id: 0, items }
-    }
-
-    /// W6-7/W6-10 — one walk yields both GC facts: approximate owned bytes, and whether the payload
-    /// can root a heap object (a `Handle`, or ANY nested core that might come to hold one).
-    #[test]
-    fn wire_summary_bytes_and_dirtiness() {
-        let node = std::mem::size_of::<WireValue>();
-        let (b, d) = wire_summary(&list((0..1000).map(WireValue::Int).collect()));
-        assert!(b >= 1000 * node, "1000 ints must be counted: {b}");
-        assert!(!d, "pure ints root nothing");
-
-        let (_, d) = wire_summary(&list(vec![WireValue::Handle(GcRef(0))]));
-        assert!(d, "a nested Handle is dirty");
-
-        // A nested core is ALWAYS dirty (it may gain a handle via its OWN store, invisible here)
-        // and its bytes stop at the boundary.
-        let inner = Arc::new(AtomicCore {
-            v: Mutex::new(list((0..1000).map(WireValue::Int).collect())),
-            ..Default::default()
-        });
-        let (b, d) = wire_summary(&list(vec![WireValue::Atomic(inner)]));
-        assert!(d, "a nested core is conservatively dirty");
-        assert!(
-            b < 1000 * node,
-            "nested-core bytes must NOT be included: {b}"
-        );
-
-        // A self-cycle terminates on `Backref` (this test completing IS the assertion).
-        let (_, _) = wire_summary(&WireValue::List {
-            id: 1,
-            items: vec![WireValue::Backref(1)],
-        });
-
-        // Owned bytes of the by-value scalar arms are counted.
-        let (b, _) = wire_summary(&WireValue::Str("hello".into()));
-        assert_eq!(b, node + 5);
-        let (b, _) = wire_summary(&WireValue::Bytes(vec![1u8; 32].into()));
-        assert_eq!(b, node + 32);
-        let (b, _) = wire_summary(&WireValue::ByteArray(vec![1u8; 7].into()));
-        assert_eq!(b, node + 7);
-    }
-
-    /// The cached summary: `Default` is UNKNOWN (walk), a store is absolute, and it is fail-safe in
-    /// the UNKNOWN direction only.
-    #[test]
-    fn wire_summary_state_transitions() {
-        let s = WireSummary::default();
-        assert_eq!(s.state(), WS_UNKNOWN);
-        assert_eq!(s.bytes(), 0);
-
-        s.set(&list((0..10).map(WireValue::Int).collect()));
-        assert_eq!(s.state(), WS_CLEAN);
-        assert!(s.bytes() > 0);
-
-        s.set(&list(vec![WireValue::Handle(GcRef(3))]));
-        assert_eq!(s.state(), WS_DIRTY);
-
-        // A store is ABSOLUTE — a dirty payload replaced by a clean one goes back to CLEAN.
-        s.set(&WireValue::Int(1));
-        assert_eq!(s.state(), WS_CLEAN);
     }
 }

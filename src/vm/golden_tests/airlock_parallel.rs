@@ -674,12 +674,11 @@ main()
 }
 
 #[test]
-fn airlock_closure_over_a_captured_alias_pushed_by_the_receiver_faults() {
+fn airlock_closure_over_a_captured_alias_pushed_by_the_receiver_is_seen() {
     // TICKET-105, G6. The push through `inner` runs in the RECEIVER's captured closure body,
-    // AFTER the send — the sender's `gl` never changes, so this used to be a pure W12-5 identity
-    // residual (TICKET-111): the receiver's push landed on the adopted alias and both reads
-    // observed it. TICKET-169 (D4 layer C, Decisions item 3): `work`'s capture of `inner` crossed
-    // the airlock with the closure and is marked as a copy, so the push now FAULTS instead.
+    // AFTER the send. M3.2: a channel moves the closure itself, so its capture of `inner` is the
+    // sender's `gl[0]`, and both reads see the push. Go (`rewrites.go`, M3.2 report): a closure
+    // sent over a channel writes its captured map, and both reads print `2 2`.
     let src = r#"
 import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
@@ -705,8 +704,8 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "channel capture alias: fault\n",
-        "a receiver-side push through a captured alias now faults under D4 (TICKET-169): {out:?}"
+        out, "channel capture alias: [1, 2] [1, 2]\n",
+        "a receiver-side push through a captured alias lands on the sender's object: {out:?}"
     );
 }
 

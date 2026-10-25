@@ -537,7 +537,11 @@ fn no_new_rust_test_sleeps_to_order_two_events() {
 /// nothing else can express the wait: a parked rendezvous sender or a job that must be INSIDE the
 /// sleep when cancelled has no Chezzi-visible predicate, and one entry asserts a window a value must
 /// NOT change across, which is a legitimate clock use, not a happens-before guess (TICKET-059/060).
-const CHZ_SLEEP_SITES: [(&str, &str); 10] = [
+const CHZ_SLEEP_SITES: [(&str, &str); 11] = [
+    // M3.2: the sleep lets the print reach its GC door before the swap, so the row covers the race
+    // it pins. It orders no result: the assertion accepts the print from either order, and a
+    // handshake cannot signal from inside the print path, which runs no user code.
+    ("tests/chz/spec/core_handle_test.chz", "time.sleep_ms(100)"),
     (
         "tests/chz/spec/rendezvous_channel_test.chz",
         "time.sleep_ms(150)",

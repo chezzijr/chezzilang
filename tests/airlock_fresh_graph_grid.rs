@@ -129,7 +129,7 @@ const WRAPPERS: [Wrapper; 19] = [
 
 impl Wrapper {
     /// A hand-off wrapper marks nothing the task builds or receives: an Executor job builds its
-    /// argument inside the job, and a channel send gives the value away.
+    /// argument inside the job, and a channel send hands over the value itself (M3.2).
     fn handoff(self) -> bool {
         matches!(self, Submit | SubmitResult | SubmitTask | ChannelSend)
     }
@@ -265,7 +265,7 @@ fn w_call(r: Channel[str], tag: str, d: int, x: List[List[List[int]]]? = mk_l())
 fn expect(w: Wrapper, i: Inner, d: usize) -> &'static str {
     let fresh = matches!(i, Lit | Comp | Struct);
     let runs = match w {
-        // The sender gave the value away, so the receiver owns the whole graph.
+        // The receiver gets the sender's value itself (M3.2), and nothing marks it.
         ChannelSend => true,
         // The job builds its operand itself. A captured `named` is the job's copy; `.copy()` of
         // it is a new root over the marked children.
@@ -428,10 +428,19 @@ fn cell(w: Wrapper, i: Inner, d: usize, n: usize) -> (String, String, String) {
                 String::new(),
             )
         }
+        // M3.2: a channel hands over the value itself, so a named operand is the parent's own.
+        // Each cell sends its own `named{n}` / `nn{n}`: one shared list written by two tasks would
+        // be a race (the user's bug), and the parent's `named` and `nn` stay as the line expects.
         ChannelSend => {
             let ty = if is_n { "N" } else { L };
+            let own = expr
+                .replace("named", &format!("named{n}"))
+                .replace("nn", &format!("nn{n}"));
             (
-                format!("c{n} := Channel[{ty}](1)\n    c{n}.send({expr})"),
+                format!(
+                    "named{n}: {L} = [[[0]]]\n    nn{n} := N([[0]])\n    \
+                     c{n} := Channel[{ty}](1)\n    c{n}.send({own})"
+                ),
                 fill(w.cross()),
                 String::new(),
             )

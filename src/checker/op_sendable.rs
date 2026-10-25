@@ -2,7 +2,6 @@
 //! Split out of `src/checker/proto.rs`. `super::*` is the parent module.
 
 use super::eq::EqReach;
-use super::proto::ty_mentions_error_existential;
 use super::*;
 
 impl Checker {
@@ -290,21 +289,6 @@ impl Checker {
                 stack.pop();
                 ok
             }
-        }
-    }
-
-    /// A targeted hint for the most common non-sendable channel element: the built-in `Error`
-    /// existential — what a bare `T!` / `Result[T, Error]` erases to (rendered `Result[int]`). It
-    /// isn't sendable because a value satisfying `Error` may carry a non-sendable field; point the
-    /// user at a concrete error type. Empty string when the type doesn't mention `Error`.
-    pub(super) fn sendable_error_hint(&self, ty: &Ty) -> String {
-        if ty_mentions_error_existential(ty) {
-            " — the built-in `Error` type can't cross a task boundary (a value satisfying `Error` \
-             may hold data that can't be sent between tasks); name a concrete error type, e.g. \
-             `Channel[int!str]` or `Channel[int!MyErr]`"
-                .to_string()
-        } else {
-            String::new()
         }
     }
 

@@ -421,12 +421,13 @@ impl Vm {
         Ok(None)
     }
 
-    /// `Atomic[T]` methods: `load` (copy out), `store` (copy in), `exchange` (swap, returns old),
-    /// `cas(expected, new) -> bool` (swap iff the box equals `expected`), `add`/`sub` (numeric RMW,
-    /// returns the new value). Each is a single lock-op-unlock, so the RMW is atomic across threads —
+    /// `Atomic[T]` methods: `load`, `store`, `exchange` (swap, returns old), `cas(expected, new) ->
+    /// bool` (swap iff the box equals `expected`), `add`/`sub` (numeric RMW, returns the new value).
+    /// M3.2: the box holds the value itself, so a store and a load copy one word (Go
+    /// `atomic.Value`). Each method is a single lock-op-unlock, so the RMW is atomic across threads —
     /// no user closure runs under the lock (unlike `Shared.update`), so no `update_lock` is needed.
-    /// `add`/`sub` use the language's `checked_add`/`checked_sub`
-    /// (int overflow faults, like the `+`/`-` operators) and plain float arithmetic.
+    /// `add`/`sub` use the language's `checked_add`/`checked_sub` (int overflow faults, like the
+    /// `+`/`-` operators) and plain float arithmetic.
     pub(super) fn atomic_method(
         &mut self,
         h: GcRef,
@@ -440,36 +441,28 @@ impl Vm {
         match which {
             AtomicMethod::Load => {
                 self.arity_err("load", args, 0, span)?;
-                let w = self.atomic_core(h).v.lock().unwrap().clone();
-                Ok(self.from_wire(w))
+                Ok(self.atomic_core(h).load())
             }
             AtomicMethod::Store => {
                 self.arity_err("store", args, 1, span)?;
-                let w = self.to_wire_crossable(args[0], span)?;
-                self.atomic_core(h).store(w);
+                self.atomic_core(h).store(args[0]);
                 Ok(Value::nil())
             }
             AtomicMethod::Exchange => {
                 self.arity_err("exchange", args, 1, span)?;
-                let new_w = self.to_wire_crossable(args[0], span)?;
-                // Summarise BEFORE taking the value lock (the walk is O(payload)) — see
-                // `SharedCore::store`.
-                let sum = crate::vm::core::wire_summary(&new_w);
                 let core = self.atomic_core(h);
-                let old = {
-                    let mut g = core.v.lock().unwrap();
-                    core.store_guarded(&mut g, new_w, sum)
-                };
-                Ok(self.from_wire(old))
+                let old = std::mem::replace(&mut *core.lock(), args[0]);
+                Ok(old)
             }
             AtomicMethod::Cas => {
                 self.arity_err("cas", args, 2, span)?;
                 let core = self.atomic_core(h);
-                // Hold the value lock across compare+swap so the CAS is atomic. `from_wire`/`to_wire`/
-                // `values_equal` borrow `self`, not the guard (which borrows the cloned `Arc`), so the
-                // lock can stay held while they run.
-                let mut g = core.v.lock().unwrap();
-                let cur = self.from_wire(g.clone());
+                // Hold the value lock across compare+swap so the CAS is atomic. `values_equal`
+                // borrows `self`, not the guard (which borrows the cloned `Arc`), so the lock can
+                // stay held while it runs. M3.0a / Q5: another thread may write the compared object
+                // meanwhile — a racy result, no UB.
+                let mut g = core.lock();
+                let cur = *g;
                 // TICKET-144 / TICKET-177: a payload whose `==` is slot identity (a fn value, an
                 // iterator) can never compare equal to a fresh `load()`, so `false` would spin the CAS
                 // retry loop forever — Go's `atomic.Value.CompareAndSwap` panics on the same shape.
@@ -487,63 +480,51 @@ impl Vm {
                 // fault leaves the box unchanged (the lock guard `g` drops on the early return).
                 //
                 // This is the ONE equality site that stays STRUCTURAL: the compare runs under
-                // `core.v.lock()` so the compare-and-swap is atomic, and a user `eq` re-entering the
+                // the value lock so the compare-and-swap is atomic, and a user `eq` re-entering the
                 // VM here could touch the same `Atomic` and deadlock a non-reentrant mutex. The
                 // checker rejects a payload type that REACHES a user `eq` (`reject_eq_atomic_payload`),
                 // but that walk cannot see through a `Protocol` existential or an unresolved type
                 // param — so the property is ENFORCED here, by turning the hook off for the window,
                 // instead of being asserted from the checker's exhaustiveness. Cleared on the next
                 // statement (no `?` in between), so an `Err` compare cannot leave it stuck on.
-                // ponytail: eq-under-lock ceiling — if `Atomic[T]` ever admits a user-`eq` payload,
-                // read under the lock → drop it → eq → re-acquire → verify the value is unchanged via
-                // `wire_summary` → swap.
                 self.eq_hook_off = true;
                 let cmp = self.values_equal_guarded(cur, args[0], 0, span);
                 self.eq_hook_off = false;
                 let swapped = cmp?;
                 if swapped {
-                    // Reject a non-crossable store BEFORE the assignment — a failed store leaves the
-                    // box unchanged (recoverable, no partial write). `ensure_crossable` borrows `&self`
-                    // not the guard `g`, so it is safe to call under the value lock.
-                    let next = self.to_wire_crossable(args[1], span)?;
-                    let sum = crate::vm::core::wire_summary(&next);
-                    core.store_guarded(&mut g, next, sum);
+                    *g = args[1];
                 }
                 Ok(Value::bool(swapped))
             }
             AtomicMethod::Add | AtomicMethod::Sub => {
                 self.arity_err(method, args, 1, span)?;
-                // Uniformity: route through the guard like every other store site. The checker gates
-                // `add`/`sub` to numeric deltas, so the handle-reject arm is dead-but-harmless here —
-                // it just means a future non-numeric delta path can't forget the guard.
-                let delta = self.to_wire_crossable(args[0], span)?;
+                let delta = args[0];
                 let core = self.atomic_core(h);
-                let mut g = core.v.lock().unwrap();
-                let new = match (&*g, &delta) {
-                    (WireValue::Int(a), WireValue::Int(b)) => {
-                        let op = if which == AtomicMethod::Add {
-                            BinaryOp::Add
-                        } else {
-                            BinaryOp::Sub
-                        };
-                        WireValue::Int(self.int_op(op, *a, *b, span)?)
-                    }
-                    (WireValue::Float(a), WireValue::Float(b)) => {
-                        WireValue::Float(if which == AtomicMethod::Add {
-                            a + b
-                        } else {
-                            a - b
-                        })
-                    }
+                let mut g = core.lock();
+                let cur = *g;
+                // An int or a boxed float result allocates under the lock: an allocation reaches no
+                // safepoint, so no collection waits for this lock.
+                let new = if self.is_integral(cur) && self.is_integral(delta) {
+                    let op = if which == AtomicMethod::Add {
+                        BinaryOp::Add
+                    } else {
+                        BinaryOp::Sub
+                    };
+                    let n = self.int_op(op, self.int_of(cur), self.int_of(delta), span)?;
+                    self.make_int(n)
+                } else if cur.is_float() && delta.is_float() {
+                    let (a, b) = (self.float_of(cur), self.float_of(delta));
+                    self.box_float(if which == AtomicMethod::Add {
+                        a + b
+                    } else {
+                        a - b
+                    })
+                } else {
                     // The checker gates `add`/`sub` to numeric element types, so this is unreachable.
-                    _ => {
-                        return Err(self.err(format!("type Atomic has no method '{method}'"), span));
-                    }
+                    return Err(self.err(format!("type Atomic has no method '{method}'"), span));
                 };
-                let sum = crate::vm::core::wire_summary(&new);
-                core.store_guarded(&mut g, new.clone(), sum);
-                drop(g);
-                Ok(self.from_wire(new))
+                *g = new;
+                Ok(new)
             }
         }
     }
@@ -639,9 +620,8 @@ impl Vm {
             ExecutorMethod::StdSubmitSettled => {
                 self.arity_err("_submit_settled", args, 2, span)?;
                 let ch = self.task_channel("_submit_settled", args[1], span)?;
-                let cancel = self.err_wire(super::EXEC_CANCELLED_MSG)?;
                 let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                self.executor_submit(h, args[0], JobSettle { ch, cancel, flag }, span)?;
+                self.executor_submit(h, args[0], JobSettle { ch, flag }, span)?;
                 Ok(Value::nil())
             }
             ExecutorMethod::Shutdown => {
@@ -658,11 +638,7 @@ impl Vm {
             ExecutorMethod::Cancel => {
                 self.arity_err("cancel", args, 0, span)?;
                 let core = self.executor_core(h);
-                {
-                    let mut g = core.inner.lock().unwrap();
-                    g.shut = true;
-                    g.clear(); // always empty (submit never fills it); cleared defensively
-                }
+                core.inner.lock().unwrap().shut = true;
                 // D4 — "attempts to stop", COOPERATIVE not preemptive: trip the per-core cancel
                 // flag (the Executor scope's own flag) so a running job dies at its next
                 // cancellation point, and drain the scope's parked fibers so each is cut at its
@@ -706,20 +682,11 @@ impl Vm {
         crate::vm::sched::poke_live_scheds(&self.sched_registry);
     }
 
-    /// `Result.Err(msg)` as a wire value: what a Task's channel is sealed with when its job ends
-    /// without a value of its own (TICKET-289).
-    fn err_wire(&mut self, msg: &str) -> Result<WireValue, RuntimeError> {
-        let msg = self.alloc_str(msg.to_string());
-        let err = self.alloc_enum("Result", "Err", &[msg]);
-        self.to_wire(err)
-    }
-
     /// TICKET-289 — a submit the Executor refuses (shut down, or its creating job was cancelled)
     /// returns an already-settled Task: seal the fresh channel of `settle` with `Err(msg)`. The
     /// channel is unread, so no reader needs a wake.
     pub(super) fn refuse_job(&mut self, settle: JobSettle, msg: &str) -> Result<(), RuntimeError> {
-        let v = self.err_wire(msg)?;
-        settle.seal(v);
+        settle.seal_err(msg);
         Ok(())
     }
 

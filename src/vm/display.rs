@@ -3,6 +3,7 @@
 
 use super::stmt::BoxCore;
 use super::stmt::BoxSnaps;
+use super::wire::WireNode;
 use super::*;
 use crate::base::hooks::Hook;
 
@@ -40,6 +41,19 @@ fn io_state_now<T>(inner: &std::sync::Mutex<Option<T>>) -> bool {
         std::thread::yield_now();
     }
     true
+}
+
+/// Queue every core nested in the snapshot `w` that `seen` does not hold yet: the boxes a print
+/// path snapshot reaches ([`Vm::box_snapshots`]). A cycle of boxes ends on `seen`.
+fn nested_cores(w: &WireValue, seen: &mut fxhash::FxHashSet<usize>, out: &mut Vec<WireValue>) {
+    match w.visit(|x| nested_cores(x, seen, out)) {
+        WireNode::Core(id) => {
+            if seen.insert(id) {
+                out.push(w.clone());
+            }
+        }
+        WireNode::Handle(_) | WireNode::Data { .. } => {}
+    }
 }
 
 impl Vm {
@@ -243,14 +257,8 @@ impl Vm {
                     "AtomicInt({})",
                     core.v.load(std::sync::atomic::Ordering::SeqCst)
                 )),
-                // Work not yet finished, counted across BOTH halves: the lazy `inner` queue (which
-                // only the since-removed cooperative engine ever filled) and the eager outstanding
-                // count. Summing both is what keeps this honest — reading only the queue would report
-                // `pending=0` while jobs are running. Exactly one term is ever non-zero today.
-                Obj::Executor(core) => Ok(format!(
-                    "Executor(pending={})",
-                    core.inner.lock().unwrap().len() + core.outstanding()
-                )),
+                // Work not yet finished: the jobs submitted and not yet ended.
+                Obj::Executor(core) => Ok(format!("Executor(pending={})", core.outstanding())),
                 // D6: render open/closed without exposing the fd; matches no interp counterpart (net
                 // is VM-only) but mirrors the core handles' structural `Display`.
                 Obj::Socket(core) => Ok(format!(
@@ -309,7 +317,14 @@ impl Vm {
                 let st = c.state.try_read()?;
                 self.box_copy_out(st.as_ref()?, Span::default()).ok()?
             }
-            BoxCore::Atomic(c) => c.v.lock().unwrap().clone(),
+            // M3.2 — the value itself, read with no wait (`load` copies one word), encoded so a
+            // box it reaches renders through this same renderer and a cycle ends on `seen`. A
+            // value with no wire form (a suspended generator) renders as the heap object.
+            BoxCore::Atomic(c) => {
+                let v = c.load();
+                self.to_wire_memo_at(v, Span::default(), &mut airlock_out::WireMemo::default())
+                    .unwrap_or(WireValue::Handle(v.as_gcref()))
+            }
         })
     }
 
@@ -364,23 +379,40 @@ impl Vm {
     /// Snapshots of `root` and of every box nested in a snapshot, each box once. The print path
     /// takes them BEFORE it renders, so [`Vm::display_box`] never waits and never shows
     /// `<locked>` to user output.
+    ///
+    /// M3.2 — an `Atomic` holds a heap value, not an owned copy, and a snapshot holds only its
+    /// core: once the snapshot's box is written by another task, nothing roots that value. A
+    /// `Shared` snapshot can wait in the GC door, so an `Atomic` found in a snapshot is
+    /// snapshotted at once, before the next wait: no stop can complete between the copy that
+    /// found it and its own copy, since this thread reaches no safepoint in between.
     pub(super) fn box_snapshots(
         &mut self,
         root: BoxCore,
         span: Span,
     ) -> Result<BoxSnaps, RuntimeError> {
         let mut snaps = BoxSnaps::default();
-        let mut seen = super::core::SeenCores::with(root.addr());
+        let mut seen = fxhash::FxHashSet::default();
+        seen.insert(root.addr());
         let mut work = vec![root.to_wire()];
-        let mut handles = Vec::new();
         while let Some(w) = work.pop() {
-            // `pending` also carries channels and executors; they hold no box state to render.
+            // `work` also carries the other cores; they hold no box state to render.
             let Some(core) = BoxCore::of_wire(&w) else {
                 continue;
             };
-            let snap = self.box_snapshot_one(core, span)?;
-            super::core::collect_gcrefs_structural(&snap, &mut handles, &mut seen, &mut work);
-            snaps.insert(core.addr(), snap);
+            let mut found = vec![(core.addr(), self.box_snapshot_one(core, span)?)];
+            while let Some((addr, snap)) = found.pop() {
+                let mut nested = Vec::new();
+                nested_cores(&snap, &mut seen, &mut nested);
+                snaps.insert(addr, snap);
+                for n in nested {
+                    if let WireValue::Atomic(c) = &n {
+                        let a = BoxCore::Atomic(c);
+                        found.push((a.addr(), self.box_snapshot_one(a, span)?));
+                    } else {
+                        work.push(n);
+                    }
+                }
+            }
         }
         Ok(snaps)
     }
@@ -491,12 +523,7 @@ impl Vm {
                     core.v.load(std::sync::atomic::Ordering::SeqCst)
                 )
             }
-            WireValue::Executor(core) => {
-                format!(
-                    "Executor(pending={})",
-                    core.inner.lock().unwrap().len() + core.outstanding()
-                )
-            }
+            WireValue::Executor(core) => format!("Executor(pending={})", core.outstanding()),
             // D6: render open/closed without exposing the fd (mirrors the heap `Display`).
             WireValue::Socket(core) => {
                 format!(

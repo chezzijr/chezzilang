@@ -56,9 +56,11 @@ test fn generator_crossing_cost_is_independent_of_parent_heap():
 
 # ---- TICKET-190 route grid: every crossing route x generator state x slot kind x writer ----
 # A marking route (spawn forms, Executor jobs) faults a write to a frame slot
-# the parent can still reach and runs one to a private slot; a hand-off (Channel, Shared, RwShared,
-# Atomic) gives the generator away, so every write runs. A module global is the run's one copy
-# (M3.1), so a task drives the one generator and every write runs.
+# the parent can still reach and runs one to a private slot; a hand-off (Shared, RwShared) gives a
+# copy of the generator away, so every write runs. A module global is the run's one copy (M3.1),
+# and a Channel or an Atomic holds the generator itself (M3.2), so a task drives the one generator
+# and every write runs and lands (CPython: a generator handed through a `queue.Queue` to a thread
+# prints the same row, and the parent's lists read `[[1, 2]] * 4`, `[[1]]`; M3.2 report).
 
 fn t190_cell(g: Iterator[int]) -> str:
     res_v := 0
@@ -221,8 +223,12 @@ test fn generator_route_grid():
         row := ",".join(got)
         want := if route == "channel" or route == "shared" or route == "rwshared" or route == "atomic": handoff else: marking
         assert row == want, "{route}: {row}"
-        assert named == [[], [1], [], [1]], "{route}: named {named}"
-        assert sink == [[]], "{route}: sink {sink}"
+        if route == "channel" or route == "atomic":
+            assert named == [[1, 2], [1, 2], [1, 2], [1, 2]], "{route}: named {named}"
+            assert sink == [[1]], "{route}: sink {sink}"
+        else:
+            assert named == [[], [1], [], [1]], "{route}: named {named}"
+            assert sink == [[]], "{route}: sink {sink}"
     named: List[List[int]] = [[], [], [], []]
     sink: List[List[int]] = []
     # M3.1: a task reads the run's module global, so it drives the one generator and its writes

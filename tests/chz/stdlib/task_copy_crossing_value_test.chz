@@ -14,8 +14,10 @@
 # the `unobserved` state too. `a_handoff_receiver_write_is_never_silently_lost` is the channel-handoff
 # carrier, `a_task_owned_key_reachable_from_a_memo_result_stays_writable` the over-mark cell, and
 # `a_copy_miss_on_a_key_that_never_equals_itself_returns_the_fill` the bounded read-back.
-# `a_function_valued_copy_result_leaves_the_readers_globals_writable` is the module cell: a marked
-# result that holds a function must not mark the reader's globals through the function's module.
+# `a_function_valued_channel_result_leaves_the_readers_globals_writable` is the module cell. M3.2: a
+# channel hands over the Task and the memo wrapper themselves, so a receiver's write lands on the
+# owner's one object (CPython `handoff.py`, M3.2 report: a Future and a `functools.cache` wrapper
+# handed through a `queue.Queue` print `['write ok', '[1, 5]', 'write ok'] [1, 5] [1, 5]`).
 
 import std.concurrency
 import Task from std.concurrency
@@ -258,9 +260,9 @@ test fn a_handoff_receiver_write_is_never_silently_lost():
     parallel:
         spawn handoff_write(tc, mc, out)
     got := [out.recv(), out.recv(), out.recv()]
-    assert got == ["write ok", "[1, 5]", d4_msg()], str(got)
-    assert str(must(t.get())) == "[1]", str(must(t.get()))
-    assert str(m(1)) == "[1]", str(m(1))
+    assert got == ["write ok", "[1, 5]", "write ok"], str(got)
+    assert str(must(t.get())) == "[1, 5]", str(must(t.get()))
+    assert str(m(1)) == "[1, 5]", str(m(1))
 
 struct Key:
     id: int
@@ -332,9 +334,10 @@ owner_global: List[int] = [1]
 fn send_memo(mc: Channel[fn(int) -> FnBox]):
     mc.send(memoize1(mk_box))
 
-# A wrapper received from a channel returns a marked snapshot. A function inside it points at this
-# heap's module; the mark stops there, so the reader's own global stays writable.
-test fn a_function_valued_copy_result_leaves_the_readers_globals_writable():
+# A wrapper received from a channel is the sender's wrapper (M3.2), so its result is the one cached
+# object and takes a write (CPython `handoff.py`: `2 [1, 5]`). A function inside it points at the
+# run's module, and the reader's own global stays writable.
+test fn a_function_valued_channel_result_leaves_the_readers_globals_writable():
     mc := Channel[fn(int) -> FnBox](1)
     parallel:
         spawn send_memo(mc)
@@ -343,8 +346,9 @@ test fn a_function_valued_copy_result_leaves_the_readers_globals_writable():
     assert b.f(1) == 2
     rb := recover: b.xs.push(5)
     match rb:
-        ?_: assert false, "the marked result took a write"
-        !e: assert e.message() == d4_msg(), e.message()
+        ?_: pass
+        !e: assert false, e.message()
+    assert m(1).xs == [1, 5]
     rg := recover: owner_global.push(3)
     match rg:
         ?_: pass

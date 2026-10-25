@@ -1,0 +1,162 @@
+# M3.2 — a channel, a `wait:` arm, an `Atomic` and a sealed Task hold the value by handle: a send,
+# a store and a seal copy one word, so a write after the send is seen by the receiver and a write by
+# the receiver is seen by the sender. Goldens: the Go program `core_handle.go` (go1.27.0, in the
+# M3.2 report) prints `send 2`, `send_back 3`, `select_send 2`, `select_recv 2`, `range 2`,
+# `rendezvous 2`, `atomic_store 2`, `atomic_exchange 2 2`, `atomic_cas 2`, `atomic_load 3`,
+# `task_result 2`. The file also runs under `CHEZZI_GC_STRESS=1` at two worker counts.
+import Atomic, Executor, Shared from std.concurrency
+import std.time as time
+
+m32_global: Map[str, int] = {"a": 1}
+
+test fn send_then_write_is_seen_by_the_receiver():
+    ch := Channel[Map[str, int]](1)
+    m := {"a": 1}
+    ch.send(m)
+    m["b"] = 2
+    got := ch.recv()
+    assert got.len() == 2
+    got["c"] = 3
+    assert m.len() == 3
+
+test fn try_send_and_try_recv_hold_the_handle():
+    ch := Channel[Map[str, int]](1)
+    m := {"a": 1}
+    assert ch.try_send(m)
+    m["b"] = 2
+    match ch.try_recv():
+        ?got: assert got.len() == 2
+        None: assert false, "try_recv found nothing"
+
+test fn a_wait_send_arm_holds_the_handle():
+    ch := Channel[Map[str, int]](1)
+    m := {"a": 1}
+    wait:
+        ch.send(m):
+            pass
+    m["b"] = 2
+    assert ch.recv().len() == 2
+
+test fn a_wait_recv_arm_holds_the_handle():
+    ch := Channel[Map[str, int]](1)
+    m := {"a": 1}
+    ch.send(m)
+    m["b"] = 2
+    n := 0
+    wait:
+        v := ch.recv():
+            n = v.len()
+    assert n == 2
+
+test fn for_over_a_channel_holds_the_handle():
+    ch := Channel[Map[str, int]](1)
+    m := {"a": 1}
+    ch.send(m)
+    ch.close()
+    m["b"] = 2
+    for v in ch:
+        assert v.len() == 2
+
+test fn list_of_a_channel_holds_the_handle():
+    ch := Channel[Map[str, int]](2)
+    m := {"a": 1}
+    ch.send(m)
+    ch.close()
+    m["b"] = 2
+    xs := List(ch)
+    assert xs[0].len() == 2
+
+fn m32_take(rv: Channel[Map[str, int]], done: Channel[bool]):
+    r := rv.recv()
+    r["b"] = 2
+    done.send(true)
+
+test fn a_rendezvous_hand_off_holds_the_handle():
+    rv := Channel[Map[str, int]](0)
+    done := Channel[bool](1)
+    m := {"a": 1}
+    parallel:
+        spawn m32_take(rv, done)
+        rv.send(m)
+        _ := done.recv()
+    assert m.len() == 2
+
+test fn atomic_init_and_store_hold_the_handle():
+    k := {"a": 1}
+    a := Atomic(k)
+    k["b"] = 2
+    assert a.load().len() == 2
+    k2 := {"a": 1}
+    a.store(k2)
+    k2["b"] = 2
+    assert a.load().len() == 2
+
+test fn atomic_exchange_cas_and_load_hold_the_handle():
+    a := Atomic({"a": 1})
+    k2 := {"a": 1}
+    old := a.exchange(k2)
+    k2["b"] = 2
+    assert a.load().len() == 2
+    old["x"] = 5
+    assert old.len() == 2
+    k3 := {"a": 1}
+    assert a.cas({"a": 1, "b": 2}, k3)
+    k3["b"] = 2
+    assert a.load().len() == 2
+    l := a.load()
+    l["c"] = 3
+    assert k3.len() == 3
+
+# The job returns the run's one global (M3.1): its sealed outcome is that object, not a copy.
+test fn a_sealed_task_holds_the_job_value():
+    ex := Executor()
+    t := ex.submit(fn(): m32_global)
+    ex.shutdown()
+    match t.get():
+        ?m: m["b"] = 2
+        !e: assert false, e.message()
+    assert m32_global.len() == 2
+    match t.get():
+        ?m: assert m.len() == 2
+        !e: assert false, e.message()
+
+# The print path snapshots a box and every box it holds before it renders, and a `Shared`
+# snapshot can wait in the GC door. An `Atomic` it finds holds a heap value that only the old
+# state roots, so it is snapshotted before that wait: here `b`'s guard is busy until another task
+# has replaced the root's state. Run under `CHEZZI_GC_STRESS=1` (the M3.2 report): before the fix
+# it printed a reused slot, `Atomic([5])`. The print shows the old state or, when the swap ran
+# first, the new one; never another object.
+struct M32Pair:
+    a: Atomic[List[str]]
+    b: Shared[int]
+
+fn m32_hold_body(v: int, ready: Channel[int], release: Channel[int]) -> int:
+    ready.send(1)
+    _ := release.recv()
+    return v
+
+fn m32_hold(b: Shared[int], ready: Channel[int], release: Channel[int]):
+    b.update(fn(v: int) -> int: m32_hold_body(v, ready, release))
+
+fn m32_swap(root: Shared[M32Pair], b: Shared[int], release: Channel[int]):
+    time.sleep_ms(100)
+    root.set(M32Pair(Atomic(["new"]), b))
+    junk: List[List[int]] = []
+    for i in 0..2000:
+        junk.push([i])
+    release.send(1)
+
+test fn a_print_snapshots_an_atomic_before_it_waits():
+    b := Shared(1)
+    root := Shared(M32Pair(Atomic(["x" + str(7)]), b))
+    ready := Channel[int](1)
+    release := Channel[int](1)
+    got := ""
+    parallel:
+        spawn m32_hold(b, ready, release)
+        spawn m32_swap(root, b, release)
+        _ := ready.recv()
+        got = str(root)
+    old := "Shared(M32Pair(a=Atomic(['x7']), b=Shared(1)))"
+    new := "Shared(M32Pair(a=Atomic(['new']), b=Shared(1)))"
+    assert got == old or got == new, got

@@ -70,14 +70,15 @@ data-race bug class. **Skipped.** (The branch `exp/go-shared-heap` tests one hea
  task 2 ──send──┼──►  main task          all tasks allocate in ONE heap per run
  task 3 ──send──┘   ┌──────────────────┐
                     │ results: [...]    │  the GC stops every thread that runs VM code
-                    └──────────────────┘  values still COPY across the channel
+                    └──────────────────┘  a channel hands over the value itself (M3.2)
 ```
 
 A run owns one heap. A collection stops every thread that runs VM code, marks every root (running
 threads, detached threads, parked fibers, `Shared` boxes), then sweeps. A thread that blocks (a
 channel wait, a sleep, a socket or file read, a subprocess wait, an `extern` C call) detaches first,
-as Go's `entersyscall` does, so a blocked thread never delays a stop. Values still cross a task
-boundary by deep copy. Tasks share no object.
+as Go's `entersyscall` does, so a blocked thread never delays a stop. M3.2: a channel, an `Atomic`
+and a Task's outcome hold the value itself, so the tasks that pass it share the one object (Go). A
+spawn's captures still cross by deep copy until M3.4.
 
 Known limits:
 

@@ -1242,3 +1242,118 @@ fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
         assert!(ctx.poll_written.is_none());
     }
 }
+
+/// M3.2 — a core holds the sent value itself, so a value whose only holders are cores survives
+/// a stop of the world (`CHEZZI_GC_STRESS`: a collection at every instruction boundary, on every
+/// thread). One row per holder: a channel queue, an `Atomic`, the slot of a parked receiver, the
+/// offer of a parked sender, a sealed Task channel, and the slot of a receiver blocked in place on
+/// a popped temporary (`box.get().recv()`: the receiver handle is a pin of the GC door). Each row
+/// writes through one holder and reads through another, so a copy prints `1` (Go prints `2`:
+/// `core_handle.go`, M3.2 report).
+#[test]
+fn a_value_held_only_by_a_core_survives_a_stop() {
+    let src = r#"import Atomic, Executor, Shared from std.concurrency
+
+fn churn() -> int:
+    s := 0
+    for i in 0..200:
+        xs := [i, i + 1]
+        s = s + xs[1]
+    return s
+
+fn fill(ch: Channel[Map[str, int]]):
+    m := {"a": 1}
+    ch.send(m)
+    m["b"] = 2
+
+fn put(a: Atomic[Map[str, int]]):
+    m := {"a": 1}
+    a.store(m)
+    m["b"] = 2
+
+fn give(rv: Channel[Map[str, int]]):
+    m := {"a": 1}
+    rv.send(m)
+    m["b"] = 2
+
+fn give_then_open(rv: Channel[Map[str, int]], gate: Channel[int]) -> int:
+    give(rv)
+    _ := churn()
+    gate.send(1)
+    return 0
+
+fn take(rv: Channel[Map[str, int]], gate: Channel[int], out: Channel[int]):
+    r := rv.recv()
+    _ := gate.recv()
+    out.send(r.len())
+
+fn offer(rv: Channel[Map[str, int]], ready: Channel[int], done: Channel[int], out: Channel[int]):
+    m := {"a": 1}
+    ready.send(1)
+    rv.send(m)
+    _ := done.recv()
+    out.send(m.len())
+
+fn take_offer(rv: Channel[Map[str, int]], ready: Channel[int], done: Channel[int]):
+    _ := ready.recv()
+    _ := churn()
+    r := rv.recv()
+    r["b"] = 2
+    done.send(1)
+
+fn job_value(side: Channel[Map[str, int]]) -> Map[str, int]:
+    m := {"a": 1}
+    side.send(m)
+    return m
+
+fn main():
+    ch := Channel[Map[str, int]](1)
+    fill(ch)
+    _ := churn()
+    print("queue", ch.recv().len())
+    a := Atomic({"z": 0})
+    put(a)
+    _ := churn()
+    print("atomic", a.load().len())
+    rv := Channel[Map[str, int]](0)
+    gate := Channel[int](1)
+    out := Channel[int](1)
+    parallel:
+        spawn take(rv, gate, out)
+        spawn give_then_open(rv, gate)
+    print("slot", out.recv())
+    rv2 := Channel[Map[str, int]](0)
+    ready := Channel[int](1)
+    done := Channel[int](1)
+    out2 := Channel[int](1)
+    parallel:
+        spawn offer(rv2, ready, done, out2)
+        spawn take_offer(rv2, ready, done)
+    print("offer", out2.recv())
+    ex := Executor()
+    side := Channel[Map[str, int]](1)
+    t := ex.submit(fn(): job_value(side))
+    ex.shutdown()
+    _ := churn()
+    match t.get():
+        ?m: m["b"] = 2
+        !e: print(e.message())
+    print("sealed", side.recv().len())
+    rv3 := Channel[Map[str, int]](0)
+    gate3 := Channel[int](1)
+    box := Shared(rv3)
+    ex2 := Executor()
+    _t2 := ex2.submit(fn(): give_then_open(rv3, gate3))
+    r3 := box.get().recv()
+    _ := gate3.recv()
+    print("door", r3.len())
+    ex2.shutdown()
+
+main()
+"#;
+    let (out, _) = run_with_cfg(src, true);
+    assert_eq!(
+        out.unwrap_or_else(|e| panic!("runtime error under GC stress: {e}")),
+        "queue 2\natomic 2\nslot 2\noffer 2\nsealed 2\ndoor 2\n"
+    );
+}

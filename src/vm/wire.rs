@@ -450,8 +450,8 @@ pub enum WireNode {
     /// A heap-local `GcRef` ([`WireValue::Handle`]). It has no children.
     Handle(GcRef),
     /// A shared core whose payload sits behind the core's own lock: `Channel`, `Shared`, `RwShared`,
-    /// `Atomic` or `Executor`. The `usize` is the `Arc` identity. It has no children: a walk queues
-    /// the core and reads its payload later, with no other core lock held (`core::drain_pending_cores`).
+    /// `Atomic` or `Executor`. The `usize` is the `Arc` identity. It has no children: what it holds
+    /// is objects of the run's one heap, and a walk that needs it reads it through the core.
     Core(usize),
     /// Any other node. `bytes` is what it owns beyond `size_of::<WireValue>()` and its children:
     /// string and byte payloads, struct, field and capture names, and one `u64` hash per map or
@@ -462,9 +462,9 @@ pub enum WireNode {
 impl WireValue {
     /// The one owner of "which child `WireValue`s does this variant hold, and is it a handle or a
     /// nested core" (TICKET-267). Calls `f` on each direct child in order and returns the node's
-    /// [`WireNode`]. [`has_handle`](Self::has_handle), `core::wire_summary`,
-    /// `core::collect_gcrefs_structural` and `core::nested_core_bytes_structural` read this; a new
-    /// variant gets its children here and nowhere else.
+    /// [`WireNode`]. [`has_handle`](Self::has_handle), [`owned_bytes`](Self::owned_bytes) and the
+    /// print path's box snapshot walk (`Vm::box_snapshots`) read this; a new variant gets its
+    /// children here and nowhere else.
     ///
     /// A [`Backref`](WireValue::Backref) has no children: it ends the walk on a cyclic wire graph,
     /// and its target is reached elsewhere in the same graph.
@@ -565,6 +565,18 @@ impl WireValue {
             WireNode::Data { .. } => found,
         }
     }
+
+    /// The approximate bytes this wire graph owns, for the `--max-heap` pacing charge of a crossing
+    /// (`Vm::charge_wire`): each node, plus what a [`Data`](WireNode::Data) node owns beyond it. A
+    /// nested core owns nothing here: what it holds is objects of the run's one heap.
+    pub fn owned_bytes(&self) -> usize {
+        let mut acc = std::mem::size_of::<WireValue>();
+        match self.visit(|x| acc += x.owned_bytes()) {
+            WireNode::Data { bytes } => acc += bytes,
+            WireNode::Handle(_) | WireNode::Core(_) => {}
+        }
+        acc
+    }
 }
 
 /// TICKET-267 — the walks that read [`WireValue::visit`] agree on every variant and every child slot.
@@ -575,21 +587,17 @@ impl WireValue {
 mod walk_grid {
     use super::*;
     use crate::vm::core::{
-        AtomicCore, AtomicIntCore, ChannelCore, ExecutorCore, RwSharedCore, SeenCores, SharedCore,
-        collect_core_gcrefs, nested_core_bytes, wire_summary,
+        AtomicCore, AtomicIntCore, ChannelCore, ExecutorCore, RwSharedCore, SharedCore,
     };
-    use std::sync::Mutex;
 
     /// What every walk must answer for one cell.
     #[derive(Debug, PartialEq)]
     enum Expect {
         /// The child sits in one slot of this node: every walk reaches it.
         Slot,
-        /// A nested core whose payload this heap's walks read; the payload holds the child.
-        CoreWalked,
-        /// A nested core whose payload this heap does not read: `Shared`/`RwShared` keep their value
-        /// in the box heap (TICKET-246), and an `Executor` queue is always empty (decision D3).
-        CoreNotWalked,
+        /// A nested core: it crosses as its `Arc`, and what it holds is objects of the run's one
+        /// heap (M3.2), so no wire walk enters it.
+        Core,
         Handle,
         Leaf,
     }
@@ -606,10 +614,11 @@ mod walk_grid {
             | WireValue::Cell { .. }
             | WireValue::Closure { .. }
             | WireValue::Generator { .. } => Expect::Slot,
-            WireValue::Channel(_) | WireValue::Atomic(_) => Expect::CoreWalked,
-            WireValue::Shared(_) | WireValue::RwShared(_) | WireValue::Executor(_) => {
-                Expect::CoreNotWalked
-            }
+            WireValue::Channel(_)
+            | WireValue::Atomic(_)
+            | WireValue::Shared(_)
+            | WireValue::RwShared(_)
+            | WireValue::Executor(_) => Expect::Core,
             WireValue::Handle(_) => Expect::Handle,
             WireValue::Int(_)
             | WireValue::Float(_)
@@ -671,12 +680,11 @@ mod walk_grid {
     }
 
     /// One cell per child SLOT of each variant: `child` sits in that one slot, and every other slot
-    /// holds the leaf `Int(0)`. A queue core holds `child` as its one message.
+    /// holds the leaf `Int(0)`.
     fn cells(child: &WireValue) -> Vec<WireValue> {
         let c = || child.clone();
         let leaf = || WireValue::Int(0);
         let chan: Arc<ChannelCore> = Arc::new(ChannelCore::default());
-        chan.q.lock().unwrap().push(wire_summary(child), c());
         let generator =
             |closure: Option<Box<WireValue>>, state: WireGenState| WireValue::Generator {
                 id: 1,
@@ -749,10 +757,7 @@ mod walk_grid {
             WireValue::Channel(chan),
             WireValue::Shared(Arc::new(SharedCore::default())),
             WireValue::RwShared(Arc::new(RwSharedCore::default())),
-            WireValue::Atomic(Arc::new(AtomicCore {
-                v: Mutex::new(c()),
-                ..Default::default()
-            })),
+            WireValue::Atomic(Arc::new(AtomicCore::new(crate::vm::value::Value::nil()))),
             WireValue::AtomicInt(Arc::new(AtomicIntCore::default())),
             WireValue::Executor(Arc::new(ExecutorCore::default())),
             WireValue::Ptr(0),
@@ -791,25 +796,22 @@ mod walk_grid {
 
     #[test]
     fn every_wire_variant_agrees_across_the_walks() {
-        // The child: a handle (GcRef 7) and a nested Atomic core whose payload holds GcRef 9 and
-        // 1000 bytes of string. `id: 3` tells it apart from every leaf.
-        let inner = Arc::new(AtomicCore {
-            v: Mutex::new(WireValue::List {
-                id: 2,
-                items: vec![
-                    WireValue::Handle(GcRef(9)),
-                    WireValue::Str("x".repeat(1000).into()),
-                ],
-            }),
-            ..Default::default()
-        });
+        // The child: a handle (GcRef 7) and 1000 bytes of string. `id: 3` tells it apart from
+        // every leaf.
         let child = WireValue::List {
             id: 3,
-            items: vec![WireValue::Handle(GcRef(7)), WireValue::Atomic(inner)],
+            items: vec![
+                WireValue::Handle(GcRef(7)),
+                WireValue::Str("x".repeat(1000).into()),
+            ],
         };
         let is_child = |x: &WireValue| matches!(x, WireValue::List { id: 3, .. });
-        let child_bytes = wire_summary(&child).0;
+        let child_bytes = child.owned_bytes();
         let node = std::mem::size_of::<WireValue>();
+        assert!(
+            child_bytes >= 3 * node + 1000,
+            "the child counts its string"
+        );
 
         let all = cells(&child);
         let mut covered: Vec<String> = all
@@ -827,11 +829,7 @@ mod walk_grid {
         );
 
         for w in &all {
-            let mut roots = Vec::new();
-            collect_core_gcrefs(w, &mut roots, &mut SeenCores::default());
-            roots.sort_unstable_by_key(|g| g.0);
-            let (bytes, dirty) = wire_summary(w);
-            let nested = nested_core_bytes(w, &mut Default::default());
+            let bytes = w.owned_bytes();
             let (mut children, mut reached) = (0, 0);
             w.visit(|x| {
                 children += 1;
@@ -840,58 +838,36 @@ mod walk_grid {
             match expect(w) {
                 Expect::Slot => {
                     assert_eq!(reached, 1, "{w:?}: visit reaches the child");
-                    assert_eq!(
-                        roots,
-                        vec![GcRef(7), GcRef(9)],
-                        "{w:?}: the GC walk roots the child's handles"
-                    );
-                    assert!(dirty, "{w:?}: wire_summary is dirty");
                     assert!(
                         bytes >= node + child_bytes,
-                        "{w:?}: wire_summary counts the child ({bytes})"
-                    );
-                    assert!(
-                        nested >= 1000,
-                        "{w:?}: the nested-core byte walk counts the child's core ({nested})"
+                        "{w:?}: owned_bytes counts the child ({bytes})"
                     );
                     assert!(w.has_handle(), "{w:?}: has_handle follows the child");
                 }
-                Expect::CoreWalked => {
+                Expect::Core => {
                     assert_eq!(children, 0, "{w:?}: a core has no direct child");
-                    assert_eq!(
-                        roots,
-                        vec![GcRef(7), GcRef(9)],
-                        "{w:?}: the GC walk roots the core's payload"
-                    );
-                    assert!(dirty, "{w:?}: a nested core is dirty");
-                    assert!(
-                        nested >= 1000,
-                        "{w:?}: the byte walk counts the core's payload ({nested})"
-                    );
-                    assert!(!w.has_handle(), "{w:?}: a core crosses as an Arc");
-                }
-                Expect::CoreNotWalked => {
-                    assert_eq!(children, 0, "{w:?}: a core has no direct child");
-                    assert!(
-                        roots.is_empty(),
-                        "{w:?}: this heap roots nothing through it"
-                    );
-                    assert!(dirty, "{w:?}: a nested core is dirty");
+                    assert_eq!(bytes, node, "{w:?}: a core owns no wire bytes");
                     assert!(!w.has_handle(), "{w:?}: a core crosses as an Arc");
                 }
                 Expect::Handle => {
                     assert_eq!(children, 0, "{w:?}: a handle has no child");
-                    assert_eq!(roots, vec![GcRef(7)], "{w:?}");
-                    assert!(dirty && w.has_handle() && nested == 0, "{w:?}");
+                    assert!(w.has_handle() && bytes == node, "{w:?}");
                 }
                 Expect::Leaf => {
                     assert_eq!(children, 0, "{w:?}: a leaf has no child");
-                    assert!(
-                        roots.is_empty() && !dirty && nested == 0 && !w.has_handle(),
-                        "{w:?}: a leaf roots nothing"
-                    );
+                    assert!(!w.has_handle(), "{w:?}: a leaf holds no handle");
                 }
             }
         }
+        // The by-value scalar arms count their owned bytes.
+        assert_eq!(WireValue::Str("hello".into()).owned_bytes(), node + 5);
+        assert_eq!(
+            WireValue::Bytes(vec![1u8; 32].into()).owned_bytes(),
+            node + 32
+        );
+        assert_eq!(
+            WireValue::ByteArray(vec![1u8; 7].into()).owned_bytes(),
+            node + 7
+        );
     }
 }

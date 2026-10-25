@@ -157,7 +157,7 @@ fn mnsched_park_then_wake_requeues_fiber() {
         assert_eq!(c.parked_n, 1);
         assert!(c.global.is_empty());
     }
-    sched.send_wake(key, &core, WireValue::Int(7));
+    sched.send_wake(key, &core, Value::int(7));
     {
         let c = sched.lock();
         assert_eq!(c.parked_n, 0);
@@ -203,7 +203,7 @@ fn a_give_hands_the_slot_owner_to_the_givers_runnext() {
     let f0 = take_run(&sched);
     let _f1 = take_run(&sched);
     sched.park(key, Arc::clone(&core), f0);
-    let out = sched.send_commit(key, &core, WireValue::Int(5), None, 1);
+    let out = sched.send_commit(key, &core, Value::int(5), None, 1);
     assert!(matches!(out, crate::vm::core::SendOutcome::Sent));
     assert!(
         sched.lock_local(1).runnext.is_some(),

@@ -119,8 +119,8 @@ impl Vm {
     }
 
     /// `to_wire_at` PLUS the [`ensure_crossable`](Vm::ensure_crossable) handle-reject backstop — the
-    /// serialize step used at every cross-heap VALUE-STORE site (`Channel.send`/`try_send`,
-    /// `Shared`/`RwShared`/`Atomic` construct/set/update/store/CAS/…). The spawn-arg / capture /
+    /// serialize step used at every cross-heap VALUE-STORE site (`Shared`/`RwShared`
+    /// construct/set/update/…; M3.2: a channel and an `Atomic` hold the value itself). The spawn-arg / capture /
     /// `submit` paths pair `to_wire_at` with `ensure_crossable` by hand; the value-store paths route
     /// through this single helper so a NEW store path physically can't forget the guard (a module /
     /// native / FFI handle silently crossing a channel was serial≠M:N + cross-heap corruption). Legit
@@ -156,10 +156,8 @@ impl Vm {
         // threshold, so the cap failed OPEN. This is the one helper every cross-heap value store
         // routes through, so a new store path can't forget the charge (same argument as the
         // `ensure_crossable` guard above). GATED on a live cap: a cap-off run (every `chezzi run`,
-        // every bench, the two-worker-count `tests/chz` gate) pays one `!= 0` branch and zero extra walks — the
-        // walk here is a SECOND `wire_summary` pass (the send path walks again when it caches the
-        // core's summary), accepted rather than threading a precomputed summary through
-        // `MnSched::send_wake`'s signature for a debug/CI guard. Monotonic pacing HINT, not
+        // every bench, the two-worker-count `tests/chz` gate) pays one `!= 0` branch and zero extra
+        // walks. Monotonic pacing HINT, not
         // accounting (`live_bytes()` stays the sole measure): a replacing store charges too and a
         // `recv` never decrements, because under-triggering means a guard that fails open.
         self.charge_wire(&w);
@@ -169,7 +167,7 @@ impl Vm {
     /// Charge an encoded payload's bytes against THIS heap's GC trigger, under a live cap only.
     pub(super) fn charge_wire(&self, w: &WireValue) {
         if self.heap.mem_cap() != 0 {
-            self.heap.charge_bytes(crate::vm::core::wire_summary(w).0);
+            self.heap.charge_bytes(w.owned_bytes());
         }
     }
 
@@ -187,9 +185,9 @@ impl Vm {
     /// (carrying a placeholder `Span{0,0}` that airlock callers re-stamp with the real site via
     /// `to_wire_at`/`deep_clone`). Every other arm is infallible (the `?` only forwards the
     /// generator error up through container recursion).
+    #[cfg(test)]
     pub(super) fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
-        // Fresh memo per root — correct for a SINGLE-root crossing (`Channel.send`, a `Shared`
-        // store). A crossing whose roots belong together (a `spawn`'s args, a `spawn:` block's
+        // Fresh memo per root — correct for a SINGLE-root crossing (a `Shared` store). A crossing whose roots belong together (a `spawn`'s args, a `spawn:` block's
         // captures) must instead share one memo via `to_wire_memo_at`/`deep_clone_all`, or two
         // sibling closures over the same local arrive as two cells (W7-4). TICKET-100: within a
         // memo, containers, closures and cells are ALL preserved for the whole crossing — one
@@ -283,20 +281,11 @@ impl WireMemo {
         }
     }
 
-    /// The memo for an Executor job's outcome, which `_settle` seals as the job's last act: the
-    /// job's heap ends with the job, so it keeps nothing (TICKET-295).
-    pub(super) fn job_result() -> Self {
-        WireMemo {
-            kept_roots: Some(Vec::new()),
-            ..WireMemo::default()
-        }
-    }
-
     /// D4 layer C (TICKET-291), the ONE answer to "is this capture the only live copy of its
     /// binding": bit `k` is set when capture `k` reaches no copy-marked object and no object the
-    /// source heap keeps that a write can change (`boxctx::fixed_after_build`). Two memos carry a
-    /// kept set: a box call's result (`box_result`) and an Executor job's outcome (`job_result`,
-    /// empty). Every other crossing answers 0, so every capture is marked.
+    /// source heap keeps that a write can change (`boxctx::fixed_after_build`). One memo carries a
+    /// kept set: a box call's result (`box_result`). Every other crossing answers 0, so every
+    /// capture is marked.
     pub(super) fn sole_captures(&mut self, heap: &Heap, captured: &[Value]) -> u64 {
         let Some(roots) = &self.kept_roots else {
             return 0;

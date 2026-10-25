@@ -1130,10 +1130,11 @@ fn channel_send_recv_fifo() {
 }
 
 #[test]
-fn channel_send_deep_copies_value() {
-    // Mutating the original list after send must NOT change what the channel holds (airlock).
+fn channel_send_moves_the_handle() {
+    // M3.2: a send moves the list itself, so a push after the send is what the receiver gets. Go
+    // (`rewrites.go`, M3.2 report): a map sent, then written, is received with the write (`3`).
     let src = "fn main():\n    ch := Channel[List[int]]()\n    xs := [1, 2]\n    ch.send(xs)\n    xs.push(3)\n    print(ch.recv())\nmain()\n";
-    assert_eq!(run(src), "[1, 2]\n");
+    assert_eq!(run(src), "[1, 2, 3]\n");
 }
 
 #[test]

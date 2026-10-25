@@ -89,13 +89,11 @@ fn rendezvous_park_publishes_a_bound_slot() {
             .unwrap_or_else(|e| e.into_inner())
             .send_ready_for(Some(0), None)
     );
-    let sum = crate::vm::core::wire_summary(&WireValue::Int(5));
     assert!(
         core.q
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .give(sum, WireValue::Int(5), None)
-            .is_ok()
+            .give(Value::int(5), None)
     );
     let op = {
         let mut c = sched.lock();
@@ -106,7 +104,7 @@ fn rendezvous_park_publishes_a_bound_slot() {
     };
     assert!(matches!(
         op.settle(),
-        crate::vm::core::Settled::Got(0, WireValue::Int(5))
+        crate::vm::core::Settled::Got(0, v) if v == Value::int(5)
     ));
 }
 
@@ -202,7 +200,7 @@ fn mnsched_runnable_tracks_single_queue() {
         2,
         "park transitions running→parked (no change)"
     );
-    sched.send_wake(key, &core, WireValue::Int(7));
+    sched.send_wake(key, &core, Value::int(7));
     assert_eq!(
         sched.runnable.load(Ordering::Relaxed),
         3,
@@ -468,7 +466,7 @@ fn mn_parked_entry_recv_roundtrips() {
         1,
         "recv park accounts one parked fiber"
     );
-    sched.send_wake(key, &core, WireValue::Int(5));
+    sched.send_wake(key, &core, Value::int(5));
     assert_eq!(
         sched.lock().parked_n,
         0,
@@ -508,7 +506,7 @@ fn mn_wait_park_first_waker_claims_and_sweeps() {
         "a wait fiber on N keys counts as ONE parked fiber"
     );
     // Wake on the MIDDLE key.
-    sched.send_wake(k2, &c2, WireValue::Int(99));
+    sched.send_wake(k2, &c2, Value::int(99));
     {
         let c = sched.lock();
         assert_eq!(
@@ -535,8 +533,8 @@ fn mn_wait_park_first_waker_claims_and_sweeps() {
         "the wait fiber is back on the run queue exactly once"
     );
     // A later send to a swept key must be a clean no-op (the token is gone): no new runnable fiber.
-    sched.send_wake(k1, &c1, WireValue::Int(1));
-    sched.send_wake(k3, &c3, WireValue::Int(3));
+    sched.send_wake(k1, &c1, Value::int(1));
+    sched.send_wake(k3, &c3, Value::int(3));
     let c = sched.lock();
     assert_eq!(c.parked_n, 0, "no double-wake from swept buckets");
     assert_eq!(
@@ -571,7 +569,7 @@ fn mn_wait_park_timer_self_send_claims_then_late_send_noop() {
         "wait on [timer,data] is ONE parked fiber"
     );
     // The timer's deadline job fires: `send_wake(true)` on the timer key claims + sweeps.
-    sched.send_wake(timer_key, &timer_core, WireValue::Bool(true));
+    sched.send_wake(timer_key, &timer_core, Value::bool(true));
     {
         let c = sched.lock();
         assert_eq!(
@@ -590,7 +588,7 @@ fn mn_wait_park_timer_self_send_claims_then_late_send_noop() {
         "the wait fiber is back on the run queue exactly once"
     );
     // A LATE send on the swept data key (a sibling that lost the race) is a clean no-op.
-    sched.send_wake(data_key, &data_core, WireValue::Int(9));
+    sched.send_wake(data_key, &data_core, Value::int(9));
     let c = sched.lock();
     assert_eq!(c.parked_n, 0, "no double-wake from the swept data bucket");
     assert_eq!(
@@ -942,10 +940,7 @@ fn deadlock_predicate_vetoed_by_queued_value_on_demoted_channel() {
     c.parked_n = 1;
     let tok = c.register_waiter(recv_waiter(&core, vec![]));
     // A sibling already queued a value on the demoted fiber's channel: it will pop + progress.
-    core.q.lock().unwrap().push(
-        crate::vm::core::wire_summary(&WireValue::Int(7)),
-        WireValue::Int(7),
-    );
+    core.q.lock().unwrap().push(Value::int(7));
     assert!(
         !sched.is_deadlocked(&c),
         "a queued value on a demoted channel must veto the deadlock fire (#1 false-positive)"
@@ -1068,10 +1063,7 @@ fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
     let t1 = c.register_waiter(recv_waiter(&core, vec![]));
     let t2 = c.register_waiter(recv_waiter(&core, vec![]));
     // A value queued on the shared channel → at least one demoted fiber pops + progresses.
-    core.q.lock().unwrap().push(
-        crate::vm::core::wire_summary(&WireValue::Int(7)),
-        WireValue::Int(7),
-    );
+    core.q.lock().unwrap().push(Value::int(7));
     assert!(
         !sched.is_deadlocked(&c),
         "queued value on the shared demoted channel vetoes deadlock"
@@ -1087,10 +1079,7 @@ fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
     );
     // A fresh value for the surviving fiber re-vetoes via the retained entry (proves it wasn't
     // dropped at the first unregister).
-    core.q.lock().unwrap().push(
-        crate::vm::core::wire_summary(&WireValue::Int(9)),
-        WireValue::Int(9),
-    );
+    core.q.lock().unwrap().push(Value::int(9));
     assert!(
         !sched.is_deadlocked(&c),
         "the surviving waiter still peeks the queue (unregistering one waiter kept the other)"
@@ -1102,10 +1091,6 @@ fn demoted_channel_registry_is_refcounted_for_two_fibers_on_one_channel() {
         sched.is_deadlocked(&c),
         "all demoted fibers gone, still all-blocked = deadlock"
     );
-}
-
-fn t185_sum(v: i64) -> (usize, bool) {
-    crate::vm::core::wire_summary(&WireValue::Int(v))
 }
 
 fn t185_core(cap: Option<usize>) -> Arc<crate::vm::core::ChannelCore> {
@@ -1127,22 +1112,18 @@ fn chan_state_offer_commits_exactly_once() {
         .q
         .lock()
         .unwrap()
-        .send(Some(0), t185_sum(7), WireValue::Int(7), Some((&p, 0)));
+        .send(Some(0), Value::int(7), Some((&p, 0)));
     assert!(matches!(out, SendOutcome::Offered));
     assert_eq!(core.q.lock().unwrap().len(), 0);
-    assert!(matches!(
-        core.q.lock().unwrap().pop(),
-        Some(WireValue::Int(7))
-    ));
+    assert_eq!(core.q.lock().unwrap().pop(), Some(Value::int(7)));
     assert_eq!(p.state(), crate::vm::core::PENDING_DONE);
     assert!(core.q.lock().unwrap().pop().is_none());
     let op = PendingOp::new(p, vec![(Arc::clone(&core), 0, true)]);
     assert!(matches!(op.settle(), Settled::Sent(0)));
-    assert_eq!(core.q.lock().unwrap().summary(), (0, false));
     // A withdrawn offer can never commit afterwards.
     let mut cs = ChanState::default();
     let q = Pending::new();
-    cs.offer(&q, 0, t185_sum(1), WireValue::Int(1));
+    cs.offer(&q, 0, Value::int(1));
     assert!(q.try_cancel().is_ok());
     assert!(cs.pop().is_none(), "a cancelled offer is dead");
 }
@@ -1161,11 +1142,7 @@ fn a_recv_settled_from_its_own_filled_slot_wakes_no_sender() {
     let h = vm.heap.alloc(Obj::Channel(Arc::clone(&core)));
     let p = Pending::new();
     core.q.lock().unwrap().slot(&p, 0);
-    let out = core
-        .q
-        .lock()
-        .unwrap()
-        .send(Some(0), t185_sum(5), WireValue::Int(5), None);
+    let out = core.q.lock().unwrap().send(Some(0), Value::int(5), None);
     assert!(matches!(out, SendOutcome::Sent), "the give fills the slot");
     vm.pending = Some(PendingOp::new(p, vec![(Arc::clone(&core), 0, false)]));
     let v = vm.channel_method(h, "recv", &[], Span::RUNTIME).unwrap();
@@ -1188,10 +1165,7 @@ fn a_recv_that_takes_an_offer_still_wakes_its_sender() {
     let core = t185_core(Some(0));
     let h = vm.heap.alloc(Obj::Channel(Arc::clone(&core)));
     let q = Pending::new();
-    core.q
-        .lock()
-        .unwrap()
-        .offer(&q, 0, t185_sum(7), WireValue::Int(7));
+    core.q.lock().unwrap().offer(&q, 0, Value::int(7));
     let v = vm.channel_method(h, "recv", &[], Span::RUNTIME).unwrap();
     assert_eq!(v.as_int(), 7);
     assert_eq!(q.state(), PENDING_DONE, "the recv committed the offer");
@@ -1209,26 +1183,26 @@ fn a_recv_that_takes_an_offer_still_wakes_its_sender() {
 fn chan_state_give_fills_only_a_live_slot() {
     use crate::vm::core::{ChanState, PENDING_DONE, Pending};
     let mut cs = ChanState::default();
-    assert!(cs.give(t185_sum(1), WireValue::Int(1), None).is_err());
+    assert!(!cs.give(Value::int(1), None));
     let dead = Pending::new();
     cs.slot(&dead, 0);
     assert!(dead.try_cancel().is_ok());
     let me = Pending::new();
     cs.slot(&me, 1);
     assert!(
-        cs.give(t185_sum(2), WireValue::Int(2), Some(&me)).is_err(),
+        !cs.give(Value::int(2), Some(&me)),
         "a party never fills its own slot"
     );
     assert!(me.is_queued());
     let live = Pending::new();
     cs.slot(&live, 3);
-    assert!(cs.give(t185_sum(4), WireValue::Int(4), Some(&me)).is_ok());
+    assert!(cs.give(Value::int(4), Some(&me)));
     assert_eq!(live.state(), PENDING_DONE + 3);
     assert!(
-        cs.give(t185_sum(5), WireValue::Int(5), Some(&me)).is_err(),
+        !cs.give(Value::int(5), Some(&me)),
         "a filled slot takes no second value"
     );
-    assert!(matches!(cs.take(&live), Some(WireValue::Int(4))));
+    assert_eq!(cs.take(&live), Some(Value::int(4)));
     assert_eq!(cs.len(), 0, "a filled slot is not buffered");
 }
 
@@ -1241,19 +1215,19 @@ fn chan_state_pop_refills_the_buffer_from_a_parked_offer() {
     let core = t185_core(Some(1));
     let mut g = core.q.lock().unwrap();
     assert!(matches!(
-        g.send(Some(1), t185_sum(1), WireValue::Int(1), None),
+        g.send(Some(1), Value::int(1), None),
         SendOutcome::Sent
     ));
     assert!(matches!(
-        g.send(Some(1), t185_sum(2), WireValue::Int(2), None),
+        g.send(Some(1), Value::int(2), None),
         SendOutcome::Full
     ));
     let p = Pending::new();
     assert!(matches!(
-        g.send(Some(1), t185_sum(2), WireValue::Int(2), Some((&p, 0))),
+        g.send(Some(1), Value::int(2), Some((&p, 0))),
         SendOutcome::Offered
     ));
-    assert!(matches!(g.pop(), Some(WireValue::Int(1))));
+    assert_eq!(g.pop(), Some(Value::int(1)));
     assert_eq!(g.len(), 1, "the offer moved into the buffer");
     assert!(!p.is_queued());
     g.close();
@@ -1263,10 +1237,7 @@ fn chan_state_pop_refills_the_buffer_from_a_parked_offer() {
         matches!(op.settle(), Settled::Sent(0)),
         "close came after the send"
     );
-    assert!(matches!(
-        core.q.lock().unwrap().pop(),
-        Some(WireValue::Int(2))
-    ));
+    assert_eq!(core.q.lock().unwrap().pop(), Some(Value::int(2)));
 }
 
 /// TICKET-185: `close()` closes every live offer (that sender faults) and drops unfilled slots,
@@ -1276,25 +1247,21 @@ fn chan_state_close_closes_offers_and_keeps_filled_slots() {
     use crate::vm::core::{ChanState, PENDING_CLOSED, Pending, SendOutcome};
     let mut cs = ChanState::default();
     let sender = Pending::new();
-    cs.offer(&sender, 0, t185_sum(1), WireValue::Int(1));
+    cs.offer(&sender, 0, Value::int(1));
     let filled = Pending::new();
     cs.slot(&filled, 0);
     let empty = Pending::new();
     cs.slot(&empty, 0);
-    assert!(cs.give(t185_sum(2), WireValue::Int(2), None).is_ok());
+    assert!(cs.give(Value::int(2), None));
     cs.close();
     assert_eq!(sender.state(), PENDING_CLOSED);
     assert!(cs.pop().is_none(), "a closed offer is never received");
-    assert!(
-        cs.give(t185_sum(3), WireValue::Int(3), None).is_err(),
-        "the unfilled slot is gone"
-    );
-    assert!(matches!(cs.take(&filled), Some(WireValue::Int(2))));
+    assert!(!cs.give(Value::int(3), None), "the unfilled slot is gone");
+    assert_eq!(cs.take(&filled), Some(Value::int(2)));
     assert!(matches!(
-        cs.send(Some(0), t185_sum(4), WireValue::Int(4), None),
+        cs.send(Some(0), Value::int(4), None),
         SendOutcome::Closed
     ));
-    assert_eq!(cs.summary(), (0, false));
 }
 
 /// TICKET-185: readiness ignores the caller's own entries, so a `wait:` with a send arm and a recv
@@ -1304,7 +1271,7 @@ fn chan_state_readiness_ignores_the_callers_own_entries() {
     use crate::vm::core::{ChanState, Pending};
     let mut cs = ChanState::default();
     let me = Pending::new();
-    cs.offer(&me, 0, t185_sum(1), WireValue::Int(1));
+    cs.offer(&me, 0, Value::int(1));
     cs.slot(&me, 1);
     assert!(!cs.recv_ready_for(Some(&me)));
     assert!(!cs.send_ready_for(Some(0), Some(&me)));
@@ -1313,7 +1280,7 @@ fn chan_state_readiness_ignores_the_callers_own_entries() {
     assert!(cs.recv_ready_for(Some(&other)));
     assert!(cs.send_ready_for(Some(0), Some(&other)));
     assert!(cs.send_ready_for(None, Some(&me)));
-    assert!(matches!(cs.pop_for(Some(&other)), Some(WireValue::Int(1))));
+    assert_eq!(cs.pop_for(Some(&other)), Some(Value::int(1)));
 }
 
 /// D6: `poll_park_offload` hands a fiber whose socket op `WouldBlock`ed to the netpoller —

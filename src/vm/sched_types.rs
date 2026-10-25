@@ -282,18 +282,12 @@ pub(super) struct Handler {
     pub(super) nursery_len: usize,
 }
 
-/// B3.2 — what a run isolated worker hands back across the airlock: the task's return value
-/// serialized in the worker heap, plus the worker's captured stdout/stderr (decision F —
-/// buffer-per-worker, returned to the parent rather than interleaved live).
-// `value` is read only by the worker unit tests (`ReadyWorker::run`, `#[cfg(test)]`): the join
-// discards each task's return value (data exits a spawn via `Shared`/`Channel`, not a return), so
-// the field is dead in the bin build — hence the allow. W7-27: every bin-build producer therefore
-// stores `WireValue::Nil` — a stored result is retained until the nursery join / `shutdown()`, and a
-// value nothing reads is pure retention. `out`/`stderr` are live (flushed at join).
-#[allow(dead_code)]
+/// B3.2 — what a finished task hands back to its join: the worker's captured stdout/stderr
+/// (decision F — buffer-per-worker, returned to the parent rather than interleaved live), flushed
+/// at the join. The join discards each task's return value (data exits a spawn via
+/// `Shared`/`Channel`, and an Executor job's value via its Task channel), so none is kept.
 #[derive(Debug)]
 pub(super) struct WorkerResult {
-    pub(super) value: WireValue,
     pub(super) out: Vec<u8>,
     pub(super) stderr: Vec<u8>,
 }
@@ -1025,39 +1019,26 @@ impl std::ops::IndexMut<usize> for ScopeTable {
 }
 
 /// TICKET-219 — what settles a job that [`SchedCore::job_event`] drops or cuts: the fresh cap-1
-/// result channel of its Task, the cancel value and the job's own cancel flag. Registered at the
-/// submit; every job has one (TICKET-289).
+/// result channel of its Task and the job's own cancel flag. Registered at the submit; every job
+/// has one (TICKET-289).
 pub(super) struct JobSettle {
     pub(super) ch: Arc<ChannelCore>,
-    pub(super) cancel: WireValue,
     /// TICKET-289 — the job's own cancel flag: `Task.cancel()` and an uncatchable end of this job
     /// trip it, and no sibling reads it. The job's fiber carries a clone ([`Fiber::job_cancel`]).
     pub(super) flag: Arc<AtomicBool>,
 }
 
 impl JobSettle {
-    /// Seal the Task's channel with `v`. Returns whether this call sealed it: the first writer
-    /// wins, and a body that sealed its own value keeps it. Lock order `SchedCore` then
-    /// `ChannelCore::q`, as `send_wake`.
-    pub(super) fn seal(&self, v: WireValue) -> bool {
-        let sum = crate::vm::core::wire_summary(&v);
+    /// Seal the Task's channel with `Err(msg)`, as text: the transition that seals it holds no
+    /// heap, and the first receive builds the value (`Vm::recv_ready`). Returns whether this call
+    /// sealed it: the first writer wins, and a body that sealed its own value keeps it. Lock order
+    /// `SchedCore` then `ChannelCore::q`, as `send_wake`.
+    pub(super) fn seal_err(&self, msg: &str) -> bool {
         self.ch
             .q
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .seal(sum, v)
-    }
-
-    /// The cancel value with its one payload replaced by `msg`: the `Err(msg)` of a job that
-    /// ended by a fault. The cancel value is `Result.Err(str)`.
-    pub(super) fn fault_value(&self, msg: &str) -> WireValue {
-        let mut v = self.cancel.clone();
-        if let WireValue::Enum { payload, .. } = &mut v
-            && let Some(slot) = payload.first_mut()
-        {
-            *slot = WireValue::Str(msg.into());
-        }
-        v
+            .seal_err(msg)
     }
 }
 
@@ -1292,8 +1273,8 @@ pub(super) enum SockPoll {
 /// caller wakes no sender for it (the `wait:` settle path in `Vm::op_wait_poll` never did). `Got`
 /// is every other value — a buffered one, or a parked sender's offer, whose sender must be woken.
 pub(super) enum RecvStep {
-    Got(WireValue),
-    Filled(WireValue),
+    Got(Value),
+    Filled(Value),
     ClosedEmpty,
     Parked,
 }

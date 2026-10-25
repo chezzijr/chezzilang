@@ -1,17 +1,16 @@
 ## 5. `Channel[T]` — a mailbox outside every heap
 
-A `Channel[T]` is **not** an object in any task's heap. It is a separate runtime structure — a
-**mailbox** with its own queue — that sits outside both heaps. What each task *holds* is a lightweight
-**handle**; the handle is the only shared thing, and values flowing through are **moved/copied** at
-the airlock, never live in two heaps at once.
+A `Channel[T]` is a **mailbox** with its own queue, shared by every task that holds a **handle** to
+it. M3.2: the queue holds the values themselves, as Go's `chan T` does — a `send` copies one word (the
+value, or the reference to its object), so the receiver gets the sender's object, not a copy.
 
 ```chezzi
 ch := Channel[str]()       # construct; capitalized like Shared[T] / T?. Unbounded FIFO.
 rch := Channel[int](0)     # RENDEZVOUS: send blocks until a receiver is already waiting (Go's make(chan T)),
                             # but a parked sender's value is visible to try_recv/wait: polls, not just recv
 bch := Channel[int](2)     # BOUNDED: holds ≤2 queued messages; a 3rd `send` blocks until a `recv` frees a slot
-ch.send(x)                 # x moved/copied OUT of the sender's heap → channel queue
-v := ch.recv()             # value reconstructed IN the receiver's heap
+ch.send(x)                 # x itself → channel queue (one word; an object is shared, not copied)
+v := ch.recv()             # the sender's value itself
 opt := ch.try_recv()       # non-blocking poll: v if queued, None if empty
 n := ch.len()              # current queued count
 c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0); -1 for an unbounded Channel[T]()
@@ -19,7 +18,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `send` | `send(self, v: T) -> None` | enqueue (move/copy at the airlock); the sender MAY keep using the value — the crossing copies, so its later writes are not seen by the receiver. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting. A blocked sender (rendezvous or full bounded) publishes its value as an OFFER, so a poll can take it, and `send` returns only once a receiver took it; `len()` does not count it |
+| `send` | `send(self, v: T) -> None` | enqueue the value itself (M3.2); the sender MAY keep using it, and its later writes ARE seen by the receiver (one object, Go). On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting. A blocked sender (rendezvous or full bounded) publishes its value as an OFFER, so a poll can take it, and `send` returns only once a receiver took it; `len()` does not count it |
 | `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, a **bounded** channel is **full**, or a **rendezvous** channel has no receiver already waiting. Never blocks/parks |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
 | `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll: `?v` if queued, `None` if empty (or closed), or a value handed over by a parked rendezvous sender — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
@@ -109,10 +108,10 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   A deadlock message raised inside a native callback that cannot park at all is an ordinary
   recoverable fault and still runs `defer`s. A `defer` that blocks forever is not that case: it is a
   counted party, so it reaches the verdict itself, and that verdict is fatal like any other.
-- **Move-on-send** = Go's send without Go's sharing. Nothing is *enforced* — there is no Rust-style
-  move checker, and a sender that keeps using the value it sent is legal and safe: the crossing
-  deep-copies, so the two sides stop being the same object. Measured: `ch.send(xs)` then
-  `xs.push(3)` leaves the sender with `[1, 2, 3]` and hands the receiver `[1, 2]`.
+- **A send shares, as Go's does** (M3.2). A sender that keeps using the value it sent is legal: both
+  sides hold the one object, and a write by either is seen by the other. Measured: `ch.send(xs)`
+  then `xs.push(3)` hands the receiver `[1, 2, 3]` (Go: a map sent, then written, is received with
+  the write). Two tasks that write one object with no lock race: a race is the user's bug, as in Go.
 - **Channels are themselves sendable** — pass a `Channel` over a `Channel` for reply channels.
 - **`try_recv() -> T?`** is the non-blocking sibling of `recv`: it pops or returns `None` and never
   blocks, faults, or suspends a fiber. `recv -> T` stays primary; reach for `try_recv` to poll
@@ -155,8 +154,8 @@ See [`stdlib.md`](../stdlib/01-builtins.md) for signatures.
 
 `Executor.submit[T](f: fn() -> T) -> Task[T]` is the one submit form. Its `Task` wraps a cap-1 channel
 that carries the outcome (`?value` or `!message`). That channel is **sealed**: its outcome is written
-once, and every `recv` returns a copy of it and takes nothing, so `len()` stays `1` and every reader
-sees the same outcome. Do not iterate it with `for` (it never ends); to collect several outcomes keep
+once, and every `recv` returns that one value (M3.2: by handle) and takes nothing, so `len()` stays
+`1` and every reader shares the same outcome object. Do not iterate it with `for` (it never ends); to collect several outcomes keep
 a list of `submit` channels. Two writers can seal it, and the first wins: the job body seals
 the value of `recover: f()`, and the job transition seals
 `!"task cancelled: cancel() stopped it before it finished"` when it drops a held job or a job
@@ -171,8 +170,9 @@ future-style handle (every copy of the handle, in any task, reads the same chann
   call; a task holding a copy gets the value as of the crossing, or a fresh copy when the owner had
   not called `get()` before it. `get()` never faults: a job that returned `v` gives `?v`, and a job
   that faulted gives `!message` with the job's own fault text (CPython's `Future.result()`, with a
-  `T!` in place of a raise) — handle it with `match`, `else e:` or `?`. The message carries no file
-  or line. A job fault appears ONLY here: `shutdown()` returns normally (measured: `shutdown ok`,
+  `T!` in place of a raise) — handle it with `match`, `else e:` or `?`. M3.2: it is the job's own
+  error, so `file()`/`line()`/`col()` give the job's fault site, as a local `recover:` does
+  (CPython: the future's exception keeps its traceback). A refused or cancelled Task's error has none. A job fault appears ONLY here: `shutdown()` returns normally (measured: `shutdown ok`,
   then `get()` gives `!boom`) and a job fault never cancels a sibling. A task `cancel()` cancelled
   gives `!"task cancelled: cancel() stopped it before it finished"` at once, never hangs (CPython:
   `CancelledError`), and `done()` is `true`. When `f` itself returns a `T!E`, `get()` is `(T!E)!`: the

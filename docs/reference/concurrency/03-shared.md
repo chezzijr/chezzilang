@@ -154,7 +154,8 @@ box never waits for it: when the state is busy the message shows `Shared(<locked
 
 `Atomic[T]` is `Shared[T]`'s sibling for **atomic operation primitives** (compare-and-swap, exchange,
 fetch-add) rather than `Shared`'s closure-based `update`. Same shape: one box, many tasks; the
-**handle is sendable**, the value is copied in/out under a lock; constructed value-first (`Atomic(v)`,
+**handle is sendable**; M3.2: the box holds the value itself, so `store` and `load` copy one word
+under a lock and every task shares the stored object (Go `atomic.Value`); constructed value-first (`Atomic(v)`,
 `T` inferred — an optional `Atomic[T](v)` turbofish pins it and is checked against the value). Generic
 over any `T`; the arithmetic methods are restricted to numeric `T`.
 
@@ -209,9 +210,9 @@ checker answers it from the payload's shape. No checker walk can see through a p
 payload, so the VM also switches the `eq` hook off for the compare.
 
 **`cas` on a payload that holds a `fn` value is rejected** (`Atomic[fn() -> int]`, a struct field or
-`List` element of `fn` type). Every `load()` returns a fresh copy of the closure and closures compare
-by identity, so `cas(a.load(), new)` could never succeed and the standard CAS retry loop would spin
-forever (Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape).
+`List` element of `fn` type). Closures compare by identity, and a payload that holds one is a
+container `cas` compares structurally, so the compare cannot answer what the CAS retry loop needs and
+the loop could spin forever (Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape).
 
 - The error is at the `cas` call, so `load`/`store`/`exchange` of a fn stay legal.
 - A named fn, a builtin fn (`ord`), a std native fn (`math.sqrt`) and an `extern` fn are fn values

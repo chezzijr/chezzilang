@@ -11,12 +11,15 @@ from a real `fork`:
 2. **Explicit concurrency handles cross by SHARED reference, not by copy** — `Channel`, `Shared`,
    `RwShared`, `Atomic`, `Executor`, and the socket/reader/writer handles carry their one underlying
    core across, so all tasks reach the *same* mailbox/box/queue/fd. These handles are the *only* way
-   tasks share mutable state; everything else is copied. A plain captured value mutated in a task
+   tasks share mutable state; a captured value is copied. A plain captured value mutated in a task
    changes only that task's copy, and (D4) that write faults there, except the ceilings below.
+   M3.2: a value SENT over a `Channel`, stored in an `Atomic` or returned through a `Task` is not
+   copied: the receiver gets the sender's object itself (Go), so a write by either side is seen by
+   the other.
 
 > **One-sentence mental model:** a spawned task gets its **own copies** of what it captures
 > (read-only), holds **shared handles** to channels and `Shared` boxes, and talks **only** through
-> those — which move/copy values between isolated heaps.
+> those — a channel and an `Atomic` hand over the value itself (M3.2).
 
 ```chezzi
 fn worker(id: int, prefix: str, out: Channel[str]):
@@ -87,19 +90,10 @@ Reads never check the mark. A write through a `Shared`/`RwShared`/`Atomic*`/`Cha
 
 **Two shapes still lose the write silently** (measured on the release binary):
 
-1. **Closure capture vs. a sibling reference — order-dependent, one shared memo per send.** A tuple
-   `(xs, f)`, `f := fn() -> None: xs.push(2)`, sent in one crossing over a `Channel` to a different
-   spawned task, both writes done under `recover:`:
-   - `ch.send((xs, f))` (`xs` first): `xf: f() ok` then `xf: xs.push ok` — NEITHER write faults; the
-     push is silently lost.
-   - `ch.send((f, xs))` (`f` first): `fx: f() FAULT this value is this task's copy: a write to it
-     would be lost at the join; share it through Shared/Channel, or make a task-local copy with
-     .copy()` then `fx: xs.push FAULT` — BOTH writes fault.
-
-   Whichever element the walk visits first decides whether the closure's captures are rebuilt as
-   marked copies or aliased to an already-visited (unmarked) object.
-   `tests/chz/spec/airlock_task_local_fault_test.chz` and `airlock_task_local_silent_test.chz` each
-   pin one row for this shape.
+1. M3.2 closed the channel shape of this ceiling: a tuple `(xs, f)` or `(f, xs)`,
+   `f := fn() -> None: xs.push(2)`, sent over a `Channel` to a spawned task is the sender's tuple,
+   so both writes run and land on the one `xs` in either order (Go: both writes are seen;
+   `airlock_task_local_fault_test.chz` and `airlock_task_local_silent_test.chz` pin one order each).
 2. **Captured iterator/generator cursors.** Advancing a captured `Iterator` cursor and resuming a
    captured generator are not checked. This is the deep-copy semantics, not a lost write: the task's
    copy is independent, and the parent's own `g.next()` after the join returns its own next value.
@@ -109,10 +103,13 @@ Reads never check the mark. A write through a `Shared`/`RwShared`/`Atomic*`/`Cha
    `memoize1` read all apply it; see [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md) rule 2.
 **A same-task round trip is a crossing** (owner decision 2026-10-22, TICKET-291, reversing the
 2026-09-23 ruling). A closure holds its captures by reference only in the heap that built it. Every
-rebuild of a closure -- a `Channel` send, a `Shared`/`RwShared` store read back (`get`, `read`, a
-concurrent collection's `at`/`get`/`remove`), an `Atomic` load, a `Task` result, a relay task that
-stores it again -- rebuilds its captures as copies, so a write through one faults, the task that sent
-or stored it included. Two rebuilds prove a capture is the only live copy, so its write runs:
+rebuild of a closure -- a `Shared`/`RwShared` store read back (`get`, `read`, a concurrent
+collection's `at`/`get`/`remove`), a relay task that stores it again -- rebuilds its captures as
+copies, so a write through one faults, the task that stored it included. M3.2: a `Channel` send, an
+`Atomic` load and a `Task` result rebuild nothing: they hand over the closure itself, so its
+captures are the sender's bindings (Go: a closure sent over a channel writes its captured
+variables). A `Task` result closure still faults when its capture is a job's copy (a spawn crossing,
+until M3.4). Two rebuilds prove a capture is the only live copy, so its write runs:
 - A closure that a `Shared.read` closure builds and returns. Its captures may reach an object
   the box keeps only when no write can change that object or anything below it: `[s[0]]` over
   `Shared([(1, 2)])` runs; over `Shared([(1, [2])])` or `Shared([[1]])` it faults, because the
@@ -124,8 +121,8 @@ A closure over the box's own state, or over fresh state that holds a mutable par
 `RwShared.read` runs its closure in the reader's heap over the reader's copy of the state
 (`03-shared.md`), so `rw.read(fn(s): fn(): s.push(9))` returns a closure that writes the reader's
 copy: no fault, and the box stays `[1]`. A plain
-(non-closure) value received over a `Channel` or read back from a `Shared`/`RwShared` is never marked:
-it belongs to the receiver.
+(non-closure) value received over a `Channel` (the sender's object) or read back from a
+`Shared`/`RwShared` is never marked.
 
 ### Closures and functions cross by value
 

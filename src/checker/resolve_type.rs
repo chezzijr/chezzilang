@@ -418,15 +418,9 @@ impl Checker {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
                         match b {
-                            BuiltinType::Channel => {
-                                if !self.sendable(&resolved[0]) {
-                                    let hint = self.sendable_error_hint(&resolved[0]);
-                                    self.error(
-                                        span,
-                                        format!("Channel element type must be sendable (able to cross a task boundary), found {}{hint}", resolved[0]),
-                                    );
-                                }
-                            }
+                            // M3.2 — a channel holds its values by handle, so every element type
+                            // is legal (Go `chan T`).
+                            BuiltinType::Channel => {}
                             BuiltinType::Atomic => {
                                 self.conformance_obligation(Obligation::AtomicPayload {
                                     elem: resolved[0].clone(),

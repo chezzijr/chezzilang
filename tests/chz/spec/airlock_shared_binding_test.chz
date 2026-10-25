@@ -96,10 +96,9 @@ fn _w74gen() -> Iterator[int]:
     yield 2
 
 # Headline repro — no concurrency at all, just a Channel round-trip inside one task.
-# Owner decision 2026-10-22 (TICKET-291, reversing the 2026-09-23 ruling): a same-task round trip
-# is a crossing. `recv` rebuilds the closure over a copy of its captures, so a write through it
-# would be lost and faults, and the sender's binding is unchanged. One binding per crossing is
-# still observable where a write runs: a box call's result over fresh state (`sole` captures).
+# M3.2: a channel moves the closures themselves, so the received pair writes the sender's one
+# binding (Go `closures.go`, M3.2 report: `one_binding 2 2`). One binding per crossing is also
+# observable where a box call's result runs over fresh state (`sole` captures).
 test fn channel_send_keeps_one_binding():
     c := make()
     c.inc()
@@ -108,37 +107,38 @@ test fn channel_send_keeps_one_binding():
     ch.send(c)
     d := ch.recv()
     assert d.get() == 1
-    assert copy_fault(d.inc)
-    assert c.get() == 1
+    assert not copy_fault(d.inc)
+    assert d.get() == 2
+    assert c.get() == 2
     e := concurrency.Shared(0).read(fn(s): make())
     e.inc()
     e.inc()
     assert e.get() == 2
 
 # The pair reached through a STRUCT FIELD after crossing (same cell, two field-held closures).
-# Same-task round-trip — see the owner decision above `channel_send_keeps_one_binding`.
+# Go (`closures.go`): `struct_field 1`.
 test fn struct_field_keeps_one_binding():
     ch := Channel[Ctr](1)
     ch.send(make())
     d := ch.recv()
-    assert copy_fault(d.inc)
-    assert d.get() == 0
+    assert not copy_fault(d.inc)
+    assert d.get() == 1
     e := concurrency.Shared(0).read(fn(s): make())
     e.inc()
     e.inc()
     e.inc()
     assert e.get() == 3
 
-# A cursor snapshot carrying both closures — the `Obj::Iter` airlock arm.
-# Same-task round-trip — see the owner decision above `channel_send_keeps_one_binding`.
+# A cursor carrying both closures, through a channel: the closures themselves (Go `closures.go`:
+# `cursor 1`).
 test fn cursor_keeps_one_binding():
     ch := Channel[Iterator[fn() -> int]](1)
     ch.send(pair_cursor())
     fs: List[fn() -> int] = []
     for f in ch.recv():
         fs.push(f)
-    assert copy_fault_int(fs[0])
-    assert fs[1]() == 0
+    assert not copy_fault_int(fs[0])
+    assert fs[1]() == 1
     gs: List[fn() -> int] = []
     for g in concurrency.Shared(0).read(fn(s): pair_cursor()):
         gs.push(g)
@@ -155,10 +155,9 @@ test fn shared_keeps_one_binding():
     assert d.get() == 0
     assert box.read(fn(c): c.get()) == 0
 
-# D4 layer C, the genuine cross-task counterpart: the closure crosses INTO a different task's
-# heap (a real airlock copy), so the receiving task's write is lost at the join and must fault
-# instead — the owner ruling above distinguishes this from a same-task round-trip.
-test fn channel_send_to_a_different_task_faults():
+# The cross-task counterpart: M3.2 moves the closures into the other task by handle, so the
+# receiving task's write lands on the sender's binding (Go `closures.go`: `other_task no-fault 1`).
+test fn channel_send_to_a_different_task_shares_the_binding():
     c := make()
     ch := Channel[Ctr](1)
     done := Channel[str](1)
@@ -172,7 +171,8 @@ test fn channel_send_to_a_different_task_faults():
                 !e: done.send(e.message())
         ch.send(c)
     msg := done.recv()
-    assert msg.starts_with("this value is this task's copy:"), msg
+    assert msg == "no-fault", msg
+    assert c.get() == 1
 
 # `spawn f(g, h)` — two closures arriving as two SEPARATE spawn args. TICKET-169: the task's write
 # through either now faults (its captures crossed the airlock and are marked), so the shared-binding

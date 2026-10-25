@@ -337,9 +337,10 @@ main()";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
-/// A generator crossing over an explicit `Channel[Iterator[int]]` into a task: the parent SENDS it
-/// (deep-copied into the channel), the task RECVs its own copy and drives it, and the sender's `it`
-/// is untouched (deep-copy). Byte-identical.
+/// A generator crossing over an explicit `Channel[Iterator[int]]` into a task: the parent SENDS it,
+/// and M3.2 moves the generator itself, so the task drives the sender's `it` to its end and the
+/// sender's loop then yields nothing. Go (`rewrites.go`): a stateful closure sent into a goroutine
+/// prints `10`, `20`, and the sender's loop then prints nothing.
 #[test]
 fn generator_sent_over_channel_into_task_both() {
     let src = "\
@@ -361,7 +362,7 @@ fn main():
     for x in it:
         print(x)
 main()";
-    let expect = "10\n20\n10\n20\n";
+    let expect = "10\n20\n";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 

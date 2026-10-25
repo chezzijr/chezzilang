@@ -182,19 +182,16 @@ impl MnSched {
         &self,
         key: usize,
         core: &Arc<ChannelCore>,
-        w: WireValue,
+        v: Value,
         offer: Option<(&Arc<crate::vm::core::Pending>, u32)>,
         wid: usize,
     ) -> crate::vm::core::SendOutcome {
-        // W6-7/W6-10 — summarise the message BEFORE taking core lock A: `wire_summary` is
-        // O(payload), and this critical section serializes every fiber's park/wake/finish.
-        let sum = crate::vm::core::wire_summary(&w);
         let mut c = self.lock();
         let out = core
             .q
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .send(core.cap, sum, w, offer);
+            .send(core.cap, v, offer);
         if !matches!(out, crate::vm::core::SendOutcome::Sent) {
             return out;
         }
@@ -625,14 +622,9 @@ impl MnSched {
         }
     }
 
-    pub(super) fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
-        // Summarised BEFORE core lock A — see `send_wake_bounded`.
-        let sum = crate::vm::core::wire_summary(&w);
+    pub(super) fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, v: Value) {
         let mut c = self.lock();
-        core.q
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(sum, w);
+        core.q.lock().unwrap_or_else(|e| e.into_inner()).push(v);
         self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
         self.notify_waiters();

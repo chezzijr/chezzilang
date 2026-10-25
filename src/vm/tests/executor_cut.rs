@@ -267,11 +267,11 @@ fn live_bytes_counts_an_executors_held_bytes() {
     let _ = r;
 }
 
-/// W7-26 (the second arm) — the two `--max-heap` walks share one de-dup set, so whichever meets
-/// the Executor first must charge its held bytes. Both visit orders. Fails if
-/// `drain_pending_core_bytes` and `Heap::live_bytes` read different numbers.
+/// W7-26 / M3.2 — an Executor reached only through an `Atomic`'s value is a heap slot like any
+/// other, so the slot walk charges its held bytes, once per core however many slots alias it, and
+/// in either visit order. Fails if `Heap::live_bytes` skips an Executor met through a value.
 #[test]
-fn nested_executor_charges_its_held_bytes_in_either_visit_order() {
+fn an_executor_held_in_an_atomic_charges_its_held_bytes_once() {
     use crate::vm::core::AtomicCore;
     use crate::vm::heap::{Heap, Obj};
     let ex = Arc::new(crate::vm::core::ExecutorCore::default());
@@ -283,30 +283,29 @@ fn nested_executor_charges_its_held_bytes_in_either_visit_order() {
     let eager_bytes = ex.held_bytes();
     assert!(eager_bytes >= 40_000);
 
-    // (a) reachable ONLY through a `Shared`'s payload — no `Obj::Executor` slot at all.
-    let mut h = Heap::new();
-    h.set_mem_cap(1);
-    let outer = Arc::new(AtomicCore::default());
-    outer.store(crate::vm::wire::WireValue::Executor(Arc::clone(&ex)));
-    let base = h.live_bytes();
-    let sr = h.alloc(Obj::Atomic(Arc::clone(&outer)));
-    assert!(
-        h.live_bytes() >= base + eager_bytes,
-        "a nested executor's held bytes must be charged"
-    );
-    let _ = sr;
-
-    // (b) the executor DOES have its own slot, but the enclosing `Shared` is met first.
-    let mut h = Heap::new();
-    h.set_mem_cap(1);
-    let base = h.live_bytes();
-    let sr = h.alloc(Obj::Atomic(Arc::clone(&outer)));
-    let er = h.alloc(Obj::Executor(Arc::clone(&ex)));
-    assert!(
-        h.live_bytes() >= base + eager_bytes,
-        "visit order must not decide whether the held bytes are counted"
-    );
-    let (_, _) = (sr, er);
+    for atomic_first in [true, false] {
+        let mut h = Heap::new();
+        h.set_mem_cap(1);
+        let base = h.live_bytes();
+        let held = Arc::new(AtomicCore::new(Value::nil()));
+        let ar = if atomic_first {
+            Some(h.alloc(Obj::Atomic(Arc::clone(&held))))
+        } else {
+            None
+        };
+        let er = h.alloc(Obj::Executor(Arc::clone(&ex)));
+        held.store(Value::obj(er));
+        let ar = ar.unwrap_or_else(|| h.alloc(Obj::Atomic(Arc::clone(&held))));
+        let alias = h.alloc(Obj::Executor(Arc::clone(&ex)));
+        let got = h.live_bytes() - base;
+        assert!(got >= eager_bytes, "the held bytes are charged: {got}");
+        assert!(
+            got < 2 * eager_bytes,
+            "two slots of one Executor charge its held bytes once: {got}"
+        );
+        assert_eq!(h.children(ar), vec![er]);
+        let _ = alias;
+    }
 }
 
 /// TICKET-208, the lift direction of W7-56 — an Executor job that has FINISHED is no live sender,
@@ -379,7 +378,6 @@ fn a_cut_job_handle_is_sealed_in_the_lock_hold_that_ends_the_job() {
         0,
         JobSettle {
             ch: Arc::clone(&ch),
-            cancel: WireValue::Int(7),
             flag: Arc::new(AtomicBool::new(false)),
         },
     );
@@ -449,7 +447,6 @@ fn every_way_out_of_the_counts_moves_the_epoch() {
                 0,
                 JobSettle {
                     ch: empty_core(),
-                    cancel: WireValue::Int(7),
                     flag: Arc::new(AtomicBool::new(false)),
                 },
             );
@@ -486,7 +483,6 @@ fn a_cut_job_seal_moves_the_epoch_after_the_seal() {
                 0,
                 JobSettle {
                     ch: Arc::clone(&ch),
-                    cancel: WireValue::Int(7),
                     flag: Arc::new(AtomicBool::new(false)),
                 },
             );
@@ -896,7 +892,7 @@ fn display_box_grid_terminates_on_every_cycle() {
         match kind {
             Kind::Shared => WireValue::Shared(vm.new_shared_core(WireValue::Nil)),
             Kind::RwShared => WireValue::RwShared(vm.new_rwshared_core(WireValue::Nil)),
-            Kind::Atomic => WireValue::Atomic(Arc::new(AtomicCore::default())),
+            Kind::Atomic => WireValue::Atomic(Arc::new(AtomicCore::new(Value::nil()))),
         }
     }
     fn set(vm: &mut Vm, b: &WireValue, held: WireValue) {
@@ -909,7 +905,10 @@ fn display_box_grid_terminates_on_every_cycle() {
                 let mut st = c.state.write();
                 vm.box_store(&mut st, held);
             }
-            WireValue::Atomic(c) => *c.v.lock().unwrap() = held,
+            WireValue::Atomic(c) => {
+                let v = vm.from_wire(held);
+                c.store(v);
+            }
             _ => unreachable!(),
         }
     }
@@ -960,17 +959,11 @@ fn display_box_grid_terminates_on_every_cycle() {
             (Shape::NoCycle, format!("{l}(1)")),
             (Shape::Itself, format!("{l}({l}(...))")),
             (Shape::ThroughList, format!("{l}([{l}(...)])")),
-            // A `Shared` / `RwShared` decodes what it holds into its own heap, and this fixture's
-            // empty program declares no struct `N`, so the struct prints with no name. The cell's
-            // subject is the cycle marker; `tests/chz/suites/box_grid_test.chz` runs the same
-            // shape with a declared struct.
-            (
-                Shape::ThroughStruct,
-                match kind {
-                    Kind::Atomic => format!("{l}(N(b={l}(...)))"),
-                    _ => format!("{l}(?(0={l}(...)))"),
-                },
-            ),
+            // Every box decodes what it holds into the heap (M3.2: an `Atomic` holds the value
+            // itself), and this fixture's empty program declares no struct `N`, so the struct
+            // prints with no name. The cell's subject is the cycle marker;
+            // `tests/chz/suites/box_grid_test.chz` runs the same shape with a declared struct.
+            (Shape::ThroughStruct, format!("{l}(?(0={l}(...)))")),
             (Shape::EachOther, format!("{l}({l}({l}(...)))")),
         ] {
             for renderer in [

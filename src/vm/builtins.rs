@@ -308,13 +308,12 @@ impl Vm {
                     // under `guarded` an M:N fiber demotes (blocks in place) instead of parking,
                     // so no `ip` rewind replays the surrounding `List(...)` call (DEC-181).
                     Step::Channel => {
-                        let w = match self.guarded(|vm| vm.recv_step_or_demote(h, span))? {
+                        let item = match self.guarded(|vm| vm.recv_step_or_demote(h, span))? {
                             // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
-                            RecvStep::Got(w) | RecvStep::Filled(w) => w,
+                            RecvStep::Got(v) | RecvStep::Filled(v) => v,
                             RecvStep::ClosedEmpty => break,
                             RecvStep::Parked => unreachable!("a re-entered recv never parks"),
                         };
-                        let item = self.from_wire(w);
                         let heap = self.heap.write(acc);
                         let Obj::List(buf) = heap.get(acc) else {
                             unreachable!()

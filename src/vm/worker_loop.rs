@@ -905,7 +905,6 @@ impl Vm {
                     }
                 }
                 Ok(()) => TaskOutcome::Done(WorkerResult {
-                    value: WireValue::Nil,
                     out: std::mem::take(&mut self.out),
                     stderr: std::mem::take(&mut self.stderr),
                 }),

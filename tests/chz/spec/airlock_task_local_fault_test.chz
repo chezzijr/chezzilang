@@ -133,7 +133,9 @@ test fn a_captured_closure_that_pushes_faults():
 
 gl5 := [[1]]
 
-test fn a_channel_sent_closure_pushing_a_captured_alias_faults():
+# M3.2: a channel moves the closure itself, so its push lands on the global's list (Go
+# `rewrites.go`, M3.2 report: `channel capture alias: 2 2`).
+test fn a_channel_sent_closure_pushing_a_captured_alias_lands():
     c := Channel[fn() -> str](1)
     done := Channel[str](1)
     inner := gl5[0]
@@ -149,7 +151,8 @@ test fn a_channel_sent_closure_pushing_a_captured_alias_faults():
             done.send(f())
         c.send(work)
     got := done.recv()
-    assert got != "no-fault", got
+    assert got == "no-fault", got
+    assert gl5[0] == [1, 2]
 
 test fn a_nested_element_push_faults():
     xs := [[1]]
@@ -320,11 +323,10 @@ test fn a_handle_holding_global_struct_field_write_in_a_task_lands():
     assert got == "no-fault", got
     assert r_hs.n == 2, "the task's write is lost: {r_hs.n}"
 
-# Memo-order pin (docs/reference/concurrency/ ceiling 1): a tuple (f, xs), f capturing xs, sent in ONE
-# crossing over a Channel — the closure is visited FIRST, so both f()'s push and the direct write
-# to the tuple's own xs element fault. The mirror order (xs, f) is the known under-fault, pinned
-# silent in airlock_task_local_silent_test.chz.
-test fn a_closure_visited_first_in_one_crossing_marks_the_shared_capture():
+# A tuple (f, xs), f capturing xs, sent over a Channel: M3.2 moves the tuple itself, so both
+# f()'s push and the direct write to the tuple's own xs land on the one list (Go `tuple.go`, M3.2
+# report: `f_first 3`). The mirror order (xs, f) is in airlock_task_local_silent_test.chz.
+test fn a_closure_visited_first_in_one_channel_send_shares_the_capture():
     xs := [1]
     f := fn() -> None: xs.push(2)
     ch := Channel[(fn() -> None, List[int])](1)
@@ -346,5 +348,6 @@ test fn a_closure_visited_first_in_one_crossing_marks_the_shared_capture():
                 !e: r2.send(e.message())
     got1 := r1.recv()
     got2 := r2.recv()
-    assert got1.starts_with("this value is this task's copy:"), got1
-    assert got2.starts_with("this value is this task's copy:"), got2
+    assert got1 == "no-fault", got1
+    assert got2 == "no-fault", got2
+    assert xs == [1, 2, 3]

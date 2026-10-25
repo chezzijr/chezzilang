@@ -110,7 +110,7 @@ ready `recv` completes after a cancel. Grid: `tests/executor_stop_grid.rs`.
 #### Faults and the drain contract
 
 - **A job fault or cancel appears only in `t.get()`.** `get()` returns the value or the `!e` of the
-  fault (the message, no file or line). `shutdown()`, the run end and the end of a test raise no
+  fault: the job's own error (M3.2), whose `file()`/`line()` give the job's fault site. `shutdown()`, the run end and the end of a test raise no
   ordinary job fault. An unused `Task` gets the discard warning: bind it (`t := …`) or discard it
   (`_ := …`).
 - **A job fault costs only its own result.** Its siblings still run (Python's

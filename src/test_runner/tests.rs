@@ -438,22 +438,19 @@ fn over_memory_bucket_for_runaway_alloc() {
     }
 }
 
-/// gaps.md W6-10 — a value moved across the airlock into a `Channel`/`Shared` core lives as a
-/// `WireValue` in an `Arc` OUTSIDE every `Heap`, so `live_bytes` counted it nowhere and a
-/// 195 MB channel backlog sailed straight past a 200 KB `--max-heap` cap (PASS, rc=0). The
-/// cached per-core byte summary now feeds `live_bytes`, so the natural *concurrent* runaway —
-/// an unbounded backlog, or data parked in a `Shared` — trips the cap like any other.
+/// gaps.md W6-10 — the natural *concurrent* runaway — an unbounded channel backlog, or data
+/// parked in `Shared` boxes — trips the cap like any other. M3.2: a channel holds its values
+/// themselves, so a backlog of 200000 distinct 8-int lists is heap objects the slot walk counts
+/// (Go `membacklog.go`, M3.2 report: `distinct_lists_x200000 20.4 MB`, past the 8 MB cap).
 #[test]
 fn over_memory_counts_offheap_wire_payload() {
     let d = TmpDir::new();
-    // The cap is deliberately far above anything either program keeps in its own `Heap` — only
-    // the off-heap wire storage can reach it, so the assertion isolates W6-10.
     const CAP: usize = 8_000_000;
     let d2 = TmpDir::new();
     let backlog = d.write(
         "backlog_test.chz",
         "test fn backlog():\n    ch := Channel[List[int]](200000)\n    \
-             for i in 0..40000:\n        ch.send([i, i, i, i, i, i, i, i])\n",
+             for i in 0..200000:\n        ch.send([i, i, i, i, i, i, i, i])\n",
     );
     // The sibling single-value path: data parked in `Shared` boxes. TICKET-246 — a box keeps
     // its value in its own heap (8 bytes per `int`, not a wire value), so the 150000-item list
@@ -514,7 +511,7 @@ fn over_memory_counts_offheap_wire_payload() {
             let report = run_tests_capped(f, CAP);
             assert!(
                 report.text.contains(&format!("OVER-MEMORY {label}")),
-                "off-heap wire storage must trip the cap ({label}); \
+                "a channel backlog or parked boxes must trip the cap ({label}); \
                      report:\n{}",
                 report.text
             );
@@ -798,11 +795,11 @@ fn over_memory_counts_jobs_queued_but_not_started() {
     );
 }
 
-/// W6-10r — the same backlog, reachable only through a NESTED core. `live_bytes` reaches a
-/// core's bytes through its `Obj::*` alias slot; the channel here has none once `make()`'s frame
-/// dies, so its 300 MB used to be counted nowhere and PASSED an 8 MB cap (measured on the release
-/// binary: PASS, rc=0, peak RSS 304 MB — while the identical program holding the channel in a
-/// live local tripped OVER-MEMORY).
+/// W6-10r — a backlog reachable only through a channel held in a box. Before M3.2 the channel's
+/// bytes were counted nowhere once `make()`'s frame died (PASS at peak RSS 304 MB against an
+/// 8 MB cap). M3.2: the queued strings are heap objects, rooted through the box's state and the
+/// channel, so the slot walk counts them. Each send is a fresh ~1 MB string (Go
+/// `membacklog.go`: a backlog of distinct values holds each of them).
 #[test]
 fn over_memory_counts_a_nested_core_backlog() {
     const CAP: usize = 8_000_000;
@@ -814,7 +811,7 @@ fn over_memory_counts_a_nested_core_backlog() {
              test fn nested():\n    s := make()\n    parts: List[str] = []\n    \
              for i in 0..100000:\n        parts.push(\"0123456789\")\n    \
              blob := \"\".join(parts)\n    for i in 0..300:\n        \
-             s.get().send(blob)\n    assert true\n",
+             s.get().send(blob + str(i))\n    assert true\n",
     );
     {
         let report = run_tests_capped(&nested, CAP);
@@ -844,14 +841,13 @@ fn over_memory_counts_a_nested_core_backlog() {
     );
 }
 
-/// W6-10 review, the SAMPLING half: counting the off-heap bytes is worthless if the cap is
-/// never sampled. `over_cap` is only evaluated inside `sweep()`, and `sweep()` only runs when
-/// `should_collect()` fires — which used to be a pure heap-OBJECT count. A program that pushes
-/// megabytes across the airlock while allocating ~2 `Obj`s per iteration therefore never swept,
-/// never sampled, and PASSED at hundreds of MB against an 8 MB cap. Both shapes below build
-/// their payload ONCE and then only re-send it, so object churn cannot be doing the work.
+/// W6-10 review / M3.2 — both shapes build their payload ONCE and then only re-send it. Before
+/// M3.2 each send copied it off the heap (peak RSS 304 MB and 3369 MB against an 8 MB cap), so
+/// the cap had to pace a sweep without object churn. M3.2: a send moves one word, so 300 sends
+/// of one 1 MB string and 100 sends of one 200k-int list hold one payload, well under the cap
+/// (Go `membacklog.go`, M3.2 report: `resent_blob_x300 1.2 MB`, `resent_list_x100 2.8 MB`).
 #[test]
-fn over_memory_trips_without_object_churn() {
+fn a_resent_payload_is_one_object_under_the_cap() {
     const CAP: usize = 8_000_000;
     let d = TmpDir::new();
     let d2 = TmpDir::new();
@@ -872,21 +868,12 @@ fn over_memory_trips_without_object_churn() {
              assert true\n",
     );
     for (label, f) in [("msg", &msg), ("ints", &ints)] {
-        {
-            let report = run_tests_capped(f, CAP);
-            assert!(
-                report.text.contains(&format!("OVER-MEMORY {label}")),
-                "off-heap growth must PACE a sweep so the cap is sampled ({label}); report:\n{}",
-                report.text
-            );
-            assert!(
-                !report.text.contains(&format!("FAIL {label}"))
-                    && !report.text.contains(&format!("ERROR {label}")),
-                "must be OVER-MEMORY, not FAIL/ERROR ({label}); \
-                     report:\n{}",
-                report.text
-            );
-        }
+        let report = run_tests_capped(f, CAP);
+        assert!(
+            report.text.contains(&format!("PASS {label}")),
+            "a re-sent payload is one object, under the cap ({label}); report:\n{}",
+            report.text
+        );
     }
 }
 

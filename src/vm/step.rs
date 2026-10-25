@@ -737,8 +737,7 @@ impl Vm {
                 };
                 match self.recv_step_or_demote(h, span)? {
                     // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
-                    RecvStep::Got(w) | RecvStep::Filled(w) => {
-                        let val = self.from_wire(w);
+                    RecvStep::Got(val) | RecvStep::Filled(val) => {
                         let opt = self.alloc_enum("Option", "Some", &[val]);
                         self.push(opt);
                     }
@@ -876,7 +875,7 @@ impl Vm {
             // don't reuse match-arm stack slots) and can overflow the host stack before the
             // `MAX_CALL_DEPTH` guard fires. Keep these cold constructors out of line.
             Op::NewAtomic => {
-                let v = self.new_atomic(span)?;
+                let v = self.new_atomic();
                 self.push(v);
             }
             Op::NewAtomicInt => {

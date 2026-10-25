@@ -462,10 +462,7 @@ fn mnsched_park_requeues_when_message_already_waiting() {
     sched.seed(vec![mk_fiber(0)]);
     let f = take_run(&sched);
     // Simulate a send that landed in the gap (message queued, but this fiber wasn't parked yet).
-    core.q.lock().unwrap().push(
-        crate::vm::core::wire_summary(&WireValue::Int(7)),
-        WireValue::Int(7),
-    );
+    core.q.lock().unwrap().push(Value::int(7));
     sched.park(key, Arc::clone(&core), f);
     let c = sched.lock();
     assert_eq!(c.parked_n, 0, "must not park behind a waiting message");
@@ -1970,9 +1967,13 @@ fn executor_core_shut_is_shared_across_handles() {
     let chv = vm.heap.alloc(Obj::Channel(Arc::clone(&ch)));
     vm.executor_method(h2, "_submit_settled", &[Value::nil(), Value::obj(chv)], sp)
         .expect("a refused submit returns Ok with its Task settled");
-    let mut q = ch.q.lock().unwrap();
-    assert!(q.is_sealed(), "the refusal must seal the Task's channel");
-    let sealed = format!("{:?}", q.pop());
+    assert!(
+        ch.q.lock().unwrap().is_sealed(),
+        "the refusal must seal the Task's channel"
+    );
+    // M3.2: the refusal is sealed as text, and the receive builds it into the `Err` value.
+    let got = vm.channel_method(chv, "recv", &[], sp).unwrap();
+    let sealed = vm.display(got);
     assert!(
         sealed.contains("submit on a shut-down Executor (it no longer accepts work)"),
         "sealed with: {sealed}"

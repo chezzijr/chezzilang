@@ -452,6 +452,8 @@ test fn grid_policy_r47_executor_submit_get_fresh():
     assert got == "ok 2"
 
 # ---- Channel (a receive is never marked, fresh or named send alike) ----
+# M3.2: a channel holds the list itself, so the receiver's push lands on the sender's list (Go
+# `policy.go`, M3.2 report: `r18 ok 2 [1 3]`).
 
 test fn grid_policy_r18_channel_named_send():
     ys := [1]
@@ -461,7 +463,7 @@ test fn grid_policy_r18_channel_named_send():
     parallel:
         spawn: out.send(t189_try(ch.recv()))
     assert out.recv() == "ok 2"
-    assert ys == [1]
+    assert ys == [1, 3]
 
 test fn grid_policy_r48_channel_fresh_send():
     ch := Channel[List[int]](1)
@@ -471,12 +473,15 @@ test fn grid_policy_r48_channel_fresh_send():
         spawn: out.send(t189_try(ch.recv()))
     assert out.recv() == "ok 2"
 
+# The task's `xs` is still its marked capture copy (a spawn crossing copies until M3.4), and the
+# channel hands the parent that copy itself, so the parent's push faults and `xs` is unchanged.
+# Go (`policy.go`): `r49 ok 2 [1 3]`, the answer once M3.4 passes the capture by handle.
 test fn grid_policy_r49_channel_task_to_parent():
     xs := [1]
     ch := Channel[List[int]](1)
     parallel:
         spawn: ch.send(xs)
-    assert t189_try(ch.recv()) == "ok 2"
+    assert t189_try(ch.recv()) == "fault"
     assert xs == [1]
 
 # ---- Shared / RwShared / Atomic (a read is never marked) ----
@@ -497,13 +502,14 @@ test fn grid_policy_r50_rwshared_get():
     assert out.recv() == "ok 2"
     assert s.get() == [1]
 
+# M3.2: an `Atomic` holds the list itself (Go `policy.go`: `r51 ok 2 [1 3]`).
 test fn grid_policy_r51_atomic_load():
     a := concurrency.Atomic[List[int]]([1])
     out := Channel[str](4)
     parallel:
         spawn: out.send(t189_try(a.load()))
     assert out.recv() == "ok 2"
-    assert a.load() == [1]
+    assert a.load() == [1, 3]
 
 test fn grid_policy_r52_shared_store():
     s := concurrency.Shared[List[int]]([])
@@ -526,7 +532,8 @@ test fn grid_policy_r22_module_global():
     assert out.recv() == "ok 2"
     assert t189_g == [1, 3]
 
-# ---- closure capture (a copy across heaps, the enclosing mark in the same heap) ----
+# ---- closure capture through a channel (M3.2: the closure itself, so its push lands; Go
+# `policy.go`: `r19 ok 2 [1 2]`, `r20 2 [1 2]`) ----
 
 fn t189_call(c: Channel[fn() -> int], out: Channel[str]):
     f := c.recv()
@@ -542,18 +549,13 @@ test fn grid_policy_r19_closure_other_heap():
     c.send(fn() -> int: t189_add(xs))
     parallel:
         spawn t189_call(c, out)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 2]
 
 test fn grid_policy_r20_closure_same_heap():
-    # TICKET-291: a same-task round trip is a crossing. The send copied the captures, so the
-    # received closure's write would be lost: it faults, and the parent's `xs` is unchanged.
     xs := [1]
     c := Channel[fn() -> int](1)
     c.send(fn() -> int: t189_add(xs))
     f := c.recv()
-    res := recover: f()
-    match res:
-        ?_: assert false, "the received closure's write must fault"
-        !e: assert e.message().contains("is this task's copy"), e.message()
-    assert xs == [1]
+    assert f() == 2
+    assert xs == [1, 2]

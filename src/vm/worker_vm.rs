@@ -121,7 +121,7 @@ impl Vm {
     pub(super) fn run_task_isolated(
         &mut self,
         task: PendingCall,
-    ) -> Result<WorkerResult, RuntimeError> {
+    ) -> Result<super::sched_core::IsolatedRun, RuntimeError> {
         self.prepare_worker(task, 0)?.run()
     }
 

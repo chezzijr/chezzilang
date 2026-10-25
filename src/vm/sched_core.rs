@@ -258,12 +258,12 @@ impl SchedCore {
         let Some(s) = self.job_settle.remove(&task_index) else {
             return;
         };
-        let v = match seal {
+        let sealed = match seal {
             JobSeal::Nothing => return,
-            JobSeal::Cancel => s.cancel.clone(),
-            JobSeal::Fault(msg) => s.fault_value(&msg),
+            JobSeal::Cancel => s.seal_err(crate::vm::EXEC_CANCELLED_MSG),
+            JobSeal::Fault(msg) => s.seal_err(&msg),
         };
-        if s.seal(v) {
+        if sealed {
             step.sealed.push(s.ch);
         }
         // TICKET-236 — LAST: the seal above is this leaver's final channel effect, and the caller
@@ -499,7 +499,7 @@ impl SchedCore {
     /// `member` selects the scope indices to check (a leaf family, or every scope). A `false` answer
     /// means "cannot prove", never "definitely not" — the scan is conservative in the safe direction
     /// (DEC-101's leaf-policy condition 1): any holder it cannot see (a running fiber, a
-    /// `Shared`/`RwShared`/`Atomic` box, a buffered `WireValue::Channel`, an Executor job, a module
+    /// `Shared`/`RwShared`/`Atomic` box, a channel buffered in a channel, an Executor job, a module
     /// global, an FFI value, a timer, a `Waiter`, a `PartyWait`) holds a strong `Arc`, which only
     /// RAISES `Arc::strong_count` above what the scan counts — so an incomplete scan can only return
     /// `false` where a complete one would return `true`, never the reverse.
@@ -508,10 +508,12 @@ impl SchedCore {
     /// slots REACHABLE from the parked recv fibers' roots ([`reachable_channel_aliases`]), each slot
     /// once over all of them. Two fibers that reached one slot would otherwise count one holder
     /// twice, which could prove a leaf that is not one. The walk reads the heap with no stop of the
-    /// world, and it is sound for this reason: `heap` belongs to the calling thread, which is attached
-    /// and not at a safepoint, so no collection can sweep while it runs (the collector waits for this
-    /// thread); and the parked fibers do not run, and every crossing copies (until M3), so no other
-    /// thread writes an object they reach.
+    /// world, and it is memory-safe for this reason: `heap` belongs to the calling thread, which is
+    /// attached and not at a safepoint, so no collection can sweep while it runs (the collector
+    /// waits for this thread); and a racy read of an object another thread writes reads no freed
+    /// memory (`vm/rvec.rs`). M3.1 / M3.2: a module global and a value received by handle are the
+    /// SAME slot in two tasks, so a running task can hold a slot this scan reaches; the strong count
+    /// then counts that slot once for both holders.
     fn provable(&self, heap: &Heap, member: impl Fn(usize) -> bool) -> bool {
         // A member scope whose body may still `spawn`/`send` is a live feeder this scan cannot see.
         if self.scopes.iter().any(|(i, s)| member(i) && s.body_open) {
@@ -649,6 +651,15 @@ pub(super) struct ReadyWorker {
     pub(super) payload: super::gc_door::PayloadInFlight,
 }
 
+/// What [`ReadyWorker::run`] hands a worker unit test: the task's wired return value and its
+/// captured output. A real task returns no value to its join ([`WorkerResult`]).
+#[cfg(test)]
+pub(super) struct IsolatedRun {
+    pub(super) value: WireValue,
+    pub(super) out: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
+}
+
 /// How a [`ReadyWorker`]'s task is invoked, with all values already reconstructed in the worker heap.
 pub(super) enum ReadyCall {
     /// A `spawn f(x)` / `spawn:` block — invoke the rebuilt callable with its rebuilt args.
@@ -662,14 +673,14 @@ impl ReadyWorker {
     /// `recv` instead waits on the channel condvar (it never returns the suspend sentinel), so the
     /// `suspend` guard is a safety net against a future regression, not a live path.
     #[cfg(test)]
-    pub(super) fn run(mut self) -> Result<WorkerResult, RuntimeError> {
+    pub(super) fn run(mut self) -> Result<IsolatedRun, RuntimeError> {
         let span = self.span;
         let ret = Self::invoke(&mut self.worker, self.call, span)?;
         // The result must be cross-safe too — a worker returning a `str`/closure can't hand a
         // worker-heap `GcRef` back to the parent.
         let value = self.worker.to_wire_at(ret, span)?;
         self.worker.ensure_crossable(&value, span)?;
-        Ok(WorkerResult {
+        Ok(IsolatedRun {
             value,
             out: self.worker.out,
             stderr: self.worker.stderr,

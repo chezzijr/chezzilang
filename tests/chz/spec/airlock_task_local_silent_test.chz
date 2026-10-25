@@ -180,12 +180,11 @@ test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
     assert r.recv() == "no-fault"
     assert t.s.get() == 5
 
-# Memo-order pin (docs/reference/concurrency/ ceiling 1), known under-fault: a tuple (xs, f), f capturing
-# xs, sent in ONE crossing over a Channel — xs is visited FIRST and stays unmarked, so f's own
-# capture aliases the unmarked xs and NEITHER f()'s push nor the direct write to the tuple's own
-# xs element faults. The mirror order (f, xs) faults both, pinned in
-# airlock_task_local_fault_test.chz's a_closure_visited_first_in_one_crossing_marks_the_shared_capture.
-test fn a_list_visited_first_in_one_crossing_leaves_the_shared_capture_unmarked():
+# A tuple (xs, f), f capturing xs, sent over a Channel: M3.2 moves the tuple itself, so neither
+# f()'s push nor the direct write to the tuple's own xs faults, and both land on the one list (Go
+# `tuple.go`, M3.2 report: `xs_first 3`). The mirror order (f, xs) is in
+# airlock_task_local_fault_test.chz's a_closure_visited_first_in_one_channel_send_shares_the_capture.
+test fn a_list_visited_first_in_one_channel_send_shares_the_capture():
     xs := [1]
     f := fn() -> None: xs.push(2)
     ch := Channel[(List[int], fn() -> None)](1)
@@ -207,3 +206,4 @@ test fn a_list_visited_first_in_one_crossing_leaves_the_shared_capture_unmarked(
                 !e: r2.send(e.message())
     assert r1.recv() == "no-fault"
     assert r2.recv() == "no-fault"
+    assert xs == [1, 2, 3]

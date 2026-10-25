@@ -29,11 +29,11 @@ impl MnSched {
         // W7-26r — this thread is the only party that can observe the cap for a nursery whose parent
         // is blocked in the join (see `core::halt_over_backlog`). These slots live outside every
         // `Heap`, so `live_bytes` never counted them either: this is the accounting AND the
-        // observation. Cheap: the summary is O(1) (buffered output capacities; a task's return value
-        // is `Nil`, W7-27) and the whole block is skipped when no cap is set.
+        // observation. Cheap: the summary is O(1) (buffered output capacities; a task keeps no
+        // return value, W7-27) and the whole block is skipped when no cap is set.
         let outcome = if self.mem_cap != 0 {
             let s = &mut c.scopes[scope_id];
-            s.bytes += super::core::outcome_summary(&outcome).0;
+            s.bytes += super::core::outcome_summary(&outcome);
             let (outcome, over) = super::core::halt_over_backlog(outcome, s.bytes, self.mem_cap);
             if over {
                 // Under the core lock, exactly as `trip_scope_cancel` requires — the release

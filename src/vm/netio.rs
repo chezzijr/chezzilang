@@ -385,22 +385,15 @@ impl Vm {
         )))))
     }
 
-    /// `Atomic(v)` — pop the init, box its wire form behind a fresh `Arc<AtomicCore>`. `#[inline(never)]`
-    /// so its locals stay out of `step`'s (recursion-path) stack frame.
+    /// `Atomic(v)` — pop the init and hold it, by handle (M3.2), in a fresh `Arc<AtomicCore>`.
+    /// `#[inline(never)]` so its locals stay out of `step`'s (recursion-path) stack frame.
     #[inline(never)]
-    pub(super) fn new_atomic(&mut self, span: Span) -> Result<Value, RuntimeError> {
+    pub(super) fn new_atomic(&mut self) -> Value {
         let init = self.pop();
-        // A non-sendable init (a frame-holding generator / module/native/FFI handle) faults gracefully
-        // with the `NewAtomic` span — the box is a shared cross-thread cell.
-        let init = self.to_wire_crossable(init, span)?;
-        Ok(Value::obj(self.heap.alloc(Obj::Atomic(Arc::new(
-            // The summary starts `WS_UNKNOWN` (like every other core constructor): the first GC
-            // pass walks the initial payload once and memoizes it.
-            AtomicCore {
-                v: Mutex::new(init),
-                ..Default::default()
-            },
-        )))))
+        Value::obj(
+            self.heap
+                .alloc(Obj::Atomic(Arc::new(AtomicCore::new(init)))),
+        )
     }
 
     /// `std.time.timer(ms)` (`Kind::InterceptTimer`): a fresh `Channel[bool]` stamped with `now + ms`.

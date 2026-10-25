@@ -3,17 +3,21 @@
 #
 # Grid: closure x readout route x capture kind. Every route a closure can be read out of is one
 # `route` row: the four box readout sites (`box_copy_out`, `box_copy_pieces`, the `box_call` result,
-# the `rwshared_mutate` result) and the three wire-stored routes (Channel, Atomic, Task). A reader
-# task faults on a write to a captured list (`silent_routes`). M3.1: a module global is the run's
-# one copy, so a write to it lands on every route and in every reader (Go: a closure that appends
-# to a package `var` runs in any goroutine). The task that
-# stored the closure faults too when it reads it back (TICKET-291: a same-task round trip is a crossing).
+# the `rwshared_mutate` result), the Task route and the two handle routes (Channel, Atomic). A
+# reader task faults on a write to a captured list (`silent_routes`). M3.1: a module global is the
+# run's one copy, so a write to it lands on every route and in every reader (Go: a closure that
+# appends to a package `var` runs in any goroutine). M3.2: a Channel and an Atomic hold the closure
+# itself, so a write through its captures lands on the one binding, in any reader (Go
+# `closures.go`, M3.2 report: `channel_recv_route 2`, `atomic_load_route 2`, `relay 2`). The task
+# that stored the closure faults too when it reads it back through a copying route (TICKET-291: a
+# same-task round trip is a crossing).
 import Shared, RwShared, Atomic, Executor from std.concurrency
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
 
 COPY_TAIL := "is this task's copy: a write to it would be lost at the join"
 ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get", "ConcurrentMap.remove", "Channel.recv", "Atomic.load", "Task.get"]
 BOX_ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get"]
+HANDLE_ROUTES := ["Channel.recv", "Atomic.load"]
 G := [1]
 
 fn some(o: (fn() -> None)?) -> fn() -> None:
@@ -118,11 +122,11 @@ test fn concurrent_map_get_closure_capture_write_faults():
 test fn concurrent_map_remove_closure_capture_write_faults():
     assert in_task(route("ConcurrentMap.remove", list_writer())).contains(COPY_TAIL)
 
-test fn channel_recv_closure_capture_write_faults():
-    assert in_task(route("Channel.recv", list_writer())).contains(COPY_TAIL)
+test fn channel_recv_closure_capture_write_lands():
+    assert in_task(route("Channel.recv", list_writer())) == "no-fault"
 
-test fn list_capture_write_faults_on_every_route():
-    assert silent_routes(list_writer) == []
+test fn list_capture_write_faults_on_every_copying_route():
+    assert silent_routes(list_writer) == HANDLE_ROUTES
 
 test fn global_write_lands_on_every_route():
     before := G.len()
@@ -164,13 +168,14 @@ test fn box_built_closure_capture_write_faults():
     assert outcome(built).contains(COPY_TAIL)
     assert b.get() == [1]
 
-# TICKET-291 C1: a same-task round trip is a crossing too, so the write faults on every route.
-test fn same_task_round_trip_faults_on_every_route():
+# TICKET-291 C1: a same-task round trip is a crossing too, so the write faults on every copying
+# route; a handle route returns the closure itself.
+test fn same_task_round_trip_faults_on_every_copying_route():
     silent: List[str] = []
     for name in ROUTES:
         if not outcome(route(name, list_writer())()).contains(COPY_TAIL):
             silent.push(name)
-    assert silent == []
+    assert silent == HANDLE_ROUTES
 
 # C2: a relay task re-stores the closure; the re-store must keep the mark.
 test fn relay_restore_through_shared_keeps_the_mark():
@@ -184,14 +189,15 @@ test fn relay_restore_through_shared_keeps_the_mark():
             r.send(outcome(c.get()[0]))
     assert r.recv().contains(COPY_TAIL)
 
-test fn relay_restore_through_channels_keeps_the_mark():
+# M3.2: a relay through two channels hands on the one closure (Go `closures.go`: `relay 2`).
+test fn relay_through_channels_is_the_one_closure():
     g := list_writer()
     ch := Channel[fn() -> None](1)
     ch2 := Channel[fn() -> None](1)
     ch.send(g)
     h := ch.recv()
     ch2.send(h)
-    assert outcome(ch2.recv()).contains(COPY_TAIL)
+    assert outcome(ch2.recv()) == "no-fault"
 
 # C4: a closure received inside a box closure is stamped with the storing task, not the sender.
 test fn recv_inside_box_closure_stamps_the_storing_task():
@@ -220,7 +226,9 @@ test fn box_built_closure_over_fresh_state_does_not_fault():
 
 # TICKET-291 grid: route x reader x capture kind. Every cell faults except a module-global write:
 # M3.1 makes the global the run's one copy, so that write lands for every reader (`G` grows by one).
-# Go: the closure appends to the package `var` in whichever goroutine runs it.
+# Go: the closure appends to the package `var` in whichever goroutine runs it. M3.2: on a handle
+# route the reader gets the closure itself, so only a closure that already holds a copy (over box
+# state) faults there.
 READERS := ["same task", "other task", "relay task"]
 CAPTURES := ["captured list", "module global", "fresh box state", "box state"]
 
@@ -265,6 +273,9 @@ test fn closure_capture_grid_faults_except_a_global_write():
                 got := cell(name, reader, capture)
                 if capture == "module global":
                     if got != "no-fault" or G.len() != before + 1:
+                        wrong.push("{name}/{reader}/{capture}")
+                elif HANDLE_ROUTES.contains(name) and capture != "box state":
+                    if got != "no-fault":
                         wrong.push("{name}/{reader}/{capture}")
                 elif not got.contains(COPY_TAIL):
                     wrong.push("{name}/{reader}/{capture}")
