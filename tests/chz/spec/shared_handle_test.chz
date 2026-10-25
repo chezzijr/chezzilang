@@ -7,7 +7,9 @@
 # `readwrite/main.go` (Lock in RLock) end `fatal error: all goroutines are asleep - deadlock!`:
 # the same certain deadlock is a fault here, with the re-entry text. Fix round 1: `rv33/gopref`
 # (a reader that arrives after a waiting writer) prints `r 10`; `nestedread/main.go` (a nested RLock
-# past a waiting writer) ends `fatal error: all goroutines are asleep - deadlock!`.
+# past a waiting writer) ends `fatal error: all goroutines are asleep - deadlock!`. Fix round 2:
+# `rr33/gostarve` (3 back-to-back writers x 300, one reader) prints `reader saw 20..22 of 900`
+# (GOMAXPROCS=2) and `15..22` (GOMAXPROCS=4), 10/10 runs each.
 import Executor, RwShared, Shared, Task from std.concurrency
 import Broadcast from std.concurrency.broadcast
 import memoize1 from std.memoize
@@ -253,3 +255,34 @@ test fn a_nested_read_past_a_waiting_writer_faults():
     got := out.recv()
     assert got.contains("a lock cycle"), got
     assert r.get() == 10
+
+fn slow_write(n: int) -> int:
+    s := 0
+    for i in 0..2000:
+        s += i
+    return n + 1 + s - s
+
+fn writer_loop(r: RwShared[int], started: Channel[bool], first: bool):
+    for i in 0..300:
+        r.write(slow_write)
+        if first and i == 0:
+            started.send(true)
+
+# Go `rwmutex.go:214`: a write release admits the readers that waited during the write, ahead of the
+# writers that wait too, so back-to-back writers cannot starve a reader: a starved reader sees all
+# 900 writes (round 1: 900 in 20/20 runs). Band [1, 900): Go 15..22 of 900; this engine 9..36 at
+# T=2 and 9..602 at T=4 (the high runs are the reader task's own start, not the lock).
+test fn back_to_back_writers_do_not_starve_a_reader():
+    r := RwShared(0)
+    started := Channel[bool](1)
+    out := Channel[int](1)
+    parallel:
+        spawn writer_loop(r, started, true)
+        spawn writer_loop(r, started, false)
+        spawn writer_loop(r, started, false)
+        spawn:
+            _ := started.recv()
+            out.send(r.read(fn(n): n))
+    got := out.recv()
+    assert got >= 1 and got < 900, "reader saw {got} of 900"
+    assert r.get() == 900

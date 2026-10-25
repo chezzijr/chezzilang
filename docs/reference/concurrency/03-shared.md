@@ -261,7 +261,9 @@ collection read) takes the read guard; `read`'s closure, and a key's `eq`, run o
 it, so readers run in parallel and a mutation inside a `read` closure reaches the box (a race with the
 other readers is the user's bug). A reader waits while a writer holds the box, or waits for it (Go
 writer preference: a writer counts as waiting from its first failed acquire to its take, so no
-reader slips in at the handoff). A nested `read` by a reader is granted while no writer waits; with
+reader slips in at the handoff). A write release admits every reader that waited during the write,
+ahead of the writers that wait too (Go `sync.RWMutex.Unlock`), so back-to-back writers cannot
+starve a reader. A nested `read` by a reader is granted while no writer waits; with
 a writer waiting for the outer read it is a certain cycle (Go deadlocks) and faults with the lock
 cycle text. A `print` takes no guard. The fast path is one atomic operation on the box's lock word;
 the wait-for graph is read only on a contended acquire, so a cycle that passes through a read guard

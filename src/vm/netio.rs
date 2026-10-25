@@ -263,7 +263,7 @@ impl Vm {
                 let staged = loop {
                     let left = until.saturating_duration_since(std::time::Instant::now());
                     // No `?` in this loop: a halt must still reach `width_acquire` below.
-                    match self.guard_free_then_take(key, &mut ticket, None, left, span) {
+                    match self.guard_free_then_take(&mut ticket, None, left, span) {
                         Err(halt) => break Some(Err(halt)),
                         Ok(Ok(Some(g))) => break Some(Ok(Ok(g))),
                         Ok(Err(c)) => break Some(Ok(Err(c))),
@@ -323,7 +323,6 @@ impl Vm {
     /// `Err` holding no permit, like `Ok(None)`.
     fn guard_free_then_take<'a>(
         &mut self,
-        key: GuardKey<'a>,
         ticket: &mut core::WaitTicket<'a>,
         taking: Option<&std::sync::atomic::AtomicBool>,
         budget: std::time::Duration,
@@ -331,7 +330,7 @@ impl Vm {
     ) -> Result<Result<Option<core::UpdateGuard<'a>>, GuardCycle>, RuntimeError> {
         let me = self.guard_token;
         match self.gc_blocking(&[], |_| {
-            core::await_update_guard_free(key, me, Some(budget))
+            core::await_update_guard_free(ticket, me, Some(budget))
         }) {
             Err(c) => return Ok(Err(c)),
             Ok(false) => return Ok(Ok(None)),
@@ -374,6 +373,7 @@ impl Vm {
             lock: Arc::clone(key.lock),
             mode: key.mode,
             taking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            admitted: ticket.admission(),
         };
         let taking = Arc::clone(&owned.taking);
         let reg = self.guard_wait_enter(owned.clone(), what, span)?;
@@ -390,13 +390,8 @@ impl Vm {
             // take the permit, then take the guard without waiting. Taking the guard first parks
             // its OWNER behind permit holders that wait in place for that same guard, so every
             // handoff cost one GUARD_DEMOTE_BUDGET (T=2: 7172 timeouts, 18.9 s).
-            match self.guard_free_then_take(
-                key,
-                ticket,
-                Some(&taking),
-                super::DEMOTE_POLL_BACKOFF,
-                span,
-            ) {
+            match self.guard_free_then_take(ticket, Some(&taking), super::DEMOTE_POLL_BACKOFF, span)
+            {
                 Ok(Ok(Some(g))) => break Ok(Ok(g)),
                 Ok(Err(cycle)) => break Ok(Err(cycle)),
                 Err(e) => break Err(e),

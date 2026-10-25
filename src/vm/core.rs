@@ -26,11 +26,15 @@ use std::time::Duration;
 /// (0 = none), read only on a failed acquire to find a same-task re-entry. A reader is anonymous
 /// here; the task that reads keeps its own list (`Vm::held_reads`). `sleepers` counts the tasks that
 /// wait on the registry condvar for this box, so a release wakes them only when one exists.
+/// `wait_readers` counts the readers that wait with a [`WaitTicket`] (their flags are in
+/// `GuardGraph::readers`), so a write release admits them (Go `sync/rwmutex.go:214`, "Unblock
+/// blocked readers, if any") only when one exists.
 #[derive(Debug)]
 pub struct BoxLock {
     state: AtomicU64,
     writer: AtomicU64,
     sleepers: AtomicU32,
+    wait_readers: AtomicU32,
     /// `"Shared"` or `"RwShared"`: the ONE owner of the box kind a fault text names.
     pub kind: &'static str,
 }
@@ -46,6 +50,7 @@ impl BoxLock {
             state: AtomicU64::new(0),
             writer: AtomicU64::new(0),
             sleepers: AtomicU32::new(0),
+            wait_readers: AtomicU32::new(0),
             kind,
         }
     }
@@ -92,16 +97,55 @@ impl BoxLock {
         }
     }
 
-    /// Whether an acquire in `mode` by a (counted) waiter could succeed now.
+    /// Whether an acquire in `mode` by a (counted) waiter could succeed now. SeqCst: with the
+    /// waiter's `sleepers` increment before it and the releaser's SeqCst RMW then `sleepers` load,
+    /// it is a Dekker pair, so either the waiter sees the release or the releaser sees the waiter.
     fn looks_free(&self, mode: GuardMode) -> bool {
-        let s = self.state.load(Ordering::Acquire);
+        let s = self.state.load(Ordering::SeqCst);
         match mode {
             GuardMode::Write => s & (WRITER | R_MASK) == 0,
             GuardMode::Read => s & (WRITER | WW_MASK) == 0,
         }
     }
 
-    /// Wake the tasks that wait for this box, if any.
+    /// The write release (Go `sync/rwmutex.go:201-222`, `Unlock`): with readers waiting, admit
+    /// every one of them in the same RMW that clears [`WRITER`] (their read holds counted in R,
+    /// their flags set), under the registry lock, so no writer that waits gets in ahead of them.
+    /// A reader that registers after the check waits for the next release.
+    fn release_write(&self) {
+        self.writer.store(0, Ordering::Relaxed);
+        if self.wait_readers.load(Ordering::SeqCst) == 0 {
+            self.state.fetch_and(!WRITER, Ordering::SeqCst);
+            self.wake();
+            return;
+        }
+        let (mtx, cv) = guard_registry();
+        let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+        let flags = g
+            .readers
+            .remove(&(self as *const BoxLock as usize))
+            .unwrap_or_default();
+        let n = flags.len() as u64;
+        let mut cur = self.state.load(Ordering::Relaxed);
+        while let Err(now) = self.state.compare_exchange_weak(
+            cur,
+            (cur & !WRITER) + n,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            cur = now;
+        }
+        for f in &flags {
+            f.store(true, Ordering::SeqCst);
+        }
+        self.wait_readers.fetch_sub(n as u32, Ordering::SeqCst);
+        drop(g);
+        cv.notify_all();
+    }
+
+    /// Wake the tasks that wait for this box, if any. The registry has one condvar, so this
+    /// wakes the waiters of every box (each re-checks its own word and sleeps again); a condvar
+    /// per box would cost a `Mutex` + `Condvar` per box for a contended-only gain.
     fn wake(&self) {
         if self.sleepers.load(Ordering::SeqCst) > 0 {
             let (mtx, cv) = guard_registry();
@@ -123,6 +167,9 @@ impl BoxLock {
 #[derive(Default)]
 struct GuardGraph {
     waiting: HashMap<u64, (Arc<BoxLock>, GuardMode)>,
+    /// The readers that wait for a box (keyed by its `BoxLock` address), each by its admission
+    /// flag: [`BoxLock::release_write`] admits them all.
+    readers: HashMap<usize, Vec<Arc<AtomicBool>>>,
 }
 
 impl GuardGraph {
@@ -187,44 +234,102 @@ pub struct UpdateGuard<'a> {
 impl Drop for UpdateGuard<'_> {
     fn drop(&mut self) {
         match self.mode {
-            GuardMode::Write => {
-                self.lock.writer.store(0, Ordering::Relaxed);
-                self.lock.state.fetch_and(!WRITER, Ordering::SeqCst);
-            }
+            GuardMode::Write => self.lock.release_write(),
             GuardMode::Read => {
                 self.lock.state.fetch_sub(1, Ordering::SeqCst);
+                self.lock.wake();
             }
         }
-        self.lock.wake();
     }
 }
 
-/// M3.3 — a writer's place in the waiting count of a box, from its first failed acquire to its
-/// take or its exit. While it lives a new reader waits (Go writer preference), across every stage
-/// of the wait and the width-permit handoff. A reader's ticket counts nothing.
+/// M3.3 — a waiter's place in the line for a box, from its first failed acquire to its take or its
+/// exit, across every stage of the wait and the width-permit handoff (Go `sync.RWMutex`):
+/// - a writer is counted in the waiting-writer count: while it lives a new reader waits (Go
+///   `rwmutex.go:151`, "Announce to readers there is a pending writer");
+/// - a reader is registered by its admission flag (`GuardGraph::readers`): the next write release
+///   admits it past every waiting writer (`rwmutex.go:214`), so back-to-back writers cannot starve
+///   a reader that waited during a write.
 pub struct WaitTicket<'a> {
     key: GuardKey<'a>,
     live: bool,
+    admitted: Option<Arc<AtomicBool>>,
 }
 
 impl<'a> WaitTicket<'a> {
     pub fn new(key: GuardKey<'a>) -> Self {
         let live = key.mode == GuardMode::Write;
+        let mut admitted = None;
         if live {
             key.lock.state.fetch_add(WW_ONE, Ordering::SeqCst);
+        } else {
+            let flag = Arc::new(AtomicBool::new(false));
+            let (mtx, _cv) = guard_registry();
+            let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+            g.readers
+                .entry(Arc::as_ptr(key.lock) as usize)
+                .or_default()
+                .push(Arc::clone(&flag));
+            key.lock.wait_readers.fetch_add(1, Ordering::SeqCst);
+            admitted = Some(flag);
         }
-        WaitTicket { key, live }
+        WaitTicket {
+            key,
+            live,
+            admitted,
+        }
+    }
+
+    /// A reader's admission flag (set by a write release), for its registered wait.
+    pub fn admission(&self) -> Option<Arc<AtomicBool>> {
+        self.admitted.clone()
+    }
+
+    /// Whether a write release admitted this reader: it holds the read already.
+    fn is_admitted(&self) -> bool {
+        self.admitted
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::SeqCst))
+    }
+
+    /// Take a reader out of `GuardGraph::readers` (it took the guard by its own CAS). A release
+    /// can admit it between that CAS and this lock (the release clears `WRITER` before it sets the
+    /// flags, all under the registry lock): then it holds two read counts, and gives one back.
+    fn unregister(&mut self) {
+        if let Some(flag) = self.admitted.take() {
+            let (mtx, _cv) = guard_registry();
+            let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+            if flag.load(Ordering::SeqCst) {
+                drop(g);
+                self.key.lock.state.fetch_sub(1, Ordering::SeqCst);
+                self.key.lock.wake();
+                return;
+            }
+            let addr = Arc::as_ptr(self.key.lock) as usize;
+            if let Some(list) = g.readers.get_mut(&addr) {
+                list.retain(|f| !Arc::ptr_eq(f, &flag));
+                if list.is_empty() {
+                    g.readers.remove(&addr);
+                }
+            }
+            self.key.lock.wait_readers.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     /// The guard, when this waiter can take it now (no wait).
     pub fn try_take(&mut self, me: u64) -> Option<UpdateGuard<'a>> {
-        if self.key.lock.try_take(self.key.mode, me, self.live) {
+        // Built only on a take: a dropped guard releases a hold.
+        let (lock, mode) = (self.key.lock, self.key.mode);
+        if self.is_admitted() {
+            // The release counted this read hold and dropped the registration.
+            self.admitted = None;
+            return Some(UpdateGuard { lock, mode });
+        }
+        if lock.try_take(mode, me, self.live) {
             // A counted writer's take moved it from waiting to holding.
             self.live = false;
-            return Some(UpdateGuard {
-                lock: self.key.lock,
-                mode: self.key.mode,
-            });
+            self.unregister();
+            return Some(UpdateGuard { lock, mode });
         }
         None
     }
@@ -235,6 +340,25 @@ impl Drop for WaitTicket<'_> {
         if self.live {
             self.key.lock.state.fetch_sub(WW_ONE, Ordering::SeqCst);
             self.key.lock.wake();
+        }
+        if let Some(flag) = self.admitted.take() {
+            let (mtx, _cv) = guard_registry();
+            let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+            if flag.load(Ordering::SeqCst) {
+                // Admitted, then left before the take (a halt): give the read hold back.
+                drop(g);
+                self.key.lock.state.fetch_sub(1, Ordering::SeqCst);
+                self.key.lock.wake();
+                return;
+            }
+            let addr = Arc::as_ptr(self.key.lock) as usize;
+            if let Some(list) = g.readers.get_mut(&addr) {
+                list.retain(|f| !Arc::ptr_eq(f, &flag));
+                if list.is_empty() {
+                    g.readers.remove(&addr);
+                }
+            }
+            self.key.lock.wait_readers.fetch_sub(1, Ordering::SeqCst);
         }
     }
 }
@@ -265,17 +389,18 @@ pub fn try_update_guard<'a>(key: GuardKey<'a>, me: u64) -> Option<UpdateGuard<'a
 /// waits here holding no width permit, then takes the permit, then the guard (permit before
 /// guard; DEC-141). The waiter's [`WaitTicket`] stays live across the gap, so no new reader gets in.
 pub fn await_update_guard_free(
-    key: GuardKey<'_>,
+    ticket: &WaitTicket<'_>,
     me: u64,
     budget: Option<Duration>,
 ) -> Result<bool, GuardCycle> {
+    let key = ticket.key;
     let deadline = budget.map(|d| std::time::Instant::now() + d);
     let (mtx, cv) = guard_registry();
     let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
     key.lock.sleepers.fetch_add(1, Ordering::SeqCst);
     g.waiting.insert(me, (Arc::clone(key.lock), key.mode));
     let out = loop {
-        if key.lock.looks_free(key.mode) {
+        if ticket.is_admitted() || key.lock.looks_free(key.mode) {
             break Ok(true);
         }
         if wait_for_cycle(&g, me) {
@@ -307,13 +432,21 @@ pub struct GuardWait {
     pub lock: Arc<BoxLock>,
     pub mode: GuardMode,
     pub taking: Arc<AtomicBool>,
+    /// A reader's admission flag ([`WaitTicket::admission`]): an admitted reader holds the read.
+    pub admitted: Option<Arc<AtomicBool>>,
 }
 
 /// TICKET-063 — would an acquire of `w` by `me`, issued now, NOT block? `true` too when the wait
 /// is a cycle (the acquire faults at once), and while the waiter takes the guard. Deliberately
 /// generous: a false `true` only vetoes the verdict.
 pub fn guard_wait_satisfiable(w: &GuardWait, me: u64) -> bool {
-    if w.taking.load(Ordering::SeqCst) || w.lock.looks_free(w.mode) || w.lock.writer() == me {
+    if w.taking.load(Ordering::SeqCst)
+        || w.admitted
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::SeqCst))
+        || w.lock.looks_free(w.mode)
+        || w.lock.writer() == me
+    {
         return true;
     }
     let (mtx, _cv) = guard_registry();
@@ -360,7 +493,7 @@ pub fn acquire_update_guard_within<'a>(
     let mut ticket = WaitTicket::new(key);
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if await_update_guard_free(key, me, Some(left))?
+        if await_update_guard_free(&ticket, me, Some(left))?
             && let Some(g) = ticket.try_take(me)
         {
             return Ok(Some(g));

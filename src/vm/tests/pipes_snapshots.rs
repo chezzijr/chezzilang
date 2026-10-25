@@ -1613,10 +1613,10 @@ fn m3_3_guard_modes_grid() {
         acquire_update_guard_within(key, a, std::time::Duration::from_secs(5)).map(|g| g.is_some())
     });
     // A counted probe: poll until `a` waits; then `b`'s wait for x closes the cycle at once.
+    let tb = WaitTicket::new(wr(&lx));
     let mut probes = 0u32;
     loop {
-        match crate::vm::core::await_update_guard_free(wr(&lx), b, Some(std::time::Duration::ZERO))
-        {
+        match crate::vm::core::await_update_guard_free(&tb, b, Some(std::time::Duration::ZERO)) {
             Err(GuardCycle::Cycle) => break,
             Ok(false) => {}
             other => panic!("b's wait for x: {other:?}"),
@@ -1625,9 +1625,39 @@ fn m3_3_guard_modes_grid() {
         assert!(probes < 50_000_000, "a never waited");
         std::thread::yield_now();
     }
+    drop(tb);
     drop(wb);
     assert_eq!(cyc.join().unwrap(), Ok(true));
     drop(wa);
+    // Fix round 2 (Go `rwmutex.go:214`): a write release admits the readers that waited during the
+    // write, ahead of a writer that waits too; that writer then waits for those readers.
+    let wc = try_update_guard(wr(&lx), c).expect("a free write");
+    let mut tr = WaitTicket::new(rd(&lx));
+    let mut tw = WaitTicket::new(wr(&lx));
+    assert!(tr.try_take(b).is_none() && tw.try_take(a).is_none());
+    drop(wc);
+    let rb = tr
+        .try_take(b)
+        .expect("the release admitted the waiting reader");
+    assert!(
+        tw.try_take(a).is_none(),
+        "the waiting writer waits for the admitted reader"
+    );
+    assert!(
+        try_update_guard(rd(&lx), c).is_none(),
+        "a new reader still waits behind it"
+    );
+    drop(rb);
+    assert!(tw.try_take(a).is_some());
+    // An admitted reader that leaves before its take gives the hold back.
+    let wc = try_update_guard(wr(&lx), c).expect("a free write");
+    let tr = WaitTicket::new(rd(&lx));
+    drop(wc);
+    drop(tr);
+    assert!(
+        try_update_guard(wr(&lx), c).is_some(),
+        "no read hold leaked"
+    );
 }
 
 /// TICKET-063 — `guard_wait_satisfiable` answers whether an acquire issued now would not block.
@@ -1638,6 +1668,7 @@ fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {
         lock: Arc::clone(&lock),
         mode: GuardMode::Write,
         taking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        admitted: None,
     };
     let (holder, other) = (u64::MAX - 11, u64::MAX - 12);
     assert!(
@@ -1664,7 +1695,7 @@ fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {
 /// a held one.
 #[test]
 fn ticket_193_await_update_guard_free_never_takes_the_guard() {
-    use crate::vm::core::await_update_guard_free;
+    use crate::vm::core::{WaitTicket, await_update_guard_free};
     let lock = test_lock();
     let key = GuardKey {
         lock: &lock,
@@ -1672,11 +1703,14 @@ fn ticket_193_await_update_guard_free_never_takes_the_guard() {
     };
     let (waiter, holder) = (u64::MAX - 13, u64::MAX - 14);
     let budget = Some(std::time::Duration::from_millis(5));
-    assert_eq!(await_update_guard_free(key, waiter, budget), Ok(true));
+    let t = WaitTicket::new(key);
+    assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(true));
+    drop(t);
     let held = crate::vm::core::try_update_guard(key, holder).expect("await did not take it");
-    assert_eq!(await_update_guard_free(key, waiter, budget), Ok(false));
+    let t = WaitTicket::new(key);
+    assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(false));
     drop(held);
-    assert_eq!(await_update_guard_free(key, waiter, budget), Ok(true));
+    assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(true));
 }
 
 /// W8-22: an error with no recorded span answers `None`, never a guess. A user-constructed
