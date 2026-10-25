@@ -3,7 +3,7 @@
 # A remove shifts every later entry down one position. A probe that kept its candidate positions
 # across that `eq` read a stale position and missed a key that is still in the map. CPython's
 # `lookdict` restarts on any mutation (`DKIX_KEY_CHANGED`); the probe restarts too.
-# The base binary and CPython agree: `m.get(K(2))` is `Some(2)` and the map keeps 3 keys.
+# The base binary and CPython agree: `m.get(K(2))` holds 2 and the map keeps 3 keys.
 
 struct K:
     a: int
