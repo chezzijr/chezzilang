@@ -99,7 +99,7 @@ const CALIBRATION_BURN: &str = "fn burn(n: int) -> int:\n    \
                                 return x\n\
                                 burn(750000)\n";
 
-/// The factor (at least 1) that makes a burn cost on this binary what it cost on the binary the
+/// The factor (at least 1) that makes a burn cost on this binary at least what it cost on the binary the
 /// tests were calibrated on ([`REFERENCE_BURN_CPU`]). One `burn(750000)` at `CHEZZI_THREADS=1`,
 /// measured in CPU time (rusage), which load on other cores does not inflate. Measured once per
 /// test process.
@@ -116,7 +116,7 @@ pub fn burn_scale() -> u64 {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(status.success(), "the calibration burn failed: {stdout}");
         let cpu = (user + sys).as_secs_f64();
-        ((REFERENCE_BURN_CPU.as_secs_f64() / cpu).round() as u64).max(1)
+        ((REFERENCE_BURN_CPU.as_secs_f64() / cpu).ceil() as u64).max(1)
     })
 }
 
