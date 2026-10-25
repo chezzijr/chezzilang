@@ -114,11 +114,9 @@ pub(super) struct FiberCtx {
     /// lands in its caller's stream, so a box context's buffers stay empty.
     pub(super) out: Vec<u8>,
     pub(super) stderr: Vec<u8>,
-    /// D2b / M3.1 — the fiber's module-namespace objects: the run's module objects (the same
-    /// `GcRef`s in every context, M3.1), so a task reads and writes the one copy of each global.
-    /// A context started before a module finished its init holds a shorter table. The roots swap
-    /// per-fiber (`swap_ctx` swaps them UNCONDITIONALLY).
-    pub(super) module_objs: Vec<GcRef>,
+    /// M3.1 — the run's one module table (the same `Arc` every context holds), so the parked
+    /// context's roots and copy walk (`WalkSrc::of_ctx`) reach the run's modules. Never swapped.
+    pub(super) module_objs: Arc<super::module_table::ModuleTable>,
     /// D2b — the fiber's `Executor` handles (GC roots). Per fiber: swapped by
     /// [`Vm::swap_ctx`] when `owns_side`. Empty for a context that does not own side state.
     pub(super) executors: Vec<GcRef>,

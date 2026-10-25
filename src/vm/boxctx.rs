@@ -151,7 +151,7 @@ impl Vm {
         Box::new(FiberCtx {
             owns_side: true,
             stack: vec![Value::nil()],
-            module_objs: self.module_objs.clone(),
+            module_objs: Arc::clone(&self.module_objs),
             executors: worker.executors,
             str_intern: worker.str_intern,
             ..Default::default()
@@ -186,9 +186,6 @@ impl Vm {
             gen_hosts: Vec::new(),
         };
         self.swap_frame(&mut frame);
-        // M3.1: the box closure reads the run's module objects, through its caller's table (a
-        // caller started after a late module init holds a longer one than the box was built with).
-        self.module_objs.clone_from(&frame.caller.module_objs);
         let depth = self.box_chain.len();
         let entry = (
             self.frames.len(),

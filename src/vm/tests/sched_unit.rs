@@ -1552,7 +1552,6 @@ fn fiber_roots_equal_vm_roots_after_swap() {
         },
         fresh: 0,
     }]);
-    vm.module_objs = vec![obj(&mut vm, "module")];
     vm.executors = vec![obj(&mut vm, "executor")];
     let interned = obj(&mut vm, "interned");
     vm.str_intern.insert(1, interned);
@@ -1561,8 +1560,10 @@ fn fiber_roots_equal_vm_roots_after_swap() {
     let live = roots_per_field(&vm.root_view());
     for (field, roots) in &live {
         // `start` is a parked fiber's alone: `pending_fiber_roots_its_start` covers it.
-        if *field == "start" {
-            assert!(roots.is_empty(), "the live `Vm` has no `start`");
+        // `start` is a parked fiber's alone; the module table is the run's (M3.1), rooted by
+        // every context and never swapped, so neither travels here.
+        if *field == "start" || *field == "module_objs" {
+            assert!(roots.is_empty(), "the live `Vm` has no `{field}` to move");
         } else {
             assert!(!roots.is_empty(), "the test fills RootView field `{field}`");
         }
@@ -1633,7 +1634,10 @@ fn roots_per_field(v: &super::root_registry::RootView) -> Vec<(&'static str, Vec
                 ..RootView::default()
             }),
         ),
-        ("module_objs", sorted_roots(module_objs.to_vec())),
+        (
+            "module_objs",
+            sorted_roots(module_objs.map(|t| t.iter().collect()).unwrap_or_default()),
+        ),
         ("executors", sorted_roots(executors.to_vec())),
         (
             "str_intern",

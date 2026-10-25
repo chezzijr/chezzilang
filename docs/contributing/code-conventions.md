@@ -92,7 +92,9 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   there, and its recommended escape `_ := g()` turned rc=1 into rc=0 — TICKET-038 later reversed the
   runtime abort itself for exactly that reason, so the warning fires at top level too now; the airlock rule's filed
   "locals only, `is_local_capture` draws exactly this line" would not have warned on its own filed
-  repro, because at module top level the binding is scope 0 (`is_captured` is the real question). Two
+  repro, because at module top level the binding is scope 0 (the gate then took scope 0 in; M3.1
+  made a module global the run's one copy, so a task write to it is legal and the rule is
+  `is_local_capture` again). Two
   corollaries: derive the gate from an **exhaustive** enumeration of the compiler seam that decides it
   (W8-2's is the eight `FnComp::new` sites), and when unsure **decline** — an under-warn is a ceiling
   you can pin with a test, an over-warn teaches users to ignore the channel.

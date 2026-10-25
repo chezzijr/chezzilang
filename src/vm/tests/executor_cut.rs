@@ -345,7 +345,7 @@ fn sequential_executor_round_trips_reuse_their_runner() {
     let vm = ran_program(
         "import Executor from std.concurrency\nex := Executor()\nch := Channel[int](0)\nn := 0\nfor i in 0..200:\n    ex.submit(fn(): ch.send(1))\n    n = n + ch.recv()\n",
     );
-    let entry = *vm.module_objs.last().expect("the entry module");
+    let entry = vm.entry_home();
     let Obj::Module(m) = vm.heap.get(entry) else {
         panic!("the last module is the entry module");
     };

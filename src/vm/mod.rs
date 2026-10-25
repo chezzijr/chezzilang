@@ -14,6 +14,7 @@ mod heap_core;
 mod heap_slab;
 mod map_data;
 mod module_data;
+mod module_table;
 mod poller;
 mod pool;
 mod quiesce;
@@ -948,8 +949,11 @@ pub struct Vm {
     /// Runtime configuration the native std modules read (args/env/stdin). Default = inert.
     host: crate::native::HostConfig,
     call_depth: usize,
-    /// Each module's namespace object, indexed by module index (run-once cache + import targets).
-    module_objs: Vec<GcRef>,
+    /// M3.1 — the run's one module table (`vm/module_table.rs`): each module's namespace object,
+    /// by module index (run-once cache + import targets). Every `Vm` of the run holds this one
+    /// table (`Vm::spawn_worker`), so a module that initializes after a task started is visible
+    /// to that task.
+    module_objs: Arc<module_table::ModuleTable>,
     /// M19 Phase 3 — per-heap intern cache for `ConstStr` literals. Keyed by the literal's data
     /// pointer (`s.as_ptr()`), which is stable for the program's lifetime (the `String` lives in the
     /// immutable `Arc<Program>`). A `ConstStr` push reuses the cached `Obj::Str` instead of

@@ -4,6 +4,16 @@
 use super::*;
 
 impl Vm {
+    /// Module `i`'s namespace object. Only for a module some live value or frame came from: such a
+    /// module started its init, so its slot of the run's table is filled (`vm/module_table.rs`).
+    /// A read that can name a module not yet started reads `self.module_objs.get(i)` and faults
+    /// cleanly on `None` (`Op::MakeFuncIn`, `Op::MakeMethodFunc`, `json.decode`).
+    pub(super) fn module_obj(&self, i: usize) -> GcRef {
+        self.module_objs
+            .get(i)
+            .expect("a module a value came from has started its init")
+    }
+
     /// The slot index of module global `name`, for [`Vm::read_slot`].
     pub(super) fn slot_index(&self, module: GcRef, name: &str) -> Option<u32> {
         match self.heap.get(module) {

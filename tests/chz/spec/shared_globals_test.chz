@@ -4,8 +4,11 @@
 # every row orders its access with a channel or a join.
 import Executor, Shared from std.concurrency
 import shared_globals_lib as lib
+import shared_globals_job_lib as jobs
+import shared_globals_order_lib as order
 
 G := {"a": 1}
+M := 7
 S := 1
 N := 0
 Q: List[int] = []
@@ -118,3 +121,21 @@ test fn r10_box_closure_write():
 # A module whose own top-level `parallel:` writes its global while it initializes. Go: 7.
 test fn r11_late_module_init_write():
     assert lib.L == 7, "lib.L is {lib.L}"
+
+# A job submitted at the top level of an EARLIER module receives a closure from this module, which
+# initialized later: the closure reads this module's `M` and `lib.X`'s module through the run's one
+# module table. Go (every package is initialized before `main`): `job got 49`.
+test fn r12_a_job_from_an_earlier_module_reads_a_later_modules_global():
+    jobs.CH1.send(fn() -> int: M + 42)
+    got := jobs.T1.get()
+    jobs.EX.shutdown()
+    match got:
+        ?v: assert v == 49, "job got {v}"
+        !e: assert false, "job faulted: {e.message()}"
+
+# The other order: the job reads a global of a module whose init has not reached that global's let
+# yet. A clean fault in the job's Task (TICKET-183 wording), never a VM panic.
+test fn r13_a_job_reads_a_global_before_its_module_set_it():
+    match order.R:
+        ?v: assert false, "job read {v}"
+        !e: assert e.message().contains("'Z' is read before its initialization"), e.message()

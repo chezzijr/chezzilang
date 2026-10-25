@@ -32,7 +32,7 @@ pub(super) struct RootView<'a> {
     /// A not-yet-started fiber's task, launched on its first schedule.
     pub(super) start: Option<&'a PendingCall>,
     /// The module namespace objects (the run's, M3.1): every context roots them.
-    pub(super) module_objs: &'a [GcRef],
+    pub(super) module_objs: Option<&'a super::module_table::ModuleTable>,
     /// Live executors (C5 / A2): their queued work must survive to the program-exit auto-drain
     /// even when no in-program handle remains.
     pub(super) executors: &'a [GcRef],
@@ -67,7 +67,9 @@ impl RootView<'_> {
         if let Some(task) = self.start {
             out.extend(task.roots());
         }
-        out.extend(self.module_objs.iter().copied());
+        if let Some(modules) = self.module_objs {
+            out.extend(modules.iter());
+        }
         out.extend(self.executors.iter().copied());
         let Some(c) = &self.caches else {
             return;
@@ -87,7 +89,7 @@ impl Vm {
             frames: &self.frames,
             nurseries: &self.nurseries,
             start: None,
-            module_objs: &self.module_objs,
+            module_objs: Some(&self.module_objs),
             executors: &self.executors,
             caches: Some(HeapCaches {
                 str_intern: &self.str_intern,
@@ -116,7 +118,7 @@ impl FiberCtx {
             frames: &self.frames,
             nurseries: &self.nurseries,
             start: self.start.as_ref(),
-            module_objs: &self.module_objs,
+            module_objs: Some(&self.module_objs),
             executors: &self.executors,
             caches: Some(HeapCaches {
                 str_intern: &self.str_intern,
@@ -308,7 +310,10 @@ mod tests {
     fn registry_lists_live_ctxs_and_forgets_dropped() {
         let reg = RootRegistry::default();
         let ctx = |n: u32| FiberCtx {
-            module_objs: vec![GcRef(n), GcRef(n + 1)],
+            module_objs: Arc::new(super::super::module_table::ModuleTable::of(&[
+                GcRef(n),
+                GcRef(n + 1),
+            ])),
             ..FiberCtx::default()
         };
         let a = reg.register(ctx(10));
@@ -335,7 +340,7 @@ mod tests {
     fn into_inner_leaves_the_registry() {
         let reg = RootRegistry::default();
         let b = reg.register(FiberCtx {
-            module_objs: vec![GcRef(7)],
+            module_objs: Arc::new(super::super::module_table::ModuleTable::of(&[GcRef(7)])),
             ..FiberCtx::default()
         });
         let ctx = b.into_inner();
@@ -343,6 +348,6 @@ mod tests {
             reg.roots().is_empty(),
             "the taken context is no longer listed"
         );
-        assert_eq!(ctx.module_objs, vec![GcRef(7)]);
+        assert_eq!(ctx.module_objs.iter().collect::<Vec<_>>(), vec![GcRef(7)]);
     }
 }

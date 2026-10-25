@@ -374,7 +374,7 @@ impl WireMemo {
 /// (TICKET-246 step 5). It never charges a heap: the caller charges its OWN.
 pub(super) struct WalkSrc<'a> {
     pub(super) heap: &'a Heap,
-    pub(super) module_objs: &'a [GcRef],
+    pub(super) module_objs: &'a super::module_table::ModuleTable,
     pub(super) program: &'a Program,
     pub(super) walk_base: usize,
 }
@@ -408,7 +408,7 @@ impl<'a> WalkSrc<'a> {
     /// B3.3c — the index of a `home` module `GcRef` in the source's `module_objs`, so the receiver
     /// can resolve the corresponding rebuilt module. `None` for a home not in the table.
     pub(super) fn home_index(&self, home: GcRef) -> Option<usize> {
-        self.module_objs.iter().position(|&m| m == home)
+        self.module_objs.index_of(home)
     }
 
     /// Resolve a struct instance's `tid` to its type key. Returns `"?"` for

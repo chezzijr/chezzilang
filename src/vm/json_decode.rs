@@ -96,7 +96,7 @@ impl Vm {
         t: crate::base::json_desc::DefaultThunk,
         span: Span,
     ) -> Result<Value, DecodeFail> {
-        let Some(&home) = self.module_objs.get(t.module) else {
+        let Some(home) = self.module_objs.get(t.module) else {
             return Err(DecodeFail::Fault(self.err(
                 "json.decode: the module that declares this default has not been initialized yet"
                     .to_string(),

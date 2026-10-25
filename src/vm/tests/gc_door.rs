@@ -117,7 +117,7 @@ fn one_collection_marks_every_root_source_and_frees_the_rest() {
         let d = a.heap.alloc(Obj::Str("detached".into()));
         let r = a.heap.alloc(Obj::Str("parked".into()));
         let parked = a.root_registry.register(FiberCtx {
-            module_objs: vec![r],
+            module_objs: Arc::new(crate::vm::module_table::ModuleTable::of(&[r])),
             ..FiberCtx::default()
         });
         let done = Arc::new(AtomicBool::new(false));

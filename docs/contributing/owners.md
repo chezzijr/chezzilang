@@ -101,7 +101,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | May this op block here, and how | `mode` (`vm/block.rs`), `block_ctx` (`vm/block.rs`) | TICKET-181 |
 | What the run's collector marks | `Vm::collect_from` (`vm/frames.rs`) | M1.7: the union of the attached roots (`Attached::request_collect`, `vm/gc_coord.rs`), the registry's parked fibers, and every open box call (`Vm::gc_roots`); one sweep of the run's one core |
 | When the run collects | `Heap::should_collect` (`vm/heap.rs`) | M1.7: run-wide counts, `HeapCore::flush_allocs` and `HeapCore::flush_bytes` (`vm/heap_core.rs`) |
-| Which module objects a task reads and writes | the spawner's `module_objs` (`Vm::prepare_worker`, `vm/worker_vm.rs`) | M3.1: every context holds the run's module objects; a box call takes its caller's table (`Vm::with_box`, `vm/boxctx.rs`) |
+| Which module objects a task reads and writes | `ModuleTable` (`vm/module_table.rs`), one per run | M3.1: every `Vm` and parked context holds the one table (`Vm::spawn_worker`); `Vm::run_module` fills a module's slot before its body runs, so a later module is visible to an earlier task |
 | The one fn object per fn key | `Vm::fn_value` (`vm/method_call.rs`) | M3.1: one table per run, shared by `Vm::spawn_worker` |
 | May a thread wait while it holds a GC token | `Vm::gc_blocking` (`vm/gc_door.rs`) | M1.5: every wait of an attached thread runs in its closure; `tests/wait_site_guard.rs` scans `src/vm` for each wait and lists the waits of threads that hold no token |
 | What a detached thread can reach | `Detached` (`vm/gc_door.rs`) | M3.0a: the door body's only handle, with no heap access; a native's args are copied before the door (`Vm::copy_arg`, `vm/host.rs`); a C callback re-attaches (`Detached::reenter`) |
@@ -185,6 +185,7 @@ file at 2,500 lines and a test file at 3,500.
 | VM: retiring vector | `vm/rvec.rs` (`RVec`, the growable vector of `Elem`s whose grows retire the old block on the `Heap` handle's `RetireList`; the run's list, which the stop-the-world sweep frees) |
 | VM: map and set payloads | `vm/map_data.rs` (`MapData`, `SetData`, and their index: an open-addressing table on atomic slots whose old tables retire) |
 | VM: module payload | `vm/module_data.rs` (`ModuleData`: a module's global slots, and its name and name-to-slot index behind one `RwLock`) |
+| VM: module table | `vm/module_table.rs` (`ModuleTable`: the run's one table of module objects by index, atomic slots) |
 | VM: GC roots | `vm/root_registry.rs` (`RootView`, the one root walk of an execution context that `Vm::gc_roots`, `GeneratorCore::gc_roots` and `FiberCtx::roots` call; `RootRegistry`, the run's list of boxed fiber contexts, each a `CtxBox`) |
 | VM: stop-the-world GC coordinator | `vm/gc_coord.rs` (`GcCoord`, and the `Attached` and `DetachTicket` tokens: attach, leave, detach and reattach, safepoint polls, one collection per stop, the root hand-off) |
 | VM: GC door | `vm/gc_door.rs` (each thread's GC token on the `Vm` it drives: attach and leave, the safepoint poll, the GC entry `Vm::gc_collect`, and `Vm::gc_blocking`, the one door each wait of an attached thread runs in, with its `Detached` handle) |

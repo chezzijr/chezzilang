@@ -140,6 +140,7 @@ impl Vm {
             acc += p.code.len() as u32;
         }
         let quicken = vec![Q_COLD; acc as usize];
+        let module_objs = Arc::new(super::module_table::ModuleTable::new(program.modules.len()));
         Vm {
             program,
             heap,
@@ -149,7 +150,7 @@ impl Vm {
             stderr: Vec::new(),
             host: crate::native::HostConfig::default(),
             call_depth: 0,
-            module_objs: Vec::new(),
+            module_objs,
             str_intern: fxhash::FxHashMap::default(),
             fn_values: Arc::default(),
             field_ic,
@@ -295,12 +296,7 @@ impl Vm {
         // stdin is NOT swapped: it is ONE source every task shares (Go/Python) — see `Stdin` and
         // `spawn_worker`, which hands the M:N worker the same shared handle.
         //
-        // M3.1 — the fiber's module table swaps for EVERY fiber. Its `GcRef`s are the run's module
-        // objects (every context holds the same ones), but a context started before a module
-        // finished its init holds a shorter table, so the table travels WITH the fiber. GC: a
-        // swapped-OUT `module_objs` needs no pin — `ctx` is registered with the run's
-        // `RootRegistry`, which the collector walks.
-        std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
+        // M3.1 — `module_objs` is not swapped: every context holds the run's one module table.
         // D2b — a context that owns its side state swaps it here: each field below belongs to ONE
         // fiber (or one box context), so a shell that runs many in turn must not leave it behind
         // for the next. A context that does not own side state aliases the shell's.
@@ -796,9 +792,8 @@ impl Vm {
     /// modules. The entry is the last module in dependency order. The `chezzi test` runner uses it as
     /// the home for free `test fn`s and suite construction thunks.
     pub(super) fn entry_home(&self) -> GcRef {
-        *self
-            .module_objs
-            .last()
+        self.module_objs
+            .get(self.program.modules.len().saturating_sub(1))
             .expect("modules initialized before invoking tests")
     }
 
@@ -1134,8 +1129,7 @@ impl Vm {
             slots,
             index,
         ))));
-        debug_assert_eq!(self.module_objs.len(), idx);
-        self.module_objs.push(mod_obj);
+        self.module_objs.set(idx, mod_obj);
 
         // A native std module: populate its globals with Rust `NativeFn`s + float constants. It then
         // FALLS THROUGH to `run_proto` below so a HYBRID native module's BODIED Chezzi fns (e.g.
@@ -1187,7 +1181,7 @@ impl Vm {
             .program
             .module_index(&imp.target)
             .expect("resolver guarantees the import target is in the graph");
-        let target_obj = self.module_objs[target_idx];
+        let target_obj = self.module_obj(target_idx);
         match &imp.import {
             Import::Module { path, alias, .. } => {
                 let name = alias

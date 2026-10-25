@@ -56,7 +56,9 @@ impl Vm {
         // task is still reachable by the program-exit join after this worker's heap is gone. This is
         // the whole fix: the parallel `Vm.executors` list is heap-keyed and dies with the task.
         worker.exec_registry = Arc::clone(&self.exec_registry);
-        // M3.1 — and the run's one fn-value table, as the worker shares the run's module objects.
+        // M3.1 — and the run's one module table and fn-value table, so the worker reads the
+        // run's module globals, a module that initializes later included.
+        worker.module_objs = Arc::clone(&self.module_objs);
         worker.fn_values = Arc::clone(&self.fn_values);
         // …and the blocked-party registry with it, for the same reason: the process-wide deadlock
         // verdict must see every party of THIS run and none of any other's (`future.md` §2d step 0).
@@ -136,14 +138,12 @@ impl Vm {
         // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
         //    rejecting any value that can't cross a heap boundary as-is.
         let lowered = self.lower_task(task)?;
-        // 2. Build the worker over the spawner's module objects (M3.1: the same `GcRef`s, so every
-        //    task of the run reads and writes one copy of each module global, as in Go). A module
-        //    that finishes its init after this spawn is absent from the clone: the module-index ops
-        //    read it with `.get()` (`Op::MakeFuncIn`). 3. Rebuild the callable/receiver + args into
-        //    the worker heap. The actual invoke is `ReadyWorker::run`.
+        // 2. Build the worker over the run's one module table (M3.1, `Vm::spawn_worker`), so every
+        //    task of the run reads and writes one copy of each module global, as in Go, a module
+        //    that initializes after this spawn included. 3. Rebuild the callable/receiver + args
+        //    into the worker heap. The actual invoke is `ReadyWorker::run`.
         let payload = super::gc_door::PayloadInFlight::new();
         let mut worker = self.spawn_worker();
-        worker.module_objs.clone_from(&self.module_objs);
         let (call, span) = worker.rebuild_ready(lowered, fresh);
         Ok(ReadyWorker {
             worker,
@@ -230,8 +230,8 @@ impl Vm {
     }
 
     /// PHASE 3 of task preparation — rebuild a [`Lowered`] task's callable/receiver + args INTO
-    /// THIS VM's heap, resolving home indices against `self.module_objs` (the spawner's module
-    /// objects). Split out of [`Vm::prepare_worker`]. Infallible (all crossing checks happened in
+    /// THIS VM's heap, resolving home indices against `self.module_objs` (the run's module
+    /// table). Split out of [`Vm::prepare_worker`]. Infallible (all crossing checks happened in
     /// [`Vm::lower_task`]).
     ///
     /// W7-4: ONE rebuild map spans the whole `Lowered`, mirroring `lower_task`'s single
@@ -534,8 +534,8 @@ impl Vm {
     /// back to a fresh empty home when the parent home was not a real module (test fixtures).
     pub(super) fn worker_home(&mut self, idx: Option<usize>) -> GcRef {
         match idx {
-            Some(i) if i < self.module_objs.len() => self.module_objs[i],
-            _ => self.fresh_worker_home(),
+            Some(i) => self.module_obj(i),
+            None => self.fresh_worker_home(),
         }
     }
 }

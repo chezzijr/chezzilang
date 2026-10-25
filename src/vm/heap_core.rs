@@ -72,14 +72,14 @@ pub struct HeapCore {
     /// stray mark (see `reuse`).
     marks: SlotBits,
     /// D4 layer C (TICKET-169): a side bitset marking a heap object as an airlock COPY (a spawned
-    /// task's captures/args/receiver, its module-global snapshot, or a crossing closure's
-    /// captures). Set only in `Sched::from_wire_memo`/`replay_snap` under `Vm::copy_mark`. Written
+    /// task's captures/args/receiver, or a crossing closure's captures). Set only in
+    /// `Vm::from_wire_memo` under `Vm::copy_mark`. Written
     /// with `fetch_or` / `fetch_and`: mutators on two threads can share a word. `any_copied` lets a
     /// heap that holds no copy (the main task, in every bench) skip straight past the bit test.
     copied: SlotBits,
     any_copied: AtomicBool,
-    /// A per-core identity, assigned once at construction from a process-wide counter (TICKET-213
-    /// view stamps).
+    /// A per-core identity, assigned once at construction from a process-wide counter. Tests read
+    /// it (`Heap::id`) to prove every handle of a run shares one core.
     id: u64,
     /// A handle collects once its `since_gc` reaches this; grows with the live set after each
     /// collection.

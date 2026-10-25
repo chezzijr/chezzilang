@@ -1543,7 +1543,7 @@ main()";
             let caps = vm
                 .module_objs
                 .iter()
-                .find_map(|&m| match vm.heap.get(m) {
+                .find_map(|m| match vm.heap.get(m) {
                     Obj::Module(md) if md.names().index.contains_key("K") => {
                         let names = md.names();
                         let mut names: Vec<&str> = names.index.keys().map(|k| &**k).collect();
@@ -1623,7 +1623,7 @@ fn share_handle<T: Send + 'static, R: Send + 'static>(
                 .map(|name| {
                     root.module_objs
                         .iter()
-                        .find_map(|&m| match root.heap.get(m) {
+                        .find_map(|m| match root.heap.get(m) {
                             Obj::Module(md) => {
                                 let slot = md.names().index.get(*name).copied();
                                 slot.map(|i| md.slots.get(i as usize))

@@ -83,7 +83,7 @@ impl Vm {
             return Ok(false);
         };
         self.check_proto_arity(proto, argc + 1, span)?;
-        let home = self.module_objs[prog.native_home[key]];
+        let home = self.module_obj(prog.native_home[key]);
         if self.program.protos[proto].is_generator {
             let mut gen_args = Vec::with_capacity(argc + 1);
             gen_args.push(recv);
@@ -169,12 +169,12 @@ impl Vm {
             Obj::Struct { tid, .. } => {
                 let def = self.program.structs.get(self.struct_name_of_tid(*tid))?;
                 let proto = *def.methods.get(hook.method())?;
-                Some((proto, self.module_objs[def.module_idx]))
+                Some((proto, self.module_obj(def.module_idx)))
             }
             Obj::Enum { variant_id, .. } => {
                 let key = self.enum_names(*variant_id).0;
                 let proto = *self.program.enum_methods.get(key)?.get(hook.method())?;
-                Some((proto, self.module_objs[self.enum_home_module(key)]))
+                Some((proto, self.module_obj(self.enum_home_module(key))))
             }
             Obj::Str(_)
             | Obj::Bytes(_)
@@ -405,7 +405,7 @@ impl Vm {
                 if let Some(cell) = hit {
                     let proto = cell.proto;
                     self.check_proto_arity(proto, argc + 1, span)?;
-                    let home = self.module_objs[cell.module_idx as usize];
+                    let home = self.module_obj(cell.module_idx as usize);
                     // Experimental generators — a generator method allocates rather than running (else its
                     // `Op::Yield` would poison the host run with no `generator_next` to drive it).
                     if self.program.protos[proto].is_generator {
@@ -727,7 +727,7 @@ impl Vm {
                 let resolved = def.methods.get(method).copied();
                 let def_module_idx = def.module_idx;
                 if let Some(proto) = resolved {
-                    let home = self.module_objs[def_module_idx];
+                    let home = self.module_obj(def_module_idx);
                     self.check_proto_arity(proto, argc + 1, span)?;
                     // Experimental generators — a generator method allocates rather than running (else
                     // its `Op::Yield` would poison the host run). Covers both the IC-flatten and the
@@ -838,7 +838,7 @@ impl Vm {
                 if let Some(proto) = resolved {
                     // An enum method's home module is the enum's declaring module (recorded in
                     // `enum_home`), so its body resolves top-level names against the right globals.
-                    let home = self.module_objs[self.enum_home_module(&enum_key)];
+                    let home = self.module_obj(self.enum_home_module(&enum_key));
                     self.check_proto_arity(proto, argc + 1, span)?;
                     if self.program.protos[proto].is_generator {
                         let mut gen_args = Vec::with_capacity(argc + 1);
@@ -984,7 +984,7 @@ impl Vm {
         };
         // A static method has NO receiver, so its argument count is `argc` exactly (no `+ 1`).
         self.check_proto_arity(proto, argc, span)?;
-        let home = self.module_objs[home_idx];
+        let home = self.module_obj(home_idx);
         if self.program.protos[proto].is_generator {
             let at = self.stack.len() - argc;
             let gen_args: Vec<Value> = self.stack.split_off(at);

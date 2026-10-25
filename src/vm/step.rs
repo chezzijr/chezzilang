@@ -522,7 +522,7 @@ impl Vm {
             }
             Op::MakeFuncIn(id) => {
                 let (proto, midx) = self.program.providers[*id as usize];
-                let Some(&home) = self.module_objs.get(midx) else {
+                let Some(home) = self.module_objs.get(midx) else {
                     return Err(self.err(
                         format!(
                             "the module that declares {} has not been initialized yet",
@@ -548,7 +548,7 @@ impl Vm {
                         span,
                     ));
                 };
-                let Some(&home) = self.module_objs.get(midx) else {
+                let Some(home) = self.module_objs.get(midx) else {
                     return Err(self.err(
                         format!(
                             "the module that declares {} has not been initialized yet",
