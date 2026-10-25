@@ -815,8 +815,14 @@ impl Vm {
         let floor = self.nurseries.len();
         let home = self.entry_home();
         let r = self.run_proto(proto, home, None, args, true, false, Span::RUNTIME);
+        // The result rides the operand stack across the reclaim, which can wait and so collect.
+        let Ok(v) = r else {
+            let _ = self.drain_escaped_nursery(floor);
+            return r;
+        };
+        self.push(v);
         let _ = self.drain_escaped_nursery(floor);
-        r
+        Ok(self.pop())
     }
 
     /// The per-invocation reset EVERY `chezzi test` entry point shares — [`Vm::invoke_test`],

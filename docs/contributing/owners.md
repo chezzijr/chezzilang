@@ -148,6 +148,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | VM production sources for a source-text rule | `vm_sources` (`vm/tests/mod.rs`) | |
 | Generated-program grid runner | the fn `run_grid` in `tests/support/grid_cell.rs` | 15 grid files under `tests/` include that file: 14 call `run_grid`, `tests/open_binding_grid.rs` calls `run_cell`; a cell expects a stdout, a rejection fragment or a twin program run at test time |
 | One test per grid row | the macro `grid_tests!` in `tests/support/grid_tests.rs` | each split grid under `tests/`; a row list defines the const and the tests, so a new row gets a test |
+| A `chezzi test` run of one file under GC stress | the fn `assert_stressed_pass` in `tests/support/stressed_chz.rs` | `tests/gc_blocking_pins.rs` and `tests/try_drain_rooting.rs`; the run is bounded, a timeout fails and is not retried |
 | Test time limit | `slow-timeout` in `.config/nextest.toml` (300 s; `SLOW` past 60 s) | the rule (a test well under 100 s; split with `grid_tests!`; never raise) is in `docs/contributing/dev-commands.md`; `tests/test_time_budget.rs` fails on a `slow-timeout` line without `terminate-after = 5 }` |
 | Subdirectories of `tests/chz` that have a test | the fn `assert_every_subdirectory_listed` in `tests/support/chz_dirs.rs` | `tests/chz_suite.rs` and `tests/chezzi_threads_cli.rs` list the directories; a new directory without a row, or a `.chz` file outside one, fails |
 

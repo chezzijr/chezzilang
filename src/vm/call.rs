@@ -779,6 +779,7 @@ impl Vm {
         }
         self.stack.truncate(frame.base);
         self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
+        self.push(ret); // rooted across the reclaim below, which can wait and so collect
         // Reclaim any `parallel:` nursery this frame opened but whose `JoinNursery` was skipped by a
         // `?`/return escape (no-op on the normal fall-through path — `JoinNursery` already popped it,
         // so `nurseries.len() == frame.nursery_len`; also a no-op when the implicit nursery above was
@@ -800,9 +801,9 @@ impl Vm {
         }
         // TICKET-147 — a defer fault stays the root cause; an aborted nursery's child fault fills the gap.
         if let Some(e) = defer_err.or(escaped) {
+            self.pop();
             return Err(e);
         }
-        self.push(ret);
         Ok(())
     }
 

@@ -1,0 +1,111 @@
+# tests/chz/spec/try_drain_rooting_test.chz — a value an escape carries stays rooted across its drains.
+#
+# A `?` or a `return` that leaves a `parallel:` or a `recover:` runs drains before it delivers its
+# value: the escaped body's defers, the cancel + wait of the escaped nursery, the recover block's
+# defers. Each drain can collect the run's one heap (a defer runs code; a wait detaches this
+# thread, and another thread collects). The carried value must be a root during each drain.
+# Run under `CHEZZI_GC_STRESS=1` at `CHEZZI_THREADS=1` and `2` (`tests/try_drain_rooting.rs`).
+
+fn bad() -> int!str:
+    return !"q boom"
+
+fn good() -> int!str:
+    return 7
+
+fn churn():
+    xs := [[1, 2], [3, 4]]
+    _ := "{xs}"
+
+fn err_text(r: int!str) -> str:
+    match r:
+        ?v: return "ok {v}"
+        !e: return e
+
+# A `?` error out of a `parallel:`, caught by `recover:`: the nursery cancel + wait (do_try).
+test fn a_caught_err_survives_the_escaped_nursery_wait():
+    r := recover:
+        parallel:
+            spawn:
+                churn()
+            x := bad()?
+            print(x)
+    match r:
+        ?_: assert false, "the `?` delivers its error"
+        !e: assert e.message() == "q boom"
+
+# A `?` success inside a `parallel:`: the unwrapped payload, no drain.
+test fn an_ok_unwraps_inside_a_parallel_body():
+    got := 0
+    r := recover:
+        parallel:
+            spawn:
+                churn()
+            got = good()?
+    assert got == 7
+    match r:
+        ?_: pass
+        !e: assert false, "unexpected {e}"
+
+# A `?` error out of a `parallel:` with a body defer: the body defer drain, then the wait.
+test fn a_caught_err_survives_the_escaped_body_defers():
+    r := recover:
+        parallel:
+            defer churn()
+            spawn:
+                churn()
+            x := bad()?
+            print(x)
+    match r:
+        ?_: assert false, "the `?` delivers its error"
+        !e: assert e.message() == "q boom"
+
+# A `?` error with a recover-block defer and no nursery: the recover-block defer drain.
+test fn a_caught_err_survives_the_recover_block_defers():
+    r := recover:
+        defer churn()
+        x := bad()?
+        print(x)
+    match r:
+        ?_: assert false, "the `?` delivers its error"
+        !e: assert e.message() == "q boom"
+
+# A `?` error with both defers and a nursery: every drain of the catch in one row.
+test fn a_caught_err_survives_every_drain_of_the_catch():
+    r := recover:
+        defer churn()
+        parallel:
+            defer churn()
+            spawn:
+                churn()
+            x := bad()?
+            print(x)
+    match r:
+        ?_: assert false, "the `?` delivers its error"
+        !e: assert e.message() == "q boom"
+
+fn propagate() -> int!str:
+    defer churn()
+    parallel:
+        defer churn()
+        spawn:
+            churn()
+        x := bad()?
+        print(x)
+    return 0
+
+# A function-scoped `?` out of a `parallel:`: the frame return path (do_return).
+test fn a_propagated_err_survives_the_return_drains():
+    assert err_text(propagate()) == "q boom"
+
+fn give_list() -> List[int]:
+    defer churn()
+    parallel:
+        defer churn()
+        spawn:
+            churn()
+        return [1, 2]
+    return []
+
+# `return` of a heap value out of a `parallel:`, with defers: the frame return path.
+test fn a_returned_list_survives_the_return_drains():
+    assert give_list() == [1, 2]

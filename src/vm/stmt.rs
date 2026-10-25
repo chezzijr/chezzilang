@@ -348,6 +348,11 @@ impl Vm {
                 return Ok(());
             }
             if variant_id == VID_ERR || variant_id == VID_NONE_VARIANT {
+                // The propagated value rides the operand stack from here to its delivery: each
+                // drain below can collect (a defer runs code; a nursery wait detaches this thread
+                // and another thread collects the run's one heap), and the stack is a root, a Rust
+                // local is not. `do_return` keeps its return value there for the same reason.
+                self.push(v);
                 // A `?` directly inside a `recover:` block (a handler installed in THIS frame)
                 // short-circuits to that boundary (try-block style): the `Err`/`None` value becomes
                 // the recover's result. Function-scoped `?` (no same-frame handler) falls through.
@@ -376,13 +381,13 @@ impl Vm {
                     if let Some(e) = body_defers {
                         self.store_escape_park(e);
                     }
-                    self.push(v);
                     self.rewind_op();
                     self.join_suspend = Some(origin);
                     return Ok(());
                 }
                 if let Some(h) = self.handlers.pop_if(|h| h.frame_len == frame_len) {
                     self.stack.truncate(h.stack_len);
+                    self.push(v); // the recover's value slot, rooted across the drains below
                     self.call_depth = h.call_depth;
                     // Drop scope markers of defer scopes opened inside the recover block — the `?`
                     // jumps past their `LeaveDeferScope`s, so they would otherwise leak.
@@ -418,27 +423,20 @@ impl Vm {
                     // Drain the recover block's own defers before binding the result. A fault in one
                     // supersedes the propagated value (becomes the recover's `Err`); a recover-block
                     // defer fault in turn supersedes a body defer fault (it unwinds later).
-                    match self.drain_frame_to(h.defer_len) {
-                        Some(e) => {
-                            let e = self.cleanup_halt(e)?;
-                            let sp = e.span;
-                            let msg = self.alloc_str(e.message);
-                            self.stamp_err_span(msg, sp);
-                            let err = self.alloc_enum("Result", "Err", &[msg]);
-                            self.push(err);
-                        }
-                        None => match body_defer_err {
-                            // No recover-block defer fault, but a parallel-body defer faulted: that
-                            // becomes the recover's `Err` (Go semantics — a defer fault supersedes).
-                            Some(e) => {
-                                let sp = e.span;
-                                let msg = self.alloc_str(e.message);
-                                self.stamp_err_span(msg, sp);
-                                let err = self.alloc_enum("Result", "Err", &[msg]);
-                                self.push(err);
-                            }
-                            None => self.push(v), // the propagated Result/Option value IS the result
-                        },
+                    // A body defer fault becomes the recover's `Err` when no recover-block defer
+                    // faulted (Go semantics — a defer fault supersedes).
+                    let fault = match self.drain_frame_to(h.defer_len) {
+                        Some(e) => Some(self.cleanup_halt(e)?),
+                        None => body_defer_err,
+                    };
+                    // With no fault, the propagated Result/Option value, already in place, IS the result.
+                    if let Some(e) = fault {
+                        self.pop(); // superseded
+                        let sp = e.span;
+                        let msg = self.alloc_str(e.message);
+                        self.stamp_err_span(msg, sp);
+                        let err = self.alloc_enum("Result", "Err", &[msg]);
+                        self.push(err);
                     }
                     // W13-20 — a deferred `.next()` run by either drain above (the escaped `parallel:`
                     // body's, or the recover block's own) can fault and park its own frames in
@@ -459,8 +457,7 @@ impl Vm {
                     }));
                 }
                 // Otherwise early-return this value from the enclosing function (running its
-                // deferred calls first; a fault in one propagates as a fault).
-                self.push(v);
+                // deferred calls first; a fault in one propagates as a fault). `v` is on top.
                 self.do_return(true)?;
                 return Ok(());
             }
