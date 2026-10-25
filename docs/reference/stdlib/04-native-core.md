@@ -243,7 +243,6 @@ remainder (so a later read in any task sees EOF); `read_char` consumes one scala
 | `setenv` | `(key: str, value: str) -> None` | Set an env var. `env` and `environ` see it, and it is **visible across tasks** (one env map for all M:N workers, process-global like Python `os.environ` / Go `os.Setenv`). Writes the injected env map, **not** a child's real env; `process.cmd` still inherits the real process env. |
 | `getpid` | `() -> int` | Current process id. |
 | `platform` | `() -> str` | OS name: `"linux"` / `"macos"` / `"windows"` / … (`std::env::consts::OS`). |
-| `debug_build` | `() -> bool` | `true` when the `chezzi` binary is a dev/test-profile build (Rust `cfg!(debug_assertions)`), `false` for a `--release` build. A test whose wall-clock bound holds only on a release build returns early when it is `true`. |
 | `hostname` | `() -> str?` | System hostname (`None` on the rare `gethostname` syscall failure). |
 | `home_dir` | `() -> str?` | User home (`$HOME`; `None` if unset). Unix-focused. **Stays `str`**: unlike `getcwd`/`temp_dir` it reads the injected env map, which is a lossy surface (see the decoding note). |
 | `temp_dir` | `() -> path.Path` | System temp directory, as **raw OS bytes** wrapped in a [`path.Path`](07-pure-text-data.md#pathpath): `$TMPDIR` need not be valid UTF-8. |
@@ -254,7 +253,7 @@ remainder (so a later read in any task sees EOF); `read_char` consumes one scala
 **Env source:** `env` / `environ` / `setenv` read and write the engine's injected env config.
 `chezzi run` and `chezzi test` fill it from the real process env; a Rust test harness injects its own. One env map is shared across M:N workers (an `Arc<Mutex<…>>`), so a
 `setenv` inside a task is visible to the parent and siblings. A child that `process.cmd` spawns does
-**not** see a `setenv` (it inherits the real process env). `getpid` / `platform` / `debug_build` / `hostname` /
+**not** see a `setenv` (it inherits the real process env). `getpid` / `platform` / `hostname` /
 `home_dir` / `temp_dir` are plain queries.
 
 **Non-UTF-8 argv / env (decoding rule):** the OS hands argv and the environment over as raw bytes,

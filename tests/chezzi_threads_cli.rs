@@ -78,6 +78,7 @@ fn run_chz_test(
         cmd.arg(format!("--timeout={ms}"));
     }
     cmd.arg(path);
+    chz_dirs::set_build_mode(&mut cmd);
     match threads {
         Some(n) => {
             cmd.env("CHEZZI_THREADS", n);

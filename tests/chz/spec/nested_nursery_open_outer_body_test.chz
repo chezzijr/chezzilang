@@ -7,10 +7,10 @@
 #
 # The ceiling only discriminates on a RELEASE build: one `burn(1500000)` takes ~0.2 s on the
 # release binary and ~0.5 s on the debug binary `cargo test` runs this suite with (chezzi-vm at
-# opt-level 1; ~2 s at opt-level 0). `can_fan_out()` reads the build mode from the binary
-# (`os.debug_build()`), and each test returns early (passes without asserting) on a debug build, so
-# the debug gates stay green and the release run (`chezzi test` on the release binary, the ticket's
-# declared command) asserts.
+# opt-level 1; ~2 s at opt-level 0). `can_fan_out()` reads the build mode that the Rust runners set
+# (`CHEZZI_TEST_DEBUG_BINARY=1`, from their `cfg!(debug_assertions)`), and each test returns early
+# (passes without asserting) on a debug build, so the debug gates stay green and the release run
+# (`chezzi test` on the release binary, the ticket's declared command, var unset) asserts.
 # The fan-out also needs two workers: at `CHEZZI_THREADS=1` the 8 children run one after another
 # (~1.7 s on release), so `can_fan_out()` returns early there too.
 import std.concurrency
@@ -28,7 +28,7 @@ fn burn(n: int) -> int:
 fn can_fan_out() -> bool:
     if (os.env("CHEZZI_THREADS") ?? "") == "1":
         return false
-    return not os.debug_build()
+    return (os.env("CHEZZI_TEST_DEBUG_BINARY") ?? "") != "1"
 
 fn fan_open() -> int:
     ch := Channel[int](0)

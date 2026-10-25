@@ -50,14 +50,6 @@ fn platform(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Str(std::env::consts::OS.to_string()))
 }
 
-/// `debug_build()` — `true` when this binary was built without optimizations for release (the
-/// `dev`/`test` profile: `cfg!(debug_assertions)`), `false` for a `--release` build. Rust
-/// `cfg!(debug_assertions)`. A test whose wall-clock bound only holds on a release build reads it.
-fn debug_build(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "debug_build", 0)?;
-    Ok(NativeRet::Bool(cfg!(debug_assertions)))
-}
-
 /// `hostname()` — the system hostname via `libc::gethostname` (libc is already a dep — no new one).
 /// `None` on the rare syscall failure — `Option[str]`, the same shape `env`/`home_dir` already use,
 /// rather than a `""` that's indistinguishable from a real, if absurd, hostname.
@@ -167,7 +159,6 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("exit", exit, Kind::Inline),
     ("getpid", getpid, Kind::Inline),
     ("platform", platform, Kind::Inline),
-    ("debug_build", debug_build, Kind::Inline),
     ("hostname", hostname, Kind::Inline),
     ("home_dir", home_dir, Kind::Inline),
     ("_temp_dir", temp_dir, Kind::Inline),

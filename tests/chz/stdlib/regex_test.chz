@@ -44,9 +44,10 @@ test fn replace_all_rejects_a_dollar_ref_to_a_missing_group():
 # `find_all_text` returns the matched strings directly. Measured 2026-09-22 over the same input:
 # 0.31s release, 2.25s debug. The bound is one absolute ceiling (never a quotient, DEC-049). It
 # only discriminates on a release build, so the test returns early on the debug binary that
-# `cargo test` runs this suite with (`os.debug_build()`, the binary's own build mode).
+# `cargo test` runs this suite with (the Rust runners set `CHEZZI_TEST_DEBUG_BINARY=1` from their
+# `cfg!(debug_assertions)`).
 test fn find_all_text_extraction_over_a_million_tokens_is_not_too_slow():
-    if os.debug_build():
+    if (os.env("CHEZZI_TEST_DEBUG_BINARY") ?? "") == "1":
         return
     n := 1000000
     words := List[str]()
