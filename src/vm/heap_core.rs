@@ -354,7 +354,8 @@ impl HeapCore {
     ///
     /// As for `Slab::segments_mut`: no other thread touches a slot while this runs. Every other
     /// handle of the core is stopped at a safepoint or detached (`vm/gc_coord.rs`), or the caller's
-    /// handle is the core's only one.
+    /// handle is the core's only one. A detached thread reads no slot: its door body gets a
+    /// `Detached` handle, which reaches no heap object (`vm/gc_door.rs`, M3.0a).
     pub(super) unsafe fn sweep_slots(&self, graveyard: &mut Vec<Obj>) {
         let mut live = 0usize;
         {
@@ -363,7 +364,8 @@ impl HeapCore {
             // No copy bit was ever set: the freed slots have none to clear.
             let any_copied = self.any_copied.load(Ordering::Relaxed);
             // SAFETY: the caller's contract above: the gc_coord invariant, every other handle
-            // stopped or detached for the sweep (`vm/gc_coord.rs`).
+            // stopped or detached for the sweep (`vm/gc_coord.rs`), and a detached one holds only a
+            // `Detached` handle, which reaches no slot (`vm/gc_door.rs`).
             for (start, seg) in unsafe { self.slots.segments_mut() } {
                 let marks = self.marks.segment_words(start);
                 let copied = self.copied.segment_words(start);

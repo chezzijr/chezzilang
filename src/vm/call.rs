@@ -267,12 +267,20 @@ impl Vm {
                         span,
                     ));
                 }
-                // M1.5 — Go `cgocall`: a C call runs detached, through the GC door. It reads its
-                // (pinned) args and returns an off-heap `NativeRet`; nothing allocates. M1.8 — a
-                // callback that C calls meanwhile runs attached (`VmHost::invoke_callback`, Go
-                // `cgocallback`).
+                // M1.5 — Go `cgocall`: a C call runs detached, through the GC door, and returns an
+                // off-heap `NativeRet`; nothing allocates. M3.0a — it reads the args copied out
+                // before the door opens. M1.8 — a callback that C calls meanwhile runs attached
+                // (`DoorHost::invoke_callback`, Go `cgocallback`) on the arg values, which the
+                // door pins.
                 let pins: Vec<GcRef> = args.iter().filter_map(|v| v.child_gcref()).collect();
-                let ret = self.gc_blocking(&pins, |vm| cffi.call(&mut VmHost { vm, args }));
+                let copies = self.copy_args(&args);
+                let ret = self.gc_blocking(&pins, |door| {
+                    cffi.call(&mut DoorHost {
+                        door,
+                        args: copies,
+                        vals: args,
+                    })
+                });
                 let ret = ret.map_err(|e| RuntimeError {
                     message: e.message,
                     span,
@@ -529,10 +537,17 @@ impl Vm {
         };
         let raw = if in_place {
             self.width_release();
-            // M1.5 — a native that holds its host thread waits detached. It reads its arguments
-            // (pinned) and returns an off-heap `NativeRet`: it allocates nothing on the heap.
-            let pins: Vec<GcRef> = args.iter().filter_map(|v| v.child_gcref()).collect();
-            let raw = self.gc_blocking(&pins, |vm| func(&mut VmHost { vm, args }));
+            // M1.5 — a native that holds its host thread waits detached and returns an off-heap
+            // `NativeRet`: it allocates nothing on the heap. M3.0a — it reads the args copied out
+            // before the door opens, so the door pins nothing.
+            let copies = self.copy_args(&args);
+            let raw = self.gc_blocking(&[], |door| {
+                func(&mut DoorHost {
+                    door,
+                    args: copies,
+                    vals: Vec::new(),
+                })
+            });
             self.width_acquire();
             raw
         } else {
@@ -577,94 +592,16 @@ impl Vm {
     }
 
     /// D5 — materialize a blocking native's already-evaluated `Value` args into `Send` primitives so
-    /// the dirty-pool thread can run the call without the heap. Returns `None` if any arg is not a
-    /// primitive (int / float / bool / str) — the scoped blocking fns only ever take primitives, so a
-    /// non-primitive means "don't offload, run inline" (a safe fallback, never a fault).
+    /// the dirty-pool thread can run the call without the heap ([`ArgCopy::offload_form`]). Returns
+    /// `None` if any arg is not a primitive (int / float / bool / str / bytes / a str list or map) —
+    /// the scoped blocking fns only ever take primitives, so a non-primitive means "don't offload,
+    /// run inline" (a safe fallback, never a fault).
     pub(super) fn extract_native_args(
         &self,
         args: &[Value],
     ) -> Option<Vec<crate::native::NativeArg>> {
-        use crate::native::NativeArg as A;
         args.iter()
-            .map(|&v| {
-                if let Some(n) = self.int_val(v) {
-                    return Some(A::Int(n));
-                }
-                if v.is_float() {
-                    return Some(A::Float(self.float_of(v)));
-                }
-                if let Some(b) = v.as_bool() {
-                    return Some(A::Bool(b));
-                }
-                let h = v.as_obj()?;
-                match self.heap.get(h) {
-                    Obj::Str(s) => Some(A::Str(s.to_string())),
-                    // R1 — a binary arg (today `io.write_bytes`): copied out so it survives the
-                    // off-heap handoff. `bytes` only — the checker types every seam param `bytes`
-                    // and a `bytearray` is not assignable to it (`bytes(ba)` converts).
-                    Obj::Bytes(b) => Some(A::Bytes(b.to_vec())),
-                    // A `Map[str, str]` arg (today only `request`'s headers) is snapshotted into
-                    // owned pairs so it survives the off-heap handoff. Any non-str key/value reverts
-                    // to `None` → run inline (safe fallback; the checker guarantees str/str for
-                    // typed code, so this is unreachable from a well-typed program).
-                    Obj::Map(m) => {
-                        let mut pairs = Vec::with_capacity(m.entries.len());
-                        for (_, k, mv) in &m.entries {
-                            let (Some(kh), Some(vh)) = (k.as_obj(), mv.as_obj()) else {
-                                return None;
-                            };
-                            let (Obj::Str(ks), Obj::Str(vs)) =
-                                (self.heap.get(kh), self.heap.get(vh))
-                            else {
-                                return None;
-                            };
-                            pairs.push((ks.to_string(), vs.to_string()));
-                        }
-                        Some(A::Map(pairs))
-                    }
-                    // A `List[str]` arg (today only `run_args`'s argv) is snapshotted into owned
-                    // strings so it survives the off-heap handoff. Any non-str element reverts to
-                    // `None` → run inline (the checker guarantees str for typed code).
-                    Obj::List(items) => {
-                        let mut out = Vec::with_capacity(items.len());
-                        for e in items {
-                            let eh = e.as_obj()?;
-                            let Obj::Str(s) = self.heap.get(eh) else {
-                                return None;
-                            };
-                            out.push(s.to_string());
-                        }
-                        Some(A::List(out))
-                    }
-                    Obj::ByteArray(_)
-                    | Obj::BigInt(_)
-                    | Obj::FloatBox(_)
-                    | Obj::Iter { .. }
-                    | Obj::Tuple(_)
-                    | Obj::Set(_)
-                    | Obj::Struct { .. }
-                    | Obj::Enum { .. }
-                    | Obj::Cell(_)
-                    | Obj::Func { .. }
-                    | Obj::Closure { .. }
-                    | Obj::Module(_)
-                    | Obj::Native { .. }
-                    | Obj::Builtin(_)
-                    | Obj::Cffi(_)
-                    | Obj::Ptr(_)
-                    | Obj::Channel(_)
-                    | Obj::Shared(_)
-                    | Obj::RwShared(_)
-                    | Obj::Atomic(_)
-                    | Obj::AtomicInt(_)
-                    | Obj::Executor(_)
-                    | Obj::Socket(_)
-                    | Obj::Listener(_)
-                    | Obj::Writer(_)
-                    | Obj::Reader(_)
-                    | Obj::Generator(_) => None,
-                }
-            })
+            .map(|&v| self.copy_arg(v).offload_form())
             .collect()
     }
 

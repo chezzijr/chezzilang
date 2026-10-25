@@ -103,6 +103,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | When the run collects | `Heap::should_collect` (`vm/heap.rs`) | M1.7: run-wide counts, `HeapCore::flush_allocs` and `HeapCore::flush_bytes` (`vm/heap_core.rs`) |
 | Is a cached module snapshot current (TICKET-213) | `ViewState` (`vm/heap_view.rs`) | M1.7: one view per context, swapped by `Vm::swap_ctx`; the core id names the run |
 | May a thread wait while it holds a GC token | `Vm::gc_blocking` (`vm/gc_door.rs`) | M1.5: every wait of an attached thread runs in its closure; `tests/wait_site_guard.rs` scans `src/vm` for each wait and lists the waits of threads that hold no token |
+| What a detached thread can reach | `Detached` (`vm/gc_door.rs`) | M3.0a: the door body's only handle, with no heap access; a native's args are copied before the door (`Vm::copy_arg`, `vm/host.rs`); a C callback re-attaches (`Detached::reenter`) |
 | May an abort of a fiber-owned nursery park this fiber | `park_abort_origin` (`vm/nursery.rs`) | TICKET-287: read by the `return`/`?` escape park, the fault unwind, the cancel funnel and the catching `recover:`; a fault carries its state in `Fiber::fault_park` (`FaultPark`, `vm/frames.rs`) |
 | CPU width / runner permits | `RUNNERS` (`vm/width.rs`) | TICKET-205/230 |
 | Quiescence verdict | `decide_since` (`vm/quiesce.rs`) | |
@@ -185,7 +186,7 @@ file at 2,500 lines and a test file at 3,500.
 | VM: view stamp | `vm/heap_view.rs` (`ViewState`: the TICKET-213 view of one execution context, its stamp and its per-slot bits) |
 | VM: GC roots | `vm/root_registry.rs` (`RootView`, the one root walk of an execution context that `Vm::gc_roots`, `GeneratorCore::gc_roots` and `FiberCtx::roots` call; `RootRegistry`, the run's list of boxed fiber contexts, each a `CtxBox`) |
 | VM: stop-the-world GC coordinator | `vm/gc_coord.rs` (`GcCoord`, and the `Attached` and `DetachTicket` tokens: attach, leave, detach and reattach, safepoint polls, one collection per stop, the root hand-off) |
-| VM: GC door | `vm/gc_door.rs` (each thread's GC token on the `Vm` it drives: attach and leave, the safepoint poll, the GC entry `Vm::gc_collect`, and `Vm::gc_blocking`, the one door each wait of an attached thread runs in) |
+| VM: GC door | `vm/gc_door.rs` (each thread's GC token on the `Vm` it drives: attach and leave, the safepoint poll, the GC entry `Vm::gc_collect`, and `Vm::gc_blocking`, the one door each wait of an attached thread runs in, with its `Detached` handle) |
 | Base (read by the front end and the VM) | `base/op.rs` (bytecode, `Program`, `CompileError`), `base/crossing.rs`, `base/hooks.rs`, `base/json_desc.rs`, `base/module_id.rs`, `base/provider_name.rs`, `base/words.rs` |
 | Run drivers (front end, then VM) | `run.rs` |
 | VM: execution | `vm/exec.rs` (setup, invoke), `vm/frames.rs` (frames, halts), `vm/step.rs` (dispatch loop), `vm/call.rs` (calls, natives), `vm/method_call.rs` (methods, hooks), `vm/json_decode.rs` |

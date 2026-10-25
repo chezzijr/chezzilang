@@ -1272,7 +1272,8 @@ impl Heap {
         self.core.give_back(&mut self.free);
         self.core.adopt_retired(&self.retired);
         // SAFETY: the collector protocol of `attach`: `Vm::gc_collect` sweeps with every other
-        // handle stopped or detached, or with this handle the core's only one.
+        // handle stopped or detached, or with this handle the core's only one. A detached handle's
+        // thread holds only a `Detached` handle, which reaches no heap object (`vm/gc_door.rs`).
         unsafe { self.core.sweep_slots(&mut self.graveyard) };
         self.since_gc = 0;
         self.gc_check_at = 0;

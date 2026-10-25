@@ -1963,3 +1963,92 @@ main()"
         "{faults} faults in {OPS} ops a thread"
     );
 }
+
+/// M3.0a C3 — a native that holds its host thread runs in the GC door, detached, so a stop does
+/// not wait for it. Thread A calls one (`Kind::Blocking`) on the shared list `L`; the native reads
+/// `L` through `arg_str_list` a few times. Thread B, until A is done, overwrites `L[k]` with a new
+/// str (the old one is unlinked), sorts `L` (the old block retires), allocates junk that a freed
+/// slot can be reused for, and collects. The door copies the args out of the heap BEFORE it opens
+/// (Go: `syscall.SlicePtrFromStrings` runs before `entersyscall`), so each read gives one list of
+/// `s<n>` strs, and no read meets freed memory. Run under `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn a_detached_native_reads_a_shared_list_without_uaf() {
+    const OPS: i64 = 3_000;
+    let src = "\
+L: List[str] = []
+
+fn main():
+    for i in 0..64:
+        L.push(\"s\" + str(i))
+main()"
+        .to_string();
+    /// Reads its list arg 4 times; `false` when an element is not an `s<n>` str.
+    fn probe(
+        h: &mut dyn crate::native::Host,
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        let mut sane = true;
+        for _ in 0..4 {
+            for s in h.arg_str_list(0)? {
+                sane &= s
+                    .strip_prefix('s')
+                    .is_some_and(|n| n.parse::<i64>().is_ok());
+            }
+        }
+        Ok(crate::native::NativeRet::Bool(sane))
+    }
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (garbage, collects) = share_handle(
+        src,
+        &["L"],
+        2,
+        move |i, w, g| {
+            let l = g[0];
+            let sp = Span::RUNTIME;
+            let (mut garbage, mut collects) = (0usize, 0usize);
+            if i == 0 {
+                for _ in 0..OPS {
+                    w.gc_poll();
+                    let r = w.invoke_native(
+                        probe,
+                        "probe",
+                        crate::native::Kind::Blocking,
+                        vec![Value::obj(l)],
+                        sp,
+                    );
+                    garbage += usize::from(r.expect("the probe runs") != Value::bool(true));
+                }
+                done.store(true, std::sync::atomic::Ordering::Release);
+            } else {
+                let mut k = 0i64;
+                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                    let s = w.alloc_str(format!("s{k}"));
+                    w.push(Value::obj(l));
+                    w.push(Value::int(k % 64));
+                    w.push(s);
+                    w.set_index(sp).expect("a store");
+                    if k % 4 == 0 {
+                        w.core_method(l, "sort", &[], sp).expect("a sort");
+                    }
+                    // Junk that a freed slot of an unlinked str can be reused for.
+                    for _ in 0..8 {
+                        let j = w.alloc_str("junk".to_string());
+                        w.heap.alloc(Obj::List(RVec::from_slice(&[j])));
+                    }
+                    w.gc_collect();
+                    collects += 1;
+                    k += 1;
+                }
+            }
+            (garbage, collects)
+        },
+        |_, _, results| {
+            let g = results.iter().map(|r| r.0).sum::<usize>();
+            (g, results.iter().map(|r| r.1).sum::<usize>())
+        },
+    );
+    assert!(collects > 100, "B collected {collects} times while A ran");
+    assert_eq!(
+        garbage, 0,
+        "a detached read gave a value that is not an s<n> str"
+    );
+}

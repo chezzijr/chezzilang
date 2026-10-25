@@ -114,8 +114,6 @@ Known limits:
 Open before M3. M2 still copies every crossing, so no user program reaches these today; each one
 must close before tasks share a value by handle:
 
-- A detached thread (`process.run` and the other `gc_blocking` bodies) reads list and map elements
-  that only the container pin roots; a stop does not wait for it, so a sweep can free them.
 - A fresh object is published with a Relaxed store, with no Release barrier (Go's
   `publicationBarrier`), so a reader on another core can see its slot before its contents.
 - `get_mut` makes a `&mut Obj` over an object that another thread can read.

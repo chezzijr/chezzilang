@@ -179,24 +179,32 @@ impl Vm {
     /// (Go `entersyscall`), runs `f`, and reattaches (Go `exitsyscall`), which waits out a running
     /// collection. With no token it only runs `f`.
     ///
-    /// `f` must not allocate on or write to this `Vm`'s heap (it may read the published roots),
-    /// except inside [`Vm::gc_reenter`]. The rule does not cover another `Vm` that `f` drives: a
-    /// nursery join's `f` runs a joiner shell's worker loop, and that shell attaches its own token
-    /// before it runs code. `f` must release every lock it took before it returns: the reattach
-    /// can wait for a stop, and a stop waits for each attached thread, also for one blocked on
-    /// that lock. A panic in `f` reattaches before it unwinds on.
+    /// M3.0a — a stop does not wait for a detached thread, so `f` must not read the heap: it gets
+    /// a [`Detached`] handle, not this `Vm`, and the handle reaches no heap object. A caller copies
+    /// what `f` needs out of the heap BEFORE the door and writes the results back AFTER it (Go:
+    /// `syscall.SlicePtrFromStrings` copies the args before `entersyscall`). Code that needs the
+    /// heap inside the door re-attaches for that span ([`Detached::reenter`], Go `cgocallback`).
+    /// `pins` keep alive what the caller still uses after the door. The rule does not cover
+    /// another `Vm` that `f` drives: a nursery join's `f` runs a joiner shell's worker loop, and
+    /// that shell attaches its own token before it runs code. `f` must release every lock it took
+    /// before it returns: the reattach can wait for a stop, and a stop waits for each attached
+    /// thread, also for one blocked on that lock. A panic in `f` reattaches before it unwinds on.
     ///
     /// The ticket waits in `Vm::detached` while `f` runs, so a re-entry from `f` can take it.
-    pub(super) fn gc_blocking<R>(&mut self, pins: &[GcRef], f: impl FnOnce(&mut Vm) -> R) -> R {
+    pub(super) fn gc_blocking<R>(
+        &mut self,
+        pins: &[GcRef],
+        f: impl FnOnce(&mut Detached<'_>) -> R,
+    ) -> R {
         let Some(t) = self.attached.take() else {
-            return f(self);
+            return f(&mut Detached { vm: self });
         };
         debug_no_payload_in_flight();
         let mut roots = self.gc_roots();
         roots.extend_from_slice(pins);
         self.heap.adopt_retired();
         self.detached = Some(t.detach(roots));
-        let r = catch_unwind(AssertUnwindSafe(|| f(self)));
+        let r = catch_unwind(AssertUnwindSafe(|| f(&mut Detached { vm: self })));
         let ticket = self
             .detached
             .take()
@@ -213,8 +221,8 @@ impl Vm {
     /// caller passes what it still holds in Rust locals). An extern C call runs in the door; C
     /// calls a Chezzi callback through the trampoline, and the callback runs here. With no
     /// ticket (the thread is attached, or holds no token) it only runs `f`. A panic in `f`
-    /// detaches before it unwinds on.
-    pub(super) fn gc_reenter<R>(&mut self, pins: &[GcRef], f: impl FnOnce(&mut Vm) -> R) -> R {
+    /// detaches before it unwinds on. Reached only through [`Detached::reenter`].
+    fn gc_reenter<R>(&mut self, pins: &[GcRef], f: impl FnOnce(&mut Vm) -> R) -> R {
         let Some(ticket) = self.detached.take() else {
             return f(self);
         };
@@ -240,5 +248,42 @@ impl Vm {
         if collected {
             self.heap.observe_collection();
         }
+    }
+}
+
+/// M3.0a — what the body of [`Vm::gc_blocking`] can reach while its thread is detached: the
+/// `Vm`'s Rust-owned output buffers and host config, and a re-entry. No method reads or writes a
+/// heap object, and the `Vm` field is private to this module, so a body that reads the heap does
+/// not compile. The sweep and `RetireList::free_all` rely on it: a detached thread holds no heap
+/// reference while a stop runs.
+pub(super) struct Detached<'a> {
+    vm: &'a mut Vm,
+}
+
+impl Detached<'_> {
+    /// Write to this `Vm`'s stdout sink ([`Vm::emit_out`]: a buffer or the stream writer).
+    pub(super) fn emit_out(&mut self, s: &str) {
+        self.vm.emit_out(s);
+    }
+
+    /// Write to this `Vm`'s stderr sink ([`Vm::emit_err`]).
+    pub(super) fn emit_err(&mut self, s: &str) {
+        self.vm.emit_err(s);
+    }
+
+    /// The run's host config: program args, env, stdin. Rust-owned, no heap object.
+    pub(super) fn host(&mut self) -> &mut crate::native::HostConfig {
+        &mut self.vm.host
+    }
+
+    /// [`Detached::host`], shared.
+    pub(super) fn host_ref(&self) -> &crate::native::HostConfig {
+        &self.vm.host
+    }
+
+    /// Run `f` attached, then detach again with this `Vm`'s roots plus `pins`
+    /// ([`Vm::gc_reenter`], Go `cgocallback`). The one way a door body reaches the heap.
+    pub(super) fn reenter<R>(&mut self, pins: &[GcRef], f: impl FnOnce(&mut Vm) -> R) -> R {
+        self.vm.gc_reenter(pins, f)
     }
 }

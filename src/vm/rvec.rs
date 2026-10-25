@@ -459,7 +459,9 @@ impl RetireList {
     ///
     /// The world is stopped (every other handle of the run is parked at a safepoint or
     /// detached, `vm/gc_coord.rs`), or no handle of the run is left. Either way no reader holds a
-    /// pointer to a block on this list.
+    /// pointer to a block on this list: a parked reader dropped it at its safepoint, and a
+    /// detached thread's door body gets a `Detached` handle, which reaches no heap object
+    /// (`vm/gc_door.rs`, M3.0a).
     pub(super) unsafe fn free_all(&self) {
         let blocks = {
             let mut own = self.lock();
