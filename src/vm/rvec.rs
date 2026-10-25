@@ -18,9 +18,12 @@
 //!   and `Value` in an `AtomicU64`, `u8` in an `AtomicU8`, so bytes pack one per byte; a map or
 //!   set entry in one `AtomicU64` per field, so a racy reader can see it torn; a map's index
 //!   slot is one `u64` word, so it never tears, `vm/map_data.rs`). Every slot
-//!   access is a `Relaxed` atomic of the element, so a racing read and write on one slot is no data
-//!   race and never tears. `Copy` is also what makes a racy read sound: a reader copies the bits,
-//!   and a copied `T` with a drop would drop twice.
+//!   access is an atomic of the element, so a racing read and write on one slot is no data race
+//!   and never tears. A `Value` slot stores with Release and loads with Acquire ([`VALUE_STORE`]):
+//!   it is how a `GcRef` reaches another thread, and the reader must see the object it names. A
+//!   byte or a `u64`/`i64` word is Relaxed: no reader derives a pointer from it. `Copy` is also
+//!   what makes a racy read sound: a reader copies the bits, and a copied `T` with a drop would
+//!   drop twice.
 //! - A read loads the pointer (Acquire), then that block's `len` (Acquire), then a slot below
 //!   `len`. [`get`](RVec::get) and [`set`](RVec::set) panic on an index at or past `len`, and a
 //!   panic is no fault `recover:` catches (in a spawned task it is "internal error: a parallel
@@ -89,27 +92,56 @@ pub trait Elem: Copy + sealed::Sealed {
     fn store(slot: &Self::Slot, v: Self);
 }
 
-/// An 8-byte word in an `AtomicU64`, as its bits (`$to` and `$from` convert).
+/// An 8-byte word in an `AtomicU64`, as its bits (`$to` and `$from` convert), with the
+/// orderings `$load` and `$store`.
 macro_rules! word_elem {
-    ($t:ty, $to:expr, $from:expr) => {
+    ($t:ty, $to:expr, $from:expr, $load:expr, $store:expr) => {
         impl sealed::Sealed for $t {}
         impl Elem for $t {
             type Slot = AtomicU64;
             #[inline(always)]
             fn load(slot: &AtomicU64) -> Self {
-                $from(slot.load(Ordering::Relaxed))
+                $from(slot.load($load))
             }
             #[inline(always)]
             fn store(slot: &AtomicU64, v: Self) {
-                slot.store($to(v), Ordering::Relaxed);
+                slot.store($to(v), $store);
             }
         }
     };
 }
 
-word_elem!(u64, |v: u64| v, |b: u64| b);
-word_elem!(i64, |v: i64| v as u64, |b: u64| b as i64);
-word_elem!(Value, Value::to_bits, Value::from_bits);
+/// The orderings of a `Value` slot: the one place a `GcRef` is published to another thread.
+/// A store is Release, so a reader that loads the ref (Acquire) also sees every write the storing
+/// thread made before it: the new object's contents in its heap slot, and its own buffers. Go's
+/// `publicationBarrier` after a malloc init (`runtime/malloc.go`) gives the same order. On x86
+/// both are plain moves; an ARM build is where a Relaxed slot would show the bug.
+pub(super) const VALUE_LOAD: Ordering = Ordering::Acquire;
+pub(super) const VALUE_STORE: Ordering = Ordering::Release;
+
+// A `u64` or `i64` slot holds user data or a position, never a pointer that a reader follows, so
+// it stays Relaxed (Go parity: a racy int read gives a wrong value).
+word_elem!(
+    u64,
+    |v: u64| v,
+    |b: u64| b,
+    Ordering::Relaxed,
+    Ordering::Relaxed
+);
+word_elem!(
+    i64,
+    |v: i64| v as u64,
+    |b: u64| b as i64,
+    Ordering::Relaxed,
+    Ordering::Relaxed
+);
+word_elem!(
+    Value,
+    Value::to_bits,
+    Value::from_bits,
+    VALUE_LOAD,
+    VALUE_STORE
+);
 
 /// A map entry, `(cached hash, key, value)`, in one `AtomicU64` per field. A racy reader can
 /// see a torn entry (fields of two writes): the user's race, like a torn Go struct.
@@ -1099,6 +1131,26 @@ mod tests {
     use crate::vm::value::Value;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// M3.0b (C4) — a `Value` slot publishes a `GcRef` with Release and reads it with Acquire, in
+    /// an `RVec` block and a map entry alike: both go through `<Value as Elem>`. x86 orders a
+    /// Relaxed store the same, so no runtime race test shows the bug there; an ARM build would.
+    /// This pins the orderings and reads a stored value back.
+    #[test]
+    fn value_slots_publish_with_release_and_read_with_acquire() {
+        use super::{Elem, VALUE_LOAD, VALUE_STORE};
+        use std::sync::atomic::AtomicU64;
+        assert_eq!(VALUE_STORE, Ordering::Release);
+        assert_eq!(VALUE_LOAD, Ordering::Acquire);
+        let v = Value::int(7);
+        let slot = AtomicU64::new(0);
+        <Value as Elem>::store(&slot, v);
+        assert_eq!(<Value as Elem>::load(&slot).to_bits(), v.to_bits());
+        let entry = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+        <(u64, Value, Value) as Elem>::store(&entry, (1, v, v));
+        let (h, k, x) = <(u64, Value, Value) as Elem>::load(&entry);
+        assert_eq!((h, k.to_bits(), x.to_bits()), (1, v.to_bits(), v.to_bits()));
+    }
 
     /// The constant slot offset is where `Layout::extend` puts the first slot, for every element
     /// type (the block layout reads `Layout`, a slot access reads the constant).
