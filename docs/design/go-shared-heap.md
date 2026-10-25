@@ -296,8 +296,9 @@ Today a GC traces one heap from one `Vm`'s roots (`src/vm/frames.rs:914-990`). A
 
 **Stage 1 (stop the world).** Stop all workers, mark all roots, sweep, then restart. This has the shape of
 Go's sweep-termination pause, extended to the whole cycle. It needs no write barrier. The pause grows with the
-live heap. Until stage 5 the stop limit is 100 ms on `benches/chz/many_list.chz` (128 MB live;
-`heap_stats_report_stw_pause`); concurrent mark brings it back to 10 ms. A running worker stops at
+live heap. Until stage 5 the stop limit is 100 ms on `benches/chz/many_list.chz` (128 MB live), on a release
+build: the release bench run with `CHEZZI_HEAP_STATS=1` owns it, and `heap_stats_report_stw_pause`
+checks it only in a release test build (a debug build counts and times the stops); concurrent mark brings it back to 10 ms. A running worker stops at
 its next reduction check. A reduction check is not enough for a thread
 that blocks in place. These waits block the OS thread and execute no instruction (`src/vm/block.rs:140-173`):
 
