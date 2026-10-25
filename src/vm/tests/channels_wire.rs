@@ -1256,6 +1256,7 @@ fn swap_ctx_leaves_side_state_on_the_shell_without_owns_side() {
 ///   frame then roots the value: the row covers the pin only on the slot path.
 /// - `offer`: the offer of a parked sender. On the M:N path the offer cannot be the only root:
 ///   `park_send` keeps the value on the parked fiber's stack. The row covers the hand-off only.
+///
 /// Each row reads a size AND a key of a 51-key map, so a swept slot that a `churn` list reused
 /// cannot pass. Fix round 1 checked each row RED with its one walk disabled (Channel arm of
 /// `Heap::children`: queue, slot, sealed; Atomic arm: atomic; the door pin: door, at T=2).
