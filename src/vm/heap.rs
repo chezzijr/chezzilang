@@ -698,6 +698,9 @@ const FLUSH_EVERY: usize = 256;
 /// (`Heap::charge_own`): one allocation can carry megabytes.
 const FLUSH_BYTES: usize = 256 * 1024;
 
+/// The smallest retired-bytes goal (`Heap::retired_gc_threshold`).
+const MIN_RETIRED_GOAL: usize = 1 << 20;
+
 /// TICKET-246 — a `RwShared` reader walks a box heap through `&Heap` while other readers do the
 /// same. A new `Cell` / `RefCell` in `Heap` or `Obj` must fail here, never be worked around with
 /// `unsafe impl Sync`.
@@ -996,6 +999,19 @@ impl Heap {
         }
     }
 
+    /// How many retired `RVec` bytes force a sweep: the live bytes of the last sweep, at least
+    /// [`MIN_RETIRED_GOAL`] (Go's GOGC=100 lets the garbage grow to the live heap). A retired block
+    /// is garbage that only a sweep frees, so it needs no 16 MiB floor: on `benches/chz/map.chz`
+    /// (200k inserts, no other object) the floor kept every old block until the end.
+    fn retired_gc_threshold(&self) -> usize {
+        self.core.last_live_bytes().max(MIN_RETIRED_GOAL)
+    }
+
+    /// The retired `RVec` bytes that wait for a sweep: this handle's list and the run's.
+    fn retired_bytes(&self) -> usize {
+        self.retired.bytes() + self.core.retired_bytes()
+    }
+
     /// Whether enough has been allocated since the last collection to warrant one.
     ///
     /// W6-10 (sampling half): under a live `--max-heap` cap, BYTE growth ALSO paces a sweep. Without
@@ -1030,7 +1046,10 @@ impl Heap {
         let bytes = self
             .core
             .flush_bytes(std::mem::take(self.since_gc_bytes.get_mut()));
-        if allocs >= next_gc || bytes >= self.bytes_gc_threshold() {
+        if allocs >= next_gc
+            || bytes >= self.bytes_gc_threshold()
+            || self.retired_bytes() >= self.retired_gc_threshold()
+        {
             self.gc_check_at = 0;
             return true;
         }
@@ -1283,6 +1302,12 @@ impl Heap {
     /// This handle's own retire list: an `RVec` grow puts the old block on it (`vm/rvec.rs`).
     pub(super) fn retire_list(&self) -> &RetireList {
         &self.retired
+    }
+
+    /// The bytes on the run's retire list (tests only).
+    #[cfg(test)]
+    pub(super) fn core_retired_bytes(&self) -> usize {
+        self.core.retired_bytes()
     }
 
     /// Blocks on this handle's retire list and on the run's (tests only).

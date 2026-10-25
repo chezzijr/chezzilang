@@ -18,7 +18,10 @@
 //! (`Heap::should_collect`) and when it drops, and asks for a collection when the run's count
 //! reaches `next_gc` (twice the objects the last sweep kept, at least 256), or when the run's
 //! charged bytes reach the byte goal: with the cap off the live bytes of the last sweep, at least
-//! 16 MiB (the shape of Go's GOGC=100), and under a `--max-heap` cap a quarter of the cap.
+//! 16 MiB (the shape of Go's GOGC=100), and under a `--max-heap` cap a quarter of the cap. A third
+//! trigger reads the retired `RVec` bytes that wait for a sweep (this handle's list and the run's):
+//! it fires when they reach the live bytes of the last sweep, at least 1 MiB, so a grow loop that
+//! allocates no object frees its old blocks long before the byte goal.
 
 use super::boxctx::is_arc_core;
 use super::fxhash::FxHashMap;
@@ -418,6 +421,12 @@ impl HeapCore {
     /// the retire (`vm/rvec.rs`).
     pub(super) fn adopt_retired(&self, from: &RetireList) {
         from.move_into(&self.retired);
+    }
+
+    /// The bytes of the blocks on the run's retire list.
+    #[inline]
+    pub(super) fn retired_bytes(&self) -> usize {
+        self.retired.bytes()
     }
 
     /// Blocks on the run's retire list (tests only).

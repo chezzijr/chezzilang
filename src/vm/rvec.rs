@@ -45,7 +45,9 @@
 //!
 //! Pacing: a grow charges the retired block's bytes to its handle (`Heap::charge_bytes`), once.
 //! The hand-off does not charge them again. The sweep that frees the block zeroes the run's byte
-//! count in the same stop, which uncharges them.
+//! count in the same stop, which uncharges them. Each [`RetireList`] also counts the bytes it
+//! holds (push adds, hand-off moves, free empties): the retired-bytes trigger reads that count,
+//! with a goal of the live bytes of the last sweep, at least 1 MiB (`Heap::should_collect`).
 //!
 //! No `as_slice`: a `&[T]` over a block that another thread can write with `set` is not sound.
 //! No API hands out `&mut [T]`. Miri and TSan are not available on this box, so the races here
@@ -61,9 +63,7 @@ use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of};
 use std::ptr::{self, NonNull};
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 mod sealed {
@@ -365,7 +365,7 @@ unsafe fn store<T: Elem>(h: *mut Header, i: usize, v: T) {
 fn retire<T: Elem>(heap: &Heap, old: *mut Header, cap: usize) {
     let ptr = NonNull::new(old.cast::<u8>()).expect("a retired block is not null");
     let layout = block_layout::<T>(cap);
-    heap.retire_list().lock().push(Retired {
+    heap.retire_list().push(Retired {
         ptr,
         layout,
         #[cfg(test)]
@@ -390,8 +390,16 @@ unsafe impl Send for Retired {}
 /// Retired blocks: a `Heap` handle's own (not yet handed off), or the run's (`HeapCore.retired`),
 /// which the stop-the-world sweep frees. A handle hands its list to the core before it drops, so
 /// only the core's list is ever dropped with blocks on it.
+///
+/// `bytes` is the one count of the retired bytes the list holds: a push adds the block's size, a
+/// hand-off moves it, and the free empties it. The retired-bytes GC trigger reads it
+/// (`Heap::should_collect`). It changes only under the list's lock, so a read without the lock is
+/// at most one block stale.
 #[derive(Default)]
-pub(super) struct RetireList(Mutex<Vec<Retired>>);
+pub(super) struct RetireList {
+    blocks: Mutex<Vec<Retired>>,
+    bytes: AtomicUsize,
+}
 
 impl std::fmt::Debug for RetireList {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -401,15 +409,36 @@ impl std::fmt::Debug for RetireList {
 
 impl RetireList {
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Retired>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.blocks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Put `b` on the list.
+    fn push(&self, b: Retired) {
+        let mut blocks = self.lock();
+        self.bytes.fetch_add(b.layout.size(), Ordering::Relaxed);
+        blocks.push(b);
     }
 
     /// Move every block of `self` onto `to`.
     pub(super) fn move_into(&self, to: &RetireList) {
-        let blocks = std::mem::take(&mut *self.lock());
+        let (blocks, n) = {
+            let mut own = self.lock();
+            (
+                std::mem::take(&mut *own),
+                self.bytes.swap(0, Ordering::Relaxed),
+            )
+        };
         if !blocks.is_empty() {
-            to.lock().extend(blocks);
+            let mut theirs = to.lock();
+            to.bytes.fetch_add(n, Ordering::Relaxed);
+            theirs.extend(blocks);
         }
+    }
+
+    /// The bytes of the blocks on this list.
+    #[inline]
+    pub(super) fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed)
     }
 
     /// Blocks on this list.
@@ -432,7 +461,11 @@ impl RetireList {
     /// detached, `vm/gc_coord.rs`), or no handle of the run is left. Either way no reader holds a
     /// pointer to a block on this list.
     pub(super) unsafe fn free_all(&self) {
-        let blocks = std::mem::take(&mut *self.lock());
+        let blocks = {
+            let mut own = self.lock();
+            self.bytes.store(0, Ordering::Relaxed);
+            std::mem::take(&mut *own)
+        };
         for b in blocks {
             // SAFETY: the caller's contract; no `RVec` points to a retired block.
             unsafe { free_block(b.ptr, b.layout) };
@@ -1178,6 +1211,25 @@ mod tests {
         assert_eq!(test_counts().1, freed, "the drop frees nothing");
         a.sweep();
         assert_eq!(test_counts().1, freed + 1, "the sweep frees it");
+    }
+
+    /// A retire list counts the bytes it holds: a grow adds the old block's size to the handle's
+    /// list, the hand-off moves them to the run's list, and the sweep empties both.
+    #[test]
+    fn retire_lists_count_their_bytes() {
+        let _g = test_serial();
+        let mut heap = Heap::new();
+        let v: RVec<u64> = RVec::with_capacity(4);
+        for i in 0..5 {
+            v.push(&heap, i);
+        }
+        let size = super::block_layout::<u64>(4).size();
+        assert_eq!(heap.retire_list().bytes(), size, "the grow");
+        heap.adopt_retired();
+        assert_eq!(heap.retire_list().bytes(), 0, "moved off the handle");
+        assert_eq!(heap.core_retired_bytes(), size, "onto the run");
+        heap.sweep();
+        assert_eq!(heap.core_retired_bytes(), 0, "freed");
     }
 
     /// A retired block raises the run's byte count once: the hand-off and the trigger check do

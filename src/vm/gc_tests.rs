@@ -1255,6 +1255,43 @@ main()";
     growth_retires_index_until_collect(src, "100 0 100 198\n", 3);
 }
 
+/// M2.9 — a grow loop on one map that allocates no other object retires about 5 MB of entry
+/// blocks and index tables and charges about 10 MB in all, under the 16 MiB byte goal of an
+/// empty heap. The retired bytes alone start collections (their goal is the live bytes of the
+/// last sweep, at least 1 MiB), and those collections free retired blocks during the run.
+#[test]
+fn map_grow_loop_collects_on_retired_bytes() {
+    use super::rvec::{test_counts, test_serial, test_track};
+    let _g = test_serial();
+    let src = "\
+fn main():
+    m: Map[int, int] = {}
+    i := 0
+    while i < 100000:
+        m[i] = i
+        i += 1
+    print(m.len())
+main()";
+    let (out, stops, freed) = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            test_track();
+            let mut vm = Vm::new(Arc::new(test_program(src).expect("compiles")));
+            vm.gc_stress = false;
+            let before = test_counts().1;
+            let result = vm.run();
+            let freed = test_counts().1 - before;
+            vm.finish_run(result).expect("runs");
+            (captured(vm.out), vm.gc_coord.stop_stats().0, freed)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked");
+    assert_eq!(out, "100000\n");
+    assert!(stops >= 1, "the retired bytes started no collection");
+    assert!(freed >= 1, "no retired block was freed during the run");
+}
+
 /// M2.3 — the Set twin of [`map_insert_growth_retires_index_and_entries`].
 #[test]
 fn set_insert_growth_retires_index_and_entries() {
