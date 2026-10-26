@@ -750,10 +750,8 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)]
     }
 }
 
-/// D4 (TICKET-169, TICKET-179): the ONE table of native methods that mutate their receiver in place.
-/// Layer C faults a task-side call to one of these on an airlock copy; the checker's
-/// `mutates_receiver` (`src/checker/mod.rs`) reads this function for layer A and the DEC-089
-/// warning. A new mutating native goes here and nowhere else:
+/// TICKET-179: the ONE table of native methods that mutate their receiver in place. The checker's
+/// `mutates_receiver` (`src/checker/mod.rs`) reads this function for the DEC-089 warning. A new mutating native goes here and nowhere else:
 /// `checker::tests::receiver_write_table_matches_observed_behavior` runs every native method and
 /// fails until this table agrees with the observed receiver change.
 pub fn is_mutating_native_kind(kind: &str, method: &str) -> bool {

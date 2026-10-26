@@ -31,7 +31,7 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   `native struct`; no Rust-side module sig exists). A program then reaches it like any module member
   (`import X from M`, an alias, `M.X`); no name-keyed rule is needed. A runtime-backed type that is a
   `BuiltinType` row names its module in `BuiltinType::owner`; a function that builds a heap value the
-  host seam cannot carry uses an intercepted `Kind` (`InterceptTimer`, `InterceptAirlock`). Cover the
+  host seam cannot carry uses an intercepted `Kind` (`InterceptTimer`). Cover the
   member with a row in `tests/module_member_grid.rs`.
   A global builtin name is a one-way ratchet: moving it out later breaks every example + grammar.bnf.
 - **A new native fn's `MEMBERS` entry is `(name, fn, Kind)` — the third element is not paperwork.**

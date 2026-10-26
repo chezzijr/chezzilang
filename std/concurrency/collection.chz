@@ -2,14 +2,13 @@
 # `ConcurrentMap`, `ConcurrentSet`, `ConcurrentCounter`) over the `RwShared[T]` runtime primitive
 # (many concurrent readers OR one exclusive writer). Pure Chezzi over std-internal `_` primitives.
 #
-# WHY: `RwShared[Map[...]]` already gives you a shared, lock-guarded map across the spawn/parallel
-# airlock — but raw `read`/`write` closures are verbose, and the COMPOUND mutations (insert-if-absent,
+# WHY: `RwShared[Map[...]]` already gives you a shared, lock-guarded map across spawned
+# tasks — but raw `read`/`write` closures are verbose, and the COMPOUND mutations (insert-if-absent,
 # read-modify-write a count) MUST happen inside a SINGLE `write` lock or they race. These wrappers bake
 # the correct single-lock idiom in.
 #
-# AIRLOCK SHARING: a generic struct whose only field is an `RwShared` crosses spawn/parallel as a
-# SHARED Arc handle (RwShared is sendable and shares, and a struct of all-sendable fields does too) —
-# NOT a deep copy. So mutations a spawned task makes are visible to the parent after the join.
+# SHARING: a task gets the wrapper struct by handle (M3.4), NOT a deep copy. So mutations a spawned
+# task makes are visible to the parent after the join.
 #
 # THE FOUR COLLECTIONS: `ConcurrentList[E]`, `ConcurrentMap[K, V]`, `ConcurrentSet[E]`,
 # `ConcurrentCounter[K]`. They are the user-facing surface of a shared container (TICKET-243): the

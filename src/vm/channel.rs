@@ -343,7 +343,7 @@ impl Vm {
 
     /// Bounded-channel backpressure — after a `recv` frees a slot on a BOUNDED channel, wake any fiber
     /// parked on a full `send` to it. No-op for an unbounded channel (no sender ever parks there — the
-    /// common `recv` path pays only a `cap.is_none()` check). Routes exactly like `channel_send_wire`'s
+    /// common `recv` path pays only a `cap.is_none()` check). Routes exactly like `chan_send_step`'s
     /// wake: an active sched (`mn` / `mn_enlist_sched`) → [`MnSched::recv_wake`]; else, with no
     /// scheduler in scope, [`Vm::wake_on_send`] wakes any other live sched's bucket for this channel.
     pub(super) fn wake_senders(&mut self, h: GcRef) {

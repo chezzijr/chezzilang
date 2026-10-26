@@ -1185,8 +1185,8 @@ impl Vm {
         // `close` alike, and an over-wake (woken fiber finds the queue empty and re-parks) is the
         // already-tolerated pattern. Dead entries are pruned as we walk (`Weak` — no deregistration).
         //
-        // Here rather than in `channel_send_wire` because this fn is the shared tail of ALL FIVE
-        // no-sched wake sites (`close`, `trip`, `channel_send_wire`, the bounded enqueue, and the
+        // Here rather than in `chan_send_step` because this fn is the shared tail of ALL FIVE
+        // no-sched wake sites (`close`, `trip`, `chan_send_step`, the bounded enqueue, and the
         // bounded slot-free wake); patching one would leave the other four broken. Every one of them
         // has dropped `ChannelCore::q` before calling, so taking the sched lock here is q-free.
         self.wake_on_send_key_kind(key, WakeKind::All);

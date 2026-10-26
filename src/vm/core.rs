@@ -487,7 +487,7 @@ pub fn acquire_update_guard_within<'a>(
     }
 }
 
-/// `Channel[T]` core (B3.1): the shared mailbox, a FIFO of wire-form messages. `send` locks +
+/// `Channel[T]` core (B3.1): the shared mailbox, a FIFO of values (M3.2). `send` locks +
 /// `push_back`; `recv`/`try_recv` lock + `pop_front`; `len` locks + len. `cap` is `None` for an
 /// unbounded `Channel[T]()` (the default — `send` never blocks) and `Some(n)` for a bounded
 /// `Channel[T](n)`: once `n` messages are queued a `send` BLOCKS/parks until a `recv` frees a slot

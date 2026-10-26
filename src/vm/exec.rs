@@ -299,9 +299,7 @@ impl Vm {
         if ctx.owns_side {
             // D2b — the fiber's `Executor` handles: the GC roots of the executors it made.
             std::mem::swap(&mut self.executors, &mut ctx.executors);
-            // M19 Phase 3 — the fiber's intern cache. Its strings are this context's objects: a
-            // cache left on the shell would hand the next fiber an object it may then write
-            // (every crossing copies until M3, so no two fibers share one).
+            // M19 Phase 3 — the fiber's intern cache travels with its fiber.
             std::mem::swap(&mut self.str_intern, &mut ctx.str_intern);
             // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
             // connecting fd that the netpoller is watching; it must not be left on the shell where the

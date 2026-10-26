@@ -732,12 +732,12 @@ pub struct Program {
     pub variants: HashMap<(String, String), VariantDef>,
     /// M19 lever #2 — variants indexed by their dense `variant_id` (`variants_by_id[id]` ⇒ that
     /// variant's `VariantDef`, carrying its `enum_name` + `name`). The reverse of `variants`: O(1)
-    /// cold-path id→names resolution for Display / stringify / error / wire / snap, where the instance
+    /// cold-path id→names resolution for Display / stringify / error, where the instance
     /// no longer carries the strings. Dense and gap-free (ids are assigned `0..n`).
     pub variants_by_id: Vec<VariantDef>,
     /// M19 memory-layout lever — struct type IDENTITY KEYS indexed by their dense `tid`
     /// (`struct_names[tid]` ⇒ the `structs` map key, e.g. `<main>::Point`). The reverse of `structs`:
-    /// O(1) cold-path tid→name resolution for method dispatch / Display / arith / hash / wire / snap,
+    /// O(1) cold-path tid→name resolution for method dispatch / Display / arith / hash,
     /// where `Obj::Struct` no longer carries a per-instance `name: Box<str>` (the struct analogue of
     /// `variants_by_id`). Dense and gap-free (tids are assigned `structs.len()` at each insert).
     pub struct_names: Vec<Box<str>>,

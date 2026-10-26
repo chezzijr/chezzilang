@@ -353,7 +353,7 @@ impl Vm {
     /// Run `f` with `roots` pinned on the operand stack, unrooting on BOTH the `Ok` and `Err` path.
     /// The generalisation of [`Self::hash_key_rooted`]: a user `hash`/`eq` hook re-enters the VM and
     /// can trigger a collection, so every in-flight value the caller holds only in a Rust local (a
-    /// popped receiver/argument, a cloned element vec's source, a wire-reconstructed value) must be
+    /// popped receiver/argument, a cloned element vec's source) must be
     /// reachable from a GC root for the duration. The operand stack is truncated back to its entry
     /// height afterwards, so `f` may also push roots of its own (a freshly-built snapshot key) and
     /// need not unwind them itself.
@@ -610,8 +610,8 @@ impl Vm {
                     (Obj::BigInt(a), Obj::BigInt(b)) => Ok(a == b),
                     (Obj::FloatBox(a), Obj::FloatBox(b)) => Ok(a == b),
                     // TICKET-177: a handle (or a `ptr`) is equal iff it names the same core, its
-                    // `Obj::identity` key. A crossing wraps the same core in a fresh slot, so the
-                    // `ha == hb` shortcut above is only the fast path. Anything else reaching here is
+                    // `Obj::identity` key. Two slots can wrap one core, so the `ha == hb`
+                    // shortcut above is only the fast path. Anything else reaching here is
                     // a kind mismatch or a `Slot` object in another slot: unequal.
                     (a, b) => Ok(matches!(
                         (a.identity(), b.identity()),

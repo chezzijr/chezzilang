@@ -136,8 +136,7 @@ native struct Set[T: Hashable]:
 # `native_handle_method` with the channel's element type substituted for `Ty::Param("T")` — the
 # file-backed replacement for the retired bespoke `channel_method_sig` arm.
 native struct Channel[T]:
-    # `send(v)` moves `v` across the airlock (well-typed `send` is always sendable — the element type is
-    # sendable-checked at the channel's construction).
+    # `send(v)` hands `v` to the receiver by handle (Go `chan T`).
     # Faults `send on a closed channel` after `close()` (Go: `panic: send on closed channel`,
     # identical). `try_send` is the non-faulting sibling.
     native fn send(self, v: T) -> None

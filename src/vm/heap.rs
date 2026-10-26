@@ -189,8 +189,8 @@ pub enum Obj {
     Set(SetData),
     /// Fields stored POSITIONALLY in declaration order (hidden-class / `__slots__` layout — M19
     /// memory-layout lever #1). No per-instance field-name strings AND no per-instance type-name
-    /// string: names are resolved on the cold path (method-dispatch / Display / arith / hash / error /
-    /// wire / snap) from `tid` — the type name via `Program::struct_names` (`struct_name_of_tid`), the
+    /// string: names are resolved on the cold path (method-dispatch / Display / arith / hash / error)
+    /// from `tid` — the type name via `Program::struct_names` (`struct_name_of_tid`), the
     /// field names from `StructDef::fields`. This is the JIT groundwork — a flat `Vec<Value>` with
     /// constant, declaration-order field offsets. `tid` is the struct type's dense layout id
     /// (`StructDef::tid`), stamped at construction so the field IC can guard on a pure-int compare;
@@ -204,7 +204,7 @@ pub enum Obj {
     /// `variant_id` (`VariantDef::variant_id`), NOT by per-instance type/variant-name `Box<str>`s:
     /// match dispatch / equality / `?` are pure-int compares on this id (the JIT jump-table
     /// groundwork), and the type + variant names resolve from `Program::variants_by_id` on the cold
-    /// path only (Display / stringify / error / wire / snap). The enum analogue of `Struct.tid`. Saves
+    /// path only (Display / stringify / error). The enum analogue of `Struct.tid`. Saves
     /// two string allocs per instantiation. `VID_NONE` for an unregistered variant (defensive only —
     /// not constructible from source). `payload` holds the variant's values (GC-traced as children).
     Enum {
@@ -263,10 +263,8 @@ pub enum Obj {
     /// (the program calls the library's own destroy), and holds no `GcRef`s, so it has no GC children.
     Ptr(usize),
     /// `Channel[T]` (C2) — a *handle* to the shared mailbox [`ChannelCore`]. B3.1: the queue itself
-    /// moved OUT of the heap into the `Arc` (it holds wire-form messages, not `GcRef`s); the heap
-    /// keeps only this handle, and two handles can alias one core. `children()` still traces any
-    /// `Handle`s embedded in the core's queued messages (e.g. queued closures; B3.3a: `str` messages
-    /// queue as owned bytes and root nothing).
+    /// lives in the `Arc`; the heap keeps only this handle. M3.2: the queue holds `Value`s, and
+    /// `children()` traces them under the core's lock.
     Channel(Arc<ChannelCore>),
     /// `Shared[T]` (C3) — a *handle* to the cross-task mutable box [`SharedCore`] (B3.1). See
     /// [`Channel`](Obj::Channel) for the handle/core split.
@@ -275,14 +273,13 @@ pub enum Obj {
     /// split as [`Shared`](Obj::Shared); the core holds one value by handle (M3.3).
     RwShared(Arc<RwSharedCore>),
     /// `Atomic[T]` — a *handle* to the cross-task atomic box [`AtomicCore`]. Same handle/core split as
-    /// [`Shared`](Obj::Shared); the core holds one boxed wire value behind a `Mutex`.
+    /// [`Shared`](Obj::Shared); the core holds one value by handle (M3.2).
     Atomic(Arc<AtomicCore>),
     /// `AtomicInt` — a *handle* to the monomorphic LOCK-FREE int atomic [`AtomicIntCore`]. Same
     /// handle/core split as [`Atomic`](Obj::Atomic), but the core is a raw `AtomicI64` (no lock).
     AtomicInt(Arc<AtomicIntCore>),
     /// `Executor` (C5 escape hatch) — a *handle* to the shared work queue [`ExecutorCore`] (B3.1).
-    /// The queued task closures live in the core as wire values (`Handle(closure)` at B3.1); `shut`
-    /// lives in the shared core so aliasing handles agree on shutdown state. See
+    /// `shut` lives in the shared core so every handle agrees on shutdown state. See
     /// [`Channel`](Obj::Channel).
     Executor(Arc<ExecutorCore>),
     /// `Socket` (D6) — a *handle* to a non-blocking connected TCP stream [`SocketCore`]. Same
@@ -313,14 +310,12 @@ pub enum Obj {
 /// exhaustive with no `_` arm, so a new `Obj` variant must pick an answer before the crate builds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Identity {
-    /// Compared by content (`values_equal_guarded`'s structural arms). A crossing copies the
-    /// content, so equality survives it.
+    /// Compared by content (`values_equal_guarded`'s structural arms).
     Content,
-    /// A handle to a core outside every heap (`Arc`), or a raw C address (`ptr`). Every crossing
-    /// wraps the SAME core in a fresh slot, so this key — not the slot — is the handle's identity.
+    /// A handle to a core outside every heap (`Arc`), or a raw C address (`ptr`). Two slots can
+    /// wrap the SAME core, so this key — not the slot — is the handle's identity.
     Core(CoreKey),
-    /// Equal only to its own heap slot. A crossing (or an `Atomic` store) re-materializes it in a
-    /// fresh slot, so equality does not survive one. The `str` names the kind for a diagnostic.
+    /// Equal only to its own heap slot. The `str` names the kind for a diagnostic.
     Slot(&'static str),
 }
 
@@ -512,11 +507,11 @@ impl Obj {
             Obj::Listener(c) => core(Arc::as_ptr(c) as usize),
             Obj::Writer(c) => core(Arc::as_ptr(c) as usize),
             Obj::Reader(c) => core(Arc::as_ptr(c) as usize),
-            // Two `ptr` handles are the same iff they hold the same address; `std.ffi.null()` twice,
-            // or a `ptr` that crossed, is a distinct slot around one address.
+            // Two `ptr` handles are the same iff they hold the same address; `std.ffi.null()` twice
+            // is two slots around one address.
             Obj::Ptr(addr) => core(*addr),
-            // A bare Func, Native or Cffi is one slot per fn per heap (Vm::fn_value, TICKET-215), so its
-            // == survives a crossing; it stays Slot (DEC-177). Atomic.cas refuses every fn value, a
+            // A bare Func, Native or Cffi is one slot per fn per heap (Vm::fn_value, TICKET-215), so two
+            // reads of it are `==`; it stays Slot (DEC-177). Atomic.cas refuses every fn value, a
             // Builtin included, through Vm::callable (TICKET-264).
             Obj::Func { .. } | Obj::Closure { .. } | Obj::Native { .. } | Obj::Cffi(_) => {
                 Identity::Slot("a function value")
@@ -615,12 +610,12 @@ pub struct Heap {
     /// a NEW object → [`alloc`](Heap::alloc); growth IN PLACE inside an existing one →
     /// [`write`](Heap::write) (see `pending_mut`); a retired `RVec` block or a nursery's charge →
     /// [`charge_bytes`](Heap::charge_bytes). All three charge here, with the cap on or off (M1.7;
-    /// M3.3 deleted the cap-only wire charge with the box copies): a task's garbage now
-    /// waits in the run's one heap for a collection, and a task's copy of a large global is ONE
-    /// object that the decoder fills through `write`, so the object count alone let 2000 such
-    /// copies (1.6 GB, `benches/sched/storm.chz`) pile up before one sweep.
+    /// M3.3 deleted the cap-only wire charge with the box copies): a task's garbage
+    /// waits in the run's one heap for a collection, and one object can grow through `write` by
+    /// megabytes, so the object count alone let 1.6 GB (`benches/sched/storm.chz`, before M3.4)
+    /// pile up before one sweep.
     ///
-    /// It has to count BYTES and not events. Instructions, allocations and wire crossings are all
+    /// It has to count BYTES and not events. Instructions and allocations are both
     /// proxies, and each has a shape that adds unbounded bytes without moving it: an instruction tick
     /// is defeated by `big.extend(chunk)` (measured ~240 MB past an 8 MB cap in ~1200 instructions),
     /// the object count by `s = s + s` ×22 (41 MB in 22 allocations) and by
@@ -904,7 +899,7 @@ impl Heap {
     /// fails OPEN (counting the bytes correctly in `live_bytes` does nothing if nobody ever looks).
     ///
     /// W7-28 — the byte counter now covers ALL THREE ways a heap gains bytes, not just the off-heap
-    /// wire one: see `since_gc_bytes`. The settle here is what makes `write`'s deferred charge
+    /// one: see `since_gc_bytes`. The settle here is what makes `write`'s deferred charge
     /// exact at an instruction boundary, which is the only place the cap is read.
     ///
     /// M1.7 — the trigger is run-wide: this handle adds its counts to the core's
@@ -1497,11 +1492,11 @@ mod iter_obj_tests {
         );
     }
 
-    /// W6-10 sampling half: off-heap wire bytes pace a sweep ONLY when a `--max-heap` cap is live.
+    /// W6-10 sampling half: off-heap charged bytes pace a sweep ONLY when a `--max-heap` cap is live.
     /// Cap OFF must be bit-for-bit today's object-count pacing; cap ON must sample before the
     /// off-heap growth can overshoot; `sweep()` must reset the counter like `since_gc`.
     #[test]
-    fn wire_bytes_pace_a_sweep_only_under_a_cap() {
+    fn charged_bytes_pace_a_sweep_only_under_a_cap() {
         // (a) cap OFF: a charge below the cap-off byte goal (16 MiB with nothing live) does not
         // collect.
         let mut h = Heap::new();
@@ -1517,10 +1512,7 @@ mod iter_obj_tests {
         h.charge_bytes(1024);
         assert!(!h.should_collect(), "sub-threshold charge must not collect");
         h.charge_bytes(2_000_000);
-        assert!(
-            h.should_collect(),
-            "cap/4 of charged wire bytes must collect"
-        );
+        assert!(h.should_collect(), "cap/4 of charged bytes must collect");
 
         // (c) the counter resets at sweep, like `since_gc`.
         h.sweep();
