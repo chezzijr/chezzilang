@@ -41,12 +41,38 @@ fn io_state_now<T>(inner: &std::sync::Mutex<Option<T>>) -> bool {
     true
 }
 
-/// What a `&self` render ([`Vm::display_guarded`]) is inside: the boxes (core addresses) and the
-/// containers on its path. A back edge to either renders as a marker, not a deeper walk.
+/// What a `&self` render ([`Vm::display_guarded`]) is inside: the boxes (core addresses) and, inside
+/// a box, the containers on its path. A back edge to either renders as a marker, not a deeper walk.
+/// Containers are tracked only inside a box (M3.5, in place of the deleted wire form's
+/// back-references): outside one, the depth guard stays the rule, and the print path keeps its own
+/// `repr_active`.
 #[derive(Default)]
 pub(super) struct OpenRender {
     boxes: Vec<usize>,
     objs: Vec<GcRef>,
+}
+
+impl OpenRender {
+    /// `h` is a container this render already opened inside a box.
+    fn is_back_edge(&self, h: GcRef) -> bool {
+        !self.boxes.is_empty() && self.objs.contains(&h)
+    }
+
+    /// Open container `h` for its walk; returns whether it was recorded (only inside a box).
+    fn enter(&mut self, h: GcRef) -> bool {
+        let inside = !self.boxes.is_empty();
+        if inside {
+            self.objs.push(h);
+        }
+        inside
+    }
+
+    /// Close what [`enter`](Self::enter) opened.
+    fn leave(&mut self, opened: bool) {
+        if opened {
+            self.objs.pop();
+        }
+    }
 }
 
 impl Vm {
@@ -118,9 +144,9 @@ impl Vm {
         self.display_walk(v, depth, &mut OpenRender::default())
     }
 
-    /// [`display_guarded`](Vm::display_guarded) with what the walk has `open`: a container or a box
-    /// met again inside its own render is a back edge, and renders as the print path's marker
-    /// (`[...]`, `{...}`, `Set(...)`, `...`, `Shared(...)`; W14-35c, TICKET-246).
+    /// [`display_guarded`](Vm::display_guarded) with what the walk has `open`: a box, or a container
+    /// inside a box, met again inside its own render is a back edge, and renders as the print path's
+    /// marker (`[...]`, `{...}`, `Set(...)`, `...`, `Shared(...)`; W14-35c, TICKET-246).
     fn display_walk(
         &self,
         v: Value,
@@ -149,14 +175,14 @@ impl Vm {
                 Obj::Bytes(b) => Ok(crate::slice::bytes_repr(b)),
                 // Python `bytearray` repr `bytearray(b'...')` — shared via `slice::bytearray_repr`.
                 Obj::ByteArray(b) => Ok(crate::slice::bytearray_repr(&b.to_vec())),
-                Obj::List(_) if open.objs.contains(&h) => Ok("[...]".to_string()),
+                Obj::List(_) if open.is_back_edge(h) => Ok("[...]".to_string()),
                 Obj::List(items) => {
                     let mut parts = Vec::with_capacity(items.len());
-                    open.objs.push(h);
+                    let opened = open.enter(h);
                     for v in items {
                         parts.push(self.display_walk(v, depth + 1, open));
                     }
-                    open.objs.pop();
+                    open.leave(opened);
                     let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
                     Ok(format!("[{}]", parts.join(", ")))
                 }
@@ -168,36 +194,36 @@ impl Vm {
                     }
                     Ok(crate::base::words::tuple_text(parts))
                 }
-                Obj::Map(_) if open.objs.contains(&h) => Ok("{...}".to_string()),
+                Obj::Map(_) if open.is_back_edge(h) => Ok("{...}".to_string()),
                 Obj::Map(m) => {
                     let mut parts = Vec::with_capacity(m.entries.len());
-                    open.objs.push(h);
+                    let opened = open.enter(h);
                     for (_, k, v) in &m.entries {
                         parts.push(self.display_walk(k, depth + 1, open).and_then(|k| {
                             Ok(format!("{k}: {}", self.display_walk(v, depth + 1, open)?))
                         }));
                     }
-                    open.objs.pop();
+                    open.leave(opened);
                     let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
                     Ok(format!("{{{}}}", parts.join(", ")))
                 }
                 Obj::Set(s) => {
                     if s.entries.is_empty() {
                         Ok("Set()".to_string())
-                    } else if open.objs.contains(&h) {
+                    } else if open.is_back_edge(h) {
                         Ok("Set(...)".to_string())
                     } else {
                         let mut parts = Vec::with_capacity(s.entries.len());
-                        open.objs.push(h);
+                        let opened = open.enter(h);
                         for (_, v) in &s.entries {
                             parts.push(self.display_walk(v, depth + 1, open));
                         }
-                        open.objs.pop();
+                        open.leave(opened);
                         let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
                         Ok(format!("{{{}}}", parts.join(", ")))
                     }
                 }
-                Obj::Struct { .. } if open.objs.contains(&h) => Ok("...".to_string()),
+                Obj::Struct { .. } if open.is_back_edge(h) => Ok("...".to_string()),
                 Obj::Struct { tid, fields, .. } => {
                     // Positional layout: recover declaration-order field names from the StructDef
                     // (cold display path). Resolve the type key from `tid`; snapshot values to drop
@@ -213,7 +239,7 @@ impl Vm {
                         .map(|d| (d.display_name.clone(), d.fields.clone()))
                         .unwrap_or_else(|| (crate::base::words::bare_display(name), Vec::new()));
                     let mut parts = Vec::with_capacity(vals.len());
-                    open.objs.push(h);
+                    let opened = open.enter(h);
                     for (i, v) in vals.iter().enumerate() {
                         let k = names.get(i).cloned().unwrap_or_else(|| i.to_string());
                         parts.push(
@@ -221,7 +247,7 @@ impl Vm {
                                 .map(|v| format!("{k}={v}")),
                         );
                     }
-                    open.objs.pop();
+                    open.leave(opened);
                     let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
                     Ok(format!("{display}({})", parts.join(", ")))
                 }

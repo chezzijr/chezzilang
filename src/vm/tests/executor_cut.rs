@@ -910,6 +910,29 @@ fn display_box_grid_terminates_on_every_cycle() {
             }
         }
     }
+    // Outside a box the `&self` render keeps its depth guard (fault text is unchanged: a cyclic
+    // list is `<...>`), and the print path keeps its own `repr_active` marker.
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let mut vm = Vm::new(Arc::new(empty_program()));
+            let l = list(&mut vm, vec![Value::nil()]);
+            let Obj::List(items) = vm.heap.get(l.as_obj().unwrap()) else {
+                unreachable!()
+            };
+            items.set(0, l);
+            let shown = (
+                vm.display(l),
+                vm.stringify(l, Span::default(), 0).expect("renders"),
+            );
+            let _ = tx.send(shown);
+        })
+        .unwrap();
+    let shown = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("an unboxed cycle renders");
+    assert_eq!(shown, ("<...>".to_string(), "[[...]]".to_string()));
     // Shape "guard held by another task" (a writer sits in a slow closure, or readers read): the
     // `&self` renderer builds fault messages and must not wait. M3.3: it reads the box's one slot
     // and takes no guard, so it shows the value at once, for every mode a holder can be in.
