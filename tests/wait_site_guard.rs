@@ -270,12 +270,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "entry.rs",
-        "run_file_counting",
-        "",
-        "the test thread that spawned the VM thread joins it and runs no VM code",
-    ),
-    (
-        "entry.rs",
         "run_with_cfg",
         "",
         "the test thread that spawned the VM thread joins it and runs no VM code",

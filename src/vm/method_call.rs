@@ -1,7 +1,6 @@
 //! VM: arity checks, native-bodied methods, operator hooks, `do_method_call`, static calls.
 //! Split out of `src/vm/call.rs`. `super::*` is the parent module.
 
-use super::call::is_mutating_native;
 use super::*;
 use crate::base::hooks::Hook;
 
@@ -375,10 +374,6 @@ impl Vm {
                 span,
             ));
         };
-        // D4 layer C (TICKET-169): a mutating native call on an airlock copy is a lost write.
-        if self.heap.is_copied(h) && is_mutating_native(self.heap.get(h), method) {
-            return Err(self.copied_write_err(span));
-        }
         // M19 Phase 6 / N-way poly — method-call inline-cache fast path (struct methods only). Scan
         // the site's ways for a way whose cached `tid` matches the receiver layout: a hit collapses the
         // `program.structs` clone + name-keyed `def.methods` probe to a short int-compare scan AND

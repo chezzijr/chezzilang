@@ -482,11 +482,6 @@ impl Vm {
                 let Some(h) = ch.as_obj() else {
                     unreachable!("CellStore on a non-handle value");
                 };
-                // D4 layer C (TICKET-169): a captured local reassigned inside a spawned task is a
-                // fault, never a silent lost write.
-                if self.heap.is_copied(h) {
-                    return Err(self.copied_write_err(span));
-                }
                 if let Obj::Cell(slot) = self.heap.write(h).get(h) {
                     slot.set(v);
                 } else {

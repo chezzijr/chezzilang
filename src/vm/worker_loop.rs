@@ -1362,9 +1362,8 @@ impl Vm {
     /// pushed no frame, so it never entered that loop and its heap was never sampled. Measured then
     /// on the release binary: `spawn xs.len()` over a 300 K-element `List[str]` PASSED a 8 MB cap at
     /// 170.9 MB (21×), while the byte-identical `spawn use(xs)` (`use` = `return xs.len()`, one
-    /// bytecode frame) correctly reported OVER-MEMORY at the same RSS. The worker's copy is the
-    /// BIGGER one, too: `from_wire` mints a fresh `Obj::Str` per element and does not re-intern, so
-    /// N aliases of one interned literal become N objects.
+    /// bytecode frame) correctly reported OVER-MEMORY at the same RSS. The worker's copy was the
+    /// BIGGER one, too: the airlock (deleted in M3.5) minted a fresh `Obj::Str` per element.
     ///
     /// TICKET-235: every task has an entry frame now ([`Vm::task_entry`]), so such a body does
     /// reach an instruction boundary. The sample stays: a task's payload can be born over the cap in

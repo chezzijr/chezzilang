@@ -50,11 +50,6 @@ impl ModuleTable {
         (0..self.slots.len()).filter_map(|i| self.get(i))
     }
 
-    /// The index of the module whose object is `h`.
-    pub(super) fn index_of(&self, h: GcRef) -> Option<usize> {
-        (0..self.slots.len()).find(|&i| self.get(i) == Some(h))
-    }
-
     /// A table already holding `refs` (unit tests that build a context by hand).
     #[cfg(test)]
     pub(super) fn of(refs: &[GcRef]) -> Self {
@@ -78,7 +73,5 @@ mod tests {
         t.set(1, GcRef(7));
         assert_eq!(t.get(1), Some(GcRef(7)));
         assert_eq!(t.iter().collect::<Vec<_>>(), vec![GcRef(7)]);
-        assert_eq!(t.index_of(GcRef(7)), Some(1));
-        assert_eq!(t.index_of(GcRef(8)), None);
     }
 }

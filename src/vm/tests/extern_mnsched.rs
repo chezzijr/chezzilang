@@ -1967,19 +1967,15 @@ fn collect_under_swapped_in_fiber_sweeps_the_whole_heap() {
     assert!(vm.heap.holds(hf), "the parked fiber's object survives");
 }
 
-/// B3.1: `shut` lives in the shared core, so a `from_wire`'d alias observes a shutdown done through
-/// the original handle — `submit` on the alias then settles its Task with the byte-identical
+/// B3.1: `shut` lives in the shared core, so a second handle on the core observes a shutdown done
+/// through the first — `submit` on the alias then settles its Task with the byte-identical
 /// refusal (TICKET-289: a refused submit is no longer a fault of the caller).
 #[test]
 fn executor_core_shut_is_shared_across_handles() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let h1 = vm
-        .heap
-        .alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
-    let w = vm.to_wire(Value::obj(h1)).unwrap();
-    let Some(h2) = vm.from_wire(w).as_obj() else {
-        panic!("expected handle")
-    };
+    let core = Arc::new(ExecutorCore::default());
+    let h1 = vm.heap.alloc(Obj::Executor(Arc::clone(&core)));
+    let h2 = vm.heap.alloc(Obj::Executor(core));
     let sp = Span::RUNTIME;
     vm.executor_method(h1, "shutdown", &[], sp).unwrap();
     let ch = Arc::new(ChannelCore::default());
@@ -1999,8 +1995,8 @@ fn executor_core_shut_is_shared_across_handles() {
     );
 }
 
-/// B3.1: `display` of a `Shared` box renders its contents through `display_wire` (a boxed `str`
-/// renders from its owned bytes — B3.3a). M3.3: the box holds the `str` itself, by handle.
+/// B3.1: `display` of a `Shared` box renders its contents. M3.3: the box holds the `str` itself,
+/// by handle.
 #[test]
 fn display_shared_renders_contents() {
     let mut vm = Vm::new(Arc::new(empty_program()));

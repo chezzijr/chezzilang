@@ -1,6 +1,6 @@
 // vm::sched — split out of vm/mod.rs. `super::*` == the `vm` module.
 // Spawn targets, runner and helper threads, and the runner/drainer/blocked-owner guards. The spawn and
-// nursery code is in `nursery.rs`, the airlock in `airlock_out.rs`/`airlock_in.rs`, the M:N scheduler in `mnsched*.rs`.
+// nursery code is in `nursery.rs`, the M:N scheduler in `mnsched*.rs`.
 
 use super::*;
 

@@ -166,9 +166,8 @@ future-style handle (every copy of the handle, in any task, reads the same chann
   is waited for by `shutdown()` (or the program-exit join). Read the result AFTER that call. It is the
   one submit form: `Task[None]` for a job with no value.
 - `Task.get() -> T!` — block until the outcome lands, then return it as a value; idempotent, and the
-  same answer in every task. The task holding the original handle gets the same object back each
-  call; a task holding a copy gets the value as of the crossing, or a fresh copy when the owner had
-  not called `get()` before it. `get()` never faults: a job that returned `v` gives `?v`, and a job
+  same answer in every task. Every handle, in any task, gets the same object back each call (M3.4:
+  a task holds the parent's handle, not a copy). `get()` never faults: a job that returned `v` gives `?v`, and a job
   that faulted gives `!message` with the job's own fault text (CPython's `Future.result()`, with a
   `T!` in place of a raise) — handle it with `match`, `else e:` or `?`. M3.2: it is the job's own
   error, so `file()`/`line()`/`col()` give the job's fault site, as a local `recover:` does

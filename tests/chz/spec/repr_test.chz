@@ -83,13 +83,26 @@ test fn display_hook_output_is_never_quoted():
 # ---- the OTHER renderer: a wrapper box must agree with the value it holds ----
 
 test fn shared_box_renders_like_its_contents():
-    # `print(Shared(x))` goes through a different renderer (`display_wire`) than `print(x)`; both
+    # `print(Shared(x))` goes through a different renderer (`display_box`) than `print(x)`; both
     # must quote, or one value has two spellings and the ambiguity survives in half the program.
     s := Shared([" ", "a, b", ""])
     assert "{s}" == "Shared([' ', 'a, b', ''])"
     assert "{s.get()}" == "[' ', 'a, b', '']"
     t := Shared("hi")
     assert "{t}" == "Shared('hi')"
+
+test fn shared_box_renders_a_cycle_and_an_alias_like_its_contents():
+    # M3.5: the box renders the live value, so a back edge prints CPython's `[...]` (CPython 3.14:
+    # `xs.append(xs); print([xs])` is `[[[...]]]`) and one list reached twice prints twice
+    # (`[[1], [1]]`). The deleted wire form printed `<cycle>` for both.
+    xs: List[Any] = []
+    xs.push(xs)
+    s := Shared(xs)
+    assert "{s}" == "Shared([[...]])", "{s}"
+    assert "{xs}" == "[[...]]"
+    x := [1]
+    t := Shared([x, x])
+    assert "{t}" == "Shared([[1], [1]])", "{t}"
 
 # ---- non-printable characters ----
 

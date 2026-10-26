@@ -23,43 +23,6 @@ pub(super) fn py_blank(c: char) -> bool {
     c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
-pub(super) fn is_mutating_native(obj: &Obj, method: &str) -> bool {
-    let kind = match obj {
-        Obj::List(_) => "List",
-        Obj::Map(_) => "Map",
-        Obj::Set(_) => "Set",
-        Obj::ByteArray(_) => "bytearray",
-        Obj::Str(_)
-        | Obj::Bytes(_)
-        | Obj::BigInt(_)
-        | Obj::FloatBox(_)
-        | Obj::Iter { .. }
-        | Obj::Tuple(_)
-        | Obj::Struct { .. }
-        | Obj::Enum { .. }
-        | Obj::Cell(_)
-        | Obj::Func { .. }
-        | Obj::Closure { .. }
-        | Obj::Module(_)
-        | Obj::Native { .. }
-        | Obj::Builtin(_)
-        | Obj::Cffi(_)
-        | Obj::Ptr(_)
-        | Obj::Channel(_)
-        | Obj::Shared(_)
-        | Obj::RwShared(_)
-        | Obj::Atomic(_)
-        | Obj::AtomicInt(_)
-        | Obj::Executor(_)
-        | Obj::Socket(_)
-        | Obj::Listener(_)
-        | Obj::Writer(_)
-        | Obj::Reader(_)
-        | Obj::Generator(_) => return false,
-    };
-    is_mutating_native_kind(kind, method)
-}
-
 impl Vm {
     pub(super) fn do_call(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;

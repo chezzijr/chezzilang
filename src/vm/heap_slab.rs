@@ -22,8 +22,7 @@
 //! `&self`: keeping two handles off one slot is the caller's duty, so the two writable views
 //! ([`Slab::slot_mut`], [`Slab::segments_mut`]) are `unsafe fn`.
 //!
-//! [`SlotBits`] is a bitset with one bit per slot, segmented like the slab, for the core's mark and
-//! copy bits. The bits of segments 0 to 4 (slots `[0, 64)`) are one inline word, so a heap of fewer
+//! [`SlotBits`] is a bitset with one bit per slot, segmented like the slab, for the core's mark bits. The bits of segments 0 to 4 (slots `[0, 64)`) are one inline word, so a heap of fewer
 //! than 64 slots allocates nothing for its bits.
 
 use super::heap::Obj;
@@ -307,9 +306,9 @@ type BitsTable = [AtomicPtr<AtomicU64>; SEGS];
 /// its own words (word `off >> 6` for offset `off`). The segment table and each segment's words
 /// are allocated at the first bit set in them and installed with a compare-exchange, so any thread
 /// can set a bit through `&self`. A bit that was never set reads 0. The words are `AtomicU64`:
-/// [`set`](SlotBits::set) and [`clear`](SlotBits::clear) use `fetch_or` / `fetch_and` for a plane
-/// that threads share a word of; [`set_owned`](SlotBits::set_owned) loads then stores, for a plane
-/// that one thread writes at a time (the marks).
+/// [`clear`](SlotBits::clear) uses `fetch_and`, because two handles can reuse slots of one word at
+/// once; [`set_owned`](SlotBits::set_owned) loads then stores, for a plane that one thread sets at a
+/// time (the marks).
 #[derive(Default)]
 pub(super) struct SlotBits {
     /// The bits of slots `[0, 64)`.
@@ -425,13 +424,6 @@ impl SlotBits {
     pub(super) fn get(&self, i: usize) -> bool {
         self.word(i)
             .is_some_and(|(w, bit)| w.load(Ordering::Relaxed) & bit != 0)
-    }
-
-    /// Set the bit of slot `i` with `fetch_or`.
-    #[inline]
-    pub(super) fn set(&self, i: usize) {
-        let (w, bit) = self.word_or_alloc(i);
-        w.fetch_or(bit, Ordering::Relaxed);
     }
 
     /// Clear the bit of slot `i` with `fetch_and` (no-op before its segment has a bit set).
@@ -628,7 +620,7 @@ mod tests {
             assert!(!bits.get(i), "slot {i} starts clear");
         }
         for &i in &probe {
-            bits.set(i);
+            bits.set_owned(i);
         }
         for &i in &probe {
             assert!(bits.get(i));

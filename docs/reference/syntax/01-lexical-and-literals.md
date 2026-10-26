@@ -121,7 +121,7 @@ ordinary `str`, lexed verbatim:
 - `==`/`!=` are structural; `b"a" == bytearray([97])` is content-equal (as in Python).
 - `bytearray` is NOT `Hashable` (mutable, like `list`/`set`/`map`).
 - Repr: `bytearray(b'...')`. `bytes(ba)` gives an immutable snapshot; `bytearray(b)` a mutable copy.
-- A `bytearray` crosses a task boundary by value (a deep copy, like `list`).
+- A task gets a `bytearray` by handle, like a `list` (M3.4): a write in the task lands on the parent's buffer.
 - Not supported: a `byte`/`u8` scalar, non-UTF-8 codecs, base64/hex.
 
 **Built-in conversions.**

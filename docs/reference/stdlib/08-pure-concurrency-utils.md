@@ -13,9 +13,8 @@ inside a **single** `write` lock or they race. The collections' keyed reads and 
 and build in the correct single-lock idiom. A walk (`for_each_entry`, `fold_entries`) takes one
 shallow copy under the read guard.
 
-**Airlock sharing:** a struct whose only field is an `RwShared` crosses the `spawn`/`parallel:` airlock
-as a **shared `Arc` handle, NOT a deep copy**, so the parent sees a spawned task's mutation after the
-join. (`RwShared` is sendable and shares; a struct of all-sendable fields is too.)
+**Sharing:** a task gets the wrapper struct by handle, NOT a deep copy (M3.4), so the parent sees a
+spawned task's mutation after the join.
 
 **Construction:** call the static `new()` with the type arguments (**`ConcurrentList[int].new()`**,
 **`ConcurrentMap[str, int].new()`**, **`ConcurrentSet[int].new()`**, **`ConcurrentCounter[str].new()`**)
@@ -105,8 +104,8 @@ their read-modify-write inside **one** closure, so N tasks that each increment t
 
 The result order is deterministic: the helper reassembles results by submission index (a `sort_by_key`
 on the tagged results), **never** by completion order. The nursery lives inside the helper and joins
-before the collect, so a task never outlives the call (structured concurrency); `f` crosses the airlock
-into each task by value. `pmap_limited` is also the standard concurrency limiter: use it to cap
+before the collect, so a task never outlives the call (structured concurrency); each task gets `f` by
+handle. `pmap_limited` is also the standard concurrency limiter: use it to cap
 parallel calls into a rate-limited resource.
 
 ### `std.concurrency.Task` — result handles for `Executor` work

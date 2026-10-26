@@ -4,8 +4,7 @@
 use super::block::Cut;
 use super::*;
 
-/// A plain runtime fault: no assert, cap, timeout, deadlock or panic flag. Behind [`Vm::err`] and
-/// the copy walk (`WalkSrc`), which has no `Vm`.
+/// A plain runtime fault: no assert, cap, timeout, deadlock or panic flag. Behind [`Vm::err`].
 pub(super) fn plain_err(message: String, span: Span) -> RuntimeError {
     RuntimeError {
         message,
@@ -190,8 +189,6 @@ impl Vm {
             poll_park: None,
             pending_connect: None,
             held_reads: Vec::new(),
-            #[cfg(test)]
-            copy_mark: false,
             poll_timed_out: false,
             poll_deadline: None,
             poll_partial: None,
@@ -659,8 +656,8 @@ impl Vm {
         // NURSERY-FLOOR REBASE. `nurseries` is NOT part of `GenCtx` (never swapped by `swap_gen_ctx`),
         // so `self.nurseries` is the RESUMING driver's stack, while a parked frame's / recover
         // handler's `nursery_len` was captured (absolutely) against whatever floor existed when the
-        // generator was FIRST driven — a different, possibly deeper, driver's floor (or, across the
-        // airlock, a stale SENDER floor). A generator provably opens NO nursery of its own (`spawn` /
+        // generator was FIRST driven — a different, possibly deeper, driver's floor (or, for a generator
+        // another task drove first, that task's floor). A generator provably opens NO nursery of its own (`spawn` /
         // `parallel:` are checker-banned inside a generator, recover blocks included), so its
         // frame-return drain (`do_return` → `drain_escaped_nursery(frame.nursery_len)`) and its
         // recover-catch drain (`drain_escaped_nursery(handler.nursery_len)`) MUST be no-ops — they
@@ -668,7 +665,7 @@ impl Vm {
         // every generator-internal drain is a no-op. Identity when the drive floor is unchanged (the
         // common case: existing generators drive at a fixed depth), so it is behaviour-preserving
         // there; it fixes a latent same-heap over-drain when a generator is resumed deeper than it
-        // was first driven, and makes a cross-airlock handler's stale `nursery_len` safe.
+        // was first driven, and makes another task's handler `nursery_len` safe.
         // On the first (Pending) drive `self.frames`/`self.handlers` are empty here (the body frame is
         // pushed just below), so this is a no-op then; the pushed frame gets the correct floor from
         // `push_frame`.
@@ -1222,7 +1219,7 @@ impl Vm {
             // W7-39, TICKET-208 — an executor inherits its CREATOR's whole cancel chain, as
             // every spawned task does, so an outer `cancel()` or scope cancel reaches
             // the jobs this executor will start. Captured HERE, at creation, not at `submit`:
-            // the handle crosses the airlock by `Arc`, so the submitter can belong to an
+            // any task can hold the handle, so the submitter can belong to an
             // unrelated executor.
             creator_cancel: self.scope_ancestors(),
             created_at: span,

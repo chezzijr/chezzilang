@@ -48,7 +48,7 @@ q.x = 99
 print(p.x)                # 1  -- independent instances
 ```
 
-A struct is snapshotted only as a `Map`/`Set` **key** or a `Set` **element** (see [Hashing](10-protocol-hooks.md#hashing-hashable)). A `spawn:`/`parallel:` boundary copies values (§11b).
+A struct is snapshotted only as a `Map`/`Set` **key** or a `Set` **element** (see [Hashing](10-protocol-hooks.md#hashing-hashable)). A `spawn:`/`parallel:` boundary copies nothing: a task gets the struct by handle (M3.4, §11b).
 
 **A bound method is not a value; a method named through its type is** (Rust's path rule). Reading
 `p.dist` is a check-time error (Rust E0615): `type Point has no field 'dist' ('dist' is a method — a

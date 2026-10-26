@@ -257,7 +257,7 @@ fn strip_inline_test_mods(text: &str) -> String {
 }
 
 mod autodrain;
-mod channels_wire;
+mod channels;
 mod defaults_witness;
 mod executor_cut;
 mod executor_deadlock;

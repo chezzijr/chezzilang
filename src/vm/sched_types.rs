@@ -115,7 +115,7 @@ pub(super) struct FiberCtx {
     pub(super) out: Vec<u8>,
     pub(super) stderr: Vec<u8>,
     /// M3.1 — the run's one module table (the same `Arc` every context holds), so the parked
-    /// context's roots and copy walk (`WalkSrc::of_ctx`) reach the run's modules. Never swapped.
+    /// context's roots reach the run's modules. Never swapped.
     pub(super) module_objs: Arc<super::module_table::ModuleTable>,
     /// D2b — the fiber's `Executor` handles (GC roots). Per fiber: swapped by
     /// [`Vm::swap_ctx`] when `owns_side`. Empty for a context that does not own side state.

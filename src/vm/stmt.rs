@@ -4,8 +4,8 @@
 use super::block::Cut;
 use super::*;
 
-/// TICKET-246 — one of the three boxes that render what they hold, borrowed from a heap object
-/// or from a wire handle. [`Vm::display_box`] is its only renderer.
+/// TICKET-246 — one of the three boxes that render what they hold, borrowed from a heap object.
+/// [`Vm::display_box`] is its only renderer.
 #[derive(Clone, Copy)]
 pub(super) enum BoxCore<'a> {
     Shared(&'a Arc<SharedCore>),
@@ -23,6 +23,15 @@ impl<'a> BoxCore<'a> {
         }
     }
 
+    /// What the box holds, read with no wait (M3.2 / M3.3: each box holds one word).
+    pub(super) fn peek(self) -> Value {
+        match self {
+            BoxCore::Shared(c) => c.v.get(),
+            BoxCore::RwShared(c) => c.v.get(),
+            BoxCore::Atomic(c) => c.load(),
+        }
+    }
+
     pub(super) fn label(self) -> &'static str {
         match self {
             BoxCore::Shared(_) => "Shared",
@@ -33,12 +42,6 @@ impl<'a> BoxCore<'a> {
 }
 
 impl Vm {
-    /// Build the D4 layer-C fault for a write to an airlock copy (a cell, a field, an index or a
-    /// mutating method on a marked object).
-    pub(super) fn copied_write_err(&self, span: Span) -> RuntimeError {
-        self.err(format!("this value {COPY_WRITE_TAIL}"), span)
-    }
-
     /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's
     /// own list so the not-yet-run records stay GC-rooted in the frame. Stops once any party's
     /// `std.os.exit` is published, between two `defer`s too (Go: `os.Exit` does not run deferred
@@ -497,16 +500,18 @@ impl Vm {
     }
 
     /// M19 memory-layout lever — resolve a struct `tid` back to its IDENTITY KEY (the `structs` map
-    /// key, e.g. `<main>::Point`) on the cold path (method dispatch / Display / arith / hash / wire /
-    /// snap), where `Obj::Struct` no longer carries a per-instance `name`. O(1) via `struct_names`.
+    /// key, e.g. `<main>::Point`) on the cold path (method dispatch / Display / arith / hash), where `Obj::Struct` no longer carries a per-instance `name`. O(1) via `struct_names`.
     /// Returns `"?"` for [`crate::base::op::TID_NONE`] / an out-of-range id (defensive — every
     /// source-constructed struct has a registered `def.tid`, so this is unreachable for Display).
     pub(super) fn struct_name_of_tid(&self, tid: u32) -> &str {
-        self.walk_src().struct_name_of_tid(tid)
+        self.program
+            .struct_names
+            .get(tid as usize)
+            .map_or("?", |s| s)
     }
 
     /// M19 lever #2 — resolve a `variant_id` back to its `(enum-type, variant)` names on the COLD path
-    /// (Display / stringify / error / wire / snap), where the instance no longer carries the strings.
+    /// (Display / stringify / error), where the instance no longer carries the strings.
     /// O(1) via `Program::variants_by_id`. Returns `("?", "?")` for [`crate::base::op::VID_NONE`] / an
     /// out-of-range id (defensive — a registered enum always resolves).
     pub(super) fn enum_names(&self, variant_id: u32) -> (&str, &str) {
@@ -514,24 +519,6 @@ impl Vm {
             .variants_by_id
             .get(variant_id as usize)
             .map_or(("?", "?"), |d| (d.enum_name.as_str(), d.name.as_str()))
-    }
-
-    /// The display rule of a carrier (TICKET-228): what a `T?` / `T!E` value prints in front of
-    /// its payload, the way the user writes it. An error is `!e`; a success or a present value is
-    /// its bare payload; `?` prints only in front of an absent payload (`?None`), so it stays
-    /// distinct from `None`. Rust `None` for a non-carrier and for the absent value itself, which
-    /// print by their variant name. `absent_payload` says whether the payload is absent or is
-    /// itself a `?`-prefixed present value.
-    fn carrier_prefix_of(
-        variant_id: u32,
-        absent_payload: impl FnOnce() -> bool,
-    ) -> Option<&'static str> {
-        match variant_id {
-            crate::base::op::VID_ERR => Some("!"),
-            crate::base::op::VID_OK => Some(""),
-            crate::base::op::VID_SOME => Some(if absent_payload() { "?" } else { "" }),
-            _ => None,
-        }
     }
 
     /// How a fault names a carrier value: one of the two words above, never `enum`.
@@ -554,13 +541,18 @@ impl Vm {
         )
     }
 
-    /// [`Self::carrier_prefix_of`] for a heap carrier.
+    /// The display rule of a carrier (TICKET-228): what a `T?` / `T!E` value prints in front of
+    /// its payload, the way the user writes it. An error is `!e`; a success or a present value is
+    /// its bare payload; `?` prints only in front of an absent payload (`?None`), so it stays
+    /// distinct from `None`. Rust `None` for a non-carrier and for the absent value itself, which
+    /// print by their variant name. `?` prints when the payload is absent or is itself a
+    /// `?`-prefixed present value.
     pub(super) fn carrier_prefix(
         &self,
         variant_id: u32,
         payload: &RVec<Value>,
     ) -> Option<&'static str> {
-        Self::carrier_prefix_of(variant_id, || {
+        let absent_payload = || {
             payload
                 .try_get(0)
                 .and_then(|v| v.as_obj())
@@ -572,26 +564,13 @@ impl Vm {
                     }
                     None => false,
                 })
-        })
-    }
-
-    /// [`Self::carrier_prefix_of`] for a wire carrier.
-    pub(super) fn carrier_prefix_wire(
-        variant_id: u32,
-        payload: &[WireValue],
-    ) -> Option<&'static str> {
-        Self::carrier_prefix_of(variant_id, || match payload.first() {
-            Some(WireValue::Enum {
-                variant_id: inner,
-                payload: inner_payload,
-                ..
-            }) => {
-                *inner == crate::base::op::VID_NONE_VARIANT
-                    || (*inner == crate::base::op::VID_SOME
-                        && Self::carrier_prefix_wire(*inner, inner_payload) == Some("?"))
-            }
-            _ => false,
-        })
+        };
+        match variant_id {
+            crate::base::op::VID_ERR => Some("!"),
+            crate::base::op::VID_OK => Some(""),
+            crate::base::op::VID_SOME => Some(if absent_payload() { "?" } else { "" }),
+            _ => None,
+        }
     }
 
     /// The pattern a carrier variant is matched by, for the `no match arm` fault text; Rust

@@ -1,10 +1,9 @@
-//! The shared half of the GC heap: slots, free list, mark and copy bits, and the GC counters.
+//! The shared half of the GC heap: slots, free list, mark bits, and the GC counters.
 //!
 //! A [`HeapCore`] holds the state that every runner thread of one run shares (M1.7), behind an
 //! `Arc`: `Vm::new` makes the run's core, and `Vm::spawn_worker` gives every other `Vm` of the run
 //! a handle on it (`Heap::attach`). `Heap` (`vm/heap.rs`) is the per-`Vm` handle: it keeps a small
-//! cache of free slots, the counts it has not yet added to the run-wide trigger, its copy log and
-//! the live context's TICKET-213 view state.
+//! cache of free slots and the counts it has not yet added to the run-wide trigger.
 //!
 //! The counters are atomics, not fields under a lock: `alloc` reads `mem_cap`, and
 //! `should_collect` (every instruction) reads `next_gc` and `mem_cap` each time its handle's
@@ -30,7 +29,7 @@ use super::rvec::RetireList;
 use super::value::GcRef;
 use crate::lexer::Span;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
 /// Whether `o` is a handle on an `Arc` core: its state lives outside every heap, so dropping the
 /// handle can drop the core (and run its destructor), which the sweep defers to its graveyard.
@@ -80,10 +79,6 @@ const FREE_BATCH: usize = 64;
 /// Process-wide source for [`HeapCore::id`]: one fresh id per core, never reused.
 static NEXT_HEAP_ID: AtomicU64 = AtomicU64::new(1);
 
-/// One handle's copy log (see `Heap::begin_copy_log`), shared with the core's registry so `sweep`
-/// can drop a freed slot from every handle's log.
-pub(super) type CopyLog = Arc<Mutex<Vec<u32>>>;
-
 /// What `alloc_lock` guards: the free slots and the right to append to the slab.
 #[derive(Debug)]
 struct AllocState {
@@ -108,13 +103,6 @@ pub struct HeapCore {
     /// Post-sweep invariant: all bits of live slots 0 (survivors cleared). A free slot can keep a
     /// stray mark (see `reuse`).
     marks: SlotBits,
-    /// D4 layer C (TICKET-169): a side bitset marking a heap object as an airlock COPY (a spawned
-    /// task's captures/args/receiver, or a crossing closure's captures). Set only in
-    /// `Vm::from_wire_memo` under `Vm::copy_mark`. Written
-    /// with `fetch_or` / `fetch_and`: mutators on two threads can share a word. `any_copied` lets a
-    /// heap that holds no copy (the main task, in every bench) skip straight past the bit test.
-    copied: SlotBits,
-    any_copied: AtomicBool,
     /// A per-core identity, assigned once at construction from a process-wide counter. Tests read
     /// it (`Heap::id`) to prove every handle of a run shares one core.
     id: u64,
@@ -153,9 +141,6 @@ pub struct HeapCore {
     /// is what makes this table sound: leaving an entry behind would hand a dead error's coordinates
     /// to whatever `alloc` reuses the slot for next.
     err_spans: Mutex<FxHashMap<u32, Span>>,
-    /// The copy log of every handle that has started one (TICKET-246), so `sweep` drops a freed
-    /// slot from each.
-    copy_logs: Mutex<Vec<CopyLog>>,
     /// M2: the `RVec` blocks the run's threads retired and handed in (`adopt_retired`). The
     /// sweep frees them with the world stopped (`vm/rvec.rs`).
     retired: RetireList,
@@ -182,8 +167,6 @@ impl Default for HeapCore {
                 append,
             }),
             marks: SlotBits::default(),
-            copied: SlotBits::default(),
-            any_copied: AtomicBool::new(false),
             id: NEXT_HEAP_ID.fetch_add(1, Ordering::Relaxed),
             next_gc: AtomicUsize::new(MIN_GC_THRESHOLD),
             allocs: AtomicUsize::new(0),
@@ -193,7 +176,6 @@ impl Default for HeapCore {
             over_cap: AtomicBool::new(false),
             last_live_bytes: AtomicUsize::new(0),
             err_spans: Mutex::new(FxHashMap::default()),
-            copy_logs: Mutex::new(Vec::new()),
             retired: RetireList::default(),
         }
     }
@@ -267,8 +249,8 @@ impl HeapCore {
         }
     }
 
-    /// Put `obj` into the empty slot `idx` from a handle's cache, clearing the slot's mark and copy
-    /// bit so the new object does not inherit them. The mark is 0 after a normal sweep, but a
+    /// Put `obj` into the empty slot `idx` from a handle's cache, clearing the slot's mark so the new
+    /// object does not inherit it. The mark is 0 after a normal sweep, but a
     /// collection that marks a dangling ref and then panics in `children` (caught by
     /// `call.rs`) leaves a mark on a free slot, which `sweep_slots` never visits.
     ///
@@ -286,9 +268,6 @@ impl HeapCore {
         // collector sets marks, and it does not run while a handle allocates.
         if self.marks.get(idx as usize) {
             self.marks.clear(idx as usize);
-        }
-        if self.any_copied.load(Ordering::Relaxed) {
-            self.copied.clear(idx as usize);
         }
         h
     }
@@ -341,33 +320,6 @@ impl HeapCore {
         self.marks.set_owned(i)
     }
 
-    pub(super) fn set_copied(&self, i: usize) {
-        self.copied.set(i);
-        self.any_copied.store(true, Ordering::Relaxed);
-    }
-
-    /// Test the copy bit of slot `i`. `any_copied` makes this one predictable branch on a core
-    /// that has never marked anything (the main task in every bench).
-    #[inline]
-    pub(super) fn is_copied(&self, i: usize) -> bool {
-        self.any_copied.load(Ordering::Relaxed) && self.copied.get(i)
-    }
-
-    #[inline]
-    pub(super) fn clear_copied(&self, i: usize) {
-        self.copied.clear(i);
-    }
-
-    /// Add `log` to the registry `sweep` walks.
-    pub(super) fn register_copy_log(&self, log: CopyLog) {
-        lock(&self.copy_logs).push(log);
-    }
-
-    /// Remove `log` from the registry (its handle is dropped).
-    pub(super) fn unregister_copy_log(&self, log: &CopyLog) {
-        lock(&self.copy_logs).retain(|l| !Arc::ptr_eq(l, log));
-    }
-
     pub(super) fn set_err_span(&self, r: GcRef, span: Span) {
         lock(&self.err_spans).insert(r.0, span);
     }
@@ -378,8 +330,7 @@ impl HeapCore {
 
     /// The slot half of a collection: free every unmarked object, clear the marks, set the next
     /// threshold from the survivors (twice their count) and zero the run's counts. A freed slot's
-    /// copy bit and error span go with it, and every handle's copy log drops it: the slot can be
-    /// handed to another object before a log is unmarked. The caller (`Heap::sweep`) gave its free
+    /// error span goes with it. The caller (`Heap::sweep`) gave its free
     /// cache back first and measures the live bytes after. The run's retired `RVec` blocks are
     /// freed too.
     ///
@@ -399,14 +350,11 @@ impl HeapCore {
         {
             let mut st = lock(&self.alloc_lock);
             let mut spans = lock(&self.err_spans);
-            // No copy bit was ever set: the freed slots have none to clear.
-            let any_copied = self.any_copied.load(Ordering::Relaxed);
             // SAFETY: the caller's contract above: the gc_coord invariant, every other handle
             // stopped or detached for the sweep (`vm/gc_coord.rs`), and a detached one holds only a
             // `Detached` handle, which reaches no slot (`vm/gc_door.rs`).
             for (start, seg) in unsafe { self.slots.segments_mut() } {
                 let marks = self.marks.segment_words(start);
-                let copied = self.copied.segment_words(start);
                 for (idx, slot) in (start..).zip(seg.iter_mut()) {
                     if slot.obj.is_none() {
                         continue;
@@ -430,14 +378,6 @@ impl HeapCore {
                             if !spans.is_empty() {
                                 spans.remove(&(idx as u32));
                             }
-                            // A load and, for a set bit, a store: the world is stopped, so the
-                            // locked `fetch_and` of `SlotBits::clear` was a cost per freed slot.
-                            if any_copied
-                                && let Some(w) = copied.get((idx >> 6) - (start >> 6))
-                                && w.load(Ordering::Relaxed) & bit != 0
-                            {
-                                w.store(w.load(Ordering::Relaxed) & !bit, Ordering::Relaxed);
-                            }
                         }
                     }
                 }
@@ -451,9 +391,6 @@ impl HeapCore {
             .store((live * 2).max(MIN_GC_THRESHOLD), Ordering::Relaxed);
         self.allocs.store(0, Ordering::Relaxed);
         self.bytes.store(0, Ordering::Relaxed);
-        for log in lock(&self.copy_logs).iter() {
-            lock(log).retain(|&i| self.slots.get(GcRef(i)).obj.is_some());
-        }
     }
 
     /// Move a handle's retired `RVec` blocks to the run's list. Called when the handle's thread
@@ -566,60 +503,12 @@ mod tests {
         }
     }
 
-    /// A sweep clears the copy bit of each slot it frees and keeps a survivor's, in the inline
-    /// low word (slots below 64) and in a segment past it, before any reuse could clear it.
+    /// M3.5 — the airlock's state is gone: a `Proto` has no private/deep slot masks (two `u64`),
+    /// and a `HeapCore` has no copy bits (a `SlotBits` and its `AtomicBool`) and no copy-log
+    /// registry (a `Mutex<Vec<_>>`).
     #[test]
-    fn sweep_clears_copy_bits_of_freed_slots_only() {
-        let mut heap = Heap::new();
-        let refs: Vec<GcRef> = (0..300).map(|i| heap.alloc(Obj::BigInt(i))).collect();
-        for &r in &refs {
-            heap.set_copied(r);
-        }
-        for &r in refs.iter().step_by(3) {
-            heap.mark(r);
-        }
-        heap.sweep();
-        for (i, &r) in refs.iter().enumerate() {
-            assert_eq!(
-                heap.is_copied(r),
-                i % 3 == 0,
-                "slot {} after the sweep",
-                r.0
-            );
-        }
-    }
-
-    /// A sweep drops a freed slot from the copy log of every handle on the core, so no handle
-    /// clears the copy mark of the object that reuses the slot.
-    #[test]
-    fn copy_log_retain_spans_handles() {
-        let mut a = Heap::new();
-        // SAFETY: one thread drives both handles, and `a.sweep` runs with `b` idle.
-        let mut b = unsafe { a.attach() };
-        let x = a.alloc(Obj::List(RVec::new()));
-        let y = b.alloc(Obj::List(RVec::new()));
-        let z = a.alloc(Obj::List(RVec::new()));
-        a.begin_copy_log();
-        a.set_copied(x);
-        a.set_copied(y);
-        a.end_copy_log();
-        b.begin_copy_log();
-        b.set_copied(x);
-        b.set_copied(z);
-        b.end_copy_log();
-        a.mark(y);
-        a.mark(z);
-        a.sweep();
-        let w = a.alloc(Obj::List(RVec::new()));
-        assert_eq!(w, x, "the freed slot is reused");
-        a.set_copied(w);
-        a.unmark_copy_log();
-        b.unmark_copy_log();
-        assert!(a.is_copied(w), "no log kept the freed slot");
-        assert!(
-            !a.is_copied(y) && !b.is_copied(z),
-            "each log cleared its own survivor"
-        );
+    fn airlock_state_is_gone_from_proto_and_heap_core() {
+        assert_eq!(std::mem::size_of::<super::HeapCore>(), 464);
     }
 
     /// A mark left on a freed slot (the collector marks a dangling ref, then `children` panics on

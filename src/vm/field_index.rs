@@ -493,10 +493,6 @@ impl Vm {
                 span,
             ));
         };
-        // D4 layer C (TICKET-169): a field store on an airlock copy is a lost write, not a race.
-        if self.heap.is_copied(h) {
-            return Err(self.copied_write_err(span));
-        }
         // M19 Phase 5b — IC fast path (see [`Vm::get_field`]): a hit on the `tid` guard writes straight
         // to the cached index (no field-name re-verify); a miss falls through to the probe + cache-fill.
         if ic != NO_IC {
@@ -624,13 +620,6 @@ impl Vm {
         let Some(h) = obj.as_obj() else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
         };
-        // D4 layer C (TICKET-169): an index store on an airlock copy is a lost write. A struct
-        // receiver is exempt — its `set_index` protocol method runs USER code, which may write
-        // only through a `Shared`/`RwShared` field (real sharing); that write is checked at
-        // `set_field`/`do_method_call`, not here.
-        if self.heap.is_copied(h) && !matches!(self.heap.get(h), Obj::Struct { .. }) {
-            return Err(self.copied_write_err(span));
-        }
         // M19 Tier-2 — Int-key fast path for a Map write: `scalar_hash` on an int needs no rooting
         // (it can't GC or re-enter, unlike a struct key's `hash()`), so skip `hash_key_rooted`. Same
         // `candidates`/`values_equal`/`push` as the general Map arm → byte-identical behavior. A

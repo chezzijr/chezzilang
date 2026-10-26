@@ -13,7 +13,7 @@ use super::core::{
     AtomicCore, AtomicIntCore, ChannelCore, ExecutorCore, ListenerCore, ReaderCore, RwSharedCore,
     SharedCore, SocketCore, WriterCore,
 };
-use super::heap_core::{CopyLog, HeapCore, lock};
+use super::heap_core::HeapCore;
 pub use super::map_data::{MapData, MapEntry, SetData, SetEntry};
 pub use super::module_data::{ModuleData, ModuleNames};
 use super::rvec::{RCell, RVec, RetireList};
@@ -252,7 +252,7 @@ pub enum Obj {
     /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`), carried by id.
     /// Produced by `Op::LoadBuiltin` when the name is used in value position; calling it (via
     /// `invoke_value`) routes back into the same builtin logic direct calls use. A GC LEAF (no
-    /// `GcRef`s), like `Native`. SENDABLE (pure code) — crosses the airlock by copying the id.
+    /// `GcRef`s), like `Native`. Pure code: any task can call it.
     Builtin(crate::base::builtin::Builtin),
     /// A dynamic C-ABI FFI function (`extern "lib":`). Wraps the `dlopen`'d library + resolved
     /// symbol + marshalling signature behind an `Arc` (so it is `Send` for `--parallel` and shared
@@ -261,7 +261,6 @@ pub enum Obj {
     /// An opaque C-ABI pointer handle (`ptr`) — a raw `void*` address carried as a `usize`. Produced
     /// by an `extern "lib":` fn returning `ptr` and by `std.ffi.null()`. Untyped, never auto-freed
     /// (the program calls the library's own destroy), and holds no `GcRef`s, so it has no GC children.
-    /// `Send` (a plain address), so it crosses the spawn/channel airlock by value.
     Ptr(usize),
     /// `Channel[T]` (C2) — a *handle* to the shared mailbox [`ChannelCore`]. B3.1: the queue itself
     /// moved OUT of the heap into the `Arc` (it holds wire-form messages, not `GcRef`s); the heap
@@ -287,19 +286,19 @@ pub enum Obj {
     /// [`Channel`](Obj::Channel).
     Executor(Arc<ExecutorCore>),
     /// `Socket` (D6) — a *handle* to a non-blocking connected TCP stream [`SocketCore`]. Same
-    /// handle/core split as [`Channel`](Obj::Channel); the core holds an OS fd (no `WireValue`s, no
-    /// `GcRef`s), so it traces no GC children.
+    /// handle/core split as [`Channel`](Obj::Channel); the core holds an OS fd (no `GcRef`s), so it
+    /// traces no GC children.
     Socket(Arc<SocketCore>),
     /// `Listener` (D6) — a *handle* to a non-blocking accepting socket [`ListenerCore`]. See
     /// [`Socket`](Obj::Socket).
     Listener(Arc<ListenerCore>),
     /// `Writer` (R2) — a *handle* to a write-only file/stream [`WriterCore`]. Same handle/core split as
-    /// [`Socket`](Obj::Socket); the core holds an fd/buffer (no `WireValue`s, no `GcRef`s), so it traces
-    /// no GC children.
+    /// [`Socket`](Obj::Socket); the core holds an fd/buffer (no `GcRef`s), so it traces no GC
+    /// children.
     Writer(Arc<WriterCore>),
     /// `Reader` (R2b) — a *handle* to a read-only file [`ReaderCore`]. Same handle/core split as
     /// [`Writer`](Obj::Writer)/[`Socket`](Obj::Socket); the core holds a `BufReader<File>` (no
-    /// `WireValue`s, no `GcRef`s), so it traces no GC children.
+    /// `GcRef`s), so it traces no GC children.
     Reader(Arc<ReaderCore>),
     /// Experimental generators (VM-only) — a suspendable coroutine produced by calling a `yield`-ing
     /// function. Holds its bytecode + home/closure + lifecycle state + parked execution context; its
@@ -578,10 +577,9 @@ fn obj_bytes_shallow(obj: &Obj) -> usize {
 }
 
 /// The object heap, as one `Vm` sees it: a handle on a [`HeapCore`] (`vm/heap_core.rs`), which
-/// holds the slots, the free list, the mark and copy bits and the shared counters. Every `Vm` of
+/// holds the slots, the free list, the mark bits and the shared counters. Every `Vm` of
 /// one run holds a handle on the run's one core (`Vm::spawn_worker`). The handle keeps what is its
-/// own: a cache of free slots, the counts it has not yet added to the core's trigger and its copy
-/// log.
+/// own: a cache of free slots and the counts it has not yet added to the core's trigger.
 ///
 /// The collector itself (root tracing) lives on the VM, which owns the roots; the heap provides the
 /// slot-level primitives: [`mark`](Heap::mark), [`children`](Heap::children),
@@ -659,11 +657,6 @@ pub struct Heap {
     /// Sound against a freed slot because `sweep()` — the only thing that frees, and so the only
     /// thing that can make `alloc` re-hand this slot to a different object — clears it.
     pending_mut: Option<(GcRef, usize)>,
-    /// TICKET-246 — copy marks recorded for one box call (see `begin_copy_log`), and whether
-    /// `set_copied` is recording now. The log is made and registered with the core at the first
-    /// `begin_copy_log`, so `sweep` can drop a freed slot from it.
-    copy_log: Option<CopyLog>,
-    copy_logging: bool,
     /// The objects this handle's last [`sweep`](Heap::sweep) freed that own an `Arc` core or a
     /// file: their drop can make a syscall (a buffered writer's flush, a socket's close), so the
     /// collector drops them after it releases the world (`Vm::gc_collect`), not inside the stop.
@@ -699,8 +692,8 @@ impl Default for Heap {
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        // A dropped handle's counts still pace the run (a task's payload `Vm` allocates its rebuilt
-        // arguments and is dropped before the task runs). The `write` record is NOT read here:
+        // A dropped handle's counts still pace the run (a task's payload `Vm` can allocate its
+        // closure and is dropped before the task runs). The `write` record is NOT read here:
         // the thread may have left the run's heap, and a sweep may run. It was settled while the
         // thread was attached (`Vm::gc_leave`, `ReadyWorker::into_fiber`).
         self.core.flush_allocs(self.since_gc);
@@ -708,9 +701,6 @@ impl Drop for Heap {
         self.core.give_back(&mut self.free);
         // A retired block is freed only by a stop, never here.
         self.core.adopt_retired(&self.retired);
-        if let Some(log) = &self.copy_log {
-            self.core.unregister_copy_log(log);
-        }
     }
 }
 
@@ -728,8 +718,6 @@ impl Heap {
             gc_check_at: 0,
             since_gc_bytes: AtomicUsize::new(0),
             pending_mut: None,
-            copy_log: None,
-            copy_logging: false,
             graveyard: Vec::new(),
             retired: RetireList::default(),
         }
@@ -759,63 +747,10 @@ impl Heap {
         Arc::strong_count(&self.core) == 1
     }
 
-    /// Mark `h` as an airlock copy (D4 layer C, TICKET-169), and record it while a copy log is on.
-    pub fn set_copied(&mut self, h: GcRef) {
-        self.core.set_copied(h.0 as usize);
-        if self.copy_logging
-            && let Some(log) = &self.copy_log
-        {
-            lock(log).push(h.0);
-        }
-    }
-
-    /// TICKET-246 — start recording the objects [`set_copied`](Heap::set_copied) marks. A box call
-    /// records the marks made while it rebuilds its closure (the closure's captures), so it can
-    /// clear exactly those when the call ends.
-    pub fn begin_copy_log(&mut self) {
-        match &self.copy_log {
-            Some(log) => lock(log).clear(),
-            None => {
-                let log = CopyLog::default();
-                self.core.register_copy_log(Arc::clone(&log));
-                self.copy_log = Some(log);
-            }
-        }
-        self.copy_logging = true;
-    }
-
-    /// Stop recording; the recorded marks stay until [`unmark_copy_log`](Heap::unmark_copy_log).
-    pub fn end_copy_log(&mut self) {
-        self.copy_logging = false;
-    }
-
-    /// Clear the mark of every recorded object that is still live, and forget the record. A
-    /// capture the closure stored into the box state is the box's own value from here on.
-    pub fn unmark_copy_log(&mut self) {
-        self.copy_logging = false;
-        let Some(log) = &self.copy_log else { return };
-        for i in std::mem::take(&mut *lock(log)) {
-            self.core.clear_copied(i as usize);
-        }
-    }
-
-    /// Test whether `h` is an airlock copy (see `HeapCore::is_copied`).
-    #[inline]
-    pub fn is_copied(&self, h: GcRef) -> bool {
-        self.core.is_copied(h.0 as usize)
-    }
-
     /// This heap's identity: its core's (see `HeapCore::id`), shared by every handle of the run.
     #[inline]
     pub fn id(&self) -> u64 {
         self.core.id()
-    }
-
-    /// D4 (TICKET-240): unmark one object the crossing site built, which no parent binding can
-    /// reach. `Vm::unmark_fresh` decides which objects, from the checker's shape.
-    #[inline]
-    pub fn unset_copied(&mut self, h: GcRef) {
-        self.core.clear_copied(h.0 as usize)
     }
 
     /// Allocate an object, returning its handle. Reuses a free slot when available.
@@ -848,7 +783,7 @@ impl Heap {
 
     /// The `&mut Obj` of an object that this call allocated and has not published: no other
     /// thread holds its `GcRef` yet (it is in no object, global, stack or channel another thread
-    /// reads). The airlock and key-snapshot rebuilds use it to fill or replace a placeholder they
+    /// reads). The key-snapshot rebuild uses it to fill or replace a placeholder they
     /// built. Every other write goes through [`write`](Heap::write) and a `&self` mutator. No
     /// cheap check proves "unpublished" (it is a reachability fact), so none is asserted.
     #[inline]
@@ -1196,8 +1131,8 @@ impl Heap {
     /// but stable enough to compare before/after on a fixed workload. M1.7: the walk covers the
     /// run's one heap, so this is the whole run's live footprint (`--max-heap` caps it).
     pub fn live_bytes(&self) -> usize {
-        // W6-10 — `from_wire` mints a FRESH `Obj::Channel`/`Executor` slot for every crossing, so the
-        // heap can hold K alias slots for one core. Charge each core ONCE (by `Arc` identity): K
+        // W6-10 — the heap can hold K handle slots for one core (two `Obj::Channel` over one
+        // `Arc`, as the unit tests build). Charge each core ONCE (by `Arc` identity): K
         // handles to one core are K views of one allocation. A HASH set: `live_bytes` runs on every
         // `sweep()`, and a linear scan would make the pass O(D²) in distinct cores. It stays
         // allocation-free until the first core slot (`HashSet::default` does not allocate).
@@ -1329,30 +1264,6 @@ mod iter_obj_tests {
         assert_eq!(
             std::mem::size_of::<crate::vm::heap_slab::Slot>(),
             std::mem::size_of::<Obj>()
-        );
-    }
-
-    /// D4 layer C (TICKET-169): the copy mark is per-slot and cleared when the slot is reused.
-    #[test]
-    fn copied_bit_is_per_slot_and_cleared_on_reuse() {
-        let mut heap = Heap::new();
-        let a = heap.alloc(Obj::List(RVec::new()));
-        let b = heap.alloc(Obj::List(RVec::new()));
-        heap.set_copied(a);
-        assert!(heap.is_copied(a));
-        assert!(!heap.is_copied(b));
-        // Neither GC-marked: sweep frees both. `free` is LIFO (pushed in index order 0,1), so the
-        // first re-alloc reuses `b`'s slot and the second reuses `a`'s — the one that was marked.
-        heap.sweep();
-        let _reuse_b = heap.alloc(Obj::List(RVec::new()));
-        let c = heap.alloc(Obj::List(RVec::new()));
-        assert_eq!(
-            c, a,
-            "the freed slot must be reused for this test to prove anything"
-        );
-        assert!(
-            !heap.is_copied(c),
-            "a reused slot must not inherit the prior copy mark"
         );
     }
 
@@ -1793,9 +1704,8 @@ mod iter_obj_tests {
         );
     }
 
-    /// W6-10 / M3.2 — a channel charges one word per value it holds, once per CORE: `from_wire`
-    /// mints a fresh alias slot per crossing, and charging per slot would multiply the backlog by
-    /// K (a false OVER-MEMORY). D distinct cores all count. The held objects are slots of the
+    /// W6-10 / M3.2 — a channel charges one word per value it holds, once per CORE: K handle
+    /// slots on one core charging per slot would multiply the backlog by K (a false OVER-MEMORY). D distinct cores all count. The held objects are slots of the
     /// heap, which the slot walk counts.
     #[test]
     fn live_bytes_counts_a_channel_once_per_core() {

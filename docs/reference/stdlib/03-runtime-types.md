@@ -200,7 +200,7 @@ nobody to send faults in milliseconds instead of hanging, while `ex.submit(fn():
   - `read(0)` (or a negative / computed-zero `n`) is a **no-op** `?""`: it never touches the socket,
     never reports EOF, and leaves any carried tail for the next read. It still reports a closed socket
     (`!"read on a closed socket"`).
-  - Two tasks may share one `Socket` (it crosses the airlock as a shared handle): each `read` takes its
+  - Two tasks may share one `Socket` (a task gets it by handle): each `read` takes its
     bytes off the socket and decodes them as ONE atomic step, so concurrent readers see wire order (they
     still must not both *block* on it: a second parked op on a shared socket is a fault).
   - Bytes that are not UTF-8 (a **binary payload**) → `!"invalid utf-8 on the socket: …"`.

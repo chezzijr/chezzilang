@@ -1220,7 +1220,7 @@ impl Vm {
     /// CLEANUP is the cleanup's own work and must not inherit the already-tripped enclosing flag, or its
     /// children die at their first checkpoint and the cleanup is silently truncated through the back
     /// door. The `deferring > 0` suppression that makes a defer uncancellable is per-VM and does NOT
-    /// cross the airlock into a worker fiber (a fresh `Vm` with `deferring == 0`), so the severance has
+    /// reach a worker fiber (a fresh `Vm` with `deferring == 0`), so the severance has
     /// to happen HERE, where the child's flag chain is built. The defer's OWN nursery still gets a
     /// fresh flag, so it can cancel its own children.
     /// `Op::EnterNursery` — outlined from the dispatch `match` deliberately.

@@ -56,17 +56,6 @@ fn golden_entry_cfg_lines(src: &str, mk_cfg: impl Fn() -> crate::native::HostCon
     out
 }
 
-/// [`golden_entry`], plus the value `counter` reached during the run (TICKET-233).
-pub(super) fn golden_entry_counting(
-    src: &str,
-    counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
-) -> (String, usize) {
-    let t = TmpDir::new();
-    let p = t.write("main.chz", src);
-    let ((out, _err, _result, _code), n) = run_file_counting(&p, counter);
-    (out, n)
-}
-
 /// Like [`golden_entry`], but for a program that must FAULT: runs the graph path on the M:N engine
 /// and returns the fault message so the caller can assert its content.
 #[cfg(test)]

@@ -16,11 +16,6 @@ pub fn carrier_word_for(word: &str, written: &str) -> String {
     }
 }
 
-/// D4 layer C (TICKET-169): the one copy of the fault message text, quoted once here so every write
-/// site stays byte-identical. `copied_write_err` prefixes it with `this value`; the checker with
-/// `'<name>'`.
-pub const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
-
 /// Maximum structural-recursion depth for value display / equality — a cyclic data structure (e.g.
 /// a struct with a `List[Self]` field forming a cycle) would otherwise recurse unbounded on the
 /// HOST stack and SIGABRT (uncatchable). This bound turns that into a recoverable `RuntimeError`.

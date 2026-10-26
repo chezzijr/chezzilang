@@ -336,8 +336,8 @@ for a shared table, but the `read`/`write` closures are verbose and the *compoun
 pure-Chezzi `std.concurrency.collection` module bakes the single-lock idiom into four generic
 structs — **`ConcurrentList[E]`**, **`ConcurrentMap[K, V]`**, **`ConcurrentSet[E]`** and
 **`ConcurrentCounter[K]`** — each over one `RwShared` box (`c.inner`), built with `X.new()` or
-`X(RwShared(data))`. A struct of all-sendable fields crosses the airlock as a **shared handle** (same
-as `RwShared` itself), so the wrappers keep the cross-task sharing; `get`/`len`/`count`/`snapshot` are
+`X(RwShared(data))`. A task gets the wrapper struct by handle, like
+every value (M3.4), so the wrappers keep the cross-task sharing; `get`/`len`/`count`/`snapshot` are
 concurrent reads and `insert`/`push`/`add`/`increment`/`get_or_insert` are exclusive writes (the compound
 ones atomic in one lock). See [`stdlib.md`](../stdlib/01-builtins.md) §5 → `std.concurrency.collection` and
 `examples/concurrent_collection.chz`.

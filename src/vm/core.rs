@@ -1410,8 +1410,7 @@ pub(super) fn halt_over_backlog(
 /// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. `submit` runs EAGERLY
 /// (the job goes straight to the pool, matching Python's `ThreadPoolExecutor` / Java's
 /// `ExecutorService`); the pending work lives in its scope's sched.
-/// `shut` lives in the **shared** core, so any handle aliasing this core sees the same shutdown state
-/// (this is what prevents a `from_wire`'d alias from being drained twice at program exit).
+/// `shut` lives in the **shared** core, so any handle on this core sees the same shutdown state.
 #[derive(Default)]
 pub struct ExecutorCore {
     /// At most this many jobs run at once; zero means no cap; set once at construction.
@@ -1434,8 +1433,8 @@ pub struct ExecutorCore {
     /// Every job dispatched from this core inherits it as its `cancel_outer`, so an outer
     /// `cancel()` reaches a nested executor's jobs (W7-39, `docs/reference/concurrency/` §Executor).
     ///
-    /// **Keyed on the CREATOR, never on the submitter.** An `Executor` value crosses the airlock by
-    /// `Arc`, so `submit` can be reached from a job of an entirely unrelated executor; keying on the
+    /// **Keyed on the CREATOR, never on the submitter.** Any task can hold an `Executor`
+    /// handle, so `submit` can be reached from a job of an entirely unrelated executor; keying on the
     /// submitter made *that* executor's `cancel()` kill a job belonging to `main`'s executor, and
     /// `main`'s own graceful `shutdown()` then returned with the work silently dropped.
     ///

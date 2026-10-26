@@ -1,5 +1,5 @@
-//! VM: spawn and the nursery lifecycle: `do_spawn`, task entry and registration, join and escape,
-//! M:N and eager nurseries.
+//! VM: spawn and the nursery lifecycle: `do_spawn`, task entry, start and registration, join and
+//! escape, M:N and eager nurseries.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
 use super::sched::JoinCover;
@@ -12,6 +12,43 @@ use super::sched::spawn_worker_thread;
 use super::*;
 
 impl Vm {
+    /// Launch a fiber's initial task in the (already swapped-in) child context: push the callee's
+    /// frame and return; the scheduler then runs it. The callee always pushes a frame (TICKET-235,
+    /// [`Vm::task_entry`]), so a call that waits inside the task has an `ip` to rewind.
+    pub(super) fn start_task(&mut self, task: PendingCall) -> Result<(), RuntimeError> {
+        match task {
+            PendingCall::Call { callee, args, span } => {
+                // Sample the `--max-heap` cap before dispatch (see `sample_mem_cap`). The callee and
+                // args are plain Rust locals here, so they are NOT rooted — park them on the operand
+                // stack (which `collect` traces) across the sample and take them back after. Under a
+                // live cap only, so the uncapped path is byte-for-byte what it was.
+                let (callee, args) = if self.heap.mem_cap() != 0 {
+                    let argc = args.len();
+                    self.push(callee);
+                    for a in args {
+                        self.push(a);
+                    }
+                    self.sample_mem_cap(span)?;
+                    let args = self.stack.split_off(self.stack.len() - argc);
+                    (self.pop(), args)
+                } else {
+                    (callee, args)
+                };
+                // TICKET-235: `Vm::task_entry` gave every callable head that pushes no frame an
+                // entry thunk. A task queued any other way stops here, not at a park's rewind.
+                // (A non-callable callee falls through to `invoke_value`'s own fault.)
+                if self.callable(callee).is_some() && !self.enters_frame(callee) {
+                    return Err(self.err(
+                        "internal error: a task must start in a Chezzi frame".to_string(),
+                        span,
+                    ));
+                }
+                self.invoke_value(callee, args, span)?;
+                Ok(())
+            }
+        }
+    }
+
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands and register the task on the
     /// innermost nursery. The callee, the receiver and the args pass by handle (M3.4, Go `go f(x)`),
     /// like `defer`.

@@ -685,31 +685,6 @@ fn the_settle_internals_reject_a_non_channel() {
     assert!(e.message.contains("requires a Channel"), "{}", e.message);
 }
 
-/// TICKET-246 — the copy walk only reads its source heap: a value encoded in one run decodes into
-/// another run's heap.
-#[test]
-fn a_wire_copy_decodes_into_another_runs_heap() {
-    let mut owner = Vm::new(Arc::new(empty_program()));
-    let s = owner.heap.alloc(Obj::Str("s".into()));
-    let inner = owner
-        .heap
-        .alloc(Obj::List(vec![Value::int(1), Value::int(2)].into()));
-    let outer = owner
-        .heap
-        .alloc(Obj::List(vec![Value::obj(inner), Value::obj(s)].into()));
-    let wire = owner
-        .to_wire_memo_at(
-            Value::obj(outer),
-            Span::default(),
-            &mut super::airlock_out::WireMemo::default(),
-        )
-        .expect("plain data crosses");
-    let mut reader = Vm::new(Arc::new(empty_program()));
-    assert_ne!(reader.heap.id(), owner.heap.id());
-    let copy = reader.from_wire(wire);
-    assert_eq!(reader.display(copy), "[[1, 2], 's']");
-}
-
 /// M1.7 — one heap core per run: two `Vm::new` roots are two runs with two cores (above), and a
 /// worker built in a run (a task's payload `Vm`, a runner or joiner shell, a box context) is a
 /// handle on its root's core.
@@ -814,11 +789,12 @@ main()
     }
 }
 
-/// TICKET-246 (F1) — every renderer terminates on every box cycle, with the container cycle
-/// marker. Grid: renderer {`Vm::display`, `Vm::display_wire`, `stringify`} x box {Shared,
-/// RwShared, Atomic} x shape {no cycle, holds itself, through a `List`, through a struct, two
-/// boxes holding each other}. Each cell runs on its own thread under a ten-second wait, so a
-/// renderer that recurses while it holds a payload lock fails its cell instead of hanging the run.
+/// TICKET-246 (F1) / M3.5 — every renderer terminates on every box cycle and every container
+/// cycle inside a box, with the cycle marker. Grid: renderer {`Vm::display`, `stringify`} x box
+/// {Shared, RwShared, Atomic} x shape {no cycle, holds itself, through a `List`, through a struct,
+/// two boxes holding each other, a list that holds itself, one list twice}. Each cell runs on its
+/// own thread under a ten-second wait, so a renderer that recurses while it holds a payload lock
+/// fails its cell instead of hanging the run.
 #[test]
 fn display_box_grid_terminates_on_every_cycle() {
     use std::sync::mpsc;
@@ -835,69 +811,72 @@ fn display_box_grid_terminates_on_every_cycle() {
         ThroughList,
         ThroughStruct,
         EachOther,
+        ListCycle,
+        ListTwice,
     }
     #[derive(Clone, Copy, Debug)]
     enum Renderer {
         Display,
-        DisplayWire,
         Stringify,
     }
-    // A box of `kind` as a wire handle, plus the way to set what it holds.
-    fn new_box(_vm: &mut Vm, kind: Kind) -> WireValue {
-        match kind {
-            Kind::Shared => WireValue::Shared(Arc::new(SharedCore::default())),
-            Kind::RwShared => WireValue::RwShared(Arc::new(RwSharedCore::default())),
-            Kind::Atomic => WireValue::Atomic(Arc::new(AtomicCore::new(Value::nil()))),
-        }
+    // A box of `kind` on the heap.
+    fn new_box(vm: &mut Vm, kind: Kind) -> Value {
+        Value::obj(vm.heap.alloc(match kind {
+            Kind::Shared => Obj::Shared(Arc::new(SharedCore::new(Value::nil()))),
+            Kind::RwShared => Obj::RwShared(Arc::new(RwSharedCore::new(Value::nil()))),
+            Kind::Atomic => Obj::Atomic(Arc::new(AtomicCore::new(Value::nil()))),
+        }))
     }
-    fn set(vm: &mut Vm, b: &WireValue, held: WireValue) {
-        let v = vm.from_wire(held);
-        match b {
-            WireValue::Shared(c) => c.v.set(v),
-            WireValue::RwShared(c) => c.v.set(v),
-            WireValue::Atomic(c) => c.store(v),
+    fn set(vm: &Vm, b: Value, v: Value) {
+        match vm.heap.get(b.as_obj().expect("a box")) {
+            Obj::Shared(c) => c.v.set(v),
+            Obj::RwShared(c) => c.v.set(v),
+            Obj::Atomic(c) => c.store(v),
             _ => unreachable!(),
         }
+    }
+    fn list(vm: &mut Vm, items: Vec<Value>) -> Value {
+        Value::obj(vm.heap.alloc(Obj::List(items.into())))
     }
     fn cell(kind: Kind, shape: Shape, renderer: Renderer) -> String {
         let mut vm = Vm::new(Arc::new(empty_program()));
         let b = new_box(&mut vm, kind);
         match shape {
-            Shape::NoCycle => set(&mut vm, &b, WireValue::Int(1)),
-            Shape::Itself => set(&mut vm, &b, b.clone()),
-            Shape::ThroughList => set(
-                &mut vm,
-                &b,
-                WireValue::List {
-                    id: 0,
-                    items: vec![b.clone()],
-                },
-            ),
-            Shape::ThroughStruct => set(
-                &mut vm,
-                &b,
-                WireValue::Struct {
-                    id: 0,
-                    name: "N".into(),
-                    fields: vec![("b".into(), b.clone())],
-                },
-            ),
+            Shape::NoCycle => set(&vm, b, Value::int(1)),
+            Shape::Itself => set(&vm, b, b),
+            Shape::ThroughList => {
+                let l = list(&mut vm, vec![b]);
+                set(&vm, b, l);
+            }
+            Shape::ThroughStruct => {
+                let n = Value::obj(vm.heap.alloc(Obj::Struct {
+                    tid: crate::base::op::TID_NONE,
+                    fields: Fields::from_vec(vec![b]),
+                }));
+                set(&vm, b, n);
+            }
             Shape::EachOther => {
                 let other = new_box(&mut vm, kind);
-                set(&mut vm, &other, b.clone());
-                set(&mut vm, &b, other);
+                set(&vm, other, b);
+                set(&vm, b, other);
+            }
+            Shape::ListCycle => {
+                let l = list(&mut vm, vec![Value::nil()]);
+                let Obj::List(items) = vm.heap.get(l.as_obj().unwrap()) else {
+                    unreachable!()
+                };
+                items.set(0, l);
+                set(&vm, b, l);
+            }
+            Shape::ListTwice => {
+                let x = list(&mut vm, vec![Value::int(1)]);
+                let l = list(&mut vm, vec![x, x]);
+                set(&vm, b, l);
             }
         }
         match renderer {
-            Renderer::DisplayWire => vm.display_wire(&b),
-            Renderer::Display => {
-                let v = vm.from_wire(b);
-                vm.display(v)
-            }
-            Renderer::Stringify => {
-                let v = vm.from_wire(b);
-                vm.stringify(v, Span::default(), 0).expect("renders")
-            }
+            Renderer::Display => vm.display(b),
+            Renderer::Stringify => vm.stringify(b, Span::default(), 0).expect("renders"),
         }
     }
     for kind in [Kind::Shared, Kind::RwShared, Kind::Atomic] {
@@ -911,12 +890,12 @@ fn display_box_grid_terminates_on_every_cycle() {
             // `tests/chz/suites/box_grid_test.chz` runs the same shape with a declared struct.
             (Shape::ThroughStruct, format!("{l}(?(0={l}(...)))")),
             (Shape::EachOther, format!("{l}({l}({l}(...)))")),
+            // A container back edge is the print path's marker (CPython `[[...]]`); one object
+            // reached twice is no cycle (Go `fmt` prints `[[1] [1]]`).
+            (Shape::ListCycle, format!("{l}([[...]])")),
+            (Shape::ListTwice, format!("{l}([[1], [1]])")),
         ] {
-            for renderer in [
-                Renderer::Display,
-                Renderer::DisplayWire,
-                Renderer::Stringify,
-            ] {
+            for renderer in [Renderer::Display, Renderer::Stringify] {
                 let (tx, rx) = mpsc::channel();
                 std::thread::Builder::new()
                     .stack_size(VM_STACK_BYTES)

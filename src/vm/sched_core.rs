@@ -490,7 +490,7 @@ pub(super) fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span)
 /// B3.3-threads — a worker `Vm` with its task's callee and args (the spawner's values, by handle,
 /// M3.4), ready to run on whatever thread owns it. [`Vm::prepare_worker`] builds this (the
 /// spawner-thread half of `run_task_isolated`); [`ReadyWorker::run`] is the thread-side half
-/// (invoke + wire the result back, test only). Splitting the two lets the bounded pool prepare a task on the parent thread, then **move**
+/// (invoke and hand the result back, test only). Splitting the two lets the bounded pool prepare a task on the parent thread, then **move**
 /// the whole `ReadyWorker` (it is `Send` — `Vm` is `Send`, `Value`/`String` are `Send`) onto a pool
 /// thread to execute. Single-thread `run_task_isolated` = `prepare_worker(task)?.run()`.
 pub(super) struct ReadyWorker {
@@ -501,35 +501,32 @@ pub(super) struct ReadyWorker {
     pub(super) payload: super::gc_door::PayloadInFlight,
 }
 
-/// What [`ReadyWorker::run`] hands a worker unit test: the task's wired return value and its
-/// captured output. A real task returns no value to its join ([`WorkerResult`]).
+/// What [`ReadyWorker::run`] hands a worker unit test: the task's return value (a handle in the
+/// run's one heap, unrooted: read it before the next safepoint) and its captured output. A real
+/// task returns no value to its join ([`WorkerResult`]).
 #[cfg(test)]
 pub(super) struct IsolatedRun {
-    pub(super) value: WireValue,
+    pub(super) value: Value,
     pub(super) out: Vec<u8>,
     pub(super) stderr: Vec<u8>,
 }
 
-/// How a [`ReadyWorker`]'s task is invoked, with all values already reconstructed in the worker heap.
+/// How a [`ReadyWorker`]'s task is invoked: the spawner's values, by handle (M3.4).
 pub(super) enum ReadyCall {
-    /// A `spawn f(x)` / `spawn:` block — invoke the rebuilt callable with its rebuilt args.
+    /// A `spawn f(x)` / `spawn:` block — invoke the callable with its args.
     Invoke { callee: Value, args: Vec<Value> },
 }
 
 impl ReadyWorker {
     /// Run the prepared task to completion **on the current thread** and hand back its return value
-    /// (wired into a `Send` form) plus the worker's captured `out`/`stderr` (decision F). A method
+    /// plus the worker's captured `out`/`stderr` (decision F). A method
     /// task that blocks on `recv` would leave no result on the stack; under `--parallel` the blocking
     /// `recv` instead waits on the channel condvar (it never returns the suspend sentinel), so the
     /// `suspend` guard is a safety net against a future regression, not a live path.
     #[cfg(test)]
     pub(super) fn run(mut self) -> Result<IsolatedRun, RuntimeError> {
         let span = self.span;
-        let ret = Self::invoke(&mut self.worker, self.call, span)?;
-        // The result must be cross-safe too — a worker returning a `str`/closure can't hand a
-        // worker-heap `GcRef` back to the parent.
-        let value = self.worker.to_wire_at(ret, span)?;
-        super::airlock_out::ensure_crossable_wire(&value, span)?;
+        let value = Self::invoke(&mut self.worker, self.call, span)?;
         Ok(IsolatedRun {
             value,
             out: self.worker.out,

@@ -27,7 +27,6 @@ pub mod sched_seed;
 mod timer;
 pub mod value;
 mod width;
-pub mod wire;
 
 use crate::base::op;
 use core::{
@@ -42,7 +41,6 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use value::{GcRef, Value, ValueView};
-use wire::{WireCallFrame, WireGenState, WireValue};
 
 use crate::ast::Span;
 use crate::lexer::render_span;
@@ -662,8 +660,8 @@ const _: fn() = || {
 /// Experimental generators — the heap payload of an `Obj::Generator`. A one-shot coroutine driven
 /// synchronously by `.next()`: each call resumes [`Vm::generator_next`] until the next `Op::Yield`
 /// (returns `Some(v)`) or the body ends (`None`, state → `Done`). Generators hold live VM frame
-/// state, so they never cross the airlock by value (`yield` was never part of the removed
-/// interpreter's surface).
+/// state; a task reaches one by handle (M3.4), and a second driver faults `generator already
+/// running` (`yield` was never part of the removed interpreter's surface).
 #[derive(Clone)]
 pub(crate) struct GeneratorCore {
     proto: ProtoId,
@@ -1133,12 +1131,6 @@ pub struct Vm {
     /// to find a same-task re-entry (`Vm::guard_reentry`). A `Vm` field, NOT a `FiberCtx` field: a
     /// box closure runs under `Vm::reentered`, where no other fiber runs on this stack.
     held_reads: Vec<usize>,
-    /// D4 layer C (TICKET-169): true while the test-only `from_wire_memo` runs a copying walk (a
-    /// crossing `Closure`/`Generator`'s captures). Every object allocated while this is set gets
-    /// `Heap::set_copied`, so a later write to it faults. Pure scratch, toggled and restored around
-    /// one call — never part of [`FiberCtx`]. M3.5 deletes it with the airlock.
-    #[cfg(test)]
-    pub(super) copy_mark: bool,
     /// D6c — live mirror of [`FiberCtx::poll_timed_out`] while the fiber is swapped in: set by the poll
     /// thread on the detached fiber's ctx when a socket op's `timeout_ms` deadline elapsed before the
     /// fd became ready, swapped in here on schedule-in. `socket_method`/`listener_method` consume it at
@@ -1434,10 +1426,6 @@ mod json_decode;
 mod list_hof;
 mod method_call;
 use crate::lexer::strip_num_underscores_radix;
-use crate::native::is_mutating_native_kind;
-#[cfg(test)]
-mod airlock_in;
-mod airlock_out;
 mod blocking;
 mod builtins;
 mod channel;
@@ -1458,9 +1446,7 @@ mod step;
 mod stmt;
 mod worker_loop;
 mod worker_vm;
-use crate::base::words::{
-    COPY_WRITE_TAIL, MAX_STRUCTURAL_DEPTH, OPTION_VALUE_WORD, RESULT_VALUE_WORD,
-};
+use crate::base::words::{MAX_STRUCTURAL_DEPTH, OPTION_VALUE_WORD, RESULT_VALUE_WORD};
 mod sched_types;
 mod stream;
 use sched_types::*;

@@ -884,54 +884,6 @@ main()";
     assert_eq!(run_capture_stress(src), "21\n21\n9\n42\n7\n5\n");
 }
 
-/// A container crossing the airlock must be rebuilt at **exact** capacity.
-///
-/// `from_wire`'s container arms used to be `items.into_iter().map(…).collect()`, which Rust
-/// specializes into an **in-place** collect: the destination element (`Value`, 8 B) is smaller than
-/// the source (`WireValue`, 176 B), so the source `Vec`'s allocation is reused and the rebuilt
-/// `Vec<Value>` inherits its capacity — 22× the elements it holds. Measured before the fix: a
-/// 200 000-int list arrived on the far heap as `len = 200 000, capacity = 4 400 000` — a 35.2 MB
-/// `Obj::List` carrying 1.6 MB of data, and 50 such `spawn`s peaked at 3.45 GB (203 MB after).
-///
-/// `len` is IDENTICAL either way and every value-level assertion passes, so `capacity` is the only
-/// thing that can see this — which is why the bug survived the whole behavioural suite.
-#[test]
-fn a_crossed_container_rebuilds_at_exact_capacity() {
-    const N: usize = 4096;
-    let span = Span::RUNTIME;
-    let mut src = Vm::new(Arc::new(crate::vm::tests::empty_program()));
-
-    // A list and a tuple — two of the eight arms now sharing one rebuild helper.
-    let items: Vec<Value> = (0..N as i64).map(Value::int).collect();
-    let list = Value::obj(src.heap.alloc(Obj::List(items.clone().into())));
-    let tuple = Value::obj(src.heap.alloc(Obj::Tuple(items)));
-
-    let iter = Value::obj(src.heap.alloc(Obj::Iter {
-        items: (0..N as i64).map(Value::int).collect(),
-        pos: RCell::new(0),
-    }));
-
-    let mut dst = Vm::new(Arc::clone(&src.program));
-    for (label, v) in [("List", list), ("Tuple", tuple), ("Iter", iter)] {
-        let w = src.to_wire_at(v, span).expect("pure data crosses");
-        let rebuilt = dst.from_wire(w);
-        let h = rebuilt.as_obj().expect("rebuilds to a heap object");
-        let (len, cap) = match dst.heap.get(h) {
-            Obj::List(xs) | Obj::Iter { items: xs, .. } => (xs.len(), xs.capacity()),
-            Obj::Tuple(xs) => (xs.len(), xs.capacity()),
-            other => panic!("{label} rebuilt as the wrong object: {other:?}"),
-        };
-        assert_eq!(len, N, "{label}: every element must survive the crossing");
-        assert_eq!(
-            cap,
-            len,
-            "{label}: rebuilt at {cap} capacity for {len} elements — the wire buffer was retained \
-             in place (expected exactly {len}; the in-place-collect regression gives {}×)",
-            std::mem::size_of::<crate::vm::wire::WireValue>() / std::mem::size_of::<Value>()
-        );
-    }
-}
-
 /// `min`/`max`/`min_by`/`max_by` now return `Some(<extremum>)`, so the winning element travels one
 /// hop further than it used to. When a re-entrant `compare`/key extractor has REMOVED that element
 /// from the live receiver, the GC-rooted snapshot is the ONLY thing keeping it alive across the

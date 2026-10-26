@@ -101,10 +101,6 @@ thread_local! {
     /// cannot move them. Each is read by [`run_capture_counting`] and counts only work done on the
     /// thread that runs the program's top level.
     ///
-    /// Wire nodes `Vm::to_wire_depth` visited (every airlock serialize).
-    pub(crate) static WIRE_ENCODE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Wire nodes `Vm::from_wire_memo` rebuilt (every airlock deserialize).
-    pub(crate) static WIRE_DECODE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// `Vm::elem_equal` calls (every element comparison a collection method makes).
     pub(crate) static ELEM_COMPARES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Characters a `str` subscript read to find its one character.
@@ -167,31 +163,6 @@ pub fn run_file_counting_runners(
             ));
             let (peak, denials, spawns, permits) = RUN_PEAK_RUNNERS.with(|p| p.get());
             (out, peak, denials, spawns, permits)
-        })
-        .expect("failed to spawn VM thread")
-        .join()
-        .expect("VM thread panicked")
-}
-
-/// [`run_file`], plus the value `counter` reached during the run (TICKET-233). The graph-path twin
-/// of [`run_capture_counting`], for a program that needs its `std` imports resolved.
-#[cfg(test)]
-pub fn run_file_counting(
-    entry: &std::path::Path,
-    counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
-) -> (RunOutput, usize) {
-    let entry = entry.to_path_buf();
-    std::thread::Builder::new()
-        .stack_size(VM_STACK_BYTES)
-        .spawn(move || {
-            counter.with(|c| c.set(0));
-            let out = to_str_output(run_built(
-                || crate::compiler::compile_entry_file(&entry, None),
-                crate::native::HostConfig::default(),
-                None,
-                false,
-            ));
-            (out, counter.with(|c| c.get()))
         })
         .expect("failed to spawn VM thread")
         .join()

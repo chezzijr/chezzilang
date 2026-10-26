@@ -190,7 +190,7 @@ fn reentry_text(guard: &str, kind: &str, nested: &str, closure: &str) -> String 
 impl Vm {
     /// B3.1 — clone out the shared `Arc<ChannelCore>` behind a `Channel` handle (refcount bump). The
     /// `Arc` is held only for the duration of the calling method, so locking it does not borrow the
-    /// heap, leaving `self` free for the re-entrant value paths (`from_wire`, `invoke_value`).
+    /// heap, leaving `self` free for the re-entrant value paths (`invoke_value`).
     pub(super) fn channel_core(&self, h: GcRef) -> Arc<ChannelCore> {
         match self.heap.get(h) {
             Obj::Channel(core) => Arc::clone(core),

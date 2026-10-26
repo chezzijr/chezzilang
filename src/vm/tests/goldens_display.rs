@@ -844,10 +844,8 @@ main()
 /// O(whole container). The first cut resolved a piece's cross-element `Backref` by rebuilding the
 /// ENTIRE stored container once PER ELEMENT, so `for_each`/`fold`/`at` over a container of closures
 /// sharing one binding went quadratic (measured on the pre-fix release binary: n=4000 → 3.7s, n=12000
-/// → 34s, versus 0.02s before W7-4). Since TICKET-154 the looping views share ONE rebuild map over an
-/// aliased store, so no looping view re-materializes the whole per element. Pinned with a COUNT of
-/// the wire nodes the view rebuilt (TICKET-233). M3.3: a view reads the live container by handle,
-/// so it rebuilds no wire node at all.
+/// → 34s, versus 0.02s before W7-4). M3.3: a view reads the live container by handle, so it rebuilds nothing
+/// (M3.5 deleted the wire node counter with the wire form; this pins the result).
 #[test]
 fn rwshared_view_over_shared_bindings_is_not_quadratic() {
     let src = "\
@@ -869,17 +867,13 @@ fn main():
     print(c)
 main()
 ";
-    let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "3001\n");
-    assert_eq!(
-        nodes, 0,
-        "RwShared.for_each over 3001 sibling-binding closures rebuilt {nodes} wire nodes (M3.3: none)"
-    );
 }
 
 /// TICKET-154 (W11-15) -- the CONTAINER twin of the cell test above. One `inner` list pushed three
 /// thousand times into the stored list is an aliased store, so every element after the first is a
-/// bare back-ref. Same counted measure as its sibling; M3.3: the walk rebuilds no wire node.
+/// bare back-ref. M3.3: the walk reads the live container by handle.
 #[test]
 fn rwshared_for_each_over_a_dag_alias_is_not_quadratic() {
     let src = "\
@@ -898,17 +892,12 @@ fn main():
     print(c)
 main()
 ";
-    let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "3001\n");
-    assert_eq!(
-        nodes, 0,
-        "RwShared.for_each over 3001 aliases of one list rebuilt {nodes} wire nodes (M3.3: none)"
-    );
 }
 
 /// TICKET-154 (W11-15) -- the single-piece cost on an aliased store. Before M3.3 `at(1)` rebuilt the
-/// whole root once per call (225055 wire nodes for five calls). M3.3: `at` returns the live element
-/// by handle and rebuilds no wire node.
+/// whole root once per call. M3.3: `at` returns the live element by handle.
 #[test]
 fn rwshared_at_over_an_aliased_store_stays_under_its_ceiling() {
     let src = "\
@@ -928,17 +917,13 @@ fn main():
     print(total)
 main()
 ";
-    let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "25000\n");
-    assert_eq!(
-        nodes, 0,
-        "5 RwShared.at(1) calls over an aliased store rebuilt {nodes} wire nodes (M3.3: none)"
-    );
 }
 
 /// W13-9 / TICKET-119 — a module global that is a 5000-deep struct chain. A spawn used to snapshot
-/// it and fault at the depth cap after an O(depth^2) walk. M3.1: a spawn copies no module global,
-/// so the task runs and the walk visits almost nothing (the task's own empty capture list).
+/// it and fault at the depth cap after an O(depth^2) walk. M3.1: a spawn copies no module global, so
+/// the task runs.
 #[test]
 fn a_spawn_beside_a_deep_module_global_copies_nothing() {
     let src = "\
@@ -964,21 +949,15 @@ fn main():
         !e: print(\"err: {e.message()}\")
 main()
 ";
-    let (out, nodes) = run_capture_counting(src, &WIRE_ENCODE_NODES);
+    let out = run_capture(src);
     let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
     assert_eq!(out, "crossed\nok\n");
-    let want = 0..=10;
-    assert!(
-        want.contains(&nodes),
-        "a spawn beside a 5000-deep module global visited {nodes} wire nodes (want {want:?}): \
-         a spawn copies a module global again"
-    );
 }
 
 /// W13-9 / TICKET-119 — a module global that is a 5000-deep chain with a payload at every level. A
 /// spawn used to snapshot it
 /// and fault at the depth cap after an O(depth^2) walk. M3.1: a spawn copies no module global, so
-/// the task runs and the walk visits almost nothing (the task's own empty capture list).
+/// the task runs.
 #[test]
 fn a_spawn_beside_a_deep_payload_module_global_copies_nothing() {
     let src = "\
@@ -1005,20 +984,14 @@ fn main():
         !e: print(\"err: {e.message()}\")
 main()
 ";
-    let (out, nodes) = run_capture_counting(src, &WIRE_ENCODE_NODES);
+    let out = run_capture(src);
     let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
     assert_eq!(out, "crossed\nok\n");
-    let want = 0..=10;
-    assert!(
-        want.contains(&nodes),
-        "a spawn beside a 5000-deep payload module global visited {nodes} wire nodes \
-         (want {want:?}): a spawn copies a module global again"
-    );
 }
 
 /// W13-9 / TICKET-119 — a module global that is 6000 nested closures. A spawn used to snapshot it
 /// and fault at the depth cap after an O(depth^2) walk. M3.1: a spawn copies no module global, so
-/// the task runs and the walk visits almost nothing (the task's own empty capture list).
+/// the task runs.
 #[test]
 fn a_spawn_beside_a_deep_closure_module_global_copies_nothing() {
     let src = "\
@@ -1040,15 +1013,9 @@ fn main():
         !e: print(\"err: {e.message()}\")
 main()
 ";
-    let (out, nodes) = run_capture_counting(src, &WIRE_ENCODE_NODES);
+    let out = run_capture(src);
     let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
     assert_eq!(out, "crossed\nok\n");
-    let want = 0..=10;
-    assert!(
-        want.contains(&nodes),
-        "a spawn beside a 6000-deep nested-closure module global visited {nodes} wire nodes \
-         (want {want:?}): a spawn copies a module global again"
-    );
 }
 
 /// TICKET-119 review finding -- the first doomed-skip design (`(node, shallowest depth)` alone,

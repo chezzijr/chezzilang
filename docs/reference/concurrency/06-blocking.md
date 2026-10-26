@@ -131,7 +131,7 @@ diff a.txt b.txt
 The repo's own standing gate does this over `tests/chz` (`tests/chezzi_threads_cli.rs`).
 `CHEZZI_THREADS=1` is one CPU runner (1.00 cores, vs 1.91 at `=2`), so the diff compares a serialized
 run against a concurrent one. A difference is a **signal to investigate**, not automatically a bug: it
-can be an order-dependence / airlock / scheduler fault, *or* a **non-deterministic cross-task print
+can be an order-dependence / race / scheduler fault, *or* a **non-deterministic cross-task print
 order**, which `chezzi run` does not promise
 ([Output ordering](01-model.md#output-ordering-streaming-cli-vs-buffered-sink)). Compare a line SET, or
 make the program deterministic by construction, before calling a diff a defect. A seeded scheduler

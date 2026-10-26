@@ -80,11 +80,9 @@ Full sink list: `syntax.md` §3.
   beside a written `None` takes the optional. A carrier beside its plain payload (`T?` or `T!E` beside
   `T`) does **not** join by itself: the error names the annotation that makes it legal
   (`x: int? = ...`, `xs: List[int?] = [...]`). See `syntax.md` "Return types".
-- **Protocol existentials are sendable** (like Go's `chan interface`): `Channel[Error]`,
-  `Channel[int!]` and `Channel[Drawable]` over any user protocol type-check. The erased witness crosses
-  the airlock by deep copy, and each widening site checks the concrete witness's own sendability. A
-  witness that cannot serialize (one that holds a `Module` handle) is rejected at the **runtime
-  airlock**.
+- **Protocol existentials cross tasks** (like Go's `chan interface`): `Channel[Error]`,
+  `Channel[int!]` and `Channel[Drawable]` over any user protocol type-check. The receiver gets the
+  sender's witness by handle (M3.2).
 - **Map/set keys.** Any CONCRETE `Hashable` type is a valid map/set key. `Hashable` embeds `Eq`, so a
   generic `[T: Hashable]` may build, index, or mention a `Map[T, _]`/`Set[T]` and compare `T`.
 - **Enum methods.** `fn name(self, …)` blocks after an enum's variants work like struct methods:

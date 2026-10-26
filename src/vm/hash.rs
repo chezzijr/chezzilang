@@ -254,8 +254,8 @@ impl Vm {
     /// VM re-entry ⇒ no GC fires mid-copy), so it needs no rooting; a caller that then re-enters the
     /// VM (e.g. `hash_value` on a *later* element) must root the returned snapshot itself.
     ///
-    /// Deliberately NOT `deep_clone` (the concurrency airlock's `to_wire`/`from_wire`): that
-    /// serializer (a) FAULTS on a generator / cyclic key — nonsensical for a plain
+    /// Deliberately NOT a full deep copy (the deleted concurrency airlock's serializer): that copy
+    /// (a) FAULTED on a generator / cyclic key — nonsensical for a plain
     /// single-thread insert that previously stored the key by reference and worked — and (b) rebuilds
     /// every by-reference sub-value (a `Closure`/`Channel`/`Shared`/… field) with a FRESH handle,
     /// which `values_equal` (identity-only for those arms) then never matches, so a later lookup of
@@ -387,9 +387,9 @@ impl Vm {
     /// every other value (scalars, immutable `Str`/`Bytes`/`Ptr`/`Builtin`, and all identity-compared
     /// by-reference objects: `Closure`/`Func`/`Channel`/`Shared`/…/`Generator`/`Iter`/`Cell`) BY
     /// REFERENCE — keeping those handles is what preserves `values_equal` (identity-only for them) and
-    /// avoids the airlock's non-sendable faults. `visited` maps an original aggregate handle to its
+    /// avoids a fault on a value a deep copy cannot rebuild. `visited` maps an original aggregate handle to its
     /// copy so a cyclic key is copied ONCE (cycle preserved, not overflowed); `depth` caps genuinely
-    /// deep (non-cyclic) keys at `MAX_STRUCTURAL_DEPTH` — the SAME bound `values_equal`/`to_wire` use —
+    /// deep (non-cyclic) keys at `MAX_STRUCTURAL_DEPTH` — the SAME bound `values_equal` uses —
     /// degrading to by-reference rather than a host-stack overflow. Pure alloc (no VM re-entry) so no
     /// GC can run mid-walk, hence no rooting: the intermediate handles held in Rust locals stay live.
     fn snapshot_value(

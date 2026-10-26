@@ -41,6 +41,14 @@ fn io_state_now<T>(inner: &std::sync::Mutex<Option<T>>) -> bool {
     true
 }
 
+/// What a `&self` render ([`Vm::display_guarded`]) is inside: the boxes (core addresses) and the
+/// containers on its path. A back edge to either renders as a marker, not a deeper walk.
+#[derive(Default)]
+pub(super) struct OpenRender {
+    boxes: Vec<usize>,
+    objs: Vec<GcRef>,
+}
+
 impl Vm {
     /// [`io_state`] for the print path: a busy handle is waited for through the GC door.
     fn io_state_door<T>(&mut self, inner: &std::sync::Mutex<Option<T>>) -> bool {
@@ -97,16 +105,28 @@ impl Vm {
     }
 
     /// `Display` form. Thin wrapper over the depth-guarded worker — kept infallible so every
-    /// error-message / `display_wire` caller is unchanged; a cyclic structure renders as `<...>` here
-    /// (the print path surfaces the error).
+    /// error-message caller is unchanged; a structure too deep renders as `<...>` here (the print
+    /// path surfaces the error).
     pub(super) fn display(&self, v: Value) -> String {
         self.display_guarded(v, 0)
             .unwrap_or_else(|_| "<...>".to_string())
     }
 
     /// Depth-guarded structural display. Returns `Err` (recoverable) once recursion exceeds
-    /// [`MAX_STRUCTURAL_DEPTH`] — guarding cyclic data from overflowing the host stack.
+    /// [`MAX_STRUCTURAL_DEPTH`] — guarding deep data from overflowing the host stack.
     pub(super) fn display_guarded(&self, v: Value, depth: usize) -> Result<String, RuntimeError> {
+        self.display_walk(v, depth, &mut OpenRender::default())
+    }
+
+    /// [`display_guarded`](Vm::display_guarded) with what the walk has `open`: a container or a box
+    /// met again inside its own render is a back edge, and renders as the print path's marker
+    /// (`[...]`, `{...}`, `Set(...)`, `...`, `Shared(...)`; W14-35c, TICKET-246).
+    fn display_walk(
+        &self,
+        v: Value,
+        depth: usize,
+        open: &mut OpenRender,
+    ) -> Result<String, RuntimeError> {
         if self.walk_base + depth > MAX_STRUCTURAL_DEPTH {
             return Err(self.depth_exceeded_err(Span::RUNTIME));
         }
@@ -129,43 +149,55 @@ impl Vm {
                 Obj::Bytes(b) => Ok(crate::slice::bytes_repr(b)),
                 // Python `bytearray` repr `bytearray(b'...')` — shared via `slice::bytearray_repr`.
                 Obj::ByteArray(b) => Ok(crate::slice::bytearray_repr(&b.to_vec())),
+                Obj::List(_) if open.objs.contains(&h) => Ok("[...]".to_string()),
                 Obj::List(items) => {
                     let mut parts = Vec::with_capacity(items.len());
+                    open.objs.push(h);
                     for v in items {
-                        parts.push(self.display_guarded(v, depth + 1)?);
+                        parts.push(self.display_walk(v, depth + 1, open));
                     }
+                    open.objs.pop();
+                    let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
                     Ok(format!("[{}]", parts.join(", ")))
                 }
                 Obj::Tuple(items) => {
                     let n = items.len();
                     let mut parts = Vec::with_capacity(n);
                     for v in items {
-                        parts.push(self.display_guarded(*v, depth + 1)?);
+                        parts.push(self.display_walk(*v, depth + 1, open)?);
                     }
                     Ok(crate::base::words::tuple_text(parts))
                 }
+                Obj::Map(_) if open.objs.contains(&h) => Ok("{...}".to_string()),
                 Obj::Map(m) => {
                     let mut parts = Vec::with_capacity(m.entries.len());
+                    open.objs.push(h);
                     for (_, k, v) in &m.entries {
-                        parts.push(format!(
-                            "{}: {}",
-                            self.display_guarded(k, depth + 1)?,
-                            self.display_guarded(v, depth + 1)?
-                        ));
+                        parts.push(self.display_walk(k, depth + 1, open).and_then(|k| {
+                            Ok(format!("{k}: {}", self.display_walk(v, depth + 1, open)?))
+                        }));
                     }
+                    open.objs.pop();
+                    let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
                     Ok(format!("{{{}}}", parts.join(", ")))
                 }
                 Obj::Set(s) => {
                     if s.entries.is_empty() {
                         Ok("Set()".to_string())
+                    } else if open.objs.contains(&h) {
+                        Ok("Set(...)".to_string())
                     } else {
                         let mut parts = Vec::with_capacity(s.entries.len());
+                        open.objs.push(h);
                         for (_, v) in &s.entries {
-                            parts.push(self.display_guarded(v, depth + 1)?);
+                            parts.push(self.display_walk(v, depth + 1, open));
                         }
+                        open.objs.pop();
+                        let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
                         Ok(format!("{{{}}}", parts.join(", ")))
                     }
                 }
+                Obj::Struct { .. } if open.objs.contains(&h) => Ok("...".to_string()),
                 Obj::Struct { tid, fields, .. } => {
                     // Positional layout: recover declaration-order field names from the StructDef
                     // (cold display path). Resolve the type key from `tid`; snapshot values to drop
@@ -181,10 +213,16 @@ impl Vm {
                         .map(|d| (d.display_name.clone(), d.fields.clone()))
                         .unwrap_or_else(|| (crate::base::words::bare_display(name), Vec::new()));
                     let mut parts = Vec::with_capacity(vals.len());
+                    open.objs.push(h);
                     for (i, v) in vals.iter().enumerate() {
                         let k = names.get(i).cloned().unwrap_or_else(|| i.to_string());
-                        parts.push(format!("{k}={}", self.display_guarded(*v, depth + 1)?));
+                        parts.push(
+                            self.display_walk(*v, depth + 1, open)
+                                .map(|v| format!("{k}={v}")),
+                        );
                     }
+                    open.objs.pop();
+                    let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
                     Ok(format!("{display}({})", parts.join(", ")))
                 }
                 Obj::Enum {
@@ -196,7 +234,7 @@ impl Vm {
                     if let Some(prefix) = self.carrier_prefix(*variant_id, payload) {
                         let inner = match payload.try_get(0) {
                             Some(v) => {
-                                self.display_guarded(v, if depth == 0 { 0 } else { depth + 1 })?
+                                self.display_walk(v, if depth == 0 { 0 } else { depth + 1 }, open)?
                             }
                             None => Self::NONE_TEXT.to_string(),
                         };
@@ -210,7 +248,7 @@ impl Vm {
                     } else {
                         let mut parts = Vec::with_capacity(payload.len());
                         for v in &payload {
-                            parts.push(self.display_guarded(*v, depth + 1)?);
+                            parts.push(self.display_walk(*v, depth + 1, open)?);
                         }
                         Ok(format!("{variant}({})", parts.join(", ")))
                     }
@@ -235,9 +273,9 @@ impl Vm {
                 // invisible here too, matching `Channel.len()`.
                 Obj::Channel(core) => Ok(format!("Channel(len={})", core.q.lock().unwrap().len())),
                 // A box renders through `display_box` only (TICKET-246).
-                Obj::Shared(core) => Ok(self.display_box_alone(BoxCore::Shared(core))),
-                Obj::RwShared(core) => Ok(self.display_box_alone(BoxCore::RwShared(core))),
-                Obj::Atomic(core) => Ok(self.display_box_alone(BoxCore::Atomic(core))),
+                Obj::Shared(core) => self.display_box(BoxCore::Shared(core), depth, open),
+                Obj::RwShared(core) => self.display_box(BoxCore::RwShared(core), depth, open),
+                Obj::Atomic(core) => self.display_box(BoxCore::Atomic(core), depth, open),
                 Obj::AtomicInt(core) => Ok(format!(
                     "AtomicInt({})",
                     core.v.load(std::sync::atomic::Ordering::SeqCst)
@@ -269,219 +307,38 @@ impl Vm {
                 Obj::Generator(_) => Ok("<generator>".to_string()),
                 // A cell is a transparent by-reference box (never a user-visible operand — reads
                 // `CellLoad` first); defensively display its inner value.
-                Obj::Cell(v) => self.display_guarded(v.get(), depth),
+                Obj::Cell(v) => self.display_walk(v.get(), depth, open),
                 Obj::Iter { .. } => Ok("<iterator>".to_string()),
             },
         }
     }
 
-    /// `Display` form of a [`WireValue`] — the read-only (`&self`) counterpart of [`display`] for
-    /// values that live in a core (only a box renders its contents). A `Handle(GcRef)` resolves
-    /// back through the heap via `display`; a nested box renders through [`Vm::display_box`], the
-    /// same function its heap counterpart uses. B3.1: total over the sendable set.
-    #[cfg(test)]
-    pub(super) fn display_wire(&self, w: &WireValue) -> String {
-        self.display_wire_in(w, &mut Vec::new())
-    }
-
-    /// A box with nothing being rendered around it.
-    fn display_box_alone(&self, core: BoxCore) -> String {
-        self.display_box(core, &mut Vec::new())
-    }
-
-    /// What a box holds, encoded so a box it reaches renders through this same renderer and a
-    /// cycle ends on `seen`. M3.2 / M3.3 — the value itself, read with no wait (each box holds one
-    /// word); a value with no wire form (a suspended generator) renders as the heap object.
-    fn box_peek(&self, core: BoxCore) -> WireValue {
-        let v = match core {
-            BoxCore::Shared(c) => c.v.get(),
-            BoxCore::RwShared(c) => c.v.get(),
-            BoxCore::Atomic(c) => c.load(),
-        };
-        self.to_wire_memo_at(v, Span::default(), &mut airlock_out::WireMemo::default())
-            .unwrap_or(WireValue::Handle(v.as_gcref()))
-    }
-
-    /// TICKET-246 — the ONE renderer of a `Shared` / `RwShared` / `Atomic`, for a heap object and
-    /// for a wire handle alike. Its rule:
+    /// TICKET-246 — the ONE renderer of a `Shared` / `RwShared` / `Atomic`, for every path that
+    /// renders one. Its rule:
     ///
-    /// 1. a box already on the `seen` stack renders `Shared(...)`, like any container cycle;
+    /// 1. a box already open in this render renders `Shared(...)`, like any container cycle;
     /// 2. it takes no lock and no guard: it reads the box's one slot (M3.3), as Go's `fmt` reads a
     ///    struct's fields, and renders that value with no safepoint in between;
     /// 3. contents render structurally, with no user `str` hook: a hook is user code.
-    pub(super) fn display_box(&self, core: BoxCore, seen: &mut Vec<usize>) -> String {
+    pub(super) fn display_box(
+        &self,
+        core: BoxCore,
+        depth: usize,
+        open: &mut OpenRender,
+    ) -> Result<String, RuntimeError> {
         let (label, addr) = (core.label(), core.addr());
-        if seen.contains(&addr) {
-            return format!("{label}(...)");
+        if open.boxes.contains(&addr) {
+            return Ok(format!("{label}(...)"));
         }
-        let w = self.box_peek(core);
-        seen.push(addr);
-        let inner = self.display_wire_in(&w, seen);
-        seen.pop();
-        format!("{label}({inner})")
+        open.boxes.push(addr);
+        let inner = self.display_walk(core.peek(), depth + 1, open);
+        open.boxes.pop();
+        Ok(format!("{label}({})", inner?))
     }
 
-    /// [`display_wire`](Vm::display_wire) with the stack of boxes being rendered.
-    fn display_wire_in(&self, w: &WireValue, seen: &mut Vec<usize>) -> String {
-        match w {
-            WireValue::Int(n) => n.to_string(),
-            WireValue::Float(x) => format_float(*x),
-            WireValue::Bool(b) => b.to_string(),
-            WireValue::Nil => Self::NONE_TEXT.to_string(),
-            // Every `display_wire` caller renders a NESTED position — inside `Shared(…)`/`Atomic(…)`,
-            // a container, or a struct field — so a wire string is always quoted (`Shared(['a'])`).
-            WireValue::Str(s) => crate::slice::str_repr(s),
-            WireValue::Bytes(b) => crate::slice::bytes_repr(b),
-            WireValue::ByteArray(b) => crate::slice::bytearray_repr(b),
-            WireValue::Handle(h) => self.display(Value::obj(*h)),
-            WireValue::List { items, .. } => {
-                let inner = items
-                    .iter()
-                    .map(|v| self.display_wire_in(v, seen))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("[{inner}]")
-            }
-            WireValue::Tuple { items, .. } => {
-                crate::base::words::tuple_text(items.iter().map(|v| self.display_wire_in(v, seen)))
-            }
-            WireValue::Map { entries, .. } => {
-                let inner = entries
-                    .iter()
-                    .map(|(_, k, v)| {
-                        format!(
-                            "{}: {}",
-                            self.display_wire_in(k, seen),
-                            self.display_wire_in(v, seen)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{{{inner}}}")
-            }
-            WireValue::Set { entries, .. } => {
-                if entries.is_empty() {
-                    "Set()".to_string()
-                } else {
-                    let inner = entries
-                        .iter()
-                        .map(|(_, v)| self.display_wire_in(v, seen))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("{{{inner}}}")
-                }
-            }
-            WireValue::Struct { name, fields, .. } => {
-                let inner = fields
-                    .iter()
-                    .map(|(k, v)| format!("{k}={}", self.display_wire_in(v, seen)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                // ROOT REDESIGN — `name` is the qualified identity key; render the bare display name.
-                let display = self
-                    .program
-                    .structs
-                    .get(name.as_ref())
-                    .map(|d| d.display_name.clone())
-                    .unwrap_or_else(|| crate::base::words::bare_display(name.as_ref()));
-                format!("{display}({inner})")
-            }
-            WireValue::Enum {
-                variant_id,
-                payload,
-                ..
-            } => {
-                // A carrier: its prefix, then its payload (a wire position is always nested).
-                if let Some(prefix) = Self::carrier_prefix_wire(*variant_id, payload) {
-                    let inner = match payload.first() {
-                        Some(v) => self.display_wire_in(v, seen),
-                        None => Self::NONE_TEXT.to_string(),
-                    };
-                    return format!("{prefix}{inner}");
-                }
-                // M19 lever #2 — the wire form carries the id; resolve the variant name on this cold
-                // display path via the shared program's `variants_by_id`.
-                let variant = self.enum_names(*variant_id).1;
-                if payload.is_empty() {
-                    variant.to_string()
-                } else {
-                    let inner = payload
-                        .iter()
-                        .map(|v| self.display_wire_in(v, seen))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("{variant}({inner})")
-                }
-            }
-            WireValue::Channel(core) => {
-                // TICKET-042a — see the `Obj::Channel` arm above.
-                format!("Channel(len={})", core.q.lock().unwrap().len())
-            }
-            WireValue::Shared(core) => self.display_box(BoxCore::Shared(core), seen),
-            WireValue::RwShared(core) => self.display_box(BoxCore::RwShared(core), seen),
-            WireValue::Atomic(core) => self.display_box(BoxCore::Atomic(core), seen),
-            WireValue::AtomicInt(core) => {
-                format!(
-                    "AtomicInt({})",
-                    core.v.load(std::sync::atomic::Ordering::SeqCst)
-                )
-            }
-            WireValue::Executor(core) => format!("Executor(pending={})", core.outstanding()),
-            // D6: render open/closed without exposing the fd (mirrors the heap `Display`).
-            WireValue::Socket(core) => {
-                format!(
-                    "Socket({})",
-                    if core.stream.lock().unwrap().is_some() {
-                        "open"
-                    } else {
-                        "closed"
-                    }
-                )
-            }
-            WireValue::Listener(core) => {
-                format!(
-                    "Listener({})",
-                    if core.listener.lock().unwrap().is_some() {
-                        "open"
-                    } else {
-                        "closed"
-                    }
-                )
-            }
-            // R2: render open/closed without exposing the fd (mirrors the heap `Display`).
-            WireValue::Writer(core) => io_handle_text("Writer", io_state_now(&core.inner)),
-            // R2b: render open/closed without exposing the fd (mirrors the heap `Display`).
-            WireValue::Reader(core) => io_handle_text("Reader", io_state_now(&core.inner)),
-            // An opaque `ptr` renders like its heap counterpart (`Obj::Ptr` → "<ptr null>"/"<ptr>");
-            // never the raw address (non-deterministic across engines).
-            WireValue::Ptr(a) => {
-                if *a == 0 {
-                    "<ptr null>".to_string()
-                } else {
-                    "<ptr>".to_string()
-                }
-            }
-            // A wired first-class builtin fn renders like its heap counterpart (`<builtin fn name>`).
-            WireValue::Builtin(b) => format!("<builtin fn {}>", b.name()),
-            // A wired native/FFI fn renders like its heap counterpart (`Obj::Native`/`Obj::Cffi`).
-            WireValue::Native { name, .. } => format!("<native fn {name}>"),
-            WireValue::Cffi(c) => format!("<extern fn {}>", c.name()),
-            // B3.6: a wired closure renders like its heap counterpart (`Obj::Closure` → "<closure>").
-            WireValue::Closure { .. } => "<closure>".to_string(),
-            // B3.3: a wired bare fn renders like its heap counterpart (`Obj::Func` → "<fn NAME>"),
-            // DISTINCT from a closure — this is why `WireValue::Func` is kept separate from `Closure`.
-            WireValue::Func { proto, .. } => format!("<fn {}>", self.program.protos[*proto].name),
-            // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
-            WireValue::Iter { .. } => "<iterator>".to_string(),
-            // A cell is a transparent box — render its inner value (never user-visible in practice).
-            WireValue::Cell { inner, .. } => self.display_wire_in(inner, seen),
-            // A back-reference closes a Cell/Closure cycle; render a stable marker rather than recurse
-            // (never user-visible in practice — a wire value is only rendered on the error path).
-            WireValue::Backref(_) => "<cycle>".to_string(),
-            // F3 path C: a wired generator renders like its heap counterpart (`Obj::Generator` →
-            // "<generator>").
-            WireValue::Generator { .. } => "<generator>".to_string(),
-        }
+    /// A box with nothing open around it (the print path's own walk keeps no [`OpenRender`]).
+    fn display_box_alone(&self, core: BoxCore, depth: usize) -> Result<String, RuntimeError> {
+        self.display_box(core, depth, &mut OpenRender::default())
     }
 
     /// Protocol-aware render for `print` / `str()` / interpolation: a struct with a self-only
@@ -841,9 +698,11 @@ impl Vm {
                 out.push_str(&io_handle_text("Reader", open));
             }
             // TICKET-246 / M3.3 — a box renders through its one renderer, with no wait.
-            Obj::Shared(c) => out.push_str(&self.display_box_alone(BoxCore::Shared(&c))),
-            Obj::RwShared(c) => out.push_str(&self.display_box_alone(BoxCore::RwShared(&c))),
-            Obj::Atomic(c) => out.push_str(&self.display_box_alone(BoxCore::Atomic(&c))),
+            Obj::Shared(c) => out.push_str(&self.display_box_alone(BoxCore::Shared(&c), depth)?),
+            Obj::RwShared(c) => {
+                out.push_str(&self.display_box_alone(BoxCore::RwShared(&c), depth)?)
+            }
+            Obj::Atomic(c) => out.push_str(&self.display_box_alone(BoxCore::Atomic(&c), depth)?),
             // Experimental generators stringify opaquely (no protocol hook).
             Obj::Generator(_) => out.push_str("<generator>"),
             // A cell is a transparent by-reference box (never a user-visible operand — reads

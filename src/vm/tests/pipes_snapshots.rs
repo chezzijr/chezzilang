@@ -1914,38 +1914,24 @@ main()
     }
 }
 
-/// TICKET-192: `RwShared[Map].get_key` scans the flat `WireValue::Map` entry vector, so one lookup is
-/// O(n) and n lookups on an n-entry shared map are O(n^2). Go `sync.Map` / a CPython `dict` behind a
-/// `Lock` are O(1) per lookup. Pinned with a COUNT of the wire nodes rebuilt (TICKET-233): a key and
-/// a value per lookup, against every stored entry per lookup for a scan.
-///
-/// M3.3: the box holds the map by handle and a lookup is the map's own hash probe, so no wire node
-/// is rebuilt at all (before: 8001; a scan would be 4 000 000).
+/// TICKET-192: `RwShared[Map].get_key` once scanned the box's copied entry vector, O(n) per lookup.
+/// Go `sync.Map` / a CPython `dict` behind a `Lock` are O(1) per lookup. M3.3: the box holds the map
+/// by handle and a lookup is the map's own hash probe. M3.5 deleted the wire node counter with the
+/// wire form; this pins the result.
 #[test]
 fn rwshared_map_get_key_is_not_linear() {
     let src = "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := ConcurrentMap(concurrency.RwShared(m))\n    s := 0\n    i = 0\n    while i < n:\n        match box.get(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
-    let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "2000\n");
-    assert_eq!(
-        touches, 0,
-        "2000 ConcurrentMap.get on a 2000-entry map rebuilt {touches} wire nodes (M3.3: none)"
-    );
 }
 
-/// TICKET-192: `RwShared[Map].set_key` writes one entry in place instead of re-encoding the whole map
-/// (what `write` does). 2000 inserts then 2000 overwrites on one box, pinned with the same count.
-///
-/// M3.3: a writer stores its key and its value by handle, so no wire node is rebuilt (before:
-/// 10003; a re-encode would be millions).
+/// TICKET-192: `RwShared[Map].set_key` writes one entry in place. 2000 inserts then 2000 overwrites
+/// on one box. M3.3: a writer stores its key and its value by handle.
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
     let src = "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(concurrency.RwShared(m))\n    i := 0\n    while i < n:\n        _ := box.insert(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        _ := box.insert(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
-    let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "2000\n2000\n");
-    assert_eq!(
-        touches, 0,
-        "2000 ConcurrentMap.insert inserts + 2000 overwrites rebuilt {touches} wire nodes (M3.3: none)"
-    );
 }
 
 /// TICKET-194 X1: an op that does not wait is not a cancellation point. A job that already returned

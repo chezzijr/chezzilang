@@ -95,7 +95,7 @@ import Point as Pt from core.geo     # rename on import (user types only)
 canonical **identity key**, always module-qualified: `<module-key>::Name` (the module key is the
 declaring module's dotted path, or the entry file's stem).
 - The key is the runtime type tag and the key into every layout table (construction, field/method
-  resolution, `match`-pattern variant ids, `json.decode` targets, the task wire/snapshot format). The
+  resolution, `match`-pattern variant ids, `json.decode` targets). The
   checker, compiler, and VM derive it identically. Two modules' `Point` are `a::Point` and `b::Point`,
   with no collision special case.
 - The **display name** is the bare `Name`. All user-facing output (print/`str`, error messages,
