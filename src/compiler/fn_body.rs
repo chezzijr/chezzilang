@@ -57,16 +57,8 @@ impl Compiler {
         fc.is_generator = decl.is_generator;
         fc.is_test = decl.is_test;
         fc.decl_span = decl.name_span;
-        if decl.is_generator
-            && let Some(names) = self
-                .gen_crossings
-                .frames
-                .get(&(self.current_module_idx, decl.name_span))
-        {
-            fc.gen_slots = names.clone();
-        }
         for p in &decl.params {
-            fc.add_frame_local(p.name.clone());
+            fc.add_local(p.name.clone());
         }
         for w in &self.witness_locals {
             fc.add_local(witness_local(w));
@@ -236,9 +228,6 @@ impl Compiler {
     }
 
     pub(super) fn finish(&mut self, fc: FnComp) -> ProtoId {
-        let claims = |c: &[Option<bool>]| c.iter().map(|&c| c == Some(true)).collect::<Vec<_>>();
-        let private = crate::base::crossing::slot_bits(&claims(&fc.slot_private));
-        let deep = private & crate::base::crossing::slot_bits(&claims(&fc.slot_deep));
         let pid = self.program.protos.len();
         // M19: peephole pass — const-fold + superinstruction fusion, with jump relocation.
         let (code, lines) = peephole::optimize(fc.code, fc.lines);
@@ -255,8 +244,6 @@ impl Compiler {
             decl_span: fc.decl_span,
             // Lever #3: cold-path capture-name metadata in slot order (empty for non-closures).
             capture_names: fc.captured_names,
-            private_slots: private,
-            deep_slots: deep,
         });
         pid
     }

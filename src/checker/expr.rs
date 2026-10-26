@@ -117,37 +117,6 @@ impl Checker {
         let t = self.infer_call_dispatch(callee, args, named, type_args, span);
         // TICKET-269: a handed receiver lives for this call only; a later pass re-infers the node.
         self.handed_recv = None;
-        let slots = self.bound_slots(call_id, args, named);
-        // TICKET-190: a call that creates a generator stamps its param slots with how each
-        // argument crosses (a fresh argument is private to the new frame). A bare-name callee
-        // stamps only through `labels_certain`, settled at its binding's `pop_scope`: a written
-        // binding may hold another fn at the call, so that call gets no stamp.
-        if self.records_node(call_id)
-            && self
-                .named_fn_summary(callee)
-                .is_some_and(|(_, s)| s.is_generator)
-        {
-            let crossing = self.call_crossing(&slots);
-            let call = (self.graph_module_idx, call_id.0);
-            match callee.kind.as_ident() {
-                Some(name) => {
-                    if let Some(key) = self.labels_certain(name) {
-                        let pending = (key, super::globals::KwUse::GenStamp(call, crossing, span));
-                        if !self.kw_pending.contains(&pending) {
-                            self.kw_pending.push(pending);
-                        }
-                    }
-                }
-                None => crate::checker::record_call_table_entry(
-                    &mut self.gen_crossings.calls,
-                    &mut self.table_conflicts,
-                    call,
-                    crossing,
-                    "generator crossing",
-                    span,
-                ),
-            }
-        }
         let consumed = std::mem::replace(&mut self.call_ctx, saved).is_some_and(|c| c.consumed);
         // A call whose named arguments no binder and no refusal consumed: its callee binds none.
         if !named.is_empty() && !consumed {
@@ -757,7 +726,7 @@ impl Checker {
                 // Settled at the binding's `pop_scope` (a write may come after this call). Nothing
                 // is recorded under the generic-arg prepass, and a closure body inferred more than
                 // once (DEC-025) records each call once.
-                let pending = (key, super::globals::KwUse::Keyword(span));
+                let pending = (key, span);
                 if !self.generic_arg_prepass && !self.kw_pending.contains(&pending) {
                     self.kw_pending.push(pending);
                 }

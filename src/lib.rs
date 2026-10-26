@@ -63,7 +63,7 @@ pub(crate) mod test_support;
 
 // Each layer is its own crate, so an edit in one never recompiles a layer it does not reach:
 // `chezzi-syntax` (lexer, AST, parser), `chezzi-native` (natives, FFI, embedded std), `chezzi-base`
-// (bytecode, hooks, crossing marks), `chezzi-front` (resolver, desugar, checker, compiler) and
+// (bytecode, hooks, message words), `chezzi-front` (resolver, desugar, checker, compiler) and
 // `chezzi-vm`. Their sources stay under `src/`, and every `crate::<module>::…` path in this crate keeps
 // resolving through these re-exports.
 pub use chezzi_base::base;

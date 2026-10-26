@@ -380,7 +380,6 @@ impl Vm {
             | Op::False
             | Op::Nil
             | Op::Pop
-            | Op::StampGen(_)
             | Op::Assert { .. }
             | Op::LoadBuiltin(_)
             | Op::GetLocal(_)
@@ -507,7 +506,6 @@ impl Vm {
                 | Op::False
                 | Op::Nil
                 | Op::Pop
-                | Op::StampGen(_)
                 | Op::Assert { .. }
                 | Op::LoadBuiltin(_)
                 | Op::GetLocal(_)
@@ -904,7 +902,6 @@ impl Vm {
             | Op::False
             | Op::Nil
             | Op::Pop
-            | Op::StampGen(_)
             | Op::Assert { .. }
             | Op::LoadBuiltin(_)
             | Op::GetLocal(_)
@@ -1027,7 +1024,6 @@ impl Vm {
             | Op::False
             | Op::Nil
             | Op::Pop
-            | Op::StampGen(_)
             | Op::Assert { .. }
             | Op::LoadBuiltin(_)
             | Op::GetLocal(_)
@@ -1166,7 +1162,6 @@ impl Vm {
                         | Op::False
                         | Op::Nil
                         | Op::Pop
-                        | Op::StampGen(_)
                         | Op::Assert { .. }
                         | Op::LoadBuiltin(_)
                         | Op::GetLocal(_)

@@ -210,15 +210,6 @@ impl Compiler {
             } => {
                 let bracket = bracket.as_deref();
                 self.compile_call(fc, callee, args, named, bracket, expr.span, expr.id)?;
-                // TICKET-190: a call that creates a generator stamps its param crossings.
-                if let Some(c) = self
-                    .gen_crossings
-                    .calls
-                    .get(&(self.current_module_idx, expr.id.0))
-                {
-                    let mask = crate::base::crossing::stamp_mask(&c.args);
-                    fc.emit(Op::StampGen(mask), expr.span);
-                }
             }
             ExprKind::Field { obj, name, .. } => {
                 // A tuple slot (`t.0`) is a value, never a name; everything else reads the

@@ -745,7 +745,6 @@ impl Checker {
         }
         let map = struct_param_map(info, targs);
         Some(FnSig {
-            summary: fn_writes::FnSummary::default(),
             ..instantiate_method(sig, &map)
         })
     }

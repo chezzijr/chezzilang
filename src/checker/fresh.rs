@@ -1,8 +1,92 @@
-//! Checker: block checking and fresh temporaries: `check_block`, `temporary_write`, `fresh_shape`,
-//! generator frames, call crossing.
+//! Checker: block checking and fresh temporaries: `check_block`, `temporary_write`, `fresh_shape`
+//! and its `Fresh` shape.
 //! Split out of `src/checker/sig.rs`. `super::*` is the parent module.
 
 use super::*;
+
+/// The deepest shape level `Checker::fresh_shape` describes; below it a subtree is [`Fresh::Marked`].
+const MAX_DEPTH: usize = 16;
+/// The most positional children one [`Kids::At`] holds; a wider node falls back to [`Kids::Each`].
+const MAX_WIDTH: usize = 64;
+
+/// TICKET-254 — which objects of the value graph an expression builds are new: no name holds them
+/// (TICKET-240 drew the shape for the deleted airlock; the temporary-write warning reads it).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Fresh {
+    /// A name may still hold it: do not descend.
+    Marked,
+    /// Built by the expression; [`Kids`] says which of its children are.
+    Node(Kids),
+    /// Every object reachable from it was built by the expression.
+    All,
+}
+
+/// The children of a [`Fresh::Node`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Kids {
+    /// Every child stays marked (`copy()` is shallow, DEC-160).
+    Marked,
+    /// Every child takes this one shape. For a map these are its VALUES; a key stays marked.
+    Each(Box<Fresh>),
+    /// Child `i` takes shape `i`.
+    At(Box<[Fresh]>),
+}
+
+impl Fresh {
+    pub(super) fn is_all(&self) -> bool {
+        *self == Fresh::All
+    }
+
+    pub(super) fn is_marked(&self) -> bool {
+        *self == Fresh::Marked
+    }
+
+    /// A fresh object whose children all stay marked.
+    pub(super) fn root() -> Fresh {
+        Fresh::Node(Kids::Marked)
+    }
+
+    /// A fresh object whose children each take shape `k`.
+    pub(super) fn each(k: Fresh) -> Fresh {
+        match k {
+            Fresh::All => Fresh::All,
+            Fresh::Marked => Fresh::root(),
+            k => Fresh::Node(Kids::Each(Box::new(k))),
+        }
+    }
+
+    /// A fresh object with positional children. No child, or every child `All`, is `All`. Past
+    /// [`MAX_WIDTH`] children it is `each` of their [`meet`](Fresh::meet).
+    pub(super) fn at(kids: Vec<Fresh>) -> Fresh {
+        if kids.iter().all(Fresh::is_all) {
+            Fresh::All
+        } else if kids.len() > MAX_WIDTH {
+            Fresh::each(Fresh::meet(&kids))
+        } else {
+            Fresh::Node(Kids::At(kids.into_boxed_slice()))
+        }
+    }
+
+    /// A fresh map whose keys are not all fresh: its values each take shape `k`. It NEVER gives
+    /// `All`, because a name may still hold a key.
+    pub(super) fn values(k: Fresh) -> Fresh {
+        match k {
+            Fresh::Marked => Fresh::root(),
+            k @ Fresh::Node(_) | k @ Fresh::All => Fresh::Node(Kids::Each(Box::new(k))),
+        }
+    }
+
+    /// One shape that is sound for every one of `kids`: the shared shape when all are equal,
+    /// root-only when none is `Marked`, else `Marked`.
+    pub(super) fn meet(kids: &[Fresh]) -> Fresh {
+        match kids {
+            [] => Fresh::All,
+            [first, rest @ ..] if rest.iter().all(|k| k == first) => first.clone(),
+            _ if kids.iter().any(Fresh::is_marked) => Fresh::Marked,
+            _ => Fresh::root(),
+        }
+    }
+}
 
 impl Checker {
     pub(super) fn check_block(&mut self, block: &Block) {
@@ -25,8 +109,7 @@ impl Checker {
     /// user operator, so the result is a new value that holds no operand.
     fn operands_keep_root(&mut self, left: &Expr, right: &Expr) -> bool {
         let (l, r) = (self.probe_ty(left), self.probe_ty(right));
-        let op = fn_writes::RootUse::Op;
-        self.use_keeps_root(&op, &l) && self.use_keeps_root(&op, &r)
+        self.op_keeps_root(&l) && self.op_keeps_root(&r)
     }
 
     /// TICKET-254 — `obj.name(..)` is a native method of a `List`/`Map`/`Set`/`bytearray` whose
@@ -36,7 +119,7 @@ impl Checker {
     /// so the shape is `Fresh::root()` (DEC-160).
     fn native_method_returns_container(&mut self, obj: &Expr, name: &str) -> bool {
         let recv = self.probe_ty(obj);
-        fn_writes::native_receiver(recv.scalar()).is_some_and(|(key, _)| {
+        fn_writes::native_receiver(recv.scalar()).is_some_and(|key| {
             self.structs
                 .get(key)
                 .and_then(|info| info.methods.get(name))
@@ -61,7 +144,7 @@ impl Checker {
     /// element `xs` shares).
     pub(super) fn temporary_write(&mut self, written: &Expr) -> bool {
         let (base, links) = fn_writes::place_base(written, &|span| self.is_fresh_subscript(span));
-        let shape = self.fresh_shape(base, 0, true);
+        let shape = self.fresh_shape(base, 0);
         if links == 0 {
             !shape.is_marked()
         } else {
@@ -69,18 +152,17 @@ impl Checker {
         }
     }
 
-    /// D4 (TICKET-240): what a crossing leaves marked in the value graph `e` builds. The one
-    /// decider of "can the parent still reach this object", recursive over the expression. A
+    /// TICKET-240 / TICKET-254: which objects of the value graph `e` builds are new. The one
+    /// decider of "can a name still reach this object", recursive over the expression. A
     /// constructor-like node is fresh and each child is judged by the same rule: a list, tuple,
     /// set or map literal, a comprehension, a struct or variant constructor, a carrier wrap
     /// (explicit, or the implicit one `WrapTable` records), and a zero-argument `.copy()` on a
     /// List/Map/Set/bytearray (its own level only, DEC-160). A name, a field read, an index and
-    /// any other call result stay `Marked` (`id(xs)` returns the parent's own list). A map with a
+    /// any other call result stay `Marked` (`id(xs)` returns the caller's own list). A map with a
     /// key that is not fresh is never `All`: a struct with a mutable field is a legal key. Below
-    /// `MAX_DEPTH` levels a subtree is `Marked`. `live` is false when `e` is read outside the
-    /// scope it was checked in: nothing is inferred then, so a `.copy()` stays `Marked`.
-    pub(super) fn fresh_shape(&mut self, e: &Expr, depth: usize, live: bool) -> Fresh {
-        if depth >= crate::base::crossing::MAX_DEPTH {
+    /// `MAX_DEPTH` levels a subtree is `Marked`.
+    pub(super) fn fresh_shape(&mut self, e: &Expr, depth: usize) -> Fresh {
+        if depth >= MAX_DEPTH {
             return Fresh::Marked;
         }
         let d = depth + 1;
@@ -92,8 +174,7 @@ impl Checker {
                 lhs: left,
                 rhs: right,
                 ..
-            } if live
-                && fn_writes::aliases_operand(&e.kind) == fn_writes::OperandAlias::Fresh
+            } if fn_writes::aliases_operand(&e.kind) == fn_writes::OperandAlias::Fresh
                 && self.operands_keep_root(left, right) =>
             {
                 Fresh::root()
@@ -106,23 +187,19 @@ impl Checker {
             | ExprKind::Bool(..)
             | ExprKind::NoneLit => Fresh::All,
             ExprKind::List(items, _) | ExprKind::Tuple(items) => {
-                Fresh::at(items.iter().map(|x| self.fresh_shape(x, d, live)).collect())
+                Fresh::at(items.iter().map(|x| self.fresh_shape(x, d)).collect())
             }
             ExprKind::Set(items) => {
-                if items.iter().all(|x| self.fresh_shape(x, d, live).is_all()) {
+                if items.iter().all(|x| self.fresh_shape(x, d).is_all()) {
                     Fresh::All
                 } else {
                     Fresh::root()
                 }
             }
             ExprKind::Map(pairs) => {
-                let keys_fresh = pairs
-                    .iter()
-                    .all(|(k, _)| self.fresh_shape(k, d, live).is_all());
-                let values: Vec<Fresh> = pairs
-                    .iter()
-                    .map(|(_, v)| self.fresh_shape(v, d, live))
-                    .collect();
+                let keys_fresh = pairs.iter().all(|(k, _)| self.fresh_shape(k, d).is_all());
+                let values: Vec<Fresh> =
+                    pairs.iter().map(|(_, v)| self.fresh_shape(v, d)).collect();
                 if keys_fresh && values.iter().all(Fresh::is_all) {
                     Fresh::All
                 } else {
@@ -132,7 +209,7 @@ impl Checker {
             ExprKind::Comprehension {
                 kind, key, elem, ..
             } => {
-                let elem = self.fresh_shape(elem, d, live);
+                let elem = self.fresh_shape(elem, d);
                 match kind {
                     crate::ast::CompKind::List => Fresh::each(elem),
                     crate::ast::CompKind::Set if elem.is_all() => Fresh::All,
@@ -140,7 +217,7 @@ impl Checker {
                     crate::ast::CompKind::Map => {
                         let key_fresh = key
                             .as_deref()
-                            .is_some_and(|k| self.fresh_shape(k, d, live).is_all());
+                            .is_some_and(|k| self.fresh_shape(k, d).is_all());
                         if key_fresh && elem.is_all() {
                             Fresh::All
                         } else {
@@ -153,7 +230,7 @@ impl Checker {
             // at frame end, after this runs. The compiler finds no record for a synthesized node.
             ExprKind::Unary { op, expr } => match super::fn_writes::aliases_operand(&e.kind) {
                 super::fn_writes::OperandAlias::Holds => {
-                    let held = Fresh::at(vec![self.fresh_shape(expr, d, live)]);
+                    let held = Fresh::at(vec![self.fresh_shape(expr, d)]);
                     if *op == crate::ast::UnaryOp::Wrap {
                         return if e.id.0 == crate::ast::NodeId::SYNTH.0 {
                             Fresh::Marked
@@ -174,7 +251,7 @@ impl Checker {
                 ..
             } => match &callee.kind {
                 ExprKind::Field { obj, name, .. }
-                    if live && self.native_method_returns_container(obj, name) =>
+                    if self.native_method_returns_container(obj, name) =>
                 {
                     Fresh::root()
                 }
@@ -218,7 +295,7 @@ impl Checker {
                             .struct_shape(&key)
                             .is_some_and(|s| s.fields.len() == slots.len())
                         {
-                            Fresh::at(slots.iter().map(|s| self.slot_fresh(s, d, live)).collect())
+                            Fresh::at(slots.iter().map(|s| self.slot_fresh(s, d)).collect())
                         } else {
                             Fresh::root()
                         }
@@ -228,7 +305,7 @@ impl Checker {
                     Some(Resolution::Variant { .. } | Resolution::VariantFn { .. })
                         if named.is_empty() =>
                     {
-                        Fresh::at(args.iter().map(|x| self.fresh_shape(x, d, live)).collect())
+                        Fresh::at(args.iter().map(|x| self.fresh_shape(x, d)).collect())
                     }
                     Some(Resolution::Variant { .. } | Resolution::VariantFn { .. }) => {
                         Fresh::root()
@@ -265,90 +342,17 @@ impl Checker {
     /// The shape of one bound slot of a call. A variadic pack is a list built at the call site; an
     /// inline default is a self-contained literal; a provider default is a call result, which may
     /// return a global (a known false-fault ceiling).
-    fn slot_fresh(&mut self, s: &super::fn_writes::SlotSrc, depth: usize, live: bool) -> Fresh {
+    fn slot_fresh(&mut self, s: &super::fn_writes::SlotSrc, depth: usize) -> Fresh {
         match s {
-            super::fn_writes::SlotSrc::Arg(e) => self.fresh_shape(e, depth, live),
+            super::fn_writes::SlotSrc::Arg(e) => self.fresh_shape(e, depth),
             super::fn_writes::SlotSrc::Pack(elems) => Fresh::at(
                 elems
                     .iter()
-                    .map(|e| self.fresh_shape(e, depth + 1, live))
+                    .map(|e| self.fresh_shape(e, depth + 1))
                     .collect(),
             ),
             super::fn_writes::SlotSrc::Default { inline: true } => Fresh::All,
             super::fn_writes::SlotSrc::Default { inline: false } => Fresh::Marked,
-        }
-    }
-
-    /// TICKET-190, TICKET-240: record a generator decl's frame slot verdicts (Rule G). A slot is
-    /// `Root` when every binding of it builds a fresh root and that root cannot escape the body. It
-    /// is `All` when, in addition, every binding is all-fresh and [`Self::deep_private`] holds. A
-    /// param takes its shape from the creating call's stamp unless an assignment rebinds it. Main
-    /// pass only; a second walk of the same decl keeps the lower verdict.
-    pub(super) fn record_gen_frame(&mut self, decl: &FnDecl) {
-        let Some(acc) = self.gen_frame.take() else {
-            return;
-        };
-        if self.generic_arg_prepass || self.resolving_returns || decl.name_span == Span::default() {
-            return;
-        }
-        let uses = super::fn_writes::frame_uses(decl);
-        let is_param = |n: &str| decl.params.iter().any(|p| p.name == n);
-        let names: Vec<(String, Fresh)> = decl
-            .params
-            .iter()
-            .map(|p| {
-                let shape = acc.fresh.get(&p.name).cloned().unwrap_or(Fresh::All);
-                (p.name.clone(), shape)
-            })
-            .chain(
-                acc.fresh
-                    .iter()
-                    .filter(|(n, _)| !is_param(n))
-                    .map(|(n, f)| (n.clone(), f.clone())),
-            )
-            .collect();
-        // The root test first: it only reads `self`.
-        let stays: Vec<bool> = {
-            let callee = |c: &super::fn_writes::ArgCallee, j: usize| self.arg_escapes(c, j, None);
-            let no_tys = Vec::new();
-            names
-                .iter()
-                .map(|(n, shape)| {
-                    !shape.is_marked()
-                        && !self.root_leaves(&uses, n, acc.tys.get(n).unwrap_or(&no_tys), &callee)
-                })
-                .collect()
-        };
-        let mut slots = HashMap::new();
-        for ((n, shape), stays) in names.into_iter().zip(stays) {
-            if !stays {
-                continue;
-            }
-            if shape.is_all() && self.deep_private(&uses, &acc, &n) {
-                slots.insert(n, SlotFresh::All);
-            } else if !uses.matched.contains(&n) {
-                slots.insert(n, SlotFresh::Root);
-            }
-        }
-        let key = (self.graph_module_idx, decl.name_span);
-        match self.gen_crossings.frames.get_mut(&key) {
-            Some(prev) => {
-                prev.retain(|n, _| slots.contains_key(n));
-                for (n, v) in prev.iter_mut() {
-                    *v = (*v).min(slots[n]);
-                }
-            }
-            None => {
-                self.gen_crossings.frames.insert(key, slots);
-            }
-        }
-    }
-
-    /// TICKET-189: how a call's bound slots cross, for a call that creates a generator: its
-    /// creation stamp (TICKET-190).
-    pub(super) fn call_crossing(&mut self, slots: &[super::fn_writes::SlotSrc]) -> CallCrossing {
-        CallCrossing {
-            args: slots.iter().map(|s| self.slot_fresh(s, 0, true)).collect(),
         }
     }
 
@@ -372,5 +376,48 @@ impl Checker {
         self.stmt_mark = outer;
         self.stmt_mark.poison += inner;
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_layout_round_trips() {
+        use Fresh::{All, Marked, Node};
+        assert_eq!(Fresh::root(), Node(Kids::Marked));
+        assert_eq!(Fresh::each(All), All);
+        assert_eq!(Fresh::each(Marked), Fresh::root());
+        assert_eq!(
+            Fresh::each(Fresh::root()),
+            Node(Kids::Each(Box::new(Fresh::root())))
+        );
+        // `at`: no kid and all-`All` kids are `All`; anything else keeps its positions.
+        assert_eq!(Fresh::at(vec![]), All);
+        assert_eq!(Fresh::at(vec![All, All]), All);
+        assert_eq!(
+            Fresh::at(vec![All, Marked]),
+            Node(Kids::At(vec![All, Marked].into_boxed_slice()))
+        );
+        // The value each side of MAX_WIDTH.
+        let mut wide = vec![Fresh::root(); MAX_WIDTH];
+        assert!(matches!(Fresh::at(wide.clone()), Node(Kids::At(k)) if k.len() == MAX_WIDTH));
+        wide.push(Fresh::root());
+        assert_eq!(Fresh::at(wide.clone()), Fresh::each(Fresh::root()));
+        wide.push(Marked);
+        assert_eq!(Fresh::at(wide), Fresh::root());
+        // `meet`.
+        assert_eq!(Fresh::meet(&[Fresh::root(), Fresh::root()]), Fresh::root());
+        assert_eq!(Fresh::meet(&[All, Fresh::root()]), Fresh::root());
+        assert_eq!(Fresh::meet(&[Marked, All]), Marked);
+        assert_eq!(Fresh::meet(&[All, All]), All);
+        // A map with a key that is not fresh never becomes `All`, at any nesting.
+        let v = Fresh::values(All);
+        assert_eq!(v, Node(Kids::Each(Box::new(All))));
+        assert!(!v.is_all());
+        assert!(!Fresh::at(vec![v.clone()]).is_all());
+        assert!(!Fresh::each(v).is_all());
+        assert_eq!(Fresh::values(Marked), Fresh::root());
     }
 }

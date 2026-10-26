@@ -70,7 +70,6 @@ impl Checker {
             loop_vars: Vec::new(),
             globals: HashMap::new(),
             functions: HashMap::new(),
-            fn_write_scopes: Vec::new(),
             local_fn_names: std::collections::HashSet::new(),
             structs: HashMap::new(),
             protocols: HashMap::new(),
@@ -140,8 +139,6 @@ impl Checker {
             field_widths: crate::checker::FieldWidthTable::new(),
             fresh_subscripts: Default::default(),
             sum_seeds: crate::checker::SumSeedTable::new(),
-            gen_crossings: crate::checker::GenCrossings::default(),
-            gen_frame: None,
             ret_coerce: crate::checker::RetCoerceTable::new(),
             wraps: crate::checker::WrapTable::new(),
             table_conflicts: Vec::new(),
@@ -197,8 +194,6 @@ impl Checker {
             index_value_checks: 0,
             #[cfg(any(test, feature = "test-api"))]
             bracket_receivers: 0,
-            #[cfg(any(test, feature = "test-api"))]
-            writer_scans: 0,
             memo_verify: std::env::var_os("CHEZZI_MEMO_VERIFY").is_some(),
             memo_verifying: false,
         };

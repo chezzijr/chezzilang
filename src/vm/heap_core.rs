@@ -509,6 +509,7 @@ mod tests {
     #[test]
     fn airlock_state_is_gone_from_proto_and_heap_core() {
         assert_eq!(std::mem::size_of::<super::HeapCore>(), 464);
+        assert_eq!(std::mem::size_of::<crate::base::op::Proto>(), 136);
     }
 
     /// A mark left on a freed slot (the collector marks a dangling ref, then `children` panics on

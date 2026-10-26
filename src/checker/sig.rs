@@ -282,10 +282,6 @@ impl Checker {
             .collect();
         let wparams = self.witness_params_of(decl);
         FnSig {
-            summary: fn_writes::FnSummary {
-                is_generator: decl.is_generator,
-                ..Default::default()
-            },
             // Trailing defaulted parameters are filled by the CALLEE's own prologue, so a call may
             // omit them. Same predicate the compiler sizes `Proto::min_arity` with — and because
             // this reading DEPENDS on `wparams`, which the hoist fixpoint re-derives (non-monotone:

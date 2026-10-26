@@ -114,7 +114,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, ns, rc, conflicts, rs, nf, gc, wr, ht, hc, fw) = tables;
+    let (kw, wt, ct, ns, rc, conflicts, rs, nf, wr, ht, hc, fw) = tables;
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
     c.hook_calls = hc;
@@ -124,7 +124,6 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.witnesses = wt;
     c.carriers = ct;
     c.sum_seeds = ns;
-    c.gen_crossings = gc;
     c.resolutions = rs;
     c.ret_coerce = rc;
     c.wraps = wr;
@@ -237,7 +236,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, ns, rc, conflicts, rs, nf, gc, wr, ht, hc, fw) =
+    let (kw, wt, ct, ns, rc, conflicts, rs, nf, wr, ht, hc, fw) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
@@ -248,7 +247,6 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.witnesses = wt;
     c.carriers = ct;
     c.sum_seeds = ns;
-    c.gen_crossings = gc;
     c.resolutions = rs;
     c.ret_coerce = rc;
     c.wraps = wr;
@@ -404,9 +402,6 @@ struct Compiler {
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
     /// pre-fix lowering. See [`crate::checker::SumSeedTable`].
     sum_seeds: crate::checker::SumSeedTable,
-    /// TICKET-190 — the checker's generator creation stamps and private frame slot names. See
-    /// [`crate::checker::GenCrossings`].
-    gen_crossings: crate::checker::GenCrossings,
     /// TICKET-180 — the checker's answer to what every name head means; the ONLY source for
     /// it. Read through [`Compiler::resolution`].
     resolutions: crate::checker::ResolutionTable,
@@ -665,7 +660,6 @@ impl Compiler {
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
-            gen_crossings: crate::checker::GenCrossings::default(),
             resolutions: crate::checker::ResolutionTable::new(),
             fall_off: crate::checker::FallOffTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),

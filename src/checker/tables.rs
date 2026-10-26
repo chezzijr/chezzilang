@@ -62,7 +62,6 @@ pub type CallTables = (
     TableConflicts,
     ResolutionTable,
     FallOffTable,
-    GenCrossings,
     WrapTable,
     HookTable,
     HookCallTable,

@@ -80,7 +80,6 @@ impl Checker {
             kw_certain: self.kw_certain.clone(),
             kw_written: self.kw_written.clone(),
             kw_pending: self.kw_pending.clone(),
-            fn_write_scopes: self.fn_write_scopes.clone(),
         }
     }
 
@@ -100,7 +99,6 @@ impl Checker {
         self.kw_certain = m.kw_certain;
         self.kw_written = m.kw_written;
         self.kw_pending = m.kw_pending;
-        self.fn_write_scopes = m.fn_write_scopes;
     }
 
     /// Attribute a diagnostic to the module currently being checked (graph path only). Shared by
@@ -136,8 +134,7 @@ impl Checker {
     pub(super) fn begin_module(&mut self, label: Option<String>) {
         self.scopes.clear();
         self.hole_rejected.clear();
-        // `push_scope` pushes both stacks; index `i` of one is scope `i` of the other (TICKET-190).
-        self.fn_write_scopes.clear();
+        // `push_scope` pushes both stacks; index `i` of one is scope `i` of the other.
         self.loop_vars.clear();
         self.functions.clear();
         self.fn_homes.clear();
@@ -230,7 +227,6 @@ impl Checker {
         self.collect_docs(stmts);
         self.hoist(stmts);
         self.bind_variant_imports(stmts);
-        self.infer_fn_summaries(stmts);
         // SINGLE-RESOLVER FFI fix: cache every struct declared in THIS module under its identity key,
         // its by-value `CType::Struct` computed HERE — in this (the DEFINING) module's import/alias
         // scope (extends the `AliasSig::ctype` precedent to structs). Done only when harvesting
@@ -698,6 +694,5 @@ pub(super) struct DiagMark {
     table_conflicts: Vec<(Span, String)>,
     kw_certain: HashMap<(usize, String), Vec<(usize, String)>>,
     kw_written: std::collections::HashSet<(usize, String)>,
-    kw_pending: Vec<(Vec<(usize, String)>, super::globals::KwUse)>,
-    fn_write_scopes: Vec<HashMap<String, fn_writes::FnSummary>>,
+    kw_pending: Vec<(Vec<(usize, String)>, Span)>,
 }

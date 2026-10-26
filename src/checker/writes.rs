@@ -1,5 +1,5 @@
-//! Checker: loop variables, captures, task writes, places and subscripts, self writers, closure
-//! captures.
+//! Checker: loop variables, the `spawn:` frame flag, bound call slots, subscript keys and
+//! module-scope names.
 //! Split out of `src/checker/setup.rs`. `super::*` is the parent module.
 
 use super::*;

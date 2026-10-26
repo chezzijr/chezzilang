@@ -21,8 +21,6 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         is_test: false,
         decl_span: Span::RUNTIME,
         capture_names: Vec::new(),
-        private_slots: 0,
-        deep_slots: 0,
     };
     let program = Program {
         protos: vec![proto],

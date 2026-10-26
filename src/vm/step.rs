@@ -43,36 +43,6 @@ impl Vm {
             Op::Pop => {
                 self.pop();
             }
-            Op::StampGen(m) => {
-                if let Some(h) = self.stack.last().and_then(|v| v.as_obj())
-                    && matches!(self.heap.get(h), Obj::Generator(_))
-                {
-                    let heap = self.heap.write(h);
-                    let Obj::Generator(g) = heap.get(h) else {
-                        unreachable!()
-                    };
-                    let pending = g.parked.with(|p| {
-                        matches!(
-                            p,
-                            Some(Parked {
-                                state: GenState::Pending(_),
-                                ..
-                            })
-                        )
-                    });
-                    if pending {
-                        let p = &self.program.protos[g.proto];
-                        g.stamp.set(
-                            g.stamp.get()
-                                | m & crate::base::crossing::param_stamp(
-                                    p.private_slots,
-                                    p.deep_slots,
-                                    p.arity,
-                                ),
-                        );
-                    }
-                }
-            }
             Op::Assert { has_msg, cmp } => {
                 // Reached only on the failing path: the compiler emits `Op::Assert` after a
                 // `JumpIfFalse` that already consumed (and tested) `cond`, so this op always faults.

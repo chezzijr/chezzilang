@@ -45,17 +45,6 @@ pub fn check_graph_counting_fn_bodies(graph: &ModuleGraph) -> usize {
     })
 }
 
-/// TICKET-265 — the number of top-level fns one checker pass over `graph` scans for writes
-/// (`Checker::writer_scans`).
-#[cfg(any(test, feature = "test-api"))]
-pub fn check_graph_counting_writer_scans(graph: &ModuleGraph) -> usize {
-    crate::on_frontend_stack_scoped(move || {
-        let mut c = Checker::new();
-        c.run_graph_pass(graph, false);
-        c.writer_scans
-    })
-}
-
 /// [`check`], plus the number of `index_value` entries the pass made (TICKET-253;
 /// `Checker::index_value_checks`): one per subscript when each index is typed once.
 #[cfg(any(test, feature = "test-api"))]
@@ -360,7 +349,6 @@ pub(super) fn compile_tables_pass(
             std::mem::take(&mut c.table_conflicts),
             std::mem::take(&mut c.resolutions),
             std::mem::take(&mut c.fall_off),
-            std::mem::take(&mut c.gen_crossings),
             std::mem::take(&mut c.wraps),
             std::mem::take(&mut c.hook_table),
             std::mem::take(&mut c.hook_calls),

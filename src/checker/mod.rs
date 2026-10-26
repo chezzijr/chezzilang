@@ -25,10 +25,9 @@ pub(crate) use builtin_type::BuiltinType;
 pub use graph_pass::std_protocol_owner;
 pub use ty::Ty;
 pub use ty::{
-    ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,
-    FallOff, FallOffTable, FnLabels, Fresh, GenCrossings, Resolution, ResolutionTable, RetCoerce,
-    RetCoerceTable, SlotFresh, SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc,
-    WitnessTable, Wrap, WrapTable,
+    ArgFill, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, FallOff, FallOffTable, FnLabels,
+    Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
+    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -386,31 +385,6 @@ struct CallCtx {
     bracket: Option<Expr>,
 }
 
-/// TICKET-190 — the facts a generator body's check collects for its frame verdict.
-#[derive(Clone, Debug, Default)]
-struct GenFrameAcc {
-    /// Per name: the `Fresh::meet` of the shape of every single-name `let` and plain assignment
-    /// of it (`fresh_shape`); `Marked` once a destructuring `let` or an unsafe compound
-    /// assignment bound it.
-    fresh: HashMap<String, Fresh>,
-    /// TICKET-240: the type `Checker::infer` gave each node of the body, by `NodeId`. A missing
-    /// id is unknown, which no deep-privacy rule accepts.
-    expr_tys: HashMap<u32, Ty>,
-    /// Per name: the declared type of each single-name `let` of it.
-    tys: HashMap<String, Vec<Ty>>,
-}
-
-impl GenFrameAcc {
-    /// One more binding of `name` with `shape`.
-    fn bind(&mut self, name: &str, shape: Fresh) {
-        let met = match self.fresh.get(name) {
-            Some(prev) => Fresh::meet(&[prev.clone(), shape]),
-            None => shape,
-        };
-        self.fresh.insert(name.to_string(), met);
-    }
-}
-
 /// A protocol bound with its type args RESOLVED (`Conv[S]` -> name `Conv`, args `[Ty::Param("S")]`).
 /// The args are resolved once, in the DECLARING scope, by [`Checker::resolve_bound`] (TICKET-202):
 /// a use site substitutes them, never re-resolves them in the caller's scope.
@@ -451,8 +425,6 @@ fn subst_ty_params(tps: &[TyParam], map: &HashMap<String, Ty>) -> Vec<TyParam> {
 /// only for generic functions (`fn max[T: Comparable]`), where `params`/`ret` contain `Ty::Param`s.
 #[derive(Clone)]
 struct FnSig {
-    /// Proven writes and param escapes of this named function (TICKET-190: one summary).
-    summary: fn_writes::FnSummary,
     params: Vec<Ty>,
     /// Swift-style parameter labels parallel to `params` (the declaration's param names; `None` for
     /// `self` or an unnamed slot). Surface-only — used ONLY to build a labelled `Ty::Func` value type
@@ -537,7 +509,6 @@ impl FnSig {
     fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
         let min_params = params.len();
         FnSig {
-            summary: fn_writes::FnSummary::default(),
             labels: Vec::new(),
             params,
             ret,
@@ -649,8 +620,7 @@ struct MemberSig {
     ty: Ty,
     /// The one declaration the slot holds: set only when the module declares the name once as
     /// `fn` / extern / native, which a fn slot keeps because it can never be assigned. Labels,
-    /// defaults, variadic, type params, witnesses, the write summary and the escape verdict are
-    /// read from here and nowhere else.
+    /// defaults, variadic, type params and witnesses are read from here and nowhere else.
     certain_fn: Option<FnSig>,
     /// A `const` top-level let, or a native constant.
     is_const: bool,
@@ -820,7 +790,6 @@ struct Checker {
     /// (`poison_reads`); the stored type is bare `Ty::Unknown`, which other sources produce too.
     hole_rejected: Vec<std::collections::HashSet<String>>,
     functions: HashMap<String, FnSig>,
-    fn_write_scopes: Vec<HashMap<String, fn_writes::FnSummary>>,
     /// Names of functions declared in the CURRENT module (top-level `fn`s only — NOT imported names).
     /// Gates the generic-fn-as-value turbofish B-path (`ident[int]`) so the checker only accepts a
     /// turbofish on a SAME-MODULE generic fn — the exact set the compiler's `fn_names` erases at
@@ -1065,12 +1034,6 @@ struct Checker {
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
     /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`SumSeedTable`].
     sum_seeds: SumSeedTable,
-    /// TICKET-190 — generator creation stamps and private frame slots, consumed verbatim by the
-    /// compiler. See [`GenCrossings`].
-    gen_crossings: GenCrossings,
-    /// TICKET-190 — while a generator body is checked: per name, whether every binding of it is
-    /// fresh, and the types it was declared with. `None` outside a generator body.
-    gen_frame: Option<GenFrameAcc>,
     /// W8-21 — which implicit success-coercion, if any, each declared `T?`/`T!E` return sink applies,
     /// keyed by [`ret_coerce_key`] on the returned value's own span and consumed verbatim by the
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is
@@ -1348,10 +1311,10 @@ struct Checker {
     /// TICKET-139 (W14-2) — every accepted keyword call through a `kw_certain` binding, settled at
     /// the binding's `pop_scope` against `kw_written` so the verdict does not depend on whether the
     /// write comes before or after the call. Deduplicated by `(keys, use)` (DEC-025: a closure body
-    /// is inferred more than once). TICKET-190: a generator creation stamp waits here too.
+    /// is inferred more than once). The span is the keyword call's.
     /// TICKET-197: an entry waits on every key it lists (the binding, then its `kw_certain`
     /// dependencies); each key settles at its own scope's `pop_scope`, and a write to any voids it.
-    kw_pending: Vec<(Vec<(usize, String)>, globals::KwUse)>,
+    kw_pending: Vec<(Vec<(usize, String)>, Span)>,
     /// TICKET-238 -- where the statement being checked began (`Checker::with_stmt_mark`).
     stmt_mark: StmtMark,
     /// TICKET-238 -- reads of a `hole_rejected` binding so far. Written during a body walk, so
@@ -1383,10 +1346,6 @@ struct Checker {
     /// [`check_counting_bracket_receivers`].
     #[cfg(any(test, feature = "test-api"))]
     bracket_receivers: usize,
-    /// TICKET-265 — top-level fns `infer_fn_summaries` scanned in this pass; read by
-    /// [`check_graph_counting_writer_scans`].
-    #[cfg(any(test, feature = "test-api"))]
-    writer_scans: usize,
 }
 
 mod args;

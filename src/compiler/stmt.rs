@@ -133,7 +133,7 @@ impl Compiler {
                         if fc.is_global_scope() {
                             fc.emit(Op::DefineGlobalSlot(self.global_slot(name)), stmt.span);
                         } else {
-                            fc.emit_decl_frame(name.clone(), stmt.span);
+                            fc.emit_decl_named(name.clone(), stmt.span);
                         }
                     }
                     Pattern::Variant { .. }

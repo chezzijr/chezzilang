@@ -168,32 +168,6 @@ pub enum SumSeed {
 }
 pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 
-pub use crate::base::crossing::{Fresh, SlotFresh};
-
-/// TICKET-190, TICKET-240 — the shape each argument of one generator-creating call crosses with:
-/// which objects of its value graph no caller binding can reach ([`Fresh`]). `args` is in
-/// bound-slot order, so default fills and packs sit at their compiled position.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CallCrossing {
-    pub args: Vec<Fresh>,
-}
-
-/// A [`CallCrossing`] per call, keyed `(graph module index, call NodeId)` like
-/// [`CallPlanTable`]. The checker decides it once (`Checker::fresh_shape`); the compiler only
-/// stores it. A missing key means every operand is `Marked`.
-pub type CrossingTable = HashMap<(usize, u32), CallCrossing>;
-
-/// TICKET-190 — the generator frame verdicts the compiler encodes. `calls` holds each call that
-/// creates a generator from a statically named fn, keyed like [`CrossingTable`]: its param
-/// shapes become the generator's creation stamp. `frames` holds, per generator decl keyed
-/// `(graph module index, decl name span)`, the verdict of each private frame slot name: `Root`
-/// or `All` (TICKET-240). A name it does not hold is `Marked`.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct GenCrossings {
-    pub calls: CrossingTable,
-    pub frames: HashMap<(usize, Span), HashMap<String, SlotFresh>>,
-}
-
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
 /// identity: two function types differing only in labels are the SAME type (mutually assignable,

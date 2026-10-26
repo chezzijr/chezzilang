@@ -557,7 +557,6 @@ impl Vm {
                 state: GenState::Pending(args),
                 ctx: GenCtx::default(),
             }),
-            stamp: RCell::new(0),
         };
         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
     }

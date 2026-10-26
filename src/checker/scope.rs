@@ -167,7 +167,6 @@ impl Checker {
 
     pub(super) fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
-        self.fn_write_scopes.push(HashMap::new());
         self.loop_vars.push(std::collections::HashSet::new());
         self.const_decls.push(std::collections::HashSet::new());
         self.hole_rejected.push(std::collections::HashSet::new());
@@ -181,39 +180,23 @@ impl Checker {
         // drain here.
         let top = self.scopes.len().saturating_sub(1);
         let pending = std::mem::take(&mut self.kw_pending);
-        for (mut keys, kw_use) in pending {
+        for (mut keys, span) in pending {
             let written = keys
                 .iter()
                 .find(|k| k.0 >= top && self.kw_written.contains(*k))
                 .cloned();
             keys.retain(|k| k.0 < top);
             if written.is_none() && !keys.is_empty() {
-                self.kw_pending.push((keys, kw_use));
+                self.kw_pending.push((keys, span));
                 continue;
             }
-            match kw_use {
-                super::globals::KwUse::Keyword(span) => {
-                    if let Some(key) = written {
-                        self.error(span, super::globals::kw_ambiguous_msg(&key.1));
-                    }
-                }
-                super::globals::KwUse::GenStamp(call, crossing, span) if written.is_none() => {
-                    crate::checker::record_call_table_entry(
-                        &mut self.gen_crossings.calls,
-                        &mut self.table_conflicts,
-                        call,
-                        crossing,
-                        "generator crossing",
-                        span,
-                    );
-                }
-                _ => {}
+            if let Some(key) = written {
+                self.error(span, super::globals::kw_ambiguous_msg(&key.1));
             }
         }
         self.kw_certain.retain(|k, _| k.0 < top);
         self.kw_written.retain(|k| k.0 < top);
         self.scopes.pop();
-        self.fn_write_scopes.pop();
         self.loop_vars.pop();
         self.const_decls.pop();
         self.hole_rejected.pop();

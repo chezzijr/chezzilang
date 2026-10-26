@@ -5,7 +5,7 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
 - The phases are `lexer` → `parser` → `ast` → `desugar` → `checker` → `compiler` → `vm` (the engine
   of record), plus `native` (builtins / std), `resolver` (module paths), `base` (what both the front
-  end and the VM read: bytecode, hooks, crossing marks) and `run` (the CLI's run drivers). Each layer
+  end and the VM read: bytecode, hooks, message words) and `run` (the CLI's run drivers). Each layer
   is its own crate: `crates/chezzi-syntax` (lexer, ast, parser), `crates/chezzi-native`,
   `crates/chezzi-base`, `crates/chezzi-front` (resolver, desugar, checker, compiler) and
   `crates/chezzi-vm`; the root `chezzi` crate holds the CLI, `run` and the editor. The sources stay

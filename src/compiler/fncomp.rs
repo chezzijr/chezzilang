@@ -56,14 +56,6 @@ pub(super) struct FnComp {
     /// This proto is a `test fn` body (free test or suite method). Stamped onto the [`Proto`] in
     /// `finish`; used only by `chezzi test` discovery.
     pub(super) is_test: bool,
-    /// TICKET-190, TICKET-240 — the checker's verdict per private frame slot name of this
-    /// generator body (empty for every other body). Read only by [`FnComp::add_frame_local`].
-    pub(super) gen_slots: HashMap<String, crate::base::crossing::SlotFresh>,
-    /// TICKET-190 — per slot, the AND of every binder's privacy claim (`None` = never claimed). A
-    /// slot reused by sibling scopes is private only if every binding in it is.
-    pub(super) slot_private: Vec<Option<bool>>,
-    /// TICKET-240 — the same AND for the claim that the slot's whole graph is private.
-    pub(super) slot_deep: Vec<Option<bool>>,
 }
 
 impl FnComp {
@@ -94,9 +86,6 @@ impl FnComp {
             has_implicit_nursery: false,
             is_generator: false,
             is_test: false,
-            gen_slots: HashMap::new(),
-            slot_private: Vec::new(),
-            slot_deep: Vec::new(),
         }
     }
 
@@ -191,13 +180,6 @@ impl FnComp {
         self.emit_decl_into(slot, span)
     }
 
-    /// TICKET-190 — [`Self::emit_decl_named`] for a single-name `let`: its slot claims the checker's
-    /// frame privacy verdict ([`Self::add_frame_local`]).
-    pub(super) fn emit_decl_frame(&mut self, name: String, span: Span) -> usize {
-        let slot = self.add_frame_local(name);
-        self.emit_decl_into(slot, span)
-    }
-
     fn emit_decl_into(&mut self, slot: usize, span: Span) -> usize {
         if self.is_boxed_slot(slot) {
             self.emit(Op::NewCell, span);
@@ -252,7 +234,6 @@ impl FnComp {
             | other @ Op::False
             | other @ Op::Nil
             | other @ Op::Pop
-            | other @ Op::StampGen(_)
             | other @ Op::Assert { .. }
             | other @ Op::LoadBuiltin(_)
             | other @ Op::GetLocal(_)
@@ -397,7 +378,6 @@ impl FnComp {
             | other @ Op::False
             | other @ Op::Nil
             | other @ Op::Pop
-            | other @ Op::StampGen(_)
             | other @ Op::Assert { .. }
             | other @ Op::LoadBuiltin(_)
             | other @ Op::GetLocal(_)
@@ -529,36 +509,7 @@ impl FnComp {
     /// Add a named local, returning its slot. A redeclaration in the same scope shadows by getting
     /// a fresh slot (later lookups find the newest).
     pub(super) fn add_local(&mut self, name: String) -> usize {
-        self.add_local_claiming(name, crate::base::crossing::SlotFresh::Marked)
-    }
-
-    /// TICKET-190 — [`Self::add_local`] for a declared param or a single-name `let`: the slot is
-    /// private when the checker named `name` private in this generator frame. Every other binder
-    /// claims `false`.
-    pub(super) fn add_frame_local(&mut self, name: String) -> usize {
-        let claim = self
-            .gen_slots
-            .get(&name)
-            .copied()
-            .unwrap_or(crate::base::crossing::SlotFresh::Marked);
-        self.add_local_claiming(name, claim)
-    }
-
-    fn add_local_claiming(
-        &mut self,
-        name: String,
-        claim: crate::base::crossing::SlotFresh,
-    ) -> usize {
-        use crate::base::crossing::SlotFresh;
         let slot = self.slot_count;
-        if self.slot_private.len() <= slot {
-            self.slot_private.resize(slot + 1, None);
-            self.slot_deep.resize(slot + 1, None);
-        }
-        self.slot_private[slot] =
-            Some(self.slot_private[slot].unwrap_or(true) && claim != SlotFresh::Marked);
-        self.slot_deep[slot] =
-            Some(self.slot_deep[slot].unwrap_or(true) && claim == SlotFresh::All);
         self.locals.push(LocalVar {
             name,
             depth: self.scope_depth,
@@ -577,7 +528,7 @@ impl FnComp {
 
     /// The ONE answer to "which of this frame's locals can a name see here", each paired with its
     /// slot (enumerate before skip, so the index stays the slot). Every name lookup and every
-    /// capture snapshot iterates this; slot allocation (`add_local_claiming`, `end_scope`) and
+    /// capture snapshot iterates this; slot allocation (`add_local`, `end_scope`) and
     /// slot-indexed reads (`is_boxed_slot`, `emit_hidden_get`/`emit_hidden_set`) use `locals`
     /// directly because they are about slots, not names.
     fn visible_locals(&self) -> impl DoubleEndedIterator<Item = (usize, &LocalVar)> {

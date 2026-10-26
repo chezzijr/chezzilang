@@ -725,7 +725,6 @@ impl Checker {
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         // An inline expression body is never a generator: a stray `yield` in it is diagnosed.
         let saved_ig = std::mem::replace(&mut self.in_generator, false);
-        let saved_gf = self.gen_frame.take();
         // M24 — same rule as `check_fn_body` (a module-level free fn or a member, never a nested fn).
         // Without it an UNANNOTATED `fn reset[T: Default](old: T): return T.default()` would infer
         // its return as `Unknown` here (the pass-1 error is truncated), and that residual Unknown is
@@ -765,7 +764,6 @@ impl Checker {
         };
         self.pop_scope();
         self.in_generator = saved_ig;
-        self.gen_frame = saved_gf;
         self.inferring_ret = saved_flag;
         self.current_ret = saved_ret;
         self.ret_declared = saved_ret_decl;

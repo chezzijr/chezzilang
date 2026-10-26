@@ -431,7 +431,6 @@ impl Vm {
                 | other @ Op::False
                 | other @ Op::Nil
                 | other @ Op::Pop
-                | other @ Op::StampGen(_)
                 | other @ Op::Assert { .. }
                 | other @ Op::LoadBuiltin(_)
                 | other @ Op::GetGlobalSlot(_)

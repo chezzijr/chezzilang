@@ -672,11 +672,6 @@ pub(crate) struct GeneratorCore {
     /// null pointer means a run holds the generator, so a second resume, on this thread or
     /// another, faults "generator already running" and never writes the frames twice.
     parked: rvec::AtomicBox<Parked>,
-    /// TICKET-190, TICKET-240: the creating call's verdict for each PARAM slot, two bits per param
-    /// (layout `crossing::stamp_mask`), set only by `Op::StampGen`. A marking crossing reads it
-    /// through `crossing::frame_slot`; a local slot reads the proto's own masks there. An
-    /// [`RCell`], so the stamp store takes `&self`.
-    stamp: RCell<u64>,
 }
 
 // Hand-rolled so `CallFrame`/`Handler`/`Deferred` need not derive `Debug` (keeps the hot call

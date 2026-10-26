@@ -39,12 +39,6 @@ impl Checker {
                     }
                 }
                 if target.target_ident().is_none() && !matches!(target, Pattern::Wildcard) {
-                    // TICKET-190: a destructured name is never a private frame slot.
-                    if let Some(acc) = &mut self.gen_frame {
-                        for n in &names {
-                            acc.fresh.insert(n.clone(), Fresh::Marked);
-                        }
-                    }
                     // destructuring let `a, (b, c) := expr` — `expr` must be a tuple of matching shape.
                     self.check_destructure(target, &val_ty, value.span, span);
                     return;
@@ -74,17 +68,6 @@ impl Checker {
                     return;
                 }
                 let name = &names[0];
-                // TICKET-190: a frame slot is private only if every binding of it is fresh.
-                if self.gen_frame.is_some() {
-                    let fresh = self.fresh_shape(value, 0, true);
-                    if let Some(acc) = &mut self.gen_frame {
-                        acc.bind(name, fresh);
-                        acc.tys
-                            .entry(name.clone())
-                            .or_default()
-                            .push(declared.clone());
-                    }
-                }
                 // TICKET-186: the first let of a seeded module global merges into the seed the
                 // bodies above it read; it never wipes it. `declared` is the merged type.
                 let refined = self.refine_first_let(name, declared.clone(), span, BindSite::Let);
@@ -174,25 +157,6 @@ impl Checker {
                 } else {
                     self.infer_value(value)
                 };
-                // TICKET-190: a plain rebind keeps a frame slot private only with a fresh value; a
-                // compound one only on a type whose operator cannot return a parent's value.
-                if self.gen_frame.is_some()
-                    && let ExprKind::Ident(n) = &target.kind
-                {
-                    let fresh = if *op == AssignOp::Eq {
-                        self.fresh_shape(value, 0, true)
-                    } else if self
-                        .lookup(n)
-                        .is_some_and(|t| self.use_keeps_root(&super::fn_writes::RootUse::Op, &t))
-                    {
-                        Fresh::root()
-                    } else {
-                        Fresh::Marked
-                    };
-                    if let Some(acc) = &mut self.gen_frame {
-                        acc.bind(n, fresh);
-                    }
-                }
                 self.check_assign(target, *op, val_ty, Some(value), span);
                 // TICKET-254 — `xs.copy()[0] = 9`, `g[0..2][0] = v` store into a value no name
                 // holds, so the store is dropped.
@@ -228,7 +192,6 @@ impl Checker {
                         return;
                     }
                     let mut sig = self.fn_sig(decl, decl.name_span, None);
-                    self.bind_nested_fn_summary(decl);
                     // TICKET-139 (W14-2) — a nested fn's own name is certain to hold that one fn (a
                     // keyword call through it is legal). Its two declares below are a same-scope
                     // re-declaration, which `declare` marks as a write; undo that mark unless the

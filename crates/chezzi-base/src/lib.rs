@@ -1,5 +1,5 @@
 #![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
-//! `chezzi-base`: what both the front end and the VM read (bytecode, hooks, crossing marks, module
+//! `chezzi-base`: what both the front end and the VM read (bytecode, hooks, message words, module
 //! identity). Its files live under `src/base/`, included by path.
 
 pub use chezzi_native::native;
