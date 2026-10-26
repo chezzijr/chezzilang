@@ -273,7 +273,7 @@ impl Checker {
     }
 
     /// The first type reachable from `ty` by a STRUCTURAL equality walk that has the `eq` hook,
-    /// or the first type parameter that does not carry `StructuralEq`, or `None`. `stack` is the cycle guard (`sendable_rec`'s shape — a recursive
+    /// or the first type parameter that does not carry `StructuralEq`, or `None`. `stack` is the cycle guard (a recursive
     /// `Node { next: Option[Node] }` terminates).
     ///
     /// Reachability here means exactly what `Vm::values_equal_guarded` recurses through: list/set

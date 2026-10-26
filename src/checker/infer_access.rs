@@ -962,21 +962,12 @@ impl Checker {
         if self.recover_depth > 0 {
             return match t {
                 Ty::Result(ok, err) => {
-                    // A `recover:` result's error slot is the built-in `Error` existential (sendable,
-                    // like every protocol) — the recover result (`Result[_, Error]`) is itself
-                    // sendable, so a propagated error must satisfy Error AND be sendable, else a
-                    // non-sendable payload would launder through the erased slot across a task
-                    // boundary. Split the diagnostic so a satisfies-but-non-sendable error is not
-                    // mislabelled as failing to satisfy Error (it does — it's merely non-sendable).
+                    // A `recover:` result's error slot is the built-in `Error` existential, so a
+                    // propagated error must satisfy Error.
                     if self.satisfies(&err, "Error").is_err() {
                         self.error(
                             span,
                             format!("'?' inside a recover block propagates error {err}, which must satisfy Error"),
-                        );
-                    } else if !self.sendable(&err) {
-                        self.error(
-                            span,
-                            format!("'?' inside a recover block propagates error {err}, which satisfies Error but isn't sendable — a recover result's error type is the sendable `Error`; name a sendable error type"),
                         );
                     }
                     *ok

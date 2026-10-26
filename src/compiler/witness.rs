@@ -258,8 +258,7 @@ impl Compiler {
     ///
     /// The wrapper is a `MakeClosure` rather than a `MakeFunc` only so it can reach the enclosing
     /// frame's `$w:T` witnesses the way a `defer:` block does ([`Self::with_witness_captures`]); nothing
-    /// else is captured, so a witness-free target is still a capture-free callee and crosses the
-    /// `spawn` airlock by handle. Returns the operand count for `DeferCall`/`SpawnCall`.
+    /// else is captured, so a witness-free target is still a capture-free callee. Returns the operand count for `DeferCall`/`SpawnCall`.
     pub(super) fn compile_receiverless_target(
         &mut self,
         fc: &mut FnComp,

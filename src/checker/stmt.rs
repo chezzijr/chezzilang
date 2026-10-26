@@ -592,9 +592,8 @@ impl Checker {
                 self.infer(e);
             }
             StmtKind::Defer(DeferTarget::Block(body)) => {
-                // `defer:` block — an ordinary nested scope checked in place. Unlike a `spawn:` block
-                // it runs in the same task (no thread airlock), so we push NO `capture_floor`: reads
-                // of enclosing locals (even non-sendable ones) are fine, and — uniform by-reference
+                // `defer:` block — an ordinary nested scope checked in place. It runs in the same
+                // task, and — uniform by-reference
                 // capture — the block shares the enclosing binding's cell, so writing back through a
                 // captured local now mutates the shared cell (A2/A3/E1); no reassign gate is needed.
                 // A `defer:` block compiles to a fresh child proto with an empty loop stack, so a
@@ -642,7 +641,7 @@ impl Checker {
                     SpawnTarget::Call(e) => {
                         // `spawn` targets a method call or a call to a first-class callable (a user
                         // function/closure, a name bound to one, or a first-class builtin fn value —
-                        // `print`/`ord`/`chr`/`panic`, which cross the airlock by name). Other built-ins
+                        // `print`/`ord`/`chr`/`panic`). Other built-ins
                         // and struct/enum constructors are not first-class values — wrap them in a
                         // function. Mirrors `defer`'s guard so the two features agree.
                         if let ExprKind::Call { callee, .. } = &e.kind {

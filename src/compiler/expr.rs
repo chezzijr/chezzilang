@@ -643,8 +643,8 @@ impl Compiler {
             DeferTarget::Call(call) => call,
             DeferTarget::Block(body) => {
                 // `defer:` block → a synthetic zero-arg closure capturing the referenced bindings by
-                // reference at the defer point (exactly `compile_spawn`'s Block arm, minus the
-                // airlock), then defer-invoke it with 0 args. Reuses `MakeClosure` + `DeferCall` — no
+                // reference at the defer point (exactly `compile_spawn`'s Block arm), then
+                // defer-invoke it with 0 args. Reuses `MakeClosure` + `DeferCall` — no
                 // new op. Free-variable capture (Finding D): only names the block references.
                 let snap = fc.snapshot_entries();
                 let (kept, free) = filter_entries_free_block(&snap, body, &[]);

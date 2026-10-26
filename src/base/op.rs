@@ -549,11 +549,11 @@ pub enum Op {
     /// `has_cap`: when `true`, a capacity int is on the operand stack (pop it; `<= 0` faults, else the
     /// channel is bounded to that many queued messages). When `false`, the channel is unbounded.
     NewChannel(bool),
-    /// `Shared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Shared(init)`.
+    /// `Shared(v)` — stack `[init]`; pop it, push `Obj::Shared(init)` (the box holds `init` itself).
     NewShared,
-    /// `RwShared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::RwShared(init)`.
+    /// `RwShared(v)` — stack `[init]`; pop it, push `Obj::RwShared(init)`.
     NewRwShared,
-    /// `Atomic(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Atomic(init)`.
+    /// `Atomic(v)` — stack `[init]`; pop it, push `Obj::Atomic(init)`.
     NewAtomic,
     /// `AtomicInt(v)` — stack `[init]`; pop the int, push a fresh lock-free `Obj::AtomicInt(AtomicI64)`.
     NewAtomicInt,

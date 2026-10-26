@@ -826,8 +826,8 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         // Capture ONLY the names this body actually references from the enclosing frame (its
         // free-variable set), not every visible local. Capturing all visible locals (the old model)
-        // dragged unused non-sendable siblings (a closure value / live generator) across the spawn
-        // airlock → check-OK/run-fault (Finding D). `free_names_expr` is a trusted over-approximation
+        // dragged unused siblings (a closure value / live generator) into the spawn's deep copy
+        // → check-OK/run-fault (Finding D, before M3.4). `free_names_expr` is a trusted over-approximation
         // (it also drives cell-boxing), so this is behavior-identical and strictly smaller.
         let params_set: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
         let mut free = FreeNames::default();

@@ -774,9 +774,8 @@ impl Checker {
             Ty::Channel(elem) => {
                 // The sigs are harvested from `std/prelude.chz`'s `native struct Channel[T]` (re-seeded
                 // by `seed_stdlib_structs`); the element type is substituted for `Ty::Param("T")` here.
-                // `send(v)` moves `v` across the airlock; `check_args` enforces it matches the element
-                // type `T`, which is itself sendable-checked at the channel's construction — so a
-                // well-typed `send` is always sendable.
+                // `send(v)` hands `v` over by handle (M3.2); `check_args` enforces it matches the
+                // element type `T`.
                 let elem = (**elem).clone();
                 if let Some(sig) =
                     self.native_method_sig("Channel", method, std::slice::from_ref(&elem))
