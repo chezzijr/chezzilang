@@ -114,7 +114,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, ns, rc, conflicts, fo, rs, nf, gc, wr, ht, hc, fw) = tables;
+    let (kw, wt, ct, ns, rc, conflicts, rs, nf, gc, wr, ht, hc, fw) = tables;
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
     c.hook_calls = hc;
@@ -124,7 +124,6 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.witnesses = wt;
     c.carriers = ct;
     c.sum_seeds = ns;
-    c.crossings = fo;
     c.gen_crossings = gc;
     c.resolutions = rs;
     c.ret_coerce = rc;
@@ -238,7 +237,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, ns, rc, conflicts, fo, rs, nf, gc, wr, ht, hc, fw) =
+    let (kw, wt, ct, ns, rc, conflicts, rs, nf, gc, wr, ht, hc, fw) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
@@ -249,7 +248,6 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.witnesses = wt;
     c.carriers = ct;
     c.sum_seeds = ns;
-    c.crossings = fo;
     c.gen_crossings = gc;
     c.resolutions = rs;
     c.ret_coerce = rc;
@@ -406,11 +404,6 @@ struct Compiler {
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
     /// pre-fix lowering. See [`crate::checker::SumSeedTable`].
     sum_seeds: crate::checker::SumSeedTable,
-    /// D4 (TICKET-189, TICKET-240) — the checker's per-slot shape for each `spawn` call, read by
-    /// [`Self::crossing_mask`]. See [`crate::checker::CrossingTable`].
-    crossings: crate::checker::CrossingTable,
-    /// The index of each distinct entry of `Program.fresh_calls`.
-    fresh_index: HashMap<Vec<crate::checker::Fresh>, usize>,
     /// TICKET-190 — the checker's generator creation stamps and private frame slot names. See
     /// [`crate::checker::GenCrossings`].
     gen_crossings: crate::checker::GenCrossings,
@@ -577,7 +570,6 @@ impl Compiler {
             providers: Vec::new(),
             native_methods: HashMap::new(),
             native_home: HashMap::new(),
-            fresh_calls: Vec::new(),
             variants: HashMap::new(),
             variants_by_id: Vec::new(),
             struct_names: Vec::new(),
@@ -673,8 +665,6 @@ impl Compiler {
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
-            crossings: crate::checker::CrossingTable::new(),
-            fresh_index: HashMap::new(),
             gen_crossings: crate::checker::GenCrossings::default(),
             resolutions: crate::checker::ResolutionTable::new(),
             fall_off: crate::checker::FallOffTable::new(),

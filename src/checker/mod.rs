@@ -583,7 +583,6 @@ struct StructInfo {
     /// The ctor's call-binding slots, one per field (see [`FnSig::slots`]). `None` for a native or
     /// builtin struct.
     field_slots: Option<Vec<crate::desugar::SlotSpec>>,
-    self_writers: HashSet<String>,
 }
 
 /// A protocol's required method signatures, in declaration order. `Self` appears as `Ty::Param("Self")`
@@ -783,15 +782,6 @@ struct EnumSigInfo {
     /// The enum's own decl docstring, carried across the module boundary for an importer's hover
     /// (see [`StructInfo::doc`]). Editor-only; never read by checking/codegen.
     doc: Option<String>,
-}
-
-/// B3.3 (Task 2a) — one non-sendable LOCAL capture of a closure/nested-fn value: the captured
-/// binding's name and its checker type. Recorded at the value's decl site and replayed as a compile
-/// error at a spawn callee/arg site.
-#[derive(Clone)]
-struct Capture {
-    name: String,
-    ty: Ty,
 }
 
 /// TICKET-238 -- the state of `errors` and `poison_reads` when a statement began, and its span.
@@ -1075,9 +1065,6 @@ struct Checker {
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
     /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`SumSeedTable`].
     sum_seeds: SumSeedTable,
-    /// D4 (TICKET-179) — which `spawn` operands are fresh, recorded by the spawn arm and consumed
-    /// verbatim by the compiler. See [`CrossingTable`].
-    crossings: CrossingTable,
     /// TICKET-190 — generator creation stamps and private frame slots, consumed verbatim by the
     /// compiler. See [`GenCrossings`].
     gen_crossings: GenCrossings,
@@ -1245,32 +1232,6 @@ struct Checker {
     /// `int`. A function of the AST alone (a span carries its module), so no `DiagMark` entry.
     const_operand_faults:
         std::collections::HashMap<Span, (BinaryOp, crate::ast::consteval::IntFault)>,
-    /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
-    /// at the point the task body opened. A binding living at a scope index *below* the innermost
-    /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
-    /// Empty outside any `spawn:` block.
-    capture_floors: Vec<usize>,
-    /// B3.3 (Task 2a) — per-scope side-table of the NON-SENDABLE LOCAL captures of each
-    /// closure/nested-fn value declared in that scope, keyed by the bound name. Mirrors `scopes`
-    /// index-for-index (pushed/popped by `push_scope`/`pop_scope`). Populated at the closure/nested-fn
-    /// DECL site (a `let name := fn(...)` RHS or a nested `fn name(...)` body) using the SAME free-var
-    /// over-approximation (`free_names_*`) the runtime uses to build the closure's captures — so the
-    /// gate matches exactly what actually crosses the airlock. Consulted at a `spawn <name>()` callee /
-    /// `spawn f(<name>)` arg site to reject a captured `ref` (or other non-sendable local) at compile
-    /// time, mirroring the `spawn:` block form. A module-global (scope 0) capture is EXCLUDED at record
-    /// time (a read-only global, not a per-task capture — never gated).
-    capture_table: Vec<HashMap<String, Vec<Capture>>>,
-    /// Active closure frames: scope depth before the closure parameter scope, plus outer bindings
-    /// the closure body writes. Nested closures contribute to every frame they capture through.
-    closure_write_frames: Vec<(usize, HashSet<String>)>,
-    /// Write summary produced by the most recently inferred closure literal.
-    last_closure_writes: HashSet<String>,
-    /// Stable write summaries for closure literals, keyed by graph module and body span. Closure
-    /// inference can run repeatedly during generic probing; a later memoized pass must not erase the
-    /// summary produced by the pass that checked the body.
-    closure_literal_writes: HashMap<(usize, Span), Vec<String>>,
-    /// Per-scope write summaries for closure literals bound with `:=`, parallel to `scopes`.
-    written_captures: Vec<HashMap<String, Vec<String>>>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
     /// Phase 4c-net — the harvested `StructInfo` (method table) for std.net's reserved `Socket` /
@@ -1422,35 +1383,10 @@ struct Checker {
     /// [`check_counting_bracket_receivers`].
     #[cfg(any(test, feature = "test-api"))]
     bracket_receivers: usize,
-    /// TICKET-265 — top-level fns `infer_fn_writers` scanned in this pass; read by
+    /// TICKET-265 — top-level fns `infer_fn_summaries` scanned in this pass; read by
     /// [`check_graph_counting_writer_scans`].
     #[cfg(any(test, feature = "test-api"))]
     writer_scans: usize,
-}
-
-/// TICKET-165 — one constant segment of a projected lvalue chain (`xs[i].f` -> `[Dynamic,
-/// Field("f")]`, root first). D4 retains only whether the chain is projected; declared-type
-/// resolution uses [`ChainLink`] and declines links whose write semantics are unknown.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum PathSeg {
-    Field(String),
-    Int(i64),
-    Str(String),
-    Dynamic,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum ChainLink {
-    Field(String),
-    /// A subscript as the syntax walkers see it, before the checker has typed the body. The span is
-    /// the index expression's, the key of [`Checker::fresh_subscripts`] in the module that owns the
-    /// body. [`Checker::resolve_link`] turns it into `Element` or `Slice`.
-    Index(Span),
-    /// A subscript the checker resolved to one element of its container: a place.
-    Element,
-    /// A subscript the checker resolved to a builtin slice: a new container, no place. A summary
-    /// carries this form across modules, so a reader needs no span lookup in another module.
-    Slice,
 }
 
 mod args;
@@ -1494,7 +1430,6 @@ mod resolve_ctype;
 mod resolve_type;
 mod satisfies;
 mod scope;
-mod self_writes;
 mod setup;
 mod sig;
 mod stmt;

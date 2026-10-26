@@ -1,0 +1,68 @@
+# M3.4 — `spawn f(args)`, `spawn obj.m()`, `spawn:` captures and `Executor.submit(f)` hand the task
+# the parent's values by handle (Go `go f(x)`, `go func() { ... }()`): a task's write lands on the
+# parent's object and a captured local is one shared binding. Goldens: the Go program in the M3.4
+# report (`m34go/spawn/main.go`, go1.27.0) prints `block_and_call 2 5`, `loop_capture 0 10 20`,
+# `method_receiver 1`, `executor_job 2`, `module_value 3`.
+import Executor from std.concurrency
+import std.math as math
+
+fn fill(m: Map[int, int]):
+    m[2] = 2
+
+test fn a_spawn_block_and_a_spawned_call_write_the_parents_values():
+    xs: Map[int, int] = {}
+    n := 0
+    parallel:
+        spawn:
+            xs[1] = 1
+            n = 5
+        spawn fill(xs)
+    assert xs.len() == 2
+    assert n == 5
+
+test fn a_loop_capture_is_one_cell_per_iteration():
+    out := [0, 0, 0]
+    for i in 0..3:
+        parallel:
+            spawn:
+                out[i] = i * 10
+    assert out == [0, 10, 20]
+
+test fn spawned_loop_tasks_each_see_their_own_iteration():
+    out: Map[int, int] = {}
+    parallel:
+        for i in 0..3:
+            spawn:
+                out[i] = i * 10
+    assert out == {0: 0, 1: 10, 2: 20}
+
+struct Counter:
+    n: int
+
+    fn bump(self):
+        self.n += 1
+
+test fn a_spawned_method_writes_its_receiver():
+    c := Counter(0)
+    parallel:
+        spawn c.bump()
+    assert c.n == 1
+
+fn put_b(m: Map[str, int]):
+    m["b"] = 2
+
+test fn an_executor_job_writes_a_captured_map():
+    shared := {"a": 1}
+    ex := Executor()
+    _ := ex.submit(fn(): put_b(shared))
+    ex.shutdown()
+    assert shared.len() == 2
+
+fn apply(f: fn(float) -> float, x: float, out: List[float]):
+    out.push(f(x))
+
+test fn a_module_fn_value_passes_to_a_spawned_call():
+    out: List[float] = []
+    parallel:
+        spawn apply(math.abs[float], -3.0, out)
+    assert out == [3.0]

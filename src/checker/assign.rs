@@ -59,22 +59,14 @@ impl Checker {
         value: Option<&Expr>,
         span: Span,
     ) {
-        // M3.1 — an index/field-assign (`m[k]=v`, `s.field=x`) on a module global inside a task is
-        // legal: the task writes the run's one copy (Go).
-        //
-        // W8-3 — a write to a captured LOCAL is invisible to the parent, and nothing said so. Taint
-        // the root binding here (inside a task) / untaint it (in the parent) for every lvalue shape
-        // at once: this `match` is the sole lvalue dispatch, its `Tuple` arm recurses back into
-        // `check_assign` per element, and the ident/index/field arms all write THROUGH the same
-        // root binding. Done before the arms run so a parent-side `xs[0] = v` untaints ahead of its
-        // own receiver read. A blank `_` element of a tuple target (`a, _ = t`) discards its
-        // element, exactly as a whole `_ = e` statement does; it is never a variable to resolve or
-        // store.
+        // M3.1/M3.4 — a write inside a task (to a module global or to a captured local, `m[k]=v`,
+        // `s.field=x`, `n = 5`) is legal: the task writes the one object (Go). A blank `_` element
+        // of a tuple target (`a, _ = t`) discards its element, exactly as a whole `_ = e`
+        // statement does; it is never a variable to resolve or store.
         if op == AssignOp::Eq && target.is_blank() {
             return;
         }
         let val_ty = self.pinning_value_ty(&val_ty);
-        self.note_assign_root(target);
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(var_ty) = self.lookup(name) else {
@@ -84,12 +76,6 @@ impl Checker {
                     );
                     return;
                 };
-                if op == AssignOp::Eq
-                    && let Some(scope) = self.owning_scope(name)
-                    && let Some(table) = self.written_captures.get_mut(scope)
-                {
-                    table.remove(name);
-                }
                 // TICKET-139 (W14-2) — a write voids the certainty of a keyword call through `name`.
                 if let Some(s) = self.owning_scope(name) {
                     self.kw_written.insert((s, name.clone()));

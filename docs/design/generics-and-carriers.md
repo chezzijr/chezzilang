@@ -45,7 +45,7 @@ table that makes a bare name a variant. `None` is the one bare carrier name.
 method path, variant, `T.m`, native, extern, `json.decode[T]`), so equality follows from the key.
 One compiler memo, `Compiler::synth_fn_proto`, keyed by `SynthFn`, builds every synthesized fn; a
 synthesized fn reads no home global. One classifier, `Vm::callable` (an exhaustive `match`), is read
-by call, `lower_task`, `Executor.submit` and the entrypoint.
+by call, `prepare_worker`, `Executor.submit` and the entrypoint.
 
 **R5. Type variables, solved per statement.** A generic value read without a pin gets a type
 variable. Joins (`if`/`match`/`??`/list/map/set/`==`) and call arguments on the SAME statement pin

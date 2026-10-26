@@ -712,9 +712,9 @@ main()
 #[test]
 fn airlock_task_local_alias_of_a_global_is_one_object() {
     // TICKET-105, G7. A spawn-arg alias (`spawn f(gl[0], r)`) and a whole-value alias (`a := gl`)
-    // are both closed by TICKET-111 (W12-5): the task's copy of the alias is now ADOPTED as the
-    // global's own object, so a push through the alias is visible through the global too. CPython
-    // 3.14.7 prints `[1, 2] [1, 2]` and `[[1, 2]] [[1, 2]]` (measured 2026-09-10).
+    // are the global's own object (M3.1 one global, M3.4 by handle), so a push through the alias is
+    // visible through the global. CPython 3.14.7 prints `[1, 2] [1, 2]` and `[[1, 2]] [[1, 2]]`
+    // (measured 2026-09-10).
     let src = r#"
 import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
@@ -735,12 +735,9 @@ fn main():
 main()
 "#;
     let out = golden_entry(src);
-    // TICKET-169 (D4 layer C): TICKET-111's adoption still holds (`x` IS `gl[0]`'s copy, one
-    // object), but D4 now faults the write through either name instead of letting it land.
     assert_eq!(
-        out, "spawn arg alias: fault [1] [1]\n",
-        "a spawn-arg alias of a global element must fault as the global's own (adopted) copy \
-         (TICKET-111 identity, TICKET-169 write fault): {out:?}"
+        out, "spawn arg alias: no-fault [1, 2] [1, 2]\n",
+        "a spawn-arg alias of a global element is the global's own list: {out:?}"
     );
 
     let src2 = r#"
@@ -763,9 +760,8 @@ main()
 "#;
     let out2 = golden_entry(src2);
     assert_eq!(
-        out2, "whole alias: fault [[1]] [[1]]\n",
-        "a whole-value alias of a global must fault as the global's own (adopted) copy \
-         (TICKET-111 identity, TICKET-169 write fault): {out2:?}"
+        out2, "whole alias: no-fault [[1, 2]] [[1, 2]]\n",
+        "a whole-value alias of a global is the global itself: {out2:?}"
     );
 }
 
@@ -807,11 +803,10 @@ main()
 
 #[test]
 fn airlock_channel_message_ids_stay_in_their_own_crossing() {
-    // TICKET-111, gotcha 1. `c`'s received `[[7]]` mints ids in the CHANNEL's own id space, and
-    // must resolve to the freshly-received list, never to another crossing's node. `inner` is a
-    // parent-made alias the task captures, so it is a crossing copy until M3.4 and its push
-    // faults; `gl[0]` is the run's one list (M3.1). CPython 3.14.7 prints `[[7, 5]] [1, 2] [1, 2]`
-    // (one object; M3.4 removes the capture copy).
+    // TICKET-111, gotcha 1. `c`'s received `[[7]]` must be the freshly-sent list, never another
+    // crossing's node. `inner` is a parent-made alias the task captures: M3.4 hands it over by
+    // handle, so it is `gl[0]` itself (M3.1: the run's one list) and its push lands. CPython 3.14.7
+    // prints `[[7, 5]] [1, 2] [1, 2]`.
     let src = r#"
 import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 
@@ -833,7 +828,7 @@ main()
 "#;
     let out = golden_entry(src);
     assert_eq!(
-        out, "[[7, 5]] [1] [1]\n",
+        out, "[[7, 5]] [1, 2] [1, 2]\n",
         "a Channel message's ids must never resolve to another crossing's node \
          (TICKET-111 gotcha 1): {out:?}"
     );

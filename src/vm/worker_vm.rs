@@ -1,11 +1,8 @@
 //! VM: worker VMs, Executor joins and the worker home (a worker shares the run's module objects).
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
-use super::airlock_out::WireMemo;
-use super::airlock_out::ensure_crossable_wire;
 use super::sched::poke_live_scheds;
 use super::*;
-use crate::base::crossing::{self, Route};
 
 impl Vm {
     /// B3.2 — construct a fresh worker `Vm` that shares this VM's compiled program by `Arc`
@@ -22,22 +19,29 @@ impl Vm {
     ///
     ///   1. [`Vm::sample_mem_cap`], in [`Vm::start_task`], before dispatch: a full collection of
     ///      the run under a live cap. It was added for a task body running NO bytecode
-    ///      (`spawn blob.len()`, W6-10s residual (a)). Removing it needs its own measurement
-    ///      against `over_memory_trips_on_an_all_native_task_body`.
-    ///   2. The byte pacing: the payload a task's arguments rebuild into is charged by `alloc` to
-    ///      the worker's handle, and the handle adds its counts to the run's trigger when it drops
+    ///      (`spawn blob.len()`, W6-10s residual (a)), whose heap held a rebuilt copy of its
+    ///      payload. M3.4 removed that copy (`a_spawned_payload_is_the_producers_and_costs_no_heap`);
+    ///      removing the sample still needs its own measurement.
+    ///   2. The byte pacing: what a task allocates is charged by `alloc` to the handle of the `Vm`
+    ///      that runs it, and the handle adds its counts to the run's trigger when it drops
     ///      (`Heap`'s `Drop`). The per-worker `request_collect` that was here forced a collection at
     ///      the task's first instruction, the same point as (1); with one heap (1) samples the run
     ///      there already, so it went.
     ///
     /// WHAT NEITHER COVERS: growth AFTER the sample is paced, not bounded (`Heap::write`'s settle
-    /// charges it). Do not restate any of the above as an unconditional guarantee.
+    /// charges the growth of the object the writing handle armed; since M3.4 another task's
+    /// handle can grow that same object, so the charge lands on whichever handle armed it). Do not
+    /// restate any of the above as an unconditional guarantee.
     pub(super) fn spawn_worker(&self) -> Vm {
         // SAFETY: the gc_coord protocol (`vm/gc_coord.rs`): the worker joins this run's `GcCoord`
-        // (below) and attaches before it runs code on its own thread (`Vm::worker_loop_held`); a
-        // payload `Vm` allocates only on the spawner's attached thread between two of its
-        // safepoints. M3.1: the worker shares the run's module objects (`prepare_worker`), so it
-        // writes a module global in place, as a goroutine writes a Go `var`.
+        // (below) and attaches before it runs code on its own thread (`Vm::worker_loop_held`).
+        // Since M3.4 the worker writes objects other tasks hold (the spawner's args and captured
+        // cells, the run's module globals since M3.1), so "a worker writes only what it built" no
+        // longer holds. Two facts keep a write sound: every heap slot write is atomic and no
+        // `&mut Obj` exists across a safepoint (M3.0), so two tasks racing on one object is a
+        // user-level race, never UB; and a container buffer a write outgrows is retired, freed
+        // only by the stop-the-world collector (M2), so a reader on another thread never sees a
+        // freed buffer.
         let heap = unsafe { self.heap.attach() };
         let mut worker = Vm::with_heap(Arc::clone(&self.program), heap);
         worker.gc_stress = self.gc_stress;
@@ -94,198 +98,41 @@ impl Vm {
         worker
     }
 
-    /// B3.2 — run a spawned task in an isolated worker (`spawn_worker`): its args/captures cross IN
-    /// as [`WireValue`] (serialized in *this* parent heap, reconstructed in the worker heap) and
-    /// its return value + captured `out`/`stderr` cross back OUT. The worker runs **synchronously**
-    /// on the calling thread (no OS thread until B3.3), proving the `Arc<Program>` + heap-handoff
-    /// plumbing in isolation.
-    ///
-    /// The callee is **not** crossed as a parent-heap `Handle` (a `GcRef` is meaningless in another
-    /// heap); instead the task is lowered to its `ProtoId` + wire'd captures (the proto lives in
-    /// the shared `Arc<Program>`) and the worker rebuilds the closure over its own heap.
-    ///
-    /// **Cross-heap safety (enforced, not just documented).** A `WireValue` that still carries a
-    /// by-reference [`Handle`](WireValue::has_handle) — a `str`, a closure/func value, a module —
-    /// is a parent-heap `GcRef` that means nothing in the worker heap, so every crossed value
-    /// (captures, args, and the returned result) is checked with [`Vm::ensure_crossable`] and a
-    /// clean `RuntimeError` is raised rather than silently reconstructing a dangling handle. Plain
-    /// data and `Channel`/`Shared`/`Executor` handles (which cross as a shared `Arc`, not a
-    /// `GcRef`) pass. `str`/closure crossing **by value** lands in B3.3.
-    ///
-    /// M3.1: the worker's modules are the spawner's module objects ([`Vm::prepare_worker`]), so a
-    /// task reads and writes the live module globals and calls sibling/imported fns through them.
-    /// The synchronous single-thread driver: prepare + run on the calling thread. The `--parallel`
-    /// engine calls `prepare_worker` and `ReadyWorker::run` separately (across the pool boundary),
-    /// so this convenience wrapper is now only used by the B3.2–B3.3d worker unit tests.
+    /// B3.2 — run a spawned task in a worker (`spawn_worker`) synchronously on the calling thread:
+    /// [`Vm::prepare_worker`] then [`ReadyWorker::run`]. Only the worker unit tests use it; the
+    /// engine calls the two halves separately (across the pool boundary).
     #[cfg(test)]
     pub(super) fn run_task_isolated(
         &mut self,
         task: PendingCall,
     ) -> Result<super::sched_core::IsolatedRun, RuntimeError> {
-        self.prepare_worker(task, 0)?.run()
+        self.prepare_worker(task)?.run()
     }
 
-    /// B3.3-threads — the parent-thread half of [`Vm::run_task_isolated`]: lower the task to a
-    /// `Send` description against THIS heap, build the worker over the spawner's module objects,
-    /// and rebuild the callee/receiver + args **into the worker heap**, yielding a [`ReadyWorker`]
-    /// that can be moved to a pool thread and `run()`. Everything that reads the parent heap
-    /// happens here; nothing in `ReadyWorker::run` touches `self`.
+    /// B3.3-threads — the spawner-thread half of a task start: build the worker over the run's
+    /// module objects and the run's one heap, and hand it the task's callee and args by handle
+    /// (M3.4: a task shares the parent's values, as `go f(x)` does in Go), yielding a
+    /// [`ReadyWorker`] that can be moved to a pool thread and `run()`. A non-callable callee is the
+    /// one fault.
     pub(super) fn prepare_worker(
         &mut self,
         task: PendingCall,
-        fresh: u32,
     ) -> Result<ReadyWorker, RuntimeError> {
-        // 1. Lower the task to a `Send` description in THIS (parent) heap (read-only serialize),
-        //    rejecting any value that can't cross a heap boundary as-is.
-        let lowered = self.lower_task(task)?;
-        // 2. Build the worker over the run's one module table (M3.1, `Vm::spawn_worker`), so every
-        //    task of the run reads and writes one copy of each module global, as in Go, a module
-        //    that initializes after this spawn included. 3. Rebuild the callable/receiver + args
-        //    into the worker heap. The actual invoke is `ReadyWorker::run`.
+        let PendingCall::Call { callee, args, span } = task;
+        if self.callable(callee).is_none() {
+            return Err(self.err(
+                format!("spawn: '{}' is not callable", self.type_name(callee)),
+                span,
+            ));
+        }
+        // The callee and args are in no root set from here to `into_fiber` (`vm/gc_door.rs`).
         let payload = super::gc_door::PayloadInFlight::new();
-        let mut worker = self.spawn_worker();
-        let (call, span) = worker.rebuild_ready(lowered, fresh);
         Ok(ReadyWorker {
-            worker,
-            call,
+            worker: self.spawn_worker(),
+            call: ReadyCall::Invoke { callee, args },
             span,
             payload,
         })
-    }
-
-    /// PHASE 1 of task preparation — lower a [`PendingCall`] to a heap-independent [`Lowered`] against
-    /// the CURRENT (parent/shell) heap: home indices resolve against `self.module_objs`, and every
-    /// crossing value goes through `to_wire`/`ensure_crossable` (rejecting a non-isolable callee). Split
-    /// out of [`Vm::prepare_worker`] as its own phase (historically so the since-removed `--serial`
-    /// engine could reuse the exact M:N lowering — a behavior-preserving extraction; today it has the
-    /// one caller).
-    ///
-    /// W7-4: ONE [`WireMemo`] spans the whole lowering (closure captures + args, or receiver + args),
-    /// matched by ONE rebuild map in [`rebuild_ready`](Vm::rebuild_ready). Per-value memos re-split a
-    /// shared binding here even after `do_spawn` unified it. See [`deep_clone_all`](Vm::deep_clone_all) for the scope invariant.
-    /// **Serialize order must equal `rebuild_ready`'s reconstruct order**: whichever walk reaches a
-    /// shared cell first emits its `WireValue::Cell` and the later one emits a `Backref`, so rebuilding
-    /// in the other order would hit `from_wire_memo`'s `.expect` with an unregistered id. Here that
-    /// order is ARGS, then the callee's captures — `wire_args` stays where it always was, at the top of
-    /// the `Call` arm, because it is the only site applying `ensure_crossable` to spawn arguments and
-    /// moving it below the callee classification would (a) skip argument validation entirely for a
-    /// non-callable callee and (b) let a capture fault pre-empt an argument fault. `rebuild_ready`
-    /// matches by reconstructing a `Closure`'s args before its captures.
-    pub(super) fn lower_task(&mut self, task: PendingCall) -> Result<Lowered, RuntimeError> {
-        let mut memo = WireMemo::default();
-        let lowered = match task {
-            PendingCall::Call { callee, args, span } => {
-                let wargs = self.wire_args(&args, span, &mut memo)?;
-                match self.callable(callee) {
-                    Some(Callee::Closure { proto, home }) => {
-                        let h = callee.as_obj().expect("a closure is an object");
-                        let Obj::Closure { captured, .. } = self.heap.get(h) else {
-                            unreachable!("callable classified a closure")
-                        };
-                        let captured = captured.clone();
-                        // Lever #3: captures are positional; carry names from the proto in slot
-                        // order so the wire format (Vec<(name, value)>) is unchanged. Its globals
-                        // are the run's: the worker shares the spawner's module objects.
-                        let names = self.program.protos[proto].capture_names.clone();
-                        let mut wcap = Vec::with_capacity(captured.len());
-                        for (i, v) in captured.into_iter().enumerate() {
-                            let w = self.to_wire_memo_at(v, span, &mut memo)?;
-                            self.ensure_crossable(&w, span)?;
-                            let name = names.get(i).cloned().unwrap_or_default();
-                            wcap.push((name, w));
-                        }
-                        Lowered::Closure {
-                            proto,
-                            captured: wcap,
-                            args: wargs,
-                            home: self.home_index(home),
-                            span,
-                        }
-                    }
-                    // TICKET-226: every other callable kind crosses by value, AFTER the args (the
-                    // order `rebuild_ready` rebuilds in); `from_wire_memo` lands it in the
-                    // worker heap's one `fn_value` slot.
-                    Some(_) => {
-                        let w = self.to_wire_memo_at(callee, span, &mut memo)?;
-                        self.ensure_crossable(&w, span)?;
-                        Lowered::Value {
-                            callee: w,
-                            args: wargs,
-                            span,
-                        }
-                    }
-                    None => {
-                        return Err(self.err(
-                            format!(
-                                "spawn: '{}' is not an isolable task",
-                                self.type_name(callee)
-                            ),
-                            span,
-                        ));
-                    }
-                }
-            }
-        };
-        Ok(lowered)
-    }
-
-    /// PHASE 3 of task preparation — rebuild a [`Lowered`] task's callable/receiver + args INTO
-    /// THIS VM's heap, resolving home indices against `self.module_objs` (the run's module
-    /// table). Split out of [`Vm::prepare_worker`]. Infallible (all crossing checks happened in
-    /// [`Vm::lower_task`]).
-    ///
-    /// W7-4: ONE rebuild map spans the whole `Lowered`, mirroring `lower_task`'s single
-    /// [`WireMemo`] and reconstructing in the SAME order it serialized (a `Call`'s args before the
-    /// callee's captures), so a cell shared between an arg and a capture is rebuilt once and both
-    /// references tie to it — and no `Backref` is ever reached before the `WireValue::Cell` that
-    /// defines it.
-    ///
-    /// D4 (TICKET-240): `fresh` names the checker's shape for each argument ([`crossing::operand`];
-    /// a receiver is arg 0 of its entry thunk, TICKET-235). After the rebuild [`Vm::unmark_fresh`]
-    /// unmarks exactly the objects each shape says the call site built.
-    pub(super) fn rebuild_ready(&mut self, lowered: Lowered, fresh: u32) -> (ReadyCall, Span) {
-        // D4 layer C (TICKET-169): everything this call rebuilds — a spawned callee's captures, a
-        // `spawn f(args)`'s arguments, a `spawn obj.m()`'s receiver — follows `Route::Spawn`.
-        let saved_copy_mark = self.copy_mark;
-        self.copy_mark = crossing::marks(Route::Spawn);
-        let rb = &mut super::fxhash::FxHashMap::default();
-        let out = match lowered {
-            Lowered::Closure {
-                proto,
-                captured,
-                args,
-                home,
-                span,
-            } => {
-                let home = self.worker_home(home);
-                // ARGS FIRST — `lower_task` serializes them first (see its doc), so the defining
-                // `WireValue::Cell` of a cell shared with a capture lives here.
-                let args = self.rebuild_items(args, rb, |w| w);
-                // Lever #3: rebuild positionally (slot order), discarding the carried names.
-                let cap = self.rebuild_items(captured, rb, |(_k, w)| w);
-                let callee = Value::obj(self.heap.alloc(Obj::Closure {
-                    proto,
-                    captured: cap.into(),
-                    home,
-                }));
-                (ReadyCall::Invoke { callee, args }, span)
-            }
-            Lowered::Value { callee, args, span } => {
-                // ARGS FIRST — `lower_task` serializes them before the callee.
-                let args = self.rebuild_items(args, rb, |w| w);
-                let callee = self.from_wire_memo(callee, rb);
-                (ReadyCall::Invoke { callee, args }, span)
-            }
-        };
-        self.copy_mark = saved_copy_mark;
-        if fresh != 0 {
-            let program = self.program.clone();
-            let ReadyCall::Invoke { args, .. } = &out.0;
-            for (i, &arg) in args.iter().enumerate() {
-                self.unmark_fresh(arg, crossing::operand(&program.fresh_calls, fresh, i));
-            }
-        }
-        out
     }
 
     /// TICKET-208 — THE Executor join, behind `shutdown`, the exit drain and the
@@ -479,63 +326,5 @@ impl Vm {
         self.out.extend_from_slice(&out);
         self.stderr.extend_from_slice(&stderr);
         self.adopt_exit_output(exits);
-    }
-
-    /// Reject a wired value that still carries a by-reference [`Handle`](WireValue::has_handle) — a
-    /// heap-local `GcRef` that cannot cross into another heap as-is. As of B3.3 plain data, `str`/bytes,
-    /// closures/functions, native/FFI fns, and the `Channel`/`Shared`/`Executor`/socket handles all
-    /// cross by value (or as a shared `Arc` core), so the only remaining non-crossable value is a
-    /// module handle — a module's mutable globals can't be shared across an OS-thread heap boundary.
-    /// (Source-unreachable: `module` is not a nameable type, so this is a defensive-only guard.)
-    pub(super) fn ensure_crossable(&self, w: &WireValue, span: Span) -> Result<(), RuntimeError> {
-        ensure_crossable_wire(w, span)
-    }
-
-    /// Serialize a task's argument list across the airlock (read-only walk of this heap), rejecting any
-    /// argument that can't cross a heap boundary as-is (see [`Vm::ensure_crossable`]). W7-4: the caller
-    /// supplies the [`WireMemo`], because the args share one serialization with the callee's captures
-    /// (and the matching rebuild map in [`rebuild_ready`](Vm::rebuild_ready)) — see
-    /// [`deep_clone_all`](Vm::deep_clone_all) for the scope invariant.
-    pub(super) fn wire_args(
-        &self,
-        args: &[Value],
-        span: Span,
-        memo: &mut WireMemo,
-    ) -> Result<Vec<WireValue>, RuntimeError> {
-        args.iter()
-            .map(|&a| {
-                // `to_wire_memo_at` re-stamps a generator's placeholder span with this call site's.
-                let w = self.to_wire_memo_at(a, span, memo)?;
-                self.ensure_crossable(&w, span)?;
-                Ok(w)
-            })
-            .collect()
-    }
-
-    /// A fresh empty module to serve as a worker closure's `home`. The parent's `home` `GcRef`
-    /// can't cross heaps; used as the fallback when the task's home is not a real `module_objs`
-    /// entry (the hand-built unit-test fixtures) — real spawns resolve a run's module (see
-    /// `worker_home`).
-    pub(super) fn fresh_worker_home(&mut self) -> GcRef {
-        self.heap.alloc(Obj::Module(Box::new(ModuleData::new(
-            "<worker>".into(),
-            RVec::new(),
-            Default::default(),
-        ))))
-    }
-
-    /// B3.3c — the index of a `home` module `GcRef` in this VM's `module_objs`, so the worker can
-    /// resolve the same module. `None` for a home not in the table (test fixtures).
-    pub(super) fn home_index(&self, home: GcRef) -> Option<usize> {
-        self.walk_src().home_index(home)
-    }
-
-    /// B3.3c — resolve a lowered home index to this (worker) VM's module obj, falling
-    /// back to a fresh empty home when the parent home was not a real module (test fixtures).
-    pub(super) fn worker_home(&mut self, idx: Option<usize>) -> GcRef {
-        match idx {
-            Some(i) => self.module_obj(i),
-            None => self.fresh_worker_home(),
-        }
     }
 }

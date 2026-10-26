@@ -1368,8 +1368,9 @@ impl Vm {
     ///
     /// TICKET-235: every task has an entry frame now ([`Vm::task_entry`]), so such a body does
     /// reach an instruction boundary. The sample stays: a task's payload can be born over the cap in
-    /// few objects. Removing it needs its own measurement against
-    /// `over_memory_trips_on_an_all_native_task_body`.
+    /// few objects. M3.4: a spawn copies nothing, so the payload is the producer's
+    /// (`a_spawned_payload_is_the_producers_and_costs_no_heap`); removing the sample still needs its
+    /// own measurement.
     ///
     /// SCOPE — [`start_task`](Vm::start_task), which every task is dispatched through: `spawn`,
     /// `parallel:` and `Executor` jobs alike. The byte pacing (`Heap::should_collect`) is the

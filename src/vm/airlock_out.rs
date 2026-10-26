@@ -52,51 +52,9 @@ impl Vm {
         }
     }
 
-    /// Deep-copy a value across a task airlock (`spawn` / `Channel.send` / `Shared` get-set):
-    /// data — scalars, collections, structs, enums — is recursively cloned into fresh heap objects
-    /// so a task can't share mutable state with the spawner. `str` (immutable), callables, modules,
-    /// and `Channel` / `Shared` handles pass by reference (the handle is what crosses). Allocates, but
-    /// only at the instruction boundary that called it (no GC runs mid-clone), so intermediate handles
-    /// can't be collected.
-    ///
-    /// Implemented as a [`WireValue`] round-trip — `to_wire` (read-only serialize) then `from_wire`
-    /// (reconstruct into this heap). Byte-identical to the old direct deep-copy; the wire form is what
-    /// de-risks the cores-as-`Arc` and real-OS-thread-boundary crossings. By-reference objects cross
-    /// as `Handle`. Since F3 path-C a live generator crosses BY VALUE (its parked frame serialized,
-    /// rebuilt as an independent copy on `from_wire`), so this is **fallible** only for the generator
-    /// HARD ARMS `to_wire` rejects — a generator suspended mid-`recover:` (live handler) or with a
-    /// pending `defer`, or one whose parked slot is itself non-sendable — each re-stamped with the real
-    /// spawn-site `span` (the caller has it) via `to_wire_at`, a catchable error instead of a panic.
-    ///
-    /// W7-4 — takes the whole LIST of values that form ONE logical crossing (a `spawn`'s
-    /// callee/receiver + args, a `spawn:` block's captures), because cloning them one at a time gave
-    /// each its own [`WireMemo`]: two sibling closures over the SAME captured local then arrived as two
-    /// cells and the shared binding silently split. One memo spans the whole serialize pass and ONE
-    /// rebuild map spans the whole reconstruct pass. (The old single-value `deep_clone` had no callers
-    /// left once every crossing became a batch, so it is gone rather than kept as a trap.)
-    ///
-    /// **Scope invariant** (the loud failure mode): a serialize memo's lifetime must equal its rebuild
-    /// map's. A `Backref` minted under memo A but reconstructed under a fresh rebuild map resolves to
-    /// nothing — loud in a debug build (the `Backref` arm of `from_wire_memo`; it used to be an
-    /// `.expect` that aborted the host; W7-11). Both passes here are local to this call, so they
-    /// match by construction.
-    pub(super) fn deep_clone_all(
-        &mut self,
-        vs: Vec<Value>,
-        span: Span,
-    ) -> Result<Vec<Value>, RuntimeError> {
-        let mut memo = WireMemo::default();
-        let mut ws = Vec::with_capacity(vs.len());
-        for &v in &vs {
-            ws.push(self.to_wire_memo_at(v, span, &mut memo)?);
-        }
-        let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        Ok(self.rebuild_items(ws, &mut rebuild, |w| w))
-    }
-
     /// [`to_wire_at`](Vm::to_wire_at) against a CALLER-OWNED [`WireMemo`], so several roots that cross
-    /// together share one serialization (see [`deep_clone_all`](Vm::deep_clone_all) for the
-    /// memo-scope == rebuild-scope invariant this obliges the caller to keep).
+    /// together share one serialization. A serialize memo's lifetime must equal its rebuild map's
+    /// (`from_wire_memo`), or a `Backref` minted under one memo hits the other's empty map.
     pub(super) fn to_wire_memo_at(
         &self,
         v: Value,
@@ -128,14 +86,14 @@ impl Vm {
     /// modules, `Channel`/`Shared`/`Executor`) cross as `Handle`. The ONE fallible arm is a
     /// frame-holding **generator** (`Obj::Generator`): its parked frames reference this heap, so it
     /// is not sendable and returns a graceful `a generator cannot be sent across tasks` error here
-    /// (carrying a placeholder `Span{0,0}` that airlock callers re-stamp with the real site via
-    /// `to_wire_at`/`deep_clone`). Every other arm is infallible (the `?` only forwards the
+    /// (carrying a placeholder `Span{0,0}` that callers re-stamp with the real site via
+    /// `to_wire_at`). Every other arm is infallible (the `?` only forwards the
     /// generator error up through container recursion).
     #[cfg(test)]
     pub(super) fn to_wire(&self, v: Value) -> Result<WireValue, RuntimeError> {
-        // Fresh memo per root — correct for a SINGLE-root crossing (a `Shared` store). A crossing whose roots belong together (a `spawn`'s args, a `spawn:` block's
-        // captures) must instead share one memo via `to_wire_memo_at`/`deep_clone_all`, or two
-        // sibling closures over the same local arrive as two cells (W7-4). TICKET-100: within a
+        // Fresh memo per root — correct for a SINGLE-root serialize. Roots that belong together
+        // must instead share one memo via `to_wire_memo_at`, or two sibling closures over the same
+        // local arrive as two cells (W7-4). TICKET-100: within a
         // memo, containers, closures and cells are ALL preserved for the whole crossing — one
         // source object produces one copy per crossing (see [`WireMemo`]).
         let mut memo = WireMemo::default();
@@ -270,7 +228,8 @@ impl<'a> WalkSrc<'a> {
     }
 }
 
-/// The handle-reject backstop behind [`Vm::ensure_crossable`].
+/// The handle-reject backstop of a test worker's wired result ([`ReadyWorker::run`]).
+#[cfg(test)]
 pub(super) fn ensure_crossable_wire(w: &WireValue, span: Span) -> Result<(), RuntimeError> {
     if w.has_handle() {
         return Err(super::exec::plain_err(

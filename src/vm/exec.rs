@@ -190,6 +190,7 @@ impl Vm {
             poll_park: None,
             pending_connect: None,
             held_reads: Vec::new(),
+            #[cfg(test)]
             copy_mark: false,
             poll_timed_out: false,
             poll_deadline: None,

@@ -235,8 +235,8 @@ fn golden_closure_capture_scopes_chz_matches_expected_and_interp() {
 // ----- Uniform by-reference closure capture (the acceptance matrix, §4 of the design). Each row is
 // a runnable `examples/capture_*.chz` + `.expected`, asserted `run_capture (serial) ==
 // run_capture (M:N) == .expected`. Capture is now by REFERENCE: a closure shares the
-// closest binding of a captured name and sees/makes writes to it. The one deliberate divergence from
-// Go is F1 (a plain capture into a `spawn` is an isolated per-task copy, not shared+raced). -----
+// closest binding of a captured name and sees/makes writes to it. M3.4: a `spawn` task shares it
+// too, as a goroutine does (F1 is no longer a divergence from Go). -----
 
 /// A1 — a closure reads a captured local by reference, seeing a write made after creation → `20`.
 #[test]
@@ -327,14 +327,10 @@ fn golden_capture_defer_latest() {
     assert_eq!(out, expected, "serial vs .expected");
 }
 
-/// F3 / B2 — a closure capturing a by-reference local (a cell), invoked in a `spawn`
-/// task via `spawn f()`, produces the same result → `7` (post-join, exact-match).
-/// A capture-bearing closure crosses the task boundary by DEEP value
-/// (`do_spawn` → `cross_spawn_callee` → `wire_callable`/`from_wire`), matching the M:N
-/// `prepare_worker`/`to_snap` deep-copy — so the task's `f` and its cells are isolated from the
-/// parent's. See `golden_capture_spawn_closure_mutates_isolated` /
-/// `golden_capture_spawn_closure_owner_write_isolated` for the mutation forms that make this
-/// deep-cross load-bearing.
+/// F3 / B2 — a closure capturing a by-reference local (a cell), invoked in a `spawn` task via
+/// `spawn f()`, reads the parent's cell → `7` (post-join, exact-match). M3.4: the task gets `f` and
+/// its cell by handle. The mutation forms are `golden_capture_spawn_closure_mutates_shared` /
+/// `golden_capture_spawn_closure_owner_write_shared`.
 #[test]
 fn golden_capture_cell_closure_into_spawn() {
     let src = include_str!("../../../examples/capture_cell_closure_into_spawn.chz");
@@ -343,53 +339,37 @@ fn golden_capture_cell_closure_into_spawn() {
     assert_eq!(out, expected, "vs .expected");
 }
 
-/// F3 (mutation form) — the MEDIUM-severity bug the first draft's F3 docstring wrongly declared
-/// impossible. A closure `f := fn(): xs.push(2)` mutates its captured cell's INNER heap value (the
-/// list) via a method call — the cell is never rebound, so "closures are expression-only" does not
-/// save you. When `f` crosses `spawn f()` it must be a deep isolated copy → the
-/// parent's `xs` stays `[1]`. Before the `cross_spawn_callee` deep-cross, the since-removed serial
-/// engine shared `f` by handle
-/// and printed `[1, 2]` while M:N isolated and printed `[1]` (a real serial-vs-M:N divergence). The
-/// print is post-join → exact-match.
+/// F3 (mutation form) — a closure `f := fn(): xs.push(2)` mutates its captured cell's INNER heap
+/// value. M3.4: `spawn invoke(f)` hands the task `f` itself, so the push lands on the parent's
+/// list (Go `m34go/captures/main.go`: `mutates [1 2]`). The print is post-join → exact-match.
 #[test]
-fn golden_capture_spawn_closure_mutates_isolated() {
-    let src = include_str!("../../../examples/capture_spawn_closure_mutates_isolated.chz");
-    let expected =
-        include_str!("../../../examples/capture_spawn_closure_mutates_isolated.expected");
+fn golden_capture_spawn_closure_mutates_shared() {
+    let src = include_str!("../../../examples/capture_spawn_closure_mutates_shared.chz");
+    let expected = include_str!("../../../examples/capture_spawn_closure_mutates_shared.expected");
     let out = run_capture(src).expect("vm run");
-    assert_eq!(out, expected, "vs .expected (isolated push → [1])");
+    assert_eq!(out, expected, "vs .expected (shared push → [1, 2])");
 }
 
-/// F3 (owner-write form) — the CRITICAL-severity bug: a closure `f` READS a captured cell that the owner
-/// MUTATES after `spawn f()`. Nesting `work()` under `main`'s `parallel:` forces the M:N eager
-/// nested-nursery path (wires the task at spawn time). Before the fix, the since-removed serial
-/// engine shared `f` and read the
-/// post-write value (`5`) at join while M:N read the spawn-time snapshot (`0`); now `cross_spawn_callee`
-/// snapshots the cell at spawn time → `0`. `result` is a `Shared[int]` (crosses by
-/// reference) so the task reports what it observed. Print is post-join → exact-match.
+/// F3 (owner-write form) — a closure `f` READS a captured cell that the owner writes after
+/// `spawn f()`, on the M:N eager nested-nursery path (the task starts at the spawn). M3.4: the task
+/// holds the owner's cell, and a channel orders its read after the write → `5` (Go `owner_write 5`).
 #[test]
-fn golden_capture_spawn_closure_owner_write_isolated() {
-    let src = include_str!("../../../examples/capture_spawn_closure_owner_write_isolated.chz");
+fn golden_capture_spawn_closure_owner_write_shared() {
+    let src = include_str!("../../../examples/capture_spawn_closure_owner_write_shared.chz");
     let expected =
-        include_str!("../../../examples/capture_spawn_closure_owner_write_isolated.expected");
+        include_str!("../../../examples/capture_spawn_closure_owner_write_shared.expected");
     let out = run_capture(src).expect("vm run");
-    assert_eq!(out, expected, "vs .expected (spawn-time snapshot → 0)");
+    assert_eq!(out, expected, "vs .expected (the owner's write → 5)");
 }
 
-/// F1 — THE ONE DELIBERATE DIVERGENCE FROM GO: a plain captured local sent into a `spawn` is
-/// snapshot-copied into an independent per-task cell (the airlock deep-copies it), so the task's
-/// `x = x + 1` mutates only its OWN copy — the parent's `x` stays `0` (Go shares+races → `1`). The
-/// print is post-join, so the value is `0` exactly (not order-sensitive). This is the
-/// memory-safety line; do NOT "fix" toward Go.
+/// F1 — a plain captured local written by a `spawn` task: M3.4 (Go model) shares the one cell, so
+/// the task's `x = x + 1` lands and the post-join print is `1` (Go `shares_local 1`).
 #[test]
-fn golden_capture_spawn_isolated() {
-    let src = include_str!("../../../examples/capture_spawn_isolated.chz");
-    let expected = include_str!("../../../examples/capture_spawn_isolated.expected");
+fn golden_capture_spawn_shares_local() {
+    let src = include_str!("../../../examples/capture_spawn_shares_local.chz");
+    let expected = include_str!("../../../examples/capture_spawn_shares_local.expected");
     let out = run_capture(src).expect("vm run");
-    assert_eq!(
-        out, expected,
-        "serial vs .expected (isolated → 0, NOT Go's 1)"
-    );
+    assert_eq!(out, expected, "vs .expected (shared → 1)");
 }
 
 /// B8 (defensive tripwire) — a boxed (captured) local must never surface as a raw cell in a
@@ -531,19 +511,12 @@ main()";
     assert_golden_out(src, "100\n");
 }
 
-/// W7-4 (was `airlock_aliased_closure_stays_independent`, which asserted `1`): a list holding the SAME
-/// closure twice (`[f, f]`, f closing over the mutable outer local `count`) crosses the airlock. TICKET-100:
-/// the two list slots now hold ONE closure object — step 4's `Obj::Closure` arm back-references an
-/// off-stack alias exactly like the container arms — and the ONE BINDING they close over was already ONE
-/// cell (`WireMemo::cells` is never popped). Collapsing the closure VALUE is unobservable: a closure is
-/// proto + captures, immutable, and every piece of mutable state it owns already lived in the cell. So
-/// `pair[0]()` then `pair[1]()` still reads `2`, matching the language's own sibling-closure sharing rule
-/// (docs/reference/syntax/) and Go. See `airlock_struct_alias_preserves_identity` — data and closures now follow
-/// the SAME identity rule.
+/// W7-4: a list holding the SAME closure twice (`[f, f]`, f closing over the mutable outer local
+/// `count`) is captured by a task. M3.4: the task holds the parent's list, closure and cell, so
+/// `pair[0]()` then `pair[1]()` reads `2` and the parent's `count` is `2` (Go
+/// `aliased_closure 2 2`).
 #[test]
 fn airlock_aliased_closure_shares_its_binding() {
-    // TICKET-169 (D4 layer C, Decisions item 3): `bump`'s crossed capture (`count`) is marked as
-    // an airlock copy, so `count = count + 1` now faults instead of sharing the binding.
     let src = "\
 fn main():
     count := 0
@@ -560,9 +533,9 @@ fn main():
             a := pair[0]()
             b := pair[1]()
             r.send(b)
-    print(r.recv())
+    print(r.recv(), count)
 main()";
-    assert_golden_out(src, "-1\n");
+    assert_golden_out(src, "2 2\n");
 }
 
 /// Identity-preserving airlock, DATA path — a self-referential `struct` (`a.next = [b]; b.next = [a]`,
@@ -641,18 +614,11 @@ fn airlock_mixed_struct_closure_cycle_round_trips_both() {
     assert_golden_out(src, "5\n");
 }
 
-/// TICKET-100: the airlock copy is now identity-preserving for a plain non-cyclic alias, matching the
-/// same-task semantics (`b := a` means a write through `a` is visible through `b`) and CPython's
-/// `deepcopy` (which memoizes by source identity). `pair := [box, box]` holds ONE struct reached by two
-/// references; mutating through one alias in the task is visible through the other (`9 9`, not `9 1`).
-/// Before this change the back-edge-only (pop-on-DFS-exit) memo discipline re-serialized an off-stack
-/// alias as an independent copy — `airlock_struct_dag_alias_stays_independent` pinned that as `9 1` and
-/// is now deleted (this test runs the byte-identical program with the corrected golden).
+/// TICKET-100: `pair := [box, box]` holds ONE struct reached by two references. M3.4: the task holds
+/// the parent's list, so a write through one alias is visible through the other, in the task and in
+/// the parent (Go `struct_alias 9 9`).
 #[test]
 fn airlock_struct_alias_preserves_identity() {
-    // TICKET-169 (D4 layer C): the crossed capture `pair` (and its adopted local alias `p`) is
-    // marked as an airlock copy, so `p[0].n = 9` now faults instead of landing through either
-    // alias. Identity is still preserved — the fault is reported once, not per-alias.
     let src = "\
 struct Box:
     n: int
@@ -668,20 +634,16 @@ fn main():
             match res:
                 ?_: r.send(\"{p[0].n} {p[1].n}\")
                 !_: r.send(\"fault {p[0].n} {p[1].n}\")
-    print(r.recv())
+    print(r.recv(), box.n)
 main()";
-    assert_golden_out(src, "fault 1 1\n");
+    assert_golden_out(src, "9 9 9\n");
 }
 
-/// W7-4/TICKET-100 fence for the SEAM the fix creates: `do_spawn`/`lower_task` serialize the callee, ALL
-/// args and the receiver under ONE `WireMemo` (so sibling closures/aliases keep their one identity). The
-/// same list passed as TWO SEPARATE args is one source object reached via two roots, so it must stay ONE
-/// object on the far side too — the data-DAG identity rule is per-serialization, not per-arg. Mutating
-/// arg `a` in the task must be visible through arg `b` (`2 2`, not `2 1`).
+/// W7-4/TICKET-100: the same list passed as TWO SEPARATE spawn args is one object. M3.4: both args
+/// are the parent's list, so a push through `a` is visible through `b` and in the parent (Go
+/// `cross_arg_alias 2 2`).
 #[test]
 fn airlock_cross_arg_data_alias_preserves_identity() {
-    // TICKET-169 (D4 layer C): `a` (and its alias `b`) crossed as a spawn arg and is marked as an
-    // airlock copy, so `a.push(2)` now faults instead of landing through either alias.
     let src = "\
 fn work(a: List[int], b: List[int], r: Channel[str]):
     res := recover:
@@ -694,9 +656,9 @@ fn main():
     r := Channel[str]()
     parallel:
         spawn work(xs, xs, r)
-    print(r.recv())
+    print(r.recv(), xs)
 main()";
-    assert_golden_out(src, "fault 1 1\n");
+    assert_golden_out(src, "2 2 [1, 2]\n");
 }
 
 /// TICKET-100: `Channel.send` is an ordinary cross-heap STORE (`to_wire_crossable`),
@@ -746,7 +708,7 @@ main()";
 /// SAME frame-local generator twice reaches it a second time off-stack and the second reach is a
 /// `Backref` to the first copy. The crossing holds ONE generator with the alias intact: driving
 /// `ys[0]` consumes the value `ys[1]` would have seen, as it does without a channel in between.
-/// (An on-stack cycle through a generator still rejects: see `generator_in_data_cycle_rejects_both`.)
+/// (A cycle through a spawned generator is one generator too: `generator_in_data_cycle_is_the_one_generator`.)
 #[test]
 fn airlock_generator_reached_twice_is_one_copy() {
     let src = "\
@@ -813,27 +775,21 @@ main()";
     assert_golden_out(src, "0\n1\n2\n");
 }
 
-/// NF#8 — spawn airlock (F1 shape): a nested fn capturing an outer local, invoked via `spawn bump()`
-/// inside `parallel:`, is a capture-bearing `Obj::Closure` that crosses the airlock by DEEP value
-/// — its captured `x`-cell is snapshot-copied, so
-/// the task's `x = x + 1` mutates its OWN isolated copy and the parent's `x` stays `0`. Identical to
-/// the closure airlock isolation (F1). Print is post-join → exact-match.
+/// NF#8 — a nested fn capturing an outer local, invoked via `spawn bump()` inside `parallel:`.
+/// M3.4: the task holds the parent's `x` cell, so `x = x + 1` lands (Go `nested_fn_spawn 1`).
 #[test]
-fn nested_fn_spawn_airlock_isolated_parity() {
-    // TICKET-169 (D4 layer C): the task's write to its isolated copy of `x` now FAULTS (`recover:`
-    // catches it) instead of landing silently — the parent's `x` was always going to stay `0`.
+fn nested_fn_spawn_shares_the_parents_cell() {
     let src = "\
 fn main():
     x := 0
     fn bump():
-        recover:
-            x = x + 1
+        x = x + 1
     parallel:
         spawn bump()
     print(x)
 main()";
     let out = run_capture(src).expect("run");
-    assert_eq!(out, "0\n", "nested fn capture isolated at airlock");
+    assert_eq!(out, "1\n", "nested fn capture shared with the task");
 }
 
 /// NF#7b — loop-variable capture at MODULE TOP LEVEL (not inside a `fn`): a nested fn defined in a

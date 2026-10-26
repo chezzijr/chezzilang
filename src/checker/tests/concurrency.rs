@@ -379,9 +379,8 @@ fn reassign_captured_local_in_spawn_block_ok() {
     // Uniform by-reference capture (F1): a `spawn:` task gets its OWN per-task copy of a captured
     // LOCAL (the airlock deep-copies its cell), so reassigning it is allowed — the write mutates the
     // isolated copy and is not visible to the parent (the one deliberate divergence from Go).
-    rejects(
+    ok(
         "fn main():\n    counter := 0\n    parallel:\n        spawn:\n            counter = counter + 1\nmain()\n",
-        "'counter' is this task's copy",
     );
 }
 
@@ -391,13 +390,11 @@ fn reassign_captured_local_in_spawn_block_ok() {
 fn mutate_fn_local_aggregate_in_spawn_block_ok() {
     // A fn-LOCAL aggregate captured into a spawn: is deep-copied per task (agrees serial==M:N), so its
     // in-place mutation stays ACCEPTED — only MODULE-GLOBAL roots are frozen.
-    rejects(
+    ok(
         "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n",
-        "'xs' is this task's copy",
     );
-    rejects(
+    ok(
         "fn main():\n    m := {1: 2}\n    parallel:\n        spawn:\n            m[1] = 9\nmain()\n",
-        "'m' is this task's copy",
     );
 }
 
@@ -1123,20 +1120,22 @@ fn spawn_on_non_sendable_receiver_still_rejected() {
     );
 }
 
-/// NON-REGRESSION for the fix above: the ARGUMENT sweep is untouched for a BARE module — a
-/// non-sendable value handed directly to a spawned call is still refused there. The container case
-/// (TICKET-021 RE-PINNED): `Ty::Module` no longer reaches a container at all (the module-value read
-/// itself now errors), so `xs := [math]` fails at the read, not at the argument sweep.
+/// A module passed to a spawned call is the same error as a module passed to any call: a module is
+/// not a value (Go `m34go/pkgval`: `use of package math not in selector`). M3.4:
+/// the spawn adds no second, sendability error.
 #[test]
-fn spawn_non_sendable_argument_still_rejected() {
-    entry_rejects(
+fn spawn_module_argument_is_not_a_value() {
+    for src in [
         "import std.math\nfn take(m: int) -> int:\n    return m\nfn main():\n    parallel:\n        spawn take(math)\nmain()\n",
-        "cannot pass a non-sendable value of type module math to a spawned task",
-    );
-    entry_rejects(
         "import std.math\nfn take(m: int) -> int:\n    return m\nfn main():\n    xs := [math]\n    parallel:\n        spawn take(xs)\nmain()\n",
-        "module 'math' is not a value",
-    );
+    ] {
+        let errs = check_entry(src);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(
+            errs[0].message.contains("module 'math' is not a value"),
+            "{errs:?}"
+        );
+    }
 }
 
 #[test]
@@ -1210,9 +1209,8 @@ fn submit_capturefree_closure_through_nested_closure_ok() {
 #[test]
 fn top_level_closure_submitted_ok() {
     // Regression pin (mirrors `top_level_closure_used_in_spawn_block_ok`): a module-scope binding is a
-    // global, not a per-task capture — submitting a closure that reads it is fine even when it's
-    // non-sendable (the `is_local_capture` scope-0 exclusion). Locks the intentional gap so a future
-    // tightening of the gate can't silently flip it without a test failing.
+    // global — submitting a closure that reads it is fine (M3.4: a job holds every capture by
+    // handle, so no gate exists to tighten).
     entry_ok(
         "import Executor from std.concurrency\ng := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
     );

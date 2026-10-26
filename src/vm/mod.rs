@@ -773,12 +773,12 @@ impl Deferred {
 }
 
 /// A task registered by `spawn`, awaiting its nursery's join barrier (C4). The callee/receiver and
-/// arguments are evaluated and deep-copied across the airlock at the `spawn` statement (Go's
-/// arg-evaluation timing); the body runs at the `parallel:` dedent. A `spawn:` block is lowered to
+/// arguments are evaluated at the `spawn` statement (Go's arg-evaluation timing) and held by
+/// handle (M3.4); the body runs at the `parallel:` dedent. A `spawn:` block is lowered to
 /// a zero-arg closure, so it rides the `Call` variant.
 /// The held values are GC roots while the task is pending (see [`Vm::collect`]).
 /// `Clone` is shallow (a `Value`/`GcRef` copy — both originals and clones stay rooted), used by
-/// `early_enlist_outer` to prepare workers from a copy so a non-crossable task faults BEFORE the
+/// `early_enlist_outer` to prepare workers from a copy so a non-callable task faults BEFORE the
 /// nursery is consumed (atomic enlist — charge #4).
 #[derive(Clone)]
 enum PendingCall {
@@ -806,14 +806,11 @@ impl PendingCall {
     }
 }
 
-/// A task queued on a nursery: the call and the spawn op's freshness bits. It reads the run's
-/// module globals live (M3.1), so nothing about the module view is pinned at the `spawn`.
+/// A task queued on a nursery: the call, holding the parent's values by handle (M3.4). It reads
+/// the run's module globals live (M3.1), so nothing about the module view is pinned at the `spawn`.
 #[derive(Clone)]
 struct QueuedTask {
     call: PendingCall,
-    /// D4 (TICKET-179) — the spawn op's freshness bitmask, passed to [`Vm::rebuild_ready`]: bit 0 = the
-    /// receiver, bit `i + 1` = arg `i`. `0` for a `spawn:` block.
-    fresh: u32,
 }
 
 impl QueuedTask {
@@ -910,8 +907,8 @@ pub(crate) enum FnKey {
     Builtin(crate::base::builtin::Builtin),
 }
 
-/// TICKET-226 — how a callable value runs: [`Vm::callable`]'s answer, read by call, `lower_task`,
-/// `Executor.submit` and the entrypoint. Holds only `Copy`/cheap fields, so reading it allocates
+/// TICKET-226 — how a callable value runs: [`Vm::callable`]'s answer, read by call,
+/// `prepare_worker`, `Executor.submit` and the entrypoint. Holds only `Copy`/cheap fields, so reading it allocates
 /// nothing on the hot user-fn/closure paths.
 pub(crate) enum Callee {
     Func {
@@ -1136,11 +1133,11 @@ pub struct Vm {
     /// to find a same-task re-entry (`Vm::guard_reentry`). A `Vm` field, NOT a `FiberCtx` field: a
     /// box closure runs under `Vm::reentered`, where no other fiber runs on this stack.
     held_reads: Vec<usize>,
-    /// D4 layer C (TICKET-169): true while `from_wire_memo` is running an airlock
-    /// copying walk (`rebuild_ready`'s captures/args/receiver, or a crossing
-    /// `Closure`/`Generator`'s captures). Every object allocated while this is set gets
+    /// D4 layer C (TICKET-169): true while the test-only `from_wire_memo` runs a copying walk (a
+    /// crossing `Closure`/`Generator`'s captures). Every object allocated while this is set gets
     /// `Heap::set_copied`, so a later write to it faults. Pure scratch, toggled and restored around
-    /// one call — never part of [`FiberCtx`].
+    /// one call — never part of [`FiberCtx`]. M3.5 deletes it with the airlock.
+    #[cfg(test)]
     pub(super) copy_mark: bool,
     /// D6c — live mirror of [`FiberCtx::poll_timed_out`] while the fiber is swapped in: set by the poll
     /// thread on the detached fiber's ctx when a socket op's `timeout_ms` deadline elapsed before the
@@ -1438,6 +1435,7 @@ mod list_hof;
 mod method_call;
 use crate::lexer::strip_num_underscores_radix;
 use crate::native::is_mutating_native_kind;
+#[cfg(test)]
 mod airlock_in;
 mod airlock_out;
 mod blocking;
@@ -1460,7 +1458,6 @@ mod step;
 mod stmt;
 mod worker_loop;
 mod worker_vm;
-use crate::base::crossing::CROSSING_CLOSURE_METHODS;
 use crate::base::words::{
     COPY_WRITE_TAIL, MAX_STRUCTURAL_DEPTH, OPTION_VALUE_WORD, RESULT_VALUE_WORD,
 };

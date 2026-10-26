@@ -487,17 +487,17 @@ pub(super) fn panic_to_fault(payload: Box<dyn std::any::Any + Send>, span: Span)
     }
 }
 
-/// B3.3-threads — a worker `Vm` with its task already reconstructed in its own heap, ready to run on
-/// whatever thread owns it. [`Vm::prepare_worker`] builds this (the parent-heap-touching half of the
-/// old `run_task_isolated`); [`ReadyWorker::run`] is the thread-side half (invoke + wire the result
-/// back). Splitting the two lets the bounded pool prepare a task on the parent thread, then **move**
+/// B3.3-threads — a worker `Vm` with its task's callee and args (the spawner's values, by handle,
+/// M3.4), ready to run on whatever thread owns it. [`Vm::prepare_worker`] builds this (the
+/// spawner-thread half of `run_task_isolated`); [`ReadyWorker::run`] is the thread-side half
+/// (invoke + wire the result back, test only). Splitting the two lets the bounded pool prepare a task on the parent thread, then **move**
 /// the whole `ReadyWorker` (it is `Send` — `Vm` is `Send`, `Value`/`String` are `Send`) onto a pool
 /// thread to execute. Single-thread `run_task_isolated` = `prepare_worker(task)?.run()`.
 pub(super) struct ReadyWorker {
     pub(super) worker: Vm,
     pub(super) call: ReadyCall,
     pub(super) span: Span,
-    /// M1.7 — the rebuilt values are in no root set until `into_fiber` (`vm/gc_door.rs`).
+    /// M1.7 — the callee and args are in no root set until `into_fiber` (`vm/gc_door.rs`).
     pub(super) payload: super::gc_door::PayloadInFlight,
 }
 
@@ -529,7 +529,7 @@ impl ReadyWorker {
         // The result must be cross-safe too — a worker returning a `str`/closure can't hand a
         // worker-heap `GcRef` back to the parent.
         let value = self.worker.to_wire_at(ret, span)?;
-        self.worker.ensure_crossable(&value, span)?;
+        super::airlock_out::ensure_crossable_wire(&value, span)?;
         Ok(IsolatedRun {
             value,
             out: self.worker.out,

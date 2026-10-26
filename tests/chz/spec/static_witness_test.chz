@@ -564,7 +564,7 @@ test fn a_spawned_value_call_keeps_its_head_links_witness():
 # `SpawnMethod` / `DeferCall` / `DeferMethod`) pushed no hidden argument, so the call would have
 # lowered one `argc` short. They push it now — TRAILING, exactly as `Op::Call`/`CallMethod` do — and
 # the VM needed nothing: `do_defer`/`do_spawn` are argc-generic and a witness is a plain `str`, so it
-# deep-copies across the spawn airlock like any other sendable value.
+# passes to the task like any other argument.
 #
 # Go is the ancestor and accepts both (measured 2026-08-14, Go 1.26.5 — `defer reset(c, "defer")`
 # plus `go reset(c, "go")` on `func reset[T Defaulter[T]]` print `go reset ran -> {7}`,
@@ -726,7 +726,7 @@ test fn a_deferred_closure_reaches_the_witness():
     defer_closure(Tag("hi"), sink)
     assert sink == ["body", "Counter(n=0)", "body", "Tag(s='none')"]
 
-# ---- 4: a `spawn:` block — the witness `str` deep-copies across the airlock ----
+# ---- 4: a `spawn:` block — the witness `str` is one more capture ----
 
 fn spawn_block[T: Default](x: T, ch: Channel[str]):
     parallel:

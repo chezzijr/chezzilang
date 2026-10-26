@@ -7,6 +7,10 @@
 #
 # TICKET-100: a DATA DAG alias (`pair := [xs, xs]`) now crosses as ONE object too, same as a cell —
 # both a data alias and a cell alias mean the same source object stays one object per crossing.
+# M3.4: a spawn, a `spawn:` capture and an Executor job hold the parent's closures and data by
+# handle, so a task's write through a capture lands on the parent's one binding (Go
+# `m34go/binding/main.go`, go1.27.0: `spawn_named_args 1`, `spawn_block_two_captures 1`,
+# `separate_tasks 1 1`, `data_dag_alias_across_args [1 2]`).
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import Iterator from std.iter
 import std.concurrency
@@ -73,10 +77,9 @@ _w74pair := _w74mk()
 _w74cyc := _w74pair.it
 _w74size := _w74pair.size
 
-# W7-4 REVIEW — fixtures for `spawn_serializes_args_before_the_callee` (below): a struct chain deeper
-# than the 10000 structural cap (a non-crossable ARG), and a generator parked on a reference cycle
-# through the module-global list it reads (a non-crossable CALLEE CAPTURE). Two DIFFERENT reject
-# messages, so serialization ORDER is observable.
+# W7-4 REVIEW — fixtures for `spawn_passes_a_deep_arg_and_a_cyclic_capture_by_handle` (below): a
+# struct chain deeper than the 10000 structural cap, and a generator parked on a reference cycle
+# through the module-global list it reads.
 struct _W74Deep:
     next: List[_W74Deep]
 
@@ -174,9 +177,8 @@ test fn channel_send_to_a_different_task_shares_the_binding():
     assert msg == "no-fault", msg
     assert c.get() == 1
 
-# `spawn f(g, h)` — two closures arriving as two SEPARATE spawn args. TICKET-169: the task's write
-# through either now faults (its captures crossed the airlock and are marked), so the shared-binding
-# question this used to probe no longer arises for a WRITE — the read half (D2) is untouched.
+# `spawn f(g, h)` — two closures arriving as two SEPARATE spawn args: the task's write through one
+# lands on the parent's one binding (M3.4).
 test fn spawn_named_args_keep_one_binding():
     c := make()
     r := Channel[str](1)
@@ -189,9 +191,10 @@ test fn spawn_named_args_keep_one_binding():
     parallel:
         spawn work(c.inc, c.get, r)
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert c.get() == 1
 
-# `spawn:` block with TWO separate captured locals over one cell — same fault, from inside the block.
+# `spawn:` block with TWO separate captured locals over one cell — one binding, from inside the block.
 test fn spawn_block_two_captures_keeps_one_binding():
     c := make()
     gi := c.inc
@@ -205,7 +208,8 @@ test fn spawn_block_two_captures_keeps_one_binding():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gg() == 1
 
 # M3.1: two module globals over one factory-local cell are the run's closures, so a task's write
 # through one lands and the other reads it, in the task and in the parent. Go: +1 both ways.
@@ -248,12 +252,9 @@ test fn data_dag_alias_is_one_object():
     assert p[0].len() == 2
     assert p[1].len() == 2
 
-# FENCE — the OTHER boundary of the new rule: identity is preserved within ONE crossing, never BETWEEN
-# crossings. TICKET-169: the first task's write now faults (its captured cell crossed the airlock and
-# is marked), so it can never reach the parent OR a second task either way; a second task's own read
-# still sees the parent's unwritten `0` (F1 per-task isolation, docs/reference/syntax/ rule 2). Goes red if the
-# cell memo is ever widened to Vm-lived state.
-test fn separate_tasks_each_get_their_own_binding():
+# FENCE — two tasks in turn over one captured binding: the first task's write lands on the parent's
+# cell, and the second task and the parent read it (M3.4, Go `separate_tasks 1 1`).
+test fn separate_tasks_share_the_parents_binding():
     c := make()
     r := Channel[str](1)
     r2 := Channel[int](1)
@@ -268,14 +269,13 @@ test fn separate_tasks_each_get_their_own_binding():
         spawn:
             r2.send(c.get())
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
-    assert r2.recv() == 0
-    assert c.get() == 0
+    assert got == "no-fault", got
+    assert r2.recv() == 1
+    assert c.get() == 1
 
 # W7-4c — a task-local binding of a module global's closure and the global itself are one
-# binding: the task's `_w74i()` writes and its `gg()` reads the same cell (M3.1: the run's). The
-# alias is made in the task; a parent-made alias the task captures is a crossing copy until M3.4.
-# Go: the read sees the write.
+# binding: the task's `_w74i()` writes and its `gg()` reads the same cell (M3.1: the run's). Go:
+# the read sees the write.
 test fn module_global_plus_local_capture_shares_its_binding():
     before := _w74g()
     r := Channel[str](2)
@@ -333,10 +333,9 @@ test fn rwshared_views_over_sibling_closures():
     # (`contains` shares the code path but is unreachable with closures — a `fn` is not Hashable, so a
     # Set can never hold two sibling closures.)
 
-# FENCE — TICKET-100: same inverted rule across two SEPARATE spawn args (the seam a shared serialize
-# memo could collapse the wrong way). TICKET-169: the task's write now faults (a spawn arg crossed
-# the airlock and is marked).
-test fn data_dag_alias_across_spawn_args_faults():
+# FENCE — TICKET-100: one object across two SEPARATE spawn args: the task's write lands on the
+# parent's list (M3.4, Go `data_dag_alias_across_args [1 2]`).
+test fn data_dag_alias_across_spawn_args_lands():
     xs := [1]
     r := Channel[str](1)
     fn work(a: List[int], b: List[int], out: Channel[str]):
@@ -348,7 +347,8 @@ test fn data_dag_alias_across_spawn_args_faults():
     parallel:
         spawn work(xs, xs, r)
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert xs == [1, 2]
 
 # W7-4 REVIEW (charge 1/5/7) — a `RwShared` read VIEW run CONCURRENTLY with a writer. The first cut
 # resolved a piece's `Backref` by RE-READING `core.v` after dropping the read guard, so a `set` in that
@@ -383,12 +383,10 @@ test fn rwshared_view_survives_a_concurrent_writer():
             d.send(2)
     assert d.recv() + d.recv() == 3
 
-# W7-4 REVIEW (charge 3) — SPAWN FAULT ORDERING. `do_spawn` batches the callee/receiver and the args
-# into ONE serialization; the args must still be serialized FIRST, as they were before the batch, or a
-# non-crossable callee pre-empts a non-crossable argument and the reported message changes. Here the
-# ARG trips the depth cap and the CALLEE's capture is a generator in a reference cycle: the arg's fault
-# is the one that must surface.
-test fn spawn_serializes_args_before_the_callee():
+# W7-4 REVIEW (charge 3) — M3.4: a spawn walks none of its values, so an arg deeper than the
+# structural cap and a callee capture that is a generator in a reference cycle both pass by handle
+# and the task runs (Go hands a goroutine any pointer).
+test fn spawn_passes_a_deep_arg_and_a_cyclic_capture_by_handle():
     it := _w74gen()
     _w74hold.push(it)
     for x in it:
@@ -401,5 +399,5 @@ test fn spawn_serializes_args_before_the_callee():
         parallel:
             spawn callee(d)
     match r:
-        ?_: assert false
-        !e: assert e.message() == "maximum structural depth (10000) exceeded (cyclic data structure?)"
+        ?_: pass
+        !e: assert false, e.message()

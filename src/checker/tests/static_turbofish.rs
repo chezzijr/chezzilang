@@ -1903,12 +1903,9 @@ fn receiver_write_table_matches_observed_behavior() {
 #[test]
 fn airlock_crossing_grid_compile_cells() {
     for write in ["xs.push(9)", "xs[0] = 9", "p.x = 9", "n += 1"] {
-        rejects(
-            &format!(
-                "struct P:\n    x: int\nfn main():\n    xs := [1]\n    p := P(1)\n    n := 0\n    parallel:\n        spawn:\n            {write}\n    print(xs, p.x, n)\nmain()\n"
-            ),
-            "is this task's copy",
-        );
+        ok(&format!(
+            "struct P:\n    x: int\nfn main():\n    xs := [1]\n    p := P(1)\n    n := 0\n    parallel:\n        spawn:\n            {write}\n    print(xs, p.x, n)\nmain()\n"
+        ));
     }
     ok(
         "struct P:\n    x: int\nfn main():\n    xs := [1]\n    p := P(1)\n    n := 0\n    parallel:\n        spawn:\n            _ := xs.len() + p.x + n\n    print(xs, p.x, n)\nmain()\n",
@@ -1918,9 +1915,8 @@ fn airlock_crossing_grid_compile_cells() {
         "g := 0\nfn always():\n    g = 1\nfn main():\n    parallel:\n        spawn: always()\n    print(g)\nmain()\n",
     );
     // A callee that writes its PARAMETER, given a captured local, writes a crossing copy.
-    rejects(
+    ok(
         "fn always(xs: List[int]):\n    xs.push(1)\nfn main():\n    xs := [0]\n    parallel:\n        spawn: always(xs)\n    print(xs)\nmain()\n",
-        "is this task's copy",
     );
     // Layer A declines each of these: the write is reached on some paths only.
     let spawned = "fn main():\n    xs := [0]\n    parallel:\n        spawn: f(xs, false)\n    print(xs)\nmain()\n";
@@ -1954,10 +1950,9 @@ fn airlock_crossing_grid_compile_cells() {
         "    if flag:\n        print(1)\n    xs.push(1)",
         "    if w(xs):\n        print(1)",
     ] {
-        rejects(
-            &format!("{w}fn f(xs: List[int], flag: bool):\n{body}\n{spawned}"),
-            "is this task's copy",
-        );
+        ok(&format!(
+            "{w}fn f(xs: List[int], flag: bool):\n{body}\n{spawned}"
+        ));
     }
 }
 

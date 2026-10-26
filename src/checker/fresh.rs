@@ -344,15 +344,10 @@ impl Checker {
         }
     }
 
-    /// TICKET-189: how a call's receiver and bound slots cross. Read by the spawn arm and, for a
-    /// call that creates a generator, by its creation stamp (TICKET-190).
-    pub(super) fn call_crossing(
-        &mut self,
-        receiver: Option<&Expr>,
-        slots: &[super::fn_writes::SlotSrc],
-    ) -> CallCrossing {
+    /// TICKET-189: how a call's bound slots cross, for a call that creates a generator: its
+    /// creation stamp (TICKET-190).
+    pub(super) fn call_crossing(&mut self, slots: &[super::fn_writes::SlotSrc]) -> CallCrossing {
         CallCrossing {
-            recv: receiver.map(|r| self.fresh_shape(r, 0, true)),
             args: slots.iter().map(|s| self.slot_fresh(s, 0, true)).collect(),
         }
     }

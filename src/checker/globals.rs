@@ -93,11 +93,6 @@ impl GlobalBinding {
             DeclKind::Let | DeclKind::Fn | DeclKind::Hoisted | DeclKind::Type(_) => false,
         })
     }
-    pub(super) fn has_let(&self) -> bool {
-        self.decls
-            .iter()
-            .any(|(k, _, _)| matches!(k, DeclKind::Let | DeclKind::ConstLet))
-    }
     pub(super) fn first_let(&self) -> Option<Span> {
         self.decls
             .iter()

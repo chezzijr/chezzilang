@@ -812,15 +812,12 @@ impl Vm {
                     return Err(e);
                 }
             }
-            Op::SpawnCall(argc, fresh, entry) => {
-                self.do_spawn(super::sched::SpawnHead::Callee(*entry), *argc, *fresh, span)?
+            Op::SpawnCall(argc, entry) => {
+                self.do_spawn(super::sched::SpawnHead::Callee(*entry), *argc, span)?
             }
-            Op::SpawnRecv(argc, fresh, entry) => self.do_spawn(
-                super::sched::SpawnHead::Receiver(*entry),
-                *argc,
-                *fresh,
-                span,
-            )?,
+            Op::SpawnRecv(argc, entry) => {
+                self.do_spawn(super::sched::SpawnHead::Receiver(*entry), *argc, span)?
+            }
             Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
             Op::WaitPoll(meta) => {
                 self.sched_seed_point();

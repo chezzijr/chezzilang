@@ -77,8 +77,9 @@ A run owns one heap. A collection stops every thread that runs VM code, marks ev
 threads, detached threads, parked fibers, `Shared` boxes), then sweeps. A thread that blocks (a
 channel wait, a sleep, a socket or file read, a subprocess wait, an `extern` C call) detaches first,
 as Go's `entersyscall` does, so a blocked thread never delays a stop. M3.2: a channel, an `Atomic`
-and a Task's outcome hold the value itself, so the tasks that pass it share the one object (Go). A
-spawn's captures still cross by deep copy until M3.4.
+and a Task's outcome hold the value itself, so the tasks that pass it share the one object (Go).
+M3.4: a `spawn`'s arguments and receiver, a `spawn:` block's captures and an `Executor` job's
+closure pass by handle too, so a task shares the parent's values.
 
 Known limits:
 
@@ -133,7 +134,7 @@ Known limits:
   for a stop from one thread only.
 - Miri and TSan cannot run on the development box, so no sanitizer checks the race test.
 
-Tasks share no object, and the **process** is one process: a task inherits the parent's `std.os.args`
+The **process** is one process: a task inherits the parent's `std.os.args`
 and env, and **stdin is ONE source every task shares** (Go's `os.Stdin` / Python's `sys.stdin`, not
 entry-task-owned). Any task may `io.read_line()` / `io.input()`; a line goes to **exactly one** task
 (never duplicated, never dropped); **which** task gets it is nondeterministic — order it
@@ -141,82 +142,39 @@ yourself (entry task reads, fans out over a `Channel[str]`), exactly as with con
 means stdin is exhausted. A blocked read demotes its worker, so it pins no core worker; details in
 [`stdlib.md`](../stdlib/01-builtins.md) §`std.io`.
 
-### The race you can't write
+### Tasks share the parent's values (the Go rule)
+
+A spawned task holds the parent's values by handle, as a goroutine does (M3.1 for module globals,
+M3.4 for the rest). A captured local is one cell that the task and the parent share; a loop
+variable gets a cell per iteration (Go 1.22). A `spawn f(xs)` argument, a `spawn obj.m()` receiver
+and an `Executor.submit(f)` job's captures are the parent's objects, not copies:
 
 ```chezzi
-# Go — compiles, runs, WRONG: 1000 goroutines stomp one int → torn writes, data race
-# counter := 0; for i := 0; i < 1000; i++ { go func() { counter++ }() }
-
-# Chezzi — the shared-mutation race is unrepresentable
-counter := 0
-parallel:
-    spawn: counter = counter + 1   # checker error: the task got its OWN isolated copy of `counter`
-                                    # at the spawn boundary. D4 rejects this provable lost write;
-                                    # layer C faults at runtime if static checking is bypassed.
-```
-
-**Module globals are shared (M3.1, the Go rule).** A run has one copy of each module global. A
-`spawn`ed task, an `Executor` job and a box closure read and write the live value, as a goroutine
-reads and writes a package-level `var`:
-
-```chezzi
-N := 0
+xs: Map[int, int] = {}
+n := 0
 parallel:
     spawn:
-        N = 5
-print(N)    # 5
+        xs[1] = 1
+        n = 5
+    spawn fill(xs)          # fn fill(m: Map[int, int]): m[2] = 2
+print(xs.len(), n)          # 2 5
 ```
 
-A closure or generator, wherever it was created, reads the run's globals, so a closure received
-over a `Channel` sees the sender's global writes. Two tasks that write one global without a
-`Channel`, a join or a box between them race, and a race is the program's bug (Go). A captured
-LOCAL is still a crossing copy, and a write to it is the D4 fault:
+Go prints `2 5` for the same program (`go func() { xs[1] = 1; n = 5 }()`). The join orders the
+task's writes before the parent's read. Two tasks that write one value without a `Channel`, a
+join or a box (`Shared[T]`, `RwShared[T]`) between them race, and a race is the program's bug:
 
+```chezzi
+counter := 0
+parallel:
+    for _i in 0..1000:
+        spawn:
+            counter = counter + 1   # a data race, as in Go: the result is not 1000
 ```
-'<name>' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()
-```
 
-The decision record is [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
+Share a counter through `Shared[T]` (`update` runs under the box's guard) or an `AtomicInt`.
+`tests/chz/spec/spawn_handle_test.chz` pins the rule (Go goldens in its header).
 
-**The checker rejects writes it can prove will be lost (D4 layer A).** The diagnostic is
-byte-identical to the runtime fault.
-
-- It rejects direct task writes to captured local bindings, including compound/projected writes and
-  known mutating native or user methods. A write to a module global is legal (M3.1).
-- It rejects a capture-writing closure executed by `spawn g()`, by a call inside `spawn:`, or by
-  `Executor.submit`.
-- Named function calls carry proven writes through parameters and captures, including
-  transitive and recursive calls. A direct call inside `spawn:`, a direct `spawn f(args)`, or an
-  `Executor.submit` job reports the write at its task-side call, with the mutating operation in help.
-  `spawn f(args)` evaluates `args` in the parent.
-- Indirect function values, unresolved paths, generic/protocol receivers and `Channel.send` decline
-  to layer C (the runtime fault).
-- Reads, task-local copies, handle writes and parent-side writes stay valid.
-- Layer A reports a write only when every path through the function reaches it. A write under
-  `if`/`match`/a loop/a short-circuit right side, or after a possible `return`/`break`/`continue`/`?`,
-  is left to layer C.
-
-**A task's own values stay writable.** Every object a `spawn` operand's expression builds crosses
-unmarked, at every depth: a list, tuple, set or map literal, a comprehension, a struct or variant
-constructor, a `?x` or implicit carrier wrap, and a List/Map/Set/bytearray `.copy()` for its own
-level. So `spawn work([], out)` may push onto its list, also when the parameter is `List[int]?`, and
-`spawn work(S([[]]))` may push onto `s.xs[0]`, as in Go and Python. A named value, a field read and a
-call result inside the operand stay copies: `spawn f([xs])` faults on `a[0].push(1)`, and
-`spawn f(xs.copy())` faults on a child of `xs`. The same holds for a literal default fill
-(`acc: List[int] = []`), a variadic pack (its NAMED elements stay copies), and every spawn callee form:
-`f()`, `obj.m()`, `lib.f()`, `lib.K.f()` and a function value. Layer A maps each parameter through the
-checker's call plan, so a parameter the callee rebinds before writing is not a task copy, and a
-keyword-bound named argument that an `f()` or `lib.f()` callee writes (`spawn w(out=out, xs=xs)`) is a
-compile error.
-
-Two ceilings stay, each pinned by `tests/chz/spec/airlock_crossing_policy_grid_test.chz`:
-
-1. A provider default (any default that is not all-literal) is a call result and stays a copy, so a
-   write to it faults.
-2. Layer A declines method, static and value callees, so their write to a named argument compiles and
-   faults at run time in layer C.
-
-Full rules: [`syntax.md` §capture](../syntax/01-lexical-and-literals.md) and [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
 
 **A task reads the live global — at every depth.** There is no per-task view: a global first
 initialized *after* an earlier nursery is visible, a write by the root task between two spawns is
@@ -381,8 +339,8 @@ Two separate guarantees; do not conflate them:
 How a `parallel:` block runs (`chezzi run`):
 
 1. Executing `spawn X` **evaluates the call's callee + arguments eagerly, at the spawn point** (Go's
-   arg-evaluation timing), **deep-copies them across the airlock**
-   ([§7](07-sendability.md#7-sendability)), and **starts** the task on the innermost nursery. **The
+   arg-evaluation timing), hands them to the task by handle
+   ([§7](07-sendability.md#7-sendability), M3.4), and **starts** the task on the innermost nursery. **The
    parent then continues to the next statement immediately** — `spawn` does not block. A `parallel:`
    nursery entered **inside a spawned task** starts the same way, at every worker count: its tasks
    run on the existing workers without adding an OS thread, and the owner parks at its join,

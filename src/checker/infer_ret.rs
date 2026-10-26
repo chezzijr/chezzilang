@@ -45,24 +45,6 @@ impl Checker {
         self.infer_returns_pass(stmts, true);
         // Global types read the finalized returns.
         self.type_globals_pass(stmts);
-        // Closure writes: a body above `h := fn(): ...` calling `h()` must see which captures `h`
-        // writes. The walk above recorded them per closure literal (`closure_literal_writes` is not
-        // in `DiagMark`, so the rollback kept them).
-        for (s, firsts) in self.seeded_first_lets(stmts) {
-            if let StmtKind::Let { target, value, .. } = &s.kind
-                && let Some(name) = target.target_ident()
-                && firsts.len() == 1
-                && let ExprKind::Closure { body, .. } = &value.kind
-                && let Some(writes) = self
-                    .closure_literal_writes
-                    .get(&(self.graph_module_idx, body.span))
-                && !writes.is_empty()
-            {
-                let mut writes = writes.clone();
-                writes.sort();
-                self.written_captures[0].insert(name.to_string(), writes);
-            }
-        }
         self.report_untyped_globals(stmts);
         self.resolving_returns = saved_resolving;
     }
@@ -738,8 +720,7 @@ impl Checker {
             decl.name
                 .starts_with(crate::base::provider_name::PROVIDER_PREFIX),
         );
-        // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48), so it also does
-        // not inherit the enclosing frame's W8-3 airlock taint (`enter_own_frame` moves the pair).
+        // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48).
         let saved_frame = self.enter_own_frame();
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         // An inline expression body is never a generator: a stray `yield` in it is diagnosed.

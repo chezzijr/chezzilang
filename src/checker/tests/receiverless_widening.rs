@@ -1707,13 +1707,13 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
             "{name}: carriers"
         );
         assert_eq!(
-            sorted_debug(&on.12),
-            sorted_debug(&off.12),
+            sorted_debug(&on.11),
+            sorted_debug(&off.11),
             "{name}: hook_calls"
         );
         assert_eq!(
-            sorted_debug(&on.11),
-            sorted_debug(&off.11),
+            sorted_debug(&on.10),
+            sorted_debug(&off.10),
             "{name}: hook_table"
         );
         assert_eq!(
@@ -1726,19 +1726,14 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
             sorted_debug(&off.4),
             "{name}: ret_coerce"
         );
-        assert_eq!(sorted_debug(&on.10), sorted_debug(&off.10), "{name}: wraps");
+        assert_eq!(sorted_debug(&on.9), sorted_debug(&off.9), "{name}: wraps");
         assert_eq!(on.5, off.5, "{name}: table_conflicts");
         assert_eq!(
-            sorted_debug(&on.6),
-            sorted_debug(&off.6),
-            "{name}: crossings"
-        );
-        assert_eq!(
-            sorted_debug(&on.9.calls),
-            sorted_debug(&off.9.calls),
+            sorted_debug(&on.8.calls),
+            sorted_debug(&off.8.calls),
             "{name}: gen_crossings.calls"
         );
-        assert_eq!(on.9.frames, off.9.frames, "{name}: gen_crossings.frames");
+        assert_eq!(on.8.frames, off.8.frames, "{name}: gen_crossings.frames");
     }
 }
 

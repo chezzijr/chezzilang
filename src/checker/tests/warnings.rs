@@ -383,90 +383,65 @@ fn no_warn_on_a_clean_program() {
     no_warn("print(1)\n");
 }
 
-// ===== W8-3 — the airlock-staleness warning (a task-side write read after the join) =====
+// ===== W8-3 / D4 layer A — task writes to captures, args and receivers (deleted in M3.4) =====
 //
-// Every shape below was MEASURED on the release binary before the rule was written; the warn/silent
-// split is that table, not a guess. Task-side write → value after the join:
-//   reassign 0 · push 0 · `xs[i]=v` 0 · `p.f=v` 1(unchanged) · `m[k]=v` 1(unchanged) ·
-//   top-level spawn 0 · implicit nursery 0 · module global 0     → LOST, warn
-//   `Shared.update` 1 · `Channel.send` 7 · `defer:` block push 1 · parent overwrite 2 → visible, silent
-//
-// The filed defect's failure mode is why it ranks: `for r in results:` over the stale empty list ran
-// ZERO iterations, so every `assert` inside was skipped and the program exited 0.
+// W8-3 warned, and D4 layer A then rejected, a task's write to a captured local, a spawn argument
+// or a receiver, because the task wrote a copy and the write was lost at the join. M3.4 (Go model):
+// a task holds the parent's values by handle, so the write lands and every program below checks
+// clean (Go compiles each shape: `go func() { xs = append(xs, 1) }()`). The per-test notes keep the
+// measurements of the deleted rule for each shape; the run-time answers are the `tests/chz/spec/`
+// rewrites (`airlock_task_local_fault_test.chz`, `airlock_crossing_grid_test.chz`).
 
-/// D4 rule 1 rejects each direct task-body write to an airlock copy.
+/// Each direct task-body write form (the old D4 rule 1 rows).
 #[test]
-fn a_task_side_write_read_after_the_join_is_an_error() {
+fn a_task_side_write_read_after_the_join_checks_clean() {
     // Reassignment — the filed repro.
-    rejects(
+    ok(
         "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results = [\"a\"]\n    print(results.len())\nf()\n",
-        "'results' is this task's copy",
     );
     // Mutator method call.
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // Index assign, read WHOLE. A captured `List` deep-copies across the airlock, so the parent's
     // whole-value read observes the lost element write — the checker can tell, so it reports. (The
     // granular read `xs[0]` of this same granular write now warns too; see
     // `a_same_path_read_of_a_projected_task_write_warns`.)
-    rejects(
+    ok(
         "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    print(xs)\nf()\n",
-        "'xs' is this task's copy",
     );
     // Field assign — a captured struct deep-copies across the airlock too.
-    rejects(
+    ok(
         "struct P:\n    x: int\nfn f():\n    p := P(1)\n    parallel:\n        spawn:\n            p.x = 9\n    print(p)\nf()\n",
-        "'p' is this task's copy",
     );
     // Map key assign.
-    rejects(
+    ok(
         "fn f():\n    m := {\"a\": 1}\n    parallel:\n        spawn:\n            m[\"a\"] = 9\n    print(m)\nf()\n",
-        "'m' is this task's copy",
     );
     // The other mixed pair: a WHOLE-binding task write, read back through a projection. The whole
     // copy is stale, so every field of it is — the checker can tell here too.
-    rejects(
+    ok(
         "struct P:\n    x: int\n    s: str\nfn f():\n    p := P(1, \"a\")\n    parallel:\n        spawn:\n            p = P(9, \"z\")\n    print(p.s)\nf()\n",
-        "'p' is this task's copy",
     );
     // An IMPLICIT nursery (a bare `spawn:` with no `parallel:`) is the same airlock.
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    spawn:\n        xs.push(1)\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
 }
 
-/// D4 layer A (TICKET-170) — a direct write to a captured binding inside a `spawn:` task body must
-/// be a COMPILE-TIME ERROR, not the W8-3 warning above. As of this commit the checker still only
-/// warns on this shape (see `a_task_side_write_read_after_the_join_warns`'s first case, the exact
-/// same program), so this pins the gap: it currently fails because `check_src` returns zero errors.
+/// A statically known free function writes its parameter, the task's capture (D4 layer A followed
+/// it; M3.4: the write lands on the parent's list).
 #[test]
-fn spawn_body_direct_write_to_captured_binding_is_a_compile_time_error() {
-    rejects(
-        "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results = [\"a\"]\n    print(results.len())\nf()\n",
-        "'results' is this task's copy: a write to it would be lost at the join",
-    );
-}
-
-/// D4 must follow a statically known free function's parameter write back to the task capture.
-/// This currently returns no checker errors; the runtime faults at `xs.push(2)` instead.
-#[test]
-fn spawn_body_named_function_parameter_write_to_captured_binding_is_a_compile_time_error() {
-    rejects(
+fn spawn_body_named_function_parameter_write_to_captured_binding_checks_clean() {
+    ok(
         "fn bump(xs: List[int]):\n    xs.push(2)\n\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            bump(xs)\n\nmain()\n",
-        "'xs' is this task's copy: a write to it would be lost at the join",
     );
 }
 
 #[test]
 fn d4_named_helper_transitive_and_recursive_writes() {
-    rejects_help_at(
+    ok(
         "fn bump(xs: List[int], n: int):\n    xs.push(2)\n    if n > 0:\n        bump(xs, n - 1)\nfn relay(xs: List[int]):\n    bump(xs, 1)\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            relay(xs)\nmain()\n",
-        "'xs' is this task's copy: a write to it would be lost at the join",
-        "push",
-        11,
     );
     // TICKET-179: a write reached only under `if` is left to layer C, even when every branch
     // reaches it through recursion.
@@ -484,11 +459,8 @@ fn d4_named_helper_loop_shadow_does_not_write_caller() {
 
 #[test]
 fn d4_nested_named_callee_writes_outer_parameter() {
-    rejects_help_at(
+    ok(
         "fn outer(xs: List[int]):\n    fn inner():\n        xs.push(2)\n    inner()\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            outer(xs)\nmain()\n",
-        "'xs' is this task's copy: a write to it would be lost at the join",
-        "push",
-        9,
     );
 }
 
@@ -530,11 +502,8 @@ fn d4_inner_for_assignment_invalidates_outer_helper_write() {
 
 #[test]
 fn d4_nested_named_capture_write() {
-    rejects_help_at(
+    ok(
         "fn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    parallel:\n        spawn:\n            bump()\nmain()\n",
-        "'xs' is this task's copy: a write to it would be lost at the join",
-        "push",
-        7,
     );
 }
 
@@ -545,40 +514,26 @@ fn d4_named_global_and_imported_writes() {
     ok(
         "xs := [1]\nfn bump():\n    xs.push(2)\nfn main():\n    parallel:\n        spawn:\n            bump()\nmain()\n",
     );
-    files_reject(
-        &[
-            ("lib_w.chz", "fn bump(xs: List[int]):\n    xs.push(2)\n"),
-            (
-                "main.chz",
-                "import lib_w\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            lib_w.bump(xs)\nmain()\n",
-            ),
-        ],
-        "'xs' is this task's copy: a write to it would be lost at the join",
-    );
+    files_ok(&[
+        ("lib_w.chz", "fn bump(xs: List[int]):\n    xs.push(2)\n"),
+        (
+            "main.chz",
+            "import lib_w\nfn main():\n    xs := [1]\n    parallel:\n        spawn:\n            lib_w.bump(xs)\nmain()\n",
+        ),
+    ]);
 }
 
 #[test]
 fn d4_spawn_named_callee_write() {
-    rejects_help_at(
+    ok(
         "fn bump(xs: List[int]):\n    xs.push(2)\nfn main():\n    xs := [1]\n    parallel:\n        spawn bump(xs)\nmain()\n",
-        "'xs' is this task's copy: a write to it would be lost at the join",
-        "push",
-        6,
     );
 }
 
 #[test]
 fn d4_executor_submit_named_capture_write_and_read_only() {
-    let errs = check_entry(
+    entry_ok(
         "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    fn bump():\n        xs.push(2)\n    ex := Executor()\n    ex.submit(bump)\n    ex.shutdown()\nmain()\n",
-    );
-    assert!(
-        errs.iter().any(|e| e
-            .message
-            .contains("'xs' is this task's copy: a write to it would be lost at the join")
-            && e.help.as_deref().is_some_and(|h| h.contains("push"))
-            && e.span.line == 7),
-        "expected submit-argument error with push help at line 7, got: {errs:?}"
     );
     entry_ok(
         "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    fn read():\n        print(xs.len())\n    ex := Executor()\n    ex.submit(read)\n    ex.shutdown()\nmain()\n",
@@ -606,22 +561,9 @@ fn d4_named_helper_valid_calls_and_indirection() {
     }
 }
 
-/// Removing D4 rule 1 makes this source return zero matching errors. Speculative checking must not
-/// report the same write twice.
-#[test]
-fn d4_rule1_reports_each_write_once() {
-    let src = "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results = [\"a\"]\n    print(results.len())\nf()\n";
-    let errs = check_src(src);
-    let matching = errs
-        .iter()
-        .filter(|e| e.message.contains("'results' is this task's copy"))
-        .count();
-    assert_eq!(matching, 1, "expected one D4 error, got: {errs:?}");
-}
-
 /// Removing each corresponding write hook makes that row return zero D4 errors.
 #[test]
-fn d4_rule1_every_task_body_write_form_is_an_error() {
+fn d4_rule1_every_task_body_write_form_checks_clean() {
     let rows = [
         (
             "fn f():\n    n := 0\n    parallel:\n        spawn:\n            n = 5\nf()\n",
@@ -676,8 +618,8 @@ fn d4_rule1_every_task_body_write_form_is_an_error() {
             "ba",
         ),
     ];
-    for (src, name) in rows {
-        rejects(src, &format!("'{name}' is this task's copy"));
+    for (src, _written) in rows {
+        ok(src);
     }
     // M3.1: a module global is the run's one copy, so a task's write to it is legal.
     ok("n := 0\nparallel:\n    spawn:\n        n = 5\n");
@@ -712,7 +654,7 @@ fn d4_rule1_silent_set_stays_clean() {
 /// Without the self-write fixed point, every row returns zero D4 errors. The transitive and mutual
 /// recursion rows fail if inference stops after one pass.
 #[test]
-fn d4_user_method_writing_self_is_an_error_in_a_task() {
+fn d4_user_method_writing_self_checks_clean_in_a_task() {
     let rows = [
         (
             "struct C:\n    n: int\n    fn bump(self):\n        self.n = self.n + 1\nfn f():\n    c := C(0)\n    parallel:\n        spawn:\n            c.bump()\nf()\n",
@@ -747,8 +689,8 @@ fn d4_user_method_writing_self_is_an_error_in_a_task() {
             "c",
         ),
     ];
-    for (src, name) in rows {
-        rejects(src, &format!("'{name}' is this task's copy"));
+    for (src, _written) in rows {
+        ok(src);
     }
 }
 
@@ -776,29 +718,22 @@ fn d4_user_method_write_inference_declines() {
 /// Without rule 3, each closure writes its named capture but crosses an executing task boundary
 /// without a compile-time error.
 #[test]
-fn d4_rule3_writing_closure_crossing_a_task_is_an_error() {
-    rejects(
+fn d4_rule3_writing_closure_crossing_a_task_checks_clean() {
+    ok(
         "fn f():\n    xs := [1]\n    g := fn(): xs.push(2)\n    parallel:\n        spawn:\n            g()\nf()\n",
-        "'xs' is this task's copy",
     );
-    rejects(
+    ok(
         "fn f():\n    xs := [1]\n    g := fn(): xs.push(2)\n    parallel:\n        spawn g()\nf()\n",
-        "'xs' is this task's copy",
     );
-    entry_rejects(
+    entry_ok(
         "import Executor from std.concurrency\nfn f():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): xs.push(3))\n    ex.shutdown()\nf()\n",
-        "'xs' is this task's copy",
     );
-    entry_rejects(
+    entry_ok(
         "import Executor from std.concurrency\nfn f():\n    xs := [1]\n    g := fn(): xs.push(3)\n    ex := Executor()\n    ex.submit(g)\n    ex.shutdown()\nf()\n",
-        "'xs' is this task's copy",
     );
     // M3.1: a closure that writes a module global writes the run's one copy, so it is legal.
     ok("G := [1]\ng := fn(): G.push(2)\nparallel:\n    spawn:\n        g()\n");
-    rejects(
-        "fn f():\n    xs := [1]\n    parallel:\n        spawn (fn(): xs.push(2))()\nf()\n",
-        "'xs' is this task's copy",
-    );
+    ok("fn f():\n    xs := [1]\n    parallel:\n        spawn (fn(): xs.push(2))()\nf()\n");
 }
 
 /// These values either do not execute at the crossing or carry no provable captured write. Treating
@@ -836,33 +771,28 @@ fn a_module_global_written_in_a_task_is_legal_where_a_received_closure_reads_it(
 /// which is the rule's "under-warning, never over-warning" invariant negated, not a documented
 /// ceiling. `pop_scope` now drops every entry whose owning scope is the one going away.
 #[test]
-fn a_shadows_taint_is_not_charged_to_the_outer_binding() {
+fn a_shadow_written_in_a_task_checks_clean() {
     // The outer `xs` is a different list; the task wrote the SHADOW. Correctly prints 2.
-    rejects(
+    ok(
         "fn f():\n    xs := [10, 20]\n    if true:\n        xs := [1]\n        parallel:\n            spawn:\n                xs.push(99)\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // The outer binding is an `int` that never entered a task at all. Correctly returns 42.
-    rejects(
+    ok(
         "fn f() -> int:\n    n := 41\n    if true:\n        n := [1]\n        parallel:\n            spawn:\n                n.push(99)\n    return n + 1\nprint(f())\n",
-        "'n' is this task's copy",
     );
     // The premise cuts one way only. A read of the SHADOW, inside the shadow's own scope, is a read
     // of the binding the task actually wrote — it still reports (measured: prints 1).
-    rejects(
+    ok(
         "fn f():\n    xs := [10, 20]\n    if true:\n        xs := [1]\n        parallel:\n            spawn:\n                xs.push(99)\n        print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // …and an intervening block that does NOT shadow leaves the outer taint intact (measured: the
     // read prints the stale 2). The cut is scope-keyed, not "any block boundary clears it".
-    rejects(
+    ok(
         "fn f():\n    xs := [10, 20]\n    if true:\n        parallel:\n            spawn:\n                xs.push(99)\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // A block that pops BETWEEN the task write and the read must not clear a fn-body-scope taint.
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    if true:\n        print(\"mid\")\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
 }
 
@@ -875,34 +805,29 @@ fn a_shadows_taint_is_not_charged_to_the_outer_binding() {
 #[test]
 fn a_granular_read_of_a_granular_task_write_declines() {
     // Different field. Correctly prints "bob".
-    rejects(
+    ok(
         "struct P:\n    count: int\n    name: str\nfn f(p: P):\n    parallel:\n        spawn:\n            p.count = p.count + 1\n    print(p.name)\nf(P(0, \"bob\"))\n",
-        "'p' is this task's copy",
     );
     // The decisive form: still silent once the user has applied the warning's OWN advice and carried
     // the value out on a Channel. A warning that fires after its own fix is applied is the worst
     // possible outcome for the rule's credibility.
-    rejects(
+    ok(
         "struct P:\n    count: int\n    name: str\nfn f(p: P, ch: Channel[int]):\n    parallel:\n        spawn:\n            p.count = p.count + 1\n            ch.send(p.count)\n    print(p.name)\n    print(ch.recv())\nf(P(0, \"bob\"), Channel[int](4))\n",
-        "'p' is this task's copy",
     );
     // Different map key — the write side's own stated example, now answered the same way on the read
     // side. Correctly prints 7.
-    rejects(
+    ok(
         "fn f(m: Map[str, int]):\n    parallel:\n        spawn:\n            m[\"a\"] = 1\n    print(m[\"b\"])\nm := {\"a\": 0, \"b\": 7}\nf(m)\n",
-        "'m' is this task's copy",
     );
     // The decline is per-BINDING, not a blanket "inside a projection" mute: a stale `i` read within
     // the INDEX EXPRESSION of a shielded `m[...]` still reports.
-    rejects(
+    ok(
         "fn f(m: Map[str, int], i: int):\n    parallel:\n        spawn:\n            m[\"a\"] = 1\n            i = 3\n    print(m[str(i)])\nm := {\"a\": 0, \"0\": 7}\nf(m, 0)\n",
-        "'i' is this task's copy",
     );
     // Only a MUTATOR write is whole-container, so a granular read of one still reports: every member
     // of `mutates_receiver` is a read-modify-write over the whole container.
-    rejects(
+    ok(
         "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs.push(9)\n    print(xs[0])\nf()\n",
-        "'xs' is this task's copy",
     );
 }
 
@@ -931,10 +856,9 @@ fn airlock_src(init: &str, writes: &[&str], reads: &[&str]) -> String {
 /// above is about a DIFFERENT field/key than the one written — this is the SAME field, where the
 /// checker can in fact tell, and must not decline.
 #[test]
-fn a_granular_read_of_the_same_field_a_granular_task_write_wrote_warns() {
-    rejects(
+fn a_granular_read_of_the_same_field_a_granular_task_write_wrote_checks_clean() {
+    ok(
         "struct S:\n    v: int\nfn f():\n    s := S(1)\n    parallel:\n        spawn:\n            s.v = 2\n    print(s.v)\nf()\n",
-        "'s' is this task's copy",
     );
 }
 
@@ -943,116 +867,74 @@ fn a_granular_read_of_the_same_field_a_granular_task_write_wrote_warns() {
 /// DIFFERENT field ahead of the overlapping one (W6, which must cite the overlapping write's line,
 /// not the first write's).
 #[test]
-fn a_same_path_read_of_a_projected_task_write_warns() {
+fn a_same_path_read_of_a_projected_task_write_checks_clean() {
     const MK: &str = "    s := S(1, 5, [1], T(1))\n";
     const XS: &str = "    xs := [[1], [7]]\n";
     const M: &str = "    m := {\"a\": 1, \"b\": 7}\n";
     const TS: &str = "    ts := [T(1)]\n";
     // W1
-    rejects(
-        &airlock_src(MK, &["s.v = 2"], &["print(s.v)"]),
-        "'s' is this task's copy",
-    );
+    ok(&airlock_src(MK, &["s.v = 2"], &["print(s.v)"]));
     // W2
-    rejects(
-        &airlock_src(MK, &["s.v = 2"], &["print(\"{s.v}\")"]),
-        "'s' is this task's copy",
-    );
+    ok(&airlock_src(MK, &["s.v = 2"], &["print(\"{s.v}\")"]));
     // W3
-    rejects(
-        &airlock_src(MK, &["s.t.v = 2"], &["print(s.t.v)"]),
-        "'s' is this task's copy",
-    );
+    ok(&airlock_src(MK, &["s.t.v = 2"], &["print(s.t.v)"]));
     // W4
-    rejects(
-        &airlock_src(MK, &["s.t.v = 2"], &["print(s.t)"]),
-        "'s' is this task's copy",
-    );
+    ok(&airlock_src(MK, &["s.t.v = 2"], &["print(s.t)"]));
     // W5
-    rejects(
-        &airlock_src(MK, &["s.v += 1"], &["print(s.v)"]),
-        "'s' is this task's copy",
-    );
+    ok(&airlock_src(MK, &["s.v += 1"], &["print(s.v)"]));
     // W6 — a DIFFERENT field write (line 12) precedes the overlapping one (line 13); the report
     // must cite the overlapping write, not the first.
     let w6 = airlock_src(MK, &["s.w = 2", "s.v = 2"], &["print(s.v)"]);
-    rejects(&w6, "'s' is this task's copy");
+    ok(&w6);
     // W7
-    rejects(
-        &airlock_src(XS, &["xs[0] = [2]"], &["print(xs[0])"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(XS, &["xs[0] = [2]"], &["print(xs[0])"]));
     // W8
-    rejects(
-        &airlock_src(XS, &["xs[0] = [2]"], &["print(xs[0][0])"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(XS, &["xs[0] = [2]"], &["print(xs[0][0])"]));
     // W9
-    rejects(
-        &airlock_src(M, &["m[\"a\"] = 2"], &["print(m[\"a\"])"]),
-        "'m' is this task's copy",
-    );
+    ok(&airlock_src(M, &["m[\"a\"] = 2"], &["print(m[\"a\"])"]));
     // W10
-    rejects(
-        &airlock_src(M, &["m[\"a\"] += 1"], &["print(m[\"a\"])"]),
-        "'m' is this task's copy",
-    );
+    ok(&airlock_src(M, &["m[\"a\"] += 1"], &["print(m[\"a\"])"]));
     // W11
-    rejects(
-        &airlock_src(TS, &["ts[0].v = 2"], &["print(ts[0].v)"]),
-        "'ts' is this task's copy",
-    );
+    ok(&airlock_src(TS, &["ts[0].v = 2"], &["print(ts[0].v)"]));
 }
 
 /// TICKET-165 rows W12-W19: a mutator called on an element or field of a binding (`xs[0].push(2)`,
 /// `s.xs.push(2)`, `m["a"].push(3)`) is a WRITE through the root, so a read of it — whole, of the
 /// element itself, or via a follow-on parent-side mutator (W19) — warns.
 #[test]
-fn a_mutator_on_a_projected_receiver_is_a_task_write() {
+fn a_mutator_on_a_projected_receiver_in_a_task_checks_clean() {
     const MK: &str = "    s := S(1, 5, [1], T(1))\n";
     const XS: &str = "    xs := [[1], [7]]\n";
     const ML: &str = "    m := {\"a\": [1]}\n";
     // W12
-    rejects(
-        &airlock_src(XS, &["xs[0].push(2)"], &["print(xs)"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(XS, &["xs[0].push(2)"], &["print(xs)"]));
     // W13
-    rejects(
-        &airlock_src(XS, &["xs[0].push(2)"], &["print(\"{xs}\")"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(XS, &["xs[0].push(2)"], &["print(\"{xs}\")"]));
     // W14
-    rejects(
-        &airlock_src(XS, &["xs[0].push(2)"], &["print(xs[0])"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(XS, &["xs[0].push(2)"], &["print(xs[0])"]));
     // W15
-    rejects(
-        &airlock_src(XS, &["xs[0].push(2)"], &["print(xs[0].len())"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(
+        XS,
+        &["xs[0].push(2)"],
+        &["print(xs[0].len())"],
+    ));
     // W16
-    rejects(
-        &airlock_src(MK, &["s.xs.push(2)"], &["print(s.xs)"]),
-        "'s' is this task's copy",
-    );
+    ok(&airlock_src(MK, &["s.xs.push(2)"], &["print(s.xs)"]));
     // W17
-    rejects(
-        &airlock_src(MK, &["s.xs.push(2)"], &["print(s)"]),
-        "'s' is this task's copy",
-    );
+    ok(&airlock_src(MK, &["s.xs.push(2)"], &["print(s)"]));
     // W18
-    rejects(
-        &airlock_src(ML, &["m[\"a\"].push(3)"], &["print(m[\"a\"])"]),
-        "'m' is this task's copy",
-    );
+    ok(&airlock_src(
+        ML,
+        &["m[\"a\"].push(3)"],
+        &["print(m[\"a\"])"],
+    ));
     // W19 — the parent-side follow-on mutator is itself a read-modify-write; it observes the stale
     // task write before superseding it.
-    rejects(
-        &airlock_src(XS, &["xs[0].push(2)"], &["xs[0].push(3)", "print(xs)"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(
+        XS,
+        &["xs[0].push(2)"],
+        &["xs[0].push(3)", "print(xs)"],
+    ));
 }
 
 /// TICKET-165: the warning fires at every position a task write to a captured LOCAL can occur — a
@@ -1060,7 +942,7 @@ fn a_mutator_on_a_projected_receiver_is_a_task_write() {
 /// projected-mutator write on a list element (P5). At module top level the binding is a module
 /// global, the run's one copy (M3.1), so the task write is legal there (P1, P4).
 #[test]
-fn a_projected_task_write_warns_at_every_position() {
+fn a_projected_task_write_checks_clean_at_every_position() {
     const PRE: &str =
         "struct T:\n    v: int\nstruct S:\n    v: int\n    w: int\n    xs: List[int]\n    t: T\n";
     const MK: &str = "    s := S(1, 5, [1], T(1))\n";
@@ -1069,25 +951,18 @@ fn a_projected_task_write_warns_at_every_position() {
         "{PRE}s := S(1, 5, [1], T(1))\nparallel:\n    spawn:\n        s.v = 2\nprint(s.v)\n"
     ));
     // P2 — nested parallel:/spawn:.
-    rejects(
-        &format!(
-            "{PRE}fn main():\n{MK}    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    s.v = 2\n    print(s.v)\nmain()\n"
-        ),
-        "'s' is this task's copy",
-    );
+    ok(&format!(
+        "{PRE}fn main():\n{MK}    parallel:\n        spawn:\n            parallel:\n                spawn:\n                    s.v = 2\n    print(s.v)\nmain()\n"
+    ));
     // P3 — spawn: inside a loop.
-    rejects(
-        &format!(
-            "{PRE}fn main():\n{MK}    for _ in 0..2:\n        spawn:\n            s.v = 2\n    print(s.v)\nmain()\n"
-        ),
-        "'s' is this task's copy",
-    );
+    ok(&format!(
+        "{PRE}fn main():\n{MK}    for _ in 0..2:\n        spawn:\n            s.v = 2\n    print(s.v)\nmain()\n"
+    ));
     // P4 — module top level, projected mutator on a list element of a module global.
     ok("xs := [[1]]\nparallel:\n    spawn:\n        xs[0].push(2)\nprint(xs[0])\n");
     // P5 — spawn: inside a loop, projected mutator.
-    rejects(
+    ok(
         "fn main():\n    xs := [[1]]\n    for _ in 0..2:\n        spawn:\n            xs[0].push(2)\n    print(xs)\nmain()\n",
-        "'xs' is this task's copy",
     );
 }
 
@@ -1099,30 +974,15 @@ fn a_disjoint_path_read_of_a_projected_task_write_stays_silent() {
     const XS: &str = "    xs := [[1], [7]]\n";
     const M: &str = "    m := {\"a\": 1, \"b\": 7}\n";
     // S1
-    rejects(
-        &airlock_src(XS, &["xs[0] = [2]"], &["print(xs[1])"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(XS, &["xs[0] = [2]"], &["print(xs[1])"]));
     // S2
-    rejects(
-        &airlock_src(M, &["m[\"a\"] = 2"], &["print(m[\"b\"])"]),
-        "'m' is this task's copy",
-    );
+    ok(&airlock_src(M, &["m[\"a\"] = 2"], &["print(m[\"b\"])"]));
     // S3
-    rejects(
-        &airlock_src(MK, &["s.xs.push(2)"], &["print(s.v)"]),
-        "'s' is this task's copy",
-    );
+    ok(&airlock_src(MK, &["s.xs.push(2)"], &["print(s.v)"]));
     // S4
-    rejects(
-        &airlock_src(XS, &["xs[0].push(2)"], &["print(xs[1])"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(XS, &["xs[0].push(2)"], &["print(xs[1])"]));
     // S5
-    rejects(
-        &airlock_src(MK, &["s.t.v = 2"], &["print(s.w)"]),
-        "'s' is this task's copy",
-    );
+    ok(&airlock_src(MK, &["s.t.v = 2"], &["print(s.w)"]));
 }
 
 /// TICKET-165 rows C1-C2: the narrowed seventh ceiling. A computed or negative index cannot be
@@ -1132,19 +992,17 @@ fn a_disjoint_path_read_of_a_projected_task_write_stays_silent() {
 fn an_unmatchable_projected_path_declines() {
     const XS: &str = "    xs := [[1], [7]]\n";
     // C1 — a computed index on the write side.
-    rejects(
-        &airlock_src(
-            &format!("{XS}    n := 1\n"),
-            &["xs[n - 1] = [2]"],
-            &["print(xs[0])"],
-        ),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(
+        &format!("{XS}    n := 1\n"),
+        &["xs[n - 1] = [2]"],
+        &["print(xs[0])"],
+    ));
     // C2 — a negative index literal on the read side.
-    rejects(
-        &airlock_src("    xs := [1]\n", &["xs[0] = 2"], &["print(xs[-1])"]),
-        "'xs' is this task's copy",
-    );
+    ok(&airlock_src(
+        "    xs := [1]\n",
+        &["xs[0] = 2"],
+        &["print(xs[-1])"],
+    ));
 }
 
 /// TICKET-165 rows H1-H5, L1-L3: a projected write through a handle type (`Shared`/`RwShared`/
@@ -1189,12 +1047,9 @@ fn a_projected_write_through_a_handle_a_task_local_or_before_the_nursery_stays_s
         &["print(s.v)", "print(xs[0])"],
     ));
     // L2 — the read is lexically BEFORE the nursery opens.
-    rejects(
-        &format!(
-            "struct T:\n    v: int\nstruct S:\n    v: int\n    w: int\n    xs: List[int]\n    t: T\nfn main():\n{MK}    print(s.v)\n    parallel:\n        spawn:\n            s.v = 2\nmain()\n"
-        ),
-        "'s' is this task's copy",
-    );
+    ok(&format!(
+        "struct T:\n    v: int\nstruct S:\n    v: int\n    w: int\n    xs: List[int]\n    t: T\nfn main():\n{MK}    print(s.v)\n    parallel:\n        spawn:\n            s.v = 2\nmain()\n"
+    ));
     // L3 — the task only READS the bindings; there is no write to taint.
     no_warn(&airlock_src(
         &format!("{MK}{XS}"),
@@ -1220,7 +1075,7 @@ fn a_task_side_write_at_module_top_level_and_on_a_module_global_is_legal() {
 /// `Shared` 1, `Channel` 7). Telling someone their correct `Shared` code is broken is worse than the
 /// missing warning, so `mutates_receiver` is keyed on the receiver TYPE and none of them is in it.
 #[test]
-fn a_write_through_a_handle_type_never_warns() {
+fn a_write_through_a_handle_type_checks_clean() {
     entry_no_warn(
         "import Shared from std.concurrency\nfn f():\n    s := Shared(0)\n    parallel:\n        spawn:\n            s.update(fn(x: int) -> int: x + 1)\n    print(s.get())\nf()\n",
     );
@@ -1244,7 +1099,7 @@ fn a_write_through_a_handle_type_never_warns() {
 /// `widening-untested-by-its-own-suite`): swap the order, add an unused statement, move the read a
 /// block deeper.
 #[test]
-fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
+fn a_write_that_is_not_lost_checks_clean() {
     // A `defer:` block in the PARENT runs in the parent frame and shares the enclosing cell, so its
     // write is not a task write and taints nothing (measured: `defer: xs.push(1)` beside a later
     // `defer: print(xs.len())` prints 1). Its task-side twin — a `defer:` nested INSIDE the `spawn:` —
@@ -1260,24 +1115,20 @@ fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
         "fn f():\n    parallel:\n        spawn:\n            xs: List[int] = []\n            xs.push(1)\n            print(xs.len())\nf()\n",
     );
     // A captured write never read outside the task.
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(1)\nf()\n",
-        "'xs' is this task's copy",
     );
     // A read only INSIDE the task — the copy IS what is being read there.
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n            print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // A parent-side overwrite supersedes the lost write (measured: prints the parent's 2).
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    xs = [5, 6]\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // …and a parent-side INDEX assign, which untaints before its own receiver read reports.
-    rejects(
+    ok(
         "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    xs[0] = 1\n    print(xs[0])\nf()\n",
-        "'xs' is this task's copy",
     );
     // A nested `fn` declared inside the task writing its OWN local.
     no_warn(
@@ -1285,9 +1136,8 @@ fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
     );
     // NEIGHBOUR (order swap): the read placed BEFORE the spawn is a declared ceiling — lexical order,
     // not dataflow. Silent, and the write that follows taints nothing that is ever read.
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    print(xs.len())\n    parallel:\n        spawn:\n            xs.push(1)\nf()\n",
-        "'xs' is this task's copy",
     );
     // NEIGHBOUR (no spawn at all): the same statements without the task must stay silent.
     no_warn("fn f():\n    xs: List[int] = []\n    xs.push(1)\n    print(xs.len())\nf()\n");
@@ -1310,15 +1160,13 @@ fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
 /// The read a block DEEPER than the spawn still reports — the taint lives on the checker, not on a
 /// scope, so an `if`/`for` body after the join is not an escape.
 #[test]
-fn a_stale_read_nested_in_a_later_block_still_warns() {
-    rejects(
+fn a_read_nested_in_a_later_block_checks_clean() {
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    if true:\n        print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // The filed failure mode itself: the `for` head reads the stale (empty) list.
-    rejects(
+    ok(
         "fn f():\n    results: List[str] = []\n    parallel:\n        spawn:\n            results.push(\"a\")\n    for r in results:\n        print(r)\nf()\n",
-        "'results' is this task's copy",
     );
 }
 
@@ -1327,64 +1175,54 @@ fn a_stale_read_nested_in_a_later_block_still_warns() {
 /// real (`diag_rollback` truncates `warnings`, and the taint is re-derived on the second walk), and a
 /// second read of the same name after the first report (the entry is consumed).
 #[test]
-fn the_airlock_warning_is_reported_exactly_once() {
+fn a_task_write_read_twice_after_the_join_checks_clean() {
     // No declared return type on `f` → the speculative inference pass runs over this body. `zz := 99`
     // is the NEIGHBOUR (an unused statement inserted between the write and the read): an unrelated
     // binding in between must neither be tainted nor untaint `xs`, and the count assertion is what
     // proves it.
     let src = "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    zz := 99\n    print(zz)\n    print(xs.len())\n    print(xs.len())\n    n := xs.len()\n    print(n)\nf()\n";
-    let errs = check_src(src);
-    let matching = errs
-        .iter()
-        .filter(|e| e.message.contains("'xs' is this task's copy"))
-        .count();
-    assert_eq!(matching, 1, "expected one D4 error, got: {errs:?}");
+    ok(src);
 }
 
 /// A COMPOUND assign in the parent reads the stale binding before it writes it (`n += 1` after a
 /// task-side `n = n + 1` measured 1, not 2), so it reports rather than silently untainting — unlike
 /// the plain `=` form, whose neighbour test above asserts silence.
 #[test]
-fn a_parent_compound_assign_reads_the_stale_value_and_warns() {
-    rejects(
+fn a_parent_compound_assign_after_a_task_write_checks_clean() {
+    ok(
         "fn f():\n    n := 0\n    parallel:\n        spawn:\n            n = n + 1\n    n += 1\n    print(n)\nf()\n",
-        "'n' is this task's copy",
     );
     // Inside the task the compound assign reads the task's OWN copy — silent.
-    rejects(
+    ok(
         "fn f():\n    n := 0\n    parallel:\n        spawn:\n            n += 1\n            print(n)\nf()\n",
-        "'n' is this task's copy",
     );
 }
 
-/// …and never reported ZERO times. Reporting CONSUMES the taint, so a SPECULATIVE walk that reads the
-/// name eats it and the rolled-back warning is gone for good. `ys := []` (an unrefined empty literal)
-/// makes the receiver refine speculatively infer `ys.push(...)`'s argument — measured before
-/// `diag_mark`/`diag_rollback` snapshotted the taint: the warning vanished, while the byte-identical
-/// program with `ys` already concrete still warned.
+/// `ys := []` (an unrefined empty literal) makes the receiver refine speculatively infer
+/// `ys.push(...)`'s argument. Beside a task write (M3.4: legal), the program keeps exactly its own
+/// error: the uninferable `ys` (the BASE binary reports it too).
 #[test]
-fn a_speculative_walk_that_rolls_back_does_not_swallow_the_airlock_warning() {
+fn a_speculative_refine_beside_a_task_write_reports_only_its_own_error() {
     let stale = "fn f():\n    xs: List[int] = []\n    ys := []\n    parallel:\n        spawn:\n            xs.push(1)\n    ys.push(xs.len())\n    print(ys.len())\nf()\n";
-    rejects(stale, "'xs' is this task's copy");
+    let errs = check_src(stale);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("cannot infer the element type of `ys`"),
+        "{errs:?}"
+    );
     // The control: identical but for `ys` being concrete, so no speculative refine runs at all.
     let concrete = "fn f():\n    xs: List[int] = []\n    ys: List[int] = [0]\n    parallel:\n        spawn:\n            xs.push(1)\n    ys.push(xs.len())\n    print(ys.len())\nf()\n";
-    rejects(concrete, "'xs' is this task's copy");
-    // …and still exactly once through the speculative path.
-    let errs = check_src(stale);
-    let matching = errs
-        .iter()
-        .filter(|e| e.message.contains("'xs' is this task's copy"))
-        .count();
-    assert_eq!(matching, 1, "expected one D4 error, got: {errs:?}");
+    ok(concrete);
 }
 
 /// One function's taint must not leak into the next: the map is taken and restored around every fn
 /// body, so a second function reading a same-named binding of its own is clean.
 #[test]
-fn the_airlock_taint_does_not_leak_across_function_bodies() {
-    rejects(
+fn two_bodies_with_a_task_write_check_clean() {
+    ok(
         "fn writer():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\nfn reader():\n    xs: List[int] = []\n    print(xs.len())\nwriter()\nreader()\n",
-        "'xs' is this task's copy",
     );
 }
 
@@ -1396,7 +1234,7 @@ fn the_airlock_taint_does_not_leak_across_function_bodies() {
 /// closure body's `xs.len()`, then `1` printed inside the task and `0` after the join with nothing
 /// reported at all.
 #[test]
-fn a_body_declared_inside_the_task_neither_reports_nor_swallows_the_parents_warning() {
+fn a_body_declared_inside_the_task_checks_clean() {
     for inner in [
         // closure
         "            g := fn() -> int: xs.len()\n            print(g())\n",
@@ -1406,14 +1244,13 @@ fn a_body_declared_inside_the_task_neither_reports_nor_swallows_the_parents_warn
         let src = format!(
             "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n{inner}    print(xs.len())\nf()\n"
         );
-        rejects(&src, "'xs' is this task's copy");
+        ok(&src);
     }
     // NEIGHBOUR the premise implies (and the reason the taint is not dropped unconditionally): a
     // closure declared in the PARENT reads the same stale copy the parent would — measured, `g()`
     // returns 0 — so it must still warn.
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    g := fn() -> int: xs.len()\n    print(g())\nf()\n",
-        "'xs' is this task's copy",
     );
 }
 
@@ -1423,34 +1260,30 @@ fn a_body_declared_inside_the_task_neither_reports_nor_swallows_the_parents_warn
 /// `n == 0`. The code comment and `docs/reference/syntax/` both claimed the opposite (that a `defer:` never
 /// reaches the write path as a task write) — a claim written without running the program.
 #[test]
-fn a_defer_inside_the_task_is_on_the_far_side_of_the_airlock() {
-    rejects(
+fn a_defer_inside_the_task_checks_clean() {
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            defer:\n                xs.push(1)\n            print(1)\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // The reassignment spelling, which only a `defer:`/`spawn:` statement body can hold.
-    rejects(
+    ok(
         "fn f():\n    n := 0\n    parallel:\n        spawn:\n            defer:\n                n = 5\n            print(1)\n    print(n)\nf()\n",
-        "'n' is this task's copy",
     );
 }
 
 /// A closure value still declines; a direct named nested call reports its proven captured write.
 /// A read inside a parent-side nested function still reports the earlier lost task write.
 #[test]
-fn the_two_frame_shaped_ceilings_under_warn() {
+fn the_two_frame_shaped_ceilings_check_clean() {
     // Ceiling 6 — the write never leaves the nested body's frame.
     no_warn(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            bump := fn(): xs.push(1)\n            bump()\n    print(xs.len())\nf()\n",
     );
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            fn bump():\n                xs.push(1)\n            bump()\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // Ceiling 1 — the read never enters the parent-side nested `fn`'s frame.
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    fn g() -> int:\n        return xs.len()\n    print(g())\nf()\n",
-        "'xs' is this task's copy",
     );
 }
 
@@ -1460,7 +1293,7 @@ fn the_two_frame_shaped_ceilings_under_warn() {
 /// false. One case per binding form that can introduce a name into a scope; all of them route through
 /// `Checker::declare`, which is where the untaint lives.
 #[test]
-fn a_fresh_binding_of_the_name_untaints_it() {
+fn a_fresh_binding_after_a_task_write_checks_clean() {
     let head =
         "fn f():\n    n: int = 0\n    print(n)\n    parallel:\n        spawn:\n            n = 5\n";
     for tail in [
@@ -1481,13 +1314,12 @@ fn a_fresh_binding_of_the_name_untaints_it() {
         // nested-fn parameter
         "    fn h(n: int) -> int:\n        return n + 1\n    print(h(2))\n",
     ] {
-        rejects(&format!("{head}{tail}f()\n"), "'n' is this task's copy");
+        ok(&format!("{head}{tail}f()\n"));
     }
     // NEIGHBOUR: a loop whose variable is a DIFFERENT name must still warn — the untaint is keyed on
     // the name bound, not on "a binding happened".
-    rejects(
+    ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    for i in 0..2:\n        print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
 }
 
@@ -1496,30 +1328,18 @@ fn a_fresh_binding_of_the_name_untaints_it() {
 /// whole-container replacement (`clear` does not exist), so none of them can legitimately supersede
 /// the task's write. Measured: task `xs.push("a")` then parent `xs.push("b")` prints 1, not 2.
 #[test]
-fn a_parent_side_mutator_reads_the_stale_value_and_warns() {
-    rejects(
-        "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n    xs.push(\"b\")\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
-    );
-    // …still exactly once: reporting consumes the entry, so the receiver read that follows is silent.
-    let errs = check_src(
+fn a_parent_side_mutator_after_a_task_write_checks_clean() {
+    ok(
         "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n    xs.push(\"b\")\n    print(xs.len())\nf()\n",
     );
-    let matching = errs
-        .iter()
-        .filter(|e| e.message.contains("'xs' is this task's copy"))
-        .count();
-    assert_eq!(matching, 1, "expected one D4 error, got: {errs:?}");
     // Inside the task the mutator writes the task's OWN copy — silent, as before.
-    rejects(
+    ok(
         "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n            xs.push(\"b\")\n            print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
     // NEIGHBOUR: a whole-binding overwrite genuinely supersedes and stays silent (the asymmetry that
     // makes this rule a claim about read-modify-write, not about "any parent write").
-    rejects(
+    ok(
         "fn f():\n    xs: List[str] = []\n    parallel:\n        spawn:\n            xs.push(\"a\")\n    xs = [\"b\"]\n    print(xs.len())\nf()\n",
-        "'xs' is this task's copy",
     );
 }
 

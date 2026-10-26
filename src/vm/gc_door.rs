@@ -9,16 +9,17 @@
 //!   the outer `Vm` detached: the outer runs the nested loop inside [`Vm::gc_blocking`]. A second
 //!   token on one thread fails a debug assertion ([`ThreadToken`]).
 //!
-//! A `Vm` with no token (a test fixture that never ran `Vm::run`, a worker `Vm` that only rebuilds
+//! A `Vm` with no token (a test fixture that never ran `Vm::run`, a worker `Vm` that only carries
 //! a task's payload) polls nothing and blocks with no door. It collects alone only while its
 //! handle is its heap core's only one: a sweep of a core that other handles use needs a stop.
 //!
-//! M1.7 — a task's payload `Vm` (`Vm::prepare_worker`) allocates into the run's heap on the
-//! spawner's thread, under the spawner's token, and its values are in no root set until
-//! `ReadyWorker::into_fiber` registers the fiber's context. It never collects (it has no token and
-//! is not its core's only handle), and the spawner reaches no safepoint, collection or door in
-//! between, so no stop can complete while those values are unrooted: the stop waits for the
-//! spawner. [`PayloadInFlight`] checks the second half in debug builds.
+//! M1.7 — a task's payload (`Vm::prepare_worker`) is the spawner's callee and args, by handle since
+//! M3.4. Between the spawn op's pop and `ReadyWorker::into_fiber`, which registers the fiber's
+//! context, those values are in no root set (a lazy nursery's queued task is rooted by
+//! `nurseries` instead). The payload `Vm` never collects (it has no token and is not its core's
+//! only handle), and the spawner reaches no safepoint, collection or door in between, so no stop
+//! can complete while those values are unrooted: the stop waits for the spawner.
+//! [`PayloadInFlight`] checks the second half in debug builds.
 
 use super::gc_coord::{Attached, DetachTicket};
 use super::*;
@@ -27,12 +28,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 thread_local! {
     /// The GC tokens this OS thread holds: 0 or 1.
     static TOKENS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    /// The task payloads this thread rebuilt that are not yet in a registered context.
+    /// The task payloads this thread prepared that are not yet in a registered context.
     static PAYLOADS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-/// A rebuilt task payload in flight on this thread (see the module doc): from the payload `Vm`'s
-/// first allocation to `ReadyWorker::into_fiber`. While one lives, this thread must not stop,
+/// A task payload in flight on this thread (see the module doc): from `Vm::prepare_worker` to
+/// `ReadyWorker::into_fiber`. While one lives, this thread must not stop,
 /// collect or detach: its values are in no root set.
 pub(super) struct PayloadInFlight(());
 

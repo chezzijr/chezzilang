@@ -170,18 +170,17 @@ pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 
 pub use crate::base::crossing::{Fresh, SlotFresh};
 
-/// D4 (TICKET-189, TICKET-240) — the shape each operand of one `spawn` call crosses with: which
-/// objects of its value graph no parent binding can reach ([`Fresh`]). `args` is in bound-slot
-/// order, so default fills and packs sit at their compiled position.
+/// TICKET-190, TICKET-240 — the shape each argument of one generator-creating call crosses with:
+/// which objects of its value graph no caller binding can reach ([`Fresh`]). `args` is in
+/// bound-slot order, so default fills and packs sit at their compiled position.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallCrossing {
-    pub recv: Option<Fresh>,
     pub args: Vec<Fresh>,
 }
 
-/// Every spawn call's [`CallCrossing`], keyed `(graph module index, call NodeId)` like
+/// A [`CallCrossing`] per call, keyed `(graph module index, call NodeId)` like
 /// [`CallPlanTable`]. The checker decides it once (`Checker::fresh_shape`); the compiler only
-/// stores it and the runtime only walks it. A missing key means every operand is `Marked`.
+/// stores it. A missing key means every operand is `Marked`.
 pub type CrossingTable = HashMap<(usize, u32), CallCrossing>;
 
 /// TICKET-190 — the generator frame verdicts the compiler encodes. `calls` holds each call that

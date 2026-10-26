@@ -2438,6 +2438,8 @@ const FIELD_ROWS: &[Row] = &[
             R(r#"cannot infer the"#),
         ],
     ),
+    // M3.4: the task's write is no copy any more, and a write from a task body opens no slot,
+    // as a closure's write does not (the `c_field` rows; Go `z := nil` does not compile).
     row(
         "field/c_cap_spawn",
         BOX_SHOW,
@@ -2452,15 +2454,9 @@ const FIELD_ROWS: &[Row] = &[
     print(z)
 "#,
         [
-            R(
-                r#"'z' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"#,
-            ),
-            R(
-                r#"'z' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"#,
-            ),
-            R(
-                r#"'z' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"#,
-            ),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2551,6 +2547,8 @@ const FIELD_ROWS: &[Row] = &[
             R(r#"cannot infer the"#),
         ],
     ),
+    // M3.4: the task's write is no copy any more, and a write from a task body opens no slot,
+    // as a closure's write does not (the `c_field` rows; Go `z := nil` does not compile).
     row(
         "field/cap_spawn",
         BOX_SHOW,
@@ -2564,15 +2562,9 @@ const FIELD_ROWS: &[Row] = &[
     show(z)
 "#,
         [
-            R(
-                r#"'z' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"#,
-            ),
-            R(
-                r#"'z' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"#,
-            ),
-            R(
-                r#"'z' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"#,
-            ),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(

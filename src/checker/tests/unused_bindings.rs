@@ -660,7 +660,7 @@ fn fn_body_keyword_call_through_closure_global_below_checks() {
 fn head_resolution(src: &str, line: u32, col: u32) -> Resolution {
     let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
     crate::desugar::run_standalone(&mut m).expect("desugar");
-    let table = resolve_call_tables_standalone(&m.stmts).7;
+    let table = resolve_call_tables_standalone(&m.stmts).6;
     let hits: Vec<Resolution> = crate::ast::node_ids(&m)
         .into_iter()
         .filter(|(_, sp)| sp.line == line && sp.col == col)
@@ -815,7 +815,7 @@ fn resolution_records_every_pattern_head() {
                fn k(n: int) -> int:\n    return match n:\n        1: 1\n        other: other\n";
     let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
     crate::desugar::run_standalone(&mut m).expect("desugar");
-    let table = resolve_call_tables_standalone(&m.stmts).7;
+    let table = resolve_call_tables_standalone(&m.stmts).6;
     let mut got: Vec<String> = crate::ast::node_ids(&m)
         .into_iter()
         .filter_map(|(id, _)| table.get(&(0, id)))
@@ -871,7 +871,7 @@ fn decode_target_is_recorded_for_an_imported_alias() {
     );
     let graph = crate::resolver::build_graph(&main).expect("resolve");
     assert!(check_graph(&graph).is_ok(), "{:?}", check_graph(&graph));
-    let table = resolve_call_tables(&graph).7;
+    let table = resolve_call_tables(&graph).6;
     let decodes: Vec<&TypeDescriptor<ArgFill>> = table
         .values()
         .filter_map(|r| match r {
@@ -925,7 +925,7 @@ fn decode_descriptor_fills_equal_the_ctor_plan_fills() {
     let plans: Vec<&Vec<ArgFill>> = tables.0.values().filter(|p| p.len() == 2).collect();
     assert_eq!(plans.len(), 1, "{plans:?}");
     let decodes: Vec<&TypeDescriptor<ArgFill>> = tables
-        .7
+        .6
         .values()
         .filter_map(|r| match r {
             Resolution::Decode(d) => Some(d),
@@ -1297,7 +1297,7 @@ fn ticket184_flow_grid() {
         (
             "W2",
             "fn f(xs: List[int]):\n    xs.push(1)\nxs := [0]\nspawn f(xs)\nprint(xs)\n",
-            "task's copy",
+            "ok",
         ),
         (
             "W3",

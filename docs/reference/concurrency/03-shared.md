@@ -7,10 +7,10 @@
 > ([04-timer-wait.md](04-timer-wait.md)). The constructors lower to dedicated opcodes, so the import
 > costs nothing at run time.
 
-Captured locals **cross into a task as copies** ([§7](07-sendability.md#7-sendability)) — same-task
-capture is by reference, but the task boundary deep-copies — so a task can't mutate the parent's
-state. For shared mutable state *across* tasks, use **`Shared[T]`** — a box whose writes are
-serialised by a single owner (Elixir's `Agent` trick), so the torn-write race is unrepresentable.
+A task shares the parent's captured locals and arguments by handle ([§7](07-sendability.md#7-sendability),
+M3.4, the Go rule), so two tasks that write one value without a lock race. For mutable state that
+several tasks write, use **`Shared[T]`** — a box whose writes run under its guard (Go's
+`mu.Lock(); f(v); mu.Unlock()`).
 
 ```chezzi
 import Shared from std.concurrency
@@ -37,10 +37,9 @@ fn bump(s: Shared[int]):
 > value, outside the guard: a race with another task's `update` is the user's bug, as in Go. Write
 > under the guard with `update` (or `set` a whole new value).
 
-**The ladder:** bare value (copied) → a mutable in-task `struct`/collection → `Shared[T]` (cross-task
-box). An in-task mutable value (a one-field `struct`, a `List`, …) is a shared reference *within one
-task* but is **not** sendable (copy-on-spawn gives each task its own copy); `Shared[T]` **is** sendable
-(the handle is copied, the value isn't).
+**The ladder:** a value one task writes → a value tasks share and order by a join or a `Channel` →
+`Shared[T]` (a cross-task box). A mutable value (a one-field `struct`, a `List`, …) is one object
+in every task that holds it (M3.4); `Shared[T]` adds the guard that orders the writes.
 
 ### Where the value lives
 

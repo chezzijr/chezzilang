@@ -237,19 +237,15 @@ impl Checker {
             Ty::Tuple(elems) => elems.iter().all(|t| self.sendable_rec(t, stack)),
             // B3.3 (Task 2a) — a user `Func` (closure / nested fn / bare fn) crosses the airlock BY
             // VALUE now (the runtime `to_wire`/`to_snap` lowering carries its proto + wired captures),
-            // so the bare `fn` type is sendable. The bare type cannot carry its captures, so the
-            // per-closure capture-sendability check is done at the airlock SITES (the `spawn:` block
-            // read gate + the spawn callee/arg gate in `sig.rs`), NOT here. `Ty::Module` stays
-            // non-sendable (a module namespace never crosses).
+            // so the bare `fn` type is sendable. M3.4: a spawn passes a closure and its captures by
+            // handle, so no site checks a capture. `Ty::Module` stays non-sendable (a module
+            // namespace is no value).
             Ty::Func { .. } => true,
             Ty::Module(_) => false,
             // Task 2 (option a) — a protocol existential is SENDABLE (Go `chan interface` parity): the
             // erased witness crosses by value like any other type, and the concrete witness is
-            // sendable-checked at each widening site (`assignable`). A witness that genuinely can't be
-            // serialized (one carrying an FFI/native handle, or a mid-`recover:` generator) is caught
-            // at the RUNTIME airlock (`ensure_crossable` over `has_handle`), which is an exhaustive,
-            // recoverable safety net — a checker-permissive type here is
-            // never UB, at worst a deferred fault.
+            // sendable-checked at each widening site (`assignable`). M3.4: no run-time route copies
+            // a witness, so a checker-permissive type here is never UB.
             Ty::Protocol(..) => true,
             Ty::Struct(name, args) => {
                 if !args.iter().all(|a| self.sendable_rec(a, stack)) {

@@ -9,6 +9,11 @@ pre-landing risk list, is kept verbatim in
 [`history/designs/adr-d4-airlock-full.md`](../history/designs/adr-d4-airlock-full.md). The user rules
 are in [`concurrency.md`](../reference/concurrency/01-model.md).
 
+**Superseded on `exp/go-shared-heap` (the Go model, M3.1-M3.4).** A task shares module globals (M3.1),
+a channel, an `Atomic` and a `Task` hand over the value (M3.2), a box holds one value (M3.3), and a
+spawn, a `spawn:` capture and an `Executor` job pass by handle (M3.4), so no route copies and no
+write is lost. M3.4 deleted layer A; the layer C fault sites and the copy bits go in M3.5.
+
 ## The problem
 
 A task gets its own deep copy of everything it captures, and of every module global. A write inside

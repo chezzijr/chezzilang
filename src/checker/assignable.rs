@@ -149,7 +149,7 @@ impl Checker {
             // widening) is always sendable, so this only rejects a genuine non-sendable concrete
             // witness — in practice one reaching `Ty::Module` (near-unconstructible). A witness that
             // carries an FFI/native handle is checker-sendable (its `Ty::Func`/handle type is
-            // sendable) and rejected at the RUNTIME airlock instead (`ensure_crossable`), not here.
+            // sendable); since M3.4 no run-time route copies it, so nothing rejects it.
             // TICKET-053: the erasure hands `a` the unconditional intrinsic `Eq` grant for a
             // protocol receiver (the `INTRINSIC_PROTO_METHODS` row above), so the witness's own
             // conditional `eq` must be discharged HERE — the same

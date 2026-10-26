@@ -75,12 +75,11 @@ enum T254Expect {
     Warns(&'static str, &'static str),
     /// A fresh temporary the warning declines (a ceiling): no warning, no error, the root unchanged.
     Silent,
-    /// A write that reaches the root, as a D4 control: no warning, the error of `t254_control_errors`.
-    /// In a context that checks clean, the run follows `t254_control_faults`.
+    /// A write that reaches the root, as a control: no warning, no error, and the run ends clean
+    /// (M3.4: every context holds the root by handle, so the write lands).
     Control,
     /// A write the checker cannot see reaches the root (a user `slice` hook that returns its own
-    /// field): no warning, no error, and the run follows `t254_control_faults`: the D4 fault, never
-    /// a silent lost write.
+    /// field): no warning, no error, and the run ends clean, as for `Control`.
     Declined,
     /// M3.3 — a write to the box's live value (`g.get()`): no warning, no error in any context,
     /// and the run ends clean (the write lands in the box; a `sort` of the sorted root is a no-op).
@@ -511,39 +510,6 @@ fn t254_program(
     (files, main)
 }
 
-/// Does a D4 error ("this task's copy") belong to a plain-name or plain-index write in `ctx`?
-/// Measured with `T254_DUMP`: a spawned fn and a fn of another module write their ARGUMENT, a
-/// crossing copy, so they are errors. A `spawn:` block writes the root itself, a module global,
-/// which every task shares (M3.1), so it is not; nor are a plain call, the top level, a box closure
-/// and an `Executor` job.
-fn t254_control_errors(ctx: T254Ctx) -> bool {
-    match ctx {
-        T254Ctx::SpawnedFn | T254Ctx::ImportedFn => true,
-        T254Ctx::Top
-        | T254Ctx::Fn
-        | T254Ctx::SpawnBlock
-        | T254Ctx::ExecutorJob
-        | T254Ctx::BoxClosure => false,
-    }
-}
-
-/// A write that reaches the root, run in `ctx` where the program checks clean: the top level, a
-/// plain call, a `spawn:` block and a box closure write the root, a module global (M3.1: the run's
-/// one copy, so the write lands). A spawned fn receives the root as an argument, a crossing copy,
-/// and the run ends with the D4 fault `this value is this task's copy`. An `Executor` job also runs
-/// on a copy of its argument, but its fault lives only in its `Task` (TICKET-289), which this
-/// program discards: the run ends clean, root unchanged.
-fn t254_control_faults(ctx: T254Ctx) -> bool {
-    match ctx {
-        T254Ctx::Top
-        | T254Ctx::Fn
-        | T254Ctx::SpawnBlock
-        | T254Ctx::ExecutorJob
-        | T254Ctx::BoxClosure => false,
-        T254Ctx::SpawnedFn | T254Ctx::ImportedFn => true,
-    }
-}
-
 /// The last line a program printed, or the fault it ended with. The program runs through
 /// `run_file`, so the checker's hook and slice tables reach the compiler (`run_capture` has none).
 fn t254_last_line(src: &str) -> String {
@@ -583,38 +549,35 @@ fn fresh_temporary_grid() {
                     let cell = format!("{}_{}_{:?}_w{wi}", shape.name, row.name, ctx);
                     let (files, main) = t254_program(shape, ctx, &stmt);
                     let (errs, warns) = t254_diags(&cell, &files, &main);
-                    let errored = errs.iter().any(|e| e.contains("this task's copy"));
-                    let (want_warn, want_err) = match row.expect {
-                        T254Expect::Warns(call, store) => {
-                            let text = if *is_call { call } else { store };
-                            (Some(text), false)
-                        }
-                        T254Expect::Silent | T254Expect::Declined | T254Expect::Lands => {
-                            (None, false)
-                        }
-                        T254Expect::Control => (None, t254_control_errors(ctx)),
+                    // M3.4: no context is a crossing copy, so no cell is a check error.
+                    let want_warn = match row.expect {
+                        T254Expect::Warns(call, store) => Some(if *is_call { call } else { store }),
+                        T254Expect::Silent
+                        | T254Expect::Declined
+                        | T254Expect::Lands
+                        | T254Expect::Control => None,
                     };
                     let warned = match want_warn {
                         Some(text) => warns.iter().any(|w| w.contains(text)),
                         None => t254_any_temporary_warning(&warns),
                     };
-                    let stray = errs.len() != usize::from(want_err);
+                    let stray = !errs.is_empty();
                     // The run-time column: a fresh or declined write leaves the root as it was.
                     let ran = (errs.is_empty() && ctx != T254Ctx::ImportedFn)
                         .then(|| t254_last_line(&main));
                     let run_bad = match (&ran, row.expect) {
                         (Some(got), T254Expect::Warns(..) | T254Expect::Silent) => *got != baseline,
-                        (Some(got), T254Expect::Lands) => got.starts_with("fault:"),
-                        (Some(got), T254Expect::Control | T254Expect::Declined) => {
-                            let d4 = got.starts_with("fault:") && got.contains("this task's copy");
-                            let other_fault = got.starts_with("fault:") && !d4;
-                            d4 != t254_control_faults(ctx) || other_fault
-                        }
+                        // M3.4: a spawned fn and an Executor job hold the root by handle, so a write
+                        // that reaches it lands and no context faults (Go `go work(g)`).
+                        (
+                            Some(got),
+                            T254Expect::Lands | T254Expect::Control | T254Expect::Declined,
+                        ) => got.starts_with("fault:"),
                         (None, _) => false,
                     };
-                    if warned != want_warn.is_some() || errored != want_err || stray || run_bad {
+                    if warned != want_warn.is_some() || stray || run_bad {
                         bad.push(format!(
-                            "{cell}: stmt `{stmt}` warned={warned} (want {want_warn:?}) errored={errored} (want {want_err}) errs={errs:?} ran={ran:?} baseline={baseline:?}"
+                            "{cell}: stmt `{stmt}` warned={warned} (want {want_warn:?}) errs={errs:?} ran={ran:?} baseline={baseline:?}"
                         ));
                     }
                 }
@@ -904,9 +867,11 @@ fn native_container_results_are_new_objects() {
     assert!(bad.is_empty(), "native container results: {bad:#?}");
 }
 
-/// TICKET-254 — a write whose LAST place link is a builtin slice changes a new container, so it is no
-/// write to the root; a write that goes on through an element of the slice, or through a `Map` key
-/// that is a `Range`, still reaches the root and stays a D4 error in a spawned fn.
+/// TICKET-254 — a write whose LAST place link is a builtin slice changes a new container; a write
+/// that goes on through an element of the slice, or through a `Map` key that is a `Range`, reaches
+/// the root. M3.4: a spawned fn holds the root by handle, so neither is a check error (Go
+/// `go work(g)`); the run prints the root the task wrote (CPython `m34py/slice_place.py`, a thread:
+/// `[[1], [2], [3]]` twice, `[[1, 9], [2], [3]]` twice, `[[1], [2], [3], [9]]`, `{range(0, 3): [1, 9]}`).
 #[test]
 fn a_slice_is_no_place_but_an_element_of_it_and_a_range_key_are() {
     let spawn = |params: &str, root: &str, stmt: &str| {
@@ -914,19 +879,20 @@ fn a_slice_is_no_place_but_an_element_of_it_and_a_range_key_are() {
     };
     let list = ("g: List[List[int]]", "g := [[1], [2], [3]]\n");
     let map = ("g: Map[Range, List[int]]", "g := {0..3: [1]}\n");
-    // (params and root, statement, is it a D4 error?)
+    // (params and root, statement, the root the parent prints after the join)
     let cells = [
-        (list, "g[0..2].push([9])", false),
-        (list, "g[0..2][0] = [9]", false),
-        (list, "g[0..2][0].push(9)", true),
-        (list, "g[0].push(9)", true),
-        (list, "g.push([9])", true),
-        (map, "g[0..3].push(9)", true),
+        (list, "g[0..2].push([9])", "[[1], [2], [3]]"),
+        (list, "g[0..2][0] = [9]", "[[1], [2], [3]]"),
+        (list, "g[0..2][0].push(9)", "[[1, 9], [2], [3]]"),
+        (list, "g[0].push(9)", "[[1, 9], [2], [3]]"),
+        (list, "g.push([9])", "[[1], [2], [3], [9]]"),
+        (map, "g[0..3].push(9)", "{0..3: [1, 9]}"),
     ];
-    for ((params, root), stmt, errors) in cells {
-        let (errs, _) = t254_diags("slice_place", &[], &spawn(params, root, stmt));
-        let got = errs.iter().any(|e| e.contains("this task's copy"));
-        assert_eq!(got, errors, "`{stmt}`: errors={errs:?}");
+    for ((params, root), stmt, printed) in cells {
+        let src = spawn(params, root, stmt);
+        let (errs, _) = t254_diags("slice_place", &[], &src);
+        assert!(errs.is_empty(), "`{stmt}`: errors={errs:?}");
+        assert_eq!(t254_last_line(&src), printed, "`{stmt}`");
     }
 }
 
@@ -943,9 +909,9 @@ fn a_user_slice_hook_result_is_no_fresh_temporary() {
     }
 }
 
-/// TICKET-254 — the freshness of a subscript travels with the write summary, so a spawned callee in
-/// ANOTHER module (a fn, or a method of a struct that module declares) is judged by the module that
-/// typed it. A read of the record by key in the caller's module would miss it.
+/// TICKET-254 — a spawned callee in ANOTHER module (a fn, or a method of a struct that module
+/// declares) that writes through a slice or an element of one. M3.4: the task holds `g` and `b` by
+/// handle, so no call is a check error.
 #[test]
 fn a_slice_write_in_an_imported_callee_is_no_task_write() {
     let lib = "struct Board:\n    rows: List[List[int]]\n    fn poke(self):\n        self.rows[0..2].push([9])\n    fn real(self):\n        self.rows[0].push(9)\nfn work(g: List[List[int]]):\n    g[0..2].push([9])\nfn deep(g: List[List[int]]):\n    g[0..2][0].push(9)\n".to_string();
@@ -954,21 +920,16 @@ fn a_slice_write_in_an_imported_callee_is_no_task_write() {
             "import lib\nb := lib.Board([[1], [2], [3]])\ng := [[1], [2], [3]]\nparallel:\n    spawn {call}\nprint(g)\n"
         )
     };
-    for (call, errors) in [
-        ("lib.work(g)", false),
-        ("b.poke()", false),
-        ("lib.deep(g)", true),
-    ] {
+    for call in ["lib.work(g)", "b.poke()", "lib.deep(g)"] {
         let (errs, _) = t254_diags("imported_slice", &[("lib.chz", lib.clone())], &main(call));
-        let got = errs.iter().any(|e| e.contains("this task's copy"));
-        assert_eq!(got, errors, "`spawn {call}`: errors={errs:?}");
+        assert!(errs.is_empty(), "`spawn {call}`: errors={errs:?}");
     }
 }
 
 /// TICKET-254 — `fn_writes::builtin_slice` (the types whose `x[a..b]` builds a new value) and
 /// `slice_result` (the types that slice at all) name the same four built-in sequence types. A type
-/// `slice_result` slices into itself that the classifier misses stays a place link: the old false
-/// D4 error.
+/// `slice_result` slices into itself that the classifier misses stays a place link: a missed
+/// temporary-write warning.
 #[test]
 fn builtin_slice_matches_what_slice_result_slices() {
     let c = Checker::new();

@@ -53,8 +53,7 @@ fn main():
   function, a `recover:` block, the module top level); `defer`'s all-exit-paths guarantee reaps it on
   fall-through, `?`, `break`/`continue`, return, or panic.
 - **Still no floating tasks.** Fire-and-forget work has a definite owner and a definite reap point.
-  Submission is gated on the same **sendability** rules as a `spawn` capture
-  ([§7](07-sendability.md#7-sendability)).
+  A job holds its captures by handle, as a `spawn` does ([§7](07-sendability.md#7-sendability)).
 - **Submitted work is unstructured *by design*.** Reach for `parallel:` first; use an `Executor` only
   when a task must outlive the block that starts it. An `Executor` runs tasks and reaps them; it does
   not restart them (no supervision policies).
@@ -67,9 +66,9 @@ fn main():
 `ThreadPoolExecutor` / `ExecutorService` model.
 
 - **A job is a spawned task.** It starts the way `spawn` does, reads and writes the run's globals,
-  inherits its creator's cancel chain, and parks like any fiber. **Captures cross by value**: `submit`
-  wires the closure through the same airlock `spawn` uses, so a mutation of a captured collection after
-  the `submit` is NOT observed by the job, and a non-sendable capture faults at submit.
+  inherits its creator's cancel chain, and parks like any fiber. **Captures are shared** (M3.4, Go): the
+  job holds the submitter's captured values by handle, so its write lands on them and it sees the
+  submitter's later writes; order the two with a `Channel`, a box or `shutdown()`, or they race.
 - **The pool** is the Executor's own runner threads, started on demand up to the worker count; an idle
   runner waits 5 ms for a next job, then leaves, so an idle Executor holds no thread.
 - **`Executor(n)` caps the jobs running at once at `n`** (`Executor()` has no cap; `n < 1` faults

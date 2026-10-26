@@ -949,17 +949,14 @@ main()";
 }
 
 #[test]
-fn executor_submit_mutating_closure_isolated_parity() {
-    // Repro #3: a submitted closure captures + mutates a local list, observed after the drain. WAS a
-    // SILENT value divergence: the since-removed cooperative engine shared by reference (prints `2`),
-    // M:N isolated by value (prints `1`). NOW it isolates at submit → prints `1`.
-    // TICKET-169 (D4 layer C): the submitted closure's capture of `box` crossed the airlock and
-    // is marked as a copy, so `box.push(1)` inside the job now faults instead of mutating it — the
-    // parent's `box` was always going to read `1` (its own, untouched list) either way.
+fn executor_submit_mutating_closure_lands_parity() {
+    // Repro #3: a submitted closure captures + mutates a local list, observed after the drain. M3.4:
+    // the job holds the submitter's `box` by handle, so its push lands (Go, a goroutine appends to
+    // a captured slice through a pointer: `2`).
     let out = golden_entry(
-        "import Executor from std.concurrency\nfn bump_box(b):\n    recover: b.push(1)\nfn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): bump_box(box))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
+        "import Executor from std.concurrency\nfn bump_box(b):\n    b.push(1)\nfn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): bump_box(box))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
     );
-    assert_eq!(out, "1\n");
+    assert_eq!(out, "2\n");
 }
 
 #[test]

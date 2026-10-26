@@ -39,15 +39,7 @@ impl Checker {
                     globals::DeclKind::Fn | globals::DeclKind::Hoisted
                 ))
             .then(|| self.functions.get(name).cloned())
-            .flatten()
-            .map(|mut fsig| {
-                for effect in &mut fsig.summary.writes {
-                    if let fn_writes::WriteRoot::Global(gname) = &effect.root {
-                        effect.global_ty = self.lookup(gname);
-                    }
-                }
-                fsig
-            });
+            .flatten();
             let ty = match &certain_fn {
                 Some(f) => Some(fn_value_ty(f)),
                 None => self
@@ -179,8 +171,6 @@ impl Checker {
         self.loop_vars.push(std::collections::HashSet::new());
         self.const_decls.push(std::collections::HashSet::new());
         self.hole_rejected.push(std::collections::HashSet::new());
-        self.capture_table.push(HashMap::new());
-        self.written_captures.push(HashMap::new());
     }
     pub(super) fn pop_scope(&mut self) {
         // TICKET-139 (W14-2) — settle the popped scope's keyword calls BEFORE the scope goes: a
@@ -227,8 +217,6 @@ impl Checker {
         self.loop_vars.pop();
         self.const_decls.pop();
         self.hole_rejected.pop();
-        self.capture_table.pop();
-        self.written_captures.pop();
     }
     /// Record `name` (already declared in the current scope) as a `const T` binding. At module
     /// scope it writes nothing: module const-ness is `GlobalBinding::is_const` (TICKET-186).

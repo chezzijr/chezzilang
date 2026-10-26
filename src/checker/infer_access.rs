@@ -596,10 +596,7 @@ impl Checker {
     /// by the caller's own `infer_value`, on every arm.
     ///
     /// Three properties this shape depends on:
-    /// * **Its own scope.** A fresh scope can't shadow a user name, is removed on every path, and sits
-    ///   at or below every `capture_floors` entry — so `is_local_capture` never mistakes the scratch
-    ///   for a binding captured by an enclosing `spawn:`/`Executor.submit` and over-fires the
-    ///   non-sendable read gate on it.
+    /// * **Its own scope.** A fresh scope can't shadow a user name and is removed on every path.
     /// * **`Span::default()`**, like the `__optN` payload binder `lower_carrier_option` synthesizes.
     ///   No lowered node derives its span from the operand's (both `lower_carrier_*` stamp everything
     ///   from the carrier's own `span`/`name_span`), and a default span can never equal the 1-based

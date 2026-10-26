@@ -10,19 +10,15 @@ use super::sched::cancel_fiber_owned_family;
 use super::sched::join_helpers;
 use super::sched::spawn_worker_thread;
 use super::*;
-use crate::base::crossing::{self};
 
 impl Vm {
-    /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
-    /// the method form, the receiver) across the airlock, and register the task on the innermost
-    /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. `fresh`
-    /// names the checker's operand shapes (see [`crate::base::op::Op::SpawnRecv`]), carried to
-    /// [`Vm::rebuild_ready`].
+    /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands and register the task on the
+    /// innermost nursery. The callee, the receiver and the args pass by handle (M3.4, Go `go f(x)`),
+    /// like `defer`.
     pub(super) fn do_spawn(
         &mut self,
         kind: SpawnHead,
         argc: usize,
-        fresh: u32,
         span: Span,
     ) -> Result<(), RuntimeError> {
         self.sched_seed_point();
@@ -32,7 +28,7 @@ impl Vm {
         if self.nurseries.is_empty() {
             return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
         }
-        self.spawn_into(SpawnTarget::Nursery, kind, head, raw_args, fresh, span)
+        self.spawn_into(SpawnTarget::Nursery, kind, head, raw_args, span)
     }
 
     /// TICKET-235 — does calling `v` push a Chezzi frame that the task then runs in? True for a
@@ -49,19 +45,18 @@ impl Vm {
     /// TICKET-235 — THE decision of how a spawned call becomes a task body; every task it yields
     /// starts in a frame. A head that pushes its own frame runs directly, unchanged. Any other
     /// head (a receiver, a native fn value, a builtin, a ctor, a generator fn) becomes argument 0
-    /// of the site's entry thunk, and `fresh` says so ([`crossing::behind_entry`]). A
-    /// non-callable callee passes through, so `lower_task` reports it as it always did.
+    /// of the site's entry thunk. A non-callable callee passes through, so `prepare_worker`
+    /// reports it.
     fn task_entry(
         &mut self,
         kind: SpawnHead,
         head: Value,
         mut args: Vec<Value>,
-        fresh: u32,
         span: Span,
-    ) -> Result<(Value, Vec<Value>, u32), RuntimeError> {
+    ) -> Result<(Value, Vec<Value>), RuntimeError> {
         let proto = match kind {
             SpawnHead::Callee(_) if self.enters_frame(head) || self.callable(head).is_none() => {
-                return Ok((head, args, fresh));
+                return Ok((head, args));
             }
             SpawnHead::Callee(None) => {
                 return Err(self.err(
@@ -75,11 +70,11 @@ impl Vm {
         let home = self.frames.last().expect("a spawn runs in a frame").home;
         let entry = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
         args.insert(0, head);
-        Ok((entry, args, crossing::behind_entry(fresh)))
+        Ok((entry, args))
     }
 
-    /// Start one task: the ONE function behind `spawn` and `Executor.submit` (TICKET-208). It
-    /// crosses the callee and its arguments in one serialization, and hands the task to `target`.
+    /// Start one task: the ONE function behind `spawn` and `Executor.submit` (TICKET-208). The
+    /// task gets the callee and its arguments by handle (M3.4), and `target` gets the task.
     /// Everything a new party inherits from its
     /// starter is decided here or below, once, whichever door started it.
     pub(super) fn spawn_into(
@@ -88,45 +83,19 @@ impl Vm {
         kind: SpawnHead,
         head: Value,
         raw_args: Vec<Value>,
-        fresh: u32,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        let (head, raw_args, fresh) = self.task_entry(kind, head, raw_args, fresh, span)?;
-        // W7-4: everything that crosses here crosses in ONE serialization, so two sibling closures
-        // over the SAME captured local (`spawn work(c.inc, c.get)`) still share their one binding on
-        // the far side. Root-by-root `deep_clone` gave each its own [`WireMemo`] → one cell per
-        // REFERENCE, silently splitting the binding. A capture-free `spawn f(…)` callee still keeps
-        // the cheap shared handle (see [`spawn_callee_crosses_deep`](Vm::spawn_callee_crosses_deep)),
-        // so it stays out of the batch.
-        //
-        // ARGS FIRST, callee LAST — the pre-batch order (every arg was `deep_clone`d, then
-        // `cross_spawn_callee`). Serialization order is observable when two of them are
-        // non-crossable in DIFFERENT ways (a depth-cap arg vs a reference-cycle callee): the first
-        // failure is the reported fault. `lower_task` keeps the same args-before-captures order.
-        // A head behind an entry thunk is argument 0 (TICKET-235), so a receiver is serialized
-        // before the arguments.
-        let cross_head = self.spawn_callee_crosses_deep(head);
-        let mut batch = raw_args;
-        if cross_head {
-            batch.push(head);
-        }
-        let mut crossed = self.deep_clone_all(batch, span)?;
-        let head = if cross_head {
-            crossed.pop().expect("the head was pushed last")
-        } else {
-            head
-        };
-        let args = crossed;
+        let (head, args) = self.task_entry(kind, head, raw_args, span)?;
         let task = PendingCall::Call {
             callee: head,
             args,
             span,
         };
         match target {
-            SpawnTarget::Nursery => self.register_task(task, span, fresh),
+            SpawnTarget::Nursery => self.register_task(task, span),
             SpawnTarget::Scope { sched, settle } => {
-                let rw = self.prepare_worker(task, fresh)?;
-                // W7-26r — M1.7: a job's rebuilt payload is objects of the run's one heap, which
+                let rw = self.prepare_worker(task)?;
+                // W7-26r — M1.7: a job's values are objects of the run's one heap, which
                 // `live_bytes` counts already, so the starter is charged no worker heap of its own
                 // (the submit-time charge went with the per-task heap).
                 let mut fiber = rw.into_fiber(0, 0);
@@ -176,38 +145,11 @@ impl Vm {
         }
     }
 
-    /// Does a `spawn f()` **callee** have to cross the task boundary by DEEP value? A closure that
-    /// captures locals holds them (uniformly) as `Obj::Cell` handles; sharing that closure by
-    /// handle would let the task alias the parent's cells — a serial-vs-M:N divergence, since the
-    /// M:N engine's `prepare_worker` path already deep-copies a task closure's captures into fresh
-    /// cells. So a *capture-bearing* closure joins the [`deep_clone_all`](Vm::deep_clone_all) batch
-    /// in [`do_spawn`](Vm::do_spawn), snapshotting its cells at spawn time on BOTH engines. A
-    /// capture-free callable (plain `Obj::Func`, a builtin, or a closure with no captures) keeps
-    /// the cheap shared handle — it holds no mutable captured state, so sharing is observationally
-    /// identical to copying (and preserves the closure hot path).
-    /// `Shared`/`RwShared`/`Atomic`/`Channel` captures still cross by reference (their `Arc` core
-    /// is deep-copied as the same `Arc`), so `Shared`-based cross-task sharing is unaffected.
-    ///
-    /// W7-4 folded the old `cross_spawn_callee` (a SEPARATE `wire_callable` → `from_wire`
-    /// round-trip) into that batch so a callee and an arg closing over the same local keep one
-    /// cell. The `wire_callable` step's only extra was `ensure_crossable`;
-    /// [`lower_task`](Vm::lower_task) applies it to every one of this closure's captures with the
-    /// same span, and a `Closure` wire's `has_handle` is exactly the OR over its captures' — so
-    /// nothing is dropped (and the guard is source-unreachable anyway: `module` is not a nameable
-    /// type).
-    fn spawn_callee_crosses_deep(&self, callee: Value) -> bool {
-        match callee.as_obj() {
-            Some(h) => {
-                matches!(self.heap.get(h), Obj::Closure { captured, .. } if !captured.is_empty())
-            }
-            None => false,
-        }
-    }
-
     /// `spawn:` block — snapshot the captured bindings from the current frame (like `MakeClosure`),
-    /// deep-copy each captured value across the airlock, build a zero-arg closure over the synthetic
-    /// block proto, and register it as a `Call` task (captured locals deep-copied; home globals by
-    /// handle).
+    /// build a zero-arg closure over the synthetic block proto, and register it as a `Call` task.
+    /// A captured local is its frame's cell (uniform by-reference capture), so the task and the
+    /// parent share one binding (M3.4, a Go closure in `go func() { ... }()`); a loop variable has
+    /// a cell per iteration.
     pub(super) fn do_spawn_block(
         &mut self,
         proto: ProtoId,
@@ -258,14 +200,10 @@ impl Vm {
             };
             captured.push(v);
         }
-        // Deep-copy across the airlock: the task can't share mutable state with the parent.
         // Positional (lever #3): slot order matches the synthetic block proto's `capture_names`.
-        // W7-4: ONE serialization for all captures — two captured closures over the same local
-        // (`gi := c.inc; gg := c.get`) must reach the task sharing their single binding.
         if self.nurseries.is_empty() {
             return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
         }
-        let captured = self.deep_clone_all(captured, span)?;
         let h = self.heap.alloc(Obj::Closure {
             proto,
             captured: captured.into(),
@@ -278,13 +216,11 @@ impl Vm {
                 span,
             },
             span,
-            0,
         )
     }
 
     /// Register a spawned task on the innermost nursery. Per-connection spawn: if that nursery is
-    /// EAGER, build the handler into a live [`Fiber`] (serializing its args out of THIS fiber's heap,
-    /// the same airlock copy `do_spawn`'s `deep_clone` does) and [`MnSched::inject`] it straight into
+    /// EAGER, build the handler into a live [`Fiber`] and [`MnSched::inject`] it straight into
     /// the running sched — it runs concurrently with the rest of the body. The `task_index` is the
     /// scope's monotonic `next_index` (spawn order), so Decision-F output stays deterministic.
     /// Otherwise (lazy/top-level) push the [`QueuedTask`] for the join to drain. The checker guarantees
@@ -293,7 +229,6 @@ impl Vm {
         &mut self,
         task: PendingCall,
         span: Span,
-        fresh: u32,
     ) -> Result<(), RuntimeError> {
         // The innermost open nursery (`nurseries`, `mn_scopes` and `eager_scheds` are lockstep).
         let Some(i) = self.nurseries.len().checked_sub(1) else {
@@ -308,7 +243,7 @@ impl Vm {
             // fiber (`activate_fiber_owned_nursery`), so a spawn goes to the nursery's TAIL scope,
             // or opens a continuation scope when the tail is no longer the sched's last.
             let tail = scope.more_scopes.last().copied().unwrap_or(scope.scope);
-            let fiber = self.prepare_worker(task, fresh)?.into_fiber(0, tail);
+            let fiber = self.prepare_worker(task)?.into_fiber(0, tail);
             let (opened, wids) = sched.inject_or_extend(fiber, tail);
             if let Some(n) = opened
                 && let Some(Some(scope)) = self.eager_scheds.last_mut()
@@ -318,7 +253,7 @@ impl Vm {
             self.start_runners(&sched, wids);
             return Ok(());
         }
-        self.nurseries[i].push(QueuedTask { call: task, fresh });
+        self.nurseries[i].push(QueuedTask { call: task });
         Ok(())
     }
 
@@ -611,7 +546,7 @@ impl Vm {
         let mut fibers = Vec::with_capacity(total);
         for (i, t) in tasks.into_iter().enumerate() {
             // scope 0 — the outermost nursery.
-            fibers.push(self.prepare_worker(t.call, t.fresh)?.into_fiber(i, 0));
+            fibers.push(self.prepare_worker(t.call)?.into_fiber(i, 0));
         }
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock();
         // Worker count must account for the early-enlisted OUTER scopes' tasks too (case-A: `main`'s `O`),
@@ -652,7 +587,7 @@ impl Vm {
         // inline body must run with `mn == None` so it does not take the worker-only yield/park paths).
         // Each enlisted scope reduces at its OWN `JoinNursery` (deferred — preserves per-nursery order).
         // Install `mn_enlist_sched` only AFTER a SUCCESSFUL enlist that actually deferred a scope: an
-        // early `?` (a `prepare_worker` backstop on a non-crossable spawn) must leave NO stale sched
+        // early `?` (a `prepare_worker` backstop on a non-callable spawn) must leave NO stale sched
         // behind for a later `join_enlisted_scope`/inline-send to pick up; and if nothing was enlisted
         // there are no deferred joins, so it stays `None` (clean teardown at this owner's reduce).
         self.early_enlist_outer(&sched)?;
@@ -721,7 +656,7 @@ impl Vm {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(tasks.len());
         for t in tasks {
-            workers.push(self.prepare_worker(t.call, t.fresh)?);
+            workers.push(self.prepare_worker(t.call)?);
         }
         let scope_id =
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
@@ -783,14 +718,14 @@ impl Vm {
             let total = self.nurseries[i].len();
             // VALIDATE THEN COMMIT (atomic enlist — charge #4). Prepare every task from a CLONE first,
             // BEFORE any irreversible mutation. `prepare_worker` is the only fallible step (the checker
-            // gates non-crossable spawns, so this backstop normally never fires — but if it did, an early
+            // gates non-callable spawns, so this backstop normally never fires — but if it did, an early
             // `?` here must not leave a half-state). On `Err` the nursery is untouched (originals still in
             // `self.nurseries[i]`), no scope is registered (so no unseeded scope can hang `wait_for_scope`)
             // and `mn_scopes`/`mn_enlisted` are unbumped — the fault propagates cleanly.
             let clones: Vec<QueuedTask> = self.nurseries[i].clone();
             let mut prepared = Vec::with_capacity(total);
             for t in clones {
-                prepared.push(self.prepare_worker(t.call, t.fresh)?);
+                prepared.push(self.prepare_worker(t.call)?);
             }
             // COMMIT — nothing fallible remains. Discard the originals (the clones became the fibers),
             // register + seed the scope, and record it for its OWN `JoinNursery` to reduce.

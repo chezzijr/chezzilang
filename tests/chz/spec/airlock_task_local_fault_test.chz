@@ -1,8 +1,11 @@
-# TICKET-169 — D4 layer C: a spawned task's write to an airlock copy (a captured local, or a
-# struct/list it did not itself create) must FAULT at the write, not be silently lost at the join.
-# M3.1: a module global is not a copy (Go model), so the global rows below assert the write LANDS
-# (goldens from the equivalent Go program, go1.27.0). Currently these all still print the pre-spawn value at rc=0; this
-# suite pins the fault D4 requires. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+# TICKET-169 — D4 layer C made a spawned task's write to an airlock copy fault. M3.1: a module
+# global is the run's one copy; M3.4: a captured local, a spawn arg and an Executor job's capture
+# are the parent's values by handle (Go model). So every row asserts the write LANDS on the parent's
+# value (Go `m34go/tasklocal/main.go`, go1.27.0: `captured_scalar 5`, `captured_list_push [1 2]`,
+# `struct_method 2`, `captured_closure_push [1 2]`, `nested_element_push [1 2]`,
+# `every_mutating_native [9 2 3 4] map[c:3] [2 3] [1 2 1] 2`, `spawn_arg_written [1 9]`,
+# `nested_struct_method 2`, `executor_job_capture [1 2]`, `nested_nursery_inner_write [1 2]`).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
 
 fn d4_push2(xs: List[int]):
@@ -11,7 +14,7 @@ fn d4_push2(xs: List[int]):
 fn d4_invoke(g: fn() -> None):
     g()
 
-test fn captured_scalar_write_inside_spawn_faults():
+test fn captured_scalar_write_inside_spawn_lands():
     n := 1
     r := Channel[str](1)
     parallel:
@@ -24,9 +27,11 @@ test fn captured_scalar_write_inside_spawn_faults():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    assert r.recv() != "no-fault"
+    got := r.recv()
+    assert got == "no-fault", got
+    assert n == 5
 
-test fn captured_list_push_inside_spawn_faults():
+test fn captured_list_push_inside_spawn_lands():
     xs := [1]
     r := Channel[str](1)
     parallel:
@@ -37,7 +42,9 @@ test fn captured_list_push_inside_spawn_faults():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    assert r.recv() != "no-fault"
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [1, 2]
 
 struct Counter:
     n: int
@@ -48,7 +55,7 @@ struct Counter:
 fn d4_bump(c: Counter):
     c.bump()
 
-test fn struct_method_write_on_spawned_copy_faults():
+test fn struct_method_write_on_a_spawned_struct_lands():
     c := Counter(1)
     r := Channel[str](1)
     parallel:
@@ -59,7 +66,9 @@ test fn struct_method_write_on_spawned_copy_faults():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    assert r.recv() != "no-fault"
+    got := r.recv()
+    assert got == "no-fault", got
+    assert c.n == 2
 
 r3_n := 1
 
@@ -118,7 +127,7 @@ test fn a_top_level_binding_written_in_spawn_lands():
     assert got == "no-fault", got
     assert r1_g == 5, "the task's write is lost: {r1_g}"
 
-test fn a_captured_closure_that_pushes_faults():
+test fn a_captured_closure_that_pushes_lands():
     xs := [1]
     f := fn(): xs.push(2)
     r := Channel[str](1)
@@ -129,7 +138,9 @@ test fn a_captured_closure_that_pushes_faults():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    assert r.recv() != "no-fault"
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [1, 2]
 
 gl5 := [[1]]
 
@@ -154,7 +165,7 @@ test fn a_channel_sent_closure_pushing_a_captured_alias_lands():
     assert got == "no-fault", got
     assert gl5[0] == [1, 2]
 
-test fn a_nested_element_push_faults():
+test fn a_nested_element_push_lands():
     xs := [[1]]
     r := Channel[str](1)
     parallel:
@@ -165,13 +176,9 @@ test fn a_nested_element_push_faults():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    assert r.recv() != "no-fault"
-
-fn faults[T](f: fn() -> T) -> bool:
-    res := recover: f()
-    match res:
-        ?_: return false
-        !_: return true
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [[1, 2]]
 
 fn idx_set(xs: List[int]):
     xs[0] = 9
@@ -185,38 +192,39 @@ fn bytes_idx_set(b: bytearray):
 fn counter_field_set(c: Counter):
     c.n = 2
 
-test fn every_mutating_native_faults_on_a_task_copy():
+test fn every_mutating_native_lands_on_the_parents_value():
     xs := [1, 2, 3]
     m := {"a": 1}
     s := Set([1, 2])
     b := bytearray([1, 2])
     c2 := Counter(1)
-    r := Channel[str](1)
     parallel:
         spawn:
-            ok := true
-            if not faults(fn(): xs.push(9)): ok = false
-            if not faults(fn(): xs.pop()): ok = false
-            if not faults(fn(): xs.reverse()): ok = false
-            if not faults(fn(): xs.sort()): ok = false
-            if not faults(fn(): xs.sort_by(fn(a, b): a - b)): ok = false
-            if not faults(fn(): xs.sort_by_key(fn(a): a)): ok = false
-            if not faults(fn(): xs.extend([4])): ok = false
-            if not faults(fn(): xs.insert(0, 9)): ok = false
-            if not faults(fn(): xs.remove(0)): ok = false
-            if not faults(fn(): idx_set(xs)): ok = false
-            if not faults(fn(): map_idx_set(m)): ok = false
-            if not faults(fn(): m.remove("a")): ok = false
-            if not faults(fn(): m.update({"c": 3})): ok = false
-            if not faults(fn(): s.insert(3)): ok = false
-            if not faults(fn(): s.remove(1)): ok = false
-            if not faults(fn(): bytes_idx_set(b)): ok = false
-            if not faults(fn(): b.push(1)): ok = false
-            if not faults(fn(): b.pop()): ok = false
-            if not faults(fn(): b.extend([1])): ok = false
-            if not faults(fn(): counter_field_set(c2)): ok = false
-            r.send("{ok}")
-    assert r.recv() == "true"
+            xs.push(9)
+            _ := xs.pop()
+            xs.reverse()
+            xs.sort()
+            xs.sort_by(fn(a, b): a - b)
+            xs.sort_by_key(fn(a): a)
+            xs.extend([4])
+            xs.insert(0, 9)
+            _ := xs.remove(0)
+            idx_set(xs)
+            map_idx_set(m)
+            _ := m.remove("a")
+            m.update({"c": 3})
+            s.insert(3)
+            _ := s.remove(1)
+            bytes_idx_set(b)
+            b.push(1)
+            _ := b.pop()
+            b.extend([1])
+            counter_field_set(c2)
+    assert xs == [9, 2, 3, 4]
+    assert m == {"c": 3}
+    assert s == Set([2, 3])
+    assert b == bytearray([1, 2, 1])
+    assert c2.n == 2
 
 fn push_arg(ys: List[int], r: Channel[str]):
     res := recover:
@@ -225,12 +233,14 @@ fn push_arg(ys: List[int], r: Channel[str]):
         ?_: r.send("no-fault")
         !e: r.send(e.message())
 
-test fn a_spawn_arg_written_by_the_callee_faults():
+test fn a_spawn_arg_written_by_the_callee_lands():
     xs := [1]
     r := Channel[str](1)
     parallel:
         spawn push_arg(xs, r)
-    assert r.recv() != "no-fault"
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [1, 9]
 
 struct Holder:
     c: Counter
@@ -238,7 +248,7 @@ struct Holder:
 fn d4_bump_holder(h: Holder):
     h.c.bump()
 
-test fn a_nested_struct_method_write_faults():
+test fn a_nested_struct_method_write_lands():
     h := Holder(Counter(1))
     r := Channel[str](1)
     parallel:
@@ -249,7 +259,9 @@ test fn a_nested_struct_method_write_faults():
             match res:
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
-    assert r.recv() != "no-fault"
+    got := r.recv()
+    assert got == "no-fault", got
+    assert h.c.n == 2
 
 fn executor_job(xs: List[int], r: Channel[str]):
     res := recover:
@@ -258,16 +270,18 @@ fn executor_job(xs: List[int], r: Channel[str]):
         ?_: r.send("no-fault")
         !e: r.send(e.message())
 
-test fn an_executor_job_writing_a_capture_faults():
+test fn an_executor_job_writing_a_capture_lands():
     xs := [1]
     r := Channel[str](1)
     ex := concurrency.Executor()
     _ := ex.submit(fn(): executor_job(xs, r))
     ex.shutdown()
-    assert r.recv() != "no-fault"
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [1, 2]
 
-test fn a_nested_nursery_inner_task_write_to_a_parent_task_object_faults():
-    r := Channel[str](1)
+test fn a_nested_nursery_inner_task_write_to_a_parent_task_object_lands():
+    r := Channel[str](2)
     parallel:
         spawn:
             ys := [1]
@@ -279,7 +293,10 @@ test fn a_nested_nursery_inner_task_write_to_a_parent_task_object_faults():
                     match res:
                         ?_: r.send("no-fault")
                         !e: r.send(e.message())
-    assert r.recv() != "no-fault"
+            r.send("{ys}")
+    got := r.recv()
+    assert got == "no-fault", got
+    assert r.recv() == "[1, 2]"
 
 r_hl := [Channel[int](1)]
 

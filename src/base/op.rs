@@ -520,30 +520,24 @@ pub enum Op {
     /// parallels are each torn down in their own right. §2c1 — the cancel is SILENT; the
     /// `"{n} pending task(s) cancelled…"` line it used to write is deleted.
     ReclaimNursery,
-    /// `spawn f(args)` — stack `[callee, arg0, …]`; pops `argc + 1`, deep-copies the args across the
-    /// airlock (the callee passes by handle, like `defer`), and registers the task on the innermost
-    /// nursery. Mirrors `DeferCall`. The `u32` names the checker's shapes for this call's operands
-    /// (D4, TICKET-240) in `Program.fresh_calls`, laid out by `vm::crossing::operand_ref`: `0` =
-    /// every operand stays marked. Entry position `j + 1` is bound slot `j` (default fills and
-    /// packs included); position 0 is the callee or the receiverless wrapper closure and is
-    /// always `Marked`. After the rebuild the runtime unmarks what each shape names
-    /// (`Vm::unmark_fresh`).
+    /// `spawn f(args)` — stack `[callee, arg0, …]`; pops `argc + 1` and registers the task on the
+    /// innermost nursery. The task gets the parent's values by handle (M3.4, Go `go f(x)`). Mirrors
+    /// `DeferCall`.
     ///
     /// TICKET-235: the `ProtoId` is the site's entry thunk. The head is a callee and enters through
     /// the thunk only when `Vm::enters_frame` says the callee pushes no frame (a native fn value, a
     /// builtin, a ctor, a generator fn). `None` = the head is the receiverless wrapper closure,
     /// which always pushes its own.
-    SpawnCall(usize, u32, Option<ProtoId>),
-    /// `spawn recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1`, deep-copies the receiver
-    /// AND the args across the airlock, and registers the task. The `u32` names the operand shapes
-    /// (`vm::crossing::operand_ref`): entry position 0 = the receiver, `j + 1` = bound slot `j`.
+    SpawnCall(usize, Option<ProtoId>),
+    /// `spawn recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1` and registers the task.
+    /// The receiver and the args pass by handle (M3.4).
     ///
     /// TICKET-235: the head is a receiver and always enters through the site's entry thunk (the
     /// `ProtoId`), whose body is the `Op::CallMethod` the block form runs.
-    SpawnRecv(usize, u32, ProtoId),
+    SpawnRecv(usize, ProtoId),
     /// `spawn:` block — snapshot each `CapEntry`'s value from the enclosing frame (like
-    /// `MakeClosure`), deep-copy the captured values across the airlock, build a zero-arg closure
-    /// over `ProtoId`, and register it as a `Call` task. (Form 2; the block was compiled to a
+    /// `MakeClosure`), build a zero-arg closure over `ProtoId` that holds the same captured cells
+    /// (one binding, shared with the parent, M3.4), and register it as a `Call` task. (Form 2; the block was compiled to a
     /// synthetic zero-arg proto.)
     SpawnBlock(ProtoId, Vec<CapEntry>),
     /// `wait:` — Chezzi's `select` (§6d). The N arm channel handles are on the operand stack
@@ -743,10 +737,6 @@ pub struct Program {
     /// Native-struct bare name → the index of the module that declared it (home-globals for its bodied
     /// methods), mirroring `enum_home`.
     pub native_home: HashMap<String, usize>,
-    /// TICKET-240: the checker's shape for every operand of each spawn call that has a fresh one,
-    /// `[receiver or Marked] ++ bound slots`. A spawn op's `u32` names its entry
-    /// (`crossing::operand_ref`); the layout lives in `vm::crossing`.
-    pub fresh_calls: Vec<Vec<super::crossing::Fresh>>,
     pub variants: HashMap<(String, String), VariantDef>,
     /// M19 lever #2 — variants indexed by their dense `variant_id` (`variants_by_id[id]` ⇒ that
     /// variant's `VariantDef`, carrying its `enum_name` + `name`). The reverse of `variants`: O(1)

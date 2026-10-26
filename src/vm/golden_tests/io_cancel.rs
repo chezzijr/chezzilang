@@ -768,17 +768,13 @@ fn reader_program_type_checks_clean() {
     );
 }
 
-/// B3 — a fn-LOCAL aggregate mutated inside a spawn: task deep-copies per task (the airlock), so the
-/// parent's list is untouched by the isolated task copy (prints `3`). Task 1
-/// gave the MODULE-GLOBAL form the same isolation (module globals are snapshotted per task now —
-/// see `serial_module_global_direct_mutation_forms_isolate_parity`), so this fn-local case is just the
-/// sibling boundary: a captured local was already deep-copied and still is.
+/// B3 — a fn-LOCAL aggregate mutated inside a spawn: M3.4 (Go model) shares the captured list, so
+/// the task's push lands and the parent reads `4` (Go, a goroutine appends through the captured
+/// slice: `4`). The module-global form is `serial_module_global_method_call_mutation_lands_parity`.
 #[test]
-fn module_global_aggregate_mutation_in_task_parity() {
-    // TICKET-169 (D4 layer C): the task's copy of the captured `xs` is marked, so `xs.push(99)`
-    // now faults instead of mutating it — the parent's list was always going to stay `3` long.
-    let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            recover: xs.push(99)\n    print(xs.len())\nmain()\n";
-    assert_golden_out(src, "3\n");
+fn fn_local_aggregate_mutation_in_task_lands_parity() {
+    let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n";
+    assert_golden_out(src, "4\n");
 }
 
 /// Task 1 — a module global written through a cross-module FN CALL from a task lands in the run's

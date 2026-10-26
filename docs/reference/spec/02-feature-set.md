@@ -156,16 +156,11 @@ generator usable anywhere an `Iterator[T]` is (`for` loops, `Iterator[T]` bounds
   ``a generator function (one that uses `yield`) must declare a return type of `Iterator[T]` ``.
 - A **numeric mix** under a written `Iterator[float]` (`yield 1`) is rejected: there is no
   `int`→`float` coercion at a `yield`.
-- A **live** generator crosses a task airlock **by value**, whether a frame **local** or a **module
-  global** holds it: it is passed/captured into a `spawn`, stored in a `Channel`/`Shared`/`RwShared`/
-  `Atomic`, submitted to an `Executor`, or reached through a module global. The receiver gets an
-  **independent deep copy** (its parked frame rebuilt; advancing one copy never affects the other).
-  A module-global generator does not cross: two tasks that reach it drive the run's one generator (M3.1).
-- A suspension **inside a `recover:`** is sendable too (its handlers are rebuilt with it).
-- These reject cleanly with a catchable `... cannot be sent across tasks` error, never a panic: a
-  non-sendable parked slot (a `Module` handle, or an acyclic nest past the depth cap) and a value cycle
-  through the generator. Two more reject shapes cannot occur in a valid program (a pending `defer`,
-  which a generator bans, and a multi-frame suspension).
+- A **live** generator is one object in every task that holds it: passed or captured into a
+  `spawn`, submitted to an `Executor` (M3.4), stored in a `Channel`/`Shared`/`RwShared`/`Atomic`
+  (M3.2, M3.3), or reached through a module global (M3.1). A task drives the parent's generator, so
+  the parent's `next()` continues where the task left it (CPython: a thread drives the caller's
+  generator). Two tasks that drive it at once race (below).
 - A generator is **not re-entrant**: resuming one that is *already running* (a `.next()` or `for` over
   it from inside its own body) raises the catchable `generator already running` (Python's
   `ValueError: generator already executing`), never a panic. The guard clears on every unwind path, so
@@ -188,25 +183,22 @@ composable cursor); `Iterator[T]` also promises `.next()`, so every `Iterator` I
 - `Iterable[T]` is usable in **type position** as well as a bound: `fn f(xs: Iterable[int])` accepts
   any of those, and its body may `for`/comprehend/`List()` it. Like every protocol existential it is
   strictly invariant in its args (`List[int]` → `Iterable[Any]` is rejected).
-- The cursor is **sendable**: it crosses the airlock as a deep copy, like a `list`.
+- The cursor is one object in every task that holds it (M3.4), like a `list`.
 - There is **no** compile-time multi-pass safety (it needs move/ownership): each `.iter()` is a fresh
   cursor, but an exhausted one yields nothing.
 
 **Capture is by reference.** Closure/`defer:`/`spawn:` capture is **uniformly by reference**: a
 capturing frame shares the closest binding of a captured name, and reads and writes are live. A
-captured **loop variable** gets a fresh cell per iteration (Go ≥1.22). At the **task boundary**, a
-captured local is copied into an independent per-task view, taken fresh at each `spawn` (the one
-deliberate divergence from Go), so cross-task shared mutation of a local requires `Shared[T]` and its
-siblings. A module global is the run's one copy (M3.1): every task reads and writes it live (Go). See `syntax.md` "Closure capture".
+captured **loop variable** gets a fresh cell per iteration (Go ≥1.22). A spawned task shares the
+binding too (M3.4, Go): `spawn:` captures, `spawn f(xs)` arguments, a `spawn obj.m()` receiver and
+an `Executor` job's captures are the parent's values, by handle. A module global is the run's one
+copy (M3.1). Two tasks that write one value without a join, a `Channel` or a box (`Shared[T]`)
+between them race, and a race is the program's bug. See `syntax.md` "Closure capture".
 
-**A task's write to its airlock copy faults** ([ADR D4](../../design/adr-d4-airlock.md)). A spawned
-task's write to a captured local or a captured container (every object the airlock copied for the
-task) is a recoverable runtime **fault**; three shapes still lose the write
-silently (see `concurrency.md`'s limits). Direct visible task writes, inferred `self`-writing user
-methods, and capture-writing closures at executing crossings are compile-time errors with the same
-text. A received closure reads and writes the run's module globals (M3.1). The
-parent's original object is never marked, and a write through a real handle (`Shared`/`RwShared`/
-`Atomic*`/`Channel`) is unaffected.
+**A task's write lands on the parent's value** (M3.4 deleted the D4 copy rule,
+[ADR D4](../../design/adr-d4-airlock.md)): a captured local, a captured container, a spawn argument
+and a spawned receiver are the parent's own, so the write is seen after the join, as in Go. No
+compile-time error or run-time fault guards it.
 
 ### Syntax sketch
 

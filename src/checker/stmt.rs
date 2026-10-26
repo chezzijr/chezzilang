@@ -122,37 +122,6 @@ impl Checker {
                 if is_const {
                     self.declare_const(name);
                 }
-                // B3.3 (Task 2a): a closure bound to a name records its non-sendable LOCAL captures
-                // keyed by the binding, so a later `spawn <name>()` (or `spawn f(<name>)`) rejects a
-                // captured `ref` at compile time. Uses the SAME free-var over-approximation the runtime
-                // uses to build the closure's captures. Module globals (scope 0) are excluded at record
-                // time (see `local_captures_of`), so a module-global `ref` is never gated.
-                if let ExprKind::Closure { params, body, .. } = &value.kind {
-                    let bound: std::collections::HashSet<String> =
-                        params.iter().map(|p| p.name.clone()).collect();
-                    let free = crate::compiler::free_names_of_expr(body, &bound);
-                    self.record_closure_captures(name, &free);
-                    let mut writes = self
-                        .closure_literal_writes
-                        .get(&(self.graph_module_idx, body.span))
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            std::mem::take(&mut self.last_closure_writes)
-                                .into_iter()
-                                .collect()
-                        });
-                    writes.sort();
-                    let binding_scope = self.owning_scope(name);
-                    if let Some(table) =
-                        binding_scope.and_then(|scope| self.written_captures.get_mut(scope))
-                    {
-                        if writes.is_empty() {
-                            table.remove(name);
-                        } else {
-                            table.insert(name.clone(), writes);
-                        }
-                    }
-                }
             }
             StmtKind::Assign { target, op, value } => {
                 // TICKET-142 (W14-32): `_ = e` is the blank identifier — evaluate and discard, at
@@ -259,7 +228,7 @@ impl Checker {
                         return;
                     }
                     let mut sig = self.fn_sig(decl, decl.name_span, None);
-                    self.bind_nested_fn_writes(decl);
+                    self.bind_nested_fn_summary(decl);
                     // TICKET-139 (W14-2) — a nested fn's own name is certain to hold that one fn (a
                     // keyword call through it is legal). Its two declares below are a same-scope
                     // re-declaration, which `declare` marks as a write; undo that mark unless the
@@ -289,15 +258,6 @@ impl Checker {
                     if !kw_was_written {
                         self.kw_written.remove(&kw_key);
                     }
-                    // B3.3 (Task 2a): record the nested fn's non-sendable LOCAL captures keyed by its
-                    // name (same free-var over-approximation as the runtime), so `spawn <name>()`
-                    // rejects a captured `ref` at compile time. `decl.name` is bound BEFORE this so a
-                    // self-recursive reference resolves; it (and the params) are subtracted as binds.
-                    let mut bound: std::collections::HashSet<String> =
-                        decl.params.iter().map(|p| p.name.clone()).collect();
-                    bound.insert(decl.name.clone());
-                    let free = crate::compiler::free_names_of_block(&decl.body, &bound);
-                    self.record_closure_captures(&decl.name, &free);
                     self.check_fn_body(decl, None, sig);
                     return;
                 }
@@ -780,152 +740,8 @@ impl Checker {
                         // Full type-check of the call (callee, arity, args) — the single source of
                         // type diagnostics for the sub-expressions.
                         self.infer(e);
-                        // Every value crossing the airlock must be sendable: the arguments, and
-                        // (for a method spawn) the receiver the task talks through. Re-inferring
-                        // here would duplicate the type errors `infer(e)` already reported, so we
-                        // truncate any errors this re-inference adds and keep only the sendability
-                        // diagnostics.
-                        if let ExprKind::Call {
-                            callee,
-                            args,
-                            named,
-                            ..
-                        } = &e.kind
-                        {
-                            let checkpoint = self.diag_mark();
-                            let mut bad: Vec<(Span, String)> = Vec::new();
-                            if let ExprKind::Field { obj, .. } = &callee.kind {
-                                let rty = self.infer(obj);
-                                // A module-qualified callee (`lib.helper(3)`, `math.abs(-3)`) is a
-                                // PLAIN CALL through a NAMESPACE, not a call on a receiver value —
-                                // nothing about the module crosses the airlock, so asking whether it
-                                // is sendable is a question about the wrong thing. `defer` already
-                                // treats this shape as a plain call, and Go accepts `go pkg.F(x)`
-                                // exactly as it accepts `defer pkg.F(x)`; one concept, one verdict
-                                // (M24-5).
-                                //
-                                // The skip is keyed on the same thing the compiler's
-                                // [`crate::compiler::Compiler::receiverless_call_head`] is — an
-                                // UNBOUND module NAME — not on the resolved type being `Ty::Module`.
-                                // A module bound to a local (`m := math`) is `Ty::Module` but is not
-                                // a namespace head: the compiler lowers it as a real receiver, and
-                                // the airlock then refuses the module handle at RUN time on a
-                                // program `chezzi check` had just passed. Two halves of one rule, so
-                                // they ask one question (M24-5b).
-                                let namespace_head = matches!(rty, Ty::Module(_))
-                                    && matches!(&obj.kind, ExprKind::Ident(n)
-                                        if self.imported_modules.contains_key(n)
-                                            && !self.head_is_value(n));
-                                if !namespace_head && !self.sendable(&rty) {
-                                    bad.push((
-                                        obj.span,
-                                        format!(
-                                            "cannot spawn on a non-sendable receiver of type {rty}"
-                                        ),
-                                    ));
-                                }
-                            }
-                            // Every argument crossing the airlock must be sendable — positional AND
-                            // keyword (a value+keyword spawn, `spawn h(f=cb)`, lowers to the same
-                            // positional SpawnCall, so a non-sendable value smuggled in by LABEL must
-                            // be rejected exactly like the positional form).
-                            // D4 (TICKET-189, TICKET-240): decide, once, the shape each operand
-                            // crosses with, per bound slot (keyword args, default fills and a pack
-                            // at their compiled position). For a `lib.f` / `lib.K.f` head the
-                            // receiver is the namespace expression, which is `Marked`. The compiler
-                            // stores the shapes; the runtime walks them.
-                            let receiver = match &callee.kind {
-                                ExprKind::Field { obj, .. } => Some(&**obj),
-                                ExprKind::Int(_)
-                                | ExprKind::Float(_)
-                                | ExprKind::Str(_)
-                                | ExprKind::Interp(_)
-                                | ExprKind::Bytes(_)
-                                | ExprKind::RawStr(_)
-                                | ExprKind::Bool(_)
-                                | ExprKind::NoneLit
-                                | ExprKind::Pass
-                                | ExprKind::Ident(_)
-                                | ExprKind::List(..)
-                                | ExprKind::Tuple(_)
-                                | ExprKind::Map(_)
-                                | ExprKind::Set(_)
-                                | ExprKind::Comprehension { .. }
-                                | ExprKind::Unary { .. }
-                                | ExprKind::Binary { .. }
-                                | ExprKind::Compare { .. }
-                                | ExprKind::Range { .. }
-                                | ExprKind::Call { .. }
-                                | ExprKind::Index { .. }
-                                | ExprKind::Try(_)
-                                | ExprKind::OptChain { .. }
-                                | ExprKind::NullCoalesce { .. }
-                                | ExprKind::Closure { .. }
-                                | ExprKind::Match { .. }
-                                | ExprKind::IfElse { .. }
-                                | ExprKind::Recover(..)
-                                | ExprKind::ElseGuard { .. } => None,
-                            };
-                            let slots = self.bound_slots(e.id, args, named);
-                            let crossing = self.call_crossing(receiver, &slots);
-                            if self.records_node(e.id) {
-                                crate::checker::record_call_table_entry(
-                                    &mut self.crossings,
-                                    &mut self.table_conflicts,
-                                    (self.graph_module_idx, e.id.0),
-                                    crossing.clone(),
-                                    "spawn crossing",
-                                    e.span,
-                                );
-                            }
-                            for arg in args.iter().chain(named.iter().map(|(_, v)| v)) {
-                                let aty = self.infer(arg);
-                                if !self.sendable(&aty) {
-                                    bad.push((
-                                        arg.span,
-                                        format!("cannot pass a non-sendable value of type {aty} to a spawned task"),
-                                    ));
-                                }
-                            }
-                            self.diag_rollback(checkpoint);
-                            for (sp, msg) in bad {
-                                self.error(sp, msg);
-                            }
-                            // D4 layer A: the callee's certain writes, through the same slots
-                            // the compiler encodes.
-                            self.report_named_call_writes(callee, &slots, true);
-                            // B3.3 (Task 2a): a closure/nested-fn VALUE at the callee or an arg crosses
-                            // the airlock by value — reject each of its non-sendable LOCAL captures (a
-                            // captured `ref` etc.) at compile time, matching the `spawn:` block form.
-                            // The callee `f` in `spawn f()` and every positional/keyword arg are
-                            // checked; a module-global capture is already excluded at record time.
-                            let mut cap_errs: Vec<(Span, Vec<Capture>)> = Vec::new();
-                            for ex in std::iter::once(&**callee)
-                                .chain(args.iter())
-                                .chain(named.iter().map(|(_, v)| v))
-                            {
-                                let caps = self.spawn_value_captures(ex);
-                                if !caps.is_empty() {
-                                    cap_errs.push((ex.span, caps));
-                                }
-                            }
-                            for (sp, caps) in cap_errs {
-                                self.emit_capture_errors(&caps, sp);
-                            }
-                            if let Some(written) = self.value_writes(callee).first() {
-                                self.error(
-                                    callee.span,
-                                    format!("'{written}' {}", crate::base::words::COPY_WRITE_TAIL),
-                                );
-                            }
-                        }
                     }
                     SpawnTarget::Block(body) => {
-                        // Bindings visible now are captured by the task and are read-only inside
-                        // it (the airlock); bindings the body declares (at this floor or deeper)
-                        // are task-local. `enter`/`leave` is balanced even if checking errors.
-                        let floor = self.scopes.len();
-                        self.capture_floors.push(floor);
                         // A spawned task outlives the frame — there is nothing for a `return` here
                         // to return to (it was silently dropped). Reject it, like `recover:`.
                         // Only `return` is checked: the `loop_depth` reset below owns break/continue.
@@ -963,9 +779,7 @@ impl Checker {
                         let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
                         let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, true);
                         // M24 Task 4: the witness scope carries in. `compile_spawn`'s block arm
-                        // appends the enclosing frame's `$w:T` bindings to the capture entries, and
-                        // a witness is a plain `str` — it deep-copies across the airlock like any
-                        // other captured string, so nothing here needs a sendability exemption.
+                        // appends the enclosing frame's `$w:T` bindings to the capture entries.
                         self.push_scope();
                         for stmt in body {
                             self.check_stmt(stmt);
@@ -975,7 +789,6 @@ impl Checker {
                         self.recover_depth = saved_recover;
                         self.in_defer_block = saved_in_defer;
                         self.loop_depth = saved_loop_depth;
-                        self.capture_floors.pop();
                     }
                 }
             }

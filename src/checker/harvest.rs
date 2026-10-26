@@ -28,7 +28,6 @@ impl Checker {
             doc: None,
             defaulted_fields: Vec::new(),
             field_slots: None,
-            self_writers: HashSet::new(),
         };
         // The LAYOUT stays globally present (so field access on a native return — `regex.find(...)
         // .text`, `request.get(...).status`, `process.run(...).code` — resolves import-free via
@@ -205,7 +204,6 @@ impl Checker {
                     doc: None,
                     defaulted_fields: Vec::new(),
                     field_slots: None,
-                    self_writers: HashSet::new(),
                 };
                 sig.struct_defs.insert(name.clone(), info.clone());
                 sig.types.insert(name.clone());
@@ -528,7 +526,6 @@ impl Checker {
                     doc: None,
                     defaulted_fields: Vec::new(),
                     field_slots: None,
-                    self_writers: HashSet::new(),
                 });
             }
         }

@@ -1,7 +1,7 @@
 # TICKET-169 — D4 layer C silent table: every shape below must NOT fault under the new mark-and-
 # check rule. Read of a copy, a task's own object, a shallow `.copy()`, and every handle-mediated
-# write stay silent; only a WRITE straight through a copy the airlock made must fault
-# (`airlock_task_local_fault_test.chz`).
+# write stay silent. M3.4: a spawn makes no copy, so no shape faults; the writes that used to fault
+# land (`airlock_task_local_fault_test.chz`).
 import std.concurrency
 import std.net
 

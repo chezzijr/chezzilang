@@ -1,15 +1,15 @@
 //! The airlock's crossing policy (D4, `docs/design/adr-d4-airlock.md`): can the parent still reach an
 //! object after it crosses into another task? The checker decides it ONCE per crossing value, as a
 //! shape over the value graph ([`Fresh`], built by `Checker::fresh_shape`, TICKET-240). The
-//! compiler only stores that shape; the runtime only walks it (`Vm::unmark_fresh`). A route whose
+//! compiler only stores that shape; the test-only rebuild walks it (`Vm::unmark_fresh`, deleted
+//! with the airlock in M3.5). A route whose
 //! answer does not depend on the operand is one row of [`marks`]. Every bit layout lives only
-//! here: the spawn operand reference ([`operand_ref`], [`operand`]), the generator creation stamp
-//! ([`stamp_mask`], [`param_stamp`]) and the frame slot verdict ([`frame_slot`]).
+//! here: the generator creation stamp ([`stamp_mask`], [`param_stamp`]) and the frame slot verdict
+//! ([`frame_slot`]). M3.4: a spawn passes its operands by handle, so no spawn shape is left.
 //!
 //! Limits, each a false fault and never a missed mark: a shape deeper than [`MAX_DEPTH`] levels or
-//! wider than [`MAX_WIDTH`] positional children is `Marked` or root-only below the limit; a spawn
-//! whose table index does not fit 31 bits has every operand `Marked`; a generator param at index
-//! 32 and up and a frame local at slot 64 and up are `Marked`.
+//! wider than [`MAX_WIDTH`] positional children is `Marked` or root-only below the limit; a
+//! generator param at index 32 and up and a frame local at slot 64 and up are `Marked`.
 
 /// The deepest shape level `Checker::fresh_shape` describes; below it a subtree is [`Fresh::Marked`].
 pub const MAX_DEPTH: usize = 16;
@@ -37,8 +37,6 @@ pub enum Kids {
     /// Child `i` takes shape `i`. The runtime applies it only when the child count matches.
     At(Box<[Fresh]>),
 }
-
-static MARKED: Fresh = Fresh::Marked;
 
 impl Fresh {
     pub fn is_all(&self) -> bool {
@@ -94,35 +92,6 @@ impl Fresh {
             _ => Fresh::root(),
         }
     }
-}
-
-/// The head-behind-an-entry-thunk bit of a spawn operand reference.
-const BEHIND_ENTRY: u32 = 1 << 31;
-
-/// The `u32` a spawn op carries for entry `index` of `Program.fresh_calls`: `0` = every operand is
-/// `Marked`, else the index plus one in the low 31 bits. An index that does not fit gives `0`.
-pub fn operand_ref(index: usize) -> u32 {
-    match u32::try_from(index) {
-        Ok(i) if i < BEHIND_ENTRY - 1 => i + 1,
-        _ => 0,
-    }
-}
-
-/// The head rides as argument 0 behind an entry thunk (TICKET-235): argument `i` then reads entry
-/// position `i` instead of `i + 1`. `0` stays `0`.
-pub fn behind_entry(r: u32) -> u32 {
-    if r == 0 { 0 } else { r | BEHIND_ENTRY }
-}
-
-/// The shape of argument `arg` of the spawn whose reference is `r`. Entry position 0 is the
-/// receiver, position `j + 1` is bound slot `j`. A miss is `Marked`.
-pub fn operand(table: &[Vec<Fresh>], r: u32, arg: usize) -> &Fresh {
-    let entry = match (r & !BEHIND_ENTRY) as usize {
-        0 => return &MARKED,
-        i => table.get(i - 1),
-    };
-    let pos = if r & BEHIND_ENTRY != 0 { arg } else { arg + 1 };
-    entry.and_then(|e| e.get(pos)).unwrap_or(&MARKED)
 }
 
 /// What a marking crossing unmarks in one generator frame slot. A frame lives on between build
@@ -197,9 +166,6 @@ pub fn slot_bits(claims: &[bool]) -> u64 {
 /// A runtime crossing route whose mark does not depend on the operand.
 #[derive(Clone, Copy, Debug)]
 pub enum Route {
-    /// A spawn's callee captures, arguments and receiver: the parent keeps its bindings, so every
-    /// rebuilt object is a copy (what an operand's [`Fresh`] shape names is then unmarked).
-    Spawn,
     /// A crossing closure's captures: a capture is a by-reference binding of its creator, so its
     /// rebuild is a copy in every heap, the one it left included (TICKET-291).
     ClosureCaptures,
@@ -212,23 +178,11 @@ pub enum Route {
 /// Whether a rebuild on `route` marks what it allocates.
 pub fn marks(route: Route) -> bool {
     match route {
-        Route::Spawn | Route::ClosureCaptures => true,
+        Route::ClosureCaptures => true,
         Route::Handoff => false,
     }
 }
 
-/// The ONE list of native methods whose closure argument CROSSES: it is encoded and runs in
-/// another heap, so its captures are copies (D4). Two readers, one fact:
-///
-/// - the checker (`Checker::with_crossing_floor`) puts the capture floor on these calls, so a
-///   direct write to a captured local is the D4 error at check time;
-/// - the run time (`Vm::executor_submit`) asserts the row in a debug build.
-///
-/// A new method that runs its closure in another heap gets a row here; never an
-/// `if method == ..` clause. M3.3: a `Shared` / `RwShared` closure runs in its caller's task, so
-/// those methods have no row.
-pub const CROSSING_CLOSURE_METHODS: &[(&str, &str)] =
-    &[("Executor", "submit"), ("Executor", "_submit_settled")];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,27 +223,6 @@ mod tests {
         assert!(!Fresh::at(vec![v.clone()]).is_all());
         assert!(!Fresh::each(v).is_all());
         assert_eq!(Fresh::values(Marked), Fresh::root());
-        // Spawn operands: entry position 0 is the receiver, `j + 1` is bound slot `j`.
-        let table = vec![vec![Marked, All], vec![All, Marked, Fresh::root()]];
-        assert_eq!(operand_ref(0), 1);
-        assert_eq!(operand_ref(1), 2);
-        let r = operand_ref(1);
-        assert_eq!(operand(&table, r, 0), &Marked);
-        assert_eq!(operand(&table, r, 1), &Fresh::root());
-        assert_eq!(operand(&table, r, 2), &Marked);
-        assert_eq!(operand(&table, 0, 0), &Marked);
-        assert_eq!(operand(&table, 3, 0), &Marked);
-        // TICKET-235: behind an entry thunk argument `i` reads position `i`.
-        let b = behind_entry(r);
-        assert_eq!(operand(&table, b, 0), &All);
-        assert_eq!(operand(&table, b, 1), &Marked);
-        assert_eq!(operand(&table, b, 2), &Fresh::root());
-        assert_eq!(operand(&table, b, 3), &Marked);
-        assert_eq!(behind_entry(0), 0);
-        // An index that does not fit 31 bits has every operand `Marked`.
-        assert_eq!(operand_ref(0x7FFF_FFFE), 0x7FFF_FFFF);
-        assert_eq!(operand_ref(0x7FFF_FFFF), 0);
-        assert_eq!(operand_ref(usize::MAX), 0);
         // Generator stamp: two bits per param.
         let stamp = stamp_mask(&[Marked, Fresh::root(), All]);
         assert_eq!(stamp, 0b11_01_00);
@@ -329,7 +262,6 @@ mod tests {
 
     #[test]
     fn every_route_marks_as_documented() {
-        assert!(marks(Route::Spawn));
         assert!(marks(Route::ClosureCaptures));
         assert!(!marks(Route::Handoff));
     }

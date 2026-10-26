@@ -173,17 +173,6 @@ fn rejects_help(src: &str, msg_needle: &str, help_needle: &str) {
     );
 }
 
-fn rejects_help_at(src: &str, msg_needle: &str, help_needle: &str, line: u32) {
-    let errs = check_src(src);
-    assert_no_missing_std_import(src, &errs, msg_needle);
-    assert!(
-        errs.iter().any(|e| e.message.contains(msg_needle)
-            && e.help.as_deref().is_some_and(|h| h.contains(help_needle))
-            && e.span.line == line),
-        "expected a task-side error at line {line} with help containing {help_needle:?}, got: {errs:?}"
-    );
-}
-
 /// Type-check a source string, returning the collected WARNINGS (non-fatal diagnostics).
 fn warn_src(src: &str) -> (Vec<CheckError>, Vec<CheckError>) {
     let tokens = lexer::tokenize(src).expect("lex should succeed");

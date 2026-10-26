@@ -292,9 +292,10 @@ impl<'a> WaitTicket<'a> {
             .is_some_and(|f| f.load(Ordering::SeqCst))
     }
 
-    /// Take a reader out of `GuardGraph::readers` (it took the guard by its own CAS). A release
-    /// can admit it between that CAS and this lock (the release clears `WRITER` before it sets the
-    /// flags, all under the registry lock): then it holds two read counts, and gives one back.
+    /// Take a reader out of `GuardGraph::readers`: after it took the guard by its own CAS, or when
+    /// its ticket drops before a take (a halt). A release can admit it before this lock (the release
+    /// clears `WRITER` before it sets the flags, all under the registry lock): then it holds a read
+    /// count it does not keep, and gives it back.
     fn unregister(&mut self) {
         if let Some(flag) = self.admitted.take() {
             let (mtx, _cv) = guard_registry();
@@ -341,25 +342,7 @@ impl Drop for WaitTicket<'_> {
             self.key.lock.state.fetch_sub(WW_ONE, Ordering::SeqCst);
             self.key.lock.wake();
         }
-        if let Some(flag) = self.admitted.take() {
-            let (mtx, _cv) = guard_registry();
-            let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
-            if flag.load(Ordering::SeqCst) {
-                // Admitted, then left before the take (a halt): give the read hold back.
-                drop(g);
-                self.key.lock.state.fetch_sub(1, Ordering::SeqCst);
-                self.key.lock.wake();
-                return;
-            }
-            let addr = Arc::as_ptr(self.key.lock) as usize;
-            if let Some(list) = g.readers.get_mut(&addr) {
-                list.retain(|f| !Arc::ptr_eq(f, &flag));
-                if list.is_empty() {
-                    g.readers.remove(&addr);
-                }
-            }
-            self.key.lock.wait_readers.fetch_sub(1, Ordering::SeqCst);
-        }
+        self.unregister();
     }
 }
 

@@ -6,16 +6,15 @@
 # an Atomic hold the closure itself. M3.3: a box holds the closure itself too, and a box closure
 # runs in its caller's task, so a write through a capture lands on the one binding, in any reader
 # (Go `closures.go`, M3.3 report: `box_route_other_task 2`, `box_route_same_task 3`,
-# `box_built_closure [1 9]`, `job_closure_over_box [0 1]`). Only `Task.get` still copies: an
-# Executor job's closure crosses as a copy (D4 until M3.4), so a closure it returns over a capture
-# of its submitter faults.
+# `box_built_closure [1 9]`, `job_closure_over_box [0 1]`). M3.4: an Executor job holds its
+# submitter's locals by handle, so the `Task.get` route lands too (Go `m34go/readout/main.go`:
+# `task_get_submitter_local 2`, `task_get_other_task 3`).
 import Shared, RwShared, Atomic, Executor from std.concurrency
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
 
 COPY_TAIL := "is this task's copy: a write to it would be lost at the join"
 ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get", "ConcurrentMap.remove", "Channel.recv", "Atomic.load", "Task.get"]
 BOX_ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get"]
-HANDLE_ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get", "ConcurrentMap.remove", "Channel.recv", "Atomic.load"]
 G := [1]
 
 fn some(o: (fn() -> None)?) -> fn() -> None:
@@ -123,8 +122,8 @@ test fn concurrent_map_remove_closure_capture_write_lands():
 test fn channel_recv_closure_capture_write_lands():
     assert in_task(route("Channel.recv", list_writer())) == "no-fault"
 
-test fn list_capture_write_faults_only_on_the_task_route():
-    assert silent_routes(list_writer) == HANDLE_ROUTES
+test fn list_capture_write_lands_on_every_route():
+    assert silent_routes(list_writer) == ROUTES
 
 test fn global_write_lands_on_every_route():
     before := G.len()
@@ -167,13 +166,13 @@ test fn box_built_closure_capture_write_lands_in_the_box():
     assert outcome(built) == "no-fault"
     assert b.get() == [1, 9]
 
-# TICKET-291 C1: a same-task round trip faults only on the copying route.
-test fn same_task_round_trip_faults_only_on_the_task_route():
+# TICKET-291 C1: a same-task round trip lands on every route (M3.4: no route copies).
+test fn same_task_round_trip_lands_on_every_route():
     silent: List[str] = []
     for name in ROUTES:
         if not outcome(route(name, list_writer())()).contains(COPY_TAIL):
             silent.push(name)
-    assert silent == HANDLE_ROUTES
+    assert silent == ROUTES
 
 # C2: a relay task re-stores the closure; it is still the one closure.
 test fn relay_restore_through_shared_is_the_one_closure():
@@ -222,9 +221,8 @@ test fn box_built_closure_over_fresh_state_does_not_fault():
     c := Shared([1]).read(fn(s): make_logger())
     assert outcome(c) == "no-fault"
 
-# TICKET-291 grid: route x reader x capture kind. Every cell lands except the `Task.get` route,
-# whose job closure is a copy (D4 until M3.4): there every capture but a module global faults. A
-# module-global write lands for every reader (`G` grows by one).
+# TICKET-291 grid: route x reader x capture kind. Every cell lands (M3.4: the `Task.get` route
+# too). A module-global write lands for every reader (`G` grows by one).
 READERS := ["same task", "other task", "relay task"]
 CAPTURES := ["captured list", "module global", "fresh box state", "box state"]
 
@@ -260,7 +258,7 @@ fn cell(name: str, reader: str, capture: str) -> str:
             return relay(name, read)
         _: panic("no reader {reader}")
 
-test fn closure_capture_grid_faults_only_on_the_task_route():
+test fn closure_capture_grid_lands_on_every_route():
     wrong: List[str] = []
     for name in ROUTES:
         for reader in READERS:
@@ -270,10 +268,7 @@ test fn closure_capture_grid_faults_only_on_the_task_route():
                 if capture == "module global":
                     if got != "no-fault" or G.len() != before + 1:
                         wrong.push("{name}/{reader}/{capture}")
-                elif HANDLE_ROUTES.contains(name):
-                    if got != "no-fault":
-                        wrong.push("{name}/{reader}/{capture}")
-                elif not got.contains(COPY_TAIL):
+                elif got != "no-fault":
                     wrong.push("{name}/{reader}/{capture}")
     assert wrong == []
 
@@ -393,14 +388,15 @@ fn job_closure(f: fn() -> fn() -> None) -> str:
     ex.shutdown()
     return outcome(ok(t.get()))
 
-# TICKET-295 grid: a job result closure faults exactly when a capture reaches a copy: the job's
-# copy of a submitter local (D4 until M3.4). Box state is the box's live value (M3.3).
+# TICKET-295 grid: a job result closure faults on no capture (M3.4: a submitter local is the
+# submitter's one list, Go `task_get_submitter_local 2`). Box state is the box's live value (M3.3).
 test fn task_result_closure_capture_grid():
     xs := [1]
     box := Shared[List[int]]([0])
     wrong: List[str] = []
     wrong.extend(miss("fresh state", job_closure(fresh_logger), false))
     wrong.extend(miss("module global", job_closure(global_writer), false))
-    wrong.extend(miss("submitter local", job_closure(fn(): list_capture(xs)), true))
+    wrong.extend(miss("submitter local", job_closure(fn(): list_capture(xs)), false))
     wrong.extend(miss("box state", job_closure(fn(): shared_logger(box)), false))
     assert wrong == []
+    assert xs == [1, 1]

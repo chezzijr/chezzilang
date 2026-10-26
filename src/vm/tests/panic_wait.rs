@@ -740,27 +740,15 @@ fn executor_submitted_closure_captures_by_value() {
     assert_eq!(run_capture(src).expect("parallel run"), "7\n");
 }
 
-/// A submitted closure crosses the airlock **by value**: it isolates its captures at
-/// `submit` time (`wire_callable` → `to_wire` deep-copies), so a mutation of a captured collection
-/// after the `submit` is NOT observed by the job. Eager execution shrank that window to nothing on the
-/// default (no-`--parallel`) run (the job is already running), but the isolation is what makes the
-/// plain run and M:N agree here regardless — it has always been keyed to the `submit`, never to when
-/// the job runs. The since-removed cooperative engine
-/// used to share captures by reference (queuing the closure's own `Handle`) to mirror the tree-walk
-/// `interp` oracle; that oracle has been removed and byte-identical output is now the sole invariant,
-/// so a plain run isolates identically to M:N — both print `[1]` here (not `[1, 2]`).
+/// M3.4: an Executor job holds its submitter's captured list by handle, so it reads the push the
+/// submitter makes before the gate opens (Go `m34go/captures/main.go`: `job_reads_submitter_push 2`).
 #[test]
-fn executor_cooperative_submit_isolates_captures_by_value() {
-    let src = "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): print(xs))\n    xs.push(2)\nmain()\n";
+fn executor_cooperative_submit_shares_captures_by_handle() {
+    let src = "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    gate := Channel[int](1)\n    ex := Executor()\n    ex.submit(fn(): print(gate.recv() + xs.len()))\n    xs.push(2)\n    gate.send(0)\n    ex.shutdown()\nmain()\n";
     assert_eq!(
         run_capture(src).expect("vm run"),
-        "[1]\n",
-        "plain submit isolates the captured list by value at submit time"
-    );
-    assert_eq!(
-        run_capture(src).expect("parallel run"),
-        "[1]\n",
-        "M:N submit isolates the captured list by value too"
+        "2\n",
+        "the job reads the submitter's list"
     );
 }
 

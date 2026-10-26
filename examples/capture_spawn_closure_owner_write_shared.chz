@@ -1,0 +1,22 @@
+# Uniform by-reference capture (F3 — owner-write form, nested-nursery path). A closure `f` captures a
+# by-reference local `x` and READS it; the owner writes `x[0] = 5` after `spawn f()`. M3.4: the task
+# holds the owner's own cell, so it reads the owner's write. A channel orders the read after the
+# write, so the program has no race (Go `m34go/captures/main.go`: `owner_write 5`). Nesting `work()`
+# under `main`'s `parallel:` takes the M:N eager nested-nursery path, which starts the task at the
+# spawn.
+fn work():
+    x := [0]
+    gate := Channel[int](1)
+    seen := Channel[int](1)
+    f := fn(): seen.send(gate.recv() + x[0])
+    parallel:
+        spawn f()
+        x[0] = 5
+        gate.send(0)
+    print(seen.recv())          # 5
+
+fn main():
+    parallel:
+        spawn work()
+
+main()

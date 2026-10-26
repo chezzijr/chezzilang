@@ -358,7 +358,6 @@ pub(super) fn compile_tables_pass(
             std::mem::take(&mut c.sum_seeds),
             std::mem::take(&mut c.ret_coerce),
             std::mem::take(&mut c.table_conflicts),
-            std::mem::take(&mut c.crossings),
             std::mem::take(&mut c.resolutions),
             std::mem::take(&mut c.fall_off),
             std::mem::take(&mut c.gen_crossings),

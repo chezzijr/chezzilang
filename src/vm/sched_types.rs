@@ -292,35 +292,6 @@ pub(super) struct WorkerResult {
     pub(super) stderr: Vec<u8>,
 }
 
-/// B3.2 — a spawned task lowered to a `Send` description (no parent-heap `GcRef`s), ready to rebuild
-/// in a worker heap. The callee crosses as its `ProtoId` (the proto lives in the shared `Arc<Program>`)
-/// plus wire'd captures/args.
-/// `home`: the index of the callee's home module in the parent's `module_objs` (B3.3c), so the
-/// worker can resolve the rebuilt module obj for global / sibling-fn resolution; `None` when the
-/// home is a standalone module not in `module_objs` (the unit-test fixtures), which falls back to a
-/// fresh empty home.
-pub(super) enum Lowered {
-    // The direct spawn callee (a `spawn:` block or `spawn f(..)`): its globals are the run's
-    // (`home` indexes the shared module objects, M3.1), so only its captures cross.
-    Closure {
-        proto: ProtoId,
-        captured: Vec<(String, WireValue)>,
-        args: Vec<WireValue>,
-        home: Option<usize>,
-        span: Span,
-    },
-    /// TICKET-226 — `spawn f(args)` where `f` is any non-closure callable ([`Vm::callable`]): a bare
-    /// fn, method path, variant ctor, `T.m`, `json.decode[T]`, native, builtin or extern fn. The
-    /// callee crosses by value through `to_wire`, and `from_wire_memo` lands it in the worker heap's
-    /// one `fn_value` slot. A closure stays [`Lowered::Closure`] for TICKET-016's no-globals rule.
-    /// Never add a per-kind arm beside this one.
-    Value {
-        callee: WireValue,
-        args: Vec<WireValue>,
-        span: Span,
-    },
-}
-
 /// B3.4 — how a `--parallel` task ended, recorded in its slot. The join ([`Vm::reduce_task_slots`])
 /// scans these in task order: `Done`/`Exit` flush their buffered output; the lowest-index `Exit` or
 /// `Fault` propagates (an `Exit` hard-halts the parent, a `Fault` unwinds normally so an outer
@@ -330,7 +301,7 @@ pub(super) enum Lowered {
 /// Higher-index racy faults and `Cancelled` still drop (no deterministic slot).
 #[derive(Debug)]
 pub(super) enum TaskOutcome {
-    /// Ran to completion. Its return value crossed the airlock; output flushed in task order.
+    /// Ran to completion; output flushed in task order.
     Done(WorkerResult),
     /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Its buffered
     /// output is FLUSHED at its task-order slot, not dropped: with cancellation points a started task

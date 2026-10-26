@@ -295,8 +295,8 @@ impl Vm {
         }
     }
 
-    /// TICKET-226 — THE answer to "is `v` callable, and how": call, `lower_task`, `Executor.submit`
-    /// and the entrypoint all read it. Borrows the heap object only long enough to copy its
+    /// TICKET-226 — THE answer to "is `v` callable, and how": call, `prepare_worker`,
+    /// `Executor.submit` and the entrypoint all read it. Borrows the heap object only long enough to copy its
     /// `Copy`/cheap fields, so the hot fn/closure paths allocate nothing. The `match` names every
     /// `Obj` variant and has no `_` arm: a new `Obj` kind does not compile until it is classified.
     /// Always inlined: as a call, its `Option<Callee>` result went back through the stack in

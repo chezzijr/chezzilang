@@ -69,11 +69,6 @@ impl Flow {
         }
     }
 
-    /// Some `break` / `continue` / `return` leaves the statement.
-    pub(super) fn escapes(&self) -> bool {
-        self.breaks.is_some() || self.continues.is_some() || self.returns.is_some()
-    }
-
     /// The earliest escape in source order, with its keyword.
     pub(super) fn first_escape(&self) -> Option<(Span, &'static str)> {
         [

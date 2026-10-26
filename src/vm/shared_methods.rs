@@ -663,12 +663,7 @@ impl Vm {
         settle: JobSettle,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        // The job's closure crosses on the spawn path (`spawn_into`), so the method is a row of
-        // the one list the checker's capture floor reads (TICKET-246, fact A4).
-        debug_assert!(
-            super::CROSSING_CLOSURE_METHODS.contains(&("Executor", "_submit_settled")),
-            "Executor._submit_settled crosses a closure but has no row in CROSSING_CLOSURE_METHODS"
-        );
+        // The job's closure starts on the spawn path (`spawn_into`), by handle (M3.4).
         let core = self.executor_core(h);
         // Cheap early reject so a shut executor costs no wiring work. Re-checked below under
         // the lock — this one is advisory, the one that decides is the atomic one.
@@ -724,7 +719,6 @@ impl Vm {
             crate::vm::sched::SpawnHead::Callee(Some(self.program.task_entry)),
             f,
             Vec::new(),
-            0,
             span,
         )
     }

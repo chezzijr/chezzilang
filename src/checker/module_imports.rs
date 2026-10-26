@@ -230,8 +230,7 @@ impl Checker {
         self.collect_docs(stmts);
         self.hoist(stmts);
         self.bind_variant_imports(stmts);
-        self.infer_self_writers(stmts);
-        self.infer_fn_writers(stmts);
+        self.infer_fn_summaries(stmts);
         // SINGLE-RESOLVER FFI fix: cache every struct declared in THIS module under its identity key,
         // its by-value `CType::Struct` computed HERE — in this (the DEFINING) module's import/alias
         // scope (extends the `AliasSig::ctype` precedent to structs). Done only when harvesting
@@ -244,7 +243,6 @@ impl Checker {
         }
         self.infer_returns(stmts);
         self.record_hook_table(stmts);
-        self.pretype_place_subscripts(stmts);
         for stmt in stmts {
             self.check_stmt(stmt);
         }

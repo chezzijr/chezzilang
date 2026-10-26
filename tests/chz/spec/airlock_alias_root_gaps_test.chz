@@ -11,10 +11,12 @@
 # M3.1 (Go model): a module global is the run's one copy. A task's write to it, through the
 # global or a task-local alias, LANDS, and a received closure reads the live global. The rows
 # below that write through a task-local alias assert that (goldens: the equivalent Go program,
-# go1.27.0). An alias the PARENT made and the task captured is still a crossing copy until M3.4.
-# TICKET-111 (docs/contributing/gaps.md W12-5) — a task-local alias of a global is the SAME object as the
-# task's copy of the global (adoption), not a second copy. That still holds; a write through
-# either the alias or the global now faults identically (both denote the one copied object).
+# go1.27.0). M3.4: an alias the PARENT made and the task captured is the same object too, so a
+# write through it lands (Go `m34go/aliasroot/main.go`: `element_alias [1 2]`,
+# `whole_global_alias [1 2]`, `struct_in_map_alias 5`, `spawn_adopted_alias [1 2]`,
+# `spawn_arg_alias [1 2]`, `two_hop [1 2]`).
+# TICKET-111 (docs/contributing/gaps.md W12-5) — a task-local alias of a global is the SAME object
+# as the global (adoption), not a second copy: since M3.1 both denote the run's one object.
 import Iterator from std.iter
 import std.concurrency
 
@@ -23,7 +25,7 @@ fn d4_push2(xs: List[int]):
 
 gl: List[List[int]] = [[1]]
 
-test fn local_alias_of_global_element_write_through_alias_faults():
+test fn local_alias_of_global_element_write_through_alias_lands():
     inner := gl[0]
     r := Channel[str](1)
     parallel:
@@ -35,7 +37,8 @@ test fn local_alias_of_global_element_write_through_alias_faults():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gl == [[1, 2]]
 
 g: List[int] = [1]
 
@@ -85,7 +88,7 @@ test fn write_through_param_alias_of_global_lands_and_the_received_closure_reads
 
 gw: List[List[int]] = [[1]]
 
-test fn local_alias_of_a_whole_global_write_through_alias_faults():
+test fn local_alias_of_a_whole_global_write_through_alias_lands():
     a := gw
     r := Channel[str](1)
     parallel:
@@ -97,7 +100,8 @@ test fn local_alias_of_a_whole_global_write_through_alias_faults():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gw == [[1, 2]]
 
 struct P:
     n: int
@@ -107,7 +111,7 @@ fn d4_set_p(p: P):
 
 gm: Map[str, P] = {"k": P(1)}
 
-test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_faults():
+test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_lands():
     k := "k"
     p := gm[k]
     r := Channel[str](1)
@@ -120,7 +124,8 @@ test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_faults():
                 ?_: r.send("no-fault")
                 !e: r.send(e.message())
     got := r.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gm["k"].n == 5
 
 fn count3() -> Iterator[int]:
     yield 1
@@ -129,8 +134,7 @@ fn count3() -> Iterator[int]:
 
 gg: List[Iterator[int]] = [count3()]
 
-# The alias is made in the task (a parent-made alias the task captures is a crossing copy until
-# M3.4). Go: one iterator, `1 2`.
+# The alias is made in the task. Go: one iterator, `1 2`.
 test fn local_alias_of_a_global_generator_is_one_generator():
     r := Channel[str](1)
     parallel:
@@ -143,11 +147,10 @@ test fn local_alias_of_a_global_generator_is_one_generator():
     assert got == "1 2", "generator alias is two live copies: {got}"
 
 # W13-1 (docs/contributing/gaps.md) — a spawn-ADOPTED alias of a module global (`a := gl` in the parent,
-# `a.push(2)` in the task). Under D2/TICKET-111 the adopted alias IS the task's copy of the global.
-# TICKET-169: writing it now faults instead of silently landing only in the sender's copy.
+# `a.push(2)` in the task). M3.4: the adopted alias IS the global, so the write lands.
 gl2: List[int] = [1]
 
-test fn write_through_spawn_adopted_alias_faults():
+test fn write_through_spawn_adopted_alias_lands():
     a := gl2
     c := Channel[str](1)
     parallel:
@@ -159,13 +162,14 @@ test fn write_through_spawn_adopted_alias_faults():
                 ?_: c.send("no-fault")
                 !e: c.send(e.message())
     got := c.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gl2 == [1, 2]
 
 # W13-1 neighbours (TICKET-116) — the same shape across container kinds, closure timings and
-# forwarding hops. Each write now faults instead of landing only in the sender's copy.
+# forwarding hops. Each write lands on the global (M3.4).
 gl3: List[List[int]] = [[1]]
 
-test fn element_alias_write_faults():
+test fn element_alias_write_lands():
     inner := gl3[0]
     c := Channel[str](1)
     parallel:
@@ -177,7 +181,8 @@ test fn element_alias_write_faults():
                 ?_: c.send("no-fault")
                 !e: c.send(e.message())
     got := c.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gl3 == [[1, 2]]
 
 gl4: List[List[int]] = [[1]]
 
@@ -188,12 +193,13 @@ fn w4(xs: List[int], c: Channel[str]):
         ?_: c.send("no-fault")
         !e: c.send(e.message())
 
-test fn spawn_arg_alias_write_faults():
+test fn spawn_arg_alias_write_lands():
     c := Channel[str](1)
     parallel:
         spawn w4(gl4[0], c)
     got := c.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gl4 == [[1, 2]]
 
 struct P116:
     n: int
@@ -203,7 +209,7 @@ fn d4_set_p116(p: P116):
 
 gm116: Map[str, P116] = {"k": P116(1)}
 
-test fn struct_in_map_alias_write_faults():
+test fn struct_in_map_alias_write_lands():
     p := gm116["k"]
     c := Channel[str](1)
     parallel:
@@ -215,11 +221,12 @@ test fn struct_in_map_alias_write_faults():
                 ?_: c.send("no-fault")
                 !e: c.send(e.message())
     got := c.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gm116["k"].n == 5
 
 gl5: List[int] = [1]
 
-test fn closure_built_before_the_alias_push_faults():
+test fn closure_built_before_the_alias_push_lands():
     a := gl5
     c := Channel[str](1)
     parallel:
@@ -232,11 +239,12 @@ test fn closure_built_before_the_alias_push_faults():
                 ?_: c.send("no-fault")
                 !e: c.send(e.message())
     got := c.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gl5 == [1, 2]
 
 gl6: List[int] = [1]
 
-test fn nested_nursery_send_faults():
+test fn nested_nursery_send_lands():
     a := gl6
     c := Channel[str](1)
     parallel:
@@ -251,7 +259,8 @@ test fn nested_nursery_send_faults():
                 spawn:
                     pass
     got := c.recv()
-    assert got.starts_with("this value is this task's copy:"), got
+    assert got == "no-fault", got
+    assert gl6 == [1, 2]
 
 gl8: List[int] = [1]
 
@@ -274,7 +283,7 @@ test fn executor_job_reads_the_tasks_alias_write():
 
 gl9: List[int] = [1]
 
-test fn two_hop_closure_alias_write_faults():
+test fn two_hop_closure_alias_write_lands():
     a := gl9
     c := Channel[str](1)
     fc := Channel[fn() -> str](1)
@@ -292,9 +301,9 @@ test fn two_hop_closure_alias_write_faults():
             f := fc.recv()
             d.send(f)
     fault := c.recv()
-    assert fault.starts_with("this value is this task's copy:"), fault
+    assert fault == "no-fault", fault
     got := d.recv()()
-    assert got == "[1]", "two-hop forwarded closure read {got}"
+    assert got == "[1, 2]", "two-hop forwarded closure read {got}"
 
 # W13-2 (docs/contributing/gaps.md) — a receiver's OWN in-place mutation of a module global used to be silently
 # overwritten by an arriving closure whose sender also mutated it. M3.1: both writes land in the

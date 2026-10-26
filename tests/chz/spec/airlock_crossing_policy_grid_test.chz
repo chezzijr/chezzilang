@@ -12,7 +12,10 @@
 # Generator rows belong to TICKET-190.
 #
 # Each row sends "ok <len>" when the task's push succeeded, or "fault" when the task wrote its copy
-# of parent data (layer C).
+# of parent data (layer C). M3.4: a spawn, a `spawn:` capture and an Executor job hold the parent's
+# values by handle, so no row faults and the parent sees the push (Go `m34go/policy/main.go`,
+# go1.27.0: every named row `ok 2 [1 3]`, `r28_receiver_named ok 2 2`,
+# `r29b_ctor_holding_named ok 2 [1 2]`, `r30_receiver_call_result ok 2`).
 
 import std.concurrency
 import airlock_crossing_policy_lib as lib
@@ -117,8 +120,8 @@ test fn grid_policy_r3_fn_call_result():
     out := Channel[str](4)
     parallel:
         spawn t189_w(t189_id(xs), out)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
 test fn grid_policy_r4_fn_fresh_holding_named():
     xs := [1]
@@ -126,8 +129,8 @@ test fn grid_policy_r4_fn_fresh_holding_named():
     parallel:
         spawn t189_nested([xs], out)
     assert out.recv() == "ok 2"
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
 test fn grid_policy_r5_fn_keyword_fresh():
     out := Channel[str](4)
@@ -151,13 +154,13 @@ fn t189_pack_elem(out: Channel[str], ...rest: List[int]):
     out.send(t189_try(rest[0]))
 
 test fn grid_policy_r8_fn_variadic_element_named():
-    # The pack list is fresh; its NAMED element is the parent's list, so it stays a copy.
+    # The pack list is fresh; its NAMED element is the parent's list.
     xs := [1]
     out := Channel[str](4)
     parallel:
         spawn t189_pack_elem(out, xs)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
 fn t189_rebind(ys: List[int], out: Channel[str]):
     ys = [1, 2]
@@ -180,21 +183,21 @@ fn t189_dg_get() -> List[int]:
 fn t189_dprov(out: Channel[str], acc: List[int] = t189_dg_get()):
     out.send(t189_try(acc))
 
-test fn grid_policy_r53_fn_provider_default_is_copy():
-    # Ceiling: a provider default is a call result, which may return a parent global.
+test fn grid_policy_r53_fn_provider_default_is_the_global():
+    # A provider default is a call result: here the parent's global itself.
     out := Channel[str](4)
     parallel:
         spawn t189_dprov(out)
-    assert out.recv() == "fault"
-    assert t189_dg == [1]
+    assert out.recv() == "ok 2"
+    assert t189_dg == [1, 3]
 
 test fn grid_policy_r14_fn_conditional_named():
     xs := [1]
     out := Channel[str](4)
     parallel:
         spawn t189_cond(xs, out, true)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
 test fn grid_policy_r15_fn_conditional_fresh():
     out := Channel[str](4)
@@ -238,18 +241,18 @@ test fn grid_policy_r27_method_named():
     out := Channel[str](4)
     parallel:
         spawn r.w(xs, out)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
-# ---- the receiver: a struct constructor is fresh (TICKET-190); a named or call-result struct is not ----
+# ---- the receiver: named, constructed or a call result, the task holds it by handle (M3.4) ----
 
 test fn grid_policy_r28_receiver_named():
     c := T189C(n=1)
     out := Channel[str](4)
     parallel:
         spawn c.bump(out)
-    assert out.recv() == "fault"
-    assert c.n == 1
+    assert out.recv() == "ok 2"
+    assert c.n == 2
 
 test fn grid_policy_r29_receiver_constructor():
     out := Channel[str](4)
@@ -257,8 +260,7 @@ test fn grid_policy_r29_receiver_constructor():
         spawn T189C(n=1).bump(out)
     assert out.recv() == "ok 2"
 
-# A constructor is fresh, and so is each field it builds (TICKET-240): a NAMED list in a field
-# stays marked.
+# A NAMED list in a constructed field is the parent's list (M3.4).
 struct T190H:
     xs: List[int]
     fn push_inner(self, out: Channel[str]):
@@ -273,14 +275,14 @@ test fn grid_policy_r29b_constructor_holding_a_named_list():
     out := Channel[str](4)
     parallel:
         spawn T190H(xs=xs).push_inner(out)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 2]
 
 test fn grid_policy_r30_receiver_call_result():
     out := Channel[str](4)
     parallel:
         spawn t189_mk().bump(out)
-    assert out.recv() == "fault"
+    assert out.recv() == "ok 2"
 
 # ---- spawn lib.f() ----
 
@@ -313,8 +315,8 @@ test fn grid_policy_r34_qualified_named():
     out := Channel[str](4)
     parallel:
         spawn lib.push_len(xs, out)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
 # ---- spawn lib.K.f() ----
 
@@ -347,8 +349,8 @@ test fn grid_policy_r38_static_named():
     out := Channel[str](4)
     parallel:
         spawn lib.PolicyK.push_len(xs, out)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
 # ---- spawn value() ----
 
@@ -380,8 +382,8 @@ test fn grid_policy_r41_value_named():
     out := Channel[str](4)
     parallel:
         spawn g(xs, out)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
 test fn grid_policy_r42_value_keyword_named():
     xs := [1]
@@ -389,10 +391,10 @@ test fn grid_policy_r42_value_keyword_named():
     out := Channel[str](4)
     parallel:
         spawn g(out=out, xs=xs)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
-# ---- spawn: block (a capture is always a copy) ----
+# ---- spawn: block (a capture is the parent's binding, M3.4) ----
 
 test fn grid_policy_r43_block_fresh_literal():
     # The literal is built inside the task.
@@ -415,10 +417,10 @@ test fn grid_policy_r45_block_named_capture():
     out := Channel[str](4)
     parallel:
         spawn: h(xs, out)
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
-# ---- Executor (the job's captures are a copy; its root is a hand-off) ----
+# ---- Executor (the job holds its captures by handle, M3.4) ----
 
 test fn grid_policy_r16_executor_submit_fresh():
     out := Channel[str](4)
@@ -434,16 +436,16 @@ test fn grid_policy_r17_executor_submit_named():
     ex := concurrency.Executor()
     _ := ex.submit(fn(): h(xs, out))
     ex.shutdown()
-    assert out.recv() == "fault"
-    assert xs == [1]
+    assert out.recv() == "ok 2"
+    assert xs == [1, 3]
 
 test fn grid_policy_r46_executor_submit_get_named():
     xs := [1]
     ex := concurrency.Executor()
     got := must(ex.submit(fn() -> str: t189_try(xs)).get())
     ex.shutdown()
-    assert got == "fault"
-    assert xs == [1]
+    assert got == "ok 2"
+    assert xs == [1, 3]
 
 test fn grid_policy_r47_executor_submit_get_fresh():
     ex := concurrency.Executor()
@@ -473,16 +475,15 @@ test fn grid_policy_r48_channel_fresh_send():
         spawn: out.send(t189_try(ch.recv()))
     assert out.recv() == "ok 2"
 
-# The task's `xs` is still its marked capture copy (a spawn crossing copies until M3.4), and the
-# channel hands the parent that copy itself, so the parent's push faults and `xs` is unchanged.
-# Go (`policy.go`): `r49 ok 2 [1 3]`, the answer once M3.4 passes the capture by handle.
+# The task's `xs` is the parent's list (M3.4), and the channel hands it back, so the parent's push
+# lands. Go (`m34go/policy/main.go`): `r49_channel_task_to_parent ok 2 [1 3]`.
 test fn grid_policy_r49_channel_task_to_parent():
     xs := [1]
     ch := Channel[List[int]](1)
     parallel:
         spawn: ch.send(xs)
-    assert t189_try(ch.recv()) == "fault"
-    assert xs == [1]
+    assert t189_try(ch.recv()) == "ok 2"
+    assert xs == [1, 3]
 
 # ---- Shared / RwShared / Atomic (a read is never marked) ----
 

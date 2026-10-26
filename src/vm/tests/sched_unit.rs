@@ -1517,7 +1517,6 @@ fn fiber_roots_equal_vm_roots_after_swap() {
             args: vec![Value::obj(t_arg)],
             span: Span::RUNTIME,
         },
-        fresh: 0,
     }]);
     vm.executors = vec![obj(&mut vm, "executor")];
     let interned = obj(&mut vm, "interned");

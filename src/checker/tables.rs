@@ -60,7 +60,6 @@ pub type CallTables = (
     SumSeedTable,
     RetCoerceTable,
     TableConflicts,
-    CrossingTable,
     ResolutionTable,
     FallOffTable,
     GenCrossings,

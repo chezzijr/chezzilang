@@ -55,12 +55,11 @@ test fn generator_crossing_cost_is_independent_of_parent_heap():
     assert elapsed < 1000, "{elapsed} ms"
 
 # ---- TICKET-190 route grid: every crossing route x generator state x slot kind x writer ----
-# A marking route (spawn forms, Executor jobs) faults a write to a frame slot
-# the parent can still reach and runs one to a private slot; a hand-off (Shared, RwShared) gives a
-# copy of the generator away, so every write runs. A module global is the run's one copy (M3.1),
-# and a Channel or an Atomic holds the generator itself (M3.2), so a task drives the one generator
-# and every write runs and lands (CPython: a generator handed through a `queue.Queue` to a thread
-# prints the same row, and the parent's lists read `[[1, 2]] * 4`, `[[1]]`; M3.2 report).
+# Every route hands the task the one generator: a module global is the run's one copy (M3.1), a
+# Channel or an Atomic holds the generator itself (M3.2), a box too (M3.3), and a spawn, a
+# `spawn:` capture and an Executor job hold it by handle (M3.4). So the task drives the one
+# generator and every write runs and lands (CPython `m34py/gen_routes.py`: `route_row
+# 3,3,2,2,3,3,2,2,3,2,3,2,1,0 [[1, 2], [1, 2], [1, 2], [1, 2]] [[1]]`).
 
 fn t190_cell(g: Iterator[int]) -> str:
     res_v := 0
@@ -211,7 +210,6 @@ fn t190_snapshot_row(named: List[List[int]], sink: List[List[int]]) -> str:
     return ",".join(got)
 
 test fn generator_route_grid():
-    marking := "3,fault,2,fault,3,fault,2,fault,3,2,3,2,fault,0"
     handoff := "3,3,2,2,3,3,2,2,3,2,3,2,1,0"
     routes := ["spawn_fn", "spawn_block", "spawn_value", "submit", "submit_value", "channel", "shared", "rwshared", "atomic", "task_get", "memoize"]
     for route in routes:
@@ -221,16 +219,9 @@ test fn generator_route_grid():
         for g in t190_cells(named, sink):
             got.push(t190_route(route, g))
         row := ",".join(got)
-        want := if route == "channel" or route == "shared" or route == "rwshared" or route == "atomic": handoff else: marking
-        assert row == want, "{route}: {row}"
-        # M3.2 / M3.3: a channel, an `Atomic` and a box hold the generator itself, so the task
-        # drives the one generator (CPython `gen_routes.py`, M3.2 report: `[[1, 2]] * 4`, `[[1]]`).
-        if route == "channel" or route == "atomic" or route == "shared" or route == "rwshared":
-            assert named == [[1, 2], [1, 2], [1, 2], [1, 2]], "{route}: named {named}"
-            assert sink == [[1]], "{route}: sink {sink}"
-        else:
-            assert named == [[], [1], [], [1]], "{route}: named {named}"
-            assert sink == [[]], "{route}: sink {sink}"
+        assert row == handoff, "{route}: {row}"
+        assert named == [[1, 2], [1, 2], [1, 2], [1, 2]], "{route}: named {named}"
+        assert sink == [[1]], "{route}: sink {sink}"
     named: List[List[int]] = [[], [], [], []]
     sink: List[List[int]] = []
     # M3.1: a task reads the run's module global, so it drives the one generator and its writes
@@ -250,7 +241,8 @@ test fn module_global_started_generator_runs_in_a_task():
     assert out.recv() == "2"
 
 # A generator callee stores its arguments in the new frame without running its body, so `acc`
-# escapes into `t190_inner`'s frame and stays marked: a write to it would be lost at the join.
+# escapes into `t190_inner`'s frame; the task's push lands on that one list (CPython
+# `gen_routes.py`: `gen_arg_to_gen_callee 2 2`).
 fn t190_inner(xs: List[int]) -> Iterator[int]:
     yield xs.len()
 
@@ -261,18 +253,19 @@ fn t190_gin(sink: List[Iterator[int]]) -> Iterator[int]:
     acc.push(2)
     yield acc.len()
 
-test fn generator_arg_to_a_generator_callee_stays_marked():
+test fn generator_arg_to_a_generator_callee_is_one_list():
     s: List[Iterator[int]] = []
     x := t190_gin(s)
     _ := x.next()
     out := Channel[str](1)
     parallel:
         spawn: out.send(t190_cell(x))
-    assert out.recv() == "fault"
-    assert t190_cell(s[0]) == "1"
+    assert out.recv() == "2"
+    assert t190_cell(s[0]) == "2"
 
 # Review finding (TICKET-190): a local value that shadows a nested generator is a value callee, so
-# its call gets no creation stamp and `gen2`'s param stays marked. The task's second push faults.
+# its call gets no creation stamp. M3.4: the task drives the one generator over the parent's
+# `named`, so its second push lands (CPython `gen_routes.py`: `value_callee_shadow 2 [1, 2]`).
 fn t190_gen2(xs: List[int]) -> Iterator[int]:
     xs.push(1)
     yield 0
@@ -295,11 +288,11 @@ test fn value_callee_shadowing_a_nested_generator_gets_no_stamp():
     out := Channel[str](1)
     parallel:
         spawn: out.send(t190_cell(g))
-    assert out.recv() == "fault"
-    assert named == [1]
+    assert out.recv() == "2"
+    assert named == [1, 2]
 
 # Review round 2 (TICKET-190): the same shadow in the nested fn's OWN scope. The re-declare drops
-# the generator's summary, so the value call gets no stamp and the task's second push faults.
+# the generator's summary, so the value call gets no stamp; the task's second push lands.
 fn t190_shadow_same_scope(named: List[int]) -> Iterator[int]:
     fn gen(xs: List[int]) -> Iterator[int]:
         yield xs.len()
@@ -314,8 +307,8 @@ test fn same_scope_value_shadowing_a_nested_generator_gets_no_stamp():
     out := Channel[str](1)
     parallel:
         spawn: out.send(t190_cell(g))
-    assert out.recv() == "fault"
-    assert named == [1]
+    assert out.recv() == "2"
+    assert named == [1, 2]
 
 # Beside it: the nested generator itself, called by name with a fresh argument, keeps its stamp.
 fn t190_nested_outer() -> Iterator[int]:
@@ -337,7 +330,7 @@ test fn nested_generator_called_with_a_fresh_argument_runs():
 # Review round 3 (TICKET-190): a nested generator's binding that is written anywhere in its scope
 # may hold another function at the call, so the call gets no creation stamp. Three writes: a plain
 # reassignment, a write after the call in a loop, and a write from a nested fn. Each value callee
-# returns `t190_gen2(named)`, whose param stays marked, so the task's second push faults.
+# returns `t190_gen2(named)`, so the task's second push lands on `named` (M3.4).
 fn t190_written_reassign(named: List[int]) -> Iterator[int]:
     fn gen(xs: List[int]) -> Iterator[int]:
         yield xs.len()
@@ -377,7 +370,7 @@ fn t190_written_cell(shape: str) -> str:
 test fn written_nested_generator_binding_gets_no_stamp():
     for shape in ["reassign", "loop", "nested_fn"]:
         cell := t190_written_cell(shape)
-        assert cell == "fault [1]", "{shape}: {cell}"
+        assert cell == "2 [1, 2]", "{shape}: {cell}"
 
 fn t220_started() -> Iterator[int]:
     return t190_started(t190_gl())
@@ -407,3 +400,31 @@ test fn memoize_copy_hit_of_frame_local_generator_runs():
             spawn: out.send(t190_cell(m(0)))
         got.push(out.recv())
     assert ",".join(got) == "2,0"
+
+# M3.4: two tasks share one generator. A second task's `next()` while the first runs the body is
+# the M2.4 fault, as CPython raises `ValueError` (`m34py/gen_running.py`: `['a 7', 'b generator
+# already executing']`).
+fn t340_waiting(started: Channel[int], gate: Channel[int]) -> Iterator[int]:
+    started.send(1)
+    _ := gate.recv()
+    yield 7
+
+test fn a_second_task_next_on_a_running_shared_generator_faults():
+    started := Channel[int](1)
+    gate := Channel[int](1)
+    g := t340_waiting(started, gate)
+    out := Channel[str](2)
+    parallel:
+        spawn:
+            out.send("a {g.next() ?? 0}")
+        spawn:
+            _ := started.recv()
+            res := recover:
+                _ := g.next()
+            match res:
+                ?_: out.send("b ok")
+                !e: out.send("b {e.message()}")
+            gate.send(1)
+    got := [out.recv(), out.recv()]
+    got.sort()
+    assert got == ["a 7", "b generator already running"], "{got}"

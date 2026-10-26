@@ -1,0 +1,15 @@
+# Uniform by-reference capture (F3 — the mutation form). A closure `f` captures a by-reference local
+# `xs` (a cell holding a list) and MUTATES its inner heap value through a method call
+# (`xs.push(2)`). M3.4: `spawn invoke(f)` hands the task `f` itself, so its push lands on the
+# parent's list, as a goroutine's write does in Go (`m34go/captures/main.go`: `mutates [1 2]`).
+fn invoke(g: fn() -> None):
+    g()
+
+fn main():
+    xs := [1]
+    f := fn(): xs.push(2)
+    parallel:
+        spawn invoke(f)
+    print(xs)                   # [1, 2]
+
+main()

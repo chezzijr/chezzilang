@@ -107,14 +107,12 @@ fn spawn_callee_rebinding_its_param_before_writing_is_not_a_task_copy_write() {
     );
 }
 
-/// TICKET-189 G1: layer A's compile-time verdict for every non-generator spawn route × argument
-/// source × callee body. A param is mapped through the checker's call plan (`bound_slots`), so a
-/// keyword-bound named arg a callee writes is rejected, and a variadic pack, a literal default fill
-/// or a param rebound before the write is not a task copy. Method, static and value callees decline
-/// to layer C (the runtime fault, G2 in `tests/chz/spec/airlock_crossing_policy_grid_test.chz`).
+/// TICKET-189 G1: the compile-time verdict for every non-generator spawn route × argument source ×
+/// callee body. M3.4: a spawn passes its values by handle (Go `go w(xs, out)`), so layer A is gone
+/// and every cell checks clean; the run-time answers are G2 in
+/// `tests/chz/spec/airlock_crossing_policy_grid_test.chz`.
 #[test]
 fn airlock_crossing_policy_grid_compile_cells() {
-    const COPY: &str = "is this task's copy";
     let prelude = "import std.concurrency\n\
 fn w(xs: List[int], out: Channel[int]):\n    xs.push(3)\n    out.send(xs.len())\n\
 fn rb(ys: List[int], out: Channel[int]):\n    ys = [1, 2]\n    ys.push(3)\n    out.send(ys.len())\n\
@@ -141,15 +139,15 @@ struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs
     let cells: &[(&str, bool, Option<&str>)] = &[
         ("spawn rb(xs, out)", false, None),
         ("spawn rbc(xs, out, true)", false, None),
-        ("spawn wr(xs, out)", false, Some(COPY)),
+        ("spawn wr(xs, out)", false, None),
         ("spawn pk(out, xs)", false, None),
-        ("spawn w(out=out, xs=xs)", false, Some(COPY)),
+        ("spawn w(out=out, xs=xs)", false, None),
         ("spawn w(out=out, xs=[1])", false, None),
         ("spawn df(out)", false, None),
-        ("spawn w(xs, out)", false, Some(COPY)),
+        ("spawn w(xs, out)", false, None),
         ("spawn w([1], out)", false, None),
-        ("spawn lib.w(xs, out)", true, Some(COPY)),
-        ("spawn lib.w(out=out, xs=xs)", true, Some(COPY)),
+        ("spawn lib.w(xs, out)", true, None),
+        ("spawn lib.w(out=out, xs=xs)", true, None),
         ("spawn lib.pk(out, xs)", true, None),
         ("spawn lib.dflt(out)", true, None),
         ("spawn lib.K.w(xs, out)", true, None),
@@ -157,11 +155,11 @@ struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs
         ("spawn r.w(out=out, xs=xs)", false, None),
         ("spawn r.rb(xs, out)", false, None),
         ("spawn g(xs, out)", false, None),
-        ("spawn: w(out=out, xs=xs)", false, Some(COPY)),
-        ("spawn: w(xs, out)", false, Some(COPY)),
+        ("spawn: w(out=out, xs=xs)", false, None),
+        ("spawn: w(xs, out)", false, None),
         ("spawn: pk(out, xs)", false, None),
         ("spawn: rb(xs, out)", false, None),
-        ("spawn: lib.w(xs, out)", true, Some(COPY)),
+        ("spawn: lib.w(xs, out)", true, None),
     ];
     let mut wrong = Vec::new();
     for &(cell, is_graph, want) in cells {
@@ -210,7 +208,7 @@ fn executor_has_no_submit_outcome() {
 /// TICKET-196 Family D2: a module exports ONE record per slot (`ModuleSig::members`). Every read path
 /// of another module's name (qualified call, from-import call, qualified/from-import value, `defer` /
 /// `spawn` / `spawn:` call forms, turbofish member, generic caller) reads labels / defaults /
-/// variadic / type params / witnesses / write summary from the one declaration. A module that binds
+/// variadic / type params / witnesses / escape summary from the one declaration. A module that binds
 /// a value name twice is rejected at home (`GlobalBinding::clashes`), so no importer sees two.
 #[test]
 fn module_export_grid() {
@@ -229,7 +227,6 @@ fn module_export_grid() {
     const VAL: &str = "need a binding that holds one known function";
     const DUP: &str = "is already defined";
     const IMP: &str = "is already imported";
-    const COPY: &str = "is this task's copy";
     const WF: &str =
         "fn w(xs: List[int], out: Channel[int]):\n    xs.push(3)\n    out.send(xs.len())\n";
     const WL: &str = "protocol Zero:\n    fn zero() -> Self\nstruct N:\n    v: int\n\n    fn zero() -> N:\n        return N(v=0)\nfn mk[T: Zero](x: T) -> T:\n    return T.zero()\n";
@@ -268,8 +265,8 @@ fn module_export_grid() {
         ("const_from_import_compound", CO.into(), "import Y from lib\nY += 1\n".into(), Some(RE_Y)),
         ("const_list_from_import_extend", "XS: const List[int] = [1]\n".into(), "import XS from lib\nXS += [2]\n".into(), Some("cannot reassign 'XS' — it is declared const in module 'lib'")),
         ("const_qualified_assign", CO.into(), "import lib\nlib.Y = 3\n".into(), Some(RE_Y)),
-        ("write_fn_only_qualified_spawn", WF.into(), par("import lib", "spawn lib.w(xs, out)"), Some(COPY)),
-        ("write_fn_only_from_spawn_block", WF.into(), par("import w from lib", "spawn: w(xs, out)"), Some(COPY)),
+        ("write_fn_only_qualified_spawn", WF.into(), par("import lib", "spawn lib.w(xs, out)"), None),
+        ("write_fn_only_from_spawn_block", WF.into(), par("import w from lib", "spawn: w(xs, out)"), None),
         ("witness_fn_only_charges", WL.into(), "import lib\nfn g[T: lib.Zero](x: T) -> T:\n    return lib.mk(x)\nh := g\nprint(g(lib.N(v=5)).v)\n".into(), Some("cannot be used as a function value")),
     ];
     let mut wrong = Vec::new();

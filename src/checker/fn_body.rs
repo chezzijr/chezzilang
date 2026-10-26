@@ -583,8 +583,7 @@ impl Checker {
         // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
         // …nor a spawn block: a fn DECLARED inside a `spawn:` has its own caller, so a `?` in its
-        // body targets it normally (W7-48) — and (W8-3) the airlock-staleness taint is per-frame for
-        // the same reason. `enter_own_frame` moves the pair so neither can be reset without the other.
+        // body targets it normally (W7-48).
         let saved_frame = self.enter_own_frame();
         // M24 — the witness params whose `$w:T` binding this body can reach, and the name the
         // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER

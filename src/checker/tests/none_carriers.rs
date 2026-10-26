@@ -1678,23 +1678,32 @@ fn optional_chain_void_call_has_no_value() {
     ));
 }
 
-/// The `CallCrossing` of the one spawn in `src`.
-fn spawn_crossing(src: &str) -> crate::checker::CallCrossing {
-    let tokens = lexer::tokenize(src).expect("lex should succeed");
-    let mut m = parser::parse(tokens).unwrap_or_else(|e| panic!("parse failed: {e:?}\n{src}"));
-    crate::desugar::run_standalone(&mut m).unwrap_or_else(|e| panic!("desugar failed: {e:?}"));
-    assert_eq!(format!("{:?}", check_diags(&m)), "(Ok(()), [])", "{src}");
-    let table = crate::checker::resolve_call_tables_standalone(&m.stmts).6;
-    assert_eq!(table.len(), 1, "one spawn per program\n{src}");
-    table.into_values().next().unwrap()
+/// The `CallCrossing` of the one generator-creating call in `src`'s main module (TICKET-190's
+/// creation stamp). A graph check, so `std.iter` resolves.
+fn gen_crossing(src: &str) -> crate::checker::CallCrossing {
+    let t = crate::test_support::TmpDir::new();
+    let main = t.write("main.chz", src);
+    let graph = crate::resolver::build_graph(&main).expect("resolve");
+    assert!(
+        check_graph(&graph).is_ok(),
+        "{:?}\n{src}",
+        check_graph(&graph)
+    );
+    let table = crate::checker::resolve_call_tables(&graph).8.calls;
+    let main_idx = table.keys().map(|k| k.0).max().expect("a generator call");
+    let mut calls: Vec<_> = table.into_iter().filter(|(k, _)| k.0 == main_idx).collect();
+    assert_eq!(calls.len(), 1, "one generator call per program\n{src}");
+    calls.pop().unwrap().1
 }
 
-/// TICKET-240 Rule S: `Checker::fresh_shape` decides, per node of a spawn operand, whether the
-/// parent can still reach the object. One cell per rule line, as `(param, operand, slot shapes)`.
+/// TICKET-240 Rule S: `Checker::fresh_shape` decides, per node of an operand, whether the caller can
+/// still reach the object. M3.4: a spawn records no shape, so the grid reads the shapes a
+/// generator-creating call records (TICKET-190). One cell per rule line, as
+/// `(param, operand, slot shapes)`.
 #[test]
 fn fresh_shape_grid() {
-    let head = "struct S:\n    a: List[int]\n    b: List[int]\n    fn go(self):\n        pass\nstruct Key:\n    id: int\n    log: List[int]\n    fn hash(self) -> int:\n        return self.id\n    fn eq(self, other: Key) -> bool:\n        return self.id == other.id\nenum E:\n    V(List[int])\nfn mk() -> List[int]:\n    return [0]\n";
-    let main = "fn main():\n    xs := [0]\n    n := 1\n    s := S([], [])\n    k := Key(1, [])\n    ks := [k]\n    msg := str(n)\n    _ := (xs, n, s, k, ks, msg)\n    parallel:\n";
+    let head = "import Iterator from std.iter\nstruct S:\n    a: List[int]\n    b: List[int]\n    fn go(self):\n        pass\nstruct Key:\n    id: int\n    log: List[int]\n    fn hash(self) -> int:\n        return self.id\n    fn eq(self, other: Key) -> bool:\n        return self.id == other.id\nenum E:\n    V(List[int])\nfn mk() -> List[int]:\n    return [0]\n";
+    let main = "fn main():\n    xs := [0]\n    n := 1\n    s := S([], [])\n    k := Key(1, [])\n    ks := [k]\n    msg := str(n)\n    _ := (xs, n, s, k, ks, msg)\n";
     let deep = |n: usize| format!("{}0{}", "[".repeat(n), "]".repeat(n));
     let deep_ty = |n: usize| format!("{}int{}", "List[".repeat(n), "]".repeat(n));
     let deep17 = format!("[{}Marked{}]", "Node(At([".repeat(16), "]))".repeat(16));
@@ -1796,32 +1805,24 @@ fn fresh_shape_grid() {
     ])
     .collect();
     for (param, arg, want) in cells {
-        let src = format!("{head}fn w({param}):\n    pass\n{main}        spawn w({arg})\nmain()\n");
-        let c = spawn_crossing(&src);
-        assert_eq!(c.recv, None, "{param} <- {arg}");
+        let src = format!(
+            "{head}fn w({param}) -> Iterator[int]:\n    yield 0\n{main}    _g := w({arg})\nmain()\n"
+        );
+        let c = gen_crossing(&src);
         assert_eq!(format!("{:?}", c.args), want, "{param} <- {arg}");
     }
     // The deferred wrap: `?x` into a generic param records its carrier at frame end, after the
     // crossing is computed, so the level comes from the node itself.
-    let c = spawn_crossing(&format!(
-        "{head}fn show[T](x: T):\n    pass\n{main}        spawn show(?[xs])\nmain()\n"
+    let c = gen_crossing(&format!(
+        "{head}fn show[T](x: T) -> Iterator[int]:\n    yield 0\n{main}    _g := show(?[xs])\nmain()\n"
     ));
     assert_eq!(format!("{:?}", c.args), "[Node(At([Node(At([Marked]))]))]");
     // A default that mentions a type parameter is callee-filled (`desugar::dflt_for`): the task
     // builds it, so it is no operand of the crossing and has no shape.
-    let c = spawn_crossing(&format!(
-        "{head}fn anyl[U]() -> List[U]:\n    return []\nfn gw[T](a: T, x: List[T] = anyl()):\n    pass\n{main}        spawn gw(1)\nmain()\n"
+    let c = gen_crossing(&format!(
+        "{head}fn anyl[U]() -> List[U]:\n    return []\nfn gw[T](a: T, x: List[T] = anyl()) -> Iterator[int]:\n    yield 0\n{main}    _g := gw(1)\nmain()\n"
     ));
     assert_eq!(format!("{:?}", c.args), "[All]");
-    // The receiver is entry 0.
-    for (recv, want) in [
-        ("S([], [])", "Some(All)"),
-        ("S(xs, [])", "Some(Node(At([Marked, All])))"),
-        ("s", "Some(Marked)"),
-    ] {
-        let c = spawn_crossing(&format!("{head}{main}        spawn {recv}.go()\nmain()\n"));
-        assert_eq!(format!("{:?}", c.recv), want, "{recv}");
-    }
 }
 
 #[test]

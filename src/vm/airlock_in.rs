@@ -1,5 +1,7 @@
 //! VM: the airlock inbound: `from_wire`, rebuild, unmark.
-//! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
+//! Split out of `src/vm/sched.rs`. `super::*` is the parent module. M3.4: no run path rebuilds a
+//! wire value any more (a spawn passes handles), so the module is test-only until M3.5 deletes it
+//! with `vm/wire.rs`.
 
 use super::*;
 use crate::base::crossing::{self, Fresh, Kids, Route};
@@ -14,7 +16,6 @@ impl Vm {
     /// so no intermediate is lost mid-reconstruction.
     // `&mut self` is intentional: `from_wire` reconstructs *into* this VM's heap (it allocates),
     // so it is not the usual ownership-less `from_*` constructor the lint expects.
-    #[cfg(test)]
     #[allow(clippy::wrong_self_convention)]
     pub(super) fn from_wire(&mut self, w: WireValue) -> Value {
         // Fresh rebuild memo per root: it maps each identity-preserved wire `id` (a `Cell`/`Closure` or
@@ -50,11 +51,9 @@ impl Vm {
     /// `len()` and to every value-level test; only `Vec::capacity` shows it.
     ///
     /// **Use this at EVERY wire→`Value` list rebuild, not just the ones in `from_wire_memo`.** The
-    /// first cut of this fix converted that function's eight container arms and left the identical
-    /// shape in `deep_clone_all` and in `rebuild_ready`'s five `Lowered` arms — two of which
-    /// (`deep_clone_all`'s result and the `Lowered::Closure` captures) land in a durable
-    /// `Obj::Closure { captured }`, so `spawn` with a capturing closure still leaked 22–24×, under a
-    /// doc comment claiming captures were fixed. Adversarial review caught it; the suite did not.
+    /// first cut of this fix converted that function's eight container arms and missed the spawn
+    /// rebuild sites (deleted with the spawn copy in M3.4), so `spawn` with a capturing closure
+    /// still leaked 22–24×. Adversarial review caught it; the suite did not.
     ///
     /// Pre-sizing and pushing keeps the exact-capacity guarantee at the cost of one extra live
     /// buffer while the source drains, which the wire copy was already paying.
@@ -519,7 +518,7 @@ impl Vm {
             // `id`. Present whenever the rebuild map spans the SAME scope the serialize memo did —
             // `to_wire` emits the defining node before any `Backref` to it, and `from_wire_memo`
             // registers the placeholder BEFORE recursing children. Keeping those two scopes equal is
-            // the caller's job (see [`deep_clone_all`](Vm::deep_clone_all)).
+            // the caller's job (one memo, one rebuild map per crossing).
             //
             // W7-11 — a miss is a bug (M3.3 deleted the piecewise `RwShared` drain, the one caller
             // whose scopes could differ): loud in a debug build; in release it degrades to `nil`
@@ -737,6 +736,27 @@ impl Vm {
                 rebuild.insert(id, g.as_obj().expect("generator rebuilds to a heap object"));
                 g
             }
+        }
+    }
+
+    /// A fresh empty module to serve as a worker closure's `home`. The parent's `home` `GcRef`
+    /// can't cross heaps; used as the fallback when the task's home is not a real `module_objs`
+    /// entry (the hand-built unit-test fixtures) — real spawns resolve a run's module (see
+    /// `worker_home`).
+    pub(super) fn fresh_worker_home(&mut self) -> GcRef {
+        self.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+            "<worker>".into(),
+            RVec::new(),
+            Default::default(),
+        ))))
+    }
+
+    /// B3.3c — resolve a lowered home index to this (worker) VM's module obj, falling
+    /// back to a fresh empty home when the parent home was not a real module (test fixtures).
+    pub(super) fn worker_home(&mut self, idx: Option<usize>) -> GcRef {
+        match idx {
+            Some(i) => self.module_obj(i),
+            None => self.fresh_worker_home(),
         }
     }
 }

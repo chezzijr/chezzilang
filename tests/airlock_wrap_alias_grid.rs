@@ -1,14 +1,15 @@
 //! TICKET-247 (wave 23, Family "Airlock"): `?x` / `!x` hold the object bound to `x`, so every form
 //! that wraps or stores a generator's frame-local gets the bare name's answer when a task then
-//! writes it: a fault or a compile error, never a silent lost write. Grid: leak form x root type
-//! x route x crossing, each cell its own process at `CHEZZI_THREADS` 1, 2 and default.
+//! writes it. M3.4: the task drives the parent's one generator (by handle), so the write runs and
+//! lands where the parent holds it (CPython: a thread drives the parent's generator); the only
+//! compile error is `!x` of a non-`Error` root. Grid: leak form x root type x route x crossing,
+//! each cell its own process at `CHEZZI_THREADS` 1, 2 and default.
 
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const THREADS: [Option<&str>; 3] = [Some("1"), Some("2"), None];
-const FAULT: &str = "this value is this task's copy";
 
 fn run(tag: &str, src: &str, threads: Option<&str>) -> (i32, String, String) {
     let dir = std::env::temp_dir().join(format!(
@@ -184,7 +185,7 @@ fn program(
 }
 
 #[test]
-fn wrapped_name_yield_faults_like_the_bare_name() {
+fn wrapped_name_yield_writes_like_the_bare_name() {
     let mut cells = Vec::new();
     for root in ROOTS {
         for form in FORMS {
@@ -198,7 +199,6 @@ fn wrapped_name_yield_faults_like_the_bare_name() {
         }
     }
     let next = AtomicUsize::new(0);
-    let silent = Mutex::new(Vec::new());
     let drift = Mutex::new(Vec::new());
     std::thread::scope(|s| {
         for _ in 0..4 {
@@ -216,14 +216,12 @@ fn wrapped_name_yield_faults_like_the_bare_name() {
                     );
                     let wrote = out.contains("task wrote");
                     // `!x` takes an operand that satisfies `Error`; only struct `S` does.
-                    let expected = if form.0 == "errval" && root.0 != "struct" {
-                        "does not satisfy Error"
+                    let ok = if form.0 == "errval" && root.0 != "struct" {
+                        code != 0 && !wrote && err.contains("does not satisfy Error")
                     } else {
-                        FAULT
+                        code == 0 && wrote
                     };
-                    if code == 0 && wrote {
-                        silent.lock().unwrap().push(format!("{cell}: {out:?}"));
-                    } else if wrote || !err.contains(expected) {
+                    if !ok {
                         drift
                             .lock()
                             .unwrap()
@@ -233,16 +231,10 @@ fn wrapped_name_yield_faults_like_the_bare_name() {
             });
         }
     });
-    let (silent, drift) = (silent.into_inner().unwrap(), drift.into_inner().unwrap());
-    assert!(
-        silent.is_empty(),
-        "silent lost write, no fault and no compile error:\n{}",
-        silent.join("\n")
-    );
-    // A cell that fails for any other reason would pass the assert above without testing anything.
+    let drift = drift.into_inner().unwrap();
     assert!(
         drift.is_empty(),
-        "template drift, a cell failed for another reason:\n{}",
+        "a cell did not run its write (or `!x` of a non-Error root compiled):\n{}",
         drift.join("\n")
     );
 }

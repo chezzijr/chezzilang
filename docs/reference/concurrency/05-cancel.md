@@ -50,7 +50,7 @@ fn serve(tok: Token, io: Channel[str]):
 - **`done()` cascades transitively** through that same walk: a `cancel()` at *any* depth above trips a
   grandchild's `done()`, so a task parked in `wait: leaf.done()` wakes on a grandparent cancel.
 - **The link is live across tasks.** A parent flip is observed by an already-derived child, *including
-  a child that crossed the `spawn`/`parallel:`/`Channel` airlock*, in **both** directions (a task on the
+  a child that a `spawn`/`parallel:` task or a `Channel` receiver holds*, in **both** directions (a task on the
   far side of a `spawn` can `derive()` into a registry the canceller drains).
 - **Deadlines.** A child inherits the **tightest** deadline (the soonest absolute deadline of itself
   and its ancestors), copied into its own `deadline` field at derive time, so a timeout needs no
@@ -76,7 +76,7 @@ Cost of the `parent` link:
 | | with the parent link | without it |
 |---|---|---|
 | `cancelled()` poll, depth 0 / 1 / 3 / 5 | **0.30 / 0.58 / 1.15 / 1.74 µs** (~0.29 µs per ancestor) | 0.30 µs at any depth |
-| deepest token that crosses a `spawn` airlock | **4 999** (5 000 faults `maximum structural depth (10000) exceeded`) | any depth |
+| deepest token a `spawn` task holds | any depth (M3.4: a spawn walks nothing; a 9 000-deep chain passes and polls) | any depth |
 | 1 000-link chain of `derive()` + one root cancel | 85 ms | 19 ms |
 | 8 000-wide fan-out + cancel | 81 ms | 88 ms (unaffected) |
 

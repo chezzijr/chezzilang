@@ -468,7 +468,7 @@ fn resolve_threads_env(raw: Option<&str>) -> Result<Option<usize>, String> {
 /// value is traceable to which subcommand read it.
 ///
 /// Before this, `chezzi test` silently ignored `CHEZZI_THREADS` — only `cmd_run` read it
-/// (`test_runner.rs`'s `over_memory_trips_on_an_all_native_task_body` test documents exactly this
+/// (`test_runner.rs`'s pre-M3.4 `over_memory_trips_on_an_all_native_task_body` test documented this
 /// gap: "`CHEZZI_THREADS=1` does NOT reproduce that — the env var is read by `main::cmd_run`, not by
 /// `run_tests_capped`"). That made a `CHEZZI_THREADS=2 chezzi test tests/chz` differential a no-op:
 /// both runs used the same (auto) worker count. This closes it for `test` too.

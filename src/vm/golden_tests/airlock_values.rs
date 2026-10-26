@@ -244,17 +244,17 @@ main()";
     assert_eq!(vm_outcome(src).expect("program should run"), "1\n");
 }
 
-// ----- F3 path C: a frame-holding generator crosses the airlock BY VALUE (deep copy) -----
-// A generator (whether held in a frame LOCAL or a MODULE GLOBAL — see the item-B tests below) is
-// serialized by `to_wire`/`from_wire` and rebuilt on the receiving heap as an INDEPENDENT copy. Every
-// parked slot is checked sendable at serialize time, so a non-sendable slot still rejects at the
-// crossing. All tests run on the M:N engine against a literal golden.
+// ----- A generator a task captures or receives is the parent's one generator -----
+// F3 path C once rebuilt a crossing generator as an INDEPENDENT copy. M3.4: a spawn passes values by
+// handle, so the task drives the parent's generator and the parent sees what is left (CPython
+// `m34py/gen_spawn.py`, a thread: `pending [1, 2, 3, 0]`, `suspended [2, 3, 0]`,
+// `closure_backed [101, 102, 0]`, `deep_parked_slot [1]`, `got 1` twice). All tests run on the M:N
+// engine against a literal golden.
 
-/// A PENDING generator (never driven) captured into a `spawn:` block crosses by value; the receiving
-/// task drives it fully, and the sender's copy is INDEPENDENT (deep-copy: sender also drives the full
-/// sequence). Byte-identical.
+/// A PENDING generator (never driven) captured into a `spawn:` block: the task drives it fully, so
+/// the sender's loop then yields nothing (CPython `pending [1, 2, 3, 0]`).
 #[test]
-fn generator_pending_sent_into_spawn_deep_copy_both() {
+fn generator_pending_captured_by_spawn_is_the_one_generator() {
     let src = "\
 fn gen() -> Iterator[int]:
     yield 1
@@ -275,15 +275,14 @@ fn main():
     for x in it:
         print(x)
 main()";
-    let expect = "1\n2\n3\n0\n1\n2\n3\n";
+    let expect = "1\n2\n3\n0\n";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
-/// A SUSPENDED generator (driven once → one parked frame) captured into a `spawn:` block crosses by
-/// value; the task drives the REMAINDER, and the sender's copy independently drives its own remainder
-/// (deep-copy). Byte-identical.
+/// A SUSPENDED generator (driven once → one parked frame) captured into a `spawn:` block: the task
+/// drives the REMAINDER and the sender's loop yields nothing (CPython `suspended [2, 3, 0]`).
 #[test]
-fn generator_suspended_sent_keeps_deep_copy_both() {
+fn generator_suspended_captured_by_spawn_is_the_one_generator() {
     let src = "\
 fn gen() -> Iterator[int]:
     yield 1
@@ -304,16 +303,15 @@ fn main():
     for x in it:
         print(x)
 main()";
-    let expect = "2\n3\n0\n2\n3\n";
+    let expect = "2\n3\n0\n";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
-/// A CLOSURE-backed generator (a nested `fn` capturing a local) crosses by value: `to_wire` wires the
-/// generator's backing closure (carrying the captured `base`) and `from_wire` rebuilds it, so the
-/// received copy yields the captured-relative values independently of the sender. Covers the
-/// `closure = Some(..)` serialize/rebuild arm. Byte-identical.
+/// A CLOSURE-backed generator (a nested `fn` capturing a local) captured into a `spawn:` block: the
+/// task drives it over the captured `base`, and the sender's loop yields nothing (CPython
+/// `closure_backed [101, 102, 0]`).
 #[test]
-fn generator_closure_backed_sent_deep_copy_both() {
+fn generator_closure_backed_captured_by_spawn_is_the_one_generator() {
     let src = "\
 fn main():
     base := 100
@@ -333,7 +331,7 @@ fn main():
     for x in it:
         print(x)
 main()";
-    let expect = "101\n102\n0\n101\n102\n";
+    let expect = "101\n102\n0\n";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
@@ -366,16 +364,11 @@ main()";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
 }
 
-/// A suspended generator whose PARKED SLOT holds a non-sendable value rejects cleanly at the crossing —
-/// the per-slot sendable-at-serialize-time check walks the parked stack. The witness is a >10000-DEEP
-/// ACYCLIC nested list (`keep = [keep]` in a loop), which trips the shared `MAX_STRUCTURAL_DEPTH` guard
-/// in `to_wire_depth` — a to_wire-TIME fault that fires byte-identically on BOTH engines. (A CYCLIC
-/// struct is NO LONGER a valid witness — self-referential data now round-trips via `WireValue::Backref`;
-/// see `airlock_self_ref_struct_round_trips_both`. A genuinely-unbounded ACYCLIC nest is the remaining
-/// both-engines-identical serialize-time reject: the depth cap stays as that backstop. A recursive local
-/// `fn` is also sendable now — see `generator_carrying_recursive_closure_round_trips_both` below.)
+/// A suspended generator whose PARKED SLOT holds a >10000-DEEP acyclic nested list once tripped the
+/// `MAX_STRUCTURAL_DEPTH` guard of `to_wire_depth` at the crossing. M3.4: the spawn walks nothing, so
+/// the task resumes the one generator (CPython `deep_parked_slot [1]`).
 #[test]
-fn generator_parked_slot_nonsendable_rejects_both() {
+fn generator_parked_slot_deep_value_resumes_in_a_task() {
     let src = "\
 fn gen() -> Iterator[int]:
     keep: List[int] = []
@@ -387,28 +380,22 @@ fn gen() -> Iterator[int]:
 fn main():
     it := gen()
     started := it.next()
-    out := Channel[int]()
+    out := Channel[int](4)
     parallel:
         spawn:
             for x in it:
                 out.send(x)
+    print(out.recv())
 main()";
-    let ve = vm_outcome(src).expect_err("non-sendable parked slot must reject");
-    assert!(ve.contains("maximum structural depth"), "{ve}");
+    assert_eq!(vm_outcome(src).expect("program should run"), "1\n");
 }
 
-/// REGRESSION (silent generator DUPLICATION, the e8dcad7 wrong-result class): a value CYCLE that passes
-/// through BOTH an identity-preserved container AND a generator must REJECT, not round-trip. A generator
-/// carries no `WireValue` id (its parked frame can't be a `Backref` target), so once the containers
-/// back-reference, the depth cap no longer trips on such a cycle — re-serializing the generator would
-/// silently deep-copy it TWICE (two independent copies sharing one container). Here a PENDING generator
-/// `gen(box)` parks `box` in its call args and `box` holds the generator (`box.push(g)`), so
-/// `box -> g -> box` is a cycle through the (non-preservable) generator. The `gens_on_stack` guard
-/// rejects it cleanly (byte-identical fault). Without the guard the program prints
-/// `got 1` (the duplicated generator round-trips) — a bug the since-removed parity oracle was blind
-/// to, since both the cooperative and M:N engines agreed on the wrong result.
+/// A PENDING generator `gen(box)` parks `box` in its call args and `box` holds the generator, so
+/// `box -> g -> box` is a cycle through it. The copy once had to reject this cycle (a second copy of
+/// the generator would have been a silent duplicate). M3.4: the task drives the one generator
+/// (CPython `got 1`).
 #[test]
-fn generator_in_data_cycle_rejects_both() {
+fn generator_in_data_cycle_is_the_one_generator() {
     let src = "\
 fn gen(box: List[Iterator[int]]) -> Iterator[int]:
     yield box.len()
@@ -421,18 +408,14 @@ fn main():
             for x in g:
                 print(\"got {x}\")
 main()";
-    let ve = vm_outcome(src).expect_err("generator in a data cycle must reject");
-    assert!(ve.contains("reference cycle"), "{ve}");
+    assert_eq!(vm_outcome(src).expect("program should run"), "got 1\n");
 }
 
-/// REGRESSION (bug #2, the SUSPENDED shape): a SUSPENDED single-frame generator whose PARKED STACK SLOT
-/// holds a container that transitively references the generator is the same cycle-through-a-generator
-/// wrong-result as `generator_in_data_cycle_rejects_both`, reached via the `Suspended` arm (parked
-/// operand stack) instead of `Pending` (call args). `keep := box` parks `box` across the first `yield`;
-/// `box.push(g)` closes `box -> g -> box`. Must reject cleanly (never duplicate the
-/// suspended generator's live drive-state).
+/// The SUSPENDED shape of `generator_in_data_cycle_is_the_one_generator`: `keep := box` parks `box`
+/// across the first `yield`, and `box.push(g)` closes `box -> g -> box`. M3.4: the task resumes the
+/// one generator (CPython `got 1`).
 #[test]
-fn suspended_generator_in_data_cycle_rejects_both() {
+fn suspended_generator_in_data_cycle_is_the_one_generator() {
     let src = "\
 fn gen(box: List[Iterator[int]]) -> Iterator[int]:
     keep := box
@@ -448,15 +431,11 @@ fn main():
             for x in g:
                 print(\"got {x}\")
 main()";
-    let ve = vm_outcome(src).expect_err("suspended generator in a data cycle must reject");
-    assert!(ve.contains("reference cycle"), "{ve}");
+    assert_eq!(vm_outcome(src).expect("program should run"), "got 1\n");
 }
 
-/// Identity-preserving airlock, generator path — a suspended generator whose PARKED SLOT holds a
-/// recursive local `fn` (`keep := rec`, a self-cycle closure) now ROUND-TRIPS: the generator serializes
-/// its parked stack via `to_wire`, which back-references the self-cell, and `from_wire` ties the knot.
-/// The generator crosses into the spawned task, resumes, and `keep(3) == 3`. Pairs with
-/// `generator_parked_slot_nonsendable_rejects_both` (which now uses a cyclic struct, not a recursive fn).
+/// A suspended generator whose PARKED SLOT holds a recursive local `fn` (`keep := rec`, a self-cycle
+/// closure): the spawned task resumes the one generator and `keep(3) == 3` (M3.4: by handle).
 #[test]
 fn generator_carrying_recursive_closure_round_trips_both() {
     let src = "\
@@ -484,8 +463,7 @@ main()";
 // ----- A MODULE-GLOBAL live generator is the run's one generator (M3.1) ----- A task reads the
 // run's module globals, so a task that reaches a module-global generator drives the one generator
 // the parent holds, as a CPython thread drives a module-global generator. Goldens: CPython
-// (`m31go/py/gen_globals.py`). A generator that CROSSES (a capture, an arg, a Channel) is still a
-// deep copy until M3.4.
+// (`m31go/py/gen_globals.py`). A captured or passed generator is the one generator too (M3.4).
 
 /// A module-global PENDING generator reached by a spawned task drives fully; the parent then finds
 /// the one generator exhausted. CPython: `[1, 2, 3]`, then `[]`.
@@ -601,8 +579,8 @@ main()";
 }
 
 /// TICKET-137 — a module-global generator in a reference CYCLE through `box`: the task drives the
-/// run's one generator (M3.1), so `box.len()` is `1`. (A cycle that re-enters the generator ON the
-/// serialize stack of a crossing still rejects: `generator_in_data_cycle_rejects_both`.)
+/// run's one generator (M3.1), so `box.len()` is `1`. (A frame-local one does too since M3.4:
+/// `generator_in_data_cycle_is_the_one_generator`.)
 #[test]
 fn generator_module_global_in_data_cycle_crosses_as_one_copy() {
     let src = "\
@@ -669,33 +647,6 @@ fn main():
 main()";
     let expect = "1\n2\n";
     assert_eq!(vm_outcome(src).expect("program should run"), expect);
-}
-
-/// CHECKER-UNREACHABLE defensive guard (backlog arm c): `defer` is banned inside a generator body
-/// (`checker::sig` — "`defer` is not supported inside a generator"), so a suspended generator's
-/// parked frame can NEVER carry a pending `defer` from checker-valid source. This test reaches the
-/// guard only because the parity harness (`run_program_inner`) compiles WITHOUT the checker (the
-/// compiler is type-blind); the `to_wire` reject in `sched.rs` is a belt-and-braces guard against
-/// that type-blind path. Kept as a reject (nothing built): the state is unreachable, so there is
-/// nothing coherent to serialize.
-#[test]
-fn generator_parked_defer_rejects_clean_both() {
-    let src = "\
-fn gen() -> Iterator[int]:
-    defer print(\"cleanup\")
-    yield 1
-    yield 2
-fn main():
-    it := gen()
-    started := it.next()
-    out := Channel[int]()
-    parallel:
-        spawn:
-            for x in it:
-                out.send(x)
-main()";
-    let ve = vm_outcome(src).expect_err("parked defer must reject");
-    assert!(ve.contains("pending `defer`"), "{ve}");
 }
 
 /// Backlog arm (b) — a generator suspended INSIDE a `recover:` block (a LIVE handler in its parked

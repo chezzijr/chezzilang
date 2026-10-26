@@ -938,9 +938,9 @@ fn cross_module_witness_defer_target_runs_both_engines() {
 /// Proves `CHEZZI_THREADS` actually reaches [`worker_count`] in THIS test process, rather than being
 /// silently ignored — the second-schedule differential gate (`docs/contributing/bug-discovery.md` Tier 2,
 /// `CHEZZI_THREADS=2 cargo test`) is worthless if the knob does nothing: a dropped env read would
-/// make the "second" run byte-identical to the default one and nobody would notice. Locked against
-/// `over_memory_trips_on_an_all_native_task_body` (the one test that transiently forces a count) so
-/// this can't read its critical section and flake.
+/// make the "second" run byte-identical to the default one and nobody would notice. Locked by
+/// `TEST_WORKER_LOCK` against any test that transiently forces a count, so this can't read its
+/// critical section and flake.
 ///
 /// - default `cargo test` (`CHEZZI_THREADS` unset): `worker_count()` must equal the auto-sized
 ///   `available_parallelism()` — not some override leaked from another test.
@@ -1484,11 +1484,11 @@ print(f(3))
     );
 }
 
-/// TICKET-016 / W8-25 contrast — the identical shape over a captured LOCAL (not a module global)
-/// already crosses the airlock correctly: the airlock copies a captured local by value, so the
-/// closure's `n` is fixed at capture/copy time and the receiver sees the sender's write.
+/// TICKET-016 / W8-25 contrast — the identical shape over a captured LOCAL (not a module global).
+/// M3.4: the task holds the parent's `n` cell, so its write lands and the received closure reads it
+/// (Go, a goroutine writes the captured `n`: `300`).
 #[test]
-fn ticket_016_closure_over_local_in_fn_crosses_airlock_correctly() {
+fn ticket_016_closure_over_a_captured_local_reads_the_tasks_write() {
     let src = "\
 import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 
@@ -1509,9 +1509,10 @@ main()
     let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?}");
-    // TICKET-169 (D4 layer C): the captured local `n` crossed the airlock and is marked, so
-    // `n = 100` now faults instead of sharing it.
-    assert_eq!(out, "3\n", "captured-local write now faults: {out:?}");
+    assert_eq!(
+        out, "300\n",
+        "the task's write to the captured local: {out:?}"
+    );
 }
 
 /// A box lock for the guard unit tests below.

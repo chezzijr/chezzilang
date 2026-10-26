@@ -147,7 +147,7 @@ spelling is `import std.concurrency.pmap` then `pmap.pmap(xs, f)` / `pmap.pmap_l
 
 Determinism comes from reassembling by submission INDEX (`sort_by_key`), never completion order — so
 the result is byte-identical at every worker count. The nursery lives inside the helper and joins
-before the collect (a task can't outlive the call); `f` crosses the airlock into each task by value.
+before the collect (a task can't outlive the call); each task holds `f` by handle (M3.4).
 See [`stdlib.md`](../stdlib/01-builtins.md) for signatures.
 
 ### 5b. `std.concurrency.Task` — result handles for `Executor` work

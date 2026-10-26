@@ -117,9 +117,7 @@ impl Checker {
         let t = self.infer_call_dispatch(callee, args, named, type_args, span);
         // TICKET-269: a handed receiver lives for this call only; a later pass re-infers the node.
         self.handed_recv = None;
-        // D4 layer A inside a `spawn:` body, through the plan the dispatch just bound.
         let slots = self.bound_slots(call_id, args, named);
-        self.report_named_call_writes(callee, &slots, false);
         // TICKET-190: a call that creates a generator stamps its param slots with how each
         // argument crosses (a fresh argument is private to the new frame). A bare-name callee
         // stamps only through `labels_certain`, settled at its binding's `pop_scope`: a written
@@ -129,7 +127,7 @@ impl Checker {
                 .named_fn_summary(callee)
                 .is_some_and(|(_, s)| s.is_generator)
         {
-            let crossing = self.call_crossing(None, &slots);
+            let crossing = self.call_crossing(&slots);
             let call = (self.graph_module_idx, call_id.0);
             match callee.kind.as_ident() {
                 Some(name) => {
@@ -179,16 +177,6 @@ impl Checker {
         // threaded into the generic ctor / generic fn-call dispatchers below to pre-seed `T`.
         let expected = self.expected_hint.take();
         let expected = expected.as_ref();
-        if self.in_spawn_block
-            && let ExprKind::Ident(name) = &callee.kind
-            && self.is_local_capture(name)
-            && let Some(written) = self.value_writes(callee).first()
-        {
-            self.error(
-                callee.span,
-                format!("'{written}' {}", crate::base::words::COPY_WRITE_TAIL),
-            );
-        }
         // What the callee names: ONE answer from the rule table (`resolve.rs`). Every arm below takes
         // its branch from it and none re-decides what the path is.
         let res = self.resolve_path(callee);
@@ -1415,89 +1403,6 @@ fn type_apply_param_head(obj: &Expr) -> Option<String> {
         | ExprKind::IfElse { .. }
         | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
-    }
-}
-
-impl Checker {
-    /// Run `f`, the check of the arguments of the native handle method `owner.method`. When the
-    /// pair is a row of [`crate::base::crossing::CROSSING_CLOSURE_METHODS`] its closure argument
-    /// crosses into another heap (an `Executor` job), exactly like a `spawn` task's: a capture
-    /// floor at the current scope depth surrounds the check, so the closure's own params and
-    /// locals are task-local and an outer binding it reads is a capture; then a direct write to a
-    /// captured local is the D4 error (`COPY_WRITE_TAIL`). A pair that is no row runs `f` bare.
-    /// TICKET-289 — `Executor.submit` is a bodied generic, so its caller wraps the whole method
-    /// resolution here and no `Concrete` arm sees the closure.
-    pub(super) fn with_crossing_floor<R>(
-        &mut self,
-        owner: &str,
-        method: &str,
-        args: &[Expr],
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        if !crate::base::crossing::CROSSING_CLOSURE_METHODS.contains(&(owner, method)) {
-            return f(self);
-        }
-        self.capture_floors.push(self.scopes.len());
-        let r = f(self);
-        self.capture_floors.pop();
-        self.report_crossing_writes(args);
-        r
-    }
-
-    /// The write report of [`Checker::with_crossing_floor`]: the first captured local the
-    /// crossing closure `args[0]` writes directly.
-    fn report_crossing_writes(&mut self, args: &[Expr]) {
-        let Some(task) = args.first() else {
-            return;
-        };
-        self.report_named_call_writes(task, &[], true);
-        let mut writes: Vec<String> = match &task.kind {
-            ExprKind::Closure { body, .. } => self
-                .closure_literal_writes
-                .get(&(self.graph_module_idx, body.span))
-                .cloned()
-                .unwrap_or_else(|| {
-                    std::mem::take(&mut self.last_closure_writes)
-                        .into_iter()
-                        .collect()
-                }),
-            ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Str(_)
-            | ExprKind::Interp(_)
-            | ExprKind::Bytes(_)
-            | ExprKind::RawStr(_)
-            | ExprKind::Bool(_)
-            | ExprKind::NoneLit
-            | ExprKind::Pass
-            | ExprKind::Ident(_)
-            | ExprKind::List(..)
-            | ExprKind::Tuple(_)
-            | ExprKind::Map(_)
-            | ExprKind::Set(_)
-            | ExprKind::Comprehension { .. }
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Compare { .. }
-            | ExprKind::Range { .. }
-            | ExprKind::Call { .. }
-            | ExprKind::Field { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::Try(_)
-            | ExprKind::OptChain { .. }
-            | ExprKind::NullCoalesce { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::IfElse { .. }
-            | ExprKind::Recover(..)
-            | ExprKind::ElseGuard { .. } => self.value_writes(task),
-        };
-        writes.sort();
-        if let Some(written) = writes.first() {
-            self.error(
-                task.span,
-                format!("'{written}' {}", crate::base::words::COPY_WRITE_TAIL),
-            );
-        }
     }
 }
 

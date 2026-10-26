@@ -1,0 +1,13 @@
+# M3.4 (Go model) — a spawned task shares the parent's captured local: one cell, one binding. The
+# task's `x = x + 1` lands on the parent's `x`, and the join orders the parent's read after it
+# (Go `m34go/captures/main.go`: `shares_local 1`). Two tasks that write one variable without a lock
+# race, as in Go; share it through `Shared[T]` (`update` runs under the box's guard) when more than
+# one task writes.
+fn main():
+    x := 0
+    parallel:
+        spawn:
+            x = x + 1
+    print(x)                 # 1
+
+main()

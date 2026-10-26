@@ -932,34 +932,6 @@ fn a_crossed_container_rebuilds_at_exact_capacity() {
     }
 }
 
-/// `deep_clone_all` — the OTHER wire→`Value` list rebuild — must also land at exact capacity.
-///
-/// Sibling of [`a_crossed_container_rebuilds_at_exact_capacity`], and the reason it exists as its own
-/// test: the first cut of that fix converted `from_wire_memo`'s eight container arms and left this
-/// one — plus `rebuild_ready`'s `Lowered` arms — on the old `into_iter().map(…).collect()`. Both feed
-/// a DURABLE `Obj::Closure { captured }` (`sched.rs`, the `parallel:`/block-spawn path), so `spawn`
-/// with a capturing closure still retained the wire buffer at 22–24× while the suite stayed green.
-/// One arm of an N-way set is not the set.
-#[test]
-fn deep_clone_all_rebuilds_at_exact_capacity() {
-    const N: usize = 4096;
-    let span = Span::RUNTIME;
-    let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
-    let vs: Vec<Value> = (0..N as i64).map(Value::int).collect();
-
-    let out = vm.deep_clone_all(vs, span).expect("scalars deep-clone");
-
-    assert_eq!(out.len(), N, "every value must survive the clone");
-    assert_eq!(
-        out.capacity(),
-        out.len(),
-        "deep_clone_all returned {} capacity for {} values — the intermediate Vec<WireValue> was \
-         retained in place by an in-place collect",
-        out.capacity(),
-        out.len()
-    );
-}
-
 /// `min`/`max`/`min_by`/`max_by` now return `Some(<extremum>)`, so the winning element travels one
 /// hop further than it used to. When a re-entrant `compare`/key extractor has REMOVED that element
 /// from the live receiver, the GC-rooted snapshot is the ONLY thing keeping it alive across the

@@ -1,8 +1,11 @@
 #![allow(clippy::wildcard_enum_match_arm)]
-//! TICKET-240 (wave 22 Family D, "Airlock"): freshness is a property of the value graph that
-//! crosses, decided once by `Checker::fresh_shape`. The grid is wrapper path x inner value x write
-//! depth. Every cell does its write inside `recover:` in the task and sends `runs` or `faults`;
-//! the parent prints its own named values after the join. Each program runs in a fresh process at
+//! TICKET-240 (wave 22 Family D, "Airlock"): the grid is wrapper path x inner value x write depth.
+//! Every cell does its write inside `recover:` in the task and sends `runs` or `faults`; the parent
+//! prints its own named values after the join. M3.4 (Go model): a spawn, a `spawn:` capture and an
+//! Executor job hold the parent's values by handle, so every cell runs and a write to a value the
+//! parent can reach lands in the parent's view (Go, a goroutine writes through a pointer: the
+//! parent sees the write). Each cell writes its own `named{n}` / `nn{n}`: one value written by two
+//! tasks would be a race (the user's bug). Each program runs in a fresh process at
 //! `CHEZZI_THREADS` 1, 2 and default. A `.chz` test cannot run one program at three worker counts
 //! or read a compile error, so this runs the built binary.
 
@@ -261,22 +264,9 @@ fn w_call(r: Channel[str], tag: str, d: int, x: List[List[List[int]]]? = mk_l())
     }
 }
 
-/// The verdict of one cell.
-fn expect(w: Wrapper, i: Inner, d: usize) -> &'static str {
-    let fresh = matches!(i, Lit | Comp | Struct);
-    let runs = match w {
-        // The receiver gets the sender's value itself (M3.2), and nothing marks it.
-        ChannelSend => true,
-        // The job builds its operand itself. A captured `named` is the job's copy; `.copy()` of
-        // it is a new root over the marked children.
-        Submit | SubmitResult | SubmitTask => fresh || i == Call || (d == 0 && i != Named),
-        // A ceiling, a false fault at every depth: the checker's verdict for this local is `All`,
-        // but the compiler gives it the slot the comprehension's hidden loop slots just left, and
-        // a reused slot is the AND of its claims (a hidden slot never claims).
-        GenFrame if i == Comp => false,
-        _ => fresh || (i == Copy && d == 0),
-    };
-    if runs { "runs" } else { "faults" }
+/// The verdict of one cell: M3.4, every wrapper passes its operand by handle, so every write runs.
+fn expect(_w: Wrapper, _i: Inner, _d: usize) -> &'static str {
+    "runs"
 }
 
 const PRELUDE: &str = "import std.concurrency\nimport Iterator from std.iter\nimport Executor from std.concurrency
@@ -396,11 +386,16 @@ fn cell(w: Wrapper, i: Inner, d: usize, n: usize) -> (String, String, String) {
     let tag = format!("{i:?} {d}");
     let (expr, is_n) = i.expr();
     let sfx = if is_n { "n" } else { "l" };
+    // The cell's own named values: no two tasks write one value.
+    let own = expr
+        .replace("named", &format!("named{n}"))
+        .replace("nn", &format!("nn{n}"));
+    let own_decls = format!("named{n}: {L} = [[[0]]]\n    nn{n} := N([[0]])");
     let fill = |t: &str| {
         t.replace("@S", sfx)
             .replace("@G", &tag)
             .replace("@D", &d.to_string())
-            .replace("@I", expr)
+            .replace("@I", &own)
             .replace("@N", &n.to_string())
     };
     match w {
@@ -417,36 +412,28 @@ fn cell(w: Wrapper, i: Inner, d: usize, n: usize) -> (String, String, String) {
                 Lit => format!("gen_lit({d})"),
                 Comp => format!("gen_comp({d})"),
                 Struct => format!("gen_struct({d})"),
-                Named => format!("gen_named({d}, named)"),
+                Named => format!("gen_named({d}, named{n})"),
                 Call => format!("gen_call({d})"),
-                Copy => format!("gen_copy({d}, named)"),
-                StructCopy => format!("gen_scopy({d}, nn)"),
+                Copy => format!("gen_copy({d}, named{n})"),
+                StructCopy => format!("gen_scopy({d}, nn{n})"),
             };
             (
-                format!("g{n} := {call}\n    g{n}.next()"),
+                format!("{own_decls}\n    g{n} := {call}\n    g{n}.next()"),
                 format!("spawn drive(r, \"{tag}\", g{n})"),
                 String::new(),
             )
         }
         // M3.2: a channel hands over the value itself, so a named operand is the parent's own.
-        // Each cell sends its own `named{n}` / `nn{n}`: one shared list written by two tasks would
-        // be a race (the user's bug), and the parent's `named` and `nn` stay as the line expects.
         ChannelSend => {
             let ty = if is_n { "N" } else { L };
-            let own = expr
-                .replace("named", &format!("named{n}"))
-                .replace("nn", &format!("nn{n}"));
             (
-                format!(
-                    "named{n}: {L} = [[[0]]]\n    nn{n} := N([[0]])\n    \
-                     c{n} := Channel[{ty}](1)\n    c{n}.send({own})"
-                ),
+                format!("{own_decls}\n    c{n} := Channel[{ty}](1)\n    c{n}.send({own})"),
                 fill(w.cross()),
                 String::new(),
             )
         }
-        Submit | SubmitResult | SubmitTask => (String::new(), String::new(), fill(w.cross())),
-        _ => (String::new(), fill(w.cross()), String::new()),
+        Submit | SubmitResult | SubmitTask => (own_decls, String::new(), fill(w.cross())),
+        _ => (own_decls, fill(w.cross()), String::new()),
     }
 }
 
@@ -534,15 +521,13 @@ fn check_grid(keep: impl Fn(Wrapper, Inner, usize) -> bool) {
     );
 }
 
-/// A value graph the call site built crosses unmarked at every depth, under every marking
-/// wrapper. A container `.copy()` is a fresh root (its children stay the parent's, DEC-160). The
-/// one fresh cell that still faults is a generator frame-local built by a comprehension: see
-/// `expect`.
+/// Every cell of every spawn wrapper runs (M3.4: the task holds the operand by handle). A
+/// container `.copy()` is a fresh root (its children stay the parent's, DEC-160).
 #[test]
 fn fresh_graph_cells_run() {
-    check_grid(|w, i, d| !w.handoff() && expect(w, i, d) == "runs");
+    check_grid(|w, _, _| !w.handoff());
     // The fresh sibling of a named value is writable, at either position (the named side is the
-    // `mixed-siblings` cell of `reachable_cells_still_fault`).
+    // `mixed-siblings` cell of `reachable_cells_land`).
     let src = format!(
         "{PRELUDE}fn w2(r: Channel[str], tag: str, x: List[List[int]], k: int):
     res := recover:
@@ -578,27 +563,30 @@ main()
     }
 }
 
-/// A value the parent can still reach faults at every depth under every marking wrapper, and the
-/// hand-off wrappers keep their verdicts.
+/// Every cell of every hand-off wrapper (an Executor job, a channel send) runs too.
 #[test]
 fn controls_hold() {
-    check_grid(|w, i, d| w.handoff() || expect(w, i, d) == "faults");
-    // A struct `.copy()` receiver is a call result: it faults at every depth.
+    check_grid(|w, _, _| w.handoff());
+    // A struct `.copy()` receiver is shallow: its `v` is the parent's list, so each task's write
+    // lands in the parent's Box (one Box per task: no two tasks write one value). Go, a copied
+    // struct holding a slice pointer: `Box(v=[[[0]], [[1]]]) Box(v=[[[0], [1]]]) Box(v=[[[0, 1]]])`.
     let src = format!(
         "{PRELUDE}struct Box:
     v: List[List[List[int]]]
     fn go(self, r: Channel[str], tag: str, d: int):
         poke_l(r, tag, d, self.v)
 fn main():
-    named := Box([[[0]]])
+    b0 := Box([[[0]]])
+    b1 := Box([[[0]]])
+    b2 := Box([[[0]]])
     r := Channel[str](4)
     parallel:
-        spawn named.copy().go(r, \"d0\", 0)
-        spawn named.copy().go(r, \"d1\", 1)
-        spawn named.copy().go(r, \"d2\", 2)
+        spawn b0.copy().go(r, \"d0\", 0)
+        spawn b1.copy().go(r, \"d1\", 1)
+        spawn b2.copy().go(r, \"d2\", 2)
     out := [r.recv(), r.recv(), r.recv()]
     out.sort()
-    print(out, named)
+    print(out, b0, b1, b2)
 main()
 "
     );
@@ -608,7 +596,7 @@ main()
             (code, out.as_str()),
             (
                 0,
-                "['d0 faults', 'd1 faults', 'd2 faults'] Box(v=[[[0]]])\n"
+                "['d0 runs', 'd1 runs', 'd2 runs'] Box(v=[[[0]], [[1]]]) Box(v=[[[0], [1]]]) Box(v=[[[0, 1]]])\n"
             ),
             "at {t:?}: {err}"
         );
@@ -632,7 +620,11 @@ fn w(r: Channel[str], m: Map[Key, List[int]]):
 ";
 
 /// Every cell where the parent CAN still reach the object: `(name, program body, stdout)`. Each
-/// prints the task's verdict and then the parent's own view after the join.
+/// prints the task's verdict and then the parent's own view after the join. M3.4: the task holds
+/// the object by handle, so the write runs and the parent sees it (CPython `m34py/reachable.py`, a
+/// thread: the lists below). A key read back through `keys()` is the map's own key, and a map stores
+/// its key by value with no task at all (BASE prints `[]` for `k.log` after `{k: [0]}` and a
+/// `keys()` write), so those three key rows print `[]`; a write through the param itself lands.
 fn reachable_cells() -> Vec<(&'static str, String, &'static str)> {
     let lists = "fn w(r: Channel[str], x: List[List[int]]):
     res := recover:
@@ -662,7 +654,7 @@ fn main():
 main()
 "
             .to_string(),
-            "gen faults [0]\n",
+            "gen runs [0, 1]\n",
         ),
         (
             "gen-pushes-param",
@@ -683,7 +675,7 @@ fn main():
 main()
 "
             .to_string(),
-            "gen faults [0]\n",
+            "gen runs [0, 1]\n",
         ),
         (
             "gen-yields-match-binder",
@@ -710,7 +702,7 @@ fn main():
 main()
 "
             .to_string(),
-            "gen faults []\n",
+            "gen runs [1]\n",
         ),
         (
             "gen-reverse-moves-param",
@@ -731,7 +723,7 @@ fn main():
 main()
 "
             .to_string(),
-            "gen faults [0]\n",
+            "gen runs [0, 1]\n",
         ),
         (
             "struct-named-arg-reordered",
@@ -751,7 +743,7 @@ fn main():
 main()
 "
             .to_string(),
-            "w faults [0]\n",
+            "w runs [0, 7]\n",
         ),
         (
             "map-duplicate-key",
@@ -768,7 +760,7 @@ fn main():
 main()
 "
             .to_string(),
-            "w faults [0]\n",
+            "w runs [0, 7]\n",
         ),
         (
             "named-in-fresh-list",
@@ -786,10 +778,11 @@ main()
 main()
 "
             ),
-            "w faults [[0]]\nw faults [0]\n",
+            "w runs [[0, 7]]\nw runs [0, 7]\n",
         ),
-        // A named value beside a fresh sibling stays marked at its position. The fresh side of
-        // the same line is in `fresh_graph_cells_run`.
+        // A named value beside a fresh sibling, at its position: the write lands on the named
+        // value. Each task writes its own list (no race). The fresh side of the same line is in
+        // `fresh_graph_cells_run`.
         (
             "mixed-siblings",
             r#"fn w2(r: Channel[str], tag: str, x: List[List[int]], k: int):
@@ -815,39 +808,46 @@ fn wtup(r: Channel[str], tag: str, t: (List[int], List[int]), k: int):
             t.1.push(7)
     verdict(r, tag, res)
 fn main():
-    xs := [0]
+    xa := [0]
+    xc := [0]
+    xd := [0]
     opt: List[int]? = [0]
+    xf := [0]
+    xg := [0]
+    xh := [0]
+    xi := [0]
+    xk := [0]
     r := Channel[str](32)
     parallel:
-        spawn w2(r, "a named-first 0", [xs, []], 0)
-        spawn w2(r, "c comp-named 0", [xs for _i in 0..2], 0)
-        spawn w2(r, "d alias-twice 1", [xs, xs], 1)
+        spawn w2(r, "a named-first 0", [xa, []], 0)
+        spawn w2(r, "c comp-named 0", [xc for _i in 0..2], 0)
+        spawn w2(r, "d alias-twice 1", [xd, xd], 1)
         spawn wopt(r, "e named-opt", opt)
-        spawn wopt(r, "f wrap-named", xs)
-        spawn wmap(r, "g map-mixed a", {"a": xs, "b": []}, "a")
-        spawn wmap(r, "h map-mixed b", {"a": xs, "b": []}, "b")
-        spawn wtup(r, "i tuple 0", (xs, []), 0)
-        spawn w2(r, "k copy-child 0", [xs].copy(), 0)
+        spawn wopt(r, "f wrap-named", xf)
+        spawn wmap(r, "g map-mixed a", {"a": xg, "b": []}, "a")
+        spawn wmap(r, "h map-mixed b", {"a": xh, "b": []}, "b")
+        spawn wtup(r, "i tuple 0", (xi, []), 0)
+        spawn w2(r, "k copy-child 0", [xk].copy(), 0)
     out: List[str] = []
     for _i in 0..9:
         out.push(r.recv())
     out.sort()
     for s in out:
         print(s)
-    print(xs, opt)
+    print(xa, xc, xd, opt, xf, xg, xh, xi, xk)
 main()
 "#
             .to_string(),
-            "a named-first 0 faults
-c comp-named 0 faults
-d alias-twice 1 faults
-e named-opt faults
-f wrap-named faults
-g map-mixed a faults
-h map-mixed b faults
-i tuple 0 faults
-k copy-child 0 faults
-[0] [0]
+            "a named-first 0 runs
+c comp-named 0 runs
+d alias-twice 1 runs
+e named-opt runs
+f wrap-named runs
+g map-mixed a runs
+h map-mixed b runs
+i tuple 0 runs
+k copy-child 0 runs
+[0, 7] [0, 7] [0, 7] [0, 7] [0, 7] [0, 7] [0] [0, 7] [0, 7]
 ",
         ),
         (
@@ -862,7 +862,7 @@ k copy-child 0 faults
 main()
 "
             ),
-            "key faults []\n",
+            "key runs []\n",
         ),
         (
             "key-comprehension",
@@ -877,7 +877,7 @@ main()
 main()
 "
             ),
-            "key faults []\n",
+            "key runs []\n",
         ),
         (
             "key-gen-store-then-param-write",
@@ -899,7 +899,7 @@ fn main():
 main()
 "
             ),
-            "key faults []\n",
+            "key runs [1]\n",
         ),
         (
             "key-gen-store-then-keys-write",
@@ -922,15 +922,16 @@ fn main():
 main()
 "
             ),
-            "key faults []\n",
+            "key runs []\n",
         ),
     ]
 }
 
-/// Never trade a false fault for a lost write: where the parent can reach the object, the task's
-/// write faults (or the program does not compile), and the parent's view is unchanged.
+/// Where the parent can reach the object, the task's write lands and the parent sees it (M3.4).
+/// A spawned fn's unconditional write to a named operand compiles and lands too (layer A is gone;
+/// Go `go w(named)` prints `[0 7]`).
 #[test]
-fn reachable_cells_still_fault() {
+fn reachable_cells_land() {
     let mut bad = Vec::new();
     for (name, body, want) in reachable_cells() {
         let src = format!("{PRELUDE}{body}");
@@ -943,7 +944,6 @@ fn reachable_cells_still_fault() {
             }
         }
     }
-    // Layer A: an unconditional write to a named operand does not compile.
     let src = "fn w(xs: List[int]):
     xs.push(7)
 fn main():
@@ -955,7 +955,7 @@ main()
 ";
     for t in THREADS {
         let (code, out, err) = run("layer-a", src, t);
-        if code == 0 || !out.is_empty() || !err.contains("'named' is this task's copy") {
+        if code != 0 || out != "[0, 7]\n" {
             bad.push(format!(
                 "layer-a at CHEZZI_THREADS={t:?}: rc {code}, stdout {out:?}\n{err}"
             ));
