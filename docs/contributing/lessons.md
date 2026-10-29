@@ -110,8 +110,8 @@ executes prose.
 - **Check list contents with `.len()` and index, never with `print()`.** `[""]` renders as `[]`. An
   unfamiliar behaviour is not a bug until an oracle says so.
 - **Adversarial review is a required step.** Each incident in this section passed the full gate. Budget
-  it for checker soundness, runtime verdicts, the airlock, and any error-vs-proceed decision (the
-  `adversarial-review` skill).
+  it for checker soundness, runtime verdicts, the shared-heap safety rules, and any error-vs-proceed
+  decision (the `adversarial-review` skill).
 
 ## 3. Checker soundness
 
@@ -172,7 +172,7 @@ check-OK-then-broken program, and a JIT would trust the static type.
   binding; give the statement the type (`xs: List[int] = []`) or reject it there. One predicate
   (`Ty::has_hole`), one check (`Checker::closed_binding_ty`).
 
-## 4. Runtime, airlock, concurrency
+## 4. Runtime and concurrency
 
 - **A runtime verdict that declares user code broken is built from what is impossible, never from
   what looks idle.** Three deadlock predicates in a row faulted healthy programs (a cap-1 pipeline is
@@ -186,15 +186,16 @@ check-OK-then-broken program, and a JIT would trust the static type.
   takes `me` (`ChanState::recv_ready_for(me)`, `send_ready_for(cap, me)`), in the park gap checks and in
   `PartyWait::satisfiable`. "Delivered" has one commit point: a CAS on the party's `Pending` under the
   channel lock.
-- **The airlock has two layers; only the runtime one protects memory.** The checker's `assignable`
-  sendable clause gives an early error; `to_wire` + `has_handle` + `ensure_crossable` is the real net,
-  and it covers only sites that call the guard. Each new cross-heap store goes through
-  `to_wire_crossable`, never bare `to_wire_at`. A missed runtime guard is UB.
+- **The shared heap is memory-safe only through three rules; a race is the user's bug** (M2, M3.0;
+  [`01-model.md`](../reference/concurrency/01-model.md) "Data races"). A buffer that grows, or that a
+  sort or a remove replaces, retires, and only the stop-the-world sweep frees it. A `Value` slot
+  stores with Release and loads with Acquire. An op on a live object writes atomic slots, never a
+  `&mut` over the object. A new container op or object kind obeys all three, plus a grid in the
+  race gates; a missed rule is UB. (Until M3.5 the rule here was the airlock's runtime guard.)
 - **Freshness is a property of the value graph, not of the operand's root AST kind** (TICKET-240). One
-  recursive decider (`Checker::fresh_shape`) and a shape the runtime walks. Before you add a root
-  shape, ask what the rule says one level down. Traps: a tuple or enum carries no copy mark, so a walk
-  that stops at an unmarked object misses a carrier's payload; a map key can be a struct with a mutable
-  field.
+  recursive decider (`Checker::fresh_shape`, `checker/fresh.rs`), read by the write-to-a-temporary
+  check (TICKET-254). Before you add a root shape, ask what the rule says one level down. Trap: a map
+  key can be a struct with a mutable field.
 - **An operator arm with a wildcard on the operator absorbs each operator added later** (TICKET-247:
   `yield ?buf` lost a write). Match the operator enum with no wildcard in one function every walker
   reads (`aliases_operand`). Default an unnamed kind to "holds": a false fault beats a lost write.
@@ -205,21 +206,11 @@ check-OK-then-broken program, and a JIT would trust the static type.
   `ExprKind::as_ident`, `ExprKind::is_named_head`); (2) the named variants; (3) an `#[allow]` with a
   one-line reason and a raised `PINNED_ALLOWS` in the gate test. Do not rewrite it as `if let`,
   `let ... else` or `matches!` on the raw enum. A foreign `#[non_exhaustive]` enum keeps its `_`.
-- **"Is a write" has one owner.** The checker reads the VM's one table of mutating natives, a behaviour
-  grid checks it, and the task-copy mark follows "can the parent observe it" (TICKET-179,
-  [`adr-d4-airlock.md`](../design/adr-d4-airlock.md)). Never add a second list or a per-method
-  exemption.
-- **Closures cross by value iff every capture is sendable** (Rust `Send` model). The only runtime
-  non-sendables are `Obj::Module` and a generator inside a value cycle. Fault a non-sendable only in the
-  `Obj::Closure` capture arms of `to_wire`/`to_snap`, never in the general struct/snapshot path: a
-  module-global read from a spawned task is a read-only snapshot.
+- **"Is a write" has one owner.** `native::is_mutating_native_kind` is the one table of mutating
+  natives; the checker's `mutates_receiver` reads it (TICKET-179). Never add a second list or a
+  per-method exemption.
 - **Capture is free-variable, by reference.** A superset capture is safe; a subset breaks silently. The
   analyzer matches every `ExprKind` with no `_` arm and also drives cell-boxing.
-- **Cycles keep identity through every container; only a generator does not.** A cycle that re-enters
-  a non-preserved node duplicates it silently. A generator still on the DFS stack rejects cleanly. A
-  non-sendable module-global generator snapshots as inert `Nil` and faults only when reached.
-- **A data-snapshot `Iterator[T]` crosses by deep copy like a `List`.** Do not copy the generator
-  pattern for a cursor.
 - **Container key and membership equality fault like `==`.** Each production site uses the guarded
   form through `seq_slot`/`set_slot`/`map_slot`; the swallowing wrapper is `#[cfg(test)]`-only. Grep
   both `self.values_equal(` and `vm.values_equal(`.
@@ -245,17 +236,16 @@ check-OK-then-broken program, and a JIT would trust the static type.
   parse iteratively and overflow the walkers. Do not raise `VM_STACK_BYTES`: each M:N worker reserves
   it.
 - **Opt-in caps measured per heap or by wall clock are not comparable across execution contexts.**
-- **Swap what belongs to a context, and undo the swap on unwind** (TICKET-246). A `Shared`/`RwShared`
-  closure runs in the box's own context (M1.7: its objects are in the run's one heap). Each `GcRef`
-  holder travels with its context (`FiberCtx`, running generators and their parked hosts);
-  `out`/`stderr` swap back. Only `Vm::with_box` swaps, under `catch_unwind`.
-- **Render a shared box from a snapshot: copy, drop the lock, then render** (TICKET-246).
-  `Vm::display_box` keeps a stack of boxes being rendered and prints `Shared(...)` for one already on
-  it. A `&self` render never waits: a busy box prints `Shared(<locked>)`. The print path waits first,
-  through the update guard.
-- **A parallel reader of a live heap is proven by the type system** (TICKET-246). `Heap: Sync` is a
-  `const _` assertion. A new `Cell`/`RefCell` in `Heap` or `Obj` must fail that build; never add
-  `unsafe impl Sync`. No user code runs under the read lock.
+- **Swap what belongs to a context, and undo the swap on unwind** (TICKET-246). M3.3 deleted the box
+  context and `Vm::with_box`: a `Shared`/`RwShared` closure runs in the caller's task. A new swap of
+  per-context state is undone under `catch_unwind`, never by a swap pair after the call.
+- **Render a shared box with no lock and no wait** (TICKET-246, M3.5). Rendering under the payload
+  lock hung a box that holds itself (`rc=124`). `Vm::display_box` reads the box's one slot with no
+  lock or guard (Go's `fmt`), and keeps a stack of open boxes so a box already on it prints
+  `Shared(...)`.
+- **A parallel reader of a live heap is proven by the type system** (TICKET-246). Every task reads
+  the one heap through `&Heap` (M3.3). `Heap: Sync` is a `const _` assertion. A new `Cell`/`RefCell`
+  in `Heap` or `Obj` must fail that build; never add `unsafe impl Sync`.
 - **A pure-Chezzi scanner over non-ASCII text must pre-collect its codepoints.** `text[i:i+1]` is O(1)
   only for all-ASCII text; non-ASCII re-collects the `Vec<char>` per call (O(n²)). `field = field + c`
   is O(k²). Check with a large-input timing test.

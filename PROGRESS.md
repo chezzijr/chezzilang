@@ -28,7 +28,9 @@ The core language is implemented through M24 and still evolves:
 
 Concurrency is complete through Tier-D: `spawn`, the `parallel:` nursery, `Channel[T]`,
 `Broadcast[T]` (`std.concurrency.broadcast`), `Shared[T]`, `Executor`, the OS-thread M:N engine,
-the netpoller and `std.net`. There is one engine: the bytecode VM on its M:N scheduler.
+the netpoller and `std.net`. There is one engine: the bytecode VM on its M:N scheduler. On the
+branch `exp/go-shared-heap`, tasks share one heap and get values by handle (Go's model; see the
+experiment section below).
 
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:
@@ -65,8 +67,8 @@ lists each remaining copy as DUPLICATE.
 | 3 | one owner per fact: facts 1-9 (blank name, places, `self`, type-application head, operator hooks, pattern names, reserved names, std module members, type keys) | done 2026-10-16 |
 | 3, fact 8 step 2 | builtin dispatch by an id (`enum Builtin` in `base/builtin.rs`) | done 2026-10-16 |
 | 3, names | one redeclaration rule; a module binds each name once, a type and a value never sharing it (TICKET-263) | done 2026-10-18 |
-| 3, fact 11 | one `WireValue` child visitor: `WireValue::visit` owns what a variant holds (TICKET-267) | done 2026-10-19 |
-| 3, airlock capture copy | one owner per capture, `WireMemo::sole_captures`: every rebuild of a closure marks its captures, a same-task round trip and a relay included; only a box call's result and an Executor job's result stay unmarked, for a capture that reaches no copy and nothing writable the source keeps (TICKET-295) (TICKET-285, TICKET-291, concurrency-facts Family 1) | done 2026-10-22 |
+| 3, fact 11 | one `WireValue` child visitor: `WireValue::visit` owns what a variant holds (TICKET-267) | done 2026-10-19; deleted with the wire form by M3.5 (branch `exp/go-shared-heap`) |
+| 3, airlock capture copy | one owner per capture, `WireMemo::sole_captures`: every rebuild of a closure marks its captures, a same-task round trip and a relay included; only a box call's result and an Executor job's result stay unmarked, for a capture that reaches no copy and nothing writable the source keeps (TICKET-295) (TICKET-285, TICKET-291, concurrency-facts Family 1) | done 2026-10-22; deleted with the airlock by M3.5 (branch `exp/go-shared-heap`) |
 | 5 | workspace crates: `chezzi-syntax`, `chezzi-native`, `chezzi-base`, `chezzi-front`, `chezzi-vm` | done 2026-10-16 |
 | docs | docs split into `reference/`, `design/`, `contributing/`, `history/` | in progress (branch `docs/refactor`) |
 
@@ -185,9 +187,11 @@ Rules for counting:
 - At JIT start, the bytecode and the `Value` layout freeze. The JIT's correctness oracle is the
   interpreter against the JIT, byte-identical on `tests/chz` and the CPython differential corpus.
 
-**D4 (approved 2026-09-22).** A spawned task's write to an airlock copy is a check error or a runtime
-fault, never a silent lost write. Read [`docs/design/adr-d4-airlock.md`](docs/design/adr-d4-airlock.md)
-before any airlock work, and [`w16.md`](docs/history/bug-hunts/w16.md) Family 4.
+**D4 (approved 2026-09-22, superseded 2026-10-29 on `exp/go-shared-heap`).** On `main`, a spawned
+task's write to an airlock copy is a check error or a runtime fault. On the branch, no route copies:
+a task's write lands on the parent's value and a race is the user's bug (Go). Record:
+[`docs/design/adr-d4-airlock.md`](docs/design/adr-d4-airlock.md); current rules:
+[`docs/reference/concurrency/01-model.md`](docs/reference/concurrency/01-model.md).
 
 ## Ledger
 
@@ -272,6 +276,9 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
 - M3.4: `spawn f(args)`, `spawn obj.m()`, `spawn:` captures and `Executor.submit(f)` hand the task the parent's values by handle (Go `go f(x)`): a task's write lands on the parent's object and a captured local is one binding with the parent (`Vm::prepare_worker` builds the call from the spawner's values). A shared generator that a second task drives while the first runs it faults `generator already running` (CPython `ValueError`). Deleted: `deep_clone_all`, `lower_task`, `rebuild_ready`, `wire_args`, `ensure_crossable`, `Lowered`, the spawn op's fresh `u32` and `Program.fresh_calls`; the checker's layer A (`note_task_write`, `report_named_call_writes`, `is_local_capture`, the W8-3 taint and closure-write frames, the spawn and capture `sendable` gates, `CROSSING_CLOSURE_METHODS`), the fn write summaries and `self_writers` (`checker/self_writes.rs`); `vm/airlock_in.rs` is test-only until M3.5. Gate: `tests/chz/spec/spawn_handle_test.chz` (6 rows, Go goldens; base: 6 type errors, an Executor write lost, a fault). Release, new/BASE median (5 runs): fib 1.03, closure 1.00, hof 0.99, struct 1.01; T=1/T=2 `storm` 1.00/0.87, `spawn_fresh_graph` 0.56/0.46, `executor_and_parallel` 1.01/1.00; native-hof 0.79.
 - M3.5: the airlock is gone: deleted `vm/wire.rs`, `vm/airlock_in.rs`, `vm/airlock_out.rs` (`start_task` moved to `vm/nursery.rs`), `base/crossing.rs`, the copy bits and copy logs of `HeapCore`/`Heap`, the five layer C fault sites and `COPY_WRITE_TAIL`, `Op::StampGen`, `Proto.private_slots`/`deep_slots`, the generator frame verdicts and param-escape summaries, and the checker's `sendable` (its two last callers had no reachable reject: 14 probes, same output on BASE). `Fresh` (TICKET-254) lives in `checker/fresh.rs`. A box renders the live value (`Vm::display_box`): `print(Shared(xs))` with `xs.push(xs)` is `Shared([[...]])` (was `Shared([<cycle>])`), one list twice is `Shared([[1], [1]])`. Gate: `airlock_state_is_gone_from_proto_and_heap_core` (Proto 152 to 136 B, HeapCore 512 to 464 B). Release, new/main median (`-w 2 -r 7`): fib 0.99, struct 0.88, closure 1.02, hof 1.00, many_list 1.08, map_str 1.10-1.13 (f900b091 1.12 and BASE 1.13 too: not this task); `storm` T=2 36 ms (f900b091 3361 ms), `spawn_fresh_graph` 0.41-0.52x of f900b091; `send_one_channel` T=1/T=4 0.91/0.76 of f900b091, T=2 even (high variance). Peak RSS storm T=4 11.8 MB (f900b091 104 MB), many_map 94.7 MB (main 169.5).
 - M3.6: no test or doc example asserts a race's result (Go parity: a race is the user's bug). Audit of `tests/chz`, `examples`, Rust tests and `docs/reference`: 4 racy rows, all the `xs`/`fill` shape or a loop of tasks that write one map; the rest is ordered by a join, a Channel or a box. `spawn_handle_test.chz` orders the two writes with a `Channel` and its loop tasks send their pairs to the parent; `01-model.md` and `07-sendability.md` show the ordered form. Gate: 3 x 5000 rounds at `CHEZZI_THREADS=4` fail 0 (HEAD: 1 and 54 of 5000); the Go translation runs clean under `go run -race`.
+- M3 is closed (M3.0a to M3.6): tasks share values by handle, and the airlock, the wire form and the D4 rule are deleted.
+- M4: the docs state the shared-heap model at each owner (`concurrency/01-model.md` the model and the race rules, `03-shared.md` the boxes, `07-sendability.md` retitled "What crosses a task boundary", `stdlib/03-runtime-types.md` the Executor job); ADR D4 carries a superseded note; `go-shared-heap.md` gets its status and an outcome section (§7); `lessons.md` §4 drops the copy-model rules (`lessons-incidents.md` notes each change). Gate: the audit grep has 0 stale rows (74 before); `doc_fences_lex`, `doc_links`, `conformance`, `source_layout`, `gaps_ledger_count` pass.
+- Open rows on the branch: `map_str` at T=1 is 1.10-1.13 against `main` (owner accepted 2026-10-29; f900b091 1.12 and the M3.5 base 1.13 too); `owner_fault_grid` cell `Nursery#16` flakes under full-suite load (seen 3 times, about 1 in 400 cells; passes alone); `CHEZZI_GC_STRESS=1` timeouts in `tests/chz` that also occur on the base.
 
 ## Later
 
