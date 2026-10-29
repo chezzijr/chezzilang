@@ -683,7 +683,7 @@ impl crate::native::Host for VmHost<'_> {
         // TICKET-270 — a FIBER that exits counts itself as an exit origin BEFORE the code is
         // published: a joiner that reads the code and flushes finished output then waits in
         // `take_finished_streams` until this fiber's slot holds what it printed. The code itself stays
-        // here, at the call: `classify_mn_outcome` trips this fiber's scope cancel before `finish`, and
+        // here, at the call: `MnSched::finish_with` trips this fiber's scope cancel, and
         // a sibling woken by it must already read the exit, or it runs its `defer` (DEC-213). `main` is
         // not a fiber and holds its own output.
         if self.vm.fiber_scope.is_some() && !self.vm.exit_origin {

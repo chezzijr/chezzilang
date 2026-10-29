@@ -237,14 +237,6 @@ impl Vm {
         depth_exceeded(span)
     }
 
-    /// B3.4 — set this VM's nursery cancel flag (if it runs under one), so sibling workers abort.
-    /// No-op when this VM runs under no nursery (`cancel` is `None`) — e.g. the top-level VM.
-    pub(super) fn trip_cancel(&self) {
-        if let Some(c) = &self.cancel {
-            crate::vm::trip_cancel_flag(c);
-        }
-    }
-
     /// M1.6 — a task switch: [`Vm::swap_ctx`] plus the task's output stream. A task owns its
     /// `out` / `stderr` (Decision F), so only a task switch moves them; a box call runs in its
     /// caller's stream and swaps with `swap_ctx` alone.

@@ -1850,7 +1850,7 @@ fn ticket126_every_cancel_store_goes_through_trip_cancel_flag() {
 /// both sides `Relaxed` the pair establishes no happens-before, so `drain_scan_due` can see the
 /// bumped generation, read the flag it was bumped for as still `false`, record that generation, and
 /// leave a fiber parked under a cancelled ancestor undrained — W13-8's false deadlock. No mutex
-/// orders the pair for us: `Vm::trip_cancel` stores an ancestor flag under no core lock and
+/// orders the pair for us: `Executor.cancel()` stores an ancestor flag under no core lock and
 /// `scope_cancel_tripped` reads it under one. A source-text rule, because no test can observe a
 /// memory ordering.
 #[test]

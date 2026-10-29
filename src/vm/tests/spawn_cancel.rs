@@ -252,28 +252,101 @@ fn parallel_defer_runs_when_enlisted_nursery_escapes() {
 }
 
 /// N4 (panic-fault seam): a worker-VM PANIC (a VM bug, a panicking native/FFI callback) becomes a task
-/// `Fault` via `run_one_fiber`'s `catch_unwind` fallback — which NEVER reaches `classify_mn_outcome`,
-/// the only other place that trips the scope cancel. Without a trip here the scope aborts with
-/// `cancel == false`: `cancel_drain` requeues the parked siblings, they re-run `recv`, `park`'s gap
-/// re-check sees no cancel and PARKS THEM AGAIN, the scope quiesces uncancelled, `is_deadlocked` fires
-/// (by its own rules — nothing is cancelled), and `flag_deadlock` drops them without `unwind_deferred`
-/// — their `defer`s silently skipped, hidden behind the panic-fault (`reduce_task_slots` ranks Fault >
-/// Deadlocked). Unit-level because there is no Chezzi-source way to panic a worker VM (every runtime
-/// error is an `Err(RuntimeError)`; even integer overflow is a clean fault).
+/// `Fault` via `run_one_fiber`'s `catch_unwind` fallback. Without a trip of its scope cancel the scope
+/// aborts with `cancel == false`: `cancel_drain` requeues the parked siblings, they re-run `recv`,
+/// `park`'s gap re-check sees no cancel and PARKS THEM AGAIN, the scope quiesces uncancelled,
+/// `is_deadlocked` fires (by its own rules — nothing is cancelled), and `flag_deadlock` drops them
+/// without `unwind_deferred` — their `defer`s silently skipped, hidden behind the panic-fault
+/// (`reduce_task_slots` ranks Fault > Deadlocked). `MnSched::finish_with` is the one trip of a task's
+/// aborting end, so the grid holds every outcome kind: a `Fault` (a panic's included) and an `Exit`
+/// trip the flag the fiber ran under, under the core lock with the slot; the others trip nothing.
+/// Unit-level because there is no Chezzi-source way to panic a worker VM (every runtime error is an
+/// `Err(RuntimeError)`; even integer overflow is a clean fault).
 #[test]
-fn panic_fault_trips_the_scope_cancel() {
+fn an_aborting_outcome_trips_the_fibers_cancel_at_finish() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let cancel = Arc::new(AtomicBool::new(false));
-    vm.cancel = Some(Arc::clone(&cancel)); // as `run_one_fiber`'s swap-in re-points it, per fiber scope
-    let out = vm.panic_outcome(Box::new("worker boom"), Span::RUNTIME);
+    let panic = vm.panic_outcome(Box::new("worker boom"), Span::RUNTIME);
     assert!(
-        matches!(out, TaskOutcome::Fault { .. }),
+        matches!(panic, TaskOutcome::Fault { .. }),
         "a panicking task is a Fault"
     );
-    assert!(
-        cancel.load(Ordering::Relaxed),
-        "a panic-fault must trip its scope's cancel — siblings unwind (and run their defers) only if it does"
-    );
+    let grid: Vec<(&str, TaskOutcome, bool)> = vec![
+        ("panic fault", panic, true),
+        (
+            "fault",
+            TaskOutcome::Fault {
+                err: dl_err(),
+                out: Vec::new(),
+                stderr: Vec::new(),
+                trace: Vec::new(),
+            },
+            true,
+        ),
+        (
+            "exit",
+            TaskOutcome::Exit {
+                code: 3,
+                out: Vec::new(),
+                stderr: Vec::new(),
+            },
+            true,
+        ),
+        (
+            "done",
+            TaskOutcome::Done(WorkerResult {
+                out: Vec::new(),
+                stderr: Vec::new(),
+            }),
+            false,
+        ),
+        (
+            "cancelled",
+            TaskOutcome::Cancelled {
+                out: Vec::new(),
+                stderr: Vec::new(),
+            },
+            false,
+        ),
+        (
+            "cancelled fault",
+            TaskOutcome::CancelledFault {
+                err: dl_err(),
+                out: Vec::new(),
+                stderr: Vec::new(),
+            },
+            false,
+        ),
+        (
+            "deadlocked",
+            TaskOutcome::Deadlocked {
+                err: dl_err(),
+                out: Vec::new(),
+                stderr: Vec::new(),
+            },
+            false,
+        ),
+    ];
+    for (what, outcome, trips) in grid {
+        let scope = Arc::new(AtomicBool::new(false));
+        let mine = AtomicBool::new(false);
+        let sched = MnSched::new(1, 1, Arc::clone(&scope), dl_err(), 0);
+        sched.seed(vec![mk_fiber(0)]);
+        let f = take_run(&sched);
+        let _ = sched.finish_with(f.task_index, 0, outcome, Some(&mine));
+        assert_eq!(
+            mine.load(Ordering::Relaxed),
+            trips,
+            "{what}: the fiber's own flag"
+        );
+        assert!(
+            !scope.load(Ordering::Relaxed),
+            "{what}: only the fiber's own flag trips"
+        );
+        assert!(
+            sched.lock().slots[f.task_index].is_some(),
+            "{what}: the slot is recorded in the same lock hold"
+        );
+    }
 }
 
 /// B3.4: `defer` runs even when a task is cancelled at the CPU **back-edge** (not only on the

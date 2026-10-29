@@ -18,10 +18,15 @@ thread_local! {
     pub(super) static PANIC_AT_LOOP_TOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// TICKET-289 — test-only: arms [`Vm::finish_drain_window_hook`] once per run, through that run's
+/// TICKET-289 — test-only: arms [`Vm::window_hook`] once per run, through that run's
 /// own `HostConfig.env` (the seam `OWNER_FAULT_WINDOW_ENV` uses).
 #[cfg(test)]
 pub(crate) const FINISH_DRAIN_WINDOW_ENV: &str = "CHEZZI_TEST_FINISH_DRAIN_WINDOW";
+
+/// Test-only: arms the same 300 ms hold once per run, between a task's aborting outcome (a fault or
+/// an exit) and the `finish` that records it, so a reader of the scope's halt is reachable there.
+#[cfg(test)]
+pub(crate) const PRE_FINISH_WINDOW_ENV: &str = "CHEZZI_TEST_PRE_FINISH_WINDOW";
 
 impl Vm {
     /// TICKET-016 (W8-3) generalisation of the demote bracket: "I am about to block in place" for any
@@ -497,7 +502,15 @@ impl Vm {
                             std::thread::sleep(std::time::Duration::from_millis(300))
                         });
                     }
-                    let (aborts, job_fault) = sched.finish(task_index, scope_id, outcome);
+                    #[cfg(test)]
+                    if matches!(
+                        &outcome,
+                        TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
+                    ) {
+                        self.window_hook(PRE_FINISH_WINDOW_ENV);
+                    }
+                    let (aborts, job_fault) =
+                        sched.finish_with(task_index, scope_id, outcome, self.cancel.as_deref());
                     if job_fault {
                         self.halt_run();
                     }
@@ -506,7 +519,7 @@ impl Vm {
                     if std::mem::take(&mut self.exit_origin) {
                         self.quiesce.end_exit_origin();
                     }
-                    // A fault/exit tripped the FIBER's SCOPE cancel (in `classify_mn_outcome`, via the
+                    // A fault/exit tripped the FIBER's SCOPE cancel (in `finish_with`, via the
                     // re-pointed `self.cancel`); requeue THAT scope's parked siblings so they observe it
                     // and unwind (running ones see it at a back-edge). `drain_family(scope_id)` reaches
                     // the channel-parked and the netpoller-parked fibers of this scope's family ONLY
@@ -517,7 +530,7 @@ impl Vm {
                     // only its own nursery's fibers read that.
                     if aborts && fiber.job_cancel.is_none() {
                         #[cfg(test)]
-                        self.finish_drain_window_hook();
+                        self.window_hook(FINISH_DRAIN_WINDOW_ENV);
                         sched.drain_family(scope_id);
                     }
                     // A finished Executor job is one fewer live sender for every other sched: an
@@ -587,7 +600,7 @@ impl Vm {
         self.swap_task(&mut fiber.ctx);
         // Cross-nursery flat scheduler — RE-POINT the shell's `self.cancel` to THIS fiber's SCOPE cancel
         // on every swap-in. One shell runs fibers from MULTIPLE scopes off the global queue; the
-        // back-edge cancel check (`run_until`), `trip_cancel` (on this fiber's fault/exit), the demote
+        // back-edge cancel check (`run_until`), `finish_with` (on this fiber's fault/exit), the demote
         // loops, and the netpoller `register` all read `self.cancel`, so it MUST track the running
         // fiber's scope — else an inner fault would trip the wrong scope and cancel an outer sibling.
         // `self.mn` is always `Some` here in practice — the only caller, `mn_worker_loop`, only ever
@@ -821,20 +834,17 @@ impl Vm {
     }
 
     /// D2b — a worker-VM PANIC (a VM `unwrap`/index bug, a panicking native/FFI callback) became this
-    /// fiber's outcome. It never reached [`Vm::classify_mn_outcome`], so this is the ONLY place that can
-    /// trip the fiber's SCOPE cancel on that path — and it MUST: `mn_worker_loop` treats a `Fault` as an
-    /// abort and calls `cancel_drain`, but a requeued sibling with `cancel == false` just re-runs `recv`
-    /// and PARKS AGAIN; the scope then quiesces uncancelled, `is_deadlocked` fires (correctly, by its own
-    /// rules), and `flag_deadlock` drops those siblings without `unwind_deferred` — their `defer`s never
-    /// run, hidden behind the panic-fault (`reduce_task_slots` ranks Fault > Deadlocked). The trip is
-    /// program-ordered before `finish`'s lock release, which publishes it (see `trip_scope_cancel`).
-    /// `self.cancel` is the RUNNING fiber's scope cancel (re-pointed at every `swap_ctx` in).
+    /// fiber's outcome. It is a `Fault`, so [`MnSched::finish_with`] trips the fiber's cancel for it
+    /// as for any fault — and it MUST: `mn_worker_loop` treats a `Fault` as an abort and calls
+    /// `cancel_drain`, but a requeued sibling with `cancel == false` just re-runs `recv` and PARKS
+    /// AGAIN; the scope then quiesces uncancelled, `is_deadlocked` fires (correctly, by its own
+    /// rules), and `flag_deadlock` drops those siblings without `unwind_deferred` — their `defer`s
+    /// never run, hidden behind the panic-fault (`reduce_task_slots` ranks Fault > Deadlocked).
     pub(super) fn panic_outcome(
         &mut self,
         p: Box<dyn std::any::Any + Send>,
         span: Span,
     ) -> TaskOutcome {
-        self.trip_cancel();
         TaskOutcome::Fault {
             err: panic_to_fault(p, span),
             out: Vec::new(),
@@ -843,18 +853,19 @@ impl Vm {
         }
     }
 
-    /// TICKET-289 — test-only: hold the window between a nursery child's `finish` (its fault is in
-    /// its slot) and the `drain_family` that follows, so a verdict judged inside it is
-    /// deterministically reachable. No-op unless armed via [`FINISH_DRAIN_WINDOW_ENV`] in this
-    /// run's own `HostConfig.env`.
+    /// TICKET-289 — test-only: hold a window of a task's end for 300 ms, so a party judged inside it
+    /// is deterministically reachable. [`FINISH_DRAIN_WINDOW_ENV`]: between a nursery child's
+    /// `finish` (its fault is in its slot) and the `drain_family` that follows.
+    /// [`PRE_FINISH_WINDOW_ENV`]: before the `finish`. No-op unless `key` is armed in this run's own
+    /// `HostConfig.env`.
     #[cfg(test)]
-    fn finish_drain_window_hook(&mut self) {
+    fn window_hook(&mut self, key: &str) {
         let armed = self
             .host
             .env
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(FINISH_DRAIN_WINDOW_ENV)
+            .remove(key)
             .is_some();
         if armed {
             self.gc_blocking(&[], |_| {
@@ -866,11 +877,10 @@ impl Vm {
     /// D2b — classify a finished fiber's run into a [`TaskOutcome`] (the M:N analogue of
     /// [`ReadyWorker::run_outcome`]). Unlike the legacy path it uses `start_task`/`run_until` and
     /// **discards the task's return value** (a spawned task's return is never observable to its
-    /// caller). Trips the shared cancel flag on a fault/exit so siblings abort. The
-    /// fiber's `out`/`stderr` are taken from the live (swapped-in) shell buffers.
+    /// caller). A fault/exit trips the fiber's cancel flag in [`MnSched::finish_with`], so siblings
+    /// abort. The fiber's `out`/`stderr` are taken from the live (swapped-in) shell buffers.
     pub(super) fn classify_mn_outcome(&mut self, res: Result<(), RuntimeError>) -> TaskOutcome {
         if let Some(code) = self.pending_exit {
-            self.trip_cancel();
             TaskOutcome::Exit {
                 code,
                 out: std::mem::take(&mut self.out),
@@ -879,7 +889,7 @@ impl Vm {
         } else if self.is_cancelled() || matches!(self.cut, Some(crate::vm::block::Cut::RunFault)) {
             // TICKET-147 (W14-12) — the cancel funnel replaced the `cancelled` sentinel with a real
             // fault from the task's own `defer` / an aborted nested nursery: report it, ranked below
-            // every ordinary fault. No `trip_cancel`: the scope is already cancelled.
+            // every ordinary fault. No trip: the scope is already cancelled.
             match res {
                 Err(err) if std::mem::take(&mut self.cancel_unwind_faulted) => {
                     TaskOutcome::CancelledFault {
@@ -895,15 +905,12 @@ impl Vm {
             }
         } else {
             match res {
-                Err(e) => {
-                    self.trip_cancel();
-                    TaskOutcome::Fault {
-                        err: e,
-                        out: std::mem::take(&mut self.out),
-                        stderr: std::mem::take(&mut self.stderr),
-                        trace: self.take_fault_trace(),
-                    }
-                }
+                Err(e) => TaskOutcome::Fault {
+                    err: e,
+                    out: std::mem::take(&mut self.out),
+                    stderr: std::mem::take(&mut self.stderr),
+                    trace: self.take_fault_trace(),
+                },
                 Ok(()) => TaskOutcome::Done(WorkerResult {
                     out: std::mem::take(&mut self.out),
                     stderr: std::mem::take(&mut self.stderr),

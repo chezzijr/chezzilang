@@ -22,8 +22,34 @@ impl MnSched {
         scope_id: usize,
         outcome: TaskOutcome,
     ) -> (bool, bool) {
+        self.finish_with(task_index, scope_id, outcome, None)
+    }
+
+    /// [`MnSched::finish`] for a fiber that ran: a `Fault` or an `Exit` trips `trip`, the cancel
+    /// flag the fiber ran under (its scope's, or an Executor job's own), so its siblings unwind.
+    /// THE one trip of a task's aborting end. It goes under this lock, together with the slot: a
+    /// party that reads the tripped flag and then asks [`MnSched::scope_fault`] (`block::halt_of`)
+    /// waits for this lock, so it finds the fault. A trip before the lock let an owner parked at an
+    /// inner join read the flag with an empty slot, take no halt, and run the line after its join
+    /// (`tests/owner_fault_grid.rs` `Nursery#16`). Under the lock it also publishes the flag to the
+    /// deadlock verdict (`trip_scope_cancel`).
+    pub(super) fn finish_with(
+        &self,
+        task_index: usize,
+        scope_id: usize,
+        outcome: TaskOutcome,
+        trip: Option<&AtomicBool>,
+    ) -> (bool, bool) {
         let mut c = self.lock();
         debug_assert!(Arc::ptr_eq(&c.left, &self.quiesce.epoch()));
+        if let Some(flag) = trip
+            && matches!(
+                outcome,
+                TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
+            )
+        {
+            crate::vm::trip_cancel_flag(flag);
+        }
         let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
         c.leave_running();
         // W7-26r — this thread is the only party that can observe the cap for a nursery whose parent
@@ -146,8 +172,8 @@ impl MnSched {
     /// evaluate `is_deadlocked` (a bare `Relaxed` store outside it has no synchronizes-with edge, so a
     /// lock-holder could legally still read `false` and reap the scope's parked fibers as `Deadlocked`);
     /// (2) it lets the abort seams arm this veto BEFORE they clear their own (`awaiting_builder` /
-    /// `body_open`) — a gapless veto handoff. Idempotent (the fault path also trips via
-    /// `Vm::trip_cancel`, which is program-ordered before `finish`'s own lock release).
+    /// `body_open`) — a gapless veto handoff. Idempotent (the fault path trips its flag in
+    /// [`MnSched::finish_with`], under `finish`'s own lock hold).
     pub(super) fn trip_scope_cancel(&self, scope_id: usize) {
         let c = self.lock();
         crate::vm::trip_cancel_flag(&c.scopes[scope_id].cancel);
@@ -794,7 +820,7 @@ impl MnSched {
     /// lets the child's peer veto lift), independently reaches the same false conclusion about itself and
     /// faults its OWN parked siblings directly — with `flag_deadlock` dropping their `defer`s, instead of
     /// letting the child's fault propagate up through the blocked fiber's own return and trip the
-    /// parent's scope cancel the ordinary way (`Vm::classify_mn_outcome` → `Vm::trip_cancel`).
+    /// parent's scope cancel the ordinary way (`MnSched::finish_with`).
     pub(super) fn is_deadlocked_ignoring_jobs(&self, c: &SchedCore) -> bool {
         self.is_deadlocked_ignoring_jobs_given(c, None)
     }
