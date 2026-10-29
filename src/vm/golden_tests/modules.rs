@@ -1,4 +1,4 @@
-//! Golden tests: native handles and SSO, airlock existentials, named imports, cross-module types
+//! Golden tests: native handles and SSO, existentials across tasks, named imports, cross-module types
 //! and collisions, qualified decode, Executor submit, number parsing.
 //! Split out of `src/vm/golden_tests.rs`. `super::*` is the parent module.
 
@@ -129,13 +129,10 @@ fn protocol_value_crosses_channel_three_engine() {
     assert_golden_out(src, "sq\n");
 }
 
-/// An FFI fn (`Cffi`) crosses the wire-value airlock BY VALUE (its shared `Arc<Cffi>`, the same the
-/// snapshot path already ships across M:N workers) — a spawn fn-ARG. `cos` reaches the task and
-/// computes `cos(0.0) == 1.0`, byte-identical. (Was runtime-rejected pre-fix: an extern
-/// fn's type is `fn(float)->float` (`Ty::Func`, checker-sendable), so the runtime airlock was the sole
-/// — and wrong — gate; a Cffi is pure code, not a heap-local handle, so it now crosses.)
+/// An FFI fn (`Cffi`, pure code) passed as a spawn fn-ARG reaches the task and computes
+/// `cos(0.0) == 1.0`.
 #[test]
-fn ffi_handle_crosses_airlock_three_engine() {
+fn ffi_handle_crosses_spawn_arg() {
     assert_golden_out(
         "extern \"libm.so.6\":\n    fn cos(x: float) -> float\nfn use_fn(g: fn(float) -> float):\n    print(g(0.0))\nf := cos\nparallel:\n    spawn use_fn(f)\n",
         "1.0\n",
@@ -646,10 +643,10 @@ fn enum_no_collision_construct_in_importing_module() {
     assert_eq!(out, "1\n");
 }
 
-/// A spawned task constructs an imported struct AND a value crosses a Channel (cross-airlock,
-/// data-not-time): the run must produce `7`.
+/// A spawned task constructs an imported struct AND a value crosses a Channel (data-not-time):
+/// the run must produce `7`.
 #[test]
-fn imported_struct_across_airlock_three_engine() {
+fn imported_struct_crosses_channel_from_task() {
     let files = [
         ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
         (

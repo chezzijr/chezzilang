@@ -1582,14 +1582,12 @@ main()
     assert_mc_parity(src, "len 100000 first 0 last 99999\n");
 }
 
-/// Golden: `examples/airlock_cycle.chz` — a SELF-REFERENTIAL sendable now ROUND-TRIPS across the
-/// airlock (`spawn` arg / `Channel.send` / `Shared`) via identity-preserving container serialization,
-/// and a wide-acyclic sendable still crosses fine (the depth cap stays the acyclic-nesting backstop).
-/// All sections use LOCAL self-referential values; since M3.4 they reach the task by handle.
+/// Golden: `examples/crossing_cycle.chz`: a SELF-REFERENTIAL value reaches a task (`spawn` arg /
+/// `Channel.send` / `Shared`) by handle (M3.4), and so does a wide acyclic list.
 #[test]
-fn golden_airlock_cycle_chz_matches_expected() {
-    let src = include_str!("../../../examples/airlock_cycle.chz");
-    let expected = include_str!("../../../examples/airlock_cycle.expected");
+fn golden_crossing_cycle_chz_matches_expected() {
+    let src = include_str!("../../../examples/crossing_cycle.chz");
+    let expected = include_str!("../../../examples/crossing_cycle.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }

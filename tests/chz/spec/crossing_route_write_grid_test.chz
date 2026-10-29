@@ -1,6 +1,5 @@
-# TICKET-179 -- D4 crossing grid. Every route a value takes into a task x every write op, with the
-# expected outcome derived from one question: can the parent observe this value after the join?
-# "ok" = the write runs; "fault" = D4's runtime fault. M3.4: a spawn passes its values by handle, so
+# TICKET-179: the crossing grid. Every route a value takes into a task x every write op. "ok" = the
+# write runs, "fault" = the write faults. M3.4: a spawn passes its values by handle, so
 # every spawn cell runs and the parent sees the write (Go `m34go/grid/main.go`, go1.27.0:
 # `spawn_arg_named ok,ok,ok,ok,ok [9 9] 9`, `spawn_arg_copy ok,ok,ok,ok,ok [1] 1`,
 # `spawn_arg_call_result ok,ok,ok,ok,ok [9 9]`, `spawn_receiver_named [1 9]`,

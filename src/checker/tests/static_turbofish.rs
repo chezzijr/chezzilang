@@ -1898,7 +1898,7 @@ fn receiver_write_table_matches_observed_behavior() {
 }
 
 /// TICKET-179 grid 2, compile-time cells (the runtime cells are
-/// `tests/chz/spec/airlock_crossing_grid_test.chz`). A write the parent could observe and that every
+/// `tests/chz/spec/crossing_route_write_grid_test.chz`). A write the parent could observe and that every
 /// path reaches is rejected; a read, and a write only some paths reach (left to layer C), are ok.
 #[test]
 fn airlock_crossing_grid_compile_cells() {

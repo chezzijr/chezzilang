@@ -1,10 +1,8 @@
-# TICKET-137 (owner decision D2) — a closure received from another task reads the module globals of
-# the task that RUNS it. The airlock must not install the sender's value into the receiver's copy,
-# and must not replace the receiver's slot object (which detaches its aliases).
-# M3.1 (Go model): every task reads and writes the run's one copy of each module global, so the
-# sending task's `g.push(2)`/`w.push(2)` below lands, the received closure reads it, and the
-# receiver's alias is the same object. Goldens: the equivalent Go program (go1.27.0); the running
-# generator row follows CPython (`ValueError: generator already executing`).
+# TICKET-137: a closure received from another task reads the run's module globals. M3.1 (Go
+# model): every task reads and writes the run's one copy of each module global, so the sending
+# task's `g.push(2)`/`w.push(2)` below lands, the received closure reads it, and the receiver's
+# alias is the same object. Goldens: the equivalent Go program (go1.27.0); the running generator
+# row follows CPython (`ValueError: generator already executing`).
 import Iterator from std.iter
 import std.concurrency
 import std.time

@@ -342,7 +342,7 @@ These parts exist only because the heaps are separate. A shared heap deletes the
 | Private box heaps for `Shared` / `RwShared` | `src/vm/core.rs:821-905`, `src/vm/boxctx.rs:186-338` |
 | Checker sendability and D4 layer A | `src/checker/op_sendable.rs:149-160`, `src/checker/writes.rs:78-136`, `src/checker/fresh.rs:90` |
 
-The `tests/chz/spec/airlock_*` grids pin the copy semantics. A shared heap breaks them by design.
+The `tests/chz/spec/airlock_*` grids (since M4b `tests/chz/spec/crossing_*`) pinned the copy semantics. A shared heap breaks them by design.
 Each grid needs a new golden from the Go program of the same shape, not a deletion.
 
 ### 5.5 What the user sees

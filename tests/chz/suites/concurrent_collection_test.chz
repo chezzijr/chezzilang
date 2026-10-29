@@ -1,15 +1,15 @@
 # Tests for std.concurrency.collection — ConcurrentMap[K, V] + ConcurrentCounter[K] over RwShared.
 # Covers single-thread semantics AND the load-bearing concurrency cruxes: the struct stays a SHARED
-# handle across the spawn/parallel airlock (NOT deep-copied), and compound read-modify-write mutators
+# handle in a spawned task (the parent's object, by handle), and compound read-modify-write mutators
 # (increment/add/get_or_insert) are race-free via a SINGLE exclusive write lock.
 import std.concurrency
 import std.concurrency.collection
 
-# CRUX GUARD — the wrapper struct must cross the airlock as a shared Arc handle, not a deep copy.
+# CRUX GUARD — a spawned task must hold the parent's wrapper struct by handle.
 # 1 pre-bind increment + 100 spawned increments on the SAME key under `parallel:` must total exactly
 # 101, observed by the PARENT after the join. If the struct were deep-copied, the parent would see 1.
 # If the RMW raced (get-then-set instead of one write closure), it would be < 101.
-test fn airlock_shares_handle():
+test fn spawned_task_shares_the_wrapper_handle():
     ctr: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(concurrency.RwShared({}))
     ctr.increment("k")
     parallel:

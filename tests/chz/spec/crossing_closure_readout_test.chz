@@ -1,4 +1,4 @@
-# TICKET-285 — D4 layer C: a closure read out of a route. Grid: closure x readout route x capture
+# TICKET-285: a closure read out of a route, and a write through its captures. Grid: closure x readout route x capture
 # kind. Every route a closure can be read out of is one `route` row: the box routes (`Shared.get`,
 # `Shared.read`, `RwShared.get`, `RwShared.read`, the ConcurrentList / ConcurrentMap read views and
 # `remove`), the Task route and the two handle routes (Channel, Atomic). M3.1: a module global is

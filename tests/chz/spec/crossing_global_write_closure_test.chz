@@ -1,8 +1,7 @@
-# TICKET-137 (owner decision D2) — supersedes TICKET-097/TICKET-051's install: a crossing carries
-# captures only, and a received closure reads the module globals the RUNNING task reads.
-# M3.1 (Go model): every task reads and writes the run's one copy of each module global, so a
-# spawned task's write (`n = 100`, `xs = [1, 2]`, `ys.push(2)`) lands and every received closure
-# reads it. Goldens: the equivalent Go program (go1.27.0): 100 / 2.
+# A spawned task writes a module global (`n = 100`, `xs = [1, 2]`, `ys.push(2)`), and every closure
+# it sends reads the run's one copy of the global (M3.1, Go model). Goldens: the equivalent Go
+# program (go1.27.0): 100 / 2. History: TICKET-097/051 (install) and TICKET-137 (D2, per-task
+# copies) gave other answers; M3 deleted that copy model.
 import std.concurrency
 
 n: int = 1

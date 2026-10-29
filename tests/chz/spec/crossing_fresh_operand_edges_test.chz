@@ -1,4 +1,4 @@
-# TICKET-179 -- edges of the old fresh spawn operand rule (D4). M3.4: a spawn passes every operand
+# TICKET-179: fresh and named spawn operands at their edges. M3.4: a spawn passes every operand
 # by handle, fresh or named, at any depth, so each write lands on the parent's object (Go
 # `m34go/edges/main.go`, go1.27.0: `fresh_literal_holding_parent_list ok,ok [1 9]`,
 # `keyword_named ok [1 9]`, `generator_captured 5 false`).

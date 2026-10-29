@@ -1,6 +1,6 @@
-# TICKET-179 — D4 airlock false faults: a value no parent binding can reach (a fresh spawn
-# argument, a `merge` result, a generator's own frame-local list) is not a write the parent could
-# observe, so it must not fault. Go/Python run each of these.
+# TICKET-179: a task writes a value that no parent binding reaches (a fresh spawn argument, a
+# `merge` result, a generator's own frame-local list), and the write runs. Go/Python run each of
+# these.
 
 import Iterator from std.iter
 fn t179_work(acc: List[int], out: Channel[str]):

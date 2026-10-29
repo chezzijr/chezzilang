@@ -1,7 +1,6 @@
-# TICKET-169 — D4 layer C silent table: every shape below must NOT fault under the new mark-and-
-# check rule. Read of a copy, a task's own object, a shallow `.copy()`, and every handle-mediated
-# write stay silent. M3.4: a spawn makes no copy, so no shape faults; the writes that used to fault
-# land (`airlock_task_local_fault_test.chz`).
+# TICKET-169 rows: a task reads a captured value, writes its own object or a `.copy()`, or writes
+# through a handle (Shared, RwShared, Atomic, Channel, a listener), and no row faults. The writes
+# to a parent's value land too (`crossing_task_write_lands_test.chz`).
 import std.concurrency
 import std.net
 
@@ -183,7 +182,7 @@ test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
 # A tuple (xs, f), f capturing xs, sent over a Channel: M3.2 moves the tuple itself, so neither
 # f()'s push nor the direct write to the tuple's own xs faults, and both land on the one list (Go
 # `tuple.go`, M3.2 report: `xs_first 3`). The mirror order (f, xs) is in
-# airlock_task_local_fault_test.chz's a_closure_visited_first_in_one_channel_send_shares_the_capture.
+# crossing_task_write_lands_test.chz's a_closure_visited_first_in_one_channel_send_shares_the_capture.
 test fn a_list_visited_first_in_one_channel_send_shares_the_capture():
     xs := [1]
     f := fn() -> None: xs.push(2)

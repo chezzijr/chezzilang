@@ -110,7 +110,7 @@ fn spawn_callee_rebinding_its_param_before_writing_is_not_a_task_copy_write() {
 /// TICKET-189 G1: the compile-time verdict for every non-generator spawn route × argument source ×
 /// callee body. M3.4: a spawn passes its values by handle (Go `go w(xs, out)`), so layer A is gone
 /// and every cell checks clean; the run-time answers are G2 in
-/// `tests/chz/spec/airlock_crossing_policy_grid_test.chz`.
+/// `tests/chz/spec/crossing_operand_grid_test.chz`.
 #[test]
 fn airlock_crossing_policy_grid_compile_cells() {
     let prelude = "import std.concurrency\n\

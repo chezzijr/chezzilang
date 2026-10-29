@@ -390,7 +390,7 @@ fn no_warn_on_a_clean_program() {
 // a task holds the parent's values by handle, so the write lands and every program below checks
 // clean (Go compiles each shape: `go func() { xs = append(xs, 1) }()`). The per-test notes keep the
 // measurements of the deleted rule for each shape; the run-time answers are the `tests/chz/spec/`
-// rewrites (`airlock_task_local_fault_test.chz`, `airlock_crossing_grid_test.chz`).
+// rewrites (`crossing_task_write_lands_test.chz`, `crossing_route_write_grid_test.chz`).
 
 /// Each direct task-body write form (the old D4 rule 1 rows).
 #[test]
@@ -757,7 +757,7 @@ fn d4_rule3_declines() {
 
 /// TICKET-137 (W14-25) repro shape: a global pushed inside a task, a closure over it sent out, both
 /// read after the join. M3.1: the global is the run's one copy, so the program is legal and prints
-/// `[1, 2] [1, 2]` (`airlock_received_closure_globals_test.chz`; Go and CPython agree).
+/// `[1, 2] [1, 2]` (`crossing_received_closure_globals_test.chz`; Go and CPython agree).
 #[test]
 fn a_module_global_written_in_a_task_is_legal_where_a_received_closure_reads_it() {
     ok(

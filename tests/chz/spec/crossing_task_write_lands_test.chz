@@ -1,4 +1,4 @@
-# TICKET-169 — D4 layer C made a spawned task's write to an airlock copy fault. M3.1: a module
+# A spawned task's write lands on the parent's value (the TICKET-169 rows). M3.1: a module
 # global is the run's one copy; M3.4: a captured local, a spawn arg and an Executor job's capture
 # are the parent's values by handle (Go model). So every row asserts the write LANDS on the parent's
 # value (Go `m34go/tasklocal/main.go`, go1.27.0: `captured_scalar 5`, `captured_list_push [1 2]`,
@@ -342,7 +342,7 @@ test fn a_handle_holding_global_struct_field_write_in_a_task_lands():
 
 # A tuple (f, xs), f capturing xs, sent over a Channel: M3.2 moves the tuple itself, so both
 # f()'s push and the direct write to the tuple's own xs land on the one list (Go `tuple.go`, M3.2
-# report: `f_first 3`). The mirror order (xs, f) is in airlock_task_local_silent_test.chz.
+# report: `f_first 3`). The mirror order (xs, f) is in crossing_no_fault_test.chz.
 test fn a_closure_visited_first_in_one_channel_send_shares_the_capture():
     xs := [1]
     f := fn() -> None: xs.push(2)

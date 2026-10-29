@@ -1,24 +1,21 @@
-# TICKET-189 -- the crossing-policy grid (D4, docs/design/adr-d4-airlock.md): "can the parent observe
-# this operand after the join?" is decided ONCE per bound slot by the checker and read by every
-# non-generator crossing route.
+# TICKET-189: the crossing operand grid. A task pushes to a list it received; every row checks that
+# the push lands on the parent's list.
 #
 # Axes: route x argument source (explicit, keyword, default fill, variadic) x operand shape (fresh
 # literal, .copy(), named, call result, fresh holding a named) x callee body (writes, conditional).
-# Routes (every consumer of the fact, ticket `## Single source` item 1b): spawn f(), spawn obj.m(),
-# spawn lib.f(), spawn lib.K.f(), spawn value(), spawn: block, Executor submit (dropped or read),
-# Channel receive, Shared/RwShared get, Atomic load, Shared store, module global (the spawn
-# snapshot), closure capture. `Executor.map` does not exist (`std/concurrency.chz`). A hand-off read
-# (Channel/Shared/RwShared/Atomic) is never marked, so those routes have no fresh-operand axis.
-# Generator rows belong to TICKET-190.
+# Routes: spawn f(), spawn obj.m(), spawn lib.f(), spawn lib.K.f(), spawn value(), spawn: block,
+# Executor submit (dropped or read), Channel receive, Shared/RwShared get, Atomic load, Shared store,
+# module global, closure capture. `Executor.map` does not exist (`std/concurrency.chz`). A hand-off
+# read (Channel/Shared/RwShared/Atomic) has no fresh-operand axis. Generator rows are in
+# `crossing_generator_route_test.chz` (TICKET-190).
 #
-# Each row sends "ok <len>" when the task's push succeeded, or "fault" when the task wrote its copy
-# of parent data (layer C). M3.4: a spawn, a `spawn:` capture and an Executor job hold the parent's
-# values by handle, so no row faults and the parent sees the push (Go `m34go/policy/main.go`,
-# go1.27.0: every named row `ok 2 [1 3]`, `r28_receiver_named ok 2 2`,
-# `r29b_ctor_holding_named ok 2 [1 2]`, `r30_receiver_call_result ok 2`).
+# Each row sends "ok <len>" when the task's push succeeded, or "fault" when it faulted. M3.4: a
+# spawn, a `spawn:` capture and an Executor job hold the parent's values by handle, so no row faults
+# and the parent sees the push (Go `m34go/policy/main.go`, go1.27.0: every named row `ok 2 [1 3]`,
+# `r28_receiver_named ok 2 2`, `r29b_ctor_holding_named ok 2 [1 2]`, `r30_receiver_call_result ok 2`).
 
 import std.concurrency
-import airlock_crossing_policy_lib as lib
+import crossing_operand_lib as lib
 
 # A handle carries a `T!E`; these tests read a job that did not fault.
 fn must[T](r: T!) -> T:

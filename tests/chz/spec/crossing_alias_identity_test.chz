@@ -1,6 +1,6 @@
-# TICKET-100 — the airlock's cross-heap copy is identity-preserving: one source object stays one
-# object per crossing, for containers as well as cells (`b := a` inside a task means the same thing it
-# means outside one). `outer := [inner, inner]` holds ONE list reached twice.
+# TICKET-100: two aliases of one object stay one object in a task (`b := a` inside a task means the
+# same thing it means outside one). `outer := [inner, inner]` holds ONE list reached twice.
+# M3.4 (Go model) supersedes TICKET-169's write half: a spawned task holds the parent's object by
 # M3.4 (Go model) supersedes TICKET-169's write half: a spawned task holds the parent's object by
 # handle, so its write through EITHER alias lands and the other alias sees it. Go
 # (`m34go/aliasid/main.go`, go1.27.0): `container_alias [1 99] [1 99]`, `struct_alias 9 9`.

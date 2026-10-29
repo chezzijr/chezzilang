@@ -12,12 +12,12 @@ test fn native_crosses_channel():
     f := ch.recv()
     assert f(25.0) == 5.0
 
-# Store a native fn in a Shared box (the ctor value-store airlock), read it back, call it.
+# Store a native fn in a Shared box, read it back, call it.
 test fn native_crosses_shared():
     box := Shared(math.sqrt)
     assert box.get()(9.0) == 3.0
 
-# A native fn passed as a spawn fn-ARG crosses the wire path; the task writes the result into a Shared.
+# A native fn passed as a spawn fn-ARG; the task writes the result into a Shared.
 test fn native_crosses_spawn_arg():
     out := Shared(0.0)
     fn compute(g: fn(float) -> float):
@@ -26,7 +26,7 @@ test fn native_crosses_spawn_arg():
         spawn compute(math.sqrt)
     assert out.get() == 4.0
 
-# A native captured by a `spawn:` BLOCK crosses too — same rebuilt `Obj::Native` on the other side.
+# A native captured by a `spawn:` BLOCK: the task calls the same fn value.
 test fn native_crosses_spawn_block():
     out := Shared(0.0)
     sq := math.sqrt

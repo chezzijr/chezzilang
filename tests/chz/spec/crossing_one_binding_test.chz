@@ -1,12 +1,6 @@
-# W7-4 — a captured local is ONE BINDING, so two sibling closures over it must still share ONE cell
-# after crossing the airlock. `docs/reference/syntax/` says a write through a capture is visible "across
-# sibling closures", and a crossing snapshot-copies the binding into ONE independent per-task cell —
-# per BINDING, not per reference. The serializer used to re-serialize an off-DFS-stack cell as a fresh
-# `WireValue::Cell`, so `d.inc()` and `d.get()` landed on TWO cells and the shared binding silently
-# split (`d.get()` read 1 where 2 was written).
-#
-# TICKET-100: a DATA DAG alias (`pair := [xs, xs]`) now crosses as ONE object too, same as a cell —
-# both a data alias and a cell alias mean the same source object stays one object per crossing.
+# W7-4: a captured local is ONE BINDING, so two sibling closures over it share ONE cell in every
+# task they reach. `docs/reference/syntax/` says a write through a capture is visible "across
+# sibling closures". TICKET-100: a DATA DAG alias (`pair := [xs, xs]`) is one object in a task too.
 # M3.4: a spawn, a `spawn:` capture and an Executor job hold the parent's closures and data by
 # handle, so a task's write through a capture lands on the parent's one binding (Go
 # `m34go/binding/main.go`, go1.27.0: `spawn_named_args 1`, `spawn_block_two_captures 1`,

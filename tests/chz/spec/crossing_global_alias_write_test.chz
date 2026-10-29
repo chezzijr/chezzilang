@@ -1,22 +1,13 @@
-# TICKET-137 (owner decision D2) — supersedes TICKET-105/TICKET-116's carry-and-install. A
-# closure received from another task reads the module globals of the task that RUNS it: each task
-# owns a deep copy of every module global, and a crossing carries captures only.
-# TICKET-169 (D4 layer C) supersedes the write half: a sender's write to a global (directly,
-# through a local alias, a callee param alias, a spawn-adopted alias, or an element alias) now
-# FAULTS instead of silently landing in the sender's own copy. Since the write never lands, the
-# receiver's closure still reads its own (unwritten) value — D2's isolation still holds, now
-# enforced at the write instead of by a silent drop. CPython threading and Go see one shared
-# object; the divergence is the deliberate "module globals isolate per task, and a task may not
-# write one" rule (docs/reference/concurrency/) — use `Shared`/`Channel` to share.
-# M3.1 (Go model): a module global is the run's one copy. A task's write to it, through the
-# global or a task-local alias, LANDS, and a received closure reads the live global. The rows
-# below that write through a task-local alias assert that (goldens: the equivalent Go program,
-# go1.27.0). M3.4: an alias the PARENT made and the task captured is the same object too, so a
-# write through it lands (Go `m34go/aliasroot/main.go`: `element_alias [1 2]`,
-# `whole_global_alias [1 2]`, `struct_in_map_alias 5`, `spawn_adopted_alias [1 2]`,
-# `spawn_arg_alias [1 2]`, `two_hop [1 2]`).
-# TICKET-111 (docs/contributing/gaps.md W12-5) — a task-local alias of a global is the SAME object
-# as the global (adoption), not a second copy: since M3.1 both denote the run's one object.
+# A write in a task through an alias of a module global lands on the run's one copy of the global,
+# and a closure that another task receives reads the live global (M3.1, Go model). The aliases: a
+# task-local alias, a callee param alias, a spawn-adopted alias, an element alias, and an alias the
+# PARENT made and the task captured (M3.4). Goldens: the equivalent Go program, go1.27.0
+# (`m34go/aliasroot/main.go`: `element_alias [1 2]`, `whole_global_alias [1 2]`,
+# `struct_in_map_alias 5`, `spawn_adopted_alias [1 2]`, `spawn_arg_alias [1 2]`, `two_hop [1 2]`).
+# History: TICKET-105/116 (carry-and-install), TICKET-137 (D2, per-task global copies) and
+# TICKET-169 (D4 layer C, a fault on the write) gave other answers; M3 deleted that copy model.
+# TICKET-111 (docs/contributing/gaps.md W12-5): a task-local alias of a global is the SAME object
+# as the global.
 import Iterator from std.iter
 import std.concurrency
 

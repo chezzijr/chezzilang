@@ -1,11 +1,7 @@
-# examples/airlock_cycle.chz — a SELF-REFERENTIAL value crossing the concurrency airlock (a `spawn`
-# arg, a `Channel.send`, a `Shared(...)`). The airlock serializer (`to_wire`/`from_wire`) is now
-# identity-preserving for every container arm (struct/list/map/set/tuple/enum/iter), exactly
-# as it already was for closures/cells: a self-referential value earns a per-serialization id + a
-# back-reference, so `a -> b -> a` ROUND-TRIPS across the airlock byte-identically
-# instead of overflowing the host stack. The depth cap stays only as the backstop for a
-# genuinely-unbounded ACYCLIC nest (see section 4's shallow-but-wide control). Sections 1-3 below cross
-# a LOCAL self-referential value → the `to_wire` path.
+# examples/crossing_cycle.chz: a SELF-REFERENTIAL value handed to another task (a `spawn` arg, a
+# `Channel.send`, a `Shared(...)`). A task holds the value by handle (M3.4, Go model), so
+# `a -> b -> a` reaches the task as the same object and nothing walks the cycle. Section 4 hands a
+# wide, acyclic list (100k elements) to a task.
 
 import Shared from std.concurrency
 
@@ -60,8 +56,7 @@ match shared_r:
     ?_:  print("shared ok: {shared_r_v}")
     !e: print("shared caught: {e.message()}")
 
-# 4) a wide, ACYCLIC sendable (100k shallow siblings, structural depth ~2) still crosses fine — the
-# 10_000 depth cap counts nesting LEVELS, not siblings, so large-but-shallow data never false-trips.
+# 4) a wide, ACYCLIC list (100k shallow siblings) reaches a task as one handle.
 wide_v := ""
 wide := recover:
     xs := [0]
