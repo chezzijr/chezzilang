@@ -614,10 +614,10 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
 }
 
 /// FLIPPED (item A, was `airlock_cyclic_struct_recoverable_both_engines`) — a SELF-REFERENTIAL value
-/// crossing the concurrency airlock (`spawn` arg) now ROUND-TRIPS via identity-preserving container
-/// serialization (`WireValue::Backref` on every container arm), instead of tripping the depth cap. The
-/// spawned task reads `a.val == 1` (prints `got 1`) and the recover returns `done`; byte-identical on
-/// the serial and M:N engines (both copy the local cyclic value via `deep_clone`→`to_wire`).
+/// crossing the concurrency airlock (`spawn` arg) now reaches the task (once via the deleted wire
+/// form's back-references, since M3.4 by handle), instead of tripping the depth cap. The
+/// spawned task reads `a.val == 1` (prints `got 1`) and the recover returns `done`; byte-identical
+/// on every engine.
 #[test]
 fn airlock_cyclic_struct_crosses_both_engines() {
     let src = "\
@@ -643,8 +643,8 @@ main()
 }
 
 /// FLIPPED (item A, was `airlock_cyclic_via_channel_send_and_shared_recoverable`) — the same self-
-/// referential value crossing via `Channel.send` and `Shared(...)` (both route through `to_wire_at`)
-/// also now ROUND-TRIPS. Regression lock on the other airlock entry points beyond a bare `spawn` arg.
+/// referential value crossing via `Channel.send` and `Shared(...)` (M3.2/M3.3: by handle)
+/// also gets through. Regression lock on the other airlock entry points beyond a bare `spawn` arg.
 #[test]
 fn airlock_cyclic_via_channel_send_and_shared_crosses() {
     let chan_src = "\
@@ -687,10 +687,9 @@ main()
 }
 
 /// A nested (local) recursive `fn` crossing the airlock has a self-referential capture graph (the
-/// letrec self-cell: `Closure h -> captured[Cell] -> Cell.inner = h`). Identity-preserving airlock
-/// serialization (`WireValue::Backref`, scoped to the Cell/Closure arms) ties that knot back together
-/// on the far heap, so the recursive fn is now SENDABLE and computes correctly — `fact(5) == 120`,
-/// byte-identical (serial `deep_clone`→`to_wire`, M:N spawn-block `to_wire`/`to_snap`).
+/// letrec self-cell: `Closure h -> captured[Cell] -> Cell.inner = h`). The task gets the
+/// closure by handle (M3.4; the deleted wire form back-referenced the knot), so the recursive fn
+/// computes correctly — `fact(5) == 120`.
 #[test]
 fn airlock_recursive_local_fn_round_trips_both_engines() {
     let src = "\
@@ -1586,7 +1585,7 @@ main()
 /// Golden: `examples/airlock_cycle.chz` — a SELF-REFERENTIAL sendable now ROUND-TRIPS across the
 /// airlock (`spawn` arg / `Channel.send` / `Shared`) via identity-preserving container serialization,
 /// and a wide-acyclic sendable still crosses fine (the depth cap stays the acyclic-nesting backstop).
-/// All sections use LOCAL self-referential values (the `to_wire` path), so the output is byte-identical.
+/// All sections use LOCAL self-referential values; since M3.4 they reach the task by handle.
 #[test]
 fn golden_airlock_cycle_chz_matches_expected() {
     let src = include_str!("../../../examples/airlock_cycle.chz");

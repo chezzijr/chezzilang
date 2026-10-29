@@ -1281,3 +1281,91 @@ fn an_adopted_exit_keeps_its_output_at_every_depth() {
     }
     assert!(red.is_empty(), "red cells: {red:?}");
 }
+
+/// M3.5 fix round 1 — a value with TWO self edges renders fast on every render path: a depth fault
+/// in one child stops the walk (it does not render each sibling to the depth limit, 2^depth).
+/// Grid: shape {struct, list, map} x {unboxed, boxed} x path {print, `str()`, an unhandled `!e`
+/// fault}, plus the `&self` `no field` paths of `get_field` / `set_field`. A set cannot hold
+/// itself (a `Set` is not `Hashable`). Goldens: BASE 95aa3642, except a box, which prints its live
+/// value (M3.5 by design). Each cell runs under a ten-second watchdog.
+#[test]
+fn a_value_with_two_self_edges_renders_fast_on_every_path() {
+    use std::sync::mpsc;
+    fn watch<T: Send + 'static>(what: String, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(VM_STACK_BYTES)
+            .spawn(move || {
+                let _ = tx.send(f());
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{what}: no render in 10 s"))
+    }
+    const HDR: &str = "import Shared from std.concurrency\nstruct N:\n    id: int\n    kids: List[Any]\n    fn message(self) -> str:\n        return \"m\"\nstruct E:\n    v: Any\n    fn message(self) -> str:\n        return \"e\"\nfn mk_s() -> N:\n    n := N(1, [])\n    n.kids.push(n)\n    n.kids.push(n)\n    return n\nfn mk_l() -> List[Any]:\n    xs: List[Any] = []\n    xs.push(xs)\n    xs.push(xs)\n    return xs\nfn mk_m() -> Map[str, Any]:\n    m: Map[str, Any] = {}\n    m[\"a\"] = m\n    m[\"b\"] = m\n    return m\nfn fail(v: Any) -> int!E:\n    return !E(v)\n";
+    let cells = [
+        ("mk_s()", "N(id=1, kids=[..., ...])", "<...>"),
+        ("mk_l()", "[[...], [...]]", "<...>"),
+        ("mk_m()", "{'a': {...}, 'b': {...}}", "<...>"),
+        (
+            "Shared(mk_s())",
+            "Shared(N(id=1, kids=[..., ...]))",
+            "E(v=Shared(N(id=1, kids=[..., ...])))",
+        ),
+        (
+            "Shared(mk_l())",
+            "Shared([[...], [...]])",
+            "E(v=Shared([[...], [...]]))",
+        ),
+        (
+            "Shared(mk_m())",
+            "Shared({'a': {...}, 'b': {...}})",
+            "E(v=Shared({'a': {...}, 'b': {...}}))",
+        ),
+    ];
+    for (value, shown, fault) in cells {
+        let src = format!("{HDR}v: Any = {value}\nprint(v)\nprint(str(v))\nx := fail(v)?\n");
+        let got = watch(value.to_string(), move || {
+            run_capture(&src).map_err(|e| e.message)
+        });
+        let err = got.expect_err("the `?` faults");
+        assert!(
+            err.ends_with(&format!("unhandled error: {fault}")),
+            "{value}: fault text {err:?}"
+        );
+        let out = watch(format!("{value} print"), {
+            let src = format!("{HDR}v: Any = {value}\nprint(v)\nprint(str(v))\n");
+            move || run_capture(&src).expect("prints")
+        });
+        assert_eq!(out, format!("{shown}\n{shown}\n"), "{value}: print / str");
+    }
+    // The `&self` `no field` paths: a struct whose one field is a list holding it twice.
+    for set in [false, true] {
+        let msg = watch(format!("no field set={set}"), move || {
+            let mut vm = Vm::new(Arc::new(empty_program()));
+            let l = Value::obj(
+                vm.heap
+                    .alloc(Obj::List(vec![Value::nil(), Value::nil()].into())),
+            );
+            let s = Value::obj(vm.heap.alloc(Obj::Struct {
+                tid: crate::base::op::TID_NONE,
+                fields: Fields::from_vec(vec![l]),
+            }));
+            let Obj::List(items) = vm.heap.get(l.as_obj().unwrap()) else {
+                unreachable!()
+            };
+            items.set(0, s);
+            items.set(1, s);
+            vm.push(s);
+            if set {
+                vm.push(Value::int(1));
+                vm.set_field("zz", crate::base::op::NO_IC, Span::default())
+            } else {
+                vm.get_field("zz", crate::base::op::NO_IC, Span::default())
+            }
+            .expect_err("no such field")
+            .message
+        });
+        assert_eq!(msg, "no field 'zz' on <...>", "set={set}");
+    }
+}

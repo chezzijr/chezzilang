@@ -1236,7 +1236,7 @@ fn builtin_value_equality_both_engines() {
 }
 
 /// Bug 3: all four first-class builtins are SENDABLE — a builtin bound to a local and CAPTURED
-/// into a spawned task crosses the airlock (`WireValue::Builtin`) and runs. Byte-identical
+/// into a spawned task reaches the task and runs. Byte-identical
 /// on the VM and the M:N engine.
 #[test]
 fn builtin_value_sendable_across_airlock_both_engines() {
@@ -1250,8 +1250,8 @@ fn builtin_value_sendable_across_airlock_both_engines() {
 /// callee reaches `prepare_worker`'s `PendingCall::Call` arm, which only handled Closure/Func —
 /// a raw `Obj::Builtin` hit the reject `_` on the M:N engine only (`spawn: 'function' is not an
 /// isolable task`) while serial/interp dispatched it fine: a three-engine parity divergence on a
-/// checker-accepted program. Fixed by `Lowered::Value` (TICKET-226: every non-closure callable
-/// crosses by value through `to_wire`, classified by `Vm::callable`).
+/// checker-accepted program. Fixed by `Lowered::Value` (TICKET-226; since M3.4 the task gets the
+/// callable by handle, classified by `Vm::callable`).
 #[test]
 fn spawn_builtin_fn_value_as_call_callee_both_engines() {
     let src = "import std.concurrency\nfn main():\n    g := print\n    parallel:\n        spawn g(\"from-task\")\nmain()\n";

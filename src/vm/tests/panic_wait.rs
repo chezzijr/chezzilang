@@ -729,9 +729,8 @@ fn str_method_dispatch_does_not_clone_the_receiver() {
     );
 }
 
-/// B3.6: a submitted closure capturing a plain value (`int`) observes it **by value** across the
-/// airlock — exercises the `WireValue::Closure` capture round-trip (not just the shared-`Arc` handle
-/// path the golden's `Channel` capture takes). Auto-drained at program exit; the
+/// B3.6: a submitted closure capturing a plain value (`int`) observes it (M3.4: the job holds the
+/// closure and its cell by handle). Auto-drained at program exit; the
 /// `--parallel` drain reconstructs and runs the closure on the pool.
 #[test]
 fn executor_submitted_closure_captures_by_value() {

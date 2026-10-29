@@ -184,12 +184,10 @@ fn d_no_undercapture_nonrecursive_nested_fn_parity() {
     );
 }
 
-// ===== B3.3 (runtime) — closures / bare funcs cross the spawn/Channel airlock BY VALUE =====
-// The generic `to_wire`/`to_snap` lowering crosses a closure/nested-fn/bare-func as data (its proto
-// + wired captures + home index), never a by-reference `Handle`. A `spawn f()` callee whose captured
-// environment contains a NESTED closure (or is a bare fn) now runs identically,
-// instead of the old "task value can't cross a worker boundary" airlock fault. The checker's
-// Func-non-sendable gate on Channel ELEMENT types is a separate follow-up and still stands.
+// ===== B3.3 (runtime) — closures / bare funcs reach a spawned task or a Channel receiver =====
+// History: B3.3 copied a closure as data at the crossing; since M3.4 a task gets it by handle (the
+// wire form is deleted, M3.5). A `spawn f()` callee whose captured environment contains a NESTED
+// closure (or is a bare fn) runs, as it has since B3.3.
 
 #[test]
 fn closure_as_data_into_spawn_callee_parity() {
@@ -832,9 +830,8 @@ fn genreach_cross_module_clean_member_call_ok_both() {
 
 #[test]
 fn bare_func_crosses_spawn_callee_renders_fn_name_parity() {
-    // A bare top-level fn captured into a spawn callee crosses as a distinct `WireValue::Func` (not a
-    // Closure), so `str()` still renders `<fn NAME>` — identical serial vs M:N. Proves the distinct
-    // Func variant preserves bare-func identity across the airlock.
+    // A bare top-level fn captured into a spawn callee stays an `Obj::Func` (not a Closure), so
+    // `str()` renders `<fn NAME>` in the task (M3.4: the task gets it by handle).
     let src = "\
 fn helper(x: int) -> int:
     return x + 1
@@ -1158,7 +1155,7 @@ main()
 // ----- Regression: snapshot must NOT reuse the airlock deep_clone (its fault/identity-remap modes)
 // A struct/enum key that embeds a cyclic back-edge, a live generator, or an identity-typed
 // (closure/channel/…) sub-value used to be stored BY REFERENCE and worked on a plain serial insert.
-// The first cut routed the snapshot through `deep_clone` (to_wire/from_wire), which FAULTED on the
+// The first cut routed the snapshot through the airlock's deep copy (deleted in M3.5), which FAULTED on the
 // first two and gave the identity sub-value a FRESH handle (so `values_equal`, identity-only for it,
 // never matched → lookup miss). `snapshot_value` copies only mutable structural arms + keeps
 // identity/by-ref sub-values by handle, so all three insert AND resolve again.

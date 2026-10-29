@@ -177,14 +177,14 @@ impl Vm {
                 Obj::ByteArray(b) => Ok(crate::slice::bytearray_repr(&b.to_vec())),
                 Obj::List(_) if open.is_back_edge(h) => Ok("[...]".to_string()),
                 Obj::List(items) => {
-                    let mut parts = Vec::with_capacity(items.len());
+                    // The collect stops at the first fault; `leave` runs on both paths.
                     let opened = open.enter(h);
-                    for v in items {
-                        parts.push(self.display_walk(v, depth + 1, open));
-                    }
+                    let parts = items
+                        .into_iter()
+                        .map(|v| self.display_walk(v, depth + 1, open))
+                        .collect::<Result<Vec<_>, _>>();
                     open.leave(opened);
-                    let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
-                    Ok(format!("[{}]", parts.join(", ")))
+                    Ok(format!("[{}]", parts?.join(", ")))
                 }
                 Obj::Tuple(items) => {
                     let n = items.len();
@@ -196,16 +196,16 @@ impl Vm {
                 }
                 Obj::Map(_) if open.is_back_edge(h) => Ok("{...}".to_string()),
                 Obj::Map(m) => {
-                    let mut parts = Vec::with_capacity(m.entries.len());
                     let opened = open.enter(h);
-                    for (_, k, v) in &m.entries {
-                        parts.push(self.display_walk(k, depth + 1, open).and_then(|k| {
+                    let parts = (&m.entries)
+                        .into_iter()
+                        .map(|(_, k, v)| {
+                            let k = self.display_walk(k, depth + 1, open)?;
                             Ok(format!("{k}: {}", self.display_walk(v, depth + 1, open)?))
-                        }));
-                    }
+                        })
+                        .collect::<Result<Vec<_>, RuntimeError>>();
                     open.leave(opened);
-                    let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
-                    Ok(format!("{{{}}}", parts.join(", ")))
+                    Ok(format!("{{{}}}", parts?.join(", ")))
                 }
                 Obj::Set(s) => {
                     if s.entries.is_empty() {
@@ -213,14 +213,13 @@ impl Vm {
                     } else if open.is_back_edge(h) {
                         Ok("Set(...)".to_string())
                     } else {
-                        let mut parts = Vec::with_capacity(s.entries.len());
                         let opened = open.enter(h);
-                        for (_, v) in &s.entries {
-                            parts.push(self.display_walk(v, depth + 1, open));
-                        }
+                        let parts = (&s.entries)
+                            .into_iter()
+                            .map(|(_, v)| self.display_walk(v, depth + 1, open))
+                            .collect::<Result<Vec<_>, _>>();
                         open.leave(opened);
-                        let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
-                        Ok(format!("{{{}}}", parts.join(", ")))
+                        Ok(format!("{{{}}}", parts?.join(", ")))
                     }
                 }
                 Obj::Struct { .. } if open.is_back_edge(h) => Ok("...".to_string()),
@@ -238,18 +237,17 @@ impl Vm {
                         .get(name)
                         .map(|d| (d.display_name.clone(), d.fields.clone()))
                         .unwrap_or_else(|| (crate::base::words::bare_display(name), Vec::new()));
-                    let mut parts = Vec::with_capacity(vals.len());
                     let opened = open.enter(h);
-                    for (i, v) in vals.iter().enumerate() {
-                        let k = names.get(i).cloned().unwrap_or_else(|| i.to_string());
-                        parts.push(
-                            self.display_walk(*v, depth + 1, open)
-                                .map(|v| format!("{k}={v}")),
-                        );
-                    }
+                    let parts = vals
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let k = names.get(i).cloned().unwrap_or_else(|| i.to_string());
+                            Ok(format!("{k}={}", self.display_walk(*v, depth + 1, open)?))
+                        })
+                        .collect::<Result<Vec<_>, RuntimeError>>();
                     open.leave(opened);
-                    let parts = parts.into_iter().collect::<Result<Vec<_>, _>>()?;
-                    Ok(format!("{display}({})", parts.join(", ")))
+                    Ok(format!("{display}({})", parts?.join(", ")))
                 }
                 Obj::Enum {
                     variant_id,

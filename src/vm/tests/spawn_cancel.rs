@@ -363,7 +363,7 @@ fn atomic_float_ops_two_engine_parity() {
     assert_eq!(run_capture(src).expect("vm"), "3.5\n3.0\n3.0\ntrue\n4.0\n");
 }
 
-/// `cas` on a non-scalar `T` (a list) exercises the VM's lock-held `from_wire`/`values_equal` path
+/// `cas` on a non-scalar `T` (a list) exercises the VM's lock-held `values_equal` path
 /// — the most distinctive Atomic code path. Both engines must agree.
 #[test]
 fn atomic_cas_on_list_two_engine_parity() {

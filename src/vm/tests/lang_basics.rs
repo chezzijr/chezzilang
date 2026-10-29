@@ -1080,8 +1080,8 @@ fn generator_passed_to_spawn_crosses_by_value() {
     assert_eq!(run_capture(src).expect("M:N"), "hi\n");
 }
 
-/// F3 path C: a generator nested inside a LIST spawn arg crosses BY VALUE too (the container recursion
-/// in `to_wire` serializes the leaf generator instead of faulting).
+/// F3 path C: a generator nested inside a LIST spawn arg reaches the task too (M3.4: by handle; the
+/// deleted wire form once faulted on it).
 #[test]
 fn generator_in_list_arg_to_spawn_crosses_by_value() {
     let src = concat!(

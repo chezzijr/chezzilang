@@ -861,7 +861,7 @@ fn atomic_int_from_import_runs_parity() {
 /// Wide-int returns: a value outside ±2^62 (a legal Chezzi int, boxed as Obj::BigInt) must round-trip
 /// through load/exchange/add — the value-producing arms MUST box via make_int, not Value::int (inline-
 /// only: debug-asserts + release-truncates for |n| >= 2^62). 2^62 = 4611686018427387904; INT_MAX_INLINE
-/// = 2^62-1. Mirrors Mutex-backed Atomic, which is correct via from_wire→make_int.
+/// = 2^62-1. Mirrors `Atomic[T]`, which holds the boxed value itself (M3.2).
 #[test]
 fn atomic_int_wide_value_returns_parity() {
     // load a wide stored value
@@ -1178,8 +1178,8 @@ main()";
 
 #[test]
 fn parity_airlock_bigint_and_float_roundtrip() {
-    // A boxed big-int and a boxed float cross the airlock (spawn + Channel) and round-trip on BOTH
-    // engines: `from_wire` re-boxes via `make_int`/`box_float` on the destination heap identically.
+    // A boxed big-int and a boxed float reach a task (spawn + Channel) by handle (M3.2, M3.4) and
+    // print the same values.
     let src = "\
 fn main():
     ci := Channel[int]()

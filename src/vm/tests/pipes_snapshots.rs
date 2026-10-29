@@ -266,8 +266,8 @@ main()
     let _ = std::fs::remove_file(&path);
 }
 
-/// R1 — REGRESSION PIN: a `bytes` / `bytearray` value already crosses the task airlock
-/// (`WireValue::Bytes`/`ByteArray`). R1 must not regress it.
+/// R1 — REGRESSION PIN: a `bytes` / `bytearray` value reaches a task (M3.4: by handle).
+/// R1 must not regress it.
 #[test]
 fn bytes_crosses_the_task_airlock() {
     let src = "\
@@ -1358,8 +1358,8 @@ print(r.read(fn(v: int) -> int: v))
     );
 }
 
-/// TICKET-016 / W8-25 — the module-global closure crossing INTO a `spawn:` (the `Lowered::Closure`
-/// wire form, not `WireValue`) must carry the airlock snapshot.
+/// TICKET-016 / W8-25 — the module-global closure crossing INTO a `spawn:` sees the module global
+/// (M3.1: the run's one copy).
 #[test]
 fn ticket_016_closure_over_module_global_crossing_into_spawn() {
     let src = "\

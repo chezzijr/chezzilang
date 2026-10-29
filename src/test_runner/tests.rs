@@ -913,11 +913,11 @@ fn a_resent_payload_is_one_object_under_the_cap() {
 /// by construction:
 ///
 /// - to isolate the worker, the worker heap must be over the cap while the parent's is under it;
-/// - the worker's copy is built by `from_wire` from the parent's OWN live value, and for a
+/// - (before M3.4) the worker's copy was built by the airlock from the parent's OWN live value, and for a
 ///   low-`Obj`-count payload it is never larger (`push` over-allocates, so the parent's
 ///   `Vec::capacity()` is up to 2× the worker's exact-sized rebuild);
 /// - the only wire path that AMPLIFIES is one that allocates more `Obj`s in the worker than the
-///   parent held — `WireValue::Str` carries no identity id, so N aliases of one interned string
+///   parent held — the wire string carried no identity id, so N aliases of one interned string
 ///   become N fresh `Obj::Str`. Measured: 20 K × 100-char const → parent ~160 KB (PASS), worker
 ///   ~3.4 MB (OVER-MEMORY) at a 1 MB cap. But that amplification IS extra allocations, so
 ///   `since_gc` alone trips it — verified by deleting `spawn_worker`'s `request_collect` flag:
@@ -929,7 +929,7 @@ fn a_resent_payload_is_one_object_under_the_cap() {
 /// this pair can isolate them. `nospawn` is kept, with the same payload, asserting the new truth
 /// — that is what keeps the assertions above honest about WHY they are green. The one shape
 /// where the worker's heap really is over the cap while the parent's is under it — a
-/// non-re-interning `from_wire` amplification behind a NESTED nursery, so the parent's own copy
+/// non-re-interning airlock amplification behind a NESTED nursery, so the parent's own copy
 /// is garbage in the same opcode — was `over_memory_trips_on_an_all_native_task_body`, which M3.4
 /// retired with the copy (`a_spawned_payload_is_the_producers_and_costs_no_heap`). The eager-`Executor` job door has no in-tree witness at all;
 /// its guard is documented at `Vm::spawn_worker` rather than tested.
@@ -1010,7 +1010,7 @@ fn over_memory_trips_on_a_worker_payload_with_no_task_allocation() {
 }
 
 /// W6-10s residual (a) — a task whose ENTIRE body is one native call (`spawn xs.len()`) was once
-/// never sampled, while its heap held the worker's copy of the payload: `from_wire` minted a fresh
+/// never sampled, while its heap held the worker's copy of the payload: the airlock (deleted in M3.5) minted a fresh
 /// `Obj::Str` per element, so 8 K aliases of one interned literal (~130 KB) became ~1.6 MB, over a
 /// 1 MB cap. `Vm::start_task` samples the cap before dispatch since (`Vm::sample_mem_cap`).
 ///
@@ -1065,7 +1065,7 @@ fn a_spawned_payload_is_the_producers_and_costs_no_heap() {
 ///
 /// The accounting was always right (`obj_bytes_shallow` charges `Vec::capacity()`); nobody ever
 /// looked. The fix charges bytes at the three funnels every byte must pass through — `alloc`,
-/// `write`, `to_wire_crossable` — so the shape of the growth stops mattering.
+/// `write` and `charge_bytes` — so the shape of the growth stops mattering.
 ///
 /// `while`, not `for i in range(...)`: `range()` materialises its own `List[int]`, which would
 /// trip the cap by itself and confound what this proves.
@@ -1142,7 +1142,7 @@ fn over_memory_trips_on_inline_scalar_growth() {
 
 /// W6-10 review — the NEGATIVE direction, which matters just as much: a program comfortably
 /// UNDER the cap must still PASS while holding a shared core. A core's payload is ONE `Arc`
-/// allocation, but `from_wire` mints a FRESH `Obj::Shared` alias slot for every crossing, so 50
+/// allocation, but the airlock once minted a FRESH `Obj::Shared` alias slot for every crossing, so 50
 /// receives of the same handle used to charge that payload 50 times and fire a spurious
 /// OVER-MEMORY at ~1/50th of the real footprint — a resource cap whose false-positive rate grows
 /// with fan-out. Bytes are now charged once per CORE per heap.

@@ -182,8 +182,7 @@ fn ffi_handle_send_succeeds() {
     );
 }
 
-/// MUST-PRESERVE: a legit `Shared` handle STILL crosses a `Channel` (maps to `WireValue::Shared`,
-/// `has_handle()` == false) — the guard must not over-reject shared-core handles.
+/// MUST-PRESERVE: a legit `Shared` handle crosses a `Channel` (M3.2: the receiver gets the handle).
 #[test]
 fn positive_shared_handle_crosses_channel() {
     assert_golden_out(
@@ -925,14 +924,13 @@ fn executor_autodrain_skipped_on_os_exit() {
 // ----- Executor.submit crosses a submitted closure BY VALUE (previously diverged: serial vs M:N) -----
 // The since-removed cooperative engine used to queue the submitted closure's own heap Handle
 // (captures shared by reference, bypassing the airlock), while M:N wired it by value — the two
-// disagreed. Now it routes through `wire_callable`/`to_wire`, so the generator airlock enforcement
-// runs and captures isolate correctly.
+// disagreed. M3.4: every engine path hands the job its captures by handle (the wire form is
+// deleted, M3.5).
 
 #[test]
 fn executor_submit_generator_capturing_closure_crosses_by_value() {
-    // F3 path C: a submitted closure captures a LIVE local generator (`it`, Pending). The by-value
-    // airlock (`to_wire`) serializes it and the submitted task drives its own copy. WAS: this
-    // faulted the generator crossing; NOW: it runs, byte-identical.
+    // F3 path C: a submitted closure captures a LIVE local generator (`it`, Pending). M3.4: the job
+    // drives the parent's generator by handle. WAS: this faulted the generator crossing.
     let src = "import Executor from std.concurrency\n\
 fn gen() -> Iterator[int]:
     yield 1

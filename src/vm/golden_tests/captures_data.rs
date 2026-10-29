@@ -449,9 +449,8 @@ main()";
     assert_golden_out(src, "120\n");
 }
 
-/// Identity-preserving airlock (`WireValue::Backref`): a self-recursive nested `fn` crossing the
-/// airlock has a `Closure -> Cell -> Closure` self-cycle; the wire form assigns the Closure/Cell ids
-/// and back-references the self-edge, and `from_wire` ties the knot back (placeholder-alloc → patch).
+/// A self-recursive nested `fn` passed to a task has a `Closure -> Cell -> Closure` self-cycle. The
+/// deleted wire form back-referenced the self-edge; since M3.4 the task gets the closure by handle.
 /// `fact(5) == 120` — previously this rejected ("recursive local fn cannot be sent").
 #[test]
 fn airlock_recursive_local_fn_round_trips_parity() {
@@ -540,8 +539,8 @@ main()";
 
 /// Identity-preserving airlock, DATA path — a self-referential `struct` (`a.next = [b]; b.next = [a]`,
 /// a cycle threaded through struct fields + lists) crosses the airlock as a `spawn` argument and round-
-/// trips (was `maximum structural depth exceeded`). The container arms now earn a `WireValue` id +
-/// `Backref` exactly like `Cell`/`Closure`, so the cycle is preserved instead of overflowing the cap.
+/// trips (was `maximum structural depth exceeded`). The deleted wire form back-referenced the cycle;
+/// since M3.4 the task gets the struct by handle.
 /// `use_it(a)` reads `a.val == 1`.
 #[test]
 fn airlock_self_ref_struct_round_trips_both() {
@@ -661,8 +660,8 @@ main()";
     assert_golden_out(src, "2 2 [1, 2]\n");
 }
 
-/// TICKET-100: `Channel.send` is an ordinary cross-heap STORE (`to_wire_crossable`),
-/// so it now keeps identity like `spawn` args do. `xs := [box, box]` holds ONE struct reached twice;
+/// TICKET-100: `Channel.send` keeps identity like `spawn` args do (M3.2: the receiver
+/// gets the handle). `xs := [box, box]` holds ONE struct reached twice;
 /// after `ch.send(xs)` the receiving task mutates through `ys[0]` and reads the SAME value through
 /// `ys[1]` (`9 9`).
 #[test]
@@ -1040,8 +1039,8 @@ fn vm_bytes_slice_step_parity() {
 
 #[test]
 fn bytes_crosses_channel() {
-    // `bytes` is fully value-typed and sendable — it crosses the --parallel airlock via
-    // WireValue::Bytes and reconstructs as a fresh heap `bytes` (Python b'...' repr preserved).
+    // `bytes` is immutable; the receiver gets the sender's `bytes` by handle (M3.2; Python b'...'
+    // repr preserved).
     // Buffer-then-drain (send before recv) — a holdover from when the since-removed cooperative
     // and interp engines could not block a consumer mid-flight on a live producer (a C5
     // limitation, not bytes-specific).
