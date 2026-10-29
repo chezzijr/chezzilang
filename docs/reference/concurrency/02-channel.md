@@ -112,7 +112,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   sides hold the one object, and a write by either is seen by the other. Measured: `ch.send(xs)`
   then `xs.push(3)` hands the receiver `[1, 2, 3]` (Go: a map sent, then written, is received with
   the write). Two tasks that write one object with no lock race: a race is the user's bug, as in Go.
-- **Channels are themselves sendable** — pass a `Channel` over a `Channel` for reply channels.
+- **A `Channel` is a value like any other** — pass a `Channel` over a `Channel` for reply channels.
 - **`try_recv() -> T?`** is the non-blocking sibling of `recv`: it pops or returns `None` and never
   blocks, faults, or suspends a fiber. `recv -> T` stays primary; reach for `try_recv` to poll
   without guarding on `len()`. On a rendezvous channel, `try_recv` also takes a value handed over by a
@@ -229,6 +229,6 @@ receiver's oldest value instead.
 `trip()` is the one native primitive `std.cancel` needs. It flips a permanent latch on a channel: the
 channel then reports ready (`recv`/`try_recv`/`wait` → `true`) on **every** call thereafter, fanning
 out to any number of receivers — like a passed `timer` deadline, but flipped on demand. (An ordinary
-`Channel[bool]` can't be a fan-out `done()`: it is move-on-send, so a value reaches one receiver
-once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `closed` flag, so a
+`Channel[bool]` can't be a fan-out `done()`: one `recv` takes each value, so a value reaches one
+receiver once.) `trip()` is idempotent and reuses `close()`'s wake fan-out (minus the `closed` flag, so a
 `wait:` arm stays *ready* rather than *skipped*). See `examples/channel_trip.chz`.

@@ -1,5 +1,5 @@
 # std.cancel — cooperative task cancellation & timeouts (a Go `context`-inspired token, adapted to
-# Chezzi). A `Token` is an explicit, sendable handle you thread down a call tree: poll `cancelled()`
+# Chezzi). A `Token` is an explicit handle you thread down a call tree: poll `cancelled()`
 # in CPU loops, race `done()` in a `wait:` for IO loops, and `cancel()` it from anywhere.
 #
 # Written entirely in Chezzi over existing primitives: `Shared[bool]` (the manual-cancel bit),
@@ -50,7 +50,7 @@ import std.time
 import std.concurrency
 
 struct Token:
-    flag: concurrency.Shared[bool]     # cancel bit (sendable, owner-serialized)
+    flag: concurrency.Shared[bool]     # cancel bit (one box, writes under its guard)
     deadline: float        # absolute monotonic() secs; 0.0 == no deadline; checked at POLL TIME
     dl: Channel[bool]      # done(): a timer channel (timeout) or a trip()-able latch channel (manual)
     parent: Token?         # the live derivation link (None for a root); cancelled()/reason() fall back to it

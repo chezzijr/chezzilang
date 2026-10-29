@@ -53,7 +53,7 @@ fn main():
   function, a `recover:` block, the module top level); `defer`'s all-exit-paths guarantee reaps it on
   fall-through, `?`, `break`/`continue`, return, or panic.
 - **Still no floating tasks.** Fire-and-forget work has a definite owner and a definite reap point.
-  A job holds its captures by handle, as a `spawn` does ([§7](07-sendability.md#7-sendability)).
+  A job holds its captures by handle, as a `spawn` does ([§7](07-sendability.md#7-what-crosses-a-task-boundary)).
 - **Submitted work is unstructured *by design*.** Reach for `parallel:` first; use an `Executor` only
   when a task must outlive the block that starts it. An `Executor` runs tasks and reaps them; it does
   not restart them (no supervision policies).

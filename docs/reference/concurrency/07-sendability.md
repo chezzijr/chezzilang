@@ -1,4 +1,4 @@
-## 7. Sendability
+## 7. What crosses a task boundary
 
 **The model — a task shares the parent's values (the Go rule).** A `spawn`ed task, a `spawn:`
 block and an `Executor` job hold the values they get by handle, as a goroutine does: a captured
@@ -33,9 +33,9 @@ main()
 
 `tests/chz/spec/spawn_handle_test.chz` pins the rule against the equivalent Go program.
 
-### What is sendable
+### Every value crosses
 
-Every value is sendable. A **module namespace** is not a value: `spawn take(math)` is the same
+Every value crosses a task boundary, by handle. A **module namespace** is not a value: `spawn take(math)` is the same
 compile error as `take(math)` (`module 'math' is not a value`), as Go rejects `go take(math)`
 (`use of package math not in selector`). The concurrency handles (`Channel`, `Atomic[T]`,
 `AtomicInt`, `Shared[T]`, `RwShared[T]`, `Executor`) and the I/O handles (`Writer`, `Reader`,
@@ -57,9 +57,8 @@ print(c.n)                   # 1
 
 Two tasks that write one value without a join, a `Channel` or a box between them race. The race is
 memory-safe ([§2](01-model.md), "Data races"): a wrong value, a missed map hit or an
-out-of-range task fault, never a VM panic. M3.4 deleted the D4 copy rule (the checker's layer A and
-the "this task's copy" fault on a spawn's values); its record is
-[`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
+out-of-range task fault, never a VM panic. No check error and no run-time fault guards a task's
+write. The old copy rule (D4) is history: [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
 
 ### Generators
 

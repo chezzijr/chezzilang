@@ -1,7 +1,7 @@
 ## 6e. `std.cancel` — cooperative cancellation & timeouts
 
 `std.cancel` is a Go-`context`-inspired **cancellation token**, adapted to Chezzi. A `Token` is an
-explicit, sendable handle you thread down a call tree (like `Channel`/`Shared`): poll `cancelled()` in
+explicit handle you thread down a call tree (like `Channel`/`Shared`): poll `cancelled()` in
 CPU loops, race `done()` in a `wait:` for IO loops, and `cancel()` it from anywhere. It is written
 entirely in Chezzi (`std/cancel.chz`) over existing primitives, plus the one native `Channel.trip()`
 latch ([§6c'](02-channel.md#6c-channeltrip--the-manual-level-trigger-latch)).

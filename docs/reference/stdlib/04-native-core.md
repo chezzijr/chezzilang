@@ -105,7 +105,7 @@ The file seams (`read_file`/`write_file`/`read_bytes`/`write_bytes`) are
 | `buffered` | `(w: Writer, size: int = 8192) -> Writer` | Wrap a writer so writes accumulate in-VM and reach the host in **one** call per `flush` / buffer-full / `close` (Go `bufio.NewWriter`; 8 KiB default). |
 | `open` | `(p: PathLike) -> Reader!` | Open a **read-only** file handle for line/chunk streaming (past the 64 MB whole-file `read_file` cap). A directory is an `!e` **at the call** (Python `IsADirectoryError`), same message as `read_file`. |
 
-**`Writer`: write-only file / stream handle.** A sendable native handle (like `Socket`) for buffered
+**`Writer`: write-only file / stream handle.** A native handle (like `Socket`) for buffered
 output. Two openers, not a mode string (`create` = truncate, `append` = append). Text vs binary is
 **per call**. `stdout()`/`stderr()` route through the *same* sink as `print`/`eprint` (never a raw fd),
 so a `Writer` over stdout captures and streams identically. `buffered(...)` batches host/fd writes.
@@ -134,7 +134,7 @@ so a `Writer` over stdout captures and streams identically. `buffered(...)` batc
   writes from different tasks is not guaranteed. Join and write from one task if you need order.
 - Not supported: seek / random access.
 
-**`Reader`: read-only file handle.** The read twin of `Writer` (same sendable native handle, opened by
+**`Reader`: read-only file handle.** The read twin of `Writer` (same kind of native handle, opened by
 `open(path)`): stream a large file line by line or chunk by chunk (the 64 MB `read_file`/`read_bytes`
 cap does not apply).
 

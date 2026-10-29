@@ -112,8 +112,8 @@ parameter labels, so `g := greet; g(name="Bob")` works):
   (a direct call still fills them), and built-in fn values take no keywords.
 - The checker rewrites the keyword call to positional, so the runtime ABI stays positional.
 
-**Concurrency.** A shared-nothing actor model: `spawn` cheap tasks + a `parallel:`
-structured-concurrency nursery, `Channel[T]` (move-on-send; unbounded `Channel[T]()`, rendezvous
+**Concurrency.** Go's shared-heap model: `spawn` cheap tasks that share one heap + a `parallel:`
+structured-concurrency nursery, `Channel[T]` (a send hands over the value by handle; unbounded `Channel[T]()`, rendezvous
 `Channel[T](0)`, or bounded `Channel[T](cap)` with backpressure; `close`/`for v in ch`/`try_send`/
 `cap`), `Shared[T]`, and `Executor`. `chezzi run` uses the OS-thread engine, the only engine (size its
 worker pool with `--threads=N` / `CHEZZI_THREADS`, `0` = all cores). It is an **M:N work-stealing
@@ -195,7 +195,7 @@ an `Executor` job's captures are the parent's values, by handle. A module global
 copy (M3.1). Two tasks that write one value without a join, a `Channel` or a box (`Shared[T]`)
 between them race, and a race is the program's bug. See `syntax.md` "Closure capture".
 
-**A task's write lands on the parent's value** (M3.4 deleted the D4 copy rule,
+**A task's write lands on the parent's value** (Go; the old copy rule is history,
 [ADR D4](../../design/adr-d4-airlock.md)): a captured local, a captured container, a spawn argument
 and a spawned receiver are the parent's own, so the write is seen after the join, as in Go. No
 compile-time error or run-time fault guards it.

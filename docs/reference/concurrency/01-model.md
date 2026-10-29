@@ -1,11 +1,11 @@
 # Chezzi — Concurrency & Parallelism (`spawn` / `parallel:`)
 
-Chezzi's concurrency is a **shared-nothing actor model** in the lineage of the Erlang/Elixir **BEAM**
-(shared-nothing tasks, message passing) **plus** two borrowings — **Go's
-first-class channel** and **Rust's move-on-send**. The surface is the **goroutine feel** (`spawn`,
-cheap, no `async` colouring) wrapped in a **structured-concurrency nursery** (`parallel:`) so tasks
-can't leak. The design **never taxes the single-threaded fast path** (`Rc`, per-heap
-stop-the-world GC stays untouched).
+Chezzi's concurrency takes **Go's memory model**: every task of a run allocates in one heap, a task
+gets the parent's values by handle, and a **first-class channel** hands over the value itself. The
+surface is the **goroutine feel** (`spawn`, cheap, no `async` colouring) wrapped in a
+**structured-concurrency nursery** (`parallel:`) so tasks can't leak. A data race is the program's
+bug, as in Go, and the VM stays memory-safe under it ([§2](#data-races)). No container takes a lock
+per operation, so the single-threaded fast path pays no lock.
 
 The engine is a real OS-thread M:N work-stealing scheduler with reduction-counting preemption, a
 dirty/blocking pool, and an epoll/kqueue netpoller behind non-blocking `std.net`. Every function body
@@ -32,36 +32,26 @@ Chapters:
 
 ## 1. Status & lineage
 
-- **Model:** shared-nothing tasks. Each task owns its heap + GC; tasks share **nothing
-  mutable**, communicating only by **move/copy** through channels.
+- **Model:** one heap per run, collected with the world stopped. Tasks share values by handle (Go).
+  A write that another task reads needs an order: a join, a `Channel` or a box.
 - **Surface:** `spawn` (a statement, goroutine-feel) inside a nursery that joins all children at
   its end. No `async`/`await` colouring, no `WaitGroup`.
-- **Primitives:** `Channel[T]` (the sync primitive — a mailbox outside every heap) and `Shared[T]`
-  (the sanctioned cross-task mutable box — an owner serialises writes, Elixir's `Agent` trick).
+- **Primitives:** `Channel[T]` (the sync primitive: a queue that hands over each value by handle)
+  and `Shared[T]` (a box whose writes run under its guard, Go's `sync.Mutex` around one value).
 - **Staging:** the surface, type system and semantics shipped first on a sequential executor; the
   M:N OS-thread engine came later behind the same syntax. Tasks start at their `spawn` and
   interleave ([§4](#4-execution-semantics)).
 
 ---
 
-## 2. Why shared-nothing, and why not the Go memory model
+## 2. The memory model: one heap, Go's rules
 
-The key principle: **cost scales with shared mutable memory, not with the number of cores.** Forbid
-sharing — make tasks copy/move messages — and parallelism gets cheap, because no two threads ever
-touch the same object.
-
-| Tier | Model | Multicore? | `Rc`→`Arc`? | GC change? | Cost |
-|------|-------|-----------|-------------|-----------|------|
-| A | Cooperative fibers (1 thread) | ❌ | no | +scan suspended fiber stacks | cheap |
-| B | Worker processes (`std.process`) | ✅ | no | none | ~free, but heavy IPC |
-| C | **Shared-nothing threads** + channels | ✅ | no | none (per-thread heap+GC) | medium |
-| D | Shared-memory threads (Go/Java) | ✅ | **yes, everywhere** | concurrent collector | huge |
-
-**Chosen = A + C composed.** The **Go model (Tier D)** would mean `Rc`→`Arc` across every value
-(atomic refcount bumps ~10–30× a normal bump, taxing single-threaded code *forever*) plus a
-thread-safe concurrent GC. That permanently taxes the common case and hands users the entire
-data-race bug class. **Skipped.** (The branch `exp/go-shared-heap` tests one heap per run; M1 is done, see
-[`go-shared-heap.md`](../../design/go-shared-heap.md).)
+Before the branch `exp/go-shared-heap`, each task had its own heap, and a value that crossed a task
+boundary was deep-copied ([ADR D4](../../design/adr-d4-airlock.md), now superseded). The branch
+replaced that model with Go's (M1 to M3, 2026-10). The old reason to reject Go was the cost of
+`Rc`→`Arc` on every value. That reason did not hold: a `Value` is one word with no reference count,
+so a shared heap needed atomic slots and a stop-the-world collector, not a new value model. The study
+and the plan: [`go-shared-heap.md`](../../design/go-shared-heap.md).
 
 ### Memory picture: one heap per run, channel between
 
@@ -172,7 +162,7 @@ counter := 0
 parallel:
     for _i in 0..1000:
         spawn:
-            counter = counter + 1   # a data race, as in Go: the result is not 1000
+            counter = counter + 1   # a data race, as in Go: the result is undefined
 ```
 
 Share a counter through `Shared[T]` (`update` runs under the box's guard) or an `AtomicInt`.
@@ -187,9 +177,9 @@ by reassignment) is visible to the parent and to every other task once the two a
 two tasks write concurrently, use `Shared[T]` / `RwShared[T]` / `Atomic[T]`
 ([03-shared.md](03-shared.md)) or a `Channel[T]`.
 
-**The trade in one line:** Tier D lets you share → fast sends, but races are your problem. A+C
-forbids sharing → the race cannot be expressed. For a scripting language that is a *good*
-trade — the #1 concurrency bug class doesn't exist.
+**The trade:** a send, a spawn argument and a box store cost one word whatever the value's size,
+and a race is your bug, as in Go. Go finds a race with `go run -race`; Chezzi has no race detector
+(design phase 6 in [`go-shared-heap.md`](../../design/go-shared-heap.md#6-experiment-plan)).
 
 ---
 
@@ -219,11 +209,11 @@ fn main():
     ch := Channel[str]()
     label := "task"
     parallel:                          # nursery — joins all children at the dedent
-        spawn worker(1, label, ch)     # 1, label COPIED in; ch = shared mailbox handle
+        spawn worker(1, label, ch)     # the task gets 1, label and ch by handle
         spawn worker(2, label, ch)
     # reaching here ⇒ both workers finished. No WaitGroup, no leaks.
     for _ in 0..2:
-        print(ch.recv())               # workers' strings move into main's heap here
+        print(ch.recv())               # each recv hands over a worker's string
 
 main()
 ```
@@ -343,7 +333,7 @@ How a `parallel:` block runs (`chezzi run`):
 
 1. Executing `spawn X` **evaluates the call's callee + arguments eagerly, at the spawn point** (Go's
    arg-evaluation timing), hands them to the task by handle
-   ([§7](07-sendability.md#7-sendability), M3.4), and **starts** the task on the innermost nursery. **The
+   ([§7](07-sendability.md#7-what-crosses-a-task-boundary), M3.4), and **starts** the task on the innermost nursery. **The
    parent then continues to the next statement immediately** — `spawn` does not block. A `parallel:`
    nursery entered **inside a spawned task** starts the same way, at every worker count: its tasks
    run on the existing workers without adding an OS thread, and the owner parks at its join,

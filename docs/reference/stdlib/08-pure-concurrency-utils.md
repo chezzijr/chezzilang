@@ -13,7 +13,7 @@ inside a **single** `write` lock or they race. The collections' keyed reads and 
 and build in the correct single-lock idiom. A walk (`for_each_entry`, `fold_entries`) takes one
 shallow copy under the read guard.
 
-**Sharing:** a task gets the wrapper struct by handle, NOT a deep copy (M3.4), so the parent sees a
+**Sharing:** a task gets the wrapper struct by handle, like every value (M3.4), so the parent sees a
 spawned task's mutation after the join.
 
 **Construction:** call the static `new()` with the type arguments (**`ConcurrentList[int].new()`**,

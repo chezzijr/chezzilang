@@ -7,7 +7,7 @@
 # read-modify-write a count) MUST happen inside a SINGLE `write` lock or they race. These wrappers bake
 # the correct single-lock idiom in.
 #
-# SHARING: a task gets the wrapper struct by handle (M3.4), NOT a deep copy. So mutations a spawned
+# SHARING: a task gets the wrapper struct by handle, like every value (M3.4). So mutations a spawned
 # task makes are visible to the parent after the join.
 #
 # THE FOUR COLLECTIONS: `ConcurrentList[E]`, `ConcurrentMap[K, V]`, `ConcurrentSet[E]`,

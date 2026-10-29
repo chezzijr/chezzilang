@@ -7,7 +7,7 @@
 > ([04-timer-wait.md](04-timer-wait.md)). The constructors lower to dedicated opcodes, so the import
 > costs nothing at run time.
 
-A task shares the parent's captured locals and arguments by handle ([§7](07-sendability.md#7-sendability),
+A task shares the parent's captured locals and arguments by handle ([§7](07-sendability.md#7-what-crosses-a-task-boundary),
 M3.4, the Go rule), so two tasks that write one value without a lock race. For mutable state that
 several tasks write, use **`Shared[T]`** — a box whose writes run under its guard (Go's
 `mu.Lock(); f(v); mu.Unlock()`).
@@ -17,7 +17,7 @@ import Shared from std.concurrency
 
 s := Shared(0)             # one owner holds the value
 parallel:
-    spawn bump(s)          # the HANDLE is copied in — both reach the same owner
+    spawn bump(s)          # each task gets the box by handle: one box, one guard
     spawn bump(s)
 print(s.get())             # 2
 
@@ -107,17 +107,18 @@ b.set(?n)
 print(n)        # N(id=1, box=Shared(N(id=1, box=Shared(...))))
 ```
 
-The renderer takes a snapshot of the box, drops the lock, then renders. A fault message that shows a
-box never waits for it: when the state is busy the message shows `Shared(<locked>)`. User output from
-`print` / `str` never shows `<locked>`.
+The renderer takes no lock and no guard: it reads the box's one slot and renders that value, as
+Go's `fmt` reads a struct's fields. A box that holds one list twice renders it twice
+(`Shared([[1], [1]])`, as CPython prints `[[1], [1]]`). A fault message renders a box the same way,
+so it never waits for a box that another task holds.
 
 ---
 
 ## 6b. `Atomic[T]` — the cross-task atomic box
 
 `Atomic[T]` is `Shared[T]`'s sibling for **atomic operation primitives** (compare-and-swap, exchange,
-fetch-add) rather than `Shared`'s closure-based `update`. Same shape: one box, many tasks; the
-**handle is sendable**; M3.2: the box holds the value itself, so `store` and `load` copy one word
+fetch-add) rather than `Shared`'s closure-based `update`. Same shape: one box, many tasks, each with
+the box by handle; the box holds the value itself, so `store` and `load` copy one word
 under a lock and every task shares the stored object (Go `atomic.Value`); constructed value-first (`Atomic(v)`,
 `T` inferred — an optional `Atomic[T](v)` turbofish pins it and is checked against the value). Generic
 over any `T`; the arithmetic methods are restricted to numeric `T`.
@@ -227,7 +228,7 @@ under contention — it measured **~2.7× faster** than the Mutex-backed `Atomic
 ## 6f. `RwShared[T]` — the cross-task read-write box
 
 `RwShared[T]` is `Shared[T]`'s read-write counterpart: **MANY concurrent readers OR one exclusive
-writer**. Same shape as `Shared` — one box, many tasks; the **handle is sendable**; constructed
+writer**. Same shape as `Shared` — one box, many tasks, each with the box by handle; constructed
 value-first (`RwShared(v)`, `T` inferred — an optional `RwShared[T](v)` turbofish pins it and is
 checked against the value) — but the lock is a `RwLock` instead of a `Mutex`. **Reach for `RwShared`
 over `Shared` when reads dominate** (a shared config/registry/map read on every request): read guards
@@ -311,10 +312,11 @@ the shallow copy, reduce inside `xs.inner.read(..)`.
 
 ```chezzi
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
+import RwShared from std.concurrency
 
 # Each spawned worker reduces its own view of the SAME shared container — no per-worker copy of the inner.
 fn sum_shard(xs: ConcurrentList[int]) -> int:
-    return xs.fold(0, fn(a: int, x: int) -> int: a + x)   # one snapshot of the list, then a loop
+    return xs.fold(0, fn(a: int, x: int) -> int: a + x)   # one shallow copy of the list, then a loop
 
 fn sum_values(m: ConcurrentMap[str, int]) -> int:
     return m.fold_entries(0, fn(a: int, k: str, v: int) -> int: a + v)   # per-entry reduce over a shared map
