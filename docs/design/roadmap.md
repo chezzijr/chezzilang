@@ -17,7 +17,7 @@
 | [3](#3-language-and-tooling-gaps) | REPL, formatter, closed ideas | open / closed |
 | [3b](#3b-test-system-follow-ups) | subtests, skip/xfail, timeout watchdog | open |
 | [4](#4-optimizations-open-levers) | perf levers not yet landed | open |
-| (branch `exp/go-shared-heap`) | Go shared heap experiment: [design](go-shared-heap.md) | M1 done (one heap per run, stop-the-world GC); M2 next |
+| (branch `exp/go-shared-heap`) | Go shared heap experiment: [design](go-shared-heap.md) | M1 to M4 done (one heap per run, tasks share values by handle, docs); not merged |
 
 ---
 
@@ -30,13 +30,13 @@ Chezzi has one engine, so every oracle compares it against a reference or a lite
 | sequential wrong result | CPython differential (`src/difftest/`, `tests/difftest.rs`, `src/bin/difffuzz`) | built |
 | accidental schedule divergence | two worker counts over `tests/chz` (`tests/chezzi_threads_cli.rs`) | built |
 | scheduler races, lost wakeups | seeded M:N (`CHEZZI_SCHED_SEED`, `src/bin/schedfuzz`) | built; limits in [`bug-discovery.md`](../contributing/bug-discovery.md) |
-| airlock and nursery semantics | hand-written known-answer tests | built |
+| task sharing and nursery semantics | hand-written known-answer tests (Go goldens in `tests/chz/spec/*_handle_test.chz` headers) | built |
 | channel / `select` semantics | **Go paired programs** | **not built** |
 
 **The open item.** Write each Go twin so that its outcome is deterministic under a nondeterministic
 schedule. Sort the output lines where only the order can vary. Go's channels, `select`, close and
 backpressure map almost 1:1 to `Channel[T]` and `wait:`. Use this oracle only in that range: Go has
-no equivalent for the airlock or for structured nurseries. Nothing in the repo generates or runs Go
+no equivalent for structured nurseries. Nothing in the repo generates or runs Go
 programs today.
 
 **Rule for the new oracle: compare raw bytes.** `String::from_utf8_lossy` is not injective (`ff` and

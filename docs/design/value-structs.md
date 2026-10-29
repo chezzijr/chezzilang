@@ -13,7 +13,7 @@ gap means letting some structs live **unboxed** (on the stack or inline in their
 sound only where no code observes the struct's reference identity, and **escape/alias analysis**
 decides where. So the milestone has two parts: the analysis and the representation it unlocks. It is
 soundness-critical (a wrong answer is a use-after-free) and touches the checker, compiler, VM value
-model, GC and airlock.
+model, GC and the task boundary.
 
 ## 1. The problem, measured
 
@@ -53,7 +53,8 @@ default). A value escapes if it is:
 2. stored into a heap object: a `List`/`Map`/`Set`, another struct's field, an escaping tuple, a
    `Channel`, a `Shared` or cell;
 3. captured by a closure that escapes (capture is by reference);
-4. sent across the airlock (`spawn`/`Channel`/`Shared` deep-copy via `WireValue`);
+4. handed to another task (`spawn`/`Channel`/`Shared`: by handle since the shared heap, so the task
+   holds the same object);
 5. aliased out: bound to another name, or read out of a container and mutated so that the mutation
    is shared with a longer-lived binding.
 
@@ -79,9 +80,8 @@ the field layout). The second mirrors Go's `[]P` and is the target for (ii).
 - **GC tracing.** An inline struct is not a `GcRef`; the container must trace its fields.
   `children()` (`src/vm/heap.rs`) gets a case for typed containers. A missed trace collects a live
   object. Gate: the `*_gc_stress` tests (`src/vm/gc_tests.rs`).
-- **Airlock.** The frame arena is thread-local. Rule 4 forbids unboxing anything that crosses, so the
-  crossing path (`WireValue::Struct`) stays as it is; the analysis must not
-  under-approximate what reaches them.
+- **Tasks.** The frame arena is thread-local. Rule 4 forbids unboxing anything another task can
+  reach; the analysis must not under-approximate what reaches it.
 - **Mutation through a view.** `y := xs[0]; y.x = 7` must mutate `xs[0]`. When `y` escapes, `xs` must
   fall back to boxed, or the view dangles. This is why (ii) is stage 3.
 - **Observable behaviour is fixed.** Goldens and `tests/chz` stay byte-identical at both worker
@@ -105,7 +105,7 @@ Each stage lands with failing-then-green tests and gc-stress, and is measured ag
 - **Soundness.** A wrong "non-escaping" corrupts the heap, likely intermittently and only under M:N.
   Gate: `*_gc_stress`, the two-worker-count suite, and an adversarial corpus with one test per escape
   route. Work in small reviewed deltas with an adversarial review per delta, not one autonomous run.
-- **Complexity.** Every struct op (field get/set, dispatch, `==`, hash, Display, wire, snap, `match`)
+- **Complexity.** Every struct op (field get/set, dispatch, `==`, hash, Display, `match`)
   must handle boxed and unboxed, or box on demand. Kill criterion: stop if Stage 0 shows the analysis
   rarely fires.
 - **Determinism.** A behaviour that changes with the worker count is a bug.
@@ -165,7 +165,6 @@ s.x = 42                  # r.x is 42, as today
 | Inline storage: 2M two-int structs in about 64 MB instead of 150 MB | `packed-storage.md` measurement, Go `[]P` |
 | No per-struct allocation or GC trace for value structs | one fewer object per element |
 | Value fields in machine registers under the JIT | a value has no identity to keep |
-| A cheaper airlock crossing for a value: a flat copy, no GC walk | values hold no `GcRef` when their fields are scalars |
 | No unsafe proof: the program states the fact that §3a must prove | a wrong escape answer is a use-after-free |
 
 ### What it costs
@@ -182,12 +181,10 @@ s.x = 42                  # r.x is 42, as today
 4. **Mutation of an element.** `xs[0].x = 7` on a value list must write the element in place
    (Go allows it, the element is addressable), or the checker rejects it as a write to a
    temporary (the `PackedList` v1 rule). Pick one.
-5. **Every struct operation** (field get and set, `==`, hash, Display, `match`, the wire and snapshot
-   paths) handles an inline value and a slot. The rule "the representation never shows in output"
+5. **Every struct operation** (field get and set, `==`, hash, Display, `match`) handles an inline value and a slot. The rule "the representation never shows in output"
    stays.
-6. **The airlock is unchanged in meaning.** A reference stays inside one task heap and is
-   deep-copied at `spawn`, as a struct is today. A pointer never shares memory across tasks, which
-   differs from Go and matches D4.
+6. **A task shares a reference by handle**, as a struct is today and as Go shares a pointer: every task of a run
+   uses one heap ([`go-shared-heap.md`](go-shared-heap.md)).
 
 ### Two spellings to choose from
 

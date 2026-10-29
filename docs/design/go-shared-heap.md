@@ -1,7 +1,11 @@
 # Go shared-heap model: study and mapping onto Chezzi
 
-**Status:** experiment notes, branch `exp/go-shared-heap`. Not accepted. The model of record stays
-the shared-nothing model in [`../reference/concurrency/01-model.md`](../reference/concurrency/01-model.md).
+**Status:** experiment, branch `exp/go-shared-heap`, not merged to `main`. M1 (one heap per run, a
+stop-the-world GC), M2 (memory-safe containers under a race), M3 (tasks share values by handle; the
+airlock deleted) are done. M4 (2026-10-29) rewrote the docs, so on this branch the model of record is
+[`../reference/concurrency/01-model.md`](../reference/concurrency/01-model.md). §1 to §6 are the study,
+written at `772e0bb8` before M1: "today" in them means that commit. §7 records what the
+implementation decided and where it differs from the study.
 
 **Purpose:** describe the Go concurrency model as Go 1.27.0 implements it, then map each Go part onto
 the Chezzi part that it would replace. Use this doc to plan the experiment "one heap for every task".
@@ -16,7 +20,7 @@ the Chezzi part that it would replace. Use this doc to plan the experiment "one 
 
 ## 1. The two models side by side
 
-| Topic | Go (shared heap) | Chezzi today (shared nothing) |
+| Topic | Go (shared heap) | Chezzi at `772e0bb8` (shared nothing) |
 |---|---|---|
 | Heap | One heap for the process | One heap per fiber (`FiberCtx.heap`, `src/vm/sched_types.rs:106`) |
 | Value | Raw pointer; multi-word values (string, slice, interface) | One 8-byte tagged word; objects are `GcRef(u32)` slab indices (`src/vm/value.rs:32-39`) |
@@ -390,3 +394,24 @@ Each phase ends with numbers or a pass/fail result. Stop at a phase whose number
 
 Build this worktree with its own target directory, for example
 `CARGO_TARGET_DIR=$PWD/target cargo build --release`. If you use main's target directory, cargo links a binary from a mix of both trees.
+
+---
+
+## 7. Outcome (M1 to M4)
+
+The phases ran as M1 (phase 2), M2 (phase 3) and M3 (phases 1 and 4). Phases 5 and 6 are open. The
+progress lines and the gate numbers are in `PROGRESS.md`, "Experiment: Go shared heap".
+
+| Study item | Decision or result | Differs from the study |
+|---|---|---|
+| §5.1 containers | No lock per object (owner, Go parity). A buffer that grows, or that a sort or a remove replaces, retires; only the stop-the-world sweep frees it (`vm/rvec.rs`, M2.2 to M2.4). A racy op reads one view of the buffer and gives its own out-of-range fault. | Close to option (b), with the stop of the world in place of QSBR or an epoch. |
+| §5.1 one-word slots | A `Value` slot stores with Release and loads with Acquire (M3.0b). | As planned. |
+| §5.3 stage 1 | One heap per run, collected with the world stopped; a thread that blocks detaches first (M1.7, M1.8). The longest stop on `many_list` is 46 ms in release; the test bound is 100 ms until stage 2. | As planned. |
+| §5.4 deletions | Deleted in M3.1 to M3.5: module snapshots, the airlock walkers, the wire form, the copy bits, the D4 layer A and layer C sites, the box heaps, the checker's `sendable`. | As planned. The spec grids got Go goldens; a test that asserted only deleted machinery was deleted. |
+| §5.5 `Shared[T]` | `Shared[T]` stays: one value behind a guard; `update(f)` runs `f` in the caller's task on the live value (M3.3). `RwShared[T]` takes Go's `RWMutex` rules. | The first option; no `Mutex[T]`. |
+| §6 phase 3 exit | Miri and TSan cannot run on the development box. The gates are stress tests of 10,000 rounds, also under `CHEZZI_GC_STRESS=1` (`01-model.md`, "Data races"). | No sanitizer run. |
+| §6 phase 4 exit | `storm` at T=2: 36 ms (3361 ms before M3); `spawn_fresh_graph` 0.41 to 0.52 of the time before M3. `send_one_channel` at T=2 is even with the time before M3. | One bench does not beat phase 0. |
+
+Open rows at the end of M4: `map_str` at T=1 is 1.10 to 1.13 against `main` (owner accepted
+2026-10-29; the branch base is 1.13 too); a flaky `owner_fault_grid` cell under full-suite load; the
+`CHEZZI_GC_STRESS=1` timeouts in `tests/chz` that also occur on the branch base.
