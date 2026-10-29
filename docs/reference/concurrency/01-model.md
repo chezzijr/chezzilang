@@ -152,16 +152,19 @@ and an `Executor.submit(f)` job's captures are the parent's objects, not copies:
 ```chezzi
 xs: Map[int, int] = {}
 n := 0
+done := Channel[int](1)
 parallel:
     spawn:
+        _ := done.recv()    # waits for fill's write: two writes to xs need an order
         xs[1] = 1
         n = 5
-    spawn fill(xs)          # fn fill(m: Map[int, int]): m[2] = 2
+    spawn fill(xs, done)    # fn fill(m, done): m[2] = 2, then done.send(1)
 print(xs.len(), n)          # 2 5
 ```
 
-Go prints `2 5` for the same program (`go func() { xs[1] = 1; n = 5 }()`). The join orders the
-task's writes before the parent's read. Two tasks that write one value without a `Channel`, a
+Go prints `2 5` for the same program (`go func() { <-done; xs[1] = 1; n = 5 }()`), and
+`go run -race` reports no race. The `done` channel orders the two writes to `xs`. The join orders
+the tasks' writes before the parent's read. Two tasks that write one value without a `Channel`, a
 join or a box (`Shared[T]`, `RwShared[T]`) between them race, and a race is the program's bug:
 
 ```chezzi

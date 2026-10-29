@@ -13,18 +13,21 @@ box holds one value behind its guard (M3.3). Nothing that a task gets is a copy.
 > race is the program's bug (Go).
 
 ```chezzi
-fn fill(m: Map[int, int]):
+fn fill(m: Map[int, int], done: Channel[int]):
     m[2] = 2
+    done.send(1)
 
 fn main():
     xs: Map[int, int] = {}
     n := 0
+    done := Channel[int](1)
     parallel:
         spawn:
+            _ := done.recv()     # the channel orders the two writes to xs
             xs[1] = 1
             n = 5
-        spawn fill(xs)
-    print(xs.len(), n)       # 2 5, as in Go
+        spawn fill(xs, done)
+    print(xs.len(), n)       # 2 5, as in Go (no race under go run -race)
 main()
 ```
 
