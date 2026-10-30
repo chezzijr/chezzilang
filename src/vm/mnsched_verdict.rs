@@ -173,8 +173,8 @@ impl MnSched {
     /// evaluate `is_deadlocked` (a bare `Relaxed` store outside it has no synchronizes-with edge, so a
     /// lock-holder could legally still read `false` and reap the scope's parked fibers as `Deadlocked`);
     /// (2) it lets the abort seams arm this veto BEFORE they clear their own (`awaiting_builder` /
-    /// `body_open`) — a gapless veto handoff. Idempotent (the fault path also trips via
-    /// `Vm::trip_cancel`, which is program-ordered before `finish`'s own lock release).
+    /// `body_open`) — a gapless veto handoff. Idempotent (the fault path trips its
+    /// flag in [`MnSched::finish_with`], under `finish`'s own lock hold).
     pub(super) fn trip_scope_cancel(&self, scope_id: usize) {
         let c = self.lock();
         crate::vm::trip_cancel_flag(&c.scopes[scope_id].cancel);
@@ -821,7 +821,7 @@ impl MnSched {
     /// lets the child's peer veto lift), independently reaches the same false conclusion about itself and
     /// faults its OWN parked siblings directly — with `flag_deadlock` dropping their `defer`s, instead of
     /// letting the child's fault propagate up through the blocked fiber's own return and trip the
-    /// parent's scope cancel the ordinary way (`Vm::classify_mn_outcome` → `Vm::trip_cancel`).
+    /// parent's scope cancel the ordinary way (`MnSched::finish_with`).
     pub(super) fn is_deadlocked_ignoring_jobs(&self, c: &SchedCore) -> bool {
         self.is_deadlocked_ignoring_jobs_given(c, None)
     }

@@ -382,8 +382,8 @@ static CANCEL_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// Store FIRST, then bump, and bump with `Release` against the `Acquire` load in
 /// [`SchedCore::drain_scan_due`]. That release/acquire pair on `CANCEL_GEN` is the ONLY thing that
 /// makes the flag store visible to a scanner which sees the new generation: `Relaxed` on both sides
-/// establishes no happens-before. There is no mutex to fall back on — `Vm::trip_cancel`
-/// (`src/vm/exec.rs:212`) stores an ancestor flag under NO core lock, while
+/// establishes no happens-before. There is no mutex to fall back on — `Executor.cancel()`
+/// (`src/vm/shared_methods.rs`) stores an ancestor flag under NO core lock, while
 /// `SchedCore::scope_cancel_tripped` reads that same shared flag under the core lock. Under
 /// `Relaxed`/`Relaxed` this interleaving is reachable: the trip stores the flag and bumps the
 /// generation; `drain_scan_due` loads the new generation, scans, reads the flag as still `false`,

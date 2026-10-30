@@ -54,8 +54,8 @@ impl SchedCore {
     ///
     /// A cancel trip and its `cancel_drain` are TWO SEPARATE core-lock acquisitions apart at every seam
     /// that trips one — there are exactly THREE (the only scope-cancel stores in the VM):
-    /// `Vm::trip_cancel` (exec.rs, from `classify_mn_outcome`'s fault/exit AND `run_one_fiber`'s
-    /// panic-fault fallback) followed by `mn_worker_loop`'s `finish` → `cancel_drain`;
+    /// `MnSched::finish_with` (a fiber's fault/exit, `run_one_fiber`'s panic-fault fallback
+    /// included) followed by `mn_worker_loop`'s `drain_family`;
     /// `abort_enlisted_scope`; and `abort_eager_nursery` (sched.rs). (The two demote self-detect loops
     /// only READ a cancel — they trip none.) An idle worker's `take_runnable` landing in such a gap sees
     /// the pre-drain quiesce (`running == 0 && runnable == 0 && parked_n > 0`) and, without this veto,

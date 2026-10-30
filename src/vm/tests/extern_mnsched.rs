@@ -616,7 +616,7 @@ fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
         let c = sched.lock();
         assert_eq!(c.parked_n, 2, "both fibers parked (quiesced, pre-cancel)");
     }
-    // A sibling faults: `classify_mn_outcome` trips the scope cancel BEFORE `finish`/`cancel_drain`.
+    // A sibling faults: `MnSched::finish_with` trips the scope cancel, then `cancel_drain` runs.
     cancel.store(true, Ordering::Relaxed);
     let c = sched.lock();
     assert!(

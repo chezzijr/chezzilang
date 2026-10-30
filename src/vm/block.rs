@@ -230,7 +230,7 @@ pub(super) enum Halt {
 pub(super) struct OwnedRef<'a> {
     /// the nursery's `nurseries` index
     pub(super) n: usize,
-    /// the nursery's cancel flag, which a faulting child trips before `finish` records the fault
+    /// the nursery's cancel flag, which a faulting child trips in `MnSched::finish_with`, with the fault
     pub(super) flag: &'a Arc<AtomicBool>,
     pub(super) sched: &'a Arc<MnSched>,
     pub(super) scope: usize,
@@ -300,8 +300,10 @@ impl WakeSet {
 
 /// TICKET-188 — THE decider of "must this party stop now, and why?". Cancel first; then, unless a
 /// run-wide exit is pending (DEC-096: `Exit > Fault`), the innermost owned nursery whose flag is
-/// tripped AND whose family recorded a `Fault`. A flag is only a wake hint: a child trips it just
-/// before `finish` records the fault, so a tripped flag with no recorded fault is not a halt.
+/// tripped AND whose family recorded a `Fault`. A flag is only a wake hint: a cancel or an abort seam
+/// trips it with no fault, so a tripped flag with no recorded fault is not a halt. A child's fault
+/// trips it in `MnSched::finish_with`, in the core-lock hold that stores the slot, so `scope_fault`
+/// (which takes that lock) finds the fault behind the flag (TICKET-297).
 pub(super) fn halt_of<'a>(
     cancel: impl Iterator<Item = &'a AtomicBool>,
     owned: impl DoubleEndedIterator<Item = OwnedRef<'a>>,
@@ -642,7 +644,7 @@ mod tests {
 
     #[test]
     fn halt_of_declines_a_tripped_flag_with_no_recorded_fault() {
-        // Gotcha 2: the child trips its flag before `finish` records the fault.
+        // Gotcha 2: a cancel trips a flag with no fault; the flag is only a hint.
         let (flag, sched) = owned_sched(true, false);
         let got = halt_of(
             std::iter::empty(),

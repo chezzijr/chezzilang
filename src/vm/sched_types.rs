@@ -1350,7 +1350,7 @@ pub(super) struct SchedCore {
     /// count vetoes only THIS sched's OWN fault decision (`is_deadlocked_ignoring_jobs`), the same way
     /// `is_deadlocked`'s `outstanding_jobs` veto does for an uncounted `Executor` sender: the child's
     /// own deadlock detection (if genuine) will fire on the CHILD sched instead, and its `Fault`
-    /// propagates back through this fiber's own call return (`Vm::classify_mn_outcome` → `trip_cancel`)
+    /// propagates back through this fiber's own call return (`MnSched::finish_with` trips its cancel)
     /// exactly like any other task failure — never through this sched declaring itself deadlocked.
     /// `local_quiesced` does NOT read this field: a peer sched's veto (`peer_can_move` →
     /// `local_quiesced`) must still see THIS sched as quiesced, or the child's own genuine deadlock is
