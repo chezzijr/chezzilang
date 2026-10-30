@@ -1,5 +1,5 @@
 # tests/chz/spec/generator_shared_read_test.chz — M2.4: many tasks read one shared, started
-# generator at once (`RwShared.get` copies it). A read never sees another read as a running
+# generator at once (`RwShared.get` returns its handle). A read never sees another read as a running
 # generator, so no read faults. Go: concurrent reads of one value never fail.
 import Iterator from std.iter
 import std.concurrency

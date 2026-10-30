@@ -1,15 +1,15 @@
 # B3.6 `--parallel` golden: Executor tasks run on the bounded pool. Each submitted closure captures
-# the result Channel (a sendable handle — crosses as a shared Arc) and sends its value; `shutdown`
-# drains the three tasks onto the pool and joins them, then main collects and SORTS what it gathered,
-# so the printed order is fixed however the pool threads interleave (decision A/F, deterministic-by-
-# construction). Run with: chezzi run --parallel examples/executor_pool.chz
+# the result Channel by handle (Go: a goroutine's closure shares its captures) and sends its value;
+# `shutdown` drains the three tasks onto the pool and joins them, then main collects and SORTS what
+# it gathered, so the printed order is fixed however the pool threads interleave (decision A/F,
+# deterministic-by-construction). Run with: chezzi run --parallel examples/executor_pool.chz
 
 import Executor from std.concurrency
 
 fn main():
     out := Channel[int]()
     ex := Executor()
-    _ := ex.submit(fn(): out.send(30))     # captures `out` (Channel, sendable); runs on a pool thread
+    _ := ex.submit(fn(): out.send(30))     # captures `out` by handle; runs on a pool thread
     _ := ex.submit(fn(): out.send(10))
     _ := ex.submit(fn(): out.send(20))
     ex.shutdown()                     # drains the three tasks onto the pool and joins them

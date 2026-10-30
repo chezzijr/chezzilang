@@ -1,7 +1,7 @@
 # golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # C2 concurrency: `Channel[T]` fan-out. Workers run at the nursery's dedent and drop their results
-# into a shared mailbox; the parent collects them after the join. Move-on-send keeps each task's
-# heap isolated — only the channel handle is shared.
+# into a shared mailbox; the parent collects them after the join. A send hands the receiver the
+# value by handle (Go `chan T`): every task shares the run's one heap.
 #
 # `channel.expected`'s exact line order is the BUFFERED test sink (every lib helper), where a task's
 # output is flushed at the join in spawn order.
