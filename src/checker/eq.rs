@@ -373,10 +373,10 @@ impl Checker {
 
     /// The rendered type of the first `fn` value reachable from `ty` by the same structural walk as
     /// [`Self::reaches_user_eq`] (same cycle guard, same holes), or `None`. Every `Ty::Func` is a hit,
-    /// a builtin fn value (`ord`) included (owner answer 2026-10-17). TICKET-144 (W14-24): `Atomic.cas` on a payload
-    /// holding a closure can never succeed — every `load()` builds a fresh copy and closures compare by
-    /// identity. `Param`/`Protocol` payloads hide the fn from this walk; the runtime `cas` backstops
-    /// them (`Vm::slot_identity_in`).
+    /// a builtin fn value (`ord`) included (owner answer 2026-10-17). TICKET-144 (W14-24): `Atomic.cas`
+    /// refuses a payload that holds a fn value, as Go's `atomic.Value.CompareAndSwap` panics on an
+    /// uncomparable func. `Param`/`Protocol` payloads hide the fn from this walk; the runtime `cas`
+    /// backstops them (`Vm::fn_value_in`).
     pub(super) fn reaches_func(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
         let any = |s: &Self, ts: &[Ty], stack: &mut Vec<String>| -> Option<String> {
             ts.iter().find_map(|t| s.reaches_func(t, stack))

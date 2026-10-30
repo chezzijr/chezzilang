@@ -426,15 +426,15 @@ impl Vm {
                 // meanwhile — a racy result, no UB.
                 let mut g = core.lock();
                 let cur = *g;
-                // TICKET-144 / TICKET-177: a payload whose `==` is slot identity (a fn value, an
-                // iterator) can never compare equal to a fresh `load()`, so `false` would spin the CAS
-                // retry loop forever — Go's `atomic.Value.CompareAndSwap` panics on the same shape.
-                // Every fn value is refused, a builtin included (TICKET-264); `Vm::slot_identity_in`
-                // reads `Vm::callable` and `Obj::identity`. A handle payload compares by core and is
-                // accepted. (`g` drops on the early return, leaving the box unchanged.)
-                if let Some(what) = self.slot_identity_in(cur) {
+                // TICKET-144 / TICKET-264: a payload that holds a fn value is refused, a builtin
+                // included: Go's func is uncomparable, and `atomic.Value.CompareAndSwap` panics on
+                // it (`Vm::fn_value_in`). Every other payload compares as `==` does: a handle by its
+                // core, an iterator or a generator by its object. (`g` drops on the early return,
+                // leaving the box unchanged.)
+                if self.fn_value_in(cur) {
                     return Err(self.err(
-                        format!("Atomic.cas: the payload holds {what}, which cas cannot compare"),
+                        "Atomic.cas: the payload holds a function value, which cas cannot compare"
+                            .to_string(),
                         span,
                     ));
                 }

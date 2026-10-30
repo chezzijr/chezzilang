@@ -4,6 +4,7 @@
 # (fresh slot around the same core) made the handle unequal to itself.
 import Atomic, AtomicInt, Executor, RwShared, Shared, StructuralEq from std.concurrency
 import Eq from std.cmp
+import Iterator from std.iter
 import std.net
 import std.io
 import std.os
@@ -123,11 +124,12 @@ fn grid[T: StructuralEq](kind: str, a: T, c: T, ops: fn(T, T, T) -> List[str]) -
     tag(bad, kind, "executor", ops(a, via_executor(a), c))
     return bad
 
-# `Atomic.cas` refuses a payload whose equality does not survive the store (TICKET-144's rule, read
-# from `Obj::identity` since TICKET-177): every fn kind and an iterator compare by heap slot, and a
-# store re-materializes them in a fresh one. A builtin fn (`ord`) compares by name, but `cas` refuses it
-# like every fn value (TICKET-264). A handle compares by core, so the grid's `cas` cells above
-# are accepted. `cas_self` is generic so the checker's static fn check cannot see the payload.
+# `Atomic.cas` compares as `==` does (Go `atomic.Value.CompareAndSwap`), and refuses a payload that
+# holds a fn value: Go's func is uncomparable, so its CAS panics `comparing uncomparable type`. Every
+# fn kind is refused, a builtin fn (`ord`) included (TICKET-264). A handle compares by core, and an
+# iterator or a generator by its object: `load()` returns the stored handle, so `cas(a.load(), v)`
+# succeeds (Go: a pointer compares by address). `cas_self` is generic so the checker's static fn
+# check cannot see the payload.
 extern "libm.so.6":
     fn cos(x: float) -> float
 
@@ -144,7 +146,7 @@ fn refused(r: bool!, want: str) -> bool:
 fn named_fn() -> int:
     return 1
 
-test fn atomic_cas_refuses_every_payload_whose_equality_does_not_survive_the_store():
+test fn atomic_cas_refuses_every_fn_value():
     bad: List[str] = []
     k := 2
     closure := fn() -> int: k
@@ -163,15 +165,31 @@ test fn atomic_cas_refuses_every_payload_whose_equality_does_not_survive_the_sto
     r4 := recover: cas_self(Atomic(cv), cv)
     if not refused(r4, "a function value"):
         bad.push("extern-fn")
-    it := [1, 2].iter()
-    r5 := recover: cas_self(Atomic(it), it)
-    if not refused(r5, "an iterator"):
-        bad.push("iterator")
     bv := ord
     r6 := recover: cas_self(Atomic(bv), bv)
     if not refused(r6, "a function value"):
         bad.push("builtin-fn")
     assert bad.len() == 0, " ".join(bad)
+
+fn gen_three() -> Iterator[int]:
+    for i in 0..3:
+        yield i
+
+# An iterator or a generator payload compares by its object, as `==` does: the stored one swaps,
+# another one does not.
+test fn atomic_cas_compares_an_iterator_or_a_generator_by_identity():
+    it := [1, 2].iter()
+    a := Atomic(it)
+    assert cas_self(a, [3].iter())
+    assert not a.cas(it, [4].iter())
+    g := gen_three()
+    b := Atomic[Iterator[int]](g)
+    assert b.cas(b.load(), gen_three())
+    assert not b.cas(g, gen_three())
+    assert b.load() != g
+    xs := [gen_three()]
+    c := Atomic(xs)
+    assert cas_self(c, [gen_three()])
 
 # The refusal walk descends into content: a fn inside a list is still refused.
 test fn atomic_cas_refuses_a_function_value_nested_in_content():

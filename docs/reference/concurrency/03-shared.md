@@ -173,19 +173,20 @@ A module's own `protocol StructuralEq` is its own protocol. No type can implemen
 checker answers it from the payload's shape. No checker walk can see through a protocol existential
 payload, so the VM also switches the `eq` hook off for the compare.
 
-**`cas` on a payload that holds a `fn` value is rejected** (`Atomic[fn() -> int]`, a struct field or
-`List` element of `fn` type). Closures compare by identity, and a payload that holds one is a
-container `cas` compares structurally, so the compare cannot answer what the CAS retry loop needs and
-the loop could spin forever (Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape).
+**`cas` compares as `==` does, and rejects a payload that holds a `fn` value** (`Atomic[fn() -> int]`,
+a struct field or `List` element of `fn` type). Go's func is uncomparable, so Go's
+`atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape.
 
 - The error is at the `cas` call, so `load`/`store`/`exchange` of a fn stay legal.
 - A named fn, a builtin fn (`ord`), a std native fn (`math.sqrt`) and an `extern` fn are fn values
   like a closure, so `cas` rejects them too.
 - A generic `fn f[T](a: Atomic[T], …)` hides the fn from the checker, so the runtime `cas` faults
-  `Atomic.cas: the payload holds a function value, which cas cannot compare` instead of answering
-  `false` forever. A builtin fn (`ord`) faults the same way. An iterator payload faults the same way
-  (`Atomic.cas: the payload holds an iterator, which cas cannot compare`).
+  `Atomic.cas: the payload holds a function value, which cas cannot compare`. A builtin fn (`ord`)
+  faults the same way.
 - A handle payload (`Atomic(ch)`) compares by its core, so `cas(a.load(), …)` on it succeeds.
+- An iterator or a generator payload compares by its object, as `==` does (Go: a pointer compares by
+  address): `load()` returns the stored one, so `cas(a.load(), …)` on it succeeds, and `cas` with
+  another iterator answers `false`.
 
 ### `AtomicInt` — the monomorphic **lock-free** int atomic
 

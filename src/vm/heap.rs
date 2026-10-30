@@ -306,7 +306,7 @@ pub enum Obj {
 
 /// How `==` decides whether two heap objects are the same value — the ONE classification of
 /// identity (TICKET-177, wave 16 Family 5). `Vm::values_equal_guarded` compares `Core` keys and
-/// `Vm::slot_identity_in` (the `Atomic.cas` refusal) looks for `Slot`. The match below is
+/// `Vm::fn_value_in` (the `Atomic.cas` refusal) descends only into `Content`. The match below is
 /// exhaustive with no `_` arm, so a new `Obj` variant must pick an answer before the crate builds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Identity {
@@ -315,8 +315,8 @@ pub enum Identity {
     /// A handle to a core outside every heap (`Arc`), or a raw C address (`ptr`). Two slots can
     /// wrap the SAME core, so this key — not the slot — is the handle's identity.
     Core(CoreKey),
-    /// Equal only to its own heap slot. The `str` names the kind for a diagnostic.
-    Slot(&'static str),
+    /// Equal only to its own heap slot.
+    Slot,
 }
 
 /// A handle's identity: its variant plus the core's address. The variant keeps a raw `ptr`
@@ -513,13 +513,14 @@ impl Obj {
             // A bare Func, Native or Cffi is one slot per fn per heap (Vm::fn_value, TICKET-215), so two
             // reads of it are `==`; it stays Slot (DEC-177). Atomic.cas refuses every fn value, a
             // Builtin included, through Vm::callable (TICKET-264).
-            Obj::Func { .. } | Obj::Closure { .. } | Obj::Native { .. } | Obj::Cffi(_) => {
-                Identity::Slot("a function value")
-            }
-            Obj::Iter { .. } => Identity::Slot("an iterator"),
-            Obj::Generator(_) => Identity::Slot("a generator"),
-            Obj::Module(_) => Identity::Slot("a module"),
-            Obj::Cell(_) => Identity::Slot("a captured cell"),
+            Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Native { .. }
+            | Obj::Cffi(_)
+            | Obj::Iter { .. }
+            | Obj::Generator(_)
+            | Obj::Module(_)
+            | Obj::Cell(_) => Identity::Slot,
         }
     }
 }

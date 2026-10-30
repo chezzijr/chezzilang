@@ -623,15 +623,13 @@ impl Vm {
         }
     }
 
-    /// The kind of the first heap object reachable from `v` that is a fn value or whose `==` is
-    /// slot identity ([`Identity::Slot`]), or `None`. `Atomic.cas` refuses such a payload: every
-    /// `load()` rebuilds a slot-identity object in a fresh slot, so the compare could never succeed
-    /// and a CAS retry loop would spin forever (TICKET-144, DEC-144). Every fn value is refused,
-    /// a builtin (`ord`) included, whose `==` is by name: one rule for every fn, as Go's func is
-    /// uncomparable (TICKET-264). [`Vm::callable`] decides fn-ness; [`Obj::identity`], read by the
-    /// equality arm too, decides the rest. A `Core` handle is not descended: it compares by core,
-    /// never by what the core holds. `seen` makes a cyclic payload terminate.
-    pub(super) fn slot_identity_in(&self, v: Value) -> Option<&'static str> {
+    /// Whether a fn value is reachable from `v` through the content `==` compares. `Atomic.cas`
+    /// refuses such a payload, as Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable
+    /// type` on a func (TICKET-144, TICKET-264): every fn value, a builtin (`ord`) included, whose
+    /// `==` is by name. [`Vm::callable`] decides fn-ness. The walk descends only into
+    /// [`Identity::Content`]: a handle compares by its core and a slot object (an iterator, a
+    /// generator) by its slot, never by what they hold. `seen` makes a cyclic payload terminate.
+    pub(super) fn fn_value_in(&self, v: Value) -> bool {
         let mut stack: Vec<GcRef> = v.child_gcref().into_iter().collect();
         let mut seen = super::fxhash::FxHashSet::default();
         while let Some(h) = stack.pop() {
@@ -639,15 +637,14 @@ impl Vm {
                 continue;
             }
             if self.callable(Value::obj(h)).is_some() {
-                return Some("a function value");
+                return true;
             }
             match self.heap.get(h).identity() {
-                Identity::Slot(what) => return Some(what),
-                Identity::Core(_) => {}
+                Identity::Slot | Identity::Core(_) => {}
                 Identity::Content => stack.extend(self.heap.children(h)),
             }
         }
-        None
+        false
     }
 
     /// Total order over scalar values for `sort()`. The checker restricts `sort` to homogeneous
