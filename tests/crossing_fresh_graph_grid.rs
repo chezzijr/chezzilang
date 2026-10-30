@@ -1,13 +1,13 @@
 #![allow(clippy::wildcard_enum_match_arm)]
 //! TICKET-240 (wave 22 Family D): the grid is wrapper path x inner value x write depth.
-//! Every cell does its write inside `recover:` in the task and sends `runs` or `faults`; the parent
-//! prints its own named values after the join. M3.4 (Go model): a spawn, a `spawn:` capture and an
-//! Executor job hold the parent's values by handle, so every cell runs and a write to a value the
-//! parent can reach lands in the parent's view (Go, a goroutine writes through a pointer: the
-//! parent sees the write). Each cell writes its own `named{n}` / `nn{n}`: one value written by two
-//! tasks would be a race (the user's bug). Each program runs in a fresh process at
-//! `CHEZZI_THREADS` 1, 2 and default. A `.chz` test cannot run one program at three worker counts
-//! or read a compile error, so this runs the built binary.
+//! Every cell does its write inside `recover:` in the task and sends `runs`, or `other` with the
+//! fault's message; the parent prints its own named values after the join. M3.4 (Go model): a
+//! spawn, a `spawn:` capture and an Executor job hold the parent's values by handle, so every cell
+//! runs and a write to a value the parent can reach lands in the parent's view (Go, a goroutine
+//! writes through a pointer: the parent sees the write). Each cell writes its own `named{n}` /
+//! `nn{n}`: one value written by two tasks would be a race (the user's bug). Each program runs in
+//! a fresh process at `CHEZZI_THREADS` 1, 2 and default. A `.chz` test cannot run one program at
+//! three worker counts or read a compile error, so this runs the built binary.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -269,18 +269,15 @@ fn expect(_w: Wrapper, _i: Inner, _d: usize) -> &'static str {
     "runs"
 }
 
-const PRELUDE: &str = "import std.concurrency\nimport Iterator from std.iter\nimport Executor from std.concurrency
+const PRELUDE: &str =
+    "import std.concurrency\nimport Iterator from std.iter\nimport Executor from std.concurrency
 
 struct N:
     kids: List[List[int]]
 fn verdict(r: Channel[str], tag: str, res: None!):
     match res:
         ?_: r.send(tag + \" runs\")
-        !e:
-            if e.message().contains(\"this value is this task's copy: a write to it would be lost at the join\"):
-                r.send(tag + \" faults\")
-            else:
-                r.send(tag + \" other \" + e.message())
+        !e: r.send(tag + \" other \" + e.message())
 fn poke_l(r: Channel[str], tag: str, d: int, v: List[List[List[int]]]):
     res := recover:
         if d == 0:
