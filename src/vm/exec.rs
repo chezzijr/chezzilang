@@ -239,14 +239,6 @@ impl Vm {
         depth_exceeded(span)
     }
 
-    /// B3.4 — set this VM's nursery cancel flag (if it runs under one), so sibling workers abort.
-    /// No-op when this VM runs under no nursery (`cancel` is `None`) — e.g. the top-level VM.
-    pub(super) fn trip_cancel(&self) {
-        if let Some(c) = &self.cancel {
-            crate::vm::trip_cancel_flag(c);
-        }
-    }
-
     /// Swap the live per-execution `Vm` fields with `ctx` (B1). Used by the nursery scheduler to
     /// schedule a fiber in (its saved context becomes live) or out (the running context is parked
     /// back into the fiber). Exactly the fields [`FiberCtx`] holds — `pending_exit` stays global.

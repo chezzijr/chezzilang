@@ -5,6 +5,17 @@
 use super::*;
 
 impl MnSched {
+    /// [`MnSched::finish_with`] for a task that never ran (`spawn_into`'s no-runner path, the unit
+    /// tests): there is no flag it ran under, so nothing trips.
+    pub(super) fn finish(
+        &self,
+        task_index: usize,
+        scope_id: usize,
+        outcome: TaskOutcome,
+    ) -> (bool, bool) {
+        self.finish_with(task_index, scope_id, outcome, None)
+    }
+
     /// Record a finished fiber's outcome in its FLAT slot, bump its SCOPE's done, drop it from
     /// `running`. Sets GLOBAL `terminate` only when EVERY scope is done (and no eager body is open) —
     /// because farmed helpers (sentinel scope_id) drain until global terminate, and the scope-scoped
@@ -16,14 +27,29 @@ impl MnSched {
     /// `matches!` on the outcome it handed in would miss that and leave the scope's parked fibers
     /// with nobody to wake them. Also returns whether it published a job fault
     /// ([`MnSched::publish_job_fault`]), so the caller runs [`Vm::halt_run`].
-    pub(super) fn finish(
+    /// TICKET-297 — `trip` is the cancel flag the fiber ran under (`Vm::cancel`: its scope's flag,
+    /// or an Executor job's own). An aborting outcome ([`TaskOutcome::aborts`]) trips it HERE, in
+    /// the core-lock hold that stores the slot: THE one trip of a task's aborting end. A party that
+    /// reads the tripped flag and then asks [`MnSched::scope_fault`] (`block::halt_of`) waits for
+    /// this lock, so it finds the fault. A trip before the lock let an owner parked at an inner join
+    /// read the flag with an empty slot, take no halt, and run the line after its join. Under the
+    /// lock the trip also reaches the deadlock verdict (`trip_scope_cancel`).
+    pub(super) fn finish_with(
         &self,
         task_index: usize,
         scope_id: usize,
         outcome: TaskOutcome,
+        trip: Option<&AtomicBool>,
     ) -> (bool, bool) {
         let mut c = self.lock();
         debug_assert!(Arc::ptr_eq(&c.left, &self.quiesce.epoch()));
+        // The outcome the worker handed in, before the W7-26r conversion below: that conversion
+        // trips the scope's own flag, for a backlog only.
+        if let Some(flag) = trip
+            && outcome.aborts()
+        {
+            crate::vm::trip_cancel_flag(flag);
+        }
         let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
         c.leave_running();
         // DEC-205 — a task's submit-time bytes stay charged until it FINISHES.
@@ -50,10 +76,7 @@ impl MnSched {
         } else {
             outcome
         };
-        let aborts = matches!(
-            outcome,
-            TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
-        );
+        let aborts = outcome.aborts();
         // A job the deadlock verdict ended: the verdict cut the sched (it latched `terminate`, or a
         // demoted fiber is left to settle), so a released held job would never run and its `None`
         // slot would hang the join. It reads as a latched verdict.
