@@ -12,10 +12,15 @@ use super::sched::poke_live_scheds;
 use super::sched::spawn_worker_thread;
 use super::*;
 
-/// TICKET-289 — test-only: arms [`Vm::finish_drain_window_hook`] once per run, through that run's
+/// TICKET-289 — test-only: arms [`Vm::window_hook`] once per run, through that run's
 /// own `HostConfig.env` (the seam `OWNER_FAULT_WINDOW_ENV` uses).
 #[cfg(test)]
 pub(crate) const FINISH_DRAIN_WINDOW_ENV: &str = "CHEZZI_TEST_FINISH_DRAIN_WINDOW";
+
+/// Test-only: arms the same 300 ms hold once per run, between a task's aborting outcome (a fault or
+/// an exit) and the `finish` that records it, so a reader of the scope's halt is reachable there.
+#[cfg(test)]
+pub(crate) const PRE_FINISH_WINDOW_ENV: &str = "CHEZZI_TEST_PRE_FINISH_WINDOW";
 
 impl Vm {
     /// TICKET-016 (W8-3) generalisation of the demote bracket: "I am about to block in place" for any
@@ -459,6 +464,13 @@ impl Vm {
                     {
                         std::thread::sleep(std::time::Duration::from_millis(300));
                     }
+                    #[cfg(test)]
+                    if matches!(
+                        &outcome,
+                        TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
+                    ) {
+                        self.window_hook(PRE_FINISH_WINDOW_ENV);
+                    }
                     let (aborts, job_fault) = sched.finish(task_index, scope_id, outcome);
                     if job_fault {
                         self.halt_run();
@@ -479,7 +491,7 @@ impl Vm {
                     // only its own nursery's fibers read that.
                     if aborts && fiber.job_cancel.is_none() {
                         #[cfg(test)]
-                        self.finish_drain_window_hook();
+                        self.window_hook(FINISH_DRAIN_WINDOW_ENV);
                         sched.drain_family(scope_id);
                     }
                     // A finished Executor job is one fewer live sender for every other sched: an
@@ -795,18 +807,19 @@ impl Vm {
         }
     }
 
-    /// TICKET-289 — test-only: hold the window between a nursery child's `finish` (its fault is in
-    /// its slot) and the `drain_family` that follows, so a verdict judged inside it is
-    /// deterministically reachable. No-op unless armed via [`FINISH_DRAIN_WINDOW_ENV`] in this
-    /// run's own `HostConfig.env`.
+    /// TICKET-289 — test-only: hold a window of a task's end for 300 ms, so a party judged inside it
+    /// is deterministically reachable. [`FINISH_DRAIN_WINDOW_ENV`]: between a nursery child's
+    /// `finish` (its fault is in its slot) and the `drain_family` that follows.
+    /// [`PRE_FINISH_WINDOW_ENV`]: before the `finish`. No-op unless `key` is armed in this run's own
+    /// `HostConfig.env`.
     #[cfg(test)]
-    fn finish_drain_window_hook(&self) {
+    fn window_hook(&self, key: &str) {
         let armed = self
             .host
             .env
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(FINISH_DRAIN_WINDOW_ENV)
+            .remove(key)
             .is_some();
         if armed {
             std::thread::sleep(std::time::Duration::from_millis(300));

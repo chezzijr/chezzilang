@@ -1136,6 +1136,122 @@ main()
     }
 }
 
+/// An owner parked at an inner join, whose own nursery's child faults, is cut at that join and
+/// never runs the line after it (`docs/reference/concurrency/05-cancel.md`, "a nursery join").
+/// The child's fault trips the scope's cancel flag, and `finish` records the fault in its slot.
+/// The flag cancels the inner child, so the inner join can complete between the two. The owner's
+/// halt read there saw a tripped flag with no recorded fault and returned no halt, so the owner
+/// printed `after` (`tests/owner_fault_grid.rs` `Nursery#16`, about 1 cell in 400 under load).
+/// The pre-finish window hook holds that gap open for 300 ms. Grid: every owner kind x every
+/// context the owner reaches the inner join from.
+#[test]
+fn an_owner_at_an_inner_join_is_cut_when_its_childs_fault_is_not_yet_recorded() {
+    const PROGRAM: &str = "\
+import Iterator from std.iter
+import std.concurrency
+import Executor, Shared from std.concurrency
+import std.time
+ch := Channel[int](0)
+s := Shared[int](0)
+sink := Channel[int](0)
+fn op(n: int) -> int:
+    parallel:
+        spawn:
+            print(ch.recv())
+    return 0
+fn gen() -> Iterator[int]:
+    yield op(0)
+fn bump(v: int) -> int:
+    return v + op(0)
+{OWNER}";
+    const CHILD: &str = "spawn:\n    time.sleep_ms(50)\n    panic(\"boom\")";
+    const CONTEXTS: [&str; 4] = [
+        "_ := op(0)",
+        "_ := [0].map(op)",
+        "for _ in gen():\n    pass",
+        "s.update(bump)",
+    ];
+    fn indent(text: &str, n: usize) -> String {
+        let pad = " ".repeat(n);
+        text.lines().map(|l| format!("{pad}{l}\n")).collect()
+    }
+    type Owner = (&'static str, fn(&str) -> String);
+    let owners: [Owner; 5] = [
+        ("main_body", |b| format!("parallel:\n{}", indent(b, 4))),
+        ("fn_in_main", |b| {
+            format!("fn owner():\n{}owner()\n", indent(b, 4))
+        }),
+        ("spawned_owner", |b| {
+            format!(
+                "fn owner():\n{}{}parallel:\n    spawn:\n        owner()\n    spawn:\n        \
+                 time.sleep_ms(300)\n        sink.send(1)\n        print(\"sibling sent\")\n",
+                indent(b, 4),
+                indent("print(sink.recv())", 4),
+            )
+        }),
+        ("fiber_nested", |b| {
+            format!(
+                "parallel:\n    spawn:\n        parallel:\n{}",
+                indent(b, 12)
+            )
+        }),
+        ("executor_job", |b| {
+            format!(
+                "fn owner_job() -> None:\n{}ex := Executor()\nt := ex.submit(owner_job)\n\
+                 ex.shutdown()\nmatch t.get():\n    ?_: pass\n    !e: panic(e.message())\n",
+                indent(b, 4)
+            )
+        }),
+    ];
+    // The literal equals `worker_loop::PRE_FINISH_WINDOW_ENV`. The hook `remove`s the key when it
+    // arms, so a key still present after the run means THIS run never reached the window.
+    const KEY: &str = "CHEZZI_TEST_PRE_FINISH_WINDOW";
+    let mut misses = Vec::new();
+    for (kind, owner) in owners {
+        for ctx in CONTEXTS {
+            let body = format!("{CHILD}\n{ctx}\nprint(\"after\")");
+            let src = PROGRAM.replace("{OWNER}", &owner(&body));
+            let entry = write_temp_chz("pre_finish_window", &src);
+            let cfg = crate::native::HostConfig::default();
+            cfg.env
+                .lock()
+                .unwrap()
+                .insert(KEY.to_string(), "1".to_string());
+            let env = std::sync::Arc::clone(&cfg.env);
+            let run_entry = entry.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(run_file_with(&run_entry, cfg));
+            });
+            let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+            let _ = std::fs::remove_file(&entry);
+            let cell = format!("{kind}/{}", ctx.lines().next().unwrap_or(""));
+            if env.lock().unwrap().contains_key(KEY) {
+                misses.push(format!("{cell}: the hook never armed"));
+                continue;
+            }
+            match result {
+                Ok((out, _err, res, _code)) => {
+                    let msg = format!("{res:?}");
+                    if out.contains("after")
+                        || out.contains("sibling sent")
+                        || !msg.contains("boom")
+                    {
+                        misses.push(format!("{cell}: out={out:?} res={msg}"));
+                    }
+                }
+                Err(_) => misses.push(format!("{cell}: hung")),
+            }
+        }
+    }
+    assert!(
+        misses.is_empty(),
+        "{} misses:\n{}",
+        misses.len(),
+        misses.join("\n")
+    );
+}
+
 /// gaps.md W10-16 — a child task's fault must outrank a synthesized `Deadlocked` verdict for the
 /// nursery OWNER parked on a channel `recv`, exactly as `reduce_task_slots` already ranks
 /// `Exit` > `Fault` > `Deadlocked` for SIBLING slots (W7-47). Today the owner-parked path bypasses
@@ -1300,7 +1416,7 @@ main()
 /// with the child's fault. `finish` records the fault, and `drain_family` wakes the parked owner a
 /// moment later. A verdict judged in that gap sees a quiesced Executor sched with the job parked
 /// and the nursery complete: it read the job as deadlocked, and the deadlock outranked the fault.
-/// `finish_drain_window_hook` holds the gap open for 300 ms so the verdict lands in it.
+/// `Vm::window_hook` holds the gap open for 300 ms so the verdict lands in it.
 #[test]
 fn a_job_parked_in_send_whose_child_faulted_is_not_called_deadlocked() {
     let src = "\
