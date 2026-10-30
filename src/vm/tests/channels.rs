@@ -661,7 +661,7 @@ fn nursery_rounds_reuse_their_runner_threads() {
 /// exceeds `limit` — the semaphore caps concurrent f-execution.
 #[test]
 fn pmap_limited_bounds_in_flight_both_engines() {
-    // A nested named fn (multi-statement) captures the two Atomics by-ref; both cross the airlock as
+    // A nested named fn (multi-statement) captures the two Atomics by-ref; both cross a spawn as
     // shared handles, so every task sees the one live counter/max pair. `cur` is incremented on entry
     // and decremented on exit, so it never exceeds the number of tasks running `f` at once — which the
     // token bucket caps at `limit`. `mx` records the peak, so `mx <= limit` proves the bound holds.

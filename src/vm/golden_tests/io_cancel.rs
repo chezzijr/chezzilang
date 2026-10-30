@@ -325,7 +325,7 @@ fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
 
 /// The cleanup's OWN work must survive too: a `parallel:` (or `spawn`) opened INSIDE a cancelled task's
 /// `defer` runs to completion on BOTH engines. The `deferring > 0` suppression that makes a defer
-/// uncancellable is per-`Vm` and does NOT cross the airlock — a worker fiber is a fresh `Vm` with
+/// uncancellable is per-`Vm` and does NOT cross a spawn — a worker fiber is a fresh `Vm` with
 /// `deferring == 0` — while the cancel-flag chain DOES cross it (`Vm::scope_ancestors` →
 /// `JoinScope::ancestors` → `cancel_outer`). So the child of a cleanup's nursery inherited the
 /// already-tripped enclosing flag and died at its first checkpoint (back-edge / blocking op): M:N
@@ -727,8 +727,8 @@ fn reader_open_missing_file_clean_err_parity() {
 }
 
 /// R2b — `import Reader from std.io` (a pure TYPE with no runtime member value) + send the handle
-/// across a `spawn` boundary and read in the task: no runtime fault (the `bind_import` skip + airlock
-/// sites). Both engines.
+/// across a `spawn` boundary and read in the task: no runtime fault (the `bind_import` skip).
+/// Both engines.
 #[test]
 fn import_reader_type_and_send_across_spawn_parity() {
     for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {

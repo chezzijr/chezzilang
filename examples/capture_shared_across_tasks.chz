@@ -1,6 +1,6 @@
-# Retained feature (F2): CROSS-TASK shared mutation uses `Shared[T]` (it crosses the airlock by
-# reference as a shared Arc), so N tasks over one `Shared` all accumulate — the sanctioned way to
-# share mutable state across tasks (a plain captured local would be isolated per task; see F1).
+# Retained feature (F2): CROSS-TASK shared mutation uses `Shared[T]` (a spawn gets the one box by
+# handle), so N tasks over one `Shared` all accumulate — the sanctioned way to order writes
+# across tasks (a plain captured local is shared too, but N unlocked writes to it race).
 import Shared from std.concurrency
 
 fn main():

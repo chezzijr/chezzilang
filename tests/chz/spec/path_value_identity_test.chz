@@ -117,7 +117,7 @@ test fn grid_a_path_value_read_inside_a_spawned_task_is_one_value():
     bad := r.recv()
     assert bad.len() == 0, "red cells: {bad}"
 
-# A captured value crosses the airlock and is rebuilt in the task's heap (CPython threads: True).
+# A captured value crosses into the task by handle (CPython threads: True).
 test fn grid_a_path_value_captured_into_a_spawned_task_is_one_value():
     f := plainf
     i := idt[int]

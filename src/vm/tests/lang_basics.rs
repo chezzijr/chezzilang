@@ -1062,8 +1062,8 @@ fn golden_generators_inferred_chz() {
     assert_eq!(run_capture(src).unwrap(), expect);
 }
 
-/// F3 path C: a PENDING generator passed DIRECTLY as a spawn arg now CROSSES the airlock BY VALUE
-/// (deep copy) — the callee runs on its own copy instead of faulting.
+/// F3 path C: a PENDING generator passed DIRECTLY as a spawn arg now CROSSES by handle (M3.4)
+/// — the callee gets the parent's generator instead of faulting.
 #[test]
 fn generator_passed_to_spawn_crosses_by_value() {
     let src = concat!(

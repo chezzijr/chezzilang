@@ -330,9 +330,9 @@ test fn cyclic_slice_shared_map_is_not_poisoned_by_a_piece_that_needs_the_contai
     assert sl[0]() == 2
     assert sl[1]() == 102
 
-# ADVERSARIAL REVIEW, charge 2 — `slice` is ONE call returning a container, so it shares within itself
-# (`concurrency.md` §airlock). That must hold on cyclic data too: the whole-container rebuild goes into
-# the CALLER's map, so every later piece is served from that same container instead of a private copy.
+# ADVERSARIAL REVIEW, charge 2 — `slice` is ONE call returning a container, so it shares within itself.
+# That must hold on cyclic data too: `slice` returns the box's elements by handle, so every later
+# piece is the same container, not a private copy.
 test fn cyclic_slice_shares_within_itself_like_get():
     a := Cyc(1, [])
     b := Cyc(2, [])

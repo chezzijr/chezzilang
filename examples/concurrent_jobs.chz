@@ -5,7 +5,7 @@
 #   1. Correctness — a wrong aggregate fails a `check` and the run ends "... N FAILURES".
 #   2. Determinism — the whole thing is deterministic by construction, so EVERY run, at every worker
 #                    count, MUST print byte-for-byte identical output. Any diff is a real
-#                    airlock/scheduler bug.
+#                    crossing/scheduler bug.
 #
 # It deliberately touches EVERY concurrency primitive Chezzi offers:
 #   Channel (send/recv/try_send/try_recv/close/len/cap/for-drain, unbounded + bounded-cap backpressure) ·
@@ -13,7 +13,7 @@
 #   block · Executor (submit/cancel/shutdown) ·
 #   Shared · RwShared · Atomic · std.concurrency.collection (ConcurrentMap/ConcurrentCounter) ·
 #   std.cancel (manual/timeout/derive/done/cancelled/reason/cancel) · std.time.timer · defer cleanup ·
-#   and the airlock: recursive-closure + protocol-existential + mid-`recover:` generator crossing.
+#   and task crossings: recursive-closure + protocol-existential + mid-`recover:` generator.
 #
 # Determinism discipline (why every schedule agrees): all concurrent accumulation is commutative or lock-RMW
 # (order-independent); no RNG / no wall-clock in any asserted value; `timer` is only used where it
@@ -93,15 +93,15 @@ fn shard_fold(lo: int, hi: int, out: Channel[int]):
     out.send(acc)
 
 # =====================================================================================================
-# Phase 3 — airlock stress, verified: polymorphic Jobs carrying recursive closures cross a Channel[Job],
+# Phase 3 — crossing stress, verified: polymorphic Jobs carrying recursive closures cross a Channel[Job],
 # and live generators (incl. one paused mid-`recover:`) cross a Channel[Iterator[int]].
 # =====================================================================================================
 protocol Job:
     fn run(self) -> int
     fn label(self) -> str
 
-# A job whose payload is a RECURSIVE CLOSURE captured by-value (recursive-local-fn-sendable path,
-# nested protocol > struct > closure across the airlock).
+# A job whose payload is a RECURSIVE CLOSURE (recursive-local-fn-sendable path,
+# nested protocol > struct > closure across a channel, by handle).
 struct ApplyJob:
     seed: int
     op: fn(int) -> int

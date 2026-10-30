@@ -90,11 +90,9 @@ fn d_repro_unused_generator_sibling_parity() {
 #[test]
 fn d_used_sibling_closure_crosses_by_value_parity() {
     // B3.3: the task ACTUALLY captures + uses a sibling CLOSURE (`inc`). This used to fault at the
-    // airlock (a closure lowered to a by-reference `Handle`); as of B3.3 closures cross the airlock BY
-    // VALUE, so the captured `inc` is deep-copied into the task and `inc(7)` runs → prints 8 on both
-    // engines. (The Finding-D free-var filter is still exercised: only `inc` is captured.) A residual
-    // non-sendable value (a live generator) still faults — see
-    // `generator_captured_into_spawn_callee_still_faults`.
+    // spawn (a closure lowered to a by-reference `Handle`); since M3.4 the task gets the parent's
+    // `inc` by handle and `inc(7)` runs → prints 8. (The Finding-D free-var filter is still
+    // exercised: only `inc` is captured.)
     assert_golden_out(
         "g := 7\nfn main():\n    inc := fn(x: int): x + 1\n    fn task():\n        print(inc(g))\n    parallel:\n        spawn task()\nmain()\n",
         "8\n",
@@ -192,7 +190,7 @@ fn d_no_undercapture_nonrecursive_nested_fn_parity() {
 #[test]
 fn closure_as_data_into_spawn_callee_parity() {
     // `work` is a closure whose captured env holds another closure (`double`). Crossing the spawn
-    // callee airlock used to fault (the nested closure lowered to a `Handle`); it now crosses by value.
+    // callee used to fault (the nested closure lowered to a `Handle`); it now crosses by handle.
     let src = "\
 fn main():
     double := fn(x: int) -> int: x * 2
@@ -648,12 +646,12 @@ main()";
 }
 
 /// Backlog arm (b) — a generator suspended INSIDE a `recover:` block (a LIVE handler in its parked
-/// context) now CROSSES the airlock and RESUMES with its recover boundary intact. The generator is
+/// context) now CROSSES a spawn and RESUMES with its recover boundary intact. The generator is
 /// advanced once at top level (suspending at `yield 1`, inside the recover), sent into a spawned
 /// task, and driven to exhaustion there. The recover block completes NORMALLY after crossing (the
 /// trailing `99` becomes `Ok(99)`), and the bound `r` flows through the post-crossing `match` — so
-/// the resumed values are `2, 3, 99`, proving the serialized `Handler` (stack_len/frame_len/ip)
-/// reconstructs a coherent boundary. Was a clean HARD-ARM reject; now a resume-semantics test.
+/// the resumed values are `2, 3, 99`: the task drives the parent's generator, `Handler` included
+/// (M3.4). Was a clean HARD-ARM reject; now a resume-semantics test.
 #[test]
 fn generator_recover_suspended_resumes_both() {
     let src = "\
@@ -683,12 +681,12 @@ main()";
 }
 
 /// Backlog arm (b), the item-#2 SEMANTIC guard (not just a non-faulting round-trip): after crossing
-/// the airlock, the generator's `recover:` must actually CATCH a post-crossing fault and produce the
+/// a spawn, the generator's `recover:` must actually CATCH a post-crossing fault and produce the
 /// correct recovered value — not silently drop the handler and let the fault abort the task. The
 /// generator suspends at `yield 10` inside the recover; when resumed in the spawned task the `1 / 0`
-/// fires, the (serialized) recover catches it (`r = Err`), and the post-recover `match` yields `99`
-/// down the Err arm. Asserted EQUAL to a same-heap, NO-airlock control that drives the identical
-/// generator inline (`generator_recover_fault_control_inline`): if the handler were NOT serialized,
+/// fires, the recover catches it (`r = Err`), and the post-recover `match` yields `99`
+/// down the Err arm. Asserted EQUAL to a no-crossing control that drives the identical
+/// generator inline (`generator_recover_fault_control_inline`): if the crossing lost the handler,
 /// the crossed fault would be UNCAUGHT and abort the task, diverging from the control.
 #[test]
 fn generator_crossed_recover_catches_fault_matches_control_both() {
@@ -714,14 +712,14 @@ fn main():
     print(out.recv())
 main()";
     // Expected value is pinned by the same-heap control below (plain, well-tested generator
-    // semantics with no airlock): catch → r=Err → yield 20, then match Err → yield 99.
+    // semantics with no crossing): catch → r=Err → yield 20, then match Err → yield 99.
     assert_golden_out(src, "20\n99\n");
 }
 
-/// Same-heap NO-airlock control for `generator_crossed_recover_catches_fault_matches_control_both`:
+/// NO-crossing control for `generator_crossed_recover_catches_fault_matches_control_both`:
 /// the identical generator driven INLINE (never crossing a task boundary). This pins the correct
 /// recovered semantics with the plain, well-exercised generator+recover path; the crossed test must
-/// match this exact output or the airlock changed the computation.
+/// match this exact output or the crossing changed the computation.
 #[test]
 fn generator_recover_fault_control_inline() {
     let src = "\
@@ -849,7 +847,7 @@ main()";
 
 // ===== B3.3 (Task 2a) — closures-as-data at spawn/Channel sites RUN =====
 // The checker half (permissive `sendable(Func)` + capture gate) makes these type-check; here we pin
-// that they actually RUN identically on the serial + M:N engines (the by-value airlock crossing).
+// that they actually RUN (the task gets each closure by handle).
 
 #[test]
 fn channel_of_closures_runs_parity() {
@@ -1152,7 +1150,7 @@ main()
     assert_golden_out(src, "1\n0\n1\n4\n0\n6\n");
 }
 
-// ----- Regression: snapshot must NOT reuse the airlock deep_clone (its fault/identity-remap modes)
+// ----- Regression: snapshot must NOT reuse a deep_clone (the deleted copy step's fault/remap modes)
 // A struct/enum key that embeds a cyclic back-edge, a live generator, or an identity-typed
 // (closure/channel/…) sub-value used to be stored BY REFERENCE and worked on a plain serial insert.
 // The first cut routed the snapshot through the airlock's deep copy (deleted in M3.5), which FAULTED on the

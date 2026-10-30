@@ -2193,7 +2193,7 @@ print("done")
 /// The NEGATIVE twin of the test above: a `cancel()` must reach only the executors its own job
 /// CREATED, never one that merely had work submitted to it from inside that job.
 ///
-/// An `Executor` crosses the airlock by `Arc`, so any job can `submit` to any executor it can name. A
+/// An `Executor` crosses a spawn by `Arc`, so any job can `submit` to any executor it can name. A
 /// first cut keyed cancel inheritance on the SUBMITTER (`if self.the job's sched.is_some() {
 /// rw.worker.cancel_outer = self.scope_ancestors() }`), which handed `other`'s cancel chain to a job
 /// belonging to `main`'s executor: `other.cancel()` then killed an already-started job that was

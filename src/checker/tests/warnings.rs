@@ -1,4 +1,4 @@
-//! Checker tests: warnings: severity channel, discarded Result/Option, airlock staleness.
+//! Checker tests: warnings: severity channel, discarded Result/Option, task-write grid.
 //! Split out of `src/checker/tests.rs`. `super::*` is the parent module.
 
 use super::*;
@@ -403,14 +403,14 @@ fn a_task_side_write_read_after_the_join_checks_clean() {
     ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    print(xs.len())\nf()\n",
     );
-    // Index assign, read WHOLE. A captured `List` deep-copies across the airlock, so the parent's
-    // whole-value read observes the lost element write — the checker can tell, so it reports. (The
+    // Index assign, read WHOLE. A captured `List` was copied before M3.4, so the parent's
+    // whole-value read observed the lost element write — the checker could tell, so it reported. (The
     // granular read `xs[0]` of this same granular write now warns too; see
     // `a_same_path_read_of_a_projected_task_write_warns`.)
     ok(
         "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    print(xs)\nf()\n",
     );
-    // Field assign — a captured struct deep-copies across the airlock too.
+    // Field assign — a captured struct was copied before M3.4 too.
     ok(
         "struct P:\n    x: int\nfn f():\n    p := P(1)\n    parallel:\n        spawn:\n            p.x = 9\n    print(p)\nf()\n",
     );
@@ -423,7 +423,7 @@ fn a_task_side_write_read_after_the_join_checks_clean() {
     ok(
         "struct P:\n    x: int\n    s: str\nfn f():\n    p := P(1, \"a\")\n    parallel:\n        spawn:\n            p = P(9, \"z\")\n    print(p.s)\nf()\n",
     );
-    // An IMPLICIT nursery (a bare `spawn:` with no `parallel:`) is the same airlock.
+    // An IMPLICIT nursery (a bare `spawn:` with no `parallel:`) is the same spawn.
     ok(
         "fn f():\n    xs: List[int] = []\n    spawn:\n        xs.push(1)\n    print(xs.len())\nf()\n",
     );
@@ -831,7 +831,7 @@ fn a_granular_read_of_a_granular_task_write_declines() {
     );
 }
 
-/// Build the fn-body row shape shared by the TICKET-165 airlock table tests: `PRE` (the `T`/`S`
+/// Build the fn-body row shape shared by the TICKET-165 crossing table tests: `PRE` (the `T`/`S`
 /// structs the table's INIT strings construct against) + `fn main():` + `init` + a `parallel: /
 /// spawn:` block holding `writes` (12-space indent) + `reads` after the join (4-space indent).
 fn crossing_src(init: &str, writes: &[&str], reads: &[&str]) -> String {
@@ -1070,8 +1070,8 @@ fn a_task_side_write_at_module_top_level_and_on_a_module_global_is_legal() {
     );
 }
 
-/// The false-positive guard, and the highest-value case in the rule: the handle types cross the
-/// airlock BY HANDLE, so a task-side write through one IS visible after the join (measured:
+/// The false-positive guard, and the highest-value case in the rule: the handle types cross a
+/// spawn BY HANDLE, so a task-side write through one IS visible after the join (measured:
 /// `Shared` 1, `Channel` 7). Telling someone their correct `Shared` code is broken is worse than the
 /// missing warning, so `mutates_receiver` is keyed on the receiver TYPE and none of them is in it.
 #[test]
@@ -1103,7 +1103,7 @@ fn a_write_that_is_not_lost_checks_clean() {
     // A `defer:` block in the PARENT runs in the parent frame and shares the enclosing cell, so its
     // write is not a task write and taints nothing (measured: `defer: xs.push(1)` beside a later
     // `defer: print(xs.len())` prints 1). Its task-side twin — a `defer:` nested INSIDE the `spawn:` —
-    // does warn; see `a_defer_inside_the_task_is_on_the_far_side_of_the_airlock`.
+    // checks clean too; see `a_defer_inside_the_task_checks_clean`.
     no_warn(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            print(1)\n    defer:\n        xs.push(1)\n    print(xs.len())\nf()\n",
     );
@@ -1254,8 +1254,8 @@ fn a_body_declared_inside_the_task_checks_clean() {
     );
 }
 
-/// A `defer:` block nested INSIDE a `spawn:` body is on the far side of the airlock like any other
-/// task statement — its write really is lost, so it must taint. Measured on the release binary:
+/// A `defer:` block nested INSIDE a `spawn:` body runs in the task like any other task statement;
+/// M3.4: its write lands (`1`, `5`). Under the deleted copy step it was lost. Measured then:
 /// `spawn: defer: xs.push(1)` leaves `xs.len() == 0` after the join, and `spawn: defer: n = 5` leaves
 /// `n == 0`. The code comment and `docs/reference/syntax/` both claimed the opposite (that a `defer:` never
 /// reaches the write path as a task write) — a claim written without running the program.

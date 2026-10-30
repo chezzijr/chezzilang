@@ -162,7 +162,7 @@ test fn stat_survives_the_offload_boundary():
     assert off_size.get() == inline_size, "offloaded stat.size must match the inline one"
     assert off_is_file.get() == inline_is_file, "offloaded stat.is_file must match the inline one"
 
-# A `Path` crosses the airlock (spawn) by value like any other struct over immutable `bytes`.
+# A `Path` crosses a spawn by handle like any other struct over immutable `bytes`.
 # (It is also W7-19's `fs.walk` offload-boundary coverage: `walk` runs here from a FIBER, so under
 # M:N it takes the dirty-pool path, and the assert is byte-exact on what came back.)
 test fn path_crosses_a_spawn():

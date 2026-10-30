@@ -468,10 +468,10 @@ main()";
     assert_golden_out(src, "120\n");
 }
 
-/// Identity-preserving airlock — a MUTUALLY-recursive closure PAIR (`Cell_even -> Closure_even ->
+/// Identity across a spawn — a MUTUALLY-recursive closure PAIR (`Cell_even -> Closure_even ->
 /// Cell_odd -> Closure_odd -> Cell_even`, a 4-node cycle threaded through two Cells and two Closures)
-/// crosses the airlock inside a spawned task's captured environment and ties BOTH directions of the
-/// knot. `even(10) == true`. (Nested `fn`s can't forward-reference each other, so the
+/// crosses a spawn inside the task's captured environment by handle, so BOTH directions of the
+/// knot hold. `even(10) == true`. (Nested `fn`s can't forward-reference each other, so the
 /// pair is built from reassigned fn-typed cells — the same closure/cell cycle a mutual `fn` would form.)
 #[test]
 fn crossing_mutually_recursive_pair_round_trips() {
@@ -489,10 +489,9 @@ main()";
     assert_golden_out(src, "true\n");
 }
 
-/// Identity-preserving airlock — a recursive nested `fn` that ALSO reads an outer local (`base`). Its
-/// capture graph has the self-cell (on the DFS stack → `Backref`) AND the `base`-cell (visited once,
-/// OFF the stack → inline deep copy). The visited-set distinguishes them: the self-edge round-trips as
-/// a cycle, the outer local as an independent copy. `f(3)` reads `base == 100`.
+/// Identity across a spawn — a recursive nested `fn` that ALSO reads an outer local (`base`). Its
+/// capture graph has the self-cell AND the `base`-cell; the task gets both by handle (M3.4).
+/// `f(3)` reads `base == 100`.
 #[test]
 fn crossing_recursive_closure_captures_outer_local_round_trips() {
     let src = "\
@@ -537,8 +536,8 @@ main()";
     assert_golden_out(src, "2 2\n");
 }
 
-/// Identity-preserving airlock, DATA path — a self-referential `struct` (`a.next = [b]; b.next = [a]`,
-/// a cycle threaded through struct fields + lists) crosses the airlock as a `spawn` argument and round-
+/// Identity across a spawn, DATA path — a self-referential `struct` (`a.next = [b]; b.next = [a]`,
+/// a cycle threaded through struct fields + lists) crosses as a `spawn` argument and round-
 /// trips (was `maximum structural depth exceeded`). The deleted wire form back-referenced the cycle;
 /// since M3.4 the task gets the struct by handle.
 /// `use_it(a)` reads `a.val == 1`.
@@ -561,7 +560,7 @@ main()";
     assert_golden_out(src, "got 1\n");
 }
 
-/// Identity-preserving airlock, DATA path — a self-referential `list` (`xs.push(xs)`, a list holding
+/// Identity across a channel, DATA path — a self-referential `list` (`xs.push(xs)`, a list holding
 /// itself) crosses a `Channel[List[List[int]]].send` and round-trips. The receiving task reads the
 /// first element (`10`) and that the self-slot is the list itself (`ys[1].len() == 2`).
 #[test]
@@ -580,9 +579,9 @@ main()";
     assert_golden_out(src, "10 2\n");
 }
 
-/// Identity-preserving airlock, DATA path — a self-referential `map` (a map whose value refers back to
-/// the map) crosses a `Channel` and round-trips using the CARRIED hash on reconstruction (never re-hashes
-/// a cyclic key/value). The task reads the leaf entry's self-length.
+/// Identity across a channel, DATA path — a self-referential `map` (a map whose value refers back to
+/// the map) crosses a `Channel` by handle (M3.2), so nothing re-hashes a cyclic key/value. The task
+/// reads the leaf entry's self-length.
 #[test]
 fn crossing_self_ref_map_round_trips_both() {
     let src = "\
@@ -1186,9 +1185,8 @@ fn vm_bytearray_conversion_bridge() {
 
 #[test]
 fn bytearray_crosses_channel_deep_copy() {
-    // `bytearray` crosses the --parallel airlock by VALUE (deep copy): the other side gets a
-    // fresh independent buffer. Buffer-then-drain (send before recv) so the sequential interp
-    // agrees, exactly like bytes_crosses_channel (a C5 limitation, not bytearray-specific).
+    // `bytearray` crosses a channel by handle (M3.2): the receiver gets the sender's buffer.
+    // Buffer-then-drain (send before recv), exactly like bytes_crosses_channel.
     let src = concat!(
         "fn main():\n",
         "    ch := Channel[bytearray]()\n",
@@ -1419,8 +1417,8 @@ fn for_over_fresh_temp_cursor_full() {
 
 #[test]
 fn cursor_crosses_spawn_three_engine_parity() {
-    // A cursor IS sendable: it crosses the spawn/channel airlock as a DEEP COPY (independent
-    // snapshot + pos on the receiver), like a `list`. The receiver drives it and gets `Some(1)`.
+    // A cursor IS sendable: it crosses a spawn/channel by handle, like a `list`, so the receiver
+    // drives the sender's cursor and gets `Some(1)`.
     // This must hold byte-identically under the M:N `--parallel` engine.
     // (Regression guard: an earlier cut gated the cursor non-sendable like a generator, which
     // panicked the spawned worker on the VM while the since-removed interp engine succeeded — a

@@ -614,7 +614,7 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
 }
 
 /// FLIPPED (item A, was `airlock_cyclic_struct_recoverable_both_engines`) — a SELF-REFERENTIAL value
-/// crossing the concurrency airlock (`spawn` arg) now reaches the task (once via the deleted wire
+/// crossing a task boundary (`spawn` arg) now reaches the task (once via the deleted wire
 /// form's back-references, since M3.4 by handle), instead of tripping the depth cap. The
 /// spawned task reads `a.val == 1` (prints `got 1`) and the recover returns `done`; byte-identical
 /// on every engine.
@@ -644,7 +644,7 @@ main()
 
 /// FLIPPED (item A, was `airlock_cyclic_via_channel_send_and_shared_recoverable`) — the same self-
 /// referential value crossing via `Channel.send` and `Shared(...)` (M3.2/M3.3: by handle)
-/// also gets through. Regression lock on the other airlock entry points beyond a bare `spawn` arg.
+/// also gets through. Regression lock on the other crossing entry points beyond a bare `spawn` arg.
 #[test]
 fn crossing_cyclic_via_channel_send_and_shared_crosses() {
     let chan_src = "\
@@ -686,7 +686,7 @@ main()
     assert_mc_parity(shared_src, "ok: done\n");
 }
 
-/// A nested (local) recursive `fn` crossing the airlock has a self-referential capture graph (the
+/// A nested (local) recursive `fn` crossing a spawn has a self-referential capture graph (the
 /// letrec self-cell: `Closure h -> captured[Cell] -> Cell.inner = h`). The task gets the
 /// closure by handle (M3.4; the deleted wire form back-referenced the knot), so the recursive fn
 /// computes correctly — `fact(5) == 120`.
@@ -706,10 +706,9 @@ main()
     assert_mc_parity(src, "ok: 120\n");
 }
 
-/// Memory-safety lock for the tie-the-knot reconstruction: the same recursive-fn airlock crossing under
-/// GC STRESS. The reconstructed closure/cell cycle (placeholder-alloc → patch) must be fully GC-traced —
-/// if the placeholder patch left a dangling `GcRef`, a collection at the next safepoint would panic
-/// ("dangling GcRef"). A GC pass runs before/after the spawn, then the result is used (`fact(6) == 720`).
+/// Memory-safety lock (it once guarded the deleted copy step's tie-the-knot rebuild): the same
+/// recursive-fn crossing under GC STRESS. The closure/cell cycle must stay GC-traced — a dangling
+/// `GcRef` would panic at the next safepoint ("dangling GcRef"). A GC pass runs before/after the spawn, then the result is used (`fact(6) == 720`).
 #[test]
 fn crossing_recursive_local_fn_round_trips_under_gc_stress() {
     let src = "\
@@ -730,10 +729,9 @@ main()
     assert_eq!(run_capture_stress(src), run(src));
 }
 
-/// Memory-safety lock for the CONTAINER tie-the-knot reconstruction (item A): a self-referential
-/// `struct` crossing the airlock under GC STRESS. The reconstructed struct/list cycle (placeholder-
-/// alloc → patch) must be fully GC-traced — if the placeholder patch left a dangling `GcRef`, a
-/// collection at the next safepoint would panic ("dangling GcRef"). A GC pass runs before/after the
+/// Memory-safety lock (item A; it once guarded the deleted copy step's CONTAINER rebuild): a
+/// self-referential `struct` crossing a spawn under GC STRESS. The struct/list cycle must stay
+/// GC-traced — a dangling `GcRef` would panic at the next safepoint ("dangling GcRef"). A GC pass runs before/after the
 /// spawn, then the crossed cyclic node is read (`a.val == 1`, and the cycle is intact: `a.next[0]` is
 /// `b` and `b.next[0]` is `a`). Mirrors `crossing_recursive_local_fn_round_trips_under_gc_stress`.
 #[test]
@@ -1563,8 +1561,8 @@ main()
 }
 
 /// Bug A guard-precision — a BREADTH-shaped acyclic value (~100k shallow siblings, structural depth
-/// ~2) must STILL cross the airlock fine: the 10_000 depth cap counts nesting LEVELS, not siblings,
-/// so a large-but-shallow sendable never false-trips. (A genuinely >10_000-DEEP acyclic nest would
+/// ~2) must cross a spawn fine (the deleted copy step's 10_000 depth cap counted nesting LEVELS, not
+/// siblings), so a large-but-shallow sendable never false-trips. (A genuinely >10_000-DEEP acyclic nest would
 /// error — same false-positive the print/`==` path already has — so this is deliberately breadth-shaped.)
 #[test]
 fn crossing_wide_acyclic_crosses_fine() {

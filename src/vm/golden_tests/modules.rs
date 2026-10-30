@@ -118,7 +118,7 @@ main()
     );
 }
 
-// ----- Task 2 (option a): user protocol existentials cross the airlock -----
+// ----- Task 2 (option a): user protocol existentials cross tasks -----
 
 /// A concrete struct widened to a user protocol existential rides a `Channel[Proto]` to a spawned
 /// task, which calls a protocol method and prints — byte-identical. (Was checker-
@@ -170,7 +170,7 @@ fn ffi_handle_crosses_shared_set() {
 }
 
 /// The FFI-over-`Channel` send now SUCCEEDS (Ok), byte-identical: `recover:` sees an
-/// `Ok` → prints `false`. (Was `true` when the send rejected; the flip proves the airlock accepts it.)
+/// `Ok` → prints `false`. (Was `true` when the send rejected; the flip proves the send accepts it.)
 #[test]
 fn ffi_handle_send_succeeds() {
     assert_golden_out(
@@ -858,8 +858,8 @@ fn match_arm_only_in_a_variant_three_engine() {
     }
 }
 
-/// AIRLOCK: a colliding struct value sent through a Channel survives the wire round-trip and
-/// prints its BARE name on the other side. Identical on interp, default VM, and `--parallel`.
+/// CROSSING: a colliding struct value sent through a Channel reaches the other side and
+/// prints its BARE name there. Identical on interp, default VM, and `--parallel`.
 #[test]
 fn collision_struct_sent_across_task() {
     let files = [

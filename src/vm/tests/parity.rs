@@ -1261,7 +1261,7 @@ fn spawn_builtin_fn_value_as_call_callee_both_engines() {
 
 /// `spawn print("hi")` — a bare first-class builtin spawned DIRECTLY (no intermediate binding),
 /// symmetric with `defer print(...)`. `print` lowers to `Op::LoadBuiltin` (value position) then
-/// `SpawnCall`, so the callee is an `Obj::Builtin` crossing the airlock by name.
+/// `SpawnCall`, so the callee is an `Obj::Builtin` crossing the spawn by name.
 /// The checker gate accepts it (parity-perf-0 fix); runtime prints identically.
 #[test]
 fn spawn_bare_builtin_print_both_engines() {

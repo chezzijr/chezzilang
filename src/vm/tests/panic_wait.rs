@@ -113,7 +113,7 @@ fn golden_rwshared_concurrent_matches_expected() {
     assert_eq!(run_capture(src).expect("repeat run"), expected);
 }
 
-/// Airlock identity: a `RwShared` mutated from a spawned task is observed by the parent — the
+/// Crossing identity: a `RwShared` mutated from a spawned task is observed by the parent — the
 /// handle crosses as a SHARED `Arc` core (not a deep-copy), so both reach the one box.
 #[test]
 fn rwshared_mutation_from_spawn_is_observed_by_parent() {

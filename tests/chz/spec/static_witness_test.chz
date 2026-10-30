@@ -640,7 +640,7 @@ test fn a_spawned_member_witness_call_constructs_the_callers_type():
     assert ch.recv() == "7:Tag(s='none')"
 
 # …and the target inside a GENERIC body, where the witness stops being a constant and becomes a
-# FORWARD of the enclosing frame's own `$w:T` — for `spawn`, across the airlock.
+# FORWARD of the enclosing frame's own `$w:T` — for `spawn`, into the task.
 
 fn defer_forward[T: Default](x: T, sink: List[str]):
     defer reset_into(x, sink)
