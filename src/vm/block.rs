@@ -297,11 +297,18 @@ impl WakeSet {
 /// TICKET-188 — THE decider of "must this party stop now, and why?". Cancel first; then, unless a
 /// run-wide exit is pending (DEC-096: `Exit > Fault`), the innermost owned nursery whose flag is
 /// tripped AND whose family recorded a `Fault`. A flag is only a wake hint. A fault trips it under
-/// the core lock with its slot (`MnSched::finish_with`), but other trips record no fault: a child's
-/// `Exit` end (`finish_with`), the run-wide exit (`MnSched::cancel_all`, from `halt_all_scheds`),
-/// the abort seams (`trip_scope_cancel` from `abort_enlisted_scope`, the eager-nursery abort and
-/// `sched::cancel_fiber_owned_family`) and a `--timeout` gap wake (`netio::deadline_gap_wake`).
-/// So a tripped flag with no recorded fault is not a halt.
+/// the core lock with its slot (`MnSched::finish_with`), but other trips record no fault. Each
+/// production caller of `trip_cancel_flag`:
+/// - a child's `Exit` end (`finish_with`);
+/// - the run-wide exit (`MnSched::cancel_all`, from `halt_all_scheds`);
+/// - the abort seams (`trip_scope_cancel` from `abort_enlisted_scope`, the eager-nursery abort and
+///   `sched::cancel_fiber_owned_family`);
+/// - a `--timeout` gap wake (`netio::deadline_gap_wake`);
+/// - an Executor job cut (`SchedCore::cancel_one`), an Executor join that timed out
+///   (`worker_vm.rs`) and `Executor.cancel()` (`shared_methods.rs`).
+///
+/// The `--max-heap` backlog trip in `finish_with` turns the outcome into a `Fault`. So a tripped
+/// flag with no recorded fault is not a halt.
 pub(super) fn halt_of<'a>(
     cancel: impl Iterator<Item = &'a AtomicBool>,
     owned: impl DoubleEndedIterator<Item = OwnedRef<'a>>,
