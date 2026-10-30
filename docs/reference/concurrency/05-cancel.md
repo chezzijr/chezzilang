@@ -181,15 +181,18 @@ Resource caps, measured:
 - **`--max-heap` caps the whole run.** Every task of a test allocates into one heap, and each
   collection, on any thread, measures that heap's live bytes. Three tasks that each hold 4.2 MB
   are OVER-MEMORY together under a 10 MB cap, though each one alone is under it.
-- **`--max-heap` reaches a sleeper only through the cancel arm** — when the over-allocating task is a
-  nursery/`Executor` sibling sharing its cancel scope (measured 365 ms, before the one-heap change).
-  The task that runs the collection reads the verdict; a sleeping top-level `main` has no cancel
-  flag, so it sleeps out (measured 3005 ms) before the OVER-MEMORY verdict lands.
+- **`--max-heap` cuts a sleeper at once, except an `Executor` job when the test fn itself trips the
+  cap.** Measured on a release build, 8 MB cap, `CHEZZI_THREADS` 1, 2 and default, 1 to 5 runs
+  each: a task that grows a global list while the test fn, a nursery sibling or another job sleeps
+  3000 or 5000 ms ends OVER-MEMORY in 0.08-0.12 s. When the test fn grows past the cap, a job that
+  sleeps 5000 ms sleeps out, and the verdict lands at 5.02 s (T=2 and default; at T=1 the job has
+  not started, and the run ends in 0.10 s).
 - **`--max-heap` counts an `Executor` job's captured payload while the job is queued or runs.** The
-  payload is objects of the run's one heap. Measured on the per-task heaps, 300 jobs capturing
-  ~1 MB each under an 8 MB cap: peak RSS 18 MB at `CHEZZI_THREADS` 1, 2 and default, each run
+  payload is objects of the run's one heap. Measured, 300 jobs that capture ~1 MB each and sleep
+  2000 ms under an 8 MB cap: peak RSS 20.5-20.9 MB at `CHEZZI_THREADS` 1, 2 and default, each run
   `OVER-MEMORY`. A test whose unfinished jobs together exceed the cap trips, sleeping jobs
-  included.
+  included. The submit loop is the test fn, so the verdict lands when the jobs' sleeps end
+  (2.02-2.03 s), as in the row above.
 
 **Where a cancel is NOT delivered — pure CPU with no back-edge.** **Deep recursion is not a
 checkpoint**: a recursive function emits only `Call`/`Return`, never a backward jump, so a cancelled
