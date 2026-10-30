@@ -654,8 +654,8 @@ pub struct Heap {
     pending_mut: Option<(GcRef, usize)>,
     /// The objects this handle's last [`sweep`](Heap::sweep) freed that own an `Arc` core or a
     /// file: their drop can make a syscall (a buffered writer's flush, a socket's close), so the
-    /// collector drops them after it releases the world, detached through the GC door
-    /// (`Vm::drop_graveyard`): a flush into a full pipe blocks.
+    /// collector drops them after it releases the world (`Vm::drop_graveyard`), by their
+    /// `heap_core::DropSite`.
     graveyard: Vec<Obj>,
     /// M2: the `RVec` blocks this handle's grows retired, not yet handed to the core
     /// (`adopt_retired`; `vm/rvec.rs`).
@@ -1104,6 +1104,11 @@ impl Heap {
     /// (see `graveyard`).
     pub(super) fn take_graveyard(&mut self) -> Vec<Obj> {
         std::mem::take(&mut self.graveyard)
+    }
+
+    /// The count of this run's batches on the reaper (`vm/reaper.rs`).
+    pub(super) fn reaped(&self) -> std::sync::Arc<super::reaper::Pending> {
+        std::sync::Arc::clone(self.core.reaped())
     }
 
     /// Approximate live heap footprint in bytes: each live slot's `Obj` plus the owned backing

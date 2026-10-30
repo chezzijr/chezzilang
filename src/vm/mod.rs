@@ -18,6 +18,7 @@ mod module_table;
 mod poller;
 mod pool;
 mod quiesce;
+mod reaper;
 mod root_registry;
 mod rvec;
 use root_registry::{CtxBox, RootRegistry};

@@ -169,22 +169,34 @@ impl Vm {
         if !ran {
             self.heap.observe_collection();
         }
-        self.drop_graveyard();
+        // A panic of the collection wins: the graveyard waits for the next collection.
         if let Err(p) = r {
             resume_unwind(p);
         }
+        self.drop_graveyard();
     }
 
     /// Drop the objects the last sweep freed whose drop can make a syscall
-    /// (`Heap::take_graveyard`), through the door: a garbage writer flushes its tail in its drop
-    /// (`WriterCore::drop`, the `BufWriter` drop), and that write blocks while a pipe is full. If
-    /// the pipe's reader is a task of this run, its next stop would wait for this thread forever.
-    /// The dropped objects are out of their slots, so the drop reads no heap object.
+    /// (`Heap::take_graveyard`), by their `heap_core::DropSite`, after the world restarts and
+    /// through the door. A drop that can block (a garbage writer flushes its tail into a full pipe)
+    /// goes to the reaper thread (`vm/reaper.rs`): run here, it would stall this task runner, and
+    /// the task it takes next. The rest (a core's lock, an fd close) drops here, detached. The
+    /// dropped objects are out of their slots, so no drop reads a heap object.
     fn drop_graveyard(&mut self) {
         let dead = self.heap.take_graveyard();
-        if !dead.is_empty() {
-            self.gc_blocking(&[], move |_| drop(dead));
+        if dead.is_empty() {
+            return;
         }
+        let (slow, rest): (Vec<Obj>, Vec<Obj>) = dead
+            .into_iter()
+            .partition(|o| super::heap_core::drop_site(o) == super::heap_core::DropSite::Reaper);
+        let reaped = self.heap.reaped();
+        self.gc_blocking(&[], move |_| {
+            if !slow.is_empty() {
+                super::reaper::reap(slow, &reaped);
+            }
+            drop(rest);
+        });
     }
 
     /// THE blocking door. Every wait this thread can make while it holds a token runs as `f`

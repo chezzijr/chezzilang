@@ -128,10 +128,14 @@ so a `Writer` over stdout captures and streams identically. `buffered(...)` batc
   **file**-backed buffered writer flushes its tail when the handle is dropped (program exit / GC), a
   nested `buffered(buffered(create(p)))` chain included. A **stdout/stderr**-backed buffered writer's
   tail is *not* recovered on drop: call `flush()`/`close()`. A plain `create`/`append` writer never
-  loses data (its `BufWriter` flushes on drop). A drop at GC runs on the task whose allocation
-  started the collection, after the world restarts and detached like any blocking write: while the
-  fd is a full pipe, that one task waits for the reader, and the other tasks run on (Python's
-  `BufferedWriter` and Rust's `BufWriter` flush on drop too; Go's `bufio.Writer` loses the tail).
+  loses data (its `BufWriter` flushes on drop). A writer that becomes garbage flushes when a
+  collection frees it, so its tail reaches the fd at a collection, not when the last reference
+  goes (call `flush()`/`close()` when a reader waits for it). One reaper thread runs these drops,
+  in the order the collections freed the writers, and it runs no task: while an fd is a full pipe,
+  no task waits for the flush, but a second freed writer's flush waits behind the first (Go runs
+  its finalizers on one goroutine the same way). A run waits for its pending flushes before it
+  returns. Python's `BufferedWriter` and Rust's `BufWriter` flush on drop too; Go's `bufio.Writer`
+  loses the tail.
 - **Cross-task write order to one shared `Writer` is unspecified** (Go's `bufio`-not-goroutine-safe
   rule). Each single `write`/`write_bytes` is one atomic critical section, but the *order* of separate
   writes from different tasks is not guaranteed. Join and write from one task if you need order.

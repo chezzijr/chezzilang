@@ -248,7 +248,19 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "core.rs",
         "drop",
         "",
-        "`WriterCore::drop` flushes a buffered writer where the last handle drops, with no Vm: a sweep's graveyard drops it in a door (`Vm::drop_graveyard`, `tests/gc_graveyard_drop_grid.rs`)",
+        "`WriterCore::drop` flushes a buffered writer where the last handle drops, with no Vm: a sweep's graveyard hands it to the reaper thread, which never attaches (`vm/reaper.rs`, `tests/gc_graveyard_drop_grid.rs`)",
+    ),
+    (
+        "reaper.rs",
+        "wait",
+        "",
+        "`Pending::wait`: its one caller is `HeapCore`'s `Drop` (the row below)",
+    ),
+    (
+        "heap_core.rs",
+        "drop",
+        "",
+        "the run's last heap handle is gone, so no thread of the run holds a token or can request a stop",
     ),
     (
         "entry.rs",

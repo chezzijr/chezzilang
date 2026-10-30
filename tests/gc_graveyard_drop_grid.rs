@@ -1,24 +1,31 @@
-//! M5 — a sweep's graveyard drops through the GC door. A freed object whose `Drop` makes a syscall
-//! (`Heap::take_graveyard`) drops after the world restarts, on the collecting thread. A garbage
-//! writer with an unflushed tail flushes it in that drop, and the write blocks while the FIFO is
-//! full. If the thread is still attached, the next stop waits for it. The FIFO's reader is the same
-//! run's `main`, and its next instruction requests that stop: the run hangs.
+//! M5 — a sweep's graveyard drops off the task runners. A freed object whose `Drop` makes a
+//! syscall (`Heap::take_graveyard`) drops after the world restarts. A garbage writer with an
+//! unflushed tail flushes it in its drop, and the write blocks while the FIFO is full. Run on the
+//! collecting thread, the block holds every later stop (M5 before its fix: attached) or stalls the
+//! task runner and the next task it takes (M5b: detached). The writer and the `Cffi` kinds go to
+//! the reaper thread (`vm/reaper.rs`), which runs no task and never attaches.
 //!
-//! One program per graveyard kind whose drop can block. An Executor job writes 60000 bytes into a
-//! FIFO, then leaves a tail (7000 or 10000 bytes) in a writer that becomes garbage, so the drop's
-//! flush passes the 65536-byte pipe buffer. `main` reads the FIFO 300 ms after the job signals.
-//! `CHEZZI_GC_STRESS=1` collects at every instruction, so the job's next instructions sweep the
-//! writer. Each run is its own process and must exit 0 with its golden stdout within [`LIMIT`].
-//! A run that outlives the bound is killed and FAILS. It is never retried.
+//! One program per writer kind: an Executor job writes 60000 bytes into a FIFO, then leaves a tail
+//! (7000 or 10000 bytes) in a writer that becomes garbage, so the drop's flush passes the
+//! 65536-byte pipe buffer. `main` reads the FIFO 300 ms after the job signals. `two_jobs` runs two
+//! such jobs on two FIFOs and drains only after both signal. `CHEZZI_GC_STRESS=1` collects at every
+//! instruction, so the jobs' next instructions sweep the writers. Each run is its own process and
+//! must exit 0 with its golden stdout within [`LIMIT`]. A run that outlives the bound is killed and
+//! FAILS. It is never retried.
+//!
+//! Base (bd5d6403, before M5; release, 60 s cap): `file`, `buffered` and `nested` hang at T=2, T=4
+//! and default, 9 of 9 runs. HEAD of M5 before the reaper (debug): `two_jobs` hangs in 4 of 4 runs
+//! at T=2, 2 of 4 at T=4 and 2 of 4 at the default count.
 //!
 //! No `t1` cell: at one worker the job's blocked write keeps the one run permit (`vm/width.rs`), so
 //! `main` cannot run to drain the FIFO. An explicit `flush()` hangs there too, on main before M5.
 //!
-//! The other graveyard kinds (`is_arc_core` in `vm/heap_core.rs`) and why none blocks in its drop:
-//! a `Reader`, `Socket` or `Listener` drop closes an fd (no linger is set); a `Channel`, `Shared`,
-//! `RwShared`, `Atomic` or `AtomicInt` drop frees memory; an `Executor` drop detaches its threads
-//! (a `JoinHandle` drop does not join). A `Cffi` drop runs `dlclose`, which runs the library's C
-//! destructors: those can block, and the same door covers them, but no program here builds one.
+//! The other graveyard kinds (`heap_core::drop_site`) and why none blocks in its drop: a `Reader`,
+//! `Socket` or `Listener` drop closes an fd (no linger is set); a `Channel`, `Shared`, `RwShared`,
+//! `Atomic` or `AtomicInt` drop frees memory; an `Executor` drop detaches its threads (a
+//! `JoinHandle` drop does not join). They drop in the GC door. A `Cffi` drop runs `dlclose`, which
+//! runs the library's C destructors: those can block, so the reaper drops it, but no program here
+//! builds one.
 
 #[path = "support/grid_tests.rs"]
 #[macro_use]
@@ -70,6 +77,61 @@ fn main():
     ex.shutdown()
 main()
 ";
+
+/// Two Executor jobs, one FIFO each: `main` drains a FIFO only after both jobs signal. A collection
+/// on a runner sweeps job 1's garbage writer, and a drop there blocks that runner on the full FIFO.
+/// If the runner is to run job 2 next (or runs it), job 2 never signals, and `main` never drains:
+/// the run hangs. M5 before the reaper: T=2 4 of 4 runs hang, T=4 2 of 4, default 2 of 4.
+const TWO_JOBS: &str = "fn leave_tail(path: str, ready: Channel[bool]):
+    w := must(io.create(path))
+    _ := must(w.write(\"x\".repeat(60000)))
+    _ := must(w.write(\"y\".repeat(7000)))
+    ready.send(true)
+
+fn writer(path: str, ready: Channel[bool], done: Channel[str]):
+    leave_tail(path, ready)
+    _ := churn(200)
+    done.send(\"writer done\")
+
+fn drain(r: io.Reader) -> int:
+    total := 0
+    while total < 67000:
+        b := must(r.read_bytes(1000))
+        if b.len() == 0:
+            break
+        total += b.len()
+    return total
+
+fn main():
+    ready := Channel[bool](2)
+    done := Channel[str](2)
+    ex := Executor()
+    _ := ex.submit(fn(): writer(\"@FIFO@\", ready, done))
+    _ := ex.submit(fn(): writer(\"@FIFO2@\", ready, done))
+    r1 := must(io.open(\"@FIFO@\"))
+    r2 := must(io.open(\"@FIFO2@\"))
+    _ := ready.recv()
+    _ := ready.recv()
+    time.sleep_ms(300)
+    a := drain(r1)
+    b := drain(r2)
+    print(\"reader got\", a, b)
+    print(done.recv())
+    print(done.recv())
+    ex.shutdown()
+main()
+";
+
+/// The whole program of `kind` and its golden stdout.
+fn source(kind: &str) -> (String, String) {
+    if kind == "two_jobs" {
+        let want = "reader got 67000 67000\nwriter done\nwriter done\n".to_string();
+        return (format!("{PRELUDE}\n{TWO_JOBS}"), want);
+    }
+    let (writer, total) = program(kind);
+    let src = format!("{PRELUDE}\n{writer}{MAIN}").replace("@TOTAL@", &total.to_string());
+    (src, format!("reader got {total}\nwriter done\n"))
+}
 
 /// (writer half of the program, the bytes the FIFO carries)
 fn program(kind: &str) -> (&'static str, u32) {
@@ -126,20 +188,19 @@ fn writer(path: str, ready: Channel[bool], done: Channel[str]):
 }
 
 fn assert_cell(kind: &str, threads: &str) {
-    let (writer, total) = program(kind);
+    let (src, want) = source(kind);
     let name = format!("{kind}-{threads}");
     let dir = std::env::temp_dir().join(format!("chz-graveyard-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let fifo = dir.join("fifo");
-    let made = Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .expect("run mkfifo");
-    assert!(made.success(), "mkfifo {}", fifo.display());
-    let src = format!("{PRELUDE}\n{writer}{MAIN}")
+    let (fifo, fifo2) = (dir.join("fifo"), dir.join("fifo2"));
+    for f in [&fifo, &fifo2] {
+        let made = Command::new("mkfifo").arg(f).status().expect("run mkfifo");
+        assert!(made.success(), "mkfifo {}", f.display());
+    }
+    let src = src
         .replace("@FIFO@", &fifo.to_string_lossy())
-        .replace("@TOTAL@", &total.to_string());
+        .replace("@FIFO2@", &fifo2.to_string_lossy());
     let path = dir.join("main.chz");
     std::fs::write(&path, src).expect("write program");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
@@ -152,6 +213,9 @@ fn assert_cell(kind: &str, threads: &str) {
     match threads {
         "t2" => {
             cmd.env("CHEZZI_THREADS", "2");
+        }
+        "t4" => {
+            cmd.env("CHEZZI_THREADS", "4");
         }
         "tdefault" => {
             cmd.env_remove("CHEZZI_THREADS");
@@ -190,11 +254,7 @@ fn assert_cell(kind: &str, threads: &str) {
         Some(0),
         "{name}: exit code\nstdout:\n{out}\nstderr:\n{err}"
     );
-    assert_eq!(
-        out,
-        format!("reader got {total}\nwriter done\n"),
-        "{name}: stdout\nstderr:\n{err}"
-    );
+    assert_eq!(out, want, "{name}: stdout\nstderr:\n{err}");
 }
 
-grid_tests!(KINDS x THREADS: [file, buffered, nested] x [t2, tdefault] => crate::assert_cell);
+grid_tests!(KINDS x THREADS: [file, buffered, nested, two_jobs] x [t2, t4, tdefault] => crate::assert_cell);
