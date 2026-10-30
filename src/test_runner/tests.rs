@@ -904,7 +904,8 @@ fn a_resent_payload_is_one_object_under_the_cap() {
 /// written to prove — since W7-28 it is the PARENT that samples and trips first for both, which
 /// is what the `nospawn` control below (no `spawn` at all, same payload, OVER-MEMORY) measures.
 /// See the attribution proof further down; do not credit these verdicts to the worker-side
-/// mechanisms (`Vm::sample_mem_cap` at the fiber door, `Heap::request_collect` at the job door).
+/// mechanisms (`Vm::sample_mem_cap` at the fiber door, the per-worker `Heap::request_collect`
+/// that M5 deleted).
 ///
 /// **W7-28 re-base — the worker path can no longer be ATTRIBUTED, and that is a proof, not a
 /// gap.** The `nospawn` control below did exactly the job it was written for: the parent-side

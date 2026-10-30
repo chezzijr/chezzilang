@@ -595,9 +595,8 @@ pub struct Heap {
     /// without reading the core. A cache with one refresh point: `should_collect` sets it to what
     /// is left of the core's `next_gc` (at most `FLUSH_EVERY`) when it reads the core with no
     /// `--max-heap` cap live. 0 means "read the core at the next call": [`sweep`](Heap::sweep), a
-    /// collection another handle ran ([`observe_collection`](Heap::observe_collection)),
-    /// [`request_collect`](Heap::request_collect) and [`set_mem_cap`](Heap::set_mem_cap) set it to
-    /// 0, since each can lower the answer.
+    /// collection another handle ran ([`observe_collection`](Heap::observe_collection)) and
+    /// [`set_mem_cap`](Heap::set_mem_cap) set it to 0, since each can lower the answer.
     gc_check_at: usize,
     /// BYTES charged since the last collection — the `since_gc` sibling for growth that allocates
     /// (almost) no `Obj`s. A monotonic pacing **HINT**, never accounting: it only decides WHEN to
@@ -948,21 +947,6 @@ impl Heap {
         self.gc_check_at = 0;
         *self.since_gc_bytes.get_mut() = 0;
         self.pending_mut = None;
-    }
-
-    /// W6-10s — force the next [`should_collect`](Heap::should_collect), so a heap that was HANDED a
-    /// large payload samples the `--max-heap` cap even though it allocated almost no `Obj`s doing so.
-    /// `over_cap` is assigned only in `sweep()`, and `sweep()` only runs when `should_collect()`
-    /// fires; a worker heap holding a rebuilt `List` of any size counts ONE object, so the growth
-    /// trigger never moves and the guard fails OPEN. Set by `Vm::spawn_worker` under a live cap only
-    /// (so cap-off pacing is untouched), and consumed at the task's first instruction boundary in
-    /// `run_until` — the first point where every live value is properly rooted.
-    ///
-    /// Every task (`spawn`, `parallel:`, an `Executor` job) is also sampled before dispatch by
-    /// `Vm::sample_mem_cap` in `Vm::start_task` — see the note in `Vm::spawn_worker`.
-    pub fn request_collect(&mut self) {
-        self.core.request_collect();
-        self.gc_check_at = 0;
     }
 
     /// Mark one object reachable. Returns `true` if it was *newly* marked (caller should then
@@ -1457,8 +1441,8 @@ mod iter_obj_tests {
     }
 
     /// `should_collect` caches the core's threshold on the handle (`gc_check_at`). Each write that
-    /// can lower the answer must reach the next call: a sweep that lowers `next_gc`, a
-    /// `request_collect`, and a cap set after the cache was filled.
+    /// can lower the answer must reach the next call: a sweep that lowers `next_gc` and a cap set
+    /// after the cache was filled.
     #[test]
     fn should_collect_sees_each_threshold_change() {
         let mut h = Heap::new();
@@ -1480,10 +1464,6 @@ mod iter_obj_tests {
             h.should_collect(),
             "a sweep that freed everything lowered the threshold to 256"
         );
-        h.sweep();
-        assert!(!h.should_collect());
-        h.request_collect();
-        assert!(h.should_collect(), "request_collect forces the next call");
         h.sweep();
         assert!(!h.should_collect());
         h.set_mem_cap(8_000_000);

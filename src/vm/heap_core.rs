@@ -108,13 +108,6 @@ pub struct HeapCore {
     id: u64,
     /// A handle collects once its `since_gc` reaches this; grows with the live set after each
     /// collection.
-    ///
-    /// W6-10s: [`request_collect`](HeapCore::request_collect) sets it to 0 to force the next
-    /// `Heap::should_collect`, regardless of object count. That happens only under a live cap, for
-    /// a heap that is handed a large payload in very few `Obj`s (a worker's rebuilt task
-    /// args/captures): the object-count trigger cannot see those bytes, so without this nobody ever
-    /// samples the cap. The next `sweep()` sets the threshold again. (One field, not a separate
-    /// `force_collect` flag, so the per-instruction test is one load.)
     next_gc: AtomicUsize,
     /// Objects every handle allocated since the last sweep, as far as the handles added them
     /// (`flush_allocs`). The trigger compares it with `next_gc`.
@@ -282,14 +275,6 @@ impl HeapCore {
     #[inline]
     pub(super) fn next_gc(&self) -> usize {
         self.next_gc.load(Ordering::Relaxed)
-    }
-
-    /// Force the next `Heap::should_collect` (see `next_gc`) of the handle that calls
-    /// `Heap::request_collect`, which also empties that handle's cached threshold. Every other
-    /// handle reads the 0 at its next boundary: a request is made only under a live cap, and under
-    /// a cap no handle caches a threshold (`Heap::should_collect` caches only with the cap off).
-    pub(super) fn request_collect(&self) {
-        self.next_gc.store(0, Ordering::Relaxed);
     }
 
     /// Add `n` allocations of one handle to the run's count; returns the run's count since the
