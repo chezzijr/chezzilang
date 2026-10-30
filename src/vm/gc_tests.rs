@@ -561,7 +561,7 @@ main()";
     assert_eq!(run_capture_stress(src), normal);
 }
 
-/// Concurrency C4 rooting: a `spawn`'s deep-copied args, a pending task's captured closure env,
+/// Concurrency C4 rooting: a `spawn`'s args, a pending task's captured closure env,
 /// and the values queued in a `Channel` / boxed in a `Shared` must all survive collections that
 /// fire (under stress) between registration and the nursery's join. Each task allocates strings
 /// so a missing root would corrupt the output (or panic on a dangling `GcRef`).
@@ -594,8 +594,8 @@ main()";
 }
 
 /// B3.1 regression: a core nested *inside* another core. The channel core is reachable ONLY
-/// through the `Shared` box's wire value once `stash`'s local channel handle is gone — its queued
-/// `"hello"` (a heap `Str` handle embedded in the channel core's wire queue) must still be traced
+/// through the `Shared` box's value once `stash`'s local channel handle is gone — its queued
+/// `"hello"` (a heap `Str` handle embedded in the channel core's queue) must still be traced
 /// as a GC root, or `gc_stress` sweeps it and `recv` dangles. Pins that `collect_gcrefs` recurses
 /// into nested cores.
 #[test]
@@ -658,9 +658,8 @@ main()";
 }
 
 /// Executor: a submitted task closure must survive GC firing between the `submit` and the job's
-/// completion, and across each task's re-entrant call. Under eager `submit` the closure has already
-/// crossed into its own worker heap by the time `submit` returns, so this covers the wire crossing as
-/// well as the heap root. Each task allocates a string into a Channel — a missing root would corrupt
+/// completion, and across each task's re-entrant call. Under eager `submit` the job already holds the
+/// closure by handle when `submit` returns, so this covers the job's root as well as the heap root. Each task allocates a string into a Channel — a missing root would corrupt
 /// the output or dangle a `GcRef`.
 /// Eager `Executor` + GC stress on the M:N engine, where the dispatch actually happens.
 ///
@@ -821,7 +820,7 @@ main()";
     );
 }
 
-/// W6-7 — the GC now SHORT-CIRCUITS a core whose cached summary says its wire payload holds no
+/// W6-7 — the GC now SHORT-CIRCUITS a core whose cached summary says its payload holds no
 /// `Handle` and no nested core. That memo is only sound if EVERY store refreshes it, and the
 /// `Shared`/`RwShared`/`Atomic` payload is *replaced* (`set`/`update`/`write`/`store`/`exchange`/
 /// `cas`/`add`), not mutated in place. Under GC stress a stale `CLEAN` would free a value that is
@@ -932,9 +931,9 @@ main()";
     assert_eq!(run_capture_stress(by_src), "1\n");
 }
 
-/// TICKET-246 — a `Shared` state lives in the box's own heap, rooted at `stack[0]` of the box
+/// TICKET-246 — a `Shared` state lives in the run's one heap, rooted at `stack[0]` of the box
 /// context. Under gc-stress a collection runs at every instruction INSIDE the closure, with the
-/// caller's heap parked: the state, the closure, its captures and the slot-door values must all
+/// caller's context parked: the state, the closure, its captures and the slot-door values must all
 /// survive, and the caller's own values must be intact after the call. The state is built
 /// across three updates, then read back three ways.
 #[test]

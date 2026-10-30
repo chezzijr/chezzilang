@@ -593,7 +593,7 @@ fn over_memory_counts_an_executor_result_backlog() {
 
 /// W7-26r — the cap must be observed while the parent fiber is BLOCKED IN A JOIN, where it
 /// reaches no instruction boundary and so never sweeps. Both programs below build their payload
-/// inside the task (nothing is captured, so the parent wires ~nothing at spawn/submit and has
+/// inside the task (nothing is captured, so the parent hands over ~nothing at spawn/submit and has
 /// nothing to trigger a GC on) and hold it as buffered OUTPUT, which is retained to the join for
 /// the task-order flush (W7-5c). Measured on the release binary against an 8 MB cap, ~1 MB × 300:
 /// **PASS at 622 MB** (executor) and **PASS at 733 MB** (nursery) — the nursery half was counted
@@ -935,8 +935,8 @@ fn a_resent_payload_is_one_object_under_the_cap() {
 /// its guard is documented at `Vm::spawn_worker` rather than tested.
 #[test]
 fn over_memory_trips_on_a_worker_payload_with_no_task_allocation() {
-    // The worker heap holds ~1.6 MB (200k inline ints) against a 1 MB cap — and so does the
-    // PARENT that built it by `push`, which since W7-28 samples its own heap and trips first.
+    // The payload holds ~1.6 MB (200k inline ints) against a 1 MB cap — built by the PARENT
+    // by `push`, which since W7-28 samples the heap and trips first.
     const CAP: usize = 1_000_000;
     // `{name}` is the test-fn name, so the report line is greppable per shape.
     let body = |name: &str| {
@@ -2159,7 +2159,7 @@ fn recover_does_not_catch_over_memory_via_native_reentry() {
 #[test]
 fn over_memory_buckets_across_spawn_on_both_engines() {
     // A runaway alloc inside a `spawn`ed task must bucket OverMemory. The task runs on a worker
-    // VM with its own heap, so the cap must be threaded onto the worker and the over-memory
+    // VM over the run's one heap, so the cap must reach the worker and the over-memory
     // marker must cross the worker→parent fault boundary.
     let d = TmpDir::new();
     let f = d.write(

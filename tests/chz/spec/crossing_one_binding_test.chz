@@ -30,16 +30,16 @@ fn pair_cursor() -> Iterator[fn() -> int]:
         return 0
     return [bump, c.get].iter()
 
-# Module globals: two closures over ONE function-local cell, reached through the module SNAPSHOT path.
+# Module globals: two closures over ONE function-local cell, read as the run's one global (M3.1).
 _w74c := make()
 _w74i := _w74c.inc
 _w74g := _w74c.get
 
-# A module-global generator inside a REFERENCE CYCLE (it is parked in the very list it closes over), so
-# its snapshot walk is DISCARDED (`to_wire` Errs → inert Nil) AFTER it has already reached the local
-# cell holding `_w74cyc`'s list. `_w74size` then reaches that same cell. If the discarded walk's cell
-# ids are not rolled back out of the shared per-module memo, `_w74size` emits a `Backref` to an id no
-# `WireValue::Cell` ever defines and the replay panics on `from_wire_memo`'s `.expect`.
+# A module-global generator inside a REFERENCE CYCLE (it is parked in the very list it closes over).
+# Before M3.1 its snapshot walk was DISCARDED (`to_wire` Erred → inert Nil) AFTER it reached the local
+# cell holding `_w74cyc`'s list, and `_w74size` reached that same cell. Cell ids not rolled back out
+# of the per-module memo made `_w74size` emit a `Backref` to an id no `WireValue::Cell` defined, and
+# the replay panicked on `from_wire_memo`'s `.expect`.
 struct CycPair:
     it: Iterator[int]
     size: fn() -> int
@@ -335,8 +335,8 @@ test fn data_dag_alias_across_spawn_args_lands():
 # resolved a piece's `Backref` by RE-READING `core.v` after dropping the read guard, so a `set` in that
 # window swapped the stored wire for a fresh serialization whose ids are unrelated: the piece's backref
 # then hit `from_wire_memo`'s `.expect` — a HOST PANIC on a legal program (write-preferring `RwLock`,
-# so the queued writer wins the window: reproduced at every thread count). Stored wires are now
-# self-contained per element, so a view never needs a second read. The reader's `at(1)` copy is its own
+# so the queued writer wins the window: reproduced at every thread count). M3.3: a view reads the
+# live container by handle, so it never needs a second read. The reader's `at(1)` copy is its own
 # binding either way; what is asserted is that the program completes at all.
 test fn rwshared_view_survives_a_concurrent_writer():
     n := 0

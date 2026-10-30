@@ -256,7 +256,7 @@ impl Vm {
     ///
     /// Deliberately NOT a full deep copy (the deleted concurrency airlock's serializer): that copy
     /// (a) FAULTED on a generator / cyclic key — nonsensical for a plain
-    /// single-thread insert that previously stored the key by reference and worked — and (b) rebuilds
+    /// single-thread insert that previously stored the key by reference and worked — and (b) rebuilt
     /// every by-reference sub-value (a `Closure`/`Channel`/`Shared`/… field) with a FRESH handle,
     /// which `values_equal` (identity-only for those arms) then never matches, so a later lookup of
     /// the same key misses. [`Vm::snapshot_value`] instead copies only the mutable, structurally-

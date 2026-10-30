@@ -376,10 +376,9 @@ impl Vm {
     /// **`--max-heap` reaches this loop only through the CANCEL arm, and only when the over-allocating
     /// task shares a cancel scope with the sleeper** — a nursery sibling or an `Executor` job, whose
     /// over-memory hard halt (`executor_hard_halt`) trips a flag this loop reads (measured: 365 ms).
-    /// It does NOT reach a sleeping **top-level `main`**, which has no cancel flag and whose own heap
-    /// is not the one growing — `--max-heap` is a per-`Vm` live-heap cap, so there is nothing here for
-    /// a sleeper in a different heap to observe (measured: the sleep runs in full, 3005 ms, then the
-    /// OVER-MEMORY verdict lands). `--timeout` has no such gap: it is an absolute wall-clock deadline
+    /// A sleeping **top-level `main`** has no cancel flag, but the run has one heap, so the
+    /// over-allocating task's OVER-MEMORY verdict still ends the run (measured: 121 ms into a 3000 ms
+    /// sleep, `chezzi test --max-heap=8000000`). `--timeout` has no such gap: it is an absolute wall-clock deadline
     /// this loop reads directly.
     ///
     /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.

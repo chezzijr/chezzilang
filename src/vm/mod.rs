@@ -613,7 +613,7 @@ struct CallFrame {
     /// [`crate::base::op::Op::JumpIfProvided`], so the callee's own prologue can tell an OMITTED
     /// trailing argument (which it must fill from the parameter's declared default) from one the
     /// caller supplied. Computed at the single shared frame-entry point, so every door —
-    /// `push_frame`, `push_frame_in_place`, generators, `spawn`, `defer`, the wire path — gets it
+    /// `push_frame`, `push_frame_in_place`, generators, `spawn`, `defer` — gets it
     /// without threading anything through the call sites.
     argc: usize,
 }

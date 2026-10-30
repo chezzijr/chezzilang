@@ -690,10 +690,10 @@ impl Vm {
             return self.refuse_job(settle, super::EXEC_CREATOR_CANCELLED_MSG);
         }
         // TICKET-208 — a job IS a spawned task. `spawn_into` is the one function behind
-        // `spawn` and `submit`: it pins the globals view as of this submit, crosses the
-        // closure by value, and starts a fiber on the Executor's detached sched, built on
+        // `spawn` and `submit`: it hands the job the closure by handle (M3.4), and starts a
+        // fiber on the Executor's detached sched, built on
         // first use. No `ExecutorCore` lock is held across it: a job that captures its own
-        // Executor puts an `Obj::Executor` over THIS core into the worker heap, and the heap
+        // Executor holds an `Obj::Executor` over THIS core, and the heap
         // walk locks the core. A submit racing a `shutdown()` is rejected by the slot
         // reservation itself (the join closes scope 0 under the sched's core lock), so a job
         // is either rejected or counted by that join.

@@ -950,8 +950,8 @@ main()";
 
 #[test]
 fn capture_closure_across_spawn_parity() {
-    // A capturing closure sent across spawn/channel — exercises the --parallel deep-clone +
-    // wire/snap rebuild of positional captures. VM (serial), interp, and --parallel must agree.
+    // A capturing closure sent across spawn/channel — exercises positional captures read by the
+    // task. VM (serial), interp, and --parallel must agree.
     let src = "\
 fn main():
     base := 41
@@ -1435,7 +1435,7 @@ fn cursor_crosses_spawn_three_engine_parity() {
     assert_eq!(
         run_capture(src).expect("--parallel"),
         "1\n",
-        "cursor crosses the M:N airlock"
+        "cursor crosses a spawn by handle"
     );
 }
 

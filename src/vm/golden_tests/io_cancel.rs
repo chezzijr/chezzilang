@@ -741,10 +741,7 @@ fn import_reader_type_and_send_across_spawn_parity() {
         );
         let entry = t.write("main.chz", &src);
         let (out, _e, r, _c) = run(&entry);
-        assert!(
-            r.is_ok(),
-            "run faulted (bind_import/airlock missing?): {r:?}"
-        );
+        assert!(r.is_ok(), "run faulted (bind_import skip missing?): {r:?}");
         assert_eq!(out, "hello\n");
     }
 }
@@ -807,10 +804,10 @@ fn serial_module_global_task_local_alias_lands_parity() {
     assert_eq!(out, "4\n");
 }
 
-/// Task 1 — the ESCAPE HATCH must survive the serial snapshot change: `Atomic`/`Shared`/`Channel` cross
-/// the spawn boundary by shared `Arc` core (via `to_snap`), NOT by deep copy, so a task-side mutation IS
-/// visible to the parent. Two tasks each `add(1)` to a module-global `Atomic`; the parent reads 2 on both
-/// engines. This is the regression guard for trap #1 (a hand-rolled copier would clone the Arc away → 0).
+/// Task 1 — the ESCAPE HATCH: `Atomic`/`Shared`/`Channel` cross the spawn boundary by their shared
+/// `Arc` core, so a task-side mutation IS visible to the parent. Two tasks each `add(1)` to a
+/// module-global `Atomic`; the parent reads 2. It was the regression guard for trap #1 (a
+/// hand-rolled copier cloned the Arc away → 0).
 #[test]
 fn atomic_incremented_in_task_visible_to_parent_parity() {
     let src = "import Atomic from std.concurrency\na := Atomic(0)\nfn main():\n    parallel:\n        spawn:\n            a.add(1)\n        spawn:\n            a.add(1)\n    print(a.load())\nmain()\n";

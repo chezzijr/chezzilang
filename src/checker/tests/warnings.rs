@@ -405,8 +405,7 @@ fn a_task_side_write_read_after_the_join_checks_clean() {
     );
     // Index assign, read WHOLE. A captured `List` was copied before M3.4, so the parent's
     // whole-value read observed the lost element write — the checker could tell, so it reported. (The
-    // granular read `xs[0]` of this same granular write now warns too; see
-    // `a_same_path_read_of_a_projected_task_write_warns`.)
+    // granular read `xs[0]` of the same write: `a_same_path_read_of_a_projected_task_write_checks_clean`.)
     ok(
         "fn f():\n    xs := [0]\n    parallel:\n        spawn:\n            xs[0] = 9\n    print(xs)\nf()\n",
     );
@@ -1226,9 +1225,8 @@ fn two_bodies_with_a_task_write_check_clean() {
     );
 }
 
-/// A body DECLARED INSIDE the task runs inside it, where the write IS visible — so it must not report,
-/// and (the double failure) must not CONSUME the entry either, or the parent's real stale read after
-/// the join goes silent. Both halves, `fn` and closure: only the `fn` half was written first, and the
+/// A body DECLARED INSIDE the task runs inside it, where the write IS visible. The deleted rule had to
+/// skip it and (the double failure) not CONSUME the entry, or the parent's stale read went silent. Both halves, `fn` and closure: only the `fn` half was written first, and the
 /// closure half is exactly what shipped broken (`infer_closure` cleared `in_spawn_block` without
 /// taking the taint). Measured on the pre-fix binary for the closure form: a FALSE warning at the
 /// closure body's `xs.len()`, then `1` printed inside the task and `0` after the join with nothing
@@ -1246,9 +1244,8 @@ fn a_body_declared_inside_the_task_checks_clean() {
         );
         ok(&src);
     }
-    // NEIGHBOUR the premise implies (and the reason the taint is not dropped unconditionally): a
-    // closure declared in the PARENT reads the same stale copy the parent would — measured, `g()`
-    // returns 0 — so it must still warn.
+    // NEIGHBOUR the premise implied: a closure declared in the PARENT read the same stale copy (before
+    // M3.4, `g()` returned 0). M3.4: it reads the landed write and checks clean.
     ok(
         "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    g := fn() -> int: xs.len()\n    print(g())\nf()\n",
     );

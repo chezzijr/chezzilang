@@ -46,7 +46,7 @@ test fn grid_a_path_value_read_in_two_modules_is_one_value():
     bad := module_cells()
     assert bad.len() == 0, "red cells: {bad}"
 
-# A spawned task runs on its own heap, with each module's globals copied in from a snapshot.
+# A spawned task reads each module's globals as the run's one copy (M3.1).
 test fn grid_a_path_value_read_in_two_modules_inside_a_spawned_task_is_one_value():
     r := Channel[List[str]](1)
     parallel:

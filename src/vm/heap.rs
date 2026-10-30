@@ -256,7 +256,7 @@ pub enum Obj {
     Builtin(crate::base::builtin::Builtin),
     /// A dynamic C-ABI FFI function (`extern "lib":`). Wraps the `dlopen`'d library + resolved
     /// symbol + marshalling signature behind an `Arc` (so it is `Send` for `--parallel` and shared
-    /// by the M:N snapshot path without re-`dlopen`). Holds no `GcRef`s, so it has no GC children.
+    /// across tasks without re-`dlopen`). Holds no `GcRef`s, so it has no GC children.
     Cffi(Arc<crate::native::cffi::Cffi>),
     /// An opaque C-ABI pointer handle (`ptr`) — a raw `void*` address carried as a `usize`. Produced
     /// by an `extern "lib":` fn returning `ptr` and by `std.ffi.null()`. Untyped, never auto-freed
@@ -630,7 +630,7 @@ pub struct Heap {
     ///
     /// This is the door for byte growth that allocates NOTHING: `xs.push(i)` /
     /// `m[k] = v` / `s.insert(x)` / `ba.push(b)` / `big.extend(chunk)` all append into the `Vec` behind
-    /// an EXISTING `Obj`, so neither the object count nor the wire counter moves and `sweep()` never
+    /// an EXISTING `Obj`, so neither the object count nor `charge_bytes` moves and `sweep()` never
     /// runs — `over_cap` is assigned nowhere else, so the cap failed OPEN. Measured on the release
     /// binary against `--max-heap=8000000`: an 80 M-element `List[int]` grown by `push` PASSED at
     /// 617.8 MB (**77× the cap**), and one `big.extend(chunk)` loop PASSED at ~240 MB in ~1200
@@ -810,7 +810,7 @@ impl Heap {
     }
 
     /// Charge the growth of the object the last [`write`](Heap::write) handed out, and disarm.
-    /// A SHRINK charges 0 — monotonic, exactly like the wire counter (`live_bytes()` is what
+    /// A SHRINK charges 0 — monotonic, exactly like `charge_bytes` (`live_bytes()` is what
     /// measures; this only decides when to look). M1.7: `Vm::swap_ctx` settles at every context
     /// switch, so a handle never keeps a record of an object another thread may write.
     #[inline]
@@ -1530,7 +1530,7 @@ mod iter_obj_tests {
         assert!(h.should_collect());
     }
 
-    /// W7-28 — the OTHER two byte funnels (`alloc` and `write`), same contract as the wire-byte
+    /// W7-28 — the OTHER two byte funnels (`alloc` and `write`), same contract as the `charge_bytes`
     /// sibling above. These are the growth the object count cannot see: FEW-huge allocations, and
     /// in-place appends into an existing object that allocate nothing at all.
     #[test]
@@ -1539,8 +1539,7 @@ mod iter_obj_tests {
 
         // (a) M1.7 — cap OFF, both funnels pace by bytes against the cap-off goal (the last
         // sweep's live bytes, at least 16 MiB): one 20 MB object collects, though it is one
-        // object, and so does a 20 MB in-place growth of a small one (the wire decoder fills a
-        // copy that way). Below the goal neither collects. A charge of `FLUSH_BYTES` or more
+        // object, and so does a 20 MB in-place growth of a small one. Below the goal neither collects. A charge of `FLUSH_BYTES` or more
         // empties the handle's cached object threshold, so the next call reads the bytes.
         let mut h = Heap::new();
         h.alloc(big(1_000_000)); // 8 MB of backing
@@ -1588,7 +1587,7 @@ mod iter_obj_tests {
             "a bulk in-place append must be charged at the next settle"
         );
 
-        // (d) a SHRINK charges 0 — monotonic, like the wire counter. `mark` first: this heap has no
+        // (d) a SHRINK charges 0 — monotonic, like `charge_bytes`. `mark` first: this heap has no
         // VM roots, so an unmarked `r` would be freed and the settle would read a dead slot (which
         // is exactly why `sweep()` clears `pending_mut`).
         h.mark(r);
@@ -1621,7 +1620,7 @@ mod iter_obj_tests {
             "a second write must settle the first's growth, not drop it"
         );
 
-        // (f) the 64 KB floor survives a tiny cap (shared with the wire threshold).
+        // (f) the 64 KB floor survives a tiny cap (shared with the `charge_bytes` threshold).
         let mut h = Heap::new();
         h.set_mem_cap(1000); // cap/4 = 250, floored to 65536
         h.alloc(big(4_096)); // exactly 32 KB

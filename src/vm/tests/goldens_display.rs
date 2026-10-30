@@ -1451,7 +1451,7 @@ go()
     assert_eq!(par_out, "1\n");
 }
 
-/// W7-4a — a DISCARDED speculative wire attempt must not forge a `Backref`. Found by adversarial
+/// W7-4a — a DISCARDED speculative wire attempt once forged a `Backref` (wire form deleted, M3.5). Found by adversarial
 /// review, and it was a live host PANIC, not a theoretical one: `main.chz` below aborted the M:N task
 /// with `CellLoad on a non-handle value` (the since-removed cooperative engine printed `7`, which is
 /// how the wire path was identified as the culprit).
@@ -1562,8 +1562,8 @@ main()
 
 /// Bug A guard-precision — a BREADTH-shaped acyclic value (~100k shallow siblings, structural depth
 /// ~2) must cross a spawn fine (the deleted copy step's 10_000 depth cap counted nesting LEVELS, not
-/// siblings), so a large-but-shallow sendable never false-trips. (A genuinely >10_000-DEEP acyclic nest would
-/// error — same false-positive the print/`==` path already has — so this is deliberately breadth-shaped.)
+/// siblings), so a large-but-shallow sendable never false-trips. (A >10_000-DEEP acyclic nest errored
+/// there — the false-positive the print/`==` path has — so this test is breadth-shaped.)
 #[test]
 fn crossing_wide_acyclic_crosses_fine() {
     let src = "\

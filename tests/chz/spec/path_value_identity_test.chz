@@ -108,7 +108,7 @@ test fn grid_a_path_value_read_in_one_heap_is_one_value():
     bad := local_cells()
     assert bad.len() == 0, "red cells: {bad}"
 
-# A spawned task runs on its own heap, with its globals copied in from a snapshot.
+# A spawned task reads its globals as the run's one copy (M3.1).
 test fn grid_a_path_value_read_inside_a_spawned_task_is_one_value():
     r := Channel[List[str]](1)
     parallel:

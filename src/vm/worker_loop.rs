@@ -1391,8 +1391,8 @@ impl Vm {
     /// **Collecting before the task's entry frame is pushed is sound.** The sample runs in
     /// `start_task` ahead of `invoke_value`, so `self.frames` is still empty here. Empty frames stop
     /// `run_until`'s *loop*; they do not make a direct [`collect`](Vm::collect) unsafe. `collect`
-    /// roots the operand stack first (`for v in &self.stack`), plus the swapped-in child's module
-    /// objects, intern cache and snapshot registry — the same root set the task's first instruction
+    /// roots the operand stack first (`for v in &self.stack`), plus the rest of the live context
+    /// (`RootView`) and the run's root registry — the same root set the task's first instruction
     /// boundary would see, minus frame slots that do not exist yet. That is why the contract above
     /// is "operands on the stack".
     ///

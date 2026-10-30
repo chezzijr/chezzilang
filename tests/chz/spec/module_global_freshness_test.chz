@@ -239,8 +239,8 @@ test fn an_executor_jobs_mutation_reaches_a_later_nursery_task():
 # instants — the task at its `spawn`, the job at the later drain — and the test's job was to contrast
 # them. Eager execution collapsed that difference (a job starts at its `submit`, so both now pin
 # "when this work started"), so the contrast is gone. What survives as the property: BOTH paths must
-# snapshot the CURRENT value of the global, never its declaration-time one — a stale snapshot in
-# either path reads `1` here.
+# read the CURRENT value of the global (M3.1: the run's one copy), never its declaration-time one — a
+# stale read in either path reads `1` here.
 test fn executor_alongside_a_nursery():
     a := Shared(0)
     b := Shared(0)

@@ -30,7 +30,7 @@ print(\"done\")
 ";
 
 /// The bound. Measured in `docs/contributing/benchmarks.md` (TICKET-213): one snapshot shared by every task
-/// stays under a tenth of this; one snapshot per task is several times over it.
+/// stayed under a tenth of this (M3.1 copies none); one snapshot per task was several times over.
 const MAX_RSS_KB: i64 = 300 * 1024;
 
 /// Run `chezzi run <entry>` at `threads` workers; return (exit status, stdout, max RSS in KB).

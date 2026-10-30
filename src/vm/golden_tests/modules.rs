@@ -139,7 +139,7 @@ fn ffi_handle_crosses_spawn_arg() {
     );
 }
 
-/// An FFI fn sent over a `Channel` crosses by value and is callable after `recv` — `sqrt(9.0) == 3.0`,
+/// An FFI fn sent over a `Channel` crosses by handle and is callable after `recv` — `sqrt(9.0) == 3.0`,
 /// byte-identical (previously rejected at the `channel_method` "send" value-store).
 #[test]
 fn ffi_handle_crosses_channel_send() {
@@ -149,7 +149,7 @@ fn ffi_handle_crosses_channel_send() {
     );
 }
 
-/// An FFI fn stored in a `Shared` box at CONSTRUCTION crosses by value and is callable after `get` —
+/// An FFI fn stored in a `Shared` box at CONSTRUCTION crosses by handle and is callable after `get` —
 /// `sqrt(16.0) == 4.0` (previously rejected at the ctor value-store).
 #[test]
 fn ffi_handle_crosses_shared_ctor() {
@@ -159,7 +159,7 @@ fn ffi_handle_crosses_shared_ctor() {
     );
 }
 
-/// An FFI fn stored via `Shared.set` — the STORE path distinct from the ctor — crosses by value and
+/// An FFI fn stored via `Shared.set` — the STORE path distinct from the ctor — crosses by handle and
 /// is callable after `get` — `sqrt(25.0) == 5.0` (previously rejected at the store).
 #[test]
 fn ffi_handle_crosses_shared_set() {
@@ -918,7 +918,7 @@ fn executor_autodrain_skipped_on_os_exit() {
     assert_eq!(code, Some(0));
 }
 
-// ----- Executor.submit crosses a submitted closure BY VALUE (previously diverged: serial vs M:N) -----
+// ----- Executor.submit hands a job its closure BY HANDLE (previously diverged: serial vs M:N) -----
 // The since-removed cooperative engine used to queue the submitted closure's own heap Handle
 // (captures shared by reference, bypassing the airlock), while M:N wired it by value — the two
 // disagreed. M3.4: every engine path hands the job its captures by handle (the wire form is
@@ -978,9 +978,9 @@ fn executor_submit_module_global_callee_reassign_lands_parity() {
 
 #[test]
 fn executor_submit_atomic_visible_to_parent_parity() {
-    // Task 1 (Executor escape hatch) — an `Atomic` module global crosses the Executor drain by shared
-    // `Arc` (via `to_snap`), NOT deep-copied, so a task-side `add` IS visible to the parent. Guards that
-    // the per-task serial snapshot does not clone the Arc away (trap #1) on the Executor path too.
+    // Task 1 (Executor escape hatch) — an `Atomic` module global is the run's one global (M3.1), so a
+    // task-side `add` IS visible to the parent. It once guarded that the per-task snapshot kept the
+    // `Arc` (trap #1) on the Executor path too.
     let out = golden_entry(
         "import Atomic, Executor from std.concurrency\na := Atomic(0)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): a.add(1))\n    ex.submit(fn(): a.add(1))\n    ex.shutdown()\n    print(a.load())\nmain()\n",
     );

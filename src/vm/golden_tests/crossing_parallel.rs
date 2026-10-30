@@ -768,10 +768,9 @@ main()
 
 #[test]
 fn crossing_adopted_alias_keeps_a_later_globals_backref_into_its_old_subtree() {
-    // TICKET-111, gotcha 2. `inner` (a spawn-crossed alias of `gl[0]`) is adopted as the global's
-    // object during the module snapshot's replay, but the snapshot memo cached `y := gl[0][0]`
-    // EARLIER in the nursery, so `y`'s Backref must still resolve into the adopted node's OLD
-    // subtree even though that subtree is discarded rather than installed. CPython 3.14.7 prints
+    // TICKET-111, gotcha 2 (M3.1 deleted the snapshot). `inner` (an alias of `gl[0]`) was adopted
+    // as the global's object during the module snapshot's replay, but the memo cached `y := gl[0][0]`
+    // EARLIER in the nursery, so `y`'s Backref had to resolve into the adopted node's OLD subtree. CPython 3.14.7 prints
     // `[] [[]] [1]` (measured 2026-09-11). The two sibling sends race, so the program prints
     // whichever message is not "first" rather than the second one received.
     let src = r#"

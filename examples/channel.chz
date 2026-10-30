@@ -16,7 +16,7 @@ fn main():
     ch := Channel[str]()
     label := "task"
     parallel:
-        spawn worker(1, label, ch)       # 1, label COPIED in; ch is the shared mailbox handle
+        spawn worker(1, label, ch)       # 1, label passed in; ch is the shared mailbox handle
         spawn worker(2, label, ch)
         spawn worker(3, label, ch)
     # Reaching here ⇒ all three workers finished. Their strings are queued FIFO.

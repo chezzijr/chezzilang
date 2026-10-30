@@ -222,8 +222,8 @@ main()";
 
 #[test]
 fn generator_captured_into_spawn_callee_crosses_by_value() {
-    // F3 path C: a spawn callee capturing a LOCAL generator (`it`, Pending) crosses it BY VALUE —
-    // the task drives its own copy. The module global `g := 7` is a non-generator, unrelated to the
+    // F3 path C: a spawn callee capturing a LOCAL generator (`it`, Pending) crosses it by handle —
+    // the task drives the parent's generator. The module global `g := 7` is a non-generator, unrelated to the
     // crossing. Byte-identical.
     let src = "\
 g := 7
@@ -783,8 +783,8 @@ main()";
 }
 
 /// Backlog item B, cross-module path: a spawned task calls a module-member fn `genmod.bar(10)` whose
-/// body drives a live generator global in ITS OWN module. The generator crosses BY VALUE via the
-/// other module's per-task snapshot, so the task drives its own copy: `10 + 1 + 2 = 13`.
+/// body drives a live generator global in ITS OWN module. The task drives the run's one global
+/// generator (M3.1): `10 + 1 + 2 = 13`.
 /// Byte-identical (was the cross-module reach-gate fault).
 #[test]
 fn generator_cross_module_member_call_crosses_both() {
@@ -852,7 +852,7 @@ main()";
 #[test]
 fn channel_of_closures_runs_parity() {
     // A `Channel[fn() -> int]`: a capture-free closure is sent over the channel and called by the
-    // consumer — crosses by value, runs 42.
+    // consumer — crosses by handle, runs 42.
     let src = "\
 fn producer(ch: Channel[fn() -> int]):
     ch.send(fn() -> int: 42)
@@ -869,7 +869,7 @@ main()";
 #[test]
 fn closure_returned_across_task_runs_parity() {
     // A CAPTURING closure (`adder(100)` closes over the int `n=100`) returned from a factory and sent
-    // over a `Channel[fn(int) -> int]` — its capture is sendable, so it crosses by value; `f(5)` = 105
+    // over a `Channel[fn(int) -> int]` — its capture is sendable, so it crosses by handle; `f(5)` = 105
     //.
     let src = "\
 fn adder(n: int) -> fn(int) -> int:
@@ -889,7 +889,7 @@ main()";
 #[test]
 fn sendable_capturing_closure_through_channel_still_runs() {
     // A closure capturing ONLY sendable data (an int + a `List[int]`) sent over a `Channel[fn() -> int]`
-    // still crosses by value and runs. `21*2 + 1` = 43.
+    // still crosses by handle and runs. `21*2 + 1` = 43.
     let src = "\
 fn main():
     n := 21

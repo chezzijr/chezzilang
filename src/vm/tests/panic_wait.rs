@@ -627,11 +627,10 @@ fn golden_executor_pool_chz_matches_expected() {
     assert_eq!(run_capture(src).expect("vm run"), expected);
 }
 
-/// D1 (lazy module snapshot): a `--parallel` task that calls a sibling free function which in
-/// turn reads a module-level global must resolve both against the worker's *own* home module —
-/// exercising lazy fault-in of that module into the worker heap on first global access. The
-/// plain (no-`--parallel`) run is the equivalence oracle (same output). Characterization test:
-/// green before D1 (eager `build_worker_modules`) and after (lazy snapshot).
+/// D1 (historical: lazy module snapshot): a `--parallel` task that calls a sibling free function
+/// which in turn reads a module-level global must resolve both. M3.1: the task reads the run's one
+/// module, so nothing faults in. The plain (no-`--parallel`) run is the equivalence oracle (same
+/// output).
 #[test]
 fn parallel_task_resolves_sibling_fn_and_global() {
     let src = "\

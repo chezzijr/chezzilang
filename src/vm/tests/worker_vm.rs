@@ -1,4 +1,4 @@
-//! VM tests: isolated worker VMs, home snapshot, method tasks.
+//! VM tests: worker VMs, module globals in a task, method tasks.
 //! Split out of `src/vm/tests.rs`. `super::*` is the parent module.
 
 use super::*;
@@ -187,7 +187,7 @@ fn worker_returns_a_str_by_handle() {
     assert!(vm.values_equal(got, want), "the str result is \"oops\"");
 }
 
-// ----- B3.3c: read-only `home` snapshot (worker module-graph reconstruction) -----
+// ----- B3.3c: a task reads module globals (M3.1: the run's one copy; was a `home` snapshot) -----
 
 /// Compile + run a multi-file graph from its entry path, returning the populated parent `Vm`
 /// (all imported modules present in `module_objs`).
@@ -213,8 +213,8 @@ fn sp() -> Span {
     Span::RUNTIME
 }
 
-/// A spawned task reads a module-level constant — needs the read-only `home` snapshot (B3.3c):
-/// the worker's `home` is a reconstruction of the parent module's globals, not a fresh-empty one.
+/// A spawned task reads a module-level constant — the run's one global (M3.1; B3.3c once rebuilt
+/// a read-only `home` snapshot for it).
 #[test]
 fn worker_reads_module_global() {
     let mut vm = ran_program("answer := 42\nfn get_answer() -> int:\n    return answer\n");

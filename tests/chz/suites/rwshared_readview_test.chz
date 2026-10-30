@@ -220,13 +220,13 @@ test fn set_read_view_nested_read_under_writer():
 
 # ---- W7-11: a stored element whose cycle closes through the ROOT container ----
 #
-# `RwShared` stores its value as a flat wire; `RwShared([a])` with `a.back = [a]`'s own list gives
+# `RwShared` stored its value as a flat wire; `RwShared([a])` with `a.back = [a]`'s own list gave
 #     List{id:0, items:[ Struct{id:1, back: Backref(0)} ]}
-# A copy-out view rebuilds ONE piece with its own id->object map, where id 0 (the container, which the
-# view never copied) is undefined. That used to hit a `.expect` and ABORT THE HOST — not a fault, the
+# A copy-out view rebuilt ONE piece with its own id->object map, where id 0 (the container, which the
+# view never copied) was undefined. That used to hit a `.expect` and ABORT THE HOST — not a fault, the
 # process died — on a legal single-threaded program, while `get()` on the same box worked.
 #
-# The view now rebuilds the whole container and returns the piece out of it, so the cycle survives.
+# M3.3: the view reads the live container by handle, so the cycle survives.
 # That is CPython's measured answer for the same shape:
 #     b = copy.deepcopy(xs[0]); b.val = 42; b.next[0].val   -> 42
 # `elem_split` cannot cover this: it re-emits CELL definitions per piece, and the missing node is a
@@ -317,8 +317,7 @@ test fn cyclic_set_element_views():
 # so element 0's half-finished attempt left a `Cell` holding the inert placeholder in that shared map,
 # and element 1 hit the cell's first-wins dedupe and got `None`:
 #   sl[1]()  ->  runtime error: type None has no method 'len'
-# The check is now a PRE-check (`WireValue::backrefs_resolvable`): nothing is allocated until the piece
-# is known to be rebuildable, so the map is never poisoned. Both engines agreed on the wrong answer,
+# M3.3: a view returns the closures by handle and rebuilds nothing, so no map can be poisoned. Both engines agreed on the wrong answer,
 # so parity could not have caught it.
 test fn cyclic_slice_shared_map_is_not_poisoned_by_a_piece_that_needs_the_container():
     xs: List[fn() -> int] = []
@@ -349,12 +348,12 @@ test fn cyclic_slice_shares_within_itself_like_get():
 
 # ADVERSARIAL REVIEW round 2 — the same contract, with only a LATER element cyclic. This is the case
 # the test above cannot reach, and the second cut of the fix got it wrong: the whole-container rebuild
-# went into the shared map at element 1, and `from_wire_memo`'s container arms have no first-wins
+# went into the shared map at element 1, and `from_wire_memo`'s container arms had no first-wins
 # dedupe (only `Cell` does), so it OVERWROTE the entry for element 0 — already materialized and already
 # pushed into the result. `sl[1].back[0]` was then a different object than `sl[0]`, i.e. identity
 # depended on element ORDER. Measured against CPython on the same shape:
 #   sl[0].val = 55  ->  sl[1].back[0].val   CPython 55 (`is sl[0]` -> True), Chezzi gave 1.
-# `slice` now decides once, before the first element.
+# M3.3: `slice` returns the elements by handle, so identity cannot depend on order.
 test fn cyclic_slice_shares_when_only_a_LATER_element_is_cyclic():
     a := Cyc(1, [])
     b := Cyc(2, [])
@@ -364,7 +363,7 @@ test fn cyclic_slice_shares_when_only_a_LATER_element_is_cyclic():
     sl[0].val = 55
     assert sl[1].back[0].val == 55, "slice identity must not depend on element order"
 
-# ADVERSARIAL REVIEW, charge 3 — a `Generator` carries NO wire id (its parked frame can never be a
+# ADVERSARIAL REVIEW, charge 3 — a `Generator` carried NO wire id (its parked frame could never be a
 # `Backref` target), but it CAN contain one through its backing closure. The first cut read "no id" as
 # "cannot dangle" and handed back the degraded placeholder; the generator then faulted on `None`.
 test fn cyclic_generator_element_rebuilds_against_the_whole_container():
