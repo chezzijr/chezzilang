@@ -5,17 +5,22 @@
 //! task runner and the next task it takes (M5b: detached). The writer and the `Cffi` kinds go to
 //! the reaper thread (`vm/reaper.rs`), which runs no task and never attaches.
 //!
-//! One program per writer kind: an Executor job writes 60000 bytes into a FIFO, then leaves a tail
-//! (7000 or 10000 bytes) in a writer that becomes garbage, so the drop's flush passes the
-//! 65536-byte pipe buffer. `main` reads the FIFO 300 ms after the job signals. `two_jobs` runs two
-//! such jobs on two FIFOs and drains only after both signal. `CHEZZI_GC_STRESS=1` collects at every
-//! instruction, so the jobs' next instructions sweep the writers. Each run is its own process and
-//! must exit 0 with its golden stdout within [`LIMIT`]. A run that outlives the bound is killed and
-//! FAILS. It is never retried.
+//! One program per buffered writer kind: an Executor job writes 60000 bytes into a FIFO, then
+//! leaves a tail (7000 or 10000 bytes) in an `io.buffered` writer that becomes garbage, so the
+//! drop's flush passes the 65536-byte pipe buffer. `main` reads the FIFO 300 ms after the job
+//! signals. `two_jobs` runs two such jobs on two FIFOs and drains only after both signal.
+//! `CHEZZI_GC_STRESS=1` collects at every instruction, so the jobs' next instructions sweep the
+//! writers. `create_no_gc` (no stress) checks that a plain `create` writer keeps no bytes (M5c).
+//! Each run is its own process and must exit 0 with its golden stdout within [`LIMIT`]. A run that
+//! outlives the bound is killed and FAILS. It is never retried.
 //!
-//! Base (bd5d6403, before M5; release, 60 s cap): `file`, `buffered` and `nested` hang at T=2, T=4
-//! and default, 9 of 9 runs. HEAD of M5 before the reaper (debug): `two_jobs` hangs in 4 of 4 runs
-//! at T=2, 2 of 4 at T=4 and 2 of 4 at the default count.
+//! M5c: a plain `create`/`append` writer is unbuffered (Go `os.File`), so it leaves no tail, and
+//! the `file` kind is gone: a job that writes 67000 bytes into a 65536-byte FIFO before it signals
+//! is the user's deadlock (Go's translation hangs the same way).
+//!
+//! Base (bd5d6403, before M5; release, 60 s cap): `file` (the M5 kind), `buffered` and `nested`
+//! hang at T=2, T=4 and default, 9 of 9 runs. HEAD of M5 before the reaper (debug), `two_jobs`
+//! with `create` tails: 4 of 4 runs hang at T=2, 2 of 4 at T=4 and 2 of 4 at the default count.
 //!
 //! No `t1` cell: at one worker the job's blocked write keeps the one run permit (`vm/width.rs`), so
 //! `main` cannot run to drain the FIFO. An explicit `flush()` hangs there too, on main before M5.
@@ -85,7 +90,8 @@ main()
 const TWO_JOBS: &str = "fn leave_tail(path: str, ready: Channel[bool]):
     w := must(io.create(path))
     _ := must(w.write(\"x\".repeat(60000)))
-    _ := must(w.write(\"y\".repeat(7000)))
+    b := io.buffered(w, 100000)
+    _ := must(b.write(\"y\".repeat(7000)))
     ready.send(true)
 
 fn writer(path: str, ready: Channel[bool], done: Channel[str]):
@@ -122,35 +128,57 @@ fn main():
 main()
 ";
 
-/// The whole program of `kind` and its golden stdout.
-fn source(kind: &str) -> (String, String) {
+/// M5c — a job writes 100 bytes into a FIFO through a plain `create` writer and ends without a
+/// `close()`. No stress and no later allocation, so no collection runs: a byte the writer kept in a
+/// buffer would never reach the FIFO, and `main` would wait for it forever. `create` is unbuffered
+/// (Go `os.File`), so the bytes reach the FIFO at the `write`. Base (M5b, a `BufWriter` per file
+/// writer): 4 of 4 runs hang at T=2, T=4 and default; Go and main print `reader got 100`.
+const CREATE_NO_GC: &str = "fn leave_bytes(path: str, ready: Channel[bool]):
+    w := must(io.create(path))
+    _ := must(w.write(\"z\".repeat(100)))
+    ready.send(true)
+
+fn writer(path: str, ready: Channel[bool], done: Channel[str]):
+    leave_bytes(path, ready)
+    done.send(\"writer done\")
+
+fn main():
+    ready := Channel[bool](1)
+    done := Channel[str](1)
+    ex := Executor()
+    _ := ex.submit(fn(): writer(\"@FIFO@\", ready, done))
+    r := must(io.open(\"@FIFO@\"))
+    _ := ready.recv()
+    total := 0
+    while total < 100:
+        b := must(r.read_bytes(100))
+        if b.len() == 0:
+            break
+        total += b.len()
+    print(\"reader got\", total)
+    print(done.recv())
+    ex.shutdown()
+main()
+";
+
+/// The whole program of `kind`, its golden stdout, and whether it runs under `CHEZZI_GC_STRESS=1`.
+fn source(kind: &str) -> (String, String, bool) {
     if kind == "two_jobs" {
         let want = "reader got 67000 67000\nwriter done\nwriter done\n".to_string();
-        return (format!("{PRELUDE}\n{TWO_JOBS}"), want);
+        return (format!("{PRELUDE}\n{TWO_JOBS}"), want, true);
+    }
+    if kind == "create_no_gc" {
+        let want = "reader got 100\nwriter done\n".to_string();
+        return (format!("{PRELUDE}\n{CREATE_NO_GC}"), want, false);
     }
     let (writer, total) = program(kind);
     let src = format!("{PRELUDE}\n{writer}{MAIN}").replace("@TOTAL@", &total.to_string());
-    (src, format!("reader got {total}\nwriter done\n"))
+    (src, format!("reader got {total}\nwriter done\n"), true)
 }
 
 /// (writer half of the program, the bytes the FIFO carries)
 fn program(kind: &str) -> (&'static str, u32) {
     match kind {
-        // A plain `create` writer: its `BufWriter` holds a 7000-byte tail.
-        "file" => (
-            "fn leave_tail(path: str, ready: Channel[bool]):
-    w := must(io.create(path))
-    _ := must(w.write(\"x\".repeat(60000)))
-    _ := must(w.write(\"y\".repeat(7000)))
-    ready.send(true)
-
-fn writer(path: str, ready: Channel[bool], done: Channel[str]):
-    leave_tail(path, ready)
-    _ := churn(200)
-    done.send(\"writer done\")
-",
-            67000,
-        ),
         // A `buffered` writer over a live file writer: `WriterCore::drop` writes its tail.
         "buffered" => (
             "fn leave_tail(w: io.Writer, ready: Channel[bool]):
@@ -188,7 +216,7 @@ fn writer(path: str, ready: Channel[bool], done: Channel[str]):
 }
 
 fn assert_cell(kind: &str, threads: &str) {
-    let (src, want) = source(kind);
+    let (src, want, stress) = source(kind);
     let name = format!("{kind}-{threads}");
     let dir = std::env::temp_dir().join(format!("chz-graveyard-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -206,10 +234,14 @@ fn assert_cell(kind: &str, threads: &str) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run")
         .arg(&path)
-        .env("CHEZZI_GC_STRESS", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if stress {
+        cmd.env("CHEZZI_GC_STRESS", "1");
+    } else {
+        cmd.env_remove("CHEZZI_GC_STRESS");
+    }
     match threads {
         "t2" => {
             cmd.env("CHEZZI_THREADS", "2");
@@ -257,4 +289,4 @@ fn assert_cell(kind: &str, threads: &str) {
     assert_eq!(out, want, "{name}: stdout\nstderr:\n{err}");
 }
 
-grid_tests!(KINDS x THREADS: [file, buffered, nested, two_jobs] x [t2, t4, tdefault] => crate::assert_cell);
+grid_tests!(KINDS x THREADS: [buffered, nested, two_jobs, create_no_gc] x [t2, t4, tdefault] => crate::assert_cell);

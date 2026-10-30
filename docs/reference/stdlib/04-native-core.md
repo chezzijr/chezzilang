@@ -98,23 +98,29 @@ The file seams (`read_file`/`write_file`/`read_bytes`/`write_bytes`) are
 | `write_file` | `(p: PathLike, contents: str) -> None!` | Write / overwrite. |
 | `read_bytes` | `(p: PathLike) -> bytes!` | Whole file as raw bytes (≤ 64 MB): binary files. |
 | `write_bytes` | `(p: PathLike, data: bytes) -> None!` | Write / overwrite raw bytes; no size cap, like `write_file`. |
-| `create` | `(p: PathLike) -> Writer!` | Open a **truncating** write handle (create-or-truncate). |
-| `append` | `(p: PathLike) -> Writer!` | Open an **append** write handle (create-if-absent, never truncates). |
+| `create` | `(p: PathLike) -> Writer!` | Open a **truncating** write handle (create-or-truncate). Unbuffered: see below. |
+| `append` | `(p: PathLike) -> Writer!` | Open an **append** write handle (create-if-absent, never truncates). Unbuffered: see below. |
 | `stdout` | `() -> Writer` | A fresh write handle over the process stdout sink (same sink as `print`). |
 | `stderr` | `() -> Writer` | A fresh write handle over the process stderr sink (same sink as `eprint`). |
 | `buffered` | `(w: Writer, size: int = 8192) -> Writer` | Wrap a writer so writes accumulate in-VM and reach the host in **one** call per `flush` / buffer-full / `close` (Go `bufio.NewWriter`; 8 KiB default). |
 | `open` | `(p: PathLike) -> Reader!` | Open a **read-only** file handle for line/chunk streaming (past the 64 MB whole-file `read_file` cap). A directory is an `!e` **at the call** (Python `IsADirectoryError`), same message as `read_file`. |
 
-**`Writer`: write-only file / stream handle.** A native handle (like `Socket`) for buffered
-output. Two openers, not a mode string (`create` = truncate, `append` = append). Text vs binary is
-**per call**. `stdout()`/`stderr()` route through the *same* sink as `print`/`eprint` (never a raw fd),
-so a `Writer` over stdout captures and streams identically. `buffered(...)` batches host/fd writes.
+**`Writer`: write-only file / stream handle.** A native handle (like `Socket`). Two openers, not a
+mode string (`create` = truncate, `append` = append). Text vs binary is **per call**.
+`stdout()`/`stderr()` route through the *same* sink as `print`/`eprint` (never a raw fd), so a
+`Writer` over stdout captures and streams identically.
+
+**A `create`/`append` writer is unbuffered, as Go's `os.File`:** each `write` is one write to the
+fd, so its bytes are on the fd when the call returns (visible to a second handle, a child process,
+a FIFO reader), and `flush()` on it is a no-op. Buffering comes only from `io.buffered(...)` (Go
+`bufio.NewWriter`), which batches the fd writes. Many small writes to a plain file writer cost one
+syscall each: wrap the writer in `io.buffered` for throughput.
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `write` | `(data: str) -> int!` | UTF-8-encode + write; returns bytes written. |
 | `write_bytes` | `(data: bytes) -> int!` | Write raw bytes; returns bytes written. Byte-exact on **every** backing (a file, `stdout()`/`stderr()`, or a `buffered` chain over either), so `stdout().write_bytes(b"\xff\xfe")` puts `ff fe` on fd 1, matching Python's `sys.stdout.buffer.write` and Go's `os.Stdout.Write`. |
-| `flush` | `() -> None!` | Drain a `buffered` writer's in-VM buffer **and** flush every core beneath it (one host/fd write per level). On a **file**-backed chain (`buffered(create(p))`, nested `buffered` included) an `?v` means the bytes are on the fd: visible to an in-process `io.read_file`, a `process.run` child, a sibling process. Like `fs.atomic_write` this is **not** `fsync`'d: observer visibility, **not** crash/power-loss durability. A no-op on unbuffered `stdout`/`stderr`; on a `buffered(stdout())` writer the drained bytes go to the same background stdout queue as `print`, so `?v` there means *queued*, not *written*. |
+| `flush` | `() -> None!` | Drain a `buffered` writer's in-VM buffer **and** flush every core beneath it (one host/fd write per level). A no-op on a plain `create`/`append` writer (it holds no buffer; a flush is not `fsync`). On a **file**-backed chain (`buffered(create(p))`, nested `buffered` included) an `?v` means the bytes are on the fd: visible to an in-process `io.read_file`, a `process.run` child, a sibling process. Like `fs.atomic_write` this is **not** `fsync`'d: observer visibility, **not** crash/power-loss durability. A no-op on unbuffered `stdout`/`stderr`; on a `buffered(stdout())` writer the drained bytes go to the same background stdout queue as `print`, so `?v` there means *queued*, not *written*. |
 | `close` | `() -> None!` | Flush (same full-chain guarantee as `flush`) + close the handle. Use-after-close is a clean `!e`, never a fault. |
 
 - **An explicit `flush()`/`close()` on a file-backed buffered writer always persists** (Python
@@ -127,10 +133,10 @@ so a `Writer` over stdout captures and streams identically. `buffered(...)` batc
 - **If you forget `flush`/`close` on a `buffered` writer, you can lose the tail** (as in Go). A
   **file**-backed buffered writer flushes its tail when the handle is dropped (program exit / GC), a
   nested `buffered(buffered(create(p)))` chain included. A **stdout/stderr**-backed buffered writer's
-  tail is *not* recovered on drop: call `flush()`/`close()`. A plain `create`/`append` writer never
-  loses data (its `BufWriter` flushes on drop). A writer that becomes garbage flushes when a
-  collection frees it, so its tail reaches the fd at a collection, not when the last reference
-  goes (call `flush()`/`close()` when a reader waits for it). One reaper thread runs these drops,
+  tail is *not* recovered on drop: call `flush()`/`close()`. A plain `create`/`append` writer holds
+  no bytes to lose. A `buffered` writer that becomes garbage flushes when a collection frees it,
+  so its tail reaches the fd at a collection, not when the last reference goes (call
+  `flush()`/`close()` when a reader waits for it). One reaper thread runs these drops,
   in the order the collections freed the writers, and it runs no task: while an fd is a full pipe,
   no task waits for the flush, but a second freed writer's flush waits behind the first (Go runs
   its finalizers on one goroutine the same way). A run waits for its pending flushes before it

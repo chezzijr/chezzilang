@@ -1255,8 +1255,8 @@ pub struct WriterCore {
 }
 
 /// R2 — where a [`WriterCore`] sends bytes.
-/// * `File` — a `create`/`append` file writer. The `BufWriter` gives OS-level write buffering for free
-///   and **flushes on drop**, so an unclosed file writer never silently loses data.
+/// * `File` — a `create`/`append` file writer. M5c: unbuffered, as Go's `os.File`: each write is a
+///   `write(2)`, so an unclosed file writer holds no bytes to lose.
 /// * `Stdout`/`Stderr` — markers: a write ROUTES through [`Vm::emit_out`]/[`Vm::emit_err`] (the
 ///   captured `Vm.out` buffer / the streaming-CLI sink), NEVER a raw fd — else capture/streaming break.
 /// * `Buffered` — the Go `bufio.NewWriter` escape hatch: accumulate in `buf`, drain to `inner` on
@@ -1266,7 +1266,7 @@ pub struct WriterCore {
 ///   (documented ceiling — needs an explicit `flush()`/`close()`).
 #[derive(Debug)]
 pub enum Backing {
-    File(std::io::BufWriter<std::fs::File>),
+    File(std::fs::File),
     Stdout,
     Stderr,
     Buffered {
@@ -1277,8 +1277,8 @@ pub enum Backing {
 }
 
 impl Drop for WriterCore {
-    /// R2 — best-effort drop-flush for a `Buffered` tail (the extra `Vec<u8>` std's `BufWriter` drop
-    /// can't see). All four inner backings are handled: `File` → write+flush it; `Buffered` → append to
+    /// R2 — best-effort drop-flush for a `Buffered` tail. All four inner backings are handled:
+    /// `File` → write it to the fd; `Buffered` → append to
     /// the inner's own buffer, whose `Drop` cascades it one level further down (a nested
     /// `buffered(buffered(file))` chain is still file-backed, so it owes the same drop-flush);
     /// `Stdout`/`Stderr` → dropped silently, it can't reach `&mut Vm` from here (`emit_out` needs it).
@@ -1295,9 +1295,9 @@ impl Drop for WriterCore {
             let drained = std::mem::take(buf);
             if let Ok(mut ig) = inner.inner.lock() {
                 match ig.as_mut() {
-                    Some(Backing::File(bw)) => {
+                    Some(Backing::File(file)) => {
                         use std::io::Write;
-                        let _ = bw.write_all(&drained).and_then(|()| bw.flush());
+                        let _ = file.write_all(&drained);
                     }
                     Some(Backing::Buffered { buf: ibuf, .. }) => ibuf.extend_from_slice(&drained),
                     Some(Backing::Stdout) | Some(Backing::Stderr) | None => {}
@@ -1589,7 +1589,7 @@ mod tests {
         let path = dir.join(format!("chz_nested_drop_{}.txt", std::process::id()));
         let file = std::fs::File::create(&path).unwrap();
         let inner = Arc::new(WriterCore {
-            inner: Mutex::new(Some(Backing::File(std::io::BufWriter::new(file)))),
+            inner: Mutex::new(Some(Backing::File(file))),
             key: next_poll_key(),
         });
         let mid = Arc::new(WriterCore {

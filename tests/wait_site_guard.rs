@@ -210,12 +210,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "fileio.rs",
-        "flush_locked",
-        "",
-        "runs only in `with_writer_lock`: in the door, or attached when `flush_is_local` says it makes no syscall",
-    ),
-    (
-        "fileio.rs",
         "read_line_locked",
         "",
         "runs only in `with_reader_locks`: in the door, or attached when `line_is_buffered` says it makes no syscall",

@@ -98,7 +98,8 @@ impl Vm {
         })
     }
 
-    /// R2 — write `data` to a writer core. `File` → `write_all` on the `BufWriter`; `Stdout`/`Stderr` →
+    /// R2 — write `data` to a writer core. `File` → `write_all` on the fd (M5c: unbuffered, Go
+    /// `os.File`); `Stdout`/`Stderr` →
     /// hand the RAW bytes to the [`Vm::emit_out_bytes`]/[`Vm::emit_err_bytes`] sink (`Vm.out` —
     /// NEVER a raw fd), which is byte-typed end to end, so `write_bytes(b"\xff\xfe")` is byte-exact
     /// on the console exactly as it already was on a file (W6-9); `Buffered` → append to the in-VM
@@ -107,14 +108,10 @@ impl Vm {
     fn write_to_core(&mut self, core: &WriterCore, data: &[u8]) -> Result<usize, WriteErr> {
         // Take the drain decision under the lock, then route to the inner core with the lock RELEASED
         // (the inner core has its own Mutex; a Stdout inner needs `&mut self`).
-        // M1.5 — a file write that reaches the fd (a FIFO or a pipe blocks) runs with the lock
-        // through the GC door; a write the `BufWriter` takes in its buffer runs attached. The
+        // M1.5 — a file write reaches the fd (a FIFO or a pipe blocks), so it runs with the lock
+        // through the GC door; a write a `Buffered` core keeps in its buffer runs attached. The
         // console sinks are written after the lock is released.
-        let next = self.with_writer_lock(
-            core,
-            |g| writes_are_buffered(g, data.len()),
-            |g| write_locked(g, data),
-        )?;
+        let next = self.with_writer_lock(core, writes_are_buffered, |g| write_locked(g, data))?;
         match next {
             Wrote::Done => {}
             Wrote::Stdout => self.emit_out_bytes(data),
@@ -126,12 +123,13 @@ impl Vm {
         Ok(data.len())
     }
 
-    /// R2 — flush a writer core. `File` → flush the `BufWriter` to the fd. `Stdout`/`Stderr` → honest
-    /// no-op (the sink is unbuffered — `io.flush()` stays inert there). `Buffered` → drain the in-VM
-    /// buffer to the inner core, THEN flush the inner (so `buffered(create(f))` is durable on disk).
+    /// R2 — flush a writer core. `File` and `Stdout`/`Stderr` → an honest no-op: each holds no
+    /// buffer (M5c: a file writer is unbuffered, Go `os.File`; a flush is not `File.Sync`).
+    /// `Buffered` → drain the in-VM buffer to the inner core, THEN flush the inner.
     fn flush_core(&mut self, core: &WriterCore) -> Result<(), WriteErr> {
-        // M1.5 — a flush that reaches the fd runs with the lock through the GC door.
-        let drain = self.with_writer_lock(core, flush_is_local, flush_locked)?;
+        // No backing's flush reaches the fd (a file holds no buffer; a `Buffered` drain is a write
+        // on the inner core), so it runs attached unless the lock is busy.
+        let drain = self.with_writer_lock(core, |_| true, flush_locked)?;
         if let Some((inner, drained)) = drain {
             // Guard the WRITE, not the flush: an empty `write_to_core` on a `Stdout`/`Stderr` inner
             // would hand `emit_out("")` to the captured `Vm.out` buffer / stream queue.
@@ -194,7 +192,7 @@ impl Vm {
                 // Flush the tail first, THEN take + drop the backing (closing the fd). A flush error on
                 // close still surfaces, but the backing is dropped regardless (no leaked fd).
                 let flushed = self.flush_core(&core);
-                // M1.5 — the drop closes the fd (a `BufWriter` drop also flushes), through the door.
+                // M1.5 — the drop closes the fd, through the door (a FIFO close can wait on its lock).
                 self.gc_blocking(&[], |_| close_slot(&core.inner));
                 match flushed {
                     Ok(()) | Err(WriteErr::Closed) => Ok(self.sock_ok(Value::nil())),
@@ -252,7 +250,7 @@ impl Vm {
         match opened {
             Ok(f) => {
                 let core = Arc::new(WriterCore {
-                    inner: Mutex::new(Some(Backing::File(std::io::BufWriter::new(f)))),
+                    inner: Mutex::new(Some(Backing::File(f))),
                     key: core::next_poll_key(),
                 });
                 let v = Value::obj(self.heap.alloc(Obj::Writer(core)));
@@ -507,7 +505,7 @@ impl Vm {
 }
 
 /// Close an I/O handle's `inner` slot: take its backing out under the lock, then drop it (a file
-/// closes, a `BufWriter` flushes) after the lock is released. M3.0a C7 — so a thread holds the
+/// closes) after the lock is released. M3.0a C7 — so a thread holds the
 /// lock for long only for an op on an OPEN slot, which is what a render that cannot wait reads
 /// (`io_state_now`, `vm/display.rs`): a drop's flush can block on a FIFO.
 pub(super) fn close_slot<T>(inner: &std::sync::Mutex<Option<T>>) {
@@ -634,9 +632,9 @@ fn write_locked(guard: &mut Option<Backing>, data: &[u8]) -> Result<Wrote, Write
         return Err(WriteErr::Closed);
     };
     Ok(match backing {
-        Backing::File(bw) => {
+        Backing::File(file) => {
             use std::io::Write;
-            bw.write_all(data)
+            file.write_all(data)
                 .map_err(|e| WriteErr::Io(e.to_string()))?;
             Wrote::Done
         }
@@ -653,19 +651,11 @@ fn write_locked(guard: &mut Option<Backing>, data: &[u8]) -> Result<Wrote, Write
     })
 }
 
-/// Does a write of `n` bytes stay off the fd: a closed core, a console or in-VM sink, or a
-/// `BufWriter` with room for it?
-fn writes_are_buffered(guard: &Option<Backing>, n: usize) -> bool {
+/// Does a write stay off the fd: a closed core, or a console or in-VM sink? A file write always
+/// reaches the fd.
+fn writes_are_buffered(guard: &Option<Backing>) -> bool {
     match guard {
-        Some(Backing::File(bw)) => bw.buffer().len() + n < bw.capacity(),
-        Some(Backing::Stdout | Backing::Stderr | Backing::Buffered { .. }) | None => true,
-    }
-}
-
-/// Does a flush stay off the fd: anything but a `BufWriter` with buffered bytes?
-fn flush_is_local(guard: &Option<Backing>) -> bool {
-    match guard {
-        Some(Backing::File(bw)) => bw.buffer().is_empty(),
+        Some(Backing::File(_)) => false,
         Some(Backing::Stdout | Backing::Stderr | Backing::Buffered { .. }) | None => true,
     }
 }
@@ -679,16 +669,9 @@ fn flush_locked(guard: &mut Option<Backing>) -> Result<Drained, WriteErr> {
         return Err(WriteErr::Closed);
     };
     Ok(match backing {
-        Backing::File(bw) => {
-            use std::io::Write;
-            bw.flush().map_err(|e| WriteErr::Io(e.to_string()))?;
-            None
-        }
-        Backing::Stdout | Backing::Stderr => None,
+        Backing::File(_) | Backing::Stdout | Backing::Stderr => None,
         // W6-1 — ALWAYS recurse, even with an empty in-VM buffer: an empty `buf` does NOT mean
-        // the inner core is clean. A mid-write drain (`write_to_core`) already `write_all`'d
-        // into the inner `BufWriter` WITHOUT flushing it and emptied `buf`, so the old
-        // `if buf.is_empty() { None }` short-circuit made `flush`/`close` persist nothing.
+        // the inner core is clean (a nested `Buffered` inner can hold a mid-write drain).
         Backing::Buffered { inner, buf, .. } => Some((Arc::clone(inner), std::mem::take(buf))),
     })
 }

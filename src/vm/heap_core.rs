@@ -49,6 +49,9 @@ pub(super) enum DropSite {
 /// The [`DropSite`] of `o`.
 pub(super) fn drop_site(o: &Obj) -> DropSite {
     match o {
+        // Every `Writer`: a `buffered` one writes its tail in its drop. A plain `create`/`append`
+        // writer (unbuffered, M5c) only closes its fd, but its backing sits behind the core's
+        // lock, so the table keeps one row per `Obj` kind.
         Obj::Writer(_) | Obj::Cffi(_) => DropSite::Reaper,
         Obj::Channel(_)
         | Obj::Shared(_)
