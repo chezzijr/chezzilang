@@ -128,7 +128,10 @@ so a `Writer` over stdout captures and streams identically. `buffered(...)` batc
   **file**-backed buffered writer flushes its tail when the handle is dropped (program exit / GC), a
   nested `buffered(buffered(create(p)))` chain included. A **stdout/stderr**-backed buffered writer's
   tail is *not* recovered on drop: call `flush()`/`close()`. A plain `create`/`append` writer never
-  loses data (its `BufWriter` flushes on drop).
+  loses data (its `BufWriter` flushes on drop). A drop at GC runs on the task whose allocation
+  started the collection, after the world restarts and detached like any blocking write: while the
+  fd is a full pipe, that one task waits for the reader, and the other tasks run on (Python's
+  `BufferedWriter` and Rust's `BufWriter` flush on drop too; Go's `bufio.Writer` loses the tail).
 - **Cross-task write order to one shared `Writer` is unspecified** (Go's `bufio`-not-goroutine-safe
   rule). Each single `write`/`write_bytes` is one atomic critical section, but the *order* of separate
   writes from different tasks is not guaranteed. Join and write from one task if you need order.

@@ -337,7 +337,8 @@ impl HeapCore {
     /// The slots in another handle's free cache are empty, so this skips them: it neither counts
     /// them live nor puts them on the free list a second time, and they stay with their handle.
     /// A freed object that owns an `Arc` core or a file goes to `graveyard` and is dropped by the
-    /// caller after the world restarts: its drop can make a syscall (a buffered writer flushes).
+    /// caller after the world restarts, through the GC door (`Vm::drop_graveyard`): its drop can
+    /// make a blocking syscall (a buffered writer flushes).
     ///
     /// # Safety
     ///

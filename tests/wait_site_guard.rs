@@ -248,7 +248,7 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "core.rs",
         "drop",
         "",
-        "`WriterCore::drop` flushes a buffered writer where the last handle drops, with no Vm (a sweep can drop it); open for M1.7",
+        "`WriterCore::drop` flushes a buffered writer where the last handle drops, with no Vm: a sweep's graveyard drops it in a door (`Vm::drop_graveyard`, `tests/gc_graveyard_drop_grid.rs`)",
     ),
     (
         "entry.rs",

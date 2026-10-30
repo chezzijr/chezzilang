@@ -147,12 +147,12 @@ impl Vm {
     /// A request that finds another thread's stop running joins it as a poller: that collection
     /// swept the one heap, so it serves this request too (`sample_mem_cap` and the `--max-heap`
     /// check read the core's verdict of that sweep). The freed objects whose drop can make a
-    /// syscall are dropped here, after the world restarts (`Heap::take_graveyard`).
+    /// syscall are dropped after the world restarts ([`Vm::drop_graveyard`]).
     pub(super) fn gc_collect(&mut self) {
         let Some(mut t) = self.attached.take() else {
             if self.heap.is_sole_handle() {
                 self.collect();
-                drop(self.heap.take_graveyard());
+                self.drop_graveyard();
             }
             return;
         };
@@ -169,9 +169,21 @@ impl Vm {
         if !ran {
             self.heap.observe_collection();
         }
-        drop(self.heap.take_graveyard());
+        self.drop_graveyard();
         if let Err(p) = r {
             resume_unwind(p);
+        }
+    }
+
+    /// Drop the objects the last sweep freed whose drop can make a syscall
+    /// (`Heap::take_graveyard`), through the door: a garbage writer flushes its tail in its drop
+    /// (`WriterCore::drop`, the `BufWriter` drop), and that write blocks while a pipe is full. If
+    /// the pipe's reader is a task of this run, its next stop would wait for this thread forever.
+    /// The dropped objects are out of their slots, so the drop reads no heap object.
+    fn drop_graveyard(&mut self) {
+        let dead = self.heap.take_graveyard();
+        if !dead.is_empty() {
+            self.gc_blocking(&[], move |_| drop(dead));
         }
     }
 
