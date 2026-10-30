@@ -300,7 +300,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 116] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 117] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     // TICKET-208, `tests/executor_task_grid.rs`. Every `time.sleep_ms` of these five is inside a
     // fixture .chz program's SOURCE STRING: a job's long work (3 s, 6 s) that a cut must end, or a
@@ -506,6 +506,12 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 116] = [
     // programs' SOURCE STRINGS: it is the `defer` cleanup that the 300 ms `--timeout` cuts. It orders
     // no two events in the Rust test's own control flow.
     "a_hard_halt_in_a_defer_is_never_bound_by_recover_at_every_route",
+    // TICKET-297, `src/vm/tests/sched_wake.rs`. Its `time.sleep_ms` calls are inside the fixture .chz
+    // programs' SOURCE STRINGS: the 50 ms delays the child's fault until the owner is parked at the
+    // inner join, and the 300 ms keeps the `spawned_owner` sibling alive. The Rust test orders
+    // nothing with them; the `CHEZZI_TEST_PRE_FINISH_WINDOW` hook holds the gap between the trip
+    // and `finish` open, and the assertion holds for either arrival order of the fault.
+    "an_owner_at_an_inner_join_is_cut_when_its_childs_fault_is_not_yet_recorded",
 ];
 
 #[test]
