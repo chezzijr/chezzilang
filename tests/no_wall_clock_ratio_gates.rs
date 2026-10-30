@@ -355,7 +355,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 117] = [
     "an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout",
     "an_eager_wait_timer_arm_loses_to_a_sibling_value",
     "an_executor_jobs_send_wakes_a_task_parked_on_another_scheds_channel",
-    "cancel_cascade_crosses_the_airlock",
+    "cancel_cascade_crosses_tasks",
     "cancel_trip_wakes_parked_wait_under_parallel",
     "connect_to_dead_port_reports_refused",
     // TICKET-114: the sleep is a POLL INTERVAL on `try_wait` against the 60 s hang bound (DEC-095's

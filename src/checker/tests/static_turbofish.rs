@@ -1901,7 +1901,7 @@ fn receiver_write_table_matches_observed_behavior() {
 /// `tests/chz/spec/crossing_route_write_grid_test.chz`). A write the parent could observe and that every
 /// path reaches is rejected; a read, and a write only some paths reach (left to layer C), are ok.
 #[test]
-fn airlock_crossing_grid_compile_cells() {
+fn crossing_crossing_grid_compile_cells() {
     for write in ["xs.push(9)", "xs[0] = 9", "p.x = 9", "n += 1"] {
         ok(&format!(
             "struct P:\n    x: int\nfn main():\n    xs := [1]\n    p := P(1)\n    n := 0\n    parallel:\n        spawn:\n            {write}\n    print(xs, p.x, n)\nmain()\n"

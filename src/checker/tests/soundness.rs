@@ -1371,7 +1371,7 @@ fn contains_through_bound_ok_and_item_mismatch_rejects() {
 /// just the built-in `Error`: `Channel[Drawable]`, `Channel[int!]`, `Channel[Error]`, and
 /// `Channel[NS]` over any user protocol all type-check. A genuinely-unserializable element (one
 /// carrying an FFI/native handle) is rejected at the RUNTIME airlock, not at construction — see
-/// `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`.
+/// `vm::golden_tests::ffi_handle_crosses_spawn_arg`.
 #[test]
 fn channel_of_any_protocol_existential_is_sendable() {
     entry_ok(
@@ -1387,9 +1387,9 @@ fn channel_of_any_protocol_existential_is_sendable() {
 /// Task 2 (option a) — a user protocol existential is now SENDABLE across the airlock (Go
 /// `chan interface` parity): the erased witness crosses by value like any other type; a witness that
 /// genuinely can't cross (one carrying an FFI/native handle) is rejected at the runtime airlock, not
-/// at construction (see `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`).
+/// at construction (see `vm::golden_tests::ffi_handle_crosses_spawn_arg`).
 #[test]
-fn protocol_existential_is_sendable_across_airlock() {
+fn protocol_existential_crosses_tasks() {
     // Bare `Channel[UserProto]()` type-checks.
     entry_ok(
         "protocol Drawable:\n    fn draw(self) -> str\nc := Channel[Drawable]()\nprint(\"x\")\n",
@@ -1409,7 +1409,7 @@ fn protocol_existential_is_sendable_across_airlock() {
 /// type-checks (and runs: prints `sent`). This was rejected under the old Error-only rule, where a
 /// protocol-field struct was the canonical "non-sendable Error witness"; that class no longer exists
 /// at the checker level. A witness carrying an FFI/native handle is checker-sendable and rejected at
-/// the RUNTIME airlock instead (`vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`).
+/// the RUNTIME airlock instead (`vm::golden_tests::ffi_handle_crosses_spawn_arg`).
 #[test]
 fn channel_send_sendable_error_literal_ok() {
     entry_ok(

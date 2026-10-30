@@ -112,7 +112,7 @@ fn spawn_callee_rebinding_its_param_before_writing_is_not_a_task_copy_write() {
 /// and every cell checks clean; the run-time answers are G2 in
 /// `tests/chz/spec/crossing_operand_grid_test.chz`.
 #[test]
-fn airlock_crossing_policy_grid_compile_cells() {
+fn crossing_crossing_policy_grid_compile_cells() {
     let prelude = "import std.concurrency\n\
 fn w(xs: List[int], out: Channel[int]):\n    xs.push(3)\n    out.send(xs.len())\n\
 fn rb(ys: List[int], out: Channel[int]):\n    ys = [1, 2]\n    ys.push(3)\n    out.send(ys.len())\n\

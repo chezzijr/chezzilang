@@ -1,5 +1,5 @@
 #![allow(clippy::wildcard_enum_match_arm)]
-//! TICKET-240 (wave 22 Family D, "Airlock"): the grid is wrapper path x inner value x write depth.
+//! TICKET-240 (wave 22 Family D): the grid is wrapper path x inner value x write depth.
 //! Every cell does its write inside `recover:` in the task and sends `runs` or `faults`; the parent
 //! prints its own named values after the join. M3.4 (Go model): a spawn, a `spawn:` capture and an
 //! Executor job hold the parent's values by handle, so every cell runs and a write to a value the

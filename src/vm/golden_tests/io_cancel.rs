@@ -1177,7 +1177,7 @@ main()";
 }
 
 #[test]
-fn parity_airlock_bigint_and_float_roundtrip() {
+fn parity_crossing_bigint_and_float_roundtrip() {
     // A boxed big-int and a boxed float reach a task (spawn + Channel) by handle (M3.2, M3.4) and
     // print the same values.
     let src = "\

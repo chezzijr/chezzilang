@@ -92,7 +92,7 @@ fn channel_protocol_element_is_sendable() {
     // Task 2 (option a): a protocol existential element type is now SENDABLE (Go `chan interface`
     // parity) — the erased witness crosses by value. A witness that genuinely can't serialize (an
     // FFI/native handle) is rejected at the RUNTIME airlock, not here — see
-    // `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`. (Was rejected under the old
+    // `vm::golden_tests::ffi_handle_crosses_spawn_arg`. (Was rejected under the old
     // Error-only sendable-bounded rule.)
     entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nfn main():\n    ch := Channel[NS]()\n    print(ch.len())\nmain()\n",
@@ -276,7 +276,7 @@ fn spawn_arg_closure_capturing_protocol_local_ok() {
     // The capture gate routes through `self.sendable()`, so this flipped when protocols became
     // sendable; the old rejection was a false positive. A capture that genuinely can't cross (an
     // FFI/native handle) is still rejected at the RUNTIME airlock — see
-    // `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`.
+    // `vm::golden_tests::ffi_handle_crosses_spawn_arg`.
     entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn run(g)\nmain()\n",
     );

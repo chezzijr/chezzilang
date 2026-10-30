@@ -453,7 +453,7 @@ main()";
 /// deleted wire form back-referenced the self-edge; since M3.4 the task gets the closure by handle.
 /// `fact(5) == 120` — previously this rejected ("recursive local fn cannot be sent").
 #[test]
-fn airlock_recursive_local_fn_round_trips_parity() {
+fn crossing_recursive_local_fn_round_trips_parity() {
     let src = "\
 fn main():
     fn fact(n: int) -> int:
@@ -474,7 +474,7 @@ main()";
 /// knot. `even(10) == true`. (Nested `fn`s can't forward-reference each other, so the
 /// pair is built from reassigned fn-typed cells — the same closure/cell cycle a mutual `fn` would form.)
 #[test]
-fn airlock_mutually_recursive_pair_round_trips() {
+fn crossing_mutually_recursive_pair_round_trips() {
     let src = "\
 fn main():
     even := fn(n: int) -> bool: n == 0
@@ -494,7 +494,7 @@ main()";
 /// OFF the stack → inline deep copy). The visited-set distinguishes them: the self-edge round-trips as
 /// a cycle, the outer local as an independent copy. `f(3)` reads `base == 100`.
 #[test]
-fn airlock_recursive_closure_captures_outer_local_round_trips() {
+fn crossing_recursive_closure_captures_outer_local_round_trips() {
     let src = "\
 fn main():
     base := 100
@@ -515,7 +515,7 @@ main()";
 /// `pair[0]()` then `pair[1]()` reads `2` and the parent's `count` is `2` (Go
 /// `aliased_closure 2 2`).
 #[test]
-fn airlock_aliased_closure_shares_its_binding() {
+fn crossing_aliased_closure_shares_its_binding() {
     let src = "\
 fn main():
     count := 0
@@ -543,7 +543,7 @@ main()";
 /// since M3.4 the task gets the struct by handle.
 /// `use_it(a)` reads `a.val == 1`.
 #[test]
-fn airlock_self_ref_struct_round_trips_both() {
+fn crossing_self_ref_struct_round_trips_both() {
     let src = "\
 struct Node:
     val: int
@@ -565,7 +565,7 @@ main()";
 /// itself) crosses a `Channel[List[List[int]]].send` and round-trips. The receiving task reads the
 /// first element (`10`) and that the self-slot is the list itself (`ys[1].len() == 2`).
 #[test]
-fn airlock_self_ref_list_round_trips_both() {
+fn crossing_self_ref_list_round_trips_both() {
     let src = "\
 fn main():
     xs: List[List[int]] = [[10]]
@@ -584,7 +584,7 @@ main()";
 /// the map) crosses a `Channel` and round-trips using the CARRIED hash on reconstruction (never re-hashes
 /// a cyclic key/value). The task reads the leaf entry's self-length.
 #[test]
-fn airlock_self_ref_map_round_trips_both() {
+fn crossing_self_ref_map_round_trips_both() {
     let src = "\
 fn main():
     m: Map[str, List[Map[str, int]]] = {\"leaf\": []}
@@ -608,7 +608,7 @@ main()";
 /// closure `n.f = fn: n.x` closes `Closure -> Struct(n) -> Closure`; the task calls `n.f()` and reads
 /// `n.x == 5`.
 #[test]
-fn airlock_mixed_struct_closure_cycle_round_trips_both() {
+fn crossing_mixed_struct_closure_cycle_round_trips_both() {
     let src = "struct Node:\n    f: fn() -> int\n    x: int\nfn main():\n    n := Node(fn() -> int: 0, 5)\n    n.f = fn() -> int: n.x\n    parallel:\n        spawn:\n            print(n.f())\nmain()\n";
     assert_golden_out(src, "5\n");
 }
@@ -617,7 +617,7 @@ fn airlock_mixed_struct_closure_cycle_round_trips_both() {
 /// the parent's list, so a write through one alias is visible through the other, in the task and in
 /// the parent (Go `struct_alias 9 9`).
 #[test]
-fn airlock_struct_alias_preserves_identity() {
+fn crossing_struct_alias_preserves_identity() {
     let src = "\
 struct Box:
     n: int
@@ -642,7 +642,7 @@ main()";
 /// are the parent's list, so a push through `a` is visible through `b` and in the parent (Go
 /// `cross_arg_alias 2 2`).
 #[test]
-fn airlock_cross_arg_data_alias_preserves_identity() {
+fn crossing_cross_arg_data_alias_preserves_identity() {
     let src = "\
 fn work(a: List[int], b: List[int], r: Channel[str]):
     res := recover:
@@ -665,7 +665,7 @@ main()";
 /// after `ch.send(xs)` the receiving task mutates through `ys[0]` and reads the SAME value through
 /// `ys[1]` (`9 9`).
 #[test]
-fn airlock_channel_send_preserves_alias_identity() {
+fn crossing_channel_send_preserves_alias_identity() {
     let src = "\
 struct Box:
     n: int
@@ -689,7 +689,7 @@ main()";
 /// CPython 3.14.7 (`copy.deepcopy(outer)`) and Rust agree. M3.3: the box holds `outer` itself, so
 /// this is Go's answer too.
 #[test]
-fn airlock_rwshared_store_dag_alias_is_one_object() {
+fn crossing_rwshared_store_dag_alias_is_one_object() {
     let src = "\
 import RwShared from std.concurrency
 fn main():
@@ -709,7 +709,7 @@ main()";
 /// `ys[0]` consumes the value `ys[1]` would have seen, as it does without a channel in between.
 /// (A cycle through a spawned generator is one generator too: `generator_in_data_cycle_is_the_one_generator`.)
 #[test]
-fn airlock_generator_reached_twice_is_one_copy() {
+fn crossing_generator_reached_twice_is_one_copy() {
     let src = "\
 fn gen() -> Iterator[int]:
     yield 1
@@ -1418,7 +1418,7 @@ fn for_over_fresh_temp_cursor_full() {
 }
 
 #[test]
-fn cursor_crosses_spawn_airlock_three_engine_parity() {
+fn cursor_crosses_spawn_three_engine_parity() {
     // A cursor IS sendable: it crosses the spawn/channel airlock as a DEEP COPY (independent
     // snapshot + pos on the receiver), like a `list`. The receiver drives it and gets `Some(1)`.
     // This must hold byte-identically under the M:N `--parallel` engine.

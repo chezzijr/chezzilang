@@ -269,7 +269,7 @@ main()
 /// R1 — REGRESSION PIN: a `bytes` / `bytearray` value reaches a task (M3.4: by handle).
 /// R1 must not regress it.
 #[test]
-fn bytes_crosses_the_task_airlock() {
+fn bytes_crosses_tasks() {
     let src = "\
 fn worker(ch: Channel[bytes], b: bytes):
     ch.send(b)

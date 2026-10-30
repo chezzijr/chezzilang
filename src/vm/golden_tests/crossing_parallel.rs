@@ -1,11 +1,11 @@
-//! Golden tests: airlock-crossed closures and module globals, `parallel:` programs, deadlock and
+//! Golden tests: closures and module globals handed to tasks, `parallel:` programs, deadlock and
 //! cancel trips.
 //! Split out of `src/vm/golden_tests.rs`. `super::*` is the parent module.
 
 use super::*;
 
 #[test]
-fn airlock_crossed_closure_reads_module_global_live_same_task() {
+fn crossing_crossed_closure_reads_module_global_live_same_task() {
     // TICKET-041(b), historical. Before the fix, a closure's snapshot of its module-global reads
     // was frozen at the FIRST crossing and never refreshed — even on a same-task round trip
     // through `Channel.send`/`.recv()` where no task boundary is ever crossed. Calling the SAME
@@ -33,7 +33,7 @@ print("direct : {k(3)}")
 }
 
 #[test]
-fn airlock_nested_closure_created_after_the_tasks_own_write_reads_it() {
+fn crossing_nested_closure_created_after_the_tasks_own_write_reads_it() {
     // TICKET-051, Shape B: the receiving task writes `n = 100`, then builds the nested closure
     // `inner`. Both reads see the write (M3.1: one `n`). Go (go1.27.0, `m31go/rust`) and CPython:
     // `100` for both.
@@ -68,7 +68,7 @@ print("plain global read   : {res.recv()}")
 }
 
 #[test]
-fn airlock_forwarded_closure_reads_the_forwarders_write() {
+fn crossing_forwarded_closure_reads_the_forwarders_write() {
     // TICKET-137: a closure carries captures only. A -> B -> C: B writes `n = 999` and forwards the
     // closure; C runs it after the receive, so it reads the run's one `n` (M3.1). Go (go1.27.0,
     // `m31go/rust`) and CPython: `2997`.
@@ -105,7 +105,7 @@ print("result: {res.recv()}")
 }
 
 #[test]
-fn airlock_receiving_tasks_own_write_beats_an_arriving_closures_global() {
+fn crossing_receiving_tasks_own_write_beats_an_arriving_closures_global() {
     // TICKET-051: a closure arriving from another task must not clobber the receiving task's own
     // write to the same global. Task A writes `n = 5` before it receives a closure over `n`. Go
     // (go1.27.0, `m31go/rust`) and CPython: `5` and `5`.
@@ -141,9 +141,9 @@ print("task read    : {res.recv()}")
 }
 
 #[test]
-fn airlock_arriving_closure_loses_to_the_receiving_views_own_assignment() {
+fn crossing_arriving_closure_loses_to_the_receiving_views_own_assignment() {
     // TICKET-051: same shape as
-    // `airlock_receiving_tasks_own_write_beats_an_arriving_closures_global` with a top-level `n =
+    // `crossing_receiving_tasks_own_write_beats_an_arriving_closures_global` with a top-level `n =
     // 7` before the nursery. The crossing carries no globals, so the receiver's own later write
     // wins. Go (go1.27.0, `m31go/rust`) and CPython: `5` and `5`.
     let src = r#"
@@ -179,7 +179,7 @@ print("task read    : {res.recv()}")
 }
 
 #[test]
-fn airlock_arriving_closure_does_not_clobber_the_receivers_in_place_push() {
+fn crossing_arriving_closure_does_not_clobber_the_receivers_in_place_push() {
     // TICKET-051: an arriving closure must not replace the receiving task's global, which it has
     // mutated in place (`xs.push(9)`). M3.1: the push lands in the run's one `xs`. Go (go1.27.0,
     // `m31go/rust`): `[1, 9] len 2`.
@@ -214,7 +214,7 @@ print(res.recv())
 }
 
 #[test]
-fn airlock_closure_from_a_sender_that_only_inherited_a_global_reads_the_live_global() {
+fn crossing_closure_from_a_sender_that_only_inherited_a_global_reads_the_live_global() {
     // TICKET-051: main writes `n = 7` between the two spawns; the received closure runs after the
     // receive, so it reads the write (M3.1: one `n`). Go (go1.27.0, `m31go/rust`) and CPython: `7`.
     let src = r#"
@@ -245,7 +245,7 @@ print("closure sees : {res.recv()}")
 }
 
 #[test]
-fn airlock_forwarded_closure_without_its_own_write_reads_the_first_senders_write() {
+fn crossing_forwarded_closure_without_its_own_write_reads_the_first_senders_write() {
     // TICKET-137: task A writes `n = 999` and sends a closure over `n`; B forwards it; C reads the
     // run's one `n` (M3.1). Go (go1.27.0, `m31go/rust`) and CPython: `2997`.
     let src = r#"
@@ -282,7 +282,7 @@ print("result: {res.recv()}")
 }
 
 #[test]
-fn airlock_same_task_closure_round_trip_mutates_module_list_in_place() {
+fn crossing_same_task_closure_round_trip_mutates_module_list_in_place() {
     // TICKET-041(b), data-loss variant. An in-place write to a module-global container from a
     // same-task channel-round-tripped closure must land, matching CPython's measured
     // `module xs: [1, 9]` (2026-09-03). Before the fix the frozen global snapshot made the write
@@ -307,7 +307,7 @@ print("module xs: {xs}")
 }
 
 #[test]
-fn airlock_closure_calling_a_helper_that_reads_a_global_reads_the_live_global() {
+fn crossing_closure_calling_a_helper_that_reads_a_global_reads_the_live_global() {
     // TICKET-097 defect A: a received closure reads `n` live whether it names the global or calls a
     // helper that reads it. M3.1: one `n` for the run. Go (go1.27.0, `m31go/rust`) and CPython:
     // `100` on every line.
@@ -345,7 +345,7 @@ main()
 }
 
 #[test]
-fn airlock_a_called_helper_that_writes_the_global_keeps_it_a_late_load() {
+fn crossing_a_called_helper_that_writes_the_global_keeps_it_a_late_load() {
     // TICKET-097 guard: a global the closure tree WRITES is a live read, even behind a called
     // helper. M3.1: the run has one `n`, so the sender's `n = 100` is what `bump()` reads. Go
     // (go1.27.0, `m31go/rust`): `101`.
@@ -379,7 +379,7 @@ main()
 }
 
 #[test]
-fn airlock_a_closure_calling_a_nested_fn_reads_the_live_global() {
+fn crossing_a_closure_calling_a_nested_fn_reads_the_live_global() {
     // TICKET-137: a nested fn is a CAPTURE of the crossing closure; its global read is a live read
     // of the run's one `n` (M3.1), so it sees the sender's `n = 100`. Go (go1.27.0, `m31go/rust`)
     // and CPython: `100`.
@@ -409,7 +409,7 @@ main()
 }
 
 #[test]
-fn airlock_closure_over_a_global_the_sender_mutated_in_place_reads_the_live_global() {
+fn crossing_closure_over_a_global_the_sender_mutated_in_place_reads_the_live_global() {
     // TICKET-097 defect B: the sender's `xs = [1, 2]` and `ys.push(2)` land in the run's one copy
     // (M3.1). Go (go1.27.0, `m31go/rust`) and CPython: `2` twice.
     let src = r#"
@@ -443,7 +443,7 @@ main()
 }
 
 #[test]
-fn airlock_closure_over_a_global_the_sender_mutated_by_index_or_field_assignment_reads_the_live_global()
+fn crossing_closure_over_a_global_the_sender_mutated_by_index_or_field_assignment_reads_the_live_global()
  {
     // TICKET-097 defect B: the sender's `zs[0] = 9` and `p.v = 9` land in the run's one copy
     // (M3.1). Go (go1.27.0, `m31go/rust`) and CPython: `9` and `9`.
@@ -481,7 +481,7 @@ main()
 }
 
 #[test]
-fn airlock_closure_over_a_global_a_user_struct_method_mutated_reads_the_live_global() {
+fn crossing_closure_over_a_global_a_user_struct_method_mutated_reads_the_live_global() {
     // TICKET-097/105: `g.bump()` twice in the sender changes the run's one `g` (M3.1). Go
     // (go1.27.0, `m31go/rust`) and CPython: `3`.
     let src = r#"
@@ -513,7 +513,7 @@ main()
 }
 
 #[test]
-fn airlock_closure_over_a_global_main_mutated_through_a_local_alias_reads_the_live_global() {
+fn crossing_closure_over_a_global_main_mutated_through_a_local_alias_reads_the_live_global() {
     // TICKET-105 (W12-6) G1: `main` pushes through a local alias of `g` before the send; one `g`
     // for the run (M3.1). Go (go1.27.0, `m31go/rust`) and CPython: `[1, 2]`.
     let src = r#"
@@ -543,7 +543,8 @@ main()
 }
 
 #[test]
-fn airlock_closure_over_a_global_the_sender_mutated_through_a_struct_alias_reads_the_live_global() {
+fn crossing_closure_over_a_global_the_sender_mutated_through_a_struct_alias_reads_the_live_global()
+{
     // TICKET-105 (W12-6) G2: `h := g; h.n = 5` writes the run's one `g` (M3.1). Go (go1.27.0,
     // `m31go/rust`) and CPython: `5`.
     let src = r#"
@@ -576,7 +577,7 @@ main()
 }
 
 #[test]
-fn airlock_alias_write_reaches_a_grandchild_senders_closure() {
+fn crossing_alias_write_reaches_a_grandchild_senders_closure() {
     // TICKET-105 (W12-6) G3: the alias write happens in `producer`, an ancestor of the closure's
     // sender `child`. M3.1: one `g` for the run, so `main` reads the write. Go (go1.27.0,
     // `m31go/rust`) and CPython: `[1, 2]`.
@@ -610,7 +611,7 @@ main()
 }
 
 #[test]
-fn airlock_closure_over_an_aliased_element_reads_the_live_global() {
+fn crossing_closure_over_an_aliased_element_reads_the_live_global() {
     // TICKET-105 (W12-6) G4: `inner` is a CAPTURE (it crosses as the sender's `[1, 2]`) and `gl[0]`
     // is the run's one global (M3.1), which the push changed too. Go (go1.27.0, `m31go/rust`) and
     // CPython: `[1, 2] [1, 2]`.
@@ -641,7 +642,7 @@ main()
 }
 
 #[test]
-fn airlock_unchanged_aliased_global_does_not_clobber_the_receivers_push() {
+fn crossing_unchanged_aliased_global_does_not_clobber_the_receivers_push() {
     // TICKET-105 (W12-6), G5 (negative control): `a := xs; n := a.len()` never mutates the alias,
     // so nothing clobbers the receiver's in-place push, which lands in the run's one `xs` (M3.1).
     // Go (go1.27.0, `m31go/rust`): `[[1, 9], [1, 9]] len 4`.
@@ -674,7 +675,7 @@ main()
 }
 
 #[test]
-fn airlock_closure_over_a_captured_alias_pushed_by_the_receiver_is_seen() {
+fn crossing_closure_over_a_captured_alias_pushed_by_the_receiver_is_seen() {
     // TICKET-105, G6. The push through `inner` runs in the RECEIVER's captured closure body,
     // AFTER the send. M3.2: a channel moves the closure itself, so its capture of `inner` is the
     // sender's `gl[0]`, and both reads see the push. Go (`rewrites.go`, M3.2 report): a closure
@@ -710,7 +711,7 @@ main()
 }
 
 #[test]
-fn airlock_task_local_alias_of_a_global_is_one_object() {
+fn crossing_task_local_alias_of_a_global_is_one_object() {
     // TICKET-105, G7. A spawn-arg alias (`spawn f(gl[0], r)`) and a whole-value alias (`a := gl`)
     // are the global's own object (M3.1 one global, M3.4 by handle), so a push through the alias is
     // visible through the global. CPython 3.14.7 prints `[1, 2] [1, 2]` and `[[1, 2]] [[1, 2]]`
@@ -766,7 +767,7 @@ main()
 }
 
 #[test]
-fn airlock_adopted_alias_keeps_a_later_globals_backref_into_its_old_subtree() {
+fn crossing_adopted_alias_keeps_a_later_globals_backref_into_its_old_subtree() {
     // TICKET-111, gotcha 2. `inner` (a spawn-crossed alias of `gl[0]`) is adopted as the global's
     // object during the module snapshot's replay, but the snapshot memo cached `y := gl[0][0]`
     // EARLIER in the nursery, so `y`'s Backref must still resolve into the adopted node's OLD
@@ -802,7 +803,7 @@ main()
 }
 
 #[test]
-fn airlock_channel_message_ids_stay_in_their_own_crossing() {
+fn crossing_channel_message_ids_stay_in_their_own_crossing() {
     // TICKET-111, gotcha 1. `c`'s received `[[7]]` must be the freshly-sent list, never another
     // crossing's node. `inner` is a parent-made alias the task captures: M3.4 hands it over by
     // handle, so it is `gl[0]` itself (M3.1: the run's one list) and its push lands. CPython 3.14.7

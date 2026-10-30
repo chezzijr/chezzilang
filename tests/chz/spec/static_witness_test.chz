@@ -656,7 +656,7 @@ test fn a_deferred_target_forwards_the_enclosing_witness():
     defer_forward(Tag("hi"), sink)
     assert sink == ["body", "Counter(n=0)", "body", "Tag(s='none')"]
 
-test fn a_spawned_target_forwards_the_enclosing_witness_across_the_airlock():
+test fn a_spawned_target_forwards_the_enclosing_witness_across_tasks():
     ch := Channel[str](4)
     spawn_forward(Counter(9), ch)
     assert ch.recv() == "Counter(n=0)"

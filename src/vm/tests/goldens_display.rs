@@ -619,7 +619,7 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
 /// spawned task reads `a.val == 1` (prints `got 1`) and the recover returns `done`; byte-identical
 /// on every engine.
 #[test]
-fn airlock_cyclic_struct_crosses_both_engines() {
+fn crossing_cyclic_struct_crosses_both_engines() {
     let src = "\
 struct Node:
     val: int
@@ -646,7 +646,7 @@ main()
 /// referential value crossing via `Channel.send` and `Shared(...)` (M3.2/M3.3: by handle)
 /// also gets through. Regression lock on the other airlock entry points beyond a bare `spawn` arg.
 #[test]
-fn airlock_cyclic_via_channel_send_and_shared_crosses() {
+fn crossing_cyclic_via_channel_send_and_shared_crosses() {
     let chan_src = "\
 import std.concurrency
 struct Node:
@@ -691,7 +691,7 @@ main()
 /// closure by handle (M3.4; the deleted wire form back-referenced the knot), so the recursive fn
 /// computes correctly — `fact(5) == 120`.
 #[test]
-fn airlock_recursive_local_fn_round_trips_both_engines() {
+fn crossing_recursive_local_fn_round_trips_both_engines() {
     let src = "\
 fn main():
     fn fact(n: int) -> int:
@@ -711,7 +711,7 @@ main()
 /// if the placeholder patch left a dangling `GcRef`, a collection at the next safepoint would panic
 /// ("dangling GcRef"). A GC pass runs before/after the spawn, then the result is used (`fact(6) == 720`).
 #[test]
-fn airlock_recursive_local_fn_round_trips_under_gc_stress() {
+fn crossing_recursive_local_fn_round_trips_under_gc_stress() {
     let src = "\
 fn main():
     fn fact(n: int) -> int:
@@ -735,9 +735,9 @@ main()
 /// alloc → patch) must be fully GC-traced — if the placeholder patch left a dangling `GcRef`, a
 /// collection at the next safepoint would panic ("dangling GcRef"). A GC pass runs before/after the
 /// spawn, then the crossed cyclic node is read (`a.val == 1`, and the cycle is intact: `a.next[0]` is
-/// `b` and `b.next[0]` is `a`). Mirrors `airlock_recursive_local_fn_round_trips_under_gc_stress`.
+/// `b` and `b.next[0]` is `a`). Mirrors `crossing_recursive_local_fn_round_trips_under_gc_stress`.
 #[test]
-fn airlock_self_ref_struct_round_trips_under_gc_stress() {
+fn crossing_self_ref_struct_round_trips_under_gc_stress() {
     let src = "\
 struct Node:
     val: int
@@ -1028,7 +1028,7 @@ main()
 /// `holder.y` takes a slow arm. Before TICKET-276 the program held a module value (`p := [k]`), which
 /// `chezzi check` rejects.
 #[test]
-fn airlock_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
+fn crossing_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_t119_review_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
@@ -1052,7 +1052,7 @@ fn airlock_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
 /// Backrefs `z` because `z` is on its `path`, but `w`'s own attempt lacks that state, re-enters `z` by
 /// a shorter route and is kept. Skipping `w` loops the slow arms.
 #[test]
-fn airlock_cyclic_module_global_with_a_shorter_reentry_still_crosses() {
+fn crossing_cyclic_module_global_with_a_shorter_reentry_still_crosses() {
     let src = "\
 struct G:
     a: G?
@@ -1148,7 +1148,7 @@ main()
 /// TICKET-119 -- a module global just under `MAX_STRUCTURAL_DEPTH` must still cross without ever
 /// hitting the depth-tripped recording path at all.
 #[test]
-fn airlock_module_global_just_under_the_depth_cap_still_crosses() {
+fn crossing_module_global_just_under_the_depth_cap_still_crosses() {
     let src = "\
 struct N:
     next: N?
@@ -1179,7 +1179,7 @@ main()
 /// one object (M3.1: the run's), beside a deep module global. Go (go1.27.0, `m31go/rust`): `2
 /// true`.
 #[test]
-fn airlock_deep_module_global_alias_is_one_object() {
+fn crossing_deep_module_global_alias_is_one_object() {
     let src = "\
 struct N:
     next: N?
@@ -1209,7 +1209,7 @@ main()
 /// that writes through one and reads through the other runs under GC STRESS with junk allocation
 /// around it. M3.1: one cell for the run. Go (go1.27.0, `m31go/rust`): `2`.
 #[test]
-fn airlock_module_global_shared_binding_survives_gc_stress() {
+fn crossing_module_global_shared_binding_survives_gc_stress() {
     let src = "\
 struct Ctr:
     inc: fn() -> None
@@ -1246,7 +1246,7 @@ main()
 /// calls the run's one closure pair, so its two `l.GI()` writes reach `GG()`. CPython and Go
 /// (go1.27.0, `m31go/rust`): `2`.
 #[test]
-fn airlock_cross_module_shared_binding_is_one_cell() {
+fn crossing_cross_module_shared_binding_is_one_cell() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74a_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -1309,7 +1309,7 @@ main()
 /// run's one closure pair, so `GC()` reads both `GA()` writes. CPython: `3`; Go (go1.27.0,
 /// `m31go/rust`): `3`.
 #[test]
-fn airlock_handle_bearing_cell_keeps_one_binding() {
+fn crossing_handle_bearing_cell_keeps_one_binding() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74b_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
@@ -1362,7 +1362,7 @@ main()
 /// cleanly" — a fault on a program CPython runs fine (`m = bk` + the same recursive `down`,
 /// printing `41`). M3.1 deleted the snapshot: the task reads the run's one global.
 #[test]
-fn airlock_handle_bearing_recursive_local_fn_round_trips() {
+fn crossing_handle_bearing_recursive_local_fn_round_trips() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74b_cyc_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
@@ -1408,7 +1408,7 @@ main()
 /// global `I` that wrote the binding before that spawn agree on its VALUE: CPython measures `1`.
 /// M3.1: the global is the run's one closure, and the capture is copied after `I()` ran.
 #[test]
-fn airlock_shared_cell_takes_the_spawn_time_value_on_both_engines() {
+fn crossing_shared_cell_takes_the_spawn_time_value_on_both_engines() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74c_val_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
@@ -1466,7 +1466,7 @@ go()
 /// module that never wrote the definition. Ordering matters: the handle-bearing global must come
 /// FIRST — move `H` below `GG` and it prints `7` either way.
 #[test]
-fn airlock_discarded_wire_attempt_does_not_forge_a_backref() {
+fn crossing_discarded_wire_attempt_does_not_forge_a_backref() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74a_spec_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -1519,7 +1519,7 @@ main()
 /// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
 /// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.
 #[test]
-fn airlock_module_global_recursive_fn_control_sends() {
+fn crossing_module_global_recursive_fn_control_sends() {
     let src = "\
 fn fact(n: int) -> int:
     if n <= 1: return 1
@@ -1538,7 +1538,7 @@ main()
 /// value. M3.1: the task reads the run's one global, so nothing walks the cycle; the worker prints
 /// `w`, then the recover returns `done`.
 #[test]
-fn airlock_cyclic_module_global_crosses_mn() {
+fn crossing_cyclic_module_global_crosses_mn() {
     let src = "\
 struct Node:
     val: int
@@ -1567,7 +1567,7 @@ main()
 /// so a large-but-shallow sendable never false-trips. (A genuinely >10_000-DEEP acyclic nest would
 /// error — same false-positive the print/`==` path already has — so this is deliberately breadth-shaped.)
 #[test]
-fn airlock_wide_acyclic_crosses_fine() {
+fn crossing_wide_acyclic_crosses_fine() {
     let src = "\
 fn use_it(xs: List[int]):
     print(\"len {xs.len()} first {xs[0]} last {xs[99999]}\")

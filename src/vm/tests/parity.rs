@@ -1239,7 +1239,7 @@ fn builtin_value_equality_both_engines() {
 /// into a spawned task reaches the task and runs. Byte-identical
 /// on the VM and the M:N engine.
 #[test]
-fn builtin_value_sendable_across_airlock_both_engines() {
+fn builtin_value_crosses_tasks_both_engines() {
     let src = "import std.concurrency\nfn main():\n    f := ord\n    p := print\n    parallel:\n        spawn:\n            p(f(\"a\"))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "97\n");

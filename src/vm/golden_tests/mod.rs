@@ -187,9 +187,9 @@ fn vm_outcome_bytes(src: &str) -> Result<Vec<u8>, String> {
     run_capture_bytes(src).map_err(|e| e.to_string())
 }
 
-mod airlock_parallel;
-mod airlock_values;
 mod captures_data;
+mod crossing_parallel;
+mod crossing_values;
 mod examples;
 mod ffi;
 mod io_cancel;

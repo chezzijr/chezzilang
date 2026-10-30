@@ -1,4 +1,4 @@
-//! TICKET-247 (wave 23, Family "Airlock"): `?x` / `!x` hold the object bound to `x`, so every form
+//! TICKET-247 (wave 23): `?x` / `!x` hold the object bound to `x`, so every form
 //! that wraps or stores a generator's frame-local gets the bare name's answer when a task then
 //! writes it. M3.4: the task drives the parent's one generator (by handle), so the write runs and
 //! lands where the parent holds it (CPython: a thread drives the parent's generator); the only

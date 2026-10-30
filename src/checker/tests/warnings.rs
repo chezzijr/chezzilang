@@ -834,7 +834,7 @@ fn a_granular_read_of_a_granular_task_write_declines() {
 /// Build the fn-body row shape shared by the TICKET-165 airlock table tests: `PRE` (the `T`/`S`
 /// structs the table's INIT strings construct against) + `fn main():` + `init` + a `parallel: /
 /// spawn:` block holding `writes` (12-space indent) + `reads` after the join (4-space indent).
-fn airlock_src(init: &str, writes: &[&str], reads: &[&str]) -> String {
+fn crossing_src(init: &str, writes: &[&str], reads: &[&str]) -> String {
     const PRE: &str =
         "struct T:\n    v: int\nstruct S:\n    v: int\n    w: int\n    xs: List[int]\n    t: T\n";
     let mut src = format!("{PRE}fn main():\n{init}    parallel:\n        spawn:\n");
@@ -873,29 +873,29 @@ fn a_same_path_read_of_a_projected_task_write_checks_clean() {
     const M: &str = "    m := {\"a\": 1, \"b\": 7}\n";
     const TS: &str = "    ts := [T(1)]\n";
     // W1
-    ok(&airlock_src(MK, &["s.v = 2"], &["print(s.v)"]));
+    ok(&crossing_src(MK, &["s.v = 2"], &["print(s.v)"]));
     // W2
-    ok(&airlock_src(MK, &["s.v = 2"], &["print(\"{s.v}\")"]));
+    ok(&crossing_src(MK, &["s.v = 2"], &["print(\"{s.v}\")"]));
     // W3
-    ok(&airlock_src(MK, &["s.t.v = 2"], &["print(s.t.v)"]));
+    ok(&crossing_src(MK, &["s.t.v = 2"], &["print(s.t.v)"]));
     // W4
-    ok(&airlock_src(MK, &["s.t.v = 2"], &["print(s.t)"]));
+    ok(&crossing_src(MK, &["s.t.v = 2"], &["print(s.t)"]));
     // W5
-    ok(&airlock_src(MK, &["s.v += 1"], &["print(s.v)"]));
+    ok(&crossing_src(MK, &["s.v += 1"], &["print(s.v)"]));
     // W6 — a DIFFERENT field write (line 12) precedes the overlapping one (line 13); the report
     // must cite the overlapping write, not the first.
-    let w6 = airlock_src(MK, &["s.w = 2", "s.v = 2"], &["print(s.v)"]);
+    let w6 = crossing_src(MK, &["s.w = 2", "s.v = 2"], &["print(s.v)"]);
     ok(&w6);
     // W7
-    ok(&airlock_src(XS, &["xs[0] = [2]"], &["print(xs[0])"]));
+    ok(&crossing_src(XS, &["xs[0] = [2]"], &["print(xs[0])"]));
     // W8
-    ok(&airlock_src(XS, &["xs[0] = [2]"], &["print(xs[0][0])"]));
+    ok(&crossing_src(XS, &["xs[0] = [2]"], &["print(xs[0][0])"]));
     // W9
-    ok(&airlock_src(M, &["m[\"a\"] = 2"], &["print(m[\"a\"])"]));
+    ok(&crossing_src(M, &["m[\"a\"] = 2"], &["print(m[\"a\"])"]));
     // W10
-    ok(&airlock_src(M, &["m[\"a\"] += 1"], &["print(m[\"a\"])"]));
+    ok(&crossing_src(M, &["m[\"a\"] += 1"], &["print(m[\"a\"])"]));
     // W11
-    ok(&airlock_src(TS, &["ts[0].v = 2"], &["print(ts[0].v)"]));
+    ok(&crossing_src(TS, &["ts[0].v = 2"], &["print(ts[0].v)"]));
 }
 
 /// TICKET-165 rows W12-W19: a mutator called on an element or field of a binding (`xs[0].push(2)`,
@@ -907,30 +907,30 @@ fn a_mutator_on_a_projected_receiver_in_a_task_checks_clean() {
     const XS: &str = "    xs := [[1], [7]]\n";
     const ML: &str = "    m := {\"a\": [1]}\n";
     // W12
-    ok(&airlock_src(XS, &["xs[0].push(2)"], &["print(xs)"]));
+    ok(&crossing_src(XS, &["xs[0].push(2)"], &["print(xs)"]));
     // W13
-    ok(&airlock_src(XS, &["xs[0].push(2)"], &["print(\"{xs}\")"]));
+    ok(&crossing_src(XS, &["xs[0].push(2)"], &["print(\"{xs}\")"]));
     // W14
-    ok(&airlock_src(XS, &["xs[0].push(2)"], &["print(xs[0])"]));
+    ok(&crossing_src(XS, &["xs[0].push(2)"], &["print(xs[0])"]));
     // W15
-    ok(&airlock_src(
+    ok(&crossing_src(
         XS,
         &["xs[0].push(2)"],
         &["print(xs[0].len())"],
     ));
     // W16
-    ok(&airlock_src(MK, &["s.xs.push(2)"], &["print(s.xs)"]));
+    ok(&crossing_src(MK, &["s.xs.push(2)"], &["print(s.xs)"]));
     // W17
-    ok(&airlock_src(MK, &["s.xs.push(2)"], &["print(s)"]));
+    ok(&crossing_src(MK, &["s.xs.push(2)"], &["print(s)"]));
     // W18
-    ok(&airlock_src(
+    ok(&crossing_src(
         ML,
         &["m[\"a\"].push(3)"],
         &["print(m[\"a\"])"],
     ));
     // W19 — the parent-side follow-on mutator is itself a read-modify-write; it observes the stale
     // task write before superseding it.
-    ok(&airlock_src(
+    ok(&crossing_src(
         XS,
         &["xs[0].push(2)"],
         &["xs[0].push(3)", "print(xs)"],
@@ -974,15 +974,15 @@ fn a_disjoint_path_read_of_a_projected_task_write_stays_silent() {
     const XS: &str = "    xs := [[1], [7]]\n";
     const M: &str = "    m := {\"a\": 1, \"b\": 7}\n";
     // S1
-    ok(&airlock_src(XS, &["xs[0] = [2]"], &["print(xs[1])"]));
+    ok(&crossing_src(XS, &["xs[0] = [2]"], &["print(xs[1])"]));
     // S2
-    ok(&airlock_src(M, &["m[\"a\"] = 2"], &["print(m[\"b\"])"]));
+    ok(&crossing_src(M, &["m[\"a\"] = 2"], &["print(m[\"b\"])"]));
     // S3
-    ok(&airlock_src(MK, &["s.xs.push(2)"], &["print(s.v)"]));
+    ok(&crossing_src(MK, &["s.xs.push(2)"], &["print(s.v)"]));
     // S4
-    ok(&airlock_src(XS, &["xs[0].push(2)"], &["print(xs[1])"]));
+    ok(&crossing_src(XS, &["xs[0].push(2)"], &["print(xs[1])"]));
     // S5
-    ok(&airlock_src(MK, &["s.t.v = 2"], &["print(s.w)"]));
+    ok(&crossing_src(MK, &["s.t.v = 2"], &["print(s.w)"]));
 }
 
 /// TICKET-165 rows C1-C2: the narrowed seventh ceiling. A computed or negative index cannot be
@@ -992,13 +992,13 @@ fn a_disjoint_path_read_of_a_projected_task_write_stays_silent() {
 fn an_unmatchable_projected_path_declines() {
     const XS: &str = "    xs := [[1], [7]]\n";
     // C1 — a computed index on the write side.
-    ok(&airlock_src(
+    ok(&crossing_src(
         &format!("{XS}    n := 1\n"),
         &["xs[n - 1] = [2]"],
         &["print(xs[0])"],
     ));
     // C2 — a negative index literal on the read side.
-    ok(&airlock_src(
+    ok(&crossing_src(
         "    xs := [1]\n",
         &["xs[0] = 2"],
         &["print(xs[-1])"],
@@ -1035,7 +1035,7 @@ fn a_projected_write_through_a_handle_a_task_local_or_before_the_nursery_stays_s
         "import Shared from std.concurrency\nstruct H:\n    h: Shared[int]\nfn main():\n    s := H(Shared[int](1))\n    parallel:\n        spawn:\n            s.h.set(2)\n    print(s.h.get())\nmain()\n",
     );
     // L1 — the task re-declares both bindings locally with `:=`; its writes are to the SHADOW.
-    no_warn(&airlock_src(
+    no_warn(&crossing_src(
         &format!("{MK}{XS}"),
         &[
             "s := S(9, 9, [9], T(9))",
@@ -1051,7 +1051,7 @@ fn a_projected_write_through_a_handle_a_task_local_or_before_the_nursery_stays_s
         "struct T:\n    v: int\nstruct S:\n    v: int\n    w: int\n    xs: List[int]\n    t: T\nfn main():\n{MK}    print(s.v)\n    parallel:\n        spawn:\n            s.v = 2\nmain()\n"
     ));
     // L3 — the task only READS the bindings; there is no write to taint.
-    no_warn(&airlock_src(
+    no_warn(&crossing_src(
         &format!("{MK}{XS}"),
         &["print(s.v + xs[0][0])"],
         &["print(s.v)", "print(xs[0])"],

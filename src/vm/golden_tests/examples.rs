@@ -121,7 +121,7 @@ fn cancel_derive_free_fn_form() {
 /// channel, two levels up). Every round must wake — the strongest liveness proof for the downward
 /// cascade, since neither half of the registry is owned by the task that reads it.
 #[test]
-fn cancel_cascade_crosses_the_airlock() {
+fn cancel_cascade_crosses_tasks() {
     let src = "import std.cancel\n\
                    import std.time\n\
                    fn waiter(c: cancel.Token, out: Channel[bool]):\n\
