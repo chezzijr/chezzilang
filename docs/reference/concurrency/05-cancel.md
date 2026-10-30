@@ -182,17 +182,96 @@ Resource caps, measured:
   collection, on any thread, measures that heap's live bytes. Three tasks that each hold 4.2 MB
   are OVER-MEMORY together under a 10 MB cap, though each one alone is under it.
 - **`--max-heap` cuts a sleeper at once, except an `Executor` job when the test fn itself trips the
-  cap.** Measured on a release build, 8 MB cap, `CHEZZI_THREADS` 1, 2 and default, 1 to 5 runs
-  each: a task that grows a global list while the test fn, a nursery sibling or another job sleeps
-  3000 or 5000 ms ends OVER-MEMORY in 0.08-0.12 s. When the test fn grows past the cap, a job that
-  sleeps 5000 ms sleeps out, and the verdict lands at 5.02 s (T=2 and default; at T=1 the job has
-  not started, and the run ends in 0.10 s).
+  cap.** The program below ran on a release build with `chezzi test --max-heap=8000000 --filter
+  <test fn>`, 3 runs per cell. Each cell gives the wall time of the whole process. Every run
+  ended OVER-MEMORY.
 - **`--max-heap` counts an `Executor` job's captured payload while the job is queued or runs.** The
-  payload is objects of the run's one heap. Measured, 300 jobs that capture ~1 MB each and sleep
-  2000 ms under an 8 MB cap: peak RSS 20.5-20.9 MB at `CHEZZI_THREADS` 1, 2 and default, each run
-  `OVER-MEMORY`. A test whose unfinished jobs together exceed the cap trips, sleeping jobs
-  included. The submit loop is the test fn, so the verdict lands when the jobs' sleeps end
-  (2.02-2.03 s), as in the row above.
+  payload is objects of the run's one heap. A test whose unfinished jobs together exceed the cap
+  trips, sleeping jobs included (`three_hundred_jobs_capture_a_megabyte_each`: peak RSS 20.6-21.0 MB
+  at each thread count).
+
+| Test fn | `CHEZZI_THREADS=1` | `=2` | default |
+|---|---|---|---|
+| `a_job_grows_the_test_fn_sleeps` | 0.11-0.12 s | 0.11 s | 0.10-0.11 s |
+| `a_child_grows_a_sibling_sleeps` | 0.11 s | 0.11-0.12 s | 0.11 s |
+| `a_job_grows_another_job_sleeps` | 0.11-0.12 s | 0.10-0.11 s | 0.10-0.11 s |
+| `the_body_grows_a_child_sleeps` | 0.11 s | 0.11 s | 0.09-0.11 s |
+| `the_test_fn_grows_forever_a_job_sleeps` | 0.11 s (the job never starts) | 5.02-5.03 s | 5.02 s |
+| `the_test_fn_appends_400_lists_a_job_sleeps` | 5.11-5.12 s | 5.01-5.02 s | 5.01-5.02 s |
+| `three_hundred_jobs_capture_a_megabyte_each` | 2.02-2.03 s | 2.02 s | 2.02 s |
+
+When the test fn trips the cap, a job that sleeps 5000 ms (or 2000 ms) sleeps out before the
+verdict lands. At T=1, `grow()` never parks, so the job never starts and the run ends at once;
+the 400-list loop ends, `shutdown` lets the job run, and the job sleeps out.
+
+```chezzi
+import Executor from std.concurrency
+import std.time
+
+xs: List[str] = []
+ys: List[List[int]] = []
+
+fn grow():
+    i := 0
+    while true:
+        xs.push("x".repeat(100) + str(i))
+        i += 1
+
+fn nap():
+    time.sleep_ms(5000)
+
+fn block(n: int) -> List[int]:
+    out: List[int] = []
+    for k in 0..n:
+        out.push(k)
+    return out
+
+fn hold(s: str) -> int:
+    time.sleep_ms(2000)
+    return s.len()
+
+test fn a_job_grows_the_test_fn_sleeps():
+    ex := Executor()
+    _ := ex.submit(grow)
+    time.sleep_ms(3000)
+    ex.shutdown()
+
+test fn a_child_grows_a_sibling_sleeps():
+    parallel:
+        spawn grow()
+        spawn time.sleep_ms(3000)
+
+test fn a_job_grows_another_job_sleeps():
+    ex := Executor()
+    _ := ex.submit(nap)
+    _ := ex.submit(grow)
+    ex.shutdown()
+
+test fn the_body_grows_a_child_sleeps():
+    parallel:
+        spawn nap()
+        grow()
+
+test fn the_test_fn_grows_forever_a_job_sleeps():
+    ex := Executor()
+    _ := ex.submit(nap)
+    grow()
+    ex.shutdown()
+
+test fn the_test_fn_appends_400_lists_a_job_sleeps():
+    ex := Executor()
+    _ := ex.submit(nap)
+    for _ in 0..400:
+        ys.push(block(5000))
+    ex.shutdown()
+
+test fn three_hundred_jobs_capture_a_megabyte_each():
+    ex := Executor()
+    for i in 0..300:
+        big := "x".repeat(1000000) + str(i)
+        _ := ex.submit(fn() -> int: hold(big))
+    ex.shutdown()
+```
 
 **Where a cancel is NOT delivered — pure CPU with no back-edge.** **Deep recursion is not a
 checkpoint**: a recursive function emits only `Call`/`Return`, never a backward jump, so a cancelled
