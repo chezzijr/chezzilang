@@ -606,12 +606,13 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
 fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
     // Scope 0's `JoinScope::cancel` IS this Arc (see `mnsched_park_requeues_when_cancel_tripped`).
     let cancel = Arc::new(AtomicBool::new(false));
-    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err(), 0);
+    let sched = MnSched::new(3, 4, Arc::clone(&cancel), dl_err(), 0);
     let c1 = empty_core();
     let c2 = empty_core();
-    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1), mk_fiber(2)]);
     let a = take_run(&sched);
     let b = take_run(&sched);
+    let f = take_run(&sched);
     // Cancel still false → these really park (the park-gap re-check does not requeue them).
     sched.park(core_key(&c1), Arc::clone(&c1), a);
     sched.park(core_key(&c2), Arc::clone(&c2), b);
@@ -619,8 +620,23 @@ fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
         let c = sched.lock();
         assert_eq!(c.parked_n, 2, "both fibers parked (quiesced, pre-cancel)");
     }
-    // A sibling faults: `classify_mn_outcome` trips the scope cancel BEFORE `finish`/`cancel_drain`.
-    cancel.store(true, Ordering::Relaxed);
+    // A sibling faults: `finish_with` trips the scope cancel under the core lock with its slot,
+    // and the worker loop's `cancel_drain` runs after it.
+    sched.finish_with(
+        f.task_index,
+        0,
+        TaskOutcome::Fault {
+            err: dl_err(),
+            out: Vec::new(),
+            stderr: Vec::new(),
+            trace: Vec::new(),
+        },
+        Some(&cancel),
+    );
+    assert!(
+        cancel.load(Ordering::Relaxed),
+        "the fault tripped the scope cancel"
+    );
     let c = sched.lock();
     assert!(
         !sched.is_deadlocked(&c),
@@ -652,9 +668,9 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
         c.running -= 1;
         c.register_waiter(recv_waiter(&core, vec![]));
     }
-    // Sibling a faults: trips the scope cancel, then finishes. No fiber of the scope is parked.
-    cancel.store(true, Ordering::Relaxed);
-    sched.finish(
+    // Sibling a faults: `finish_with` trips the scope cancel with its slot. No fiber of the scope
+    // is parked.
+    sched.finish_with(
         a.task_index,
         0,
         TaskOutcome::Fault {
@@ -663,6 +679,11 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
             stderr: Vec::new(),
             trace: Vec::new(),
         },
+        Some(&cancel),
+    );
+    assert!(
+        cancel.load(Ordering::Relaxed),
+        "the fault tripped the scope cancel"
     );
     let c = sched.lock();
     assert_eq!(c.parked_n, 0, "no fiber of the cancelled scope is parked");
@@ -701,10 +722,9 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
         c.running -= 1;
         c.register_waiter(recv_waiter(&core, vec![Arc::clone(&cancel)]))
     };
-    // Sibling a faults: trips the scope cancel, then finishes. No fiber of the scope is parked, so
-    // the parked-window veto is silent — only the demoted watch can save b.
-    cancel.store(true, Ordering::Relaxed);
-    sched.finish(
+    // Sibling a faults: `finish_with` trips the scope cancel with its slot. No fiber of the scope is
+    // parked, so the parked-window veto is silent — only the demoted watch can save b.
+    sched.finish_with(
         a.task_index,
         0,
         TaskOutcome::Fault {
@@ -713,6 +733,7 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
             stderr: Vec::new(),
             trace: Vec::new(),
         },
+        Some(&cancel),
     );
     {
         let c = sched.lock();
@@ -758,8 +779,7 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
         c.running -= 1;
         c.register_waiter(recv_waiter(&demote_core, vec![]));
     }
-    cancel.store(true, Ordering::Relaxed);
-    sched.finish(
+    sched.finish_with(
         a.task_index,
         0,
         TaskOutcome::Fault {
@@ -768,6 +788,7 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
             stderr: Vec::new(),
             trace: Vec::new(),
         },
+        Some(&cancel),
     );
     let c = sched.lock();
     assert_eq!(c.parked_n, 1);

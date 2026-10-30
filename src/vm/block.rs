@@ -296,8 +296,12 @@ impl WakeSet {
 
 /// TICKET-188 — THE decider of "must this party stop now, and why?". Cancel first; then, unless a
 /// run-wide exit is pending (DEC-096: `Exit > Fault`), the innermost owned nursery whose flag is
-/// tripped AND whose family recorded a `Fault`. A flag is only a wake hint: a child trips it just
-/// before `finish` records the fault, so a tripped flag with no recorded fault is not a halt.
+/// tripped AND whose family recorded a `Fault`. A flag is only a wake hint. A fault trips it under
+/// the core lock with its slot (`MnSched::finish_with`), but other trips record no fault: a child's
+/// `Exit` end (`finish_with`), the run-wide exit (`MnSched::cancel_all`, from `halt_all_scheds`),
+/// the abort seams (`trip_scope_cancel` from `abort_enlisted_scope`, the eager-nursery abort and
+/// `sched::cancel_fiber_owned_family`) and a `--timeout` gap wake (`netio::deadline_gap_wake`).
+/// So a tripped flag with no recorded fault is not a halt.
 pub(super) fn halt_of<'a>(
     cancel: impl Iterator<Item = &'a AtomicBool>,
     owned: impl DoubleEndedIterator<Item = OwnedRef<'a>>,
@@ -638,7 +642,7 @@ mod tests {
 
     #[test]
     fn halt_of_declines_a_tripped_flag_with_no_recorded_fault() {
-        // Gotcha 2: the child trips its flag before `finish` records the fault.
+        // A trip with no fault in the slot: an `Exit` end, the run-wide exit or an abort seam.
         let (flag, sched) = owned_sched(true, false);
         let got = halt_of(
             std::iter::empty(),
