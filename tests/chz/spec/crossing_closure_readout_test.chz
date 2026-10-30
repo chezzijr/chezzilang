@@ -12,7 +12,6 @@
 import Shared, RwShared, Atomic, Executor from std.concurrency
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
 
-COPY_TAIL := "is this task's copy: a write to it would be lost at the join"
 ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get", "ConcurrentMap.remove", "Channel.recv", "Atomic.load", "Task.get"]
 BOX_ROUTES := ["Shared.get", "Shared.read", "RwShared.get", "RwShared.read", "ConcurrentList.at", "ConcurrentMap.get"]
 G := [1]
@@ -94,7 +93,17 @@ fn global_writer() -> fn() -> None:
 fn silent_routes(make: fn() -> fn() -> None) -> List[str]:
     out: List[str] = []
     for name in ROUTES:
-        if not in_task(route(name, make())).contains(COPY_TAIL):
+        if in_task(route(name, make())) == "no-fault":
+            out.push(name)
+    return out
+
+# The routes on which `call` ran a closure over a fresh list with no fault, and its push reached
+# that list.
+fn landed_routes(call: fn(fn() -> fn() -> None) -> str) -> List[str]:
+    out: List[str] = []
+    for name in ROUTES:
+        xs := [1]
+        if call(route(name, fn(): xs.push(2))) == "no-fault" and xs == [1, 2]:
             out.push(name)
     return out
 
@@ -123,7 +132,7 @@ test fn channel_recv_closure_capture_write_lands():
     assert in_task(route("Channel.recv", list_writer())) == "no-fault"
 
 test fn list_capture_write_lands_on_every_route():
-    assert silent_routes(list_writer) == ROUTES
+    assert landed_routes(in_task) == ROUTES
 
 test fn global_write_lands_on_every_route():
     before := G.len()
@@ -168,11 +177,7 @@ test fn box_built_closure_capture_write_lands_in_the_box():
 
 # TICKET-291 C1: a same-task round trip lands on every route (M3.4: no route copies).
 test fn same_task_round_trip_lands_on_every_route():
-    silent: List[str] = []
-    for name in ROUTES:
-        if not outcome(route(name, list_writer())()).contains(COPY_TAIL):
-            silent.push(name)
-    assert silent == ROUTES
+    assert landed_routes(fn(read): outcome(read())) == ROUTES
 
 # C2: a relay task re-stores the closure; it is still the one closure.
 test fn relay_restore_through_shared_is_the_one_closure():
@@ -354,9 +359,9 @@ enum Hold:
     Num(int)
     Items(List[int])
 
-# The cell `name` when its outcome `got` does not match `faults`, else nothing.
-fn miss(name: str, got: str, faults: bool) -> List[str]:
-    if got.contains(COPY_TAIL) == faults:
+# The cell `name` when its outcome `got` is a fault, else nothing.
+fn miss(name: str, got: str) -> List[str]:
+    if got == "no-fault":
         return []
     return [name]
 
@@ -366,16 +371,16 @@ fn hold_first[T](s: List[T]) -> fn() -> None:
 
 test fn fresh_capture_over_a_kept_element_grid():
     wrong: List[str] = []
-    wrong.extend(miss("str", outcome(Shared(["a"]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("tuple of ints", outcome(Shared([(1, 2)]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("option of tuple", outcome(Shared[List[(int, int)?]]([?(1, 2)]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("enum of int", outcome(Shared([Hold.Num(1)]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("tuple holding a list", outcome(Shared([(1, [2])]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("option of list", outcome(Shared[List[List[int]?]]([?[2]]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("enum holding a list", outcome(Shared([Hold.Items([2])]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("struct", outcome(Shared([Pt(1)]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("list", outcome(Shared([[1]]).read(fn(s): hold_first(s))), false))
-    wrong.extend(miss("map", outcome(Shared([{1: 2}]).read(fn(s): hold_first(s))), false))
+    wrong.extend(miss("str", outcome(Shared(["a"]).read(fn(s): hold_first(s)))))
+    wrong.extend(miss("tuple of ints", outcome(Shared([(1, 2)]).read(fn(s): hold_first(s)))))
+    wrong.extend(miss("option of tuple", outcome(Shared[List[(int, int)?]]([?(1, 2)]).read(fn(s): hold_first(s)))))
+    wrong.extend(miss("enum of int", outcome(Shared([Hold.Num(1)]).read(fn(s): hold_first(s)))))
+    wrong.extend(miss("tuple holding a list", outcome(Shared([(1, [2])]).read(fn(s): hold_first(s)))))
+    wrong.extend(miss("option of list", outcome(Shared[List[List[int]?]]([?[2]]).read(fn(s): hold_first(s)))))
+    wrong.extend(miss("enum holding a list", outcome(Shared([Hold.Items([2])]).read(fn(s): hold_first(s)))))
+    wrong.extend(miss("struct", outcome(Shared([Pt(1)]).read(fn(s): hold_first(s)))))
+    wrong.extend(miss("list", outcome(Shared([[1]]).read(fn(s): hold_first(s)))))
+    wrong.extend(miss("map", outcome(Shared([{1: 2}]).read(fn(s): hold_first(s)))))
     assert wrong == []
 
 fn list_capture(l: List[int]) -> fn() -> None:
@@ -394,9 +399,9 @@ test fn task_result_closure_capture_grid():
     xs := [1]
     box := Shared[List[int]]([0])
     wrong: List[str] = []
-    wrong.extend(miss("fresh state", job_closure(fresh_logger), false))
-    wrong.extend(miss("module global", job_closure(global_writer), false))
-    wrong.extend(miss("submitter local", job_closure(fn(): list_capture(xs)), false))
-    wrong.extend(miss("box state", job_closure(fn(): shared_logger(box)), false))
+    wrong.extend(miss("fresh state", job_closure(fresh_logger)))
+    wrong.extend(miss("module global", job_closure(global_writer)))
+    wrong.extend(miss("submitter local", job_closure(fn(): list_capture(xs))))
+    wrong.extend(miss("box state", job_closure(fn(): shared_logger(box))))
     assert wrong == []
     assert xs == [1, 1]

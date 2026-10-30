@@ -22,19 +22,6 @@ fn make() -> Ctr:
         return n
     return Ctr(inc, get)
 
-# TICKET-291: true when `g()` faults because it writes a binding it holds only a copy of.
-fn copy_fault(g: fn() -> None) -> bool:
-    res := recover: g()
-    match res:
-        ?_: return false
-        !e: return e.message().contains("is this task's copy")
-
-fn copy_fault_int(g: fn() -> int) -> bool:
-    res := recover: g()
-    match res:
-        ?_: return false
-        !e: return e.message().contains("is this task's copy")
-
 # Two closures over one binding in a cursor, built by a box call: the caller holds the only copy.
 fn pair_cursor() -> Iterator[fn() -> int]:
     c := make()
@@ -104,7 +91,7 @@ test fn channel_send_keeps_one_binding():
     ch.send(c)
     d := ch.recv()
     assert d.get() == 1
-    assert not copy_fault(d.inc)
+    d.inc()
     assert d.get() == 2
     assert c.get() == 2
     e := concurrency.Shared(0).read(fn(s): make())
@@ -118,7 +105,7 @@ test fn struct_field_keeps_one_binding():
     ch := Channel[Ctr](1)
     ch.send(make())
     d := ch.recv()
-    assert not copy_fault(d.inc)
+    d.inc()
     assert d.get() == 1
     e := concurrency.Shared(0).read(fn(s): make())
     e.inc()
@@ -134,7 +121,7 @@ test fn cursor_keeps_one_binding():
     fs: List[fn() -> int] = []
     for f in ch.recv():
         fs.push(f)
-    assert not copy_fault_int(fs[0])
+    fs[0]()
     assert fs[1]() == 1
     gs: List[fn() -> int] = []
     for g in concurrency.Shared(0).read(fn(s): pair_cursor()):
@@ -148,7 +135,7 @@ test fn cursor_keeps_one_binding():
 test fn shared_keeps_one_binding():
     box := concurrency.Shared(make())
     d := box.get()
-    assert not copy_fault(d.inc)
+    d.inc()
     assert d.get() == 1
     assert box.read(fn(c): c.get()) == 1
 
@@ -300,14 +287,14 @@ test fn rwshared_views_over_sibling_closures():
         return n
     s := ConcurrentList(concurrency.RwShared([inc, get]))
     both := s.inner.get()          # the live container
-    assert not copy_fault_int(both[0])
+    both[0]()
     assert both[1]() == 1
     # per-element view (`at` is the SAFE index: `E?`)
     match s.at(1):
         ?f: assert f() == 1
         None: assert false, "at(1) on a 2-element list must be Some"
     sl := s[0..2]      # one call, one container
-    assert not copy_fault_int(sl[0])
+    sl[0]()
     assert sl[1]() == 2
     calls := 0
     fn tick(f: fn() -> int):
@@ -315,13 +302,13 @@ test fn rwshared_views_over_sibling_closures():
     s.for_each(tick)
     assert calls == 2
     # one walk: `inc` runs inside the fold and its write lands.
-    assert not copy_fault_int(fn() -> int: s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()))
+    s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f())
     m := ConcurrentMap(concurrency.RwShared({"i": inc, "g": get}))
     assert m.contains("i")
     match m.get("g"):
         ?f: assert f() == 3
         None: assert false
-    assert not copy_fault(fn(): m.for_each_entry(fn(k: str, f: fn() -> int): f()))
+    m.for_each_entry(fn(k: str, f: fn() -> int): f())
     assert m.fold_entries(0, fn(a: int, k: str, f: fn() -> int) -> int: a + 1) == 2
     assert n == 4
     # (`contains` shares the code path but is unreachable with closures — a `fn` is not Hashable, so a

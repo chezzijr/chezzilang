@@ -1,6 +1,5 @@
 # Uniform by-reference capture (F3 / B2 parity guard). A closure `f` that captures a by-reference
-# local (`x`, a cell) is invoked inside a `spawn` task via the call form `spawn f()`. Whichever way
-# the task's copy of `f` and its cell are reconstructed, the print is
+# local (`x`, a cell) is invoked inside a `spawn` task via the call form `spawn f()`. The print is
 # post-join, so it prints `7` exactly.
 #
 # M3.4: the task gets `f` itself, with the parent's captured cell (by handle). This read-only case

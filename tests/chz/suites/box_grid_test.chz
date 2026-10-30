@@ -343,13 +343,6 @@ fn make_ctr() -> Ctr:
         return n
     return Ctr(inc, get)
 
-# TICKET-291: true when `g()` faults because it writes a binding it holds only a copy of.
-fn copy_fault(g: fn() -> None) -> bool:
-    res := recover: g()
-    match res:
-        ?_: return false
-        !e: return e.message().contains("is this task's copy")
-
 fn bump_ctr(c: Ctr) -> Ctr:
     c.inc()
     return c
@@ -362,10 +355,10 @@ test fn shared_closure_over_a_cell_is_one_binding_for_every_holder():
     s.update(fn(c): bump_ctr(c))
     assert s.read(fn(c): c.get()) == 2
     d := s.get()
-    assert not copy_fault(d.inc)
+    d.inc()
     assert d.get() == 3
     e := s.read(fn(c): c)
-    assert not copy_fault(e.inc)
+    e.inc()
     assert e.get() == 4
     assert s.read(fn(c): c.get()) == 4
     s.set(make_ctr())
@@ -602,7 +595,7 @@ test fn rwshared_closure_over_a_cell_is_one_binding_for_every_holder():
     s.write(fn(c): bump_ctr(c))
     assert s.read(fn(c): c.get()) == 2
     d := s.get()
-    assert not copy_fault(d.inc)
+    d.inc()
     assert d.get() == 3
     assert s.read(fn(c): c.get()) == 3
 
