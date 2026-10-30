@@ -523,10 +523,10 @@ mod tests {
 
     /// M3.5 — the airlock's state is gone: a `Proto` has no private/deep slot masks (two `u64`),
     /// and a `HeapCore` has no copy bits (a `SlotBits` and its `AtomicBool`) and no copy-log
-    /// registry (a `Mutex<Vec<_>>`).
+    /// registry (a `Mutex<Vec<_>>`). M5b: the reaper's `Arc<Pending>` adds 8 bytes (464 to 472).
     #[test]
     fn airlock_state_is_gone_from_proto_and_heap_core() {
-        assert_eq!(std::mem::size_of::<super::HeapCore>(), 464);
+        assert_eq!(std::mem::size_of::<super::HeapCore>(), 472);
         assert_eq!(std::mem::size_of::<crate::base::op::Proto>(), 136);
     }
 
