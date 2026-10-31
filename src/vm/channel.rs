@@ -262,10 +262,8 @@ impl Vm {
         let p = Arc::clone(&op.p);
         let mut r = Ok(());
         while p.is_queued() {
-            let party =
-                self.block_party_guard(quiesce::PartyWait::Send(Arc::clone(&p)), Some((msg, span)));
-            r = self.block_wait_tick(WaitSpec::Send, h, core, span, |_| !p.is_queued());
-            drop(party);
+            let on = Blocked::at(quiesce::PartyWait::Send(Arc::clone(&p)), msg, span);
+            r = self.block_wait_tick(WaitSpec::Send, on, h, core, span, |_| !p.is_queued());
             if r.is_err() {
                 break;
             }

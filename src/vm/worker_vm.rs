@@ -165,11 +165,10 @@ impl Vm {
         let slack = usize::from(self.owns_nested_sched(&sched));
         let mut reg = self.wait_begin(
             WaitSpec::Join,
-            Some(PartyWait::Join(Arc::clone(&sched), slack)),
+            Some(Blocked::on(PartyWait::Join(Arc::clone(&sched), slack))),
             "an Executor join",
             span,
         )?;
-        let party = self.block_party_guard(PartyWait::Join(Arc::clone(&sched), slack), None);
         let leave = loop {
             if sched.lock().join_over(slack) {
                 break None;
@@ -187,7 +186,6 @@ impl Vm {
         if let Some(m) = self.mn.clone() {
             reg.release(&m, &mut m.lock());
         }
-        drop(party);
         self.wait_end(reg, &[]);
         let take_scope =
             |core: &ExecutorCore| core.scope.lock().unwrap_or_else(|e| e.into_inner()).take();

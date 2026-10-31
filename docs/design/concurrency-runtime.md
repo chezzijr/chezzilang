@@ -116,7 +116,7 @@ reader with no waker, and the run faults at every worker count
 (`a_cut_plain_channel_feeder_is_still_a_deadlock`). The grid is `tests/executor_reader_grid.rs`:
 reader (main, nursery task, task in a callback, task in a `defer`, job of another Executor, job
 of the same Executor) x wait (`recv`, `Task.get`, plain channel) x job end x cutter x worker
-count. One cell stays open as `docs/contributing/gaps.md` W22-1.
+count. Every cell with a cut feeder of a plain channel is a deadlock fault.
 
 ## Guard waits
 
@@ -339,12 +339,20 @@ gate of its own. Full tables: `docs/contributing/benchmarks.md` §TICKET-168.
 
 ## Blocking-table accounting
 
-**Accounting derives from `will_return`.** A demoted wait that ends on a deadline or an external
-completion is `inflight` (it vetoes the deadlock verdict); every other one registers a waiter in
-the ONE registry `SchedCore::waiters`, and the verdict vetoes while any waiter can still be
+**The counts come from one table.** `block::wait_steps(spec, ctx)` gives each wait the counts it
+registers for the two deadlock verdicts, and `Vm::wait_begin` takes them (`Vm::nursery_counts` for
+a nursery join); `Vm::wait_end` drops them before it takes the permit back (an in-place channel
+tick, after it, before its next pop). A wait that ends by
+itself (`will_return`: a deadline or an external completion) counts nothing, and a demoted one is
+`inflight` (it vetoes the sched verdict). Every other wait is a party of the process-wide verdict
+on a judged thread, marks the eager bodies of its thread blocked on it, and a demoted one registers
+a waiter in the ONE registry `SchedCore::waiters`; the verdict vetoes while any waiter can still be
 satisfied (`Waiter::satisfiable`: a cancel flag it would honour, or its `PartyWait`). A guard wait
-is never `inflight` (DEC-063). A new blocking shape adds a `PartyWait` arm or a table row, never a
-new list or veto.
+is never `inflight` (DEC-063). An Executor join is a waiter since TICKET-208 (a job is a fiber, so
+its sched can satisfy the join); DEC-181's "Executor join is `inflight`" no longer holds. A
+nursery join is a party on a thread with no sched under it and a blocked owner on a shell. A parked
+fiber counts through its park (`parked_n`, `join_parked`, a timer's `inflight`), not through the
+table. A new blocking shape adds a `PartyWait` arm or a table row, never a new list or veto.
 
 **Cells TICKET-181 changed**, each red in the grid before the fix and judged against Go 1.27 at
 `GOMAXPROCS=1` (or CPython where Go has no twin):

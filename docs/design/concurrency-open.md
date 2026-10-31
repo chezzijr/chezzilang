@@ -45,7 +45,7 @@ open-row ledger is [`gaps.md`](../contributing/gaps.md). User-facing rules:
   measured rate (`gaps.md` W15-10). A fix ships only if unseeded runs pay nothing for it.
 - **Deadlock verdict residuals.** An all-joiner cycle, bounded-pool starvation and PARTIAL deadlock (a
   subset stuck while the rest runs on, which Go cannot report either) are not reported (`gaps.md`
-  W7-12r / W7-15). One cell of `tests/executor_reader_grid.rs` stays open as `gaps.md` W22-1.
+  W7-12r / W7-15).
 - **The deadlock verdict reaps a parked `Executor` job without settling its handle.** Making the verdict
   a run halt is its own ticket (CHAN4).
 - **`std.cancel` depth cost.** `cancelled()` is quadratic in token depth (2360 µs at depth 400, where

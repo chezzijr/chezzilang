@@ -8,7 +8,8 @@
 //! with each op; only the decision lives here.
 
 use super::gc_door::Detached;
-use super::quiesce::PartyWait;
+use super::quiesce::{PartyGuard, PartyWait};
+use super::sched::BlockedOwnerGuard;
 use super::{GcRef, width};
 use super::{MnSched, RuntimeError, SchedCore, Span, TraceFrame, Vm};
 use crate::native::Kind;
@@ -117,29 +118,98 @@ impl WaitSpec {
     }
 }
 
-/// The bookkeeping steps a wait on a VM host thread takes, besides the GC detach that every wait
-/// takes: [`wait_steps`]'s answer.
+/// How a wait hands this thread's runner slot over: [`wait_steps`]'s answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Handover {
+    /// the thread keeps its slot
+    Keep,
+    /// [`Vm::block_enter`]: a replacement worker takes the slot, and the wait is accounted
+    Demote(Account),
+    /// a nursery joiner that may not run fibers on its own stack: [`Vm::joiner_shell`] gives the
+    /// joined sched a runner in its place
+    Joiner,
+}
+
+/// How a demoted wait is accounted while its worker is off `running`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Account {
+    /// a [`Waiter`] the sched verdict asks "can you still be satisfied?"
+    Waiter,
+    /// `inflight`: a wait that ends by itself, which vetoes the sched verdict
+    Inflight,
+}
+
+/// How a wait marks the eager nursery bodies this thread runs ([`Vm::mark_bodies`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum BodyMark {
+    /// blocked on the wait, which each body's sched publishes as a waiter
+    Wait,
+    /// blocked in a nested nursery join: the body comes back to its scope after it (`awaiting_builder`)
+    Awaiting,
+}
+
+/// The steps a wait on a VM host thread takes besides the GC detach that every wait takes, and the
+/// counts it registers for the two deadlock verdicts: [`wait_steps`]'s answer. [`Vm::wait_begin`]
+/// takes them and [`Vm::wait_end`] drops them; a nursery join takes its counts through
+/// [`Vm::nursery_counts`].
+///
+/// A parked fiber registers none of these: its park files it with its sched (`parked_n`,
+/// `join_parked`, a timer's `inflight`). A parked fiber is not a waiting thread.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct WaitSteps {
-    /// hold no run permit during the wait (Go: a blocking syscall hands off its P)
-    pub(super) permit: bool,
-    /// [`Vm::block_enter`]: hand this worker's runner slot to a replacement and account the wait
-    pub(super) demote: bool,
+    /// the thread stops running for the wait: it holds no run permit (Go: a blocking syscall
+    /// hands off its P), and the `parallel:` body it runs gives its runner slot (bit 0) to the
+    /// claim, which starts a runner for the tasks the body queued (TICKET-211). The slot goes in
+    /// [`Vm::wait_enter`] and [`Vm::nursery_counts`], so a guard's bounded first stage (DEC-016)
+    /// hands it over at its second stage.
+    pub(super) stops: bool,
+    pub(super) hand: Handover,
+    /// a party of the process-wide verdict (`QuiesceState::parties`)
+    pub(super) party: bool,
+    pub(super) bodies: Option<BodyMark>,
+    /// a blocked owner on this fiber's own sched (`SchedCore::blocked_owners`)
+    pub(super) owner: bool,
 }
 
 /// THE steps of a wait, from its kind and the block context. `None` is a wait that ends at once (a
-/// regular-file syscall, a stat, a permit take): it keeps the permit. Every listed spec can last
-/// past one tick, so it releases the permit. The demote is the `Demote` cell of [`mode`].
+/// regular-file syscall, a stat, a permit take): it keeps the permit and counts nothing.
+///
+/// - A wait that ends by itself ([`WaitSpec::will_return`]) counts nothing: it is a live party, so
+///   both verdicts decline while it lasts. A demoted one is `inflight`.
+/// - Any other wait is a judged party ([`BlockCtx::judged`]), marks its bodies blocked on it, and a
+///   demoted one is a [`Waiter`].
+/// - A nursery join is a party on every thread with no sched under it (`main`, the builder, `main`
+///   in a callback: the `1 +` of `live`), and a blocked owner on a shell. Its bodies wait for it.
+///   Its joiner hands its slot over in `Vm::joiner_shell` where it may not help (the `Demote` and
+///   `InPlace` cells of [`mode`]).
 pub(super) fn wait_steps(spec: Option<WaitSpec>, ctx: BlockCtx) -> WaitSteps {
     let Some(spec) = spec else {
         return WaitSteps {
-            permit: false,
-            demote: false,
+            stops: false,
+            hand: Handover::Keep,
+            party: false,
+            bodies: None,
+            owner: false,
         };
     };
-    let demote = match spec {
-        // A nursery joiner hands its slot over in `Vm::joiner_shell`, not here.
-        WaitSpec::Nursery => false,
+    let m = mode(ctx, spec);
+    let shell = match ctx {
+        BlockCtx::Park | BlockCtx::Demote => true,
+        BlockCtx::Builder { .. } | BlockCtx::OwnThread { .. } => false,
+    };
+    match spec {
+        WaitSpec::Nursery => WaitSteps {
+            stops: true,
+            hand: match m {
+                BlockMode::Demote | BlockMode::InPlace => Handover::Joiner,
+                BlockMode::Park | BlockMode::Help | BlockMode::InlineSleep | BlockMode::Refuse => {
+                    Handover::Keep
+                }
+            },
+            party: !shell,
+            bodies: Some(BodyMark::Awaiting),
+            owner: shell,
+        },
         WaitSpec::Recv
         | WaitSpec::Timer
         | WaitSpec::Send
@@ -150,11 +220,92 @@ pub(super) fn wait_steps(spec: Option<WaitSpec>, ctx: BlockCtx) -> WaitSteps {
         | WaitSpec::Socket
         | WaitSpec::Connect
         | WaitSpec::Guard
-        | WaitSpec::Join => mode(ctx, spec) == BlockMode::Demote,
-    };
-    WaitSteps {
-        permit: true,
-        demote,
+        | WaitSpec::Join => {
+            let ends = spec.will_return();
+            let account = if ends {
+                Account::Inflight
+            } else {
+                Account::Waiter
+            };
+            WaitSteps {
+                stops: true,
+                hand: if m == BlockMode::Demote {
+                    Handover::Demote(account)
+                } else {
+                    Handover::Keep
+                },
+                party: !ends && ctx.judged(),
+                bodies: (!ends).then_some(BodyMark::Wait),
+                owner: false,
+            }
+        }
+    }
+}
+
+/// What a wait is blocked on, for the deadlock verdicts: the condition each verdict asks, and the
+/// report the party gives when the process-wide verdict names it (`None` for a join, whose report
+/// is the victims').
+/// One `Arc` is shared by every registration of the wait, so they cannot disagree about what the
+/// thread waits for.
+pub(super) struct Blocked {
+    wait: Arc<PartyWait>,
+    site: Option<(&'static str, Span)>,
+}
+
+impl Blocked {
+    pub(super) fn on(wait: PartyWait) -> Self {
+        Blocked {
+            wait: Arc::new(wait),
+            site: None,
+        }
+    }
+
+    pub(super) fn at(wait: PartyWait, msg: &'static str, span: Span) -> Self {
+        Blocked {
+            wait: Arc::new(wait),
+            site: Some((msg, span)),
+        }
+    }
+}
+
+/// The counts a wait registered for the deadlock verdicts ([`WaitSteps`]), released on drop: the
+/// body marks first (each body's veto comes back), then the blocked owner, then the party.
+pub(super) struct Counts {
+    owner: Option<BlockedOwnerGuard>,
+    party: Option<PartyGuard>,
+    /// raised `awaiting_builder` too ([`BodyMark::Awaiting`])
+    awaiting: bool,
+    bodies: Vec<(Arc<MnSched>, usize)>,
+    /// the wait each sched in `bodies` publishes; `None` for a nested join
+    wait: Option<Arc<PartyWait>>,
+    /// the scheds whose body runner slot this wait handed over ([`WaitSteps::stops`])
+    runners: Vec<Arc<MnSched>>,
+}
+
+impl Counts {
+    fn none() -> Self {
+        Counts {
+            owner: None,
+            party: None,
+            awaiting: false,
+            bodies: Vec::new(),
+            wait: None,
+            runners: Vec::new(),
+        }
+    }
+}
+
+impl Drop for Counts {
+    fn drop(&mut self) {
+        for (s, scope) in &self.bodies {
+            s.set_body_wait(*scope, self.wait.as_ref(), false, self.awaiting);
+        }
+        // TICKET-211 — the body runs again on its own thread: it takes bit 0 back.
+        for s in &self.runners {
+            s.body_runner(false);
+        }
+        drop(self.owner.take());
+        drop(self.party.take());
     }
 }
 
@@ -408,7 +559,7 @@ impl Waiter {
 
 /// A demote bracket entered by [`Vm::block_enter`]: how the wait is accounted while this worker
 /// is off `running`. Ended by [`DemoteReg::release`] (a waiter-registered wait, in the same lock
-/// hold as the pop or settle that ends it — DEC-176) or [`Vm::block_exit`] (a `will_return` wait).
+/// hold as the pop or settle that ends it — DEC-176) or [`Vm::block_exit`] (an `inflight` wait).
 struct DemoteReg {
     /// the `SchedCore::waiters` token, or `None` for an `inflight` wait
     tok: Option<u64>,
@@ -427,9 +578,10 @@ impl DemoteReg {
     }
 }
 
-/// A wait started by [`Vm::wait_begin`]: the demote bracket, when the wait's steps take one, and
-/// whether the wait gave its run permit back. [`Vm::wait_end`] ends it.
+/// A wait started by [`Vm::wait_begin`]: the counts it registered, the demote bracket when its
+/// steps take one, and whether it gave its run permit back. [`Vm::wait_end`] ends it.
 pub(super) struct WaitReg {
+    counts: Counts,
     demote: Option<DemoteReg>,
     released: bool,
     /// a tick of this wait already ran ([`Vm::wait_tick`])
@@ -437,6 +589,13 @@ pub(super) struct WaitReg {
 }
 
 impl WaitReg {
+    /// Take the counts out of this wait, for an in-place channel tick: it drops them after the
+    /// permit take and after its own `GatedReg`, before its next pop. Dropping them before the
+    /// `GatedReg` made `benches/sched/rendezvous_pingpong` at T=1 14% slower (r=15).
+    pub(super) fn take_counts(&mut self) -> Counts {
+        std::mem::replace(&mut self.counts, Counts::none())
+    }
+
     /// End a registered wait's demote under core lock A, in the same hold as the pop or settle
     /// that ends it (DEC-176). A no-op when the wait took no demote. [`Vm::wait_end`] still ends
     /// the wait.
@@ -448,19 +607,17 @@ impl WaitReg {
 }
 
 impl Vm {
-    /// THE demote bracket: take this worker off `running` and account the wait by its spec — a
-    /// `will_return` wait is `inflight` (it vetoes the verdict), every other one registers a
-    /// [`Waiter`] on `wait` the verdict asks "can you still be satisfied?". Spawns this thread's
-    /// replacement worker once. With no M:N scheduler (`mn == None`) it keeps DEC-052's
-    /// `yield_pool_slot(None)` and accounts nothing.
+    /// THE demote bracket: take this worker off `running` and account the wait — `inflight` (it
+    /// vetoes the verdict), or a [`Waiter`] on `wait` the verdict asks "can you still be
+    /// satisfied?". Spawns this thread's replacement worker once. With no M:N scheduler
+    /// (`mn == None`) it keeps DEC-052's `yield_pool_slot(None)` and accounts nothing.
     fn block_enter(
         &mut self,
-        spec: WaitSpec,
-        wait: Option<PartyWait>,
+        account: Account,
+        wait: Option<&Arc<PartyWait>>,
         what: &str,
         span: Span,
     ) -> Result<DemoteReg, RuntimeError> {
-        debug_assert_eq!(spec.will_return(), wait.is_none());
         let Some(sched) = self.mn.as_ref().map(Arc::clone) else {
             self.yield_pool_slot(None);
             return Ok(DemoteReg { tok: None });
@@ -468,13 +625,15 @@ impl Vm {
         let reg = {
             let mut c = sched.lock();
             c.leave_running();
-            let tok = match wait {
-                Some(w) => Some(c.register_waiter(Waiter {
-                    wait: Arc::new(w),
+            let tok = match account {
+                Account::Waiter => Some(c.register_waiter(Waiter {
+                    wait: Arc::clone(
+                        wait.expect("a waiter-registered wait names what it waits for"),
+                    ),
                     cancel: self.wake_set().flags(),
                     fiber: true,
                 })),
-                None => {
+                Account::Inflight => {
                     sched.inflight.fetch_add(1, Ordering::Relaxed);
                     None
                 }
@@ -499,7 +658,7 @@ impl Vm {
         Ok(reg)
     }
 
-    /// End a `will_return` bracket: takes core lock A itself. With no M:N scheduler there is
+    /// End an `inflight` bracket: takes core lock A itself. With no M:N scheduler there is
     /// nothing to undo, exactly as before (DEC-052).
     fn block_exit(&mut self, reg: DemoteReg) {
         debug_assert!(
@@ -511,55 +670,197 @@ impl Vm {
         }
     }
 
-    /// THE start of a wait: steps (b) and (c) of [`wait_steps`], once for the whole wait (Go
-    /// `entersyscall`). When the steps say demote, [`Vm::block_enter`] hands this worker's runner
-    /// slot to a replacement and accounts the wait (`wait` is its registered waiter, `None` for a
-    /// `will_return` wait). Then the thread gives its run permit back, if it holds one. Each tick of
-    /// the wait runs through [`Vm::wait_door`]; [`Vm::wait_end`] ends it.
+    /// THE counts of a wait ([`WaitSteps`]): the party first, with no sched lock held (P before
+    /// A), then the body marks, then the blocked owner. `on` is what the party and the body
+    /// marks wait on; `joined` is a nursery join's sched and scope.
+    fn counts(
+        &self,
+        steps: WaitSteps,
+        on: Option<&Blocked>,
+        joined: Option<(&Arc<MnSched>, usize)>,
+    ) -> Counts {
+        let mut counts = Counts::none();
+        if steps.party
+            && let Some(b) = on
+        {
+            counts.party = Some(self.quiesce.block_shared(
+                Arc::clone(&b.wait),
+                self.wake_set(),
+                b.site,
+            ));
+        }
+        match steps.bodies {
+            Some(BodyMark::Wait) => self.mark_bodies(&mut counts, false, on.map(|b| &b.wait)),
+            Some(BodyMark::Awaiting) => self.mark_bodies(&mut counts, true, None),
+            None => {}
+        }
+        if steps.stops {
+            self.hand_body_runners(&mut counts);
+        }
+        if steps.owner
+            && let Some((sched, scope)) = joined
+        {
+            counts.owner =
+                self.blocked_owner_guard(sched, self.owns_nested_sched(sched).then_some(scope));
+        }
+        counts
+    }
+
+    /// §2c1 — mark every eager nursery scope this thread runs the body of as blocked, publishing
+    /// `wait` on its sched in the same `SchedCore` acquisition (`set_body_wait`). A body that is
+    /// blocked cannot reach another `spawn`, so its `body_open` must stop vetoing the deadlock
+    /// predicate (see [`super::JoinScope::body_blocked`]). A fiber-owned nursery's body is a
+    /// counted fiber: marking its scope `awaiting_builder` would veto a genuine deadlock, so a shell
+    /// marks nothing. Continuations need no entry: `set_body_wait` marks the whole family.
+    fn mark_bodies(&self, counts: &mut Counts, awaiting: bool, wait: Option<&Arc<PartyWait>>) {
+        counts.awaiting = awaiting;
+        counts.wait = wait.cloned();
+        counts.bodies = self
+            .owned_eager_scopes()
+            .filter(|s| !s.fiber_owned)
+            .map(|s| {
+                s.sched.set_body_wait(s.scope, wait, true, awaiting);
+                (Arc::clone(&s.sched), s.scope)
+            })
+            .collect();
+    }
+
+    /// TICKET-211 — the body's thread stops running ([`WaitSteps::stops`]): each `parallel:` body
+    /// it runs gives its runner slot to the claim, which starts runners for whatever the body
+    /// already queued. A fiber-owned nursery's body is a fiber; it has no slot of its own.
+    fn hand_body_runners(&self, counts: &mut Counts) {
+        counts.runners = self
+            .owned_eager_scopes()
+            .filter(|s| !s.fiber_owned && s.scope == 0)
+            .map(|s| {
+                let w = s.sched.body_runner(true);
+                self.start_runners(&s.sched, w);
+                Arc::clone(&s.sched)
+            })
+            .collect();
+    }
+
+    /// TICKET-095, TICKET-099 — count a fiber whose OS thread blocks in a nursery join as a
+    /// `SchedCore::blocked_owners` on ITS OWN sched (`self.mn`), whether the joined `sched` is that
+    /// same sched or another one: a fiber waiting on a join can feed nobody, so a peer veto
+    /// (`MnSched::peer_can_move`) that asks `self.mn` "can you still feed me?" must see it blocked.
+    /// TICKET-103 — it also counts the owner on its own scope (`JoinScope::owners_blocked`) and, when
+    /// `joined` is `Some`, the joined nursery's origin scope on this same sched
+    /// (`JoinScope::joins_blocked`); `flag_deadlock_leaves` reads both. `None` with no sched under
+    /// this thread: such a joiner is a party instead.
+    fn blocked_owner_guard(
+        &self,
+        sched: &Arc<MnSched>,
+        joined: Option<usize>,
+    ) -> Option<BlockedOwnerGuard> {
+        let (owner, cross_sched) = if self.owns_nested_sched(sched) {
+            (Arc::clone(sched), false)
+        } else {
+            let own = self.mn.clone()?;
+            if Arc::ptr_eq(&own, sched) {
+                return None;
+            }
+            (own, true)
+        };
+        {
+            let mut c = owner.lock();
+            c.owner_blocked(cross_sched);
+            if let Some(s) = self.fiber_scope {
+                c.scopes[s].owners_blocked += 1;
+            }
+            if let Some(j) = joined {
+                debug_assert!(
+                    !cross_sched,
+                    "a joined scope lives on the owner's own sched"
+                );
+                c.scopes[j].joins_blocked += 1;
+            }
+        }
+        owner.notify_waiters();
+        Some(BlockedOwnerGuard {
+            sched: owner,
+            cross_sched,
+            scope: self.fiber_scope,
+            joined,
+        })
+    }
+
+    /// The counts of a nursery join or abort of `scope` on `sched`, from the `Nursery` row of
+    /// [`wait_steps`], held while the joiner waits. The join's permit step is the caller's
+    /// [`Vm::wait_permit`] around the whole join.
+    pub(super) fn nursery_counts(&self, sched: &Arc<MnSched>, scope: usize) -> Counts {
+        let steps = wait_steps(Some(WaitSpec::Nursery), self.block_ctx());
+        let on = Blocked::on(PartyWait::Nursery(Arc::clone(sched)));
+        self.counts(steps, Some(&on), Some((sched, scope)))
+    }
+
+    /// The counts and the demote of a wait, steps (a) and (c) of [`wait_steps`].
+    fn wait_enter(
+        &mut self,
+        spec: WaitSpec,
+        on: Option<Blocked>,
+        what: &str,
+        span: Span,
+    ) -> Result<(Counts, Option<DemoteReg>), RuntimeError> {
+        let steps = wait_steps(Some(spec), self.block_ctx());
+        let counts = self.counts(steps, on.as_ref(), None);
+        let demote = match steps.hand {
+            Handover::Demote(account) => {
+                Some(self.block_enter(account, on.as_ref().map(|b| &b.wait), what, span)?)
+            }
+            Handover::Keep | Handover::Joiner => None,
+        };
+        Ok((counts, demote))
+    }
+
+    /// THE start of a wait, once for the whole wait (Go `entersyscall`): the counts [`wait_steps`]
+    /// gives it on `on`, the demote when the steps say so ([`Vm::block_enter`] hands this worker's
+    /// runner slot to a replacement and accounts the wait), then the run permit given back, if the
+    /// thread holds one. Each tick of the wait runs through [`Vm::wait_door`]; [`Vm::wait_end`]
+    /// ends it.
     pub(super) fn wait_begin(
         &mut self,
         spec: WaitSpec,
-        wait: Option<PartyWait>,
+        on: Option<Blocked>,
         what: &str,
         span: Span,
     ) -> Result<WaitReg, RuntimeError> {
-        let demote = if wait_steps(Some(spec), self.block_ctx()).demote {
-            Some(self.block_enter(spec, wait, what, span)?)
-        } else {
-            None
-        };
+        let (counts, demote) = self.wait_enter(spec, on, what, span)?;
         let mut reg = self.wait_permit(spec);
+        reg.counts = counts;
         reg.demote = demote;
         Ok(reg)
     }
 
-    /// Step (b) alone: the start of a wait whose demote comes later ([`Vm::wait_demote`], the
-    /// guard's second stage, DEC-016) or is not this table's (a nursery joiner hands its slot over
-    /// in `Vm::joiner_shell`).
+    /// The permit step alone: the start of a wait whose counts and demote come later
+    /// ([`Vm::wait_demote`], the guard's second stage, DEC-016), or a nursery join, whose counts each
+    /// join site takes ([`Vm::nursery_counts`]).
     pub(super) fn wait_permit(&mut self, spec: WaitSpec) -> WaitReg {
-        let released = wait_steps(Some(spec), self.block_ctx()).permit && width::holds();
+        let released = wait_steps(Some(spec), self.block_ctx()).stops && width::holds();
         if released {
             width::release();
         }
         WaitReg {
+            counts: Counts::none(),
             demote: None,
             released,
             ticked: false,
         }
     }
 
-    /// Step (c) on a wait that [`Vm::wait_permit`] started: the guard's second stage.
+    /// The counts and the demote on a wait that [`Vm::wait_permit`] started: the guard's second
+    /// stage.
     pub(super) fn wait_demote(
         &mut self,
         reg: &mut WaitReg,
         spec: WaitSpec,
-        wait: Option<PartyWait>,
+        on: Option<Blocked>,
         what: &str,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        if wait_steps(Some(spec), self.block_ctx()).demote {
-            reg.demote = Some(self.block_enter(spec, wait, what, span)?);
-        }
+        let (counts, demote) = self.wait_enter(spec, on, what, span)?;
+        reg.counts = counts;
+        reg.demote = demote;
         Ok(())
     }
 
@@ -600,14 +901,22 @@ impl Vm {
         })
     }
 
-    /// End a wait (Go `exitsyscall`): take the permit back if the wait gave it up, a free one first
-    /// (`pins` are the values the caller holds in Rust locals across that take), then end a
-    /// `will_return` demote.
+    /// End a wait (Go `exitsyscall`): drop its counts, then take the permit back if the wait gave it
+    /// up, a free one first (`pins` are the values the caller holds in Rust locals across that
+    /// take), then end an `inflight` demote. The counts go first: a party still counted as blocked
+    /// while it waits for a permit after its wait ended is a party that made progress.
     pub(super) fn wait_end(&mut self, reg: WaitReg, pins: &[GcRef]) {
-        if reg.released {
+        let WaitReg {
+            counts,
+            demote,
+            released,
+            ticked: _,
+        } = reg;
+        drop(counts);
+        if released {
             self.width_acquire_pinned(pins);
         }
-        if let Some(reg) = reg.demote {
+        if let Some(reg) = demote {
             self.block_exit(reg);
         }
     }
@@ -670,14 +979,12 @@ impl Vm {
         mode(self.block_ctx(), spec)
     }
 
-    /// TICKET-245 — THE answer to "may this nursery joiner run fibers on its own stack?", read
-    /// from the `Nursery` row of [`mode`]. Only [`Vm::joiner_shell`] asks it. A `Park` joiner that
-    /// reaches an inline wait (an abort that `park_abort_origin` declines) still helps.
-    pub(super) fn joiner_helps(&self) -> bool {
-        matches!(
-            self.block_mode(WaitSpec::Nursery),
-            BlockMode::Park | BlockMode::Help
-        )
+    /// TICKET-245 — THE answer to "must this nursery joiner hand its runner slot over instead of
+    /// running fibers on its own stack?", the `Nursery` row of [`wait_steps`]. Only
+    /// [`Vm::joiner_shell`] asks it. A `Park` joiner that reaches an inline wait (an abort that
+    /// `park_abort_origin` declines) still helps.
+    pub(super) fn joiner_hands_over(&self) -> bool {
+        wait_steps(Some(WaitSpec::Nursery), self.block_ctx()).hand == Handover::Joiner
     }
 }
 
@@ -767,31 +1074,78 @@ mod tests {
         }
     }
 
-    /// [`wait_steps`] in every context: a listed spec releases the permit and demotes on its
-    /// `Demote` cell of [`mode`], except a nursery join; `None` takes neither step.
+    /// [`wait_steps`]: one row per spec in the row order of [`TABLE`], one cell per context in its
+    /// column order. A cell is the hand-over (K keep, W demote as a waiter, F demote as `inflight`,
+    /// J the nursery joiner's hand-over), then the counts: `p` a party, `w`/`a` the body marks
+    /// ([`BodyMark::Wait`], [`BodyMark::Awaiting`]), `o` a blocked owner, `-` for none. Every listed
+    /// spec stops the thread ([`WaitSteps::stops`]).
+    ///
+    /// The `Nursery` row's party cells are the W7-58 gate: a thread with no sched under it is the
+    /// `1 +` of `live` and must count, the early-enlisted builder too (a `judged` gate would drop
+    /// it); a worker shell must not, or `parties.len()` could exceed `live` and fault a live program.
+    const STEPS: [(&str, &str); 15] = [
+        ("Recv", "K-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
+        ("Timer", "K--- F--- K--- K--- K--- K--- K--- K---"),
+        ("Send", "K-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
+        ("Wait", "K-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
+        ("Wait+send", "K-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
+        ("Wait+deadline", "K--- F--- K--- K--- K--- K--- K--- K---"),
+        (
+            "Wait+deadline+send",
+            "K--- F--- K--- K--- K--- K--- K--- K---",
+        ),
+        ("Sleep", "K--- F--- K--- K--- K--- K--- K--- K---"),
+        ("Offload", "K--- F--- K--- K--- K--- K--- K--- K---"),
+        ("HostFd", "F--- F--- F--- F--- F--- F--- F--- F---"),
+        ("Socket", "K--- F--- K--- K--- K--- K--- K--- K---"),
+        ("Connect", "K--- K--- K--- K--- K--- K--- K--- K---"),
+        ("Guard", "W-w- W-w- W-w- W-w- W-w- W-w- Wpw- Wpw-"),
+        ("Join", "W-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
+        ("Nursery", "K-ao J-ao Kpa- Jpa- Kpa- Jpa- Kpa- Jpa-"),
+    ];
+
     #[test]
-    fn every_wait_steps_cell_derives_from_the_table() {
+    fn every_wait_steps_cell_matches_the_table() {
+        let cell = |w: WaitSteps| {
+            let hand = match w.hand {
+                Handover::Keep => 'K',
+                Handover::Demote(Account::Waiter) => 'W',
+                Handover::Demote(Account::Inflight) => 'F',
+                Handover::Joiner => 'J',
+            };
+            let bodies = match w.bodies {
+                Some(BodyMark::Wait) => 'w',
+                Some(BodyMark::Awaiting) => 'a',
+                None => '-',
+            };
+            assert!(w.stops, "every listed spec stops the thread");
+            format!(
+                "{hand}{}{bodies}{}",
+                if w.party { 'p' } else { '-' },
+                if w.owner { 'o' } else { '-' }
+            )
+        };
+        let specs = specs();
+        assert_eq!(specs.len(), STEPS.len());
+        for (spec, (name, row)) in specs.into_iter().zip(STEPS) {
+            let got: Vec<String> = contexts()
+                .into_iter()
+                .map(|c| cell(wait_steps(Some(spec), c)))
+                .collect();
+            assert_eq!(got.join(" "), row, "row {name} ({spec:?})");
+        }
         for ctx in contexts() {
             assert_eq!(
                 wait_steps(None, ctx),
                 WaitSteps {
-                    permit: false,
-                    demote: false
+                    stops: false,
+                    hand: Handover::Keep,
+                    party: false,
+                    bodies: None,
+                    owner: false,
                 },
                 "None in {ctx:?}"
             );
-            for spec in specs() {
-                let steps = wait_steps(Some(spec), ctx);
-                let demote = spec != WaitSpec::Nursery && mode(ctx, spec) == BlockMode::Demote;
-                assert_eq!(
-                    steps,
-                    WaitSteps {
-                        permit: true,
-                        demote
-                    },
-                    "{spec:?} in {ctx:?}"
-                );
-            }
         }
     }
 

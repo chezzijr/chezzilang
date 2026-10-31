@@ -1787,32 +1787,24 @@ fn w758_quiesced_counts_a_nursery_owner_against_live() {
     drop(owner);
 }
 
-/// W7-58 — the GATE. A worker shell must never register a nursery party: it is not in `live`, so
-/// registering it would let `parties.len()` exceed `live`, which is the one error direction that
-/// faults a live program (`quiesce`'s error-direction table).
-///
-/// Also pins the deliberate WIDENING versus `BlockCtx::judged`: a builder holding an early-enlisted
-/// sched (`mn_enlist_sched.is_some()`, `BlockCtx::Builder`) is NOT judged, yet it is exactly
-/// `main`, i.e. the `1 +` in `live` — so it MUST register.
+/// W7-58 — the gate, on a real `Vm`'s `block_ctx`: only a thread with no sched under it counts a
+/// nursery join as a party (`block::wait_steps`). Top-level `main` is the `1 +` of `live`; an
+/// early-enlisted builder (`mn_enlist_sched`, `BlockCtx::Builder`) is still `main`, though not
+/// `judged`; a worker shell is not in `live`, and its count could let `parties.len()` exceed it.
 #[test]
-fn w758_only_a_thread_with_no_scheduler_under_it_registers_a_nursery_party() {
+fn w758_only_a_thread_with_no_scheduler_under_it_counts_a_nursery_party() {
+    use crate::vm::block::{BlockCtx, WaitSpec, wait_steps};
     let mut vm = Vm::new(Arc::new(empty_program()));
     let sched = Arc::new(mk_sched(0));
-    assert!(
-        vm.nursery_party_guard(&sched).is_some(),
-        "top-level main owns its OS thread — it is the `1 +` in `live`"
-    );
+    let party = |vm: &Vm| wait_steps(Some(WaitSpec::Nursery), vm.block_ctx()).party;
+    assert!(party(&vm), "top-level main owns its OS thread");
     vm.mn_enlist_sched = Some(Arc::clone(&sched));
-    assert!(
-        vm.nursery_party_guard(&sched).is_some(),
-        "an early-enlisted builder is still main; a `BlockCtx::judged` gate would wrongly exclude it"
-    );
+    assert!(matches!(vm.block_ctx(), BlockCtx::Builder { .. }));
+    assert!(party(&vm), "an early-enlisted builder is still main");
     vm.mn_enlist_sched = None;
     vm.mn = Some(Arc::clone(&sched));
-    assert!(
-        vm.nursery_party_guard(&sched).is_none(),
-        "a worker SHELL is not in `live` — registering it would let parties exceed live"
-    );
+    assert_eq!(vm.block_ctx(), BlockCtx::Park);
+    assert!(!party(&vm), "a worker shell is not in `live`");
 }
 
 /// D2b: `finish` records a task's outcome in its slot, drops it from `running`, and flips

@@ -18,8 +18,6 @@ use std::time::{Duration, Instant};
 
 const JOB_FAULT: &str = "index 5 out of bounds (len 1)";
 const GUARD: Duration = Duration::from_secs(30);
-/// The guard of the declines class, whose expected outcome is a hang.
-const DECLINES_GUARD: Duration = Duration::from_secs(5);
 /// `0` is the default worker count.
 const THREADS: [&str; 4] = ["1", "2", "4", "0"];
 
@@ -317,24 +315,17 @@ enum Class {
     Settle,
     /// A real deadlock: nonzero exit, stderr names a deadlock.
     Deadlock,
-    /// `docs/contributing/gaps.md` W22-1: a real deadlock the verdict does not report. A hang or a deadlock
-    /// fault, never a settle.
-    Declines,
     /// The same `cancel()` cuts the reader. Two legal outcomes: every round settles, or the
     /// run ends with a deadlock fault.
     Race,
 }
 
-fn class((reader, wait, end, cutter): Cell) -> Class {
+fn class((reader, wait, end, _): Cell) -> Class {
     let cut = end.is_cut();
     if reader == Reader::SameExec && wait != Wait::Plain && cut {
         Class::Race
     } else if wait == Wait::Plain && (cut || end == End::Faults) {
-        if cut && reader == Reader::OtherExec && cutter == Cutter::Sibling {
-            Class::Declines
-        } else {
-            Class::Deadlock
-        }
+        Class::Deadlock
     } else {
         Class::Settle
     }
@@ -376,8 +367,6 @@ fn check(cell: Cell, rounds: usize, g: &Got) -> Option<String> {
         Class::Settle => settled(cell.2, rounds, g),
         Class::Deadlock => (!g.deadlock_fault())
             .then(|| "a cut feeder of a plain channel must end in a deadlock fault".to_string()),
-        Class::Declines => (g.code.is_some() && !g.deadlock_fault())
-            .then(|| "W22-1 must hang or report a deadlock, never settle".to_string()),
         Class::Race => {
             if g.deadlock_fault() {
                 None
@@ -405,12 +394,7 @@ fn sweep(cells: &[Cell], rounds: usize) {
                         break;
                     };
                     let (reader, wait, end, cutter) = cell;
-                    let guard = if class(cell) == Class::Declines {
-                        DECLINES_GUARD
-                    } else {
-                        GUARD
-                    };
-                    let g = run(&prog(reader, wait, end, cutter, rounds), t, guard);
+                    let g = run(&prog(reader, wait, end, cutter, rounds), t, GUARD);
                     if let Some(why) = check(cell, rounds, &g) {
                         misses.lock().unwrap().push(format!(
                             "{reader:?} x {wait:?} x {end:?} x {cutter:?} T={t} ({:?}): {why}\n{}",

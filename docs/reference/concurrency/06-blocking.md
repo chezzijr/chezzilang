@@ -13,8 +13,22 @@ takes steps 2 and 3 once at the start of the wait and `Vm::wait_end` undoes them
 | step | when |
 |---|---|
 | 1. detach the thread from the run's one heap | every wait |
-| 2. hold no runner permit for the whole wait | every row of the table below, when the thread holds one; the end takes a free permit first, else queues |
-| 3. demote (hand the runner slot to a replacement) | the `D` cells below, except a nursery join, which hands its slot over in its own joiner |
+| 2. hold no runner permit for the whole wait, and give a `parallel:` body's runner slot to its sched | every row of the table below, when the thread holds one; the end takes a free permit first, else queues |
+| 3. demote (hand the runner slot to a replacement) | the `D` cells below; a nursery join hands its slot over in its own joiner, in its `D` and `I` cells |
+
+The same table gives each wait the counts it registers for the deadlock verdicts. `Vm::wait_end`
+drops them before it takes the permit back; an in-place channel tick drops them after the permit
+take, before its next pop:
+
+| wait | counts |
+|---|---|
+| ends by itself (timer, sleep, offload, host fd, socket, connect, a timed `wait:`) | none; a demoted one is `inflight` |
+| `recv`, `send`, an untimed `wait:`, a guard, an Executor join | a party on a judged thread (`main`, a `main` `defer:`), the eager bodies of its thread marked blocked on it; a demoted one is a waiter |
+| a nursery join or abort | a party on a thread with no sched under it (`main`, the builder, `main` in a callback); a blocked owner on a fiber's thread; the eager bodies of its thread wait for it |
+
+A wait that ends by itself is a live party, so both verdicts decline while it lasts: a `wait:` whose
+timer arm is live returns at the deadline, as Go's `select` with `time.After` does.
+`tests/wait_counts_grid.rs` runs each wait kind in each context as a deadlock and as a live program.
 
 A guard wait takes the permit back in the middle, before it takes the guard (a thread that took the
 guard first would park the guard's owner behind permit holders), and gives it back again if it loses

@@ -628,11 +628,13 @@ impl QuiesceState {
     }
 
     /// Register a blocked party for as long as the returned guard lives. It has no deadlock site.
+    /// Test-only: a production wait registers through its counts (`block::wait_steps`).
+    #[cfg(test)]
     pub(super) fn block(self: &Arc<Self>, wait: PartyWait, wake: WakeSet) -> PartyGuard {
         self.block_shared(Arc::new(wait), wake, None)
     }
 
-    /// §2c1 — [`Self::block`] over an `Arc` the caller already holds, so ONE `PartyWait` can be both
+    /// §2c1 — register a blocked party over an `Arc` the caller already holds, so ONE `PartyWait` can be both
     /// the registered party AND the sched-side `SchedCore::waiters` entry. Two separately-built
     /// waits for the same block could disagree about what the thread waits for; one cannot.
     /// `site` is the party's deadlock report (TICKET-223).

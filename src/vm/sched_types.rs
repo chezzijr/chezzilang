@@ -846,8 +846,8 @@ pub(super) struct JoinScope {
     /// see). `JoinNursery` clears it. Always `false` for a lazy (queue-at-join) nursery.
     pub(super) body_open: bool,
     /// §2c1 — `true` while this eager scope's body thread is itself BLOCKED in place (parked on a
-    /// channel / `wait:` / an executor join — every counted-party block funnels through
-    /// [`super::Vm::block_party_guard`], which sets and clears this).
+    /// channel / `wait:` / an executor join — the body marks of a wait's counts set and clear
+    /// this, `block::wait_steps`).
     ///
     /// `body_open` means "the body may still `inject`". While the body is blocked that is FALSE — it
     /// cannot reach another `spawn` until something wakes it — so the DEADLOCK predicate must stop
@@ -868,7 +868,7 @@ pub(super) struct JoinScope {
     /// `all_incomplete_awaiting_builder` + `is_deadlocked`).
     ///
     /// §2c1 — an EAGER scope now raises it too, for the span in which its body is parked in a NESTED
-    /// nursery's join (`Vm::blocked_bodies_guard(true)`). The meaning is identical: a builder will
+    /// nursery's join (`BodyMark::Awaiting`). The meaning is identical: a builder will
     /// return to this scope and may then `send`/`close`, so a quiesce in which the inner scope is DONE
     /// is not a deadlock. It stays `false` for a body blocked on a CHANNEL — that body resumes only if
     /// somebody feeds it, so it promises no progress.
@@ -1135,7 +1135,7 @@ pub(super) struct SchedCore {
     pub(super) verdict_cut: bool,
     /// TICKET-181 — THE registry of blocked waiters the counters cannot see: every demoted recv
     /// or `wait:`, every M:N guard wait, and every blocked body of this sched's thread
-    /// (`Vm::block_party_guard`), keyed by a token. Each entry answers "can you still be
+    /// (the body marks of a wait's counts, `block::wait_steps`), keyed by a token. Each entry answers "can you still be
     /// satisfied?" ([`crate::vm::block::Waiter::satisfiable`]: a cancel flag it would honour, or its
     /// `PartyWait`), and `quiesced_core_given` vetoes while any can — the ONE veto clause. A new
     /// blocking shape adds a `PartyWait` arm, never a new list here. `fiber` entries are the demoted

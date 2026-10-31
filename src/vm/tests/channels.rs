@@ -603,6 +603,59 @@ fn nursery_rounds_reuse_their_runner_threads() {
     );
 }
 
+/// TICKET-211 — a `parallel:` body that waits gives its runner slot (bit 0) to the claim, so its
+/// queued tasks run on every worker while it waits: one cell per wait kind the body can reach. At
+/// 2 workers the run's peak runner threads must reach 2 (the drainer plus the runner the body's
+/// freed slot starts). A body that keeps its slot leaves the peak at 1.
+#[test]
+fn a_waiting_body_hands_its_runner_slot_over_in_every_wait() {
+    if crate::vm::rerun_in_child(
+        module_path!(),
+        "a_waiting_body_hands_its_runner_slot_over_in_every_wait",
+    ) {
+        return;
+    }
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    crate::vm::set_worker_count(2);
+    let header = "import std.time\nfn burn(n: int) -> int:\n    s := 0\n    for i in 0..n:\n        s = s + i % 7\n    return s\nch := Channel[int](3)\nparallel:\n    for _ in 0..3:\n        spawn:\n            ch.send(burn(400000))\n";
+    let waits: [(&str, &str); 3] = [
+        ("recv", "    for _ in 0..3:\n        _ := ch.recv()\n"),
+        (
+            "wait",
+            "    got := 0\n    while got < 3:\n        wait:\n            _ := ch.recv(): got = got + 1\n",
+        ),
+        (
+            "timed_wait",
+            "    got := 0\n    while got < 3:\n        wait:\n            _ := ch.recv(): got = got + 1\n            _ := time.timer(60000).recv(): print(\"timeout\")\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, body) in waits {
+        let entry = write_temp_chz(&format!("body_handover_{name}"), &format!("{header}{body}"));
+        let ((_out, _err, res, _code), peak, denials, _spawns, _permits) =
+            crate::vm::run_file_counting_runners(&entry);
+        let _ = std::fs::remove_file(&entry);
+        assert!(res.is_ok(), "{name} faulted: {res:?}");
+        if peak < 2 && denials == 0 {
+            failures.push(format!("{name}: peak runner threads {peak} at 2 workers"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a waiting body kept its runner slot: {failures:#?}"
+    );
+}
+
 /// `pmap_limited`'s token bucket actually BOUNDS in-flight tasks: an Atomic max-in-flight probe never
 /// exceeds `limit` — the semaphore caps concurrent f-execution.
 #[test]

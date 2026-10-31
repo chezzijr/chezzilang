@@ -72,7 +72,8 @@ lists each remaining copy as DUPLICATE.
 | 5 | workspace crates: `chezzi-syntax`, `chezzi-native`, `chezzi-base`, `chezzi-front`, `chezzi-vm` | done 2026-10-16 |
 | docs | docs split into `reference/`, `design/`, `contributing/`, `history/` | in progress (branch `docs/refactor`) |
 
-Details of each step are in [`docs/history/progress/2026-10.md`](docs/history/progress/2026-10.md).
+Details of each step are in [`docs/history/progress/2026-10.md`](docs/history/progress/2026-10.md)
+and [`docs/history/progress/2026-11.md`](docs/history/progress/2026-11.md).
 
 ## What is next
 
@@ -154,11 +155,11 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     demote) come from one table, `block::wait_steps`, through one door, `Vm::wait_door`. Fixed cells:
     a `print` of a FIFO `Writer` that a blocked writer holds no longer hangs at T=1. Code-only: a `net.connect`
     handshake in a callback takes its own `Connect` row. History: `docs/history/progress/2026-10.md`.
-12. **How a wait counts for the deadlock verdict (fact 2, next refactor unit).** Two mechanisms
-    count a blocked party: `block_enter` registration, and the party guards with `demote_once` and
-    `yield_pool_slot` (the 12 nursery joins, the in-place channel waits, guard stage 1). The nursery
-    joins never call `block_enter(Nursery)`, so the `Demote` cell of the `Nursery` row is dead
-    (`wait_steps` gives it no demote). Row W22-1 belongs to this fact.
+12. **How a wait counts for the deadlock verdicts (fact 2, done 2026-11-01).** One table,
+    `block::wait_steps`, gives each wait its counts (party, body marks, waiter or `inflight`,
+    blocked owner) and the joiner hand-over; `Vm::wait_begin` and `Vm::nursery_counts` take them.
+    No cell changed a program's output (`tests/wait_counts_grid.rs`). W22-1 closed as not
+    reproducing (fixed by TICKET-289). History: `docs/history/progress/2026-11.md`.
 13. **A watcher for long `extern` calls (next unit after fact 2).** An `extern` C call keeps its
     runner permit, so at `CHEZZI_THREADS=1` a sibling task waits for the call to return (Go 1.27 at
     `GOMAXPROCS=1` prints the sibling's `tick` first: sysmon retakes the P of a cgo call after 20 us).
@@ -169,6 +170,9 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     it too). `parallel:` with a child that panics at 50 ms and an owner in `usleep(600 ms)` prints
     `after` before the `boom` report. A blocking native delivers the halt at its return (TICKET-188),
     but the `Callee::Cffi` path does not. Go ends the process at the panic.
+15. **A spawned task's nursery abort reports `deadlock`, not the body's fault** (2026-11-01, base
+    too): a faulting body beside a child stuck in its `defer:` reports `index 5 …` on `main` but
+    `deadlock: every task …` in a `spawn`. Go ends with the panic.
 
 ### Open questions for the owner
 
@@ -215,8 +219,8 @@ route copies: a task's write lands on the parent's value and a race is the user'
 ## Ledger
 
 [`docs/contributing/gaps.md`](docs/contributing/gaps.md) is a short ledger of open rows. Each row is
-re-verified on the release binary. **8 open rows** today: W8-19, W13-28, W15-4, W15-5, W15-10,
-W17-1, W22-1, W23-1. All are P2/P3 or tracking rows. `tests/gaps_ledger_count.rs` checks this count.
+re-verified on the release binary. **7 open rows** today: W8-19, W13-28, W15-4, W15-5, W15-10,
+W17-1, W23-1. All are P2/P3 or tracking rows. `tests/gaps_ledger_count.rs` checks this count.
 After each merge, re-derive it with `grep -c '^| \*\*W' docs/contributing/gaps.md`: a merge can
 produce a wrong counter with no conflict marker. Closed rows and the bug-hunt session logs are in
 [`docs/history/bug-hunts/`](docs/history/bug-hunts/).

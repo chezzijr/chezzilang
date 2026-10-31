@@ -611,8 +611,10 @@ fn the_scan_sees_doors_and_wrappers() {
 }
 
 /// The spellings that take a step of a wait by hand: the run permit and the demote bracket.
-/// The fact-2 steps (`yield_pool_slot`, `demote_once`, `hand_joiner_slot`) are not listed: they
-/// have no single owner yet (`PROGRESS.md` "What is next", fact 2).
+/// The hand-over mechanisms (`yield_pool_slot`, `demote_once`, `hand_joiner_slot`) are not listed:
+/// a wait takes them through `Vm::block_enter` or `Vm::joiner_shell`, whose decision is the table's
+/// `Handover`; a preempted runner (`worker_loop.rs`) and an in-place tick's pool yield
+/// (`blocking.rs`) are not waits.
 const STEPS: &[&str] = &[
     "width_release(",
     "width_acquire(",
@@ -693,5 +695,64 @@ fn every_wait_step_comes_from_the_table() {
         stale.is_empty(),
         "a STEP_ALLOWED row matches no call any more; delete it:\n{}",
         stale.join("\n")
+    );
+}
+
+/// The spellings that register a wait's counts for the deadlock verdicts by hand, each with the
+/// files that own it: `block.rs` takes the counts from `block::wait_steps`, `quiesce.rs` holds the
+/// party registry, and `mnsched.rs` holds the waiter registry and the body marks it publishes.
+/// A parked fiber counts through its park, so the park owners hold the rest: [`PARK_OWNERS`].
+const COUNTS: &[(&str, &[&str])] = &[
+    ("block_shared(", &["block.rs", "quiesce.rs"]),
+    ("register_waiter(", &["block.rs", "mnsched.rs"]),
+    ("set_body_wait(", &["block.rs", "mnsched.rs"]),
+    ("owner_blocked(", &["block.rs", "mnsched.rs"]),
+    ("owners_blocked +=", &["block.rs", "mnsched_take.rs"]),
+    ("joins_blocked +=", &["block.rs", "mnsched_take.rs"]),
+    ("inflight.fetch_add(", PARK_OWNERS),
+    ("block_party_guard(", &[]),
+    ("nursery_party_guard(", &[]),
+    ("blocked_bodies_guard(", &[]),
+    ("blocked_owner_guard(", &["block.rs"]),
+];
+
+/// The files whose park paths count a parked fiber themselves: `block.rs` (a demoted wait's
+/// `inflight`), `mnsched_take.rs` (`MnSched::park_join`'s owner and join counts),
+/// `mnsched_verdict.rs` (the offload and netpoller parks' `inflight`), and `channel.rs` and
+/// `blocking.rs` (a timer park's pending `inflight`).
+const PARK_OWNERS: &[&str] = &[
+    "block.rs",
+    "mnsched_take.rs",
+    "mnsched_verdict.rs",
+    "channel.rs",
+    "blocking.rs",
+];
+
+/// A wait takes its verdict counts from its `WaitSpec` through `Vm::wait_begin` or
+/// `Vm::nursery_counts`: no other site registers a party, a waiter, a body mark or a blocked owner.
+#[test]
+fn every_wait_count_comes_from_the_table() {
+    let src = Path::new("src/vm");
+    let mut bad = Vec::new();
+    for path in rust_files(src) {
+        let rel = path
+            .strip_prefix(src)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let code = production_code(&fs::read_to_string(&path).unwrap());
+        for (n, l) in code.lines().enumerate() {
+            for (s, owners) in COUNTS {
+                if l.contains(s) && !owners.contains(&rel.as_str()) {
+                    bad.push(format!("src/vm/{rel}:{}: `{s}`", n + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a site registers a deadlock-verdict count by hand. Name the wait's `WaitSpec` and use \
+         `Vm::wait_begin` (or `Vm::nursery_counts` for a nursery join):\n{}",
+        bad.join("\n")
     );
 }

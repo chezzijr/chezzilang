@@ -2,7 +2,7 @@
 //! outcome classification, wakes, the sched registry.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
-use super::sched::BlockedOwnerGuard;
+use super::netio::GUARD_DEADLOCK;
 use super::sched::GatedReg;
 use super::sched::JoinCover;
 #[cfg(test)]
@@ -217,7 +217,11 @@ impl Vm {
         self.wait_demote(
             reg,
             WaitSpec::Guard,
-            Some(quiesce::PartyWait::Guard(key, self.guard_token)),
+            Some(Blocked::at(
+                quiesce::PartyWait::Guard(key, self.guard_token),
+                GUARD_DEADLOCK,
+                span,
+            )),
             what,
             span,
         )
@@ -233,7 +237,7 @@ impl Vm {
 
     /// TICKET-245 — THE shell an inline nursery joiner runs fibers on, or `None` when the joiner
     /// only waits. Every join and abort site calls this and decides nothing itself. The decision is
-    /// [`Vm::joiner_helps`] (the `Nursery` row of `block::mode`). A joiner that may not help and
+    /// [`Vm::joiner_hands_over`] (the `Nursery` row of `block::wait_steps`). A joiner that may not help and
     /// has no cover hands its runner slot over ([`Vm::hand_joiner_slot`]); it keeps the inline
     /// loop only when the OS refused that thread. Call it after the site's guards.
     pub(super) fn joiner_shell(
@@ -243,7 +247,7 @@ impl Vm {
         wid: usize,
         cover: JoinCover,
     ) -> Option<Vm> {
-        let helps = self.joiner_helps();
+        let helps = !self.joiner_hands_over();
         let runs = match cover {
             JoinCover::Runners => {
                 helps && eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner()
@@ -1247,102 +1251,10 @@ impl Vm {
             .push(Arc::downgrade(sched));
     }
 
-    /// gaps.md W7-58 — register this thread as a party blocked in a `parallel:` nursery JOIN, for as
-    /// long as the returned guard lives. Without it a `main` sitting in `mn_worker_loop` is invisible
-    /// to the process-wide verdict, so `parties.len() < live` vetoes forever and a genuinely stuck
-    /// job + stuck nursery hangs instead of faulting.
-    ///
-    /// **The gate is deliberately NOT `BlockCtx::judged`.** That is false for
-    /// `BlockCtx::Builder` (`mn_enlist_sched.is_some()`), which is the very builder that owns an
-    /// early-enlisted scope — the commonest owner there is. What `quiesce`'s `live` actually counts is
-    /// "threads with no scheduler UNDER them": top-level `main` (the `1 +`) and an eager `Executor`
-    /// job (the `Σ outstanding`). That is exactly `mn.is_none()`.
-    ///
-    /// **A worker SHELL (`mn.is_some()`) must never register.** It is not in `live`, so registering it
-    /// would let `parties.len()` exceed `live` — the one error direction that faults a live program.
-    /// The gate excludes it.
-    ///
-    /// §2c1 — `join_eager_nursery`/`abort_eager_nursery` DO call this now. They used to be exempt
-    /// because `activate_eager_nursery` `debug_assert!`ed `mn.is_some()`, so their joiner was always a
-    /// shell; the outermost nursery is eager now, so its joiner is top-level `main`. The gate keeps
-    /// those calls no-ops on the nested (shell) path.
-    ///
-    /// Called with NO sched core lock held — the total order is `parties` → `SchedCore`.
-    pub(super) fn nursery_party_guard(
-        &self,
-        sched: &Arc<MnSched>,
-    ) -> Option<crate::vm::quiesce::PartyGuard> {
-        self.mn.is_none().then(|| {
-            self.quiesce.block(
-                crate::vm::quiesce::PartyWait::Nursery(Arc::clone(sched)),
-                self.wake_set(),
-            )
-        })
-    }
-
-    /// TICKET-095 — true on the exact complement of `nursery_party_guard`'s gate: `self` is a fiber
-    /// running ON `sched` itself (the `(Some(sched), _)` arm of `run_mn_nursery`), not the top-level
-    /// late-spawn builder (the `(None, Some(held))` arm, which `nursery_party_guard` covers instead).
+    /// TICKET-095 — `self` is a fiber running ON `sched` itself (the `(Some(sched), _)` arm of
+    /// `run_mn_nursery`), not the top-level late-spawn builder (the `(None, Some(held))` arm).
     pub(super) fn owns_nested_sched(&self, sched: &Arc<MnSched>) -> bool {
         self.mn.as_ref().is_some_and(|m| Arc::ptr_eq(m, sched))
-    }
-
-    /// TICKET-095 — counts a fiber whose OS thread is about to block in a NESTED nursery join as a
-    /// `SchedCore::blocked_owners` ON ITS OWN SCHED, so `is_deadlocked_ignoring_jobs`'s `running ==
-    /// blocked_owners` clause can tell "stuck by construction" from "genuinely running". `None` on
-    /// the `(None, Some(held))` late-spawn arm — that owner is not counted in `running` either, which
-    /// is exactly the `self.mn.is_none()` case.
-    ///
-    /// TICKET-099 widened this from the same-sched case only: a fiber blocked at a nested join counts
-    /// as a `blocked_owner` on ITS OWN sched (`self.mn`) whether the child nursery it is waiting on
-    /// (`sched`) runs on that same sched (`owns_nested_sched`) or on a private eager one of its own.
-    /// TICKET-099's peer veto (`MnSched::peer_can_move`) asks a PEER sched "can you still feed me?",
-    /// and a fiber waiting on a join can feed nobody, whichever sched its child runs on — the same
-    /// distinction `local_quiesced`'s §2c1 comment already draws between `any_body_injecting` and
-    /// `any_body_open`. Without this widening the outer sched of a nested nursery never counts its
-    /// join-blocked fiber as a `blocked_owner`, so it never reads `local_quiesced`, so a peer veto
-    /// against it never lifts and a genuine nested deadlock hangs forever instead of faulting
-    /// (measured: `parity_nested_deadlock_cancels_the_outer_parked_siblings_defer` at `fdc71d70`).
-    ///
-    /// TICKET-103 — it also counts the owner on its OWN scope (`JoinScope::owners_blocked`, from
-    /// `self.fiber_scope`) and, when `joined` is `Some`, the nursery it joins on this same sched
-    /// (`JoinScope::joins_blocked` on that nursery's origin scope). `flag_deadlock_leaves` reads
-    /// both. `owner` is `self.mn` in both branches, so `fiber_scope` indexes the right sched.
-    pub(super) fn blocked_owner_guard(
-        &self,
-        sched: &Arc<MnSched>,
-        joined: Option<usize>,
-    ) -> Option<BlockedOwnerGuard> {
-        let (owner, cross_sched) = if self.owns_nested_sched(sched) {
-            (Arc::clone(sched), false)
-        } else {
-            let own = self.mn.clone()?;
-            if Arc::ptr_eq(&own, sched) {
-                return None;
-            }
-            (own, true)
-        };
-        {
-            let mut c = owner.lock();
-            c.owner_blocked(cross_sched);
-            if let Some(s) = self.fiber_scope {
-                c.scopes[s].owners_blocked += 1;
-            }
-            if let Some(j) = joined {
-                debug_assert!(
-                    !cross_sched,
-                    "a joined scope lives on the owner's own sched"
-                );
-                c.scopes[j].joins_blocked += 1;
-            }
-        }
-        owner.notify_waiters();
-        Some(BlockedOwnerGuard {
-            sched: owner,
-            cross_sched,
-            scope: self.fiber_scope,
-            joined,
-        })
     }
 
     /// `chezzi test --max-heap` — collect and read the cap, at a point that is NOT an instruction

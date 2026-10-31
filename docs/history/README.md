@@ -14,6 +14,7 @@ The dated log that `PROGRESS.md` held until 2026-10-16. Newest entries come firs
 
 | file | contents |
 |---|---|
+| [2026-11.md](progress/2026-11.md) | November 2026: refactor fact 2 |
 | [2026-10.md](progress/2026-10.md) | October 2026: refactor phases, TICKET-188..262 |
 | [2026-09.md](progress/2026-09.md) | September 2026 |
 | [2026-08.md](progress/2026-08.md) | August 2026 (ends with one 2026-08-18 GC entry that sat after the July block) |
@@ -68,5 +69,5 @@ Design documents of shipped work, and the full text of design docs before they w
 
 ## benchmarks/
 
-Dated benchmark records, one file per month (`2026-06.md` to `2026-10.md`). Current figures are in
+Dated benchmark records, one file per month (`2026-06.md` to `2026-11.md`). Current figures are in
 [`docs/contributing/benchmarks.md`](../contributing/benchmarks.md).

@@ -68,10 +68,10 @@ impl Vm {
         //    deadlock (the #1 false-positive against an innocent parked sibling).
         let mut reg = match self.wait_begin(
             WaitSpec::Recv,
-            Some(quiesce::PartyWait::Recv(
+            Some(Blocked::on(quiesce::PartyWait::Recv(
                 Arc::clone(&core),
                 Some(Arc::clone(&p)),
-            )),
+            ))),
             "recv",
             span,
         ) {
@@ -210,7 +210,7 @@ impl Vm {
         let _gated = self.gated_register(&[core]);
         let mut reg = self.wait_begin(
             WaitSpec::Send,
-            Some(quiesce::PartyWait::Send(Arc::clone(p))),
+            Some(Blocked::on(quiesce::PartyWait::Send(Arc::clone(p)))),
             "send",
             span,
         )?;
@@ -297,15 +297,14 @@ impl Vm {
             let refs: Vec<&Arc<ChannelCore>> = arms.iter().map(|(c, _)| c).collect();
             self.gated_register(&refs)
         };
-        // TICKET-181 — a timed `wait:` returns at its deadline whatever anyone does, so it is
-        // `inflight` (changed cell (a), C1); an untimed one registers its arms as a waiter.
+        // A timed `wait:` returns at its deadline whatever anyone does: the table accounts it
+        // `inflight`, an untimed one a waiter on its arms (`block::wait_steps`).
         let spec = WaitSpec::Wait {
             deadline: timer.is_some(),
             has_send: arms.iter().any(|(_, is_send)| *is_send),
         };
-        let wait = (!spec.will_return())
-            .then(|| quiesce::PartyWait::Wait(arms.clone(), Some(Arc::clone(p))));
-        let mut reg = self.wait_begin(spec, wait, "wait", span)?;
+        let on = Blocked::on(quiesce::PartyWait::Wait(arms.clone(), Some(Arc::clone(p))));
+        let mut reg = self.wait_begin(spec, Some(on), "wait", span)?;
         let recv_ready = |core: &Arc<ChannelCore>, g: &crate::vm::core::ChanState| {
             g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
         };

@@ -1169,7 +1169,7 @@ print(\"never\")
 
 /// TICKET-063 — the same shape as `ticket_063_guard_waiter_behind_a_recv_faults_deadlock`, but the
 /// WAITER is the inline nursery body itself rather than a spawned sibling. Without
-/// `Vm::block_party_guard` marking the body blocked, `SchedCore::any_body_injecting` vetoes the
+/// the wait's counts marking the body blocked, `SchedCore::any_body_injecting` vetoes the
 /// deadlock predicate forever for this shape.
 #[test]
 fn ticket_063_guard_waiter_in_the_nursery_body_faults_deadlock() {

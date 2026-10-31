@@ -1,9 +1,8 @@
-//! VM: blocking waits: wait ticks, party guards, deadlines and halts, `block_recv`, `wait` polling
+//! VM: blocking waits: wait ticks, deadlines and halts, `block_recv`, `wait` polling
 //! and arms.
 //! Split out of `src/vm/netio.rs`. `super::*` is the parent module.
 
 use super::core::{Pending, PendingOp, SendOutcome, Settled};
-use super::netio::BlockGuard;
 use super::netio::CLOSED_SEND;
 use super::netio::EMPTY_RECV_DEADLOCK;
 use super::netio::EMPTY_WAIT_DEADLOCK;
@@ -58,8 +57,11 @@ impl Vm {
     /// observed once per tick, so cancellation is now the SLOWEST thing in this loop rather than the
     /// fastest. That bound is unchanged by this fix, not introduced by it.
     ///
-    /// The tick is one wait of `spec` (`Recv` or `Send`): it holds no width permit, the halt check
-    /// included ([`Vm::wait_begin`]).
+    /// The tick is one wait of `spec` (`Recv` or `Send`) on `on`: it holds no width permit and
+    /// counts as blocked, the halt check included ([`Vm::wait_begin`]). The counts end with the
+    /// tick, before the caller's next pop: a party still counted while it consumes a value is
+    /// counted as stuck at the instant it made progress (measured: a 300-handoff gate/data
+    /// pipeline, `an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout`, faulted 6/10).
     ///
     /// M3.2 — `h` is the channel's handle, pinned for the wait: the collector reads the values in
     /// `core` (a buffered value, this party's offer or its filled slot) through it. The receiver of
@@ -67,15 +69,19 @@ impl Vm {
     pub(super) fn block_wait_tick(
         &mut self,
         spec: WaitSpec,
+        on: Blocked,
         h: GcRef,
         core: &Arc<ChannelCore>,
         span: Span,
         mut ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
     ) -> Result<(), RuntimeError> {
-        let _gated = self.gated_register(&[core]);
-        let reg = self.wait_begin(spec, None, "a channel wait", span)?;
+        let gated = self.gated_register(&[core]);
+        let mut reg = self.wait_begin(spec, Some(on), "a channel wait", span)?;
+        let counts = reg.take_counts();
         if let Err(e) = self.block_halt_check(span) {
             self.wait_end(reg, &[h]);
+            drop(gated);
+            drop(counts);
             return Err(e);
         }
         self.wait_door(&[h], |_| {
@@ -97,6 +103,8 @@ impl Vm {
             drop((guard, waited));
         });
         self.wait_end(reg, &[h]);
+        drop(gated);
+        drop(counts);
         Ok(())
     }
 
@@ -125,86 +133,6 @@ impl Vm {
                 std::thread::sleep(std::time::Duration::from_millis(1))
             });
         }
-    }
-
-    /// Register this thread as a blocked party for as long as the returned guard lives, so the
-    /// process-wide verdict can see it parked. The party half is `None` when this thread is not a
-    /// counted party.
-    ///
-    /// §2c1 — it ALSO marks every eager nursery this thread owns as `body_blocked` for the same span.
-    /// A body that is parked here cannot reach another `spawn`, so its `body_open` flag must stop
-    /// vetoing the deadlock predicate (see [`super::JoinScope::body_blocked`]). This is the one funnel
-    /// every counted-party block goes through, which is why the mark lives here rather than at each
-    /// blocking site. Unmarked on drop, in `BlockGuard`'s `Drop`.
-    ///
-    /// TICKET-223 — `site` is the deadlock report this wait gives when the verdict names it: the
-    /// one place a wait names its deadlock text. `None` for a join, whose report is the victims'.
-    pub(super) fn block_party_guard(
-        &self,
-        wait: quiesce::PartyWait,
-        site: Option<(&'static str, Span)>,
-    ) -> BlockGuard {
-        // The wait is published WITH the `body_blocked` mark, in one `SchedCore` acquisition per
-        // sched (`set_body_wait`) — see its doc for the race that two acquisitions leave open. The
-        // party (P) is taken FIRST (TICKET-232), with no `SchedCore` held, so the documented P → A
-        // order holds: the mark lifts the body veto, and a judge that saw a blocked body and no
-        // party had no site to latch. ONE `Arc<PartyWait>` is shared by the sched registration and
-        // the party, so the two can never disagree about what this thread is waiting for.
-        let wait = Arc::new(wait);
-        let party = self.block_ctx().judged().then(|| {
-            self.quiesce
-                .block_shared(Arc::clone(&wait), self.wake_set(), site)
-        });
-        let mut g = self.blocked_bodies_guard_with(false, Some(wait));
-        g._party = party;
-        g
-    }
-
-    /// §2c1 — the `body_blocked` half of [`Vm::block_party_guard`] on its own: mark every eager
-    /// nursery scope open on THIS thread as unable to inject, for as long as the guard lives.
-    ///
-    /// Used directly wherever the body stops running without registering a party — a NESTED eager
-    /// nursery's join, where the enclosing body sits in `mn_worker_loop` rather than in a channel
-    /// wait. Without it the enclosing scope's `body_open` vetoes the deadlock predicate for the whole
-    /// duration of that join, and a genuine nested deadlock hangs
-    /// (`parallel_cross_nursery_genuine_nested_deadlock_still_faults`).
-    pub(super) fn blocked_bodies_guard(&self, awaiting_builder: bool) -> BlockGuard {
-        self.blocked_bodies_guard_with(awaiting_builder, None)
-    }
-
-    /// [`Vm::blocked_bodies_guard`] plus the wait this block is on — published on every eager sched of
-    /// this thread, atomically with the `body_blocked` mark.
-    fn blocked_bodies_guard_with(
-        &self,
-        awaiting_builder: bool,
-        wait: Option<Arc<quiesce::PartyWait>>,
-    ) -> BlockGuard {
-        let g = BlockGuard {
-            _party: None,
-            awaiting: awaiting_builder,
-            bodies: self
-                .owned_eager_scopes()
-                // TICKET-103 — a fiber-owned nursery's body is a counted fiber, and marking its scope
-                // `awaiting_builder` would veto a genuine deadlock. Continuations need no entry here:
-                // `set_body_wait` marks the whole family.
-                .filter(|s| !s.fiber_owned)
-                .map(|s| {
-                    s.sched
-                        .set_body_wait(s.scope, wait.as_ref(), true, awaiting_builder);
-                    (Arc::clone(&s.sched), s.scope)
-                })
-                .collect(),
-            wait,
-        };
-        // TICKET-211 — the body's thread just stopped running: its runner slot goes to the claim,
-        // which starts runners for whatever the body already queued.
-        for (sched, scope) in &g.bodies {
-            if *scope == 0 {
-                let w = sched.body_runner(true);
-                self.start_runners(sched, w);
-            }
-        }
-        g
     }
 
     /// The `chezzi test --timeout` wall-clock halt, on its own so the ops that PARK a fiber can observe
@@ -363,11 +291,9 @@ impl Vm {
     /// every other blocking path here already pays ([`Vm::block_wait_tick`], `demote_recv_block`,
     /// `demote_block_socket`): ≤5 ms of cancel latency, 200 wakes/s per SLEEPING thread.
     ///
-    /// **The sleeper is deliberately NOT registered** as a blocked party ([`Vm::block_party_guard`]).
-    /// It is a live, unregistered party, so `blocked < live` and the process-wide verdict always
-    /// declines — the safe direction (it can only delay someone else's fault, never fabricate one),
-    /// and exactly what `inflight` does for the M:N side of the same sleep. A `PartyWait::Sleep` would
-    /// be a false-deadlock generator: a sleeper's wait is never unsatisfiable, it always ends.
+    /// The sleeper counts as no blocked party: a wait that ends by itself counts nothing
+    /// (`block::wait_steps`), so the process-wide verdict declines while it lasts, as `inflight`
+    /// does for the M:N side of the same sleep.
     ///
     /// **`--max-heap` reaches this loop only through the CANCEL arm, and only when the over-allocating
     /// task shares a cancel scope with the sleeper** — a nursery sibling or an `Executor` job, whose
@@ -431,32 +357,22 @@ impl Vm {
                 }
             }
             let op = PendingOp::new(Arc::clone(&p), vec![(Arc::clone(core), 0, false)]);
-            // Registered ONLY for the wait below — a per-iteration guard, so it is dropped before the
-            // next `pop` attempt at the loop head. **That scoping is load-bearing, and holding the
-            // registration across the attempt is a false-deadlock bug**: `pop()` and un-registering
-            // are not one atomic step, so a party still registered while it consumes a value is
-            // counted as parked at the very instant it made progress. Measured (a 300-handoff
-            // gate/data pipeline, `an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout`):
-            // the consumer waits on `data`, the producer pops `gate` and is momentarily "blocked on an
-            // empty gate" between the pop and the return — all parties registered, none satisfiable —
-            // and the run faulted 6/10. The inverse costs nothing: an unregistered party makes
-            // `blocked < live`, which only DECLINES a verdict (a delayed fault, never a wrong one).
-            let party = self.block_party_guard(
-                quiesce::PartyWait::Recv(Arc::clone(core), Some(Arc::clone(&p))),
-                Some((EMPTY_RECV_DEADLOCK, span)),
-            );
             // Ready == the settle conditions the loop head consumes (a value to take, `closed`, a
             // `trip()` latch), plus this receiver's own slot being filled, so the wait cannot sleep
             // through a state the next iteration would immediately take (W7-13). All are written
             // under `core.q` (`done_latch` since W7-13r(b)), so re-checking them under the guard the
             // wait consumes closes the window.
-            let r = self.block_wait_tick(WaitSpec::Recv, h, core, span, |g| {
+            let on = Blocked::at(
+                quiesce::PartyWait::Recv(Arc::clone(core), Some(Arc::clone(&p))),
+                EMPTY_RECV_DEADLOCK,
+                span,
+            );
+            let r = self.block_wait_tick(WaitSpec::Recv, on, h, core, span, |g| {
                 g.recv_ready_for(Some(&p))
                     || g.closed
                     || core.done_latch.load(Ordering::Relaxed)
                     || !p.is_queued()
             });
-            drop(party);
             // Settle before acting on a fault: a filled slot is a delivered value.
             if let Settled::Got(_, v) = op.settle() {
                 return Ok(RecvStep::Filled(v));
@@ -768,19 +684,25 @@ impl Vm {
         // re-runs this `WaitPoll`, which settles and re-polls every arm. Rewinding rather than looping
         // in place also means the halts land on the ordinary back-edge checkpoint.
         if wait_mode == BlockMode::InPlace {
-            // Registered FIRST, before the halt check, so this party counts ITSELF as blocked; after
+            // The wait begins BEFORE the halt check, so this party counts ITSELF as blocked; after
             // it, a lone `wait:`-blocked party would forever see `blocked < live` and never fault.
-            // The registration is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is
-            // progress), so the verdict declines while any one of them is feedable.
+            // The wait is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is progress),
+            // so the verdict declines while any one of them is feedable.
             let (first, is_send0) = arms[0].clone(); // non-empty: an all-closed arm set returned above
             let arm_cores: Vec<Arc<ChannelCore>> =
                 arms.iter().map(|(c, _)| Arc::clone(c)).collect();
-            let party = self.block_party_guard(
+            let refs: Vec<&Arc<ChannelCore>> = arm_cores.iter().collect();
+            let _gated = self.gated_register(&refs);
+            let on = Blocked::at(
                 quiesce::PartyWait::Wait(arms, Some(Arc::clone(&p))),
-                Some((EMPTY_WAIT_DEADLOCK, span)),
+                EMPTY_WAIT_DEADLOCK,
+                span,
             );
+            let mut reg = self.wait_begin(wait_spec, Some(on), "wait", span)?;
+            let counts = reg.take_counts();
             if let Err(e) = self.block_halt_check(span) {
-                drop(party);
+                self.wait_end(reg, &[]);
+                drop(counts);
                 let settled = op.settle();
                 return self
                     .wait_settled(settled, base, meta, span)
@@ -806,9 +728,6 @@ impl Vm {
                     || (!is_send0
                         && (g.recv_ready_for(Some(&p)) || first.done_latch.load(Ordering::Relaxed)))
             };
-            let refs: Vec<&Arc<ChannelCore>> = arm_cores.iter().collect();
-            let _gated = self.gated_register(&refs);
-            let reg = self.wait_begin(wait_spec, None, "wait", span)?;
             #[cfg(test)]
             WAIT_ARM0_ENTRIES.fetch_add(1, Ordering::Relaxed);
             // M3.2 — the arm handles stay on the operand stack across the door, so the collector
@@ -830,7 +749,7 @@ impl Vm {
                 drop((guard, waited));
             });
             self.wait_end(reg, &[]);
-            drop(party);
+            drop(counts);
             self.pending = Some(op);
             self.rewind_op();
             return Ok(());

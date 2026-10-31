@@ -642,9 +642,8 @@ impl Vm {
             }));
         }
         {
-            // gaps.md W7-58 — this thread is now blocked in a nursery join; make it visible to the
-            // process-wide verdict for exactly that span (RAII, dropped before the reduce).
-            let _party = self.nursery_party_guard(&sched);
+            // gaps.md W7-58 — the join's counts, for exactly that span (dropped before the reduce).
+            let _counts = self.nursery_counts(&sched, 0);
             let shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -698,30 +697,19 @@ impl Vm {
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
         // TICKET-095 — the owner-fiber arm (`self.owns_nested_sched(sched)`) gets its OWN deadlock
         // error, naming THIS nursery's span, so a T=1 fault reports the inner nursery like every other
-        // worker count does. The `(None, Some(held))` late-spawn arm gets none: it has no
-        // `blocked_owners` bracket either (see `blocked_owner_guard`), and DEC-048 makes the sched's
-        // builder-span error correct for it.
+        // worker count does. The `(None, Some(held))` late-spawn arm gets none: it counts no blocked
+        // owner either (`Vm::nursery_counts`), and DEC-048 makes the sched's builder-span error
+        // correct for it.
         if self.owns_nested_sched(sched) {
             sched.lock().scopes[scope_id].deadlock_err =
                 Some(self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock());
         }
         let wid = self.wid;
         {
-            // gaps.md W7-58 — a no-op on the `(Some(sched), _)` path (a fiber's nested nursery runs on
-            // a worker shell, `mn.is_some()`); it registers only on the `(None, Some(held))` late-spawn
-            // path, where `self` really is the top-level builder blocked in this join.
-            let _party = self.nursery_party_guard(sched);
-            // TICKET-095 — counts this fiber's OS thread as a `blocked_owner`, on ITS OWN sched
-            // (`self.mn`), for the span it sits inline in this join, so `is_deadlocked_ignoring_jobs`
-            // can tell it apart from a genuinely running worker. `None` on the late-spawn arm (see
-            // `blocked_owner_guard`). TICKET-099 widened this to the cross-sched case too: `sched`
-            // (the child nursery this fiber is joining) may be a private eager sched of its own, not
-            // `self.mn` — the fiber still counts as blocked on `self.mn`, because a peer veto asks
-            // `self.mn` "can you still feed me?" and a fiber waiting on this join can feed nobody.
-            // TICKET-103 — in the owner arm the joined scope is on the owner's own sched, so it is
-            // recorded as this join's target for `flag_deadlock_leaves`.
-            let _owner =
-                self.blocked_owner_guard(sched, self.owns_nested_sched(sched).then_some(scope_id));
+            // A party on the `(None, Some(held))` late-spawn arm; a blocked owner on its own sched
+            // on the `(Some(sched), _)` arm, so `is_deadlocked_ignoring_jobs` can tell it apart from
+            // a running worker.
+            let _counts = self.nursery_counts(sched, scope_id);
             let shell = self.joiner_shell(sched, &cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -807,8 +795,7 @@ impl Vm {
         // A shell runs no code of its own: every fiber it schedules in carries its own module view
         // (`FiberCtx`).
         {
-            // gaps.md W7-58 — the enlisted-scope join blocks this (inline builder) thread too.
-            let _party = self.nursery_party_guard(&sched);
+            let _counts = self.nursery_counts(&sched, scope_id);
             let shell = self.joiner_shell(&sched, &cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -856,8 +843,8 @@ impl Vm {
         let wid = self.wid;
         // A shell needs no module view of its own (see `join_enlisted_scope`).
         {
-            // gaps.md W7-58 — the cancel-teardown drain blocks this thread just as the normal join does.
-            let _party = self.nursery_party_guard(&sched);
+            // The cancel-teardown drain blocks this thread just as the normal join does.
+            let _counts = self.nursery_counts(&sched, scope_id);
             let shell = self.joiner_shell(&sched, &cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -1113,11 +1100,9 @@ impl Vm {
     ///   (TICKET-211: `MnSched::claim_runners` in `inject_or_extend`, `Vm::start_runners`).
     ///   `close_body` gives the body's runner bit back, and the inline joiner runs fibers only if
     ///   `MnSched::claim_joiner` finds a slot left under the worker count.
-    /// - **The W7-58 party guard.** The joiner used to be a worker shell by construction, so it was
-    ///   never a counted party; a top-level joiner IS one, and without registering, `main` sitting in
-    ///   `mn_worker_loop` is invisible to the process-wide verdict (`parties.len() < live` vetoes
-    ///   forever). `nursery_party_guard` self-gates on `mn.is_none()`,
-    ///   so it stays a no-op on a shell.
+    /// - **The W7-58 party.** A top-level joiner is a counted party: without its count, `main`
+    ///   sitting in `mn_worker_loop` is invisible to the process-wide verdict (`parties.len() <
+    ///   live` vetoes forever). [`Vm::nursery_counts`] counts it only with no sched under it.
     pub(super) fn join_eager_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
         if scope.fiber_owned {
             return self.join_fiber_owned_nursery(scope);
@@ -1141,20 +1126,13 @@ impl Vm {
         if drainer.is_none() {
             {
                 // §2c1 — the ENCLOSING body is parked here for the duration, so it cannot inject:
-                // clear its `body_open` veto or a genuine nested deadlock hangs.
-                let _bodies = self.blocked_bodies_guard(true);
-                let _party = self.nursery_party_guard(&sched);
+                // the counts clear its `body_open` veto, or a genuine nested deadlock hangs.
+                let _counts = self.nursery_counts(&sched, sid);
                 // T1-fix (W8-8, nested arm) — this scope has NO drainer of its own; the OUTER scope's
                 // `chezzi-eager` drainer already drains the shared global queue (scope-blind) and
                 // cannot self-stop while `main` sits here (`scopes[0].body_open` stays true), so at a
                 // budget of one that drainer alone is the whole CPU allowance. Running the inline
                 // owner too would be a second runner. Same gate as the outermost arms below.
-                // TICKET-099 — this thread's OS-level block on `wait_for_scope` below counts as a
-                // `blocked_owner` on `self.mn` (see `blocked_owner_guard`'s doc): `None` here since
-                // `drainer.is_none()` only happens when `self.mn` was already `None` at nursery entry
-                // (`activate_eager_nursery`'s reused-scope branch requires it), so there is no sched
-                // above this one to report to.
-                let _owner = self.blocked_owner_guard(&sched, None);
                 // TICKET-118 (W13-7) — only the top-level `Vm` (`mn.is_none()`) may hand its pool
                 // slot over while it waits here (DEC-052).
                 let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
@@ -1183,13 +1161,7 @@ impl Vm {
             return self.reduce_task_slots(slots);
         }
         {
-            let _party = self.nursery_party_guard(&sched);
-            // TICKET-099 — this thread's OS-level block on `wait_for_completion` below counts as a
-            // `blocked_owner` on `self.mn`, whether `sched` (this join's PRIVATE eager sched) is the
-            // outermost nursery (`self.mn` is `None`, the guard is a no-op) or a nursery entered
-            // inside a spawned task (`self.mn` is `Some(outer)`, so this fiber counts as blocked on
-            // `outer` — the fiber that is join-blocked here can feed `outer`'s peer veto nothing).
-            let _owner = self.blocked_owner_guard(&sched, None);
+            let _counts = self.nursery_counts(&sched, sid);
             // TICKET-118 (W13-7) — only the top-level `Vm` (`mn.is_none()`) may hand its pool slot
             // over while it waits here (DEC-052).
             let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
@@ -1314,8 +1286,7 @@ impl Vm {
         // `join_eager_nursery`'s nested arm); the owner's drainer and sibling scopes are untouched.
         if drainer.is_none() {
             {
-                let _bodies = self.blocked_bodies_guard(true); // see `join_eager_nursery`'s nested arm
-                let _party = self.nursery_party_guard(&sched);
+                let _counts = self.nursery_counts(&sched, sid); // see `join_eager_nursery`'s nested arm
                 // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above,
                 // over the same family (TICKET-103).
                 let mut shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::RunnersAbort);
@@ -1339,10 +1310,10 @@ impl Vm {
             return self.escape_child_fault(slots);
         }
         {
-            // §2c1 — same reason as `join_eager_nursery`: a top-level escape settles its handlers on
-            // `main`, which must be a counted party for that span or the process-wide verdict vetoes
-            // forever. No-op on a worker shell.
-            let _party = self.nursery_party_guard(&sched);
+            // §2c1 — the same counts as `join_eager_nursery`: a top-level escape settles its handlers
+            // on `main`, which must be a counted party for that span or the process-wide verdict
+            // vetoes forever.
+            let _counts = self.nursery_counts(&sched, sid);
             let shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::RunnersAbort);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -1368,16 +1339,14 @@ impl Vm {
 
     /// TICKET-103 — `JoinNursery` for a fiber-owned nursery (`EagerScope::fiber_owned`). Its scopes
     /// live on this fiber's own sched, so the owner's OS thread runs them inline, scope by scope over
-    /// the family, under `blocked_owner_guard` with the origin scope as its join target. Mirrors
-    /// `run_mn_nursery_nested`'s owner arm.
+    /// the family, counted as a blocked owner with the origin scope as its join target
+    /// ([`Vm::nursery_counts`]), as `run_mn_nursery_nested`'s owner arm is.
     ///
     /// [`Vm::joiner_shell`] decides whether this thread runs the family's fibers (TICKET-245).
     /// Under `native_reentry > 0` the owner hands its runner slot to its demote replacement and
     /// only waits; the inline loop remains there only for a refused OS thread. It is not gated on
     /// `eager_joiner_runs_fibers` (the main-thread nested arm differs because a drainer exists
-    /// there). No `nursery_party_guard`: the owner is a fiber, never a counted party. No
-    /// `blocked_bodies_guard`: the body is a counted fiber, and `awaiting_builder` on its scope would
-    /// veto a genuine deadlock.
+    /// there).
     ///
     /// With `native_reentry == 0` the family is complete here, because `join_nursery` parked the
     /// fiber otherwise. Under `native_reentry > 0` the fiber cannot park (its Rust stack holds the
@@ -1386,7 +1355,7 @@ impl Vm {
         let sids = scope.sids();
         if !scope.sched.lock().family_done(scope.scope) {
             let wid = self.wid;
-            let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
+            let _counts = self.nursery_counts(&scope.sched, scope.scope);
             let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {
@@ -1418,7 +1387,7 @@ impl Vm {
         cancel_fiber_owned_family(&scope);
         if !scope.sched.lock().family_done(scope.scope) {
             let wid = self.wid;
-            let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
+            let _counts = self.nursery_counts(&scope.sched, scope.scope);
             let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid, JoinCover::None);
             // M1.5 — the join waits detached; an inline loop attaches its own token.
             self.wait_door(&[], |_| {

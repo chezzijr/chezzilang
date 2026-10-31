@@ -3,38 +3,6 @@
 
 use super::*;
 
-/// §2c1 — the RAII pair [`Vm::block_party_guard`] hands back: the process-wide blocked-party
-/// registration (absent when this thread is not a counted party) plus the `body_blocked` marks on
-/// every eager nursery this thread owns. Both are released together when the block returns.
-///
-/// The marks are what let a genuine `main`-plus-sibling deadlock still FAULT under §2c1's eager
-/// start: a top-level nursery's `body_open` spans essentially the whole program, and it vetoes the
-/// deadlock predicate, so without clearing it for the duration of the block the verdict could never
-/// fire. See [`super::JoinScope::body_blocked`].
-pub(super) struct BlockGuard {
-    pub(super) _party: Option<quiesce::PartyGuard>,
-    /// Whether this guard also raised `awaiting_builder` — a NESTED-JOIN block does, a channel block
-    /// does not. See `MnSched::set_body_blocked`.
-    pub(super) awaiting: bool,
-    pub(super) bodies: Vec<(Arc<MnSched>, usize)>,
-    /// This block's wait, published on every sched in `bodies` for the duration. See
-    /// `SchedCore::waiters` — this is what keeps the `body_blocked` relaxation from false-faulting
-    /// a rendezvous. `None` for a nested-join block, which waits on no channel.
-    pub(super) wait: Option<Arc<quiesce::PartyWait>>,
-}
-
-impl Drop for BlockGuard {
-    fn drop(&mut self) {
-        for (s, scope) in &self.bodies {
-            s.set_body_wait(*scope, self.wait.as_ref(), false, self.awaiting);
-            // TICKET-211 — the body runs again on its own thread: it takes bit 0 back.
-            if *scope == 0 {
-                s.body_runner(false);
-            }
-        }
-    }
-}
-
 /// Generate a `pub(super) fn <name>(&self, GcRef) -> Arc<CoreType>` that clones out the shared
 /// `Arc` behind a handle of the given `Obj` variant (refcount bump). See [`Vm::channel_core`] for
 /// the rationale (the `Arc` is held only for the calling method, so it does not borrow the heap);
@@ -112,7 +80,7 @@ pub(super) const EMPTY_WAIT_DEADLOCK: &str = "wait on channels that are all empt
 
 /// TICKET-223 — the report of a party blocked on a `Shared`/`RwShared` guard when the deadlock
 /// verdict names it. Replaces the "parallel: block" text the guard wait used to borrow.
-const GUARD_DEADLOCK: &str = "update guard wait: deadlock — the task holding this Shared/RwShared \
+pub(super) const GUARD_DEADLOCK: &str = "update guard wait: deadlock — the task holding this Shared/RwShared \
     guard is blocked and no runnable task can release it";
 
 /// W7-17 — end a timer park EARLY, because the run's `--timeout` expired before the timer's own
@@ -378,11 +346,7 @@ impl Vm {
             admitted: ticket.admission(),
         };
         let taking = Arc::clone(&owned.taking);
-        self.guard_wait_enter(reg, owned.clone(), what, span)?;
-        let _party = self.block_party_guard(
-            quiesce::PartyWait::Guard(owned, self.guard_token),
-            Some((GUARD_DEADLOCK, span)),
-        );
+        self.guard_wait_enter(reg, owned, what, span)?;
         let out = loop {
             // TICKET-193 — permit BEFORE guard. Wait for the guard to come free holding no permit,
             // take the permit, then take the guard without waiting. Taking the guard first parks

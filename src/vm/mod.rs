@@ -1414,7 +1414,7 @@ mod equality;
 mod hash;
 #[cfg(test)]
 use block::Waiter;
-use block::{BlockMode, WaitReg, WaitSpec};
+use block::{BlockMode, Blocked, WaitReg, WaitSpec};
 mod call;
 mod core_method;
 mod json_decode;
