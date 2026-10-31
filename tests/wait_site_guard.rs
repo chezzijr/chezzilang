@@ -6,8 +6,8 @@
 //! production code of `src/vm` (comments, string contents and inline `#[cfg(test)] mod NAME { .. }`
 //! blocks removed; `tests/`, `golden_tests/` and `*tests.rs` skipped) and finds each blocking call:
 //! a condvar or barrier wait, a sleep, a park, a channel receive, a thread join, a `poll(2)`. Each
-//! hit must sit inside the parentheses of a `gc_blocking(` call, or inside a function on
-//! [`ALLOWED`] with its reason.
+//! hit must sit inside the parentheses of a door call ([`DOORS`]: `gc_blocking(` or a wrapper of
+//! it), or inside a function on [`ALLOWED`] with its reason.
 //!
 //! A row with a call spelling is a WRAPPER: a function that blocks for its caller. Each call of it
 //! is then a hit too, so the door moves to its callers and the scan follows it there.
@@ -367,13 +367,28 @@ fn strip_line(line: &str) -> String {
     out
 }
 
-/// The byte ranges of `code` inside the parentheses of each `gc_blocking(` call.
+/// The doors: `Vm::gc_blocking`, and the two functions that run their closure through it
+/// (`Vm::host_wait`, the bracket of a wait that holds its host thread, and `Vm::fd_door`, which
+/// picks it or the plain door). `doors_reach_gc_blocking` checks that each wrapper's body calls
+/// `gc_blocking(`.
+const DOORS: [&str; 3] = ["gc_blocking", "host_wait", "fd_door"];
+
+/// The byte ranges of `code` inside the parentheses of each call of a door.
 fn door_spans(code: &str) -> Vec<(usize, usize)> {
+    DOORS
+        .iter()
+        .flat_map(|door| door_spans_of(code, door))
+        .collect()
+}
+
+/// The byte ranges of `code` inside the parentheses of each `door(` call.
+fn door_spans_of(code: &str, door: &str) -> Vec<(usize, usize)> {
     let bytes = code.as_bytes();
     let mut spans = Vec::new();
     let mut from = 0;
-    while let Some(at) = code[from..].find("gc_blocking(") {
-        let open = from + at + "gc_blocking".len();
+    let call = format!("{door}(");
+    while let Some(at) = code[from..].find(&call) {
+        let open = from + at + door.len();
         let mut depth = 0usize;
         let mut close = bytes.len();
         for (k, b) in bytes.iter().enumerate().skip(open) {
@@ -530,6 +545,47 @@ fn every_wait_of_a_vm_thread_goes_through_the_gc_door() {
         "an ALLOWED row matches no wait any more; delete it:\n{}",
         stale.join("\n")
     );
+}
+
+/// Each door but `gc_blocking` is a wrapper: its own body must open the GC door.
+#[test]
+fn doors_reach_gc_blocking() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/vm");
+    let mut files = Vec::new();
+    for e in std::fs::read_dir(&root).expect("read src/vm") {
+        let p = e.expect("dir entry").path();
+        if p.extension().is_some_and(|x| x == "rs") {
+            files.push(production_code(&std::fs::read_to_string(&p).expect("read")));
+        }
+    }
+    for door in &DOORS[1..] {
+        let def = format!("fn {door}");
+        let body = files
+            .iter()
+            .find_map(|code| {
+                let at = code.find(&def)?;
+                let open = at + code[at..].find('{')?;
+                let mut depth = 0usize;
+                for (k, b) in code.bytes().enumerate().skip(open) {
+                    match b {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(code[open..k].to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| panic!("door `{door}` has no definition in src/vm"));
+        assert!(
+            body.contains("gc_blocking("),
+            "door `{door}` does not call `gc_blocking(` in its body"
+        );
+    }
 }
 
 /// The scan itself: a wait inside a door passes, one outside fails, a wrapper's call is a hit.
