@@ -25,35 +25,20 @@
 use super::fxhash::FxHashMap;
 use super::heap::Obj;
 use super::heap_slab::{Slab, SlabAppend, Slot, SlotBits};
-use super::reaper::Pending;
 use super::rvec::RetireList;
 use super::value::GcRef;
 use crate::lexer::Span;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
-/// Where a freed object's drop runs: the one table that `HeapCore::sweep_slots` and
-/// `Vm::drop_graveyard` read.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum DropSite {
-    /// In its slot, inside the stop: the drop frees memory only.
-    InPlace,
-    /// A handle on an `Arc` core: its drop can drop the core and run its destructor (take a lock,
-    /// close an fd). The collector drops it after the world restarts, in the GC door.
-    Door,
-    /// A drop that can block (a writer's flush, `dlclose`): the reaper thread drops it
-    /// (`vm/reaper.rs`), so no task runner waits for it.
-    Reaper,
-}
-
-/// The [`DropSite`] of `o`.
-pub(super) fn drop_site(o: &Obj) -> DropSite {
+/// Whether `o` is a handle on an `Arc` core: its state lives outside every heap, so dropping the
+/// handle can drop the core (and run its destructor: take a lock, close an fd), which the sweep
+/// defers to its graveyard. M5d: no such drop writes to an fd (a dropped `buffered` writer
+/// discards its tail), and none can block.
+fn is_arc_core(o: &Obj) -> bool {
     match o {
-        // Every `Writer`: a `buffered` one writes its tail in its drop. A plain `create`/`append`
-        // writer (unbuffered, M5c) only closes its fd, but its backing sits behind the core's
-        // lock, so the table keeps one row per `Obj` kind.
-        Obj::Writer(_) | Obj::Cffi(_) => DropSite::Reaper,
-        Obj::Channel(_)
+        Obj::Cffi(_)
+        | Obj::Channel(_)
         | Obj::Shared(_)
         | Obj::RwShared(_)
         | Obj::Atomic(_)
@@ -61,7 +46,8 @@ pub(super) fn drop_site(o: &Obj) -> DropSite {
         | Obj::Executor(_)
         | Obj::Socket(_)
         | Obj::Listener(_)
-        | Obj::Reader(_) => DropSite::Door,
+        | Obj::Writer(_)
+        | Obj::Reader(_) => true,
         Obj::Str(_)
         | Obj::Bytes(_)
         | Obj::BigInt(_)
@@ -81,7 +67,7 @@ pub(super) fn drop_site(o: &Obj) -> DropSite {
         | Obj::Cell(_)
         | Obj::Closure { .. }
         | Obj::Module(_)
-        | Obj::Generator(_) => DropSite::InPlace,
+        | Obj::Generator(_) => false,
     }
 }
 
@@ -153,8 +139,6 @@ pub struct HeapCore {
     /// M2: the `RVec` blocks the run's threads retired and handed in (`adopt_retired`). The
     /// sweep frees them with the world stopped (`vm/rvec.rs`).
     retired: RetireList,
-    /// The batches this run handed the reaper and it did not drop yet (`vm/reaper.rs`).
-    reaped: Arc<Pending>,
 }
 
 /// `HeapCore` is shared by every handle of one core; a new `Cell` / `RefCell` in it must fail here.
@@ -188,25 +172,11 @@ impl Default for HeapCore {
             last_live_bytes: AtomicUsize::new(0),
             err_spans: Mutex::new(FxHashMap::default()),
             retired: RetireList::default(),
-            reaped: Arc::default(),
         }
     }
 }
 
-impl Drop for HeapCore {
-    /// The run's heap is gone: wait for the reaper to drop what this run's sweeps handed it, so a
-    /// freed writer's tail reaches its fd before the run returns.
-    fn drop(&mut self) {
-        self.reaped.wait();
-    }
-}
-
 impl HeapCore {
-    /// The count of this run's batches on the reaper (`vm/reaper.rs`).
-    pub(super) fn reaped(&self) -> &Arc<Pending> {
-        &self.reaped
-    }
-
     /// Slot `h` (see `Slab::get`).
     #[inline]
     pub(super) fn get(&self, h: GcRef) -> &Slot {
@@ -353,8 +323,8 @@ impl HeapCore {
     ///
     /// The slots in another handle's free cache are empty, so this skips them: it neither counts
     /// them live nor puts them on the free list a second time, and they stay with their handle.
-    /// A freed object whose [`DropSite`] is not `InPlace` goes to `graveyard`, and the caller
-    /// drops it after the world restarts (`Vm::drop_graveyard`).
+    /// A freed object that owns an `Arc` core or a file goes to `graveyard`, and the caller drops it
+    /// after the world restarts, through the GC door (`Vm::drop_graveyard`).
     ///
     /// # Safety
     ///
@@ -386,11 +356,7 @@ impl HeapCore {
                         Some(_) | None => {
                             // Drop a plain object in place: moving every dead `Obj` out to the
                             // stack first cost a store-forwarding stall per slot (M2.8 profile).
-                            if slot
-                                .obj
-                                .as_ref()
-                                .is_some_and(|o| drop_site(o) != DropSite::InPlace)
-                            {
+                            if slot.obj.as_ref().is_some_and(is_arc_core) {
                                 graveyard.extend(slot.obj.take());
                             } else {
                                 slot.obj = None;
@@ -526,10 +492,10 @@ mod tests {
 
     /// M3.5 — the airlock's state is gone: a `Proto` has no private/deep slot masks (two `u64`),
     /// and a `HeapCore` has no copy bits (a `SlotBits` and its `AtomicBool`) and no copy-log
-    /// registry (a `Mutex<Vec<_>>`). M5b: the reaper's `Arc<Pending>` adds 8 bytes (464 to 472).
+    /// registry (a `Mutex<Vec<_>>`).
     #[test]
     fn airlock_state_is_gone_from_proto_and_heap_core() {
-        assert_eq!(std::mem::size_of::<super::HeapCore>(), 472);
+        assert_eq!(std::mem::size_of::<super::HeapCore>(), 464);
         assert_eq!(std::mem::size_of::<crate::base::op::Proto>(), 136);
     }
 

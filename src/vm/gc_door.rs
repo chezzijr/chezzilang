@@ -176,27 +176,16 @@ impl Vm {
         self.drop_graveyard();
     }
 
-    /// Drop the objects the last sweep freed whose drop can make a syscall
-    /// (`Heap::take_graveyard`), by their `heap_core::DropSite`, after the world restarts and
-    /// through the door. A drop that can block (a garbage writer flushes its tail into a full pipe)
-    /// goes to the reaper thread (`vm/reaper.rs`): run here, it would stall this task runner, and
-    /// the task it takes next. The rest (a core's lock, an fd close) drops here, detached. The
-    /// dropped objects are out of their slots, so no drop reads a heap object.
+    /// Drop the objects the last sweep freed that own an `Arc` core or a file
+    /// (`Heap::take_graveyard`), through the door: a drop can take a core's lock or close an fd. No
+    /// such drop writes to an fd (M5d: a dropped `buffered` writer discards its tail, as Go's
+    /// `bufio.Writer`), so none blocks. The dropped objects are out of their slots, so the drop
+    /// reads no heap object.
     fn drop_graveyard(&mut self) {
         let dead = self.heap.take_graveyard();
-        if dead.is_empty() {
-            return;
+        if !dead.is_empty() {
+            self.gc_blocking(&[], move |_| drop(dead));
         }
-        let (slow, rest): (Vec<Obj>, Vec<Obj>) = dead
-            .into_iter()
-            .partition(|o| super::heap_core::drop_site(o) == super::heap_core::DropSite::Reaper);
-        let reaped = self.heap.reaped();
-        self.gc_blocking(&[], move |_| {
-            if !slow.is_empty() {
-                super::reaper::reap(slow, &reaped);
-            }
-            drop(rest);
-        });
     }
 
     /// THE blocking door. Every wait this thread can make while it holds a token runs as `f`

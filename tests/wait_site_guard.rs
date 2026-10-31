@@ -21,7 +21,8 @@
 //!   (an in-place `Kind::Blocking`/`Kind::HostWait` native runs inside the door at `call.rs`; a
 //!   `Kind::Inline` native's syscalls must stay short, such as `getcwd` or `getrandom`);
 //! - a `Mutex::lock` held by a thread that waits detached (the rule is in `Vm::gc_blocking`'s doc);
-//! - a `Drop` that makes a syscall (`WriterCore::drop` flushes a buffered writer);
+//! - a `Drop` that makes a syscall (M5d: no `Drop` in `src/vm` writes to an fd; a dropped core
+//!   closes its fd);
 //! - a row is keyed by file and function name, so a new wait in an allowed function passes;
 //! - a value the door must carry: a `GcRef` held in a Rust local across a door must be in the
 //!   door's `pins` or on the VM stack. `tests/gc_blocking_pins.rs` checks that under GC stress,
@@ -237,24 +238,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "spawn_writer",
         "",
         "the stdout/stderr writer thread never attaches",
-    ),
-    (
-        "core.rs",
-        "drop",
-        "",
-        "`WriterCore::drop` flushes a buffered writer where the last handle drops, with no Vm: a sweep's graveyard hands it to the reaper thread, which never attaches (`vm/reaper.rs`, `tests/gc_graveyard_drop_grid.rs`)",
-    ),
-    (
-        "reaper.rs",
-        "wait",
-        "",
-        "`Pending::wait`: its one caller is `HeapCore`'s `Drop` (the row below)",
-    ),
-    (
-        "heap_core.rs",
-        "drop",
-        "",
-        "the run's last heap handle is gone, so no thread of the run holds a token or can request a stop",
     ),
     (
         "entry.rs",

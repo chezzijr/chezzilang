@@ -919,8 +919,7 @@ mod io_state_tests {
     use std::sync::Mutex;
     use std::sync::mpsc::{Receiver, Sender, channel};
 
-    /// A backing whose drop blocks until the test lets it go, as a `buffered` writer's drop flush
-    /// blocks on a full FIFO.
+    /// A backing whose drop blocks until the test lets it go: the render must not wait on a close.
     struct SlowDrop {
         entered: Sender<()>,
         release: Receiver<()>,

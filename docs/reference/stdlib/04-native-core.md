@@ -130,18 +130,10 @@ syscall each: wrap the writer in `io.buffered` for throughput.
   (`the inner writer this buffer drains into is closed`). A flush that persisted nothing never reports
   `?v`, and `close()` does not mask it either. (`w0 := io.create(p)?; w := io.buffered(w0, 8); w0.close()`
   ⇒ `w.flush()` is that `!e`.)
-- **If you forget `flush`/`close` on a `buffered` writer, you can lose the tail** (as in Go). A
-  **file**-backed buffered writer flushes its tail when the handle is dropped (program exit / GC), a
-  nested `buffered(buffered(create(p)))` chain included. A **stdout/stderr**-backed buffered writer's
-  tail is *not* recovered on drop: call `flush()`/`close()`. A plain `create`/`append` writer holds
-  no bytes to lose. A `buffered` writer that becomes garbage flushes when a collection frees it,
-  so its tail reaches the fd at a collection, not when the last reference goes (call
-  `flush()`/`close()` when a reader waits for it). One reaper thread runs these drops,
-  in the order the collections freed the writers, and it runs no task: while an fd is a full pipe,
-  no task waits for the flush, but a second freed writer's flush waits behind the first (Go runs
-  its finalizers on one goroutine the same way). A run waits for its pending flushes before it
-  returns. Python's `BufferedWriter` and Rust's `BufWriter` flush on drop too; Go's `bufio.Writer`
-  loses the tail.
+- **Call `flush()` or `close()`: a `buffered` writer that becomes garbage loses its tail** (Go: no
+  finalizer flushes a `bufio.Writer`, and `os.File`'s finalizer only closes the fd). A dropped
+  writer never writes to an fd: the GC frees its buffer and closes a file it owned, at a
+  collection or at the end of the run. A plain `create`/`append` writer holds no bytes to lose.
 - **Cross-task write order to one shared `Writer` is unspecified** (Go's `bufio`-not-goroutine-safe
   rule). Each single `write`/`write_bytes` is one atomic critical section, but the *order* of separate
   writes from different tasks is not guaranteed. Join and write from one task if you need order.

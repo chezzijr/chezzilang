@@ -1260,10 +1260,8 @@ pub struct WriterCore {
 /// * `Stdout`/`Stderr` — markers: a write ROUTES through [`Vm::emit_out`]/[`Vm::emit_err`] (the
 ///   captured `Vm.out` buffer / the streaming-CLI sink), NEVER a raw fd — else capture/streaming break.
 /// * `Buffered` — the Go `bufio.NewWriter` escape hatch: accumulate in `buf`, drain to `inner` on
-///   flush / buffer-full / close. A file-backed tail — `inner=File` **or** a nested `inner=Buffered`
-///   chain that bottoms out in one — is best-effort drained on drop by [`WriterCore`]'s `Drop`; a
-///   `Buffered{ inner=Stdout/Stderr }` tail CANNOT reach `&mut Vm` from `Drop`, so it is lost on drop
-///   (documented ceiling — needs an explicit `flush()`/`close()`).
+///   flush / buffer-full / close. M5d: a dropped `Buffered` core discards its tail, as Go's
+///   `bufio.Writer` does (no finalizer flushes it), so no drop of a writer writes to an fd.
 #[derive(Debug)]
 pub enum Backing {
     File(std::fs::File),
@@ -1274,37 +1272,6 @@ pub enum Backing {
         buf: Vec<u8>,
         cap: usize,
     },
-}
-
-impl Drop for WriterCore {
-    /// R2 — best-effort drop-flush for a `Buffered` tail. All four inner backings are handled:
-    /// `File` → write it to the fd; `Buffered` → append to
-    /// the inner's own buffer, whose `Drop` cascades it one level further down (a nested
-    /// `buffered(buffered(file))` chain is still file-backed, so it owes the same drop-flush);
-    /// `Stdout`/`Stderr` → dropped silently, it can't reach `&mut Vm` from here (`emit_out` needs it).
-    /// Must NEVER panic (a failed flush at GC/exit — ENOSPC — would abort the process): every error is
-    /// swallowed.
-    fn drop(&mut self) {
-        let Ok(mut guard) = self.inner.lock() else {
-            return;
-        };
-        if let Some(Backing::Buffered { inner, buf, .. }) = guard.as_mut() {
-            if buf.is_empty() {
-                return;
-            }
-            let drained = std::mem::take(buf);
-            if let Ok(mut ig) = inner.inner.lock() {
-                match ig.as_mut() {
-                    Some(Backing::File(file)) => {
-                        use std::io::Write;
-                        let _ = file.write_all(&drained);
-                    }
-                    Some(Backing::Buffered { buf: ibuf, .. }) => ibuf.extend_from_slice(&drained),
-                    Some(Backing::Stdout) | Some(Backing::Stderr) | None => {}
-                }
-            }
-        }
-    }
 }
 
 /// The mutable inside of an [`ExecutorCore`]: the shut flag. `submit` starts every job at once
@@ -1577,42 +1544,5 @@ mod tests {
             s2.listener.lock().unwrap().is_some(),
             "a fresh listener core is open"
         );
-    }
-
-    /// W6-1 sibling — the drop-flush must walk a NESTED `buffered(buffered(file))` chain, not just a
-    /// one-level `Buffered{inner=File}`. `docs/reference/stdlib/` promises a **file**-backed buffered writer's
-    /// tail is recovered on drop, and a transitively file-backed chain is file-backed. Rust-only:
-    /// `assert` can't observe drop timing (the Chezzi suite covers the explicit `flush`/`close` path).
-    #[test]
-    fn drop_flushes_a_nested_buffered_chain_to_the_file() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("chz_nested_drop_{}.txt", std::process::id()));
-        let file = std::fs::File::create(&path).unwrap();
-        let inner = Arc::new(WriterCore {
-            inner: Mutex::new(Some(Backing::File(file))),
-            key: next_poll_key(),
-        });
-        let mid = Arc::new(WriterCore {
-            inner: Mutex::new(Some(Backing::Buffered {
-                inner: Arc::clone(&inner),
-                buf: Vec::new(),
-                cap: 8,
-            })),
-            key: next_poll_key(),
-        });
-        let outer = Arc::new(WriterCore {
-            inner: Mutex::new(Some(Backing::Buffered {
-                inner: Arc::clone(&mid),
-                buf: b"abc".to_vec(),
-                cap: 4,
-            })),
-            key: next_poll_key(),
-        });
-        drop(outer);
-        drop(mid);
-        drop(inner);
-        let got = std::fs::read(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(got, b"abc", "a nested buffered chain must drop-flush");
     }
 }

@@ -477,24 +477,22 @@ fn buffered_stdout_one_flush_byte_identical() {
     assert_eq!(serial, mn, "serial vs M:N byte-identical");
 }
 
-/// R2 — a buffered file writer dropped WITHOUT close still lands its tail (best-effort drop-flush at
-/// program exit / heap teardown). Both engines.
+/// M5d — a buffered file writer dropped WITHOUT `flush()`/`close()` loses its tail at heap
+/// teardown, as Go's `bufio.Writer` does (no finalizer flushes it). The file exists and is empty.
 #[test]
-fn buffered_file_drop_flushes_best_effort_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("drop.txt");
-        // Write via a buffered file writer, NEVER flush/close — the handle just goes out of scope.
-        let src = format!(
-            "import create, buffered from std.io\nfn go():\n    bw := buffered(create(\"{f}\")?)\n    bw.write(\"tail\")?\nfn main():\n    go()\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (_out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        let got = std::fs::read_to_string(&f).unwrap_or_default();
-        assert_eq!(got, "tail", "drop-flush must land the buffered tail");
-    }
+fn buffered_file_dropped_without_close_loses_its_tail() {
+    let t = TmpDir::new();
+    let f = t.0.join("drop.txt");
+    // Write via a buffered file writer, NEVER flush/close — the handle just goes out of scope.
+    let src = format!(
+        "import create, buffered from std.io\nfn go():\n    bw := buffered(create(\"{f}\")?)\n    bw.write(\"tail\")?\nfn main():\n    go()\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (_out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    let got = std::fs::read_to_string(&f).expect("create made the file");
+    assert_eq!(got, "", "a dropped buffered writer's tail is lost");
 }
 
 /// R2 — `import Writer from std.io` (a pure TYPE with no runtime member value) and `import buffered

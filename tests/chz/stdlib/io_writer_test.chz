@@ -1,7 +1,7 @@
 # tests/chz/stdlib/io_writer_test.chz — std.io `Writer` durability (W6-1).
 #
 # `flush()`/`close()` on a `buffered(create(p))` writer must make the bytes readable FROM WITHIN THE
-# SAME PROGRAM, not merely at process exit (the drop-flush). W6-1: a mid-write drain (write > cap)
+# SAME PROGRAM (M5d: a dropped buffered writer loses its tail, as Go). W6-1: a mid-write drain (write > cap)
 # emptied the in-VM buffer and left the drained bytes sitting unflushed in the inner `BufWriter`, so a
 # later flush/close saw an empty buffer, returned early, and persisted NOTHING.
 # Temp paths carry the pid (the suite runs concurrently with other `cargo test` / `chezzi test` runs).
