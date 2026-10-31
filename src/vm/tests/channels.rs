@@ -371,65 +371,11 @@ fn pmap_limited_matches_pmap_both_engines() {
     );
 }
 
-/// TICKET-211 (W1): a nursery opened inside a spawned task, after the outer body has closed, runs on
-/// ~2 cores however many workers exist (measured: 8 tasks of 10M iterations, T=8, 199% CPU, 2.6 s).
-/// An Atomic in-flight probe cannot see it (fibers interleave on 2 runners, peak still reads 8), so
-/// the test compares wall time of the same 8 spawns flat vs nested in one program.
-#[test]
-fn nested_nursery_in_spawned_task_uses_all_workers() {
-    if crate::vm::rerun_in_child(
-        module_path!(),
-        "nested_nursery_in_spawned_task_uses_all_workers",
-    ) {
-        return;
-    }
-    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-    impl Drop for Workers {
-        fn drop(&mut self) {
-            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
-        }
-    }
-    let _workers = Workers(
-        crate::vm::TEST_WORKER_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-    );
-    crate::vm::set_worker_count(8);
-    let src = "
-import std.time
-fn burn():
-    i := 0
-    while i < 3000000:
-        i += 1
-fn fan():
-    parallel:
-        for _ in 0..8:
-            spawn burn()
-t0 := time.monotonic()
-parallel:
-    for _ in 0..8:
-        spawn burn()
-flat := time.monotonic() - t0
-t1 := time.monotonic()
-parallel:
-    spawn fan()
-nested := time.monotonic() - t1
-print(nested < flat * 1.6 + 0.05)
-";
-    let entry = write_temp_chz("w1_nested_nursery", src);
-    let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
-    let _ = std::fs::remove_file(&entry);
-    res.expect("program runs");
-    assert_eq!(
-        out, "true\n",
-        "8 spawns nested in a spawned task must run within 1.6x of the same 8 spawns flat"
-    );
-}
-
 /// TICKET-211 (W1) — the grid: every nesting shape {flat, nested in a spawned task, two deep,
 /// nested in an Executor job} x outer body {open, closed} x T {2, 4, 8} must reach exactly T runner
 /// threads. A cell may stay below T only when the `NestedDrainerSlot` budget refused a start (another
-/// test holds slots), and never exceed T.
+/// test holds slots), and never exceed T. The thread count replaced a wall-time test of `nested_closed`
+/// (`nested_nursery_in_spawned_task_uses_all_workers`), which failed 1 run in 10 under CPU load.
 ///
 /// TICKET-230 — every shape, plus two Executors, an Executor beside a `parallel:`, an Executor
 /// beside a busy main and a body that blocks once then burns (W15-9), at T {1, 2, 4, 8}: the run's
