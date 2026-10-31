@@ -71,7 +71,7 @@ back and strike them here; (c), (d) and (g) closed under TICKET-158 on 2026-09-2
         s := S(1)
         parallel:
             spawn: s.v = 2
-        print("{s.v}")        # unreachable: `s.v = 2` errors with "'s' is this task's copy: ..."
+        print("{s.v}")        # 2 (before M3.4: `s.v = 2` errored with "'s' is this task's copy: ...")
     main()
 
     # W11-14 (CLOSED 2026-09-21, TICKET-155 — the owner map is now cut short) — the child's fault never cuts the owner's straight-line callback short

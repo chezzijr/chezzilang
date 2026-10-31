@@ -1,8 +1,8 @@
 # Go shared-heap model: study and mapping onto Chezzi
 
-**Status:** experiment, branch `exp/go-shared-heap`, not merged to `main`. M1 (one heap per run, a
-stop-the-world GC), M2 (memory-safe containers under a race), M3 (tasks share values by handle; the
-airlock deleted) are done. M4 (2026-10-29) rewrote the docs, so on this branch the model of record is
+**Status:** done, branch `exp/go-shared-heap` merged to `main` 2026-10-31 (`be9684a4`). M1 (one
+heap per run, a stop-the-world GC), M2 (memory-safe containers under a race), M3 (tasks share values
+by handle; the airlock deleted) are done. M4 (2026-10-29) rewrote the docs, so the model of record is
 [`../reference/concurrency/01-model.md`](../reference/concurrency/01-model.md). §1 to §6 are the study,
 written at `772e0bb8` before M1: "today" in them means that commit. §7 records what the
 implementation decided and where it differs from the study.
@@ -400,7 +400,7 @@ Build this worktree with its own target directory, for example
 ## 7. Outcome (M1 to M4)
 
 The phases ran as M1 (phase 2), M2 (phase 3) and M3 (phases 1 and 4). Phases 5 and 6 are open. The
-progress lines and the gate numbers are in `PROGRESS.md`, "Experiment: Go shared heap".
+progress lines and the gate numbers are in `PROGRESS.md`, "Go shared heap".
 
 | Study item | Decision or result | Differs from the study |
 |---|---|---|

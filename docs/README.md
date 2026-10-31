@@ -41,9 +41,9 @@ Start with the [syntax reference](reference/syntax/01-lexical-and-literals.md). 
 | [value-structs.md](design/value-structs.md) | Proposal, not started; §9 explicit value/ref structs is the owner-preferred route |
 | [packed-storage.md](design/packed-storage.md) | Proposal, not started |
 | [ffi-and-packaging.md](design/ffi-and-packaging.md) | Proposal, not started |
-| [adr-d4-airlock.md](design/adr-d4-airlock.md) | Superseded 2026-10-29 by the shared heap (branch `exp/go-shared-heap`) |
+| [adr-d4-airlock.md](design/adr-d4-airlock.md) | Superseded 2026-10-29 by the shared heap (merged to `main` 2026-10-31) |
 | [generics-and-carriers.md](design/generics-and-carriers.md) | Accepted and implemented |
-| [go-shared-heap.md](design/go-shared-heap.md) | Experiment (branch `exp/go-shared-heap`): M1 to M4 done, not merged to `main` |
+| [go-shared-heap.md](design/go-shared-heap.md) | Done: M1 to M5, merged to `main` 2026-10-31 |
 
 ## History
 

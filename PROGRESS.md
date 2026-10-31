@@ -28,9 +28,9 @@ The core language is implemented through M24 and still evolves:
 
 Concurrency is complete through Tier-D: `spawn`, the `parallel:` nursery, `Channel[T]`,
 `Broadcast[T]` (`std.concurrency.broadcast`), `Shared[T]`, `Executor`, the OS-thread M:N engine,
-the netpoller and `std.net`. There is one engine: the bytecode VM on its M:N scheduler. On the
-branch `exp/go-shared-heap`, tasks share one heap and get values by handle (Go's model; see the
-experiment section below).
+the netpoller and `std.net`. There is one engine: the bytecode VM on its M:N scheduler. Tasks share
+one heap and get values by handle (Go's model, merged to `main` 2026-10-31; see "Go shared heap"
+below).
 
 The checker has a non-fatal warning channel (`Severity::Warning`, `"severity"` in `--errors=json`,
 `DiagnosticSeverity::WARNING` in the LSP). It has five rules:
@@ -187,9 +187,9 @@ Rules for counting:
 - At JIT start, the bytecode and the `Value` layout freeze. The JIT's correctness oracle is the
   interpreter against the JIT, byte-identical on `tests/chz` and the CPython differential corpus.
 
-**D4 (approved 2026-09-22, superseded 2026-10-29 on `exp/go-shared-heap`).** On `main`, a spawned
-task's write to an airlock copy is a check error or a runtime fault. On the branch, no route copies:
-a task's write lands on the parent's value and a race is the user's bug (Go). Record:
+**D4 (approved 2026-09-22, superseded 2026-10-29 by the shared heap, merged 2026-10-31).** Before
+the merge, a spawned task's write to an airlock copy was a check error or a runtime fault. Now no
+route copies: a task's write lands on the parent's value and a race is the user's bug (Go). Record:
 [`docs/design/adr-d4-airlock.md`](docs/design/adr-d4-airlock.md); current rules:
 [`docs/reference/concurrency/01-model.md`](docs/reference/concurrency/01-model.md).
 
@@ -245,7 +245,7 @@ To do a perf task:
 Do not trust the expected payoff of a lever before you measure it. Several levers moved a different
 bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/design/roadmap.md) §4.
 
-## Experiment: Go shared heap (branch `exp/go-shared-heap`)
+## Go shared heap (branch `exp/go-shared-heap`, merged to `main` 2026-10-31)
 
 - M1.7: one heap per run, collected with the world stopped from every root source (attached threads, detached threads, parked fibers, box contexts); crossings still copy; `--max-heap` caps the whole run. Design: [`docs/design/go-shared-heap.md`](docs/design/go-shared-heap.md).
 - M1.8: a value held in a Rust local across a blocking door survives another thread's sweep: a `recv` wakes senders through the channel core, a `Shared` method roots its receiver; an extern C call with a callback runs detached and its callback reattaches (Go `cgocallback`); printing a busy `Writer`/`Reader` waits detached. Gate: `tests/gc_blocking_pins.rs`.
@@ -285,7 +285,7 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
 - M5d (owner decision 2026-10-31): a garbage `io.buffered` writer loses its unflushed tail, as Go (no finalizer flushes a `bufio.Writer`; `os.File`'s finalizer only closes the fd): `WriterCore`'s `Drop` is deleted, so no drop writes to an fd; call `flush()` or `close()`. With no drop that can block, the M5b reaper thread (`vm/reaper.rs`, `heap_core::drop_site`, the `HeapCore` wait) is deleted, and the graveyard drops in the GC door as in M5 (a `Cffi` never reaches the graveyard: the run's fn-value table roots it). The reaper serialized blocked flushes (two buffered tails, drained in reverse order: 3 of 3 hangs at T=2, T=4 and default) and could land a tail after a later write (`b.write("T")`, b garbage, `f.write("A")`: the file held `TA`). Gate: `tests/gc_graveyard_drop_grid.rs` `rev`, `order`, `nested_order` (base: 9 of 9 cells fail) and `create_no_gc`; `buffered_file_dropped_without_close_loses_its_tail` (was `..._drop_flushes_best_effort_parity`).
 - M5e: `vm::tests::nested_nursery_in_spawned_task_uses_all_workers` is deleted: it compared two wall times and failed 1 run in 10 under CPU load. `runner_threads_reach_the_worker_count_in_every_nesting_shape` counts the runner threads of the same `nested_closed` shape at T 2, 4 and 8.
 - M5f: an `io.create`/`io.append`/`io.open` handle on a FIFO, a pipe or a device runs each open, write, flush, read and close that reaches the fd in `Vm::host_wait`, the bracket a stdin read uses (Go: a blocking syscall hands off its P): the worker hands its runner slot to a replacement and releases its width permit. Before, the thread kept its one permit inside the syscall, so at `--threads=1` the task on the other end of the FIFO never ran, and the run hung (main too). The `WaitSpec` row `Stdin` is now `HostFd`; a regular file keeps the GC-door fast path. Gate: `tests/fifo_handoff_grid.rs` (`write_full`, `read_empty`, `flush_full`, `exec_write_full` x T 1, 2, default; base: the 4 T=1 cells hang), and `tests/gc_graveyard_drop_grid.rs` gains its `t1` column.
-- Open rows on the branch: `map_str` at T=1 is 1.10-1.13 against `main` (owner accepted 2026-10-29; f900b091 1.12 and the M3.5 base 1.13 too); `CHEZZI_GC_STRESS=1` timeouts in `tests/chz` that also occur on the base.
+- Open rows: `map_str` at T=1 is 1.10-1.13 against the pre-merge base `772e0bb8` (owner accepted 2026-10-29; f900b091 1.12 and the M3.5 base 1.13 too); `CHEZZI_GC_STRESS=1` timeouts in `tests/chz` that also occur on the base.
 
 ## Later
 

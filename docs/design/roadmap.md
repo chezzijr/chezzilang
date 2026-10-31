@@ -17,7 +17,7 @@
 | [3](#3-language-and-tooling-gaps) | REPL, formatter, closed ideas | open / closed |
 | [3b](#3b-test-system-follow-ups) | subtests, skip/xfail, timeout watchdog | open |
 | [4](#4-optimizations-open-levers) | perf levers not yet landed | open |
-| (branch `exp/go-shared-heap`) | Go shared heap experiment: [design](go-shared-heap.md) | M1 to M4 done (one heap per run, tasks share values by handle, docs); not merged |
+| (shared heap) | Go shared heap: [design](go-shared-heap.md) | done (one heap per run, tasks share values by handle); merged to `main` 2026-10-31 |
 
 ---
 

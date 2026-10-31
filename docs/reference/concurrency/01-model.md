@@ -46,9 +46,9 @@ Chapters:
 
 ## 2. The memory model: one heap, Go's rules
 
-Before the branch `exp/go-shared-heap`, each task had its own heap, and a value that crossed a task
-boundary was deep-copied ([ADR D4](../../design/adr-d4-airlock.md), now superseded). The branch
-replaced that model with Go's (M1 to M3, 2026-10). The old reason to reject Go was the cost of
+Until 2026-10, each task had its own heap, and a value that crossed a task boundary was deep-copied
+([ADR D4](../../design/adr-d4-airlock.md), now superseded). The shared heap replaced that model with
+Go's (M1 to M3, 2026-10). The old reason to reject Go was the cost of
 `Rc`→`Arc` on every value. That reason did not hold: a `Value` is one word with no reference count,
 so a shared heap needed atomic slots and a stop-the-world collector, not a new value model. The study
 and the plan: [`go-shared-heap.md`](../../design/go-shared-heap.md).
@@ -78,7 +78,7 @@ Known limits:
 
 ### Data races
 
-The shared heap (branch `exp/go-shared-heap`) takes Go's rule. A data race is the user's bug, and
+The shared heap takes Go's rule. A data race is the user's bug, and
 the heap stays memory-safe. Two threads that race on one list or one map can see:
 
 - a wrong value (an old one, or one from another entry),
