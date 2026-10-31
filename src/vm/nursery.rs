@@ -132,9 +132,8 @@ impl Vm {
             SpawnTarget::Nursery => self.register_task(task, span),
             SpawnTarget::Scope { sched, settle } => {
                 let rw = self.prepare_worker(task)?;
-                // W7-26r — M1.7: a job's values are objects of the run's one heap, which
-                // `live_bytes` counts already, so the starter is charged no worker heap of its own
-                // (the submit-time charge went with the per-task heap).
+                // A job's values are objects of the run's one heap, which `live_bytes` counts
+                // already, so the starter is charged no worker heap of its own.
                 let mut fiber = rw.into_fiber(0, 0);
                 // Reserve the slot and claim the runners it needs in ONE core-lock hold. A scope
                 // whose join already closed it takes no new task: that is what makes a submit

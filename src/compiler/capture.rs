@@ -367,8 +367,7 @@ pub(super) fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
 
 /// Keep only the capture entries whose name is FREE in a statement-block body (`bound` = the body's
 /// own params). Used at the nested-fn / `spawn:` / `defer:` MakeClosure sites so a closure captures
-/// only the names it references — not every visible local (Finding D: over-capture dragged unused
-/// siblings into the spawn's deep copy, before M3.4). Positional GetCaptured slot indices stay aligned
+/// only the names it references, not every visible local. Positional GetCaptured slot indices stay aligned
 /// because both `MakeClosure`'s entries and the child's `captured_names` derive from THIS filtered vec.
 ///
 /// Returns the walk alongside the entries: M24-2's witness question is asked of the SAME walk, never
