@@ -501,7 +501,6 @@ impl Checker {
             let subst_params: Vec<Ty> = msig.params.iter().map(|t| subst(t, &pmap)).collect();
             let min_params = subst_params.len();
             let want = FnSig {
-                summary: fn_writes::FnSummary::default(),
                 labels: msig.labels.clone(),
                 params: subst_params,
                 ret: subst(&msig.ret, &pmap),

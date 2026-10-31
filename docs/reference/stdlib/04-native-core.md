@@ -98,23 +98,29 @@ The file seams (`read_file`/`write_file`/`read_bytes`/`write_bytes`) are
 | `write_file` | `(p: PathLike, contents: str) -> None!` | Write / overwrite. |
 | `read_bytes` | `(p: PathLike) -> bytes!` | Whole file as raw bytes (≤ 64 MB): binary files. |
 | `write_bytes` | `(p: PathLike, data: bytes) -> None!` | Write / overwrite raw bytes; no size cap, like `write_file`. |
-| `create` | `(p: PathLike) -> Writer!` | Open a **truncating** write handle (create-or-truncate). |
-| `append` | `(p: PathLike) -> Writer!` | Open an **append** write handle (create-if-absent, never truncates). |
+| `create` | `(p: PathLike) -> Writer!` | Open a **truncating** write handle (create-or-truncate). Unbuffered: see below. |
+| `append` | `(p: PathLike) -> Writer!` | Open an **append** write handle (create-if-absent, never truncates). Unbuffered: see below. |
 | `stdout` | `() -> Writer` | A fresh write handle over the process stdout sink (same sink as `print`). |
 | `stderr` | `() -> Writer` | A fresh write handle over the process stderr sink (same sink as `eprint`). |
 | `buffered` | `(w: Writer, size: int = 8192) -> Writer` | Wrap a writer so writes accumulate in-VM and reach the host in **one** call per `flush` / buffer-full / `close` (Go `bufio.NewWriter`; 8 KiB default). |
 | `open` | `(p: PathLike) -> Reader!` | Open a **read-only** file handle for line/chunk streaming (past the 64 MB whole-file `read_file` cap). A directory is an `!e` **at the call** (Python `IsADirectoryError`), same message as `read_file`. |
 
-**`Writer`: write-only file / stream handle.** A sendable native handle (like `Socket`) for buffered
-output. Two openers, not a mode string (`create` = truncate, `append` = append). Text vs binary is
-**per call**. `stdout()`/`stderr()` route through the *same* sink as `print`/`eprint` (never a raw fd),
-so a `Writer` over stdout captures and streams identically. `buffered(...)` batches host/fd writes.
+**`Writer`: write-only file / stream handle.** A native handle (like `Socket`). Two openers, not a
+mode string (`create` = truncate, `append` = append). Text vs binary is **per call**.
+`stdout()`/`stderr()` route through the *same* sink as `print`/`eprint` (never a raw fd), so a
+`Writer` over stdout captures and streams identically.
+
+**A `create`/`append` writer is unbuffered, as Go's `os.File`:** each `write` is one write to the
+fd, so its bytes are on the fd when the call returns (visible to a second handle, a child process,
+a FIFO reader), and `flush()` on it is a no-op. Buffering comes only from `io.buffered(...)` (Go
+`bufio.NewWriter`), which batches the fd writes. Many small writes to a plain file writer cost one
+syscall each: wrap the writer in `io.buffered` for throughput.
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `write` | `(data: str) -> int!` | UTF-8-encode + write; returns bytes written. |
 | `write_bytes` | `(data: bytes) -> int!` | Write raw bytes; returns bytes written. Byte-exact on **every** backing (a file, `stdout()`/`stderr()`, or a `buffered` chain over either), so `stdout().write_bytes(b"\xff\xfe")` puts `ff fe` on fd 1, matching Python's `sys.stdout.buffer.write` and Go's `os.Stdout.Write`. |
-| `flush` | `() -> None!` | Drain a `buffered` writer's in-VM buffer **and** flush every core beneath it (one host/fd write per level). On a **file**-backed chain (`buffered(create(p))`, nested `buffered` included) an `?v` means the bytes are on the fd: visible to an in-process `io.read_file`, a `process.run` child, a sibling process. Like `fs.atomic_write` this is **not** `fsync`'d: observer visibility, **not** crash/power-loss durability. A no-op on unbuffered `stdout`/`stderr`; on a `buffered(stdout())` writer the drained bytes go to the same background stdout queue as `print`, so `?v` there means *queued*, not *written*. |
+| `flush` | `() -> None!` | Drain a `buffered` writer's in-VM buffer **and** flush every core beneath it (one host/fd write per level). A no-op on a plain `create`/`append` writer (it holds no buffer; a flush is not `fsync`). On a **file**-backed chain (`buffered(create(p))`, nested `buffered` included) an `?v` means the bytes are on the fd: visible to an in-process `io.read_file`, a `process.run` child, a sibling process. Like `fs.atomic_write` this is **not** `fsync`'d: observer visibility, **not** crash/power-loss durability. A no-op on unbuffered `stdout`/`stderr`; on a `buffered(stdout())` writer the drained bytes go to the same background stdout queue as `print`, so `?v` there means *queued*, not *written*. |
 | `close` | `() -> None!` | Flush (same full-chain guarantee as `flush`) + close the handle. Use-after-close is a clean `!e`, never a fault. |
 
 - **An explicit `flush()`/`close()` on a file-backed buffered writer always persists** (Python
@@ -124,17 +130,16 @@ so a `Writer` over stdout captures and streams identically. `buffered(...)` batc
   (`the inner writer this buffer drains into is closed`). A flush that persisted nothing never reports
   `?v`, and `close()` does not mask it either. (`w0 := io.create(p)?; w := io.buffered(w0, 8); w0.close()`
   ⇒ `w.flush()` is that `!e`.)
-- **If you forget `flush`/`close` on a `buffered` writer, you can lose the tail** (as in Go). A
-  **file**-backed buffered writer flushes its tail when the handle is dropped (program exit / GC), a
-  nested `buffered(buffered(create(p)))` chain included. A **stdout/stderr**-backed buffered writer's
-  tail is *not* recovered on drop: call `flush()`/`close()`. A plain `create`/`append` writer never
-  loses data (its `BufWriter` flushes on drop).
+- **Call `flush()` or `close()`: a `buffered` writer that becomes garbage loses its tail** (Go: no
+  finalizer flushes a `bufio.Writer`, and `os.File`'s finalizer only closes the fd). A dropped
+  writer never writes to an fd: the GC frees its buffer and closes a file it owned, at a
+  collection or at the end of the run. A plain `create`/`append` writer holds no bytes to lose.
 - **Cross-task write order to one shared `Writer` is unspecified** (Go's `bufio`-not-goroutine-safe
   rule). Each single `write`/`write_bytes` is one atomic critical section, but the *order* of separate
   writes from different tasks is not guaranteed. Join and write from one task if you need order.
 - Not supported: seek / random access.
 
-**`Reader`: read-only file handle.** The read twin of `Writer` (same sendable native handle, opened by
+**`Reader`: read-only file handle.** The read twin of `Writer` (same kind of native handle, opened by
 `open(path)`): stream a large file line by line or chunk by chunk (the 64 MB `read_file`/`read_bytes`
 cap does not apply).
 

@@ -984,13 +984,10 @@ fn a_generic_host_self_default_resolves_in_its_definer() {
     );
 }
 
-/// **The M:N half, and the one that a `chezzi check` cannot see.** A worker VM faults a module's
-/// globals in LAZILY (`Vm::module_global`'s D1 note), so a NEW cross-module reader that forgets
-/// `ensure_module_faulted` observes an empty module and fails to resolve — on the M:N engine only.
-/// Here the out-of-closure default is evaluated inside a `spawn` in a `parallel:` nursery, i.e. on a
-/// worker whose `module_objs` copy holds the definer unfaulted. It resolves because the provider's
-/// own frame reads its home through `Op::GetGlobalSlot`, which faults first; `Op::MakeFuncIn`
-/// deliberately forces nothing, keeping the "no eager cascade" property snapshots rely on.
+/// **The M:N half, and the one that a `chezzi check` cannot see.** Here the out-of-closure default
+/// is evaluated inside a `spawn` in a `parallel:` nursery, on a worker whose `module_objs` table is
+/// the run's (M3.1). It resolves because the provider's own frame reads its home through
+/// `Op::GetGlobalSlot` on the definer's one module object.
 /// TICKET-187 (supersedes DEC-075): a protocol call binds by the protocol's own parameter list, so
 /// `p.mprobe()` omitting `x` is an arity error even though the implementor declares a default (Go:
 /// `not enough arguments in call`, Rust: `E0061`).

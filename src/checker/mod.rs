@@ -25,10 +25,9 @@ pub(crate) use builtin_type::BuiltinType;
 pub use graph_pass::std_protocol_owner;
 pub use ty::Ty;
 pub use ty::{
-    ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,
-    FallOff, FallOffTable, FnLabels, Fresh, GenCrossings, Resolution, ResolutionTable, RetCoerce,
-    RetCoerceTable, SlotFresh, SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc,
-    WitnessTable, Wrap, WrapTable,
+    ArgFill, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, FallOff, FallOffTable, FnLabels,
+    Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
+    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -386,31 +385,6 @@ struct CallCtx {
     bracket: Option<Expr>,
 }
 
-/// TICKET-190 — the facts a generator body's check collects for its frame verdict.
-#[derive(Clone, Debug, Default)]
-struct GenFrameAcc {
-    /// Per name: the `Fresh::meet` of the shape of every single-name `let` and plain assignment
-    /// of it (`fresh_shape`); `Marked` once a destructuring `let` or an unsafe compound
-    /// assignment bound it.
-    fresh: HashMap<String, Fresh>,
-    /// TICKET-240: the type `Checker::infer` gave each node of the body, by `NodeId`. A missing
-    /// id is unknown, which no deep-privacy rule accepts.
-    expr_tys: HashMap<u32, Ty>,
-    /// Per name: the declared type of each single-name `let` of it.
-    tys: HashMap<String, Vec<Ty>>,
-}
-
-impl GenFrameAcc {
-    /// One more binding of `name` with `shape`.
-    fn bind(&mut self, name: &str, shape: Fresh) {
-        let met = match self.fresh.get(name) {
-            Some(prev) => Fresh::meet(&[prev.clone(), shape]),
-            None => shape,
-        };
-        self.fresh.insert(name.to_string(), met);
-    }
-}
-
 /// A protocol bound with its type args RESOLVED (`Conv[S]` -> name `Conv`, args `[Ty::Param("S")]`).
 /// The args are resolved once, in the DECLARING scope, by [`Checker::resolve_bound`] (TICKET-202):
 /// a use site substitutes them, never re-resolves them in the caller's scope.
@@ -451,8 +425,6 @@ fn subst_ty_params(tps: &[TyParam], map: &HashMap<String, Ty>) -> Vec<TyParam> {
 /// only for generic functions (`fn max[T: Comparable]`), where `params`/`ret` contain `Ty::Param`s.
 #[derive(Clone)]
 struct FnSig {
-    /// Proven writes and param escapes of this named function (TICKET-190: one summary).
-    summary: fn_writes::FnSummary,
     params: Vec<Ty>,
     /// Swift-style parameter labels parallel to `params` (the declaration's param names; `None` for
     /// `self` or an unnamed slot). Surface-only — used ONLY to build a labelled `Ty::Func` value type
@@ -537,7 +509,6 @@ impl FnSig {
     fn plain(params: Vec<Ty>, ret: Ty) -> FnSig {
         let min_params = params.len();
         FnSig {
-            summary: fn_writes::FnSummary::default(),
             labels: Vec::new(),
             params,
             ret,
@@ -583,7 +554,6 @@ struct StructInfo {
     /// The ctor's call-binding slots, one per field (see [`FnSig::slots`]). `None` for a native or
     /// builtin struct.
     field_slots: Option<Vec<crate::desugar::SlotSpec>>,
-    self_writers: HashSet<String>,
 }
 
 /// A protocol's required method signatures, in declaration order. `Self` appears as `Ty::Param("Self")`
@@ -650,8 +620,7 @@ struct MemberSig {
     ty: Ty,
     /// The one declaration the slot holds: set only when the module declares the name once as
     /// `fn` / extern / native, which a fn slot keeps because it can never be assigned. Labels,
-    /// defaults, variadic, type params, witnesses, the write summary and the escape verdict are
-    /// read from here and nowhere else.
+    /// defaults, variadic, type params and witnesses are read from here and nowhere else.
     certain_fn: Option<FnSig>,
     /// A `const` top-level let, or a native constant.
     is_const: bool,
@@ -785,15 +754,6 @@ struct EnumSigInfo {
     doc: Option<String>,
 }
 
-/// B3.3 (Task 2a) — one non-sendable LOCAL capture of a closure/nested-fn value: the captured
-/// binding's name and its checker type. Recorded at the value's decl site and replayed as a compile
-/// error at a spawn callee/arg site.
-#[derive(Clone)]
-struct Capture {
-    name: String,
-    ty: Ty,
-}
-
 /// TICKET-238 -- the state of `errors` and `poison_reads` when a statement began, and its span.
 #[derive(Clone, Copy, Default)]
 pub(super) struct StmtMark {
@@ -830,7 +790,6 @@ struct Checker {
     /// (`poison_reads`); the stored type is bare `Ty::Unknown`, which other sources produce too.
     hole_rejected: Vec<std::collections::HashSet<String>>,
     functions: HashMap<String, FnSig>,
-    fn_write_scopes: Vec<HashMap<String, fn_writes::FnSummary>>,
     /// Names of functions declared in the CURRENT module (top-level `fn`s only — NOT imported names).
     /// Gates the generic-fn-as-value turbofish B-path (`ident[int]`) so the checker only accepts a
     /// turbofish on a SAME-MODULE generic fn — the exact set the compiler's `fn_names` erases at
@@ -1075,15 +1034,6 @@ struct Checker {
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
     /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`SumSeedTable`].
     sum_seeds: SumSeedTable,
-    /// D4 (TICKET-179) — which `spawn` operands are fresh, recorded by the spawn arm and consumed
-    /// verbatim by the compiler. See [`CrossingTable`].
-    crossings: CrossingTable,
-    /// TICKET-190 — generator creation stamps and private frame slots, consumed verbatim by the
-    /// compiler. See [`GenCrossings`].
-    gen_crossings: GenCrossings,
-    /// TICKET-190 — while a generator body is checked: per name, whether every binding of it is
-    /// fresh, and the types it was declared with. `None` outside a generator body.
-    gen_frame: Option<GenFrameAcc>,
     /// W8-21 — which implicit success-coercion, if any, each declared `T?`/`T!E` return sink applies,
     /// keyed by [`ret_coerce_key`] on the returned value's own span and consumed verbatim by the
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is
@@ -1130,8 +1080,7 @@ struct Checker {
     /// capture set is a provable SUPERSET of this scope
     /// (`compiler::nested_body_needs_witness` states why), so a mirroring narrowing here would be a
     /// second, similar-looking rule that can never change an outcome. The witness is a plain
-    /// `str`, so it crosses BY VALUE — a closure outliving its defining frame, and the `spawn:`
-    /// airlock, both stay correct. `T.static_method()` is accepted ONLY when `T` is in here, which
+    /// `str` — a closure outliving its defining frame, and a `spawn:` task, both stay correct. `T.static_method()` is accepted ONLY when `T` is in here, which
     /// is exactly what the compiler can lower (`compiler::FnComp::witness_ref` is the other half).
     /// A type param of the enclosing TYPE (`struct Bx[T]`) is never in here: its
     /// witness would have to live in the instance, which is a different mechanism.
@@ -1245,32 +1194,6 @@ struct Checker {
     /// `int`. A function of the AST alone (a span carries its module), so no `DiagMark` entry.
     const_operand_faults:
         std::collections::HashMap<Span, (BinaryOp, crate::ast::consteval::IntFault)>,
-    /// For each `spawn:` block body currently being checked, the local-scope depth (`scopes.len()`)
-    /// at the point the task body opened. A binding living at a scope index *below* the innermost
-    /// floor is a **captured** binding — read-only inside the task (assigning to it is an error).
-    /// Empty outside any `spawn:` block.
-    capture_floors: Vec<usize>,
-    /// B3.3 (Task 2a) — per-scope side-table of the NON-SENDABLE LOCAL captures of each
-    /// closure/nested-fn value declared in that scope, keyed by the bound name. Mirrors `scopes`
-    /// index-for-index (pushed/popped by `push_scope`/`pop_scope`). Populated at the closure/nested-fn
-    /// DECL site (a `let name := fn(...)` RHS or a nested `fn name(...)` body) using the SAME free-var
-    /// over-approximation (`free_names_*`) the runtime uses to build the closure's captures — so the
-    /// gate matches exactly what actually crosses the airlock. Consulted at a `spawn <name>()` callee /
-    /// `spawn f(<name>)` arg site to reject a captured `ref` (or other non-sendable local) at compile
-    /// time, mirroring the `spawn:` block form. A module-global (scope 0) capture is EXCLUDED at record
-    /// time (a read-only global, not a per-task capture — never gated).
-    capture_table: Vec<HashMap<String, Vec<Capture>>>,
-    /// Active closure frames: scope depth before the closure parameter scope, plus outer bindings
-    /// the closure body writes. Nested closures contribute to every frame they capture through.
-    closure_write_frames: Vec<(usize, HashSet<String>)>,
-    /// Write summary produced by the most recently inferred closure literal.
-    last_closure_writes: HashSet<String>,
-    /// Stable write summaries for closure literals, keyed by graph module and body span. Closure
-    /// inference can run repeatedly during generic probing; a later memoized pass must not erase the
-    /// summary produced by the pass that checked the body.
-    closure_literal_writes: HashMap<(usize, Span), Vec<String>>,
-    /// Per-scope write summaries for closure literals bound with `:=`, parallel to `scopes`.
-    written_captures: Vec<HashMap<String, Vec<String>>>,
     /// True while checking a `std.*` module — structs hoisted now are tagged `StructOrigin::Builtin`.
     current_module_is_stdlib: bool,
     /// Phase 4c-net — the harvested `StructInfo` (method table) for std.net's reserved `Socket` /
@@ -1387,10 +1310,10 @@ struct Checker {
     /// TICKET-139 (W14-2) — every accepted keyword call through a `kw_certain` binding, settled at
     /// the binding's `pop_scope` against `kw_written` so the verdict does not depend on whether the
     /// write comes before or after the call. Deduplicated by `(keys, use)` (DEC-025: a closure body
-    /// is inferred more than once). TICKET-190: a generator creation stamp waits here too.
+    /// is inferred more than once). The span is the keyword call's.
     /// TICKET-197: an entry waits on every key it lists (the binding, then its `kw_certain`
     /// dependencies); each key settles at its own scope's `pop_scope`, and a write to any voids it.
-    kw_pending: Vec<(Vec<(usize, String)>, globals::KwUse)>,
+    kw_pending: Vec<(Vec<(usize, String)>, Span)>,
     /// TICKET-238 -- where the statement being checked began (`Checker::with_stmt_mark`).
     stmt_mark: StmtMark,
     /// TICKET-238 -- reads of a `hole_rejected` binding so far. Written during a body walk, so
@@ -1422,35 +1345,6 @@ struct Checker {
     /// [`check_counting_bracket_receivers`].
     #[cfg(any(test, feature = "test-api"))]
     bracket_receivers: usize,
-    /// TICKET-265 — top-level fns `infer_fn_writers` scanned in this pass; read by
-    /// [`check_graph_counting_writer_scans`].
-    #[cfg(any(test, feature = "test-api"))]
-    writer_scans: usize,
-}
-
-/// TICKET-165 — one constant segment of a projected lvalue chain (`xs[i].f` -> `[Dynamic,
-/// Field("f")]`, root first). D4 retains only whether the chain is projected; declared-type
-/// resolution uses [`ChainLink`] and declines links whose write semantics are unknown.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum PathSeg {
-    Field(String),
-    Int(i64),
-    Str(String),
-    Dynamic,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum ChainLink {
-    Field(String),
-    /// A subscript as the syntax walkers see it, before the checker has typed the body. The span is
-    /// the index expression's, the key of [`Checker::fresh_subscripts`] in the module that owns the
-    /// body. [`Checker::resolve_link`] turns it into `Element` or `Slice`.
-    Index(Span),
-    /// A subscript the checker resolved to one element of its container: a place.
-    Element,
-    /// A subscript the checker resolved to a builtin slice: a new container, no place. A summary
-    /// carries this form across modules, so a reader needs no span lookup in another module.
-    Slice,
 }
 
 mod args;
@@ -1488,13 +1382,12 @@ mod hooks;
 mod infer_ret;
 mod iter_index;
 mod module_imports;
-mod op_sendable;
+mod op_kinds;
 pub mod proto;
 mod resolve_ctype;
 mod resolve_type;
 mod satisfies;
 mod scope;
-mod self_writes;
 mod setup;
 mod sig;
 mod stmt;

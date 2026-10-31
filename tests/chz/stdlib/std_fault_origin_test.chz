@@ -3,7 +3,7 @@
 # A NATIVE fault raised inside a std function is stamped at the user's call into std (Rust's
 # `#[track_caller]`). A `panic(...)` raised from std code stays unstamped: `file()`/`line()`/`col()`
 # answer `None`, whether std calls `panic` directly or calls it as a first-class callback value.
-# A job's fault reaches the user only through its Task, which carries the message alone.
+# A job's fault reaches the user only through its Task: the job's own error, with its origin (M3.2).
 
 import std.cmp
 import std.concurrency
@@ -40,7 +40,8 @@ test fn a_native_std_fault_in_a_job_reaches_only_the_task():
         ?_: assert false, "the job must fault"
         !e:
             assert e.message().contains("Channel"), e.message()
-            assert e.file() == None, "a Task's error carries the message only"
+            assert e.line() == ?37, "line must be the is_settled call in the job"
+            assert e.col() == ?29, "col must be the is_settled call in the job"
 
 test fn a_std_panic_stays_unstamped():
     r := recover: cmp.clamp(5, 3, 1)

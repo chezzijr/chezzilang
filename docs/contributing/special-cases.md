@@ -33,7 +33,7 @@ Size of that shape at audit time:
 | tests of a user-facing name by string (`== "push"`, `"str" =>`) in non-test code | 509 (checker 229, vm 226, native 33, compiler 20, parser 1) |
 | `match` arms on a builtin type in the checker | 888 |
 | capabilities decided in more than one place, with the places disagreeing | 11 of 15 (iterable, indexable, index-assign, sliceable, membership, equatable, stringable, addable, "has method m", callable as a value, copyable) |
-| capabilities with one decider | 4 (orderable, hashable, truthy, sendable) |
+| capabilities with one decider | 4 (orderable, hashable, truthy, sendable; M3.5 deleted sendable) |
 
 ## Unifying rules
 
@@ -90,10 +90,10 @@ These settle rules U5 to U10, U15 and U16. Ancestor output is from programs that
   is a key lookup.
 - "Inclusive" means "include the end value" for each step direction: `List(Range(2, 0, -1,
   inclusive=true))` is `[2, 1, 0]`, and a slice selects the positions the range yields.
-- Open inconsistency: `g[0..2].push([9])` is silent at top level (it changes a temporary copy that the
-  program drops) and is the airlock type error about `g` inside a spawned function. The consistent
-  rule is one warning in each context ("this changes a temporary copy; the result is dropped"), which
-  today exists for `Shared` / `RwShared` / `Atomic` reads only, and no airlock error.
+- `g[0..2].push([9])` changes a temporary copy that the program drops. It gets one warning (`'push'
+  changes a temporary copy; the result is dropped`, TICKET-254) at top level and inside a spawned
+  function alike; the airlock type error is gone (M3.4). `s.get().push(2)` gets no warning: `get()`
+  returns the box's live value (M3.3).
 
 **`recover:` (decided 2026-10-12).** The block form (`recover:` followed by an indented block) has no
 tail value: its type is `!` (`None!`, "the error, or nothing"), like Rust's `Result<(), Error>`. The

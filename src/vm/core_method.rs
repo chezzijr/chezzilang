@@ -37,8 +37,8 @@ impl Vm {
                 _ => None,
             };
             return Ok(Some(match answer {
-                Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                None => self.alloc_enum("Option", "None", Vec::new()),
+                Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                None => self.alloc_enum("Option", "None", &[]),
             }));
         }
         // `Add`/`Sub`/`Mul`/`Div`/`Mod` → the binary-arith primitive.
@@ -155,7 +155,7 @@ impl Vm {
                 let raw: Vec<u8> = match self.heap.get(h) {
                     Obj::Str(s) => s.as_bytes().to_vec(),
                     Obj::Bytes(_) => return Ok(Some(recv)),
-                    Obj::ByteArray(b) => b.clone(),
+                    Obj::ByteArray(b) => b.to_vec(),
                     Obj::BigInt(_)
                     | Obj::FloatBox(_)
                     | Obj::Iter { .. }
@@ -371,12 +371,12 @@ impl Vm {
                             .split(sep.as_str())
                             .map(|p| self.alloc_str(p.to_string()))
                             .collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(parts))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(parts.into()))))
                     }
                     StrMethod::Chars => {
                         self.arity_err("chars", args, 0, span)?;
                         let cs: Vec<Value> = s.chars().map(|c| self.alloc_char(c)).collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(cs))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(cs.into()))))
                     }
                     // `encode() -> bytes`: UTF-8 encode (str is UTF-8 internally; copy the bytes out
                     // into a new immutable `bytes`). Always succeeds — no fault path. UTF-8 only.
@@ -406,12 +406,12 @@ impl Vm {
                             ));
                         };
                         let mut out = String::new();
-                        for (i, item) in items.clone().iter().enumerate() {
+                        for (i, item) in items.to_vec().into_iter().enumerate() {
                             let Some(ih) = item.as_obj() else {
                                 return Err(self.err(
                                     format!(
                                         "join() expects a list of str, got an element of type {}",
-                                        self.type_name(*item)
+                                        self.type_name(item)
                                     ),
                                     span,
                                 ));
@@ -420,7 +420,7 @@ impl Vm {
                                 return Err(self.err(
                                     format!(
                                         "join() expects a list of str, got an element of type {}",
-                                        self.type_name(*item)
+                                        self.type_name(item)
                                     ),
                                     span,
                                 ));
@@ -596,7 +596,7 @@ impl Vm {
                         }
                         let parts: Vec<Value> =
                             lines.into_iter().map(|p| self.alloc_str(p)).collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(parts))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(parts.into()))))
                     }
                     // `strip` is a trim alias.
                     StrMethod::Strip => {
@@ -609,9 +609,9 @@ impl Vm {
                         match strip_num_underscores(s.trim()).and_then(|t| t.parse::<i64>().ok()) {
                             Some(n) => {
                                 let nv = self.make_int(n);
-                                Ok(self.alloc_enum("Option", "Some", vec![nv]))
+                                Ok(self.alloc_enum("Option", "Some", &[nv]))
                             }
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     StrMethod::ToFloat => {
@@ -619,9 +619,9 @@ impl Vm {
                         match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
                             Some(f) => {
                                 let fv = self.box_float(f);
-                                Ok(self.alloc_enum("Option", "Some", vec![fv]))
+                                Ok(self.alloc_enum("Option", "Some", &[fv]))
                             }
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     // Result-returning parse siblings of to_int/to_float — carry a human-readable
@@ -631,18 +631,18 @@ impl Vm {
                         match parse_i64_pep515(s.trim()) {
                             Ok(n) => {
                                 let nv = self.make_int(n);
-                                Ok(self.alloc_enum("Result", "Ok", vec![nv]))
+                                Ok(self.alloc_enum("Result", "Ok", &[nv]))
                             }
                             Err(IntParseErr::Overflow) => {
                                 let msg = self.alloc_str(format!(
                                     "'{s}' overflows i64 (range -9223372036854775808..=9223372036854775807)"
                                 ));
-                                Ok(self.alloc_enum("Result", "Err", vec![msg]))
+                                Ok(self.alloc_enum("Result", "Err", &[msg]))
                             }
                             Err(IntParseErr::Malformed) => {
                                 let msg =
                                     self.alloc_str(format!("cannot parse '{s}' as an integer"));
-                                Ok(self.alloc_enum("Result", "Err", vec![msg]))
+                                Ok(self.alloc_enum("Result", "Err", &[msg]))
                             }
                         }
                     }
@@ -651,11 +651,11 @@ impl Vm {
                         match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
                             Some(f) => {
                                 let fv = self.box_float(f);
-                                Ok(self.alloc_enum("Result", "Ok", vec![fv]))
+                                Ok(self.alloc_enum("Result", "Ok", &[fv]))
                             }
                             None => {
                                 let msg = self.alloc_str(format!("cannot parse '{s}' as a float"));
-                                Ok(self.alloc_enum("Result", "Err", vec![msg]))
+                                Ok(self.alloc_enum("Result", "Err", &[msg]))
                             }
                         }
                     }
@@ -673,31 +673,35 @@ impl Vm {
                     ListMethod::Push => {
                         self.arity_err("push", args, 1, span)?;
                         let v = args[0];
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
-                        items.push(v);
+                        items.push(heap, v);
                         Ok(Value::nil())
                     }
                     ListMethod::Pop => {
                         self.arity_err("pop", args, 0, span)?;
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let Obj::List(items) = self.heap.write(h).get(h) else {
                             unreachable!()
                         };
                         let popped = items.pop();
                         // M19 lever #2 — route through `alloc_enum` so the dense `variant_id` is stamped
                         // (replacing the two ad-hoc per-instance `Box<str>` builds).
                         Ok(match popped {
-                            Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                            None => self.alloc_enum("Option", "None", vec![]),
+                            Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                            None => self.alloc_enum("Option", "None", &[]),
                         })
                     }
                     ListMethod::Reverse => {
                         self.arity_err("reverse", args, 0, span)?;
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
-                        items.reverse();
+                        let mut elems = items.to_vec();
+                        elems.reverse();
+                        items.replace(heap, &elems);
                         Ok(Value::nil())
                     }
                     ListMethod::Sort => {
@@ -709,17 +713,18 @@ impl Vm {
                         // hold a struct. Primitives use the faster `value_order`. Str elements live on
                         // the heap, so `value_order` needs `&self.heap` — clone the elements out, sort
                         // (no alloc/closure → no GC for the primitive path), then write back.
-                        let user_compare = matches!(items.first().and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. } | Obj::Enum { .. } | Obj::Tuple(_) | Obj::List(_)));
+                        let user_compare = matches!(items.try_get(0).and_then(|v| v.as_obj()), Some(hh) if matches!(self.heap.get(hh), Obj::Struct { .. } | Obj::Enum { .. } | Obj::Tuple(_) | Obj::List(_)));
                         if user_compare {
                             // A user compare (struct or enum) re-enters the VM (may GC) → rooted, index-based sort.
                             return self.list_sort_structs(h, span);
                         }
-                        let mut elems = items.clone();
+                        let mut elems = items.to_vec();
                         elems.sort_by(|a, b| self.value_order(*a, *b));
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
-                        *items = elems;
+                        items.replace(heap, &elems);
                         Ok(Value::nil())
                     }
                     // `elems` is a Rust-local clone and `target` came off the stack at dispatch, so
@@ -727,7 +732,7 @@ impl Vm {
                     ListMethod::Contains => {
                         self.arity_err("contains", args, 1, span)?;
                         let target = args[0];
-                        let elems = items.clone();
+                        let elems = items.to_vec();
                         let found = self
                             .with_roots(&[Value::obj(h), target], |vm| {
                                 vm.seq_slot(&elems, target, span)
@@ -738,7 +743,7 @@ impl Vm {
                     ListMethod::IndexOf => {
                         self.arity_err("index_of", args, 1, span)?;
                         let target = args[0];
-                        let elems = items.clone();
+                        let elems = items.to_vec();
                         let idx = self.with_roots(&[Value::obj(h), target], |vm| {
                             vm.seq_slot(&elems, target, span)
                         })?;
@@ -746,19 +751,20 @@ impl Vm {
                     }
                     ListMethod::Concat => {
                         self.arity_err("concat", args, 1, span)?;
-                        let mut out = items.clone();
+                        let mut out = items.to_vec();
                         out.extend(self.expect_list_obj("concat", args[0], span)?);
                         // `out` is fully built and moved into the new Obj before any GC can run.
-                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
                     }
                     ListMethod::Extend => {
                         self.arity_err("extend", args, 1, span)?;
                         // Snapshot the other side first so `xs.extend(xs)` (self-extend) terminates.
                         let appended = self.expect_list_obj("extend", args[0], span)?;
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
-                        items.extend(appended);
+                        items.extend_from_slice(heap, &appended);
                         Ok(Value::nil())
                     }
                     ListMethod::Sum => {
@@ -775,7 +781,7 @@ impl Vm {
                         };
                         // Clone out so `make_int`/`box_float` (which mutate the heap) don't collide with
                         // the `items` heap borrow.
-                        let elems = items.clone();
+                        let elems = items.to_vec();
                         let any_float = seed_is_float || elems.iter().any(|v| v.is_float());
                         if any_float {
                             // CPython 3.12+ `sum`: Neumaier-compensated, ints included. A non-finite
@@ -821,13 +827,13 @@ impl Vm {
                             unreachable!()
                         };
                         let picked = if which == ListMethod::First {
-                            items.first().copied()
+                            items.try_get(0)
                         } else {
-                            items.last().copied()
+                            items.len().checked_sub(1).and_then(|i| items.try_get(i))
                         };
                         Ok(match picked {
-                            Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                            None => self.alloc_enum("Option", "None", vec![]),
+                            Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                            None => self.alloc_enum("Option", "None", &[]),
                         })
                     }
                     ListMethod::Reversed => {
@@ -836,9 +842,9 @@ impl Vm {
                         let Obj::List(items) = self.heap.get(h) else {
                             unreachable!()
                         };
-                        let mut out = items.clone();
+                        let mut out = items.to_vec();
                         out.reverse();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
                     }
                     ListMethod::Map
                     | ListMethod::Filter
@@ -868,12 +874,13 @@ impl Vm {
                             unreachable!()
                         };
                         let x = args[1];
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let heap = self.heap.write(h);
+                        let Obj::List(items) = heap.get(h) else {
                             unreachable!()
                         };
                         let len = items.len() as i64;
                         let idx = if i < 0 { (i + len).max(0) } else { i.min(len) } as usize;
-                        items.insert(idx, x);
+                        items.insert(heap, idx, x);
                         Ok(Value::nil())
                     }
                     ListMethod::Remove => {
@@ -882,12 +889,14 @@ impl Vm {
                         let Some(i) = self.int_val(args[0]) else {
                             unreachable!()
                         };
-                        let Obj::List(items) = self.heap.get_mut(h) else {
+                        let Obj::List(items) = self.heap.write(h).get(h) else {
                             unreachable!()
                         };
                         let len = items.len();
-                        match crate::slice::norm_index(i, len) {
-                            Some(idx) => Ok(items.remove(idx)),
+                        // M3.0a — `remove` checks `idx` against its own snapshot: another thread
+                        // can shrink the list after `len` was read.
+                        match crate::slice::norm_index(i, len).and_then(|idx| items.remove(idx)) {
+                            Some(v) => Ok(v),
                             None => {
                                 Err(self.err(format!("index {i} out of bounds (len {len})"), span))
                             }
@@ -909,7 +918,7 @@ impl Vm {
                         let Obj::List(items) = self.heap.get(h) else {
                             unreachable!()
                         };
-                        let items = items.clone();
+                        let items = items.to_vec();
                         let out = self.with_elem_roots(&[Value::obj(h)], &items, |vm| {
                             let mut out: Vec<Value> = Vec::new();
                             if which == ListMethod::Dedup {
@@ -932,21 +941,21 @@ impl Vm {
                                 // and a scanned `bytearray` of equal content both survive. A bucket hit
                                 // is still confirmed by `elem_equal` — the hash only picks candidates,
                                 // the compare remains the verdict (DEC-014).
-                                let mut seen = SetData::default();
+                                let seen = SetData::default();
                                 for &v in &items {
                                     let hv = vm.scalar_hash(v);
                                     let mut dup = false;
-                                    for &p in seen.candidates(hv) {
-                                        if vm.elem_equal(seen.entries[p].1, v, 0, span)? {
+                                    for p in seen.candidates(hv) {
+                                        if vm.elem_equal(seen.entries.get(p).1, v, 0, span)? {
                                             dup = true;
                                             break;
                                         }
                                     }
                                     if !dup {
-                                        seen.push(hv, v);
+                                        seen.push(&vm.heap, hv, v);
                                     }
                                 }
-                                out = seen.entries.iter().map(|&(_, v)| v).collect();
+                                out = seen.entries.iter().map(|(_, v)| v).collect();
                             } else {
                                 // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
                                 // Fallback for any non-flat element (container, Struct/Enum,
@@ -959,7 +968,7 @@ impl Vm {
                             }
                             Ok(out)
                         })?;
-                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
                     }
                     // chunk/windows build a `List[List[T]]`. Each inner-list alloc may GC, so the outer
                     // list is ROOTED on the operand stack and every inner handle is pushed into it
@@ -983,27 +992,32 @@ impl Vm {
                         let Obj::List(items) = self.heap.get(h) else {
                             unreachable!()
                         };
-                        let items = items.clone();
+                        let items = items.to_vec();
                         let len = items.len();
-                        let outer = self.heap.alloc(Obj::List(Vec::new()));
+                        let outer = self.heap.alloc(Obj::List(RVec::new()));
                         self.push(Value::obj(outer)); // ROOT the outer list across inner allocs
                         if which == ListMethod::Chunk {
                             let mut start = 0;
                             while start < len {
                                 let end = (start + n).min(len);
-                                let inner = self.heap.alloc(Obj::List(items[start..end].to_vec()));
-                                if let Obj::List(o) = self.heap.get_mut(outer) {
-                                    o.push(Value::obj(inner));
+                                let inner = self
+                                    .heap
+                                    .alloc(Obj::List(RVec::from_slice(&items[start..end])));
+                                let heap = self.heap.write(outer);
+                                if let Obj::List(o) = heap.get(outer) {
+                                    o.push(heap, Value::obj(inner));
                                 }
                                 start = end;
                             }
                         } else if n <= len {
                             // windows: `n > len` → no windows → empty outer list (loop skipped).
                             for start in 0..=len - n {
-                                let inner =
-                                    self.heap.alloc(Obj::List(items[start..start + n].to_vec()));
-                                if let Obj::List(o) = self.heap.get_mut(outer) {
-                                    o.push(Value::obj(inner));
+                                let inner = self
+                                    .heap
+                                    .alloc(Obj::List(RVec::from_slice(&items[start..start + n])));
+                                let heap = self.heap.write(outer);
+                                if let Obj::List(o) = heap.get(outer) {
+                                    o.push(heap, Value::obj(inner));
                                 }
                             }
                         }
@@ -1032,26 +1046,20 @@ impl Vm {
                         self.arity_err("get", args, 1, span)?;
                         let key = args[0];
                         let hk = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
-                        let found = self.map_probe(h, hk, key, span)?.map(|p| {
-                            let Obj::Map(m) = self.heap.get(h) else {
-                                unreachable!()
-                            };
-                            m.entries[p].2
-                        });
-                        match found {
-                            Some(v) => Ok(self.alloc_enum("Option", "Some", vec![v])),
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                        match self.map_lookup(h, hk, key, span)? {
+                            Some(v) => Ok(self.alloc_enum("Option", "Some", &[v])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     MapMethod::Keys => {
                         self.arity_err("keys", args, 0, span)?;
-                        let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| *k).collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(keys))))
+                        let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| k).collect();
+                        Ok(Value::obj(self.heap.alloc(Obj::List(keys.into()))))
                     }
                     MapMethod::Values => {
                         self.arity_err("values", args, 0, span)?;
-                        let vals: Vec<Value> = m.entries.iter().map(|(_, _, v)| *v).collect();
-                        Ok(Value::obj(self.heap.alloc(Obj::List(vals))))
+                        let vals: Vec<Value> = m.entries.iter().map(|(_, _, v)| v).collect();
+                        Ok(Value::obj(self.heap.alloc(Obj::List(vals.into()))))
                     }
                     MapMethod::Items => {
                         // TICKET-160 — one (k, v) tuple per entry in m.entries order, the SAME order keys() reads,
@@ -1059,20 +1067,20 @@ impl Vm {
                         // before the list alloc.
                         self.arity_err("items", args, 0, span)?;
                         let out = self.map_pairs(h);
-                        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                        Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
                     }
                     MapMethod::Copy => {
                         // TICKET-160 — shallow in the VALUES (Python dict.copy()); each struct/enum KEY is
                         // snapshotted exactly as merge() does (Go value-key model), so a key reached through the
                         // copy never aliases the original's. snapshot_key is pure alloc: no rooting.
                         self.arity_err("copy", args, 0, span)?;
-                        let mine = m.entries.clone();
-                        let mut out = MapData::default();
-                        for (hk, key, val) in mine {
-                            let key = self.snapshot_key(key);
-                            out.push(hk, key, val);
+                        let mut out = m.entries.to_vec();
+                        for e in &mut out {
+                            e.1 = self.snapshot_key(e.1);
                         }
-                        Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
+                        Ok(Value::obj(
+                            self.heap.alloc(Obj::Map(MapData::from_entries(out))),
+                        ))
                     }
                     MapMethod::Remove => {
                         self.arity_err("remove", args, 1, span)?;
@@ -1081,13 +1089,18 @@ impl Vm {
                         let pos = self.map_probe(h, hk, key, span)?;
                         match pos {
                             Some(i) => {
-                                let Obj::Map(m) = self.heap.get_mut(h) else {
+                                let heap = self.heap.write(h);
+                                let Obj::Map(m) = heap.get(h) else {
                                     unreachable!()
                                 };
-                                let (_, _, v) = m.remove_at(i);
-                                Ok(self.alloc_enum("Option", "Some", vec![v]))
+                                // M3.0a — `None`: another thread removed the entry after the
+                                // probe, a miss.
+                                match m.remove_at(heap, i) {
+                                    Some((_, _, v)) => Ok(self.alloc_enum("Option", "Some", &[v])),
+                                    None => Ok(self.alloc_enum("Option", "None", &[])),
+                                }
                             }
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     MapMethod::Insert => {
@@ -1095,8 +1108,8 @@ impl Vm {
                         let (key, val) = (args[0], args[1]);
                         let hk = self.hash_key_rooted(key, &[Value::obj(h), key, val], span)?;
                         match self.map_upsert_in_heap(h, hk, key, val, span)? {
-                            Some(old) => Ok(self.alloc_enum("Option", "Some", vec![old])),
-                            None => Ok(self.alloc_enum("Option", "None", vec![])),
+                            Some(old) => Ok(self.alloc_enum("Option", "Some", &[old])),
+                            None => Ok(self.alloc_enum("Option", "None", &[])),
                         }
                     }
                     MapMethod::Merge | MapMethod::Update => {
@@ -1104,7 +1117,7 @@ impl Vm {
                         // Snapshot the incoming entries (with their cached hashes — engine-wide
                         // consistent, so reuse is sound) first; handles `m.merge(m)`/`m.update(m)`.
                         let incoming = match args[0].as_obj().map(|oh| self.heap.get(oh)) {
-                            Some(Obj::Map(o)) => o.entries.clone(),
+                            Some(Obj::Map(o)) => o.entries.to_vec(),
                             _ => {
                                 return Err(self.err(
                                     format!(
@@ -1123,32 +1136,29 @@ impl Vm {
                             // dedup; the argument's entries upsert (last-wins). `snapshot_key` is pure
                             // alloc (no GC), so the local `out`'s contents stay valid across it.
                             let mine = match self.heap.get(h).as_map() {
-                                Some(m) => m.entries.clone(),
+                                Some(m) => m.entries.to_vec(),
                                 None => unreachable!(),
                             };
                             // Root BOTH source maps: `out` is a Rust local and its snapshot keys are
                             // reachable only from it, so the receiver + argument (whose entries every
                             // value in `out` came from) must stay alive across a re-entrant user `eq`.
                             let out = self.with_roots(&[Value::obj(h), args[0]], |vm| {
-                                let mut out = MapData::default();
+                                let out = MapData::default();
                                 for (hk, key, val) in mine {
                                     // A snapshot key is a FRESH object reachable only from the local
                                     // `out`, so root it on the operand stack too (`with_roots` truncates
                                     // back past these on the way out).
                                     let key = vm.snapshot_key(key);
                                     vm.push(key);
-                                    out.push(hk, key, val);
+                                    out.push(&vm.heap, hk, key, val);
                                 }
                                 for (hk, key, val) in incoming {
                                     let pos =
                                         vm.map_slot(&out.entries, out.candidates(hk), key, span)?;
-                                    match pos {
-                                        Some(i) => out.entries[i].2 = val,
-                                        None => {
-                                            let key = vm.snapshot_key(key);
-                                            vm.push(key);
-                                            out.push(hk, key, val);
-                                        }
+                                    if pos.and_then(|i| out.set_value(i, val)).is_none() {
+                                        let key = vm.snapshot_key(key);
+                                        vm.push(key);
+                                        out.push(&vm.heap, hk, key, val);
                                     }
                                 }
                                 Ok(out)
@@ -1195,10 +1205,11 @@ impl Vm {
                             // later mutation of the caller's live value can't corrupt the set. Pure alloc
                             // (no GC), so no rooting needed before the immediately-following push.
                             let x = self.snapshot_key(x);
-                            let Obj::Set(s) = self.heap.get_mut(h) else {
+                            let heap = self.heap.write(h);
+                            let Obj::Set(s) = heap.get(h) else {
                                 unreachable!()
                             };
-                            s.push(hx, x);
+                            s.push(heap, hx, x);
                         }
                         Ok(Value::bool(!present))
                     }
@@ -1209,11 +1220,12 @@ impl Vm {
                         let pos = self.set_probe(h, hx, x, span)?;
                         match pos {
                             Some(i) => {
-                                let Obj::Set(s) = self.heap.get_mut(h) else {
+                                let heap = self.heap.write(h);
+                                let Obj::Set(s) = heap.get(h) else {
                                     unreachable!()
                                 };
-                                s.remove_at(i);
-                                Ok(Value::bool(true))
+                                // M3.0a — `None` is a miss (see `MapMethod::Remove`).
+                                Ok(Value::bool(s.remove_at(heap, i).is_some()))
                             }
                             None => Ok(Value::bool(false)),
                         }
@@ -1226,12 +1238,12 @@ impl Vm {
                         // `eq` and re-enter the VM; `mine`/`other`/`out` are Rust locals holding elements
                         // reachable only through the two source sets, so both are rooted).
                         let mine = match self.heap.get(h).as_set() {
-                            Some(s) => s.entries.clone(),
+                            Some(s) => s.entries.to_vec(),
                             None => unreachable!(),
                         };
                         let other = self.set_arg(args[0], method, span)?;
                         let add = |vm: &mut Vm,
-                                   set: &mut SetData,
+                                   set: &SetData,
                                    he: u64,
                                    e: Value|
                          -> Result<(), RuntimeError> {
@@ -1239,16 +1251,16 @@ impl Vm {
                                 .set_slot(&set.entries, set.candidates(he), e, span)?
                                 .is_none()
                             {
-                                set.push(he, e);
+                                set.push(&vm.heap, he, e);
                             }
                             Ok(())
                         };
                         let out = self.with_roots(&[Value::obj(h), args[0]], |vm| {
-                            let mut out = SetData::default();
+                            let out = SetData::default();
                             // This arm serves exactly Union, Intersection and Difference.
                             if which == SetMethod::Union {
-                                for (he, e) in mine.iter().chain(other.entries.iter()) {
-                                    add(vm, &mut out, *he, *e)?;
+                                for (he, e) in mine.iter().copied().chain(other.entries.iter()) {
+                                    add(vm, &out, he, e)?;
                                 }
                             } else {
                                 // intersection keeps mine's elements present in other; difference drops them.
@@ -1258,7 +1270,7 @@ impl Vm {
                                         .set_slot(&other.entries, other.candidates(*he), *e, span)?
                                         .is_some();
                                     if in_other == keep_when_present {
-                                        add(vm, &mut out, *he, *e)?;
+                                        add(vm, &out, *he, *e)?;
                                     }
                                 }
                             }
@@ -1269,13 +1281,13 @@ impl Vm {
                     SetMethod::Copy => {
                         // TICKET-160 — insertion order kept; each struct/enum element snapshotted as Set.insert does.
                         self.arity_err("copy", args, 0, span)?;
-                        let mine = s.entries.clone();
-                        let mut out = SetData::default();
-                        for (he, e) in mine {
-                            let e = self.snapshot_key(e);
-                            out.push(he, e);
+                        let mut out = s.entries.to_vec();
+                        for e in &mut out {
+                            e.1 = self.snapshot_key(e.1);
                         }
-                        Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
+                        Ok(Value::obj(
+                            self.heap.alloc(Obj::Set(SetData::from_entries(out))),
+                        ))
                     }
                 }
             }
@@ -1315,7 +1327,7 @@ impl Vm {
     /// `pop() -> Option[int]`, `extend(bytes|bytearray|List[int])`. Mirrors the checker's file-backed
     /// `native struct bytearray` method table in `std/prelude.chz` (the retired `bytearray_method_sig`) —
     /// keep them in lockstep.
-    /// Mutators write IN PLACE through the heap slot (`get_mut`), exactly like the `list` methods, so a
+    /// Mutators write IN PLACE through the heap slot (`Heap::write`), exactly like the `list` methods, so a
     /// second binding to the same `bytearray` observes the change.
     pub(super) fn bytearray_method(
         &mut self,
@@ -1352,21 +1364,22 @@ impl Vm {
                         ));
                     }
                 };
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                let heap = self.heap.write(h);
+                let Obj::ByteArray(b) = heap.get(h) else {
                     unreachable!()
                 };
-                b.push(byte);
+                b.push(heap, byte);
                 Ok(Value::nil())
             }
             BytearrayMethod::Pop => {
                 self.arity_err("pop", args, 0, span)?;
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                let Obj::ByteArray(b) = self.heap.write(h).get(h) else {
                     unreachable!()
                 };
                 let popped = b.pop();
                 Ok(match popped {
-                    Some(x) => self.alloc_enum("Option", "Some", vec![Value::int(x as i64)]),
-                    None => self.alloc_enum("Option", "None", vec![]),
+                    Some(x) => self.alloc_enum("Option", "Some", &[Value::int(x as i64)]),
+                    None => self.alloc_enum("Option", "None", &[]),
                 })
             }
             BytearrayMethod::Extend => {
@@ -1374,10 +1387,11 @@ impl Vm {
                 // Snapshot the other side first (so `ba.extend(ba)` terminates) — also validates
                 // ints 0..=255 / element types up front, mirroring the constructor.
                 let appended = self.collect_bytes_arg("extend", args[0], span)?;
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                let heap = self.heap.write(h);
+                let Obj::ByteArray(b) = heap.get(h) else {
                     unreachable!()
                 };
-                b.extend_from_slice(&appended);
+                b.extend_from_slice(heap, &appended);
                 Ok(Value::nil())
             }
             // `decode() -> str`: UTF-8 decode the current buffer. Invalid UTF-8 is a RECOVERABLE
@@ -1387,17 +1401,20 @@ impl Vm {
                 let Obj::ByteArray(b) = self.heap.get(h) else {
                     unreachable!()
                 };
-                let bytes = b.clone();
+                let bytes = b.to_vec();
                 self.decode_utf8(&bytes, span)
             }
             // `reverse() -> None` reverses in place, `reversed() -> bytearray` returns a NEW buffer
             // (Python `bytearray.reverse()`, `bytearray(reversed(b))`).
             BytearrayMethod::Reverse => {
                 self.arity_err("reverse", args, 0, span)?;
-                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                let heap = self.heap.write(h);
+                let Obj::ByteArray(b) = heap.get(h) else {
                     unreachable!()
                 };
-                b.reverse();
+                let mut bytes = b.to_vec();
+                bytes.reverse();
+                b.replace(heap, &bytes);
                 Ok(Value::nil())
             }
             BytearrayMethod::Reversed => {
@@ -1405,9 +1422,9 @@ impl Vm {
                 let Obj::ByteArray(b) = self.heap.get(h) else {
                     unreachable!()
                 };
-                let mut dup = b.clone();
+                let mut dup = b.to_vec();
                 dup.reverse();
-                Ok(Value::obj(self.heap.alloc(Obj::ByteArray(dup))))
+                Ok(Value::obj(self.heap.alloc(Obj::ByteArray(dup.into()))))
             }
             // `copy() -> bytearray`: a new buffer with the same bytes (Python `bytearray.copy()`).
             BytearrayMethod::Copy => {

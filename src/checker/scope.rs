@@ -39,15 +39,7 @@ impl Checker {
                     globals::DeclKind::Fn | globals::DeclKind::Hoisted
                 ))
             .then(|| self.functions.get(name).cloned())
-            .flatten()
-            .map(|mut fsig| {
-                for effect in &mut fsig.summary.writes {
-                    if let fn_writes::WriteRoot::Global(gname) = &effect.root {
-                        effect.global_ty = self.lookup(gname);
-                    }
-                }
-                fsig
-            });
+            .flatten();
             let ty = match &certain_fn {
                 Some(f) => Some(fn_value_ty(f)),
                 None => self
@@ -175,12 +167,9 @@ impl Checker {
 
     pub(super) fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
-        self.fn_write_scopes.push(HashMap::new());
         self.loop_vars.push(std::collections::HashSet::new());
         self.const_decls.push(std::collections::HashSet::new());
         self.hole_rejected.push(std::collections::HashSet::new());
-        self.capture_table.push(HashMap::new());
-        self.written_captures.push(HashMap::new());
     }
     pub(super) fn pop_scope(&mut self) {
         // TICKET-139 (W14-2) — settle the popped scope's keyword calls BEFORE the scope goes: a
@@ -191,44 +180,26 @@ impl Checker {
         // drain here.
         let top = self.scopes.len().saturating_sub(1);
         let pending = std::mem::take(&mut self.kw_pending);
-        for (mut keys, kw_use) in pending {
+        for (mut keys, span) in pending {
             let written = keys
                 .iter()
                 .find(|k| k.0 >= top && self.kw_written.contains(*k))
                 .cloned();
             keys.retain(|k| k.0 < top);
             if written.is_none() && !keys.is_empty() {
-                self.kw_pending.push((keys, kw_use));
+                self.kw_pending.push((keys, span));
                 continue;
             }
-            match kw_use {
-                super::globals::KwUse::Keyword(span) => {
-                    if let Some(key) = written {
-                        self.error(span, super::globals::kw_ambiguous_msg(&key.1));
-                    }
-                }
-                super::globals::KwUse::GenStamp(call, crossing, span) if written.is_none() => {
-                    crate::checker::record_call_table_entry(
-                        &mut self.gen_crossings.calls,
-                        &mut self.table_conflicts,
-                        call,
-                        crossing,
-                        "generator crossing",
-                        span,
-                    );
-                }
-                _ => {}
+            if let Some(key) = written {
+                self.error(span, super::globals::kw_ambiguous_msg(&key.1));
             }
         }
         self.kw_certain.retain(|k, _| k.0 < top);
         self.kw_written.retain(|k| k.0 < top);
         self.scopes.pop();
-        self.fn_write_scopes.pop();
         self.loop_vars.pop();
         self.const_decls.pop();
         self.hole_rejected.pop();
-        self.capture_table.pop();
-        self.written_captures.pop();
     }
     /// Record `name` (already declared in the current scope) as a `const T` binding. At module
     /// scope it writes nothing: module const-ness is `GlobalBinding::is_const` (TICKET-186).
@@ -327,39 +298,6 @@ impl Checker {
     pub(super) fn lookup(&self, name: &str) -> Option<Ty> {
         self.owning_scope(name)
             .map(|i| self.scopes[i][name].clone())
-    }
-    /// TICKET-089 — `e` is a NULLARY read of a `Shared`/`RwShared`/`Atomic` box bound to a bare name
-    /// (`s.get()`, `r.get()`, `a.load()`): the value it returns is a deep copy, so a write to it is
-    /// thrown away (`docs/reference/concurrency/` §6). Returns `(box name, reader, payload type, write-through
-    /// method)`. Bare-`Ident` receivers only, so the box type comes from `lookup` with no re-inference
-    /// (which would double-report the receiver's diagnostics) — `boxes[0].get()` stays a ceiling.
-    /// `RwShared.read(f)` takes a closure, so it is not this shape.
-    pub(super) fn read_temporary_of_box(
-        &self,
-        e: &Expr,
-    ) -> Option<(String, &'static str, Ty, &'static str)> {
-        let ExprKind::Call { callee, args, .. } = &e.kind else {
-            return None;
-        };
-        let ExprKind::Field {
-            obj, name: reader, ..
-        } = &callee.kind
-        else {
-            return None;
-        };
-        let ExprKind::Ident(name) = &obj.kind else {
-            return None;
-        };
-        if !args.is_empty() {
-            return None;
-        }
-        let (reader, fix, payload) = match (self.lookup(name)?, reader.as_str()) {
-            (Ty::Shared(p), "get") => ("get", "update", *p),
-            (Ty::RwShared(p), "get") => ("get", "write", *p),
-            (Ty::Atomic(p), "load") => ("load", "store", *p),
-            _ => return None,
-        };
-        Some((name.clone(), reader, payload, fix))
     }
     /// Does scope `i` hold a binding of `name` visible from here? The ONE raw membership test over
     /// `scopes` (TICKET-183). A module global seeded before any body is walked

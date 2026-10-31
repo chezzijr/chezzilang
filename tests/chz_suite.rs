@@ -18,10 +18,9 @@ fn assert_chz_dir(dir: &str) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/chz")
         .join(dir);
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_chezzi"))
-        .arg("test")
-        .arg(&path)
-        .env_remove("CHEZZI_THREADS")
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("test").arg(&path).env_remove("CHEZZI_THREADS");
+    let out = chz_dirs::set_build_mode(&mut cmd)
         .output()
         .expect("run chezzi test");
     assert!(

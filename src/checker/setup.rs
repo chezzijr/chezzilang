@@ -68,14 +68,8 @@ impl Checker {
             const_decls: Vec::new(),
             hole_rejected: Vec::new(),
             loop_vars: Vec::new(),
-            capture_table: Vec::new(),
-            closure_write_frames: Vec::new(),
-            last_closure_writes: HashSet::new(),
-            closure_literal_writes: HashMap::new(),
-            written_captures: Vec::new(),
             globals: HashMap::new(),
             functions: HashMap::new(),
-            fn_write_scopes: Vec::new(),
             local_fn_names: std::collections::HashSet::new(),
             structs: HashMap::new(),
             protocols: HashMap::new(),
@@ -145,9 +139,6 @@ impl Checker {
             field_widths: crate::checker::FieldWidthTable::new(),
             fresh_subscripts: Default::default(),
             sum_seeds: crate::checker::SumSeedTable::new(),
-            crossings: crate::checker::CrossingTable::new(),
-            gen_crossings: crate::checker::GenCrossings::default(),
-            gen_frame: None,
             ret_coerce: crate::checker::RetCoerceTable::new(),
             wraps: crate::checker::WrapTable::new(),
             table_conflicts: Vec::new(),
@@ -171,7 +162,6 @@ impl Checker {
             builtin_binds: HashMap::new(),
             current_module_label: None,
             loop_depth: 0,
-            capture_floors: Vec::new(),
             current_module_is_stdlib: false,
             net_socket_seed: None,
             net_listener_seed: None,
@@ -204,8 +194,6 @@ impl Checker {
             index_value_checks: 0,
             #[cfg(any(test, feature = "test-api"))]
             bracket_receivers: 0,
-            #[cfg(any(test, feature = "test-api"))]
-            writer_scans: 0,
             memo_verify: std::env::var_os("CHEZZI_MEMO_VERIFY").is_some(),
             memo_verifying: false,
         };
@@ -853,102 +841,6 @@ pub(super) fn c_vararg_ctype(ty: &Ty) -> Option<CType> {
         | Ty::Var(_) => None,
     }
     .and_then(|c| c.vararg_promoted())
-}
-
-/// TICKET-165 — walk an lvalue-shaped chain (`xs`, `xs[i]`, `p.f`, `a.b[0].c`) down to the BINDING it
-/// reaches, and collect the constant [`PathSeg`] path (root first) the walk went through. That
-/// binding is the one that crosses the task airlock. `None` means the chain bottoms out on something
-/// that is not a name (`f().x`) — there is no binding to charge. An INT index literal becomes
-/// `PathSeg::Int`, a STR index literal `PathSeg::Str`, and anything else (a computed index, a
-/// `Unary { op: Neg, .. }` literal, a field projected onto by an index or vice versa) becomes
-/// `PathSeg::Dynamic` — the checker cannot tell whether it aliases a constant path, so it must not be
-/// treated as either a match or a miss.
-///
-/// The D4 write side uses the root and whether the path is empty. Declared-type resolution uses
-/// [`ChainLink`] separately because constant index values do not determine write semantics.
-pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
-    let mut e = e;
-    let mut segs = Vec::new();
-    loop {
-        match &e.kind {
-            ExprKind::Field { obj, name, .. } => {
-                segs.push(PathSeg::Field(name.clone()));
-                e = obj;
-            }
-            ExprKind::Index {
-                obj,
-                index: Some(index),
-                ..
-            } => {
-                segs.push(match &index.kind {
-                    ExprKind::Int(i) if *i >= 0 => PathSeg::Int(*i),
-                    ExprKind::Str(s) => PathSeg::Str((**s).to_owned()),
-                    ExprKind::Int(_)
-                    | ExprKind::Float(_)
-                    | ExprKind::Interp(_)
-                    | ExprKind::Bytes(_)
-                    | ExprKind::RawStr(_)
-                    | ExprKind::Bool(_)
-                    | ExprKind::NoneLit
-                    | ExprKind::Pass
-                    | ExprKind::Ident(_)
-                    | ExprKind::List(..)
-                    | ExprKind::Tuple(_)
-                    | ExprKind::Map(_)
-                    | ExprKind::Set(_)
-                    | ExprKind::Comprehension { .. }
-                    | ExprKind::Unary { .. }
-                    | ExprKind::Binary { .. }
-                    | ExprKind::Compare { .. }
-                    | ExprKind::Range { .. }
-                    | ExprKind::Call { .. }
-                    | ExprKind::Field { .. }
-                    | ExprKind::Index { .. }
-                    | ExprKind::Try(_)
-                    | ExprKind::OptChain { .. }
-                    | ExprKind::NullCoalesce { .. }
-                    | ExprKind::Closure { .. }
-                    | ExprKind::Match { .. }
-                    | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(..)
-                    | ExprKind::ElseGuard { .. } => PathSeg::Dynamic,
-                });
-                e = obj;
-            }
-            ExprKind::Ident(name) => {
-                segs.reverse();
-                return Some((name, e.span, segs));
-            }
-            ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Str(_)
-            | ExprKind::Interp(_)
-            | ExprKind::Bytes(_)
-            | ExprKind::RawStr(_)
-            | ExprKind::Bool(_)
-            | ExprKind::NoneLit
-            | ExprKind::Pass
-            | ExprKind::List(..)
-            | ExprKind::Tuple(_)
-            | ExprKind::Map(_)
-            | ExprKind::Set(_)
-            | ExprKind::Comprehension { .. }
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Compare { .. }
-            | ExprKind::Range { .. }
-            | ExprKind::Call { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::Try(_)
-            | ExprKind::OptChain { .. }
-            | ExprKind::NullCoalesce { .. }
-            | ExprKind::Closure { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::IfElse { .. }
-            | ExprKind::Recover(..)
-            | ExprKind::ElseGuard { .. } => return None,
-        }
-    }
 }
 
 /// Every variant import of a module, one entry per bound name: `(bound name — the alias wins, enum

@@ -143,13 +143,8 @@ impl Checker {
             // A protocol existential slot: the actual type must satisfy the protocol WITH the carried
             // args (empty for a bare existential — reproduces the old `satisfies(a, p)`). This single
             // witness is shared by every value write-site (param/return/field/reassign) since they all
-            // route assignment through `assignable`. Task 2 (option a): EVERY protocol widening now
-            // requires the concrete witness `a` be sendable (Go `chan interface` parity — all protocol
-            // existentials are sendable, not just `Error`). `a` already being a `Protocol(..)` (a prior
-            // widening) is always sendable, so this only rejects a genuine non-sendable concrete
-            // witness — in practice one reaching `Ty::Module` (near-unconstructible). A witness that
-            // carries an FFI/native handle is checker-sendable (its `Ty::Func`/handle type is
-            // sendable) and rejected at the RUNTIME airlock instead (`ensure_crossable`), not here.
+            // route assignment through `assignable`. M3.5: a task gets a witness by handle, so no
+            // sendability conjunct is left (a module is no value, `Checker::infer_value`).
             // TICKET-053: the erasure hands `a` the unconditional intrinsic `Eq` grant for a
             // protocol receiver (the `INTRINSIC_PROTO_METHODS` row above), so the witness's own
             // conditional `eq` must be discharged HERE — the same
@@ -157,7 +152,6 @@ impl Checker {
             // this is the last point the concrete witness is visible before it is erased.
             (Protocol(p, pargs), a) => {
                 self.satisfies_args(a, p, pargs).is_ok()
-                    && self.sendable(a)
                     && self.eq_where_bounds_unsatisfied(a).is_none()
             }
             // `Option`/`Result` are IMMUTABLE carriers — covariant element assignment stays sound
@@ -221,15 +215,12 @@ impl Checker {
     /// structurally at runtime, exactly as before.
     ///
     /// It is deliberately NOT [`Checker::assignable`]. Assignability answers a *storage* question —
-    /// "can a `B` be written into an `A` slot" — and carries two conjuncts equality has no use for:
+    /// "can a `B` be written into an `A` slot" — and carries a conjunct equality has no use for:
     ///
     /// * **Invariance.** `assignable` compares `List`/`Set`/`Map`/generic `Struct`/`Enum` type
     ///   ARGUMENTS with the context-free `compatible`, because a `G[Sub]` aliased as `G[Super]` can be
     ///   *written through*. `==` never writes, so a `List[Error]` and a `List[MyErr]` can genuinely
     ///   hold the same list; here the arguments recurse CO-VARIANTLY.
-    /// * **Sendability.** `assignable`'s `Protocol` arm ends in `&& self.sendable(a)` (the spawn-airlock
-    ///   witness). Whether two values may be equal has nothing to do with whether either crosses a
-    ///   thread boundary.
     ///
     /// And it adds the arm `assignable` cannot have: **two existentials co-inhabit**. `assignable`
     /// only passes `Protocol` vs `Protocol` when one embeds the other (a `Shape` slot really can't

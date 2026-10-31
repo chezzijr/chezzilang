@@ -911,49 +911,6 @@ pub(super) fn protocol_labels(params: &[crate::ast::Param]) -> Vec<Option<String
         .collect()
 }
 
-/// Does `ty` mention the built-in `Error` protocol existential anywhere (the E side of a bare `T!`,
-/// or nested inside a container/struct)? Drives the concrete-error-type hint on a non-sendable
-/// channel element. Matches `Error` by name — it is a global std protocol (`is_global_protocol`), so a
-/// user protocol can never shadow it.
-pub(super) fn ty_mentions_error_existential(ty: &Ty) -> bool {
-    match ty {
-        Ty::Protocol(n, _) => n == "Error",
-        Ty::List(t)
-        | Ty::Set(t)
-        | Ty::Option(t)
-        | Ty::Channel(t)
-        | Ty::Shared(t)
-        | Ty::Atomic(t)
-        | Ty::RwShared(t) => ty_mentions_error_existential(t),
-        Ty::Map(a, b) | Ty::Result(a, b) => {
-            ty_mentions_error_existential(a) || ty_mentions_error_existential(b)
-        }
-        Ty::Tuple(xs) | Ty::Struct(_, xs) | Ty::Enum(_, xs) => {
-            xs.iter().any(ty_mentions_error_existential)
-        }
-        Ty::Int
-        | Ty::Float
-        | Ty::Bool
-        | Ty::Str
-        | Ty::Bytes
-        | Ty::ByteArray
-        | Ty::Nil
-        | Ty::Func { .. }
-        | Ty::Param(_)
-        | Ty::AtomicInt
-        | Ty::Executor
-        | Ty::Socket
-        | Ty::Listener
-        | Ty::Writer
-        | Ty::Reader
-        | Ty::Ptr
-        | Ty::Width(_)
-        | Ty::Module(_)
-        | Ty::Unknown
-        | Ty::Var(_) => false,
-    }
-}
-
 /// The names of `tps` with no binding in `map` yet: a call's still-free params, which never stand
 /// as a caller's rigid param ([`Checker::rigid_param`]).
 pub(super) fn unbound_params(tps: &[TyParam], map: &HashMap<String, Ty>) -> Vec<String> {

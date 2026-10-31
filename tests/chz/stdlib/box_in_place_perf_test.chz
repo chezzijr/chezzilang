@@ -1,15 +1,15 @@
 # tests/chz/stdlib/box_in_place_perf_test.chz — TICKET-246.
 #
-# `Shared.update` runs its closure inside the box's private heap, on the live value: it does not
-# copy the value out and back. Measured on the base release binary (commit 7e4421e4, encoded
+# `Shared.update` runs its closure on the live value (M3.3: in the caller's task, the value held by
+# handle): it does not copy the value out and back. Measured on the base release binary (commit 7e4421e4, encoded
 # store) for this struct with n = 100000: 6478-7075 us per `update` call, about 13 s for 2000
 # calls. One absolute bound per row (DEC-243), 1000 ms, no ratio of two samples.
 #
 # Row 3: a closure that calls a top-level `fn` while the caller mutates a 100000-item global
-# between calls must not pay a module snapshot per call (the box's slot door). With a view only,
+# between calls must not pay a module snapshot per call. With a view only,
 # the planning prototype measured 13507-13816 ms for these 2000 calls.
 #
-# `RwShared.write` has the same row: it runs in place under the exclusive lock.
+# `RwShared.write` has the same row: it runs in place under the write guard.
 
 import RwShared, Shared from std.concurrency
 import std.time

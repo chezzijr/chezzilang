@@ -2,6 +2,7 @@
 #
 # Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
+import std.os
 import std.regex
 import std.time
 
@@ -42,23 +43,11 @@ test fn replace_all_rejects_a_dollar_ref_to_a_missing_group():
 # written as find_all + a `.text` loop took 1.64-1.83s over 1 000 000 tokens on the release binary.
 # `find_all_text` returns the matched strings directly. Measured 2026-09-22 over the same input:
 # 0.31s release, 2.25s debug. The bound is one absolute ceiling (never a quotient, DEC-049). It
-# only discriminates on an optimized build, so `optimized_build()` (TICKET-159's probe) returns
-# early on the debug binary that `cargo test` runs this suite with.
-fn burn(n: int) -> int:
-    x := 0
-    i := 0
-    while i < n:
-        x = x + i * i - i
-        i += 1
-    return x
-
-fn optimized_build() -> bool:
-    t0 := time.monotonic()
-    burn(1500000)
-    return (time.monotonic() - t0) * 1000.0 < 1000.0
-
+# only discriminates on a release build, so the test returns early on the debug binary that
+# `cargo test` runs this suite with (the Rust runners set `CHEZZI_TEST_DEBUG_BINARY=1` from their
+# `cfg!(debug_assertions)`).
 test fn find_all_text_extraction_over_a_million_tokens_is_not_too_slow():
-    if not optimized_build():
+    if (os.env("CHEZZI_TEST_DEBUG_BINARY") ?? "") == "1":
         return
     n := 1000000
     words := List[str]()

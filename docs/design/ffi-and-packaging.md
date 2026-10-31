@@ -84,14 +84,14 @@ out-of-bounds `load_*`/`store_*` are documented UB.
 ## 2. Why strong libraries are blocked
 
 Linking a Rust crate is easy: add it to `Cargo.toml` and a `native_members` entry. Using it hits three
-walls in the value model and GC airlock (`src/native/mod.rs`):
+walls in the value model and the GC boundary (`src/native/mod.rs`):
 
 1. **No opaque-handle `Value`.** A `burn::Tensor<B,D>` fits no `NativeRet` variant. Flattening to
    `List[float]` deep-copies every call and loses zero-copy. Fatal for tensors.
 2. **`NativeFn` is a stateless `fn` pointer.** A model, device, autodiff graph or optimizer has
    nowhere to live.
-3. **The GC airlock.** Native code never touches a `GcRef`. A foreign object held by a Chezzi value
-   must be GC-tracked, `Send + Sync` for the M:N workers, and survive the snapshot. A Burn tensor is
+3. **The GC boundary.** Native code never touches a `GcRef`. A foreign object held by a Chezzi value
+   must be GC-tracked and `Send + Sync`: every M:N worker can reach it through the run's one heap. A Burn tensor is
    none of these by default (often `!Send` on GPU).
 
 Python's strength is hand-written C-extension modules on the full C-API, not `ctypes`. Chezzi's
@@ -124,7 +124,7 @@ print(t.matmul(t))      # data lives in the Arc handle — zero-copy, no GC chur
 
 Stateful APIs (model, device, optimizer) are more handles; no extra mechanism.
 
-**Hazards:** the `Send + Sync` bound is required by the M:N workers and the snapshot. A `!Send` GPU
+**Hazards:** the `Send + Sync` bound is required by the M:N workers. A `!Send` GPU
 backend must sit behind a mutex-actor or be gated. Tensor data never marshals to `List[float]`; it
 stays in the handle.
 

@@ -133,7 +133,7 @@ impl Compiler {
                         if fc.is_global_scope() {
                             fc.emit(Op::DefineGlobalSlot(self.global_slot(name)), stmt.span);
                         } else {
-                            fc.emit_decl_frame(name.clone(), stmt.span);
+                            fc.emit_decl_named(name.clone(), stmt.span);
                         }
                     }
                     Pattern::Variant { .. }
@@ -638,10 +638,7 @@ impl Compiler {
                 )? {
                     let n = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
                     let entry = self.spawn_entry_proto("<spawned task>", None, n, call.span);
-                    fc.emit(
-                        Op::SpawnCall(n, self.crossing_mask(call.id), Some(entry)),
-                        call.span,
-                    );
+                    fc.emit(Op::SpawnCall(n, Some(entry)), call.span);
                     return Ok(());
                 }
                 // M24-5b — `spawn Type.m(..)`: no receiver value to hold, so it rides the eager-args
@@ -652,10 +649,7 @@ impl Compiler {
                         (call.id, callee, args, named),
                         call.span,
                     )?;
-                    fc.emit(
-                        Op::SpawnCall(n, self.crossing_mask(call.id), None),
-                        call.span,
-                    );
+                    fc.emit(Op::SpawnCall(n, None), call.span);
                     return Ok(());
                 }
                 if let ExprKind::Field {
@@ -667,16 +661,13 @@ impl Compiler {
                 {
                     // Same hidden `0.0` seed the eager `Op::CallMethod` emit pushes: the entry
                     // thunk's `Op::CallMethod` consumes it, so a missing seed changes an empty
-                    // `List[float].sum()`'s answer. The seed is a plain scalar, so it crosses
-                    // `do_spawn`'s `deep_clone_all` airlock exactly like any other spawned
-                    // argument.
+                    // `List[float].sum()`'s answer. The seed is a plain scalar argument.
                     if let Some(seed) = self.sum_seed(name, args, *name_span) {
                         self.compile_expr(fc, obj)?;
                         self.emit_sum_seed(fc, &seed, call.span);
-                        let fresh = self.crossing_mask(call.id);
                         let entry =
                             self.spawn_entry_proto("<spawned task>", Some(name), 1, call.span);
-                        fc.emit(Op::SpawnRecv(1, fresh, entry), call.span);
+                        fc.emit(Op::SpawnRecv(1, entry), call.span);
                         return Ok(());
                     }
                     self.compile_expr(fc, obj)?;
@@ -685,10 +676,9 @@ impl Compiler {
                     // `Op::CallMethod`, so the widened `argc` reaches the same proto.
                     let w =
                         self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
-                    let fresh = self.crossing_mask(call.id);
                     let entry =
                         self.spawn_entry_proto("<spawned task>", Some(name), n + w, call.span);
-                    fc.emit(Op::SpawnRecv(n + w, fresh, entry), call.span);
+                    fc.emit(Op::SpawnRecv(n + w, entry), call.span);
                 } else {
                     // A spawned value call: its arguments -- default fills included -- are
                     // evaluated here, at the statement, in the checker's slot plan when it bound
@@ -697,17 +687,15 @@ impl Compiler {
                     let n = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
                     // M24-5: TRAILING — after the arguments, never in source order.
                     let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
-                    let fresh = self.crossing_mask(call.id);
                     let entry = self.spawn_entry_proto("<spawned task>", None, n + w, call.span);
-                    fc.emit(Op::SpawnCall(n + w, fresh, Some(entry)), call.span);
+                    fc.emit(Op::SpawnCall(n + w, Some(entry)), call.span);
                 }
                 Ok(())
             }
             SpawnTarget::Block(body) => {
-                // Capture only the names this block references (its free-variable set); the values
-                // are deep-copied across the airlock at `SpawnBlock`. The block becomes a synthetic
-                // zero-arg proto whose free names resolve via `GetCaptured`. Free-variable capture
-                // (Finding D) avoids dragging unused non-sendable siblings across the airlock.
+                // Capture only the names this block references (its free-variable set); the task
+                // shares each captured cell with the parent at `SpawnBlock` (M3.4). The block becomes
+                // a synthetic zero-arg proto whose free names resolve via `GetCaptured`.
                 let snap = fc.snapshot_entries();
                 let (kept, free) = filter_entries_free_block(&snap, body, &[]);
                 let entries = self.with_witness_captures(&snap, kept, Some(&free));
@@ -725,8 +713,7 @@ impl Compiler {
                     child.nursery_scopes += 1;
                 }
                 // M24 Task 4: the block reaches the enclosing frame's witnesses through
-                // `with_witness_captures` above — a `str` per witness, deep-copied across the
-                // airlock like any captured string.
+                // `with_witness_captures` above — a `str` per witness, captured like any string.
                 self.compile_block_scoped(&mut child, body)?;
                 if implicit {
                     child.nursery_scopes -= 1;

@@ -1,7 +1,7 @@
 //! VM: channel methods, send and recv steps, sender and receiver wakes and parks.
 //! Split out of `src/vm/netio.rs`. `super::*` is the parent module.
 
-use super::core::{Pending, PendingOp, SendOutcome, Settled};
+use super::core::{ChanState, Pending, PendingOp, RecvReady, SendOutcome, Settled};
 use super::netio::CLOSED_RECV;
 use super::netio::CLOSED_SEND;
 use super::netio::EMPTY_RECV_DEADLOCK;
@@ -30,8 +30,8 @@ impl Vm {
         }
     }
 
-    /// `Channel[T]` methods (C2/C4): `send` (move-on-send, deep-copied in), `recv` (FIFO; empty =
-    /// deadlock fault under the sequential executor), `len`.
+    /// `Channel[T]` methods (C2/C4): `send` (the value itself: one word, M3.2), `recv` (FIFO;
+    /// empty = wait or a deadlock fault), `len`.
     pub(super) fn channel_method(
         &mut self,
         h: GcRef,
@@ -45,17 +45,13 @@ impl Vm {
         match which {
             ChannelMethod::Send => {
                 self.arity_err("send", args, 1, span)?;
-                // B3.1: serialize once into the core (the wire form IS the airlock copy). A
-                // non-sendable value (a frame-holding generator, or a module/native/FFI handle) faults
-                // gracefully with `send`'s span — the value crosses a heap boundary into the receiver.
-                let w = self.to_wire_crossable(args[0], span)?;
                 // TICKET-185 — `closed` is judged ONCE, inside `chan_send_step`'s commit (a fresh
                 // send) or by the offer's own `Pending` (a parked one). Unbounded: enqueue
                 // immediately. Bounded or rendezvous with no taker: publish an offer and block —
                 // park the fiber (`SendStep::Parked` — the receiver+value were re-rooted), block in
                 // place, demote, or, in a context that cannot block, fault. On park,
                 // `do_method_call` skips the result push.
-                match self.chan_send_step(h, w, args[0], span)? {
+                match self.chan_send_step(h, args[0], span)? {
                     SendStep::Sent | SendStep::Parked => Ok(Value::nil()),
                 }
             }
@@ -68,9 +64,8 @@ impl Vm {
             // SAME nondeterminism class as `try_recv` returning `None`-vs-`Some` under contention.
             ChannelMethod::TrySend => {
                 self.arity_err("try_send", args, 1, span)?;
-                let w = self.to_wire_crossable(args[0], span)?;
                 let core = self.channel_core(h);
-                let sent = matches!(self.send_commit(h, &core, w, None), SendOutcome::Sent);
+                let sent = matches!(self.send_commit(h, &core, args[0], None), SendOutcome::Sent);
                 Ok(Value::bool(sent))
             }
             ChannelMethod::Recv => {
@@ -81,12 +76,8 @@ impl Vm {
                 // (Go's `handoffp`). `demote_recv_block` is itself closed-aware (a `close` faults the
                 // demoted recv).
                 match self.recv_step_or_demote(h, span)? {
-                    RecvStep::Got(w) => {
-                        self.wake_senders(h); // freed a slot — wake a parked bounded sender
-                        Ok(self.from_wire(w))
-                    }
-                    // A `give` filled this receiver's own slot: it committed no sender.
-                    RecvStep::Filled(w) => Ok(self.from_wire(w)),
+                    // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
+                    RecvStep::Got(v) | RecvStep::Filled(v) => Ok(v),
                     // `chan_recv_step` already re-rooted the receiver + set `suspend`; the sentinel is
                     // never observed (`do_method_call` gates the result-push on `suspend`).
                     RecvStep::Parked => Ok(Value::nil()),
@@ -105,18 +96,18 @@ impl Vm {
                 // source-order scan and the `else` arm). `--parallel` may also have a real `true`
                 // queued by the background send; either way `Some(true)`.
                 // A tripped latch (`trip()`) reports ready forever, like a passed timer deadline.
-                let ready = core.recv_ready(&mut core.q.lock().unwrap());
+                let ready = self.recv_ready(&core, &mut core.q.lock().unwrap());
                 let got = match ready {
-                    core::RecvReady::Value(w) => {
+                    RecvReady::Value(v) => {
                         self.wake_senders(h); // a real pop freed a slot — wake a parked bounded sender
-                        Some(self.from_wire(w))
+                        Some(v)
                     }
-                    core::RecvReady::Fired => Some(Value::bool(true)),
-                    core::RecvReady::Closed | core::RecvReady::Wait => None,
+                    RecvReady::Fired => Some(Value::bool(true)),
+                    RecvReady::Closed | RecvReady::Wait => None,
                 };
                 Ok(match got {
-                    Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                    None => self.alloc_enum("Option", "None", vec![]),
+                    Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                    None => self.alloc_enum("Option", "None", &[]),
                 })
             }
             // `close()` marks the channel closed (idempotent) and wakes every parked / demoted
@@ -187,8 +178,7 @@ impl Vm {
     pub(super) fn chan_send_step(
         &mut self,
         h: GcRef,
-        w: WireValue,
-        orig: Value,
+        v: Value,
         span: Span,
     ) -> Result<SendStep, RuntimeError> {
         let core = self.channel_core(h);
@@ -201,7 +191,7 @@ impl Vm {
             {
                 // A stray wake: still queued — re-park on the same offer.
                 self.pending = Some(op);
-                self.park_send(h, orig, core.cap, span);
+                self.park_send(h, v, core.cap, span);
                 return Ok(SendStep::Parked);
             }
             if let Some(r) = self.send_settled(op, span) {
@@ -211,7 +201,7 @@ impl Vm {
         }
         if core.cap.is_none() {
             // Unbounded — never blocks.
-            return match self.send_commit(h, &core, w, None) {
+            return match self.send_commit(h, &core, v, None) {
                 SendOutcome::Closed => Err(self.err(CLOSED_SEND.to_string(), span)),
                 SendOutcome::Sent | SendOutcome::Offered | SendOutcome::Full => Ok(SendStep::Sent),
             };
@@ -219,7 +209,7 @@ impl Vm {
         // The table decides how this send blocks; a `Refuse` context publishes no offer.
         let mode = self.block_mode(WaitSpec::Send);
         let p = (mode != BlockMode::Refuse).then(Pending::new);
-        match self.send_commit(h, &core, w, p.as_ref().map(|p| (p, 0))) {
+        match self.send_commit(h, &core, v, p.as_ref().map(|p| (p, 0))) {
             SendOutcome::Sent => return Ok(SendStep::Sent),
             SendOutcome::Closed => return Err(self.err(CLOSED_SEND.to_string(), span)),
             SendOutcome::Full => {
@@ -243,21 +233,23 @@ impl Vm {
             // A real M:N WORKER snapshot-parks: the worker loop drives `send_suspend` →
             // `Disp::SendPark`.
             self.pending = Some(op);
-            self.park_send(h, orig, core.cap, span);
+            self.park_send(h, v, core.cap, span);
             return Ok(SendStep::Parked);
         }
         if mode == BlockMode::Demote {
-            return self.demote_send_block(core, op, span);
+            return self.demote_send_block(h, core, op, span);
         }
-        self.block_send(&core, op, span)
+        self.block_send(h, &core, op, span)
     }
 
     /// A party that owns its OS thread — an eager `Executor` job, or the top-level `main` thread —
     /// blocks until its offer settles, the mirror of the empty-`recv` case in `chan_recv_step`
     /// ([`Vm::block_wait_tick`]). The party registration is scoped to the WAIT only — see the same
-    /// rule spelled out in [`Vm::block_recv`].
+    /// rule spelled out in [`Vm::block_recv`]. M3.2: `h` is pinned across the wait, so the
+    /// collector reads the offer's value through it.
     fn block_send(
         &mut self,
+        h: GcRef,
         core: &Arc<ChannelCore>,
         op: PendingOp,
         span: Span,
@@ -272,7 +264,7 @@ impl Vm {
         while p.is_queued() {
             let party =
                 self.block_party_guard(quiesce::PartyWait::Send(Arc::clone(&p)), Some((msg, span)));
-            r = self.block_wait_tick(core, span, |_| !p.is_queued());
+            r = self.block_wait_tick(h, core, span, |_| !p.is_queued());
             drop(party);
             if r.is_err() {
                 break;
@@ -308,7 +300,7 @@ impl Vm {
         &mut self,
         h: GcRef,
         core: &Arc<ChannelCore>,
-        w: WireValue,
+        v: Value,
         offer: Option<(&Arc<Pending>, u32)>,
     ) -> SendOutcome {
         if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
@@ -321,14 +313,13 @@ impl Vm {
             } else {
                 usize::MAX
             };
-            return sched.send_commit(key, core, w, offer, wid);
+            return sched.send_commit(key, core, v, offer, wid);
         }
-        let sum = crate::vm::core::wire_summary(&w); // OFF-LOCK — see `ChanState::push`
         let out = core
             .q
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .send(core.cap, sum, w, offer);
+            .send(core.cap, v, offer);
         if matches!(out, SendOutcome::Sent) {
             core.wake_all();
             self.wake_on_send(h); // wake a receiver parked on this channel's `recv`
@@ -340,8 +331,8 @@ impl Vm {
     /// the operand stack (send is 1-arg, unlike recv's 0-arg — both must be re-pushed or the rewound
     /// `CallMethod(send)` mis-reads the stack), rewind `ip` so the send re-executes on resume, and set
     /// the `send_suspend` sentinel. The scheduler / worker loop files the fiber into the channel's wait
-    /// set; a sibling `recv` freeing a slot ([`Vm::wake_senders`]) wakes it. The value is re-serialized
-    /// on the re-run (`to_wire_at(orig)` is idempotent), so the wire form built before parking is dropped.
+    /// set; a sibling `recv` freeing a slot ([`Vm::wake_senders`]) wakes it. The re-run settles the
+    /// offer the value already sits in.
     pub(super) fn park_send(&mut self, h: GcRef, value: Value, cap: Option<usize>, span: Span) {
         self.push(Value::obj(h)); // receiver (deeper on the stack)
         self.push(value); // its one arg, back on top
@@ -352,7 +343,7 @@ impl Vm {
 
     /// Bounded-channel backpressure — after a `recv` frees a slot on a BOUNDED channel, wake any fiber
     /// parked on a full `send` to it. No-op for an unbounded channel (no sender ever parks there — the
-    /// common `recv` path pays only a `cap.is_none()` check). Routes exactly like `channel_send_wire`'s
+    /// common `recv` path pays only a `cap.is_none()` check). Routes exactly like `chan_send_step`'s
     /// wake: an active sched (`mn` / `mn_enlist_sched`) → [`MnSched::recv_wake`]; else, with no
     /// scheduler in scope, [`Vm::wake_on_send`] wakes any other live sched's bucket for this channel.
     pub(super) fn wake_senders(&mut self, h: GcRef) {
@@ -389,22 +380,32 @@ impl Vm {
     /// (block in place, spin a replacement worker) instead of faulting. A `timer(ms)` channel is
     /// excluded: it has no sibling sender, and [`Vm::chan_recv_step`] synthesises its value at any
     /// re-entry. A new site that calls `chan_recv_step` directly brings W14-16 back.
+    ///
+    /// A `Got` value freed a slot: this fn wakes a parked bounded sender. M1.8 — it wakes through
+    /// the core it read before the wait, never through `h`: the receiver may be a popped
+    /// temporary, which is no GC root while the wait is detached (`Vm::gc_blocking`).
     pub(super) fn recv_step_or_demote(
         &mut self,
         h: GcRef,
         span: Span,
     ) -> Result<RecvStep, RuntimeError> {
-        let spec = if self.channel_core(h).timer.is_some() {
+        let core = self.channel_core(h);
+        let spec = if core.timer.is_some() {
             WaitSpec::Timer
         } else {
             WaitSpec::Recv
         };
         // A timer's Demote cell is served inside `chan_recv_step`: its value is synthesised at the
         // deadline, never queued, so `demote_recv_block`'s pop loop cannot serve it.
-        if spec == WaitSpec::Recv && self.block_mode(spec) == BlockMode::Demote {
-            return self.demote_recv_block(h, span);
+        let step = if spec == WaitSpec::Recv && self.block_mode(spec) == BlockMode::Demote {
+            self.demote_recv_block(h, span)
+        } else {
+            self.chan_recv_step(h, span)
+        };
+        if let Ok(RecvStep::Got(_)) = step {
+            self.wake_senders_core(&core);
         }
-        self.chan_recv_step(h, span)
+        step
     }
 
     /// One blocking-`recv` step on the snapshot-park / block-in-place / fault paths (NOT the
@@ -421,9 +422,9 @@ impl Vm {
         // and cancel checkpoints: a filled slot means a sender's `send` already returned, so the
         // value is this receiver's.
         if let Some(op) = self.pending.take()
-            && let Settled::Got(_, w) = op.settle()
+            && let Settled::Got(_, v) = op.settle()
         {
-            return Ok(RecvStep::Filled(w));
+            return Ok(RecvStep::Filled(v));
         }
         // W7-17 — `--timeout` ABOVE the cancellation checkpoint, because the deadline outranks a cancel
         // and because ending a timer park early TRIPS this fiber's cancel to close the park gap
@@ -440,12 +441,12 @@ impl Vm {
         // not wait, so it is not a cancellation point (owner decision 1): `recv_ready` decides what
         // it gets, and only a receive that would wait reaches `wait_halt`.
         let core = self.channel_core(h);
-        let ready = core.recv_ready(&mut core.q.lock().unwrap());
+        let ready = self.recv_ready(&core, &mut core.q.lock().unwrap());
         match ready {
-            core::RecvReady::Value(w) => return Ok(RecvStep::Got(w)),
-            core::RecvReady::Fired => return Ok(RecvStep::Got(WireValue::Bool(true))),
-            core::RecvReady::Closed => return Ok(RecvStep::ClosedEmpty),
-            core::RecvReady::Wait => {}
+            RecvReady::Value(v) => return Ok(RecvStep::Got(v)),
+            RecvReady::Fired => return Ok(RecvStep::Got(Value::bool(true))),
+            RecvReady::Closed => return Ok(RecvStep::ClosedEmpty),
+            RecvReady::Wait => {}
         }
         self.wait_halt(span)?;
         // A `timer(ms)` channel delivers `true` once its deadline passes. Handled here (uniformly,
@@ -482,7 +483,7 @@ impl Vm {
                         fire_at,
                         Box::new(move || {
                             if std::time::Instant::now() >= deadline {
-                                sched_job.send_wake(key, &core_job, WireValue::Bool(true));
+                                sched_job.send_wake(key, &core_job, Value::bool(true));
                             } else {
                                 deadline_gap_wake(&sched_job, key, &core_job, &gap_cancel);
                             }
@@ -500,7 +501,7 @@ impl Vm {
                 // takes the sleep bracket, accounted `inflight`.
                 if self.block_mode(WaitSpec::Timer) == BlockMode::Demote {
                     self.demote_block_until(deadline, WaitSpec::Timer, "timer.recv()", span)?;
-                    return Ok(RecvStep::Got(WireValue::Bool(true)));
+                    return Ok(RecvStep::Got(Value::bool(true)));
                 }
                 // Every other context (`BlockMode::InlineSleep`: the top-level VM, the inline
                 // outermost-`parallel:` builder VM, an eager `Executor` job's `Vm`): inline-sleep to
@@ -512,7 +513,7 @@ impl Vm {
                 // through `--timeout`), while the same `timer(ms).recv()` in a nursery — which parks,
                 // above — was cancelled at 55 ms. Same primitive, two answers.
                 self.block_until_deadline(deadline, span)?;
-                return Ok(RecvStep::Got(WireValue::Bool(true)));
+                return Ok(RecvStep::Got(Value::bool(true)));
             }
         }
         // M:N snapshot-park path (empty-open parks the fiber; the worker loop files it into the wait
@@ -540,11 +541,36 @@ impl Vm {
         // all — the verdict is reached on the FIRST halt check, before any wait, so that program still
         // faults with no added latency.
         if recv_mode == BlockMode::InPlace {
-            return self.block_recv(&core, span);
+            return self.block_recv(h, &core, span);
         }
         // A native callback with no thread of its own to block on: the host stack cannot be unwound
         // to park either. Fault, as before.
         Err(self.err(EMPTY_RECV_DEADLOCK.to_string(), span))
+    }
+
+    /// TICKET-194 — THE ready decision of a channel receive, made in the caller's `core.q` hold
+    /// `q`: a value > a tripped latch > a fired timer > closed. M3.2: a Task outcome sealed as text
+    /// ([`ChanState::seal_err`]) is built into its `Err` value here, once, so every reader shares
+    /// that one object. The build allocates under `q`, which no collection can wait for: an
+    /// allocation reaches no safepoint.
+    pub(super) fn recv_ready(&mut self, core: &ChannelCore, q: &mut ChanState) -> RecvReady {
+        if let Some(msg) = q.unbuilt_outcome() {
+            let msg = self.alloc_str(msg.to_string());
+            let err = self.alloc_enum("Result", "Err", &[msg]);
+            q.build_outcome(err);
+        }
+        if let Some(v) = q.pop() {
+            return RecvReady::Value(v);
+        }
+        if core.done_latch.load(Ordering::Relaxed)
+            || core.timer.is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            return RecvReady::Fired;
+        }
+        if q.closed {
+            return RecvReady::Closed;
+        }
+        RecvReady::Wait
     }
 
     /// Park the running fiber on an empty `recv`: re-root the receiver on the operand stack, rewind

@@ -5,7 +5,7 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
 - The phases are `lexer` → `parser` → `ast` → `desugar` → `checker` → `compiler` → `vm` (the engine
   of record), plus `native` (builtins / std), `resolver` (module paths), `base` (what both the front
-  end and the VM read: bytecode, hooks, crossing marks) and `run` (the CLI's run drivers). Each layer
+  end and the VM read: bytecode, hooks, message words) and `run` (the CLI's run drivers). Each layer
   is its own crate: `crates/chezzi-syntax` (lexer, ast, parser), `crates/chezzi-native`,
   `crates/chezzi-base`, `crates/chezzi-front` (resolver, desugar, checker, compiler) and
   `crates/chezzi-vm`; the root `chezzi` crate holds the CLI, `run` and the editor. The sources stay
@@ -31,7 +31,7 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   `native struct`; no Rust-side module sig exists). A program then reaches it like any module member
   (`import X from M`, an alias, `M.X`); no name-keyed rule is needed. A runtime-backed type that is a
   `BuiltinType` row names its module in `BuiltinType::owner`; a function that builds a heap value the
-  host seam cannot carry uses an intercepted `Kind` (`InterceptTimer`, `InterceptAirlock`). Cover the
+  host seam cannot carry uses an intercepted `Kind` (`InterceptTimer`). Cover the
   member with a row in `tests/module_member_grid.rs`.
   A global builtin name is a one-way ratchet: moving it out later breaks every example + grammar.bnf.
 - **A new native fn's `MEMBERS` entry is `(name, fn, Kind)` — the third element is not paperwork.**
@@ -92,7 +92,9 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   there, and its recommended escape `_ := g()` turned rc=1 into rc=0 — TICKET-038 later reversed the
   runtime abort itself for exactly that reason, so the warning fires at top level too now; the airlock rule's filed
   "locals only, `is_local_capture` draws exactly this line" would not have warned on its own filed
-  repro, because at module top level the binding is scope 0 (`is_captured` is the real question). Two
+  repro, because at module top level the binding is scope 0 (the gate then took scope 0 in; M3.1
+  made a module global the run's one copy, so a task write to it is legal, and M3.4 deleted the
+  rule with the rest of D4 layer A). Two
   corollaries: derive the gate from an **exhaustive** enumeration of the compiler seam that decides it
   (W8-2's is the eight `FnComp::new` sites), and when unsure **decline** — an under-warn is a ceiling
   you can pin with a test, an over-warn teaches users to ignore the channel.

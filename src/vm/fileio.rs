@@ -1,7 +1,7 @@
 // vm::fileio — R2 `Writer` / file-handle methods + openers. `super::*` == the `vm` module.
 // Mirrors vm::netio's Socket handle dispatch, but blocking-classified with NO netpoller/park
-// (regular files are always epoll-ready, so file writes are synchronous blocking syscalls). The
-// stdout/stderr backings route through `Vm::emit_out`/`emit_err` (`Vm.out`, what the golden test
+// (file writes are synchronous blocking syscalls; one on a FIFO, a pipe or a device runs in the
+// `Vm::host_wait` bracket, which hands its runner slot over). The stdout/stderr backings route through `Vm::emit_out`/`emit_err` (`Vm.out`, what the golden test
 // suite captures), never a raw fd.
 
 use super::*;
@@ -14,6 +14,17 @@ enum WriteErr {
     Closed,
     /// A real I/O error (ENOSPC, a broken pipe, …), rendered for the `Result::Err` payload.
     Io(String),
+    /// The `Vm::host_wait` bracket could not demote the worker: the op faults.
+    Fault(RuntimeError),
+}
+
+/// What a write to a writer core leaves to do once its lock is released.
+enum Wrote {
+    Done,
+    Stdout,
+    Stderr,
+    /// a `Buffered` core reached its cap: write the drained bytes to its inner core
+    Drain(Arc<WriterCore>, Vec<u8>),
 }
 
 /// W6-1 — re-key an error raised by a core BENEATH the receiver. `writer_method` renders `Closed`
@@ -26,7 +37,7 @@ fn from_inner(e: WriteErr) -> WriteErr {
         WriteErr::Closed => {
             WriteErr::Io("the inner writer this buffer drains into is closed".into())
         }
-        io => io,
+        other @ (WriteErr::Io(_) | WriteErr::Fault(_)) => other,
     }
 }
 
@@ -70,83 +81,97 @@ impl Vm {
         }
     }
 
-    /// R2 — write `data` to a writer core. `File` → `write_all` on the `BufWriter`; `Stdout`/`Stderr` →
+    /// The door of a syscall on a `Writer`/`Reader` fd: the [`Vm::host_wait`] bracket when the
+    /// fd can wait without end (`waits`: a FIFO, a pipe or a device), so the party on its other end
+    /// runs at one worker too (Go hands off its P); else the GC door.
+    fn fd_door<R>(
+        &mut self,
+        waits: bool,
+        span: Span,
+        f: impl FnOnce() -> R,
+    ) -> Result<R, RuntimeError> {
+        if waits {
+            self.host_wait(
+                Some(WaitSpec::HostFd),
+                "a FIFO or pipe syscall",
+                span,
+                |_| f(),
+            )
+        } else {
+            Ok(self.gc_blocking(&[], |_| f()))
+        }
+    }
+
+    /// M1.5 — run `op` under a writer core's lock. With the lock free and `local` true no
+    /// syscall can happen, and `op` runs attached; else the lock and the write run through
+    /// [`Vm::fd_door`] (Go `entersyscall` only around a real syscall).
+    fn with_writer_lock<R>(
+        &mut self,
+        core: &WriterCore,
+        span: Span,
+        local: impl FnOnce(&Option<Backing>) -> bool,
+        op: impl FnOnce(&mut Option<Backing>) -> R,
+    ) -> Result<R, RuntimeError> {
+        if let Ok(mut guard) = core.inner.try_lock()
+            && local(&guard)
+        {
+            return Ok(op(&mut guard));
+        }
+        self.fd_door(core.waits, span, || {
+            op(&mut core.inner.lock().unwrap_or_else(|e| e.into_inner()))
+        })
+    }
+
+    /// R2 — write `data` to a writer core. `File` → `write_all` on the fd (M5c: unbuffered, Go
+    /// `os.File`); `Stdout`/`Stderr` →
     /// hand the RAW bytes to the [`Vm::emit_out_bytes`]/[`Vm::emit_err_bytes`] sink (`Vm.out` —
     /// NEVER a raw fd), which is byte-typed end to end, so `write_bytes(b"\xff\xfe")` is byte-exact
     /// on the console exactly as it already was on a file (W6-9); `Buffered` → append to the in-VM
     /// buffer and drain to the inner core once it reaches `cap`. Returns the byte count on success —
     /// no backing can short-write (`write_all` / in-memory / an unbounded queue).
-    fn write_to_core(&mut self, core: &WriterCore, data: &[u8]) -> Result<usize, WriteErr> {
+    fn write_to_core(
+        &mut self,
+        core: &WriterCore,
+        data: &[u8],
+        span: Span,
+    ) -> Result<usize, WriteErr> {
         // Take the drain decision under the lock, then route to the inner core with the lock RELEASED
         // (the inner core has its own Mutex; a Stdout inner needs `&mut self`).
-        let drain: Option<(Arc<WriterCore>, Vec<u8>)> = {
-            let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(backing) = guard.as_mut() else {
-                return Err(WriteErr::Closed);
-            };
-            match backing {
-                Backing::File(bw) => {
-                    use std::io::Write;
-                    bw.write_all(data)
-                        .map_err(|e| WriteErr::Io(e.to_string()))?;
-                    None
-                }
-                Backing::Stdout => {
-                    self.emit_out_bytes(data);
-                    None
-                }
-                Backing::Stderr => {
-                    self.emit_err_bytes(data);
-                    None
-                }
-                Backing::Buffered { inner, buf, cap } => {
-                    buf.extend_from_slice(data);
-                    if buf.len() >= *cap {
-                        Some((Arc::clone(inner), std::mem::take(buf)))
-                    } else {
-                        None
-                    }
-                }
+        // M1.5 — a file write reaches the fd (a FIFO or a pipe blocks), so it runs with the lock
+        // through the GC door; a write a `Buffered` core keeps in its buffer runs attached. The
+        // console sinks are written after the lock is released.
+        let next = self
+            .with_writer_lock(core, span, writes_are_buffered, |g| write_locked(g, data))
+            .map_err(WriteErr::Fault)??;
+        match next {
+            Wrote::Done => {}
+            Wrote::Stdout => self.emit_out_bytes(data),
+            Wrote::Stderr => self.emit_err_bytes(data),
+            Wrote::Drain(inner, drained) => {
+                self.write_to_core(&inner, &drained, span)
+                    .map_err(from_inner)?;
             }
-        };
-        if let Some((inner, drained)) = drain {
-            self.write_to_core(&inner, &drained).map_err(from_inner)?;
         }
         Ok(data.len())
     }
 
-    /// R2 — flush a writer core. `File` → flush the `BufWriter` to the fd. `Stdout`/`Stderr` → honest
-    /// no-op (the sink is unbuffered — `io.flush()` stays inert there). `Buffered` → drain the in-VM
-    /// buffer to the inner core, THEN flush the inner (so `buffered(create(f))` is durable on disk).
-    fn flush_core(&mut self, core: &WriterCore) -> Result<(), WriteErr> {
-        let drain: Option<(Arc<WriterCore>, Vec<u8>)> = {
-            let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(backing) = guard.as_mut() else {
-                return Err(WriteErr::Closed);
-            };
-            match backing {
-                Backing::File(bw) => {
-                    use std::io::Write;
-                    bw.flush().map_err(|e| WriteErr::Io(e.to_string()))?;
-                    None
-                }
-                Backing::Stdout | Backing::Stderr => None,
-                // W6-1 — ALWAYS recurse, even with an empty in-VM buffer: an empty `buf` does NOT mean
-                // the inner core is clean. A mid-write drain (`write_to_core`) already `write_all`'d
-                // into the inner `BufWriter` WITHOUT flushing it and emptied `buf`, so the old
-                // `if buf.is_empty() { None }` short-circuit made `flush`/`close` persist nothing.
-                Backing::Buffered { inner, buf, .. } => {
-                    Some((Arc::clone(inner), std::mem::take(buf)))
-                }
-            }
-        };
+    /// R2 — flush a writer core. `File` and `Stdout`/`Stderr` → an honest no-op: each holds no
+    /// buffer (M5c: a file writer is unbuffered, Go `os.File`; a flush is not `File.Sync`).
+    /// `Buffered` → drain the in-VM buffer to the inner core, THEN flush the inner.
+    fn flush_core(&mut self, core: &WriterCore, span: Span) -> Result<(), WriteErr> {
+        // No backing's flush reaches the fd (a file holds no buffer; a `Buffered` drain is a write
+        // on the inner core), so it runs attached unless the lock is busy.
+        let drain = self
+            .with_writer_lock(core, span, |_| true, flush_locked)
+            .map_err(WriteErr::Fault)??;
         if let Some((inner, drained)) = drain {
             // Guard the WRITE, not the flush: an empty `write_to_core` on a `Stdout`/`Stderr` inner
             // would hand `emit_out("")` to the captured `Vm.out` buffer / stream queue.
             if !drained.is_empty() {
-                self.write_to_core(&inner, &drained).map_err(from_inner)?;
+                self.write_to_core(&inner, &drained, span)
+                    .map_err(from_inner)?;
             }
-            self.flush_core(&inner).map_err(from_inner)?;
+            self.flush_core(&inner, span).map_err(from_inner)?;
         }
         Ok(())
     }
@@ -181,19 +206,21 @@ impl Vm {
                     return Err(self.err("write expects a str".into(), span));
                 };
                 let core = self.writer_core(h);
-                match self.write_to_core(&core, &data) {
+                match self.write_to_core(&core, &data, span) {
                     Ok(n) => Ok(self.sock_ok(Value::int(n as i64))),
                     Err(WriteErr::Closed) => Ok(self.sock_err("write on a closed writer")),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
+                    Err(WriteErr::Fault(e)) => Err(e),
                 }
             }
             WriterMethod::Flush => {
                 self.arity_err("flush", args, 0, span)?;
                 let core = self.writer_core(h);
-                match self.flush_core(&core) {
+                match self.flush_core(&core, span) {
                     Ok(()) => Ok(self.sock_ok(Value::nil())),
                     Err(WriteErr::Closed) => Ok(self.sock_err("flush on a closed writer")),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
+                    Err(WriteErr::Fault(e)) => Err(e),
                 }
             }
             WriterMethod::Close => {
@@ -201,11 +228,13 @@ impl Vm {
                 let core = self.writer_core(h);
                 // Flush the tail first, THEN take + drop the backing (closing the fd). A flush error on
                 // close still surfaces, but the backing is dropped regardless (no leaked fd).
-                let flushed = self.flush_core(&core);
-                *core.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                let flushed = self.flush_core(&core, span);
+                // M1.5 — the drop closes the fd, through the door (a FIFO close can wait on its lock).
+                self.fd_door(core.waits, span, || close_slot(&core.inner))?;
                 match flushed {
                     Ok(()) | Err(WriteErr::Closed) => Ok(self.sock_ok(Value::nil())),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
+                    Err(WriteErr::Fault(e)) => Err(e),
                 }
             }
         }
@@ -247,19 +276,22 @@ impl Vm {
         } else {
             return Err(self.err(format!("io.{verb} expects a path"), span));
         };
-        let opened = match verb {
+        // M1.5 — an open blocks (a FIFO waits for its reader): it runs through the door.
+        let waits = self.gc_blocking(&[], |_| path_waits(&path));
+        let opened = self.fd_door(waits, span, || match verb {
             "create" => std::fs::File::create(&path),
             "append" => std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path),
             _ => unreachable!("io_open on '{verb}'"),
-        };
+        })?;
         match opened {
             Ok(f) => {
                 let core = Arc::new(WriterCore {
-                    inner: Mutex::new(Some(Backing::File(std::io::BufWriter::new(f)))),
+                    inner: Mutex::new(Some(Backing::File(f))),
                     key: core::next_poll_key(),
+                    waits,
                 });
                 let v = Value::obj(self.heap.alloc(Obj::Writer(core)));
                 Ok(self.sock_ok(v))
@@ -274,6 +306,7 @@ impl Vm {
         let core = Arc::new(WriterCore {
             inner: Mutex::new(Some(backing)),
             key: core::next_poll_key(),
+            waits: false,
         });
         Value::obj(self.heap.alloc(Obj::Writer(core)))
     }
@@ -301,6 +334,7 @@ impl Vm {
                 cap,
             })),
             key: core::next_poll_key(),
+            waits: false,
         });
         Ok(Value::obj(self.heap.alloc(Obj::Writer(core))))
     }
@@ -346,6 +380,31 @@ impl Vm {
         }
     }
 
+    /// M1.5 — run `op` under the reader core's two locks. With both locks free and `buffered`
+    /// true no syscall can happen, and `op` runs attached; else the locks and the read run through
+    /// [`Vm::fd_door`] (Go `entersyscall` only around a real syscall).
+    fn with_reader_locks<R>(
+        &mut self,
+        core: &ReaderCore,
+        span: Span,
+        buffered: impl FnOnce(&core::ReaderCarry, &Option<std::io::BufReader<std::fs::File>>) -> bool,
+        op: impl FnOnce(&mut core::ReaderCarry, &mut Option<std::io::BufReader<std::fs::File>>) -> R,
+    ) -> Result<R, RuntimeError> {
+        // LOCK ORDER: `carry` OUTER, `inner` INNER (see `ReaderCore::carry`). A `try_lock` never
+        // waits, so the fast path cannot block attached.
+        if let Ok(mut carry) = core.carry.try_lock()
+            && let Ok(mut guard) = core.inner.try_lock()
+            && buffered(&carry, &guard)
+        {
+            return Ok(op(&mut carry, &mut guard));
+        }
+        self.fd_door(core.waits, span, || {
+            let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
+            op(&mut carry, &mut guard)
+        })
+    }
+
     /// R2b — `Reader` methods, the input twin of `writer_method`:
     /// * `read_line() -> Option[str]` — one line, trailing `\n` (and a preceding `\r`) stripped; `None`
     ///   at EOF. Matches the existing module-level `io.read_line()` shape (anti-drift). An IO error or a
@@ -366,11 +425,9 @@ impl Vm {
     /// here; an unknown one faults below). The fourth read path, `lines()`, is a BODIED pure-Chezzi
     /// generator over `read_line` (`std/io.chz`) — it inherits the carry and the stickiness for free.
     ///
-    /// No netpoller park — file reads block synchronously (regular files are always epoll-ready).
-    ///
-    /// ponytail: an inline blocking read can pin an M:N worker on a slow fifo/pipe — the same accepted
-    /// ceiling `Writer.write` carries; NOT offloaded to the dirty pool (that path is whole-file-only).
-    /// For the intended regular-file use (always ready) the risk is nil; add offload if a fifo use lands.
+    /// No netpoller park — file reads block synchronously. M1.5 — a read that can make a syscall
+    /// runs detached through [`Vm::fd_door`] (`with_reader_locks`), so a slow FIFO or pipe read
+    /// stalls no stop of the world, and it hands its runner slot over, so the FIFO's writer runs.
     pub(super) fn reader_method(
         &mut self,
         h: GcRef,
@@ -385,71 +442,14 @@ impl Vm {
             ReaderMethod::ReadLine => {
                 self.arity_err("read_line", args, 0, span)?;
                 let core = self.reader_core(h);
-                let outcome = {
-                    use std::io::BufRead;
-                    // LOCK ORDER: `carry` OUTER, `inner` INNER (see `ReaderCore::carry`).
-                    let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    match guard.as_mut() {
-                        None => Err(None), // closed (checked BEFORE the carry is served)
-                        // W7-9: the carry left by a failed READ is the truncated head of a line, so
-                        // it re-faults until drained. Decoding it into a line would present a
-                        // fragment as a whole record — a silent lie in place of the silent loss.
-                        Some(_) if carry.io_err.is_some() => {
-                            Err(Some(carry.io_err.clone().unwrap_or_default()))
-                        }
-                        // A carry left by a failed DECODE is re-decoded IN PLACE — moving it out to
-                        // a `Vec` would memmove the whole (file-sized) buffer on every probe of the
-                        // documented drain-and-retry loop. `make_contiguous` pays that once.
-                        Some(_) if !carry.bytes.is_empty() => {
-                            match std::str::from_utf8(carry.bytes.make_contiguous()) {
-                                Ok(s) => {
-                                    let line = strip_eol(s).to_string();
-                                    carry.reset();
-                                    Ok(Some(line))
-                                }
-                                Err(_) => {
-                                    Err(Some("stream did not contain valid UTF-8".to_string()))
-                                }
-                            }
-                        }
-                        Some(br) => {
-                            // W7-9: read RAW. `BufRead::read_line(&mut String)` consumes the line off
-                            // the reader and then errs with the bytes already dropped — the decode has
-                            // to happen where the bytes can still be retained.
-                            let mut buf: Vec<u8> = Vec::new();
-                            match br.read_until(b'\n', &mut buf) {
-                                Ok(0) => Ok(None), // EOF
-                                Ok(_) => match String::from_utf8(buf) {
-                                    Ok(line) => Ok(Some(strip_eol(&line).to_string())),
-                                    Err(e) => {
-                                        // Retain the raw line, terminator included: `read_bytes`
-                                        // hands it back byte-exactly.
-                                        carry.bytes = e.into_bytes().into();
-                                        Err(Some("stream did not contain valid UTF-8".to_string()))
-                                    }
-                                },
-                                Err(e) => {
-                                    // An IO error mid-line is NOT empty-handed: `read_until`
-                                    // documents that everything it read before the error is left in
-                                    // `buf`, and those bytes are already off the `BufReader`.
-                                    // Dropping them is the same silent loss W7-9 exists to kill, so
-                                    // they go in the carry too — flagged, so the truncated head is
-                                    // recoverable via `read_bytes` but never served as a line.
-                                    carry.bytes = buf.into();
-                                    carry.io_err = Some(e.to_string());
-                                    Err(Some(e.to_string()))
-                                }
-                            }
-                        }
-                    }
-                };
+                let outcome =
+                    self.with_reader_locks(&core, span, line_is_buffered, read_line_locked)?;
                 match outcome {
                     Ok(Some(line)) => {
                         let sv = self.alloc_str(line);
-                        Ok(self.alloc_enum("Option", "Some", vec![sv]))
+                        Ok(self.alloc_enum("Option", "Some", &[sv]))
                     }
-                    Ok(None) => Ok(self.alloc_enum("Option", "None", vec![])),
+                    Ok(None) => Ok(self.alloc_enum("Option", "None", &[])),
                     Err(None) => Err(self.err("read_line on a closed reader".into(), span)),
                     Err(Some(e)) => Err(self.err(
                         format!("{e} — read binary files with Reader.read_bytes"),
@@ -464,34 +464,12 @@ impl Vm {
                     _ => return Err(self.err("read_bytes expects an int byte count".into(), span)),
                 };
                 let core = self.reader_core(h);
-                let outcome = {
-                    use std::io::Read;
-                    // LOCK ORDER: `carry` OUTER, `inner` INNER (see `ReaderCore::carry`).
-                    let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    match guard.as_mut() {
-                        None => Err(None), // closed (checked BEFORE the carry is served)
-                        // W7-9: a pending carry is drained FIRST and the fd is not touched — a
-                        // carry-only SHORT read ("at most n" licenses it), byte-identical to
-                        // `socket_read_bytes`. `n <= 0` still clamps to `Ok(b"")` here, exactly as it
-                        // does off the fd — that is the documented clamp, not an EOF claim.
-                        Some(_) if !carry.bytes.is_empty() => {
-                            let take = (n as usize).min(carry.bytes.len());
-                            let out = carry.bytes.drain(..take).collect::<Vec<u8>>();
-                            if carry.bytes.is_empty() {
-                                carry.reset(); // release the (file-sized) buffer, clear the IO flag
-                            }
-                            Ok(out)
-                        }
-                        Some(br) => {
-                            let mut buf = Vec::new();
-                            match br.take(n).read_to_end(&mut buf) {
-                                Ok(_) => Ok(buf),
-                                Err(e) => Err(Some(e.to_string())),
-                            }
-                        }
-                    }
-                };
+                let outcome = self.with_reader_locks(
+                    &core,
+                    span,
+                    |carry, guard| bytes_are_buffered(carry, guard, n),
+                    |carry, guard| read_bytes_locked(carry, guard, n),
+                )?;
                 match outcome {
                     Ok(buf) => {
                         let bv = Value::obj(self.heap.alloc(Obj::Bytes(buf.into_boxed_slice())));
@@ -508,10 +486,12 @@ impl Vm {
                 // LOCK ORDER: `carry` OUTER, `inner` INNER — the one ordering `ReaderCore::carry`
                 // forbids is inner-then-carry, so close takes the carry first. Closed is closed: the
                 // carry is discarded with the fd (W7-9).
-                let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
-                *core.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                carry.reset();
-                drop(carry);
+                // M1.5 — the locks can wait for a read in progress: through the GC door.
+                self.fd_door(core.waits, span, || {
+                    let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
+                    close_slot(&core.inner);
+                    carry.reset();
+                })?;
                 Ok(self.sock_ok(Value::nil()))
             }
         }
@@ -529,8 +509,14 @@ impl Vm {
         } else {
             return Err(self.err("io.open expects a path".into(), span));
         };
-        match std::fs::File::open(&path) {
-            Ok(f) => {
+        // M1.5 — the open (a FIFO waits for its writer) and the directory probe run through the
+        // door; the handle is allocated after it.
+        let waits = self.gc_blocking(&[], |_| path_waits(&path));
+        let opened = self.fd_door(
+            waits,
+            span,
+            || -> std::io::Result<Result<std::fs::File, String>> {
+                let f = std::fs::File::open(&path)?;
                 // `File::open` SUCCEEDS on a directory (Linux), which deferred the real failure to
                 // every subsequent read — with `read_line` advising `read_bytes`, which fails too.
                 // Reject at the call like `io.read_file` does (Python `open(dir)` → IsADirectoryError).
@@ -543,11 +529,18 @@ impl Vm {
                         Err(e) => format!("{e}"),
                         Ok(_) => format!("{}", std::io::ErrorKind::IsADirectory),
                     };
-                    return Ok(self.sock_err(format!("{}: {msg}", path.display())));
+                    return Ok(Err(msg));
                 }
+                Ok(Ok(f))
+            },
+        )?;
+        match opened {
+            Ok(Err(msg)) => Ok(self.sock_err(format!("{}: {msg}", path.display()))),
+            Ok(Ok(f)) => {
                 let core = Arc::new(ReaderCore {
                     inner: Mutex::new(Some(std::io::BufReader::new(f))),
                     key: core::next_poll_key(),
+                    waits,
                     carry: Mutex::new(core::ReaderCarry::default()),
                 });
                 let v = Value::obj(self.heap.alloc(Obj::Reader(core)));
@@ -556,4 +549,182 @@ impl Vm {
             Err(e) => Ok(self.sock_err(format!("{}: {e}", path.display()))),
         }
     }
+}
+
+/// Can a syscall on the file at `path` wait without end: is it a FIFO, a socket or a device? A
+/// regular file, a directory and a path that does not exist yet answer at once.
+fn path_waits(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| !m.is_file() && !m.is_dir())
+}
+
+/// Close an I/O handle's `inner` slot: take its backing out under the lock, then drop it (a file
+/// closes) after the lock is released. M3.0a C7 — so a thread holds the
+/// lock for long only for an op on an OPEN slot, which is what a render that cannot wait reads
+/// (`io_state_now`, `vm/display.rs`): a drop's flush can block on a FIFO.
+pub(super) fn close_slot<T>(inner: &std::sync::Mutex<Option<T>>) {
+    let backing = inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(backing);
+}
+
+/// Is `read_line` served with no syscall: a closed reader, a carry, or a whole line in the buffer?
+fn line_is_buffered(
+    carry: &core::ReaderCarry,
+    guard: &Option<std::io::BufReader<std::fs::File>>,
+) -> bool {
+    match guard {
+        None => true,
+        Some(br) => {
+            carry.io_err.is_some() || !carry.bytes.is_empty() || br.buffer().contains(&b'\n')
+        }
+    }
+}
+
+/// Is `read_bytes(n)` served with no syscall: a closed reader, a carry, or `n` buffered bytes?
+fn bytes_are_buffered(
+    carry: &core::ReaderCarry,
+    guard: &Option<std::io::BufReader<std::fs::File>>,
+    n: u64,
+) -> bool {
+    match guard {
+        None => true,
+        Some(br) => !carry.bytes.is_empty() || br.buffer().len() as u64 >= n,
+    }
+}
+
+/// `Reader.read_line` under the core's two locks. `Err(None)`: the reader is closed.
+fn read_line_locked(
+    carry: &mut core::ReaderCarry,
+    guard: &mut Option<std::io::BufReader<std::fs::File>>,
+) -> Result<Option<String>, Option<String>> {
+    use std::io::BufRead;
+    match guard.as_mut() {
+        None => Err(None), // closed (checked BEFORE the carry is served)
+        // W7-9: the carry left by a failed READ is the truncated head of a line, so
+        // it re-faults until drained. Decoding it into a line would present a
+        // fragment as a whole record — a silent lie in place of the silent loss.
+        Some(_) if carry.io_err.is_some() => Err(Some(carry.io_err.clone().unwrap_or_default())),
+        // A carry left by a failed DECODE is re-decoded IN PLACE — moving it out to
+        // a `Vec` would memmove the whole (file-sized) buffer on every probe of the
+        // documented drain-and-retry loop. `make_contiguous` pays that once.
+        Some(_) if !carry.bytes.is_empty() => {
+            match std::str::from_utf8(carry.bytes.make_contiguous()) {
+                Ok(s) => {
+                    let line = strip_eol(s).to_string();
+                    carry.reset();
+                    Ok(Some(line))
+                }
+                Err(_) => Err(Some("stream did not contain valid UTF-8".to_string())),
+            }
+        }
+        Some(br) => {
+            // W7-9: read RAW. `BufRead::read_line(&mut String)` consumes the line off
+            // the reader and then errs with the bytes already dropped — the decode has
+            // to happen where the bytes can still be retained.
+            let mut buf: Vec<u8> = Vec::new();
+            match br.read_until(b'\n', &mut buf) {
+                Ok(0) => Ok(None), // EOF
+                Ok(_) => match String::from_utf8(buf) {
+                    Ok(line) => Ok(Some(strip_eol(&line).to_string())),
+                    Err(e) => {
+                        // Retain the raw line, terminator included: `read_bytes`
+                        // hands it back byte-exactly.
+                        carry.bytes = e.into_bytes().into();
+                        Err(Some("stream did not contain valid UTF-8".to_string()))
+                    }
+                },
+                Err(e) => {
+                    // An IO error mid-line is NOT empty-handed: `read_until`
+                    // documents that everything it read before the error is left in
+                    // `buf`, and those bytes are already off the `BufReader`.
+                    // Dropping them is the same silent loss W7-9 exists to kill, so
+                    // they go in the carry too — flagged, so the truncated head is
+                    // recoverable via `read_bytes` but never served as a line.
+                    carry.bytes = buf.into();
+                    carry.io_err = Some(e.to_string());
+                    Err(Some(e.to_string()))
+                }
+            }
+        }
+    }
+}
+
+/// `Reader.read_bytes(n)` under the core's two locks. `Err(None)`: the reader is closed.
+fn read_bytes_locked(
+    carry: &mut core::ReaderCarry,
+    guard: &mut Option<std::io::BufReader<std::fs::File>>,
+    n: u64,
+) -> Result<Vec<u8>, Option<String>> {
+    use std::io::Read;
+    match guard.as_mut() {
+        None => Err(None), // closed (checked BEFORE the carry is served)
+        // W7-9: a pending carry is drained FIRST and the fd is not touched — a
+        // carry-only SHORT read ("at most n" licenses it), byte-identical to
+        // `socket_read_bytes`. `n <= 0` still clamps to `Ok(b"")` here, exactly as it
+        // does off the fd — that is the documented clamp, not an EOF claim.
+        Some(_) if !carry.bytes.is_empty() => {
+            let take = (n as usize).min(carry.bytes.len());
+            let out = carry.bytes.drain(..take).collect::<Vec<u8>>();
+            if carry.bytes.is_empty() {
+                carry.reset(); // release the (file-sized) buffer, clear the IO flag
+            }
+            Ok(out)
+        }
+        Some(br) => {
+            let mut buf = Vec::new();
+            match br.take(n).read_to_end(&mut buf) {
+                Ok(_) => Ok(buf),
+                Err(e) => Err(Some(e.to_string())),
+            }
+        }
+    }
+}
+
+/// A write of `data` to a writer core under its lock: what is left to do once it is released.
+fn write_locked(guard: &mut Option<Backing>, data: &[u8]) -> Result<Wrote, WriteErr> {
+    let Some(backing) = guard.as_mut() else {
+        return Err(WriteErr::Closed);
+    };
+    Ok(match backing {
+        Backing::File(file) => {
+            use std::io::Write;
+            file.write_all(data)
+                .map_err(|e| WriteErr::Io(e.to_string()))?;
+            Wrote::Done
+        }
+        Backing::Stdout => Wrote::Stdout,
+        Backing::Stderr => Wrote::Stderr,
+        Backing::Buffered { inner, buf, cap } => {
+            buf.extend_from_slice(data);
+            if buf.len() >= *cap {
+                Wrote::Drain(Arc::clone(inner), std::mem::take(buf))
+            } else {
+                Wrote::Done
+            }
+        }
+    })
+}
+
+/// Does a write stay off the fd: a closed core, or a console or in-VM sink? A file write always
+/// reaches the fd.
+fn writes_are_buffered(guard: &Option<Backing>) -> bool {
+    match guard {
+        Some(Backing::File(_)) => false,
+        Some(Backing::Stdout | Backing::Stderr | Backing::Buffered { .. }) | None => true,
+    }
+}
+
+/// What a flush leaves to drain into a `Buffered` core's inner core.
+type Drained = Option<(Arc<WriterCore>, Vec<u8>)>;
+
+/// A flush of a writer core under its lock: what is left to drain into the inner core.
+fn flush_locked(guard: &mut Option<Backing>) -> Result<Drained, WriteErr> {
+    let Some(backing) = guard.as_mut() else {
+        return Err(WriteErr::Closed);
+    };
+    Ok(match backing {
+        Backing::File(_) | Backing::Stdout | Backing::Stderr => None,
+        // W6-1 — ALWAYS recurse, even with an empty in-VM buffer: an empty `buf` does NOT mean
+        // the inner core is clean (a nested `Buffered` inner can hold a mid-write drain).
+        Backing::Buffered { inner, buf, .. } => Some((Arc::clone(inner), std::mem::take(buf))),
+    })
 }

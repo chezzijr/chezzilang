@@ -596,10 +596,7 @@ impl Checker {
     /// by the caller's own `infer_value`, on every arm.
     ///
     /// Three properties this shape depends on:
-    /// * **Its own scope.** A fresh scope can't shadow a user name, is removed on every path, and sits
-    ///   at or below every `capture_floors` entry — so `is_local_capture` never mistakes the scratch
-    ///   for a binding captured by an enclosing `spawn:`/`Executor.submit` and over-fires the
-    ///   non-sendable read gate on it.
+    /// * **Its own scope.** A fresh scope can't shadow a user name and is removed on every path.
     /// * **`Span::default()`**, like the `__optN` payload binder `lower_carrier_option` synthesizes.
     ///   No lowered node derives its span from the operand's (both `lower_carrier_*` stamp everything
     ///   from the carrier's own `span`/`name_span`), and a default span can never equal the 1-based
@@ -965,21 +962,12 @@ impl Checker {
         if self.recover_depth > 0 {
             return match t {
                 Ty::Result(ok, err) => {
-                    // A `recover:` result's error slot is the built-in `Error` existential (sendable,
-                    // like every protocol) — the recover result (`Result[_, Error]`) is itself
-                    // sendable, so a propagated error must satisfy Error AND be sendable, else a
-                    // non-sendable payload would launder through the erased slot across a task
-                    // boundary. Split the diagnostic so a satisfies-but-non-sendable error is not
-                    // mislabelled as failing to satisfy Error (it does — it's merely non-sendable).
+                    // A `recover:` result's error slot is the built-in `Error` existential, so a
+                    // propagated error must satisfy Error.
                     if self.satisfies(&err, "Error").is_err() {
                         self.error(
                             span,
                             format!("'?' inside a recover block propagates error {err}, which must satisfy Error"),
-                        );
-                    } else if !self.sendable(&err) {
-                        self.error(
-                            span,
-                            format!("'?' inside a recover block propagates error {err}, which satisfies Error but isn't sendable — a recover result's error type is the sendable `Error`; name a sendable error type"),
                         );
                     }
                     *ok

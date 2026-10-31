@@ -4,18 +4,6 @@
 use super::proto::HookMiss;
 use super::*;
 
-/// TICKET-254 — what [`Checker::temporary_write`] found: the text of the warning follows.
-pub(super) enum TempWrite {
-    /// The write lands on the deep copy a `Shared`/`RwShared`/`Atomic` read returns (TICKET-089).
-    BoxRead {
-        name: String,
-        reader: &'static str,
-        fix: &'static str,
-    },
-    /// The write lands on any other fresh value.
-    Copy,
-}
-
 /// Where a spelled type sits: `None` ("returns nothing") is a type only in a `Void` position.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum TypePos {
@@ -294,10 +282,6 @@ impl Checker {
             .collect();
         let wparams = self.witness_params_of(decl);
         FnSig {
-            summary: fn_writes::FnSummary {
-                is_generator: decl.is_generator,
-                ..Default::default()
-            },
             // Trailing defaulted parameters are filled by the CALLEE's own prologue, so a call may
             // omit them. Same predicate the compiler sizes `Proto::min_arity` with — and because
             // this reading DEPENDS on `wparams`, which the hoist fixpoint re-derives (non-monotone:

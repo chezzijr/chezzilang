@@ -1,10 +1,11 @@
-//! TICKET-246 — many readers copy out of a LIVE `RwShared` heap while one writer changes it in
-//! place. Sixteen reader tasks copy a nested value holding every container and struct kind
-//! (`List`, `Map`, `Set`, tuple, struct, enum, `str`, `bytes`, a closure) with `get`, `read` and
-//! each collection read view; the writer keeps one invariant under the exclusive lock (`a` and
-//! `b` move together, and `log` holds exactly `a` items). Every reader asserts the invariant on
-//! its own copy, so a copy taken without the read lock, or a reader that wrote into the heap it
-//! reads, shows as a torn value.
+//! TICKET-246 / M3.3 — many readers read a LIVE `RwShared` value while one writer changes it in
+//! place. Sixteen reader tasks read a nested value holding every container and struct kind
+//! (`List`, `Map`, `Set`, tuple, struct, enum, `str`, `bytes`, a closure) under the read guard
+//! (`read`) and through each collection read view; the writer keeps one invariant under the write
+//! guard (`a` and `b` move together, and `log` holds exactly `a` items). Every reader asserts the
+//! invariant inside `read`, so a read that the write guard does not exclude shows as a torn value.
+//! M3.3: `get()` returns the live value, so a check of it outside the guard races the writer (the
+//! user's bug, as in Go); the readers call `get()` only to read one field.
 //!
 //! Each worker count runs in its own child process (DEC-230: the pool is one process-wide
 //! `OnceLock`), under a timeout.
@@ -86,7 +87,7 @@ fn some_or(o: int?, d: int) -> int:
 
 fn reader(w: concurrency.RwShared[State], xs: ConcurrentList[int], m: ConcurrentMap[int, int], st: ConcurrentSet[int], bad: concurrency.AtomicInt, rounds: int):
     for _ in 0..rounds:
-        bad.add(torn(w.get()))
+        _ := w.get().a
         bad.add(w.read(torn))
         n := xs.len()
         if n > 0:

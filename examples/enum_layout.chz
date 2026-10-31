@@ -4,7 +4,7 @@
 # a guard, enum == (equal / unequal-by-variant / unequal-by-enum-type), Display + `{}` interpolation,
 # nested enums, `T!E`/`T?` + the `?` operator, variant-name SHADOWING (a user enum reusing the
 # native `?v` name — native vs user identity + `?` on a genuine native), and an enum crossing a
-# spawn+Channel (wire/snap carry the dense variant_id directly). Byte-identical on the VM, interp, and
+# spawn+Channel (the receiver reads the sender's enum). Byte-identical on the VM, interp, and
 # --parallel — variant_id is behavior-preserving, so any divergence turns the golden RED.
 
 enum Color:
@@ -84,7 +84,7 @@ fn first_even(xs: List[int]) -> int?:
     return None
 
 # An enum value crossing a spawn + Channel: the worker sends an int? back; the receiver
-# matches it. Exercises wire/snap variant-id rebuild on the --parallel path.
+# matches it. Exercises the variant id on the --parallel path.
 fn producer(out: Channel[int?]):
     out.send(?99)
     out.send(None)

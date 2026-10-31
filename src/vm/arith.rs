@@ -380,7 +380,6 @@ impl Vm {
             | Op::False
             | Op::Nil
             | Op::Pop
-            | Op::StampGen(_)
             | Op::Assert { .. }
             | Op::LoadBuiltin(_)
             | Op::GetLocal(_)
@@ -507,7 +506,6 @@ impl Vm {
                 | Op::False
                 | Op::Nil
                 | Op::Pop
-                | Op::StampGen(_)
                 | Op::Assert { .. }
                 | Op::LoadBuiltin(_)
                 | Op::GetLocal(_)
@@ -637,22 +635,22 @@ impl Vm {
                             Value::obj(self.heap.alloc(Obj::Bytes(out)))
                         }
                         (Obj::ByteArray(a), Obj::ByteArray(b)) => {
-                            let out: Vec<u8> = a.iter().chain(b.iter()).copied().collect();
+                            let out: RVec<u8> = a.iter().chain(b.iter()).collect();
                             Value::obj(self.heap.alloc(Obj::ByteArray(out)))
                         }
                         (Obj::ByteArray(a), Obj::Bytes(b)) => {
-                            let out: Vec<u8> = a.iter().chain(b.iter()).copied().collect();
+                            let out: RVec<u8> = a.iter().chain(b.iter().copied()).collect();
                             Value::obj(self.heap.alloc(Obj::ByteArray(out)))
                         }
                         (Obj::Bytes(a), Obj::ByteArray(b)) => {
-                            let out: Box<[u8]> = a.iter().chain(b.iter()).copied().collect();
+                            let out: Box<[u8]> = a.iter().copied().chain(b.iter()).collect();
                             Value::obj(self.heap.alloc(Obj::Bytes(out)))
                         }
                         // List concat (gap #3): `[1,2] + [3,4]` — identical to `.concat` (vm:7688).
                         (Obj::List(a), Obj::List(b)) => {
-                            let mut out = a.clone();
-                            out.extend(b.iter().copied());
-                            Value::obj(self.heap.alloc(Obj::List(out)))
+                            let mut out = a.to_vec();
+                            out.extend(b.iter());
+                            Value::obj(self.heap.alloc(Obj::List(out.into())))
                         }
                         _ => {
                             return Err(self.err(
@@ -743,8 +741,9 @@ impl Vm {
     }
 
     /// `[elem...] * n` — repeat the list `n` times into a fresh list (gap #3). `n <= 0` → empty.
-    /// Guards the allocation against capacity overflow (a giant `n` would otherwise abort the
-    /// process via Vec's panic) — raises a RECOVERABLE fault, mirroring `str.repeat`.
+    /// Sizes the whole block once with `RVec::try_with_capacity`: a total that overflows or a
+    /// block that cannot be allocated raises a RECOVERABLE fault (as `str.repeat` does), not a
+    /// panic or an abort.
     pub(super) fn list_repeat(
         &mut self,
         h: GcRef,
@@ -755,7 +754,7 @@ impl Vm {
             unreachable!("list_repeat receiver is a list")
         };
         if n <= 0 {
-            return Ok(Value::obj(self.heap.alloc(Obj::List(Vec::new()))));
+            return Ok(Value::obj(self.heap.alloc(Obj::List(RVec::new()))));
         }
         let n = n as usize;
         // An empty source repeats to `[]` in constant time for any `n`: `total` below is 0
@@ -763,35 +762,27 @@ impl Vm {
         // iterate `n` times extending nothing (W13-10). CPython's `len([] * (2**63-1))` is `0`
         // instantly.
         if items.is_empty() {
-            return Ok(Value::obj(self.heap.alloc(Obj::List(Vec::new()))));
+            return Ok(Value::obj(self.heap.alloc(Obj::List(RVec::new()))));
         }
-        // Guard the allocation: a giant `n` would abort the process via `Vec`'s capacity panic.
-        // Bound the BYTE size (`count * size_of::<Value>()`) by `isize::MAX`, matching `Vec`'s own
-        // limit — `str.repeat` does the same on its byte length (vm:7514). Recoverable fault.
-        match items
+        // Guard the allocation: a total that overflows, or a block that cannot be allocated
+        // (`RVec::try_with_capacity`: past `isize::MAX` bytes, or a null from the allocator), is
+        // a recoverable fault, not an abort.
+        let src = items.to_vec();
+        let out = match src
             .len()
             .checked_mul(n)
-            .and_then(|t| t.checked_mul(std::mem::size_of::<Value>()))
-            .filter(|&bytes| bytes <= isize::MAX as usize)
+            .map(RVec::<Value>::try_with_capacity)
         {
-            Some(_) => {
-                let src = items.clone();
-                let total = src.len() * n;
-                // The outer guard only bounds the byte size by `isize::MAX`; a huge-but-representable
-                // total (e.g. 1e17) still passes it yet cannot actually be allocated, and
-                // `Vec::with_capacity` would ABORT the process. `try_reserve_exact` converts that
-                // into the same recoverable fault.
-                let mut out: Vec<Value> = Vec::new();
-                if out.try_reserve_exact(total).is_err() {
-                    return Err(self.err("list repeat capacity overflow".to_string(), span));
-                }
-                for _ in 0..n {
-                    out.extend(src.iter().copied());
-                }
-                Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+            Some(Ok(out)) => out,
+            Some(Err(AllocFailed)) | None => {
+                return Err(self.err("list repeat capacity overflow".to_string(), span));
             }
-            None => Err(self.err("list repeat capacity overflow".to_string(), span)),
+        };
+        // The block holds every copy, so no extend below grows it.
+        for _ in 0..n {
+            out.extend_from_slice(&self.heap, &src);
         }
+        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
     }
 
     /// Set algebra for the operator forms `| & - ^` (gap #3). Mirrors the
@@ -807,21 +798,21 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let mine = match self.heap.get(ha).as_set() {
-            Some(s) => s.entries.clone(),
+            Some(s) => s.entries.to_vec(),
             None => unreachable!(),
         };
         let other = match self.heap.get(hb).as_set() {
-            Some(s) => s.entries.clone(),
+            Some(s) => s.entries.to_vec(),
             None => unreachable!(),
         };
         // Dedup-insert: propagate a cyclic-key depth fault (`?`) instead of swallowing it — the
         // membership `==` here is the same one `s.add`/`|` are DEFINED by, so it must fault alike.
-        let add = |vm: &mut Vm, set: &mut SetData, he: u64, e: Value| -> Result<(), RuntimeError> {
+        let add = |vm: &mut Vm, set: &SetData, he: u64, e: Value| -> Result<(), RuntimeError> {
             if vm
                 .set_slot(&set.entries, set.candidates(he), e, span)?
                 .is_none()
             {
-                set.push(he, e);
+                set.push(&vm.heap, he, e);
             }
             Ok(())
         };
@@ -843,36 +834,36 @@ impl Vm {
             elems.extend(mine.iter().chain(other.iter()).map(|&(_, e)| e));
         }
         let out = self.with_roots(&elems, |vm| {
-            let mut out = SetData::default();
+            let out = SetData::default();
             match op {
                 SetOp::Union => {
                     for (he, e) in mine.iter().chain(other.iter()) {
-                        add(vm, &mut out, *he, *e)?;
+                        add(vm, &out, *he, *e)?;
                     }
                 }
                 SetOp::Intersection => {
                     for (he, e) in &mine {
                         if in_set(vm, &other, *he, *e)? {
-                            add(vm, &mut out, *he, *e)?;
+                            add(vm, &out, *he, *e)?;
                         }
                     }
                 }
                 SetOp::Difference => {
                     for (he, e) in &mine {
                         if !in_set(vm, &other, *he, *e)? {
-                            add(vm, &mut out, *he, *e)?;
+                            add(vm, &out, *he, *e)?;
                         }
                     }
                 }
                 SetOp::SymmetricDifference => {
                     for (he, e) in &mine {
                         if !in_set(vm, &other, *he, *e)? {
-                            add(vm, &mut out, *he, *e)?;
+                            add(vm, &out, *he, *e)?;
                         }
                     }
                     for (he, e) in &other {
                         if !in_set(vm, &mine, *he, *e)? {
-                            add(vm, &mut out, *he, *e)?;
+                            add(vm, &out, *he, *e)?;
                         }
                     }
                 }
@@ -911,7 +902,6 @@ impl Vm {
             | Op::False
             | Op::Nil
             | Op::Pop
-            | Op::StampGen(_)
             | Op::Assert { .. }
             | Op::LoadBuiltin(_)
             | Op::GetLocal(_)
@@ -1034,7 +1024,6 @@ impl Vm {
             | Op::False
             | Op::Nil
             | Op::Pop
-            | Op::StampGen(_)
             | Op::Assert { .. }
             | Op::LoadBuiltin(_)
             | Op::GetLocal(_)
@@ -1173,7 +1162,6 @@ impl Vm {
                         | Op::False
                         | Op::Nil
                         | Op::Pop
-                        | Op::StampGen(_)
                         | Op::Assert { .. }
                         | Op::LoadBuiltin(_)
                         | Op::GetLocal(_)

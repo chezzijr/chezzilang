@@ -7,15 +7,18 @@
 # crossing} x carrier {spawn call, `spawn:` block, Executor job, Channel send of the handle} x reader
 # {copy, owner}, judged against CPython (`Future.result()`, `functools.cache`: the one object) and
 # Chezzi's spawn rule (the value current at the crossing). Plus: the owner's `get()` stays one object
-# after a crossing, and a copy's write to the crossing value faults (D4), as a captured write does.
+# after a crossing. M3.3: a Task and a memo wrapper hold their result by handle (no alias cache, no
+# `task_copy_of`), so a copy's `get()` / call returns the one object and its write lands on it (Go
+# `handle/main.go`: `memoize_one_object 2`, `task_get_one_object 2`).
 #
-# TICKET-213 (A1): `a_copy_write_faults_in_every_owner_state` and its `_in_an_executor_job` twin run
-# {Task.get, memoize1} x owner state x carrier {spawn call, Executor job}: a copy's write faults in
-# the `unobserved` state too. `a_handoff_receiver_write_is_never_silently_lost` is the channel-handoff
+# TICKET-213 (A1): `a_copy_write_lands_in_every_owner_state` and its `_in_an_executor_job` twin run
+# {Task.get, memoize1} x owner state x carrier {spawn call, Executor job}. `a_handoff_receiver_write_is_never_silently_lost` is the channel-handoff
 # carrier, `a_task_owned_key_reachable_from_a_memo_result_stays_writable` the over-mark cell, and
 # `a_copy_miss_on_a_key_that_never_equals_itself_returns_the_fill` the bounded read-back.
-# `a_function_valued_copy_result_leaves_the_readers_globals_writable` is the module cell: a marked
-# result that holds a function must not mark the reader's globals through the function's module.
+# `a_function_valued_channel_result_leaves_the_readers_globals_writable` is the module cell. M3.2: a
+# channel hands over the Task and the memo wrapper themselves, so a receiver's write lands on the
+# owner's one object (CPython `handoff.py`, M3.2 report: a Future and a `functools.cache` wrapper
+# handed through a `queue.Queue` print `['write ok', '[1, 5]', 'write ok'] [1, 5] [1, 5]`).
 
 import std.concurrency
 import Task from std.concurrency
@@ -193,27 +196,23 @@ fn copy_write(t: Task[List[int]], m: fn(int) -> List[int], out: Channel[str]):
     rm := recover: m(1).push(5)
     send_outcome(rm, out)
 
-test fn a_copy_write_to_the_crossing_value_faults_like_a_captured_write():
+test fn a_copy_write_to_the_crossing_value_lands_on_the_one_object():
     t := task_in_state("mutated")
     m := memo_in_state("mutated")
     out := Channel[str](2)
     parallel:
         spawn copy_write(t, m, out)
-    d4 := "this value is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"
     got := [out.recv(), out.recv()]
-    assert got == [d4, d4], str(got)
-    assert str(must(t.get())) == "[1, 99]", str(must(t.get()))
-    assert str(m(1)) == "[1, 99]", str(m(1))
-
-fn d4_msg() -> str:
-    return "this value is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"
+    assert got == ["write ok", "write ok"], str(got)
+    assert str(must(t.get())) == "[1, 99, 5]", str(must(t.get()))
+    assert str(m(1)) == "[1, 99, 5]", str(m(1))
 
 fn want_owner(state: str) -> str:
     if state == "mutated":
-        return "[1, 99]"
-    return "[1]"
+        return "[1, 99, 5]"
+    return "[1, 5]"
 
-test fn a_copy_write_faults_in_every_owner_state():
+test fn a_copy_write_lands_in_every_owner_state():
     for state in ["mutated", "observed", "unobserved"]:
         t := task_in_state(state)
         m := memo_in_state(state)
@@ -221,11 +220,11 @@ test fn a_copy_write_faults_in_every_owner_state():
         parallel:
             spawn copy_write(t, m, out)
         got := [out.recv(), out.recv()]
-        assert got == [d4_msg(), d4_msg()], "{state}: {got}"
+        assert got == ["write ok", "write ok"], "{state}: {got}"
         assert str(must(t.get())) == want_owner(state), "{state}: {must(t.get())}"
         assert str(m(1)) == want_owner(state), "{state}: {m(1)}"
 
-test fn a_copy_write_faults_in_every_owner_state_in_an_executor_job():
+test fn a_copy_write_lands_in_every_owner_state_in_an_executor_job():
     for state in ["mutated", "observed", "unobserved"]:
         t := task_in_state(state)
         m := memo_in_state(state)
@@ -234,7 +233,7 @@ test fn a_copy_write_faults_in_every_owner_state_in_an_executor_job():
         _ := ex.submit(fn(): copy_write(t, m, out))
         ex.shutdown()
         got := [out.recv(), out.recv()]
-        assert got == [d4_msg(), d4_msg()], "{state}: {got}"
+        assert got == ["write ok", "write ok"], "{state}: {got}"
         assert str(must(t.get())) == want_owner(state), "{state}: {must(t.get())}"
         assert str(m(1)) == want_owner(state), "{state}: {m(1)}"
 
@@ -258,9 +257,9 @@ test fn a_handoff_receiver_write_is_never_silently_lost():
     parallel:
         spawn handoff_write(tc, mc, out)
     got := [out.recv(), out.recv(), out.recv()]
-    assert got == ["write ok", "[1, 5]", d4_msg()], str(got)
-    assert str(must(t.get())) == "[1]", str(must(t.get()))
-    assert str(m(1)) == "[1]", str(m(1))
+    assert got == ["write ok", "[1, 5]", "write ok"], str(got)
+    assert str(must(t.get())) == "[1, 5]", str(must(t.get()))
+    assert str(m(1)) == "[1, 5]", str(m(1))
 
 struct Key:
     id: int
@@ -290,8 +289,8 @@ test fn a_task_owned_key_reachable_from_a_memo_result_stays_writable():
     parallel:
         spawn own_key_write(m, out)
     got := [out.recv(), out.recv(), out.recv()]
-    assert got == ["write ok", "[1]", d4_msg()], str(got)
-    assert str(m(Key(7, [])).log) == "[]"
+    assert got == ["write ok", "[1]", "write ok"], str(got)
+    assert str(m(Key(7, [])).log) == "[1, 2]"
 
 struct NeverEq:
     id: int
@@ -332,9 +331,10 @@ owner_global: List[int] = [1]
 fn send_memo(mc: Channel[fn(int) -> FnBox]):
     mc.send(memoize1(mk_box))
 
-# A wrapper received from a channel returns a marked snapshot. A function inside it points at this
-# heap's module; the mark stops there, so the reader's own global stays writable.
-test fn a_function_valued_copy_result_leaves_the_readers_globals_writable():
+# A wrapper received from a channel is the sender's wrapper (M3.2), so its result is the one cached
+# object and takes a write (CPython `handoff.py`: `2 [1, 5]`). A function inside it points at the
+# run's module, and the reader's own global stays writable.
+test fn a_function_valued_channel_result_leaves_the_readers_globals_writable():
     mc := Channel[fn(int) -> FnBox](1)
     parallel:
         spawn send_memo(mc)
@@ -343,8 +343,9 @@ test fn a_function_valued_copy_result_leaves_the_readers_globals_writable():
     assert b.f(1) == 2
     rb := recover: b.xs.push(5)
     match rb:
-        ?_: assert false, "the marked result took a write"
-        !e: assert e.message() == d4_msg(), e.message()
+        ?_: pass
+        !e: assert false, e.message()
+    assert m(1).xs == [1, 5]
     rg := recover: owner_global.push(3)
     match rg:
         ?_: pass

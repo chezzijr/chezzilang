@@ -1,0 +1,50 @@
+# TICKET-100: two aliases of one object stay one object in a task (`b := a` inside a task means the
+# same thing it means outside one). `outer := [inner, inner]` holds ONE list reached twice.
+# M3.4 (Go model) supersedes TICKET-169's write half: a spawned task holds the parent's object by
+# M3.4 (Go model) supersedes TICKET-169's write half: a spawned task holds the parent's object by
+# handle, so its write through EITHER alias lands and the other alias sees it. Go
+# (`m34go/aliasid/main.go`, go1.27.0): `container_alias [1 99] [1 99]`, `struct_alias 9 9`.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+fn d4_push_nested(xs: List[List[int]]):
+    xs[0].push(99)
+
+test fn container_alias_write_through_one_alias_lands():
+    inner := [1]
+    outer := [inner, inner]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_outer := d4_push_nested
+            res := recover:
+                write_outer(outer)
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert inner == [1, 99]
+    assert outer[1] == [1, 99]
+
+struct Box:
+    n: int
+
+fn d4_set_box(pair: List[Box]):
+    pair[0].n = 9
+
+test fn struct_alias_write_through_one_alias_lands():
+    box := Box(1)
+    pair := [box, box]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_pair := d4_set_box
+            res := recover:
+                write_pair(pair)
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert box.n == 9
+    assert pair[1].n == 9

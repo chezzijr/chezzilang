@@ -54,8 +54,8 @@ impl SchedCore {
     ///
     /// A cancel trip and its `cancel_drain` are TWO SEPARATE core-lock acquisitions apart at every seam
     /// that trips one — there are exactly THREE (the only scope-cancel stores in the VM):
-    /// `MnSched::finish_with` (a fiber's fault/exit, `run_one_fiber`'s panic-fault fallback
-    /// included) followed by `mn_worker_loop`'s `drain_family`;
+    /// `MnSched::finish_with` (a fiber's fault/exit, `run_one_fiber`'s panic-fault fallback included)
+    /// followed by `mn_worker_loop`'s `cancel_drain`;
     /// `abort_enlisted_scope`; and `abort_eager_nursery` (sched.rs). (The two demote self-detect loops
     /// only READ a cancel — they trip none.) An idle worker's `take_runnable` landing in such a gap sees
     /// the pre-drain quiesce (`running == 0 && runnable == 0 && parked_n > 0`) and, without this veto,
@@ -401,8 +401,6 @@ impl MnSched {
                 exec_held: std::collections::VecDeque::new(),
                 job_settle: Default::default(),
                 leaf_site: false,
-                slot_charge: Default::default(),
-                unfinished_bytes: 0,
                 charged: 0,
                 deadline_armed: None,
             }),
@@ -749,7 +747,7 @@ impl MnSched {
         scope_id: usize,
     ) -> (Option<usize>, Vec<usize>) {
         let mut c = self.lock();
-        let opened = self.reserve_slot(&mut c, &mut fiber, scope_id, 0);
+        let opened = self.reserve_slot(&mut c, &mut fiber, scope_id);
         self.enqueue_locked(&mut c, fiber);
         let wids = self.claim_runners(&mut c);
         drop(c);
@@ -818,17 +816,15 @@ impl MnSched {
 
     /// Claim `fiber`'s outcome slot (the first half of [`MnSched::inject_or_extend`]): it grows the
     /// tail scope, or opens a continuation scope when `scope_id` is no longer the sched's last.
-    /// A nonzero `charge` is the task's submit-time bytes, held until [`MnSched::finish`].
     pub(super) fn reserve_slot(
         &self,
         c: &mut SchedCore,
         fiber: &mut Fiber,
         scope_id: usize,
-        charge: usize,
     ) -> Option<usize> {
         debug_assert!(
-            matches!(fiber.state, FiberState::Pending(_)),
-            "an injected handler must be unstarted (Pending) so `run_one_fiber` runs its body via `start_task`"
+            matches!(fiber.state, FiberState::Pending) && fiber.ctx.start.is_some(),
+            "an injected handler must be unstarted (Pending, task in `ctx.start`) so `run_one_fiber` runs its body via `start_task`"
         );
         let base_index = c.slots.len(); // authoritative flat slot index — the slots END
         let opened = if c.scopes.last_id() == Some(scope_id) {
@@ -858,10 +854,6 @@ impl MnSched {
         };
         fiber.task_index = base_index;
         c.slots.push(None);
-        if charge != 0 {
-            c.slot_charge.insert(base_index, charge);
-            c.unfinished_bytes += charge;
-        }
         opened
     }
 
@@ -874,11 +866,10 @@ impl MnSched {
         &self,
         c: &mut SchedCore,
         fiber: &mut Fiber,
-        charge: usize,
         settle: JobSettle,
     ) -> Option<usize> {
         let tail = c.exec_tail;
-        let opened = self.reserve_slot(c, fiber, tail, charge);
+        let opened = self.reserve_slot(c, fiber, tail);
         if let Some(id) = opened {
             c.exec_tail = id;
         }
@@ -956,11 +947,12 @@ impl MnSched {
         c.runner_wids.iter().any(|b| *b)
     }
 
-    /// What this sched holds outside every heap: the submit-time bytes of its unfinished tasks plus
-    /// its finished tasks' retained output (kept under a live cap only). Takes the core lock.
+    /// What this sched holds outside every heap: its finished tasks' retained output (kept under a
+    /// live cap only). M1.7: an unfinished task's payload is objects of the run's one heap, which
+    /// `live_bytes` counts, so it is not charged here. Takes the core lock.
     pub(super) fn held_bytes(&self) -> usize {
         let c = self.lock();
-        c.unfinished_bytes + c.scopes.values().map(|s| s.bytes).sum::<usize>()
+        c.scopes.values().map(|s| s.bytes).sum::<usize>()
     }
 
     /// W7-26, the sampling half — the growth of the retained-output bytes since the last call, for

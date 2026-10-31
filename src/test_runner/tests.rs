@@ -438,28 +438,24 @@ fn over_memory_bucket_for_runaway_alloc() {
     }
 }
 
-/// gaps.md W6-10 — a value moved across the airlock into a `Channel`/`Shared` core lives as a
-/// `WireValue` in an `Arc` OUTSIDE every `Heap`, so `live_bytes` counted it nowhere and a
-/// 195 MB channel backlog sailed straight past a 200 KB `--max-heap` cap (PASS, rc=0). The
-/// cached per-core byte summary now feeds `live_bytes`, so the natural *concurrent* runaway —
-/// an unbounded backlog, or data parked in a `Shared` — trips the cap like any other.
+/// gaps.md W6-10 — the natural *concurrent* runaway — an unbounded channel backlog, or data
+/// parked in `Shared` boxes — trips the cap like any other. M3.2: a channel holds its values
+/// themselves, so a backlog of 200000 distinct 8-int lists is heap objects the slot walk counts
+/// (Go `membacklog.go`, M3.2 report: `distinct_lists_x200000 20.4 MB`, past the 8 MB cap).
 #[test]
 fn over_memory_counts_offheap_wire_payload() {
     let d = TmpDir::new();
-    // The cap is deliberately far above anything either program keeps in its own `Heap` — only
-    // the off-heap wire storage can reach it, so the assertion isolates W6-10.
     const CAP: usize = 8_000_000;
     let d2 = TmpDir::new();
     let backlog = d.write(
         "backlog_test.chz",
         "test fn backlog():\n    ch := Channel[List[int]](200000)\n    \
-             for i in 0..40000:\n        ch.send([i, i, i, i, i, i, i, i])\n",
+             for i in 0..200000:\n        ch.send([i, i, i, i, i, i, i, i])\n",
     );
-    // The sibling single-value path: data parked in `Shared` boxes. TICKET-246 — a box keeps
-    // its value in its own heap (8 bytes per `int`, not a wire value), so the 150000-item list
-    // this test used to park is 1.2 MB and no longer near the cap. Three boxes of ~3.6 MB each
-    // are: no single heap exceeds the cap (`one` below PASSes), only the caller's walk over
-    // the three box heaps does.
+    // The sibling single-value path: data parked in `Shared` boxes. A 150000-item list is 1.2
+    // MB. M3.3: a box holds what it is given by handle, so each `update` parks its own copy
+    // (`xs.copy()`, Go: `append(acc, slices.Clone(xs))`) and a box holds ~3.6 MB: one box is under
+    // the cap (`one` below PASSes), three are over it (the slot walk reaches each box's value).
     const BOXES: &str = "import Shared from std.concurrency\n\n\
              fn keep(acc: List[List[int]], xs: List[int]) -> List[List[int]]:\n    \
              acc.push(xs)\n    return acc\n\n\
@@ -467,7 +463,7 @@ fn over_memory_counts_offheap_wire_payload() {
              xs: List[int] = []\n    for i in 0..150000:\n        xs.push(i)\n    \
              boxes: List[Shared[List[List[int]]]] = []\n    for _b in 0..n:\n        \
              s: Shared[List[List[int]]] = Shared([])\n        for _k in 0..3:\n            \
-             s.update(fn(acc): keep(acc, xs))\n        boxes.push(s)\n    return boxes\n\n";
+             s.update(fn(acc): keep(acc, xs.copy()))\n        boxes.push(s)\n    return boxes\n\n";
     let parked = d2.write(
         "parked_test.chz",
         &format!(
@@ -492,7 +488,7 @@ fn over_memory_counts_offheap_wire_payload() {
         report.text
     );
     // TICKET-246 — the `RwShared` twins: the same programs, `write` for `update`. Three
-    // boxes trip the cap only when the accounting walk reads each box heap (`try_read`).
+    // boxes trip the cap only when the accounting walk reads each box's value.
     for (n, want) in [(3, "OVER-MEMORY rw"), (1, "PASS rw")] {
         let d = TmpDir::new();
         let src = format!(
@@ -514,7 +510,7 @@ fn over_memory_counts_offheap_wire_payload() {
             let report = run_tests_capped(f, CAP);
             assert!(
                 report.text.contains(&format!("OVER-MEMORY {label}")),
-                "off-heap wire storage must trip the cap ({label}); \
+                "a channel backlog or parked boxes must trip the cap ({label}); \
                      report:\n{}",
                 report.text
             );
@@ -597,7 +593,7 @@ fn over_memory_counts_an_executor_result_backlog() {
 
 /// W7-26r — the cap must be observed while the parent fiber is BLOCKED IN A JOIN, where it
 /// reaches no instruction boundary and so never sweeps. Both programs below build their payload
-/// inside the task (nothing is captured, so the parent wires ~nothing at spawn/submit and has
+/// inside the task (nothing is captured, so the parent hands over ~nothing at spawn/submit and has
 /// nothing to trigger a GC on) and hold it as buffered OUTPUT, which is retained to the join for
 /// the task-order flush (W7-5c). Measured on the release binary against an 8 MB cap, ~1 MB × 300:
 /// **PASS at 622 MB** (executor) and **PASS at 733 MB** (nursery) — the nursery half was counted
@@ -661,12 +657,13 @@ fn over_memory_trips_while_the_parent_is_blocked_in_a_join() {
     }
 }
 
-/// W7-26r's sibling — a job DISPATCHED BUT NOT FINISHED is charged to its submitter (the test
-/// name predates TICKET-205, which moved the discharge from job start to job end).
-/// `spawn_into`
-/// rebuilds each submitted closure into its own worker `Vm` at submit time, so a queue deeper
-/// than the pool is N fully-built worker heaps sitting in `vm::pool`'s global FIFO: every one of
-/// them comfortably under a per-heap `--max-heap`, and their sum charged to nobody. Measured on
+/// W7-26r's sibling — a job DISPATCHED BUT NOT FINISHED counts against the cap (the test name
+/// predates TICKET-205, which moved the discharge from job start to job end). Before M3.4
+/// `spawn_into` rebuilt each submitted closure's captures at submit time, so a queue deeper than
+/// the pool held N copies of a ~1 MB capture. M3.4: a job holds its captures by handle (Go: a
+/// goroutine shares the captured string), so 60 jobs over ONE captured `blob` hold ~1 MB and PASS;
+/// the trip is now driven by what each unfinished job allocates for itself (`own`). The original
+/// measurement (before TICKET-205): Measured on
 /// the release binary, 300 slow jobs each capturing ~1 MB: **PASS, rc=0, peak RSS 666 MB**
 /// against an 8 MB cap. The submitter is charged for them until they finish
 /// (`ExecutorCore::pending`, TICKET-205), and — the W6-10 lesson yet again — the same bytes ALSO pace the
@@ -720,16 +717,32 @@ fn over_memory_counts_jobs_queued_but_not_started() {
     // 10x idle and not 2x.
     let slow = d.write(
             "slow_test.chz",
-            // ~1 MB per job × the unfinished ones — many times the cap.
+            // ~1 MB that each job builds for itself × the unfinished ones — many times the cap.
+            &prog(
+                100_000,
+                "        own := blob + \"!\"\n        while time.monotonic() < deadline:\n            pass\n        return own.len()",
+            ),
+        );
+    // M3.4: the same 60 jobs over the ONE captured ~1 MB `blob` and nothing of their own hold
+    // ~1 MB: the capture is the submitter's string, not a copy per job.
+    let dc = TmpDir::new();
+    let captured = dc.write(
+            "captured_test.chz",
             &prog(
                 100_000,
                 "        while time.monotonic() < deadline:\n            pass\n        return blob.len()",
             ),
         );
+    let report = run_tests_capped(&captured, CAP);
+    assert!(
+        report.text.contains("PASS queued"),
+        "60 jobs sharing one captured ~1 MB string hold ~1 MB; report head:\n{}",
+        &report.text[..report.text.len().min(2000)]
+    );
     let report = run_tests_capped(&slow, CAP);
     assert!(
         report.text.contains("OVER-MEMORY queued"),
-        "jobs submitted but not finished must be charged to the submitter; report head:\n{}",
+        "what jobs submitted but not finished hold must count against the cap; report head:\n{}",
         &report.text[..report.text.len().min(2000)]
     );
     let generous = run_tests_capped(&slow, 4_000_000_000);
@@ -798,11 +811,11 @@ fn over_memory_counts_jobs_queued_but_not_started() {
     );
 }
 
-/// W6-10r — the same backlog, reachable only through a NESTED core. `live_bytes` reaches a
-/// core's bytes through its `Obj::*` alias slot; the channel here has none once `make()`'s frame
-/// dies, so its 300 MB used to be counted nowhere and PASSED an 8 MB cap (measured on the release
-/// binary: PASS, rc=0, peak RSS 304 MB — while the identical program holding the channel in a
-/// live local tripped OVER-MEMORY).
+/// W6-10r — a backlog reachable only through a channel held in a box. Before M3.2 the channel's
+/// bytes were counted nowhere once `make()`'s frame died (PASS at peak RSS 304 MB against an
+/// 8 MB cap). M3.2: the queued strings are heap objects, rooted through the box's state and the
+/// channel, so the slot walk counts them. Each send is a fresh ~1 MB string (Go
+/// `membacklog.go`: a backlog of distinct values holds each of them).
 #[test]
 fn over_memory_counts_a_nested_core_backlog() {
     const CAP: usize = 8_000_000;
@@ -814,7 +827,7 @@ fn over_memory_counts_a_nested_core_backlog() {
              test fn nested():\n    s := make()\n    parts: List[str] = []\n    \
              for i in 0..100000:\n        parts.push(\"0123456789\")\n    \
              blob := \"\".join(parts)\n    for i in 0..300:\n        \
-             s.get().send(blob)\n    assert true\n",
+             s.get().send(blob + str(i))\n    assert true\n",
     );
     {
         let report = run_tests_capped(&nested, CAP);
@@ -831,7 +844,7 @@ fn over_memory_counts_a_nested_core_backlog() {
         );
     }
     // TICKET-246 — the `RwShared` twin: a channel held only inside the box grows through
-    // `s.get().send(..)` with no write to the box, so only the walk of the box heap sees it.
+    // `s.get().send(..)` with no write to the box, so only the walk of the box's value sees it.
     let d = TmpDir::new();
     let src = std::fs::read_to_string(&nested)
         .unwrap()
@@ -844,14 +857,13 @@ fn over_memory_counts_a_nested_core_backlog() {
     );
 }
 
-/// W6-10 review, the SAMPLING half: counting the off-heap bytes is worthless if the cap is
-/// never sampled. `over_cap` is only evaluated inside `sweep()`, and `sweep()` only runs when
-/// `should_collect()` fires — which used to be a pure heap-OBJECT count. A program that pushes
-/// megabytes across the airlock while allocating ~2 `Obj`s per iteration therefore never swept,
-/// never sampled, and PASSED at hundreds of MB against an 8 MB cap. Both shapes below build
-/// their payload ONCE and then only re-send it, so object churn cannot be doing the work.
+/// W6-10 review / M3.2 — both shapes build their payload ONCE and then only re-send it. Before
+/// M3.2 each send copied it off the heap (peak RSS 304 MB and 3369 MB against an 8 MB cap), so
+/// the cap had to pace a sweep without object churn. M3.2: a send moves one word, so 300 sends
+/// of one 1 MB string and 100 sends of one 200k-int list hold one payload, well under the cap
+/// (Go `membacklog.go`, M3.2 report: `resent_blob_x300 1.2 MB`, `resent_list_x100 2.8 MB`).
 #[test]
-fn over_memory_trips_without_object_churn() {
+fn a_resent_payload_is_one_object_under_the_cap() {
     const CAP: usize = 8_000_000;
     let d = TmpDir::new();
     let d2 = TmpDir::new();
@@ -872,21 +884,12 @@ fn over_memory_trips_without_object_churn() {
              assert true\n",
     );
     for (label, f) in [("msg", &msg), ("ints", &ints)] {
-        {
-            let report = run_tests_capped(f, CAP);
-            assert!(
-                report.text.contains(&format!("OVER-MEMORY {label}")),
-                "off-heap growth must PACE a sweep so the cap is sampled ({label}); report:\n{}",
-                report.text
-            );
-            assert!(
-                !report.text.contains(&format!("FAIL {label}"))
-                    && !report.text.contains(&format!("ERROR {label}")),
-                "must be OVER-MEMORY, not FAIL/ERROR ({label}); \
-                     report:\n{}",
-                report.text
-            );
-        }
+        let report = run_tests_capped(f, CAP);
+        assert!(
+            report.text.contains(&format!("PASS {label}")),
+            "a re-sent payload is one object, under the cap ({label}); report:\n{}",
+            report.text
+        );
     }
 }
 
@@ -901,7 +904,8 @@ fn over_memory_trips_without_object_churn() {
 /// written to prove — since W7-28 it is the PARENT that samples and trips first for both, which
 /// is what the `nospawn` control below (no `spawn` at all, same payload, OVER-MEMORY) measures.
 /// See the attribution proof further down; do not credit these verdicts to the worker-side
-/// mechanisms (`Vm::sample_mem_cap` at the fiber door, `Heap::request_collect` at the job door).
+/// mechanisms (`Vm::sample_mem_cap` at the fiber door, the per-worker `Heap::request_collect`
+/// that M5 deleted).
 ///
 /// **W7-28 re-base — the worker path can no longer be ATTRIBUTED, and that is a proof, not a
 /// gap.** The `nospawn` control below did exactly the job it was written for: the parent-side
@@ -910,11 +914,11 @@ fn over_memory_trips_without_object_churn() {
 /// by construction:
 ///
 /// - to isolate the worker, the worker heap must be over the cap while the parent's is under it;
-/// - the worker's copy is built by `from_wire` from the parent's OWN live value, and for a
+/// - (before M3.4) the worker's copy was built by the airlock from the parent's OWN live value, and for a
 ///   low-`Obj`-count payload it is never larger (`push` over-allocates, so the parent's
 ///   `Vec::capacity()` is up to 2× the worker's exact-sized rebuild);
 /// - the only wire path that AMPLIFIES is one that allocates more `Obj`s in the worker than the
-///   parent held — `WireValue::Str` carries no identity id, so N aliases of one interned string
+///   parent held — the wire string carried no identity id, so N aliases of one interned string
 ///   become N fresh `Obj::Str`. Measured: 20 K × 100-char const → parent ~160 KB (PASS), worker
 ///   ~3.4 MB (OVER-MEMORY) at a 1 MB cap. But that amplification IS extra allocations, so
 ///   `since_gc` alone trips it — verified by deleting `spawn_worker`'s `request_collect` flag:
@@ -926,14 +930,14 @@ fn over_memory_trips_without_object_churn() {
 /// this pair can isolate them. `nospawn` is kept, with the same payload, asserting the new truth
 /// — that is what keeps the assertions above honest about WHY they are green. The one shape
 /// where the worker's heap really is over the cap while the parent's is under it — a
-/// non-re-interning `from_wire` amplification behind a NESTED nursery, so the parent's own copy
-/// is garbage in the same opcode — is `over_memory_trips_on_an_all_native_task_body`, and that
-/// one isolates the FIBER door only. The eager-`Executor` job door has no in-tree witness at all;
+/// non-re-interning airlock amplification behind a NESTED nursery, so the parent's own copy
+/// is garbage in the same opcode — was `over_memory_trips_on_an_all_native_task_body`, which M3.4
+/// retired with the copy (`a_spawned_payload_is_the_producers_and_costs_no_heap`). The eager-`Executor` job door has no in-tree witness at all;
 /// its guard is documented at `Vm::spawn_worker` rather than tested.
 #[test]
 fn over_memory_trips_on_a_worker_payload_with_no_task_allocation() {
-    // The worker heap holds ~1.6 MB (200k inline ints) against a 1 MB cap — and so does the
-    // PARENT that built it by `push`, which since W7-28 samples its own heap and trips first.
+    // The payload holds ~1.6 MB (200k inline ints) against a 1 MB cap — built by the PARENT
+    // by `push`, which since W7-28 samples the heap and trips first.
     const CAP: usize = 1_000_000;
     // `{name}` is the test-fn name, so the report line is greppable per shape.
     let body = |name: &str| {
@@ -1006,103 +1010,18 @@ fn over_memory_trips_on_a_worker_payload_with_no_task_allocation() {
     );
 }
 
-/// W6-10s residual (a) — a task whose ENTIRE body is one native call was never sampled at all.
+/// W6-10s residual (a) — a task whose ENTIRE body is one native call (`spawn xs.len()`) was once
+/// never sampled, while its heap held the worker's copy of the payload: the airlock (deleted in M3.5) minted a fresh
+/// `Obj::Str` per element, so 8 K aliases of one interned literal (~130 KB) became ~1.6 MB, over a
+/// 1 MB cap. `Vm::start_task` samples the cap before dispatch since (`Vm::sample_mem_cap`).
 ///
-/// `over_cap` is assigned only in `Heap::sweep()`; `sweep()` runs only when `should_collect()`
-/// fires; and `should_collect()`'s only non-test caller is the top of `run_until`'s dispatch
-/// loop, guarded by `self.frames.len() > base_level`. `spawn xs.len()` pushed NO frame then (a
-/// method task ran its native call straight from `start_task`), so it never entered that loop
-/// and its heap was never looked at. That chain is history: since TICKET-235 the call runs
-/// behind an entry thunk (`Vm::task_entry`), and this test pins that the sample covers a native
-/// call behind its thunk.
-///
-/// The pair below is the whole proof: byte-identical programs, same payload, same peak RSS —
-/// pre-fix the verdict flipped on **who runs bytecode**, not on who holds bytes. Measured on the
-/// release binary at `--max-heap=8000000` with 300 K elements: `spawn xs.len()` PASSED at 170.9 MB
-/// (21× the cap), `spawn use(xs)` reported OVER-MEMORY at the same RSS. `Vm::start_task` now
-/// samples the cap for every task shape before dispatch, with the receiver/args rooted on the
-/// operand stack (see `Vm::sample_mem_cap`).
-///
-/// Two details the repro depends on, neither incidental:
-/// - the worker's copy is BIGGER than the producer's — `from_wire` mints a fresh `Obj::Str` per
-///   element and does not re-intern, so N aliases of ONE interned literal become N objects. That
-///   is what keeps the producer under the cap while the task's heap is far over it.
-/// - the NESTED `parallel:` is load-bearing. On the lazy `register_task` path the parent's own
-///   `deep_clone_all` copy stays rooted in `self.nurseries` until the join, so the PARENT trips
-///   and masks the bug. The eager arm (`self.mn.is_none() || worker_count() >= 2`)
-///   consumes the task into `prepare_worker` immediately, so that copy is garbage within the same
-///   opcode and the parent never trips.
-///
-/// Sized DOWN to 8 K elements against a 1 MB cap (the repros used 300 K / 8 MB): the generous-cap
-/// controls must run to completion on the DEBUG VM, and a slow test here perturbs this suite's
-/// wall-clock tests.
-///
-/// **Two guards, because `OVER-MEMORY nat` alone does not prove the fix works.** A producer trip
-/// renders the IDENTICAL verdict line, so anything that makes the parent trip first would leave
-/// this test green forever while testing nothing:
-///
-/// - `prod` — the same payload with no `spawn`/`parallel:` at all — must PASS. That pins that the
-///   producer's own live set is under the cap, so a payload-size drift cannot silently take over
-///   the trip.
-/// - a FORCED worker count of 4. The discrimination rests entirely on the eager arm arming
-///   (`self.mn.is_none() || worker_count() >= 2`), and on a genuinely
-///   single-core runner it cannot: the lazy `register_task` path keeps the parent's own
-///   `deep_clone_all` copy — which is the SAME non-re-interned amplification, `deep_clone_all`
-///   being a `to_wire`/`from_wire` round-trip into the parent's heap — rooted in `self.nurseries`
-///   until the join, so the parent trips and the verdict is right for the wrong reason. MEASURED:
-///   the pre-fix release binary under `taskset -c 0` prints `OVER-MEMORY nat` at this exact size,
-///   so without the override this test would be GREEN with the fix reverted on one core. Note
-///   `CHEZZI_THREADS=1` does NOT reproduce that — the env var is read by `main::cmd_run`, not by
-///   `run_tests_capped`; the affinity mask is what moves `available_parallelism()`.
-///
-/// The override makes the test deterministic on a 1-core box and on a 96-core box alike. It is
-/// safe to set it AFTER `pool()`'s `OnceLock` has already sized the pool (which an earlier test
-/// in the process will normally have done): the eager gate and `mn_join`'s `nworkers` both read
-/// `worker_count()` live, and helper shells are `pool::submit` JOBS — a smaller pool just runs
-/// them later, while "the inline owner alone still guarantees completion, helpers only
-/// accelerate" (`Vm::mn_join`). Verified by running this test under `taskset -c 0`: green, no
-/// hang, 0.1 s.
+/// M3.4: a spawn hands the task the producer's own list, so the task holds no copy and both bodies
+/// (the native one and the bytecode control) stay under the cap the copy used to trip. Go: a slice
+/// passed to a goroutine copies no element. The generous-cap run pins that the program itself is
+/// fine.
 #[test]
-fn over_memory_trips_on_an_all_native_task_body() {
-    #[rustfmt::skip]
-        let in_parent = crate::vm::rerun_in_child(module_path!(), "over_memory_trips_on_an_all_native_task_body");
-    if in_parent {
-        return;
-    }
-    // Force the eager arm on rather than demanding the hardware provide it. The lock is the
-    // house pattern for process-global test state (`native::rand::TEST_RNG_LOCK`); the guard
-    // bundles it with the restore so an assertion failure below cannot leave the rest of the
-    // suite running at a forced worker count.
-    //
-    // Restore to `test_baseline_worker_count()`, NOT a hardcoded `0`: under `CHEZZI_THREADS=2
-    // cargo test` the process baseline is 2, not auto, and every test that runs after this one
-    // in the same process must still see it — hardcoding `0` here would silently drop the
-    // `CHEZZI_THREADS` differential for the rest of the run the moment this test finishes.
-    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-    impl Drop for Workers {
-        fn drop(&mut self) {
-            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
-        }
-    }
-    let _workers = Workers(
-        crate::vm::TEST_WORKER_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-    );
-    crate::vm::set_worker_count(4);
-    // Belt-and-suspenders: this whole test's premise is the eager arm arming, which needs
-    // `worker_count() >= 2` (see the doc above). If a future change reopens a way for the
-    // `CHEZZI_THREADS` baseline to land AFTER this forced override, this fails loudly right here
-    // instead of the test quietly passing on the hardware-arm path for the wrong reason.
-    assert_eq!(
-        crate::vm::worker_count(),
-        4,
-        "forced worker count did not stick — the CHEZZI_THREADS baseline clobbered it"
-    );
-
+fn a_spawned_payload_is_the_producers_and_costs_no_heap() {
     const CAP: usize = 1_000_000;
-    // 8 K × 100 chars — the producer holds 8 K aliases of ONE interned literal (~130 KB, under
-    // the cap); the task's heap rebuilds them as 8 K separate `Obj::Str` (~1.6 MB, over it).
     let src = |name: &str, body: &str| {
         format!(
             "fn use(ys: List[str]) -> int:\n    return ys.len()\n\n\
@@ -1115,55 +1034,20 @@ fn over_memory_trips_on_an_all_native_task_body() {
     };
     let d = TmpDir::new();
     let d2 = TmpDir::new();
-    // The shape that used to PASS: the task body is one native method call, which pushed no
-    // frame and reached no boundary before TICKET-235 gave it an entry thunk.
     let nat = d.write("nat_test.chz", &src("nat", "xs.len()"));
-    // Control: byte-identical but for the body — `use` is a user fn, so it pushes a frame and
-    // `run_until` samples. It tripped pre-fix, which is what pins that ONLY the body differs.
     let bc = d2.write("bc_test.chz", &src("bc", "use(xs)"));
-    // Producer-only control: the same payload, no `spawn`/`parallel:` anywhere. It must PASS —
-    // that is what makes the two OVER-MEMORY verdicts below attributable to a TASK heap. If this
-    // ever flips, the assertions after it have stopped proving anything (a producer trip prints
-    // the same line), so read a failure here as "this test is no longer testing the fix", not as
-    // "the producer is over the cap".
-    let d3 = TmpDir::new();
-    let prod = d3.write(
-        "prod_test.chz",
-        &format!(
-            "fn build() -> List[str]:\n    xs: List[str] = []\n    i := 0\n    \
-                 while i < 8000:\n        xs.push(\"{}\")\n        i = i + 1\n    return xs\n\n\
-                 test fn prod():\n    xs := build()\n    assert xs.len() == 8000\n",
-            "a".repeat(100)
-        ),
-    );
-    let prod_report = run_tests_capped(&prod, CAP);
-    assert!(
-        prod_report.text.contains("PASS prod"),
-        "the payload ALONE must stay under the cap, or the OVER-MEMORY verdicts below are the \
-             producer's and this test proves nothing about the task-start sample; report:\n{}",
-        prod_report.text
-    );
     for (label, f) in [("nat", &nat), ("bc", &bc)] {
         let report = run_tests_capped(f, CAP);
         assert!(
-            report.text.contains(&format!("OVER-MEMORY {label}")),
-            "a task heap over the cap must be sampled at task start whatever the body runs \
-                 ({label}); report:\n{}",
-            report.text
-        );
-        assert!(
-            !report.text.contains(&format!("FAIL {label}"))
-                && !report.text.contains(&format!("ERROR {label}")),
-            "must be OVER-MEMORY, not FAIL/ERROR ({label}); report:\n{}",
+            report.text.contains(&format!("PASS {label}")),
+            "a task holds the producer's list, no copy ({label}); report:\n{}",
             report.text
         );
     }
-    // The negative direction: the same program under a generous cap must still PASS, so the trip
-    // above is a MEASUREMENT and not "an all-native spawn is over the cap".
     let generous = run_tests_capped(&nat, 4_000_000_000);
     assert!(
         generous.text.contains("PASS nat"),
-        "the same program under a generous cap must still PASS; report:\n{}",
+        "the same program under a generous cap must PASS; report:\n{}",
         generous.text
     );
 }
@@ -1182,7 +1066,7 @@ fn over_memory_trips_on_an_all_native_task_body() {
 ///
 /// The accounting was always right (`obj_bytes_shallow` charges `Vec::capacity()`); nobody ever
 /// looked. The fix charges bytes at the three funnels every byte must pass through — `alloc`,
-/// `get_mut`, `to_wire_crossable` — so the shape of the growth stops mattering.
+/// `write` and `charge_bytes` — so the shape of the growth stops mattering.
 ///
 /// `while`, not `for i in range(...)`: `range()` materialises its own `List[int]`, which would
 /// trip the cap by itself and confound what this proves.
@@ -1259,7 +1143,7 @@ fn over_memory_trips_on_inline_scalar_growth() {
 
 /// W6-10 review — the NEGATIVE direction, which matters just as much: a program comfortably
 /// UNDER the cap must still PASS while holding a shared core. A core's payload is ONE `Arc`
-/// allocation, but `from_wire` mints a FRESH `Obj::Shared` alias slot for every crossing, so 50
+/// allocation, but the airlock once minted a FRESH `Obj::Shared` alias slot for every crossing, so 50
 /// receives of the same handle used to charge that payload 50 times and fire a spurious
 /// OVER-MEMORY at ~1/50th of the real footprint — a resource cap whose false-positive rate grows
 /// with fan-out. Bytes are now charged once per CORE per heap.
@@ -2276,7 +2160,7 @@ fn recover_does_not_catch_over_memory_via_native_reentry() {
 #[test]
 fn over_memory_buckets_across_spawn_on_both_engines() {
     // A runaway alloc inside a `spawn`ed task must bucket OverMemory. The task runs on a worker
-    // VM with its own heap, so the cap must be threaded onto the worker and the over-memory
+    // VM over the run's one heap, so the cap must reach the worker and the over-memory
     // marker must cross the worker→parent fault boundary.
     let d = TmpDir::new();
     let f = d.write(
@@ -2296,10 +2180,9 @@ fn over_memory_buckets_across_spawn_on_both_engines() {
 
 #[test]
 fn over_memory_concurrent_under_cap_passes_on_both_engines() {
-    // The cap's guaranteed envelope on the low side: a CONCURRENT test whose tasks each stay well
-    // under a generous cap must PASS — no false trip. (The near-boundary aggregate
-    // case, where per-fiber allocation sums over the cap, is the documented per-heap divergence and
-    // is deliberately NOT asserted here — see `docs/design/roadmap.md §3b`.)
+    // The cap's guaranteed envelope on the low side: a CONCURRENT test whose tasks together stay
+    // well under a generous cap must PASS — no false trip. (M1.7: the cap is run-wide, so the
+    // aggregate over the cap trips: `max_heap_caps_the_run_not_each_task`.)
     let d = TmpDir::new();
     let f = d.write(
         "concpass_test.chz",
@@ -2322,6 +2205,46 @@ fn over_memory_concurrent_under_cap_passes_on_both_engines() {
         );
         assert!(report.text.contains("PASS t"), "report:\n{}", report.text);
     }
+}
+
+/// M1.7 — `--max-heap` caps the whole run: three tasks each hold about 4.2 MB, under a 10 MB cap
+/// alone, and all three are live at once (each waits on `go` until `gate` saw every `ready`). The
+/// sum is over the cap, so the test is OVER-MEMORY. With one heap per task each task was measured
+/// alone and the test passed.
+#[test]
+fn max_heap_caps_the_run_not_each_task() {
+    let d = TmpDir::new();
+    let f = d.write(
+        "runcap_test.chz",
+        "fn work(ready: Channel[int], go: Channel[int]) -> int:\n\
+            \x20   ys: List[int] = []\n\
+            \x20   for j in 0..300000:\n\
+            \x20       ys.push(j)\n\
+            \x20   ready.send(1)\n\
+            \x20   go.recv()\n\
+            \x20   return ys.len()\n\
+             fn gate(ready: Channel[int], go: Channel[int]) -> int:\n\
+            \x20   for _ in 0..3:\n\
+            \x20       ready.recv()\n\
+            \x20   for _ in 0..3:\n\
+            \x20       go.send(1)\n\
+            \x20   return 0\n\
+             test fn t():\n\
+            \x20   ready := Channel[int](3)\n\
+            \x20   go := Channel[int](3)\n\
+            \x20   parallel:\n\
+            \x20       spawn work(ready, go)\n\
+            \x20       spawn work(ready, go)\n\
+            \x20       spawn work(ready, go)\n\
+            \x20       spawn gate(ready, go)\n",
+    );
+    let report = run_tests_capped(&f, 10_000_000);
+    assert!(!report.passed, "report:\n{}", report.text);
+    assert!(
+        report.text.contains("OVER-MEMORY t"),
+        "three live 4.2 MB tasks must trip a 10 MB run-wide cap; report:\n{}",
+        report.text
+    );
 }
 
 #[test]

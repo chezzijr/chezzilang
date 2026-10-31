@@ -25,7 +25,7 @@ open-row ledger is [`gaps.md`](../contributing/gaps.md). User-facing rules:
 
 | Item | Decision | Ancestor |
 |---|---|---|
-| Custom heap | No user heap or arena API: `Shared[MyStruct]` gives a custom write interface in its own heap. Add `Frozen[T]` (build once, all tasks read in place, no lock) only when a benchmark shows the `RwShared.read` copy cost | Erlang `persistent_term`, Rust `Arc` |
+| Custom heap | No user heap or arena API: `Shared[MyStruct]` gives a custom write interface over one value of the run's heap. Since M3.3 (branch `exp/go-shared-heap`) `RwShared.read` runs on the live value with no copy; add `Frozen[T]` (build once, all tasks read in place, no lock) only when a benchmark shows the read guard's cost | Erlang `persistent_term`, Rust `Arc` |
 
 ## Open, would be fixed if a program needs it
 

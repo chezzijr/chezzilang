@@ -12,11 +12,12 @@ use std::process::Command;
 
 /// The GC's mark walk must never hold two core locks at once.
 ///
-/// `collect_core_gcrefs` used to lock a core's payload and recurse straight into a NESTED core's lock
-/// while still holding the first, and `Heap::children` held the outer core's guard across the whole
-/// call. With a CYCLIC core graph two workers marking concurrently then acquired the same two locks in
-/// opposite orders — a textbook ABBA deadlock. Every thread parked in `futex_do_wait` at 0% CPU, with
-/// no deadlock report and no way for `--timeout` to reach it, so it presents as a silent total hang.
+/// The mark walk (`core::collect_core_gcrefs`, deleted in M3.2) used to lock a core's payload and
+/// recurse straight into a NESTED core's lock while still holding the first, and `Heap::children`
+/// held the outer core's guard across the whole call. With a CYCLIC core graph two workers marking
+/// concurrently then acquired the same two locks in opposite orders — a textbook ABBA deadlock.
+/// Every thread parked in `futex_do_wait` at 0% CPU, with no deadlock report and no way for
+/// `--timeout` to reach it, so it presents as a silent total hang.
 ///
 /// Measured on the release binary at `CHEZZI_THREADS=4`: **8/40 runs hung** before the fix (and 2/80
 /// even before the mark walk was sped up — the speedup widened a pre-existing window rather than
@@ -142,8 +143,9 @@ fn gc_mark_walk_does_not_deadlock_on_a_cyclic_core_graph() {
 /// contention. A harsher fixture (8-node cycle with chords, 6 spawns, 4 000 iterations) did not raise
 /// the standalone debug rate either. So treat this as a cheap opportunistic catch, ~60% RED at 40
 /// rounds for 1.6 s; the real protection is structural — no site holds a core guard across another
-/// core's lock, which `grep` over the `_deep`/`_structural` entry points verifies statically, and the
-/// sibling rooting-walk gate covers the same class at a rate that IS reliable.
+/// core's lock. M3.2: a core holds `Value`s, so `Heap::children` and `Heap::live_bytes` lock one
+/// core, read it and drop the lock before they meet the next one; the nested-core walks are gone.
+/// The sibling rooting-walk gate covers the same class at a rate that IS reliable.
 #[test]
 fn max_heap_byte_walk_does_not_deadlock_on_a_cyclic_core_graph() {
     let dir = std::env::temp_dir().join(format!("chz-gc-abba-bytes-{}", std::process::id()));

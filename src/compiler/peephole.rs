@@ -40,7 +40,6 @@ fn bin_kind(op: &Op) -> Option<BinKind> {
         | Op::False
         | Op::Nil
         | Op::Pop
-        | Op::StampGen(_)
         | Op::Assert { .. }
         | Op::LoadBuiltin(_)
         | Op::GetLocal(_)
@@ -161,7 +160,6 @@ fn jump_target(op: &Op) -> Option<usize> {
         | Op::False
         | Op::Nil
         | Op::Pop
-        | Op::StampGen(_)
         | Op::Assert { .. }
         | Op::LoadBuiltin(_)
         | Op::GetLocal(_)
@@ -283,7 +281,6 @@ fn jump_target_mut(op: &mut Op) -> Option<&mut usize> {
         | Op::False
         | Op::Nil
         | Op::Pop
-        | Op::StampGen(_)
         | Op::Assert { .. }
         | Op::LoadBuiltin(_)
         | Op::GetLocal(_)
@@ -414,7 +411,6 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
             | Op::False
             | Op::Nil
             | Op::Pop
-            | Op::StampGen(_)
             | Op::Assert { .. }
             | Op::LoadBuiltin(_)
             | Op::GetLocal(_)

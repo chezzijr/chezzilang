@@ -49,14 +49,14 @@ fn main():
     ch := Channel[str]()
     label := "task"
     parallel:                          # nursery — joins all children at the dedent
-        spawn worker(1, label, ch)     # form 1: a named call (Go's `go f(x)`); args COPIED in
+        spawn worker(1, label, ch)     # form 1: a named call (Go's `go f(x)`); args by handle
         spawn worker(2, label, ch)
         spawn:                         # form 2: an anonymous indented block
             out := heavy()
             ch.send(out)
     # reaching here ⇒ all children finished. No WaitGroup, no leaks.
     for _ in 0..3:
-        print(ch.recv())               # results moved into main's heap
+        print(ch.recv())               # each recv hands over one result
 
 main()
 ```
@@ -99,15 +99,15 @@ fn fetch_all(urls: List[str]):
 | `Token` | `std.cancel` | cancellation token from `cancel.manual()` / `cancel.timeout(ms)`: `cancelled()`, `done() -> Channel[bool]`, `cancel()`, `reason()`, `deadline_at()`, `derive()` (a child; cancelling a parent cancels its children, never the reverse). Cooperative: poll it |
 
 - After `close()`: `send` faults, `recv` drains then faults, `try_send` returns `false`.
-- Values sent on a channel are copied; the sender's later writes are not seen by the receiver.
+- A channel hands over the value itself (Go `chan T`): the sender and the receiver share one object.
 - `std.concurrency` members import like any other: `import Shared from std.concurrency` (also with
   `as`), or `import std.concurrency` then `concurrency.Shared(0)` / `std.concurrency.Shared(0)`. A
   whole-module import binds no bare name. A generic over an `Atomic` payload needs the sealed bound
   `StructuralEq`: `fn mk[T: StructuralEq](v: T) -> Atomic[T]`.
 - `net.Socket` / `net.Listener` and `std.ffi`'s `ptr` / `owned_str` / widths are type-only:
   `net.Socket(...)` is rejected. `time.timer` in type position is `module 'time' has no type 'timer'`.
-- For in-task mutation use a plain struct (a shared reference). The ladder is: value (copied) →
-  struct/collection (in-task) → `Shared[T]` (cross-task).
+- The ladder: a value one task writes → a value tasks share and order by a join or a `Channel` →
+  `Shared[T]` (writes under a guard). See [`03-shared.md`](../concurrency/03-shared.md).
 
 **`wait:` (select)** races channel `recv` and `send` arms; the first ready arm wins, in source order.
 
@@ -121,9 +121,8 @@ fn fetch_all(urls: List[str]):
   [`examples/wait_select.chz`](../../../examples/wait_select.chz) and
   [`examples/wait_send.chz`](../../../examples/wait_send.chz).
 
-**Sendability.** A captured local and every module global cross into a task as an independent per-task
-copy; a write to either in the task is a runtime fault (§3, "Closure capture"). Sendable: scalars,
-`str`, containers and structs of sendable values, `Channel`, `Atomic`, `AtomicInt`, `Shared`,
-`RwShared`, a `std.cancel` `Token`, closures and protocol existentials. A native handle (or a witness
-that carries one) is not sendable. `Shared`/`Atomic`/`Channel` cross as shared handles, so a task's
-write through them is visible to the parent.
+**Task boundary.** A task gets the parent's values by handle (M3.4), as a goroutine does: a captured
+local, an argument and a spawned receiver are the parent's own, so a write in the task is seen after
+the join (§3, "Closure capture"). A module global is the run's one copy (M3.1). Every value can
+cross; a module is a qualifier, not a value. Two tasks that write one value with no join, `Channel`
+or box between them race (see [§7](../concurrency/07-sendability.md)).

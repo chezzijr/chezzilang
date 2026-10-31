@@ -561,7 +561,7 @@ main()";
     assert_eq!(run_capture_stress(src), normal);
 }
 
-/// Concurrency C4 rooting: a `spawn`'s deep-copied args, a pending task's captured closure env,
+/// Concurrency C4 rooting: a `spawn`'s args, a pending task's captured closure env,
 /// and the values queued in a `Channel` / boxed in a `Shared` must all survive collections that
 /// fire (under stress) between registration and the nursery's join. Each task allocates strings
 /// so a missing root would corrupt the output (or panic on a dangling `GcRef`).
@@ -594,8 +594,8 @@ main()";
 }
 
 /// B3.1 regression: a core nested *inside* another core. The channel core is reachable ONLY
-/// through the `Shared` box's wire value once `stash`'s local channel handle is gone — its queued
-/// `"hello"` (a heap `Str` handle embedded in the channel core's wire queue) must still be traced
+/// through the `Shared` box's value once `stash`'s local channel handle is gone — its queued
+/// `"hello"` (a heap `Str` handle embedded in the channel core's queue) must still be traced
 /// as a GC root, or `gc_stress` sweeps it and `recv` dangles. Pins that `collect_gcrefs` recurses
 /// into nested cores.
 #[test]
@@ -658,9 +658,8 @@ main()";
 }
 
 /// Executor: a submitted task closure must survive GC firing between the `submit` and the job's
-/// completion, and across each task's re-entrant call. Under eager `submit` the closure has already
-/// crossed into its own worker heap by the time `submit` returns, so this covers the wire crossing as
-/// well as the heap root. Each task allocates a string into a Channel — a missing root would corrupt
+/// completion, and across each task's re-entrant call. Under eager `submit` the job already holds the
+/// closure by handle when `submit` returns, so this covers the job's root as well as the heap root. Each task allocates a string into a Channel — a missing root would corrupt
 /// the output or dangle a `GcRef`.
 /// Eager `Executor` + GC stress on the M:N engine, where the dispatch actually happens.
 ///
@@ -821,7 +820,7 @@ main()";
     );
 }
 
-/// W6-7 — the GC now SHORT-CIRCUITS a core whose cached summary says its wire payload holds no
+/// W6-7 — the GC now SHORT-CIRCUITS a core whose cached summary says its payload holds no
 /// `Handle` and no nested core. That memo is only sound if EVERY store refreshes it, and the
 /// `Shared`/`RwShared`/`Atomic` payload is *replaced* (`set`/`update`/`write`/`store`/`exchange`/
 /// `cas`/`add`), not mutated in place. Under GC stress a stale `CLEAN` would free a value that is
@@ -884,83 +883,6 @@ main()";
     assert_eq!(run_capture_stress(src), "21\n21\n9\n42\n7\n5\n");
 }
 
-/// A container crossing the airlock must be rebuilt at **exact** capacity.
-///
-/// `from_wire`'s container arms used to be `items.into_iter().map(…).collect()`, which Rust
-/// specializes into an **in-place** collect: the destination element (`Value`, 8 B) is smaller than
-/// the source (`WireValue`, 176 B), so the source `Vec`'s allocation is reused and the rebuilt
-/// `Vec<Value>` inherits its capacity — 22× the elements it holds. Measured before the fix: a
-/// 200 000-int list arrived on the far heap as `len = 200 000, capacity = 4 400 000` — a 35.2 MB
-/// `Obj::List` carrying 1.6 MB of data, and 50 such `spawn`s peaked at 3.45 GB (203 MB after).
-///
-/// `len` is IDENTICAL either way and every value-level assertion passes, so `capacity` is the only
-/// thing that can see this — which is why the bug survived the whole behavioural suite.
-#[test]
-fn a_crossed_container_rebuilds_at_exact_capacity() {
-    const N: usize = 4096;
-    let span = Span::RUNTIME;
-    let mut src = Vm::new(Arc::new(crate::vm::tests::empty_program()));
-
-    // A list and a tuple — two of the eight arms now sharing one rebuild helper.
-    let items: Vec<Value> = (0..N as i64).map(Value::int).collect();
-    let list = Value::obj(src.heap.alloc(Obj::List(items.clone())));
-    let tuple = Value::obj(src.heap.alloc(Obj::Tuple(items)));
-
-    let iter = Value::obj(src.heap.alloc(Obj::Iter {
-        items: (0..N as i64).map(Value::int).collect(),
-        pos: 0,
-    }));
-
-    let mut dst = Vm::new(Arc::clone(&src.program));
-    for (label, v) in [("List", list), ("Tuple", tuple), ("Iter", iter)] {
-        let w = src.to_wire_at(v, span).expect("pure data crosses");
-        let rebuilt = dst.from_wire(w);
-        let h = rebuilt.as_obj().expect("rebuilds to a heap object");
-        let (len, cap) = match dst.heap.get(h) {
-            Obj::List(xs) | Obj::Tuple(xs) | Obj::Iter { items: xs, .. } => {
-                (xs.len(), xs.capacity())
-            }
-            other => panic!("{label} rebuilt as the wrong object: {other:?}"),
-        };
-        assert_eq!(len, N, "{label}: every element must survive the crossing");
-        assert_eq!(
-            cap,
-            len,
-            "{label}: rebuilt at {cap} capacity for {len} elements — the wire buffer was retained \
-             in place (expected exactly {len}; the in-place-collect regression gives {}×)",
-            std::mem::size_of::<crate::vm::wire::WireValue>() / std::mem::size_of::<Value>()
-        );
-    }
-}
-
-/// `deep_clone_all` — the OTHER wire→`Value` list rebuild — must also land at exact capacity.
-///
-/// Sibling of [`a_crossed_container_rebuilds_at_exact_capacity`], and the reason it exists as its own
-/// test: the first cut of that fix converted `from_wire_memo`'s eight container arms and left this
-/// one — plus `rebuild_ready`'s `Lowered` arms — on the old `into_iter().map(…).collect()`. Both feed
-/// a DURABLE `Obj::Closure { captured }` (`sched.rs`, the `parallel:`/block-spawn path), so `spawn`
-/// with a capturing closure still retained the wire buffer at 22–24× while the suite stayed green.
-/// One arm of an N-way set is not the set.
-#[test]
-fn deep_clone_all_rebuilds_at_exact_capacity() {
-    const N: usize = 4096;
-    let span = Span::RUNTIME;
-    let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
-    let vs: Vec<Value> = (0..N as i64).map(Value::int).collect();
-
-    let (out, _cells) = vm.deep_clone_all(vs, span).expect("scalars deep-clone");
-
-    assert_eq!(out.len(), N, "every value must survive the clone");
-    assert_eq!(
-        out.capacity(),
-        out.len(),
-        "deep_clone_all returned {} capacity for {} values — the intermediate Vec<WireValue> was \
-         retained in place by an in-place collect",
-        out.capacity(),
-        out.len()
-    );
-}
-
 /// `min`/`max`/`min_by`/`max_by` now return `Some(<extremum>)`, so the winning element travels one
 /// hop further than it used to. When a re-entrant `compare`/key extractor has REMOVED that element
 /// from the live receiver, the GC-rooted snapshot is the ONLY thing keeping it alive across the
@@ -1009,9 +931,9 @@ main()";
     assert_eq!(run_capture_stress(by_src), "1\n");
 }
 
-/// TICKET-246 — a `Shared` state lives in the box's own heap, rooted at `stack[0]` of the box
+/// TICKET-246 — a `Shared` state lives in the run's one heap, rooted at `stack[0]` of the box
 /// context. Under gc-stress a collection runs at every instruction INSIDE the closure, with the
-/// caller's heap parked: the state, the closure, its captures and the slot-door values must all
+/// caller's context parked: the state, the closure, its captures and the slot-door values must all
 /// survive, and the caller's own values must be intact after the call. The state is built
 /// across three updates, then read back three ways.
 #[test]
@@ -1048,11 +970,11 @@ main()";
     );
 }
 
-/// TICKET-246 — the `RwShared` twin under gc-stress: a state built across three `write`s inside
-/// the box heap, then every reader copy (`get`, `read`, display, the collection views and
-/// writers) taken while the READER's heap collects at each safepoint. A copy decoded into the
-/// reader's heap is rooted only by what the reader does next, so a missing root here is a freed
-/// slot read back as a wrong value.
+/// TICKET-246 — the `RwShared` twin under gc-stress: a value built across three `write`s, then
+/// every read (`get`, `read`, display, the collection views and writers) taken while the heap
+/// collects at each safepoint. M3.3: a read returns the box's value by handle; a value is rooted
+/// only by the box and by what the reader does next, so a missing root here is a freed slot read
+/// back as a wrong value.
 #[test]
 fn rwshared_state_and_reader_copies_survive_collections() {
     let src = "\
@@ -1108,10 +1030,9 @@ main()";
     );
 }
 
-/// TICKET-246 — a global read through the box's slot door is cached for the call, and the cache
-/// is a GC root of the box heap (`BoxFrame::roots`). The closure reads one heap-allocated `str`
-/// global twice with nothing else holding it and allocations in between. Without the root the
-/// first copy is swept, its slot is re-handed, and the second read returns another object.
+/// TICKET-246 — a box closure reads one heap-allocated `str` global twice with nothing else holding
+/// it and allocations in between. M3.3: the closure runs in the caller's context, so the global is
+/// rooted by the run's module table; a missing root would sweep it and re-hand its slot.
 #[test]
 fn box_slot_door_cache_is_rooted_across_collections() {
     let src = "\
@@ -1160,4 +1081,1463 @@ main()";
         run_capture_stress(src),
         "['0', '11', '21']\n['22', '22']\n['1', '2']\n"
     );
+}
+
+/// M2.2 — run `src` (a push loop past a container's capacity, then a print of it) and check:
+/// the grows retired the old blocks on the run's retire lists, a collection frees them all, and
+/// the container reads back intact (the print, and the same program under gc-stress).
+fn growth_retires_until_collect(src: &str, want: &str) {
+    growth_retires_index_until_collect(src, want, 0);
+}
+
+/// [`growth_retires_until_collect`], and at least `min_index` of the retired blocks are old
+/// index tables of a map or a set.
+fn growth_retires_index_until_collect(src: &str, want: &str, min_index: usize) {
+    use super::rvec::{test_counts, test_serial, test_track};
+    let _g = test_serial();
+    let owned = src.to_string();
+    let (out, retired, index, left, freed) = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            test_track();
+            let mut vm = Vm::new(Arc::new(test_program(&owned).expect("compiles")));
+            // The counts below are what the run's grows left retired: an env
+            // `CHEZZI_GC_STRESS` collect inside the run would free them first. The stressed run
+            // is the `run_capture_stress` check at the end.
+            vm.gc_stress = false;
+            let result = vm.run();
+            vm.finish_run(result).expect("runs");
+            let (own, core) = vm.heap.retired_len();
+            let index = vm.heap.retired_index_blocks();
+            let before = test_counts().1;
+            vm.gc_collect();
+            let freed = test_counts().1 - before;
+            let (own2, core2) = vm.heap.retired_len();
+            (captured(vm.out), own + core, index, own2 + core2, freed)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked");
+    assert_eq!(out, want);
+    assert!(
+        retired >= 3,
+        "each grow retired its old block, got {retired}"
+    );
+    assert!(
+        retired - index >= 1,
+        "a grow retired an old entry block, got {retired} blocks, {index} index blocks"
+    );
+    assert!(
+        index >= min_index,
+        "an index grow retired the old table, got {index} < {min_index} index blocks"
+    );
+    assert_eq!(left, 0, "the collection freed every retired block");
+    assert!(
+        freed >= retired,
+        "the collection freed {freed} < {retired} blocks"
+    );
+    assert_eq!(run_capture_stress(src), want);
+}
+
+#[test]
+fn list_growth_retires_until_collect() {
+    let src = "\
+fn main():
+    xs: List[int] = [0]
+    for i in 1..100:
+        xs.push(i)
+    print(xs.len(), xs[0], xs[50], xs[99])
+main()";
+    growth_retires_until_collect(src, "100 0 50 99\n");
+}
+
+#[test]
+fn bytearray_growth_retires_until_collect() {
+    let src = "\
+fn main():
+    b := bytearray(b\"a\")
+    for i in 1..100:
+        b.push(i)
+    print(b.len(), b[0], b[50], b[99])
+main()";
+    growth_retires_until_collect(src, "100 97 50 99\n");
+}
+
+/// M2.3 — a map insert loop past the capacity retires the old entry blocks AND the old index
+/// tables; a collection frees them, and the map reads back intact.
+#[test]
+fn map_insert_growth_retires_index_and_entries() {
+    let src = "\
+fn main():
+    m: Map[int, int] = {0: 0}
+    for i in 1..100:
+        m[i] = i * 2
+    print(m.len(), m[0], m[50], m[99])
+main()";
+    growth_retires_index_until_collect(src, "100 0 100 198\n", 3);
+}
+
+/// M2.9 — a grow loop on one map that allocates no other object retires about 5 MB of entry
+/// blocks and index tables and charges about 10 MB in all, under the 16 MiB byte goal of an
+/// empty heap. The retired bytes alone start collections (their goal is the live bytes of the
+/// last sweep, at least 1 MiB), and those collections free retired blocks during the run.
+#[test]
+fn map_grow_loop_collects_on_retired_bytes() {
+    use super::rvec::{test_counts, test_serial, test_track};
+    let _g = test_serial();
+    let src = "\
+fn main():
+    m: Map[int, int] = {}
+    i := 0
+    while i < 100000:
+        m[i] = i
+        i += 1
+    print(m.len())
+main()";
+    let (out, stops, freed) = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            test_track();
+            let mut vm = Vm::new(Arc::new(test_program(src).expect("compiles")));
+            vm.gc_stress = false;
+            let before = test_counts().1;
+            let result = vm.run();
+            let freed = test_counts().1 - before;
+            vm.finish_run(result).expect("runs");
+            (captured(vm.out), vm.gc_coord.stop_stats().0, freed)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked");
+    assert_eq!(out, "100000\n");
+    assert!(stops >= 1, "the retired bytes started no collection");
+    assert!(freed >= 1, "no retired block was freed during the run");
+}
+
+/// M2.3 — the Set twin of [`map_insert_growth_retires_index_and_entries`].
+#[test]
+fn set_insert_growth_retires_index_and_entries() {
+    let src = "\
+fn main():
+    s: Set[int] = Set([0])
+    for i in 1..100:
+        s.insert(i)
+    print(s.len(), 0 in s, 50 in s, 99 in s, 100 in s)
+main()";
+    growth_retires_index_until_collect(src, "100 true true true false\n", 3);
+}
+
+/// M2.3 — keys whose `hash()` is one constant probe one cluster of the index table; inserts past
+/// the table's capacity retire the old index block, and every key reads back.
+#[test]
+fn constant_hash_growth_retires_old_index() {
+    let src = "\
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return 7
+    fn eq(self, other: K) -> bool:
+        return self.n == other.n
+
+fn main():
+    s: Set[K] = Set([K(0)])
+    for i in 1..20:
+        s.insert(K(i))
+    print(s.len(), K(0) in s, K(19) in s, K(20) in s)
+main()";
+    growth_retires_index_until_collect(src, "20 true true false\n", 3);
+}
+
+/// M2.3 — a heap probe walks its candidates once per restart: inserting and finding `N` keys
+/// whose `hash()` is one constant reads O(N^2) index slots in all, not O(N^3). The user `eq` makes
+/// every compare re-entrant, so this is the rooted, re-validating probe path.
+#[test]
+fn constant_hash_probe_reads_each_candidate_once() {
+    const N: usize = 300;
+    let src = format!(
+        "\
+struct K:
+    n: int
+    fn hash(self) -> int:
+        return 7
+    fn eq(self, other: K) -> bool:
+        return self.n == other.n
+
+fn main():
+    s: Set[K] = Set([K(0)])
+    for i in 1..{N}:
+        s.insert(K(i))
+    found := 0
+    for i in 0..{N}:
+        if K(i) in s:
+            found += 1
+    print(s.len(), found)
+main()"
+    );
+    let (out, reads) = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let before = super::map_data::slot_reads();
+            let mut vm = Vm::new(Arc::new(test_program(&src).expect("compiles")));
+            assert!(vm.eq_may_reenter(), "the user eq is the hook");
+            let result = vm.run();
+            vm.finish_run(result).expect("runs");
+            (captured(vm.out), super::map_data::slot_reads() - before)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked");
+    assert_eq!(out, format!("{N} {N}\n"));
+    // Each of the 2N probes walks the one N-slot cluster about once: at most 2 N^2 reads. A
+    // re-walk per compare step costs about N^3 / 3 (9.1M at N = 300).
+    assert!(
+        reads <= 2 * N * N,
+        "{reads} slot reads for {N} keys, over {}",
+        2 * N * N
+    );
+}
+
+/// M2.4 — a struct of more than 3 fields keeps them in a `Spill` RVec of exactly their count. A
+/// field write is a slot store: the block stays, nothing retires, and after a collection every
+/// field reads back intact (in the heap and in a program under gc-stress).
+#[test]
+fn spill_field_write_is_slot_store() {
+    let _g = super::rvec::test_serial();
+    let mut heap = Heap::new();
+    let kept = heap.alloc(Obj::Str("kept".into()));
+    let h = heap.alloc(Obj::Struct {
+        tid: crate::base::op::TID_NONE,
+        fields: Fields::from_vec((1..=5).map(Value::int).collect()),
+    });
+    for i in 0..5 {
+        let Obj::Struct { fields, .. } = heap.write(h).get(h) else {
+            unreachable!("a struct")
+        };
+        let v = if i == 2 {
+            Value::obj(kept)
+        } else {
+            Value::int(i as i64 * 10)
+        };
+        assert!(fields.set(i, v), "field {i} is in range");
+    }
+    let Obj::Struct {
+        fields: Fields::Spill(s),
+        ..
+    } = heap.get(h)
+    else {
+        panic!("5 fields spill")
+    };
+    assert_eq!(s.capacity(), 5, "the spill block holds exactly the fields");
+    assert_eq!(heap.retired_len(), (0, 0), "a field write retires nothing");
+    heap.mark(h);
+    for c in heap.children(h) {
+        heap.mark(c);
+    }
+    heap.sweep();
+    let Obj::Struct { fields, .. } = heap.get(h) else {
+        unreachable!("a struct")
+    };
+    let got: Vec<Value> = fields.iter().collect();
+    assert_eq!(
+        got,
+        [
+            Value::int(0),
+            Value::int(10),
+            Value::obj(kept),
+            Value::int(30),
+            Value::int(40)
+        ]
+    );
+    assert!(matches!(heap.get(kept), Obj::Str(s) if &**s == "kept"));
+    let src = "\
+struct P:
+    a: int
+    b: str
+    c: int
+    d: List[int]
+    e: int
+
+fn main():
+    p := P(a=1, b=\"x\", c=3, d=[4], e=5)
+    p.a = 10
+    p.b = str(20)
+    p.d = [str(40).len()]
+    p.e = 50
+    junk := [str(1), str(2)]
+    print(p.a, p.b, p.c, p.d, p.e, junk.len())
+main()";
+    assert_eq!(run_capture_stress(src), "10 20 3 [2] 50 2\n");
+}
+
+/// The block of an M2.4 fixed buffer: an `RVec` (so the test does not compile on a `Vec`), and
+/// its capacity.
+fn rvec_cap(v: &RVec<Value>) -> usize {
+    v.capacity()
+}
+
+/// M2.4 — a closure's captures live in an exact-length `RVec`: `GetCaptured` reads a slot, and the
+/// captures survive collections (gc-stress).
+#[test]
+fn closure_captures_are_a_fixed_rvec() {
+    let mut heap = Heap::new();
+    let home = heap.alloc(Obj::Str("home".into()));
+    let h = heap.alloc(Obj::Closure {
+        proto: 0,
+        captured: vec![Value::int(1), Value::int(2)].into(),
+        home,
+    });
+    let Obj::Closure { captured, .. } = heap.get(h) else {
+        unreachable!("a closure")
+    };
+    assert_eq!(rvec_cap(captured), 2);
+    let src = "\
+fn mk(a: str, b: int) -> fn() -> str:
+    return fn() -> str: a + str(b)
+
+fn main():
+    f := mk(str(7), 8)
+    junk := [str(1), str(2)]
+    print(f(), f(), junk.len())
+main()";
+    assert_eq!(run_capture_stress(src), "78 78 2\n");
+}
+
+/// M2.4 — an enum payload lives in an exact-length `RVec`, and an empty payload (`None`, every
+/// unit variant) allocates no block at all.
+#[test]
+fn enum_payload_is_a_fixed_rvec_and_empty_allocates_nothing() {
+    use super::rvec::{test_counts, test_serial};
+    let _g = test_serial();
+    let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
+    let (a0, _) = test_counts();
+    let none = vm.alloc_enum("Option", "None", &[]);
+    assert_eq!(test_counts().0, a0, "an empty payload allocates no block");
+    let some = vm.alloc_enum("Option", "Some", &[Value::int(1)]);
+    assert_eq!(test_counts().0, a0 + 1, "a one-value payload is one block");
+    for (v, cap) in [(none, 0), (some, 1)] {
+        let Obj::Enum { payload, .. } = vm.heap.get(v.as_obj().expect("an object")) else {
+            unreachable!("an enum")
+        };
+        assert_eq!(rvec_cap(payload), cap);
+    }
+    let src = "\
+enum Shape:
+    Dot
+    Circle(str, int)
+
+fn main():
+    xs := [Shape.Dot, Shape.Circle(str(3), 4), Shape.Dot]
+    junk := [str(1), str(2)]
+    n := 0
+    for x in xs:
+        match x:
+            Shape.Dot:
+                n += 1
+            Shape.Circle(s, r):
+                print(s, r)
+    print(n, junk.len())
+main()";
+    assert_eq!(run_capture_stress(src), "3 4\n2 2\n");
+}
+
+/// M2.4 — a module's global slots live in an `RVec`: a global write is a slot store (no block
+/// retires), and the globals survive collections (gc-stress).
+#[test]
+fn module_slots_are_an_rvec() {
+    let _g = super::rvec::test_serial();
+    let src = "\
+K := [str(7)]
+N := 0
+fn main():
+    for i in 0..20:
+        N = N + i
+    junk := [str(1), str(2)]
+    print(K, N, junk.len())
+main()";
+    let owned = src.to_string();
+    let (out, caps, retired) = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let mut vm = Vm::new(Arc::new(test_program(&owned).expect("compiles")));
+            let result = vm.run();
+            vm.finish_run(result).expect("runs");
+            // The entry module (the one that binds `K`): its block holds exactly its slots.
+            let caps = vm
+                .module_objs
+                .iter()
+                .find_map(|m| match vm.heap.get(m) {
+                    Obj::Module(md) if md.names().index.contains_key("K") => {
+                        let names = md.names();
+                        let mut names: Vec<&str> = names.index.keys().map(|k| &**k).collect();
+                        names.sort();
+                        Some((rvec_cap(&md.slots), md.slots.len(), names.join(",")))
+                    }
+                    _ => None,
+                })
+                .expect("the entry module");
+            let (own, core) = vm.heap.retired_len();
+            (captured(vm.out), caps, own + core)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked");
+    assert_eq!(out, "['7'] 190 2\n");
+    assert_eq!(
+        caps,
+        (3, 3, "K,N,main".to_string()),
+        "the entry module's block holds exactly its 3 slots"
+    );
+    assert_eq!(retired, 0, "a global write retires nothing");
+    assert_eq!(run_capture_stress(src), "['7'] 190 2\n");
+}
+
+/// M2.4 — a parked generator sits behind one atomic owner pointer. The first take owns it; a
+/// second take, before the put-back, sees it running and faults; after the put-back a take
+/// succeeds again.
+#[test]
+fn generator_ctx_take_is_exclusive() {
+    let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
+    let home = vm.heap.alloc(Obj::Str("home".into()));
+    let g = vm.alloc_generator(0, home, None, vec![Value::int(1)]);
+    let h = g.as_obj().expect("a generator object");
+    let span = Span::RUNTIME;
+    let first = vm
+        .gen_take(h, span)
+        .expect("the first take owns the parked context");
+    let second = vm
+        .gen_take(h, span)
+        .err()
+        .expect("a second take sees it running");
+    assert!(
+        second.message.contains("generator already running"),
+        "{}",
+        second.message
+    );
+    vm.gen_put(h, first);
+    let third = vm
+        .gen_take(h, span)
+        .expect("a take after the put-back succeeds");
+    assert!(matches!(third.state, GenState::Pending(ref a) if a.len() == 1));
+    vm.gen_put(h, third);
+}
+
+/// Share the module globals `names` of `src` by handle between `n` worker `Vm`s on one heap. A
+/// root `Vm` runs `src`, then waits detached with its roots published; each worker
+/// (`spawn_worker`) runs on its own `VM_STACK_BYTES` thread: it attaches, roots the handles on its
+/// stack, waits at one barrier with the others, runs `body(i, worker, handles)` and leaves. After
+/// the join the root, attached again, returns `check(root, handles, results)`, the results in
+/// worker order.
+fn share_handle<T: Send + 'static, R: Send + 'static>(
+    src: String,
+    names: &'static [&'static str],
+    n: usize,
+    body: impl Fn(usize, &mut Vm, &[GcRef]) -> T + Send + Sync + 'static,
+    check: impl FnOnce(&mut Vm, &[GcRef], Vec<T>) -> R + Send + 'static,
+) -> R {
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let mut root = Vm::new(Arc::new(test_program(&src).expect("compiles")));
+            let result = root.run();
+            root.finish_run(result).expect("runs");
+            let handles: Arc<[GcRef]> = names
+                .iter()
+                .map(|name| {
+                    root.module_objs
+                        .iter()
+                        .find_map(|m| match root.heap.get(m) {
+                            Obj::Module(md) => {
+                                let slot = md.names().index.get(*name).copied();
+                                slot.map(|i| md.slots.get(i as usize))
+                            }
+                            _ => None,
+                        })
+                        .and_then(|v| v.as_obj())
+                        .unwrap_or_else(|| panic!("the module global {name}"))
+                })
+                .collect();
+            root.gc_attach();
+            let go = Arc::new(std::sync::Barrier::new(n));
+            let body = Arc::new(body);
+            let workers: Vec<Vm> = (0..n).map(|_| root.spawn_worker()).collect();
+            // The root waits on the join in the blocking door, so its roots (the module that
+            // holds the globals) stay published while the workers collect.
+            let results = root.gc_blocking(&[], |_| {
+                let threads: Vec<_> = workers
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mut w)| {
+                        let (go, body, handles) =
+                            (Arc::clone(&go), Arc::clone(&body), Arc::clone(&handles));
+                        std::thread::Builder::new()
+                            .stack_size(VM_STACK_BYTES)
+                            .spawn(move || {
+                                w.gc_attach();
+                                w.stack.extend(handles.iter().map(|&h| Value::obj(h)));
+                                go.wait();
+                                let out = body(i, &mut w, &handles);
+                                w.gc_leave();
+                                out
+                            })
+                            .expect("spawn a worker")
+                    })
+                    .collect();
+                threads
+                    .into_iter()
+                    .map(|t| t.join().expect("a worker panicked"))
+                    .collect()
+            });
+            check(&mut root, &handles, results)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked")
+}
+
+/// M2.4 — two threads drive one generator through two `Vm` handles on one heap. Each `.next()`
+/// gives a value, `None`, or the "generator already running" fault; no call crashes, every value
+/// goes to exactly one caller, in order, and `None` comes only after the last value (a resume
+/// that raced a running generator never reads it as exhausted). Run under `CHEZZI_GC_STRESS=1`
+/// too.
+#[test]
+fn generator_next_from_two_tasks_faults_cleanly() {
+    const N: i64 = 300;
+    let src = format!(
+        "\
+fn count(n: int) -> Iterator[int]:
+    for i in 0..n:
+        s := [str(i)]
+        yield i + s.len() - 1
+
+G := count({N})
+
+fn main():
+    pass
+main()"
+    );
+    let clock = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (got, faults, last_val, first_none) = share_handle(
+        src,
+        &["G"],
+        2,
+        move |_, w, h| {
+            let g = h[0];
+            let (mut vals, mut faults, mut none) = (Vec::new(), 0usize, None);
+            let tick = || clock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            for _ in 0..10_000_000 {
+                // The loop's back edge: a safepoint, as a bytecode loop has.
+                w.gc_poll();
+                match w.generator_next(g, Span::RUNTIME) {
+                    Ok(r) => match w.heap.get(r.as_obj().expect("an Option")) {
+                        Obj::Enum {
+                            variant_id,
+                            payload,
+                        } if *variant_id == crate::base::op::VID_SOME => {
+                            vals.push((tick(), payload.get(0).as_int()))
+                        }
+                        _ => {
+                            none = Some(tick());
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        assert!(
+                            e.message.contains("generator already running"),
+                            "{}",
+                            e.message
+                        );
+                        faults += 1;
+                        std::thread::yield_now();
+                    }
+                }
+            }
+            (vals, faults, none)
+        },
+        |_, _, drivers| {
+            let (mut got, mut faults, mut last_val, mut first_none) =
+                (Vec::new(), 0, 0, usize::MAX);
+            for (vals, f, none) in drivers {
+                assert!(vals.is_sorted(), "one caller sees the values in order");
+                last_val = vals
+                    .iter()
+                    .map(|&(t, _)| t)
+                    .max()
+                    .unwrap_or(0)
+                    .max(last_val);
+                first_none = first_none.min(none.expect("each caller ends on None"));
+                got.extend(vals.into_iter().map(|(_, v)| v));
+                faults += f;
+            }
+            got.sort();
+            (got, faults, last_val, first_none)
+        },
+    );
+    assert_eq!(
+        got,
+        (0..N).collect::<Vec<_>>(),
+        "each value goes to one caller ({faults} faults)"
+    );
+    assert!(
+        first_none > last_val,
+        "a None at tick {first_none} came before the last value at tick {last_val}"
+    );
+}
+
+/// M2.4 fix 1 — a Rust panic inside a resume puts the generator back `Done` (Python marks a
+/// generator that raised as finished), so a later resume reads it exhausted, not running.
+#[test]
+fn a_panic_inside_a_resume_leaves_the_generator_done() {
+    let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
+    let home = vm.heap.alloc(Obj::Str("home".into()));
+    // No proto 9999 exists, so building the first frame panics inside the resume.
+    let g = vm.alloc_generator(9999, home, None, Vec::new());
+    let h = g.as_obj().expect("a generator object");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = vm.generator_next(h, Span::RUNTIME);
+    }));
+    assert!(r.is_err(), "the resume panicked");
+    let Ok(parked) = vm.gen_take(h, Span::RUNTIME) else {
+        panic!("the panic put the box back")
+    };
+    assert!(matches!(parked.state, GenState::Done));
+}
+
+/// M2.5 — two threads race on one list `L` and one map `M` through two `Vm` handles on one heap,
+/// by the paths a Chezzi program takes (`core_method`, `get_index`, `drain_iterable`). Thread A
+/// pushes, inserts, removes every 7th op (an index rebuild and an entry block retire) and sorts
+/// every 500th (`replace`); thread B reads `L[i]`, `L.len()`, probes `M` and iterates `M`. A racy
+/// wrong value or a fault is the user's bug (Go parity); a read of freed memory is not: every read
+/// gives a value of its element type, and after a collection `L` and `M` are sane. Run under
+/// `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn two_vms_race_on_one_list_and_map_without_uaf() {
+    const OPS: i64 = 10_000;
+    const READS: u32 = 16;
+    let src = "\
+L: List[int] = []
+M: Map[int, str] = {}
+
+fn main():
+    pass
+main()"
+        .to_string();
+    // One op of one thread: `Ok(true)` when every value it read has its element type.
+    fn writer_op(w: &mut Vm, l: GcRef, m: GcRef, k: i64) -> Result<bool, RuntimeError> {
+        let sp = Span::RUNTIME;
+        w.core_method(l, "push", &[Value::int(k)], sp)?;
+        let s = w.alloc_str(k.to_string());
+        w.core_method(m, "insert", &[Value::int(k), s], sp)?;
+        if k > 0 && k % 7 == 0 {
+            w.core_method(m, "remove", &[Value::int(k - 3)], sp)?;
+        }
+        if k > 0 && k % 500 == 0 {
+            w.core_method(l, "sort", &[], sp)?;
+        }
+        Ok(true)
+    }
+    fn is_str(w: &Vm, v: Value) -> bool {
+        matches!(v.as_obj().map(|h| w.heap.get(h)), Some(Obj::Str(_)))
+    }
+    /// `seen` counts the reads that found data: an in-range `L[i]` and a `Some` probe hit.
+    fn reader_op(
+        w: &mut Vm,
+        l: GcRef,
+        m: GcRef,
+        k: i64,
+        r: u64,
+        seen: &mut (usize, usize),
+    ) -> Result<bool, RuntimeError> {
+        let sp = Span::RUNTIME;
+        let mut sane = true;
+        // A burst of reads per op, so a read overlaps the writer's grow under stress too (each
+        // op starts with a stop there).
+        for j in 0..READS {
+            let x = r.rotate_left(j * 7) ^ u64::from(j);
+            let len = w.core_method(l, "len", &[], sp)?.as_int();
+            if len > 0 {
+                w.push(Value::obj(l));
+                w.push(Value::int((x % len as u64) as i64));
+                w.get_index(sp)?;
+                let v = w.pop();
+                let good = v.as_int_inline().is_some_and(|x| (0..OPS).contains(&x));
+                seen.0 += usize::from(good);
+                sane &= good;
+            }
+            let got = w.core_method(m, "get", &[Value::int((x >> 20) as i64 % OPS)], sp)?;
+            sane &= match w.heap.get(got.as_obj().expect("an Option")) {
+                Obj::Enum {
+                    variant_id,
+                    payload,
+                } if *variant_id == crate::base::op::VID_SOME => {
+                    let good = is_str(w, payload.get(0));
+                    seen.1 += usize::from(good);
+                    good
+                }
+                Obj::Enum { .. } => true,
+                _ => false,
+            };
+        }
+        if k % 100 == 0 {
+            for pair in w.drain_iterable(Value::obj(m), sp)? {
+                sane &= match pair.as_obj().map(|h| w.heap.get(h)) {
+                    Some(Obj::Tuple(kv)) => match kv[..] {
+                        [k, v] => k.as_int_inline().is_some() && is_str(w, v),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+            }
+        }
+        Ok(sane)
+    }
+    let (faults, garbage, (reads, hits)) = share_handle(
+        src,
+        &["L", "M"],
+        2,
+        |i, w, g| {
+            let (l, m) = (g[0], g[1]);
+            let (mut faults, mut garbage, mut seen) = (0usize, 0usize, (0usize, 0usize));
+            let mut r = 0x9E37_79B9_7F4A_7C15u64;
+            for k in 0..OPS {
+                // The loop's back edge: a collection when one is due, else a safepoint, as
+                // `run_until` does per instruction. Under stress only the writer asks for one per
+                // op: a stop that both threads ask for each op runs their ops one at a time (each
+                // asker waits out the other's op), and a race needs them to overlap.
+                if (w.gc_stress && i == 0) || w.heap.should_collect() {
+                    w.gc_collect();
+                }
+                w.gc_poll();
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                let op = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if i == 0 {
+                        writer_op(w, l, m, k)
+                    } else {
+                        reader_op(w, l, m, k, r, &mut seen)
+                    }
+                }));
+                match op {
+                    Ok(Ok(true)) => {}
+                    Ok(Ok(false)) => garbage += 1,
+                    // A racy fault is the user's bug: count it and go on.
+                    Ok(Err(_)) => faults += 1,
+                    // M3.0a — a racy op gives its own fault, never a panic
+                    // (`racy_container_ops_never_panic`).
+                    Err(p) => {
+                        let msg = p
+                            .downcast_ref::<String>()
+                            .map(String::as_str)
+                            .or_else(|| p.downcast_ref::<&str>().copied())
+                            .unwrap_or("");
+                        panic!("a racy op panicked: {msg}");
+                    }
+                }
+            }
+            (faults, garbage, seen)
+        },
+        |root, g, results| {
+            let (l, m) = (g[0], g[1]);
+            // The race freed retired blocks: collections ran while the threads raced.
+            assert!(root.gc_coord.epoch() > 0, "no collection ran in the race");
+            root.collect();
+            let Obj::List(items) = root.heap.get(l) else {
+                panic!("L is a list")
+            };
+            let mut xs: Vec<i64> = items.iter().map(|v| v.as_int()).collect();
+            xs.sort();
+            assert_eq!(xs, (0..OPS).collect::<Vec<_>>(), "L holds each push once");
+            let removed = |k: i64| k >= 4 && k % 7 == 4 && k + 3 < OPS;
+            let want: Vec<i64> = (0..OPS).filter(|&k| !removed(k)).collect();
+            let entries = match root.heap.get(m) {
+                Obj::Map(md) => md.entries.to_vec(),
+                _ => panic!("M is a map"),
+            };
+            let mut keys: Vec<i64> = entries.iter().map(|e| e.1.as_int()).collect();
+            keys.sort();
+            assert_eq!(keys, want, "M holds each live key once");
+            for (p, (_, k, v)) in entries.into_iter().enumerate() {
+                let hk = root.scalar_hash(k);
+                let at = root.map_probe(m, hk, k, Span::RUNTIME).expect("a probe");
+                assert_eq!(at, Some(p), "key {} probes to its own entry", k.as_int());
+                let Obj::Str(s) = root.heap.get(v.as_obj().expect("a str")) else {
+                    panic!("a str value")
+                };
+                assert_eq!(s.to_string(), k.as_int().to_string());
+            }
+            let faults: usize = results.iter().map(|r| r.0).sum();
+            let garbage: usize = results.iter().map(|r| r.1).sum();
+            let seen = results
+                .iter()
+                .fold((0, 0), |a, r| (a.0 + r.2.0, a.1 + r.2.1));
+            (faults, garbage, seen)
+        },
+    );
+    assert_eq!(
+        garbage, 0,
+        "a read gave a value outside its type ({faults} faults)"
+    );
+    // The reader raced real data: it read `L` while it held elements and hit `M`'s keys.
+    assert!(
+        reads > 0 && hits > 0,
+        "the reader found no data: {reads} L[i] reads, {hits} M hits"
+    );
+    // A racy fault is rare: at most 1% of one thread's ops (0 seen in the M2.5 runs).
+    assert!(
+        faults <= OPS as usize / 100,
+        "{faults} faults in {OPS} ops a thread"
+    );
+}
+
+/// M3.0a C3 — a native that holds its host thread runs in the GC door, detached, so a stop does
+/// not wait for it. Thread A calls one (`Kind::Blocking`) on the shared list `L`; the native reads
+/// `L` through `arg_str_list` a few times. Thread B, until A is done, overwrites `L[k]` with a new
+/// str (the old one is unlinked), sorts `L` (the old block retires), allocates junk that a freed
+/// slot can be reused for, and collects. The door copies the args out of the heap BEFORE it opens
+/// (Go: `syscall.SlicePtrFromStrings` runs before `entersyscall`), so each read gives one list of
+/// `s<n>` strs, and no read meets freed memory. Run under `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn a_detached_native_reads_a_shared_list_without_uaf() {
+    const OPS: i64 = 3_000;
+    let src = "\
+L: List[str] = []
+
+fn main():
+    for i in 0..64:
+        L.push(\"s\" + str(i))
+main()"
+        .to_string();
+    /// Reads its list arg 4 times; `false` when an element is not an `s<n>` str.
+    fn probe(
+        h: &mut dyn crate::native::Host,
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        let mut sane = true;
+        for _ in 0..4 {
+            for s in h.arg_str_list(0)? {
+                sane &= s
+                    .strip_prefix('s')
+                    .is_some_and(|n| n.parse::<i64>().is_ok());
+            }
+        }
+        Ok(crate::native::NativeRet::Bool(sane))
+    }
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (garbage, collects) = share_handle(
+        src,
+        &["L"],
+        2,
+        move |i, w, g| {
+            let l = g[0];
+            let sp = Span::RUNTIME;
+            let (mut garbage, mut collects) = (0usize, 0usize);
+            if i == 0 {
+                for _ in 0..OPS {
+                    w.gc_poll();
+                    let r = w.invoke_native(
+                        probe,
+                        "probe",
+                        crate::native::Kind::Blocking,
+                        vec![Value::obj(l)],
+                        sp,
+                    );
+                    garbage += usize::from(r.expect("the probe runs") != Value::bool(true));
+                }
+                done.store(true, std::sync::atomic::Ordering::Release);
+            } else {
+                let mut k = 0i64;
+                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                    let s = w.alloc_str(format!("s{k}"));
+                    w.push(Value::obj(l));
+                    w.push(Value::int(k % 64));
+                    w.push(s);
+                    w.set_index(sp).expect("a store");
+                    if k % 4 == 0 {
+                        w.core_method(l, "sort", &[], sp).expect("a sort");
+                    }
+                    // Junk that a freed slot of an unlinked str can be reused for.
+                    for _ in 0..8 {
+                        let j = w.alloc_str("junk".to_string());
+                        w.heap.alloc(Obj::List(RVec::from_slice(&[j])));
+                    }
+                    w.gc_collect();
+                    collects += 1;
+                    k += 1;
+                }
+            }
+            (garbage, collects)
+        },
+        |_, _, results| {
+            let g = results.iter().map(|r| r.0).sum::<usize>();
+            (g, results.iter().map(|r| r.1).sum::<usize>())
+        },
+    );
+    assert!(collects > 100, "B collected {collects} times while A ran");
+    assert_eq!(
+        garbage, 0,
+        "a detached read gave a value that is not an s<n> str"
+    );
+}
+
+/// M3.0a C6 — the print walk waits for a busy `Writer` through the GC door while it holds the
+/// elements of the list it renders in a Rust copy. Thread A sets `outer[1]` to a new list `xs`
+/// and prints `outer = [W, xs]` while a plain thread holds `W`'s lock in bursts (a write in
+/// progress), so the walk opens the door before it reaches `xs`; thread B sets `outer[1] = 0`
+/// (`xs` is unlinked), allocates junk strs and collects. The walk roots every element it holds,
+/// so it prints `xs` or `0`, never freed memory. Run under `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn the_print_walk_roots_what_it_holds_across_a_door() {
+    const PRINTS: usize = 100;
+    let src = "\
+import std.io
+W := io.stdout()
+
+fn main():
+    pass
+main()"
+        .to_string();
+    let outer_ref = Arc::new(Mutex::new(None::<GcRef>));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // B's collections and A's finished prints: the lock holder's handshake.
+    let collects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let printed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (bad, doors) = share_handle(
+        src,
+        &["W"],
+        2,
+        move |i, w, g| {
+            let sp = Span::RUNTIME;
+            let ordering = std::sync::atomic::Ordering::SeqCst;
+            let (mut bad, mut doors) = (Vec::new(), 0usize);
+            if i == 0 {
+                let Obj::Writer(core) = w.heap.get(g[0]) else {
+                    panic!("W is a Writer")
+                };
+                let core = Arc::clone(core);
+                let outer = w.heap.alloc(Obj::List(RVec::from_slice(&[
+                    Value::obj(g[0]),
+                    Value::int(0),
+                ])));
+                w.push(Value::obj(outer));
+                *outer_ref.lock().unwrap() = Some(outer);
+                // Ends the other two loops on a panic too, so a failed print fails the test.
+                struct Done<'a>(&'a std::sync::atomic::AtomicBool);
+                impl Drop for Done<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _done = Done(&done);
+                std::thread::scope(|s| {
+                    // A write in progress: hold the lock until B collected 3 times, then let
+                    // the print that waits on it finish before the next hold. The walk finds the
+                    // lock busy and waits in the door while B unlinks and collects.
+                    s.spawn(|| {
+                        while !done.load(ordering) {
+                            let g = core.inner.lock().unwrap();
+                            let c0 = collects.load(ordering);
+                            while !done.load(ordering) && collects.load(ordering) < c0 + 3 {
+                                std::hint::spin_loop();
+                            }
+                            drop(g);
+                            let p0 = printed.load(ordering);
+                            while !done.load(ordering) && printed.load(ordering) == p0 {
+                                std::hint::spin_loop();
+                            }
+                        }
+                    });
+                    // Until enough prints met a collection.
+                    for p in 0..PRINTS * 1000 {
+                        if doors >= PRINTS {
+                            break;
+                        }
+                        w.gc_poll();
+                        let xs = w
+                            .heap
+                            .alloc(Obj::List(RVec::from_slice(&[Value::int(p as i64 + 1); 3])));
+                        w.push(Value::obj(outer));
+                        w.push(Value::int(1));
+                        w.push(Value::obj(xs));
+                        w.set_index(sp).expect("a store");
+                        let before = w.gc_coord.epoch();
+                        let text = w.stringify(Value::obj(outer), sp, 0).expect("a print");
+                        printed.fetch_add(1, ordering);
+                        doors += usize::from(w.gc_coord.epoch() != before);
+                        let n = p + 1;
+                        if text != format!("[Writer(open), [{n}, {n}, {n}]]")
+                            && text != "[Writer(open), 0]"
+                        {
+                            bad.push(text);
+                        }
+                    }
+                    drop(_done);
+                });
+            } else {
+                let outer = loop {
+                    if let Some(o) = *outer_ref.lock().unwrap() {
+                        break o;
+                    }
+                    w.gc_poll();
+                    std::thread::yield_now();
+                };
+                while !done.load(ordering) {
+                    w.push(Value::obj(outer));
+                    w.push(Value::int(1));
+                    w.push(Value::int(0));
+                    w.set_index(sp).expect("a store");
+                    // Junk that a freed slot of the unlinked list can be reused for.
+                    for _ in 0..8 {
+                        w.alloc_str("junk".to_string());
+                    }
+                    w.gc_collect();
+                    collects.fetch_add(1, ordering);
+                }
+            }
+            (bad, doors)
+        },
+        |_, _, results| {
+            let doors = results.iter().map(|r| r.1).sum::<usize>();
+            let bad: Vec<String> = results.into_iter().flat_map(|r| r.0).collect();
+            (bad, doors)
+        },
+    );
+    assert!(doors >= PRINTS, "{doors} prints met a collection");
+    assert!(
+        bad.is_empty(),
+        "{} prints gave wrong text: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(3)]
+    );
+}
+
+/// M3.0a — a racy container op never panics (Go: an index out of range is a panic that `recover`
+/// catches; here it is the op's own `RuntimeError`). The grid: thread A shrinks and regrows the
+/// shared `L`, `M`, `S` and `BA` (pop, remove, sort, reverse, map and set remove, bytearray pop
+/// and reverse) while thread B runs each read or write op of the family on them, 10,000 rounds,
+/// each op under `catch_unwind`. Every op gives a value or a `RuntimeError`, never a Rust panic.
+/// Run under `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn racy_container_ops_never_panic() {
+    const OPS: i64 = 10_000;
+    let src = "\
+L: List[int] = [1, 2, 3]
+M: Map[int, int] = {1: 1, 2: 2}
+S: Set[int] = Set([1, 2])
+BA := bytearray(b\"abc\")
+R := 1..3
+BIG: List[int] = []
+
+fn main():
+    for i in 0..100000:
+        BIG.push(i)
+main()
+C := BIG.iter()"
+        .to_string();
+    type Op = fn(&mut Vm, &[GcRef], i64) -> Result<(), RuntimeError>;
+    fn method(w: &mut Vm, h: GcRef, m: &str, args: &[Value]) -> Result<Value, RuntimeError> {
+        if matches!(w.heap.get(h), Obj::ByteArray(_)) {
+            w.bytearray_method(h, m, args, Span::RUNTIME)
+        } else {
+            w.core_method(h, m, args, Span::RUNTIME)
+        }
+    }
+    fn len_of(w: &mut Vm, h: GcRef) -> Result<i64, RuntimeError> {
+        Ok(method(w, h, "len", &[])?.as_int())
+    }
+    fn index(w: &mut Vm, h: GcRef, k: Value) -> Result<(), RuntimeError> {
+        w.push(Value::obj(h));
+        w.push(k);
+        w.get_index(Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    fn store(w: &mut Vm, h: GcRef, k: Value, v: Value) -> Result<(), RuntimeError> {
+        w.push(Value::obj(h));
+        w.push(k);
+        w.push(v);
+        w.set_index(Span::RUNTIME)
+    }
+    fn slice(w: &mut Vm, h: GcRef, r: GcRef) -> Result<(), RuntimeError> {
+        w.push(Value::obj(h));
+        w.push(Value::obj(r));
+        w.slice_range(Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    fn contains(w: &mut Vm, h: GcRef, x: Value) -> Result<(), RuntimeError> {
+        w.push(x);
+        w.push(Value::obj(h));
+        w.op_contains(Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    fn call(w: &mut Vm, h: GcRef, m: &str, args: &[Value]) -> Result<(), RuntimeError> {
+        method(w, h, m, args).map(|_| ())
+    }
+    fn iterate(w: &mut Vm, h: GcRef) -> Result<(), RuntimeError> {
+        w.drain_iterable(Value::obj(h), Span::RUNTIME).map(|_| ())
+    }
+    /// `c.next()` on the shared cursor `c`.
+    fn step(w: &mut Vm, c: GcRef) -> Result<(), RuntimeError> {
+        w.push(Value::obj(c));
+        w.do_method_call("next", 0, NO_IC, Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    let (l, m, s, ba, r) = (0, 1, 2, 3, 4);
+    let reads: Vec<(&'static str, Op)> = vec![
+        ("L[len-1]", |w, g, _| {
+            let n = len_of(w, g[0])?;
+            index(w, g[0], Value::int(n - 1))
+        }),
+        ("L[-1]", |w, g, _| index(w, g[0], Value::int(-1))),
+        ("L[R]", |w, g, _| slice(w, g[0], g[4])),
+        ("for x in L", |w, g, _| iterate(w, g[0])),
+        ("x in L", |w, g, k| contains(w, g[0], Value::int(k % 4))),
+        ("L.index_of", |w, g, k| {
+            call(w, g[0], "index_of", &[Value::int(k % 4)])
+        }),
+        ("L.first", |w, g, _| call(w, g[0], "first", &[])),
+        ("L.last", |w, g, _| call(w, g[0], "last", &[])),
+        ("L.min", |w, g, _| call(w, g[0], "min", &[])),
+        ("L.max", |w, g, _| call(w, g[0], "max", &[])),
+        ("L.sum", |w, g, _| call(w, g[0], "sum", &[])),
+        ("L.copy", |w, g, _| call(w, g[0], "copy", &[])),
+        ("L.unique", |w, g, _| call(w, g[0], "unique", &[])),
+        ("L.dedup", |w, g, _| call(w, g[0], "dedup", &[])),
+        ("L.reversed", |w, g, _| call(w, g[0], "reversed", &[])),
+        ("L.chunk", |w, g, _| {
+            call(w, g[0], "chunk", &[Value::int(2)])
+        }),
+        ("L.windows", |w, g, _| {
+            call(w, g[0], "windows", &[Value::int(2)])
+        }),
+        ("L[len-1] = v", |w, g, k| {
+            let n = len_of(w, g[0])?;
+            store(w, g[0], Value::int(n - 1), Value::int(k % 4))
+        }),
+        ("L.remove(len-1)", |w, g, _| {
+            let n = len_of(w, g[0])?;
+            call(w, g[0], "remove", &[Value::int(n - 1)])
+        }),
+        ("L.insert(len)", |w, g, k| {
+            let n = len_of(w, g[0])?;
+            call(w, g[0], "insert", &[Value::int(n), Value::int(k % 4)])
+        }),
+        ("M.get", |w, g, k| {
+            call(w, g[1], "get", &[Value::int(k % 8)])
+        }),
+        ("M[k]", |w, g, k| index(w, g[1], Value::int(k % 8))),
+        ("M[k] = v", |w, g, k| {
+            store(w, g[1], Value::int(k % 8), Value::int(k))
+        }),
+        ("k in M", |w, g, k| contains(w, g[1], Value::int(k % 8))),
+        ("M.remove", |w, g, k| {
+            call(w, g[1], "remove", &[Value::int(k % 8)])
+        }),
+        ("M.items", |w, g, _| call(w, g[1], "items", &[])),
+        ("M.copy", |w, g, _| call(w, g[1], "copy", &[])),
+        ("for k in M", |w, g, _| iterate(w, g[1])),
+        ("S.contains", |w, g, k| {
+            call(w, g[2], "contains", &[Value::int(k % 8)])
+        }),
+        ("x in S", |w, g, k| contains(w, g[2], Value::int(k % 8))),
+        ("S.remove", |w, g, k| {
+            call(w, g[2], "remove", &[Value::int(k % 8)])
+        }),
+        ("S.insert", |w, g, k| {
+            call(w, g[2], "insert", &[Value::int(k % 8)])
+        }),
+        ("for x in S", |w, g, _| iterate(w, g[2])),
+        ("BA[len-1]", |w, g, _| {
+            let n = len_of(w, g[3])?;
+            index(w, g[3], Value::int(n - 1))
+        }),
+        ("BA[R]", |w, g, _| slice(w, g[3], g[4])),
+        ("BA[len-1] = b", |w, g, k| {
+            let n = len_of(w, g[3])?;
+            store(w, g[3], Value::int(n - 1), Value::int(k % 128))
+        }),
+        ("b in BA", |w, g, k| contains(w, g[3], Value::int(k % 128))),
+        ("for b in BA", |w, g, _| iterate(w, g[3])),
+        ("BA.copy", |w, g, _| call(w, g[3], "copy", &[])),
+        ("BA.reversed", |w, g, _| call(w, g[3], "reversed", &[])),
+        ("C.next", |w, g, _| step(w, g[5])),
+    ];
+    let reads = Arc::new(reads);
+    let names: Vec<&'static str> = reads.iter().map(|(n, _)| *n).collect();
+    let panics = share_handle(
+        src,
+        &["L", "M", "S", "BA", "R", "C"],
+        2,
+        move |i, w, g| {
+            let _ = (l, m, s, ba, r);
+            let mut panics: Vec<(&'static str, String)> = Vec::new();
+            let sp = Span::RUNTIME;
+            for k in 0..OPS {
+                if (w.gc_stress && i == 0) || w.heap.should_collect() {
+                    w.gc_collect();
+                }
+                w.gc_poll();
+                let run = run_catching;
+                if i == 0 {
+                    // Shrink to empty and regrow, so a read meets a `len` that just dropped.
+                    run(
+                        w,
+                        "A",
+                        &|w| {
+                            for x in 0..4 {
+                                call(w, g[0], "push", &[Value::int(x)])?;
+                                call(w, g[1], "insert", &[Value::int(x + k % 4), Value::int(x)])?;
+                                call(w, g[2], "insert", &[Value::int(x + k % 4)])?;
+                                call(w, g[3], "push", &[Value::int(x + 97)])?;
+                            }
+                            match k % 4 {
+                                0 => call(w, g[0], "sort", &[])?,
+                                1 => call(w, g[0], "reverse", &[])?,
+                                2 => call(w, g[3], "reverse", &[])?,
+                                _ => {
+                                    let _ = call(w, g[0], "remove", &[Value::int(0)]);
+                                }
+                            }
+                            while len_of(w, g[0])? > 0 {
+                                call(w, g[0], "pop", &[])?;
+                            }
+                            for x in 0..8 {
+                                call(w, g[1], "remove", &[Value::int(x)])?;
+                                call(w, g[2], "remove", &[Value::int(x)])?;
+                            }
+                            while len_of(w, g[3])? > 0 {
+                                call(w, g[3], "pop", &[])?;
+                            }
+                            // Two threads step one cursor.
+                            for _ in 0..4 {
+                                step(w, g[5])?;
+                            }
+                            Ok(())
+                        },
+                        &mut panics,
+                    );
+                } else {
+                    for (name, op) in reads.iter() {
+                        run(
+                            w,
+                            name,
+                            &|w| op(w, g, k).map(|_| ()).or(Ok(())),
+                            &mut panics,
+                        );
+                    }
+                }
+                let _ = sp;
+            }
+            panics
+        },
+        |_, _, results| results.into_iter().flatten().collect::<Vec<_>>(),
+    );
+    let by_op = panics_by_op(panics);
+    assert!(by_op.is_empty(), "panics by op (of {names:?}): {by_op:#?}");
+}
+
+/// Run `op` on `w` under `catch_unwind`; a panic is recorded in `panics` under `name`, with its
+/// message. The racy-op grids use it, so one op's panic does not end the round.
+fn run_catching(
+    w: &mut Vm,
+    name: &'static str,
+    op: &dyn Fn(&mut Vm) -> Result<(), RuntimeError>,
+    panics: &mut Vec<(&'static str, String)>,
+) {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(w)));
+    if let Err(p) = r {
+        let msg = p
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        panics.push((name, msg));
+    }
+}
+
+/// The recorded panics, one row per op: its name, its count, and its first message.
+fn panics_by_op(panics: Vec<(&'static str, String)>) -> Vec<(&'static str, usize, String)> {
+    let mut by_op: Vec<(&str, usize, String)> = Vec::new();
+    for (name, msg) in panics {
+        match by_op.iter_mut().find(|e| e.0 == name) {
+            Some(e) => e.1 += 1,
+            None => by_op.push((name, 1, msg)),
+        }
+    }
+    by_op
+}
+
+/// M3.0b — a shared object's in-place fields are atomic slots, so a racing reader never sees a
+/// torn header, a freed buffer or a VM panic (Go parity: a race gives a wrong value or a fault).
+/// The grid, one row per field family that an op mutates in place: thread A writes each family
+/// (a field of the inline struct `SP` and of the spilled struct `SQ`, a fresh `str` into each, the
+/// cursor `C`'s position, the captured cell behind `CT`, and a new name in the module the globals
+/// live in), while thread B reads the same objects (field get, `str`, `==`, hash, `next`, a
+/// drain of `C`, a module member read), 10,000 rounds, each op under `catch_unwind`. Run under
+/// `CHEZZI_GC_STRESS=1` too.
+#[test]
+fn shared_object_mutation_grid() {
+    const OPS: i64 = 10_000;
+    let src = "\
+struct P:
+    a: int
+    b: str
+
+struct Q:
+    a: int
+    b: int
+    c: int
+    d: str
+
+struct Ctr:
+    inc: fn() -> None
+    get: fn() -> int
+
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+
+SP := P(1, \"x\")
+SQ := Q(1, 2, 3, \"y\")
+CT := make()
+F := make
+BIG: List[int] = []
+
+fn main():
+    for i in 0..100000:
+        BIG.push(i)
+main()
+C := BIG.iter()"
+        .to_string();
+    type Op = fn(&mut Vm, &[GcRef], i64) -> Result<(), RuntimeError>;
+    const SP: usize = 0;
+    const SQ: usize = 1;
+    const CT: usize = 2;
+    const F: usize = 3;
+    const C: usize = 4;
+    fn field(w: &mut Vm, h: GcRef, name: &str) -> Result<Value, RuntimeError> {
+        w.push(Value::obj(h));
+        w.get_field(name, NO_IC, Span::RUNTIME)?;
+        Ok(w.pop())
+    }
+    fn set(w: &mut Vm, h: GcRef, name: &str, v: Value) -> Result<(), RuntimeError> {
+        w.push(Value::obj(h));
+        w.push(v);
+        w.set_field(name, NO_IC, Span::RUNTIME)
+    }
+    /// A fresh `str`, published by the field store that follows.
+    fn fresh(w: &mut Vm, k: i64) -> Value {
+        Value::obj(w.heap.alloc(Obj::Str(format!("s{k}").as_str().into())))
+    }
+    fn call_field(w: &mut Vm, h: GcRef, name: &str) -> Result<(), RuntimeError> {
+        let f = field(w, h, name)?;
+        w.invoke_value(f, vec![], Span::RUNTIME).map(|_| ())
+    }
+    fn step(w: &mut Vm, c: GcRef) -> Result<(), RuntimeError> {
+        w.push(Value::obj(c));
+        w.do_method_call("next", 0, NO_IC, Span::RUNTIME)?;
+        w.pop();
+        Ok(())
+    }
+    fn render(w: &mut Vm, h: GcRef) -> Result<(), RuntimeError> {
+        w.stringify(Value::obj(h), Span::RUNTIME, 0).map(|_| ())
+    }
+    /// The module the globals live in: the home of the global fn `F`.
+    fn home(w: &Vm, g: &[GcRef]) -> GcRef {
+        match w.heap.get(g[F]) {
+            Obj::Func { home, .. } => *home,
+            _ => unreachable!("F is a fn"),
+        }
+    }
+    let reads: Vec<(&'static str, Op)> = vec![
+        ("SP.a", |w, g, _| field(w, g[SP], "a").map(|_| ())),
+        ("SP.b", |w, g, _| field(w, g[SP], "b").map(|_| ())),
+        ("SQ.a", |w, g, _| field(w, g[SQ], "a").map(|_| ())),
+        ("SQ.d", |w, g, _| field(w, g[SQ], "d").map(|_| ())),
+        ("str(SP)", |w, g, _| render(w, g[SP])),
+        ("str(SQ)", |w, g, _| render(w, g[SQ])),
+        ("SP == SP", |w, g, _| {
+            w.values_equal(Value::obj(g[SP]), Value::obj(g[SP]));
+            Ok(())
+        }),
+        ("SQ == SQ", |w, g, _| {
+            w.values_equal(Value::obj(g[SQ]), Value::obj(g[SQ]));
+            Ok(())
+        }),
+        ("hash(SP)", |w, g, _| {
+            w.hash_value(Value::obj(g[SP]), Span::RUNTIME).map(|_| ())
+        }),
+        ("hash(SQ)", |w, g, _| {
+            w.hash_value(Value::obj(g[SQ]), Span::RUNTIME).map(|_| ())
+        }),
+        ("CT.get()", |w, g, _| call_field(w, g[CT], "get")),
+        ("str(CT)", |w, g, _| render(w, g[CT])),
+        ("C.next", |w, g, _| step(w, g[C])),
+        ("str(C)", |w, g, _| render(w, g[C])),
+        ("for x in C", |w, g, k| {
+            if k == OPS / 2 {
+                w.drain_iterable(Value::obj(g[C]), Span::RUNTIME)?;
+            }
+            Ok(())
+        }),
+        ("mod.F", |w, g, _| {
+            let m = home(w, g);
+            field(w, m, "F").map(|_| ())
+        }),
+        ("str(mod)", |w, g, _| {
+            let m = home(w, g);
+            render(w, m)
+        }),
+    ];
+    let reads = Arc::new(reads);
+    let names: Vec<&'static str> = reads.iter().map(|(n, _)| *n).collect();
+    let panics = share_handle(
+        src,
+        &["SP", "SQ", "CT", "F", "C"],
+        2,
+        move |i, w, g| {
+            let mut panics: Vec<(&'static str, String)> = Vec::new();
+            for k in 0..OPS {
+                if (w.gc_stress && i == 0) || w.heap.should_collect() {
+                    w.gc_collect();
+                }
+                w.gc_poll();
+                if i == 0 {
+                    run_catching(
+                        w,
+                        "A",
+                        &|w| {
+                            set(w, g[SP], "a", Value::int(k))?;
+                            let s = fresh(w, k);
+                            set(w, g[SP], "b", s)?;
+                            set(w, g[SQ], "a", Value::int(k))?;
+                            let s = fresh(w, k);
+                            set(w, g[SQ], "d", s)?;
+                            for _ in 0..4 {
+                                step(w, g[C])?;
+                            }
+                            call_field(w, g[CT], "inc")?;
+                            let m = home(w, g);
+                            w.module_define(m, &format!("n{k}"), Value::int(k));
+                            Ok(())
+                        },
+                        &mut panics,
+                    );
+                } else {
+                    for (name, op) in reads.iter() {
+                        run_catching(w, name, &|w| op(w, g, k).or(Ok(())), &mut panics);
+                    }
+                }
+            }
+            panics
+        },
+        |_, _, results| results.into_iter().flatten().collect::<Vec<_>>(),
+    );
+    let by_op = panics_by_op(panics);
+    assert!(by_op.is_empty(), "panics by op (of {names:?}): {by_op:#?}");
 }

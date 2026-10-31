@@ -1,35 +1,193 @@
 //! B3.1 — the shared cores for `Channel` / `Shared` / `Executor`, lifted OUT of the GC heap.
 //!
-//! Before B3.1 a `Channel`'s queue (etc.) lived *inside* a heap [`Obj`](super::heap::Obj) and held
-//! [`Value`](super::value::Value)s (i.e. `GcRef`s into that one heap), so it could never be shared
-//! across threads. B3.1 moves the data into an `Arc<…Core>` that lives outside every heap and holds
-//! [`WireValue`](super::wire::WireValue) (the serialized airlock form). The heap keeps only a
-//! *handle* — `Obj::Channel(Arc<ChannelCore>)` — and two handles (e.g. one per task) can point at the
-//! same core. This is the structural move that lets B3.3 share a core across real OS threads; at B3.1
-//! everything is still single-thread and cooperative, so the `Mutex` never actually contends.
+//! The heap keeps only a *handle* — `Obj::Channel(Arc<ChannelCore>)` — and two handles (e.g. one
+//! per task) can point at the same core, across OS threads. M3.2: a channel queue and an `Atomic`
+//! hold [`Value`]s of the run's one heap, so a send or a store copies one word; the collector
+//! walks a core's values under its lock (`Heap::children`).
 //!
 //! A `Condvar` (for real blocking `recv`) was added at B3.3; a `closed` flag (for `Channel.close()`)
-//! lives alongside the queue under [`ChannelCore::q`]'s lock (see [`ChanState`]). Cooperative `recv`
-//! parks the *fiber* (it does not block on a primitive), so the condvar is dead on that engine.
+//! lives alongside the queue under [`ChannelCore::q`]'s lock (see [`ChanState`]).
 
-use super::value::GcRef;
-use super::wire::{WireNode, WireValue};
+use super::value::Value;
 use crate::lexer::Span;
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-/// TICKET-016 (W8-3) — the process-global wait-for graph behind every `Shared`/`RwShared` update
-/// guard. `owner` maps a box's stable identity (`Arc::as_ptr(..) as usize`) to the task token
-/// currently holding its guard; `waiting` maps a blocked task's token to the key it wants. A guard
-/// acquire walks `waiting`/`owner` alternately from the requester: a walk that returns to the
-/// requester is a wait-for cycle (self-held is the length-1 case), which faults instead of blocking.
+/// M3.3 — the lock of one `Shared` / `RwShared` box (Go `sync.RWMutex`). One atomic word owns the
+/// uncontended path: an acquire and a release are one CAS or one `fetch_*`, with no registry, no
+/// allocation and no syscall.
+///
+/// `state` bits: [`WRITER`] (a writer holds the box), the count of writers that wait
+/// ([`WW_ONE`] units, Go writer preference: while it is not zero a new reader waits), and the
+/// count of readers that hold the box (the low 32 bits). `writer` is the task token of the writer
+/// (0 = none), read only on a failed acquire to find a same-task re-entry. A reader is anonymous
+/// here; the task that reads keeps its own list (`Vm::held_reads`). `sleepers` counts the tasks that
+/// wait on the registry condvar for this box, so a release wakes them only when one exists.
+/// `wait_readers` counts the readers that wait with a [`WaitTicket`] (their flags are in
+/// `GuardGraph::readers`), so a write release admits them (Go `sync/rwmutex.go:214`, "Unblock
+/// blocked readers, if any") only when one exists.
+#[derive(Debug)]
+pub struct BoxLock {
+    state: AtomicU64,
+    writer: AtomicU64,
+    sleepers: AtomicU32,
+    wait_readers: AtomicU32,
+    /// `"Shared"` or `"RwShared"`: the ONE owner of the box kind a fault text names.
+    pub kind: &'static str,
+}
+
+const WRITER: u64 = 1 << 63;
+const WW_ONE: u64 = 1 << 32;
+const WW_MASK: u64 = 0x7fff_ffff << 32;
+const R_MASK: u64 = 0xffff_ffff;
+
+impl BoxLock {
+    pub fn new(kind: &'static str) -> Self {
+        BoxLock {
+            state: AtomicU64::new(0),
+            writer: AtomicU64::new(0),
+            sleepers: AtomicU32::new(0),
+            wait_readers: AtomicU32::new(0),
+            kind,
+        }
+    }
+
+    /// The task token of the writer that holds the box, 0 when none does.
+    pub fn writer(&self) -> u64 {
+        self.writer.load(Ordering::Acquire)
+    }
+
+    /// Whether a writer waits for the box (a new reader must wait behind it).
+    pub fn writer_waits(&self) -> bool {
+        self.state.load(Ordering::Acquire) & WW_MASK != 0
+    }
+
+    /// One acquire attempt with no wait. `counted`: this writer is one of the waiting writers
+    /// (it holds a [`WaitTicket`]), so the waiting count does not keep it out and the take moves it
+    /// from waiting to holding.
+    fn try_take(&self, mode: GuardMode, me: u64, counted: bool) -> bool {
+        let mut s = self.state.load(Ordering::Relaxed);
+        loop {
+            let next = match mode {
+                GuardMode::Write if s & (WRITER | R_MASK) == 0 => {
+                    let ww = if counted { WW_ONE } else { 0 };
+                    if !counted && s & WW_MASK != 0 {
+                        return false;
+                    }
+                    (s - ww) | WRITER
+                }
+                GuardMode::Read if s & (WRITER | WW_MASK) == 0 && s & R_MASK != R_MASK => s + 1,
+                GuardMode::Write | GuardMode::Read => return false,
+            };
+            match self
+                .state
+                .compare_exchange_weak(s, next, Ordering::Acquire, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    if mode == GuardMode::Write {
+                        self.writer.store(me, Ordering::Release);
+                    }
+                    return true;
+                }
+                Err(now) => s = now,
+            }
+        }
+    }
+
+    /// Whether an acquire in `mode` by a (counted) waiter could succeed now. SeqCst: with the
+    /// waiter's `sleepers` increment before it and the releaser's SeqCst RMW then `sleepers` load,
+    /// it is a Dekker pair, so either the waiter sees the release or the releaser sees the waiter.
+    fn looks_free(&self, mode: GuardMode) -> bool {
+        let s = self.state.load(Ordering::SeqCst);
+        match mode {
+            GuardMode::Write => s & (WRITER | R_MASK) == 0,
+            GuardMode::Read => s & (WRITER | WW_MASK) == 0,
+        }
+    }
+
+    /// The write release (Go `sync/rwmutex.go:201-222`, `Unlock`): with readers waiting, admit
+    /// every one of them in the same RMW that clears [`WRITER`] (their read holds counted in R,
+    /// their flags set), under the registry lock, so no writer that waits gets in ahead of them.
+    /// A reader that registers after the check waits for the next release.
+    fn release_write(&self) {
+        self.writer.store(0, Ordering::Relaxed);
+        if self.wait_readers.load(Ordering::SeqCst) == 0 {
+            self.state.fetch_and(!WRITER, Ordering::SeqCst);
+            self.wake();
+            return;
+        }
+        let (mtx, cv) = guard_registry();
+        let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+        let flags = g
+            .readers
+            .remove(&(self as *const BoxLock as usize))
+            .unwrap_or_default();
+        let n = flags.len() as u64;
+        let mut cur = self.state.load(Ordering::Relaxed);
+        while let Err(now) = self.state.compare_exchange_weak(
+            cur,
+            (cur & !WRITER) + n,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            cur = now;
+        }
+        for f in &flags {
+            f.store(true, Ordering::SeqCst);
+        }
+        self.wait_readers.fetch_sub(n as u32, Ordering::SeqCst);
+        drop(g);
+        cv.notify_all();
+    }
+
+    /// Wake the tasks that wait for this box, if any. The registry has one condvar, so this
+    /// wakes the waiters of every box (each re-checks its own word and sleeps again); a condvar
+    /// per box would cost a `Mutex` + `Condvar` per box for a contended-only gain.
+    fn wake(&self) {
+        if self.sleepers.load(Ordering::SeqCst) > 0 {
+            let (mtx, cv) = guard_registry();
+            drop(mtx.lock().unwrap_or_else(|e| e.into_inner()));
+            cv.notify_all();
+        }
+    }
+}
+
+/// TICKET-016 (W8-3) — the process-global wait-for graph, read only on the slow path (a contended
+/// acquire). `waiting` maps a blocked task's token to the box and mode it wants. A walk from the
+/// requester follows `waiting` -> the box's writer (`BoxLock::writer`) or a writer that waits for
+/// it -> `waiting`: a walk that returns to the requester is a wait-for cycle, which faults instead
+/// of blocking. A reader is anonymous ([`BoxLock`]), so a cycle that passes through a read guard is
+/// left to the run's deadlock verdict (Go: `fatal error: all goroutines are asleep - deadlock!`).
+///
+/// No std lock here lives across user code or a fiber park: the registry `Mutex` is held only for
+/// the map reads and writes below (and released by the `Condvar` wait).
 #[derive(Default)]
 struct GuardGraph {
-    owner: HashMap<usize, u64>,
-    waiting: HashMap<u64, usize>,
+    waiting: HashMap<u64, (Arc<BoxLock>, GuardMode)>,
+    /// The readers that wait for a box (keyed by its `BoxLock` address), each by its admission
+    /// flag: [`BoxLock::release_write`] admits them all.
+    readers: HashMap<usize, Vec<Arc<AtomicBool>>>,
+}
+
+impl GuardGraph {
+    /// The tasks a wait for `(lock, mode)` by `me` waits on: the writer, and for a read a writer
+    /// that waits for the same box.
+    fn blockers(&self, lock: &Arc<BoxLock>, mode: GuardMode, me: u64, out: &mut Vec<u64>) {
+        let w = lock.writer();
+        if w != 0 && w != me {
+            out.push(w);
+        }
+        if mode == GuardMode::Read {
+            for (t, (l, m)) in &self.waiting {
+                if *t != me && *m == GuardMode::Write && Arc::ptr_eq(l, lock) {
+                    out.push(*t);
+                }
+            }
+        }
+    }
 }
 
 fn guard_registry() -> &'static (Mutex<GuardGraph>, Condvar) {
@@ -37,24 +195,154 @@ fn guard_registry() -> &'static (Mutex<GuardGraph>, Condvar) {
     REGISTRY.get_or_init(|| (Mutex::new(GuardGraph::default()), Condvar::new()))
 }
 
+/// M3.3 — how a box method holds its box: `Write` exclusive (`Shared` always; `RwShared.write`,
+/// `set` and the single-entry writers), `Read` shared (`RwShared.get`, `read` and the read views).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardMode {
+    Write,
+    Read,
+}
+
+/// One guard: a box's lock in one mode. Borrowed: the method that takes it holds the box core.
+#[derive(Debug, Clone, Copy)]
+pub struct GuardKey<'a> {
+    pub lock: &'a Arc<BoxLock>,
+    pub mode: GuardMode,
+}
+
 /// Why a guard acquire refused to block: a wait-for cycle exists. `SelfHeld` is the length-1 case
-/// (the requester already owns `key`, e.g. a nested `set`/`update`/`write` on the same box inside its
-/// own closure); `Cycle` is a longer cross-task/cross-box cycle (e.g. AB-BA).
+/// (the requester already holds the box's write guard, e.g. a nested `set`/`update`/`write`, or a
+/// read, on the same box inside its own closure); `ReadHeld` is a write by a task that holds the
+/// box's read guard (M3.3, Q2: Go `RLock(); Lock()`); `Cycle` is a longer cycle: a cross-task or
+/// cross-box one (e.g. AB-BA), or a nested read past a waiting writer that waits for this task's
+/// outer read (Go: a recursive `RLock` with a writer queued deadlocks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardCycle {
     SelfHeld,
+    ReadHeld,
     Cycle,
 }
 
-/// RAII handle for a held update guard (TICKET-016 / W8-3): dropping it releases the box's guard and
-/// wakes every task waiting on the registry, so a cycle formed after registration is still found.
-pub struct UpdateGuard {
-    key: usize,
+/// RAII handle for a held guard (TICKET-016 / W8-3): dropping it releases the hold and wakes the
+/// tasks that wait for the box, if any. It belongs to the task, not to a thread or a lock guard,
+/// so it may live across a park.
+pub struct UpdateGuard<'a> {
+    lock: &'a BoxLock,
+    mode: GuardMode,
 }
 
-impl Drop for UpdateGuard {
+impl Drop for UpdateGuard<'_> {
     fn drop(&mut self) {
-        release_update_guard(self.key);
+        match self.mode {
+            GuardMode::Write => self.lock.release_write(),
+            GuardMode::Read => {
+                self.lock.state.fetch_sub(1, Ordering::SeqCst);
+                self.lock.wake();
+            }
+        }
+    }
+}
+
+/// M3.3 — a waiter's place in the line for a box, from its first failed acquire to its take or its
+/// exit, across every stage of the wait and the width-permit handoff (Go `sync.RWMutex`):
+/// - a writer is counted in the waiting-writer count: while it lives a new reader waits (Go
+///   `rwmutex.go:151`, "Announce to readers there is a pending writer");
+/// - a reader is registered by its admission flag (`GuardGraph::readers`): the next write release
+///   admits it past every waiting writer (`rwmutex.go:214`), so back-to-back writers cannot starve
+///   a reader that waited during a write.
+pub struct WaitTicket<'a> {
+    key: GuardKey<'a>,
+    live: bool,
+    admitted: Option<Arc<AtomicBool>>,
+}
+
+impl<'a> WaitTicket<'a> {
+    pub fn new(key: GuardKey<'a>) -> Self {
+        let live = key.mode == GuardMode::Write;
+        let mut admitted = None;
+        if live {
+            key.lock.state.fetch_add(WW_ONE, Ordering::SeqCst);
+        } else {
+            let flag = Arc::new(AtomicBool::new(false));
+            let (mtx, _cv) = guard_registry();
+            let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+            g.readers
+                .entry(Arc::as_ptr(key.lock) as usize)
+                .or_default()
+                .push(Arc::clone(&flag));
+            key.lock.wait_readers.fetch_add(1, Ordering::SeqCst);
+            admitted = Some(flag);
+        }
+        WaitTicket {
+            key,
+            live,
+            admitted,
+        }
+    }
+
+    /// A reader's admission flag (set by a write release), for its registered wait.
+    pub fn admission(&self) -> Option<Arc<AtomicBool>> {
+        self.admitted.clone()
+    }
+
+    /// Whether a write release admitted this reader: it holds the read already.
+    fn is_admitted(&self) -> bool {
+        self.admitted
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::SeqCst))
+    }
+
+    /// Take a reader out of `GuardGraph::readers`: after it took the guard by its own CAS, or when
+    /// its ticket drops before a take (a halt). A release can admit it before this lock (the release
+    /// clears `WRITER` before it sets the flags, all under the registry lock): then it holds a read
+    /// count it does not keep, and gives it back.
+    fn unregister(&mut self) {
+        if let Some(flag) = self.admitted.take() {
+            let (mtx, _cv) = guard_registry();
+            let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+            if flag.load(Ordering::SeqCst) {
+                drop(g);
+                self.key.lock.state.fetch_sub(1, Ordering::SeqCst);
+                self.key.lock.wake();
+                return;
+            }
+            let addr = Arc::as_ptr(self.key.lock) as usize;
+            if let Some(list) = g.readers.get_mut(&addr) {
+                list.retain(|f| !Arc::ptr_eq(f, &flag));
+                if list.is_empty() {
+                    g.readers.remove(&addr);
+                }
+            }
+            self.key.lock.wait_readers.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The guard, when this waiter can take it now (no wait).
+    pub fn try_take(&mut self, me: u64) -> Option<UpdateGuard<'a>> {
+        // Built only on a take: a dropped guard releases a hold.
+        let (lock, mode) = (self.key.lock, self.key.mode);
+        if self.is_admitted() {
+            // The release counted this read hold and dropped the registration.
+            self.admitted = None;
+            return Some(UpdateGuard { lock, mode });
+        }
+        if lock.try_take(mode, me, self.live) {
+            // A counted writer's take moved it from waiting to holding.
+            self.live = false;
+            self.unregister();
+            return Some(UpdateGuard { lock, mode });
+        }
+        None
+    }
+}
+
+impl Drop for WaitTicket<'_> {
+    fn drop(&mut self) {
+        if self.live {
+            self.key.lock.state.fetch_sub(WW_ONE, Ordering::SeqCst);
+            self.key.lock.wake();
+        }
+        self.unregister();
     }
 }
 
@@ -65,159 +353,141 @@ impl Drop for UpdateGuard {
 /// (`TasksMax=32768`): 0 ms still peaks at 1091 threads, 1 ms at 35, 5 ms at 19.
 pub const GUARD_DEMOTE_BUDGET: Duration = Duration::from_millis(5);
 
-/// Take the update guard for the `Shared`/`RwShared` box identified by `key`, as task `me`. Blocks
-/// while the box is held by a healthy other task; returns `Err` immediately when the wait-for walk
-/// from `me` finds a cycle (never blocks into a cycle it can already see).
-pub fn acquire_update_guard(key: usize, me: u64) -> Result<UpdateGuard, GuardCycle> {
-    match acquire_update_guard_within(key, me, None) {
-        Ok(Some(g)) => Ok(g),
-        Ok(None) => unreachable!("an unbounded update-guard acquire cannot time out"),
-        Err(cycle) => Err(cycle),
+/// The fast path: take the guard `key` as task `me` with one CAS, or `None`. A `None` caller checks
+/// a same-task re-entry, then waits through a [`WaitTicket`].
+pub fn try_update_guard<'a>(key: GuardKey<'a>, me: u64) -> Option<UpdateGuard<'a>> {
+    // Not `then_some`: its argument is built eagerly, and a dropped guard releases a hold.
+    if key.lock.try_take(key.mode, me, false) {
+        Some(UpdateGuard {
+            lock: key.lock,
+            mode: key.mode,
+        })
+    } else {
+        None
     }
 }
 
-/// Bounded/unbounded acquire of the update guard for `key`, as task `me`. With `budget: None` this
-/// blocks exactly like [`acquire_update_guard`]. With `budget: Some(d)`, once `d` has elapsed without
-/// acquiring the guard it returns `Ok(None)` instead of continuing to block, so the caller can pay for
-/// a worker demotion only when the wait is actually long.
-pub fn acquire_update_guard_within(
-    key: usize,
-    me: u64,
-    budget: Option<Duration>,
-) -> Result<Option<UpdateGuard>, GuardCycle> {
-    match wait_update_guard(key, me, budget, true)? {
-        GuardWait::Taken(g) => Ok(Some(g)),
-        GuardWait::TimedOut => Ok(None),
-        GuardWait::Free => unreachable!("a taking wait never reports Free"),
-    }
-}
-
-/// TICKET-193 — what an acquire of `key` by task `me` would do right now. The ONE decider: the wait
-/// loop ([`wait_update_guard`]) and the deadlock verdict ([`guard_wait_satisfiable`]) both read it.
-/// The cycle walk starts at `waiting[me]`, so a caller that wants the cycle answer registers first.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum GuardState {
-    Free,
-    SelfHeld,
-    Cycle,
-    Busy,
-}
-
-fn guard_state(g: &GuardGraph, key: usize, me: u64) -> GuardState {
-    match g.owner.get(&key) {
-        None => GuardState::Free,
-        Some(&o) if o == me => GuardState::SelfHeld,
-        Some(_) if wait_for_cycle(g, me) => GuardState::Cycle,
-        Some(_) => GuardState::Busy,
-    }
-}
-
-/// How a [`wait_update_guard`] ended without a cycle.
-enum GuardWait {
-    Taken(UpdateGuard),
-    Free,
-    TimedOut,
-}
-
-/// The one guard wait loop. `take` = take the guard once free; else report `Free` and leave it.
-/// Clears `waiting[me]` on every return (DEC-016).
-fn wait_update_guard(
-    key: usize,
-    me: u64,
-    budget: Option<Duration>,
-    take: bool,
-) -> Result<GuardWait, GuardCycle> {
-    let deadline = budget.map(|d| std::time::Instant::now() + d);
-    let (mtx, cv) = guard_registry();
-    let mut g = mtx.lock().unwrap();
-    loop {
-        g.waiting.insert(me, key);
-        let state = guard_state(&g, key, me);
-        if state != GuardState::Busy {
-            g.waiting.remove(&me);
-        }
-        let left = match state {
-            GuardState::Free if take => {
-                g.owner.insert(key, me);
-                return Ok(GuardWait::Taken(UpdateGuard { key }));
-            }
-            GuardState::Free => return Ok(GuardWait::Free),
-            GuardState::SelfHeld => return Err(GuardCycle::SelfHeld),
-            GuardState::Cycle => return Err(GuardCycle::Cycle),
-            GuardState::Busy => match deadline {
-                None => Duration::from_millis(50),
-                Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
-                    None => {
-                        g.waiting.remove(&me);
-                        return Ok(GuardWait::TimedOut);
-                    }
-                    Some(l) => l.min(Duration::from_millis(50)),
-                },
-            },
-        };
-        g = cv.wait_timeout(g, left).unwrap().0;
-    }
-}
-
-/// TICKET-193 — wait until `key` is free WITHOUT taking it: `Ok(true)` free, `Ok(false)` budget spent,
-/// `Err` a cycle. `Vm::guard_wait_block` waits here holding no width permit, then takes the permit,
-/// then the guard (permit before guard; DEC-141).
+/// TICKET-193 — wait until `key` looks free for this waiter WITHOUT taking it: `Ok(true)` free,
+/// `Ok(false)` budget spent (`None` = no limit), `Err` a wait-for cycle. `Vm::guard_wait_block`
+/// waits here holding no width permit, then takes the permit, then the guard (permit before
+/// guard; DEC-141). The waiter's [`WaitTicket`] stays live across the gap, so no new reader gets in.
 pub fn await_update_guard_free(
-    key: usize,
+    ticket: &WaitTicket<'_>,
     me: u64,
     budget: Option<Duration>,
 ) -> Result<bool, GuardCycle> {
-    match wait_update_guard(key, me, budget, false)? {
-        GuardWait::Free => Ok(true),
-        GuardWait::TimedOut => Ok(false),
-        GuardWait::Taken(_) => unreachable!("a non-taking wait never takes the guard"),
-    }
-}
-
-/// TICKET-063 — would an acquire of `key` by `me`, issued now, NOT block? Reads [`guard_state`].
-///
-/// The cycle arm answers `false` between polls, not `true`: `acquire_update_guard_within` removes
-/// `me` from `waiting` before it returns `Ok(None)` (see its deadline arm above), so once a bounded
-/// acquire has given up, `wait_for_cycle` finds no entry for `me` and this fn reports "not
-/// satisfiable" even on a real cycle. That is the safe direction — the nursery deadlock judge then
-/// reports `deadlock` where a `GuardCycle` fault was one poll away, never the reverse.
-pub fn guard_wait_satisfiable(key: usize, me: u64) -> bool {
-    let (mtx, _cv) = guard_registry();
-    let g = mtx.lock().unwrap();
-    guard_state(&g, key, me) != GuardState::Busy
-}
-
-/// Walk `waiting` -> `owner` -> `waiting` -> ... from `start`, bounded by the number of owned boxes
-/// plus one hop: a walk that revisits `start` is a wait-for cycle.
-fn wait_for_cycle(g: &GuardGraph, start: u64) -> bool {
-    let mut cur = start;
-    let max_hops = g.owner.len() + 1;
-    for _ in 0..max_hops {
-        let Some(&want) = g.waiting.get(&cur) else {
-            return false;
-        };
-        let Some(&owner) = g.owner.get(&want) else {
-            return false;
-        };
-        if owner == start {
-            return true;
+    let key = ticket.key;
+    let deadline = budget.map(|d| std::time::Instant::now() + d);
+    let (mtx, cv) = guard_registry();
+    let mut g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+    key.lock.sleepers.fetch_add(1, Ordering::SeqCst);
+    g.waiting.insert(me, (Arc::clone(key.lock), key.mode));
+    let out = loop {
+        if ticket.is_admitted() || key.lock.looks_free(key.mode) {
+            break Ok(true);
         }
-        cur = owner;
+        if wait_for_cycle(&g, me) {
+            break Err(GuardCycle::Cycle);
+        }
+        let left = match deadline {
+            None => Duration::from_millis(50),
+            Some(d) => match d.checked_duration_since(std::time::Instant::now()) {
+                None => break Ok(false),
+                Some(l) => l.min(Duration::from_millis(50)),
+            },
+        };
+        g = cv
+            .wait_timeout(g, left)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    };
+    g.waiting.remove(&me);
+    key.lock.sleepers.fetch_sub(1, Ordering::SeqCst);
+    out
+}
+
+/// TICKET-063 — a registered guard wait (`PartyWait::Guard`): the box's lock, the mode, and
+/// `taking`, which the waiter sets before each take attempt and clears when the attempt fails. A
+/// waiter that has just taken the guard stays registered until it leaves its wait loop, and its own
+/// hold is no wait: `taking` says so (a lock word cannot name an anonymous reader).
+#[derive(Debug, Clone)]
+pub struct GuardWait {
+    pub lock: Arc<BoxLock>,
+    pub mode: GuardMode,
+    pub taking: Arc<AtomicBool>,
+    /// A reader's admission flag ([`WaitTicket::admission`]): an admitted reader holds the read.
+    pub admitted: Option<Arc<AtomicBool>>,
+}
+
+/// TICKET-063 — would an acquire of `w` by `me`, issued now, NOT block? `true` too when the wait
+/// is a cycle (the acquire faults at once), and while the waiter takes the guard. Deliberately
+/// generous: a false `true` only vetoes the verdict.
+pub fn guard_wait_satisfiable(w: &GuardWait, me: u64) -> bool {
+    if w.taking.load(Ordering::SeqCst)
+        || w.admitted
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::SeqCst))
+        || w.lock.looks_free(w.mode)
+        || w.lock.writer() == me
+    {
+        return true;
+    }
+    let (mtx, _cv) = guard_registry();
+    let g = mtx.lock().unwrap_or_else(|e| e.into_inner());
+    wait_for_cycle(&g, me)
+}
+
+/// Walk `waiting` -> blockers -> `waiting` -> ... from `start`, each task once: a walk that reaches
+/// `start` again is a wait-for cycle.
+fn wait_for_cycle(g: &GuardGraph, start: u64) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut work = vec![start];
+    let mut next = Vec::new();
+    while let Some(cur) = work.pop() {
+        let Some((lock, mode)) = g.waiting.get(&cur) else {
+            continue;
+        };
+        next.clear();
+        g.blockers(lock, *mode, cur, &mut next);
+        for &t in &next {
+            if t == start {
+                return true;
+            }
+            if seen.insert(t) {
+                work.push(t);
+            }
+        }
     }
     false
 }
 
-/// Release the update guard held on `key` and wake every waiter, so a cycle that formed after this
-/// registration (or the newly-freed key) is re-checked.
-pub fn release_update_guard(key: usize) {
-    let (mtx, cv) = guard_registry();
-    let mut g = mtx.lock().unwrap();
-    g.owner.remove(&key);
-    drop(g);
-    cv.notify_all();
+/// Test-only blocking acquire: the fast path, then a [`WaitTicket`] wait of at most `budget`.
+/// The engine path is `Vm::take_update_guard` (re-entry checks, halts, width permit, parties).
+#[cfg(test)]
+pub fn acquire_update_guard_within<'a>(
+    key: GuardKey<'a>,
+    me: u64,
+    budget: Duration,
+) -> Result<Option<UpdateGuard<'a>>, GuardCycle> {
+    if let Some(g) = try_update_guard(key, me) {
+        return Ok(Some(g));
+    }
+    let deadline = std::time::Instant::now() + budget;
+    let mut ticket = WaitTicket::new(key);
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if await_update_guard_free(&ticket, me, Some(left))?
+            && let Some(g) = ticket.try_take(me)
+        {
+            return Ok(Some(g));
+        }
+        if left.is_zero() {
+            return Ok(None);
+        }
+    }
 }
 
-/// `Channel[T]` core (B3.1): the shared mailbox, a FIFO of wire-form messages. `send` locks +
+/// `Channel[T]` core (B3.1): the shared mailbox, a FIFO of values (M3.2). `send` locks +
 /// `push_back`; `recv`/`try_recv` lock + `pop_front`; `len` locks + len. `cap` is `None` for an
 /// unbounded `Channel[T]()` (the default — `send` never blocks) and `Some(n)` for a bounded
 /// `Channel[T](n)`: once `n` messages are queued a `send` BLOCKS/parks until a `recv` frees a slot
@@ -357,8 +627,7 @@ fn is_me(p: &Arc<Pending>, me: Option<&Arc<Pending>>) -> bool {
 struct Offer {
     p: Arc<Pending>,
     arm: u32,
-    sum: usize,
-    w: WireValue,
+    v: Value,
 }
 
 /// A blocked rendezvous receiver's place (TICKET-185): a sender that finds it commits it and
@@ -367,13 +636,13 @@ struct Offer {
 struct Slot {
     p: Arc<Pending>,
     arm: u32,
-    got: Option<(usize, WireValue)>,
+    got: Option<Value>,
 }
 
-/// TICKET-194 — what a `recv` on a channel gets WITHOUT waiting ([`ChannelCore::recv_ready`]).
+/// TICKET-194 — what a `recv` on a channel gets WITHOUT waiting (`Vm::recv_ready`).
 pub enum RecvReady {
     /// A buffered value or a live sender's offer, taken.
-    Value(WireValue),
+    Value(Value),
     /// A tripped `done()` latch or a fired `timer(ms)`: the receive yields `true`.
     Fired,
     /// Closed and drained.
@@ -394,23 +663,6 @@ impl ChannelCore {
         }
         self.cv.notify_all();
     }
-
-    /// TICKET-194 — THE ready decision of a channel receive, made in the caller's `core.q` hold `q`:
-    /// a value > a tripped latch > a fired timer > closed.
-    pub fn recv_ready(&self, q: &mut ChanState) -> RecvReady {
-        if let Some(w) = q.pop() {
-            return RecvReady::Value(w);
-        }
-        if self.done_latch.load(Ordering::Relaxed)
-            || self.timer.is_some_and(|d| std::time::Instant::now() >= d)
-        {
-            return RecvReady::Fired;
-        }
-        if q.closed {
-            return RecvReady::Closed;
-        }
-        RecvReady::Wait
-    }
 }
 
 /// What one `send` attempt did ([`ChanState::send`]).
@@ -424,70 +676,69 @@ pub enum SendOutcome {
     Closed,
 }
 
+/// The locked interior of a [`ChannelCore`]: the buffer, the offers, the slots and the `closed`
+/// flag. M3.2: every message is a [`Value`] of the run's one heap. The collector reads them all
+/// under this lock (`Heap::children`, [`iter`](Self::iter)); no thread holds the lock across a
+/// safepoint, a GC door or a user call, so a collection that waits for it never waits for a
+/// stopped thread.
 #[derive(Debug, Default)]
 pub struct ChanState {
-    /// PRIVATE on purpose (W6-7/W6-10): every mutation must go through the methods below so the
-    /// cached GC summary (`bytes`/`dirty`) can never go stale. A stale `dirty == false` would stop
-    /// the GC tracing a live handle queued in this channel — a use-after-free. Rust module privacy
-    /// is what makes "did I catch every push site?" a compile error instead of a code review.
-    ///
-    /// Each message carries its own [`wire_summary`] byte count so `pop` is O(1): these queues are
-    /// popped under the GLOBAL `MnSched` lock (`sched.rs` demote paths), and re-deriving the count
-    /// on removal would put an O(payload) walk in that critical section.
-    queue: VecDeque<(usize, WireValue)>,
+    queue: VecDeque<Value>,
     /// TICKET-185 — offers of blocked senders (a cap-0 channel, or a FULL bounded one).
     sendq: VecDeque<Offer>,
     /// TICKET-185 — slots of blocked cap-0 receivers.
     recvq: VecDeque<Slot>,
-    /// Approximate owned bytes of every value held here (buffer, offers, filled slots — see
-    /// [`wire_summary`]) — the off-heap storage `Heap::live_bytes` could not see before W6-10.
-    bytes: usize,
-    /// True while ANY held value can root a heap object (a `Handle` or a nested core). Cleared
-    /// only when all three queues empty, so it is conservative (over-walk = safe) and self-healing.
-    dirty: bool,
     pub closed: bool,
     /// TICKET-219 — set by [`seal`](Self::seal): the last buffered value is the handle's outcome.
     sealed: bool,
+    /// M3.2 — the `Err` text of a Task outcome sealed by a party with no heap at hand (the job
+    /// transition under the sched lock, [`seal_err`](Self::seal_err)). The first receive builds
+    /// it into the sealed value (`Vm::recv_ready`), so every reader then shares one object.
+    unbuilt: Option<Box<str>>,
 }
 
 impl ChanState {
-    fn add(&mut self, sum: (usize, bool)) {
-        self.bytes += sum.0;
-        self.dirty |= sum.1;
+    /// Buffer a message.
+    pub fn push(&mut self, v: Value) {
+        self.queue.push_back(v);
     }
 
-    fn sub(&mut self, b: usize) {
-        self.bytes = self.bytes.saturating_sub(b);
-        if self.queue.is_empty() && self.sendq.is_empty() && self.recvq.is_empty() {
-            self.bytes = 0;
-            self.dirty = false;
-        }
-    }
-
-    /// Buffer a message with its PRE-COMPUTED [`wire_summary`].
-    ///
-    /// The summary MUST be computed by the caller **before taking any lock**: `send_commit` holds
-    /// `MnSched::core` — the process-wide lock that serializes every fiber's park/wake/finish —
-    /// across this call, and `wire_summary` is O(payload). Global-lock hold time must not scale
-    /// with user payload size.
-    pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
-        self.add(sum);
-        self.queue.push_back((sum.0, w));
-    }
-
-    /// TICKET-219 — write a handle job's one outcome: buffer `w` as the last value and close the
+    /// TICKET-219 — write a handle job's one outcome: buffer `v` as the last value and close the
     /// channel. The first writer wins under `core.q`: a second seal returns `false` and changes
-    /// nothing. Every receive of a sealed channel copies `w` and takes nothing
-    /// ([`pop_for`](Self::pop_for)), so `len()` stays 1 and every reader sees the same outcome.
-    pub fn seal(&mut self, sum: (usize, bool), w: WireValue) -> bool {
+    /// nothing. Every receive of a sealed channel reads `v` and takes nothing
+    /// ([`pop_for`](Self::pop_for)), so `len()` stays 1 and every reader shares the one outcome.
+    pub fn seal(&mut self, v: Value) -> bool {
         if self.sealed {
             return false;
         }
-        self.add(sum);
-        self.queue.push_back((sum.0, w));
+        self.queue.push_back(v);
         self.sealed = true;
         self.closed = true;
         true
+    }
+
+    /// [`seal`](Self::seal) with the outcome `Err(msg)`, written as text: the caller holds no
+    /// heap. The first receive builds the value ([`build_outcome`](Self::build_outcome)).
+    pub fn seal_err(&mut self, msg: &str) -> bool {
+        if self.sealed {
+            return false;
+        }
+        self.unbuilt = Some(msg.into());
+        self.sealed = true;
+        self.closed = true;
+        true
+    }
+
+    /// The `Err` text of a sealed outcome that no receive built yet.
+    pub fn unbuilt_outcome(&self) -> Option<&str> {
+        self.unbuilt.as_deref()
+    }
+
+    /// Store `v`, built from [`unbuilt_outcome`](Self::unbuilt_outcome), as the sealed outcome.
+    pub fn build_outcome(&mut self, v: Value) {
+        if self.unbuilt.take().is_some() {
+            self.queue.push_back(v);
+        }
     }
 
     pub fn is_sealed(&self) -> bool {
@@ -495,13 +746,11 @@ impl ChanState {
     }
 
     /// Publish a blocked sender's value as `p`'s offer on `arm`.
-    pub fn offer(&mut self, p: &Arc<Pending>, arm: u32, sum: (usize, bool), w: WireValue) {
-        self.add(sum);
+    pub fn offer(&mut self, p: &Arc<Pending>, arm: u32, v: Value) {
         self.sendq.push_back(Offer {
             p: Arc::clone(p),
             arm,
-            sum: sum.0,
-            w,
+            v,
         });
     }
 
@@ -514,14 +763,9 @@ impl ChanState {
         });
     }
 
-    /// Hand `w` to the first live, unfilled slot that is not `me`'s, committing it. Dead slots are
-    /// dropped on the way. `Err(w)` when no such slot exists.
-    pub fn give(
-        &mut self,
-        sum: (usize, bool),
-        w: WireValue,
-        me: Option<&Arc<Pending>>,
-    ) -> Result<(), WireValue> {
+    /// Hand `v` to the first live, unfilled slot that is not `me`'s, committing it. Dead slots are
+    /// dropped on the way. `false` when no such slot exists.
+    pub fn give(&mut self, v: Value, me: Option<&Arc<Pending>>) -> bool {
         let mut i = 0;
         while i < self.recvq.len() {
             let s = &self.recvq[i];
@@ -530,13 +774,12 @@ impl ChanState {
                 continue;
             }
             if s.p.try_commit(s.arm) {
-                self.recvq[i].got = Some((sum.0, w));
-                self.add(sum);
-                return Ok(());
+                self.recvq[i].got = Some(v);
+                return true;
             }
             self.recvq.remove(i);
         }
-        Err(w)
+        false
     }
 
     /// THE send decision (TICKET-185), made in one `core.q` hold. In order: closed; unbounded
@@ -545,31 +788,31 @@ impl ChanState {
     pub fn send(
         &mut self,
         cap: Option<usize>,
-        sum: (usize, bool),
-        w: WireValue,
+        v: Value,
         offer: Option<(&Arc<Pending>, u32)>,
     ) -> SendOutcome {
         if self.closed {
             return SendOutcome::Closed;
         }
-        let w = match cap {
+        match cap {
             None => {
-                self.push(sum, w);
+                self.push(v);
                 return SendOutcome::Sent;
             }
-            Some(0) => match self.give(sum, w, offer.map(|(p, _)| p)) {
-                Ok(()) => return SendOutcome::Sent,
-                Err(w) => w,
-            },
+            Some(0) => {
+                if self.give(v, offer.map(|(p, _)| p)) {
+                    return SendOutcome::Sent;
+                }
+            }
             Some(n) if self.queue.len() < n => {
-                self.push(sum, w);
+                self.push(v);
                 return SendOutcome::Sent;
             }
-            Some(_) => w,
-        };
+            Some(_) => {}
+        }
         match offer {
             Some((p, arm)) => {
-                self.offer(p, arm, sum, w);
+                self.offer(p, arm, v);
                 SendOutcome::Offered
             }
             None => SendOutcome::Full,
@@ -579,25 +822,21 @@ impl ChanState {
     /// Take the next value: the buffer front (then move the first live offer into the freed
     /// place — Go's recv refill), else the first live offer that is not `me`'s. Each offer taken
     /// is committed by CAS; dead offers are dropped on the way.
-    pub fn pop_for(&mut self, me: Option<&Arc<Pending>>) -> Option<WireValue> {
+    pub fn pop_for(&mut self, me: Option<&Arc<Pending>>) -> Option<Value> {
         if self.sealed {
-            return self.queue.back().map(|(_, w)| w.clone());
+            return self.queue.back().copied();
         }
-        if let Some((b, w)) = self.queue.pop_front() {
-            self.bytes = self.bytes.saturating_sub(b);
-            if let Some((sum, ow)) = self.take_offer(me) {
-                self.queue.push_back((sum, ow));
+        if let Some(v) = self.queue.pop_front() {
+            if let Some(ov) = self.take_offer(me) {
+                self.queue.push_back(ov);
             }
-            self.sub(0);
-            return Some(w);
+            return Some(v);
         }
-        let (sum, w) = self.take_offer(me)?;
-        self.sub(sum);
-        Some(w)
+        self.take_offer(me)
     }
 
     /// Commit and remove the first live offer that is not `me`'s; dead offers are dropped.
-    fn take_offer(&mut self, me: Option<&Arc<Pending>>) -> Option<(usize, WireValue)> {
+    fn take_offer(&mut self, me: Option<&Arc<Pending>>) -> Option<Value> {
         let mut i = 0;
         while i < self.sendq.len() {
             if is_me(&self.sendq[i].p, me) {
@@ -606,46 +845,29 @@ impl ChanState {
             }
             let o = self.sendq.remove(i).unwrap();
             if o.p.try_commit(o.arm) {
-                return Some((o.sum, o.w));
+                return Some(o.v);
             }
-            self.bytes = self.bytes.saturating_sub(o.sum);
         }
         None
     }
 
-    pub fn pop(&mut self) -> Option<WireValue> {
+    pub fn pop(&mut self) -> Option<Value> {
         self.pop_for(None)
     }
 
     /// Remove `p`'s filled slot and return its value.
-    pub fn take(&mut self, p: &Arc<Pending>) -> Option<WireValue> {
+    pub fn take(&mut self, p: &Arc<Pending>) -> Option<Value> {
         let i = self
             .recvq
             .iter()
             .position(|s| s.got.is_some() && Arc::ptr_eq(&s.p, p))?;
-        let (b, w) = self.recvq.remove(i)?.got?;
-        self.sub(b);
-        Some(w)
+        self.recvq.remove(i)?.got
     }
 
     /// Remove every offer and slot of `p`.
     pub fn withdraw(&mut self, p: &Arc<Pending>) {
-        let mut freed = 0;
-        self.sendq.retain(|o| {
-            let mine = Arc::ptr_eq(&o.p, p);
-            if mine {
-                freed += o.sum;
-            }
-            !mine
-        });
-        self.recvq.retain(|s| {
-            let mine = Arc::ptr_eq(&s.p, p);
-            if mine && let Some((b, _)) = &s.got {
-                freed += b;
-            }
-            !mine
-        });
-        self.sub(freed);
+        self.sendq.retain(|o| !Arc::ptr_eq(&o.p, p));
+        self.recvq.retain(|s| !Arc::ptr_eq(&s.p, p));
     }
 
     /// `close()` (TICKET-185): in this one hold, set `closed`, close every offer (each such sender
@@ -653,21 +875,10 @@ impl ChanState {
     /// value was delivered before the close.
     pub fn close(&mut self) {
         self.closed = true;
-        let mut freed = 0;
         for o in self.sendq.drain(..) {
             o.p.try_close();
-            freed += o.sum;
         }
         self.recvq.retain(|s| s.got.is_some());
-        self.sub(freed);
-    }
-
-    pub fn clear(&mut self) {
-        self.queue.clear();
-        self.sendq.clear();
-        self.recvq.clear();
-        self.bytes = 0;
-        self.dirty = false;
     }
 
     /// The buffered message count — Go's `len`: offers and slots never count.
@@ -680,27 +891,25 @@ impl ChanState {
         self.queue.is_empty()
     }
 
-    /// Every value held here — buffer, offers and filled slots — for the GC trace.
-    pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
+    /// Every value held here — buffer, offers and filled slots — for the collector.
+    pub fn iter(&self) -> impl Iterator<Item = Value> + '_ {
         self.queue
             .iter()
-            .map(|(_, w)| w)
-            .chain(self.sendq.iter().map(|o| &o.w))
-            .chain(
-                self.recvq
-                    .iter()
-                    .filter_map(|s| s.got.as_ref().map(|(_, w)| w)),
-            )
+            .copied()
+            .chain(self.sendq.iter().map(|o| o.v))
+            .chain(self.recvq.iter().filter_map(|s| s.got))
     }
 
-    /// Cached GC summary of the held values: `(approximate owned bytes, can-root-a-heap-object)`.
-    pub fn summary(&self) -> (usize, bool) {
-        (self.bytes, self.dirty)
+    /// The bytes this state holds beside the heap objects of its values: one word per value.
+    pub fn held_bytes(&self) -> usize {
+        (self.queue.capacity() + self.sendq.len() + self.recvq.len()) * std::mem::size_of::<Value>()
     }
 
-    /// Would a `recv` by `me` take a value now? A buffered value, or a live offer of another party.
+    /// Would a `recv` by `me` take a value now? A buffered value, a sealed outcome, or a live
+    /// offer of another party.
     pub fn recv_ready_for(&self, me: Option<&Arc<Pending>>) -> bool {
         !self.queue.is_empty()
+            || self.sealed
             || self
                 .sendq
                 .iter()
@@ -731,7 +940,7 @@ pub enum Settled {
     /// Its offer on this arm was taken.
     Sent(u32),
     /// Its slot on this arm was filled with this value.
-    Got(u32, WireValue),
+    Got(u32, Value),
 }
 
 /// TICKET-185 — a blocked party's [`Pending`] and every channel it has entries on, as
@@ -796,151 +1005,99 @@ impl Drop for PendingOp {
     }
 }
 
-/// `Shared[T]` core (B3.1): the one box every task reaches. `get` locks + clones out; `set` and
-/// `update` each take the box's process-global update guard (TICKET-016 / W8-3,
-/// [`super::core::acquire_update_guard`]) before touching `v`.
+/// `Shared[T]` core: the one box every task reaches (Go `struct { mu sync.Mutex; v T }`). M3.3: it
+/// holds ONE [`Value`] of the run's one heap, by handle, in an atomic slot. Every method takes the
+/// box's guard ([`acquire_update_guard`], the lock) and then works on the live value in the
+/// caller's task: `get` returns the value itself, `set` stores one word, and the closure of `update`
+/// / `read` runs on the live value while its task holds the guard. A same-box re-entry inside that
+/// closure is the guard's length-1 cycle and FAULTS; a cross-task contender waits; a cross-box
+/// wait-for cycle (AB-BA) faults.
 ///
-/// B3.3-threads: `update`'s read-modify-write must be **atomic across threads** — that is the entire
-/// promise of `Shared[T]` ("the single owner serialises writes, so the torn-write race is
-/// unrepresentable"), and `set` must not be able to silently clobber a write an in-flight `update`'s
-/// closure made — so `set` takes the SAME guard `update` does. The value lock `v` cannot be held
-/// across the user closure (it would deadlock a closure that re-enters `get` on the same box —
-/// `Mutex` is not reentrant), so the update guard — not `v` — is what serialises the whole RMW: held
-/// for the entire operation, while `v` is still locked only for the brief read and the brief
-/// write-back. A same-box `set`/`update` re-entry inside `update`'s own closure is the guard
-/// registry's length-1 wait-for cycle and FAULTS; a cross-task contender BLOCKS until the guard
-/// frees; a genuine cross-box wait-for cycle (AB-BA) FAULTS instead of hanging.
-///
-/// TICKET-246: the value is no longer an encoded copy. It lives in the box's PRIVATE heap, at
-/// `stack[0]` of the box's own context (`state`), which that heap's GC roots. Every method takes
-/// the update guard first and then locks `state`, so user code never contends on the `Mutex`; the
-/// closure of `update` / `read` runs under it, inside the box heap (`Vm::with_box`). GC and byte
-/// accounting of an OUTER heap take no lock here: the box's values are roots of its own heap and
-/// an outer walk reads `bytes`.
-#[derive(Debug, Default)]
+/// The slot is read with no lock (Acquire), so the collector and a `&self` render never wait for a
+/// holder; a write stores with Release. No std lock is held across user code. The guard is the
+/// box's [`BoxLock`]: one CAS when free.
+#[derive(Debug)]
 pub struct SharedCore {
-    pub state: SharedState,
-    /// `Heap::approx_bytes()` of the box heap after the last write: an O(1) upper estimate.
-    pub bytes: AtomicUsize,
+    pub v: super::rvec::RCell<Value>,
+    /// The box's lock ([`BoxLock`]): an `Arc` so a slow-path waiter can name it in the registry.
+    pub lock: Arc<BoxLock>,
 }
 
-/// The context of a `Shared` box: its heap, its module view and the state at `stack[0]`. `None`
-/// only while a call has taken it out (`Vm::with_box`), under the lock.
-#[derive(Default)]
-pub struct SharedState(pub(super) Mutex<Option<Box<super::FiberCtx>>>);
-
-impl std::fmt::Debug for SharedState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SharedState")
-    }
-}
-
-impl SharedState {
-    /// Lock the state. A panic inside a box closure unwinds through the guard; `with_box` has put
-    /// the context back by then, so a poisoned lock still holds a whole state.
-    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Option<Box<super::FiberCtx>>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
-
-/// `RwShared[T]` core: the read-write counterpart to [`SharedCore`], on the same box core. The
-/// value lives in the box's PRIVATE heap, at `stack[0]` of the box's own context (`state`), behind
-/// a `RwLock`: MANY readers copy out of the live heap at once, or ONE writer runs inside it.
-///
-/// - `write(f)` / `set` and the single-entry writers take the box's update guard (TICKET-016 /
-///   W8-3, [`super::core::acquire_update_guard`]) and then the write lock; the closure runs under
-///   it, inside the box heap (`Vm::with_box`), exactly like `Shared.update`.
-/// - A reader (`get`, `read`, the `_` read views, display) tries the read lock with no registry
-///   lock. Only when a writer holds or waits for the state does it take the update guard and then
-///   the read lock, so its wait is a registered guard wait, and a reader inside the box's OWN
-///   `write` closure faults (`already holds the update guard`) instead of deadlocking.
-/// - No user code runs under the read lock: a reader copies with `WalkSrc`, drops the lock and
-///   only then decodes, compares keys or runs its closure. So `write` nested in `read` is legal.
-/// - The box heap is written, and collected, only under the write lock.
-///
-/// GC and byte accounting of an OUTER heap never wait here: see [`SharedCore`].
-#[derive(Debug, Default)]
-pub struct RwSharedCore {
-    pub state: RwSharedState,
-    /// `Heap::approx_bytes()` of the box heap after the last write: an O(1) upper estimate.
-    pub bytes: AtomicUsize,
-}
-
-/// The context of a `RwShared` box. `None` only while a writer has taken it out
-/// (`Vm::with_box`), under the write lock, so a reader never sees `None`.
-#[derive(Default)]
-pub struct RwSharedState(pub(super) RwLock<BoxSlot>);
-
-impl std::fmt::Debug for RwSharedState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("RwSharedState")
-    }
-}
-
-/// Where a box context sits behind its lock.
-pub(super) type BoxSlot = Option<Box<super::FiberCtx>>;
-
-impl RwSharedState {
-    /// The read lock when no writer holds or waits for the state; never blocks. A poisoned lock
-    /// still holds a whole state (see [`SharedState::lock`]).
-    pub(super) fn try_read(&self) -> Option<std::sync::RwLockReadGuard<'_, BoxSlot>> {
-        match self.0.try_read() {
-            Ok(g) => Some(g),
-            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
+impl SharedCore {
+    pub fn new(v: Value) -> Self {
+        SharedCore {
+            v: super::rvec::RCell::new(v),
+            lock: Arc::new(BoxLock::new("Shared")),
         }
     }
+}
 
-    /// The read lock, blocking. Only for a reader that holds the update guard: its only possible
-    /// wait is then another reader's Rust copy.
-    pub(super) fn read(&self) -> std::sync::RwLockReadGuard<'_, BoxSlot> {
-        self.0.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// The write lock, blocking. Only for a writer that holds the update guard.
-    pub(super) fn write(&self) -> std::sync::RwLockWriteGuard<'_, BoxSlot> {
-        self.0.write().unwrap_or_else(|e| e.into_inner())
+impl Default for SharedCore {
+    fn default() -> Self {
+        SharedCore::new(Value::nil())
     }
 }
 
-/// `Atomic[T]` core: the cross-task atomic box. Like [`SharedCore`] (one boxed wire value behind a
-/// `Mutex`, reachable across threads via the `Arc` handle), but presents atomic-operation methods —
+/// `RwShared[T]` core: the read-write counterpart to [`SharedCore`] (Go `sync.RWMutex`). The same
+/// one slot; the guard has two modes ([`GuardMode`]): MANY readers (`get`, `read`, the `_` read
+/// views) hold it at once, or ONE writer (`write`, `set`, the single-entry writers). A writer that
+/// waits keeps new readers out (Go writer preference); a nested read by a reader is granted unless a
+/// writer waits (then it faults, a certain cycle). A write inside the same task's read is a certain
+/// deadlock and faults (`ReadHeld`).
+#[derive(Debug)]
+pub struct RwSharedCore {
+    pub v: super::rvec::RCell<Value>,
+    /// The box's lock ([`BoxLock`]): an `Arc` so a slow-path waiter can name it in the registry.
+    pub lock: Arc<BoxLock>,
+}
+
+impl RwSharedCore {
+    pub fn new(v: Value) -> Self {
+        RwSharedCore {
+            v: super::rvec::RCell::new(v),
+            lock: Arc::new(BoxLock::new("RwShared")),
+        }
+    }
+}
+
+impl Default for RwSharedCore {
+    fn default() -> Self {
+        RwSharedCore::new(Value::nil())
+    }
+}
+
+/// `Atomic[T]` core: the cross-task atomic box. One [`Value`] of the run's one heap behind a
+/// `Mutex`, reachable across threads via the `Arc` handle, with atomic-operation methods —
 /// `load`/`store`/`exchange`/`cas` and (numeric `T`) `add`/`sub`. Each method is a single
 /// lock-op-unlock, so the read-modify-write of `add`/`sub`/`exchange`/`cas` is atomic across threads
 /// without a separate `update_lock` (no user closure runs under the lock, unlike `Shared.update`).
-#[derive(Debug, Default)]
+/// M3.2: a store copies one word (Go `atomic.Value`); the collector reads `v` under the lock.
+#[derive(Debug)]
 pub struct AtomicCore {
-    pub v: Mutex<WireValue>,
-    /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s lock by every store.
-    pub summary: WireSummary,
+    pub v: Mutex<Value>,
 }
 
 impl AtomicCore {
-    /// Replace the payload AND refresh the cached GC summary under the same lock — see
-    /// [`SharedCore::store`] (the walk is hoisted OFF the lock for the same reason).
-    pub fn store(&self, w: WireValue) {
-        let sum = wire_summary(&w);
-        let mut g = self.v.lock().unwrap();
-        self.summary.store(sum.0, sum.1);
-        *g = w;
+    pub fn new(v: Value) -> Self {
+        AtomicCore { v: Mutex::new(v) }
     }
 
-    /// Replace the payload through an ALREADY-held guard (the `exchange` / `cas` / `add`|`sub`
-    /// read-modify-write paths, which must not drop the lock between compare and swap), returning
-    /// the previous value. Refreshes the summary in the same critical section.
-    ///
-    /// `sum` is the caller's PRE-COMPUTED [`wire_summary`] of `w` — passed in, not derived here, so
-    /// the O(payload) walk can sit OUTSIDE the lock wherever the new value is known before it is
-    /// taken (`exchange`). The two RMW paths that genuinely build their value under the lock
-    /// (`cas`'s `to_wire` is already O(payload) under it; `add`/`sub` are scalars) compute it inline.
-    pub fn store_guarded(&self, g: &mut WireValue, w: WireValue, sum: (usize, bool)) -> WireValue {
-        self.summary.store(sum.0, sum.1);
-        std::mem::replace(g, w)
+    /// Lock the value. No thread holds it across a safepoint, a GC door or a user call.
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, Value> {
+        self.v.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn load(&self) -> Value {
+        *self.lock()
+    }
+
+    pub fn store(&self, v: Value) {
+        *self.lock() = v;
     }
 }
 
 /// `AtomicInt` core: the monomorphic, LOCK-FREE int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
-/// Go `atomic.Int64` style). Unlike [`AtomicCore`] (a `Mutex<WireValue>` holding an arbitrary sendable
+/// Go `atomic.Int64` style). Unlike [`AtomicCore`] (a `Mutex<Value>` holding an arbitrary
 /// value), the value is statically int, so it can be a raw `std::sync::atomic::AtomicI64` — no lock, no
 /// runtime type-sniffing, no wider-T hole. `SeqCst` on every op preserves the sequential consistency the
 /// Mutex gave — every op still appears to happen in some single global order. `add`/`sub` use a
@@ -1032,6 +1189,9 @@ pub fn new_closed() -> Arc<AtomicBool> {
 pub struct ReaderCore {
     pub inner: Mutex<Option<std::io::BufReader<std::fs::File>>>,
     pub key: usize,
+    /// The fd is a FIFO, a pipe or a device: a read can wait without end for its writer, so it
+    /// runs in the [`Vm::host_wait`] bracket. Fixed at the open.
+    pub waits: bool,
     /// W7-9 — the RAW bytes of a line `read_line` pulled off the fd but could not decode as UTF-8
     /// (terminator INCLUDED). `read_line -> Option[str]` is a str-only seam, so an undecodable line
     /// is not returnable — but it was already taken off the `BufReader`, and dropping it is the
@@ -1089,27 +1249,29 @@ impl ReaderCarry {
 /// handle/core split as [`SocketCore`] — an `Arc`'d core outside every heap, so a `spawn`ed fiber can
 /// alias one handle. `Option` so `close()` can take + drop the backing (flushing + closing an fd)
 /// while aliasing handles observe `None` — a use-after-close is then a clean fault, never a panic.
-/// `key` is a stable identity (like `SocketCore.key`); there is NO netpoller registration (regular
-/// files are always epoll-ready, so file writes are synchronous blocking syscalls — no park).
+/// `key` is a stable identity (like `SocketCore.key`); there is NO netpoller registration (file
+/// writes are synchronous blocking syscalls — no park).
 #[derive(Debug)]
 pub struct WriterCore {
     pub inner: Mutex<Option<Backing>>,
     pub key: usize,
+    /// The fd is a FIFO, a pipe or a device: a write can wait without end for its reader, so it
+    /// runs in the [`Vm::host_wait`] bracket. Fixed at the open; `false` for a console or an
+    /// `io.buffered` core, which reach their fd through an inner core.
+    pub waits: bool,
 }
 
 /// R2 — where a [`WriterCore`] sends bytes.
-/// * `File` — a `create`/`append` file writer. The `BufWriter` gives OS-level write buffering for free
-///   and **flushes on drop**, so an unclosed file writer never silently loses data.
+/// * `File` — a `create`/`append` file writer. M5c: unbuffered, as Go's `os.File`: each write is a
+///   `write(2)`, so an unclosed file writer holds no bytes to lose.
 /// * `Stdout`/`Stderr` — markers: a write ROUTES through [`Vm::emit_out`]/[`Vm::emit_err`] (the
 ///   captured `Vm.out` buffer / the streaming-CLI sink), NEVER a raw fd — else capture/streaming break.
 /// * `Buffered` — the Go `bufio.NewWriter` escape hatch: accumulate in `buf`, drain to `inner` on
-///   flush / buffer-full / close. A file-backed tail — `inner=File` **or** a nested `inner=Buffered`
-///   chain that bottoms out in one — is best-effort drained on drop by [`WriterCore`]'s `Drop`; a
-///   `Buffered{ inner=Stdout/Stderr }` tail CANNOT reach `&mut Vm` from `Drop`, so it is lost on drop
-///   (documented ceiling — needs an explicit `flush()`/`close()`).
+///   flush / buffer-full / close. M5d: a dropped `Buffered` core discards its tail, as Go's
+///   `bufio.Writer` does (no finalizer flushes it), so no drop of a writer writes to an fd.
 #[derive(Debug)]
 pub enum Backing {
-    File(std::io::BufWriter<std::fs::File>),
+    File(std::fs::File),
     Stdout,
     Stderr,
     Buffered {
@@ -1119,122 +1281,32 @@ pub enum Backing {
     },
 }
 
-impl Drop for WriterCore {
-    /// R2 — best-effort drop-flush for a `Buffered` tail (the extra `Vec<u8>` std's `BufWriter` drop
-    /// can't see). All four inner backings are handled: `File` → write+flush it; `Buffered` → append to
-    /// the inner's own buffer, whose `Drop` cascades it one level further down (a nested
-    /// `buffered(buffered(file))` chain is still file-backed, so it owes the same drop-flush);
-    /// `Stdout`/`Stderr` → dropped silently, it can't reach `&mut Vm` from here (`emit_out` needs it).
-    /// Must NEVER panic (a failed flush at GC/exit — ENOSPC — would abort the process): every error is
-    /// swallowed.
-    fn drop(&mut self) {
-        let Ok(mut guard) = self.inner.lock() else {
-            return;
-        };
-        if let Some(Backing::Buffered { inner, buf, .. }) = guard.as_mut() {
-            if buf.is_empty() {
-                return;
-            }
-            let drained = std::mem::take(buf);
-            if let Ok(mut ig) = inner.inner.lock() {
-                match ig.as_mut() {
-                    Some(Backing::File(bw)) => {
-                        use std::io::Write;
-                        let _ = bw.write_all(&drained).and_then(|()| bw.flush());
-                    }
-                    Some(Backing::Buffered { buf: ibuf, .. }) => ibuf.extend_from_slice(&drained),
-                    Some(Backing::Stdout) | Some(Backing::Stderr) | None => {}
-                }
-            }
-        }
-    }
-}
-
-/// The mutable inside of an [`ExecutorCore`]: the pending-task FIFO + the shut flag, behind one lock
-/// (one `Mutex` for both, so `submit`/`shutdown` see a consistent view and to avoid a `Mutex<bool>`).
+/// The mutable inside of an [`ExecutorCore`]: the shut flag. `submit` starts every job at once
+/// (decision D3), so the Executor holds no queue of its own.
 #[derive(Debug, Default)]
 pub struct ExecState {
-    /// PRIVATE on purpose — see [`ChanState::queue`].
-    queue: VecDeque<(usize, WireValue)>,
-    bytes: usize,
-    dirty: bool,
     pub shut: bool,
 }
 
-impl ExecState {
-    /// The eager (M:N) engine dispatches at `submit` rather than filling this queue (decision D3),
-    /// so it is permanently empty — but `len`/`iter`/`summary`/`clear` below are still live: the
-    /// `Executor` `Display` impl, the GC live-bytes walk and rooting pass, and `cancel` all
-    /// read or reset it unconditionally rather than special-case an executor that could — in a build
-    /// with a queueing decision — actually hold work. `push`/`pop`/`take_all` had no such reader left
-    /// once the queue-at-submit path was removed and are deleted; `is_empty` is kept as a trivial
-    /// wrapper purely for `clippy::len_without_is_empty` — it has no caller of its own.
-    pub fn clear(&mut self) {
-        self.queue.clear();
-        self.bytes = 0;
-        self.dirty = false;
-    }
-
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &WireValue> {
-        self.queue.iter().map(|(_, w)| w)
-    }
-
-    /// Cached GC summary of the queued tasks: `(approximate owned bytes, can-root-a-heap-object)`.
-    pub fn summary(&self) -> (usize, bool) {
-        (self.bytes, self.dirty)
-    }
-}
-
-/// W7-26 — one finished job's `(owned bytes, holds a nested core)`, the [`wire_summary`] of a
-/// [`TaskOutcome`](super::TaskOutcome). Every variant owns two buffered-output `Vec<u8>`s (W7-5c
-/// flushes them at the slot's task-order position, so they are retained until `shutdown`); only
-/// `Done` also owns a return value.
+/// W7-26 — the bytes one finished job's [`TaskOutcome`](super::TaskOutcome) holds outside every
+/// heap: two buffered-output `Vec<u8>`s (W7-5c flushes them at the slot's task-order position, so
+/// they are retained until `shutdown`). A job's return value is no part of it: `_run_outcome`
+/// seals it into the Task channel, a heap value (M3.2).
 ///
-/// Charged UNCONDITIONALLY, unlike the `mem_cap != 0` gates on `Vm::to_wire_crossable`'s pacing
-/// charge and `live_bytes`'s nested-core recursion. Those fire per-store / per-sweep; this fires
-/// once per finished job, beside a thread handoff and a condvar notify, right after that job's own
-/// `O(payload)` `to_wire` — so gating it would buy nothing and would make `live_bytes` mean two
-/// different things depending on a flag (both ancestors keep accounting live and the *limit*
-/// separate: Go's `runtime.MemStats` vs `GOMEMLIMIT`). [`ChanState::push`] charges unconditionally
-/// for the same reason.
-///
-/// Called OFF the `eager` lock (see [`the Executor's sched::finish`]) — the walk is O(result).
-pub(super) fn outcome_summary(o: &super::TaskOutcome) -> (usize, bool) {
+/// Charged UNCONDITIONALLY: both ancestors keep accounting live and the *limit* separate (Go's
+/// `runtime.MemStats` vs `GOMEMLIMIT`). Called OFF the `eager` lock (see the Executor's
+/// `sched::finish`).
+pub(super) fn outcome_summary(o: &super::TaskOutcome) -> usize {
     use super::TaskOutcome as T;
-    let (out, stderr, value) = match o {
-        T::Done(r) => (&r.out, &r.stderr, Some(&r.value)),
+    let (out, stderr) = match o {
+        T::Done(r) => (&r.out, &r.stderr),
         T::Cancelled { out, stderr }
         | T::CancelledFault { out, stderr, .. }
         | T::Exit { out, stderr, .. }
         | T::Fault { out, stderr, .. }
-        | T::Deadlocked { out, stderr, .. } => (out, stderr, None),
+        | T::Deadlocked { out, stderr, .. } => (out, stderr),
     };
-    let mut acc = (
-        std::mem::size_of::<super::TaskOutcome>() + out.capacity() + stderr.capacity(),
-        false,
-    );
-    if let Some(w) = value {
-        // The "no `Heap::children` eager arm" claim is an INVARIANT, not luck: a job's return value
-        // crossed via `to_wire_crossable`, whose `ensure_crossable` rejects a `Handle`. Fenced here
-        // rather than merely reasoned about in a comment — if this ever fires, the eager half can
-        // root a parent-heap object and `children` needs the arm `live_bytes` just gained.
-        debug_assert!(
-            !w.has_handle(),
-            "an eager job result carries a parent-heap Handle — Heap::children needs an eager arm"
-        );
-        let (b, d) = wire_summary(w);
-        acc.0 += b;
-        acc.1 |= d;
-    }
-    acc
+    std::mem::size_of::<super::TaskOutcome>() + out.capacity() + stderr.capacity()
 }
 
 /// W7-26r — the `--max-heap` verdict a finished task's own thread reaches when the RETAINED backlog
@@ -1311,9 +1383,8 @@ pub(super) fn halt_over_backlog(
 
 /// `Executor` core (B3.1 / C5 escape hatch): the explicitly-owned work queue. `submit` runs EAGERLY
 /// (the job goes straight to the pool, matching Python's `ThreadPoolExecutor` / Java's
-/// `ExecutorService`) and [`ExecState::queue`] stays empty — the pending work lives in `eager`.
-/// `shut` lives in the **shared** core, so any handle aliasing this core sees the same shutdown state
-/// (this is what prevents a `from_wire`'d alias from being drained twice at program exit).
+/// `ExecutorService`); the pending work lives in its scope's sched.
+/// `shut` lives in the **shared** core, so any handle on this core sees the same shutdown state.
 #[derive(Default)]
 pub struct ExecutorCore {
     /// At most this many jobs run at once; zero means no cap; set once at construction.
@@ -1336,8 +1407,8 @@ pub struct ExecutorCore {
     /// Every job dispatched from this core inherits it as its `cancel_outer`, so an outer
     /// `cancel()` reaches a nested executor's jobs (W7-39, `docs/reference/concurrency/` §Executor).
     ///
-    /// **Keyed on the CREATOR, never on the submitter.** An `Executor` value crosses the airlock by
-    /// `Arc`, so `submit` can be reached from a job of an entirely unrelated executor; keying on the
+    /// **Keyed on the CREATOR, never on the submitter.** Any task can hold an `Executor`
+    /// handle, so `submit` can be reached from a job of an entirely unrelated executor; keying on the
     /// submitter made *that* executor's `cancel()` kill a job belonging to `main`'s executor, and
     /// `main`'s own graceful `shutdown()` then returned with the work silently dropped.
     ///
@@ -1399,12 +1470,12 @@ impl std::fmt::Debug for ExecutorCore {
 /// walks (decision D1: an executor is detached, and the program waits for its work at exit).
 ///
 /// **Why this exists alongside `Vm.executors`** (W7-5b). `Vm.executors` is a `Vec<GcRef>`: heap-keyed,
-/// so it is swapped per fiber with its heap (`swap_ctx`) and an executor created INSIDE an M:N task
+/// so it is swapped per fiber (`swap_ctx`, under `owns_side`) and an executor created INSIDE an M:N task
 /// lands in that task's throwaway worker list, which is dropped when the task finishes. The top-level
 /// join therefore never saw it, and its work was silently lost. An `ExecutorCore` lives OUTSIDE every
 /// heap (B3.1), so a list of `Arc`s is heap-independent by construction: `spawn_worker` hands the SAME
 /// list to every worker, and an executor created anywhere in the run is visible to the one join.
-/// That is why closing W7-5b needs no change to `swap_ctx`'s heap-only gate — the change that a
+/// That is why closing W7-5b needs no change to `swap_ctx`'s `owns_side` gate — the change that a
 /// previous attempt stopped at because it drags in GC rooting for a parked parent ctx.
 ///
 /// Strong `Arc`s, not `Weak`: the whole point is to join work whose creating heap is already gone, so
@@ -1413,545 +1484,42 @@ impl std::fmt::Debug for ExecutorCore {
 /// "reap only those alive at exit" snapshot has always been push-only too.
 pub type ExecRegistry = Arc<Mutex<Vec<Arc<ExecutorCore>>>>;
 
-/// A core's `Arc` pointer identity, for the mark walk's visited-core set. `PartialEq`/`Hash` are
-/// hand-written rather than derived so the `#[cfg(test)]` probe counter in each has exactly one place
-/// to live (TICKET-049) — see [`SeenCores`].
-#[derive(Clone, Copy, Eq, Debug)]
-pub struct CoreId(pub usize);
-
-impl PartialEq for CoreId {
-    fn eq(&self, other: &Self) -> bool {
-        // TICKET-049 — charging the probe HERE, in the key type, means every dedup implementation
-        // (`contains`, `iter().any()`, a hand-written loop) is charged alike; a counter bumped only
-        // inside `SeenCores::insert` would stay green through a revert to a linear scan.
-        #[cfg(test)]
-        CORE_PROBES.with(|c| c.set(c.get() + 1));
-        self.0 == other.0
-    }
-}
-
-impl std::hash::Hash for CoreId {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        // TICKET-049 — see the comment on `eq`: charging here too means a hash-set dedup is charged
-        // once per insert attempt, matching a linear scan's once-per-comparison charge.
-        #[cfg(test)]
-        CORE_PROBES.with(|c| c.set(c.get() + 1));
-        self.0.hash(h);
-    }
-}
-
-/// The mark walk's visited-core set. The ONE membership operation (`insert`) lives at this single
-/// site so a linear-scan revert — deliberately measured at TICKET-049 step 7 — is a one-line edit
-/// here, not a six-site rewrite across every `WireValue` core arm.
-#[derive(Default, Debug)]
-pub struct SeenCores(super::fxhash::FxHashSet<CoreId>);
-
-impl SeenCores {
-    /// Build a set already containing `ptr` (the mark walk's own core, seeded before it walks its
-    /// payload).
-    pub fn with(ptr: usize) -> Self {
-        let mut s = Self::default();
-        s.insert(ptr);
-        s
-    }
-
-    /// Insert `ptr`; `true` iff it was not already present (same contract as `HashSet::insert`).
-    pub fn insert(&mut self, ptr: usize) -> bool {
-        self.0.insert(CoreId(ptr))
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// TICKET-049 — count of `CoreId::eq`/`CoreId::hash` calls, i.e. identity-comparison probes the
-    /// mark walk's dedup performs. Thread-local because `cargo test --lib` runs ~4 448 tests
-    /// concurrently at `RUST_TEST_THREADS=4`, and a process-global counter would be polluted by any
-    /// other test marking a core on another thread at the same time.
-    static CORE_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub fn probe_reset() {
-    CORE_PROBES.with(|c| c.set(0));
-}
-
-#[cfg(test)]
-pub fn probes() -> u64 {
-    CORE_PROBES.with(|c| c.get())
-}
-
-/// B3.1 GC support — collect every `GcRef` reachable from a core's wire contents into `out`, so the
-/// heap's `children()` can keep those heap objects rooted. A core's `WireValue`s can still carry
-/// `Handle(GcRef)`s into the live heap (an `Executor` queues `Closure` handles — closures can't cross
-/// by value until B3.3/G1; a `Channel[str]` now queues owned bytes (B3.3a), rooting nothing).
-///
-/// It **recurses into nested cores** (a `Channel` stored inside a `Shared`, etc.): a nested core may
-/// be reachable *only* through its parent core (its own heap handle already swept), so its embedded
-/// handles would dangle if we stopped at the boundary. `seen` (core identities by `Arc` pointer)
-/// breaks the `Arc` reference cycles decision E warns about — a cycle is walked once, not forever.
-pub fn collect_core_gcrefs(w: &WireValue, out: &mut Vec<GcRef>, seen: &mut SeenCores) {
-    // ONE core lock at a time — see the ABBA note on `collect_gcrefs_structural`. Callers that
-    // already hold a core's guard must NOT use this entry point: they call
-    // `collect_gcrefs_structural` under their guard, drop it, then `drain_pending_cores`.
-    let mut pending: Vec<WireValue> = Vec::new();
-    collect_gcrefs_structural(w, out, seen, &mut pending);
-    drain_pending_cores(out, seen, &mut pending);
-}
-
-/// Drain the nested cores queued by [`collect_gcrefs_structural`], locking exactly ONE at a time.
-///
-/// **Call this with NO core guard held.** `Heap::children` locks a core to read its payload, so if it
-/// drained while still holding that guard it would hold two core locks at once and the ABBA window
-/// stays open — which is exactly what a first attempt at this fix measured: unchanged at 8/40 hangs.
-///
-/// **Why dropping the guard between cores cannot UNDER-ROOT.** Splitting the walk means core X and a
-/// nested core Y are no longer read under one atomic pair of locks, so in principle a store could move
-/// a `Handle` from Y to X after X was walked and before Y is — invisible to both halves. That cannot
-/// happen for a handle belonging to the heap being marked: heaps are **per-fiber/per-worker**
-/// (`Vm::heap`, swapped by `Vm::swap_ctx`) and a collection runs **synchronously on the owning worker**
-/// from its own instruction loop (`Vm::collect` at `exec.rs`'s `should_collect()` check), so while this
-/// heap is marking, the fiber that owns it is not running user code and cannot be mid-move. Another
-/// worker concurrently moving handles is moving handles of ITS heap, which this mark does not root.
-/// What the old code bought with the second lock was cross-core atomicity that this invariant already
-/// provides — at the cost of the deadlock above. Probed as well as argued: a 400-node cyclic graph
-/// under 60k allocations, a diamond (one node reachable by two paths), and handles moved between cores
-/// under concurrent mutation all report 0 corruption on both profiles at 2/4/8 workers, with the
-/// `debug_assert` in `Heap::mark_core_payload` re-deriving the verdict on every debug-build pass.
-pub fn drain_pending_cores(
-    out: &mut Vec<GcRef>,
-    seen: &mut SeenCores,
-    pending: &mut Vec<WireValue>,
-) {
-    while let Some(core) = pending.pop() {
-        match &core {
-            WireValue::Channel(c) => {
-                let q = c.q.lock().unwrap();
-                for w in q.iter() {
-                    collect_gcrefs_structural(w, out, seen, pending);
-                }
-            }
-            // TICKET-246 — a `Shared` holds its value in its own heap: no handle to collect, no lock.
-            WireValue::Shared(_) => {}
-            WireValue::RwShared(_) => {}
-            WireValue::Atomic(c) => {
-                let v = c.v.lock().unwrap();
-                collect_gcrefs_structural(&v, out, seen, pending);
-            }
-            WireValue::Executor(c) => {
-                let q = c.inner.lock().unwrap();
-                for w in q.iter() {
-                    collect_gcrefs_structural(w, out, seen, pending);
-                }
-            }
-            // `pending` only ever receives the five core variants above.
-            WireValue::Int(_)
-            | WireValue::Float(_)
-            | WireValue::Bool(_)
-            | WireValue::Nil
-            | WireValue::List { .. }
-            | WireValue::Tuple { .. }
-            | WireValue::Map { .. }
-            | WireValue::Set { .. }
-            | WireValue::Str(_)
-            | WireValue::Bytes(_)
-            | WireValue::ByteArray(_)
-            | WireValue::Iter { .. }
-            | WireValue::Struct { .. }
-            | WireValue::Enum { .. }
-            | WireValue::Cell { .. }
-            | WireValue::Backref(_)
-            | WireValue::Handle(_)
-            | WireValue::AtomicInt(_)
-            | WireValue::Socket(_)
-            | WireValue::Listener(_)
-            | WireValue::Writer(_)
-            | WireValue::Reader(_)
-            | WireValue::Ptr(_)
-            | WireValue::Builtin(_)
-            | WireValue::Native { .. }
-            | WireValue::Cffi(_)
-            | WireValue::Closure { .. }
-            | WireValue::Func { .. }
-            | WireValue::Generator { .. } => {}
-        }
-        // The guard above is dropped HERE, before the next core is locked. That is the whole fix.
-    }
-}
-
-/// The lock-free half of [`collect_core_gcrefs`]: walk one already-locked `WireValue` structurally,
-/// pushing `Handle`s into `out` and QUEUEING any nested core into `pending` instead of locking it.
-///
-/// **Never lock a core from in here.** This function runs with a core's payload guard held, and the
-/// walk used to recurse straight into a nested core's lock while holding it. With a CYCLIC core graph
-/// two workers marking concurrently then took the same two locks in opposite orders — a textbook ABBA
-/// deadlock: every thread parked in `futex_do_wait` at 0% CPU, no deadlock report, unkillable by
-/// `--timeout`. Measured on the fixture in `docs/contributing/benchmarks.md` (a `Channel` whose queued struct
-/// reaches back to it): ~20% of runs at `CHEZZI_THREADS>=2`, 0% at `=1`, 0% with the cycle removed,
-/// 0% with allocation (hence GC) removed.
-pub fn collect_gcrefs_structural(
-    w: &WireValue,
-    out: &mut Vec<GcRef>,
-    seen: &mut SeenCores,
-    pending: &mut Vec<WireValue>,
-) {
-    match w.visit(|x| collect_gcrefs_structural(x, out, seen, pending)) {
-        WireNode::Handle(g) => out.push(g),
-        // A nested core is QUEUED, never locked here — `seen` keeps each one queued at most once,
-        // which is also what terminates a cyclic core graph. Cloning the variant is an `Arc` refcount
-        // bump, and it is what keeps the core alive between the queue and the drain.
-        WireNode::Core(id) => {
-            if seen.insert(id) {
-                pending.push(w.clone());
-            }
-        }
-        // A data node's children were walked above. A `Backref` has none: its target is walked
-        // elsewhere in the same graph, which also ends the walk on a cyclic wire graph.
-        WireNode::Data { .. } => {}
-    }
-}
-
-/// [`WireSummary`] state: never walked (or invalidated) — the GC must walk and then memoize. This is
-/// the `Default`, so any core built without going through a store path degrades to today's behaviour
-/// (a full walk) rather than to an under-rooted heap.
-pub const WS_UNKNOWN: u8 = 0;
-/// [`WireSummary`] state: the payload provably holds no `Handle` and no nested core — the GC skips it.
-pub const WS_CLEAN: u8 = 1;
-/// [`WireSummary`] state: the payload may root a heap object — walk it, every pass, never memoize.
-pub const WS_DIRTY: u8 = 2;
-
-/// W6-7/W6-10 — the cached GC summary of a single-value core's payload (`Shared`/`RwShared`/`Atomic`).
-///
-/// `state` answers "can the GC skip this subtree?" and `bytes` feeds `--max-heap` (an airlocked
-/// `WireValue` lives in an `Arc` **outside** every [`Heap`](super::heap::Heap), so `live_bytes` used to
-/// count it nowhere). Both are computed by ONE [`wire_summary`] walk at STORE time — the payload of
-/// these cores is *replaced*, not mutated in place, so every write path must call [`set`](Self::set)
-/// **while holding the same value lock as the write**: a stale `CLEAN` would stop the GC tracing a live
-/// handle. A `debug_assert` in `Heap::children` re-verifies the memo on every debug-build GC pass.
-#[derive(Debug, Default)]
-pub struct WireSummary {
-    state: AtomicU8,
-    bytes: AtomicUsize,
-}
-
-impl WireSummary {
-    pub fn state(&self) -> u8 {
-        self.state.load(Ordering::Relaxed)
-    }
-
-    pub fn bytes(&self) -> usize {
-        self.bytes.load(Ordering::Relaxed)
-    }
-
-    /// Record the summary of a payload that has just been stored (absolute, not incremental).
-    pub fn set(&self, w: &WireValue) {
-        let (b, dirty) = wire_summary(w);
-        self.store(b, dirty);
-    }
-
-    /// Record an already-computed summary (the lazy GC fill path).
-    pub fn store(&self, bytes: usize, dirty: bool) {
-        self.bytes.store(bytes, Ordering::Relaxed);
-        self.state
-            .store(if dirty { WS_DIRTY } else { WS_CLEAN }, Ordering::Relaxed);
-    }
-}
-
-/// W6-7/W6-10 — ONE walk of a stored wire payload yielding both GC facts: `(approximate owned bytes,
-/// can-root-a-heap-object)`.
-///
-/// **This is NOT [`WireValue::has_handle`]**, and the two must never be merged. `has_handle` answers an
-/// *airlock* question ("may this value cross?") and deliberately returns `false` for the nested
-/// `Channel`/`Shared`/`RwShared`/`Atomic`/`Executor` arms — those cross by shared `Arc`. [`collect_core_gcrefs`]
-/// (right above) *recurses into* them, because a nested core may be reachable only through its parent and
-/// its embedded handles would dangle otherwise. So a cached `has_handle` verdict would be a use-after-free.
-/// Here a nested core is therefore **always dirty**, and the walk STOPS at that boundary.
-///
-/// The byte half of that stop is completed by [`nested_core_bytes`] (gaps.md `W6-10r`, FIXED
-/// 2026-08-06), NOT by this function: a nested core's bytes belong to that core's own summary, and
-/// `Heap::live_bytes` used to reach them only through its `Obj::*` alias slot — so a nested core
-/// whose last alias slot had been swept was counted NOWHERE. `live_bytes` now runs the cross-core
-/// byte recursion (`Arc`-de-duped, under a live `--max-heap` only); the walk here still stops.
-/// That closed `W6-10r`, not the cap in general — an `Executor`'s eager half followed in `W7-26`
-/// (FIXED 2026-08-06, both here and in `nested_core_bytes`). The inline-scalar escape
-/// (`future.md §1b`) and the join-window sampling residual (`W7-26r`) are FIXED too — `W7-28`
-/// 2026-08-07 and `W7-26r` 2026-08-06 — as is `W6-10s` residual (a) (a task whose whole body is one
-/// native call reached no instruction boundary), fixed by `W7-29` 2026-08-07: `Vm::start_task`
-/// samples the cap before dispatch, with the pending call's operands rooted on the operand stack.
-/// (Since TICKET-235 such a task runs behind an entry thunk and has a frame; the sample stays.)
-///
-/// The children and the per-node bytes come from [`WireValue::visit`], the one owner of what a variant holds.
-pub fn wire_summary(w: &WireValue) -> (usize, bool) {
-    let mut acc = (std::mem::size_of::<WireValue>(), false);
-    match w.visit(|x| {
-        let (b, d) = wire_summary(x);
-        acc.0 += b;
-        acc.1 |= d;
-    }) {
-        WireNode::Handle(_) => acc.1 = true,
-        // A nested core: conservatively dirty (a store on the INNER core can introduce a handle
-        // without ever touching this one's cache), and the walk stops here.
-        WireNode::Core(_) => acc.1 = true,
-        WireNode::Data { bytes } => acc.0 += bytes,
-    }
-    acc
-}
-
-/// W6-10r — the BYTE mirror of [`collect_core_gcrefs`]: sum the cached byte counts of every core
-/// nested inside `w`, so `--max-heap` sees a payload that is reachable ONLY through another core.
-///
-/// [`wire_summary`] deliberately stops at a nested-core boundary (those bytes belong to that core's
-/// own summary), and [`Heap::live_bytes`](super::heap::Heap::live_bytes) reaches a core's summary
-/// only through its `Obj::*` alias slot. A nested core whose last alias slot has been swept — it
-/// survives inside this payload's `Arc` — therefore used to be counted **nowhere**: a `Channel`
-/// parked in a `Shared` backlogged 304 MB past an 8 MB cap and PASSED. Rooting was never affected
-/// ([`collect_core_gcrefs`] does recurse); only the byte walk stopped.
-///
-/// `seen` is the caller's per-heap `Arc`-identity set, SHARED with `live_bytes`'s own per-slot
-/// de-dup: a nested core that also has an alias slot in this heap is charged exactly once, whichever
-/// way it is met first. It also terminates `Arc` cycles (the reason [`visit_core`] exists).
-///
-/// Only entered under a live `mem_cap` (see `live_bytes`) — with no cap `over_cap` is meaningless and
-/// this walk is pure cost.
-///
-/// The children come from [`WireValue::visit`], which [`collect_core_gcrefs`] and [`wire_summary`] read too.
-///
-/// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
-/// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
-/// A caller that already holds a guard calls the `_structural` half under it, drops it, then drains.
-pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usize>) -> usize {
-    let mut pending: Vec<WireValue> = Vec::new();
-    let acc = nested_core_bytes_structural(w, seen, &mut pending);
-    acc + drain_pending_core_bytes(seen, &mut pending)
-}
-
-/// TICKET-246 — the bytes reachable through one box under a live cap. `ctx` is the box context
-/// when the caller got the state lock WITHOUT waiting (`try_lock` / `try_read`): the box heap is
-/// then walked with the caller's `seen` set and its nested cores are queued into `pending`. When
-/// the lock is busy (a closure is running in the box) the walk declines and reads `fallback`, the
-/// figure the box stored at its last settle. Never take the state lock blocking from an accounting
-/// walk: it is held across user code, and a collection can start inside that code.
-pub(super) fn box_bytes(
-    ctx: Option<&super::FiberCtx>,
-    fallback: &AtomicUsize,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    match ctx.and_then(|c| c.heap.as_ref()) {
-        Some(heap) => heap.bytes_with(true, seen, pending),
-        None => fallback.load(Ordering::Relaxed),
-    }
-}
-
-/// Bytes owned by the cores queued by the structural byte walk, locking exactly ONE at a time.
-///
-/// **Call with NO core guard held**, for the same reason as [`drain_pending_cores`]: this walk is the
-/// byte-accounting twin of the rooting walk and had the identical ABBA shape — a parent core's guard
-/// held while a child's lock was taken. It is reached through `--max-heap` (`Heap::live_bytes`'s
-/// `deep` branch), so before this split a cyclic core graph could hang the very mechanism whose job is
-/// to abort a runaway run. Measured pre-split: `chezzi test --max-heap=100000000` on a cyclic-core
-/// fixture at `CHEZZI_THREADS=4` hung 1/40 runs, versus 0/20 for the same program without the cap.
-pub fn drain_pending_core_bytes(
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    let mut acc = 0usize;
-    while let Some(core) = pending.pop() {
-        match &core {
-            WireValue::Channel(c) => {
-                let g = c.q.lock().unwrap();
-                acc += queue_bytes_structural(g.summary(), g.iter(), seen, pending);
-            }
-            // W7-26 — the queue half under its own scoped guard, then `ExecutorCore::held_bytes` (the
-            // one facade `Heap::live_bytes`'s `Obj::Executor` arm reads too), never both held at once.
-            // Both halves are charged here because `seen` is SHARED with `live_bytes`: whichever walk
-            // meets a core first is the only one that charges it. Measured during W7-26 review: an
-            // executor holding 880 400 bytes of eager results, reached through an `Obj::Shared`
-            // payload, was counted as 240 when this arm read one half.
-            WireValue::Executor(c) => {
-                let queued = {
-                    let g = c.inner.lock().unwrap();
-                    queue_bytes_structural(g.summary(), g.iter(), seen, pending)
-                };
-                acc += queued + c.held_bytes();
-            }
-            WireValue::Shared(c) => {
-                let g = c.state.0.try_lock().ok();
-                let ctx = g.as_ref().and_then(|g| g.as_deref());
-                acc += box_bytes(ctx, &c.bytes, seen, pending);
-            }
-            WireValue::RwShared(c) => {
-                let g = c.state.try_read();
-                let ctx = g.as_ref().and_then(|g| g.as_deref());
-                acc += box_bytes(ctx, &c.bytes, seen, pending);
-            }
-            WireValue::Atomic(c) => {
-                let g = c.v.lock().unwrap();
-                acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
-            }
-            // `pending` only ever receives the five core variants above.
-            WireValue::Int(_)
-            | WireValue::Float(_)
-            | WireValue::Bool(_)
-            | WireValue::Nil
-            | WireValue::List { .. }
-            | WireValue::Tuple { .. }
-            | WireValue::Map { .. }
-            | WireValue::Set { .. }
-            | WireValue::Str(_)
-            | WireValue::Bytes(_)
-            | WireValue::ByteArray(_)
-            | WireValue::Iter { .. }
-            | WireValue::Struct { .. }
-            | WireValue::Enum { .. }
-            | WireValue::Cell { .. }
-            | WireValue::Backref(_)
-            | WireValue::Handle(_)
-            | WireValue::AtomicInt(_)
-            | WireValue::Socket(_)
-            | WireValue::Listener(_)
-            | WireValue::Writer(_)
-            | WireValue::Reader(_)
-            | WireValue::Ptr(_)
-            | WireValue::Builtin(_)
-            | WireValue::Native { .. }
-            | WireValue::Cffi(_)
-            | WireValue::Closure { .. }
-            | WireValue::Func { .. }
-            | WireValue::Generator { .. } => {}
-        }
-        // Guard dropped HERE, before the next core is locked.
-    }
-    acc
-}
-
-/// The lock-free half of [`nested_core_bytes`]: walk one already-locked payload, QUEUEING nested cores
-/// into `pending` instead of locking them. **Never lock a core from in here.**
-fn nested_core_bytes_structural(
-    w: &WireValue,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    let mut acc = 0usize;
-    match w.visit(|x| acc += nested_core_bytes_structural(x, seen, pending)) {
-        // A nested core: queue it, so `drain_pending_core_bytes` charges its payload ONCE per heap
-        // and keeps recursing (a core nested two deep is just as invisible as one nested once).
-        WireNode::Core(id) => {
-            if seen.insert(id) {
-                pending.push(w.clone());
-            }
-        }
-        // A handle owns no nested core; a data node's children were walked above.
-        WireNode::Handle(_) | WireNode::Data { .. } => {}
-    }
-    acc
-}
-
-/// W6-10r — a queue core's own bytes PLUS every core nested in its messages. Takes the summary and
-/// the messages rather than the state, so the identically-shaped [`ChanState`] and [`ExecState`]
-/// share one implementation.
-///
-/// The `(bytes, dirty)` summary is maintained incrementally by `push`/`pop`, so the walk is skipped
-/// outright for a clean queue.
-///
-/// `dirty` is conservative for this purpose: it is also set by a bare `Handle`, so a queue of plain
-/// heap references is walked and finds nothing.
-/// `ponytail: one bit conflates "has a handle" with "has a nested core"` — splitting them means a
-/// third field threaded through `WireSummary` and `ChanState::push`'s tuple at every call site; do it
-/// only if a profile says this walk matters.
-///
-/// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
-/// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
-/// A caller that already holds a guard calls the `_structural` half under it, drops it, then drains.
-pub fn queue_bytes_deep<'a>(
-    summary: (usize, bool),
-    msgs: impl Iterator<Item = &'a WireValue>,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-) -> usize {
-    let mut pending: Vec<WireValue> = Vec::new();
-    let acc = queue_bytes_structural(summary, msgs, seen, &mut pending);
-    acc + drain_pending_core_bytes(seen, &mut pending)
-}
-
-/// The lock-free half of [`queue_bytes_deep`] — call it under the queue's guard, then drop the guard
-/// and call [`drain_pending_core_bytes`].
-pub fn queue_bytes_structural<'a>(
-    summary: (usize, bool),
-    msgs: impl Iterator<Item = &'a WireValue>,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    let (bytes, dirty) = summary;
-    if !dirty {
-        return bytes;
-    }
-    bytes
-        + msgs
-            .map(|w| nested_core_bytes_structural(w, seen, pending))
-            .sum::<usize>()
-}
-
-/// W6-10r — a single-value core's own bytes PLUS every core nested in its payload. Call with the
-/// payload lock held.
-///
-/// A `WS_UNKNOWN` summary is filled here (exactly as [`Heap::children`](super::heap::Heap::children)
-/// fills it during marking): every core CONSTRUCTOR leaves it `UNKNOWN`, and a core reachable only
-/// through a parent is never marked through an alias slot of its own — so without this fill it would
-/// report 0 bytes forever, which is the very hole being closed.
-///
-/// **Do NOT call this while holding any core's payload guard** — it drains nested cores, which locks
-/// them, and holding a second core lock is the ABBA deadlock `drain_pending_core_bytes` documents.
-/// A caller that already holds a guard calls the `_structural` half under it, drops it, then drains.
-pub fn value_core_bytes_deep(
-    summary: &WireSummary,
-    w: &WireValue,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-) -> usize {
-    let mut pending: Vec<WireValue> = Vec::new();
-    let acc = value_core_bytes_structural(summary, w, seen, &mut pending);
-    acc + drain_pending_core_bytes(seen, &mut pending)
-}
-
-/// The lock-free half of [`value_core_bytes_deep`] — call it under the payload guard, then drop the
-/// guard and call [`drain_pending_core_bytes`].
-pub fn value_core_bytes_structural(
-    summary: &WireSummary,
-    w: &WireValue,
-    seen: &mut super::fxhash::FxHashSet<usize>,
-    pending: &mut Vec<WireValue>,
-) -> usize {
-    if summary.state() == WS_UNKNOWN {
-        summary.set(w);
-    }
-    let bytes = summary.bytes();
-    if summary.state() == WS_DIRTY {
-        bytes + nested_core_bytes_structural(w, seen, pending)
-    } else {
-        bytes
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
 
-    /// TICKET-219 — a sealed channel is a handle's one outcome record: every receive copies the
-    /// value and takes nothing, `len()` stays 1, the first seal wins, and a `send` faults closed.
+    /// TICKET-219 / M3.2 — a sealed channel is a handle's one outcome record: every receive reads
+    /// the one value and takes nothing, `len()` stays 1, the first seal wins, and a `send` faults
+    /// closed. A text seal stays unbuilt until a receive builds it; then it is that one value.
     #[test]
-    fn sealed_channel_receive_copies_and_refuses_a_second_seal() {
+    fn sealed_channel_receive_shares_and_refuses_a_second_seal() {
         let mut q = ChanState::default();
-        assert!(q.seal((8, false), WireValue::Int(7)));
+        assert!(q.seal(Value::int(7)));
         assert!(q.is_sealed());
-        assert!(matches!(q.pop(), Some(WireValue::Int(7))));
-        assert!(matches!(q.pop(), Some(WireValue::Int(7))));
+        assert_eq!(q.pop(), Some(Value::int(7)));
+        assert_eq!(q.pop(), Some(Value::int(7)));
         assert_eq!(q.len(), 1);
         assert!(q.recv_ready_for(None));
-        assert!(!q.seal((8, false), WireValue::Int(9)));
-        assert!(matches!(q.pop(), Some(WireValue::Int(7))));
+        assert!(!q.seal(Value::int(9)));
+        assert!(!q.seal_err("late"));
+        assert_eq!(q.pop(), Some(Value::int(7)));
         assert!(matches!(
-            q.send(Some(1), (8, false), WireValue::Int(1), None),
+            q.send(Some(1), Value::int(1), None),
             SendOutcome::Closed
         ));
+
+        let mut e = ChanState::default();
+        assert!(e.seal_err("task cancelled"));
+        assert!(e.recv_ready_for(None), "an unbuilt outcome is ready");
+        assert_eq!(e.pop(), None);
+        assert_eq!(e.unbuilt_outcome(), Some("task cancelled"));
+        assert!(!e.seal(Value::int(1)), "the text seal won");
+        e.build_outcome(Value::int(3));
+        e.build_outcome(Value::int(4));
+        assert_eq!(e.unbuilt_outcome(), None);
+        assert_eq!(e.pop(), Some(Value::int(3)));
+        assert_eq!(e.len(), 1);
     }
 
     /// D6 — every `SocketCore`/`ListenerCore` gets a fresh, distinct poll key (the ABA-avoiding
@@ -1983,150 +1551,5 @@ mod tests {
             s2.listener.lock().unwrap().is_some(),
             "a fresh listener core is open"
         );
-    }
-
-    /// W6-1 sibling — the drop-flush must walk a NESTED `buffered(buffered(file))` chain, not just a
-    /// one-level `Buffered{inner=File}`. `docs/reference/stdlib/` promises a **file**-backed buffered writer's
-    /// tail is recovered on drop, and a transitively file-backed chain is file-backed. Rust-only:
-    /// `assert` can't observe drop timing (the Chezzi suite covers the explicit `flush`/`close` path).
-    #[test]
-    fn drop_flushes_a_nested_buffered_chain_to_the_file() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("chz_nested_drop_{}.txt", std::process::id()));
-        let file = std::fs::File::create(&path).unwrap();
-        let inner = Arc::new(WriterCore {
-            inner: Mutex::new(Some(Backing::File(std::io::BufWriter::new(file)))),
-            key: next_poll_key(),
-        });
-        let mid = Arc::new(WriterCore {
-            inner: Mutex::new(Some(Backing::Buffered {
-                inner: Arc::clone(&inner),
-                buf: Vec::new(),
-                cap: 8,
-            })),
-            key: next_poll_key(),
-        });
-        let outer = Arc::new(WriterCore {
-            inner: Mutex::new(Some(Backing::Buffered {
-                inner: Arc::clone(&mid),
-                buf: b"abc".to_vec(),
-                cap: 4,
-            })),
-            key: next_poll_key(),
-        });
-        drop(outer);
-        drop(mid);
-        drop(inner);
-        let got = std::fs::read(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(got, b"abc", "a nested buffered chain must drop-flush");
-    }
-
-    /// TICKET-049 — the mark walk's dedup cost must scale linearly with rooted core depth, never
-    /// quadratically: charge one probe per `CoreId` comparison (`CoreId::eq`/`hash`), never a
-    /// wall-clock sample. Doubling depth must not more than double the probe count; a linear-scan
-    /// dedup (measured ratio ~4.0) would fail this, a hash-set dedup (measured ratio ~2.0) passes.
-    #[test]
-    fn mark_walk_dedup_is_linear_in_core_chain_depth() {
-        fn chain(depth: usize) -> WireValue {
-            let mut w = WireValue::Nil;
-            for _ in 0..depth {
-                let core: Arc<ChannelCore> = Arc::new(ChannelCore::default());
-                let sum = wire_summary(&w);
-                core.q.lock().unwrap().push(sum, w);
-                w = WireValue::Channel(core);
-            }
-            w
-        }
-
-        fn probe_cost(depth: usize) -> u64 {
-            let w = chain(depth);
-            probe_reset();
-            let mut out = Vec::new();
-            let mut seen = SeenCores::default();
-            collect_core_gcrefs(&w, &mut out, &mut seen);
-            probes()
-        }
-
-        let shallow = probe_cost(1000);
-        let deep = probe_cost(2000);
-        assert!(
-            shallow > 0,
-            "the dedup must charge a probe per visited core"
-        );
-        assert!(
-            deep * 10 < shallow * 28,
-            "doubling rooted core depth must not more than double the mark walk's dedup cost (a \
-             linear scan is ~4.0, the hash set ~2.0): got {shallow} probes -> {deep} probes"
-        );
-    }
-}
-
-#[cfg(test)]
-mod summary_tests {
-    use super::*;
-
-    fn list(items: Vec<WireValue>) -> WireValue {
-        WireValue::List { id: 0, items }
-    }
-
-    /// W6-7/W6-10 — one walk yields both GC facts: approximate owned bytes, and whether the payload
-    /// can root a heap object (a `Handle`, or ANY nested core that might come to hold one).
-    #[test]
-    fn wire_summary_bytes_and_dirtiness() {
-        let node = std::mem::size_of::<WireValue>();
-        let (b, d) = wire_summary(&list((0..1000).map(WireValue::Int).collect()));
-        assert!(b >= 1000 * node, "1000 ints must be counted: {b}");
-        assert!(!d, "pure ints root nothing");
-
-        let (_, d) = wire_summary(&list(vec![WireValue::Handle(GcRef(0))]));
-        assert!(d, "a nested Handle is dirty");
-
-        // A nested core is ALWAYS dirty (it may gain a handle via its OWN store, invisible here)
-        // and its bytes stop at the boundary.
-        let inner = Arc::new(AtomicCore {
-            v: Mutex::new(list((0..1000).map(WireValue::Int).collect())),
-            ..Default::default()
-        });
-        let (b, d) = wire_summary(&list(vec![WireValue::Atomic(inner)]));
-        assert!(d, "a nested core is conservatively dirty");
-        assert!(
-            b < 1000 * node,
-            "nested-core bytes must NOT be included: {b}"
-        );
-
-        // A self-cycle terminates on `Backref` (this test completing IS the assertion).
-        let (_, _) = wire_summary(&WireValue::List {
-            id: 1,
-            items: vec![WireValue::Backref(1)],
-        });
-
-        // Owned bytes of the by-value scalar arms are counted.
-        let (b, _) = wire_summary(&WireValue::Str("hello".into()));
-        assert_eq!(b, node + 5);
-        let (b, _) = wire_summary(&WireValue::Bytes(vec![1u8; 32].into()));
-        assert_eq!(b, node + 32);
-        let (b, _) = wire_summary(&WireValue::ByteArray(vec![1u8; 7].into()));
-        assert_eq!(b, node + 7);
-    }
-
-    /// The cached summary: `Default` is UNKNOWN (walk), a store is absolute, and it is fail-safe in
-    /// the UNKNOWN direction only.
-    #[test]
-    fn wire_summary_state_transitions() {
-        let s = WireSummary::default();
-        assert_eq!(s.state(), WS_UNKNOWN);
-        assert_eq!(s.bytes(), 0);
-
-        s.set(&list((0..10).map(WireValue::Int).collect()));
-        assert_eq!(s.state(), WS_CLEAN);
-        assert!(s.bytes() > 0);
-
-        s.set(&list(vec![WireValue::Handle(GcRef(3))]));
-        assert_eq!(s.state(), WS_DIRTY);
-
-        // A store is ABSOLUTE — a dirty payload replaced by a clean one goes back to CLEAN.
-        s.set(&WireValue::Int(1));
-        assert_eq!(s.state(), WS_CLEAN);
     }
 }

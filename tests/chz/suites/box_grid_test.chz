@@ -70,11 +70,12 @@ test fn display_box_contents_are_structural_no_user_str_hook():
     s := Shared(P(1))
     assert "{s}" == "Shared(P(x=1))"
 
-# ---- Section Shared: the value lives in the box's private heap ----
+# ---- Section Shared: the box holds one value by handle, behind one guard (M3.3) ----
 #
 # Grid: method {update, read, get, set} x value {int, str, List, Map, Set, struct with a mutating
 # method, nested struct, a value holding a closure} x callers {1, 8}. The closure rule cells
-# (captures are copies, globals are the caller's as of the call) and the self re-entry cells follow.
+# (the closure runs in the caller's task: captures and globals are the caller's) and the self
+# re-entry cells follow.
 
 fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
@@ -233,6 +234,8 @@ test fn shared_eight_callers_lose_no_update():
     assert s.read(fn(a): a.log.len()) == 400
     assert n.get() == 400
 
+# A reader under the guard sees a whole value. M3.3: `get()` returns the live value, so a read of
+# it outside the guard races the writers (the user's bug, as in Go); the row reads under `read`.
 test fn shared_eight_readers_see_a_whole_value():
     s := Shared(Acc(3, [1, 2, 3]))
     bad: Shared[int] = Shared(0)
@@ -240,9 +243,6 @@ test fn shared_eight_readers_see_a_whole_value():
         for i in 0..8:
             spawn:
                 for j in 0..20:
-                    g := s.get()
-                    if g.n != g.log.len():
-                        bad.update(fn(x): x + 1)
                     if s.read(fn(a): a.n - a.log.len()) != 0:
                         bad.update(fn(x): x + 1)
                     s.update(fn(a): a.add(1))
@@ -278,13 +278,13 @@ test fn shared_closure_reads_an_aggregate_global():
     s.update(fn(x): x + DEFAULTS.len())
     assert s.get() == 3
 
-test fn shared_captured_local_is_a_copy_a_write_through_a_callee_faults():
+# M3.3: the closure runs in the caller's task, so a write to a capture lands (Go: a closure that
+# appends to a captured slice under `mu.Lock()`).
+test fn shared_captured_local_write_through_a_callee_lands():
     s := Shared(10)
     seen: List[int] = []
-    r := recover: s.update(fn(x): keep(seen, x))
-    fault := msg_of(r, "captured write")
-    assert fault.starts_with("this value is this task's copy:"), fault
-    assert seen == []
+    s.update(fn(x): keep(seen, x))
+    assert seen == [10]
     assert s.get() == 10
 
 test fn shared_captured_local_read_is_fine():
@@ -313,22 +313,23 @@ test fn shared_read_set_update_inside_its_own_update_fault():
     assert msg_of(r4, "get in read").contains("already holds the update guard")
     assert s.get() == 10
 
-test fn shared_print_of_itself_inside_its_own_update_faults():
+# M3.3: a print reads the box's one slot and takes no guard (Go's `fmt` takes no lock), so a box
+# prints inside its own `update`.
+test fn shared_print_of_itself_inside_its_own_update_prints_the_value():
     s := Shared(10)
-    r := recover: s.update(fn(x): show_self(s, x))
-    fault := msg_of(r, "self print")
-    assert fault.contains("already holds the update guard"), fault
+    s.update(fn(x): show_self(s, x))
     assert s.get() == 10
 
-test fn shared_get_result_is_the_callers_own_value():
+# M3.3: `get` and `read` return the live value (Go `handle/main.go`: `shared_get_write 2`).
+test fn shared_get_result_is_the_live_value():
     s: Shared[List[int]] = Shared([1])
     g := s.get()
     g.push(2)
     assert g == [1, 2]
-    assert s.get() == [1]
+    assert s.get() == [1, 2]
     r := s.read(fn(xs): xs)
     r.push(3)
-    assert s.get() == [1]
+    assert s.get() == [1, 2, 3]
 
 struct Ctr:
     inc: fn() -> None
@@ -342,32 +343,24 @@ fn make_ctr() -> Ctr:
         return n
     return Ctr(inc, get)
 
-# TICKET-291: true when `g()` faults because it writes a binding it holds only a copy of.
-fn copy_fault(g: fn() -> None) -> bool:
-    res := recover: g()
-    match res:
-        ?_: return false
-        !e: return e.message().contains("is this task's copy")
-
 fn bump_ctr(c: Ctr) -> Ctr:
     c.inc()
     return c
 
-# A value holding closures over ONE captured cell. Stored into the box it is the box's own
-# value: the closure's write to its cell inside `update` persists. Handed out by `get` / `read`
-# it is a copy of the box's binding, so a write through it would be lost and faults (TICKET-291).
-test fn shared_closure_over_a_cell_is_owned_by_whoever_holds_it():
+# A value holding closures over ONE captured cell. M3.3: the box holds it by handle, so `get` /
+# `read` hand out the same closures and a write through them lands on the one cell.
+test fn shared_closure_over_a_cell_is_one_binding_for_every_holder():
     s := Shared(make_ctr())
     s.update(fn(c): bump_ctr(c))
     s.update(fn(c): bump_ctr(c))
     assert s.read(fn(c): c.get()) == 2
     d := s.get()
-    assert copy_fault(d.inc)
-    assert d.get() == 2
+    d.inc()
+    assert d.get() == 3
     e := s.read(fn(c): c)
-    assert copy_fault(e.inc)
-    assert e.get() == 2
-    assert s.read(fn(c): c.get()) == 2
+    e.inc()
+    assert e.get() == 4
+    assert s.read(fn(c): c.get()) == 4
     s.set(make_ctr())
     s.update(fn(c): bump_ctr(c))
     assert s.get().get() == 1
@@ -391,57 +384,51 @@ test fn shared_update_nested_in_read_persists_in_the_other_box():
     assert a.get() == 1
     assert b.get() == 9
 
-# Owner note 1 (2026-10-11): a module global's copy stored into the state, as the whole result and
-# nested inside it, then written in place by a later call.
-#
-# Base binary (encoded store, commit 7e4421e4): no fault; the state reads `[5, 6, 1]` (nested:
-# `[[5, 6, 1]]`) and the global stays `[5, 6]`.
-# Now: the stored value is still the box view's copy of the global, so the in-place write faults.
-# The fault names this case and its fix (`.copy()`); it is never a silent lost write. The exact
-# fix (unmark the result root) was declined: the view's module slot would keep aliasing the state,
-# and a later read of the global inside the box would silently see the box's writes.
-test fn shared_global_copy_stored_as_the_state_faults_on_an_in_place_write():
-    s: Shared[List[int]] = Shared([])
-    s.update(fn(_): DEFAULTS)
-    r := recover: s.update(fn(xs): push_one(xs))
-    fault := msg_of(r, "write to a stored global copy")
-    assert fault.starts_with("this value is this task's copy:"), fault
-    assert fault.contains("if the box holds a module global's copy, store its .copy()"), fault
-    assert s.get() == [5, 6]
-    assert DEFAULTS == [5, 6]
+# Owner note 1 (2026-10-11): a module global stored into the state, as the whole result and
+# nested inside it, then written in place by a later call. M3.1: the box closure reads the run's
+# one copy of the global, so the stored state IS the global and the write lands in both (Go: a
+# locked update that returns a package `var` map shares it). Each row owns its global.
+DEF_A: List[int] = [5, 6]
+DEF_B: List[int] = [5, 6]
+DEF_C: List[int] = [5, 6]
 
-test fn shared_global_copy_stored_nested_in_the_state_faults_on_an_in_place_write():
-    s: Shared[List[List[int]]] = Shared([])
-    s.update(fn(_): [DEFAULTS])
-    r := recover: s.update(fn(xss): push_first(xss))
-    fault := msg_of(r, "write to a nested stored global copy")
-    assert fault.contains("if the box holds a module global's copy, store its .copy()"), fault
-    assert s.get() == [[5, 6]]
-    assert DEFAULTS == [5, 6]
-
-# The documented way out: store the box's own copy.
-test fn shared_global_copy_stored_with_copy_is_the_boxes_own_value():
+test fn shared_global_stored_as_the_state_is_the_global():
     s: Shared[List[int]] = Shared([])
-    s.update(fn(_): DEFAULTS.copy())
+    s.update(fn(_): DEF_A)
     s.update(fn(xs): push_one(xs))
     assert s.get() == [5, 6, 1]
-    assert DEFAULTS == [5, 6]
+    assert DEF_A == [5, 6, 1]
 
-# A CAPTURE stored into the state is the box's own value once the call ends: its copy mark is
-# cleared with the call.
-test fn shared_capture_stored_into_the_state_is_the_boxes_own_value():
+test fn shared_global_stored_nested_in_the_state_is_the_global():
+    s: Shared[List[List[int]]] = Shared([])
+    s.update(fn(_): [DEF_B])
+    s.update(fn(xss): push_first(xss))
+    assert s.get() == [[5, 6, 1]]
+    assert DEF_B == [5, 6, 1]
+
+# The way to keep the box's own value: store a copy.
+test fn shared_global_copy_stored_with_copy_is_the_boxes_own_value():
+    s: Shared[List[int]] = Shared([])
+    s.update(fn(_): DEF_C.copy())
+    s.update(fn(xs): push_one(xs))
+    assert s.get() == [5, 6, 1]
+    assert DEF_C == [5, 6]
+
+# A CAPTURE stored into the state is the caller's object itself (M3.3, by handle): a later write
+# through the box changes it. Store `ks.copy()` to keep a box's own value.
+test fn shared_capture_stored_into_the_state_is_the_captured_object():
     s: Shared[List[int]] = Shared([])
     ks := [1, 2]
     s.update(fn(_): ks)
     s.update(fn(xs): push_one(xs))
     assert s.get() == [1, 2, 1]
-    assert ks == [1, 2]
+    assert ks == [1, 2, 1]
 
 # ---- Section RwShared: the same core, many readers or one writer ----
 #
-# `write` / `set` run like `Shared.update` / `set` (inside the box heap, in place). `read(f)` and
-# `get()` copy the value out; the `read` closure runs in the READER's heap, so a `write` nested in
-# it stays legal and a mutation inside it does not reach the box.
+# `write` / `set` run like `Shared.update` / `set` (under the write guard, in place). `read(f)` and
+# `get()` take the read guard and work on the live value: a mutation inside `read` reaches the box,
+# and a `write` nested in it faults (M3.3, Q2).
 
 fn rset_then(s: RwShared[int], x: int) -> int:
     s.set(0)
@@ -522,6 +509,7 @@ test fn rwshared_eight_writers_lose_no_update():
     assert s.get().n == 400
     assert s.read(fn(a): a.log.len()) == 400
 
+# The RwShared twin: the read guard gives a whole value.
 test fn rwshared_eight_readers_see_a_whole_value():
     s := RwShared(Acc(3, [1, 2, 3]))
     bad := AtomicInt(0)
@@ -529,20 +517,18 @@ test fn rwshared_eight_readers_see_a_whole_value():
         for i in 0..8:
             spawn:
                 for j in 0..20:
-                    g := s.get()
-                    if g.n != g.log.len():
-                        bad.add(1)
                     if s.read(fn(a): a.n - a.log.len()) != 0:
                         bad.add(1)
                     s.write(fn(a): a.add(1))
     assert bad.load() == 0
     assert s.get().n == 3 + 160
 
-# The reader closure runs on a COPY in the reader's heap: its mutation does not reach the box.
-test fn rwshared_read_closure_mutation_does_not_reach_the_box():
+# M3.3: the reader closure runs on the live value: its mutation reaches the box (a race with other
+# readers is the user's bug, as under Go's `RLock`).
+test fn rwshared_read_closure_mutation_reaches_the_box():
     s: RwShared[List[int]] = RwShared([1])
     assert s.read(fn(xs): push_one(xs).len()) == 2
-    assert s.get() == [1]
+    assert s.get() == [1, 1]
 
 test fn rwshared_fault_inside_write_is_caught_and_the_box_keeps_serving():
     s: RwShared[List[int]] = RwShared([1])
@@ -557,23 +543,21 @@ test fn rwshared_write_closure_sees_later_bindings_and_globals():
     s.write(fn(x): inc(x) + K + DEFAULTS.len() + RLATE.get())
     assert s.get() == 21
 
-test fn rwshared_captured_local_is_a_copy_a_write_through_a_callee_faults():
+test fn rwshared_captured_local_write_through_a_callee_lands():
     s := RwShared(10)
     seen: List[int] = []
-    r := recover: s.write(fn(x): keep(seen, x))
-    fault := msg_of(r, "captured write")
-    assert fault.starts_with("this value is this task's copy:"), fault
-    assert seen == []
+    s.write(fn(x): keep(seen, x))
+    assert seen == [10]
     assert s.get() == 10
 
-# The reader closure runs in the reader's own heap: a captured write is an ordinary write.
+# The reader closure runs in the reader's task: a captured write is an ordinary write.
 test fn rwshared_read_closure_writes_its_capture():
     s := RwShared(10)
     seen: List[int] = []
     assert s.read(fn(x): keep(seen, x)) == 10
     assert seen == [10]
 
-test fn rwshared_get_read_set_write_print_inside_its_own_write_fault():
+test fn rwshared_get_read_set_write_inside_its_own_write_fault():
     s := RwShared(10)
     r0 := recover: s.write(fn(x): x + s.get())
     assert msg_of(r0, "self get").contains("already holds the update guard")
@@ -583,39 +567,42 @@ test fn rwshared_get_read_set_write_print_inside_its_own_write_fault():
     assert msg_of(r2, "self set").contains("already holds the update guard")
     r3 := recover: s.write(fn(x): rwrite_then(s, x))
     assert msg_of(r3, "self write").contains("already holds the update guard")
-    r4 := recover: s.write(fn(x): rshow_self(s, x))
-    assert msg_of(r4, "self print").contains("already holds the update guard")
+    s.write(fn(x): rshow_self(s, x))
     assert s.get() == 10
 
-test fn rwshared_write_nested_in_read_stays_legal():
+# Q2 (M3.3): a `write` inside the same task's `read` waits for that read, a certain deadlock (Go
+# `readwrite/main.go`: `fatal error: all goroutines are asleep - deadlock!`), so it faults. A read
+# nested in a read is Go's recursive `RLock`.
+test fn rwshared_write_nested_in_read_faults():
     s := RwShared(10)
-    assert s.read(fn(x): rwrite_from_read(s, x)) == 10
-    assert s.get() == 20
-    assert s.read(fn(x): x + s.get()) == 40
+    r := recover: s.read(fn(x): rwrite_from_read(s, x))
+    assert msg_of(r, "write in read").contains("already holds the read guard on this RwShared box")
+    assert s.get() == 10
+    assert s.read(fn(x): x + s.get()) == 20
 
-test fn rwshared_get_result_is_the_callers_own_value():
+test fn rwshared_get_result_is_the_live_value():
     s: RwShared[List[int]] = RwShared([1])
     g := s.get()
     g.push(2)
-    assert s.get() == [1]
+    assert s.get() == [1, 2]
     r := s.read(fn(xs): xs)
     r.push(3)
-    assert s.get() == [1]
+    assert s.get() == [1, 2, 3]
 
-test fn rwshared_closure_over_a_cell_is_owned_by_whoever_holds_it():
+test fn rwshared_closure_over_a_cell_is_one_binding_for_every_holder():
     s := RwShared(make_ctr())
     s.write(fn(c): bump_ctr(c))
     s.write(fn(c): bump_ctr(c))
     assert s.read(fn(c): c.get()) == 2
     d := s.get()
-    assert copy_fault(d.inc)
-    assert d.get() == 2
-    assert s.read(fn(c): c.get()) == 2
+    d.inc()
+    assert d.get() == 3
+    assert s.read(fn(c): c.get()) == 3
 
-test fn rwshared_capture_stored_into_the_state_is_the_boxes_own_value():
+test fn rwshared_capture_stored_into_the_state_is_the_captured_object():
     s: RwShared[List[int]] = RwShared([])
     ks := [1, 2]
     s.write(fn(_): ks)
     s.write(fn(xs): push_one(xs))
     assert s.get() == [1, 2, 1]
-    assert ks == [1, 2]
+    assert ks == [1, 2, 1]

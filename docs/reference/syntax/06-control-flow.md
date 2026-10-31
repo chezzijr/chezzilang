@@ -155,7 +155,7 @@ List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/
   no compile-time multi-pass check).
 - `for`, `List(it)` or `Set(it)` on a named cursor consumes it in place, so a partial `for … break`
   leaves the rest for a later `next()`/`List()`.
-- A cursor crosses `spawn` as a deep copy, like a `list`. `Iterable` and `Iterator` are members of `std.iter`.
+- A task gets a cursor by handle, like a `list` (M3.4): a `next()` in the task advances the parent's cursor. `Iterable` and `Iterator` are members of `std.iter`.
 
 ### Generators (`yield`)
 
@@ -184,10 +184,9 @@ match g.next():            # 0
 - A bare `return` stops a generator early. `defer`/`spawn`/`parallel:`/`wait:` are not allowed inside one.
 - An un-inferable element (`yield []` alone, or an int-then-float mix; no int->float coercion at a
   `yield`) is rejected.
-- A generator crosses a task boundary by value, as a deep copy of its execution state (also when it is
-  suspended in `recover:`, and also when it is a module global). A value in its frame is a task copy
-  only when the parent can still reach it: a frame-local list the parent never saw stays writable in
-  the task; a list the generator yielded and the parent holds faults on write.
+- A task gets a generator by handle (M3.4), a module-global one too (M3.1): every task drives the
+  one generator. A `next()` while another task runs it faults `generator already running` (CPython
+  raises `ValueError: generator already executing`).
 - Examples: [`examples/generators.chz`](../../../examples/generators.chz),
   [`examples/generators_inferred.chz`](../../../examples/generators_inferred.chz),
   [`examples/generators_basic.chz`](../../../examples/generators_basic.chz).

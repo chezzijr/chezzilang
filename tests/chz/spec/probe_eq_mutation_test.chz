@@ -1,0 +1,45 @@
+# tests/chz/spec/probe_eq_mutation_test.chz — a probe survives a user `eq` that removes ANOTHER key.
+#
+# A remove shifts every later entry down one position. A probe that kept its candidate positions
+# across that `eq` read a stale position and missed a key that is still in the map. CPython's
+# `lookdict` restarts on any mutation (`DKIX_KEY_CHANGED`); the probe restarts too.
+# The base binary and CPython agree: `m.get(K(2))` holds 2 and the map keeps 3 keys.
+
+struct K:
+    a: int
+    fn hash(self) -> int:
+        if self.a == 99:
+            return 8
+        return 7
+    fn eq(self, other: K) -> bool:
+        if self.a == 1 and armed[0] == 1:
+            armed[0] = 0
+            _ := m.remove(K(99))
+            _ := s.remove(K(99))
+        return self.a == other.a
+
+armed := [0]
+m: Map[K, int] = {}
+s: Set[K] = Set()
+
+test fn a_map_probe_finds_its_key_after_an_eq_removes_another():
+    m[K(0)] = 0
+    m[K(1)] = 1
+    m[K(99)] = 99
+    m[K(2)] = 2
+    armed[0] = 1
+    r := m.get(K(2))
+    assert armed[0] == 0, "the eq ran its remove"
+    assert m.len() == 3
+    match r:
+        ?v: assert v == 2
+        None: assert false, "K(2) is in the map"
+
+test fn a_set_probe_finds_its_element_after_an_eq_removes_another():
+    for a in [0, 1, 99, 2]:
+        _ := s.insert(K(a))
+    armed[0] = 1
+    found := K(2) in s
+    assert armed[0] == 0, "the eq ran its remove"
+    assert s.len() == 3
+    assert found, "K(2) is in the set"

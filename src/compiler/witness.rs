@@ -38,30 +38,6 @@ impl Compiler {
             .unwrap_or_default()
     }
 
-    /// The spawn op's operand reference (D4, TICKET-240): the checker's shapes for call `call_id`,
-    /// stored once per distinct entry in `Program.fresh_calls` and named through
-    /// [`crate::base::crossing::operand_ref`], which owns the layout. Witness args sit past the
-    /// entry's end. A miss, or a call with no fresh operand, is `0`: every operand stays marked (a
-    /// false fault, never a lost write).
-    pub(super) fn crossing_mask(&mut self, call_id: crate::ast::NodeId) -> u32 {
-        let Some(c) = self.crossings.get(&(self.current_module_idx, call_id.0)) else {
-            return 0;
-        };
-        use crate::checker::Fresh;
-        if c.recv.iter().chain(&c.args).all(Fresh::is_marked) {
-            return 0;
-        }
-        let entry: Vec<Fresh> = std::iter::once(c.recv.clone().unwrap_or(Fresh::Marked))
-            .chain(c.args.iter().cloned())
-            .collect();
-        let table = &mut self.program.fresh_calls;
-        let index = *self.fresh_index.entry(entry).or_insert_with_key(|e| {
-            table.push(e.clone());
-            table.len() - 1
-        });
-        crate::base::crossing::operand_ref(index)
-    }
-
     /// The seed a `xs.sum()` site needs, per the checker's [`crate::checker::SumSeedTable`] --
     /// `Some(SumSeed::Float)` for a plain `List[float]`. A MISS, or a recorded `None`, means the plain numeric sum (the pre-fix
     /// lowering), so a stale/absent entry can only under-apply. Keyed on the method-NAME token,
@@ -282,8 +258,7 @@ impl Compiler {
     ///
     /// The wrapper is a `MakeClosure` rather than a `MakeFunc` only so it can reach the enclosing
     /// frame's `$w:T` witnesses the way a `defer:` block does ([`Self::with_witness_captures`]); nothing
-    /// else is captured, so a witness-free target is still a capture-free callee and crosses the
-    /// `spawn` airlock by handle. Returns the operand count for `DeferCall`/`SpawnCall`.
+    /// else is captured, so a witness-free target is still a capture-free callee. Returns the operand count for `DeferCall`/`SpawnCall`.
     pub(super) fn compile_receiverless_target(
         &mut self,
         fc: &mut FnComp,

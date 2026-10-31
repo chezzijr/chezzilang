@@ -340,7 +340,6 @@ impl Checker {
                             doc: None,
                             defaulted_fields,
                             field_slots: Some(field_slots),
-                            self_writers: HashSet::new(),
                         },
                     );
                 }

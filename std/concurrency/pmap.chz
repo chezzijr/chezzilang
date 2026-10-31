@@ -13,8 +13,8 @@
 # complete tasks in different orders still produce the identical `List[U]`.
 #
 # STRUCTURED CONCURRENCY: the `parallel:` lives INSIDE the helper body and joins at its dedent (before
-# the collect), so a spawned task can never outlive `pmap`. Closures cross the airlock into each task
-# by value (they are sendable); `xs[i]` is snapshotted per-iteration into a fresh `spawn:` capture.
+# the collect), so a spawned task can never outlive `pmap`. Each task gets `f` by handle; `xs[i]` is
+# read per iteration into a fresh `spawn:` capture.
 #
 # LIMITER: `pmap_limited` caps the number of tasks running `f` at once with a channel-as-semaphore —
 # a bucket pre-seeded with `limit` tokens; a task must `recv` a token before running `f` and `send`
@@ -26,9 +26,8 @@
 # the graph edge explicit for any future concurrency-type use.
 import std.concurrency
 
-# A private tagged result: the element's submission index alongside `f`'s output. A struct of
-# all-sendable fields (int + U) is itself sendable, so it rides a `Channel[_PmapCell[U]]` cleanly —
-# and it avoids depending on tuple-field-access lowering.
+# A private tagged result: the element's submission index alongside `f`'s output. It rides a
+# `Channel[_PmapCell[U]]` by handle, and it avoids depending on tuple-field-access lowering.
 struct _PmapCell[U]:
     idx: int
     val: U

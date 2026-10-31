@@ -1,10 +1,10 @@
-//! TICKET-246 — a `Shared` / `RwShared` box keeps its value in a private heap.
+//! TICKET-246 / M3.3 — a `Shared` / `RwShared` box holds one value by handle, behind one guard.
 //!
 //! 1. The four Chezzi grids run through the built (debug) binary at `CHEZZI_THREADS` 1, 2 and
 //!    default: the box grid, the nested-call grid, the collection walk grid and the rule tests.
 //! 2. The rules that need a process run one program each, with its stdout, stderr and exit
-//!    status: `os.exit` inside a closure, a fault message that renders a box cycle, the
-//!    read-temporary warning.
+//!    status: `os.exit` inside a closure, a fault message that renders a box cycle, a write
+//!    through `get()`, a guard + channel cycle.
 //!
 //! Every child runs under a timeout, so a hang is a failure, not a pass.
 
@@ -27,10 +27,16 @@ struct Run {
 
 /// Run `chezzi <args>` at `threads` workers (`None` = default); kill it after `secs`.
 fn chezzi(args: &[&str], threads: Option<&str>, secs: u64) -> Run {
+    chezzi_env(args, threads, &[], secs)
+}
+
+/// [`chezzi`] with the extra environment `envs`.
+fn chezzi_env(args: &[&str], threads: Option<&str>, envs: &[(&str, &str)], secs: u64) -> Run {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env_remove("CHEZZI_THREADS")
+        .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -191,8 +197,7 @@ fn a_child_fault_cuts_its_owner_inside_a_box_closure() {
 ///
 /// - `nursery`: the closure opens its own `parallel:` whose child waits. Base reports
 ///   `deadlock` and exits 1 at every worker count. The inner nursery must join the task's
-///   enclosing sched, which is parked on `box_chain` inside a box; with only this context's
-///   nurseries read, the run hung.
+///   enclosing sched (M3.3: the closure runs in the caller's context, so it is the caller's own).
 /// - `direct`: the closure waits on the channel itself. Base hangs; the verdict declines. The
 ///   cell pins that no wrong verdict appears: the run never passes the call.
 #[test]
@@ -271,22 +276,40 @@ fn a_fault_message_renders_a_box_cycle_and_terminates() {
     );
 }
 
-/// The read-temporary warning is unchanged: a mutating call on the copy `get()` returns warns,
-/// the program still runs, and the box is unchanged.
+/// M3.3 (Q4): `get()` returns the live value, so a mutating call on it lands in the box and no
+/// warning fires (Go `vet` has no such check; the TICKET-089 row is deleted).
 #[test]
-fn the_read_temporary_warning_is_unchanged() {
+fn a_write_through_get_lands_and_does_not_warn() {
     let path = write_program(
         "temp",
         "import RwShared, Shared from std.concurrency\ns: Shared[List[int]] = Shared([1])\nw: RwShared[List[int]] = RwShared([1])\ns.get().push(1)\nw.get().push(1)\nprint(s.get(), w.get())\n",
     );
     let r = chezzi(&["run", path.to_str().unwrap()], None, 20);
     assert_eq!(r.code, Some(0), "stderr: {}", r.stderr);
-    assert_eq!(r.stdout, "[1] [1]\n");
-    for want in [
-        "'push' mutates the copy returned by 's.get()', so the write is discarded — write through 's.update(…)' instead",
-        "'push' mutates the copy returned by 'w.get()', so the write is discarded — write through 'w.write(…)' instead",
-    ] {
-        assert!(r.stderr.contains(want), "stderr: {}", r.stderr);
+    assert_eq!(r.stdout, "[1, 1] [1, 1]\n");
+    assert!(!r.stderr.contains("warning"), "stderr: {}", r.stderr);
+}
+
+/// M3.3 — a real guard + channel cycle: task A holds the guard and waits on a channel that only
+/// task B sends to, and B waits on the guard first. Go (`cycle/main.go`, go1.27.0) ends `fatal
+/// error: all goroutines are asleep - deadlock!`; the run here ends with the deadlock verdict, exit
+/// 1, at every worker count. The guard waiter counts as blocked only because every other party is
+/// blocked too.
+#[test]
+fn a_guard_and_channel_cycle_gets_the_deadlock_verdict() {
+    let path = write_program(
+        "guard-chan-cycle",
+        "import Shared from std.concurrency\n\nfn take(ch: Channel[int], held: Channel[bool], n: int) -> int:\n    held.send(true)\n    return n + ch.recv()\n\nfn holder(s: Shared[int], ch: Channel[int], held: Channel[bool]):\n    s.update(fn(n): take(ch, held, n))\n\nfn inc(n: int) -> int:\n    return n + 1\n\nfn sender(s: Shared[int], ch: Channel[int]):\n    s.update(inc)\n    ch.send(1)\n\ns := Shared(0)\nch := Channel[int](0)\nheld := Channel[bool](1)\nparallel:\n    spawn holder(s, ch, held)\n    spawn:\n        _ := held.recv()\n        sender(s, ch)\nprint(s.get())\n",
+    );
+    for threads in [Some("1"), Some("2"), None] {
+        let r = chezzi(&["run", path.to_str().unwrap()], threads, 30);
+        assert_eq!(r.code, Some(1), "at {threads:?}: stderr {}", r.stderr);
+        assert!(
+            r.stdout.is_empty() && r.stderr.contains("deadlock"),
+            "at {threads:?}: stdout {:?} stderr {}",
+            r.stdout,
+            r.stderr
+        );
     }
 }
 
@@ -319,9 +342,9 @@ fn run_max_rss(entry: &std::path::Path) -> (bool, String, i64) {
     )
 }
 
-/// The box heap is freed when the last handle drops: 100000 boxes created and dropped peak at
-/// most 2 MB above the same loop over `Atomic`, which keeps no heap. A box heap that outlives
-/// its handle costs at least 100000 heaps, far over the bound. Each side is the lowest of three
+/// A box's value is freed when the last handle drops: 100000 boxes created and dropped peak at
+/// most 2 MB above the same loop over `Atomic`. A box value that outlives its handle costs at least
+/// 100000 values, far over the bound. Each side is the lowest of three
 /// runs, so one noisy run cannot fail the cell.
 #[test]
 fn a_hundred_thousand_dropped_boxes_do_not_grow_memory() {
@@ -349,4 +372,27 @@ fn a_hundred_thousand_dropped_boxes_do_not_grow_memory() {
             "{kind}: {kb} KB against Atomic {base} KB (bound: +{SLACK_KB} KB)"
         );
     }
+}
+
+/// M1.7 — a box's state lives in the run's one heap, and the run's collector roots it while the
+/// box is parked in its slot. Two tasks on another thread collect at every instruction
+/// (`CHEZZI_GC_STRESS=1`) while `s` and `r` sit idle; the states read back intact. With the box
+/// contexts left out of the root walk, a collection freed the states (a wrong value or a
+/// `dangling GcRef` panic).
+#[test]
+fn box_state_survives_gc_from_another_thread() {
+    let src = "import std.concurrency\n\nfn churn(n: int) -> int:\n    acc := 0\n    for i in 0..n:\n        xs := [i, i + 1, i + 2]\n        acc += xs.len()\n    return acc\n\ns := concurrency.Shared([[1, 2], [3, 4]])\nr := concurrency.RwShared({\"k\": [5, 6]})\ns.update(fn(x): x + [[7]])\nparallel:\n    spawn churn(3000)\n    spawn churn(3000)\nprint(s.get())\nprint(r.get())\n";
+    let path = write_program("box-gc-stress", src);
+    let r = chezzi_env(
+        &["run", path.to_str().unwrap()],
+        Some("2"),
+        &[("CHEZZI_GC_STRESS", "1")],
+        120,
+    );
+    assert_eq!(
+        (r.code, r.stdout.as_str()),
+        (Some(0), "[[1, 2], [3, 4], [7]]\n{'k': [5, 6]}\n"),
+        "stderr: {}",
+        r.stderr
+    );
 }

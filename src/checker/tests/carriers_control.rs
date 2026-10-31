@@ -1210,8 +1210,8 @@ fn defer_block_reassign_capture_ok() {
 
 #[test]
 fn defer_block_new_binding_and_nonsendable_read_ok() {
-    // Reading a capture into a NEW binding is fine, and — unlike a `spawn:` block — reading a
-    // non-sendable captured value (a closure) is allowed (same task, no airlock).
+    // Reading a capture into a NEW binding is fine, and so is reading a captured closure (same
+    // task).
     ok(
         "fn w():\n    x := 1\n    g := fn(): print(\"g\")\n    defer:\n        y := x + 1\n        print(\"{y}\")\n        g()\n",
     );

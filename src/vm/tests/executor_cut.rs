@@ -241,9 +241,9 @@ fn mnsched_take_charge_reports_growth_only() {
     );
 }
 
-/// W7-26 / DEC-205 (TICKET-208: one facade) — `Heap::live_bytes` counts what an Executor holds
-/// outside every heap: its finished tasks' retained output and its unfinished tasks' submit-time
-/// bytes. Fails if `held_bytes` omits either half, or if a reduced Executor stays charged.
+/// W7-26 (TICKET-208: one facade) — `Heap::live_bytes` counts what an Executor holds outside every
+/// heap: its finished tasks' retained output (M1.7: an unfinished task's payload is in the one heap
+/// and counted as its slots). Fails if `held_bytes` omits it, or if a reduced Executor stays charged.
 #[test]
 fn live_bytes_counts_an_executors_held_bytes() {
     use crate::vm::heap::{Heap, Obj};
@@ -262,25 +262,16 @@ fn live_bytes_counts_an_executors_held_bytes() {
         with_results >= base + 40_000,
         "ten finished tasks' output must register: {base} -> {with_results}"
     );
-    {
-        let mut f = mk_pending_fiber(10);
-        let mut c = sched.lock();
-        sched.reserve_slot(&mut c, &mut f, 0, 5000);
-    }
-    assert!(
-        h.live_bytes() >= with_results + 5000,
-        "an unfinished task's submit-time bytes must register"
-    );
     *core.scope.lock().unwrap() = None;
     assert_eq!(h.live_bytes(), base, "a reduced Executor holds nothing");
     let _ = r;
 }
 
-/// W7-26 (the second arm) — the two `--max-heap` walks share one de-dup set, so whichever meets
-/// the Executor first must charge its held bytes. Both visit orders. Fails if
-/// `drain_pending_core_bytes` and `Heap::live_bytes` read different numbers.
+/// W7-26 / M3.2 — an Executor reached only through an `Atomic`'s value is a heap slot like any
+/// other, so the slot walk charges its held bytes, once per core however many slots alias it, and
+/// in either visit order. Fails if `Heap::live_bytes` skips an Executor met through a value.
 #[test]
-fn nested_executor_charges_its_held_bytes_in_either_visit_order() {
+fn an_executor_held_in_an_atomic_charges_its_held_bytes_once() {
     use crate::vm::core::AtomicCore;
     use crate::vm::heap::{Heap, Obj};
     let ex = Arc::new(crate::vm::core::ExecutorCore::default());
@@ -292,30 +283,29 @@ fn nested_executor_charges_its_held_bytes_in_either_visit_order() {
     let eager_bytes = ex.held_bytes();
     assert!(eager_bytes >= 40_000);
 
-    // (a) reachable ONLY through a `Shared`'s payload — no `Obj::Executor` slot at all.
-    let mut h = Heap::new();
-    h.set_mem_cap(1);
-    let outer = Arc::new(AtomicCore::default());
-    outer.store(crate::vm::wire::WireValue::Executor(Arc::clone(&ex)));
-    let base = h.live_bytes();
-    let sr = h.alloc(Obj::Atomic(Arc::clone(&outer)));
-    assert!(
-        h.live_bytes() >= base + eager_bytes,
-        "a nested executor's held bytes must be charged"
-    );
-    let _ = sr;
-
-    // (b) the executor DOES have its own slot, but the enclosing `Shared` is met first.
-    let mut h = Heap::new();
-    h.set_mem_cap(1);
-    let base = h.live_bytes();
-    let sr = h.alloc(Obj::Atomic(Arc::clone(&outer)));
-    let er = h.alloc(Obj::Executor(Arc::clone(&ex)));
-    assert!(
-        h.live_bytes() >= base + eager_bytes,
-        "visit order must not decide whether the held bytes are counted"
-    );
-    let (_, _) = (sr, er);
+    for atomic_first in [true, false] {
+        let mut h = Heap::new();
+        h.set_mem_cap(1);
+        let base = h.live_bytes();
+        let held = Arc::new(AtomicCore::new(Value::nil()));
+        let ar = if atomic_first {
+            Some(h.alloc(Obj::Atomic(Arc::clone(&held))))
+        } else {
+            None
+        };
+        let er = h.alloc(Obj::Executor(Arc::clone(&ex)));
+        held.store(Value::obj(er));
+        let ar = ar.unwrap_or_else(|| h.alloc(Obj::Atomic(Arc::clone(&held))));
+        let alias = h.alloc(Obj::Executor(Arc::clone(&ex)));
+        let got = h.live_bytes() - base;
+        assert!(got >= eager_bytes, "the held bytes are charged: {got}");
+        assert!(
+            got < 2 * eager_bytes,
+            "two slots of one Executor charge its held bytes once: {got}"
+        );
+        assert_eq!(h.children(ar), vec![er]);
+        let _ = alias;
+    }
 }
 
 /// TICKET-208, the lift direction of W7-56 — an Executor job that has FINISHED is no live sender,
@@ -354,7 +344,7 @@ fn sequential_executor_round_trips_reuse_their_runner() {
     let vm = ran_program(
         "import Executor from std.concurrency\nex := Executor()\nch := Channel[int](0)\nn := 0\nfor i in 0..200:\n    ex.submit(fn(): ch.send(1))\n    n = n + ch.recv()\n",
     );
-    let entry = *vm.module_objs.last().expect("the entry module");
+    let entry = vm.entry_home();
     let Obj::Module(m) = vm.heap.get(entry) else {
         panic!("the last module is the entry module");
     };
@@ -388,7 +378,6 @@ fn a_cut_job_handle_is_sealed_in_the_lock_hold_that_ends_the_job() {
         0,
         JobSettle {
             ch: Arc::clone(&ch),
-            cancel: WireValue::Int(7),
             flag: Arc::new(AtomicBool::new(false)),
         },
     );
@@ -458,7 +447,6 @@ fn every_way_out_of_the_counts_moves_the_epoch() {
                 0,
                 JobSettle {
                     ch: empty_core(),
-                    cancel: WireValue::Int(7),
                     flag: Arc::new(AtomicBool::new(false)),
                 },
             );
@@ -495,7 +483,6 @@ fn a_cut_job_seal_moves_the_epoch_after_the_seal() {
                 0,
                 JobSettle {
                     ch: Arc::clone(&ch),
-                    cancel: WireValue::Int(7),
                     flag: Arc::new(AtomicBool::new(false)),
                 },
             );
@@ -534,7 +521,10 @@ fn the_sched_idle_judge_latches_the_verdict_before_it_flags_a_leaf() {
         crate::vm::block::WakeSet::default(),
         Some(("x", Span::RUNTIME)),
     );
-    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop));
+    assert!(matches!(
+        sched.take_runnable_unattached(0, 1, 0),
+        Take::Stop
+    ));
     assert_eq!(sched.quiesce.run_halt(), RunHalt::Deadlock);
 }
 
@@ -695,92 +685,116 @@ fn the_settle_internals_reject_a_non_channel() {
     assert!(e.message.contains("requires a Channel"), "{}", e.message);
 }
 
-/// TICKET-246 — the copy walk reads a heap it only borrows: `WalkSrc` holds `&Heap` and the
-/// module table of ANOTHER `Vm`, and the value decodes into this one.
+/// M1.7 — one heap core per run: two `Vm::new` roots are two runs with two cores (above), and a
+/// worker built in a run (a task's payload `Vm`, a runner or joiner shell, a box context) is a
+/// handle on its root's core.
 #[test]
-fn walk_src_copies_out_of_a_heap_it_only_borrows() {
-    let mut owner = Vm::new(Arc::new(empty_program()));
-    let s = owner.heap.alloc(Obj::Str("s".into()));
-    let inner = owner
-        .heap
-        .alloc(Obj::List(vec![Value::int(1), Value::int(2)]));
-    let outer = owner
-        .heap
-        .alloc(Obj::List(vec![Value::obj(inner), Value::obj(s)]));
-    let src = super::airlock_out::WalkSrc {
-        heap: &owner.heap,
-        module_objs: &owner.module_objs,
-        active_generators: &owner.active_generators,
-        program: &owner.program,
-        walk_base: 0,
-    };
-    let wire = src
-        .to_wire_crossable_memo(
-            Value::obj(outer),
-            Span::default(),
-            &mut super::airlock_out::WireMemo::default(),
-        )
-        .expect("plain data crosses");
-    let mut reader = Vm::new(Arc::new(empty_program()));
-    assert_ne!(reader.heap.id(), owner.heap.id());
-    let copy = reader.from_wire(wire);
-    assert_eq!(reader.display(copy), "[[1, 2], 's']");
+fn a_worker_shares_its_roots_heap_core() {
+    let root = Vm::new(Arc::new(empty_program()));
+    let worker = root.spawn_worker();
+    let nested = worker.spawn_worker();
+    assert_eq!(worker.heap.id(), root.heap.id());
+    assert_eq!(nested.heap.id(), root.heap.id());
 }
 
-/// TICKET-246 — `with_box` undoes its swap on unwind, not only on return: after a Rust panic
-/// inside the closure the `Vm` runs on the caller's heap again, the box context is back in its
-/// slot and no caller frame is left on the chain. The second half panics two boxes deep, inside
-/// `as_box_caller`.
+/// M1.6 — a `print` / `eprint` inside a box call lands in its caller's stream, at the place of the
+/// call: for the root task, for each spawned sibling (flushed in task order at the join), and for a
+/// box call made from inside another box call. `t1` parks on a channel with output already
+/// buffered, so `t2` runs on the same shell while `t1`'s buffer is parked. The box contexts set
+/// `owns_side`, so this pins that the side-state flag never carries the output stream into a box.
 #[test]
-fn with_box_restores_the_context_when_the_closure_panics() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-    let mut vm = Vm::new(Arc::new(empty_program()));
-    vm.out.extend_from_slice(b"caller");
-    let mut outer = Some(vm.box_new());
-    let mut inner = Some(vm.box_new());
-    let (heap_id, stack_len) = (vm.heap.id(), vm.stack.len());
+fn box_print_goes_to_caller_with_owns_side() {
+    let src = r#"import Shared from std.concurrency
+import eprint from std.io
 
-    let seen_inside = std::cell::Cell::new(0);
-    let r = catch_unwind(AssertUnwindSafe(|| {
-        vm.with_box(&mut outer, |vm| {
-            seen_inside.set(vm.heap.id());
-            assert_eq!(vm.out, b"caller", "out stays the caller's inside a box");
-            vm.stack.push(Value::int(7));
-            panic!("boom");
-        })
-    }));
-    assert!(r.is_err());
-    assert_ne!(
-        seen_inside.get(),
-        heap_id,
-        "the closure ran on the box heap"
+fn note(tag: str, x: int) -> int:
+    print(tag + " inside")
+    eprint(tag + " err inside")
+    return x + 1
+
+fn nested(t: Shared[int], tag: str, x: int) -> int:
+    print(tag + " outer before")
+    t.update(fn(y): note(tag + " nested", y))
+    print(tag + " outer after")
+    return x + 1
+
+fn bump(s: Shared[int], t: Shared[int], tag: str, ch: Channel[int], waits: bool):
+    print(tag + " before")
+    eprint(tag + " err before")
+    s.update(fn(x): note(tag, x))
+    if waits:
+        _ := ch.recv()
+    else:
+        ch.send(1)
+    print(tag + " between")
+    s.update(fn(x): nested(t, tag, x))
+    print(tag + " after")
+    eprint(tag + " err after")
+
+fn main():
+    s := Shared[int](0)
+    t := Shared[int](0)
+    ch := Channel[int]()
+    print("main before")
+    s.update(fn(x): note("main", x))
+    parallel:
+        spawn bump(s, t, "t1", ch, true)
+        spawn bump(s, t, "t2", ch, false)
+    s.update(fn(x): nested(t, "main2", x))
+    print("main after")
+
+main()
+"#;
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
     );
-    assert_eq!(vm.heap.id(), heap_id);
-    assert_eq!(vm.stack.len(), stack_len);
-    assert_eq!(vm.out, b"caller");
-    assert!(vm.box_chain.is_empty());
-    assert!(outer.is_some());
-
-    let r = catch_unwind(AssertUnwindSafe(|| {
-        vm.with_box(&mut outer, |vm| {
-            vm.with_box(&mut inner, |vm| vm.as_box_caller(|_| panic!("deep")))
-        })
-    }));
-    assert!(r.is_err());
-    assert_eq!(vm.heap.id(), heap_id);
-    assert_eq!(vm.stack.len(), stack_len);
-    assert_eq!(vm.out, b"caller");
-    assert!(vm.box_chain.is_empty());
-    assert!(outer.is_some() && inner.is_some());
-    // The box contexts still work after both unwinds.
-    assert_eq!(vm.with_box(&mut outer, |vm| vm.stack.len()), 1);
+    let task = |t: &str| {
+        format!(
+            "{t} before\n{t} inside\n{t} between\n{t} outer before\n{t} nested inside\n\
+             {t} outer after\n{t} after\n"
+        )
+    };
+    let want_out = format!(
+        "main before\nmain inside\n{}{}main2 outer before\nmain2 nested inside\n\
+         main2 outer after\nmain after\n",
+        task("t1"),
+        task("t2")
+    );
+    let task_err =
+        |t: &str| format!("{t} err before\n{t} err inside\n{t} nested err inside\n{t} err after\n");
+    let want_err = format!(
+        "main err inside\n{}{}main2 nested err inside\n",
+        task_err("t1"),
+        task_err("t2")
+    );
+    for workers in [1, 2, crate::vm::test_baseline_worker_count()] {
+        crate::vm::set_worker_count(workers);
+        let path = write_temp_chz("m16_box_print", src);
+        let (out, err, res, code) = run_file_with(&path, crate::native::HostConfig::default());
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            res.is_ok() && code.is_none(),
+            "workers={workers}: {res:?} {err}"
+        );
+        assert_eq!(out, want_out, "stdout at workers={workers}");
+        assert_eq!(err, want_err, "stderr at workers={workers}");
+    }
 }
 
-/// TICKET-246 (F1) — every renderer terminates on every box cycle, with the container cycle
-/// marker. Grid: renderer {`Vm::display`, `Vm::display_wire`, `stringify`} x box {Shared,
-/// RwShared, Atomic} x shape {no cycle, holds itself, through a `List`, through a struct, two
-/// boxes holding each other}. Each cell runs on its own thread under a ten-second wait, so a
-/// renderer that recurses while it holds a payload lock fails its cell instead of hanging the run.
+/// TICKET-246 (F1) / M3.5 — every renderer terminates on every box cycle and every container
+/// cycle inside a box, with the cycle marker. Grid: renderer {`Vm::display`, `stringify`} x box
+/// {Shared, RwShared, Atomic} x shape {no cycle, holds itself, through a `List`, through a struct,
+/// two boxes holding each other, a list that holds itself, one list twice}. Each cell runs on its
+/// own thread under a ten-second wait, so a renderer that recurses while it holds a payload lock
+/// fails its cell instead of hanging the run.
 #[test]
 fn display_box_grid_terminates_on_every_cycle() {
     use std::sync::mpsc;
@@ -797,74 +811,72 @@ fn display_box_grid_terminates_on_every_cycle() {
         ThroughList,
         ThroughStruct,
         EachOther,
+        ListCycle,
+        ListTwice,
     }
     #[derive(Clone, Copy, Debug)]
     enum Renderer {
         Display,
-        DisplayWire,
         Stringify,
     }
-    // A box of `kind` as a wire handle, plus the way to set what it holds.
-    fn new_box(vm: &mut Vm, kind: Kind) -> WireValue {
-        match kind {
-            Kind::Shared => WireValue::Shared(vm.new_shared_core(WireValue::Nil)),
-            Kind::RwShared => WireValue::RwShared(vm.new_rwshared_core(WireValue::Nil)),
-            Kind::Atomic => WireValue::Atomic(Arc::new(AtomicCore::default())),
-        }
+    // A box of `kind` on the heap.
+    fn new_box(vm: &mut Vm, kind: Kind) -> Value {
+        Value::obj(vm.heap.alloc(match kind {
+            Kind::Shared => Obj::Shared(Arc::new(SharedCore::new(Value::nil()))),
+            Kind::RwShared => Obj::RwShared(Arc::new(RwSharedCore::new(Value::nil()))),
+            Kind::Atomic => Obj::Atomic(Arc::new(AtomicCore::new(Value::nil()))),
+        }))
     }
-    fn set(vm: &mut Vm, b: &WireValue, held: WireValue) {
-        match b {
-            WireValue::Shared(c) => {
-                let mut st = c.state.lock();
-                vm.box_store(&mut st, held);
-            }
-            WireValue::RwShared(c) => {
-                let mut st = c.state.write();
-                vm.box_store(&mut st, held);
-            }
-            WireValue::Atomic(c) => *c.v.lock().unwrap() = held,
+    fn set(vm: &Vm, b: Value, v: Value) {
+        match vm.heap.get(b.as_obj().expect("a box")) {
+            Obj::Shared(c) => c.v.set(v),
+            Obj::RwShared(c) => c.v.set(v),
+            Obj::Atomic(c) => c.store(v),
             _ => unreachable!(),
         }
+    }
+    fn list(vm: &mut Vm, items: Vec<Value>) -> Value {
+        Value::obj(vm.heap.alloc(Obj::List(items.into())))
     }
     fn cell(kind: Kind, shape: Shape, renderer: Renderer) -> String {
         let mut vm = Vm::new(Arc::new(empty_program()));
         let b = new_box(&mut vm, kind);
         match shape {
-            Shape::NoCycle => set(&mut vm, &b, WireValue::Int(1)),
-            Shape::Itself => set(&mut vm, &b, b.clone()),
-            Shape::ThroughList => set(
-                &mut vm,
-                &b,
-                WireValue::List {
-                    id: 0,
-                    items: vec![b.clone()],
-                },
-            ),
-            Shape::ThroughStruct => set(
-                &mut vm,
-                &b,
-                WireValue::Struct {
-                    id: 0,
-                    name: "N".into(),
-                    fields: vec![("b".into(), b.clone())],
-                },
-            ),
+            Shape::NoCycle => set(&vm, b, Value::int(1)),
+            Shape::Itself => set(&vm, b, b),
+            Shape::ThroughList => {
+                let l = list(&mut vm, vec![b]);
+                set(&vm, b, l);
+            }
+            Shape::ThroughStruct => {
+                let n = Value::obj(vm.heap.alloc(Obj::Struct {
+                    tid: crate::base::op::TID_NONE,
+                    fields: Fields::from_vec(vec![b]),
+                }));
+                set(&vm, b, n);
+            }
             Shape::EachOther => {
                 let other = new_box(&mut vm, kind);
-                set(&mut vm, &other, b.clone());
-                set(&mut vm, &b, other);
+                set(&vm, other, b);
+                set(&vm, b, other);
+            }
+            Shape::ListCycle => {
+                let l = list(&mut vm, vec![Value::nil()]);
+                let Obj::List(items) = vm.heap.get(l.as_obj().unwrap()) else {
+                    unreachable!()
+                };
+                items.set(0, l);
+                set(&vm, b, l);
+            }
+            Shape::ListTwice => {
+                let x = list(&mut vm, vec![Value::int(1)]);
+                let l = list(&mut vm, vec![x, x]);
+                set(&vm, b, l);
             }
         }
         match renderer {
-            Renderer::DisplayWire => vm.display_wire(&b),
-            Renderer::Display => {
-                let v = vm.from_wire(b);
-                vm.display(v)
-            }
-            Renderer::Stringify => {
-                let v = vm.from_wire(b);
-                vm.stringify(v, Span::default(), 0).expect("renders")
-            }
+            Renderer::Display => vm.display(b),
+            Renderer::Stringify => vm.stringify(b, Span::default(), 0).expect("renders"),
         }
     }
     for kind in [Kind::Shared, Kind::RwShared, Kind::Atomic] {
@@ -873,24 +885,17 @@ fn display_box_grid_terminates_on_every_cycle() {
             (Shape::NoCycle, format!("{l}(1)")),
             (Shape::Itself, format!("{l}({l}(...))")),
             (Shape::ThroughList, format!("{l}([{l}(...)])")),
-            // A `Shared` / `RwShared` decodes what it holds into its own heap, and this fixture's
-            // empty program declares no struct `N`, so the struct prints with no name. The cell's
-            // subject is the cycle marker; `tests/chz/suites/box_grid_test.chz` runs the same
-            // shape with a declared struct.
-            (
-                Shape::ThroughStruct,
-                match kind {
-                    Kind::Atomic => format!("{l}(N(b={l}(...)))"),
-                    _ => format!("{l}(?(0={l}(...)))"),
-                },
-            ),
+            // Every box holds the value itself (M3.2 / M3.3), and this fixture's empty program declares no struct `N`, so the struct
+            // prints with no name. The cell's subject is the cycle marker;
+            // `tests/chz/suites/box_grid_test.chz` runs the same shape with a declared struct.
+            (Shape::ThroughStruct, format!("{l}(?(0={l}(...)))")),
             (Shape::EachOther, format!("{l}({l}({l}(...)))")),
+            // A container back edge is the print path's marker (CPython `[[...]]`); one object
+            // reached twice is no cycle (Go `fmt` prints `[[1] [1]]`).
+            (Shape::ListCycle, format!("{l}([[...]])")),
+            (Shape::ListTwice, format!("{l}([[1], [1]])")),
         ] {
-            for renderer in [
-                Renderer::Display,
-                Renderer::DisplayWire,
-                Renderer::Stringify,
-            ] {
+            for renderer in [Renderer::Display, Renderer::Stringify] {
                 let (tx, rx) = mpsc::channel();
                 std::thread::Builder::new()
                     .stack_size(VM_STACK_BYTES)
@@ -905,68 +910,60 @@ fn display_box_grid_terminates_on_every_cycle() {
             }
         }
     }
-    // Shape "state lock held by another thread" (a writer sits in a slow closure): the `&self`
-    // renderer builds fault messages and must not wait, so it shows `<locked>`.
+    // Outside a box the `&self` render keeps its depth guard (fault text is unchanged: a cyclic
+    // list is `<...>`), and the print path keeps its own `repr_active` marker.
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
             let mut vm = Vm::new(Arc::new(empty_program()));
-            let core = vm.new_shared_core(WireValue::Int(1));
-            let (held_tx, held_rx) = mpsc::channel();
-            let (done_tx, done_rx) = mpsc::channel::<()>();
-            let holder_core = Arc::clone(&core);
-            let holder = std::thread::spawn(move || {
-                let _st = holder_core.state.lock();
-                held_tx.send(()).unwrap();
-                let _ = done_rx.recv();
-            });
-            held_rx.recv().unwrap();
-            let h = vm.heap.alloc(Obj::Shared(Arc::clone(&core)));
-            let shown = vm.display(Value::obj(h));
-            done_tx.send(()).unwrap();
-            holder.join().unwrap();
-            let _ = tx.send((shown, vm.display(Value::obj(h))));
-        })
-        .unwrap();
-    let (busy, free) = rx
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("Vm::display waited for a held Shared state");
-    assert_eq!(busy, "Shared(<locked>)");
-    assert_eq!(free, "Shared(1)");
-    // The same shape for `RwShared`: a writer holds the write lock. A reader beside it (the read
-    // lock held by another thread) does NOT block the render: readers share.
-    let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .stack_size(VM_STACK_BYTES)
-        .spawn(move || {
-            let mut vm = Vm::new(Arc::new(empty_program()));
-            let core = vm.new_rwshared_core(WireValue::Int(1));
-            let h = vm.heap.alloc(Obj::RwShared(Arc::clone(&core)));
-            let mut shown = Vec::new();
-            for write in [true, false] {
-                let (held_tx, held_rx) = mpsc::channel();
-                let (done_tx, done_rx) = mpsc::channel::<()>();
-                let holder_core = Arc::clone(&core);
-                let holder = std::thread::spawn(move || {
-                    let _w = write.then(|| holder_core.state.write());
-                    let _r = (!write).then(|| holder_core.state.read());
-                    held_tx.send(()).unwrap();
-                    let _ = done_rx.recv();
-                });
-                held_rx.recv().unwrap();
-                shown.push(vm.display(Value::obj(h)));
-                done_tx.send(()).unwrap();
-                holder.join().unwrap();
-            }
-            shown.push(vm.display(Value::obj(h)));
+            let l = list(&mut vm, vec![Value::nil()]);
+            let Obj::List(items) = vm.heap.get(l.as_obj().unwrap()) else {
+                unreachable!()
+            };
+            items.set(0, l);
+            let shown = (
+                vm.display(l),
+                vm.stringify(l, Span::default(), 0).expect("renders"),
+            );
             let _ = tx.send(shown);
         })
         .unwrap();
     let shown = rx
         .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("Vm::display waited for a held RwShared state");
-    assert_eq!(shown, ["RwShared(<locked>)", "RwShared(1)", "RwShared(1)"]);
+        .expect("an unboxed cycle renders");
+    assert_eq!(shown, ("<...>".to_string(), "[[...]]".to_string()));
+    // Shape "guard held by another task" (a writer sits in a slow closure, or readers read): the
+    // `&self` renderer builds fault messages and must not wait. M3.3: it reads the box's one slot
+    // and takes no guard, so it shows the value at once, for every mode a holder can be in.
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let mut vm = Vm::new(Arc::new(empty_program()));
+            let shared = Arc::new(SharedCore::new(Value::int(1)));
+            let rw = Arc::new(RwSharedCore::new(Value::int(1)));
+            let hs = vm.heap.alloc(Obj::Shared(Arc::clone(&shared)));
+            let hr = vm.heap.alloc(Obj::RwShared(Arc::clone(&rw)));
+            let mut shown = Vec::new();
+            for (lock, mode) in [
+                (&shared.lock, GuardMode::Write),
+                (&rw.lock, GuardMode::Write),
+                (&rw.lock, GuardMode::Read),
+            ] {
+                let held = super::core::try_update_guard(GuardKey { lock, mode }, u64::MAX - 77)
+                    .expect("a free guard");
+                shown.push(vm.display(Value::obj(hs)));
+                shown.push(vm.display(Value::obj(hr)));
+                drop(held);
+            }
+            let _ = tx.send(shown);
+        })
+        .unwrap();
+    let shown = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("Vm::display waited for a held box guard");
+    assert_eq!(shown, ["Shared(1)", "RwShared(1)"].repeat(3));
 }
 
 /// TICKET-248 — a missing-method fault and an operand fault name a carrier value by its kind in
@@ -1283,4 +1280,92 @@ fn an_adopted_exit_keeps_its_output_at_every_depth() {
         let _ = std::fs::remove_file(&entry);
     }
     assert!(red.is_empty(), "red cells: {red:?}");
+}
+
+/// M3.5 fix round 1 — a value with TWO self edges renders fast on every render path: a depth fault
+/// in one child stops the walk (it does not render each sibling to the depth limit, 2^depth).
+/// Grid: shape {struct, list, map} x {unboxed, boxed} x path {print, `str()`, an unhandled `!e`
+/// fault}, plus the `&self` `no field` paths of `get_field` / `set_field`. A set cannot hold
+/// itself (a `Set` is not `Hashable`). Goldens: BASE 95aa3642, except a box, which prints its live
+/// value (M3.5 by design). Each cell runs under a ten-second watchdog.
+#[test]
+fn a_value_with_two_self_edges_renders_fast_on_every_path() {
+    use std::sync::mpsc;
+    fn watch<T: Send + 'static>(what: String, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(VM_STACK_BYTES)
+            .spawn(move || {
+                let _ = tx.send(f());
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{what}: no render in 10 s"))
+    }
+    const HDR: &str = "import Shared from std.concurrency\nstruct N:\n    id: int\n    kids: List[Any]\n    fn message(self) -> str:\n        return \"m\"\nstruct E:\n    v: Any\n    fn message(self) -> str:\n        return \"e\"\nfn mk_s() -> N:\n    n := N(1, [])\n    n.kids.push(n)\n    n.kids.push(n)\n    return n\nfn mk_l() -> List[Any]:\n    xs: List[Any] = []\n    xs.push(xs)\n    xs.push(xs)\n    return xs\nfn mk_m() -> Map[str, Any]:\n    m: Map[str, Any] = {}\n    m[\"a\"] = m\n    m[\"b\"] = m\n    return m\nfn fail(v: Any) -> int!E:\n    return !E(v)\n";
+    let cells = [
+        ("mk_s()", "N(id=1, kids=[..., ...])", "<...>"),
+        ("mk_l()", "[[...], [...]]", "<...>"),
+        ("mk_m()", "{'a': {...}, 'b': {...}}", "<...>"),
+        (
+            "Shared(mk_s())",
+            "Shared(N(id=1, kids=[..., ...]))",
+            "E(v=Shared(N(id=1, kids=[..., ...])))",
+        ),
+        (
+            "Shared(mk_l())",
+            "Shared([[...], [...]])",
+            "E(v=Shared([[...], [...]]))",
+        ),
+        (
+            "Shared(mk_m())",
+            "Shared({'a': {...}, 'b': {...}})",
+            "E(v=Shared({'a': {...}, 'b': {...}}))",
+        ),
+    ];
+    for (value, shown, fault) in cells {
+        let src = format!("{HDR}v: Any = {value}\nprint(v)\nprint(str(v))\nx := fail(v)?\n");
+        let got = watch(value.to_string(), move || {
+            run_capture(&src).map_err(|e| e.message)
+        });
+        let err = got.expect_err("the `?` faults");
+        assert!(
+            err.ends_with(&format!("unhandled error: {fault}")),
+            "{value}: fault text {err:?}"
+        );
+        let out = watch(format!("{value} print"), {
+            let src = format!("{HDR}v: Any = {value}\nprint(v)\nprint(str(v))\n");
+            move || run_capture(&src).expect("prints")
+        });
+        assert_eq!(out, format!("{shown}\n{shown}\n"), "{value}: print / str");
+    }
+    // The `&self` `no field` paths: a struct whose one field is a list holding it twice.
+    for set in [false, true] {
+        let msg = watch(format!("no field set={set}"), move || {
+            let mut vm = Vm::new(Arc::new(empty_program()));
+            let l = Value::obj(
+                vm.heap
+                    .alloc(Obj::List(vec![Value::nil(), Value::nil()].into())),
+            );
+            let s = Value::obj(vm.heap.alloc(Obj::Struct {
+                tid: crate::base::op::TID_NONE,
+                fields: Fields::from_vec(vec![l]),
+            }));
+            let Obj::List(items) = vm.heap.get(l.as_obj().unwrap()) else {
+                unreachable!()
+            };
+            items.set(0, s);
+            items.set(1, s);
+            vm.push(s);
+            if set {
+                vm.push(Value::int(1));
+                vm.set_field("zz", crate::base::op::NO_IC, Span::default())
+            } else {
+                vm.get_field("zz", crate::base::op::NO_IC, Span::default())
+            }
+            .expect_err("no such field")
+            .message
+        });
+        assert_eq!(msg, "no field 'zz' on <...>", "set={set}");
+    }
 }

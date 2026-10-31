@@ -250,54 +250,17 @@ scope and in sibling closures. A plain local and a global behave the same.
 | plain local | shared (live) | `20` |
 | global | shared (live) | `20` |
 
-A closure captures only the names its body references (its free variables). An unrelated
-non-sendable value in scope (another closure, a live generator) does not block a `spawn` /
-`parallel:` crossing; only names the task uses are checked for sendability.
+A closure captures only the names its body references (its free variables).
 
 1. **Capture is by reference.** A captured **loop variable** rebinds into a fresh cell each iteration
    (Go ≥1.22), so `for i in [0,1,2]: fns.push(fn() -> int: i)` gives closures that return `0`, `1`,
    `2`. A variable declared outside the loop stays one shared cell.
-2. **The task boundary is the one place sharing stops.** Across `spawn` / `parallel:` (a real OS
-   thread) a captured local is **snapshot-copied** into a per-task cell.
-   - There is one cell per **binding**, so sibling closures that cross in one task still share it (two
-     closures over one local, sent through a `Channel` or passed to one `spawn` as two args, read and
-     write the same cell, as in Go). Two separate tasks each get their own snapshot. One task that
-     reaches a cell through a captured local and a module global shares it.
-   - **A write inside the task to a copy (the captured cell, or a container/struct it points into) is
-     a runtime fault.** `x := 0; parallel: spawn: x = x + 1; print(x)` faults in the `spawn:` body:
-     `'x' is this task's copy: a write to it would be lost at the join; share it through
-     Shared/Channel, or make a task-local copy with .copy()`. `recover:` catches it. This is the one
-     divergence from Go, and it is the memory-safety line.
-   - For shared mutation use `Shared[T]` / `RwShared[T]` / `Atomic` / `Channel[T]`, which cross by
-     reference (see [`concurrency.md`](../concurrency/01-model.md)); writes through them never fault.
-   - `.copy()` of a copy is unmarked: `ys := xs.copy(); ys.push(v)` in a task is a task-local write.
-
-**The checker rejects visible writes before the program runs.** A direct write inside a `spawn:` task
-to a captured binding or module global is a compile-time error with the runtime fault's message. This
-covers reassignment, compound assignment, field/index stores, and mutating native methods on the
-binding or a declared-type projection. A `defer:` inside the task is inside the task. The checker
-infers, to a fixed point, which user methods store through `self` or call such a method, so
-`spawn: counter.bump()` is rejected when `bump` writes `self`.
-
-```chezzi
-results: List[str] = []
-parallel:
-    spawn:
-        results = ["ok", "ok"]     # compile error: 'results' is this task's copy: ...
-for r in results:
-    assert r == "ok"
-```
-
-- The checker also rejects a closure known to write a capture when a task runs it: a captured call
-  in `spawn:`, `spawn g()`, or `Executor.submit(g)` / an inline literal.
-- It reports proven writes by a directly called named function (nested `fn`, or through another named
-  function), through a parameter, a capture or a module global. The error points at the task-side call
-  and names the write in help.
-- `spawn run(g)` arguments and `Channel.send(g)` are not execution (the receiver may never call `g`).
-- Calls through function values, unresolved projections and protocol/generic receivers rely on the
-  runtime fault. `spawn f(args)` evaluates `args` in the parent.
-- Valid: reads, parent-side writes, task-created values, `.copy()` then mutation, handle writes, and a
-  task-local `:=` shadow. The checker never reports an error unless the program would fault at runtime.
+2. **A task shares the binding too (M3.4, the Go rule).** Across `spawn` / `parallel:` (a real OS
+   thread) a captured local is the parent's own cell, so a write inside the task lands:
+   `x := 0; parallel: spawn: x = x + 1; print(x)` prints `1`, as Go does. Two tasks that write one
+   binding without a join, a `Channel` or a box between them race (the program's bug). For mutation
+   that several tasks make, use `Shared[T]` / `RwShared[T]` / `Atomic` / `Channel[T]`
+   (see [`concurrency.md`](../concurrency/01-model.md)).
 
 **Mutating a captured local.** A closure body is a single expression, so `fn(): n = n + 1` is a parse
 error. Three ways to write through a captured binding:
@@ -319,21 +282,10 @@ with a name and a statement body.
   check-time arity error).
 - **Recursion.** A nested fn may call itself (`fn fact(n: int) -> int: … fact(n - 1)`).
 - **By-reference capture,** as for any closure. Its statement body can reassign a captured local
-  (`fn bump(): x = x + 1`). Across `spawn` / `parallel:` the two rules above apply
-  ([`adr-d4-airlock.md`](../../design/adr-d4-airlock.md)): `x = x + 1` on a captured local, a
-  `.push`/index/field store on a captured container, and a write to a module global fault in the task
-  with `'<name>' is this task's copy: ...`. Three shapes still lose the write silently (see the
-  ceilings in [`concurrency.md`](../concurrency/01-model.md)).
-- **Fresh values are the task's own.** A value no parent binding can reach is writable in the task: a
-  fresh `spawn` operand (`spawn work([], out)`, a comprehension, `xs.copy()`), every object its
-  expression builds below the root (`spawn f([[]])`, `spawn f(S([]))`, a `T?` parameter given `[]`), a
-  literal default fill (`acc: List[int] = []`) and a variadic pack, for every callee form (`f()`,
-  `obj.m()`, `lib.f()`, `lib.K.f()`, a function value). A NAMED child stays a copy (`spawn f([xs])`);
-  `xs.copy()` is fresh for its own level only. A parameter the callee rebinds before writing it
-  (`ys = [1, 2]; ys.push(3)`) is not a task copy.
+  (`fn bump(): x = x + 1`). Across `spawn` / `parallel:` the task shares it (rule 2 above, M3.4).
 
   A builtin slice is a new value, not a place. `grid[0..2]` builds a new list, so a mutating call or a
-  store on it changes a dropped copy. It is not a D4 error in a spawned function; the checker warns:
+  store on it changes a dropped copy, in a spawned function as anywhere; the checker warns:
 
   ```
   fn t(grid: List[List[int]]):
@@ -346,17 +298,16 @@ with a name and a statement body.
   ```
 
   ```
-  warning (d4.chz:2:5): 'push' changes a temporary copy; the result is dropped: bind the value to a name first, or call 'push' on the source
+  warning (slice.chz:2:5): 'push' changes a temporary copy; the result is dropped: bind the value to a name first, or call 'push' on the source
   [[1], [2], [3]]
   ```
 
   A write through an element of the slice (`grid[0..2][0].push(9)`) or through an index
-  (`grid[0].push(9)`) is a real write to `grid` and stays the D4 error. A `Map[Range, V]` key
+  (`grid[0].push(9)`) is a real write to `grid`: it lands, and the parent prints it. A `Map[Range, V]` key
   (`m[0..3].push(9)`) is an index, so it is a place. A user `slice` hook may alias the receiver, so its
   result is never a temporary.
 
-  **A mutating call on a temporary.** The checker warns (as for the `Shared` read temporary,
-  [`concurrency.md`](../concurrency/01-model.md) §6) when a mutating builtin call (`push`, `extend`, `sort`,
+  **A mutating call on a temporary.** The checker warns when a mutating builtin call (`push`, `extend`, `sort`,
   `insert`, `remove`, `update`, ...) or a field/index store lands on a value no name holds:
   - a slice of a builtin (`g[0..2]`, `g[r]`), `.reversed()`, `.copy()`, or another native
     `List`/`Map`/`Set`/`bytearray` method that returns a container

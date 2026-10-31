@@ -95,11 +95,429 @@ impl crate::native::Host for OffloadHost {
     }
 }
 
-/// The VM's [`crate::native::Host`] adapter: lets a native fn read the evaluated `Value` arguments
-/// (reaching into the heap for `str` args) and write to the captured output buffers. Holds `&mut
-/// Vm` plus the arg vector; it allocates nothing itself — the returned [`crate::native::NativeRet`]
-/// is lowered to heap objects by [`Vm::lower_native`] after the call returns. (Stdin / args / env /
-/// cooperative-exit are wired in a later milestone; the unwired methods return inert defaults.)
+/// M3.0a — one native-call argument, copied out of the heap: the answer of every typed `Host`
+/// read of it. THE owner of those reads: [`VmHost`] copies an arg when a native reads it,
+/// [`DoorHost`] serves the copies made before its GC door opened, and the dirty-pool offload takes
+/// the primitive ones ([`ArgCopy::offload_form`]).
+#[derive(Clone)]
+pub(super) struct ArgCopy {
+    shape: ArgShape,
+    /// The arg's type name ([`Vm::type_name`]), for a wrong-type error.
+    ty: &'static str,
+}
+
+#[derive(Clone)]
+enum ArgShape {
+    /// An int, inline or boxed.
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+    Bytes(Vec<u8>),
+    Ptr(usize),
+    /// A list: its strs in order, or `None` when an element is not a str.
+    List(Option<Vec<String>>),
+    /// A map: its `(key, value)` strs in insertion order, or `None` when one is not a str.
+    Map(Option<Vec<(String, String)>>),
+    /// A struct: its fields' C values in declaration order ([`ArgCopy::c_form`] of each), or
+    /// `None` when a field has no C shape.
+    Struct(Option<crate::native::NativeRet>),
+    /// Any other value: nil, a tuple, a closure, a handle.
+    Other,
+}
+
+impl ArgCopy {
+    fn wrong(&self, i: usize, want: &str) -> crate::native::HostError {
+        crate::native::HostError::arg_type(i, want, self.ty)
+    }
+    fn is_int(&self) -> bool {
+        matches!(self.shape, ArgShape::Int(_))
+    }
+    fn int(self, i: usize) -> Result<i64, crate::native::HostError> {
+        if let ArgShape::Int(n) = self.shape {
+            return Ok(n);
+        }
+        Err(crate::native::HostError::arg_type(i, "int", self.ty))
+    }
+    fn float(self, i: usize) -> Result<f64, crate::native::HostError> {
+        match self.shape {
+            ArgShape::Float(f) => Ok(f),
+            ArgShape::Int(n) => Ok(n as f64),
+            ArgShape::Bool(_)
+            | ArgShape::Str(_)
+            | ArgShape::Bytes(_)
+            | ArgShape::Ptr(_)
+            | ArgShape::List(_)
+            | ArgShape::Map(_)
+            | ArgShape::Struct(_)
+            | ArgShape::Other => Err(self.wrong(i, "float")),
+        }
+    }
+    fn bool(self, i: usize) -> Result<bool, crate::native::HostError> {
+        if let ArgShape::Bool(b) = self.shape {
+            return Ok(b);
+        }
+        Err(crate::native::HostError::arg_type(i, "bool", self.ty))
+    }
+    fn ptr(self, i: usize) -> Result<usize, crate::native::HostError> {
+        if let ArgShape::Ptr(a) = self.shape {
+            return Ok(a);
+        }
+        Err(crate::native::HostError::arg_type(i, "ptr", self.ty))
+    }
+    fn str(self, i: usize) -> Result<String, crate::native::HostError> {
+        if let ArgShape::Str(s) = self.shape {
+            return Ok(s);
+        }
+        Err(crate::native::HostError::arg_type(i, "str", self.ty))
+    }
+    /// R1 — a `bytes` ONLY: the checker types every seam param `bytes`, and neither a `bytearray`
+    /// (not assignable to a `bytes` sink — 7b29552) nor a `list[int]` (a `bytes()`-ctor
+    /// convenience, not a seam contract) can reach here from typed code.
+    fn bytes(self, i: usize) -> Result<Vec<u8>, crate::native::HostError> {
+        if let ArgShape::Bytes(b) = self.shape {
+            return Ok(b);
+        }
+        Err(crate::native::HostError::arg_type(i, "bytes", self.ty))
+    }
+    fn c_value(self, i: usize) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        let ty = self.ty;
+        self.c_form()
+            .ok_or_else(|| crate::native::HostError::arg_type(i, "C value", ty))
+    }
+    /// The arg as a C-marshallable value for the FFI seam (`Host::arg_c_value`): a scalar
+    /// (`int`/`float`/`bool`/`ptr`/`str`) as itself, a struct as a `NativeRet::List` of its
+    /// fields. `None` for anything else. The one owner of that mapping.
+    fn c_form(self) -> Option<crate::native::NativeRet> {
+        use crate::native::NativeRet as N;
+        match self.shape {
+            ArgShape::Int(n) => Some(N::Int(n)),
+            ArgShape::Float(f) => Some(N::Float(f)),
+            ArgShape::Bool(b) => Some(N::Bool(b)),
+            ArgShape::Ptr(a) => Some(N::Ptr(a)),
+            ArgShape::Str(s) => Some(N::Str(s)),
+            ArgShape::Struct(c) => c,
+            ArgShape::Bytes(_) | ArgShape::List(_) | ArgShape::Map(_) | ArgShape::Other => None,
+        }
+    }
+    /// In list order (it IS the argv). Every element must be a str.
+    fn str_list(self, i: usize) -> Result<Vec<String>, crate::native::HostError> {
+        match self.shape {
+            ArgShape::List(Some(xs)) => Ok(xs),
+            ArgShape::List(None) => {
+                Err(crate::native::HostError::arg_type(i, "List[str]", "other"))
+            }
+            ArgShape::Int(_)
+            | ArgShape::Float(_)
+            | ArgShape::Bool(_)
+            | ArgShape::Str(_)
+            | ArgShape::Bytes(_)
+            | ArgShape::Ptr(_)
+            | ArgShape::Map(_)
+            | ArgShape::Struct(_)
+            | ArgShape::Other => Err(self.wrong(i, "List[str]")),
+        }
+    }
+    /// In insertion order, so header order is deterministic and matches the off-heap host. Every
+    /// key and value must be a str.
+    fn str_map(self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
+        match self.shape {
+            ArgShape::Map(Some(pairs)) => Ok(pairs),
+            ArgShape::Map(None) => Err(crate::native::HostError::arg_type(
+                i,
+                "Map[str, str]",
+                "other",
+            )),
+            ArgShape::Int(_)
+            | ArgShape::Float(_)
+            | ArgShape::Bool(_)
+            | ArgShape::Str(_)
+            | ArgShape::Bytes(_)
+            | ArgShape::Ptr(_)
+            | ArgShape::List(_)
+            | ArgShape::Struct(_)
+            | ArgShape::Other => Err(self.wrong(i, "Map[str, str]")),
+        }
+    }
+    /// D5 — the `Send` primitive form a dirty-pool thread serves ([`OffloadHost`]), or `None`
+    /// when the arg has none (the call then runs inline: a safe fallback, never a fault).
+    pub(super) fn offload_form(self) -> Option<crate::native::NativeArg> {
+        use crate::native::NativeArg as A;
+        match self.shape {
+            ArgShape::Int(n) => Some(A::Int(n)),
+            ArgShape::Float(f) => Some(A::Float(f)),
+            ArgShape::Bool(b) => Some(A::Bool(b)),
+            ArgShape::Str(s) => Some(A::Str(s)),
+            ArgShape::Bytes(b) => Some(A::Bytes(b)),
+            ArgShape::List(xs) => xs.map(A::List),
+            ArgShape::Map(pairs) => pairs.map(A::Map),
+            ArgShape::Ptr(_) | ArgShape::Struct(_) | ArgShape::Other => None,
+        }
+    }
+}
+
+impl Vm {
+    /// `v` copied out of the heap ([`ArgCopy`]).
+    pub(super) fn copy_arg(&self, v: Value) -> ArgCopy {
+        let str_of = |e: Value| match e.as_obj().map(|h| self.heap.get(h)) {
+            Some(Obj::Str(s)) => Some(s.to_string()),
+            _ => None,
+        };
+        let shape = if let Some(n) = self.int_val(v) {
+            ArgShape::Int(n)
+        } else if v.is_float() {
+            ArgShape::Float(self.float_of(v))
+        } else if let Some(b) = v.as_bool() {
+            ArgShape::Bool(b)
+        } else if let Some(h) = v.as_obj() {
+            match self.heap.get(h) {
+                Obj::Str(s) => ArgShape::Str(s.to_string()),
+                Obj::Bytes(b) => ArgShape::Bytes(b.to_vec()),
+                Obj::Ptr(a) => ArgShape::Ptr(*a),
+                Obj::List(items) => ArgShape::List(items.iter().map(str_of).collect()),
+                Obj::Map(m) => ArgShape::Map(
+                    m.entries
+                        .iter()
+                        .map(|(_, k, mv)| Some((str_of(k)?, str_of(mv)?)))
+                        .collect(),
+                ),
+                Obj::Struct { fields, .. } => ArgShape::Struct(
+                    fields
+                        .iter()
+                        .map(|f| self.copy_arg(f).c_form())
+                        .collect::<Option<Vec<_>>>()
+                        .map(crate::native::NativeRet::List),
+                ),
+                Obj::ByteArray(_)
+                | Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::Tuple(_)
+                | Obj::Set(_)
+                | Obj::Enum { .. }
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => ArgShape::Other,
+            }
+        } else {
+            ArgShape::Other
+        };
+        ArgCopy {
+            shape,
+            ty: self.type_name(v),
+        }
+    }
+
+    /// Every arg of a call, copied out before its GC door opens ([`DoorHost`]).
+    pub(super) fn copy_args(&self, args: &[Value]) -> Vec<ArgCopy> {
+        args.iter().map(|&v| self.copy_arg(v)).collect()
+    }
+
+    /// Run the Chezzi closure `callee` on the C scalars `args` that C handed a callback
+    /// trampoline, and lower its result back to a [`crate::native::NativeRet`]. Same-thread,
+    /// synchronous, through the proven `guarded`+`invoke_value` re-entry path (the one
+    /// map/filter/sort use). No span is available at the FFI boundary; a zero span is used.
+    fn run_c_callback(
+        &mut self,
+        callee: Value,
+        args: &[crate::native::NativeRet],
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        // Lower the C scalar args to engine `Value`s (allocations happen here, at the boundary).
+        let vals: Vec<Value> = args.iter().map(|a| self.lower_native(a.clone())).collect();
+        let result = self
+            .guarded(|vm| vm.invoke_value(callee, vals, Span::default()))
+            .map_err(|e| crate::native::HostError { message: e.message })?;
+        Ok(self.value_to_native_ret(result))
+    }
+}
+
+/// `std.os.getenv` from the run's shared env.
+fn env_get(host: &crate::native::HostConfig, key: &str) -> Option<String> {
+    host.env
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .cloned()
+}
+
+/// `std.os.environ`. Sorted by key: the backing store is a `HashMap` (per-instance random
+/// iteration order), but every other Chezzi map is deterministic and the serial/M:N engines each
+/// build their own HashMap — an unsorted lowering would diverge run-to-run and between engines.
+fn env_all(host: &crate::native::HostConfig) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = host
+        .env
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    pairs
+}
+
+/// `std.os.setenv`. Writes the SHARED HostConfig env — the SAME map `os_env`/`os_environ` read,
+/// shared by Arc across M:N workers — NOT `std::env::set_var` (a third, process-global-racy
+/// source). So a `setenv` from any task is observed by both readers AND by the parent/siblings.
+fn env_set(host: &crate::native::HostConfig, key: String, value: String) {
+    host.env
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key, value);
+}
+
+/// `std.os.getcwd`. W7-8 — RAW bytes, not `display().to_string()`: a non-UTF-8 cwd used to come
+/// back U+FFFD-substituted, naming nothing.
+fn cwd_bytes() -> Result<Vec<u8>, crate::native::HostError> {
+    std::env::current_dir()
+        .map(|p| crate::native::fs::path_bytes(&p))
+        .map_err(|e| crate::native::HostError {
+            message: e.to_string(),
+        })
+}
+
+/// M3.0a — the [`crate::native::Host`] of a native that runs in the GC door ([`Vm::gc_blocking`]):
+/// a native that holds its host thread, and an extern C call. It serves the args copied out of
+/// the heap before the door opened ([`Vm::copy_args`]) and the Rust-owned host state, through the
+/// door's [`super::gc_door::Detached`] handle, which reaches no heap. A C callback and an exit
+/// re-attach for their span ([`super::gc_door::Detached::reenter`]).
+pub(super) struct DoorHost<'d, 'v> {
+    pub(super) door: &'d mut super::gc_door::Detached<'v>,
+    pub(super) args: Vec<ArgCopy>,
+    /// The call's arg values, read only attached: the callee of a C callback (an extern call
+    /// pins them in its door). Empty for a native.
+    pub(super) vals: Vec<Value>,
+}
+
+impl DoorHost<'_, '_> {
+    fn arg(&self, i: usize) -> Result<ArgCopy, crate::native::HostError> {
+        self.args
+            .get(i)
+            .cloned()
+            .ok_or_else(|| crate::native::HostError::missing_arg(i))
+    }
+}
+
+impl crate::native::Host for DoorHost<'_, '_> {
+    fn arg_count(&self) -> usize {
+        self.args.len()
+    }
+    fn arg_int(&mut self, i: usize) -> Result<i64, crate::native::HostError> {
+        self.arg(i)?.int(i)
+    }
+    fn arg_is_int(&self, i: usize) -> bool {
+        self.args.get(i).is_some_and(ArgCopy::is_int)
+    }
+    fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
+        self.arg(i)?.float(i)
+    }
+    fn arg_bool(&mut self, i: usize) -> Result<bool, crate::native::HostError> {
+        self.arg(i)?.bool(i)
+    }
+    fn arg_ptr(&mut self, i: usize) -> Result<usize, crate::native::HostError> {
+        self.arg(i)?.ptr(i)
+    }
+    fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
+        self.arg(i)?.str(i)
+    }
+    fn arg_bytes(&mut self, i: usize) -> Result<Vec<u8>, crate::native::HostError> {
+        self.arg(i)?.bytes(i)
+    }
+    fn arg_c_value(
+        &mut self,
+        i: usize,
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        self.arg(i)?.c_value(i)
+    }
+    fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
+        self.arg(i)?.str_map(i)
+    }
+    fn arg_str_list(&mut self, i: usize) -> Result<Vec<String>, crate::native::HostError> {
+        self.arg(i)?.str_list(i)
+    }
+    fn invoke_callback(
+        &mut self,
+        arg_index: usize,
+        args: &[crate::native::NativeRet],
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
+        // The Chezzi closure passed as extern arg `arg_index` (a function pointer to C). This fires
+        // inside the extern `ffi_call` on the calling thread. M1.8 — the extern call waits in the
+        // GC door: the callback runs attached (Go `cgocallback`), and the call's args stay pinned
+        // after it.
+        let callee = *self
+            .vals
+            .get(arg_index)
+            .ok_or_else(|| crate::native::HostError {
+                message: format!("callback argument {arg_index} is missing"),
+            })?;
+        let pins: Vec<GcRef> = self.vals.iter().filter_map(|v| v.child_gcref()).collect();
+        self.door
+            .reenter(&pins, |vm| vm.run_c_callback(callee, args))
+    }
+    fn write_stdout(&mut self, s: &str) {
+        self.door.emit_out(s);
+    }
+    fn write_stderr(&mut self, s: &str) {
+        self.door.emit_err(s);
+    }
+    fn read_line(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        self.door.host().stdin.read_line()
+    }
+    fn read_all(&mut self) -> Result<String, crate::native::HostError> {
+        self.door.host().stdin.read_all()
+    }
+    fn read_char(&mut self) -> Result<Option<String>, crate::native::HostError> {
+        self.door.host().stdin.read_char()
+    }
+    fn os_args(&self) -> Vec<String> {
+        self.door.host_ref().args.clone()
+    }
+    fn os_env(&self, key: &str) -> Option<String> {
+        env_get(self.door.host_ref(), key)
+    }
+    fn os_environ(&self) -> Vec<(String, String)> {
+        env_all(self.door.host_ref())
+    }
+    fn os_setenv(&mut self, key: String, value: String) {
+        env_set(self.door.host_ref(), key, value);
+    }
+    fn os_getcwd(&self) -> Result<Vec<u8>, crate::native::HostError> {
+        cwd_bytes()
+    }
+    fn request_exit(&mut self, code: i64) {
+        // No native that runs in the door exits today; one that does re-attaches for the exit,
+        // whose teardown reads the `Vm`.
+        self.door.reenter(&[], |vm| {
+            crate::native::Host::request_exit(
+                &mut VmHost {
+                    vm,
+                    args: Vec::new(),
+                },
+                code,
+            )
+        });
+    }
+}
+
+/// The VM's [`crate::native::Host`] adapter for a native run attached: lets a native fn read the
+/// evaluated `Value` arguments ([`Vm::copy_arg`] copies one per read) and write to the captured
+/// output buffers. Holds `&mut Vm` plus the arg vector; it allocates nothing itself — the returned
+/// [`crate::native::NativeRet`] is lowered to heap objects by [`Vm::lower_native`] after the call
+/// returns.
 pub(super) struct VmHost<'a> {
     pub(super) vm: &'a mut Vm,
     pub(super) args: Vec<Value>,
@@ -120,6 +538,14 @@ impl VmHost<'_> {
             )),
         }
     }
+
+    /// `args[i]` copied out of the heap.
+    fn arg(&self, i: usize) -> Result<ArgCopy, crate::native::HostError> {
+        match self.args.get(i) {
+            Some(&v) => Ok(self.vm.copy_arg(v)),
+            None => Err(crate::native::HostError::missing_arg(i)),
+        }
+    }
 }
 
 impl crate::native::Host for VmHost<'_> {
@@ -127,183 +553,34 @@ impl crate::native::Host for VmHost<'_> {
         self.args.len()
     }
     fn arg_int(&mut self, i: usize) -> Result<i64, crate::native::HostError> {
-        match self.args.get(i).copied() {
-            Some(v) => match self.vm.int_val(v) {
-                Some(n) => Ok(n),
-                None => Err(crate::native::HostError::arg_type(
-                    i,
-                    "int",
-                    self.vm.type_name(v),
-                )),
-            },
-            None => Err(crate::native::HostError::missing_arg(i)),
-        }
+        self.arg(i)?.int(i)
     }
     fn arg_is_int(&self, i: usize) -> bool {
         self.args.get(i).is_some_and(|v| self.vm.is_integral(*v))
     }
     fn arg_float(&mut self, i: usize) -> Result<f64, crate::native::HostError> {
-        match self.args.get(i).copied() {
-            Some(v) if v.is_float() => Ok(self.vm.float_of(v)),
-            Some(v) if self.vm.is_integral(v) => Ok(self.vm.int_of(v) as f64),
-            Some(v) => Err(crate::native::HostError::arg_type(
-                i,
-                "float",
-                self.vm.type_name(v),
-            )),
-            None => Err(crate::native::HostError::missing_arg(i)),
-        }
+        self.arg(i)?.float(i)
     }
     fn arg_bool(&mut self, i: usize) -> Result<bool, crate::native::HostError> {
-        match self.args.get(i).copied() {
-            Some(v) => match v.as_bool() {
-                Some(b) => Ok(b),
-                None => Err(crate::native::HostError::arg_type(
-                    i,
-                    "bool",
-                    self.vm.type_name(v),
-                )),
-            },
-            None => Err(crate::native::HostError::missing_arg(i)),
-        }
+        self.arg(i)?.bool(i)
     }
     fn arg_ptr(&mut self, i: usize) -> Result<usize, crate::native::HostError> {
-        match self.args.get(i).copied() {
-            Some(v) => {
-                if let Some(h) = v.as_obj()
-                    && let Obj::Ptr(a) = self.vm.heap.get(h)
-                {
-                    Ok(*a)
-                } else {
-                    Err(crate::native::HostError::arg_type(
-                        i,
-                        "ptr",
-                        self.vm.type_name(v),
-                    ))
-                }
-            }
-            None => Err(crate::native::HostError::missing_arg(i)),
-        }
+        self.arg(i)?.ptr(i)
     }
     fn arg_str(&mut self, i: usize) -> Result<String, crate::native::HostError> {
-        match self.args.get(i).copied() {
-            Some(v) => {
-                if let Some(h) = v.as_obj()
-                    && let Obj::Str(s) = self.vm.heap.get(h)
-                {
-                    Ok(s.to_string())
-                } else {
-                    Err(crate::native::HostError::arg_type(
-                        i,
-                        "str",
-                        self.vm.type_name(v),
-                    ))
-                }
-            }
-            None => Err(crate::native::HostError::missing_arg(i)),
-        }
+        self.arg(i)?.str(i)
     }
-    /// R1 — a `bytes` arg, copied out of the heap (no aliasing). `bytes` ONLY: the checker types every
-    /// seam param `bytes`, and neither a `bytearray` (not assignable to a `bytes` sink — 7b29552) nor a
-    /// `list[int]` (a `bytes()`-ctor convenience, not a seam contract) can reach here from typed code.
     fn arg_bytes(&mut self, i: usize) -> Result<Vec<u8>, crate::native::HostError> {
-        match self.args.get(i).copied() {
-            Some(v) => {
-                if let Some(h) = v.as_obj()
-                    && let Obj::Bytes(b) = self.vm.heap.get(h)
-                {
-                    Ok(b.to_vec())
-                } else {
-                    Err(crate::native::HostError::arg_type(
-                        i,
-                        "bytes",
-                        self.vm.type_name(v),
-                    ))
-                }
-            }
-            None => Err(crate::native::HostError::missing_arg(i)),
-        }
+        self.arg(i)?.bytes(i)
     }
     fn arg_c_value(
         &mut self,
         i: usize,
     ) -> Result<crate::native::NativeRet, crate::native::HostError> {
-        let Some(v) = self.args.get(i).copied() else {
-            return Err(crate::native::HostError::missing_arg(i));
-        };
-        self.vm
-            .c_value_of(v)
-            .ok_or_else(|| crate::native::HostError::arg_type(i, "C value", self.vm.type_name(v)))
-    }
-    fn invoke_callback(
-        &mut self,
-        arg_index: usize,
-        args: &[crate::native::NativeRet],
-    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
-        // The Chezzi closure passed as extern arg `arg_index` (a function pointer to C). Re-enter the
-        // engine to run it on the C scalars, then lower its result back to a NativeRet. Same-thread,
-        // synchronous: this fires inside the extern `ffi_call` on the calling (worker) thread, so it
-        // is plain Rust-stack recursion through the proven `guarded`+`invoke_value` re-entry path
-        // (the one map/filter/sort use). No span is available at the FFI boundary; use a zero span.
-        let callee = *self
-            .args
-            .get(arg_index)
-            .ok_or_else(|| crate::native::HostError {
-                message: format!("callback argument {arg_index} is missing"),
-            })?;
-        let span = Span::default();
-        // Lower the C scalar args to engine `Value`s (allocations happen here, at the boundary).
-        let vals: Vec<Value> = args
-            .iter()
-            .map(|a| self.vm.lower_native(a.clone()))
-            .collect();
-        let result = self
-            .vm
-            .guarded(|vm| vm.invoke_value(callee, vals, span))
-            .map_err(|e| crate::native::HostError { message: e.message })?;
-        Ok(self.vm.value_to_native_ret(result))
+        self.arg(i)?.c_value(i)
     }
     fn arg_str_map(&mut self, i: usize) -> Result<Vec<(String, String)>, crate::native::HostError> {
-        let Some(v) = self.args.get(i).copied() else {
-            return Err(crate::native::HostError::missing_arg(i));
-        };
-        let entries = match v.as_obj().map(|h| self.vm.heap.get(h)) {
-            Some(Obj::Map(m)) => m.entries.clone(),
-            _ => {
-                return Err(crate::native::HostError::arg_type(
-                    i,
-                    "Map[str, str]",
-                    self.vm.type_name(v),
-                ));
-            }
-        };
-        // Iterate `entries` (insertion order) so header order is deterministic and matches the interp
-        // + off-heap hosts. Every key/value must be a str.
-        let mut pairs = Vec::with_capacity(entries.len());
-        for (_, k, val) in &entries {
-            let (Some(kh), Some(vh)) = (k.as_obj(), val.as_obj()) else {
-                return Err(crate::native::HostError::arg_type(
-                    i,
-                    "Map[str, str]",
-                    "other",
-                ));
-            };
-            let (Obj::Str(ks), Obj::Str(vs)) = (self.vm.heap.get(kh), self.vm.heap.get(vh)) else {
-                return Err(crate::native::HostError::arg_type(
-                    i,
-                    "Map[str, str]",
-                    "other",
-                ));
-            };
-            pairs.push((ks.to_string(), vs.to_string()));
-        }
-        Ok(pairs)
-    }
-    fn arg_is_task_copy(&self, i: usize) -> Result<bool, crate::native::HostError> {
-        match self.args.get(i).copied() {
-            Some(v) => Ok(v.as_obj().is_some_and(|h| self.vm.heap.is_copied(h))),
-            None => Err(crate::native::HostError::missing_arg(i)),
-        }
+        self.arg(i)?.str_map(i)
     }
     fn arg_settle_channel(&mut self, ch: usize, v: usize) -> Result<(), crate::native::HostError> {
         let h = self.arg_channel(ch)?;
@@ -311,20 +588,8 @@ impl crate::native::Host for VmHost<'_> {
             return Err(crate::native::HostError::missing_arg(v));
         };
         let core = self.vm.channel_core(h);
-        let w = self
-            .vm
-            .to_wire_crossable_memo(
-                val,
-                Span::default(),
-                &mut super::airlock_out::WireMemo::job_result(),
-            )
-            .map_err(|e| crate::native::HostError { message: e.message })?;
-        let sum = crate::vm::core::wire_summary(&w);
-        let sealed = core
-            .q
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .seal(sum, w);
+        // M3.2 — the outcome is sealed by handle: every `get()` reader shares the job's value.
+        let sealed = core.q.lock().unwrap_or_else(|e| e.into_inner()).seal(val);
         if sealed {
             self.vm.wake_receivers_all(h, &core);
         }
@@ -355,31 +620,7 @@ impl crate::native::Host for VmHost<'_> {
         Ok(sealed)
     }
     fn arg_str_list(&mut self, i: usize) -> Result<Vec<String>, crate::native::HostError> {
-        let Some(av) = self.args.get(i).copied() else {
-            return Err(crate::native::HostError::missing_arg(i));
-        };
-        let items = match av.as_obj().map(|h| self.vm.heap.get(h)) {
-            Some(Obj::List(items)) => items.clone(),
-            _ => {
-                return Err(crate::native::HostError::arg_type(
-                    i,
-                    "List[str]",
-                    self.vm.type_name(av),
-                ));
-            }
-        };
-        // Iterate in list order (it IS the argv). Every element must be a str.
-        let mut out = Vec::with_capacity(items.len());
-        for v in &items {
-            let Some(eh) = v.as_obj() else {
-                return Err(crate::native::HostError::arg_type(i, "List[str]", "other"));
-            };
-            let Obj::Str(s) = self.vm.heap.get(eh) else {
-                return Err(crate::native::HostError::arg_type(i, "List[str]", "other"));
-            };
-            out.push(s.to_string());
-        }
-        Ok(out)
+        self.arg(i)?.str_list(i)
     }
     fn write_stdout(&mut self, s: &str) {
         self.vm.emit_out(s);
@@ -405,49 +646,16 @@ impl crate::native::Host for VmHost<'_> {
         self.vm.host.args.clone()
     }
     fn os_env(&self, key: &str) -> Option<String> {
-        self.vm
-            .host
-            .env
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .cloned()
+        env_get(&self.vm.host, key)
     }
     fn os_environ(&self) -> Vec<(String, String)> {
-        // Sort by key: the backing store is a `HashMap` (per-instance random iteration order), but
-        // every other Chezzi map is deterministic and the serial/M:N engines each build their own
-        // HashMap — an unsorted lowering would diverge run-to-run and between engines.
-        let mut pairs: Vec<(String, String)> = self
-            .vm
-            .host
-            .env
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        pairs
+        env_all(&self.vm.host)
     }
     fn os_setenv(&mut self, key: String, value: String) {
-        // Writes the SHARED HostConfig env — the SAME map `os_env`/`os_environ` read, shared by Arc
-        // across M:N workers — NOT `std::env::set_var` (a third, process-global-racy source). So a
-        // `setenv` from any task is observed by both readers AND by the parent/siblings.
-        self.vm
-            .host
-            .env
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, value);
+        env_set(&self.vm.host, key, value);
     }
     fn os_getcwd(&self) -> Result<Vec<u8>, crate::native::HostError> {
-        // W7-8 — RAW bytes, not `display().to_string()`: a non-UTF-8 cwd used to come back U+FFFD-
-        // substituted, naming nothing.
-        std::env::current_dir()
-            .map(|p| crate::native::fs::path_bytes(&p))
-            .map_err(|e| crate::native::HostError {
-                message: e.to_string(),
-            })
+        cwd_bytes()
     }
     fn request_exit(&mut self, code: i64) {
         // The LOW 8 BITS of the code, exactly like POSIX `exit(3)` / bash / Python / Go: `-1` → 255,
@@ -475,7 +683,7 @@ impl crate::native::Host for VmHost<'_> {
         // TICKET-270 — a FIBER that exits counts itself as an exit origin BEFORE the code is
         // published: a joiner that reads the code and flushes finished output then waits in
         // `take_finished_streams` until this fiber's slot holds what it printed. The code itself stays
-        // here, at the call: `MnSched::finish_with` trips this fiber's scope cancel later, and
+        // here, at the call: `MnSched::finish_with` trips this fiber's scope cancel, and
         // a sibling woken by it must already read the exit, or it runs its `defer` (DEC-213). `main` is
         // not a fiber and holds its own output.
         if self.vm.fiber_scope.is_some() && !self.vm.exit_origin {

@@ -105,8 +105,9 @@ epoch is per run: `MnSched::join_run` is the one place that pairs a scheduler wi
 state.
 
 *The licence comes before the latch.* A latch never un-latches. `latch_own_verdict(licence)`
-first checks the verdict and the caller's licence to cut (`victims_proven` or
-`may_fault_unproven` for the idle judge) under the scheduler lock, then latches, then checks
+first checks the verdict and the caller's licence to cut (`may_fault_unproven`; M3.2 deleted
+the `victims_proven` holder-count proof, unsound once two tasks share a channel slot) under the
+scheduler lock, then latches, then checks
 both again. Before, it latched first and kept the latch when the licence declined. A declined
 judge takes its timed wait and re-judges.
 

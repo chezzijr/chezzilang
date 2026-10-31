@@ -23,43 +23,6 @@ pub(super) fn py_blank(c: char) -> bool {
     c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
-pub(super) fn is_mutating_native(obj: &Obj, method: &str) -> bool {
-    let kind = match obj {
-        Obj::List(_) => "List",
-        Obj::Map(_) => "Map",
-        Obj::Set(_) => "Set",
-        Obj::ByteArray(_) => "bytearray",
-        Obj::Str(_)
-        | Obj::Bytes(_)
-        | Obj::BigInt(_)
-        | Obj::FloatBox(_)
-        | Obj::Iter { .. }
-        | Obj::Tuple(_)
-        | Obj::Struct { .. }
-        | Obj::Enum { .. }
-        | Obj::Cell(_)
-        | Obj::Func { .. }
-        | Obj::Closure { .. }
-        | Obj::Module(_)
-        | Obj::Native { .. }
-        | Obj::Builtin(_)
-        | Obj::Cffi(_)
-        | Obj::Ptr(_)
-        | Obj::Channel(_)
-        | Obj::Shared(_)
-        | Obj::RwShared(_)
-        | Obj::Atomic(_)
-        | Obj::AtomicInt(_)
-        | Obj::Executor(_)
-        | Obj::Socket(_)
-        | Obj::Listener(_)
-        | Obj::Writer(_)
-        | Obj::Reader(_)
-        | Obj::Generator(_) => return false,
-    };
-    is_mutating_native_kind(kind, method)
-}
-
 impl Vm {
     pub(super) fn do_call(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
         let at = self.stack.len() - argc;
@@ -219,7 +182,7 @@ impl Vm {
                     let items: Vec<Value> = args
                         .first()
                         .and_then(|v| v.as_obj())
-                        .and_then(|h| self.heap.get(h).as_list().cloned())
+                        .and_then(|h| self.heap.get(h).as_list().map(RVec::to_vec))
                         .unwrap_or_default();
                     // ROOT the items on the operand stack while they stringify. `args` was
                     // `split_off` the stack (do_call slow path), so it is NOT a GC root; a
@@ -267,8 +230,21 @@ impl Vm {
                         span,
                     ));
                 }
-                let mut host = VmHost { vm: self, args };
-                let ret = cffi.call(&mut host).map_err(|e| RuntimeError {
+                // M1.5 — Go `cgocall`: a C call runs detached, through the GC door, and returns an
+                // off-heap `NativeRet`; nothing allocates. M3.0a — it reads the args copied out
+                // before the door opens. M1.8 — a callback that C calls meanwhile runs attached
+                // (`DoorHost::invoke_callback`, Go `cgocallback`) on the arg values, which the
+                // door pins.
+                let pins: Vec<GcRef> = args.iter().filter_map(|v| v.child_gcref()).collect();
+                let copies = self.copy_args(&args);
+                let ret = self.gc_blocking(&pins, |door| {
+                    cffi.call(&mut DoorHost {
+                        door,
+                        args: copies,
+                        vals: args,
+                    })
+                });
+                let ret = ret.map_err(|e| RuntimeError {
                     message: e.message,
                     span,
                     is_assert: false,
@@ -282,11 +258,13 @@ impl Vm {
         }
     }
 
-    /// TICKET-226 — THE answer to "is `v` callable, and how": call, `lower_task`, `Executor.submit`
-    /// and the entrypoint all read it. Borrows the heap object only long enough to copy its
+    /// TICKET-226 — THE answer to "is `v` callable, and how": call, `prepare_worker`,
+    /// `Executor.submit` and the entrypoint all read it. Borrows the heap object only long enough to copy its
     /// `Copy`/cheap fields, so the hot fn/closure paths allocate nothing. The `match` names every
     /// `Obj` variant and has no `_` arm: a new `Obj` kind does not compile until it is classified.
-    #[inline]
+    /// Always inlined: as a call, its `Option<Callee>` result went back through the stack in
+    /// pieces, and the caller's wide reload stalled on every HOF callback (M2.8 profile).
+    #[inline(always)]
     pub(super) fn callable(&self, v: Value) -> Option<Callee> {
         let h = v.as_obj()?;
         match self.heap.get(h) {
@@ -368,7 +346,6 @@ impl Vm {
                 return self.net_connect_or_listen(name, args, span);
             }
             Kind::InterceptIo => return self.io_native(name, args, span),
-            Kind::InterceptAirlock => return self.airlock_native(name, args, span),
             Kind::InterceptTimer => return self.new_timer(&args, span),
             Kind::Inline | Kind::Blocking | Kind::TimedWait | Kind::HostWait => {}
         }
@@ -435,7 +412,6 @@ impl Vm {
                 | Kind::InterceptIo
                 | Kind::InterceptNet
                 | Kind::HostWait
-                | Kind::InterceptAirlock
                 | Kind::InterceptTimer => Some(OffloadReq {
                     func,
                     args: nargs,
@@ -507,30 +483,28 @@ impl Vm {
         // scheduler the bracket is DEC-052's pool-slot yield), and an off-heap blocking native in a
         // Demote context demotes too (changed cell (f), F1: holding the runner hung `request.get`
         // to a sibling-served socket at T=1). Gated on `holds_host_thread`, so `sleep_ms(<=0)`
-        // never demotes for a no-op. The DEC-141 width bracket stays inside it.
+        // never demotes for a no-op. The DEC-141 width bracket stays inside it ([`Vm::host_wait`]).
         let in_place = kind.holds_host_thread();
-        let reg = match WaitSpec::of_native(kind) {
-            Some(spec) if in_place && self.block_mode(spec) == BlockMode::Demote => {
-                let what = if spec == WaitSpec::Stdin {
-                    "a stdin read"
-                } else {
-                    "a blocking call"
-                };
-                Some(self.block_enter(spec, None, what, span)?)
-            }
-            _ => None,
+        let raw = if in_place {
+            let what = if kind == Kind::HostWait {
+                "a stdin read"
+            } else {
+                "a blocking call"
+            };
+            // M1.5 — a native that holds its host thread waits detached and returns an off-heap
+            // `NativeRet`: it allocates nothing on the heap. M3.0a — it reads the args copied out
+            // before the door opens, so the door pins nothing.
+            let copies = self.copy_args(&args);
+            self.host_wait(WaitSpec::of_native(kind), what, span, |door| {
+                func(&mut DoorHost {
+                    door,
+                    args: copies,
+                    vals: Vec::new(),
+                })
+            })?
+        } else {
+            func(&mut VmHost { vm: self, args })
         };
-        if in_place {
-            self.width_release();
-        }
-        let mut host = VmHost { vm: self, args };
-        let raw = func(&mut host);
-        if in_place {
-            self.width_acquire();
-        }
-        if let Some(reg) = reg {
-            self.block_exit(reg);
-        }
         // TICKET-188 — a native that held its host thread has no checkpoint until it returns
         // (`docs/reference/stdlib/` "Blocking calls cannot be interrupted"), so the halt is delivered AT the
         // return, as the offload resume delivers it: the value that completed with it is dropped.
@@ -567,94 +541,16 @@ impl Vm {
     }
 
     /// D5 — materialize a blocking native's already-evaluated `Value` args into `Send` primitives so
-    /// the dirty-pool thread can run the call without the heap. Returns `None` if any arg is not a
-    /// primitive (int / float / bool / str) — the scoped blocking fns only ever take primitives, so a
-    /// non-primitive means "don't offload, run inline" (a safe fallback, never a fault).
+    /// the dirty-pool thread can run the call without the heap ([`ArgCopy::offload_form`]). Returns
+    /// `None` if any arg is not a primitive (int / float / bool / str / bytes / a str list or map) —
+    /// the scoped blocking fns only ever take primitives, so a non-primitive means "don't offload,
+    /// run inline" (a safe fallback, never a fault).
     pub(super) fn extract_native_args(
         &self,
         args: &[Value],
     ) -> Option<Vec<crate::native::NativeArg>> {
-        use crate::native::NativeArg as A;
         args.iter()
-            .map(|&v| {
-                if let Some(n) = self.int_val(v) {
-                    return Some(A::Int(n));
-                }
-                if v.is_float() {
-                    return Some(A::Float(self.float_of(v)));
-                }
-                if let Some(b) = v.as_bool() {
-                    return Some(A::Bool(b));
-                }
-                let h = v.as_obj()?;
-                match self.heap.get(h) {
-                    Obj::Str(s) => Some(A::Str(s.to_string())),
-                    // R1 — a binary arg (today `io.write_bytes`): copied out so it survives the
-                    // off-heap handoff. `bytes` only — the checker types every seam param `bytes`
-                    // and a `bytearray` is not assignable to it (`bytes(ba)` converts).
-                    Obj::Bytes(b) => Some(A::Bytes(b.to_vec())),
-                    // A `Map[str, str]` arg (today only `request`'s headers) is snapshotted into
-                    // owned pairs so it survives the off-heap handoff. Any non-str key/value reverts
-                    // to `None` → run inline (safe fallback; the checker guarantees str/str for
-                    // typed code, so this is unreachable from a well-typed program).
-                    Obj::Map(m) => {
-                        let mut pairs = Vec::with_capacity(m.entries.len());
-                        for (_, k, mv) in &m.entries {
-                            let (Some(kh), Some(vh)) = (k.as_obj(), mv.as_obj()) else {
-                                return None;
-                            };
-                            let (Obj::Str(ks), Obj::Str(vs)) =
-                                (self.heap.get(kh), self.heap.get(vh))
-                            else {
-                                return None;
-                            };
-                            pairs.push((ks.to_string(), vs.to_string()));
-                        }
-                        Some(A::Map(pairs))
-                    }
-                    // A `List[str]` arg (today only `run_args`'s argv) is snapshotted into owned
-                    // strings so it survives the off-heap handoff. Any non-str element reverts to
-                    // `None` → run inline (the checker guarantees str for typed code).
-                    Obj::List(items) => {
-                        let mut out = Vec::with_capacity(items.len());
-                        for e in items {
-                            let eh = e.as_obj()?;
-                            let Obj::Str(s) = self.heap.get(eh) else {
-                                return None;
-                            };
-                            out.push(s.to_string());
-                        }
-                        Some(A::List(out))
-                    }
-                    Obj::ByteArray(_)
-                    | Obj::BigInt(_)
-                    | Obj::FloatBox(_)
-                    | Obj::Iter { .. }
-                    | Obj::Tuple(_)
-                    | Obj::Set(_)
-                    | Obj::Struct { .. }
-                    | Obj::Enum { .. }
-                    | Obj::Cell(_)
-                    | Obj::Func { .. }
-                    | Obj::Closure { .. }
-                    | Obj::Module(_)
-                    | Obj::Native { .. }
-                    | Obj::Builtin(_)
-                    | Obj::Cffi(_)
-                    | Obj::Ptr(_)
-                    | Obj::Channel(_)
-                    | Obj::Shared(_)
-                    | Obj::RwShared(_)
-                    | Obj::Atomic(_)
-                    | Obj::AtomicInt(_)
-                    | Obj::Executor(_)
-                    | Obj::Socket(_)
-                    | Obj::Listener(_)
-                    | Obj::Writer(_)
-                    | Obj::Reader(_)
-                    | Obj::Generator(_) => None,
-                }
-            })
+            .map(|&v| self.copy_arg(v).offload_form())
             .collect()
     }
 
@@ -692,54 +588,6 @@ impl Vm {
         N::Int(0)
     }
 
-    /// A value as a C-marshallable [`crate::native::NativeRet`] shape for the FFI seam
-    /// (`Host::arg_c_value`): a scalar (`int`/`float`/`bool`/`ptr`/`str`) as itself, a struct as a
-    /// `NativeRet::List` of its fields in declaration order, recursively. `None` for anything else.
-    pub(super) fn c_value_of(&self, v: Value) -> Option<crate::native::NativeRet> {
-        use crate::native::NativeRet as N;
-        if self.int_val(v).is_some() || v.is_float() || v.as_bool().is_some() {
-            return Some(self.value_to_native_ret(v));
-        }
-        match self.heap.get(v.as_obj()?) {
-            Obj::Ptr(a) => Some(N::Ptr(*a)),
-            Obj::Str(s) => Some(N::Str(s.to_string())),
-            Obj::Struct { fields, .. } => fields
-                .as_slice()
-                .iter()
-                .map(|f| self.c_value_of(*f))
-                .collect::<Option<Vec<_>>>()
-                .map(N::List),
-            Obj::Bytes(_)
-            | Obj::ByteArray(_)
-            | Obj::BigInt(_)
-            | Obj::FloatBox(_)
-            | Obj::Iter { .. }
-            | Obj::List(_)
-            | Obj::Tuple(_)
-            | Obj::Map(_)
-            | Obj::Set(_)
-            | Obj::Enum { .. }
-            | Obj::Cell(_)
-            | Obj::Func { .. }
-            | Obj::Closure { .. }
-            | Obj::Module(_)
-            | Obj::Native { .. }
-            | Obj::Builtin(_)
-            | Obj::Cffi(_)
-            | Obj::Channel(_)
-            | Obj::Shared(_)
-            | Obj::RwShared(_)
-            | Obj::Atomic(_)
-            | Obj::AtomicInt(_)
-            | Obj::Executor(_)
-            | Obj::Socket(_)
-            | Obj::Listener(_)
-            | Obj::Writer(_)
-            | Obj::Reader(_)
-            | Obj::Generator(_) => None,
-        }
-    }
-
     pub(super) fn lower_native(&mut self, ret: crate::native::NativeRet) -> Value {
         use crate::native::NativeRet as N;
         match ret {
@@ -755,7 +603,7 @@ impl Vm {
                 for x in items {
                     vs.push(self.lower_native(x));
                 }
-                Value::obj(self.heap.alloc(Obj::List(vs)))
+                Value::obj(self.heap.alloc(Obj::List(vs.into())))
             }
             N::Struct { name, fields } => {
                 // Positional layout: lower the named native fields, then place them into a flat Vec
@@ -793,28 +641,28 @@ impl Vm {
             N::Map(entries) => {
                 // Native maps have unique scalar (str) keys — hash them directly (no re-entry, no
                 // dedup needed).
-                let mut map = MapData::default();
+                let map = MapData::default();
                 for (k, v) in entries {
                     let lk = self.lower_native(k);
                     let lv = self.lower_native(v);
                     let hk = self.scalar_hash(lk);
-                    map.push(hk, lk, lv);
+                    map.push(&self.heap, hk, lk, lv);
                 }
                 Value::obj(self.heap.alloc(Obj::Map(map)))
             }
             N::Ok(inner) => {
                 let p = self.lower_native(*inner);
-                self.alloc_enum("Result", "Ok", vec![p])
+                self.alloc_enum("Result", "Ok", &[p])
             }
             N::Err(msg) => {
                 let p = self.alloc_str(msg);
-                self.alloc_enum("Result", "Err", vec![p])
+                self.alloc_enum("Result", "Err", &[p])
             }
             N::Some(inner) => {
                 let p = self.lower_native(*inner);
-                self.alloc_enum("Option", "Some", vec![p])
+                self.alloc_enum("Option", "Some", &[p])
             }
-            N::None => self.alloc_enum("Option", "None", Vec::new()),
+            N::None => self.alloc_enum("Option", "None", &[]),
         }
     }
 
@@ -880,6 +728,7 @@ impl Vm {
         }
         self.stack.truncate(frame.base);
         self.cur_base = self.frames.last().map(|f| f.base).unwrap_or(0);
+        self.push(ret); // rooted across the reclaim below, which can wait and so collect
         // Reclaim any `parallel:` nursery this frame opened but whose `JoinNursery` was skipped by a
         // `?`/return escape (no-op on the normal fall-through path — `JoinNursery` already popped it,
         // so `nurseries.len() == frame.nursery_len`; also a no-op when the implicit nursery above was
@@ -901,9 +750,9 @@ impl Vm {
         }
         // TICKET-147 — a defer fault stays the root cause; an aborted nursery's child fault fills the gap.
         if let Some(e) = defer_err.or(escaped) {
+            self.pop();
             return Err(e);
         }
-        self.push(ret);
         Ok(())
     }
 

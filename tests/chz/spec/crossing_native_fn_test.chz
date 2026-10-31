@@ -1,0 +1,36 @@
+# NATIVE (`Obj::Native`) function values handed to another task. A native fn (`math.sqrt`) is pure
+# code (a fn pointer + name): Channel.send, Shared and a spawn fn-arg hand over the one fn value
+# (M3.2-M3.4), as a `spawn:` block capturing it does.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+import std.math
+import Shared from std.concurrency
+
+# Channel.send/recv a native fn, then call it in the parent.
+test fn native_crosses_channel():
+    ch := Channel[fn(float) -> float](1)
+    ch.send(math.sqrt)
+    f := ch.recv()
+    assert f(25.0) == 5.0
+
+# Store a native fn in a Shared box, read it back, call it.
+test fn native_crosses_shared():
+    box := Shared(math.sqrt)
+    assert box.get()(9.0) == 3.0
+
+# A native fn passed as a spawn fn-ARG; the task writes the result into a Shared.
+test fn native_crosses_spawn_arg():
+    out := Shared(0.0)
+    fn compute(g: fn(float) -> float):
+        out.set(g(16.0))
+    parallel:
+        spawn compute(math.sqrt)
+    assert out.get() == 4.0
+
+# A native captured by a `spawn:` BLOCK: the task calls the same fn value.
+test fn native_crosses_spawn_block():
+    out := Shared(0.0)
+    sq := math.sqrt
+    parallel:
+        spawn:
+            out.set(sq(49.0))
+    assert out.get() == 7.0

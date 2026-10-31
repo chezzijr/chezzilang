@@ -9,11 +9,9 @@ use crate::base::builtin_method::DECLARED_METHODS;
 /// receiver's type to its kind and reads the one table, `crate::native::is_mutating_native_kind`.
 ///
 /// The handle types (`Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/
-/// `Reader`) are absent BY DESIGN and must stay absent: they cross the airlock by handle, so a
+/// `Reader`) are absent BY DESIGN and must stay absent: a task holds them by handle, so a
 /// task-side `s.update(...)` / `ch.send(v)` IS visible to the parent (measured). This predicate feeds
-/// the DEC-089 read-temporary warning plus D4 rules 1 and 2, so handles must stay absent.
-///
-/// User-struct methods use the separate `StructInfo.self_writers` fixed-point summary.
+/// the DEC-089 read-temporary warning, so handles must stay absent.
 pub(super) fn mutates_receiver(recv: &Ty, method: &str) -> bool {
     let kind = match recv {
         Ty::List(_) => "List",

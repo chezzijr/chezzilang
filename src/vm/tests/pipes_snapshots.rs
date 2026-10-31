@@ -1,7 +1,8 @@
-//! VM tests: pipe chains, snapshot cache, cross-module witness defer, TICKET-063 guards.
+//! VM tests: pipe chains, cross-module witness defer, TICKET-063 guards.
 //! Split out of `src/vm/tests.rs`. `super::*` is the parent module.
 
 use super::*;
+use crate::vm::core::acquire_update_guard_within;
 
 // ===== Multi-line pipe chains (leading-`|>` line continuation) + `iter.sum` =====
 
@@ -214,7 +215,7 @@ fn extract_native_args_carries_bytes() {
     );
     // A `bytearray` is NOT a seam arg (the checker rejects it at a `bytes` param): extraction bails
     // to `None` → the call would run inline, never off-heap with a stale copy of a mutable buffer.
-    let ba = Value::obj(vm.heap.alloc(Obj::ByteArray(vec![1u8, 2])));
+    let ba = Value::obj(vm.heap.alloc(Obj::ByteArray(vec![1u8, 2].into())));
     assert_eq!(vm.extract_native_args(&[ba]), None);
 }
 
@@ -265,10 +266,10 @@ main()
     let _ = std::fs::remove_file(&path);
 }
 
-/// R1 — REGRESSION PIN: a `bytes` / `bytearray` value already crosses the task airlock
-/// (`WireValue::Bytes`/`ByteArray`). R1 must not regress it.
+/// R1 — REGRESSION PIN: a `bytes` / `bytearray` value reaches a task (M3.4: by handle).
+/// R1 must not regress it.
 #[test]
-fn bytes_crosses_the_task_airlock() {
+fn bytes_crosses_tasks() {
     let src = "\
 fn worker(ch: Channel[bytes], b: bytes):
     ch.send(b)
@@ -789,132 +790,6 @@ fn intrinsic_grants_all_have_vm_arms() {
     }
 }
 
-/// W6-2 — compile + run `src` on the VM and report how many module-global SNAPSHOTS it built
-/// (`snapshot_builds`, bumped on every `ensure_snapshot` cache MISS). Reaches a private counter, so it
-/// lives here rather than in a Chezzi test; a timing bench can only hint at what this counts exactly.
-fn snapshot_builds_for(src: &str) -> usize {
-    let tokens = crate::lexer::tokenize(src).expect("lex");
-    let module = crate::parser::parse(tokens).expect("parse");
-    let program = crate::compiler::compile_module_standalone(&module).expect("compile");
-    let mut vm = Vm::new(Arc::new(program));
-    vm.run().expect("run");
-    vm.snapshot_builds
-}
-
-/// W6-2 / TICKET-208 / TICKET-213 — the snapshot cache short-circuits only where that is correct.
-/// A task sees its globals as of its own start, and [`Vm::fresh_view`] rebuilds the view only when
-/// it CHANGED since the cached build:
-///
-/// * all-immutable globals (`reusable`) → ONE build for the whole run, however many nurseries;
-/// * a mutable aggregate global nobody mutates → ONE build too: the heap's view epoch
-///   (`Heap::view_epoch`) did not move, so every spawn shares the snapshot (TICKET-208 built one
-///   per spawn: 2000 spawns over a 100000-item global held 2000 copies at one worker);
-/// * an in-place mutation of anything a global reaches → one build per mutate-then-spawn;
-/// * a global ASSIGNMENT between spawns → one build per assignment-then-spawn.
-#[test]
-fn snapshot_cache_short_circuits_per_epoch_not_per_spawn() {
-    let three_nurseries = "\nfor i in 0..3:\n    parallel:\n        spawn: pass\n";
-    assert_eq!(
-        snapshot_builds_for(&format!("n: int = 1\ns := \"x\"{three_nurseries}")),
-        1,
-        "all-immutable globals: 3 nurseries must share ONE build"
-    );
-    assert_eq!(
-        snapshot_builds_for(&format!("n: int = 1\nq: List[int] = [1]{three_nurseries}")),
-        1,
-        "an unmutated aggregate global: 3 nurseries share ONE build"
-    );
-    assert_eq!(
-        snapshot_builds_for(
-            "q: List[int] = [1]\nparallel:\n    for i in 0..50:\n        spawn: pass\n"
-        ),
-        1,
-        "50 spawns over an unmutated aggregate global: ONE build"
-    );
-    assert_eq!(
-        snapshot_builds_for(
-            "q: List[int] = [1]\nxs: List[int] = [1, 2, 3]\nparallel:\n    for x in xs:\n        spawn: pass\n"
-        ),
-        1,
-        "walking a global list between spawns mutates nothing a global reaches: ONE build"
-    );
-    assert_eq!(
-        snapshot_builds_for("g: int = 0\nparallel:\n    spawn: pass\n    g = 1\n    spawn: pass\n"),
-        2,
-        "a global assignment between two spawns must refresh the view (one build each)"
-    );
-}
-
-/// TICKET-213 — every in-place mutation of something a global reaches refreshes the view: one row
-/// per mutating door, at the root and nested. Each program spawns, mutates, then spawns twice: the
-/// mutation costs exactly one rebuild and the third spawn reuses it.
-#[test]
-fn an_in_place_mutation_between_spawns_refreshes_the_view_once() {
-    let decls = "struct P:\n    x: int\n    ys: List[int]\nq: List[int] = [1]\nqq: List[List[int]] = [[1]]\nmp: Map[str, int] = {\"a\": 1}\nst: Set[int] = {1}\np := P(1, [1])\nps: List[P] = [P(1, [1])]\n";
-    for mutation in [
-        "q.push(2)",
-        "q[0] = 5",
-        "q.pop()",
-        "qq[0].push(2)",
-        "mp[\"b\"] = 2",
-        "st.insert(2)",
-        "p.x = 2",
-        "p.ys.push(2)",
-        "ps[0].x = 2",
-        "ps[0].ys.push(2)",
-    ] {
-        assert_eq!(
-            snapshot_builds_for(&format!(
-                "{decls}parallel:\n    spawn: pass\n    {mutation}\n    spawn: pass\n    spawn: pass\n"
-            )),
-            2,
-            "`{mutation}` between two spawns: one rebuild, and the third spawn reuses it"
-        );
-    }
-}
-
-/// W6-2 — a snapshot BUILD failure is CARRIED on the queued task and raised where the task is PREPARED
-/// (its nursery's join), never at the `spawn`: that is what keeps a nursery whose tasks are all cancelled
-/// (`break` out of `parallel:`) faultless, and what keeps the `parallel:` body's own output ahead of the
-/// fault. White-box because the only program-level trigger is a module global deeper than
-/// `MAX_STRUCTURAL_DEPTH`, and `to_snap`'s slow arm is O(n^2) on such a chain (~5100 links) — minutes in a
-/// debug build, on `main` as much as here, so it cannot live in the test suite.
-#[test]
-fn a_carried_snapshot_build_error_is_raised_at_task_preparation() {
-    let program = crate::compiler::compile_module_standalone(
-        &crate::parser::parse(crate::lexer::tokenize("x := 1\n").expect("lex")).expect("parse"),
-    )
-    .expect("compile");
-    let mut vm = Vm::new(Arc::new(program));
-    let span = Span {
-        line: 7,
-        col: 3,
-        file: 0,
-    };
-    let carried = vm.err("simulated snapshot build failure".to_string(), span);
-    // Open a nursery by hand (`Op::EnterNursery`'s lockstep stacks) and queue a task whose pin FAILED.
-    vm.nurseries.push(Vec::new());
-    vm.mn_scopes.push(None);
-    vm.nursery_defer_floors.push(0);
-    vm.nursery_spans.push(span);
-    vm.eager_scheds.push(None);
-    vm.nurseries[0].push(QueuedTask {
-        call: PendingCall::Call {
-            callee: Value::nil(),
-            args: Vec::new(),
-            span,
-        },
-        snap: Err(carried.clone()),
-        cell_ids: Vec::new(),
-        fresh: 0,
-    });
-    let raised = vm
-        .join_nursery()
-        .expect_err("the carried build error must surface at the join, which prepares the task");
-    assert_eq!(raised.message, carried.message);
-    assert_eq!(raised.span, span, "the error keeps its spawn-site span");
-}
-
 /// W7-21 — a module GLOBAL holding a fn VALUE, CALLED through the module (`l.BARE()`). The checker
 /// used to reject this (it read only `ModuleSig::functions`) while the runtime always supported it:
 /// `Op::CallMethod` on an `Obj::Module` looks the member up in the slot table and calls whatever
@@ -1063,9 +938,9 @@ fn cross_module_witness_defer_target_runs_both_engines() {
 /// Proves `CHEZZI_THREADS` actually reaches [`worker_count`] in THIS test process, rather than being
 /// silently ignored — the second-schedule differential gate (`docs/contributing/bug-discovery.md` Tier 2,
 /// `CHEZZI_THREADS=2 cargo test`) is worthless if the knob does nothing: a dropped env read would
-/// make the "second" run byte-identical to the default one and nobody would notice. Locked against
-/// `over_memory_trips_on_an_all_native_task_body` (the one test that transiently forces a count) so
-/// this can't read its critical section and flake.
+/// make the "second" run byte-identical to the default one and nobody would notice. Locked by
+/// `TEST_WORKER_LOCK` against any test that transiently forces a count, so this can't read its
+/// critical section and flake.
 ///
 /// - default `cargo test` (`CHEZZI_THREADS` unset): `worker_count()` must equal the auto-sized
 ///   `available_parallelism()` — not some override leaked from another test.
@@ -1421,8 +1296,8 @@ print(s.get())
 }
 
 /// TICKET-246 — the `RwShared` twin of the test above: `get` (and `read`) inside the box's own
-/// `write` closure fault with the guard text. `read` nested in `read` and `write` nested in
-/// `read` stay legal, because the reader closure runs after its lock dropped.
+/// `write` closure fault with the guard text. `read` nested in `read` is legal (Go's recursive
+/// `RLock`); M3.3 (Q2): `write` nested in `read` faults with the read-guard text.
 #[test]
 fn ticket_246_rwshared_get_inside_its_own_write_faults() {
     let src = "\
@@ -1443,37 +1318,48 @@ for f in [peek, peek_read]:
         !e: print(e.message().contains(\"already holds the update guard\"))
 print(s.get())
 print(s.read(fn(x): x + s.get()))
-print(s.read(bump), s.get())
+r := recover: s.read(bump)
+match r:
+    ?_: print(\"no fault\")
+    !e: print(e.message().contains(\"already holds the read guard\"), s.get())
 ";
     let entry = write_temp_chz("ticket246_rwshared_get_inside_write", src);
     let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
-    assert_eq!(out, "true\ntrue\n10\n20\n10 20\n", "got: {out:?}");
+    assert_eq!(out, "true\ntrue\n10\n20\ntrue 10\n", "got: {out:?}");
 }
 
-/// TICKET-016 / W8-3 — `write` nested in `read` is the one legal `RwShared` crossing and must still
-/// persist.
+/// TICKET-016 / W8-3 — M3.3 (Q2): `write` nested in the same task's `read` waits for that read, a
+/// certain deadlock (Go `RLock(); Lock()`: `fatal error: all goroutines are asleep - deadlock!`), so
+/// it faults with the read-guard text and the value stays.
 #[test]
-fn ticket_016_rwshared_write_inside_read_still_persists() {
+fn ticket_016_rwshared_write_inside_read_faults() {
     let src = "\
 import RwShared from std.concurrency
 r := RwShared(5)
 fn peek(v: int) -> int:
     r.write(fn(y: int) -> int: y + 100)
     return v
-print(r.read(peek))
+res := recover: r.read(peek)
+match res:
+    ?_: print(\"no fault\")
+    !e: print(e.message())
 print(r.read(fn(v: int) -> int: v))
 ";
     let entry = write_temp_chz("ticket016_rwshared_write_in_read", src);
     let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
-    assert_eq!(out, "5\n105\n", "expected 5 then 105: {out:?}");
+    assert_eq!(
+        out,
+        "deadlock: this task already holds the read guard on this RwShared box — a nested set/write on the same box inside its own read closure\n5\n",
+        "got: {out:?}"
+    );
 }
 
-/// TICKET-016 / W8-25 — the module-global closure crossing INTO a `spawn:` (the `Lowered::Closure`
-/// wire form, not `WireValue`) must carry the airlock snapshot.
+/// TICKET-016 / W8-25 — the module-global closure crossing INTO a `spawn:` sees the module global
+/// (M3.1: the run's one copy).
 #[test]
 fn ticket_016_closure_over_module_global_crossing_into_spawn() {
     let src = "\
@@ -1491,13 +1377,9 @@ parallel:
     assert_eq!(out, "300\n", "expected 300: {out:?}");
 }
 
-/// TICKET-016 / W8-25 review finding — a spawned task's OWN write to a module global must stay
-/// visible to a module-level closure it calls, when that closure never crosses a channel or spawn
-/// boundary at all (it existed before the `parallel:` block and is called from inside the same
-/// task that wrote the global). The per-task module snapshot (`ensure_snapshot`/`fault_module`)
-/// replicates every module global — including `f` — into the task's own module copy; `f` must keep
-/// doing a live `Op::GetGlobalSlot` read against that copy, not a value installed frozen at the
-/// snapshot's pre-write state.
+/// TICKET-016 / W8-25 review finding — a spawned task's OWN write to a module global is visible to
+/// a module-level closure it calls (one that never crosses a boundary): `f` does a live
+/// `Op::GetGlobalSlot` read of the run's one `n` (M3.1). Go (go1.27.0, `m31go/rust`): `300`.
 #[test]
 fn ticket_016_spawned_task_own_write_visible_to_module_closure_it_calls() {
     let src = "\
@@ -1506,24 +1388,22 @@ n := 1
 f := fn(x: int) -> int: x * n
 parallel:
     spawn:
-        recover:
-            n = 100
+        n = 100
         print(f(3))
 ";
     let entry = write_temp_chz("ticket016_spawn_own_write_visible", src);
     let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
-    // TICKET-169 (D4 layer C): `n = 100` above now faults, so `f` reads the receiver's unwritten
-    // `n` (`1`).
     assert_eq!(
-        out, "3\n",
-        "expected f to read the receiver's unwritten n (3), got {out:?}"
+        out, "300\n",
+        "expected f to read the task's write (300), got {out:?}"
     );
 }
 
-/// TICKET-016 / W8-25 — a crossed closure that READS AND WRITES the same module global reads its
-/// own late load of the RUNNING task's copy, so its own write is always visible to its next read.
+/// TICKET-016 / W8-25 — a crossed closure that READS AND WRITES the same module global does a late
+/// load of the run's one `n` (M3.1): the task's `n = 100`, then `n + 3`. Go (go1.27.0,
+/// `m31go/rust`): `103`.
 #[test]
 fn ticket_016_closure_over_module_global_written_by_closure_stays_late() {
     let src = "\
@@ -1537,8 +1417,7 @@ fn outer() -> fn(int) -> int:
     return f
 parallel:
     spawn:
-        recover:
-            n = 100
+        n = 100
         ch.send(outer())
 g := ch.recv()
 print(g(3))
@@ -1548,15 +1427,13 @@ print(g(3))
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
     assert_eq!(
-        out, "4\n",
-        "expected 4 (late load, not the snapshot 103): {out:?}"
+        out, "103\n",
+        "expected 103 (a late load of the run's one `n`): {out:?}"
     );
 }
 
-/// TICKET-016 / W8-25, reversed by owner decision D2 (TICKET-137) — a closure NESTED inside a crossed
-/// closure reads the module globals of the task that RUNS it, exactly like the crossed closure does:
-/// the sender's `n = 100` lands in the sender's copy, so `g(3)` prints `3`. Go/CPython print `300`
-/// (one live global); the divergence is the deliberate per-task rule — share with `Shared`/`Channel`.
+/// TICKET-016 / W8-25 — a closure NESTED inside a crossed closure reads the run's one `n` too
+/// (M3.1). Go (go1.27.0, `m31go/rust`) and CPython: `300`.
 #[test]
 fn ticket_016_closure_over_module_global_read_by_nested_closure() {
     let src = "\
@@ -1565,8 +1442,7 @@ n := 1
 ch := Channel[fn(int) -> int]()
 parallel:
     spawn:
-        recover:
-            n = 100
+        n = 100
         ch.send(fn(x: int) -> int: x * (fn() -> int: n)())
 g := ch.recv()
 print(g(3))
@@ -1576,21 +1452,16 @@ print(g(3))
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
     assert_eq!(
-        out, "3\n",
-        "a nested closure must read the receiving task's own copy of `n` (D2): {out:?}"
+        out, "300\n",
+        "a nested closure must read the run's one copy of `n`: {out:?}"
     );
 }
 
-/// TICKET-016 / W8-25, reversed by owner decision D2 (TICKET-137) — a closure's reference to a
-/// MODULE GLOBAL is a late global load, not a capture, so it is neither moved nor copied at the
-/// `parallel:`/`spawn:` airlock: it reads the module globals of the task that RUNS it. At module
-/// scope the closure crossed through the `Channel` sees the RECEIVER's un-mutated global (`n=1`),
-/// not the sender's write (`n=100`), so `f(3)` prints `3`. This is deliberate (each task owns a copy
-/// of every module global); Go/CPython print `300` (one live global). The identical body inside
-/// `fn main()` (over a LOCAL, which the airlock does copy) prints `300` — see
-/// `ticket_016_closure_over_local_in_fn_crosses_airlock_correctly` for the contrast.
+/// TICKET-016 / W8-25 — a closure's reference to a MODULE GLOBAL is a late global load, not a
+/// capture. M3.1: the run has one `n`, so the closure the task sends reads its `n = 100`. Go
+/// (go1.27.0, `m31go/rust`) and CPython: `300`.
 #[test]
-fn ticket_016_closure_over_module_global_loses_value_at_airlock() {
+fn ticket_016_closure_over_module_global_reads_the_senders_write() {
     let src = "\
 import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 
@@ -1598,8 +1469,7 @@ n := 1
 ch := Channel[fn(int) -> int]()
 parallel:
     spawn:
-        recover:
-            n = 100
+        n = 100
         ch.send(fn(x: int) -> int: x * n)
 f := ch.recv()
 print(f(3))
@@ -1609,17 +1479,16 @@ print(f(3))
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?}");
     assert_eq!(
-        out, "3\n",
-        "a closure's module-global reference must read the receiving task's own copy (D2, `3`; \
-         Go/CPython print 300), got {out:?}"
+        out, "300\n",
+        "a closure's module-global reference must read the run's one copy (Go/CPython: 300), got {out:?}"
     );
 }
 
-/// TICKET-016 / W8-25 contrast — the identical shape over a captured LOCAL (not a module global)
-/// already crosses the airlock correctly: the airlock copies a captured local by value, so the
-/// closure's `n` is fixed at capture/copy time and the receiver sees the sender's write.
+/// TICKET-016 / W8-25 contrast — the identical shape over a captured LOCAL (not a module global).
+/// M3.4: the task holds the parent's `n` cell, so its write lands and the received closure reads it
+/// (Go, a goroutine writes the captured `n`: `300`).
 #[test]
-fn ticket_016_closure_over_local_in_fn_crosses_airlock_correctly() {
+fn ticket_016_closure_over_a_captured_local_reads_the_tasks_write() {
     let src = "\
 import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency
 
@@ -1640,30 +1509,42 @@ main()
     let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?}");
-    // TICKET-169 (D4 layer C): the captured local `n` crossed the airlock and is marked, so
-    // `n = 100` now faults instead of sharing it.
-    assert_eq!(out, "3\n", "captured-local write now faults: {out:?}");
+    assert_eq!(
+        out, "300\n",
+        "the task's write to the captured local: {out:?}"
+    );
 }
 
-/// TICKET-016 — a bounded acquire returns `Ok(None)` on timeout instead of blocking, still detects
-/// self-held re-entry, and hands the guard over once it is free.
+/// A box lock for the guard unit tests below.
+fn test_lock() -> Arc<crate::vm::core::BoxLock> {
+    Arc::new(crate::vm::core::BoxLock::new("RwShared"))
+}
+
+/// TICKET-016 — a bounded acquire returns `Ok(None)` on timeout instead of blocking, and hands the
+/// guard over once it is free. (M3.3: a same-task re-entry is the `Vm`'s check, `guard_reentry`;
+/// its rows are in `tests/chz/spec/shared_handle_test.chz`.)
 #[test]
 fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
-    let key = usize::MAX - 9001;
-    let budget = Some(std::time::Duration::from_millis(5));
+    let lock = test_lock();
+    let key = GuardKey {
+        lock: &lock,
+        mode: GuardMode::Write,
+    };
+    let budget = std::time::Duration::from_millis(5);
     let held = acquire_update_guard_within(key, u64::MAX - 1, budget)
         .expect("a free box must not report a cycle")
         .expect("a free box must hand the guard over");
-    assert!(matches!(
-        acquire_update_guard_within(key, u64::MAX - 1, budget),
-        Err(GuardCycle::SelfHeld)
-    ));
+    assert_eq!(lock.writer(), u64::MAX - 1);
     let t0 = std::time::Instant::now();
     assert!(matches!(
         acquire_update_guard_within(key, u64::MAX - 2, budget),
         Ok(None)
     ));
     assert!(t0.elapsed() < std::time::Duration::from_millis(500));
+    assert!(
+        !lock.writer_waits(),
+        "a writer that gave up leaves the waiting count"
+    );
     drop(held);
     assert!(matches!(
         acquire_update_guard_within(key, u64::MAX - 2, budget),
@@ -1671,54 +1552,166 @@ fn ticket_016_bounded_update_guard_acquire_yields_instead_of_blocking() {
     ));
 }
 
-/// TICKET-063 — `guard_wait_satisfiable` answers the same three outcomes `acquire_update_guard_within`
-/// would, without acquiring.
+/// M3.3 — the two-mode lock (Go `sync.RWMutex`): readers share; a writer waits for readers and
+/// readers for a writer; a waiting writer (a live `WaitTicket`) keeps a new reader out until it
+/// takes or leaves; a cycle through two write guards is a `Cycle`.
+#[test]
+fn m3_3_guard_modes_grid() {
+    use crate::vm::core::{WaitTicket, try_update_guard};
+    let (lx, ly) = (test_lock(), test_lock());
+    let rd = |l| GuardKey {
+        lock: l,
+        mode: GuardMode::Read,
+    };
+    let wr = |l| GuardKey {
+        lock: l,
+        mode: GuardMode::Write,
+    };
+    let (a, b, c) = (u64::MAX - 31, u64::MAX - 32, u64::MAX - 33);
+    // Readers share; a writer waits for them.
+    let ra = try_update_guard(rd(&lx), a).expect("a free read");
+    let rb = try_update_guard(rd(&lx), b).expect("readers share");
+    assert!(try_update_guard(wr(&lx), c).is_none());
+    drop((ra, rb));
+    // A writer excludes readers and writers.
+    let wc = try_update_guard(wr(&lx), c).expect("a free write");
+    assert!(try_update_guard(rd(&lx), a).is_none());
+    assert!(try_update_guard(wr(&lx), a).is_none());
+    drop(wc);
+    // Writer preference: while `c` waits to write, a new reader waits; the waiting writer takes
+    // once the reader it waited for leaves; a ticket dropped untaken lets readers in again.
+    let ra = try_update_guard(rd(&lx), a).expect("a free read");
+    let mut ticket = WaitTicket::new(wr(&lx));
+    assert!(lx.writer_waits());
+    assert!(
+        try_update_guard(rd(&lx), b).is_none(),
+        "a waiting writer keeps a new reader out"
+    );
+    assert!(
+        ticket.try_take(c).is_none(),
+        "the writer waits for the reader"
+    );
+    drop(ra);
+    let wc = ticket.try_take(c).expect("the waiting writer takes first");
+    assert!(!lx.writer_waits());
+    drop(wc);
+    let t2 = WaitTicket::new(wr(&lx));
+    assert!(try_update_guard(rd(&lx), b).is_none());
+    drop(t2);
+    assert!(
+        try_update_guard(rd(&lx), b).is_some(),
+        "a writer that left lets readers in"
+    );
+    // AB-BA through two write guards: `a` writes x and waits for y; `b` writes y and wants x.
+    let wa = try_update_guard(wr(&lx), a).expect("a free write");
+    let wb = try_update_guard(wr(&ly), b).expect("a free write");
+    let ly2 = Arc::clone(&ly);
+    let cyc = std::thread::spawn(move || {
+        let key = GuardKey {
+            lock: &ly2,
+            mode: GuardMode::Write,
+        };
+        acquire_update_guard_within(key, a, std::time::Duration::from_secs(5)).map(|g| g.is_some())
+    });
+    // A counted probe: poll until `a` waits; then `b`'s wait for x closes the cycle at once.
+    let tb = WaitTicket::new(wr(&lx));
+    let mut probes = 0u32;
+    loop {
+        match crate::vm::core::await_update_guard_free(&tb, b, Some(std::time::Duration::ZERO)) {
+            Err(GuardCycle::Cycle) => break,
+            Ok(false) => {}
+            other => panic!("b's wait for x: {other:?}"),
+        }
+        probes += 1;
+        assert!(probes < 50_000_000, "a never waited");
+        std::thread::yield_now();
+    }
+    drop(tb);
+    drop(wb);
+    assert_eq!(cyc.join().unwrap(), Ok(true));
+    drop(wa);
+    // Fix round 2 (Go `rwmutex.go:214`): a write release admits the readers that waited during the
+    // write, ahead of a writer that waits too; that writer then waits for those readers.
+    let wc = try_update_guard(wr(&lx), c).expect("a free write");
+    let mut tr = WaitTicket::new(rd(&lx));
+    let mut tw = WaitTicket::new(wr(&lx));
+    assert!(tr.try_take(b).is_none() && tw.try_take(a).is_none());
+    drop(wc);
+    let rb = tr
+        .try_take(b)
+        .expect("the release admitted the waiting reader");
+    assert!(
+        tw.try_take(a).is_none(),
+        "the waiting writer waits for the admitted reader"
+    );
+    assert!(
+        try_update_guard(rd(&lx), c).is_none(),
+        "a new reader still waits behind it"
+    );
+    drop(rb);
+    assert!(tw.try_take(a).is_some());
+    // An admitted reader that leaves before its take gives the hold back.
+    let wc = try_update_guard(wr(&lx), c).expect("a free write");
+    let tr = WaitTicket::new(rd(&lx));
+    drop(wc);
+    drop(tr);
+    assert!(
+        try_update_guard(wr(&lx), c).is_some(),
+        "no read hold leaked"
+    );
+}
+
+/// TICKET-063 — `guard_wait_satisfiable` answers whether an acquire issued now would not block.
 #[test]
 fn ticket_063_guard_wait_satisfiable_answers_the_acquire_outcome() {
-    let key = usize::MAX - 9002;
-    let holder = u64::MAX - 11;
-    let other = u64::MAX - 12;
+    let lock = test_lock();
+    let owned = crate::vm::core::GuardWait {
+        lock: Arc::clone(&lock),
+        mode: GuardMode::Write,
+        taking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        admitted: None,
+    };
+    let (holder, other) = (u64::MAX - 11, u64::MAX - 12);
     assert!(
-        crate::vm::core::guard_wait_satisfiable(key, holder),
-        "an unowned key must be satisfiable"
+        crate::vm::core::guard_wait_satisfiable(&owned, other),
+        "an unowned box must be satisfiable"
     );
-    let held = acquire_update_guard_within(key, holder, Some(std::time::Duration::from_millis(5)))
-        .expect("a free box must not report a cycle")
-        .expect("a free box must hand the guard over");
+    let key = GuardKey {
+        lock: &lock,
+        mode: GuardMode::Write,
+    };
+    let held = crate::vm::core::try_update_guard(key, holder).expect("a free box");
     assert!(
-        crate::vm::core::guard_wait_satisfiable(key, holder),
-        "the holder itself must be satisfiable"
-    );
-    assert!(
-        !crate::vm::core::guard_wait_satisfiable(key, other),
+        !crate::vm::core::guard_wait_satisfiable(&owned, other),
         "another task must not be satisfiable while the holder holds it"
     );
     drop(held);
     assert!(
-        crate::vm::core::guard_wait_satisfiable(key, other),
+        crate::vm::core::guard_wait_satisfiable(&owned, other),
         "once the held guard is dropped the other task must be satisfiable again"
     );
 }
 
-/// TICKET-193 — `await_update_guard_free` reports a free guard without taking it, times out on a
-/// held one, and still faults a self-held re-entry.
+/// TICKET-193 — `await_update_guard_free` reports a free guard without taking it and times out on
+/// a held one.
 #[test]
 fn ticket_193_await_update_guard_free_never_takes_the_guard() {
-    use crate::vm::core::await_update_guard_free;
-    let key = usize::MAX - 9003;
+    use crate::vm::core::{WaitTicket, await_update_guard_free};
+    let lock = test_lock();
+    let key = GuardKey {
+        lock: &lock,
+        mode: GuardMode::Write,
+    };
     let (waiter, holder) = (u64::MAX - 13, u64::MAX - 14);
     let budget = Some(std::time::Duration::from_millis(5));
-    assert_eq!(await_update_guard_free(key, waiter, budget), Ok(true));
-    let held = acquire_update_guard_within(key, holder, Some(std::time::Duration::ZERO))
-        .expect("a free box must not report a cycle")
-        .expect("await must not have taken the guard");
-    assert_eq!(await_update_guard_free(key, waiter, budget), Ok(false));
-    assert_eq!(
-        await_update_guard_free(key, holder, budget),
-        Err(GuardCycle::SelfHeld)
-    );
+    let t = WaitTicket::new(key);
+    assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(true));
+    drop(t);
+    let held = crate::vm::core::try_update_guard(key, holder).expect("await did not take it");
+    let t = WaitTicket::new(key);
+    assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(false));
     drop(held);
-    assert_eq!(await_update_guard_free(key, waiter, budget), Ok(true));
+    assert_eq!(await_update_guard_free(&t, waiter, budget), Ok(true));
 }
 
 /// W8-22: an error with no recorded span answers `None`, never a guess. A user-constructed
@@ -1921,41 +1914,24 @@ main()
     }
 }
 
-/// TICKET-192: `RwShared[Map].get_key` scans the flat `WireValue::Map` entry vector, so one lookup is
-/// O(n) and n lookups on an n-entry shared map are O(n^2). Go `sync.Map` / a CPython `dict` behind a
-/// `Lock` are O(1) per lookup. Pinned with a COUNT of the wire nodes rebuilt (TICKET-233): a key and
-/// a value per lookup, against every stored entry per lookup for a scan.
-///
-/// TICKET-246: the box decodes its initial map ONCE into its own heap (2000 keys + 2000 values),
-/// so the count is that plus two per lookup: 8001. A scan would be 4 000 000.
+/// TICKET-192: `RwShared[Map].get_key` once scanned the box's copied entry vector, O(n) per lookup.
+/// Go `sync.Map` / a CPython `dict` behind a `Lock` are O(1) per lookup. M3.3: the box holds the map
+/// by handle and a lookup is the map's own hash probe. M3.5 deleted the wire node counter with the
+/// wire form; this pins the result.
 #[test]
 fn rwshared_map_get_key_is_not_linear() {
     let src = "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := ConcurrentMap(concurrency.RwShared(m))\n    s := 0\n    i = 0\n    while i < n:\n        match box.get(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
-    let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "2000\n");
-    assert!(
-        (4000..=8100).contains(&touches),
-        "2000 ConcurrentMap.get on a 2000-entry map rebuilt {touches} wire nodes (want 4000..=8100) -- O(n) per lookup"
-    );
 }
 
-/// TICKET-192: `RwShared[Map].set_key` writes one entry in place instead of re-encoding the whole map
-/// (what `write` does). 2000 inserts then 2000 overwrites on one box, pinned with the same count.
-///
-/// TICKET-246: a writer decodes its key and its value into the box heap and touches nothing else,
-/// so 4000 writes rebuild 8000 nodes (plus the final `get`). A re-encode would be millions.
-///
-/// TICKET-278: `insert` returns the replaced `V?`, so each overwrite also decodes its `?old` result:
-/// about one more node per overwrite: 10003 in all against 8001 before. Still O(1) per write.
+/// TICKET-192: `RwShared[Map].set_key` writes one entry in place. 2000 inserts then 2000 overwrites
+/// on one box. M3.3: a writer stores its key and its value by handle.
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
     let src = "import std.concurrency\nimport Atomic, Executor, RwShared, Shared from std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(concurrency.RwShared(m))\n    i := 0\n    while i < n:\n        _ := box.insert(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        _ := box.insert(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
-    let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "2000\n2000\n");
-    assert!(
-        (4000..=10100).contains(&touches),
-        "2000 ConcurrentMap.insert inserts + 2000 overwrites rebuilt {touches} wire nodes (want 4000..=10100) -- O(n) per write"
-    );
 }
 
 /// TICKET-194 X1: an op that does not wait is not a cancellation point. A job that already returned

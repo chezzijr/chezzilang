@@ -4,9 +4,8 @@
 //! TICKET-208 rebuilt the module snapshot at EVERY `spawn` whenever a global held a mutable
 //! aggregate, and each task keeps its snapshot until it finishes. At one worker every spawned task
 //! is alive at the join, so 2000 spawns over a 100000-item `List[int]` held 2000 snapshots: the
-//! release binary was killed at a 6 GB cap (base `fcbe2596`: max RSS 39 MB). The view is now rebuilt
-//! only when something a global reaches was mutated since the cached build (`Heap::view_epoch`),
-//! so the storm shares ONE snapshot.
+//! release binary was killed at a 6 GB cap (base `fcbe2596`: max RSS 39 MB). M3.1: a task reads the
+//! run's one copy of each module global, so the storm copies no global at all.
 //!
 //! The gate is max RSS, read from `wait4`'s rusage for this one child: an absolute bound on memory,
 //! no clock sample. Sized so the pre-fix binary is far over the bound in release and in debug:
@@ -31,7 +30,7 @@ print(\"done\")
 ";
 
 /// The bound. Measured in `docs/contributing/benchmarks.md` (TICKET-213): one snapshot shared by every task
-/// stays under a tenth of this; one snapshot per task is several times over it.
+/// stayed under a tenth of this (M3.1 copies none); one snapshot per task was several times over.
 const MAX_RSS_KB: i64 = 300 * 1024;
 
 /// Run `chezzi run <entry>` at `threads` workers; return (exit status, stdout, max RSS in KB).

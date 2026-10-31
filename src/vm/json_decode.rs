@@ -14,7 +14,7 @@ impl Vm {
     /// missing `?`'s `variant_id == VID_SOME`/`VID_OK` gate. The reserved 0..=3 ids are disjoint from
     /// every user id, so stamping the constant keeps native and user variants distinguishable. `ty` is
     /// retained in the signature so call sites read self-documentingly, but it is not stored.
-    pub(super) fn alloc_enum(&mut self, ty: &str, variant: &str, payload: Vec<Value>) -> Value {
+    pub(super) fn alloc_enum(&mut self, ty: &str, variant: &str, payload: &[Value]) -> Value {
         let _ = ty;
         use crate::base::op::{VID_ERR, VID_NONE, VID_NONE_VARIANT, VID_OK, VID_SOME};
         let variant_id = match variant {
@@ -28,7 +28,7 @@ impl Vm {
         };
         Value::obj(self.heap.alloc(Obj::Enum {
             variant_id,
-            payload,
+            payload: RVec::from_slice(payload),
         }))
     }
 
@@ -61,12 +61,12 @@ impl Vm {
                 self.stack.truncate(base - 1);
                 match r {
                     Ok(v) => {
-                        let r = self.alloc_enum("Result", "Ok", vec![v]);
+                        let r = self.alloc_enum("Result", "Ok", &[v]);
                         self.push(r);
                     }
                     Err(DecodeFail::Msg(msg)) => {
                         let s = self.alloc_str(msg);
-                        let r = self.alloc_enum("Result", "Err", vec![s]);
+                        let r = self.alloc_enum("Result", "Err", &[s]);
                         self.push(r);
                     }
                     Err(DecodeFail::Fault(e)) => return Err(e),
@@ -86,7 +86,7 @@ impl Vm {
         let (variant_id, payload) = self.heap.get(h).as_enum()?;
         // M19 lever #2 — cold path: resolve the type + variant names from the id.
         let (ty, variant) = self.enum_names(variant_id);
-        Some((ty.to_string(), variant.to_string(), payload.clone()))
+        Some((ty.to_string(), variant.to_string(), payload.to_vec()))
     }
 
     /// Run a missing field's default thunk, as `S(...)` runs it for an omitted field: afresh each
@@ -96,7 +96,7 @@ impl Vm {
         t: crate::base::json_desc::DefaultThunk,
         span: Span,
     ) -> Result<Value, DecodeFail> {
-        let Some(&home) = self.module_objs.get(t.module) else {
+        let Some(home) = self.module_objs.get(t.module) else {
             return Err(DecodeFail::Fault(self.err(
                 "json.decode: the module that declares this default has not been initialized yet"
                     .to_string(),
@@ -172,10 +172,10 @@ impl Vm {
             }
             D::Option(inner) => {
                 if variant == "Null" {
-                    Ok(self.alloc_enum("Option", "None", Vec::new()))
+                    Ok(self.alloc_enum("Option", "None", &[]))
                 } else {
                     let v = self.coerce_json(jv, inner, path, span)?;
-                    Ok(self.alloc_enum("Option", "Some", vec![v]))
+                    Ok(self.alloc_enum("Option", "Some", &[v]))
                 }
             }
             D::List(inner) => {
@@ -194,7 +194,7 @@ impl Vm {
                     self.push(v);
                 }
                 let out = self.stack.split_off(child_base);
-                Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+                Ok(Value::obj(self.heap.alloc(Obj::List(out.into()))))
             }
             D::Tuple(elems) => {
                 if variant != "Arr" {
@@ -226,7 +226,7 @@ impl Vm {
                     return Err(mismatch("object").into());
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])).as_map() {
-                    Some(m) => m.entries.clone(),
+                    Some(m) => m.entries.to_vec(),
                     None => return Err(mismatch("object").into()),
                 };
                 // Values are rooted on the operand stack, as in the list arm; the keys belong to
@@ -239,11 +239,14 @@ impl Vm {
                     self.push(coerced);
                     keys.push((hk, k));
                 }
-                let mut out = MapData::default();
-                for ((hk, k), coerced) in keys.into_iter().zip(self.stack.split_off(child_base)) {
-                    out.push(hk, k, coerced); // str keys unchanged → reuse the cached hash
-                }
-                Ok(Value::obj(self.heap.alloc(Obj::Map(out))))
+                // str keys unchanged → reuse the cached hash
+                let out: Vec<MapEntry> = (keys.into_iter())
+                    .zip(self.stack.split_off(child_base))
+                    .map(|((hk, k), coerced)| (hk, k, coerced))
+                    .collect();
+                Ok(Value::obj(
+                    self.heap.alloc(Obj::Map(MapData::from_entries(out))),
+                ))
             }
             D::Struct {
                 key,
@@ -255,7 +258,7 @@ impl Vm {
                     return Err(mismatch(&format!("object for {display}")).into());
                 }
                 let entries = match self.heap.get(self.as_obj(payload[0])).as_map() {
-                    Some(m) => m.entries.clone(),
+                    Some(m) => m.entries.to_vec(),
                     None => return Err(mismatch("object").into()),
                 };
                 // Positional layout: `fields` (the type descriptor) is already in the struct's
@@ -274,7 +277,7 @@ impl Vm {
                         // default an `Option` field is None and anything else is an error.
                         None => match (&field.default, &field.desc) {
                             (Some(t), _) => self.run_decode_default(*t, span)?,
-                            (None, D::Option(_)) => self.alloc_enum("Option", "None", Vec::new()),
+                            (None, D::Option(_)) => self.alloc_enum("Option", "None", &[]),
                             (None, _) => {
                                 return Err(format!(
                                     "decode: missing key '{}' at {path}",
@@ -364,8 +367,19 @@ impl Vm {
             .ok_or_else(|| "json.encode: std.json is not loaded".to_string())?;
         Ok(Value::obj(self.heap.alloc(Obj::Enum {
             variant_id,
-            payload,
+            payload: payload.into(),
         })))
+    }
+
+    /// The `Arr` node of a list's or a tuple's elements, one bracket level down.
+    fn json_arr(&mut self, items: Vec<Value>, depth: usize) -> Result<Value, String> {
+        let inner = Self::json_enter(depth)?;
+        let mut out = Vec::with_capacity(items.len());
+        for it in items {
+            out.push(self.json_of(it, inner)?);
+        }
+        let lv = Value::obj(self.heap.alloc(Obj::List(out.into())));
+        self.json_variant("Arr", vec![lv])
     }
 
     /// The runtime walk behind `json.encode`: a `Value` -> the `Json` tree that mirrors its shape.
@@ -389,7 +403,7 @@ impl Vm {
             if *variant_id != VID_SOME {
                 break;
             }
-            v = payload[0];
+            v = payload.get(0);
         }
         match v.view() {
             ValueView::Nil => self.json_variant("Null", Vec::new()),
@@ -408,19 +422,12 @@ impl Vm {
                     let sv = self.alloc_str(s.to_string());
                     self.json_variant("Str", vec![sv])
                 }
-                Obj::List(items) | Obj::Tuple(items) => {
-                    let inner = Self::json_enter(depth)?;
-                    let mut out = Vec::with_capacity(items.len());
-                    for it in items {
-                        out.push(self.json_of(it, inner)?);
-                    }
-                    let lv = Value::obj(self.heap.alloc(Obj::List(out)));
-                    self.json_variant("Arr", vec![lv])
-                }
+                Obj::List(items) => self.json_arr(items.to_vec(), depth),
+                Obj::Tuple(items) => self.json_arr(items, depth),
                 Obj::Map(m) => {
                     let inner = Self::json_enter(depth)?;
-                    let mut out = MapData::default();
-                    for (hk, k, val) in m.entries {
+                    let out = MapData::default();
+                    for (hk, k, val) in &m.entries {
                         if self.val_str(k).is_none() {
                             return Err(format!(
                                 "json.encode: object keys must be str, found {}",
@@ -428,7 +435,7 @@ impl Vm {
                             ));
                         }
                         let jv = self.json_of(val, inner)?;
-                        out.push(hk, k, jv);
+                        out.push(&self.heap, hk, k, jv);
                     }
                     let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
                     self.json_variant("Obj", vec![mv])
@@ -442,13 +449,13 @@ impl Vm {
                         .get(&key)
                         .map(|d| d.fields.clone())
                         .unwrap_or_default();
-                    let field_vals: Vec<Value> = fields.as_slice().to_vec();
-                    let mut out = MapData::default();
+                    let field_vals: Vec<Value> = fields.to_vec();
+                    let out = MapData::default();
                     for (fname, fval) in field_names.into_iter().zip(field_vals) {
                         let key_v = self.alloc_str(fname);
                         let hk = self.scalar_hash(key_v);
                         let jv = self.json_of(fval, inner)?;
-                        out.push(hk, key_v, jv);
+                        out.push(&self.heap, hk, key_v, jv);
                     }
                     let mv = Value::obj(self.heap.alloc(Obj::Map(out)));
                     self.json_variant("Obj", vec![mv])

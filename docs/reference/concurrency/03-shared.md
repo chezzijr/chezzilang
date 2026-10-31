@@ -7,17 +7,17 @@
 > ([04-timer-wait.md](04-timer-wait.md)). The constructors lower to dedicated opcodes, so the import
 > costs nothing at run time.
 
-Captured locals **cross into a task as copies** ([§7](07-sendability.md#7-sendability)) — same-task
-capture is by reference, but the task boundary deep-copies — so a task can't mutate the parent's
-state. For shared mutable state *across* tasks, use **`Shared[T]`** — a box whose writes are
-serialised by a single owner (Elixir's `Agent` trick), so the torn-write race is unrepresentable.
+A task shares the parent's captured locals and arguments by handle ([§7](07-sendability.md#7-what-crosses-a-task-boundary),
+M3.4, the Go rule), so two tasks that write one value without a lock race. For mutable state that
+several tasks write, use **`Shared[T]`** — a box whose writes run under its guard (Go's
+`mu.Lock(); f(v); mu.Unlock()`).
 
 ```chezzi
 import Shared from std.concurrency
 
 s := Shared(0)             # one owner holds the value
 parallel:
-    spawn bump(s)          # the HANDLE is copied in — both reach the same owner
+    spawn bump(s)          # each task gets the box by handle: one box, one guard
     spawn bump(s)
 print(s.get())             # 2
 
@@ -27,89 +27,44 @@ fn bump(s: Shared[int]):
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `get`    | `get(self) -> T` | **snapshot copy out** |
-| `set`    | `set(self, v: T) -> None` | overwrite |
-| `update` | `update(self, f: fn(T) -> T) -> None` | read-modify-write, serialised by the owner; `f` runs in the box heap on the live value |
-| `read`   | `read(self, f: fn(T) -> R) -> R` | run `f` in the box heap on the live value; only `f`'s result is copied out |
+| `get`    | `get(self) -> T` | the live value, by handle (takes the guard for the read) |
+| `set`    | `set(self, v: T) -> None` | store `v` (by handle) |
+| `update` | `update(self, f: fn(T) -> T) -> None` | read-modify-write: `f` runs in the caller's task on the live value while the task holds the guard; `f`'s result is the new value |
+| `read`   | `read(self, f: fn(T) -> R) -> R` | run `f` on the live value under the guard; return `f`'s result |
 
-> **Gotcha — `get()` returns a copy, not the box.** The value lives in the **box's own private
-> heap**, not in any task's heap, so `get` deep-copies it *out* into a fresh value each call.
-> Mutating that value — `s.get().push(x)`, `s.get().value = 1` — changes a throwaway, **not** the box:
-> the write is silently lost. Mutate only via `update` (or `set` a whole new value). Same for
-> `RwShared` (`read`/`write`) and `Atomic` (`load`/`store`). A plain in-task `struct`/collection is
-> different: its reads alias the live value (push-through works), but it can't cross the airlock.
->
-> The checker **warns** on the bare-statement shape: a mutating builtin call (`s.get().push(1)`,
-> `.insert`, `.remove`, `.pop`, …) or a field/index assign (`b.get().v = 9`, `s.get()[0] = 9`) on a
-> `Shared`/`RwShared` `get()` or `Atomic` `load()` read temporary. The message names the working
-> spelling — `s.update(…)`, `r.write(…)` or `a.store(…)` — and the exit code is unchanged. The
-> checker cannot tell the write is lost, so it stays silent on four shapes that DO lose it (each
-> prints `0`):
->
-> | shape | example |
-> |---|---|
-> | a bound temporary | `v := s.get()` then `v.push(1)` |
-> | a user struct method | `b.get().bump()` |
-> | a `RwShared.read` closure | `RwShared.read(fn(xs): xs.push(1))` |
-> | a deferred call | `defer s.get().push(1)` |
->
-> A `get()` whose value is used (`print(s.get().len())`) never warns. Only a bare-name box receiver
-> matches: `boxes[0].get().push(1)` stays silent. The box read is one row of a wider rule: a mutating
-> call or a store on ANY fresh value that no name holds (`g[0..2].push(1)`, `xs.copy().push(1)`,
-> `(xs + ys).sort()`) changes a dropped copy; [`syntax.md`](../syntax/01-lexical-and-literals.md) (slices) lists the rows. A
-> field or index store through a box read (`s.get().xs.push(1)`) warns for the same reason.
+> **`get()` returns the live value; write it only inside `update`.** M3.3: a box holds ONE value by
+> handle (Go `struct { mu sync.Mutex; v T }`). `x := s.get()` then `x["z"] = 1` changes the box's
+> value, outside the guard: a race with another task's `update` is the user's bug, as in Go. Write
+> under the guard with `update` (or `set` a whole new value).
 
-**The ladder:** bare value (copied) → a mutable in-task `struct`/collection → `Shared[T]` (cross-task
-box). An in-task mutable value (a one-field `struct`, a `List`, …) is a shared reference *within one
-task* but is **not** sendable (copy-on-spawn gives each task its own copy); `Shared[T]` **is** sendable
-(the handle is copied, the value isn't).
+**The ladder:** a value one task writes → a value tasks share and order by a join or a `Channel` →
+`Shared[T]` (a cross-task box). A mutable value (a one-field `struct`, a `List`, …) is one object
+in every task that holds it (M3.4); `Shared[T]` adds the guard that orders the writes.
 
 ### Where the value lives
 
-A `Shared[T]` owns a private heap and its value lives there. `update(f)` and `read(f)` run `f` inside
-that heap, on the live value:
+A `Shared[T]` holds its value by handle, in the run's one heap. `update(f)` and `read(f)` run `f` in
+the caller's task, on the live value, while the task holds the box's guard:
 
 ```chezzi
 s := Shared(Table(keys, 0))            # keys: 100000 items
 s.update(fn(t): hit(t))                # hit: t.hits += 1; return t   -- in place, no copy
-n := s.read(fn(t): t.hits)             # only the int is copied out
+n := s.read(fn(t): t.hits)             # f's result, no copy
 ```
 
-Measured (release, one caller, struct with a 100000-item list):
-
-| operation | cost |
-|---|---|
-| `update` (in place) | 3 to 8 us per call (2000 calls inside 1000 ms, `tests/chz/stdlib/box_in_place_perf_test.chz`) |
-| `RwShared.write`, 8 callers | up to 25 us |
-| `get()` (whole-value copy) | 4086-4912 us |
-| `Shared.read(f)` of a part | about 2 us at any size |
-| `update` on an `int` with `fn(x): x + 1` | 1.32-1.54 us |
-| creating a box | about 4 us |
-
-Read a part of a big value with `Shared.read(f)`. Every cell:
-[`benchmarks.md`](../../contributing/benchmarks.md).
-
-**The closure runs like the body of a spawned task.** Its captures are copies, so a write to one is
-the D4 error or fault, never a silent lost write. It sees module globals as the caller has them **at
-the call**. Reading a scalar, a `str`, a `fn` or a box handle from a global costs nothing extra.
-Reading a mutable aggregate global (`List`, `Map`, a struct) takes the caller's module snapshot, and
-when the caller also mutates such a global between calls the snapshot is rebuilt per call: 13493 ms
-for 2000 calls on a 100000-item global, about 6.7 ms per call, the price `spawn` pays (15 ms per call
-when the read sits two boxes deep). Capture what the closure needs instead (`n := G.len()` outside,
-`fn(x): x + n` inside): 8 ms for the same 2000 calls.
-
-A box closure never reads a stale global. Measured at `CHEZZI_THREADS` 1, 2 and default, with the
-closure reading `G.len()` of a mutable `List` global while the caller pushes to `G` between calls or
-does not: every position reads the current value — a literal closure, a named `fn`, a method called
-from the closure, a read beside a qualified module call, a closure nested in another box's closure, a
-`RwShared.write` closure and a `Shared.read` closure. A "stale global" checker warning would be false
-wherever it fired, so it is declined.
+**The closure is an ordinary call in the caller's task.** Its captures are the caller's bindings, so a
+write to one lands (Go: a closure under `mu.Lock()`). It reads and writes the run's one copy of each
+module global (M3.1). A closure that stores a global or a capture into the state (`s.update(fn(_):
+G)`) makes the state that object; store `G.copy()` to keep the box's own value. A closure may block
+(a channel wait, a sleep): the guard belongs to the task and stays with it, and every other user of
+the box waits.
 
 **Re-entry and faults.**
 
-- `get` / `read` / `set` / `update` / `print` of a `Shared` from inside that box's own `update` or
-  `read` closure fault with `already holds the update guard`; the closure holds the value, so no
-  earlier copy exists.
+- `get` / `read` / `set` / `update` of a `Shared` from inside that box's own `update` or `read`
+  closure fault with `already holds the update guard` (Go: `Lock` inside `Lock` is `fatal error: all
+  goroutines are asleep - deadlock!`). A `print` of the box takes no guard (Go's `fmt` takes no lock):
+  it shows the box's value as it is.
 - A fault inside the closure is raised in the caller, `recover:` catches it, the box keeps serving
   and the state is what the closure left.
 - A slow closure blocks every user of the box and holds its worker (the Elixir `Agent` warning
@@ -128,16 +83,16 @@ wherever it fired, so it is declined.
   fault at its own `read` / `get`, as a `Shared` user does.
 
 `Shared.read(f)` runs `f` on the live value, so a mutation `f` makes persists. `RwShared` (§6f) is the
-same box core behind a read-write lock.
+same one-value box behind a read-write guard.
 
 **When to pick which box.**
 
 | | `Shared[T]` | `RwShared[T]` |
 |---|---|---|
 | lock | one user at a time | many readers or one writer |
-| `update` / `write` | closure runs in the box heap, in place | the same, exclusive |
-| `read(f)` | `f` runs in the box heap; only its result is copied; readers queue | the reader gets a COPY and `f` runs in the reader's heap; readers run in parallel |
-| `get()` | whole-value copy out | whole-value copy out |
+| `update` / `write` | closure runs on the live value, in place | the same, exclusive |
+| `read(f)` | `f` runs on the live value under the guard; readers queue | `f` runs on the live value under the read guard; readers run in parallel; a `write` inside it faults |
+| `get()` | the live value, by handle | the live value, by handle |
 | pick it when | you mostly write, or read a small part of a big value (`read`) | reads dominate and readers must not queue |
 
 **Display rule.** `print`, `str` and interpolation of a `Shared` / `RwShared` / `Atomic` render what
@@ -152,17 +107,19 @@ b.set(?n)
 print(n)        # N(id=1, box=Shared(N(id=1, box=Shared(...))))
 ```
 
-The renderer takes a snapshot of the box, drops the lock, then renders. A fault message that shows a
-box never waits for it: when the state is busy the message shows `Shared(<locked>)`. User output from
-`print` / `str` never shows `<locked>`.
+The renderer takes no lock and no guard: it reads the box's one slot and renders that value, as
+Go's `fmt` reads a struct's fields. A box that holds one list twice renders it twice
+(`Shared([[1], [1]])`, as CPython prints `[[1], [1]]`). A fault message renders a box the same way,
+so it never waits for a box that another task holds.
 
 ---
 
 ## 6b. `Atomic[T]` — the cross-task atomic box
 
 `Atomic[T]` is `Shared[T]`'s sibling for **atomic operation primitives** (compare-and-swap, exchange,
-fetch-add) rather than `Shared`'s closure-based `update`. Same shape: one box, many tasks; the
-**handle is sendable**, the value is copied in/out under a lock; constructed value-first (`Atomic(v)`,
+fetch-add) rather than `Shared`'s closure-based `update`. Same shape: one box, many tasks, each with
+the box by handle; the box holds the value itself, so `store` and `load` copy one word
+under a lock and every task shares the stored object (Go `atomic.Value`); constructed value-first (`Atomic(v)`,
 `T` inferred — an optional `Atomic[T](v)` turbofish pins it and is checked against the value). Generic
 over any `T`; the arithmetic methods are restricted to numeric `T`.
 
@@ -216,19 +173,20 @@ A module's own `protocol StructuralEq` is its own protocol. No type can implemen
 checker answers it from the payload's shape. No checker walk can see through a protocol existential
 payload, so the VM also switches the `eq` hook off for the compare.
 
-**`cas` on a payload that holds a `fn` value is rejected** (`Atomic[fn() -> int]`, a struct field or
-`List` element of `fn` type). Every `load()` returns a fresh copy of the closure and closures compare
-by identity, so `cas(a.load(), new)` could never succeed and the standard CAS retry loop would spin
-forever (Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape).
+**`cas` compares as `==` does, and rejects a payload that holds a `fn` value** (`Atomic[fn() -> int]`,
+a struct field or `List` element of `fn` type). Go's func is uncomparable, so Go's
+`atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape.
 
 - The error is at the `cas` call, so `load`/`store`/`exchange` of a fn stay legal.
 - A named fn, a builtin fn (`ord`), a std native fn (`math.sqrt`) and an `extern` fn are fn values
   like a closure, so `cas` rejects them too.
 - A generic `fn f[T](a: Atomic[T], …)` hides the fn from the checker, so the runtime `cas` faults
-  `Atomic.cas: the payload holds a function value, which cas cannot compare` instead of answering
-  `false` forever. A builtin fn (`ord`) faults the same way. An iterator payload faults the same way
-  (`Atomic.cas: the payload holds an iterator, which cas cannot compare`).
+  `Atomic.cas: the payload holds a function value, which cas cannot compare`. A builtin fn (`ord`)
+  faults the same way.
 - A handle payload (`Atomic(ch)`) compares by its core, so `cas(a.load(), …)` on it succeeds.
+- An iterator or a generator payload compares by its object, as `==` does (Go: a pointer compares by
+  address): `load()` returns the stored one, so `cas(a.load(), …)` on it succeeds, and `cas` with
+  another iterator answers `false`.
 
 ### `AtomicInt` — the monomorphic **lock-free** int atomic
 
@@ -271,7 +229,7 @@ under contention — it measured **~2.7× faster** than the Mutex-backed `Atomic
 ## 6f. `RwShared[T]` — the cross-task read-write box
 
 `RwShared[T]` is `Shared[T]`'s read-write counterpart: **MANY concurrent readers OR one exclusive
-writer**. Same shape as `Shared` — one box, many tasks; the **handle is sendable**; constructed
+writer**. Same shape as `Shared` — one box, many tasks, each with the box by handle; constructed
 value-first (`RwShared(v)`, `T` inferred — an optional `RwShared[T](v)` turbofish pins it and is
 checked against the value) — but the lock is a `RwLock` instead of a `Mutex`. **Reach for `RwShared`
 over `Shared` when reads dominate** (a shared config/registry/map read on every request): read guards
@@ -287,7 +245,7 @@ fn total(r: RwShared[Map[str, int]]) -> int:
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `get`   | `get(self) -> T` | shared read guard; **snapshot copy out** (== `read(identity)`) — mutating it is a no-op (see the `Shared` `get()` gotcha above); mutate via `write` |
+| `get`   | `get(self) -> T` | shared read guard; the live value, by handle (== `read(identity)`); write it only inside `write` |
 | `set`   | `set(self, v: T) -> None` | exclusive write guard; overwrite |
 | `read`  | `read(self, f: fn(T) -> R) -> R` | **shared** read guard: run `f` against the current value, return `f`'s result; **no** write-back. Many `read`s run concurrently |
 | `write` | `write(self, f: fn(T) -> T) -> None` | **exclusive** write guard: `Shared.update` under the write lock — read-modify-write, store `f`'s return |
@@ -297,35 +255,42 @@ fn total(r: RwShared[Map[str, int]]) -> int:
 lock), so concurrent writers can't lose each other's updates — a `set` racing an in-flight `write`
 **blocks** behind the guard and lands; it is never silently overwritten.
 
-**Where the value lives.** As with `Shared`, the value lives in the box's private heap. `write(f)`
-runs `f` **inside** that heap on the live value, under the exclusive lock: no copy out and back, the
-closure rule of §6 applies (captures are copies, globals are the caller's as of the call), and a fault
-inside `f` leaves the state as `f` left it. A reader (`get`, `read`, a collection read, `print`)
-**copies** what it returns out of the live heap under the shared lock, drops the lock, and only then
-decodes it; `read`'s closure runs on that copy in the **reader's** heap. So no user code runs under
-the read lock, readers run in parallel, and a mutation inside a `read` closure does not reach the
-box. A reader waits only while a writer holds or waits for the box.
+**Where the value lives.** As with `Shared`, the box holds one value by handle (Go `sync.RWMutex`).
+`write(f)` runs `f` in the caller's task on the live value, under the write guard; the closure rule of
+§6 applies, and a fault inside `f` leaves the value as `f` left it. A reader (`get`, `read`, a
+collection read) takes the read guard; `read`'s closure, and a key's `eq`, run on the live value under
+it, so readers run in parallel and a mutation inside a `read` closure reaches the box (a race with the
+other readers is the user's bug). A reader waits while a writer holds the box, or waits for it (Go
+writer preference: a writer counts as waiting from its first failed acquire to its take, so no
+reader slips in at the handoff). A write release admits every reader that waited during the write,
+ahead of the writers that wait too (Go `sync.RWMutex.Unlock`), so back-to-back writers cannot
+starve a reader. A nested `read` by a reader is granted while no writer waits; with
+a writer waiting for the outer read it is a certain cycle (Go deadlocks) and faults with the lock
+cycle text. A `print` takes no guard. The fast path is one atomic operation on the box's lock word;
+the wait-for graph is read only on a contended acquire, so a cycle that passes through a read guard
+(readers are anonymous in the lock word) is left to the run's deadlock verdict.
 
 > **Reentrancy fault (same class as `Shared.update`):** a closure passed to `write` (or `set`) that
 > re-acquires the **same** `RwShared`'s update guard — `write` or `set` inside `write` — is a
 > length-1 wait-for cycle and **faults** (`"already holds the update guard"`), instead of hanging or
 > silently losing the inner write. A cross-box wait-for cycle (two boxes each written from inside the
 > other's closure) faults the same way; two tasks that merely contend for different boxes are not a
-> cycle and complete normally. `get` / `read` / `print` of the box from inside its **own `write`**
-> closure fault the same way. `write` (or `get` / `read`) nested in **`read`** is legal: the reader
-> closure runs on its own copy after the lock dropped.
+> cycle and complete normally. `get` / `read` of the box from inside its **own `write`** closure fault
+> the same way. M3.3 (Q2): `write` or `set` nested in the same task's **`read`** waits for that read,
+> a certain deadlock (Go `RLock(); Lock()`), so it faults with `already holds the read guard on this
+> RwShared box`. `get` / `read` nested in `read` are legal while no writer waits; past a waiting
+> writer they fault (`a lock cycle`). The re-entry text names the box kind (`Shared` or `RwShared`).
 
 > **A guard wait does not cost an OS thread unless it is long.** A contended `set`/`update`/`write`
 > waits in place on its worker for up to 5 ms (`GUARD_DEMOTE_BUDGET`) before it demotes the worker
 > and spawns one replacement OS thread, so almost no wait pays for a thread. Details:
 > [`concurrency-runtime.md`](../../design/concurrency-runtime.md#guard-waits).
 
-### Fan out big shared data — reduce in place, don't `get`/`read` it
+### Fan out big shared data — use a collection
 
-`get`/`read` copy the **whole** value out of the lock into the caller's heap. Fanning a 1M-element
-list out to 8 workers, each calling `get()`/`read()`, materializes the entire list eight times.
-`RwShared[T]` itself has exactly four methods for every `T` — `get`, `set`, `read`, `write` — so for a
-shared **container** use a collection from `std.concurrency.collection`:
+`get`/`read` hand out the live value (M3.3), so a reader that walks it outside the guard races the
+writers. `RwShared[T]` itself has exactly four methods for every `T` — `get`, `set`, `read`, `write`
+— so for a shared **container** use a collection from `std.concurrency.collection`:
 
 | collection | methods |
 |---|---|
@@ -334,25 +299,25 @@ shared **container** use a collection from `std.concurrency.collection`:
 | `ConcurrentSet[E]` | `contains`/`len`/`for_each`/`fold`/`insert`/`remove` |
 | `ConcurrentCounter[K]` | `increment`/`add`/`count`/`total` |
 
-The container is a live `List` / `Map` / `Set` in the box heap. The single-entry readers (`len`,
-`at`, `slice`, `get`, `contains`) copy only what they return. The writers (`push`, `insert`, `remove`,
-`get_or_insert`) are the plain container operation under the box's update guard: they copy
-their arguments in and nothing else. `get`/`contains`, `insert` and `get_or_insert` are O(1)
-expected.
+The container is the box's one live `List` / `Map` / `Set`. The single-entry readers (`len`, `at`,
+`slice`, `get`, `contains`) take the read guard and return elements by handle. The writers (`push`,
+`insert`, `remove`, `get_or_insert`) are the plain container operation under the write guard; they
+store their arguments by handle. `get`/`contains`, `insert` and `get_or_insert` are O(1) expected.
 
-**The walk rule.** `for_each`, `fold`, `for_each_entry` and `fold_entries` copy the collection once
-(`inner.get()`) and loop over the copy. A walk therefore visits **exactly the entries present when it
-starts, each once**, whatever the callback or another task removes or adds meanwhile, and the
-callback may call any method of the collection it walks. The price is one copy of the collection per
-walk; to reduce a big container without copying it, do the reduction inside the box
-(`xs.inner.read(..)` still copies; `Shared.read(f)` does not).
+**The walk rule.** `for_each`, `fold`, `for_each_entry` and `fold_entries` take a shallow copy of the
+collection under the read guard (`inner.read(fn(c): c.copy())`) and loop over the copy with no guard
+held. A walk therefore visits **exactly the entries present when it starts, each once**, whatever the
+callback or another task removes or adds meanwhile, and the callback may call any method of the
+collection it walks. The elements are the live ones, by handle. To reduce a big container without
+the shallow copy, reduce inside `xs.inner.read(..)`.
 
 ```chezzi
 import ConcurrentList, ConcurrentMap from std.concurrency.collection
+import RwShared from std.concurrency
 
 # Each spawned worker reduces its own view of the SAME shared container — no per-worker copy of the inner.
 fn sum_shard(xs: ConcurrentList[int]) -> int:
-    return xs.fold(0, fn(a: int, x: int) -> int: a + x)   # one snapshot of the list, then a loop
+    return xs.fold(0, fn(a: int, x: int) -> int: a + x)   # one shallow copy of the list, then a loop
 
 fn sum_values(m: ConcurrentMap[str, int]) -> int:
     return m.fold_entries(0, fn(a: int, k: str, v: int) -> int: a + v)   # per-entry reduce over a shared map
@@ -365,15 +330,8 @@ fan-out pattern anyway. Calling a container method on the box itself (`r.fold(..
 checker "no method" error whose help line names the collection
 (`use ConcurrentMap from std.concurrency.collection`).
 
-> **GC cost of holding a big container in a box.** Each box caches whether its payload can root a
-> heap object at all; a pure-data payload is **skipped** by the collector, so holding a big container
-> in a `Shared`/`RwShared`/`Channel` costs the same per GC pass as holding it in a plain `List`.
->
-> **Reads are O(1); each *store* pays one walk.** `set`/`write`/`send`/`store` summarises the new
-> payload once (O(payload), ~+20% on a 100k-element `RwShared.set` — measured in
-> [`benchmarks.md`](../../contributing/benchmarks.md)), so a rebind into a box is *not* as cheap as
-> rebinding a plain `List`. The walk runs **before** the value lock is taken, so it never lengthens the
-> window in which a writer blocks the readers.
+> **GC cost of holding a big container in a box.** M3.2 / M3.3: a box and a channel hold one word
+> per value, so a store is O(1) and the collector traces the value like any other heap value.
 
 **The collections — `std.concurrency.collection`.** A raw `RwShared[Map[...]]` box is the primitive
 for a shared table, but the `read`/`write` closures are verbose and the *compound* mutations
@@ -381,8 +339,8 @@ for a shared table, but the `read`/`write` closures are verbose and the *compoun
 pure-Chezzi `std.concurrency.collection` module bakes the single-lock idiom into four generic
 structs — **`ConcurrentList[E]`**, **`ConcurrentMap[K, V]`**, **`ConcurrentSet[E]`** and
 **`ConcurrentCounter[K]`** — each over one `RwShared` box (`c.inner`), built with `X.new()` or
-`X(RwShared(data))`. A struct of all-sendable fields crosses the airlock as a **shared handle** (same
-as `RwShared` itself), so the wrappers keep the cross-task sharing; `get`/`len`/`count`/`snapshot` are
+`X(RwShared(data))`. A task gets the wrapper struct by handle, like
+every value (M3.4), so the wrappers keep the cross-task sharing; `get`/`len`/`count`/`snapshot` are
 concurrent reads and `insert`/`push`/`add`/`increment`/`get_or_insert` are exclusive writes (the compound
 ones atomic in one lock). See [`stdlib.md`](../stdlib/01-builtins.md) §5 → `std.concurrency.collection` and
 `examples/concurrent_collection.chz`.

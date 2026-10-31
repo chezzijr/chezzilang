@@ -45,8 +45,8 @@ FLAGS:
                      is stdout's FIRST line, followed by the program's own output
     --parallel       Accepted no-op alias (`run` only) — the engine is the default already
     --threads=N      Worker threads for the engine (0 = all cores; env: CHEZZI_THREADS)
-    --max-heap=N     (`test`) Hard-abort any test whose live heap exceeds N bytes — a runaway-alloc
-                     guard, bucketed OVER-MEMORY (0/omitted = off)
+    --max-heap=N     (`test`) Hard-abort any test whose live heap (all its tasks together) exceeds
+                     N bytes — a runaway-alloc guard, bucketed OVER-MEMORY (0/omitted = off)
     --timeout=N      (`test`) Hard-abort any test running longer than N ms — a wall-clock guard,
                      bucketed TIMED-OUT (0/omitted = off)
 
@@ -468,7 +468,7 @@ fn resolve_threads_env(raw: Option<&str>) -> Result<Option<usize>, String> {
 /// value is traceable to which subcommand read it.
 ///
 /// Before this, `chezzi test` silently ignored `CHEZZI_THREADS` — only `cmd_run` read it
-/// (`test_runner.rs`'s `over_memory_trips_on_an_all_native_task_body` test documents exactly this
+/// (`test_runner.rs`'s pre-M3.4 `over_memory_trips_on_an_all_native_task_body` test documented this
 /// gap: "`CHEZZI_THREADS=1` does NOT reproduce that — the env var is read by `main::cmd_run`, not by
 /// `run_tests_capped`"). That made a `CHEZZI_THREADS=2 chezzi test tests/chz` differential a no-op:
 /// both runs used the same (auto) worker count. This closes it for `test` too.

@@ -614,12 +614,12 @@ fn golden_cycle_guard_chz_matches_expected_and_interp() {
 }
 
 /// FLIPPED (item A, was `airlock_cyclic_struct_recoverable_both_engines`) — a SELF-REFERENTIAL value
-/// crossing the concurrency airlock (`spawn` arg) now ROUND-TRIPS via identity-preserving container
-/// serialization (`WireValue::Backref` on every container arm), instead of tripping the depth cap. The
-/// spawned task reads `a.val == 1` (prints `got 1`) and the recover returns `done`; byte-identical on
-/// the serial and M:N engines (both copy the local cyclic value via `deep_clone`→`to_wire`).
+/// crossing a task boundary (`spawn` arg) now reaches the task (once via the deleted wire
+/// form's back-references, since M3.4 by handle), instead of tripping the depth cap. The
+/// spawned task reads `a.val == 1` (prints `got 1`) and the recover returns `done`; byte-identical
+/// on every engine.
 #[test]
-fn airlock_cyclic_struct_crosses_both_engines() {
+fn crossing_cyclic_struct_crosses_both_engines() {
     let src = "\
 struct Node:
     val: int
@@ -643,10 +643,10 @@ main()
 }
 
 /// FLIPPED (item A, was `airlock_cyclic_via_channel_send_and_shared_recoverable`) — the same self-
-/// referential value crossing via `Channel.send` and `Shared(...)` (both route through `to_wire_at`)
-/// also now ROUND-TRIPS. Regression lock on the other airlock entry points beyond a bare `spawn` arg.
+/// referential value crossing via `Channel.send` and `Shared(...)` (M3.2/M3.3: by handle)
+/// also gets through. Regression lock on the other crossing entry points beyond a bare `spawn` arg.
 #[test]
-fn airlock_cyclic_via_channel_send_and_shared_crosses() {
+fn crossing_cyclic_via_channel_send_and_shared_crosses() {
     let chan_src = "\
 import std.concurrency
 struct Node:
@@ -686,13 +686,12 @@ main()
     assert_mc_parity(shared_src, "ok: done\n");
 }
 
-/// A nested (local) recursive `fn` crossing the airlock has a self-referential capture graph (the
-/// letrec self-cell: `Closure h -> captured[Cell] -> Cell.inner = h`). Identity-preserving airlock
-/// serialization (`WireValue::Backref`, scoped to the Cell/Closure arms) ties that knot back together
-/// on the far heap, so the recursive fn is now SENDABLE and computes correctly — `fact(5) == 120`,
-/// byte-identical (serial `deep_clone`→`to_wire`, M:N spawn-block `to_wire`/`to_snap`).
+/// A nested (local) recursive `fn` crossing a spawn has a self-referential capture graph (the
+/// letrec self-cell: `Closure h -> captured[Cell] -> Cell.inner = h`). The task gets the
+/// closure by handle (M3.4; the deleted wire form back-referenced the knot), so the recursive fn
+/// computes correctly — `fact(5) == 120`.
 #[test]
-fn airlock_recursive_local_fn_round_trips_both_engines() {
+fn crossing_recursive_local_fn_round_trips_both_engines() {
     let src = "\
 fn main():
     fn fact(n: int) -> int:
@@ -707,12 +706,11 @@ main()
     assert_mc_parity(src, "ok: 120\n");
 }
 
-/// Memory-safety lock for the tie-the-knot reconstruction: the same recursive-fn airlock crossing under
-/// GC STRESS. The reconstructed closure/cell cycle (placeholder-alloc → patch) must be fully GC-traced —
-/// if the placeholder patch left a dangling `GcRef`, a collection at the next safepoint would panic
-/// ("dangling GcRef"). A GC pass runs before/after the spawn, then the result is used (`fact(6) == 720`).
+/// Memory-safety lock (it once guarded the deleted copy step's tie-the-knot rebuild): the same
+/// recursive-fn crossing under GC STRESS. The closure/cell cycle must stay GC-traced — a dangling
+/// `GcRef` would panic at the next safepoint ("dangling GcRef"). A GC pass runs before/after the spawn, then the result is used (`fact(6) == 720`).
 #[test]
-fn airlock_recursive_local_fn_round_trips_under_gc_stress() {
+fn crossing_recursive_local_fn_round_trips_under_gc_stress() {
     let src = "\
 fn main():
     fn fact(n: int) -> int:
@@ -731,14 +729,13 @@ main()
     assert_eq!(run_capture_stress(src), run(src));
 }
 
-/// Memory-safety lock for the CONTAINER tie-the-knot reconstruction (item A): a self-referential
-/// `struct` crossing the airlock under GC STRESS. The reconstructed struct/list cycle (placeholder-
-/// alloc → patch) must be fully GC-traced — if the placeholder patch left a dangling `GcRef`, a
-/// collection at the next safepoint would panic ("dangling GcRef"). A GC pass runs before/after the
+/// Memory-safety lock (item A; it once guarded the deleted copy step's CONTAINER rebuild): a
+/// self-referential `struct` crossing a spawn under GC STRESS. The struct/list cycle must stay
+/// GC-traced — a dangling `GcRef` would panic at the next safepoint ("dangling GcRef"). A GC pass runs before/after the
 /// spawn, then the crossed cyclic node is read (`a.val == 1`, and the cycle is intact: `a.next[0]` is
-/// `b` and `b.next[0]` is `a`). Mirrors `airlock_recursive_local_fn_round_trips_under_gc_stress`.
+/// `b` and `b.next[0]` is `a`). Mirrors `crossing_recursive_local_fn_round_trips_under_gc_stress`.
 #[test]
-fn airlock_self_ref_struct_round_trips_under_gc_stress() {
+fn crossing_self_ref_struct_round_trips_under_gc_stress() {
     let src = "\
 struct Node:
     val: int
@@ -844,10 +841,8 @@ main()
 /// O(whole container). The first cut resolved a piece's cross-element `Backref` by rebuilding the
 /// ENTIRE stored container once PER ELEMENT, so `for_each`/`fold`/`at` over a container of closures
 /// sharing one binding went quadratic (measured on the pre-fix release binary: n=4000 → 3.7s, n=12000
-/// → 34s, versus 0.02s before W7-4). Since TICKET-154 the looping views share ONE rebuild map over an
-/// aliased store (`box_copy_pieces`), so no looping view re-materializes the whole per
-/// element. Pinned with a COUNT of the wire nodes the view rebuilt (TICKET-233): about one per
-/// element when the walk shares one map, about n per element when it does not.
+/// → 34s, versus 0.02s before W7-4). M3.3: a view reads the live container by handle, so it rebuilds nothing
+/// (M3.5 deleted the wire node counter with the wire form; this pins the result).
 #[test]
 fn rwshared_view_over_shared_bindings_is_not_quadratic() {
     let src = "\
@@ -869,21 +864,13 @@ fn main():
     print(c)
 main()
 ";
-    let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "3001\n");
-    let want = 3001..=4 * 3001;
-    assert!(
-        want.contains(&nodes),
-        "import RwShared from std.concurrency
-RwShared.for_each over 3001 sibling-binding closures rebuilt {nodes} wire nodes (want {want:?}) — the view is materializing \
-         the whole container per element again"
-    );
 }
 
 /// TICKET-154 (W11-15) -- the CONTAINER twin of the cell test above. One `inner` list pushed three
 /// thousand times into the stored list is an aliased store, so every element after the first is a
-/// bare back-ref. `for_each` must take ONE shared rebuild map for the whole walk; if it fell back
-/// to a whole-root rebuild per element this goes quadratic. Same counted measure as its sibling.
+/// bare back-ref. M3.3: the walk reads the live container by handle.
 #[test]
 fn rwshared_for_each_over_a_dag_alias_is_not_quadratic() {
     let src = "\
@@ -902,21 +889,12 @@ fn main():
     print(c)
 main()
 ";
-    let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "3001\n");
-    let want = 3001..=4 * 3001;
-    assert!(
-        want.contains(&nodes),
-        "import RwShared from std.concurrency
-RwShared.for_each over 3001 aliases of one list rebuilt {nodes} wire nodes (want {want:?}) -- the view is materializing \
-         the whole container per element again"
-    );
 }
 
-/// TICKET-154 (W11-15) -- the widened single-piece cost. On an aliased store `at(1)` is a bare
-/// back-ref, so it takes `from_wire_pieces`'s whole-root fallback: the ROOT once per CALL instead of
-/// the element. This bounds the wire nodes rebuilt (TICKET-233; the root is 45011 nodes, so five
-/// calls rebuild 225055) so it cannot become the root twice per call, or per ELEMENT.
+/// TICKET-154 (W11-15) -- the single-piece cost on an aliased store. Before M3.3 `at(1)` rebuilt the
+/// whole root once per call. M3.3: `at` returns the live element by handle.
 #[test]
 fn rwshared_at_over_an_aliased_store_stays_under_its_ceiling() {
     let src = "\
@@ -936,27 +914,15 @@ fn main():
     print(total)
 main()
 ";
-    let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    let out = super::golden_tests::golden_entry(src);
     assert_eq!(out, "25000\n");
-    let want = 5 * 5000..=5 * 60000;
-    assert!(
-        want.contains(&nodes),
-        "import RwShared from std.concurrency
-5 RwShared.at(1) calls over an aliased store rebuilt {nodes} wire nodes (want {want:?}) -- the whole-root fallback is running per \
-         element instead of per call"
-    );
 }
 
-/// W13-9 -- a module global nested >= 5000 levels deep makes EVERY nursery open take ~22s (release,
-/// `bbac6723`) before the correct, recoverable depth-exceeded fault, because `to_snap_depth`'s
-/// `try_wire_speculative` fast-path re-walks the WHOLE remaining subtree from every node on the chain
-/// (each re-walk discarded on `Err`, then the slow arm descends one node and repeats), an O(depth^2)
-/// pattern bounded by `MAX_STRUCTURAL_DEPTH` regardless of how much deeper the real chain goes (depth
-/// 8000 measured the same ~22s as depth 5000). The same chain captured as a closed-over LOCAL (not a
-/// module global) faults in 0.04s -- so the cost is specific to the module-snapshot failure path, not
-/// the depth walk itself.
+/// W13-9 / TICKET-119 — a module global that is a 5000-deep struct chain. A spawn used to snapshot
+/// it and fault at the depth cap after an O(depth^2) walk. M3.1: a spawn copies no module global, so
+/// the task runs.
 #[test]
-fn airlock_deep_module_global_depth_fault_is_not_quadratic() {
+fn a_spawn_beside_a_deep_module_global_copies_nothing() {
     let src = "\
 struct N:
     next: N?
@@ -980,25 +946,17 @@ fn main():
         !e: print(\"err: {e.message()}\")
 main()
 ";
-    let (out, nodes) = run_capture_counting(src, &WIRE_ENCODE_NODES);
+    let out = run_capture(src);
     let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
-    assert_eq!(
-        out,
-        "err: maximum structural depth (10000) exceeded (cyclic data structure?)\n"
-    );
-    let want = 10000..=100000;
-    assert!(
-        want.contains(&nodes),
-        "a 5000-deep module global visited {nodes} wire nodes to reach the depth fault (want {want:?}) -- \
-         O(depth^2) regression in the module-snapshot failure path"
-    );
+    assert_eq!(out, "crossed\nok\n");
 }
 
-/// TICKET-119 -- same shape as `airlock_deep_module_global_depth_fault_is_not_quadratic`, but each
-/// node also carries a `List[int]` payload, to prove the skip does not depend on the node carrying no
-/// other heap data.
+/// W13-9 / TICKET-119 — a module global that is a 5000-deep chain with a payload at every level. A
+/// spawn used to snapshot it
+/// and fault at the depth cap after an O(depth^2) walk. M3.1: a spawn copies no module global, so
+/// the task runs.
 #[test]
-fn airlock_deep_module_global_with_a_payload_at_every_level_is_not_quadratic() {
+fn a_spawn_beside_a_deep_payload_module_global_copies_nothing() {
     let src = "\
 struct N:
     tag: List[int]
@@ -1023,25 +981,16 @@ fn main():
         !e: print(\"err: {e.message()}\")
 main()
 ";
-    let (out, nodes) = run_capture_counting(src, &WIRE_ENCODE_NODES);
+    let out = run_capture(src);
     let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
-    assert_eq!(
-        out,
-        "err: maximum structural depth (10000) exceeded (cyclic data structure?)\n"
-    );
-    let want = 10000..=100000;
-    assert!(
-        want.contains(&nodes),
-        "a 5000-deep module global carrying a payload at every level visited {nodes} wire nodes to reach \
-         the depth fault (want {want:?}) -- O(depth^2) regression in the module-snapshot failure path"
-    );
+    assert_eq!(out, "crossed\nok\n");
 }
 
-/// TICKET-119 -- same shape, but the chain is 6000 nested closures rather than a struct chain, to
-/// prove a doom record comes from the `Err` unwind of `to_wire_depth`, not from `memo.path` (a `Cell`
-/// is never on `path`).
+/// W13-9 / TICKET-119 — a module global that is 6000 nested closures. A spawn used to snapshot it
+/// and fault at the depth cap after an O(depth^2) walk. M3.1: a spawn copies no module global, so
+/// the task runs.
 #[test]
-fn airlock_deep_module_global_of_nested_closures_is_not_quadratic() {
+fn a_spawn_beside_a_deep_closure_module_global_copies_nothing() {
     let src = "\
 fn mk(k: int) -> fn() -> int:
     f := fn() -> int: 0
@@ -1061,18 +1010,9 @@ fn main():
         !e: print(\"err: {e.message()}\")
 main()
 ";
-    let (out, nodes) = run_capture_counting(src, &WIRE_ENCODE_NODES);
+    let out = run_capture(src);
     let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
-    assert_eq!(
-        out,
-        "err: maximum structural depth (10000) exceeded (cyclic data structure?)\n"
-    );
-    let want = 10000..=100000;
-    assert!(
-        want.contains(&nodes),
-        "a 6000-deep nested-closure module global visited {nodes} wire nodes to reach the depth fault \
-         (want {want:?}) -- O(depth^2) regression in the module-snapshot failure path"
-    );
+    assert_eq!(out, "crossed\nok\n");
 }
 
 /// TICKET-119 review finding -- the first doomed-skip design (`(node, shallowest depth)` alone,
@@ -1086,7 +1026,7 @@ main()
 /// `holder.y` takes a slow arm. Before TICKET-276 the program held a module value (`p := [k]`), which
 /// `chezzi check` rejects.
 #[test]
-fn airlock_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
+fn crossing_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_t119_review_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
@@ -1110,7 +1050,7 @@ fn airlock_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
 /// Backrefs `z` because `z` is on its `path`, but `w`'s own attempt lacks that state, re-enters `z` by
 /// a shorter route and is kept. Skipping `w` loops the slow arms.
 #[test]
-fn airlock_cyclic_module_global_with_a_shorter_reentry_still_crosses() {
+fn crossing_cyclic_module_global_with_a_shorter_reentry_still_crosses() {
     let src = "\
 struct G:
     a: G?
@@ -1155,12 +1095,11 @@ main()
     assert_eq!(run(src), "crossed\nok\n");
 }
 
-/// TICKET-119 -- a doomed-skip's `depth >= d0` comparison must honour the depth the doom was recorded
-/// at: `holder.a` and `holder.b` alias the SAME `N` chain `h`, but the generator's own depth-tripped
-/// attempt records `h`'s tail at a much deeper depth than either field reaches it at, so neither
-/// field's attempt is skipped and both cross clean, sharing identity through the mutation.
+/// TICKET-119 — `holder.a` and `holder.b` alias the SAME `N` chain `h`, beside a parked generator
+/// over a deeper chain to it. M3.1: the task reads the run's one `holder`, so the push through
+/// `a` is what `b` reads. Go (go1.27.0, `m31go/rust`): `2`.
 #[test]
-fn airlock_module_global_skip_honours_the_depth_the_doom_was_recorded_at() {
+fn two_fields_of_a_module_global_over_one_chain_are_one_object() {
     let src = "\
 struct N:
     tag: List[int]
@@ -1197,19 +1136,17 @@ started := holder.gen.next()
 fn main():
     parallel:
         spawn:
-            recover: holder.a.tag.push(9)
+            holder.a.tag.push(9)
             print(\"{holder.b.tag.len()}\")
 main()
 ";
-    // TICKET-169 (D4 layer C): the push above now faults (the task's own copy of the module
-    // global), so the alias's length stays at its pre-task value.
-    assert_eq!(run(src), "1\n");
+    assert_eq!(run(src), "2\n");
 }
 
 /// TICKET-119 -- a module global just under `MAX_STRUCTURAL_DEPTH` must still cross without ever
 /// hitting the depth-tripped recording path at all.
 #[test]
-fn airlock_module_global_just_under_the_depth_cap_still_crosses() {
+fn crossing_module_global_just_under_the_depth_cap_still_crosses() {
     let src = "\
 struct N:
     next: N?
@@ -1236,10 +1173,11 @@ main()
     assert_eq!(run(src), "crossed\nok\n");
 }
 
-/// TICKET-119 -- DEC-100 identity lock: a deep module global aliased through two `List[int]` bindings
-/// must still cross as ONE object even when a doomed-skip decision fires along the way.
+/// TICKET-119 / DEC-100 identity lock: a module global aliased through two `List[int]` bindings is
+/// one object (M3.1: the run's), beside a deep module global. Go (go1.27.0, `m31go/rust`): `2
+/// true`.
 #[test]
-fn airlock_deep_module_global_alias_still_crosses_as_one_object() {
+fn crossing_deep_module_global_alias_is_one_object() {
     let src = "\
 struct N:
     next: N?
@@ -1258,23 +1196,18 @@ gl: N = mk(4000)
 fn main():
     parallel:
         spawn:
-            recover: a.push(2)
+            a.push(2)
             print(\"{b.len()} {gl.next != None}\")
 main()
 ";
-    // TICKET-169 (D4 layer C): the push above now faults, so `b` (aliasing the same copy) stays
-    // at its pre-task length.
-    assert_eq!(run(src), "1 true\n");
+    assert_eq!(run(src), "2 true\n");
 }
 
-/// W7-4 memory-safety lock for the module-scoped REBUILD MAP: `fault_module` now keeps one wire-`id`
-/// → `GcRef` map alive ACROSS the whole `module_define` loop (so two globals over one captured local
-/// rebuild ONE cell). A `GcRef` parked in that map between globals must stay rooted — if it did not, a
-/// collection would panic ("dangling GcRef") or the second global would tie to a recycled slot. Run it
-/// under GC STRESS with junk allocation around the crossing, and assert the shared binding actually
-/// held (`2`, not `0`) as well as `stress == non-stress`.
+/// W7-4 memory-safety lock: two module globals over one captured local are one binding, and a task
+/// that writes through one and reads through the other runs under GC STRESS with junk allocation
+/// around it. M3.1: one cell for the run. Go (go1.27.0, `m31go/rust`): `2`.
 #[test]
-fn airlock_module_global_shared_binding_survives_gc_stress() {
+fn crossing_module_global_shared_binding_survives_gc_stress() {
     let src = "\
 struct Ctr:
     inc: fn() -> None
@@ -1295,26 +1228,23 @@ fn main():
     r := Channel[int]()
     parallel:
         spawn:
-            recover: gi()
-            recover: gi()
+            gi()
+            gi()
             r.send(gg())
     more := [junk, junk]
     print(\"ok: {r.recv()}\")
 main()
 ";
-    // TICKET-169 (D4 layer C): `gi()`'s capture crossed the airlock and is marked, so its write
-    // now faults instead of sharing the binding — `gg()` reads the untouched `0`.
-    assert_eq!(run_capture_stress(src), "ok: 0\n");
+    assert_eq!(run_capture_stress(src), "ok: 2\n");
     assert_eq!(run_capture_stress(src), run(src));
 }
 
 /// W7-4a — cell identity across MODULES. `k.C` holds two sibling closures over one factory-local
-/// `n`; `l.GI` and `main.GG` are globals in two DIFFERENT modules pointing at them. A memo per module
-/// minted a fresh id per module, so the task rebuilt two cells and its `l.GI()` writes were invisible
-/// to `GG()` — `0`, where CPython (`import pk, pl` + `threading.Thread`) and Go (two packages +
-/// a goroutine) both measure `2`. One snapshot-wide `WireMemo` + one `Vm`-lived rebuild map fixes it.
+/// `n`; `l.GI` and `main.GG` are globals in two DIFFERENT modules pointing at them. M3.1: the task
+/// calls the run's one closure pair, so its two `l.GI()` writes reach `GG()`. CPython and Go
+/// (go1.27.0, `m31go/rust`): `2`.
 #[test]
-fn airlock_cross_module_shared_binding_is_one_cell() {
+fn crossing_cross_module_shared_binding_is_one_cell() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74a_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -1346,8 +1276,8 @@ fn main():
     r := Channel[int]()
     parallel:
         spawn:
-            recover: l.GI()
-            recover: l.GI()
+            l.GI()
+            l.GI()
             r.send(GG())
     print(r.recv())
 main()
@@ -1356,40 +1286,28 @@ main()
     .unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
     let (par_out, _pe, par_res, _) = run_file_with(&entry, crate::native::HostConfig::default());
-    // Modules fault in LAZILY, so a cell built by `k`'s fault sits in the `Vm`-lived rebuild map
-    // across real safepoints before `l`'s and `main`'s faults tie to it. (The map is also rooted by
-    // `collect`; that root is belt-and-braces today — this test still passes without it, because
-    // every entry is reachable from the global it was `module_define`d into. It is the LAZY-FAULT
-    // window this run locks down, not the root line.)
+    // Under GC stress the cell is reached only through the module globals of `k` and `l`.
     let (stress_out, _se, stress_res, _) = run_file_stress(&entry);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
     assert!(stress_res.is_ok(), "gc-stress faulted: {stress_res:?}");
-    // TICKET-169 (D4 layer C): `l.GI()`'s capture crossed the airlock and is marked, so its write
-    // now faults instead of sharing the cell — `GG()` reads the untouched `0`.
     assert_eq!(
-        vm_out, "0\n",
+        vm_out, "2\n",
         "cross-module sibling closures split their cell"
     );
     assert_eq!(
-        par_out, "0\n",
+        par_out, "2\n",
         "cross-module sibling closures split their cell (M:N)"
     );
-    assert_eq!(
-        stress_out, "0\n",
-        "the snapshot rebuild map is not GC-rooted"
-    );
+    assert_eq!(stress_out, "2\n", "a module global's cell is not GC-rooted");
 }
 
-/// W7-4b — cell identity on the SNAPSHOT SLOW ARM. `p := [k]` holds a module, so the whole global
-/// fails `to_snap`'s `!has_handle()` fast lane (only `Obj::Module` still forces this — `Native`/
-/// `Cffi`/`Builtin` all cross by value now) and its cell lands in `SnapValue::Cell`, which carried no
-/// id: the two sibling closures rebuilt two cells and `GC()` read `1` where CPython (`p = [bk]` +
-/// `threading.Thread`) measures `3`. Fixed by giving `SnapValue` the same id/`Backref` encoding the
-/// wire arms have, drained by the same rebuild map.
+/// W7-4b — a module global whose cell holds a module handle (`p := [k]`). M3.1: the task calls the
+/// run's one closure pair, so `GC()` reads both `GA()` writes. CPython: `3`; Go (go1.27.0,
+/// `m31go/rust`): `3`.
 #[test]
-fn airlock_handle_bearing_cell_keeps_one_binding() {
+fn crossing_handle_bearing_cell_keeps_one_binding() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74b_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
@@ -1415,8 +1333,8 @@ fn main():
     r := Channel[int]()
     parallel:
         spawn:
-            recover: GA()
-            recover: GA()
+            GA()
+            GA()
             r.send(GC())
     print(r.recv())
 main()
@@ -1430,25 +1348,19 @@ main()
     assert!(vm_res.is_ok(), "serial faulted: {vm_res:?}");
     assert!(par_res.is_ok(), "M:N faulted: {par_res:?}");
     assert!(stress_res.is_ok(), "gc-stress faulted: {stress_res:?}");
-    // TICKET-169 (D4 layer C): `GA()`'s captured cell crossed the airlock and is marked, so its
-    // reassignment now faults instead of sharing the binding — `GC()` reads the untouched `1`.
-    assert_eq!(
-        vm_out, "1\n",
-        "a handle-bearing cell split its binding on the snapshot slow arm"
-    );
-    assert_eq!(par_out, "1\n", "…and on M:N");
-    assert_eq!(stress_out, "1\n", "…and under GC stress");
+    assert_eq!(vm_out, "3\n", "a handle-bearing cell split its binding");
+    assert_eq!(par_out, "3\n", "…and on M:N");
+    assert_eq!(stress_out, "3\n", "…and under GC stress");
 }
 
-/// W7-4b's second, unplanned fix — a RECURSIVE local `fn` whose captures embed a module used to abort
-/// the whole spawn with `maximum structural depth (10000) exceeded (cyclic data structure?)`. The
-/// self-cell cycle only reaches the `SnapValue` slow arm when the closure ALSO holds a handle, and
-/// that arm had no `Backref`, so the walk ran the cycle to the shared depth cap and "rejected
-/// cleanly" — a fault on a program CPython runs fine (`m = bk` + the same recursive `down`, printing
-/// `41`). Giving `SnapValue` the id/`Backref` encoding terminates the walk the way the wire path
-/// always did. Measured on the pre-fix binary (rc=1) and post-fix (`41`, both engines).
+/// W7-4b's second, unplanned fix — a RECURSIVE local `fn` whose captures embed a module used to
+/// abort the whole spawn with `maximum structural depth (10000) exceeded (cyclic data structure?)`.
+/// The self-cell cycle reached the module snapshot's slow arm when the closure ALSO held a handle,
+/// and that arm had no `Backref`, so the walk ran the cycle to the shared depth cap and "rejected
+/// cleanly" — a fault on a program CPython runs fine (`m = bk` + the same recursive `down`,
+/// printing `41`). M3.1 deleted the snapshot: the task reads the run's one global.
 #[test]
-fn airlock_handle_bearing_recursive_local_fn_round_trips() {
+fn crossing_handle_bearing_recursive_local_fn_round_trips() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74b_cyc_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
@@ -1490,18 +1402,11 @@ main()
     assert_eq!(par_out, "41\n");
 }
 
-/// W7-4c — the shared rebuild map must not let the two crossings disagree about a binding's VALUE.
-/// `from_wire_memo`'s `Cell` arm is FIRST-WINS, and the two writers can hold DIFFERENT values for one
-/// binding: a write THROUGH a cell does not drop `snapshot_memo` (only a module-SLOT write does), so
-/// the cached snapshot below still carries `0` while the second spawn's clone carries `1`.
-///
-/// Serial eager-faults every module BEFORE rebuilding the task, M:N rebuilds first and faults lazily
-/// — so whoever wrote first won, and that differed by engine: serial printed `0`, M:N `1`, where
-/// CPython measures `1` and serial's own pre-W7-4c answer was `1`. Found by adversarial review, with
-/// that repro. Fixed by rebuilding the task's crossing FIRST (the clone is the
-/// correct value — a task sees the binding as of its own spawn).
+/// W7-4c — a task's captured `gg` (a crossing copy of the binding as of its spawn) and the module
+/// global `I` that wrote the binding before that spawn agree on its VALUE: CPython measures `1`.
+/// M3.1: the global is the run's one closure, and the capture is copied after `I()` ran.
 #[test]
-fn airlock_shared_cell_takes_the_spawn_time_value_on_both_engines() {
+fn crossing_shared_cell_takes_the_spawn_time_value_on_both_engines() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74c_val_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.chz");
@@ -1546,7 +1451,7 @@ go()
     assert_eq!(par_out, "1\n");
 }
 
-/// W7-4a — a DISCARDED speculative wire attempt must not forge a `Backref`. Found by adversarial
+/// W7-4a — a DISCARDED speculative wire attempt once forged a `Backref` (wire form deleted, M3.5). Found by adversarial
 /// review, and it was a live host PANIC, not a theoretical one: `main.chz` below aborted the M:N task
 /// with `CellLoad on a non-handle value` (the since-removed cooperative engine printed `7`, which is
 /// how the wire path was identified as the culprit).
@@ -1559,7 +1464,7 @@ go()
 /// module that never wrote the definition. Ordering matters: the handle-bearing global must come
 /// FIRST — move `H` below `GG` and it prints `7` either way.
 #[test]
-fn airlock_discarded_wire_attempt_does_not_forge_a_backref() {
+fn crossing_discarded_wire_attempt_does_not_forge_a_backref() {
     let dir = std::env::temp_dir().join(format!("chezzi_vm_w74a_spec_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -1612,7 +1517,7 @@ main()
 /// crosses as `Obj::Func` (no captures; recursion resolves via its home-global slot), never entering
 /// the `Obj::Closure` serialization arm, so the new self-ref diagnostic never fires and the send works.
 #[test]
-fn airlock_module_global_recursive_fn_control_sends() {
+fn crossing_module_global_recursive_fn_control_sends() {
     let src = "\
 fn fact(n: int) -> int:
     if n <= 1: return 1
@@ -1627,16 +1532,11 @@ main()
     assert_mc_parity(src, "120\n");
 }
 
-/// FLIPPED (was `airlock_cyclic_module_global_recoverable_mn`): a cyclic MODULE-GLOBAL value
-/// snapshotted for an M:N worker (`to_snap`) now CROSSES via the `to_wire && !has_handle` fast path —
-/// once containers are identity-preserved, the cyclic `Node` serializes with a `Backref` instead of
-/// tripping the depth cap, and `to_snap` rides that fast path. Self-referential module-global data now
-/// crosses exactly like local self-referential data (the consistent, no-drift behavior). This path is
-/// M:N-ONLY: the since-removed serial engine never snapshotted module globals, so this is a `run_capture`-only
-/// assertion (NOT `assert_mc_parity`). The `parallel:` nursery forces worker-prep (`snapshot_modules` →
-/// `to_snap`) to walk the cyclic global; the worker prints `w`, then the recover returns `done`.
+/// FLIPPED (was `airlock_cyclic_module_global_recoverable_mn`): a task reads a cyclic MODULE-GLOBAL
+/// value. M3.1: the task reads the run's one global, so nothing walks the cycle; the worker prints
+/// `w`, then the recover returns `done`.
 #[test]
-fn airlock_cyclic_module_global_crosses_mn() {
+fn crossing_cyclic_module_global_crosses_mn() {
     let src = "\
 struct Node:
     val: int
@@ -1661,11 +1561,11 @@ main()
 }
 
 /// Bug A guard-precision — a BREADTH-shaped acyclic value (~100k shallow siblings, structural depth
-/// ~2) must STILL cross the airlock fine: the 10_000 depth cap counts nesting LEVELS, not siblings,
-/// so a large-but-shallow sendable never false-trips. (A genuinely >10_000-DEEP acyclic nest would
-/// error — same false-positive the print/`==` path already has — so this is deliberately breadth-shaped.)
+/// ~2) must cross a spawn fine (the deleted copy step's 10_000 depth cap counted nesting LEVELS, not
+/// siblings), so a large-but-shallow sendable never false-trips. (A >10_000-DEEP acyclic nest errored
+/// there — the false-positive the print/`==` path has — so this test is breadth-shaped.)
 #[test]
-fn airlock_wide_acyclic_crosses_fine() {
+fn crossing_wide_acyclic_crosses_fine() {
     let src = "\
 fn use_it(xs: List[int]):
     print(\"len {xs.len()} first {xs[0]} last {xs[99999]}\")
@@ -1680,14 +1580,12 @@ main()
     assert_mc_parity(src, "len 100000 first 0 last 99999\n");
 }
 
-/// Golden: `examples/airlock_cycle.chz` — a SELF-REFERENTIAL sendable now ROUND-TRIPS across the
-/// airlock (`spawn` arg / `Channel.send` / `Shared`) via identity-preserving container serialization,
-/// and a wide-acyclic sendable still crosses fine (the depth cap stays the acyclic-nesting backstop).
-/// All sections use LOCAL self-referential values (the `to_wire` path), so the output is byte-identical.
+/// Golden: `examples/crossing_cycle.chz`: a SELF-REFERENTIAL value reaches a task (`spawn` arg /
+/// `Channel.send` / `Shared`) by handle (M3.4), and so does a wide acyclic list.
 #[test]
-fn golden_airlock_cycle_chz_matches_expected() {
-    let src = include_str!("../../../examples/airlock_cycle.chz");
-    let expected = include_str!("../../../examples/airlock_cycle.expected");
+fn golden_crossing_cycle_chz_matches_expected() {
+    let src = include_str!("../../../examples/crossing_cycle.chz");
+    let expected = include_str!("../../../examples/crossing_cycle.expected");
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, expected);
 }

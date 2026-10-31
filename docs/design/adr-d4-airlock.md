@@ -1,6 +1,15 @@
 # D4 — no silent copies at the task airlock
 
-**Status: accepted 2026-09-22, implemented.** Layer C (runtime, every rule) in TICKET-169; layer A
+> **Superseded 2026-10-29** on the branch `exp/go-shared-heap` by Go's shared-heap model: tasks share
+> one heap and get the parent's values by handle, so no route copies and no write is lost. A task
+> shares module globals (M3.1); a channel, an `Atomic` and a `Task` hand over the value (M3.2); a
+> box holds one value (M3.3); a spawn, a `spawn:` capture and an `Executor` job pass by handle
+> (M3.4). M3.4 deleted layer A; M3.5 deleted the layer C fault sites, the copy bits, the crossing
+> masks and the wire form. The current rules: [`concurrency/01-model.md`](../reference/concurrency/01-model.md).
+> The study and the plan: [`go-shared-heap.md`](go-shared-heap.md). The text below is the record of
+> the old model.
+
+**Status: accepted 2026-09-22, implemented, superseded 2026-10-29.** Layer C (runtime, every rule) in TICKET-169; layer A
 (checker, the early compile-time errors) in TICKET-170; refinements in TICKET-179, -189, -190, -220,
 -240, -247 and -254. D4 supersedes **D2** (DEC-137, TICKET-137) as the answer to "is a lost task-side
 write correct": it is not, and it faults. D2 survives only as the definition of WHICH snapshot of the

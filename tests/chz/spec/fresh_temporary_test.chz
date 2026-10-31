@@ -148,8 +148,15 @@ test fn a_fresh_reversed_argument_may_be_written_by_the_task():
         spawn push_param(a.reversed())
     assert a == [1, 2]
 
-test fn a_box_read_argument_may_be_written_by_the_task():
+# M3.3: `s.get()` returns the box's live value, so it is no fresh argument. M3.4: the spawn passes
+# it by handle, so the task writes the box's own value (Go `m33go/spawnarg/main.go`:
+# `box_read_spawn_arg [1 9]`).
+test fn a_box_read_argument_is_the_boxes_value_not_a_fresh_one():
     s := Shared([1])
-    parallel:
-        spawn push_param(s.get())
-    assert s.get() == [1]
+    r := recover:
+        parallel:
+            spawn push_param(s.get())
+    match r:
+        ?_: pass
+        !e: assert false, e.message()
+    assert s.get() == [1, 9]

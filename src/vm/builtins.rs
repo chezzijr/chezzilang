@@ -172,19 +172,20 @@ impl Vm {
     /// `(key, value)` pairs, a str's 1-char strs, a bytes' or bytearray's ints (0-255), and a
     /// cursor's remaining items (not advanced). `None` for every other object. The one runtime row
     /// table: the `for` lowering (`Op::ListClone`), [`drain_iterable`](Self::drain_iterable) and the
-    /// builtin `.iter()` all read it.
-    pub(super) fn builtin_items(&mut self, h: GcRef) -> Option<Vec<Value>> {
+    /// builtin `.iter()` all read it. Collected straight into the caller's container `C` (a
+    /// `Vec` or a heap object's `RVec`), so a big list is copied once, not through a temporary.
+    pub(super) fn builtin_items<C: FromIterator<Value>>(&mut self, h: GcRef) -> Option<C> {
         match self.heap.get(h) {
-            Obj::List(items) => Some(items.clone()),
-            Obj::Set(s) => Some(s.entries.iter().map(|(_, e)| *e).collect()),
-            Obj::Map(_) => Some(self.map_pairs(h)),
+            Obj::List(items) => Some(items.iter().collect()),
+            Obj::Set(s) => Some(s.entries.iter().map(|(_, e)| e).collect()),
+            Obj::Map(_) => Some(self.map_pairs(h).into_iter().collect()),
             Obj::Bytes(b) => Some(b.iter().map(|&x| Value::int(x as i64)).collect()),
-            Obj::ByteArray(b) => Some(b.iter().map(|&x| Value::int(x as i64)).collect()),
+            Obj::ByteArray(b) => Some(b.iter().map(|x| Value::int(x as i64)).collect()),
             Obj::Str(s) => {
                 let chars: Vec<char> = s.chars().collect();
                 Some(chars.into_iter().map(|c| self.alloc_char(c)).collect())
             }
-            Obj::Iter { items, pos } => Some(items[(*pos).min(items.len())..].to_vec()),
+            Obj::Iter { items, pos } => Some(items.iter().skip(pos.get()).collect()),
             Obj::BigInt(_)
             | Obj::FloatBox(_)
             | Obj::Tuple(_)
@@ -233,16 +234,15 @@ impl Vm {
         // then advance `pos` to the end so the same cursor yields nothing on a second drain — keeping
         // `List(it)`/`Set(it)`/`for` consistent with `.next()` (which also advances the shared cursor)
         // and with the docs ("reusing one exhausted cursor yields nothing on a second pass"). Lifted
-        // OUT of the immutable-borrow `match self.heap.get(h)` below so `get_mut` can advance `pos`.
+        // OUT of the `match self.heap.get(h)` below so the write door arms the `pos` store.
         if let Some(h) = v.as_obj()
             && matches!(self.heap.get(h), Obj::Iter { .. })
         {
-            let Obj::Iter { items, pos } = self.heap.get_mut(h) else {
+            let Obj::Iter { items, pos } = self.heap.write(h).get(h) else {
                 unreachable!()
             };
-            let start = (*pos).min(items.len());
-            let drained = items[start..].to_vec();
-            *pos = items.len();
+            let drained = items.iter().skip(pos.get()).collect();
+            pos.set(items.len());
             return Ok(drained);
         }
         // Built-in collections: copy directly, no re-entry.
@@ -298,7 +298,7 @@ impl Vm {
             }
         };
         // Root the source + the growing accumulator list across the re-entrant calls.
-        let acc = self.heap.alloc(Obj::List(Vec::new()));
+        let acc = self.heap.alloc(Obj::List(RVec::new()));
         self.push(v);
         self.push(Value::obj(acc));
         let result = (|| {
@@ -308,20 +308,17 @@ impl Vm {
                     // under `guarded` an M:N fiber demotes (blocks in place) instead of parking,
                     // so no `ip` rewind replays the surrounding `List(...)` call (DEC-181).
                     Step::Channel => {
-                        let w = match self.guarded(|vm| vm.recv_step_or_demote(h, span))? {
-                            RecvStep::Got(w) => {
-                                self.wake_senders(h); // freed a slot — wake a parked bounded sender
-                                w
-                            }
-                            RecvStep::Filled(w) => w,
+                        let item = match self.guarded(|vm| vm.recv_step_or_demote(h, span))? {
+                            // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
+                            RecvStep::Got(v) | RecvStep::Filled(v) => v,
                             RecvStep::ClosedEmpty => break,
                             RecvStep::Parked => unreachable!("a re-entered recv never parks"),
                         };
-                        let item = self.from_wire(w);
-                        let Obj::List(buf) = self.heap.get_mut(acc) else {
+                        let heap = self.heap.write(acc);
+                        let Obj::List(buf) = heap.get(acc) else {
                             unreachable!()
                         };
-                        buf.push(item);
+                        buf.push(heap, item);
                         continue;
                     }
                     Step::Generator => self.generator_next(h, span)?,
@@ -341,17 +338,18 @@ impl Vm {
                 };
                 match *variant_id {
                     crate::base::op::VID_SOME => {
-                        let item = *payload.first().ok_or_else(|| {
+                        let item = payload.try_get(0).ok_or_else(|| {
                             self.err(
                                 "iterator next() returned a present value with no payload"
                                     .to_string(),
                                 span,
                             )
                         })?;
-                        let Obj::List(buf) = self.heap.get_mut(acc) else {
+                        let heap = self.heap.write(acc);
+                        let Obj::List(buf) = heap.get(acc) else {
                             unreachable!()
                         };
-                        buf.push(item);
+                        buf.push(heap, item);
                     }
                     crate::base::op::VID_NONE_VARIANT => break,
                     _ => {
@@ -366,7 +364,7 @@ impl Vm {
         let Obj::List(buf) = self.heap.get(acc) else {
             unreachable!()
         };
-        let out = buf.clone();
+        let out = buf.to_vec();
         self.pop(); // unroot accumulator
         self.pop(); // unroot source
         Ok(out)
@@ -394,7 +392,7 @@ impl Vm {
         // can't corrupt the set); the list is ours, so overwriting is safe, and rooting the
         // snapshots there keeps them alive across the phase-1 re-entrant hashes. Then hash (phase 1)
         // and build GC-free (phase 2), reading the snapshots from the list.
-        let lh = self.heap.alloc(Obj::List(src.clone()));
+        let lh = self.heap.alloc(Obj::List(src.clone().into()));
         self.push(Value::obj(lh));
         let n = src.len();
         let built = (|| {
@@ -403,11 +401,11 @@ impl Vm {
                     let Obj::List(b) = self.heap.get(lh) else {
                         unreachable!()
                     };
-                    b[i]
+                    b.get(i)
                 };
                 let snap = self.snapshot_key(orig);
-                if let Obj::List(b) = self.heap.get_mut(lh) {
-                    b[i] = snap;
+                if let Obj::List(b) = self.heap.write(lh).get(lh) {
+                    b.set(i, snap);
                 }
             }
             let mut hashes = Vec::with_capacity(n);
@@ -416,23 +414,23 @@ impl Vm {
                     let Obj::List(b) = self.heap.get(lh) else {
                         unreachable!()
                     };
-                    b[i]
+                    b.get(i)
                 };
                 hashes.push(self.hash_value(v, span)?);
             }
-            let mut set = SetData::default();
+            let set = SetData::default();
             for (i, &he) in hashes.iter().enumerate() {
                 let v = {
                     let Obj::List(b) = self.heap.get(lh) else {
                         unreachable!()
                     };
-                    b[i]
+                    b.get(i)
                 };
                 if self
                     .set_slot(&set.entries, set.candidates(he), v, span)?
                     .is_none()
                 {
-                    set.push(he, v);
+                    set.push(&self.heap, he, v);
                 }
             }
             Ok(set)
@@ -458,7 +456,7 @@ impl Vm {
                 ));
             }
         };
-        Ok(Value::obj(self.heap.alloc(Obj::List(items))))
+        Ok(Value::obj(self.heap.alloc(Obj::List(items.into()))))
     }
 
     /// `Map(it)` → a map from an iterable of 2-tuples `(k, v)` (last-wins on dup keys, like the
@@ -491,14 +489,14 @@ impl Vm {
         }
         let drained = self.drain_iterable(it, span)?;
         // Root the drained elements (as a fresh heap list) across the re-entrant hash() calls.
-        let src_obj = Value::obj(self.heap.alloc(Obj::List(drained.clone())));
+        let src_obj = Value::obj(self.heap.alloc(Obj::List(drained.clone().into())));
         self.push(src_obj);
         // Snapshot keys are rooted by pushing them onto the operand stack (the drained tuples may
         // ALIAS caller-held tuples, so they cannot be mutated in place). Everything above this base
         // is popped after the build, on both the Ok and Err path.
         let stack_base = self.stack.len();
         let built = (|| {
-            let mut map = MapData::default();
+            let map = MapData::default();
             for elem in &drained {
                 let (k, v) = match elem.as_obj().map(|eh| self.heap.get(eh)) {
                     Some(Obj::Tuple(parts)) if parts.len() == 2 => (parts[0], parts[1]),
@@ -521,9 +519,8 @@ impl Vm {
                 let hk = self.hash_key_rooted(k, &[v], span)?;
                 // last-wins upsert (mirrors the map literal + interp `map_upsert`).
                 let pos = self.map_slot(&map.entries, map.candidates(hk), k, span)?;
-                match pos {
-                    Some(p) => map.entries[p].2 = v,
-                    None => map.push(hk, k, v),
+                if pos.and_then(|p| map.set_value(p, v)).is_none() {
+                    map.push(&self.heap, hk, k, v);
                 }
             }
             Ok(map)
@@ -544,11 +541,11 @@ impl Vm {
     ) -> Result<Vec<u8>, RuntimeError> {
         match v.as_obj().map(|h| self.heap.get(h)) {
             Some(Obj::Bytes(b)) => Ok(b.to_vec()),
-            Some(Obj::ByteArray(b)) => Ok(b.clone()),
+            Some(Obj::ByteArray(b)) => Ok(b.to_vec()),
             Some(Obj::List(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for e in items {
-                    match self.int_val(*e) {
+                    match self.int_val(e) {
                         Some(n) if (0..=255).contains(&n) => out.push(n as u8),
                         Some(n) => {
                             return Err(self.err(
@@ -560,7 +557,7 @@ impl Vm {
                             return Err(self.err(
                                 format!(
                                     "{what}() expects a list of int, got an element of type {}",
-                                    self.type_name(*e)
+                                    self.type_name(e)
                                 ),
                                 span,
                             ));
@@ -587,8 +584,8 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let bytes: Vec<u8> = match args {
-            [] => Vec::new(),
+        let bytes: RVec<u8> = match args {
+            [] => RVec::new(),
             [one] if self.int_val(*one).is_some() => {
                 let n = self.int_val(*one).unwrap();
                 if n < 0 {
@@ -596,22 +593,21 @@ impl Vm {
                         self.err(format!("bytearray() size {n} must be non-negative"), span)
                     );
                 }
-                // Bound the eager zero-fill: an unguarded `vec![0u8; n]` for a huge n aborts the
-                // process (SIGABRT), uncatchable by `recover:`. `try_reserve` turns OOM into a
-                // recoverable fault, matching range()/format-width's "never a giant abort" rule —
-                // without a hard cap, so legitimately large buffers still work.
+                // Bound the zero-fill: a block that cannot be allocated is a recoverable fault
+                // (`RVec::try_zeroed`), not an abort, with no hard cap, so legitimately large
+                // buffers still work. The allocator zeroes the block, so no page is touched here.
                 let n = n as usize;
-                let mut buf: Vec<u8> = Vec::new();
-                if buf.try_reserve_exact(n).is_err() {
-                    return Err(self.err(
-                        format!("bytearray() size {n} is too large to allocate"),
-                        span,
-                    ));
+                match RVec::try_zeroed(n) {
+                    Ok(buf) => buf,
+                    Err(AllocFailed) => {
+                        return Err(self.err(
+                            format!("bytearray() size {n} is too large to allocate"),
+                            span,
+                        ));
+                    }
                 }
-                buf.resize(n, 0u8);
-                buf
             }
-            [one] => self.collect_bytes_arg("bytearray", *one, span)?,
+            [one] => self.collect_bytes_arg("bytearray", *one, span)?.into(),
             _ => {
                 return Err(self.err(
                     format!("bytearray() expects 0 or 1 argument(s), got {}", args.len()),

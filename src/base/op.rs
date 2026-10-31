@@ -121,9 +121,6 @@ pub enum Op {
     False,
     Nil,
     Pop,
-    /// TICKET-190: stamp the Pending generator on the stack top with its call site's param
-    /// shapes, two bits per param (layout `crossing::stamp_mask`); never pops.
-    StampGen(u64),
     /// The failing tail of `assert cond[, msg]`. The compiler tests `cond` with a preceding
     /// `JumpIfFalse` and only reaches this op when `cond` was false, so it *always* faults: pop
     /// `msg` (a str, if `has_msg`) and fault at this op's span with that message (or
@@ -520,30 +517,24 @@ pub enum Op {
     /// parallels are each torn down in their own right. §2c1 — the cancel is SILENT; the
     /// `"{n} pending task(s) cancelled…"` line it used to write is deleted.
     ReclaimNursery,
-    /// `spawn f(args)` — stack `[callee, arg0, …]`; pops `argc + 1`, deep-copies the args across the
-    /// airlock (the callee passes by handle, like `defer`), and registers the task on the innermost
-    /// nursery. Mirrors `DeferCall`. The `u32` names the checker's shapes for this call's operands
-    /// (D4, TICKET-240) in `Program.fresh_calls`, laid out by `vm::crossing::operand_ref`: `0` =
-    /// every operand stays marked. Entry position `j + 1` is bound slot `j` (default fills and
-    /// packs included); position 0 is the callee or the receiverless wrapper closure and is
-    /// always `Marked`. After the rebuild the runtime unmarks what each shape names
-    /// (`Vm::unmark_fresh`).
+    /// `spawn f(args)` — stack `[callee, arg0, …]`; pops `argc + 1` and registers the task on the
+    /// innermost nursery. The task gets the parent's values by handle (M3.4, Go `go f(x)`). Mirrors
+    /// `DeferCall`.
     ///
     /// TICKET-235: the `ProtoId` is the site's entry thunk. The head is a callee and enters through
     /// the thunk only when `Vm::enters_frame` says the callee pushes no frame (a native fn value, a
     /// builtin, a ctor, a generator fn). `None` = the head is the receiverless wrapper closure,
     /// which always pushes its own.
-    SpawnCall(usize, u32, Option<ProtoId>),
-    /// `spawn recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1`, deep-copies the receiver
-    /// AND the args across the airlock, and registers the task. The `u32` names the operand shapes
-    /// (`vm::crossing::operand_ref`): entry position 0 = the receiver, `j + 1` = bound slot `j`.
+    SpawnCall(usize, Option<ProtoId>),
+    /// `spawn recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1` and registers the task.
+    /// The receiver and the args pass by handle (M3.4).
     ///
     /// TICKET-235: the head is a receiver and always enters through the site's entry thunk (the
     /// `ProtoId`), whose body is the `Op::CallMethod` the block form runs.
-    SpawnRecv(usize, u32, ProtoId),
+    SpawnRecv(usize, ProtoId),
     /// `spawn:` block — snapshot each `CapEntry`'s value from the enclosing frame (like
-    /// `MakeClosure`), deep-copy the captured values across the airlock, build a zero-arg closure
-    /// over `ProtoId`, and register it as a `Call` task. (Form 2; the block was compiled to a
+    /// `MakeClosure`), build a zero-arg closure over `ProtoId` that holds the same captured cells
+    /// (one binding, shared with the parent, M3.4), and register it as a `Call` task. (Form 2; the block was compiled to a
     /// synthetic zero-arg proto.)
     SpawnBlock(ProtoId, Vec<CapEntry>),
     /// `wait:` — Chezzi's `select` (§6d). The N arm channel handles are on the operand stack
@@ -558,11 +549,11 @@ pub enum Op {
     /// `has_cap`: when `true`, a capacity int is on the operand stack (pop it; `<= 0` faults, else the
     /// channel is bounded to that many queued messages). When `false`, the channel is unbounded.
     NewChannel(bool),
-    /// `Shared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Shared(init)`.
+    /// `Shared(v)` — stack `[init]`; pop it, push `Obj::Shared(init)` (the box holds `init` itself).
     NewShared,
-    /// `RwShared(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::RwShared(init)`.
+    /// `RwShared(v)` — stack `[init]`; pop it, push `Obj::RwShared(init)`.
     NewRwShared,
-    /// `Atomic(v)` — stack `[init]`; pop it, deep-copy across the airlock, push `Obj::Atomic(init)`.
+    /// `Atomic(v)` — stack `[init]`; pop it, push `Obj::Atomic(init)`.
     NewAtomic,
     /// `AtomicInt(v)` — stack `[init]`; pop the int, push a fresh lock-free `Obj::AtomicInt(AtomicI64)`.
     NewAtomicInt,
@@ -626,11 +617,6 @@ pub struct Proto {
     /// `GetCaptured` home-global fallback + closure error messages); the hot read is a pure
     /// `captured[slot]` index. Empty for non-closure protos. Mirrors [`StructDef::fields`].
     pub capture_names: Vec<String>,
-    /// TICKET-190: bit `k` = the root of frame slot `k` is private; layout `crossing::slot_bits`.
-    pub private_slots: u64,
-    /// TICKET-240: bit `k` = the whole graph of frame slot `k` is private. A subset of
-    /// `private_slots`; read through `crossing::frame_slot`.
-    pub deep_slots: u64,
 }
 
 /// A struct type's runtime shape (program-global). `module_idx` identifies the module that defined
@@ -743,19 +729,15 @@ pub struct Program {
     /// Native-struct bare name → the index of the module that declared it (home-globals for its bodied
     /// methods), mirroring `enum_home`.
     pub native_home: HashMap<String, usize>,
-    /// TICKET-240: the checker's shape for every operand of each spawn call that has a fresh one,
-    /// `[receiver or Marked] ++ bound slots`. A spawn op's `u32` names its entry
-    /// (`crossing::operand_ref`); the layout lives in `vm::crossing`.
-    pub fresh_calls: Vec<Vec<super::crossing::Fresh>>,
     pub variants: HashMap<(String, String), VariantDef>,
     /// M19 lever #2 — variants indexed by their dense `variant_id` (`variants_by_id[id]` ⇒ that
     /// variant's `VariantDef`, carrying its `enum_name` + `name`). The reverse of `variants`: O(1)
-    /// cold-path id→names resolution for Display / stringify / error / wire / snap, where the instance
+    /// cold-path id→names resolution for Display / stringify / error, where the instance
     /// no longer carries the strings. Dense and gap-free (ids are assigned `0..n`).
     pub variants_by_id: Vec<VariantDef>,
     /// M19 memory-layout lever — struct type IDENTITY KEYS indexed by their dense `tid`
     /// (`struct_names[tid]` ⇒ the `structs` map key, e.g. `<main>::Point`). The reverse of `structs`:
-    /// O(1) cold-path tid→name resolution for method dispatch / Display / arith / hash / wire / snap,
+    /// O(1) cold-path tid→name resolution for method dispatch / Display / arith / hash,
     /// where `Obj::Struct` no longer carries a per-instance `name: Box<str>` (the struct analogue of
     /// `variants_by_id`). Dense and gap-free (tids are assigned `structs.len()` at each insert).
     pub struct_names: Vec<Box<str>>,

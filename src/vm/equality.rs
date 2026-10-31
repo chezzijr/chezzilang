@@ -31,9 +31,9 @@ impl Vm {
                     // `bytes`/`bytearray` order lexicographically by byte (Python parity), including
                     // cross-type (Python `b"a" < bytearray(b"b")` compares by content).
                     (Obj::Bytes(a), Obj::Bytes(b)) => Some(a.cmp(b)),
-                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Some(a.cmp(b)),
-                    (Obj::Bytes(a), Obj::ByteArray(b)) => Some(a.as_ref().cmp(b.as_slice())),
-                    (Obj::ByteArray(a), Obj::Bytes(b)) => Some(a.as_slice().cmp(b.as_ref())),
+                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Some(a.iter().cmp(b.iter())),
+                    (Obj::Bytes(a), Obj::ByteArray(b)) => Some(a.iter().copied().cmp(b.iter())),
+                    (Obj::ByteArray(a), Obj::Bytes(b)) => Some(a.iter().cmp(b.iter().copied())),
                     _ => None,
                 }
             }
@@ -119,21 +119,21 @@ impl Vm {
     #[inline]
     pub(super) fn set_slot(
         &mut self,
-        entries: &[(u64, Value)],
-        cands: &[usize],
+        entries: &RVec<SetEntry>,
+        cands: impl Iterator<Item = usize>,
         key: Value,
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
         // The local's elements live only in the caller's Rust-local `SetData` — root them across the
         // (re-entrant) compare, exactly as [`Self::seq_slot`] does for a cloned element vec.
         let elems: Vec<Value> = if self.eq_may_reenter() {
-            entries.iter().map(|&(_, e)| e).collect()
+            entries.iter().map(|(_, e)| e).collect()
         } else {
             Vec::new()
         };
         self.with_elem_roots(&elems, &[key], |vm| {
-            for &p in cands {
-                if vm.elem_equal(entries[p].1, key, 0, span)? {
+            for p in cands {
+                if vm.elem_equal(entries.get(p).1, key, 0, span)? {
                     return Ok(Some(p));
                 }
             }
@@ -149,21 +149,21 @@ impl Vm {
     #[inline]
     pub(super) fn map_slot(
         &mut self,
-        entries: &[(u64, Value, Value)],
-        cands: &[usize],
+        entries: &RVec<MapEntry>,
+        cands: impl Iterator<Item = usize>,
         key: Value,
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
         // Keys AND values of the caller's Rust-local `MapData` are in flight — root both (see
         // [`Self::set_slot`]).
         let elems: Vec<Value> = if self.eq_may_reenter() {
-            entries.iter().flat_map(|&(_, k, v)| [k, v]).collect()
+            entries.iter().flat_map(|(_, k, v)| [k, v]).collect()
         } else {
             Vec::new()
         };
         self.with_elem_roots(&elems, &[key], |vm| {
-            for &p in cands {
-                if vm.elem_equal(entries[p].1, key, 0, span)? {
+            for p in cands {
+                if vm.elem_equal(entries.get(p).1, key, 0, span)? {
                     return Ok(Some(p));
                 }
             }
@@ -180,18 +180,18 @@ impl Vm {
     /// Roots `mh` and `key` on the operand stack for the duration (both are typically off-stack Rust
     /// locals at a method-dispatch site, and a user `eq` can allocate → collect). A caller holding
     /// FURTHER in-flight values (an insert's `val`) wraps the call in [`Self::with_roots`].
-    /// Nothing is copied out of the heap: the candidate list is re-indexed per probe step (a distinct
-    /// key almost always has exactly one candidate, so that is one extra index lookup on the
-    /// terminating step and NO allocation).
+    /// The first candidate is read alone (a distinct key almost always has exactly one candidate:
+    /// NO allocation); the second step copies the remaining candidates once (`next_candidate`),
+    /// so a constant-hash probe stays linear.
     ///
-    /// **The returned position is re-validated after EVERY compare** and the whole probe restarts if
-    /// it moved (CPython `lookdict`'s `DKIX_KEY_CHANGED` → restart). Re-reading the candidate list
-    /// alone is NOT enough: an `eq` that mutates the map on the compare that returns TRUE hands the
-    /// caller a position that has already shifted, and every caller indexes with it — `m.get(k)`
-    /// answered a neighbouring entry's value, or panicked `index out of bounds` on the shrunken
-    /// `entries` (an uncatchable process abort from pure Chezzi source). Validation is one extra
-    /// index read of `(hash, key)` on the terminating step, gated to nothing when no `eq` can
-    /// re-enter. A restart re-runs the user `eq`, so an `eq` that mutates on EVERY call spins — the
+    /// **The map's structural version is re-checked after EVERY compare** and the whole probe
+    /// restarts with fresh candidates if it moved (CPython `lookdict`'s `DKIX_KEY_CHANGED` →
+    /// restart). Checking only the compared position is NOT enough: an `eq` that removes ANOTHER
+    /// key shifts every later position, so the copied candidates go stale and the next step misses
+    /// a key that is still present; an `eq` that mutates on the compare that returns TRUE hands the
+    /// caller a shifted position, and `m.get(k)` answered a neighbour's value or panicked `index out
+    /// of bounds`. The check is one counter load per compare (`MapData::version`), gated to nothing
+    /// when no `eq` can re-enter. A restart re-runs the user `eq`, so an `eq` that mutates on EVERY call spins — the
     /// same way an `eq` containing `while true` does, and interruptible for the same reason (it is
     /// running bytecode); "mutate the map you are being probed against" stays a bad idea, it is just
     /// no longer memory-unsafe.
@@ -204,18 +204,20 @@ impl Vm {
         span: Span,
     ) -> Result<Option<usize>, RuntimeError> {
         // One whole-program answer, hoisted: with no `eq` hook anywhere, NOTHING inside this loop can
-        // run user code, so both the rooting and the position re-validation are pure overhead.
+        // run user code, so both the rooting and the version check are pure overhead.
         let reenter = self.eq_may_reenter();
         let held = [Value::obj(mh), key];
         let roots: &[Value] = if reenter { &held } else { &[] };
         self.with_roots(roots, |vm| {
             'restart: loop {
+                // The candidates past the first, read once per restart (see `next_candidate`).
+                let mut rest = None;
                 let mut i = 0;
                 loop {
-                    let (p, hs, stored) = match vm.heap.get(mh).as_map() {
-                        Some(m) => match m.candidates(hk).get(i) {
-                            Some(&p) => match m.entries.get(p) {
-                                Some(&(h, k, _)) => (p, h, k),
+                    let (p, ver, stored) = match vm.heap.get(mh).as_map() {
+                        Some(m) => match next_candidate(i, &mut rest, || m.candidates(hk)) {
+                            Some(p) => match m.entries.try_get(p) {
+                                Some((_, k, _)) => (p, m.version(), k),
                                 None => return Ok(None),
                             },
                             None => return Ok(None),
@@ -223,16 +225,12 @@ impl Vm {
                         None => unreachable!("map_probe on non-map"),
                     };
                     let eq = vm.elem_equal(stored, key, 0, span)?;
-                    // Position still holding the key we just compared? (The entry's VALUE may have
-                    // changed — `m[k] = v` inside `eq` does not move anything — so only the cached
-                    // hash and the key are checked.) If not, the map was structurally mutated and
-                    // every position, `p` included, is stale: start over.
+                    // No push or remove during the compare? (A value write — `m[k] = v` inside
+                    // `eq` — moves nothing and does not count.) If one ran, every position, `p`
+                    // and the copied candidates included, is stale: start over.
                     let live = !reenter
                         || match vm.heap.get(mh).as_map() {
-                            Some(m) => m
-                                .entries
-                                .get(p)
-                                .is_some_and(|&(h, k, _)| h == hs && k == stored),
+                            Some(m) => m.version() == ver,
                             None => unreachable!("map_probe on non-map"),
                         };
                     if !live {
@@ -247,9 +245,29 @@ impl Vm {
         })
     }
 
+    /// The value of `key` (pre-hashed to `hk`) in the HEAP map at `mh`, or `None`: [`Self::map_probe`],
+    /// then the entry it found. M3.0a — another thread can remove entries between the two reads, so
+    /// a position the entry block no longer holds is a miss ([`MapData::value_at`]).
+    #[inline]
+    pub(super) fn map_lookup(
+        &mut self,
+        mh: GcRef,
+        hk: u64,
+        key: Value,
+        span: Span,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let Some(p) = self.map_probe(mh, hk, key, span)? else {
+            return Ok(None);
+        };
+        match self.heap.get(mh).as_map() {
+            Some(m) => Ok(m.value_at(p)),
+            None => unreachable!("map_lookup on non-map"),
+        }
+    }
+
     /// The Set twin of [`Self::map_probe`] — probe the HEAP set at `sh` for `elem` (pre-hashed to
-    /// `he`), rooting `sh`/`elem` across the (re-entrant) equality and re-validating the position
-    /// after every compare (see [`Self::map_probe`] for why the re-read alone is not enough).
+    /// `he`), rooting `sh`/`elem` across the (re-entrant) equality and re-checking the set's
+    /// structural version after every compare (see [`Self::map_probe`] for why).
     #[inline]
     pub(super) fn set_probe(
         &mut self,
@@ -263,12 +281,13 @@ impl Vm {
         let roots: &[Value] = if reenter { &held } else { &[] };
         self.with_roots(roots, |vm| {
             'restart: loop {
+                let mut rest = None;
                 let mut i = 0;
                 loop {
-                    let (p, hs, stored) = match vm.heap.get(sh).as_set() {
-                        Some(s) => match s.candidates(he).get(i) {
-                            Some(&p) => match s.entries.get(p) {
-                                Some(&(h, e)) => (p, h, e),
+                    let (p, ver, stored) = match vm.heap.get(sh).as_set() {
+                        Some(s) => match next_candidate(i, &mut rest, || s.candidates(he)) {
+                            Some(p) => match s.entries.try_get(p) {
+                                Some((_, e)) => (p, s.version(), e),
                                 None => return Ok(None),
                             },
                             None => return Ok(None),
@@ -278,10 +297,7 @@ impl Vm {
                     let eq = vm.elem_equal(stored, elem, 0, span)?;
                     let live = !reenter
                         || match vm.heap.get(sh).as_set() {
-                            Some(s) => s
-                                .entries
-                                .get(p)
-                                .is_some_and(|&(h, e)| h == hs && e == stored),
+                            Some(s) => s.version() == ver,
                             None => unreachable!("set_probe on non-set"),
                         };
                     if !live {
@@ -337,7 +353,7 @@ impl Vm {
     /// Run `f` with `roots` pinned on the operand stack, unrooting on BOTH the `Ok` and `Err` path.
     /// The generalisation of [`Self::hash_key_rooted`]: a user `hash`/`eq` hook re-enters the VM and
     /// can trigger a collection, so every in-flight value the caller holds only in a Rust local (a
-    /// popped receiver/argument, a cloned element vec's source, a wire-reconstructed value) must be
+    /// popped receiver/argument, a cloned element vec's source) must be
     /// reachable from a GC root for the duration. The operand stack is truncated back to its entry
     /// height afterwards, so `f` may also push roots of its own (a freshly-built snapshot key) and
     /// need not unwind them itself.
@@ -439,14 +455,14 @@ impl Vm {
                     (Obj::Bytes(a), Obj::Bytes(b)) => Ok(a == b),
                     // `bytearray` equality is structural byte-equality. Cross-type `bytes ==
                     // bytearray` is content-equal (Python parity: `b"a" == bytearray(b"a")` is true).
-                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Ok(a == b),
-                    (Obj::Bytes(a), Obj::ByteArray(b)) => Ok(a.as_ref() == b.as_slice()),
-                    (Obj::ByteArray(a), Obj::Bytes(b)) => Ok(a.as_slice() == b.as_ref()),
+                    (Obj::ByteArray(a), Obj::ByteArray(b)) => Ok(a.iter().eq(b.iter())),
+                    (Obj::Bytes(a), Obj::ByteArray(b)) => Ok(a.iter().copied().eq(b.iter())),
+                    (Obj::ByteArray(a), Obj::Bytes(b)) => Ok(a.iter().eq(b.iter().copied())),
                     (Obj::List(a), Obj::List(b)) => {
                         if a.len() != b.len() {
                             return Ok(false);
                         }
-                        let (a, b): (Vec<Value>, Vec<Value>) = (a.clone(), b.clone());
+                        let (a, b): (Vec<Value>, Vec<Value>) = (a.to_vec(), b.to_vec());
                         self.with_elem_roots(&a, &b, |vm| {
                             for (x, y) in a.iter().zip(&b) {
                                 if !vm.elem_equal(*x, *y, depth + 1, span)? {
@@ -477,9 +493,9 @@ impl Vm {
                             return Ok(false);
                         }
                         let ae: Vec<(Value, Value)> =
-                            a.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+                            a.entries.iter().map(|(_, k, v)| (k, v)).collect();
                         let be: Vec<(Value, Value)> =
-                            b.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+                            b.entries.iter().map(|(_, k, v)| (k, v)).collect();
                         // Keys AND values are in flight here — flatten both sides for the roots.
                         let flat = |e: &[(Value, Value)]| -> Vec<Value> {
                             e.iter().flat_map(|&(k, v)| [k, v]).collect()
@@ -512,8 +528,8 @@ impl Vm {
                         if a.entries.len() != b.entries.len() {
                             return Ok(false);
                         }
-                        let ae: Vec<Value> = a.entries.iter().map(|(_, x)| *x).collect();
-                        let be: Vec<Value> = b.entries.iter().map(|(_, x)| *x).collect();
+                        let ae: Vec<Value> = a.entries.iter().map(|(_, x)| x).collect();
+                        let be: Vec<Value> = b.entries.iter().map(|(_, x)| x).collect();
                         self.with_elem_roots(&ae, &be, |vm| {
                             for x in &ae {
                                 let mut found = false;
@@ -547,8 +563,8 @@ impl Vm {
                         if ta != tb || fa.len() != fb.len() {
                             return Ok(false);
                         }
-                        let fa: Vec<Value> = fa.as_slice().to_vec();
-                        let fb: Vec<Value> = fb.as_slice().to_vec();
+                        let fa: Vec<Value> = fa.to_vec();
+                        let fb: Vec<Value> = fb.to_vec();
                         self.with_elem_roots(&fa, &fb, |vm| {
                             for (va, vb) in fa.iter().zip(&fb) {
                                 if !vm.elem_equal(*va, *vb, depth + 1, span)? {
@@ -574,8 +590,8 @@ impl Vm {
                         if va != vb || pa.len() != pb.len() {
                             return Ok(false);
                         }
-                        let pa: Vec<Value> = pa.clone();
-                        let pb: Vec<Value> = pb.clone();
+                        let pa: Vec<Value> = pa.to_vec();
+                        let pb: Vec<Value> = pb.to_vec();
                         self.with_elem_roots(&pa, &pb, |vm| {
                             for (x, y) in pa.iter().zip(&pb) {
                                 if !vm.elem_equal(*x, *y, depth + 1, span)? {
@@ -594,8 +610,8 @@ impl Vm {
                     (Obj::BigInt(a), Obj::BigInt(b)) => Ok(a == b),
                     (Obj::FloatBox(a), Obj::FloatBox(b)) => Ok(a == b),
                     // TICKET-177: a handle (or a `ptr`) is equal iff it names the same core, its
-                    // `Obj::identity` key. A crossing wraps the same core in a fresh slot, so the
-                    // `ha == hb` shortcut above is only the fast path. Anything else reaching here is
+                    // `Obj::identity` key. Two slots can wrap one core, so the `ha == hb`
+                    // shortcut above is only the fast path. Anything else reaching here is
                     // a kind mismatch or a `Slot` object in another slot: unequal.
                     (a, b) => Ok(matches!(
                         (a.identity(), b.identity()),
@@ -607,15 +623,13 @@ impl Vm {
         }
     }
 
-    /// The kind of the first heap object reachable from `v` that is a fn value or whose `==` is
-    /// slot identity ([`Identity::Slot`]), or `None`. `Atomic.cas` refuses such a payload: every
-    /// `load()` rebuilds a slot-identity object in a fresh slot, so the compare could never succeed
-    /// and a CAS retry loop would spin forever (TICKET-144, DEC-144). Every fn value is refused,
-    /// a builtin (`ord`) included, whose `==` is by name: one rule for every fn, as Go's func is
-    /// uncomparable (TICKET-264). [`Vm::callable`] decides fn-ness; [`Obj::identity`], read by the
-    /// equality arm too, decides the rest. A `Core` handle is not descended: it compares by core,
-    /// never by what the core holds. `seen` makes a cyclic payload terminate.
-    pub(super) fn slot_identity_in(&self, v: Value) -> Option<&'static str> {
+    /// Whether a fn value is reachable from `v` through the content `==` compares. `Atomic.cas`
+    /// refuses such a payload, as Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable
+    /// type` on a func (TICKET-144, TICKET-264): every fn value, a builtin (`ord`) included, whose
+    /// `==` is by name. [`Vm::callable`] decides fn-ness. The walk descends only into
+    /// [`Identity::Content`]: a handle compares by its core and a slot object (an iterator, a
+    /// generator) by its slot, never by what they hold. `seen` makes a cyclic payload terminate.
+    pub(super) fn fn_value_in(&self, v: Value) -> bool {
         let mut stack: Vec<GcRef> = v.child_gcref().into_iter().collect();
         let mut seen = super::fxhash::FxHashSet::default();
         while let Some(h) = stack.pop() {
@@ -623,15 +637,14 @@ impl Vm {
                 continue;
             }
             if self.callable(Value::obj(h)).is_some() {
-                return Some("a function value");
+                return true;
             }
             match self.heap.get(h).identity() {
-                Identity::Slot(what) => return Some(what),
-                Identity::Core(_) => {}
+                Identity::Slot | Identity::Core(_) => {}
                 Identity::Content => stack.extend(self.heap.children(h)),
             }
         }
-        None
+        false
     }
 
     /// Total order over scalar values for `sort()`. The checker restricts `sort` to homogeneous
@@ -656,4 +669,21 @@ impl Vm {
     }
 
     // ----- calls -----
+}
+
+/// Candidate `i` of a heap probe. A probe cannot hold the table across a compare (a user `eq` can
+/// reach a safepoint), so step 0 reads the first candidate alone (no allocation: the common hit),
+/// and step 1 copies the rest into `rest` once; later steps index it. A push or remove during a
+/// compare (the table's version moved) makes the caller restart with a fresh `rest`.
+fn next_candidate<I: Iterator<Item = usize>>(
+    i: usize,
+    rest: &mut Option<Vec<usize>>,
+    fresh: impl FnOnce() -> I,
+) -> Option<usize> {
+    if i == 0 {
+        return fresh().next();
+    }
+    rest.get_or_insert_with(|| fresh().skip(1).collect())
+        .get(i - 1)
+        .copied()
 }

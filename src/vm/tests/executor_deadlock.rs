@@ -2193,7 +2193,7 @@ print("done")
 /// The NEGATIVE twin of the test above: a `cancel()` must reach only the executors its own job
 /// CREATED, never one that merely had work submitted to it from inside that job.
 ///
-/// An `Executor` crosses the airlock by `Arc`, so any job can `submit` to any executor it can name. A
+/// An `Executor` crosses a spawn by `Arc`, so any job can `submit` to any executor it can name. A
 /// first cut keyed cancel inheritance on the SUBMITTER (`if self.the job's sched.is_some() {
 /// rw.worker.cancel_outer = self.scope_ancestors() }`), which handed `other`'s cancel chain to a job
 /// belonging to `main`'s executor: `other.cancel()` then killed an already-started job that was
@@ -2477,8 +2477,8 @@ fn an_exit_beside_a_spinning_defer_ends_the_run_and_keeps_its_output() {
 
 /// TICKET-270 — DEC-213 beside a RUNNING sibling: a job exits while a task of its own nursery
 /// spins in a CPU loop (not parked) with a `defer` that prints. The exit code must be readable
-/// before the exit's cancel reaches the spinner (`MnSched::finish_with` trips it after
-/// the exit code is stored), so no `defer` runs; the job's output is kept and the code is 3. 20 runs at
+/// before the exit's cancel reaches the spinner (`finish_with` trips it under the core lock with
+/// the slot), so no `defer` runs; the job's output is kept and the code is 3. 20 runs at
 /// `CHEZZI_THREADS=1` and 20 at `=2`. Measured: base engine with the seams 20 red at T=2
 /// (`out=""`); the round-3 code, which stored a fiber's exit only in `finish`, 19 red at T=2
 /// (`defer ran`).

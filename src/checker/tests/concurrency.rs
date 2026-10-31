@@ -90,9 +90,8 @@ fn channel_needs_element_type() {
 #[test]
 fn channel_protocol_element_is_sendable() {
     // Task 2 (option a): a protocol existential element type is now SENDABLE (Go `chan interface`
-    // parity) — the erased witness crosses by value. A witness that genuinely can't serialize (an
-    // FFI/native handle) is rejected at the RUNTIME airlock, not here — see
-    // `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`. (Was rejected under the old
+    // parity) — the erased witness crosses by handle; one holding an FFI/native handle crosses
+    // too — see `vm::golden_tests::modules::ffi_handle_crosses_spawn_arg`. (Was rejected under the old
     // Error-only sendable-bounded rule.)
     entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nfn main():\n    ch := Channel[NS]()\n    print(ch.len())\nmain()\n",
@@ -262,8 +261,8 @@ fn comprehension_over_channel_checks() {
 
 #[test]
 fn spawn_capture_free_closure_arg_ok() {
-    // B3.3 (Task 2a): a CAPTURE-FREE closure passed as a spawn arg is sendable — it crosses the
-    // airlock by value — so it is accepted (was rejected under the old "Func non-sendable" rule).
+    // B3.3 (Task 2a): a CAPTURE-FREE closure passed as a spawn arg is sendable — it crosses by
+    // handle — so it is accepted (was rejected under the old "Func non-sendable" rule).
     ok(
         "fn run(f: fn() -> int):\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    parallel:\n        spawn run(g)\nmain()\n",
     );
@@ -272,11 +271,10 @@ fn spawn_capture_free_closure_arg_ok() {
 #[test]
 fn spawn_arg_closure_capturing_protocol_local_ok() {
     // Task 2 (option a): a closure ARG capturing a protocol-typed local `p: NS = Boxy(0)` is now
-    // ACCEPTED — a protocol existential is sendable (its witness `Boxy` crosses by deep value copy).
+    // ACCEPTED — a protocol existential is sendable (its witness `Boxy` crosses by handle).
     // The capture gate routes through `self.sendable()`, so this flipped when protocols became
-    // sendable; the old rejection was a false positive. A capture that genuinely can't cross (an
-    // FFI/native handle) is still rejected at the RUNTIME airlock — see
-    // `vm::golden_tests::ffi_handle_cannot_cross_airlock_three_engine`.
+    // sendable; the old rejection was a false positive. An FFI/native handle crosses too — see
+    // `vm::golden_tests::modules::ffi_handle_crosses_spawn_arg`.
     entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(f: fn() -> int):\n    print(f())\nfn main():\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn run(g)\nmain()\n",
     );
@@ -286,8 +284,8 @@ fn spawn_arg_closure_capturing_protocol_local_ok() {
 fn spawn_keyword_arg_closure_capturing_protocol_local_ok() {
     // Task 2 (option a): a closure capturing a protocol-typed local, passed by LABEL or positionally
     // through a function VALUE, is now ACCEPTED — a protocol existential is sendable (witness `Boxy`
-    // crosses by deep value copy). Both spellings agree (the capture gate routes both through
-    // `self.sendable()`). Genuine non-sendability (FFI handle) is caught at the runtime airlock.
+    // crosses by handle). Both spellings agree (the capture gate routes both through
+    // `self.sendable()`). An FFI handle crosses too.
     let prelude = "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn run(f: fn() -> int):\n    print(f())\n";
     entry_ok(&format!(
         "{prelude}fn main():\n    h := run\n    p: NS = Boxy(0)\n    g := fn() -> int: p.tag()\n    parallel:\n        spawn h(f=g)\nmain()\n"
@@ -322,7 +320,7 @@ fn spawn_sendable_args_ok() {
 
 #[test]
 fn spawn_firstclass_builtin_accepted_like_defer() {
-    // The universe fns print/ord/chr/panic are first-class values that cross the airlock by name,
+    // The universe fns print/ord/chr/panic are first-class values that cross a spawn by name,
     // so `spawn print(...)` is accepted — symmetric with `defer print(...)`. A non-first-class
     // builtin/ctor still must be wrapped.
     ok("fn main():\n    parallel:\n        spawn print(\"hi\")\nmain()\n");
@@ -376,12 +374,10 @@ fn sendable_recursive_struct_ok() {
 
 #[test]
 fn reassign_captured_local_in_spawn_block_ok() {
-    // Uniform by-reference capture (F1): a `spawn:` task gets its OWN per-task copy of a captured
-    // LOCAL (the airlock deep-copies its cell), so reassigning it is allowed — the write mutates the
-    // isolated copy and is not visible to the parent (the one deliberate divergence from Go).
-    rejects(
+    // Uniform by-reference capture (M3.4): a `spawn:` task shares the parent's cell of a captured
+    // LOCAL, so reassigning it is allowed — the write lands on the parent's local, as in Go.
+    ok(
         "fn main():\n    counter := 0\n    parallel:\n        spawn:\n            counter = counter + 1\nmain()\n",
-        "'counter' is this task's copy",
     );
 }
 
@@ -389,15 +385,13 @@ fn reassign_captured_local_in_spawn_block_ok() {
 
 #[test]
 fn mutate_fn_local_aggregate_in_spawn_block_ok() {
-    // A fn-LOCAL aggregate captured into a spawn: is deep-copied per task (agrees serial==M:N), so its
-    // in-place mutation stays ACCEPTED — only MODULE-GLOBAL roots are frozen.
-    rejects(
+    // A fn-LOCAL aggregate captured into a spawn: is the parent's (M3.4), so its in-place mutation
+    // is ACCEPTED.
+    ok(
         "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n",
-        "'xs' is this task's copy",
     );
-    rejects(
+    ok(
         "fn main():\n    m := {1: 2}\n    parallel:\n        spawn:\n            m[1] = 9\nmain()\n",
-        "'m' is this task's copy",
     );
 }
 
@@ -622,7 +616,7 @@ fn rwshared_set_readview_methods() {
 
 #[test]
 fn shared_is_sendable() {
-    // A `Shared[T]` handle crosses the airlock — both spawned tasks reach the same box.
+    // A `Shared[T]` handle crosses a spawn — both spawned tasks reach the same box.
     entry_ok(
         "import Shared from std.concurrency\nfn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n        spawn bump(s)\n        spawn bump(s)\n    print(s.get())\nmain()\n",
     );
@@ -631,7 +625,7 @@ fn shared_is_sendable() {
 #[test]
 fn shared_handle_sendable_regardless_of_element() {
     // The asymmetry vs Channel: a `Shared` handle is sendable even when its element type isn't
-    // (the value never crosses the airlock — only the handle does). Locks in the intent.
+    // (the value never crosses — only the handle does). Locks in the intent.
     entry_ok(
         "import Shared from std.concurrency\nfn use_it(s: Shared[fn() -> int]):\n    f := s.get()\n    print(f())\nfn main():\n    g := fn() -> int: 1\n    s := Shared(g)\n    parallel:\n        spawn use_it(s)\nmain()\n",
     );
@@ -808,7 +802,7 @@ fn concurrency_ctor_turbofish_arity() {
 
 #[test]
 fn atomic_is_sendable() {
-    // An `Atomic[T]` handle crosses the airlock — both spawned tasks reach the same box.
+    // An `Atomic[T]` handle crosses a spawn — both spawned tasks reach the same box.
     entry_ok(
         "import Atomic from std.concurrency\nfn bump(a: Atomic[int]):\n    a.add(1)\nfn main():\n    a := Atomic(0)\n    parallel:\n        spawn bump(a)\n        spawn bump(a)\n    print(a.load())\nmain()\n",
     );
@@ -926,7 +920,7 @@ fn executor_unknown_method_rejected() {
 
 #[test]
 fn executor_is_sendable() {
-    // The handle crosses the airlock like Channel/Shared — submitting from a spawned task is legal.
+    // The handle crosses a spawn like Channel/Shared — submitting from a spawned task is legal.
     entry_ok(
         "import Executor from std.concurrency\nfn use_ex(ex: Executor):\n    ex.submit(fn(): print(1))\nfn main():\n    ex := Executor()\n    parallel:\n        spawn use_ex(ex)\n    ex.shutdown()\nmain()\n",
     );
@@ -1041,8 +1035,7 @@ fn net_handle_bare_construction_rejected_after_import() {
 #[test]
 fn read_captured_capturefree_closure_in_spawn_block_ok() {
     // B3.3 (Task 2a): capturing a CAPTURE-FREE closure and calling it inside a task is now ACCEPTED —
-    // `sendable(Func)` is permissive because a closure crosses the airlock BY VALUE (runs on both
-    // engines). A closure that ITSELF captures a `ref` is a runtime-backstop concern (Task 2b); a
+    // `sendable(Func)` is permissive because a closure crosses a task boundary by handle. A closure that ITSELF captures a `ref` is a runtime-backstop concern (Task 2b); a
     // directly-captured `ref` is still rejected (`ref_binding_captured_in_spawn_rejected`).
     ok(
         "fn main():\n    g := fn() -> int: 1\n    parallel:\n        spawn:\n            print(g())\nmain()\n",
@@ -1108,8 +1101,8 @@ fn spawn_on_non_sendable_receiver_still_rejected() {
         "module 'math' is not a value",
     );
     // …and so is a local BOUND to the module (`m := math`): the type is `Ty::Module`, but the head
-    // is a value, not a namespace, so the compiler lowers a `SpawnRecv` on the module HANDLE and
-    // the airlock refuses it at run time. Keying the skip on the type alone let this one through
+    // is a value, not a namespace, so the compiler lowers a `SpawnRecv` on the module HANDLE, which
+    // the deleted copy step refused at run time. Keying the skip on the type alone let this one through
     // `chezzi check` and fault at run time instead.
     entry_rejects(
         "import std.math\nfn main():\n    m := math\n    parallel:\n        spawn m.abs(-3)\nmain()\n",
@@ -1123,20 +1116,22 @@ fn spawn_on_non_sendable_receiver_still_rejected() {
     );
 }
 
-/// NON-REGRESSION for the fix above: the ARGUMENT sweep is untouched for a BARE module — a
-/// non-sendable value handed directly to a spawned call is still refused there. The container case
-/// (TICKET-021 RE-PINNED): `Ty::Module` no longer reaches a container at all (the module-value read
-/// itself now errors), so `xs := [math]` fails at the read, not at the argument sweep.
+/// A module passed to a spawned call is the same error as a module passed to any call: a module is
+/// not a value (Go `m34go/pkgval`: `use of package math not in selector`). M3.4:
+/// the spawn adds no second, sendability error.
 #[test]
-fn spawn_non_sendable_argument_still_rejected() {
-    entry_rejects(
+fn spawn_module_argument_is_not_a_value() {
+    for src in [
         "import std.math\nfn take(m: int) -> int:\n    return m\nfn main():\n    parallel:\n        spawn take(math)\nmain()\n",
-        "cannot pass a non-sendable value of type module math to a spawned task",
-    );
-    entry_rejects(
         "import std.math\nfn take(m: int) -> int:\n    return m\nfn main():\n    xs := [math]\n    parallel:\n        spawn take(xs)\nmain()\n",
-        "module 'math' is not a value",
-    );
+    ] {
+        let errs = check_entry(src);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(
+            errs[0].message.contains("module 'math' is not a value"),
+            "{errs:?}"
+        );
+    }
 }
 
 #[test]
@@ -1151,8 +1146,7 @@ fn top_level_closure_used_in_spawn_block_ok() {
 #[test]
 fn read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok() {
     // B3.3 (Task 2a): a capture-free function-local closure reached through a NESTED closure inside a
-    // `spawn:` block is now ACCEPTED — both closures are sendable (they cross by value; runs on both
-    // engines). Previously rejected under the old "Func non-sendable" rule. The only remaining hole —
+    // `spawn:` block is now ACCEPTED — both closures are sendable (they cross by handle). Previously rejected under the old "Func non-sendable" rule. The only remaining hole —
     // a nested closure that ITSELF captures a `ref` — is caught by the runtime backstop (Task 2b).
     ok(
         "fn main():\n    g := fn() -> int: 1\n    parallel:\n        spawn:\n            h := fn() -> int: g()\n            print(h())\nmain()\n",
@@ -1174,7 +1168,7 @@ fn submit_protocol_capture_ok() {
 #[test]
 fn submit_capturefree_closure_ok() {
     // B3.3 (Task 2a): submitting a closure that captures a CAPTURE-FREE sibling closure is now
-    // ACCEPTED — closures cross the airlock by value. A submitted closure that
+    // ACCEPTED — closures cross by handle. A submitted closure that
     // captures a `ref` is still rejected (`submit_non_sendable_capture_rejected`).
     entry_ok(
         "import Executor from std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
@@ -1200,7 +1194,7 @@ fn submit_captured_int_ok() {
 #[test]
 fn submit_capturefree_closure_through_nested_closure_ok() {
     // B3.3 (Task 2a): a capture-free closure reached through a NESTED closure inside a submitted task
-    // is now ACCEPTED (both closures cross by value). Previously rejected under
+    // is now ACCEPTED (both closures cross by handle). Previously rejected under
     // the old "Func non-sendable" rule; a nested closure that captures a `ref` is Task 2b's backstop.
     entry_ok(
         "import Executor from std.concurrency\nfn main():\n    g := fn() -> int: 1\n    ex := Executor()\n    ex.submit(fn(): print((fn() -> int: g())()))\n    ex.shutdown()\nmain()\n",
@@ -1210,26 +1204,24 @@ fn submit_capturefree_closure_through_nested_closure_ok() {
 #[test]
 fn top_level_closure_submitted_ok() {
     // Regression pin (mirrors `top_level_closure_used_in_spawn_block_ok`): a module-scope binding is a
-    // global, not a per-task capture — submitting a closure that reads it is fine even when it's
-    // non-sendable (the `is_local_capture` scope-0 exclusion). Locks the intentional gap so a future
-    // tightening of the gate can't silently flip it without a test failing.
+    // global — submitting a closure that reads it is fine (M3.4: a job holds every capture by
+    // handle, so no gate exists to tighten).
     entry_ok(
         "import Executor from std.concurrency\ng := fn() -> int: 7\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(g()))\n    ex.shutdown()\nmain()\n",
     );
 }
 
 // ----- B3.3 (Task 2a): capture-sendability gate at the spawn CALLEE + ARG sites -----
-// A closure/nested-fn value crosses the airlock BY VALUE (`sendable(Func)` is permissive), so the
-// bare `fn` type type-checks; the per-closure capture check moves to the airlock SITES. A captured
-// NON-SENDABLE LOCAL (a protocol existential etc.) at a spawn callee/arg is a clean compile error,
-// matching the `spawn:` block form. A MODULE-GLOBAL non-sendable is a read-only global, NOT a
-// capture — never gated. (The probe is a protocol existential — a genuinely non-sendable value.)
+// A closure/nested-fn value crosses by handle (`sendable(Func)` is permissive), so the
+// bare `fn` type type-checks; the per-closure capture check moves to the spawn SITES. A captured
+// protocol existential at a spawn callee/arg type-checks (Task 2), matching the `spawn:` block
+// form. A MODULE-GLOBAL is NOT a capture — never gated. (The probe was once non-sendable.)
 
 #[test]
 fn protocol_local_captured_by_spawn_callee_closure_ok() {
     // Task 2 (option a): a function-local protocol-typed value captured by a closure VALUE that is the
     // spawn CALLEE is now ACCEPTED — a protocol existential is sendable (witness `Boxy` crosses by
-    // deep value copy). (Was rejected under the old rule.)
+    // handle). (Was rejected under the old rule.)
     entry_ok(
         "protocol NS:\n    fn tag(self) -> int\nstruct Boxy:\n    v: int\n    fn tag(self) -> int:\n        return self.v\nfn main():\n    p: NS = Boxy(0)\n    grab := fn() -> int: p.tag()\n    parallel:\n        spawn grab()\nmain()\n",
     );
@@ -1248,7 +1240,7 @@ fn module_global_nonsendable_spawn_callee_ok() {
 #[test]
 fn spawn_callee_capturing_sendable_closure_ok() {
     // A callee whose captured environment holds a CAPTURE-FREE sibling closure (`double`) is sendable
-    // (it crosses by value) — must NOT be gated (example #1, already runs; pin the check side).
+    // (it crosses by handle) — must NOT be gated (example #1, already runs; pin the check side).
     ok(
         "fn main():\n    double := fn(x: int) -> int: x * 2\n    ch := Channel[int]()\n    work := fn(): ch.send(double(21))\n    parallel:\n        spawn work()\n    print(ch.recv())\nmain()\n",
     );
@@ -1266,15 +1258,15 @@ fn channel_of_closures_typechecks() {
 #[test]
 fn closure_returned_across_task_typechecks() {
     // A capturing closure returned from a factory and sent over a `Channel[fn(int) -> int]` — the
-    // closure carries a SENDABLE capture (an int `n`), so it crosses by value (runs 105 — parity test).
+    // closure carries a SENDABLE capture (an int `n`), so it crosses by handle (runs 105 — parity test).
     ok(
         "fn adder(n: int) -> fn(int) -> int:\n    return fn(x: int) -> int: x + n\nfn producer(ch: Channel[fn(int) -> int]):\n    ch.send(adder(100))\nfn main():\n    ch := Channel[fn(int) -> int]()\n    parallel:\n        spawn producer(ch)\n    f := ch.recv()\n    print(f(5))\nmain()\n",
     );
 }
 
 // ----- G1 (B3.3b), RETIRED: these now just assert the checker ACCEPTS every shape. The read-only rule
-// was deleted in 2026-07-21 (module globals deep-copy per task, so a task write lands on
-// its own copy); W6-2 then made the copy fresh per nursery. Kept as accept-regressions. -----
+// was deleted in 2026-07-21 (module globals then deep-copied per task); W6-2 made the copy fresh
+// per nursery; M3.1 made a global the run's one copy. Kept as accept-regressions. -----
 
 #[test]
 fn sequential_global_mutation_ok() {

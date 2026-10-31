@@ -24,11 +24,6 @@ impl MnSched {
     ///
     /// TICKET-129 (W13-5 residual) — takes `core` BY VALUE and moves it into the fiber's
     /// [`PendingOp`] under the core lock, rather than leaving it live on the caller's stack.
-    /// [`SchedCore::provable`] compares `Arc::strong_count` against the handles it can see in-heap
-    /// plus the parked fibers' `pending` entries; a stack-held Arc outliving the park is an extra
-    /// holder invisible to that scan, so a genuinely provable leaf read as unprovable (measured 5/20
-    /// false faults on `d2a` at `CHEZZI_THREADS=2` before that fix). Never reintroduce a stack-held
-    /// channel Arc that outlives this fn's lock hold.
     pub(super) fn park(&self, key: usize, core: Arc<ChannelCore>, mut fiber: Fiber) {
         // Allocated BEFORE the sched lock: this critical section serializes every fiber's park.
         let p = crate::vm::core::Pending::new();
@@ -182,19 +177,16 @@ impl MnSched {
         &self,
         key: usize,
         core: &Arc<ChannelCore>,
-        w: WireValue,
+        v: Value,
         offer: Option<(&Arc<crate::vm::core::Pending>, u32)>,
         wid: usize,
     ) -> crate::vm::core::SendOutcome {
-        // W6-7/W6-10 — summarise the message BEFORE taking core lock A: `wire_summary` is
-        // O(payload), and this critical section serializes every fiber's park/wake/finish.
-        let sum = crate::vm::core::wire_summary(&w);
         let mut c = self.lock();
         let out = core
             .q
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .send(core.cap, sum, w, offer);
+            .send(core.cap, v, offer);
         if !matches!(out, crate::vm::core::SendOutcome::Sent) {
             return out;
         }
@@ -625,14 +617,9 @@ impl MnSched {
         }
     }
 
-    pub(super) fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, w: WireValue) {
-        // Summarised BEFORE core lock A — see `send_wake_bounded`.
-        let sum = crate::vm::core::wire_summary(&w);
+    pub(super) fn send_wake(&self, key: usize, core: &Arc<ChannelCore>, v: Value) {
         let mut c = self.lock();
-        core.q
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(sum, w);
+        core.q.lock().unwrap_or_else(|e| e.into_inner()).push(v);
         self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
         self.notify_waiters();

@@ -1007,16 +1007,12 @@ main()
 }
 
 #[test]
-fn airlock_crossed_running_generator_stays_live_not_exhausted() {
-    // TICKET-041(a). `generator_next` parks `GenState::Done` as a placeholder in the heap object
-    // for the DURATION of a resume (`src/vm/exec.rs:510`), so a generator crossed through the
-    // airlock (here: `Channel.send`) WHILE it is running serializes via `to_wire_depth`'s
-    // `Obj::Generator` arm, which used to read that placeholder verbatim and hand the receiver a
-    // copy that reports itself as already exhausted. A running generator's heap state describes
-    // nothing true mid-resume, so the airlock now rejects the crossing outright — the same oracle
-    // `generator_next`'s own re-entrancy guard already applies (`src/vm/exec.rs:497`) — rather than
-    // hand back a silently-wrong copy. CPython agrees: `copy.deepcopy(gen)` on a running generator
-    // raises `TypeError: cannot pickle 'generator' object`.
+fn a_running_generator_sent_over_a_channel_is_the_same_generator() {
+    // TICKET-041(a) / M3.2. A generator sent WHILE it is running used to cross as a wire copy,
+    // which the airlock refused (a running generator's heap state describes nothing true
+    // mid-resume). M3.2: `Channel.send` moves the generator itself, so the receiver resumes the
+    // one generator after it yields: `2`, then exhausted. Go (`rewrites.go`): a stateful closure
+    // sent while it runs is the same closure, `orig 1` then `copy 2 false`.
     let src = r#"
 struct H:
     g: Iterator[int]?
@@ -1033,18 +1029,14 @@ match ch.recv().g:
     ?x: print("copy", x.next(), x.next())
     None: print("none")
 "#;
-    let out = golden_entry_fault(src);
-    assert!(
-        out.contains("a running generator cannot be sent across tasks"),
-        "expected the running-generator fault message, got: {out:?}"
-    );
+    assert_golden_out(src, "orig 1\ncopy 2 None\n");
 }
 
 #[test]
-fn airlock_running_generator_atomic_store_faults() {
-    // TICKET-041(a), second vehicle. The guard lives in `to_wire_depth` (the shared serializer), not
-    // in `Channel.send` itself, so an `Atomic.store` crossing of a running generator must fault
-    // identically to the channel vehicle above.
+fn a_running_generator_stored_in_an_atomic_is_the_same_generator() {
+    // TICKET-041(a) / M3.2, second vehicle: `Atomic.store` holds the generator itself, exactly as
+    // the channel vehicle above. Go (`rewrites.go`): an `atomic.Value` store, `orig 1` then
+    // `copy 2 false`.
     let src = r#"
 import Atomic from std.concurrency
 struct H:
@@ -1062,9 +1054,5 @@ match a.load().g:
     ?x: print("copy", x.next(), x.next())
     None: print("none")
 "#;
-    let out = golden_entry_fault(src);
-    assert!(
-        out.contains("a running generator cannot be sent across tasks"),
-        "expected the running-generator fault message, got: {out:?}"
-    );
+    assert_golden_out(src, "orig 1\ncopy 2 None\n");
 }

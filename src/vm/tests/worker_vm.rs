@@ -1,4 +1,4 @@
-//! VM tests: isolated worker VMs, home snapshot, method tasks.
+//! VM tests: worker VMs, module globals in a task, method tasks.
 //! Split out of `src/vm/tests.rs`. `super::*` is the parent module.
 
 use super::*;
@@ -21,19 +21,17 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
         is_test: false,
         decl_span: Span::RUNTIME,
         capture_names: Vec::new(),
-        private_slots: 0,
-        deep_slots: 0,
     };
     let program = Program {
         protos: vec![proto],
         ..empty_program()
     };
     let mut vm = Vm::new(Arc::new(program));
-    let home = vm.heap.alloc(Obj::Module(Box::new(ModuleData {
-        name: "<test>".into(),
-        slots: Vec::new(),
-        index: Default::default(),
-    })));
+    let home = vm.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+        "<test>".into(),
+        RVec::new(),
+        Default::default(),
+    ))));
     let clo = vm.heap.alloc(Obj::Closure {
         proto: 0,
         captured: Default::default(),
@@ -49,11 +47,11 @@ fn worker_fixture(code: Vec<Op>) -> (Vm, PendingCall) {
     )
 }
 
-/// The worker allocates into its OWN heap, not the parent's: a task that builds a fresh list runs
-/// to completion in the worker, the parent heap's live-object count is unchanged, and the result
-/// crosses back as a `WireValue` that reconstructs (in the parent) to the expected value.
+/// M1.7 — the worker allocates into the run's one heap: a task that builds a fresh list runs to
+/// completion in the worker, its objects are slots of the parent's core (garbage until the next
+/// collection), and the result is a handle on one of them (M3.4: no copy).
 #[test]
-fn worker_runs_in_distinct_heap() {
+fn worker_runs_on_the_runs_one_heap() {
     // () -> [1, 2]
     let (mut vm, task) = worker_fixture(vec![
         Op::ConstInt(1),
@@ -63,16 +61,18 @@ fn worker_runs_in_distinct_heap() {
     ]);
     let before = vm.heap.live();
     let res = vm.run_task_isolated(task).expect("isolated task runs");
-    assert_eq!(
-        vm.heap.live(),
-        before,
-        "worker must not allocate into the parent heap"
+    assert!(
+        vm.heap.live() > before,
+        "the worker's objects are in the run's one heap"
     );
-    let got = vm.from_wire(res.value);
-    let want = Value::obj(vm.heap.alloc(Obj::List(vec![Value::int(1), Value::int(2)])));
+    let got = res.value;
+    let want = Value::obj(
+        vm.heap
+            .alloc(Obj::List(vec![Value::int(1), Value::int(2)].into())),
+    );
     assert!(
         vm.values_equal(got, want),
-        "result must round-trip back to [1, 2]"
+        "the result is the worker's [1, 2]"
     );
 }
 
@@ -120,7 +120,7 @@ fn worker_shares_the_one_stdin_source() {
     );
 }
 
-/// A worker's stdout is captured in ITS `out` and returned on the `WorkerResult` (decision F:
+/// A worker's stdout is captured in ITS `out` and returned on the `IsolatedRun` (decision F:
 /// buffer-per-worker), and never leaks into the parent's `out`. The return value crosses back too.
 #[test]
 fn worker_returns_value_and_out() {
@@ -141,11 +141,7 @@ fn worker_returns_value_and_out() {
         res.stderr, b"",
         "stderr is captured separately and empty here"
     );
-    assert_eq!(
-        vm.from_wire(res.value),
-        Value::int(7),
-        "return value crosses back"
-    );
+    assert_eq!(res.value, Value::int(7), "return value crosses back");
     assert_eq!(
         vm.out, b"",
         "worker output must not leak into the parent's stdout"
@@ -177,25 +173,21 @@ fn worker_shares_program_arc() {
     );
 }
 
-/// B3.3a: a `str` return value crosses the worker boundary **by value** — the worker serializes its
-/// own-heap `str` to owned bytes, and the parent reconstructs a fresh `str` from them (no dangling
-/// `GcRef`). Replaces B3.2's reject-the-str fault now that `str` is sendable by value.
+/// B3.3a / M3.4: a `str` return value reaches the parent by handle: the worker built it in the
+/// run's one heap.
 #[test]
-fn worker_crosses_str_by_value() {
+fn worker_returns_a_str_by_handle() {
     // () -> "oops"
     let (mut vm, task) = worker_fixture(vec![Op::ConstStr("oops".into()), Op::Return]);
     let res = vm
         .run_task_isolated(task)
-        .expect("a str result now crosses by value");
-    let got = vm.from_wire(res.value);
+        .expect("a str result reaches the parent");
+    let got = res.value;
     let want = Value::obj(vm.heap.alloc(Obj::Str("oops".into())));
-    assert!(
-        vm.values_equal(got, want),
-        "str result round-trips to \"oops\""
-    );
+    assert!(vm.values_equal(got, want), "the str result is \"oops\"");
 }
 
-// ----- B3.3c: read-only `home` snapshot (worker module-graph reconstruction) -----
+// ----- B3.3c: a task reads module globals (M3.1: the run's one copy; was a `home` snapshot) -----
 
 /// Compile + run a multi-file graph from its entry path, returning the populated parent `Vm`
 /// (all imported modules present in `module_objs`).
@@ -209,7 +201,7 @@ fn ran_graph(entry: &std::path::Path) -> Vm {
 
 /// Look up a top-level global in the entry module (modules run deps-first, entry last).
 fn entry_global(vm: &Vm, name: &str) -> Value {
-    let m = *vm.module_objs.last().expect("at least one module");
+    let m = vm.entry_home();
     let i = vm
         .slot_index(m, name)
         .unwrap_or_else(|| panic!("no global '{name}'"));
@@ -221,8 +213,8 @@ fn sp() -> Span {
     Span::RUNTIME
 }
 
-/// A spawned task reads a module-level constant — needs the read-only `home` snapshot (B3.3c):
-/// the worker's `home` is a reconstruction of the parent module's globals, not a fresh-empty one.
+/// A spawned task reads a module-level constant — the run's one global (M3.1; B3.3c once rebuilt
+/// a read-only `home` snapshot for it).
 #[test]
 fn worker_reads_module_global() {
     let mut vm = ran_program("answer := 42\nfn get_answer() -> int:\n    return answer\n");
@@ -234,7 +226,7 @@ fn worker_reads_module_global() {
     let res = vm
         .run_task_isolated(task)
         .expect("task reads a module global in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::int(42));
+    assert_eq!(res.value, Value::int(42));
 }
 
 #[test]
@@ -251,7 +243,7 @@ fn worker_reads_last_of_many_globals() {
     let res = vm
         .run_task_isolated(task)
         .expect("task reads the last module global in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::int(99));
+    assert_eq!(res.value, Value::int(99));
 }
 
 #[test]
@@ -315,7 +307,7 @@ fn worker_calls_sibling_free_fn() {
     let res = vm
         .run_task_isolated(task)
         .expect("task calls a sibling fn in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::int(8));
+    assert_eq!(res.value, Value::int(8));
 }
 
 /// A spawned task calls a function from an IMPORTED module — proves cross-module `module_objs`
@@ -347,7 +339,7 @@ fn worker_calls_imported_fn() {
     let res = vm
         .run_task_isolated(task)
         .expect("task calls an imported fn in its worker");
-    let got = vm.from_wire(res.value);
+    let got = res.value;
     let want = Value::obj(vm.heap.alloc(Obj::Str("abab".into())));
     assert!(vm.values_equal(got, want), "imported repeat returns abab");
 }
@@ -406,7 +398,7 @@ fn worker_calls_through_global_fn_container() {
     let res = vm
         .run_task_isolated(task)
         .expect("task calls a fn from a global container in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::int(21));
+    assert_eq!(res.value, Value::int(21));
 }
 
 /// The module-graph reconstruction must be GC-safe: with `gc_stress` on (collect before every
@@ -426,5 +418,5 @@ fn worker_reconstruction_survives_gc_stress() {
     let res = vm
         .run_task_isolated(task)
         .expect("reconstruction survives GC stress");
-    assert_eq!(vm.from_wire(res.value), Value::int(6));
+    assert_eq!(res.value, Value::int(6));
 }

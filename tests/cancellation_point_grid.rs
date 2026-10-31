@@ -515,14 +515,13 @@ fn ops() -> Vec<Op> {
     .collect()
 }
 
-/// TICKET-246 — every guard taker the private-heap boxes added. A `RwShared` reader takes the
-/// update guard only on its slow path (a writer holds the state), which is the would-wait column;
-/// its ready column is the lock-free `try_read`. Every `_` reader goes through
-/// `Vm::rwshared_read`, every `_` writer through `Vm::rwshared_mutate`, display through
-/// `Vm::box_snapshots`.
+/// TICKET-246 / M3.3 — every guard taker of the boxes. A `RwShared` reader takes the read guard,
+/// which waits behind a writer (the would-wait column). Every `_` reader goes through
+/// `Vm::rwshared_read`, every `_` writer through `Vm::rwshared_mutate`. Display takes no guard
+/// (M3.3: it reads the box's one slot), so it has a ready column only: it never waits.
 fn box_guard_ops() -> Vec<Op> {
     // (name, act leaving `got == 7` or the box changed, ready check, holder)
-    let rows: [(&'static str, &'static str, &'static str, &'static str); 17] = [
+    let rows: [(&'static str, &'static str, &'static str, &'static str); 15] = [
         (
             "RwShared.get",
             "got.add(w.get() + v)",
@@ -530,20 +529,8 @@ fn box_guard_ops() -> Vec<Op> {
             "hold_w",
         ),
         (
-            "RwShared.read (slow path)",
+            "RwShared.read",
             "got.add(w.read(fn(x: int) -> int: x + v))",
-            "got.load() == 7",
-            "hold_w",
-        ),
-        (
-            "display Shared",
-            "got.add(str(s).len() + v - 9)",
-            "got.load() == 7",
-            "hold_s",
-        ),
-        (
-            "display RwShared",
-            "got.add(str(w).len() + v - 11)",
             "got.load() == 7",
             "hold_w",
         ),
@@ -626,6 +613,17 @@ fn box_guard_ops() -> Vec<Op> {
             "hold_t",
         ),
     ];
+    let displays = [
+        ("display Shared", "got.add(str(s).len() + v - 9)"),
+        ("display RwShared", "got.add(str(w).len() + v - 11)"),
+    ]
+    .into_iter()
+    .map(|(name, act)| Op {
+        name,
+        out: "Channel[int](1)",
+        ready: Some(("", act, "got.load() == 7")),
+        wait: None,
+    });
     rows.into_iter()
         .map(|(name, act, check, holder)| Op {
             name,
@@ -638,6 +636,7 @@ fn box_guard_ops() -> Vec<Op> {
                 Some(holder),
             )),
         })
+        .chain(displays)
         .collect()
 }
 

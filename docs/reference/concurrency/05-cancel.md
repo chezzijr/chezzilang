@@ -1,7 +1,7 @@
 ## 6e. `std.cancel` — cooperative cancellation & timeouts
 
 `std.cancel` is a Go-`context`-inspired **cancellation token**, adapted to Chezzi. A `Token` is an
-explicit, sendable handle you thread down a call tree (like `Channel`/`Shared`): poll `cancelled()` in
+explicit handle you thread down a call tree (like `Channel`/`Shared`): poll `cancelled()` in
 CPU loops, race `done()` in a `wait:` for IO loops, and `cancel()` it from anywhere. It is written
 entirely in Chezzi (`std/cancel.chz`) over existing primitives, plus the one native `Channel.trip()`
 latch ([§6c'](02-channel.md#6c-channeltrip--the-manual-level-trigger-latch)).
@@ -50,7 +50,7 @@ fn serve(tok: Token, io: Channel[str]):
 - **`done()` cascades transitively** through that same walk: a `cancel()` at *any* depth above trips a
   grandchild's `done()`, so a task parked in `wait: leaf.done()` wakes on a grandparent cancel.
 - **The link is live across tasks.** A parent flip is observed by an already-derived child, *including
-  a child that crossed the `spawn`/`parallel:`/`Channel` airlock*, in **both** directions (a task on the
+  a child that a `spawn`/`parallel:` task or a `Channel` receiver holds*, in **both** directions (a task on the
   far side of a `spawn` can `derive()` into a registry the canceller drains).
 - **Deadlines.** A child inherits the **tightest** deadline (the soonest absolute deadline of itself
   and its ancestors), copied into its own `deadline` field at derive time, so a timeout needs no
@@ -76,7 +76,7 @@ Cost of the `parent` link:
 | | with the parent link | without it |
 |---|---|---|
 | `cancelled()` poll, depth 0 / 1 / 3 / 5 | **0.30 / 0.58 / 1.15 / 1.74 µs** (~0.29 µs per ancestor) | 0.30 µs at any depth |
-| deepest token that crosses a `spawn` airlock | **4 999** (5 000 faults `maximum structural depth (10000) exceeded`) | any depth |
+| deepest token a `spawn` task holds | any depth (M3.4: a spawn walks nothing; a 9 000-deep chain passes and polls) | any depth |
 | 1 000-link chain of `derive()` + one root cancel | 85 ms | 19 ms |
 | 8 000-wide fan-out + cancel | 81 ms | 88 ms (unaffected) |
 
@@ -178,14 +178,100 @@ Resource caps, measured:
   `connect`) registers with the sooner of the op's own `timeout_ms` and the run deadline: the op's own
   deadline stays a catchable `!"timeout"`, the run's is a hard abort. A socket op's `timeout_ms` is
   unaffected when the cap is off or unexpired.
-- **`--max-heap` reaches a sleeper only through the cancel arm** — when the over-allocating task is a
-  nursery/`Executor` sibling sharing its cancel scope (measured 365 ms). A sleeping top-level `main`
-  has no cancel flag and its own heap is not the one growing, so it sleeps out (3005 ms) before the
-  OVER-MEMORY verdict lands. `--max-heap` is a per-heap cap, not a process-wide signal.
-- **`--max-heap` charges an `Executor` job's submit-time bytes to the submitter until the job
-  finishes.** Measured, 300 jobs capturing ~1 MB each under an 8 MB cap: peak RSS 18 MB at
-  `CHEZZI_THREADS` 1, 2 and default, each run `OVER-MEMORY`. A test whose unfinished jobs together
-  exceed the cap trips, sleeping jobs included.
+- **`--max-heap` caps the whole run.** Every task of a test allocates into one heap, and each
+  collection, on any thread, measures that heap's live bytes. Three tasks that each hold 4.2 MB
+  are OVER-MEMORY together under a 10 MB cap, though each one alone is under it.
+- **`--max-heap` cuts a sleeper at once, except an `Executor` job when the test fn itself trips the
+  cap.** The program below ran on a release build with `chezzi test --max-heap=8000000 --filter
+  <test fn>`, 3 runs per cell. Each cell gives the wall time of the whole process. Every run
+  ended OVER-MEMORY.
+- **`--max-heap` counts an `Executor` job's captured payload while the job is queued or runs.** The
+  payload is objects of the run's one heap. A test whose unfinished jobs together exceed the cap
+  trips, sleeping jobs included (`three_hundred_jobs_capture_a_megabyte_each`: peak RSS 20.6-21.0 MB
+  at each thread count).
+
+| Test fn | `CHEZZI_THREADS=1` | `=2` | default |
+|---|---|---|---|
+| `a_job_grows_the_test_fn_sleeps` | 0.11-0.12 s | 0.11 s | 0.10-0.11 s |
+| `a_child_grows_a_sibling_sleeps` | 0.11 s | 0.11-0.12 s | 0.11 s |
+| `a_job_grows_another_job_sleeps` | 0.11-0.12 s | 0.10-0.11 s | 0.10-0.11 s |
+| `the_body_grows_a_child_sleeps` | 0.11 s | 0.11 s | 0.09-0.11 s |
+| `the_test_fn_grows_forever_a_job_sleeps` | 0.11 s (the job never starts) | 5.02-5.03 s | 5.02 s |
+| `the_test_fn_appends_400_lists_a_job_sleeps` | 5.11-5.12 s | 5.01-5.02 s | 5.01-5.02 s |
+| `three_hundred_jobs_capture_a_megabyte_each` | 2.02-2.03 s | 2.02 s | 2.02 s |
+
+When the test fn trips the cap, a job that sleeps 5000 ms (or 2000 ms) sleeps out before the
+verdict lands. At T=1, `grow()` never parks, so the job never starts and the run ends at once;
+the 400-list loop ends, `shutdown` lets the job run, and the job sleeps out.
+
+```chezzi
+import Executor from std.concurrency
+import std.time
+
+xs: List[str] = []
+ys: List[List[int]] = []
+
+fn grow():
+    i := 0
+    while true:
+        xs.push("x".repeat(100) + str(i))
+        i += 1
+
+fn nap():
+    time.sleep_ms(5000)
+
+fn block(n: int) -> List[int]:
+    out: List[int] = []
+    for k in 0..n:
+        out.push(k)
+    return out
+
+fn hold(s: str) -> int:
+    time.sleep_ms(2000)
+    return s.len()
+
+test fn a_job_grows_the_test_fn_sleeps():
+    ex := Executor()
+    _ := ex.submit(grow)
+    time.sleep_ms(3000)
+    ex.shutdown()
+
+test fn a_child_grows_a_sibling_sleeps():
+    parallel:
+        spawn grow()
+        spawn time.sleep_ms(3000)
+
+test fn a_job_grows_another_job_sleeps():
+    ex := Executor()
+    _ := ex.submit(nap)
+    _ := ex.submit(grow)
+    ex.shutdown()
+
+test fn the_body_grows_a_child_sleeps():
+    parallel:
+        spawn nap()
+        grow()
+
+test fn the_test_fn_grows_forever_a_job_sleeps():
+    ex := Executor()
+    _ := ex.submit(nap)
+    grow()
+    ex.shutdown()
+
+test fn the_test_fn_appends_400_lists_a_job_sleeps():
+    ex := Executor()
+    _ := ex.submit(nap)
+    for _ in 0..400:
+        ys.push(block(5000))
+    ex.shutdown()
+
+test fn three_hundred_jobs_capture_a_megabyte_each():
+    ex := Executor()
+    for i in 0..300:
+        big := "x".repeat(1000000) + str(i)
+        _ := ex.submit(fn() -> int: hold(big))
+    ex.shutdown()
+```
 
 **Where a cancel is NOT delivered — pure CPU with no back-edge.** **Deep recursion is not a
 checkpoint**: a recursive function emits only `Call`/`Return`, never a backward jump, so a cancelled

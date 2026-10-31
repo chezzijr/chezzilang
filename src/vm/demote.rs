@@ -55,7 +55,7 @@ impl Vm {
         // A filled slot is a delivered value: it outranks every other way out of this block.
         let finish =
             |op: crate::vm::core::PendingOp, r: Result<RecvStep, RuntimeError>| match op.settle() {
-                crate::vm::core::Settled::Got(_, w) => Ok(RecvStep::Filled(w)),
+                crate::vm::core::Settled::Got(_, v) => Ok(RecvStep::Filled(v)),
                 crate::vm::core::Settled::Cancelled
                 | crate::vm::core::Settled::Closed
                 | crate::vm::core::Settled::Sent(_) => r,
@@ -97,22 +97,28 @@ impl Vm {
             let exit: Result<RecvStep, RuntimeError> = {
                 let mut c = sched.lock();
                 let mut qg = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                if !p.is_queued() {
+                let filled = !p.is_queued();
+                let ready = if filled {
+                    crate::vm::core::RecvReady::Wait
+                } else {
+                    self.recv_ready(&core, &mut qg)
+                };
+                if filled {
                     // A sender filled the slot: `finish` takes the value.
                     reg.release(&sched, &mut c);
                     Ok(RecvStep::ClosedEmpty)
-                } else if let Some(w) = qg.pop() {
+                } else if let crate::vm::core::RecvReady::Value(v) = ready {
                     // Withdraw the slot in the same hold, so no second sender fills it.
                     let _ = p.try_cancel();
                     qg.withdraw(&p);
                     reg.release(&sched, &mut c);
-                    Ok(RecvStep::Got(w))
-                } else if core.done_latch.load(Ordering::Relaxed) {
+                    Ok(RecvStep::Got(v))
+                } else if let crate::vm::core::RecvReady::Fired = ready {
                     // A tripped latch (`trip()`) delivers `true` like a passed timer — ranks below a
                     // real value, above closed/terminate/deadlock (a `done().recv()` on a cancelled
                     // token reached inside a native callback must not false-deadlock).
                     reg.release(&sched, &mut c);
-                    Ok(RecvStep::Got(WireValue::Bool(true)))
+                    Ok(RecvStep::Got(Value::bool(true)))
                 } else {
                     // Closed-and-drained: nothing is waiting here and the channel is closed, so no value
                     // will ever arrive — signal `ClosedEmpty` (the caller faults "receive on a closed
@@ -146,11 +152,17 @@ impl Vm {
                     } else {
                         drop(c);
                         // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
-                        width::released(|| {
-                            let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                            let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
-                                p.is_queued() && !g.recv_ready_for(Some(&p)) && !width::reserved()
-                            });
+                        // M3.2 — `h` is pinned: the receiver may be a popped temporary, and the
+                        // collector reads a value a sender puts in the slot through it.
+                        self.gc_blocking(&[h], |_| {
+                            width::released(|| {
+                                let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                                let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
+                                    p.is_queued()
+                                        && !g.recv_ready_for(Some(&p))
+                                        && !width::reserved()
+                                });
+                            })
                         });
                         continue;
                     }
@@ -169,17 +181,19 @@ impl Vm {
     /// Releases this thread's width permit for the whole wait and re-takes it after (TICKET-141).
     pub(super) fn demote_send_block(
         &mut self,
+        h: GcRef,
         core: Arc<ChannelCore>,
         op: crate::vm::core::PendingOp,
         span: Span,
     ) -> Result<SendStep, RuntimeError> {
-        let r = self.demote_send_block_in_place(&core, &op.p, span);
+        let r = self.demote_send_block_in_place(h, &core, &op.p, span);
         self.send_settled(op, span)
             .unwrap_or_else(|| r.map(|()| SendStep::Sent))
     }
 
     fn demote_send_block_in_place(
         &mut self,
+        h: GcRef,
         core: &Arc<ChannelCore>,
         p: &Arc<crate::vm::core::Pending>,
         span: Span,
@@ -226,11 +240,14 @@ impl Vm {
                     continue;
                 }
             }
-            width::released(|| {
-                let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |_| {
-                    p.is_queued() && !width::reserved()
-                });
+            // M3.2 — `h` is pinned: the collector reads this send's offer through it.
+            self.gc_blocking(&[h], |_| {
+                width::released(|| {
+                    let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |_| {
+                        p.is_queued() && !width::reserved()
+                    });
+                })
             });
         }
     }
@@ -334,23 +351,28 @@ impl Vm {
             // No single condvar to wait on (N arms, N condvars) → bounded backoff poll. Sleep on the
             // FIRST arm's condvar with a timeout so a `send`/`close` to arm 0 wakes promptly, and any
             // other arm is observed within `DEMOTE_POLL_BACKOFF` (the documented lower-throughput path).
+            // M3.2 — the arm handles stay on the operand stack of `op_wait_poll` across the door, so
+            // the collector reads each arm's offers and slots through them.
             let (first, is_send0) = &arms[0];
-            width::released(|| {
-                let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-                // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
-                // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
-                let backoff = match timer {
-                    Some((_, d)) => DEMOTE_POLL_BACKOFF
-                        .min(d.saturating_duration_since(std::time::Instant::now())),
-                    None => DEMOTE_POLL_BACKOFF,
-                };
-                // W7-13r(b) — arm 0 is ready on what the loop above SETTLES on: `p` settled, or (recv arm)
-                // a value to take or a `trip()` latch. `closed` is deliberately NOT a ready condition: the
-                // re-poll SKIPS a closed+empty recv arm, so reporting ready would return instantly,
-                // re-poll, skip, and spin — the parity-perf-0 live-lock.
-                let _ = first.cv.wait_timeout_while(q, backoff, |g| {
-                    !(!p.is_queued() || (!is_send0 && recv_ready(first, g))) && !width::reserved()
-                });
+            self.gc_blocking(&[], |_| {
+                width::released(|| {
+                    let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
+                    // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
+                    // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
+                    let backoff = match timer {
+                        Some((_, d)) => DEMOTE_POLL_BACKOFF
+                            .min(d.saturating_duration_since(std::time::Instant::now())),
+                        None => DEMOTE_POLL_BACKOFF,
+                    };
+                    // W7-13r(b) — arm 0 is ready on what the loop above SETTLES on: `p` settled, or (recv arm)
+                    // a value to take or a `trip()` latch. `closed` is deliberately NOT a ready condition: the
+                    // re-poll SKIPS a closed+empty recv arm, so reporting ready would return instantly,
+                    // re-poll, skip, and spin — the parity-perf-0 live-lock.
+                    let _ = first.cv.wait_timeout_while(q, backoff, |g| {
+                        !(!p.is_queued() || (!is_send0 && recv_ready(first, g)))
+                            && !width::reserved()
+                    });
+                })
             });
         }
     }
@@ -394,7 +416,9 @@ impl Vm {
             if now >= deadline {
                 break;
             }
-            std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now));
+            self.gc_blocking(&[], |_| {
+                std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now))
+            });
             // The one predicate for a run-wide halt (`run_halt_due`): it answers `false` wherever
             // `run_exit_err` below will not fire, so the sleep is never cut short for nothing.
             let read = self.halt_requested();
@@ -520,7 +544,9 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         self.width_release();
         let r = self.demote_block_socket_in_place(fd, interest, deadline, span, attempt);
-        self.width_acquire();
+        // M1.7 — the result is a Rust local across the permit's door: pin it.
+        let pin: Vec<GcRef> = r.iter().filter_map(|v| v.child_gcref()).collect();
+        self.width_acquire_pinned(&pin);
         r
     }
 
@@ -586,7 +612,7 @@ impl Vm {
                             left.min(DEMOTE_POLL_BACKOFF)
                         }
                     };
-                    wait_fd_ready(fd, interest, left);
+                    self.gc_blocking(&[], |_| wait_fd_ready(fd, interest, left));
                 }
             }
         };

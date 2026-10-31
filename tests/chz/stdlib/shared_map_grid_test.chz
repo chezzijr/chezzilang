@@ -267,9 +267,9 @@ test fn memoize_grid_enum_keys():
     r := _memo_grid([Tag.A, Tag.B(1), Tag.B(2), Tag.B(3), Tag.B(4), Tag.B(5)])
     assert r == "", r
 
-# ---- wire identity under single-entry writes -------------------------------------------------------
-# Each single-entry write serializes one entry; its ids must not collide with the stored map's, or a
-# whole `get()` ties entry b's inner list to entry a's.
+# ---- alias identity under single-entry writes ------------------------------------------------------
+# Each single-entry write stores one entry by handle (M3.3), so a whole `get()` must not tie entry b's
+# inner list to entry a's.
 test fn single_entry_writes_keep_their_own_aliases():
     b: concurrency.RwShared[Map[str, List[List[int]]]] = concurrency.RwShared({})
     xs := [1]

@@ -187,7 +187,6 @@ fn std_internal_names_are_hidden_from_user_modules() {
     // names it.
     let want_fields: std::collections::BTreeSet<(String, String, String)> = [
         ("std.concurrency", "Task", "_ch"),
-        ("std.concurrency", "Task", "_cached"),
         ("std.concurrency", "Task", "_ex"),
         ("std.concurrency.broadcast", "Receiver", "_ch"),
         ("std.concurrency.broadcast", "Receiver", "_next"),
@@ -207,7 +206,6 @@ fn std_internal_names_are_hidden_from_user_modules() {
     let bcast = "import Broadcast from std.concurrency.broadcast\nb := Broadcast[int].new(2)\nrx := b.subscribe()\n";
     for (setup, recv, ty, name) in [
         (task, "t", "Task[int]", "_ch"),
-        (task, "t", "Task[int]", "_cached"),
         (task, "t", "Task[int]", "_ex"),
         (bcast, "rx", "Receiver[int]", "_ch"),
         (bcast, "rx", "Receiver[int]", "_next"),
@@ -301,7 +299,8 @@ fn std_internal_names_are_hidden_from_user_modules() {
     );
 }
 
-/// TICKET-246: `Shared[T]` gains `read(f)` (the closure runs inside the box heap, result copied out).
+/// TICKET-246: `Shared[T]` gains `read(f)` (M3.3: the closure runs in the caller's task on the live
+/// value and its result is returned).
 #[test]
 fn shared_has_a_read_method() {
     entry_ok(
@@ -309,17 +308,15 @@ fn shared_has_a_read_method() {
     );
 }
 
-/// TICKET-246 (Airlock, fact A4) — every row of `CROSSING_CLOSURE_METHODS` gets the capture floor:
-/// its closure runs in another heap, so a DIRECT write to a captured local is the D4 error at
-/// check time. Grid: row x {direct write in a literal closure, direct write in a closure value,
-/// write through a callee, read only, a closure that mutates only its parameter}.
-///
-/// The callee column is `ok` for every row: the floor reports a direct write only (measured,
-/// Digest section 10); that shape is the run-time D4 fault, a cell of
-/// `tests/chz/suites/box_grid_test.chz`. `RwShared.read` has no row (its closure runs in the
-/// reader's heap), so a captured write there stays `ok`.
+/// TICKET-246 (Airlock, fact A4) once put a capture floor on every method whose closure ran in
+/// another heap, so a DIRECT write to a captured local was the D4 error at check time. M3.3: a box
+/// closure (`Shared.update`, `Shared.read`, `RwShared.write`, `RwShared.read`) runs in its caller's
+/// task; M3.4: an Executor job holds its captures by handle. So no method has a floor and every
+/// cell is `ok` (Go: a goroutine and a closure under `mu.Lock()` write their captures). Grid:
+/// method x {direct write in a literal closure, direct write in a closure value, write through a
+/// callee, read only, a closure that mutates only its parameter}.
 #[test]
-fn every_crossing_closure_method_reports_a_captured_write() {
+fn every_closure_method_accepts_a_captured_write() {
     // (owner, method, receiver setup, a call with `{F}` for the closure, the closure's parameter).
     let user_rows = [
         (
@@ -350,21 +347,14 @@ fn every_crossing_closure_method_reports_a_captured_write() {
             "r.write({F})",
             "x: int",
         ),
+        (
+            "RwShared",
+            "read",
+            "r := RwShared(1)",
+            "_ := r.read({F})",
+            "x: int",
+        ),
     ];
-    for (owner, method, ..) in user_rows {
-        assert!(
-            crate::base::crossing::CROSSING_CLOSURE_METHODS.contains(&(owner, method)),
-            "{owner}.{method} has no row"
-        );
-    }
-    // `_submit_settled` is std-internal: its row exists and its one caller checks clean.
-    assert!(
-        crate::base::crossing::CROSSING_CLOSURE_METHODS.contains(&("Executor", "_submit_settled"))
-    );
-    assert_eq!(
-        crate::base::crossing::CROSSING_CLOSURE_METHODS.len(),
-        user_rows.len() + 1
-    );
     entry_ok(
         "import Executor from std.concurrency\nfn main():\n    ex := Executor(1)\n    t := ex.submit(fn() -> int: 1)\n    print(t.get())\n    ex.shutdown()\nmain()\n",
     );
@@ -389,45 +379,31 @@ fn every_crossing_closure_method_reports_a_captured_write() {
         } else {
             direct
         };
-        let cell = |shape: &str, src: String, rejects: bool| {
+        let cell = |shape: &str, src: String| {
             let errs = check_entry(&src);
-            let hit = errs
-                .iter()
-                .any(|e| e.message.contains("is this task's copy"));
-            if rejects {
-                assert!(
-                    hit,
-                    "{owner}.{method} x {shape}: want the D4 error, got {errs:?}"
-                );
-            } else {
-                assert!(
-                    errs.is_empty(),
-                    "{owner}.{method} x {shape}: want ok, got {errs:?}"
-                );
-            }
+            assert!(
+                errs.is_empty(),
+                "{owner}.{method} x {shape}: want ok, got {errs:?}"
+            );
         };
-        cell("literal direct write", program("", &direct), true);
-        cell("closure value direct write", program(&value, "f"), true);
+        cell("literal direct write", program("", &direct));
+        cell("closure value direct write", program(&value, "f"));
         let callee = if param.is_empty() {
             "fn(): keep(seen)".to_string()
         } else {
             format!("fn({param}): {tail}keep(seen)")
         };
-        cell("write through a callee", program("", &callee), false);
+        cell("write through a callee", program("", &callee));
         let read = if param.is_empty() {
             "fn(): print(seen.len())".to_string()
         } else {
             format!("fn({param}): {tail}seen.len()")
         };
-        cell("read only", program("", &read), false);
+        cell("read only", program("", &read));
     }
     // A closure that mutates only its PARAMETER is the point of the box: `ok`.
     entry_ok(
         "import RwShared, Shared from std.concurrency\nfn bump(xs: List[int]) -> List[int]:\n    xs.push(1)\n    return xs\nfn main():\n    s := Shared([1])\n    s.update(fn(xs): bump(xs))\n    w := RwShared([1])\n    w.write(fn(xs): bump(xs))\n    print(s.read(fn(xs): xs.len()), w.get())\nmain()\n",
-    );
-    // No row: `RwShared.read` runs its closure in the reader's heap, so a captured write is legal.
-    entry_ok(
-        "import RwShared from std.concurrency\nfn main():\n    seen: List[int] = []\n    w := RwShared(1)\n    n := w.read(fn(x: int) -> int: x + seen.remove(0))\n    print(n, seen)\nmain()\n",
     );
 }
 

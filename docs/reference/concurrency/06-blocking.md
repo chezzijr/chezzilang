@@ -6,6 +6,12 @@ Every blocking op asks ONE table how to block in the running context: `block::mo
 T=1, T=2 and T=0 against the Go answer. Changing a cell means changing `block::mode`, its unit test and
 this table in one commit.
 
+Every mode other than a plain compute step detaches the thread from the run's one heap before it
+blocks, and reattaches after. The garbage collector stops every attached thread and treats a detached
+thread as stopped. A blocking call that keeps its attachment hangs the next collection. Known limits:
+a CPU-bound native or C loop delays a stop, and an `extern` call keeps its runner permit at
+`CHEZZI_THREADS=1`. The model is in [`01-model.md`](01-model.md).
+
 Contexts:
 
 | context | what it is |
@@ -38,7 +44,7 @@ Modes:
 | `wait:` with timer + send arms | P | D | S | I | I | I | yes |
 | `sleep_ms` | P | D | S | S | S | S | yes |
 | blocking native (`fs`, `request`, `process`) | P | D | I | I | I | I | yes |
-| stdin (`io.input`, …) | D | D | D | D | D | D | yes |
+| stdin (`io.input`, …), a `Writer`/`Reader` on a FIFO, pipe or device | D | D | D | D | D | D | yes |
 | socket `accept`/`read`/`write` | P | D | R | R | R | I | yes |
 | `net.connect` handshake | P | I | I | R | R | I | yes |
 | `Shared` update guard | D | D | D | D | D | D | no |
@@ -108,7 +114,10 @@ top-level `main` blocks it and succeeds, as CPython (0.1 ms) and Go (314 µs) bo
 
 A `Kind::HostWait` native (the `std.io` stdin readers) demotes the worker and gives its slot back for
 the read, direct or inside a callback, so a runnable sibling runs while stdin is withheld, as under
-Go's `sysmon`.
+Go's `sysmon`. An `io.create`/`io.append`/`io.open` handle on a FIFO, a pipe or a device does the same
+for each open, write, flush, read and close that reaches the fd, so the task on the other end runs,
+also at `--threads=1` (Go: a blocking syscall hands off its P). A handle on a regular file keeps the
+fast path: its syscalls answer at once.
 
 ---
 
@@ -125,7 +134,7 @@ diff a.txt b.txt
 The repo's own standing gate does this over `tests/chz` (`tests/chezzi_threads_cli.rs`).
 `CHEZZI_THREADS=1` is one CPU runner (1.00 cores, vs 1.91 at `=2`), so the diff compares a serialized
 run against a concurrent one. A difference is a **signal to investigate**, not automatically a bug: it
-can be an order-dependence / airlock / scheduler fault, *or* a **non-deterministic cross-task print
+can be an order-dependence / race / scheduler fault, *or* a **non-deterministic cross-task print
 order**, which `chezzi run` does not promise
 ([Output ordering](01-model.md#output-ordering-streaming-cli-vs-buffered-sink)). Compare a line SET, or
 make the program deterministic by construction, before calling a diff a defect. A seeded scheduler

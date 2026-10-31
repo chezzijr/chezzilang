@@ -1,0 +1,11 @@
+# Initializes after `shared_globals_job_lib.chz`: it sends job 2 a closure over `Z` and waits for
+# the job's answer BEFORE `Z`'s let runs, so the job reads a global whose module is still
+# initializing (M3.1 fix round 1).
+import shared_globals_job_lib as jobs
+
+fn read_z() -> int:
+    return Z
+
+jobs.CH2.send(read_z)
+R := jobs.T2.get()
+Z := 5

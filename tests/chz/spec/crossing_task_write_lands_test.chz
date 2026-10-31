@@ -1,0 +1,370 @@
+# A spawned task's write lands on the parent's value (the TICKET-169 rows). M3.1: a module
+# global is the run's one copy; M3.4: a captured local, a spawn arg and an Executor job's capture
+# are the parent's values by handle (Go model). So every row asserts the write LANDS on the parent's
+# value (Go `m34go/tasklocal/main.go`, go1.27.0: `captured_scalar 5`, `captured_list_push [1 2]`,
+# `struct_method 2`, `captured_closure_push [1 2]`, `nested_element_push [1 2]`,
+# `every_mutating_native [9 2 3 4] map[c:3] [2 3] [1 2 1] 2`, `spawn_arg_written [1 9]`,
+# `nested_struct_method 2`, `executor_job_capture [1 2]`, `nested_nursery_inner_write [1 2]`).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+import std.concurrency
+
+fn d4_push2(xs: List[int]):
+    xs.push(2)
+
+fn d4_invoke(g: fn() -> None):
+    g()
+
+test fn captured_scalar_write_inside_spawn_lands():
+    n := 1
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            fn d4_set_n():
+                n = 5
+            write_n := d4_set_n
+            res := recover:
+                write_n()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert n == 5
+
+test fn captured_list_push_inside_spawn_lands():
+    xs := [1]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_xs := d4_push2
+            res := recover:
+                write_xs(xs)
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [1, 2]
+
+struct Counter:
+    n: int
+
+    fn bump(self):
+        self.n = self.n + 1
+
+fn d4_bump(c: Counter):
+    c.bump()
+
+test fn struct_method_write_on_a_spawned_struct_lands():
+    c := Counter(1)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_c := d4_bump
+            res := recover:
+                write_c(c)
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert c.n == 2
+
+r3_n := 1
+
+fn r3_bump():
+    r3_n = 5
+
+test fn module_global_slot_store_in_a_task_lands():
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_r3 := r3_bump
+            res := recover:
+                write_r3()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert r3_n == 5, "the task's write is lost: {r3_n}"
+
+r4_xs := [1]
+
+fn r4_bump():
+    r4_xs.push(2)
+
+test fn module_global_list_push_in_a_task_lands():
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_r4 := r4_bump
+            res := recover:
+                write_r4()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert r4_xs == [1, 2], "the task's push is lost: {r4_xs}"
+
+r1_g := 1
+
+fn d4_set_r1_g():
+    r1_g = 5
+
+test fn a_top_level_binding_written_in_spawn_lands():
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_r1 := d4_set_r1_g
+            res := recover:
+                write_r1()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert r1_g == 5, "the task's write is lost: {r1_g}"
+
+test fn a_captured_closure_that_pushes_lands():
+    xs := [1]
+    f := fn(): xs.push(2)
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            res := recover:
+                d4_invoke(f)
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [1, 2]
+
+gl5 := [[1]]
+
+# M3.2: a channel moves the closure itself, so its push lands on the global's list (Go
+# `rewrites.go`, M3.2 report: `channel capture alias: 2 2`).
+test fn a_channel_sent_closure_pushing_a_captured_alias_lands():
+    c := Channel[fn() -> str](1)
+    done := Channel[str](1)
+    inner := gl5[0]
+    fn work() -> str:
+        res := recover:
+            inner.push(2)
+        match res:
+            ?_: return "no-fault"
+            !e: return e.message()
+    parallel:
+        spawn:
+            f := c.recv()
+            done.send(f())
+        c.send(work)
+    got := done.recv()
+    assert got == "no-fault", got
+    assert gl5[0] == [1, 2]
+
+test fn a_nested_element_push_lands():
+    xs := [[1]]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_element := d4_push2
+            res := recover:
+                write_element(xs[0])
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [[1, 2]]
+
+fn idx_set(xs: List[int]):
+    xs[0] = 9
+
+fn map_idx_set(m: Map[str, int]):
+    m["a"] = 2
+
+fn bytes_idx_set(b: bytearray):
+    b[0] = 1
+
+fn counter_field_set(c: Counter):
+    c.n = 2
+
+test fn every_mutating_native_lands_on_the_parents_value():
+    xs := [1, 2, 3]
+    m := {"a": 1}
+    s := Set([1, 2])
+    b := bytearray([1, 2])
+    c2 := Counter(1)
+    parallel:
+        spawn:
+            xs.push(9)
+            _ := xs.pop()
+            xs.reverse()
+            xs.sort()
+            xs.sort_by(fn(a, b): a - b)
+            xs.sort_by_key(fn(a): a)
+            xs.extend([4])
+            xs.insert(0, 9)
+            _ := xs.remove(0)
+            idx_set(xs)
+            map_idx_set(m)
+            _ := m.remove("a")
+            m.update({"c": 3})
+            s.insert(3)
+            _ := s.remove(1)
+            bytes_idx_set(b)
+            b.push(1)
+            _ := b.pop()
+            b.extend([1])
+            counter_field_set(c2)
+    assert xs == [9, 2, 3, 4]
+    assert m == {"c": 3}
+    assert s == Set([2, 3])
+    assert b == bytearray([1, 2, 1])
+    assert c2.n == 2
+
+fn push_arg(ys: List[int], r: Channel[str]):
+    res := recover:
+        ys.push(9)
+    match res:
+        ?_: r.send("no-fault")
+        !e: r.send(e.message())
+
+test fn a_spawn_arg_written_by_the_callee_lands():
+    xs := [1]
+    r := Channel[str](1)
+    parallel:
+        spawn push_arg(xs, r)
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [1, 9]
+
+struct Holder:
+    c: Counter
+
+fn d4_bump_holder(h: Holder):
+    h.c.bump()
+
+test fn a_nested_struct_method_write_lands():
+    h := Holder(Counter(1))
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_holder := d4_bump_holder
+            res := recover:
+                write_holder(h)
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert h.c.n == 2
+
+fn executor_job(xs: List[int], r: Channel[str]):
+    res := recover:
+        xs.push(2)
+    match res:
+        ?_: r.send("no-fault")
+        !e: r.send(e.message())
+
+test fn an_executor_job_writing_a_capture_lands():
+    xs := [1]
+    r := Channel[str](1)
+    ex := concurrency.Executor()
+    _ := ex.submit(fn(): executor_job(xs, r))
+    ex.shutdown()
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [1, 2]
+
+test fn a_nested_nursery_inner_task_write_to_a_parent_task_object_lands():
+    r := Channel[str](2)
+    parallel:
+        spawn:
+            ys := [1]
+            parallel:
+                spawn:
+                    write_ys := d4_push2
+                    res := recover:
+                        write_ys(ys)
+                    match res:
+                        ?_: r.send("no-fault")
+                        !e: r.send(e.message())
+            r.send("{ys}")
+    got := r.recv()
+    assert got == "no-fault", got
+    assert r.recv() == "[1, 2]"
+
+r_hl := [Channel[int](1)]
+
+fn r_hl_bump():
+    r_hl.push(Channel[int](1))
+
+test fn a_handle_holding_global_list_push_in_a_task_lands():
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_hl := r_hl_bump
+            res := recover:
+                write_hl()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert r_hl.len() == 2, "the task's push is lost: {r_hl.len()}"
+
+struct HandleBox:
+    ch: Channel[int]
+    n: int
+
+r_hs := HandleBox(Channel[int](1), 1)
+
+fn r_hs_bump():
+    r_hs.n = 2
+
+test fn a_handle_holding_global_struct_field_write_in_a_task_lands():
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_hs := r_hs_bump
+            res := recover:
+                write_hs()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert r_hs.n == 2, "the task's write is lost: {r_hs.n}"
+
+# A tuple (f, xs), f capturing xs, sent over a Channel: M3.2 moves the tuple itself, so both
+# f()'s push and the direct write to the tuple's own xs land on the one list (Go `tuple.go`, M3.2
+# report: `f_first 3`). The mirror order (xs, f) is in crossing_no_fault_test.chz.
+test fn a_closure_visited_first_in_one_channel_send_shares_the_capture():
+    xs := [1]
+    f := fn() -> None: xs.push(2)
+    ch := Channel[(fn() -> None, List[int])](1)
+    ch.send((f, xs))
+    r1 := Channel[str](1)
+    r2 := Channel[str](1)
+    parallel:
+        spawn:
+            p := ch.recv()
+            res1 := recover:
+                p.0()
+            match res1:
+                ?_: r1.send("no-fault")
+                !e: r1.send(e.message())
+            res2 := recover:
+                p.1.push(3)
+            match res2:
+                ?_: r2.send("no-fault")
+                !e: r2.send(e.message())
+    got1 := r1.recv()
+    got2 := r2.recv()
+    assert got1 == "no-fault", got1
+    assert got2 == "no-fault", got2
+    assert xs == [1, 2, 3]

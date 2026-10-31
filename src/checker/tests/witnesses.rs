@@ -245,8 +245,8 @@ fn witness_unreachable_names_the_declarer_of_the_type_param() {
 
 /// M24 Task 4 — the `$w:T` binding REACHES a nested body: `with_witness_captures` appends it to the
 /// capture entries of every closure, nested `fn`, `spawn:` block and `defer:` block, so `T.static()`
-/// inside one lowers to the same `CallStaticDyn`. The witness is a `str`, so it crosses BY VALUE —
-/// an escaping closure and the `spawn:` airlock both stay correct. The RUNNING half (that the value
+/// inside one lowers to the same `CallStaticDyn`. The witness is an immutable `str`, so
+/// an escaping closure and a `spawn:` block both stay correct. The RUNNING half (that the value
 /// captured is the right type) is `tests/chz/spec/static_witness_test.chz`.
 #[test]
 fn witness_static_call_inside_a_nested_body_ok() {
@@ -255,7 +255,7 @@ fn witness_static_call_inside_a_nested_body_ok() {
     entry_ok(&format!(
         "{head}fn build[T: Default](x: T) -> fn() -> T:\n    return fn(): T.default()\nfn main():\n    print(build(Counter(1))().n)\nmain()\n"
     ));
-    // a `spawn:` block (behind the airlock — a `str` deep-copies across it)
+    // a `spawn:` block (the task shares the parent's `str`)
     entry_ok(&format!(
         "{head}fn go[T: Default](x: T) -> int:\n    parallel:\n        spawn:\n            y := T.default()\n    return 1\nfn main():\n    print(go(Counter(1)))\nmain()\n"
     ));

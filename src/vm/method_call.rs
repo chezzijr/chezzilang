@@ -1,7 +1,6 @@
 //! VM: arity checks, native-bodied methods, operator hooks, `do_method_call`, static calls.
 //! Split out of `src/vm/call.rs`. `super::*` is the parent module.
 
-use super::call::is_mutating_native;
 use super::*;
 use crate::base::hooks::Hook;
 
@@ -83,7 +82,7 @@ impl Vm {
             return Ok(false);
         };
         self.check_proto_arity(proto, argc + 1, span)?;
-        let home = self.module_objs[prog.native_home[key]];
+        let home = self.module_obj(prog.native_home[key]);
         if self.program.protos[proto].is_generator {
             let mut gen_args = Vec::with_capacity(argc + 1);
             gen_args.push(recv);
@@ -169,12 +168,12 @@ impl Vm {
             Obj::Struct { tid, .. } => {
                 let def = self.program.structs.get(self.struct_name_of_tid(*tid))?;
                 let proto = *def.methods.get(hook.method())?;
-                Some((proto, self.module_objs[def.module_idx]))
+                Some((proto, self.module_obj(def.module_idx)))
             }
             Obj::Enum { variant_id, .. } => {
                 let key = self.enum_names(*variant_id).0;
                 let proto = *self.program.enum_methods.get(key)?.get(hook.method())?;
-                Some((proto, self.module_objs[self.enum_home_module(key)]))
+                Some((proto, self.module_obj(self.enum_home_module(key))))
             }
             Obj::Str(_)
             | Obj::Bytes(_)
@@ -375,10 +374,6 @@ impl Vm {
                 span,
             ));
         };
-        // D4 layer C (TICKET-169): a mutating native call on an airlock copy is a lost write.
-        if self.heap.is_copied(h) && is_mutating_native(self.heap.get(h), method) {
-            return Err(self.copied_write_err(None, span));
-        }
         // M19 Phase 6 / N-way poly — method-call inline-cache fast path (struct methods only). Scan
         // the site's ways for a way whose cached `tid` matches the receiver layout: a hit collapses the
         // `program.structs` clone + name-keyed `def.methods` probe to a short int-compare scan AND
@@ -405,7 +400,7 @@ impl Vm {
                 if let Some(cell) = hit {
                     let proto = cell.proto;
                     self.check_proto_arity(proto, argc + 1, span)?;
-                    let home = self.module_objs[cell.module_idx as usize];
+                    let home = self.module_obj(cell.module_idx as usize);
                     // Experimental generators — a generator method allocates rather than running (else its
                     // `Op::Yield` would poison the host run with no `generator_next` to drive it).
                     if self.program.protos[proto].is_generator {
@@ -464,19 +459,19 @@ impl Vm {
             match method {
                 "iter" => self.push(recv), // idempotent: iter() on a cursor returns self
                 "next" => {
-                    let Obj::Iter { items, pos } = self.heap.get_mut(h) else {
+                    let Obj::Iter { items, pos } = self.heap.write(h).get(h) else {
                         unreachable!()
                     };
-                    let item = if *pos < items.len() {
-                        let item = items[*pos];
-                        *pos += 1;
-                        Some(item)
-                    } else {
-                        None
-                    };
+                    // M3.0a — one read answers the bound and the element: two threads can step
+                    // one shared cursor (a racy step can repeat or skip an item, as in Go).
+                    let at = pos.get();
+                    let item = items.try_get(at);
+                    if item.is_some() {
+                        pos.set(at + 1);
+                    }
                     let result = match item {
-                        Some(v) => self.alloc_enum("Option", "Some", vec![v]),
-                        None => self.alloc_enum("Option", "None", Vec::new()),
+                        Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                        None => self.alloc_enum("Option", "None", &[]),
                     };
                     self.push(result);
                 }
@@ -614,14 +609,17 @@ impl Vm {
         if method == "iter" && args.is_empty() {
             // Both readers may alloc (str per-char); root the receiver across the call.
             self.push(recv);
-            let items = if matches!(self.heap.get(h), Obj::Channel(_)) {
-                Some(self.drain_iterable(recv, span)?)
+            let items: Option<RVec<Value>> = if matches!(self.heap.get(h), Obj::Channel(_)) {
+                Some(self.drain_iterable(recv, span)?.into())
             } else {
                 self.builtin_items(h)
             };
             self.pop(); // unroot receiver
             if let Some(items) = items {
-                let cursor = self.heap.alloc(Obj::Iter { items, pos: 0 });
+                let cursor = self.heap.alloc(Obj::Iter {
+                    items,
+                    pos: RCell::new(0),
+                });
                 self.push(Value::obj(cursor));
                 return Ok(());
             }
@@ -631,7 +629,7 @@ impl Vm {
         //   `str`/`list`/`map`/`set` → `core_method` (M6),
         //   `bytes`                  → `bytes_method` (immutable: only `decode() -> str`),
         //   `bytearray`              → `bytearray_method` (`len`/`push`/`pop`/`extend`/`decode`;
-        //                              separate from `core_method`, same in-place `get_mut` discipline).
+        //                              separate from `core_method`, same in-place `write` discipline).
         enum Container {
             Core,
             Bytes,
@@ -679,34 +677,34 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
-        self.ensure_module_faulted(h); // D1: `module.fn(...)` on a not-yet-faulted worker module
-        match self.heap.get(h).clone() {
-            // `module.fn(args)` — plain call on the looked-up member, no `self`.
-            Obj::Module(m) => {
-                let idx = self.slot_index(h, method).ok_or_else(|| {
-                    self.err(
-                        format!("module '{}' has no member '{method}'", m.name),
-                        span,
-                    )
-                })?;
-                let member = self.read_slot(h, idx, span)?;
-                // W7-8 — a module member can now be a BODIED Chezzi fn (`std.fs`'s `PathLike`
-                // wrappers), not only an `Obj::Native`. `do_call` FLATTENS such a callee (installs the
-                // frame for the *running* `run_until` to execute), which is only correct on the real
-                // dispatch-loop path. A re-entrant caller passes `NO_IC` (`defer fs.remove_file(p)`
-                // runs during frame teardown, with no loop to hand the frame to) — it must use the
-                // synchronous `invoke_value`, exactly like the struct/enum arms below. Before this the
-                // arm was unconditional and safe only because every module member was a native.
-                if ic != NO_IC {
-                    self.stack.push(member);
-                    self.stack.extend(args);
-                    self.do_call(argc, span)
-                } else {
-                    let v = self.invoke_value(member, args, span)?;
-                    self.push(v);
-                    Ok(())
-                }
+        // `module.fn(args)` — plain call on the looked-up member, no `self`. Read in place: every
+        // task of the run shares the module (M3.1), so a clone would copy its slots per call.
+        if matches!(self.heap.get(h), Obj::Module(_)) {
+            let idx = self.slot_index(h, method).ok_or_else(|| {
+                self.err(
+                    format!("module '{}' has no member '{method}'", self.module_name(h)),
+                    span,
+                )
+            })?;
+            let member = self.read_slot(h, idx, span)?;
+            // W7-8 — a module member can now be a BODIED Chezzi fn (`std.fs`'s `PathLike`
+            // wrappers), not only an `Obj::Native`. `do_call` FLATTENS such a callee (installs the
+            // frame for the *running* `run_until` to execute), which is only correct on the real
+            // dispatch-loop path. A re-entrant caller passes `NO_IC` (`defer fs.remove_file(p)`
+            // runs during frame teardown, with no loop to hand the frame to) — it must use the
+            // synchronous `invoke_value`, exactly like the struct/enum arms below. Before this the
+            // arm was unconditional and safe only because every module member was a native.
+            if ic != NO_IC {
+                self.stack.push(member);
+                self.stack.extend(args);
+                return self.do_call(argc, span);
             }
+            let v = self.invoke_value(member, args, span)?;
+            self.push(v);
+            return Ok(());
+        }
+        match self.heap.get(h).clone() {
+            Obj::Module(_) => unreachable!("a module receiver returned above"),
             Obj::Struct { tid, fields, .. } => {
                 // Resolve the type IDENTITY KEY from the instance's dense `tid` (O(1) index) — the
                 // instance no longer carries a per-instance `name`. Warm method-dispatch path.
@@ -724,7 +722,7 @@ impl Vm {
                 let resolved = def.methods.get(method).copied();
                 let def_module_idx = def.module_idx;
                 if let Some(proto) = resolved {
-                    let home = self.module_objs[def_module_idx];
+                    let home = self.module_obj(def_module_idx);
                     self.check_proto_arity(proto, argc + 1, span)?;
                     // Experimental generators — a generator method allocates rather than running (else
                     // its `Op::Yield` would poison the host run). Covers both the IC-flatten and the
@@ -785,7 +783,7 @@ impl Vm {
                     .structs
                     .get(name)
                     .and_then(|d| d.fields.iter().position(|f| f == method));
-                if let Some(fval) = fidx.and_then(|i| fields.get(i).copied()) {
+                if let Some(fval) = fidx.and_then(|i| fields.get(i)) {
                     let v = self.invoke_value(fval, args, span)?;
                     if self.paused() {
                         return Ok(()); // B1/D3: the function-field call parked on `recv` or yielded.
@@ -835,7 +833,7 @@ impl Vm {
                 if let Some(proto) = resolved {
                     // An enum method's home module is the enum's declaring module (recorded in
                     // `enum_home`), so its body resolves top-level names against the right globals.
-                    let home = self.module_objs[self.enum_home_module(&enum_key)];
+                    let home = self.module_obj(self.enum_home_module(&enum_key));
                     self.check_proto_arity(proto, argc + 1, span)?;
                     if self.program.protos[proto].is_generator {
                         let mut gen_args = Vec::with_capacity(argc + 1);
@@ -935,17 +933,20 @@ impl Vm {
             .map(|&p| (p, self.enum_home_module(type_key)))
     }
 
-    /// The one fn object for `key` in this heap (TICKET-215), and the only allocator of `Obj::Func`,
-    /// `Obj::Native`, `Obj::Cffi` and `Obj::Builtin`: a fn read twice, in two modules, or after a
-    /// crossing is one value. A proto is keyed alone: one heap has one module view, so a user
-    /// proto's home is fixed, and a synthesized proto's home is fixed too (it reads no global, or,
-    /// for `json.decode[T]`, is homed in std.json by `Op::MakeFuncIn`, TICKET-226).
+    /// The one fn object for `key` in this run (TICKET-215, M3.1), and the only allocator of
+    /// `Obj::Func`, `Obj::Native`, `Obj::Cffi` and `Obj::Builtin`: a fn read twice, in two modules,
+    /// in two tasks, or after a crossing is one value. A proto is keyed alone: a run has one module
+    /// view, so a user proto's home is fixed, and a synthesized proto's home is fixed too (it reads
+    /// no global, or, for `json.decode[T]`, is homed in std.json by `Op::MakeFuncIn`, TICKET-226).
+    /// The miss allocates under the table lock, so two tasks never make two objects for one key;
+    /// `Heap::alloc` never collects, so no safepoint is reached while the lock is held.
     pub(super) fn fn_value(&mut self, key: FnKey, make: impl FnOnce() -> Obj) -> Value {
-        if let Some(&h) = self.fn_values.get(&key) {
+        let mut table = self.fn_values.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&h) = table.get(&key) {
             return Value::obj(h);
         }
         let h = self.heap.alloc(make());
-        self.fn_values.insert(key, h);
+        table.insert(key, h);
         Value::obj(h)
     }
 
@@ -978,7 +979,7 @@ impl Vm {
         };
         // A static method has NO receiver, so its argument count is `argc` exactly (no `+ 1`).
         self.check_proto_arity(proto, argc, span)?;
-        let home = self.module_objs[home_idx];
+        let home = self.module_obj(home_idx);
         if self.program.protos[proto].is_generator {
             let at = self.stack.len() - argc;
             let gen_args: Vec<Value> = self.stack.split_off(at);

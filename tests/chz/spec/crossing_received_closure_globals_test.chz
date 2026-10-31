@@ -1,0 +1,123 @@
+# TICKET-137: a closure received from another task reads the run's module globals. M3.1 (Go
+# model): every task reads and writes the run's one copy of each module global, so the sending
+# task's `g.push(2)`/`w.push(2)` below lands, the received closure reads it, and the receiver's
+# alias is the same object. Goldens: the equivalent Go program (go1.27.0); the running generator
+# row follows CPython (`ValueError: generator already executing`).
+import Iterator from std.iter
+import std.concurrency
+import std.time
+
+g: List[int] = [1]
+
+fn d4_push2(xs: List[int]):
+    xs.push(2)
+
+fn alias_case(fr: Channel[str]) -> str:
+    a := g
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn:
+            write_g := d4_push2
+            res := recover:
+                write_g(g)
+            match res:
+                ?_: fr.send("no-fault")
+                !e: fr.send(e.message())
+            c.send(fn() -> str: "{g}")
+    f := c.recv()
+    before := "{f()} {a}"
+    a.push(3)
+    return "{before} {f()} {a}"
+
+test fn received_closure_reads_the_live_global_and_keeps_alias():
+    fr := Channel[str](1)
+    got := alias_case(fr)
+    fault := fr.recv()
+    assert fault == "no-fault", fault
+    assert got == "[1, 2] [1, 2] [1, 2, 3] [1, 2, 3]", "got {got}"
+
+fn nums() -> Iterator[int]:
+    i := 0
+    while true:
+        yield i
+        i += 1
+
+g1 := nums()
+g2 := g1
+
+test fn aliased_generator_globals_do_not_become_nil_in_a_task():
+    r := recover:
+        parallel:
+            spawn:
+                x := g1.next() ?? -1
+                y := g2.next() ?? -1
+                print("{x} {y}")
+    msg := "{r}"
+    assert not msg.contains("type None"), "got {msg}"
+
+w: List[int] = [1]
+
+fn w_case(fr: Channel[str]) -> str:
+    c := Channel[fn() -> str](1)
+    parallel:
+        spawn:
+            write_w := d4_push2
+            res := recover:
+                write_w(w)
+            match res:
+                ?_: fr.send("no-fault")
+                !e: fr.send(e.message())
+            c.send(fn() -> str: "{w}")
+    f := c.recv()
+    return "{f()} {w}"
+
+test fn received_closure_reads_the_live_in_place_write():
+    fr := Channel[str](1)
+    got := w_case(fr)
+    fault := fr.recv()
+    assert fault == "no-fault", fault
+    assert got == "[1, 2] [1, 2]", "got {got}"
+
+fn rnums() -> Iterator[int]:
+    yield 1
+    yield rhelper()
+    yield 3
+
+rg := rnums()
+
+fn rhelper() -> int:
+    c := Channel[int](1)
+    parallel:
+        spawn:
+            c.send(rg.next() ?? -7)
+    return c.recv()
+
+# The task drives the run's one `rg` while the parent is inside it. CPython:
+# `ValueError('generator already executing')`.
+test fn a_running_module_generator_faults_clearly_in_a_task():
+    r := recover:
+        for v in rg:
+            pass
+    msg := "{r}"
+    assert msg.contains("generator already running"), "got {msg}"
+    assert not msg.contains("type None"), "got {msg}"
+
+struct DeepL:
+    kids: List[DeepL]
+
+fn build_deep(d: int) -> DeepL:
+    n := DeepL([])
+    for _ in 0..d:
+        n = DeepL([n])
+    return n
+
+deep_glob := build_deep(2000)
+
+test fn deep_module_global_nursery_opens_stay_linear():
+    t0 := time.monotonic()
+    for i in 0..6:
+        parallel:
+            spawn:
+                pass
+    d := time.monotonic() - t0
+    assert d < 3.0, "6 nursery opens over a depth-2000 module global took {d}s, expected < 3s"

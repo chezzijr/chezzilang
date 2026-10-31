@@ -168,33 +168,6 @@ pub enum SumSeed {
 }
 pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 
-pub use crate::base::crossing::{Fresh, SlotFresh};
-
-/// D4 (TICKET-189, TICKET-240) — the shape each operand of one `spawn` call crosses with: which
-/// objects of its value graph no parent binding can reach ([`Fresh`]). `args` is in bound-slot
-/// order, so default fills and packs sit at their compiled position.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CallCrossing {
-    pub recv: Option<Fresh>,
-    pub args: Vec<Fresh>,
-}
-
-/// Every spawn call's [`CallCrossing`], keyed `(graph module index, call NodeId)` like
-/// [`CallPlanTable`]. The checker decides it once (`Checker::fresh_shape`); the compiler only
-/// stores it and the runtime only walks it. A missing key means every operand is `Marked`.
-pub type CrossingTable = HashMap<(usize, u32), CallCrossing>;
-
-/// TICKET-190 — the generator frame verdicts the compiler encodes. `calls` holds each call that
-/// creates a generator from a statically named fn, keyed like [`CrossingTable`]: its param
-/// shapes become the generator's creation stamp. `frames` holds, per generator decl keyed
-/// `(graph module index, decl name span)`, the verdict of each private frame slot name: `Root`
-/// or `All` (TICKET-240). A name it does not hold is `Marked`.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct GenCrossings {
-    pub calls: CrossingTable,
-    pub frames: HashMap<(usize, Span), HashMap<String, SlotFresh>>,
-}
-
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
 /// function VALUE). They ride PARALLEL to a `Ty::Func`'s `params`, but participate in NO type
 /// identity: two function types differing only in labels are the SAME type (mutually assignable,
@@ -317,7 +290,7 @@ pub enum Ty {
     /// `bytearray` — the MUTABLE sibling of `bytes` (Python `bytearray` / Go mutable `[]byte` model).
     /// Constructor-only (`bytearray(...)`, no literal). Indexes/iterates to `int` (0–255), supports
     /// `ba[i] = x` (`IndexSet`), slices to `bytearray`. NOT `Hashable` (mutable ⇒ not a map/set key,
-    /// like `list`). Sendable across the `--parallel` airlock by deep copy (like `list`).
+    /// like `list`). A task gets it by handle (like `list`, M3.4).
     ByteArray,
     Nil,
     List(Box<Ty>),
@@ -332,8 +305,7 @@ pub enum Ty {
         ret: Box<Ty>,
         /// Surface-only parameter labels (parallel to `params`); equality-neutral (see [`FnLabels`]).
         /// Built with the fn's/closure's param names (or an annotation's optional labels) so a value
-        /// call can resolve `g(name="Bob")` to a positional slot. IGNORED by `compatible`/`unify`/
-        /// `sendable`. Display marks an omittable parameter (`int = …`) using `min_or`.
+        /// call can resolve `g(name="Bob")` to a positional slot. IGNORED by `compatible`/`unify`. Display marks an omittable parameter (`int = …`) using `min_or`.
         labels: FnLabels,
         /// Whether the last param is a variadic pack (`Pack`: its slot is `List[T]`) or a C `...`
         /// follows it (`C`). PART of the type: `compatible`/`unify` compare it.
@@ -354,43 +326,43 @@ pub enum Ty {
     /// `E` to the `Error` protocol existential (`Protocol("Error")`); `T!E` sets it explicitly.
     Result(Box<Ty>, Box<Ty>),
     Option(Box<Ty>),
-    /// `Channel[T]` — a shared mailbox for cross-task messages (C2). Element type `T` must be
-    /// sendable. The handle itself is sendable, so reply channels work.
+    /// `Channel[T]` — a shared mailbox for cross-task messages (C2). A task gets the handle itself,
+    /// so reply channels work.
     Channel(Box<Ty>),
     /// `Shared[T]` — the cross-task mutable box (C3): one owner holds the value, writes are
-    /// serialised. The handle is sendable (it's what `spawn` copies in — every task reaches the
-    /// same box); the value isn't copied. Constructed value-first as `Shared(v)` (`T` = `typeof v`).
+    /// serialised. Every task that holds the handle reaches the same box;
+    /// the value isn't copied. Constructed value-first as `Shared(v)` (`T` = `typeof v`).
     Shared(Box<Ty>),
-    /// `Atomic[T]` — the cross-task atomic box. Like `Shared[T]` (one box, many tasks; the handle is
-    /// sendable, the value is copied in/out under a lock), but it presents atomic-operation methods
+    /// `Atomic[T]` — the cross-task atomic box. Like `Shared[T]` (one box, many tasks; the box holds
+    /// the value by handle, M3.3), but it presents atomic-operation methods
     /// (`load`/`store`/`exchange`/`cas`, plus `add`/`sub` on numeric `T`) instead of `Shared`'s
     /// `get`/`set`/`update`. Constructed value-first as `Atomic(v)` (`T` = `typeof v`).
     Atomic(Box<Ty>),
     /// `AtomicInt` — the monomorphic, lock-free int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
     /// Go `atomic.Int64` style). UNLIKE `Atomic[T]` it is NOT generic — statically int, nothing to
-    /// widen — so it is always a lock-free `AtomicI64`. Sendable handle (one box, many tasks). Methods:
+    /// widen — so it is always a lock-free `AtomicI64`. One box, many tasks. Methods:
     /// `load`/`store`/`exchange`/`cas` plus `add`/`sub` (always valid — int is always numeric).
     AtomicInt,
-    /// `RwShared[T]` — the cross-task read-write box. Like `Shared[T]` (one box, many tasks; the
-    /// handle is sendable, the value is copied in/out under a lock), but the lock is a `RwLock`:
+    /// `RwShared[T]` — the cross-task read-write box. Like `Shared[T]` (one box, many tasks; the box
+    /// holds the value by handle, M3.3), but the lock is a read-write guard:
     /// `read(fn(T) -> R) -> R` acquires a SHARED read guard (many concurrent readers) and `write`/
     /// `set` acquire the EXCLUSIVE write guard. Reach for it over `Shared` when reads dominate.
     /// Constructed value-first as `RwShared(v)` (`T` = `typeof v`).
     RwShared(Box<Ty>),
     /// `Executor` — the C5 escape hatch: an explicitly-owned work queue for detached tasks that
-    /// outlive a `parallel:` scope. Non-generic; the handle is sendable (like `Channel`/`Shared`).
+    /// outlive a `parallel:` scope. Non-generic; any task can hold the handle (like `Channel`/`Shared`).
     Executor,
     /// `Socket` — a connected non-blocking TCP stream (D6), produced by `std.net.connect` /
-    /// `Listener.accept`. Non-generic; the handle is sendable (a `spawn`ed fiber can service it).
+    /// `Listener.accept`. Non-generic; a `spawn`ed fiber can service it.
     Socket,
-    /// `Listener` — a non-blocking accepting TCP socket (D6), produced by `std.net.listen`. Non-generic
-    /// and sendable, like `Socket`.
+    /// `Listener` — a non-blocking accepting TCP socket (D6), produced by `std.net.listen`. Non-generic,
+    /// like `Socket`.
     Listener,
     /// `Writer` — a write-only file/stream handle (R2), produced by `std.io.create`/`append`/`stdout`/
-    /// `stderr`/`buffered`. Non-generic; the handle is sendable (a `spawn`ed fiber can write to it).
+    /// `stderr`/`buffered`. Non-generic; a `spawn`ed fiber can write to it.
     Writer,
     /// `Reader` — a read-only file handle (R2b), the input twin of `Writer`, produced by
-    /// `std.io.open`. Non-generic; the handle is sendable (a `spawn`ed fiber can read from it).
+    /// `std.io.open`. Non-generic; a `spawn`ed fiber can read from it.
     Reader,
     /// `ptr` — an opaque C-ABI pointer handle (a raw `void*`). A builtin marshalling primitive (peer
     /// of `int`/`float`/`bool`/`str`) usable in `extern "lib":` signatures. Fully opaque: no methods,

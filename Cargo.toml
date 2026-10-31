@@ -73,5 +73,10 @@ split-debuginfo = "unpacked"
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
+# The VM at opt-level 0 made the GC mark walk most of a debug test's time (M2.8: the native-hof
+# cell of tests/executor_task_grid.rs ran 2.7 s against its 2 s bound). `profile.test` inherits it.
+[profile.dev.package.chezzi-vm]
+opt-level = 1
+
 [lints]
 workspace = true

@@ -1,11 +1,11 @@
 # Chezzi — Concurrency & Parallelism (`spawn` / `parallel:`)
 
-Chezzi's concurrency is a **shared-nothing actor model** in the lineage of the Erlang/Elixir **BEAM**
-(shared-nothing tasks, per-task heap + GC, message passing) **plus** two borrowings — **Go's
-first-class channel** and **Rust's move-on-send**. The surface is the **goroutine feel** (`spawn`,
-cheap, no `async` colouring) wrapped in a **structured-concurrency nursery** (`parallel:`) so tasks
-can't leak. The design **never taxes the single-threaded fast path** (`Rc`, per-heap
-stop-the-world GC stays untouched).
+Chezzi's concurrency takes **Go's memory model**: every task of a run allocates in one heap, a task
+gets the parent's values by handle, and a **first-class channel** hands over the value itself. The
+surface is the **goroutine feel** (`spawn`, cheap, no `async` colouring) wrapped in a
+**structured-concurrency nursery** (`parallel:`) so tasks can't leak. A data race is the program's
+bug, as in Go, and the VM stays memory-safe under it ([§2](#data-races)). No container takes a lock
+per operation, so the single-threaded fast path pays no lock.
 
 The engine is a real OS-thread M:N work-stealing scheduler with reduction-counting preemption, a
 dirty/blocking pool, and an epoll/kqueue netpoller behind non-blocking `std.net`. Every function body
@@ -32,48 +32,99 @@ Chapters:
 
 ## 1. Status & lineage
 
-- **Model:** shared-nothing tasks. Each task owns its heap + GC; tasks share **nothing
-  mutable**, communicating only by **move/copy** through channels.
+- **Model:** one heap per run, collected with the world stopped. Tasks share values by handle (Go).
+  A write that another task reads needs an order: a join, a `Channel` or a box.
 - **Surface:** `spawn` (a statement, goroutine-feel) inside a nursery that joins all children at
   its end. No `async`/`await` colouring, no `WaitGroup`.
-- **Primitives:** `Channel[T]` (the sync primitive — a mailbox outside every heap) and `Shared[T]`
-  (the sanctioned cross-task mutable box — an owner serialises writes, Elixir's `Agent` trick).
+- **Primitives:** `Channel[T]` (the sync primitive: a queue that hands over each value by handle)
+  and `Shared[T]` (a box whose writes run under its guard, Go's `sync.Mutex` around one value).
 - **Staging:** the surface, type system and semantics shipped first on a sequential executor; the
   M:N OS-thread engine came later behind the same syntax. Tasks start at their `spawn` and
   interleave ([§4](#4-execution-semantics)).
 
 ---
 
-## 2. Why shared-nothing, and why not the Go memory model
+## 2. The memory model: one heap, Go's rules
 
-The key principle: **cost scales with shared mutable memory, not with the number of cores.** Forbid
-sharing — make tasks copy/move messages — and parallelism gets cheap, because no two threads ever
-touch the same object.
+Before the branch `exp/go-shared-heap`, each task had its own heap, and a value that crossed a task
+boundary was deep-copied ([ADR D4](../../design/adr-d4-airlock.md), now superseded). The branch
+replaced that model with Go's (M1 to M3, 2026-10). The old reason to reject Go was the cost of
+`Rc`→`Arc` on every value. That reason did not hold: a `Value` is one word with no reference count,
+so a shared heap needed atomic slots and a stop-the-world collector, not a new value model. The study
+and the plan: [`go-shared-heap.md`](../../design/go-shared-heap.md).
 
-| Tier | Model | Multicore? | `Rc`→`Arc`? | GC change? | Cost |
-|------|-------|-----------|-------------|-----------|------|
-| A | Cooperative fibers (1 thread) | ❌ | no | +scan suspended fiber stacks | cheap |
-| B | Worker processes (`std.process`) | ✅ | no | none | ~free, but heavy IPC |
-| C | **Shared-nothing threads** + channels | ✅ | no | none (per-thread heap+GC) | medium |
-| D | Shared-memory threads (Go/Java) | ✅ | **yes, everywhere** | concurrent collector | huge |
-
-**Chosen = A + C composed.** The **Go model (Tier D)** would mean `Rc`→`Arc` across every value
-(atomic refcount bumps ~10–30× a normal bump, taxing single-threaded code *forever*) plus a
-thread-safe concurrent GC. That permanently taxes the common case and hands users the entire
-data-race bug class. **Skipped.**
-
-### Memory picture — own heaps, channel between
+### Memory picture: one heap per run, channel between
 
 ```
- task 1: [own heap] ──send──┐
- task 2: [own heap] ──send──┼──►  main task [own heap]
- task 3: [own heap] ──send──┘        ┌──────────────────┐
-                                     │ results: [...]    │
-  each heap has its OWN GC           └──────────────────┘
-  (no handshake, no barrier)   values MOVE across the channel, never shared
+ task 1 ──send──┐
+ task 2 ──send──┼──►  main task          all tasks allocate in ONE heap per run
+ task 3 ──send──┘   ┌──────────────────┐
+                    │ results: [...]    │  the GC stops every thread that runs VM code
+                    └──────────────────┘  a channel hands over the value itself (M3.2)
 ```
 
-Heaps are share-nothing, but the **process** is one process: a task inherits the parent's `std.os.args`
+A run owns one heap. A collection stops every thread that runs VM code, marks every root (running
+threads, detached threads, parked fibers, `Shared` boxes), then sweeps. A thread that blocks (a
+channel wait, a sleep, a socket or file read, a subprocess wait, an `extern` C call) detaches first,
+as Go's `entersyscall` does, so a blocked thread never delays a stop. M3.2: a channel, an `Atomic`
+and a Task's outcome hold the value itself, so the tasks that pass it share the one object (Go).
+M3.4: a `spawn`'s arguments and receiver, a `spawn:` block's captures and an `Executor` job's
+closure pass by handle too, so a task shares the parent's values.
+
+Known limits:
+
+- A CPU-bound native fn or C loop that never reaches a safepoint delays a stop until it returns.
+- An `extern` call keeps its runner permit at `CHEZZI_THREADS=1`. This is older than the one-heap change.
+
+### Data races
+
+The shared heap (branch `exp/go-shared-heap`) takes Go's rule. A data race is the user's bug, and
+the heap stays memory-safe. Two threads that race on one list or one map can see:
+
+- a wrong value (an old one, or one from another entry),
+- a torn read of a multi-word entry (a map entry is three words; a `Value` and a map index slot
+  are one aligned word each, so they never tear),
+- a missed map hit,
+- a task fault: the op's own out-of-range error (`index 3 out of bounds (len 2)`), which
+  `recover:` catches, as Go's index panic is one `recover()` catches. A racy op reads one
+  snapshot of the buffer and checks its index against that snapshot's length, so it never
+  panics the VM; a probe whose entry another thread removed is a miss. Gate:
+  `racy_container_ops_never_panic` (a grid of every container read and write op against a
+  shrinking thread, 10,000 rounds, also under `CHEZZI_GC_STRESS=1`).
+
+A race never reads freed memory. A list, map or set buffer that grows, or that a sort or a remove
+replaces, retires; only the stop-the-world GC frees it, when no thread holds a pointer into it.
+Gate: `two_vms_race_on_one_list_and_map_without_uaf` (two threads, 10,000 ops each, also under
+`CHEZZI_GC_STRESS=1`).
+
+A race never sees an object before its contents (the publish rule). A `Value` slot (a list or
+map slot, a struct field, a cell, a module global) stores with Release and loads with Acquire, so
+a thread that reads a `GcRef` also sees the object it names, as Go's `publicationBarrier` after a
+malloc gives. A lock or a channel gives the same order. A byte or an int word stays Relaxed: no
+pointer comes from it, so a race on it gives a wrong value only.
+
+A race never sees a torn header (the mutation rule). An op that changes a live object writes
+through atomic slots (a struct field, a cell, a cursor position, a buffer slot) or under a lock
+(a module's name table), never through a `&mut` over the whole object, and never replaces the
+whole object. Only an object that a call built and has not published yet takes a `&mut`. Gate:
+`shared_object_mutation_grid` (one thread writes struct fields, a cursor, a cell and a module's
+names; the other reads them; 10,000 rounds, also under `CHEZZI_GC_STRESS=1`).
+
+Known limits:
+
+- A racy map probe can give a wrong or a missing hit.
+- A racy map upsert (`m[k] = v`, `m.insert(k, v)`, `m.merge(o)`, `m.update(o)`) can write over
+  another key's value or insert a duplicate key: two threads probe, then one moves the entries
+  before the other writes. The map stays memory-safe and gives no panic. Go's runtime reports
+  "concurrent map writes" and stops; Chezzi gives a wrong map.
+- Two threads that step one cursor can both get the same item or skip one.
+- A stop of the world waits for a native loop or C call (the limit above).
+- `CHEZZI_GC_STRESS=1` with two or more threads runs them one at a time: each thread asks for a
+  stop at each instruction and waits out the other thread. Stress hides races; the race test asks
+  for a stop from one thread only.
+- Miri and TSan cannot run on the development box, so no sanitizer checks the race test.
+
+The **process** is one process: a task inherits the parent's `std.os.args`
 and env, and **stdin is ONE source every task shares** (Go's `os.Stdin` / Python's `sys.stdin`, not
 entry-task-owned). Any task may `io.read_line()` / `io.input()`; a line goes to **exactly one** task
 (never duplicated, never dropped); **which** task gets it is nondeterministic — order it
@@ -81,97 +132,54 @@ yourself (entry task reads, fans out over a `Channel[str]`), exactly as with con
 means stdin is exhausted. A blocked read demotes its worker, so it pins no core worker; details in
 [`stdlib.md`](../stdlib/01-builtins.md) §`std.io`.
 
-### The race you can't write
+### Tasks share the parent's values (the Go rule)
+
+A spawned task holds the parent's values by handle, as a goroutine does (M3.1 for module globals,
+M3.4 for the rest). A captured local is one cell that the task and the parent share; a loop
+variable gets a cell per iteration (Go 1.22). A `spawn f(xs)` argument, a `spawn obj.m()` receiver
+and an `Executor.submit(f)` job's captures are the parent's objects, not copies:
 
 ```chezzi
-# Go — compiles, runs, WRONG: 1000 goroutines stomp one int → torn writes, data race
-# counter := 0; for i := 0; i < 1000; i++ { go func() { counter++ }() }
+xs: Map[int, int] = {}
+n := 0
+done := Channel[int](1)
+parallel:
+    spawn:
+        _ := done.recv()    # waits for fill's write: two writes to xs need an order
+        xs[1] = 1
+        n = 5
+    spawn fill(xs, done)    # fn fill(m, done): m[2] = 2, then done.send(1)
+print(xs.len(), n)          # 2 5
+```
 
-# Chezzi — the shared-mutation race is unrepresentable
+Go prints `2 5` for the same program (`go func() { <-done; xs[1] = 1; n = 5 }()`), and
+`go run -race` reports no race. The `done` channel orders the two writes to `xs`. The join orders
+the tasks' writes before the parent's read. Two tasks that write one value without a `Channel`, a
+join or a box (`Shared[T]`, `RwShared[T]`) between them race, and a race is the program's bug:
+
+```chezzi
 counter := 0
 parallel:
-    spawn: counter = counter + 1   # checker error: the task got its OWN isolated copy of `counter`
-                                    # at the spawn boundary. D4 rejects this provable lost write;
-                                    # layer C faults at runtime if static checking is bypassed.
+    for _i in 0..1000:
+        spawn:
+            counter = counter + 1   # a data race, as in Go: the result is undefined
 ```
 
-**Module globals isolate per task, and a task's write to its copy faults (D4).** A `spawn`ed task
-gets its own deep copy of every module global (and of every captured local). Mutating one inside a
-task never propagates out, and the write itself is a recoverable runtime fault:
+Share a counter through `Shared[T]` (`update` runs under the box's guard) or an `AtomicInt`.
+`tests/chz/spec/spawn_handle_test.chz` pins the rule (Go goldens in its header).
 
-```
-'<name>' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()
-```
 
-A closure or generator, wherever it was created, reads the module globals of the task that RUNS it,
-so a closure received over a `Channel` never sees the sender's global writes. To share, use
-`Shared`/`Channel` ([§7](07-sendability.md#7-sendability)). The decision record is
-[`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
+**A task reads the live global — at every depth.** There is no per-task view: a global first
+initialized *after* an earlier nursery is visible, a write by the root task between two spawns is
+visible to the second task, and a task's own write (in-place, `q.push(x)`, `m[k] = v`, `p.x = 1`, or
+by reassignment) is visible to the parent and to every other task once the two are ordered by a
+`Channel`, a join or a box. An `Executor` job reads the same globals. To share mutable state that
+two tasks write concurrently, use `Shared[T]` / `RwShared[T]` / `Atomic[T]`
+([03-shared.md](03-shared.md)) or a `Channel[T]`.
 
-**The checker rejects writes it can prove will be lost (D4 layer A).** The diagnostic is
-byte-identical to the runtime fault.
-
-- It rejects direct task writes to captured bindings or module globals, including compound/projected
-  writes and known mutating native or user methods.
-- It rejects a capture-writing closure executed by `spawn g()`, by a call inside `spawn:`, or by
-  `Executor.submit`.
-- Named function calls carry proven writes through parameters, captures and globals, including
-  transitive and recursive calls. A direct call inside `spawn:`, a direct `spawn f(args)`, or an
-  `Executor.submit` job reports the write at its task-side call, with the mutating operation in help.
-  `spawn f(args)` evaluates `args` in the parent.
-- Indirect function values, unresolved paths, generic/protocol receivers and `Channel.send` decline
-  to layer C (the runtime fault).
-- Reads, task-local copies, handle writes and parent-side writes stay valid.
-- Layer A reports a write only when every path through the function reaches it. A write under
-  `if`/`match`/a loop/a short-circuit right side, or after a possible `return`/`break`/`continue`/`?`,
-  is left to layer C.
-
-**A task's own values stay writable.** Every object a `spawn` operand's expression builds crosses
-unmarked, at every depth: a list, tuple, set or map literal, a comprehension, a struct or variant
-constructor, a `?x` or implicit carrier wrap, and a List/Map/Set/bytearray `.copy()` for its own
-level. So `spawn work([], out)` may push onto its list, also when the parameter is `List[int]?`, and
-`spawn work(S([[]]))` may push onto `s.xs[0]`, as in Go and Python. A named value, a field read and a
-call result inside the operand stay copies: `spawn f([xs])` faults on `a[0].push(1)`, and
-`spawn f(xs.copy())` faults on a child of `xs`. The same holds for a literal default fill
-(`acc: List[int] = []`), a variadic pack (its NAMED elements stay copies), and every spawn callee form:
-`f()`, `obj.m()`, `lib.f()`, `lib.K.f()` and a function value. Layer A maps each parameter through the
-checker's call plan, so a parameter the callee rebinds before writing is not a task copy, and a
-keyword-bound named argument that an `f()` or `lib.f()` callee writes (`spawn w(out=out, xs=xs)`) is a
-compile error.
-
-Two ceilings stay, each pinned by `tests/chz/spec/airlock_crossing_policy_grid_test.chz`:
-
-1. A provider default (any default that is not all-literal) is a call result and stays a copy, so a
-   write to it faults.
-2. Layer A declines method, static and value callees, so their write to a named argument compiles and
-   faults at run time in layer C.
-
-Full rules: [`syntax.md` §capture](../syntax/01-lexical-and-literals.md) and [`adr-d4-airlock.md`](../../design/adr-d4-airlock.md).
-
-**The copy is taken FRESH, per task, at its `spawn` — at every depth.** A task sees the values current
-when it was spawned (the Go rule: a goroutine reads whatever a package-level var holds when `go` runs).
-So a global first initialized *after* an earlier nursery is visible, a mutation by ordinary sequential
-code (the root task, outside any `spawn`) *between* two nurseries is visible to the second nursery's
-tasks, and two spawns straddling such a root-task global assignment see the old and the new value
-respectively. A spawned task's own attempt to mutate a global — in-place (`q.push(x)`, `m[k] = v`,
-`p.x = 1`) or by reassignment — faults (D4) before any nested nursery is reached. An `Executor` job has
-no nursery, so it sees the globals as of the instant it **starts**, which is its **`submit`**. Reading
-a global that is mutated between the `submit` and the `shutdown()` is racing a running job, not
-observing a defined state. The view is identical at every `--threads`.
-
-**Within one nursery** the same rule holds: a task's view is refreshed by a global *assignment*
-(`g = …`, `q = […]`) and by an in-place mutation alike. So if a `spawn` is followed by
-`q.push(x)` and then another `spawn` into the SAME nursery — with no assignment in between — the second
-task sees the post-`push` `q` too. Every task's view is a single coherent instant (never a mix of old
-and new values): its own `spawn` / `submit`. The runtime rebuilds the view only when something a
-global reaches was mutated since the last build, so a spawn storm that mutates nothing shares one
-snapshot. To **share** mutable cross-task state, use `Shared[T]` / `RwShared[T]` / `Atomic[T]`
-([03-shared.md](03-shared.md)) or a `Channel[T]` — those cross by shared handle, not by copy, so a
-task-side write IS visible to the parent.
-
-**The trade in one line:** Tier D lets you share → fast sends, but races are your problem. A+C
-forbids sharing → the race cannot be expressed. For a scripting language that is a *good*
-trade — the #1 concurrency bug class doesn't exist.
+**The trade:** a send, a spawn argument and a box store cost one word whatever the value's size,
+and a race is your bug, as in Go. Go finds a race with `go run -race`; Chezzi has no race detector
+(design phase 6 in [`go-shared-heap.md`](../../design/go-shared-heap.md#6-experiment-plan)).
 
 ---
 
@@ -201,11 +209,11 @@ fn main():
     ch := Channel[str]()
     label := "task"
     parallel:                          # nursery — joins all children at the dedent
-        spawn worker(1, label, ch)     # 1, label COPIED in; ch = shared mailbox handle
+        spawn worker(1, label, ch)     # the task gets 1, label and ch by handle
         spawn worker(2, label, ch)
     # reaching here ⇒ both workers finished. No WaitGroup, no leaks.
     for _ in 0..2:
-        print(ch.recv())               # workers' strings move into main's heap here
+        print(ch.recv())               # each recv hands over a worker's string
 
 main()
 ```
@@ -324,8 +332,8 @@ Two separate guarantees; do not conflate them:
 How a `parallel:` block runs (`chezzi run`):
 
 1. Executing `spawn X` **evaluates the call's callee + arguments eagerly, at the spawn point** (Go's
-   arg-evaluation timing), **deep-copies them across the airlock**
-   ([§7](07-sendability.md#7-sendability)), and **starts** the task on the innermost nursery. **The
+   arg-evaluation timing), hands them to the task by handle
+   ([§7](07-sendability.md#7-what-crosses-a-task-boundary), M3.4), and **starts** the task on the innermost nursery. **The
    parent then continues to the next statement immediately** — `spawn` does not block. A `parallel:`
    nursery entered **inside a spawned task** starts the same way, at every worker count: its tasks
    run on the existing workers without adding an OS thread, and the owner parks at its join,

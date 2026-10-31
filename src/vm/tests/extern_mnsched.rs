@@ -462,10 +462,7 @@ fn mnsched_park_requeues_when_message_already_waiting() {
     sched.seed(vec![mk_fiber(0)]);
     let f = take_run(&sched);
     // Simulate a send that landed in the gap (message queued, but this fiber wasn't parked yet).
-    core.q.lock().unwrap().push(
-        crate::vm::core::wire_summary(&WireValue::Int(7)),
-        WireValue::Int(7),
-    );
+    core.q.lock().unwrap().push(Value::int(7));
     sched.park(key, Arc::clone(&core), f);
     let c = sched.lock();
     assert_eq!(c.parked_n, 0, "must not park behind a waiting message");
@@ -529,7 +526,10 @@ fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_pa
         "fiber parks while the ancestor is not yet cancelled"
     );
     crate::vm::trip_cancel_flag(&ancestor);
-    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Run(..)));
+    assert!(matches!(
+        sched.take_runnable_unattached(0, 1, 0),
+        Take::Run(..)
+    ));
     assert_eq!(
         sched.lock().parked_n,
         0,
@@ -581,7 +581,10 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
     let b = take_run(&sched);
     sched.park(core_key(&c1), Arc::clone(&c1), a);
     sched.park(core_key(&c2), Arc::clone(&c2), b);
-    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop));
+    assert!(matches!(
+        sched.take_runnable_unattached(0, 1, 0),
+        Take::Stop
+    ));
     let slots = sched.take_slots();
     assert_eq!(slots.len(), 2);
     for s in slots {
@@ -603,12 +606,13 @@ fn mnsched_deadlock_when_all_parked_runq_empty() {
 fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
     // Scope 0's `JoinScope::cancel` IS this Arc (see `mnsched_park_requeues_when_cancel_tripped`).
     let cancel = Arc::new(AtomicBool::new(false));
-    let sched = MnSched::new(2, 4, Arc::clone(&cancel), dl_err(), 0);
+    let sched = MnSched::new(3, 4, Arc::clone(&cancel), dl_err(), 0);
     let c1 = empty_core();
     let c2 = empty_core();
-    sched.seed(vec![mk_fiber(0), mk_fiber(1)]);
+    sched.seed(vec![mk_fiber(0), mk_fiber(1), mk_fiber(2)]);
     let a = take_run(&sched);
     let b = take_run(&sched);
+    let f = take_run(&sched);
     // Cancel still false → these really park (the park-gap re-check does not requeue them).
     sched.park(core_key(&c1), Arc::clone(&c1), a);
     sched.park(core_key(&c2), Arc::clone(&c2), b);
@@ -616,8 +620,23 @@ fn mnsched_cancelled_scope_with_parked_fibers_is_not_deadlock() {
         let c = sched.lock();
         assert_eq!(c.parked_n, 2, "both fibers parked (quiesced, pre-cancel)");
     }
-    // A sibling faults: `MnSched::finish_with` trips the scope cancel, then `cancel_drain` runs.
-    cancel.store(true, Ordering::Relaxed);
+    // A sibling faults: `finish_with` trips the scope cancel under the core lock with its slot,
+    // and the worker loop's `cancel_drain` runs after it.
+    sched.finish_with(
+        f.task_index,
+        0,
+        TaskOutcome::Fault {
+            err: dl_err(),
+            out: Vec::new(),
+            stderr: Vec::new(),
+            trace: Vec::new(),
+        },
+        Some(&cancel),
+    );
+    assert!(
+        cancel.load(Ordering::Relaxed),
+        "the fault tripped the scope cancel"
+    );
     let c = sched.lock();
     assert!(
         !sched.is_deadlocked(&c),
@@ -649,9 +668,9 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
         c.running -= 1;
         c.register_waiter(recv_waiter(&core, vec![]));
     }
-    // Sibling a faults: trips the scope cancel, then finishes. No fiber of the scope is parked.
-    cancel.store(true, Ordering::Relaxed);
-    sched.finish(
+    // Sibling a faults: `finish_with` trips the scope cancel with its slot. No fiber of the scope
+    // is parked.
+    sched.finish_with(
         a.task_index,
         0,
         TaskOutcome::Fault {
@@ -660,6 +679,11 @@ fn mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock() {
             stderr: Vec::new(),
             trace: Vec::new(),
         },
+        Some(&cancel),
+    );
+    assert!(
+        cancel.load(Ordering::Relaxed),
+        "the fault tripped the scope cancel"
     );
     let c = sched.lock();
     assert_eq!(c.parked_n, 0, "no fiber of the cancelled scope is parked");
@@ -698,10 +722,9 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
         c.running -= 1;
         c.register_waiter(recv_waiter(&core, vec![Arc::clone(&cancel)]))
     };
-    // Sibling a faults: trips the scope cancel, then finishes. No fiber of the scope is parked, so
-    // the parked-window veto is silent — only the demoted watch can save b.
-    cancel.store(true, Ordering::Relaxed);
-    sched.finish(
+    // Sibling a faults: `finish_with` trips the scope cancel with its slot. No fiber of the scope is
+    // parked, so the parked-window veto is silent — only the demoted watch can save b.
+    sched.finish_with(
         a.task_index,
         0,
         TaskOutcome::Fault {
@@ -710,6 +733,7 @@ fn mnsched_demoted_fiber_with_a_tripped_cancel_is_not_deadlock() {
             stderr: Vec::new(),
             trace: Vec::new(),
         },
+        Some(&cancel),
     );
     {
         let c = sched.lock();
@@ -755,8 +779,7 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
         c.running -= 1;
         c.register_waiter(recv_waiter(&demote_core, vec![]));
     }
-    cancel.store(true, Ordering::Relaxed);
-    sched.finish(
+    sched.finish_with(
         a.task_index,
         0,
         TaskOutcome::Fault {
@@ -765,6 +788,7 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
             stderr: Vec::new(),
             trace: Vec::new(),
         },
+        Some(&cancel),
     );
     let c = sched.lock();
     assert_eq!(c.parked_n, 1);
@@ -1129,8 +1153,8 @@ fn flag_deadlock_leaves_is_sched_wide_without_a_joined_family() {
 }
 
 /// TICKET-129 (W13-5 residual) — an unproven sched-wide flag must DECLINE (`None`) when
-/// `unproven_ok` is false, and only fault (`Some(true)`) when licensed. A `mk_fiber` has no heap,
-/// so its leaf is never provable.
+/// `unproven_ok` is false, and only fault (`Some(true)`) when licensed. M3.2 deleted the leaf proof
+/// (a strong count no longer proves one holder), so every sched-wide flag is unproven.
 #[test]
 fn flag_deadlock_leaves_declines_an_unproven_sched_wide_flag() {
     let s = mk_sched(1);
@@ -1141,6 +1165,37 @@ fn flag_deadlock_leaves_declines_an_unproven_sched_wide_flag() {
     assert!(!c.terminate);
     assert_eq!(c.flag_deadlock_leaves(&s.deadlock_err, true), Some(true));
     assert!(c.terminate);
+}
+
+/// M3.2 fix 1 — a channel slot can be shared: a value received by handle or a module global is
+/// the SAME `Obj::Channel` slot in two tasks, and one slot holds one `Arc`. Here the parked fiber's
+/// stack reaches the slot, and `held` stands for a running task that holds the same slot and can
+/// still send. No count of `Arc` holders can see that second holder, so an unlicensed verdict must
+/// decline; only `may_fault_unproven` (every peer parked) may license it.
+#[test]
+fn a_shared_channel_slot_never_proves_a_deadlock() {
+    let s = mk_sched(1);
+    let mut heap = Heap::new();
+    let ch = empty_core();
+    let key = core_key(&ch);
+    let held = heap.alloc(Obj::Channel(Arc::clone(&ch)));
+    let mut f = mk_fiber(0);
+    f.ctx = CtxBox::unlisted(FiberCtx {
+        stack: vec![Value::obj(held)],
+        ..FiberCtx::default()
+    });
+    s.seed(vec![f]);
+    let f = take_run(&s);
+    s.park(key, ch, f);
+    let mut c = s.lock();
+    assert_eq!(
+        c.flag_deadlock_leaves(&s.deadlock_err, false),
+        None,
+        "a slot another task may hold proves nothing"
+    );
+    assert_eq!(c.parked_n, 1);
+    assert!(!c.terminate);
+    let _ = held;
 }
 
 /// TICKET-129 (W13-5 residual) — `may_fault_unproven` must decline while a peer sched still has
@@ -1565,7 +1620,7 @@ fn mnsched_a_vetoed_sched_polls_instead_of_parking_untimed() {
     let (tx, rx) = std::sync::mpsc::channel();
     let a2 = Arc::clone(&a);
     std::thread::spawn(move || {
-        tx.send(matches!(a2.take_runnable(0, 1, 0), Take::Stop))
+        tx.send(matches!(a2.take_runnable_unattached(0, 1, 0), Take::Stop))
             .ok();
     });
 
@@ -1794,7 +1849,10 @@ fn mnsched_finish_writes_slot_and_terminates_at_total() {
         assert_eq!(c.scopes[0].done, 2);
         assert!(c.terminate);
     }
-    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop));
+    assert!(matches!(
+        sched.take_runnable_unattached(0, 1, 0),
+        Take::Stop
+    ));
 }
 
 /// D2b/U5 (mechanics half): `cancel_drain` moves every parked fiber back onto the run queue so a
@@ -1868,122 +1926,103 @@ main()
     assert_eq!(run_capture(src).unwrap(), "499500\n"); // sum 0..1000
 }
 
-/// D2a: a fiber with no heap of its own (`heap: None`, test-only today) aliases the
-/// single `Vm::heap` (decision A, share-by-ref). `swap_ctx` must leave `self.heap` untouched, so
-/// this stays byte-identical.
+/// M1.7: every context of a run shares one heap, so `swap_ctx` never moves the heap.
 #[test]
-fn swap_ctx_leaves_heap_untouched_for_cooperative_fiber() {
+fn swap_ctx_keeps_the_heap() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
+    let core = vm.heap.id();
     let mut ctx = FiberCtx::default();
-    assert!(
-        ctx.heap.is_none(),
-        "a default fiber carries no heap of its own"
-    );
     vm.swap_ctx(&mut ctx);
+    assert_eq!(vm.heap.id(), core);
     assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
-    assert!(
-        ctx.heap.is_none(),
-        "swap must not give a heapless fiber a heap"
-    );
+    vm.swap_ctx(&mut ctx);
+    assert_eq!(vm.heap.id(), core);
 }
 
-/// D2a GC canary: a `collect` while an M:N fiber is swapped in must trace the FIBER's heap (via
-/// the swapped-in operand stack) and must NOT touch the parked host heap. After the fiber parks
-/// back out, the host heap and its stack-rooted object are intact. This is the one path the
-/// swap-with-heap logic adds that the goldens can't reach (no runtime site parks a fiber until
-/// D2b), so it guards the moved-heap rooting directly.
+/// M1.7 GC canary: a `collect` while a fiber is swapped in roots the swapped-in fiber through the
+/// live `Vm` fields and the parked host context through the registry (the host's state parks in
+/// the fiber's registered `CtxBox`). After the fiber parks back out, both objects are intact.
 #[test]
-fn collect_under_swapped_in_fiber_heap_preserves_parked_host_object() {
+fn collect_under_swapped_in_fiber_roots_the_parked_host() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let hv = vm.heap.alloc(Obj::Str("vm-obj".into()));
     vm.push(Value::obj(hv)); // keep the host object stack-rooted
-
-    let mut fiber_heap = Heap::new();
-    let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
-    let mut ctx = FiberCtx {
-        heap: Some(fiber_heap),
+    let hf = vm.heap.alloc(Obj::Str("fiber-obj".into()));
+    let mut ctx = vm.root_registry.register(FiberCtx {
+        owns_side: true,
         stack: vec![Value::obj(hf)], // the fiber's own stack roots its object
         ..FiberCtx::default()
-    };
+    });
 
-    // Schedule in: host heap + stack park into the ctx; self.{heap,stack} are the fiber's.
+    // Schedule in: the host stack parks into the registered ctx; `self.stack` is the fiber's.
     vm.swap_ctx(&mut ctx);
-    vm.collect(); // roots self.stack (the fiber's) → hf survives in the fiber heap
+    vm.collect();
     assert!(matches!(vm.heap.get(hf), Obj::Str(s) if &s[..] == "fiber-obj"));
+    assert!(vm.heap.holds(hv), "the parked host's object survives");
 
-    // Park back out: the untouched host heap + its object are restored.
+    // Park back out: the host stack and its object are restored.
     vm.swap_ctx(&mut ctx);
     assert!(matches!(vm.heap.get(hv), Obj::Str(s) if &s[..] == "vm-obj"));
     assert_eq!(vm.pop(), Value::obj(hv));
 }
 
-/// D2a share-nothing lock: a `collect` while an M:N fiber is swapped in must leave the parked
-/// HOST heap fully quiescent — not even sweeping its UNROOTED garbage. An object rooted by
-/// nothing in any context would be swept by a normal host-heap collect; here the collect runs on
-/// the fiber heap, so the host heap is never traced and the garbage survives. This proves the
-/// parked heap is untouched (the positive canary only shows a *stack-rooted* host object
-/// survives; this shows the collect didn't run on the host heap at all) — the guarantee D2b
-/// relies on when parking fibers across worker threads.
+/// M1.7: one heap, one sweep. An object that no context roots is garbage whichever context made
+/// it, so a `collect` while a fiber is swapped in frees the host's unrooted object too.
 #[test]
-fn collect_under_swapped_in_fiber_heap_leaves_parked_host_heap_quiescent() {
+fn collect_under_swapped_in_fiber_sweeps_the_whole_heap() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    // Rooted by nothing — a host-heap collect would sweep it.
     let garbage = vm.heap.alloc(Obj::Str("host-garbage".into()));
-
-    let mut fiber_heap = Heap::new();
-    let hf = fiber_heap.alloc(Obj::Str("fiber-obj".into()));
-    let mut ctx = FiberCtx {
-        heap: Some(fiber_heap),
+    let hf = vm.heap.alloc(Obj::Str("fiber-obj".into()));
+    let mut ctx = vm.root_registry.register(FiberCtx {
+        owns_side: true,
         stack: vec![Value::obj(hf)],
         ..FiberCtx::default()
-    };
+    });
 
     vm.swap_ctx(&mut ctx);
-    vm.collect(); // runs on the fiber heap only — the parked host heap is not traced
+    vm.collect();
     vm.swap_ctx(&mut ctx);
 
-    // The unrooted host object is still alive: collect never ran on the host heap. (Were it
-    // swept, `heap.get` would panic on the dangling GcRef.)
-    assert!(matches!(vm.heap.get(garbage), Obj::Str(s) if &s[..] == "host-garbage"));
+    assert!(!vm.heap.holds(garbage), "the unrooted host object is freed");
+    assert!(vm.heap.holds(hf), "the parked fiber's object survives");
 }
 
-/// B3.1: `shut` lives in the shared core, so a `from_wire`'d alias observes a shutdown done through
-/// the original handle — `submit` on the alias then settles its Task with the byte-identical
+/// B3.1: `shut` lives in the shared core, so a second handle on the core observes a shutdown done
+/// through the first — `submit` on the alias then settles its Task with the byte-identical
 /// refusal (TICKET-289: a refused submit is no longer a fault of the caller).
 #[test]
 fn executor_core_shut_is_shared_across_handles() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let h1 = vm
-        .heap
-        .alloc(Obj::Executor(Arc::new(ExecutorCore::default())));
-    let w = vm.to_wire(Value::obj(h1)).unwrap();
-    let Some(h2) = vm.from_wire(w).as_obj() else {
-        panic!("expected handle")
-    };
+    let core = Arc::new(ExecutorCore::default());
+    let h1 = vm.heap.alloc(Obj::Executor(Arc::clone(&core)));
+    let h2 = vm.heap.alloc(Obj::Executor(core));
     let sp = Span::RUNTIME;
     vm.executor_method(h1, "shutdown", &[], sp).unwrap();
     let ch = Arc::new(ChannelCore::default());
     let chv = vm.heap.alloc(Obj::Channel(Arc::clone(&ch)));
     vm.executor_method(h2, "_submit_settled", &[Value::nil(), Value::obj(chv)], sp)
         .expect("a refused submit returns Ok with its Task settled");
-    let mut q = ch.q.lock().unwrap();
-    assert!(q.is_sealed(), "the refusal must seal the Task's channel");
-    let sealed = format!("{:?}", q.pop());
+    assert!(
+        ch.q.lock().unwrap().is_sealed(),
+        "the refusal must seal the Task's channel"
+    );
+    // M3.2: the refusal is sealed as text, and the receive builds it into the `Err` value.
+    let got = vm.channel_method(chv, "recv", &[], sp).unwrap();
+    let sealed = vm.display(got);
     assert!(
         sealed.contains("submit on a shut-down Executor (it no longer accepts work)"),
         "sealed with: {sealed}"
     );
 }
 
-/// B3.1: `display` of a `Shared` box renders its contents through `display_wire` (a boxed `str`
-/// renders from its owned bytes — B3.3a), since `display` is `&self` and can't `from_wire`.
+/// B3.1: `display` of a `Shared` box renders its contents. M3.3: the box holds the `str` itself,
+/// by handle.
 #[test]
 fn display_shared_renders_contents() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let s = vm.heap.alloc(Obj::Str("hi".into()));
-    let boxed = vm.to_wire(Value::obj(s)).unwrap();
-    let core = vm.new_shared_core(boxed);
+    let core = Arc::new(SharedCore::new(Value::obj(s)));
     let sh = vm.heap.alloc(Obj::Shared(core));
     // The payload sits INSIDE `Shared(…)`, i.e. nested — so it renders as its `repr` (W7-25),
     // matching `print(s.get())` on the same box.

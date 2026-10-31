@@ -300,15 +300,15 @@ for path in paths:
 - `time.timer` is a function: `defer time.timer(10)` is legal.
 - A module function is a legal target, and a module name is a namespace, not a receiver:
   `defer math.abs(-3)`, `spawn math.abs(-3)`, `defer lib.helper(3)`, `spawn lib.helper(3)`, aliased
-  imports and witness-taking generics (`spawn lib.reset(c)`) work (Go: `go pkg.F(x)`). A non-sendable
-  receiver (`spawn v.m()`, a local that shadows a module name, `m := math` then `spawn m.abs(-3)`) or
-  argument is still rejected.
+  imports and witness-taking generics (`spawn lib.reset(c)`) work (Go: `go pkg.F(x)`). A module is
+  not a value: `m := math` is rejected (`module 'math' is not a value`), so `spawn m.abs(-3)` never
+  type-checks.
 - A static method is a legal target in every call spelling: `defer Holder.build(3)`,
   `defer Gen[int].build(3)`, `defer T.default()` in a generic, `defer lib.Holder.build(3)`, a
   `from`-imported head. Arguments are evaluated at the statement; LIFO order holds. All of these spawn too.
 - `defer print(a, b, sep="-")` and `spawn print(...)` take every argument and keyword a direct
   `print` call takes.
-- The four builtins are sendable: a value bound to one (`f := ord`) crosses a `spawn` and runs in the task.
+- A value bound to one of the four builtins (`f := ord`) can go to a `spawn` and runs in the task.
 - A user binding shadows these names in value position (`fn f(ord: int): print(ord)`,
   `for chr in xs:`, a top-level `chr := "…"`). At top level a read above a same-named global's `:=` is
   the builtin (as in CPython); inside a body the name is the global in both source orders.

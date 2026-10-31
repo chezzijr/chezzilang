@@ -6,9 +6,9 @@
 # a rebinding between calls, and the plan validator's program.
 #
 # Every expected value is the output of the base binary (commit 7e4421e4, encoded store) for
-# the same cell: a box closure sees the caller's globals as of the call, at every depth. With
-# ONE saved caller instead of the chain `Vm.box_chain` the depth-3 cells panic
-# (`index out of bounds: the len is 0 but the index is 4`).
+# the same cell: a box closure sees the caller's globals as of the call, at every depth. (Before
+# M3.3 a box call parked its caller; with one saved caller instead of a chain the depth-3 cells
+# panicked. M3.3: the closure runs in the caller's context, so there is nothing to park.)
 # Generated once from the planning probe by target/t246-scratch/nest_to_test.py.
 
 import Executor, RwShared, Shared from std.concurrency

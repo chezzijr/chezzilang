@@ -1,0 +1,438 @@
+# A write in a task through an alias of a module global lands on the run's one copy of the global,
+# and a closure that another task receives reads the live global (M3.1, Go model). The aliases: a
+# task-local alias, a callee param alias, a spawn-adopted alias, an element alias, and an alias the
+# PARENT made and the task captured (M3.4). Goldens: the equivalent Go program, go1.27.0
+# (`m34go/aliasroot/main.go`: `element_alias [1 2]`, `whole_global_alias [1 2]`,
+# `struct_in_map_alias 5`, `spawn_adopted_alias [1 2]`, `spawn_arg_alias [1 2]`, `two_hop [1 2]`).
+# History: TICKET-105/116 (carry-and-install), TICKET-137 (D2, per-task global copies) and
+# TICKET-169 (D4 layer C, a fault on the write) gave other answers; M3 deleted that copy model.
+# TICKET-111 (docs/contributing/gaps.md W12-5): a task-local alias of a global is the SAME object
+# as the global.
+import Iterator from std.iter
+import std.concurrency
+
+fn d4_push2(xs: List[int]):
+    xs.push(2)
+
+gl: List[List[int]] = [[1]]
+
+test fn local_alias_of_global_element_write_through_alias_lands():
+    inner := gl[0]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_inner := d4_push2
+            res := recover:
+                write_inner(inner)
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert gl == [[1, 2]]
+
+g: List[int] = [1]
+
+fn producer_alias(c: Channel[fn() -> str], fr: Channel[str]):
+    xs := g
+    res := recover:
+        xs.push(2)
+    match res:
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
+    c.send(fn() -> str: "{g}")
+
+test fn write_through_local_alias_of_global_lands_and_the_received_closure_reads_it():
+    c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
+    parallel:
+        spawn producer_alias(c, fr)
+    fault := fr.recv()
+    assert fault == "no-fault", fault
+    f := c.recv()
+    got := f()
+    assert got == "[1, 2]", "received closure missed the sender's alias write: {got}"
+
+h: List[int] = [1]
+
+fn add(xs: List[int], fr: Channel[str]):
+    res := recover:
+        xs.push(2)
+    match res:
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
+
+fn producer_param(c: Channel[fn() -> str], fr: Channel[str]):
+    add(h, fr)
+    c.send(fn() -> str: "{h}")
+
+test fn write_through_param_alias_of_global_lands_and_the_received_closure_reads_it():
+    c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
+    parallel:
+        spawn producer_param(c, fr)
+    fault := fr.recv()
+    assert fault == "no-fault", fault
+    f := c.recv()
+    got := f()
+    assert got == "[1, 2]", "received closure missed the sender's param-alias write: {got}"
+
+gw: List[List[int]] = [[1]]
+
+test fn local_alias_of_a_whole_global_write_through_alias_lands():
+    a := gw
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_a := d4_push2
+            res := recover:
+                write_a(a[0])
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert gw == [[1, 2]]
+
+struct P:
+    n: int
+
+fn d4_set_p(p: P):
+    p.n = 5
+
+gm: Map[str, P] = {"k": P(1)}
+
+test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_lands():
+    k := "k"
+    p := gm[k]
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            write_p := d4_set_p
+            res := recover:
+                write_p(p)
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert gm["k"].n == 5
+
+fn count3() -> Iterator[int]:
+    yield 1
+    yield 2
+    yield 3
+
+gg: List[Iterator[int]] = [count3()]
+
+# The alias is made in the task. Go: one iterator, `1 2`.
+test fn local_alias_of_a_global_generator_is_one_generator():
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            it := gg[0]
+            a := it.next()
+            b := gg[0].next()
+            r.send("{a} {b}")
+    got := r.recv()
+    assert got == "1 2", "generator alias is two live copies: {got}"
+
+# W13-1 (docs/contributing/gaps.md) — a spawn-ADOPTED alias of a module global (`a := gl` in the parent,
+# `a.push(2)` in the task). M3.4: the adopted alias IS the global, so the write lands.
+gl2: List[int] = [1]
+
+test fn write_through_spawn_adopted_alias_lands():
+    a := gl2
+    c := Channel[str](1)
+    parallel:
+        spawn:
+            write_a := d4_push2
+            res := recover:
+                write_a(a)
+            match res:
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
+    got := c.recv()
+    assert got == "no-fault", got
+    assert gl2 == [1, 2]
+
+# W13-1 neighbours (TICKET-116) — the same shape across container kinds, closure timings and
+# forwarding hops. Each write lands on the global (M3.4).
+gl3: List[List[int]] = [[1]]
+
+test fn element_alias_write_lands():
+    inner := gl3[0]
+    c := Channel[str](1)
+    parallel:
+        spawn:
+            write_inner := d4_push2
+            res := recover:
+                write_inner(inner)
+            match res:
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
+    got := c.recv()
+    assert got == "no-fault", got
+    assert gl3 == [[1, 2]]
+
+gl4: List[List[int]] = [[1]]
+
+fn w4(xs: List[int], c: Channel[str]):
+    res := recover:
+        xs.push(2)
+    match res:
+        ?_: c.send("no-fault")
+        !e: c.send(e.message())
+
+test fn spawn_arg_alias_write_lands():
+    c := Channel[str](1)
+    parallel:
+        spawn w4(gl4[0], c)
+    got := c.recv()
+    assert got == "no-fault", got
+    assert gl4 == [[1, 2]]
+
+struct P116:
+    n: int
+
+fn d4_set_p116(p: P116):
+    p.n = 5
+
+gm116: Map[str, P116] = {"k": P116(1)}
+
+test fn struct_in_map_alias_write_lands():
+    p := gm116["k"]
+    c := Channel[str](1)
+    parallel:
+        spawn:
+            write_p := d4_set_p116
+            res := recover:
+                write_p(p)
+            match res:
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
+    got := c.recv()
+    assert got == "no-fault", got
+    assert gm116["k"].n == 5
+
+gl5: List[int] = [1]
+
+test fn closure_built_before_the_alias_push_lands():
+    a := gl5
+    c := Channel[str](1)
+    parallel:
+        spawn:
+            _f := fn() -> str: "{gl5}"
+            write_a := d4_push2
+            res := recover:
+                write_a(a)
+            match res:
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
+    got := c.recv()
+    assert got == "no-fault", got
+    assert gl5 == [1, 2]
+
+gl6: List[int] = [1]
+
+test fn nested_nursery_send_lands():
+    a := gl6
+    c := Channel[str](1)
+    parallel:
+        spawn:
+            write_a := d4_push2
+            res := recover:
+                write_a(a)
+            match res:
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
+            parallel:
+                spawn:
+                    pass
+    got := c.recv()
+    assert got == "no-fault", got
+    assert gl6 == [1, 2]
+
+gl8: List[int] = [1]
+
+test fn executor_job_reads_the_tasks_alias_write():
+    r := Channel[str](1)
+    ex := concurrency.Executor()
+    parallel:
+        spawn:
+            a := gl8
+            res := recover:
+                d4_push2(a)
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+            _ := ex.submit(fn(): r.send("{gl8}"))
+    fault := r.recv()
+    assert fault == "no-fault", fault
+    got := r.recv()
+    assert got == "[1, 2]", "executor job read {got}"
+
+gl9: List[int] = [1]
+
+test fn two_hop_closure_alias_write_lands():
+    a := gl9
+    c := Channel[str](1)
+    fc := Channel[fn() -> str](1)
+    d := Channel[fn() -> str](1)
+    parallel:
+        spawn:
+            write_a := d4_push2
+            res := recover:
+                write_a(a)
+            match res:
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
+            fc.send(fn() -> str: "{gl9}")
+        spawn:
+            f := fc.recv()
+            d.send(f)
+    fault := c.recv()
+    assert fault == "no-fault", fault
+    got := d.recv()()
+    assert got == "[1, 2]", "two-hop forwarded closure read {got}"
+
+# W13-2 (docs/contributing/gaps.md) — a receiver's OWN in-place mutation of a module global used to be silently
+# overwritten by an arriving closure whose sender also mutated it. M3.1: both writes land in the
+# run's one copy. The receiver writes after the sender's signal, so the two never race. Go: the
+# sender's `2`, then the receiver's `9`.
+g2: List[int] = [1]
+
+fn producer_w13_2(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g2.push(2)
+    match res:
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
+    c.send(fn() -> str: "{g2}")
+
+test fn receiver_own_write_survives_arriving_closure_write():
+    c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
+    fault := ""
+    parallel:
+        spawn producer_w13_2(c, fr)
+        fault = fr.recv()
+        g2.push(9)
+    assert fault == "no-fault", fault
+    f := c.recv()
+    got := "{f()} {g2}"
+    assert got == "[1, 2, 9] [1, 2, 9]", "receiver's own write to the global was lost: {got}"
+
+# W13-2 neighbours (TICKET-116) — the receiver's own in-place write must survive an arriving
+# closure, across write shapes, sibling receivers, and the pre-nursery control. `g2.push(9)`/
+# `g18[1] = 9`/`g22.b = 9` run on the ROOT task, after the producer's signal.
+g18: List[int] = [1, 0]
+
+fn producer_w13_2_index(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g18.push(2)
+    match res:
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
+    c.send(fn() -> str: "{g18}")
+
+test fn receiver_index_assign_survives_arriving_closure():
+    c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
+    fault := ""
+    parallel:
+        spawn producer_w13_2_index(c, fr)
+        fault = fr.recv()
+        g18[1] = 9
+    assert fault == "no-fault", fault
+    f := c.recv()
+    got := "{f()} {g18}"
+    assert got == "[1, 9, 2] [1, 9, 2]", "receiver's own index write was lost: {got}"
+
+struct Q116:
+    a: int
+    b: int
+
+g22: Q116 = Q116(0, 0)
+
+fn producer_w13_2_field(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g22.a = 2
+    match res:
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
+    c.send(fn() -> str: "{g22.a}")
+
+test fn receiver_field_write_survives_arriving_closure():
+    c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
+    fault := ""
+    parallel:
+        spawn producer_w13_2_field(c, fr)
+        fault = fr.recv()
+        g22.b = 9
+    assert fault == "no-fault", fault
+    f := c.recv()
+    got := "{f()} {g22.a} {g22.b}"
+    assert got == "2 2 9", "receiver's own field write was lost: {got}"
+
+g21: List[int] = [1]
+
+fn producer_w13_2_sibling(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g21.push(2)
+    match res:
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
+    c.send(fn() -> str: "{g21}")
+
+fn consumer_w13_2_sibling(c: Channel[fn() -> str], r: Channel[str], fr: Channel[str]):
+    f := c.recv()
+    res := recover:
+        g21.push(9)
+    match res:
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
+    r.send("{f()} {g21}")
+
+# The consumer writes after it received the producer's closure, so the two never race.
+# Go: `[1 2 9] [1 2 9]`.
+test fn sibling_task_receiver_own_write_lands():
+    c := Channel[fn() -> str](1)
+    r := Channel[str](1)
+    fr1 := Channel[str](1)
+    fr2 := Channel[str](1)
+    parallel:
+        spawn producer_w13_2_sibling(c, fr1)
+        spawn consumer_w13_2_sibling(c, r, fr2)
+    fault1 := fr1.recv()
+    fault2 := fr2.recv()
+    assert fault1 == "no-fault", fault1
+    assert fault2 == "no-fault", fault2
+    got := r.recv()
+    assert got == "[1, 2, 9] [1, 2, 9]", "a sibling's write is lost: {got}"
+
+g20: List[int] = [1]
+
+fn producer_w13_2_control(c: Channel[fn() -> str], fr: Channel[str]):
+    res := recover:
+        g20.push(2)
+    match res:
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
+    c.send(fn() -> str: "{g20}")
+
+# TICKET-137 — the receiver's `9` is pushed BEFORE the nursery, on the ROOT task; the sender's `2`
+# lands after it in the run's one copy. Go: `[1 9 2]`.
+test fn receiver_push_before_the_nursery_and_the_senders_push_both_land():
+    g20.push(9)
+    c := Channel[fn() -> str](1)
+    fr := Channel[str](1)
+    parallel:
+        spawn producer_w13_2_control(c, fr)
+    fault := fr.recv()
+    assert fault == "no-fault", fault
+    f := c.recv()
+    got := f()
+    assert got == "[1, 9, 2]", "received closure read {got}"
+    assert "{g20}" == "[1, 9, 2]", "the parent read {g20}"

@@ -325,7 +325,7 @@ fn parity_a_blocking_defer_body_completes_when_the_task_is_cancelled() {
 
 /// The cleanup's OWN work must survive too: a `parallel:` (or `spawn`) opened INSIDE a cancelled task's
 /// `defer` runs to completion on BOTH engines. The `deferring > 0` suppression that makes a defer
-/// uncancellable is per-`Vm` and does NOT cross the airlock — a worker fiber is a fresh `Vm` with
+/// uncancellable is per-`Vm` and does NOT cross a spawn — a worker fiber is a fresh `Vm` with
 /// `deferring == 0` — while the cancel-flag chain DOES cross it (`Vm::scope_ancestors` →
 /// `JoinScope::ancestors` → `cancel_outer`). So the child of a cleanup's nursery inherited the
 /// already-tripped enclosing flag and died at its first checkpoint (back-edge / blocking op): M:N
@@ -477,24 +477,22 @@ fn buffered_stdout_one_flush_byte_identical() {
     assert_eq!(serial, mn, "serial vs M:N byte-identical");
 }
 
-/// R2 — a buffered file writer dropped WITHOUT close still lands its tail (best-effort drop-flush at
-/// program exit / heap teardown). Both engines.
+/// M5d — a buffered file writer dropped WITHOUT `flush()`/`close()` loses its tail at heap
+/// teardown, as Go's `bufio.Writer` does (no finalizer flushes it). The file exists and is empty.
 #[test]
-fn buffered_file_drop_flushes_best_effort_parity() {
-    for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
-        let t = TmpDir::new();
-        let f = t.0.join("drop.txt");
-        // Write via a buffered file writer, NEVER flush/close — the handle just goes out of scope.
-        let src = format!(
-            "import create, buffered from std.io\nfn go():\n    bw := buffered(create(\"{f}\")?)\n    bw.write(\"tail\")?\nfn main():\n    go()\nmain()\n",
-            f = f.display()
-        );
-        let entry = t.write("main.chz", &src);
-        let (_out, _e, r, _c) = run(&entry);
-        assert!(r.is_ok(), "run faulted: {r:?}");
-        let got = std::fs::read_to_string(&f).unwrap_or_default();
-        assert_eq!(got, "tail", "drop-flush must land the buffered tail");
-    }
+fn buffered_file_dropped_without_close_loses_its_tail() {
+    let t = TmpDir::new();
+    let f = t.0.join("drop.txt");
+    // Write via a buffered file writer, NEVER flush/close — the handle just goes out of scope.
+    let src = format!(
+        "import create, buffered from std.io\nfn go():\n    bw := buffered(create(\"{f}\")?)\n    bw.write(\"tail\")?\nfn main():\n    go()\nmain()\n",
+        f = f.display()
+    );
+    let entry = t.write("main.chz", &src);
+    let (_out, _e, r, _c) = run_file(&entry);
+    assert!(r.is_ok(), "run faulted: {r:?}");
+    let got = std::fs::read_to_string(&f).expect("create made the file");
+    assert_eq!(got, "", "a dropped buffered writer's tail is lost");
 }
 
 /// R2 — `import Writer from std.io` (a pure TYPE with no runtime member value) and `import buffered
@@ -727,8 +725,8 @@ fn reader_open_missing_file_clean_err_parity() {
 }
 
 /// R2b — `import Reader from std.io` (a pure TYPE with no runtime member value) + send the handle
-/// across a `spawn` boundary and read in the task: no runtime fault (the `bind_import` skip + airlock
-/// sites). Both engines.
+/// across a `spawn` boundary and read in the task: no runtime fault (the `bind_import` skip).
+/// Both engines.
 #[test]
 fn import_reader_type_and_send_across_spawn_parity() {
     for run in [run_file as fn(&std::path::Path) -> RunOutput, run_file] {
@@ -741,10 +739,7 @@ fn import_reader_type_and_send_across_spawn_parity() {
         );
         let entry = t.write("main.chz", &src);
         let (out, _e, r, _c) = run(&entry);
-        assert!(
-            r.is_ok(),
-            "run faulted (bind_import/airlock missing?): {r:?}"
-        );
+        assert!(r.is_ok(), "run faulted (bind_import skip missing?): {r:?}");
         assert_eq!(out, "hello\n");
     }
 }
@@ -768,34 +763,25 @@ fn reader_program_type_checks_clean() {
     );
 }
 
-/// B3 — a fn-LOCAL aggregate mutated inside a spawn: task deep-copies per task (the airlock), so the
-/// parent's list is untouched by the isolated task copy (prints `3`). Task 1
-/// gave the MODULE-GLOBAL form the same isolation (module globals are snapshotted per task now —
-/// see `serial_module_global_direct_mutation_forms_isolate_parity`), so this fn-local case is just the
-/// sibling boundary: a captured local was already deep-copied and still is.
+/// B3 — a fn-LOCAL aggregate mutated inside a spawn: M3.4 (Go model) shares the captured list, so
+/// the task's push lands and the parent reads `4` (Go, a goroutine appends through the captured
+/// slice: `4`). The module-global form is `serial_module_global_method_call_mutation_lands_parity`.
 #[test]
-fn module_global_aggregate_mutation_in_task_parity() {
-    // TICKET-169 (D4 layer C): the task's copy of the captured `xs` is marked, so `xs.push(99)`
-    // now faults instead of mutating it — the parent's list was always going to stay `3` long.
-    let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            recover: xs.push(99)\n    print(xs.len())\nmain()\n";
-    assert_golden_out(src, "3\n");
+fn fn_local_aggregate_mutation_in_task_lands_parity() {
+    let src = "fn main():\n    xs := [1, 2, 3]\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n";
+    assert_golden_out(src, "4\n");
 }
 
-/// Task 1 — a module-global mutated via a cross-module FN CALL from a task isolates on BOTH engines.
-/// `counter.bump()` reassigns `count` inside the helper module; each spawned task snapshots the module
-/// globals (serial now deep-copies at the spawn boundary exactly as M:N does), so the parent's post-join
-/// read sees the PRE-task value. Before the fix serial printed 2 (shared) / M:N printed 0 (snapshot);
-/// after it both print 0. This program COMPILES today (a cross-module fn-call reassign escaped every
-/// old checker gate) and used to DIVERGE at runtime — the exact gaps.md §B3 (A) residual.
+/// Task 1 — a module global written through a cross-module FN CALL from a task lands in the run's
+/// one copy (M3.1): two `counter.bump()` calls, so the parent reads `2`. Go (go1.27.0,
+/// `m31go/rust`): `2`.
 #[test]
-fn serial_module_global_method_call_mutation_isolates_parity() {
-    // TICKET-169 (D4 layer C): `count = count + 1` inside `bump()` now faults (the task's own
-    // copy of the imported module's global), so the parent's read was always going to stay `0`.
+fn serial_module_global_method_call_mutation_lands_parity() {
     let out = golden_file_entry(
         &[
             (
                 "counter.chz",
-                "count := 0\nfn bump():\n    recover:\n        count = count + 1\nfn get() -> int:\n    return count\n",
+                "count := 0\nfn bump():\n    count = count + 1\nfn get() -> int:\n    return count\n",
             ),
             (
                 "main.chz",
@@ -804,26 +790,22 @@ fn serial_module_global_method_call_mutation_isolates_parity() {
         ],
         "main.chz",
     );
-    assert_eq!(out, "0\n");
+    assert_eq!(out, "2\n");
 }
 
-/// Task 1 — gaps.md §B3 (D): aliasing a module-global aggregate into a task-local (`local := xs`) then
-/// mutating the alias. The receiver root resolves to `local`, so the old flow-blind gate never caught it
-/// and the program silently diverged (serial 4 / M:N 3). With module globals snapshotted per
-/// task, the alias points at the task's OWN copy — reads 3.
+/// Task 1 — gaps.md §B3 (D): a task-local alias (`local := xs`) of a module-global aggregate is the
+/// global itself (M3.1), so a push through it lands. Go (go1.27.0, `m31go/rust`): `4`.
 #[test]
-fn serial_module_global_task_local_alias_isolates_parity() {
-    // TICKET-169 (D4 layer C): `local.push(99)` now faults (`local` is the adopted copy of the
-    // module global's), so the parent's read was always going to stay `3`.
-    let src = "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            local := xs\n            recover: local.push(99)\n    print(xs.len())\nmain()\n";
+fn serial_module_global_task_local_alias_lands_parity() {
+    let src = "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            local := xs\n            local.push(99)\n    print(xs.len())\nmain()\n";
     let out = golden_entry(src);
-    assert_eq!(out, "3\n");
+    assert_eq!(out, "4\n");
 }
 
-/// Task 1 — the ESCAPE HATCH must survive the serial snapshot change: `Atomic`/`Shared`/`Channel` cross
-/// the spawn boundary by shared `Arc` core (via `to_snap`), NOT by deep copy, so a task-side mutation IS
-/// visible to the parent. Two tasks each `add(1)` to a module-global `Atomic`; the parent reads 2 on both
-/// engines. This is the regression guard for trap #1 (a hand-rolled copier would clone the Arc away → 0).
+/// Task 1 — the ESCAPE HATCH: `Atomic`/`Shared`/`Channel` cross the spawn boundary by their shared
+/// `Arc` core, so a task-side mutation IS visible to the parent. Two tasks each `add(1)` to a
+/// module-global `Atomic`; the parent reads 2. It was the regression guard for trap #1 (a
+/// hand-rolled copier cloned the Arc away → 0).
 #[test]
 fn atomic_incremented_in_task_visible_to_parent_parity() {
     let src = "import Atomic from std.concurrency\na := Atomic(0)\nfn main():\n    parallel:\n        spawn:\n            a.add(1)\n        spawn:\n            a.add(1)\n    print(a.load())\nmain()\n";
@@ -874,7 +856,7 @@ fn atomic_int_from_import_runs_parity() {
 /// Wide-int returns: a value outside ±2^62 (a legal Chezzi int, boxed as Obj::BigInt) must round-trip
 /// through load/exchange/add — the value-producing arms MUST box via make_int, not Value::int (inline-
 /// only: debug-asserts + release-truncates for |n| >= 2^62). 2^62 = 4611686018427387904; INT_MAX_INLINE
-/// = 2^62-1. Mirrors Mutex-backed Atomic, which is correct via from_wire→make_int.
+/// = 2^62-1. Mirrors `Atomic[T]`, which holds the boxed value itself (M3.2).
 #[test]
 fn atomic_int_wide_value_returns_parity() {
     // load a wide stored value
@@ -907,86 +889,77 @@ fn atomic_int_wide_value_returns_parity() {
     );
 }
 
-/// deleted): list `.push`, map index-assign, struct field-assign, set `.add`, bytearray `.extend`, and a
-/// bare reassign. Each mutates the task's OWN module-global copy → invisible to the parent.
+/// Every direct write form a task makes to a module global lands in the run's one copy (M3.1): list
+/// `.push`, map index-assign, struct field-assign, set `.insert`, bytearray `.extend`, a bare
+/// reassign. Go (go1.27.0, `m31go/rust`): `4 9 9 3 3 1`.
 #[test]
-fn serial_module_global_direct_mutation_forms_isolate_parity() {
-    // TICKET-169 (D4 layer C): every write below now faults (a spawned task's own module-global
-    // copy) instead of mutating in place — every expected value below was already the pre-task
-    // one, so isolation holds for a stronger reason now.
+fn serial_module_global_direct_mutation_forms_land_parity() {
     // list .push
     assert_eq!(
         golden_entry(
-            "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            recover: xs.push(99)\n    print(xs.len())\nmain()\n"
+            "xs := [1, 2, 3]\nfn main():\n    parallel:\n        spawn:\n            xs.push(99)\n    print(xs.len())\nmain()\n"
         ),
-        "3\n",
+        "4\n",
     );
     // map index-assign
     assert_eq!(
         golden_entry(
-            "m := {1: 2}\nfn main():\n    parallel:\n        spawn:\n            recover:\n                m[1] = 9\n    print(m[1])\nmain()\n"
+            "m := {1: 2}\nfn main():\n    parallel:\n        spawn:\n            m[1] = 9\n    print(m[1])\nmain()\n"
         ),
-        "2\n",
+        "9\n",
     );
     // struct field-assign
     assert_eq!(
         golden_entry(
-            "struct Box:\n    n: int\ns := Box(0)\nfn main():\n    parallel:\n        spawn:\n            recover:\n                s.n = 9\n    print(s.n)\nmain()\n"
+            "struct Box:\n    n: int\ns := Box(0)\nfn main():\n    parallel:\n        spawn:\n            s.n = 9\n    print(s.n)\nmain()\n"
         ),
-        "0\n",
+        "9\n",
     );
     // set .add
     assert_eq!(
         golden_entry(
-            "st := {1, 2}\nfn main():\n    parallel:\n        spawn:\n            recover: st.insert(9)\n    print(st.len())\nmain()\n"
+            "st := {1, 2}\nfn main():\n    parallel:\n        spawn:\n            st.insert(9)\n    print(st.len())\nmain()\n"
         ),
-        "2\n",
+        "3\n",
     );
     // bytearray .extend
     assert_eq!(
         golden_entry(
-            "ba := bytearray()\nfn main():\n    parallel:\n        spawn:\n            recover: ba.extend([1, 2, 3])\n    print(ba.len())\nmain()\n"
+            "ba := bytearray()\nfn main():\n    parallel:\n        spawn:\n            ba.extend([1, 2, 3])\n    print(ba.len())\nmain()\n"
         ),
-        "0\n",
+        "3\n",
     );
     // bare reassign
     assert_eq!(
         golden_entry(
-            "g := 0\nfn main():\n    parallel:\n        spawn:\n            recover:\n                g = g + 1\n    print(g)\nmain()\n"
+            "g := 0\nfn main():\n    parallel:\n        spawn:\n            g = g + 1\n    print(g)\nmain()\n"
         ),
-        "0\n",
+        "1\n",
     );
 }
 
-/// Task 1 — a module global mutated through a directly-spawned free-fn callee (`spawn worker()` where
-/// `worker` does `m[1] = 9`) — the old transitive-scan gate's job. Now it just isolates: the callee runs
-/// against the task's module-global copy, so the parent's map is untouched.
+/// Task 1 — a module global written through a directly-spawned free-fn callee (`spawn worker()`
+/// where `worker` does `m[1] = 9`) lands in the run's one copy (M3.1). Go (go1.27.0, `m31go/rust`):
+/// `9`.
 #[test]
-fn serial_module_global_spawned_callee_mutation_isolates_parity() {
-    // TICKET-169 (D4 layer C): `m[1] = 9` now faults (the callee's own module-global copy).
-    let src = "m := {1: 2}\nfn worker():\n    recover:\n        m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\n    print(m[1])\nmain()\n";
-    assert_eq!(golden_entry(src), "2\n");
+fn serial_module_global_spawned_callee_mutation_lands_parity() {
+    let src = "m := {1: 2}\nfn worker():\n    m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\n    print(m[1])\nmain()\n";
+    assert_eq!(golden_entry(src), "9\n");
 }
 
-/// Task 1 — a NESTED serial spawn (a task that itself opens a `parallel:` nursery and spawns) still
-/// isolates the module global at every level: the inner task copies the (already-copied) outer view, so
-/// its mutation is invisible even to the intermediate task. Guards the recursion in the snapshot path.
+/// Task 1 — a NESTED spawn (a task that itself opens a `parallel:` nursery and spawns): both writes
+/// land in the run's one `g` (M3.1). Go (go1.27.0, `m31go/rust`): `101`.
 #[test]
-fn nested_serial_spawn_module_global_isolates_parity() {
-    // TICKET-169 (D4 layer C): both writes now fault (each is a spawned task's own module-global
-    // copy: `outer` is itself spawned from `main`, and `inner` from `outer`).
-    let src = "g := 0\nfn inner():\n    recover:\n        g = g + 100\nfn outer():\n    parallel:\n        spawn inner()\n    recover:\n        g = g + 1\nfn main():\n    parallel:\n        spawn outer()\n    print(g)\nmain()\n";
-    assert_eq!(golden_entry(src), "0\n");
+fn nested_serial_spawn_module_global_writes_land_parity() {
+    let src = "g := 0\nfn inner():\n    g = g + 100\nfn outer():\n    parallel:\n        spawn inner()\n    g = g + 1\nfn main():\n    parallel:\n        spawn outer()\n    print(g)\nmain()\n";
+    assert_eq!(golden_entry(src), "101\n");
 }
 
-/// Task 1 — a task that mutates its module-global copy, PARKS on a channel recv, resumes, then reads the
-/// global keeps its per-fiber snapshot across the park (the copy lives in `FiberCtx`, travels with the
-/// fiber). The task sees its own mutation (1) and the parent sees the untouched global
-/// (0). Guards trap #3 (snapshot survives a park).
+/// Task 1 — a task that writes a module global, PARKS on a channel recv, resumes, then reads the
+/// global sees its own write, and so does the parent (M3.1: one `g` for the run). Go (go1.27.0,
+/// `m31go/rust`): `1`, `1`.
 #[test]
-fn channel_park_keeps_module_snapshot_parity() {
-    // TICKET-169 (D4 layer C): `g = g + 1` now faults (the task's own module-global copy), so the
-    // task's snapshot stays `0` across the park — the parent's read was always going to be `0`.
+fn channel_park_keeps_the_tasks_global_write_parity() {
     let src = "\
 import Atomic, AtomicInt, Executor, RwShared, Shared from std.concurrency
 g := 0
@@ -994,8 +967,7 @@ fn main():
     ch := Channel[int]()
     parallel:
         spawn:
-            recover:
-                g = g + 1
+            g = g + 1
             v := ch.recv()
             print(\"task sees {g} got {v}\")
         spawn:
@@ -1004,30 +976,21 @@ fn main():
 main()
 ";
     // task-order buffered output (decision F): the task's line flushes before the parent's read.
-    assert_eq!(golden_entry(src), "task sees 0 got 7\nparent sees 0\n");
+    assert_eq!(golden_entry(src), "task sees 1 got 7\nparent sees 1\n");
 }
 
-/// W6-2 (was: …`reads_frozen_parity`, expecting `0`) — a task that mutates a module global and THEN
-/// opens a NESTED `parallel:` gives its grandchild the TASK's CURRENT view (1), at every depth.
-/// The old `0` was a MEMOIZATION ARTIFACT, not design: `ensure_snapshot` memoized the first
-/// nursery's snapshot forever and every later worker/nested nursery replayed that frozen `Arc` (decision
-/// G1), so the grandchild read the pre-mutation value. A task now snapshots FRESH at its own `spawn`,
-/// from the view of whoever spawned it — so the nested rule is uniform and Go-like. Per-task
-/// ISOLATION is unchanged (`nested_serial_spawn_module_global_isolates_parity` still reads `0`).
+/// W6-2 — a task that writes a module global and THEN opens a NESTED `parallel:` gives its
+/// grandchild the write, at every depth (M3.1: one `g` for the run). Go (go1.27.0, `m31go/rust`):
+/// `1`.
 #[test]
 fn nested_serial_spawn_mutation_before_nested_reads_fresh_parity() {
-    // TICKET-169 (D4 layer C): `g = g + 1` now faults (`worker` is a spawned task's own copy of
-    // `g`), so the grandchild's fresh-snapshot read sees the task's UNCHANGED view (`0`) — the
-    // property this test guards (a nested nursery sees its parent TASK's current view, not the
-    // module's declaration-time one) no longer has a write to demonstrate it with.
-    let src = "g := 0\nfn worker():\n    recover:\n        g = g + 1\n    parallel:\n        spawn:\n            print(g)\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
-    assert_eq!(golden_entry(src), "0\n");
+    let src = "g := 0\nfn worker():\n    g = g + 1\n    parallel:\n        spawn:\n            print(g)\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
+    assert_eq!(golden_entry(src), "1\n");
 }
 
 /// W6-2 (was: …`reads_frozen_parity`, expecting `0\n0\n`) — TWO sequential top-level nurseries with
 /// ordinary (non-task) parent code mutating an imported module's global BETWEEN them: the second
-/// nursery's task sees the MUTATED value (2 * 100). The old frozen `0` came from the never-invalidated
-/// `snapshot_memo`; a module-slot write now drops the cache, so each nursery snapshots fresh.
+/// nursery's task sees the MUTATED value (2 * 100). M3.1: every task reads the run's one `count`.
 #[test]
 fn sequential_mutation_between_nurseries_reads_fresh_parity() {
     let out = golden_file_entry(
@@ -1046,40 +1009,35 @@ fn sequential_mutation_between_nurseries_reads_fresh_parity() {
     assert_eq!(out, "0\n200\n");
 }
 
-/// W6-19 — a spawned task whose FIRST module-global access is a WRITE. `Op::GetGlobalSlot` calls
-/// `ensure_module_faulted`, but `DefineGlobalSlot`/`SetGlobalSlot` did not, so on M:N the write indexed
-/// an unfaulted (empty-slots) worker module and PANICKED the pool thread
-/// (`index out of bounds: the len is 0`) → `internal error: a parallel task panicked`, while the
-/// since-removed cooperative engine
-/// printed the right answer. Rooted at `set_global_slot` (one guard, all callers).
+/// W6-19 — a spawned task whose FIRST module-global access is a WRITE (it once panicked the pool on
+/// an unfaulted worker module). M3.1: the write lands in the run's one `g`.
+/// Go (go1.27.0, `m31go/rust`): `99`, `99`.
 #[test]
 fn spawn_task_first_global_access_is_write_parity() {
-    // TICKET-169 (D4 layer C): the task's first access being a WRITE now faults cleanly (D4)
-    // instead of the historical W6-19 panic — the worker's own read still sees its unfaulted `1`.
     let src = "g: int = 1\nfn worker():\n    res := recover:\n        g = 99\n    match res:\n        ?_: print(\"worker g =\", g)\n        !_: print(\"worker g fault, g =\", g)\nfn main():\n    parallel:\n        spawn worker()\n    print(\"parent g =\", g)\nmain()\n";
-    assert_eq!(golden_entry(src), "worker g fault, g = 1\nparent g = 1\n");
+    assert_eq!(golden_entry(src), "worker g = 99\nparent g = 99\n");
 }
 
-/// W6-2 — the PIN INSTANT, and the reason it exists: a task's view is pinned at its own `spawn`, so an
-/// OUTER nursery's queued task keeps that view even though the two (then-existing) engines used to
-/// PREPARE it at different program points — the since-removed serial engine at the outer nursery's own
-/// join (post-`g = 2`), M:N at the nested nursery's join via `early_enlist_outer` (pre-`g = 2`). Both
-/// `A` (outer, spawned before the mutation) and the nested `B` therefore read `1` while the parent
-/// reads `2`, byte-identically. Without the pin this shape diverges 2 vs 1. Observed through `Shared`
-/// and printed once after the join, because the print ORDER of this shape is nondeterministic
-/// (a bare-`print` variant is not byte-identical).
+/// W6-2 — an OUTER nursery's task `A` and a nested nursery's task `B` both read `g` before the
+/// parent's `g = 2`: `A` signals after its read, and the parent waits for that signal and the
+/// nested join before the write, so nothing races. Observed through `Shared` and printed once after
+/// the join. Go (go1.27.0, `m31go/rust`): `A=1 B=1 parent=2`.
 #[test]
-fn task_snapshot_pins_at_its_own_spawn_parity() {
+fn an_outer_task_and_a_nested_task_read_the_live_global_parity() {
     let src = "\
 import Shared from std.concurrency
 g: int = 1
 fn main():
     a := Shared(0)
     b := Shared(0)
+    read := Channel[int](1)
     parallel:
-        spawn: a.set(g)
+        spawn:
+            a.set(g)
+            read.send(0)
         parallel:
             spawn: b.set(g)
+        read.recv()
         g = 2
     print(\"A={a.get()} B={b.get()} parent={g}\")
 main()
@@ -1087,21 +1045,23 @@ main()
     assert_eq!(golden_entry(src), "A=1 B=1 parent=2\n");
 }
 
-/// W6-2 — the pin is per-TASK, at its own `spawn`: two spawns into the SAME nursery straddling a global
-/// mutation read the value live when EACH ran, identically. That is the Go rule (a
-/// goroutine sees the globals current when `go` ran) and it is what makes the IMPLICIT nursery — which
-/// spans a whole module/function body — behave, since a per-NURSERY pin would freeze the whole body at
-/// its first bare `spawn` (see `bare_spawn_implicit_nursery_pins_per_spawn_parity`).
+/// W6-2 — two spawns into the SAME nursery straddling a global write. The first task signals after
+/// its read and the write runs only then, so each reads the value live and nothing races. Go
+/// (go1.27.0, `m31go/rust`): `A=1 B=2 parent=2`.
 #[test]
-fn two_spawns_one_nursery_pin_at_their_own_spawn_parity() {
+fn two_spawns_one_nursery_read_the_live_global_parity() {
     let src = "\
 import Shared from std.concurrency
 g: int = 1
 fn main():
     a := Shared(0)
     b := Shared(0)
+    read := Channel[int]()
     parallel:
-        spawn: a.set(g)
+        spawn:
+            a.set(g)
+            read.send(0)
+        read.recv()
         g = 2
         spawn: b.set(g)
     print(\"A={a.get()} B={b.get()} parent={g}\")
@@ -1129,17 +1089,21 @@ spawn: print(\"n = {n} len = {q.len()} sum = {n + 1}\")
     assert_eq!(golden_entry(src), "n = 42 len = 3 sum = 43\n");
 }
 
-/// W6-2 — the same, one level down: a bare `spawn` inside a FUNCTION body sees the globals live at the
-/// spawn, and a later mutation in that body is NOT time-travelled back into it (pre-W6-2 the snapshot was
-/// built at the body-end join, so the task read the POST-mutation value).
+/// W6-2 — a bare `spawn` inside a FUNCTION body reads the global live. The task signals after its
+/// read, and the body writes `g = 2` only then, so the two never race. Go (go1.27.0, `m31go/rust`):
+/// `1`.
 #[test]
-fn bare_spawn_in_a_function_body_pins_per_spawn_parity() {
+fn bare_spawn_in_a_function_body_reads_the_live_global_parity() {
     let src = "\
 import Shared from std.concurrency
 g: int = 1
 fn main() -> Shared[int]:
     seen := Shared(0)
-    spawn: seen.set(g)
+    read := Channel[int]()
+    spawn:
+        seen.set(g)
+        read.send(0)
+    read.recv()
     g = 2
     return seen
 print(main().get())
@@ -1208,9 +1172,9 @@ main()";
 }
 
 #[test]
-fn parity_airlock_bigint_and_float_roundtrip() {
-    // A boxed big-int and a boxed float cross the airlock (spawn + Channel) and round-trip on BOTH
-    // engines: `from_wire` re-boxes via `make_int`/`box_float` on the destination heap identically.
+fn parity_crossing_bigint_and_float_roundtrip() {
+    // A boxed big-int and a boxed float reach a task (spawn + Channel) by handle (M3.2, M3.4) and
+    // print the same values.
     let src = "\
 fn main():
     ci := Channel[int]()

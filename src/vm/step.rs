@@ -43,19 +43,6 @@ impl Vm {
             Op::Pop => {
                 self.pop();
             }
-            Op::StampGen(m) => {
-                if let Some(h) = self.stack.last().and_then(|v| v.as_obj())
-                    && let Obj::Generator(g) = self.heap.get_mut(h)
-                    && matches!(g.state, GenState::Pending(_))
-                {
-                    let p = &self.program.protos[g.proto];
-                    g.stamp |= m & crate::base::crossing::param_stamp(
-                        p.private_slots,
-                        p.deep_slots,
-                        p.arity,
-                    );
-                }
-            }
             Op::Assert { has_msg, cmp } => {
                 // Reached only on the failing path: the compiler emits `Op::Assert` after a
                 // `JumpIfFalse` that already consumed (and tested) `cond`, so this op always faults.
@@ -122,24 +109,9 @@ impl Vm {
             }
             Op::GetGlobalSlot(slot) => {
                 let home = self.frames.last().unwrap().home;
-                // TICKET-051: one module global denotes one object inside one task. A crossing
-                // closure's free globals are installed into the RECEIVING view's own module copy at
-                // the airlock (`from_wire_memo`'s `WireValue::Closure` arm), so a plain live read
-                // always agrees with a closure's read of the same slot.
-                // TICKET-246: inside a box closure the global is the caller's, through the one door.
-                let door = if self.box_chain.is_empty() {
-                    None
-                } else {
-                    self.box_global(home, Some(*slot), span)?
-                };
-                let v = match door {
-                    Some(v) => v,
-                    None => {
-                        // D1: lazily reconstruct the worker's home module
-                        self.ensure_module_faulted(home);
-                        self.read_slot(home, *slot, span)?
-                    }
-                };
+                // M3.1: one module global denotes one object for the whole run. Every context,
+                // a task's and a box closure's included, reads the run's module objects.
+                let v = self.read_slot(home, *slot, span)?;
                 self.push(v);
             }
             Op::DefineGlobalSlot(slot) => {
@@ -150,14 +122,6 @@ impl Vm {
             Op::SetGlobalSlot(slot) => {
                 let v = self.pop();
                 let home = self.frames.last().unwrap().home;
-                // D4 layer C (TICKET-169): a spawned task's write to its module-global copy is a
-                // fault, never a silent lost write (owner decision D4 supersedes DEC-137's write
-                // half). The root task (not a task view) writes its globals freely.
-                if self.is_task_view() {
-                    self.ensure_module_faulted(home);
-                    let name = self.global_slot_name(home, *slot);
-                    return Err(self.copied_write_err(name.as_deref(), span));
-                }
                 self.set_global_slot(home, *slot, v);
             }
             Op::GetCaptured(slot) => {
@@ -168,7 +132,7 @@ impl Vm {
                 let frame = self.frames.last().unwrap();
                 let (clo, home) = (frame.closure, frame.home);
                 let v = clo.and_then(|h| match self.heap.get(h) {
-                    Obj::Closure { captured, .. } => captured.get(*slot as usize).copied(),
+                    Obj::Closure { captured, .. } => captured.try_get(*slot as usize),
                     Obj::Str(_)
                     | Obj::Bytes(_)
                     | Obj::ByteArray(_)
@@ -203,9 +167,8 @@ impl Vm {
                 match v {
                     Some(v) => self.push(v),
                     None => {
-                        // Cold path: not a closure frame, or slot out of range. Recover the name from
-                        // the proto's capture_names and fall back to a home global (D1 lazy fault).
-                        self.ensure_module_faulted(home);
+                        // Cold path: not a closure frame, or slot out of range. Recover the name
+                        // from the proto's capture_names and fall back to a home global.
                         let proto = self.frames.last().unwrap().proto;
                         let name = self.program.protos[proto]
                             .capture_names
@@ -392,7 +355,8 @@ impl Vm {
             }
             Op::NewList(n) => {
                 let at = self.stack.len() - *n;
-                let items: Vec<Value> = self.stack.split_off(at);
+                let items = RVec::from_slice(&self.stack[at..]);
+                self.stack.truncate(at);
                 let h = self.heap.alloc(Obj::List(items));
                 self.push(Value::obj(h));
             }
@@ -422,12 +386,12 @@ impl Vm {
                     let snap = self.snapshot_key(k);
                     self.stack[at + 2 * j] = snap;
                 }
-                let mut map = MapData::default();
+                let map = MapData::default();
                 for (j, &hk) in hashes.iter().enumerate() {
                     let (k, v) = (self.stack[at + 2 * j], self.stack[at + 2 * j + 1]);
-                    match self.map_slot(&map.entries, map.candidates(hk), k, span)? {
-                        Some(p) => map.entries[p].2 = v,
-                        None => map.push(hk, k, v),
+                    let pos = self.map_slot(&map.entries, map.candidates(hk), k, span)?;
+                    if pos.and_then(|p| map.set_value(p, v)).is_none() {
+                        map.push(&self.heap, hk, k, v);
                     }
                 }
                 self.stack.truncate(at);
@@ -448,14 +412,14 @@ impl Vm {
                     let snap = self.snapshot_key(self.stack[at + j]);
                     self.stack[at + j] = snap;
                 }
-                let mut set = SetData::default();
+                let set = SetData::default();
                 for (j, &he) in hashes.iter().enumerate() {
                     let e = self.stack[at + j];
                     if self
                         .set_slot(&set.entries, set.candidates(he), e, span)?
                         .is_none()
                     {
-                        set.push(he, e);
+                        set.push(&self.heap, he, e);
                     }
                 }
                 self.stack.truncate(at);
@@ -467,7 +431,7 @@ impl Vm {
             Op::NewCell => {
                 // `v` moves straight into the `Obj` (no rooting window — alloc never GCs mid-op).
                 let v = self.pop();
-                let h = self.heap.alloc(Obj::Cell(v));
+                let h = self.heap.alloc(Obj::Cell(RCell::new(v)));
                 self.push(Value::obj(h));
             }
             Op::CellLoad => {
@@ -478,7 +442,7 @@ impl Vm {
                 let Obj::Cell(v) = self.heap.get(h) else {
                     unreachable!("CellLoad on a non-cell object");
                 };
-                let v = *v;
+                let v = v.get();
                 self.push(v);
             }
             Op::CellStore => {
@@ -488,13 +452,8 @@ impl Vm {
                 let Some(h) = ch.as_obj() else {
                     unreachable!("CellStore on a non-handle value");
                 };
-                // D4 layer C (TICKET-169): a captured local reassigned inside a spawned task is a
-                // fault, never a silent lost write.
-                if self.heap.is_copied(h) {
-                    return Err(self.copied_write_err(None, span));
-                }
-                if let Obj::Cell(slot) = self.heap.get_mut(h) {
-                    *slot = v;
+                if let Obj::Cell(slot) = self.heap.write(h).get(h) {
+                    slot.set(v);
                 } else {
                     unreachable!("CellStore on a non-cell object");
                 }
@@ -511,14 +470,14 @@ impl Vm {
                 self.push(v);
             }
             // A default-argument provider declared in a module this one does not import — see
-            // [`Op::MakeFuncIn`]. `home` comes from the DEFINER's module index, not this frame's, so
-            // the default resolves in its own namespace with no import edge.
+            // [`Op::MakeFuncIn`]. `home` comes from the DEFINER's module index, not this frame's,
+            // so the default resolves in its own namespace with no import edge.
             //
-            // `.get()` rather than `[]`: `module_objs` grows as modules RUN (and a worker's copy holds
-            // only the modules that had run when it was snapshotted), so a not-yet-initialized definer
-            // must be a clean `RuntimeError`, never an index panic on a pool thread.
-            // The module's globals themselves fault in lazily — the provider's own `GetGlobalSlot`
-            // calls `ensure_module_faulted` — so nothing is forced here.
+            // `.get()` rather than `[]`: `module_objs` grows as modules RUN (and a task's table
+            // holds only the modules that had started when it was spawned), so a
+            // not-yet-initialized definer must be a clean `RuntimeError`, never an index panic on a
+            // pool thread.
+            //
             // Callee-side default fill: the argument WAS supplied, so skip the compiled default.
             // Falling through runs it and stores it into the slot.
             Op::JumpIfProvided(slot, target) => {
@@ -528,7 +487,7 @@ impl Vm {
             }
             Op::MakeFuncIn(id) => {
                 let (proto, midx) = self.program.providers[*id as usize];
-                let Some(&home) = self.module_objs.get(midx) else {
+                let Some(home) = self.module_objs.get(midx) else {
                     return Err(self.err(
                         format!(
                             "the module that declares {} has not been initialized yet",
@@ -554,7 +513,7 @@ impl Vm {
                         span,
                     ));
                 };
-                let Some(&home) = self.module_objs.get(midx) else {
+                let Some(home) = self.module_objs.get(midx) else {
                     return Err(self.err(
                         format!(
                             "the module that declares {} has not been initialized yet",
@@ -575,14 +534,14 @@ impl Vm {
                 // the enclosing closure's value by its positional `parent_slot`.
                 let frame = self.frames.last().unwrap();
                 let (base, home, enclosing) = (frame.base, frame.home, frame.closure);
-                let mut captured = Vec::with_capacity(entries.len());
-                for e in entries {
-                    let v = match e.src {
+                let captured: RVec<Value> = entries
+                    .iter()
+                    .map(|e| match e.src {
                         CapSrc::Slot(i) => self.stack[base + i],
                         CapSrc::Captured(parent_slot) => enclosing
                             .and_then(|h| match self.heap.get(h) {
                                 Obj::Closure { captured, .. } => {
-                                    captured.get(parent_slot as usize).copied()
+                                    captured.try_get(parent_slot as usize)
                                 }
                                 Obj::Str(_)
                                 | Obj::Bytes(_)
@@ -616,9 +575,8 @@ impl Vm {
                                 | Obj::Generator(_) => None,
                             })
                             .unwrap_or(Value::nil()),
-                    };
-                    captured.push(v);
-                }
+                    })
+                    .collect();
                 let h = self.heap.alloc(Obj::Closure {
                     proto: *proto,
                     captured,
@@ -668,7 +626,10 @@ impl Vm {
                 // Snapshot a `for` iterand into an index-iterable list (a body that mutates the
                 // source does not disturb iteration). `builtin_items` holds the rows.
                 let v = self.pop();
-                let Some(items) = v.as_obj().and_then(|h| self.builtin_items(h)) else {
+                let Some(items) = v
+                    .as_obj()
+                    .and_then(|h| self.builtin_items::<RVec<Value>>(h))
+                else {
                     return Err(
                         self.err(format!("cannot iterate over {}", self.type_name(v)), span)
                     );
@@ -740,20 +701,13 @@ impl Vm {
                     return Err(self.err("`for` over a non-channel value".to_string(), span));
                 };
                 match self.recv_step_or_demote(h, span)? {
-                    RecvStep::Got(w) => {
-                        self.wake_senders(h); // `for v in ch:` freed a slot — wake a parked bounded sender
-                        let val = self.from_wire(w);
-                        let opt = self.alloc_enum("Option", "Some", vec![val]);
-                        self.push(opt);
-                    }
-                    // A `give` filled this receiver's own slot: it committed no sender.
-                    RecvStep::Filled(w) => {
-                        let val = self.from_wire(w);
-                        let opt = self.alloc_enum("Option", "Some", vec![val]);
+                    // `recv_step_or_demote` woke a sender for `Got`; a filled slot committed none.
+                    RecvStep::Got(val) | RecvStep::Filled(val) => {
+                        let opt = self.alloc_enum("Option", "Some", &[val]);
                         self.push(opt);
                     }
                     RecvStep::ClosedEmpty => {
-                        let opt = self.alloc_enum("Option", "None", vec![]);
+                        let opt = self.alloc_enum("Option", "None", &[]);
                         self.push(opt);
                     }
                     // `chan_recv_step` re-rooted the handle + set `suspend`; `run_until`'s `paused()`
@@ -823,15 +777,12 @@ impl Vm {
                     return Err(e);
                 }
             }
-            Op::SpawnCall(argc, fresh, entry) => {
-                self.do_spawn(super::sched::SpawnHead::Callee(*entry), *argc, *fresh, span)?
+            Op::SpawnCall(argc, entry) => {
+                self.do_spawn(super::sched::SpawnHead::Callee(*entry), *argc, span)?
             }
-            Op::SpawnRecv(argc, fresh, entry) => self.do_spawn(
-                super::sched::SpawnHead::Receiver(*entry),
-                *argc,
-                *fresh,
-                span,
-            )?,
+            Op::SpawnRecv(argc, entry) => {
+                self.do_spawn(super::sched::SpawnHead::Receiver(*entry), *argc, span)?
+            }
             Op::SpawnBlock(proto, entries) => self.do_spawn_block(*proto, entries, span)?,
             Op::WaitPoll(meta) => {
                 self.sched_seed_point();
@@ -858,26 +809,19 @@ impl Vm {
                 })));
                 self.push(Value::obj(h));
             }
+            // M3.3 — a box holds its init by handle (Go `&Shared{v: x}`).
             Op::NewShared => {
                 let init = self.pop();
-                // The box holds the wire form (single serialization == the old deep_clone-in). A
-                // non-sendable init (a frame-holding generator / module/native/FFI handle) faults
-                // gracefully with this Op's span — the box is a shared cross-thread cell.
-                let init = self.to_wire_crossable(init, span)?;
-                // TICKET-246: the value is decoded into the box's own heap and lives there.
-                let core = self.new_shared_core(init);
-                let h = self.heap.alloc(Obj::Shared(core));
+                let h = self
+                    .heap
+                    .alloc(Obj::Shared(Arc::new(SharedCore::new(init))));
                 self.push(Value::obj(h));
             }
             Op::NewRwShared => {
                 let init = self.pop();
-                // The box holds the wire form (single serialization == the old deep_clone-in). A
-                // non-sendable init (a frame-holding generator / module/native/FFI handle) faults
-                // gracefully with this Op's span — the box is a shared cross-thread cell.
-                // TICKET-154: an `RwShared` store serializes like every other cross-heap store (one object per alias).
-                let init = self.to_wire_crossable(init, span)?;
-                let core = self.new_rwshared_core(init);
-                let h = self.heap.alloc(Obj::RwShared(core));
+                let h = self
+                    .heap
+                    .alloc(Obj::RwShared(Arc::new(RwSharedCore::new(init))));
                 self.push(Value::obj(h));
             }
             // `NewAtomic`/`NewAtomicInt` delegate to `#[inline(never)]` helpers so their locals do NOT
@@ -886,7 +830,7 @@ impl Vm {
             // don't reuse match-arm stack slots) and can overflow the host stack before the
             // `MAX_CALL_DEPTH` guard fires. Keep these cold constructors out of line.
             Op::NewAtomic => {
-                let v = self.new_atomic(span)?;
+                let v = self.new_atomic();
                 self.push(v);
             }
             Op::NewAtomicInt => {

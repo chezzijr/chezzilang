@@ -44,7 +44,7 @@ pub fn run_program_bytes(src: &str) -> (Vec<u8>, Result<(), RuntimeError>) {
 /// Compile a test program through the module graph, as `chezzi run` does; a front-end error is
 /// the run's error.
 #[cfg(test)]
-fn test_program(src: &str) -> Result<Program, RuntimeError> {
+pub(super) fn test_program(src: &str) -> Result<Program, RuntimeError> {
     crate::compiler::compile_source(src).map_err(|e| RuntimeError {
         message: e.message,
         span: e.span,
@@ -99,12 +99,8 @@ thread_local! {
     pub(crate) static RUN_PICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// TICKET-233 — costs of the current test's own run, counted instead of timed so CPU load
     /// cannot move them. Each is read by [`run_capture_counting`] and counts only work done on the
-    /// thread that runs the program's top level, except [`MODULE_REPLAYS`].
+    /// thread that runs the program's top level.
     ///
-    /// Wire nodes `Vm::to_wire_depth` visited (every airlock serialize, speculative ones included).
-    pub(crate) static WIRE_ENCODE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Wire nodes `Vm::from_wire_memo` rebuilt (every airlock deserialize).
-    pub(crate) static WIRE_DECODE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// `Vm::elem_equal` calls (every element comparison a collection method makes).
     pub(crate) static ELEM_COMPARES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Characters a `str` subscript read to find its one character.
@@ -112,9 +108,6 @@ thread_local! {
     /// Receiver bytes `Vm::core_method` cloned before dispatching a `str` method.
     pub(crate) static STR_RECV_CLONED_BYTES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
-    /// Module replays (`Vm::fault_module` past its guard) by every task of the run, summed from
-    /// `ModuleSnapshot::replays` at the outermost nursery join.
-    pub(crate) static MODULE_REPLAYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// TICKET-211 — `(peak runner threads, runner slot denials, runner thread spawns, peak runner
     /// permit holders)` of the current test's own run, set by `run_file_inner` from the run's
     /// `QuiesceState`; read by [`run_file_counting_runners`]. The fourth is TICKET-230's.
@@ -176,31 +169,6 @@ pub fn run_file_counting_runners(
         .expect("VM thread panicked")
 }
 
-/// [`run_file`], plus the value `counter` reached during the run (TICKET-233). The graph-path twin
-/// of [`run_capture_counting`], for a program that needs its `std` imports resolved.
-#[cfg(test)]
-pub fn run_file_counting(
-    entry: &std::path::Path,
-    counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
-) -> (RunOutput, usize) {
-    let entry = entry.to_path_buf();
-    std::thread::Builder::new()
-        .stack_size(VM_STACK_BYTES)
-        .spawn(move || {
-            counter.with(|c| c.set(0));
-            let out = to_str_output(run_built(
-                || crate::compiler::compile_entry_file(&entry, None),
-                crate::native::HostConfig::default(),
-                None,
-                false,
-            ));
-            (out, counter.with(|c| c.get()))
-        })
-        .expect("failed to spawn VM thread")
-        .join()
-        .expect("VM thread panicked")
-}
-
 /// Run a single-file program and return its full stdout, or the error (test helper).
 #[cfg(test)]
 pub fn run_capture(src: &str) -> Result<String, RuntimeError> {
@@ -238,7 +206,7 @@ pub fn run_with_cfg(src: &str, stress: bool) -> (Result<String, RuntimeError>, u
                 Err(e) => return (Err(e), 0),
             };
             let mut vm = Vm::new(Arc::new(program));
-            vm.gc_stress = stress;
+            vm.gc_stress |= stress;
             let result = vm.run();
             let result = vm.finish_run(result);
             let live = vm.heap.live();
@@ -352,9 +320,8 @@ pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) ->
     to_str_output(run_file_engine(entry, cfg, None, None, false))
 }
 
-/// W7-4a — a MULTI-FILE run under GC stress (collect at every safepoint). The single-source
-/// `run_capture_stress` cannot reach the lazy per-module fault path, which is exactly where a cell
-/// now sits parked in `Vm::snapshot_rebuild` across real safepoints between two modules' faults.
+/// W7-4a — a MULTI-FILE run under GC stress (collect at every safepoint), for what the
+/// single-source `run_capture_stress` cannot reach: globals of several modules.
 #[cfg(test)]
 pub fn run_file_stress(entry: &std::path::Path) -> RunOutput {
     to_str_output(run_file_engine(
@@ -419,7 +386,8 @@ pub fn run_built(
     };
     let mut vm = Vm::new(Arc::new(program));
     vm.host = cfg;
-    vm.gc_stress = stress;
+    // `Vm::new` already set it from `CHEZZI_GC_STRESS`.
+    vm.gc_stress |= stress;
     // On a clean finish, gracefully reap any Executor never explicitly shut down (C5 / A2). A
     // deadlock verdict still drains, so finished jobs' buffered output reaches the sink (TICKET-195);
     // skipped on any other fault (the program is already erroring) and on a hard `std.os.exit`
@@ -445,12 +413,16 @@ pub fn run_built(
     // gated on `CHEZZI_HEAP_STATS=1`. `.max(live_bytes())` covers workloads under the GC threshold
     // that never `sweep()` (peak would otherwise be 0). Real stderr, never `vm.out`/`vm.stderr`, so
     // stdout parity is untouched.
+    // M1.5 — and the run's stops of the world: how many, and the longest wait for one.
     if std::env::var("CHEZZI_HEAP_STATS").is_ok() {
         let peak = vm.heap.peak_live_bytes().max(vm.heap.live_bytes());
+        let (stw, stw_max) = vm.gc_coord.stop_stats();
         eprintln!(
-            "[heap-stats] peak_live_bytes={} size_of_value={}",
+            "[heap-stats] peak_live_bytes={} size_of_value={} stw={} stw_max_us={}",
             peak,
-            std::mem::size_of::<Value>()
+            std::mem::size_of::<Value>(),
+            stw,
+            stw_max.as_micros()
         );
     }
     // A pending exit means `result` is the `exit()` unwind sentinel, not a fault: report the

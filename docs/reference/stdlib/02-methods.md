@@ -177,7 +177,7 @@ slice** (`b[1..3]`, byte offsets), and a slice keeps the receiver's type: `bytes
   Python).
 - `bytes` is `Hashable` (a valid map/set key). `bytearray` is **not** (mutable, like `list`).
 - `str(b)` / `print(b)` / interpolation use the Python repr: `b'...'` and `bytearray(b'...')`.
-- A `bytearray` crosses the task airlock by value (a deep copy, like `list`).
+- A task gets a `bytearray` by handle, like a `list` (M3.4): a write in the task lands on the parent's buffer.
 - UTF-8 only: there is no encoding-name argument, no `byte`/`u8` scalar and no non-UTF-8 codec
   (latin1/utf16).
 

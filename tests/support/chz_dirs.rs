@@ -2,6 +2,21 @@
 
 #![allow(dead_code)]
 
+/// Set to `1` for a `chezzi test` of tests/chz when the binary is a debug build. A tests/chz file
+/// whose wall-clock ceiling only a release build meets reads it with `os.env` and returns early.
+pub const DEBUG_BINARY_ENV: &str = "CHEZZI_TEST_DEBUG_BINARY";
+
+/// The one place that tells a tests/chz run its binary's build mode. `CARGO_BIN_EXE_chezzi` is built
+/// in this test crate's profile, so `cfg!(debug_assertions)` here is the binary's build mode. Unset
+/// (a manual `chezzi test tests/chz`, or a release test build), the files assert their ceilings.
+pub fn set_build_mode(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    if cfg!(debug_assertions) {
+        cmd.env(DEBUG_BINARY_ENV, "1")
+    } else {
+        cmd.env_remove(DEBUG_BINARY_ENV)
+    }
+}
+
 /// Fails when a subdirectory of `tests/chz` is missing from `listed`, when `listed` names a
 /// directory that does not exist, or when a `.chz` file sits in `tests/chz` itself.
 pub fn assert_every_subdirectory_listed(listed: &[&str]) {

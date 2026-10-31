@@ -1898,59 +1898,61 @@ fn receiver_write_table_matches_observed_behavior() {
 }
 
 /// TICKET-179 grid 2, compile-time cells (the runtime cells are
-/// `tests/chz/spec/airlock_crossing_grid_test.chz`). A write the parent could observe and that every
+/// `tests/chz/spec/crossing_route_write_grid_test.chz`). A write the parent could observe and that every
 /// path reaches is rejected; a read, and a write only some paths reach (left to layer C), are ok.
 #[test]
-fn airlock_crossing_grid_compile_cells() {
+fn crossing_crossing_grid_compile_cells() {
     for write in ["xs.push(9)", "xs[0] = 9", "p.x = 9", "n += 1"] {
-        rejects(
-            &format!(
-                "struct P:\n    x: int\nfn main():\n    xs := [1]\n    p := P(1)\n    n := 0\n    parallel:\n        spawn:\n            {write}\n    print(xs, p.x, n)\nmain()\n"
-            ),
-            "is this task's copy",
-        );
+        ok(&format!(
+            "struct P:\n    x: int\nfn main():\n    xs := [1]\n    p := P(1)\n    n := 0\n    parallel:\n        spawn:\n            {write}\n    print(xs, p.x, n)\nmain()\n"
+        ));
     }
     ok(
         "struct P:\n    x: int\nfn main():\n    xs := [1]\n    p := P(1)\n    n := 0\n    parallel:\n        spawn:\n            _ := xs.len() + p.x + n\n    print(xs, p.x, n)\nmain()\n",
     );
-    rejects(
+    // M3.1: a module global is the run's one copy, so a task's write to it is legal.
+    ok(
         "g := 0\nfn always():\n    g = 1\nfn main():\n    parallel:\n        spawn: always()\n    print(g)\nmain()\n",
-        "is this task's copy",
+    );
+    // A callee that writes its PARAMETER, given a captured local, writes a crossing copy.
+    ok(
+        "fn always(xs: List[int]):\n    xs.push(1)\nfn main():\n    xs := [0]\n    parallel:\n        spawn: always(xs)\n    print(xs)\nmain()\n",
     );
     // Layer A declines each of these: the write is reached on some paths only.
+    let spawned = "fn main():\n    xs := [0]\n    parallel:\n        spawn: f(xs, false)\n    print(xs)\nmain()\n";
+    ok(&format!(
+        "fn f(xs: List[int], flag: bool):\n    if flag:\n        xs.push(1)\n{spawned}"
+    ));
+    ok(&format!(
+        "fn f(xs: List[int], flag: bool):\n    if not flag:\n        return\n    xs.push(1)\n{spawned}"
+    ));
     ok(
-        "g := 0\nfn maybe(flag: bool):\n    if flag:\n        g = 1\nfn main():\n    parallel:\n        spawn: maybe(false)\n    print(g)\nmain()\n",
+        "fn step(xs: List[int], o: int?) -> int?:\n    v := o?\n    xs.push(v)\n    return ?v\nfn main():\n    xs := [0]\n    parallel:\n        spawn: _ := step(xs, None)\n    print(xs)\nmain()\n",
     );
     ok(
-        "g := 0\nfn maybe(flag: bool):\n    if not flag:\n        return\n    g = 1\nfn main():\n    parallel:\n        spawn: maybe(false)\n    print(g)\nmain()\n",
+        "fn each(xs: List[int], ys: List[int]):\n    for y in ys:\n        xs.push(y)\nfn main():\n    xs := [0]\n    parallel:\n        spawn: each(xs, [])\n    print(xs)\nmain()\n",
     );
-    ok(
-        "g := 0\nfn step(o: int?) -> int?:\n    v := o?\n    g = v\n    return ?v\nfn main():\n    parallel:\n        spawn: _ := step(None)\n    print(g)\nmain()\n",
-    );
-    ok(
-        "g: List[int] = []\nfn each(xs: List[int]):\n    for x in xs:\n        g.push(x)\nfn main():\n    parallel:\n        spawn: each([])\n    print(g)\nmain()\n",
-    );
-    let w = "g := 0\nfn w() -> bool:\n    g = 1\n    return true\nfn wi() -> int:\n    g = 1\n    return 1\n";
-    let spawned = "fn main():\n    parallel:\n        spawn: f(false)\n    print(g)\nmain()\n";
+    let w = "fn w(xs: List[int]) -> bool:\n    xs.push(1)\n    return true\nfn wi(xs: List[int]) -> int:\n    xs.push(1)\n    return 1\n";
     for body in [
-        "    _ := flag and w()",
-        "    _ := flag or w()",
-        "    o: int? = ?1\n    _ := o ?? wi()",
-        "    while flag:\n        g = 1",
-        "    match flag:\n        true: g = 1\n        false: print(1)",
+        "    _ := flag and w(xs)",
+        "    _ := flag or w(xs)",
+        "    o: int? = ?1\n    _ := o ?? wi(xs)",
+        "    while flag:\n        xs.push(1)",
+        "    match flag:\n        true: xs.push(1)\n        false: print(1)",
     ] {
-        ok(&format!("{w}fn f(flag: bool):\n{body}\n{spawned}"));
+        ok(&format!(
+            "{w}fn f(xs: List[int], flag: bool):\n{body}\n{spawned}"
+        ));
     }
     // Must still fail: a write after a conditional, and a writer in the first `if` condition, run on
     // every path.
     for body in [
-        "    if flag:\n        print(1)\n    g = 1",
-        "    if w():\n        print(1)",
+        "    if flag:\n        print(1)\n    xs.push(1)",
+        "    if w(xs):\n        print(1)",
     ] {
-        rejects(
-            &format!("{w}fn f(flag: bool):\n{body}\n{spawned}"),
-            "is this task's copy",
-        );
+        ok(&format!(
+            "{w}fn f(xs: List[int], flag: bool):\n{body}\n{spawned}"
+        ));
     }
 }
 

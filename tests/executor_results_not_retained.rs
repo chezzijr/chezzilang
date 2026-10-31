@@ -35,7 +35,7 @@ fn write_test_file(name: &str, contents: &str) -> std::path::PathBuf {
 #[test]
 fn executor_results_are_not_retained() {
     const CAP: usize = 8_000_000;
-    // ~1 MB blob, captured (so each submit wires it and paces the parent's sweeps) and RETURNED by
+    // ~1 MB blob, captured (each job holds it by handle) and RETURNED by
     // 300 jobs. Nothing reads those 300 MB, so nothing may hold them.
     let path = write_test_file(
         "ret_test.chz",

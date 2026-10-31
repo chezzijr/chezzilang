@@ -562,9 +562,9 @@ fn typeid_guard_distinct_layouts_keep_distinct_values() {
 
 #[test]
 fn typeid_guard_struct_round_trips_through_channel() {
-    // A struct sent across a Channel is serialized (to_wire) and rebuilt (from_wire) in the
-    // receiver; from_wire must stamp a `tid` so the receiver's field IC stays sound. VM-only
-    // (channels don't run under the frozen interp), so assert the VM output directly.
+    // A struct sent across a Channel reaches the receiver by handle (M3.2), with its `tid`, so
+    // the receiver's field IC stays sound. VM-only (channels don't run under the frozen interp),
+    // so assert the VM output directly.
     let src = concat!(
         "struct Pt:\n    x: int\n    y: int\n",
         "fn worker(ch: Channel[Pt]):\n    p := ch.recv()\n    print(\"{p.x} {p.y}\")\n",
@@ -1245,7 +1245,7 @@ fn callable_classifies_every_fn_kind() {
         Obj::Func { proto: 0, home },
         Obj::Closure {
             proto: 0,
-            captured: vec![],
+            captured: RVec::new(),
             home,
         },
         Obj::Native {
@@ -1335,43 +1335,6 @@ fn guarded_walk_restores_walk_base_on_panic() {
         vm.native_reentry, 0,
         "the inner guarded must still have restored native_reentry"
     );
-}
-
-#[test]
-fn cursor_crosses_airlock_by_deep_copy() {
-    // A cursor (`Obj::Iter`) IS sendable: `to_wire` deep-copies it (recursively wiring items +
-    // carrying `pos`) into a `WireValue::Iter`, and `from_wire` rebuilds an INDEPENDENT cursor —
-    // exactly how a `List` crosses, and matching the interpreter's `deep_clone`. (Earlier this was
-    // gated non-sendable like a generator, which panicked `deep_clone`'s `.expect` and diverged VM
-    // from interp; a cursor is plain data — a snapshot Vec + index — so it crosses by value.)
-    let mut vm = Vm::new(Arc::new(empty_program()));
-    let cursor = Value::obj(vm.heap.alloc(Obj::Iter {
-        items: vec![Value::int(7), Value::int(8)],
-        pos: 1,
-    }));
-    let wire = vm
-        .to_wire(cursor)
-        .expect("a cursor is sendable by deep copy");
-    assert!(!wire.has_handle(), "a cursor of scalars carries no handle");
-    match &wire {
-        WireValue::Iter { items, pos, .. } => {
-            assert_eq!(*pos, 1, "pos carried across the wire");
-            assert_eq!(items.len(), 2, "both snapshot items wired");
-        }
-        other => panic!("expected WireValue::Iter, got {other:?}"),
-    }
-    // Rebuild on the heap: an independent cursor with the same items + pos.
-    let rebuilt = vm.from_wire(wire);
-    let Some(h) = rebuilt.as_obj() else {
-        panic!("from_wire(cursor) must be a heap obj")
-    };
-    match vm.heap.get(h) {
-        Obj::Iter { items, pos } => {
-            assert_eq!(*pos, 1);
-            assert_eq!(items, &vec![Value::int(7), Value::int(8)]);
-        }
-        _ => panic!("expected a rebuilt Obj::Iter"),
-    }
 }
 
 #[test]

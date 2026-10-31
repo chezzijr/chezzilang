@@ -59,23 +59,14 @@ impl Checker {
         value: Option<&Expr>,
         span: Span,
     ) {
-        // Task 1 — an index/field-assign (`m[k]=v`, `s.field=x`) on a captured module global inside a
-        // task is no longer rejected: spawning deep-copies module globals per task, so the write hits
-        // the task's OWN copy. Gate
-        // deleted alongside the sibling method-mutation + reassign gates (see `infer_method_call`).
-        //
-        // W8-3 — but the write IS invisible to the parent, and nothing said so. Taint the root
-        // binding here (inside a task) / untaint it (in the parent) for every lvalue shape at once:
-        // this `match` is the sole lvalue dispatch, its `Tuple` arm recurses back into `check_assign`
-        // per element, and the ident/index/field arms all write THROUGH the same root binding. Done
-        // before the arms run so a parent-side `xs[0] = v` untaints ahead of its own receiver read.
-        // A blank `_` element of a tuple target (`a, _ = t`) discards its element, exactly as a
-        // whole `_ = e` statement does; it is never a variable to resolve or store.
+        // M3.1/M3.4 — a write inside a task (to a module global or to a captured local, `m[k]=v`,
+        // `s.field=x`, `n = 5`) is legal: the task writes the one object (Go). A blank `_` element
+        // of a tuple target (`a, _ = t`) discards its element, exactly as a whole `_ = e`
+        // statement does; it is never a variable to resolve or store.
         if op == AssignOp::Eq && target.is_blank() {
             return;
         }
         let val_ty = self.pinning_value_ty(&val_ty);
-        self.note_assign_root(target);
         match &target.kind {
             ExprKind::Ident(name) => {
                 let Some(var_ty) = self.lookup(name) else {
@@ -85,12 +76,6 @@ impl Checker {
                     );
                     return;
                 };
-                if op == AssignOp::Eq
-                    && let Some(scope) = self.owning_scope(name)
-                    && let Some(table) = self.written_captures.get_mut(scope)
-                {
-                    table.remove(name);
-                }
                 // TICKET-139 (W14-2) — a write voids the certainty of a keyword call through `name`.
                 if let Some(s) = self.owning_scope(name) {
                     self.kw_written.insert((s, name.clone()));
@@ -102,11 +87,9 @@ impl Checker {
                     );
                     return;
                 }
-                // Uniform by-reference capture: a `spawn:` task gets its OWN per-task copy of a
-                // captured LOCAL (the airlock deep-copies its cell), so reassigning it is allowed —
-                // the write mutates the isolated copy and is NOT visible to the parent (design §4 F1,
-                // the one deliberate divergence from Go). A captured MODULE GLOBAL is handled the
-                // same way — see the Task 1 note below.
+                // Uniform by-reference capture: a `spawn:` task shares the captured LOCAL's cell
+                // (M3.4), so reassigning it is allowed and the parent sees the write after the join,
+                // as in Go. A captured MODULE GLOBAL is shared too (M3.1, the note below).
                 // A `from`-imported module global is a SNAPSHOT copy of the module's value, so
                 // rebinding the bare name would write a LOCAL alias that is silently lost (the module
                 // global is unchanged, and every other module keeps its own snapshot). Reject it,
@@ -138,18 +121,16 @@ impl Checker {
                     );
                     return;
                 }
-                // Task 1 — reassigning a captured MODULE GLOBAL inside a task (`g = g + 1`) is no longer
-                // rejected: spawning deep-copies module globals per task, so the write mutates the
-                // task's OWN copy — invisible to the parent (exactly like a captured LOCAL, which
-                // already deep-copies). The
-                // frozen-module-global gate is deleted; `Shared`/`Channel` stay the shared-state hatch.
-                // A `defer:` block runs in the SAME task (no airlock), so it shares the enclosing
-                // binding's cell — reassigning a captured local mutates the shared cell (A2/A3/E1).
-                // Editor hover (decl-site): a reassignment's LHS `i` is an `Ident` lvalue the probe
-                // does NOT visit via `infer` (it's the assignment TARGET, not an evaluated expr), so
-                // record its type at the target span here. Probe-gated no-op off the probe; mirrors
-                // the let-binding/for-binding `Local` hover. Simple-Ident lvalue only (Index/Field
-                // targets are handled in their own arms below, where the receiver IS inferred).
+                // M3.1 — reassigning a MODULE GLOBAL inside a task (`g = g + 1`) is legal: every
+                // task of the run shares the global (Go), so the write lands for the parent and
+                // siblings. A `defer:` block runs in the SAME task, so it shares the
+                // enclosing binding's cell — reassigning a captured local mutates the shared cell
+                // (A2/A3/E1). Editor hover (decl-site): a reassignment's LHS `i` is an `Ident`
+                // lvalue the probe does NOT visit via `infer` (it's the assignment TARGET, not an
+                // evaluated expr), so record its type at the target span here. Probe-gated no-op
+                // off the probe; mirrors the let-binding/for-binding `Local` hover. Simple-Ident
+                // lvalue only (Index/Field targets are handled in their own arms below, where the
+                // receiver IS inferred).
                 self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
                 self.check_assign_value(&var_ty, op, &val_ty, value, target.span);
             }

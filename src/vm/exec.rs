@@ -4,8 +4,7 @@
 use super::block::Cut;
 use super::*;
 
-/// A plain runtime fault: no assert, cap, timeout, deadlock or panic flag. Behind [`Vm::err`] and
-/// the copy walk (`WalkSrc`), which has no `Vm`.
+/// A plain runtime fault: no assert, cap, timeout, deadlock or panic flag. Behind [`Vm::err`].
 pub(super) fn plain_err(message: String, span: Span) -> RuntimeError {
     RuntimeError {
         message,
@@ -120,7 +119,14 @@ impl Vm {
         }
     }
 
+    /// A root `Vm`: it makes its run's heap core. Every other `Vm` of the run is built by
+    /// [`Vm::spawn_worker`], on a handle of that core.
     pub(super) fn new(program: Arc<Program>) -> Self {
+        Vm::with_heap(program, Heap::new())
+    }
+
+    /// A `Vm` over the heap handle `heap`.
+    pub(super) fn with_heap(program: Arc<Program>, heap: Heap) -> Self {
         let field_ic = vec![IcCell::EMPTY; program.field_ic_sites as usize];
         let method_ic = vec![MethodIcSite::EMPTY; program.method_ic_sites as usize];
         // M19 Tier-2 quickening: prefix-sum the per-proto code lengths into `quicken_base`, and size
@@ -133,18 +139,19 @@ impl Vm {
             acc += p.code.len() as u32;
         }
         let quicken = vec![Q_COLD; acc as usize];
+        let module_objs = Arc::new(super::module_table::ModuleTable::new(program.modules.len()));
         Vm {
             program,
-            heap: Heap::new(),
+            heap,
             stack: Vec::new(),
             frames: Vec::new(),
             out: Vec::new(),
             stderr: Vec::new(),
             host: crate::native::HostConfig::default(),
             call_depth: 0,
-            module_objs: Vec::new(),
+            module_objs,
             str_intern: fxhash::FxHashMap::default(),
-            fn_values: fxhash::FxHashMap::default(),
+            fn_values: Arc::default(),
             field_ic,
             method_ic,
             quicken,
@@ -153,11 +160,9 @@ impl Vm {
             handlers: Vec::new(),
             pending_exit: None,
             exit_origin: false,
-            box_chain: Vec::new(),
-            box_view_err: None,
             fault_trace: None,
             fault_trace_depth: 0,
-            gc_stress: false,
+            gc_stress: gc_door::gc_stress_env(),
             nurseries: Vec::new(),
             mn_scopes: Vec::new(),
             mn_enlisted: 0,
@@ -169,6 +174,10 @@ impl Vm {
             executors: Vec::new(),
             exec_registry: Arc::new(Mutex::new(Vec::new())),
             sched_registry: Arc::new(Mutex::new(Vec::new())), // W7-56
+            root_registry: RootRegistry::default(),           // M1.4
+            gc_coord: Arc::new(gc_coord::GcCoord::new()),     // M1.5
+            attached: None,
+            detached: None,
             suspend: None,
             join_suspend: None,
             wait_suspend: None,
@@ -179,8 +188,7 @@ impl Vm {
             offload: None,
             poll_park: None,
             pending_connect: None,
-            wire_backref_missing: false, // W7-11
-            copy_mark: false,
+            held_reads: Vec::new(),
             poll_timed_out: false,
             poll_deadline: None,
             poll_partial: None,
@@ -214,16 +222,6 @@ impl Vm {
             deadline: None,
             back_edge_tick: 0,
             deferring: 0,
-            module_snapshot: None,
-            module_faulted: Vec::new(),
-            snapshot_memo: None,
-            snapshot_rebuild: super::fxhash::FxHashMap::default(),
-            snapshot_cells: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
-            snapshot_nodes: std::sync::Arc::new(super::fxhash::FxHashMap::default()),
-            snapshot_adopt: super::fxhash::FxHashMap::default(),
-            adopt_active: false,
-            snapshot_next_id: 0,
-            snapshot_builds: 0,
             mn: None,
         }
     }
@@ -239,10 +237,35 @@ impl Vm {
         depth_exceeded(span)
     }
 
+    /// M1.6 — a task switch: [`Vm::swap_ctx`] plus the task's output stream. A task owns its
+    /// `out` / `stderr` (Decision F), so only a task switch moves them; a box call runs in its
+    /// caller's stream and swaps with `swap_ctx` alone.
+    ///
+    /// M1.7 (brief item 4) — the running generators and their parked hosts are `Vm` fields that
+    /// `FiberCtx` does not carry, so a task switch asserts they are empty: a generator body runs
+    /// under [`Vm::reentered`], where a blocking op demotes instead of parking, so no fiber parks
+    /// with one open. `Vm::gc_roots` roots them while they are open.
+    pub(super) fn swap_task(&mut self, ctx: &mut FiberCtx) {
+        assert!(
+            self.gen_host_ctx.is_empty()
+                && self.active_generators.is_empty()
+                && self.held_reads.is_empty(),
+            "a task switch with a generator or a box read open"
+        );
+        self.swap_ctx(ctx);
+        std::mem::swap(&mut self.out, &mut ctx.out);
+        std::mem::swap(&mut self.stderr, &mut ctx.stderr);
+    }
+
     /// Swap the live per-execution `Vm` fields with `ctx` (B1). Used by the nursery scheduler to
     /// schedule a fiber in (its saved context becomes live) or out (the running context is parked
-    /// back into the fiber). Exactly the fields [`FiberCtx`] holds — `pending_exit` stays global.
+    /// back into the fiber), and by a box call. The fields [`FiberCtx`] holds, except the output
+    /// stream ([`Vm::swap_task`]) and `start` — `pending_exit` stays global.
     pub(super) fn swap_ctx(&mut self, ctx: &mut FiberCtx) {
+        // M1.7 — the handle's `write` record names an object of the context that leaves: settle
+        // it now. The context can resume on another shell (or a box on another caller's thread)
+        // and write that object while this handle would read it.
+        self.heap.settle_pending_mut();
         std::mem::swap(&mut self.frames, &mut ctx.frames);
         std::mem::swap(&mut self.stack, &mut ctx.stack);
         std::mem::swap(&mut self.call_depth, &mut ctx.call_depth);
@@ -261,57 +284,22 @@ impl Vm {
         // stdin is NOT swapped: it is ONE source every task shares (Go/Python) — see `Stdin` and
         // `spawn_worker`, which hands the M:N worker the same shared handle.
         //
-        // Task 1 — the fiber's module-globals view swaps for EVERY fiber; those `GcRef`s index the
-        // fiber's own heap, swapped just below, so they travel WITH the fiber. The parent's REAL
-        // modules move into `ctx.module_objs` on its swap-out. W6-2 — `module_snapshot` + `snapshot_memo` swap WITH them: a snapshot describes a
-        // module VIEW, and one shell drains fibers holding DIFFERENT views, so each must fault in (and
-        // re-snapshot) from its OWN. They carry no `GcRef` (heap-independent `SnapValue`), so GC
-        // rooting is unaffected.
-        std::mem::swap(&mut self.module_objs, &mut ctx.module_objs);
-        std::mem::swap(&mut self.module_faulted, &mut ctx.module_faulted);
-        std::mem::swap(&mut self.module_snapshot, &mut ctx.module_snapshot);
-        std::mem::swap(&mut self.snapshot_memo, &mut ctx.snapshot_memo);
-        // W7-4a — the snapshot rebuild map describes the SAME view, so it travels with it. Unlike the
-        // two `Arc<ModuleSnapshot>`s above it IS heap-keyed (`GcRef` values), exactly like
-        // `module_objs` just above: for an M:N fiber it indexes the heap swapped below, for a fiber
-        // with no heap of its own the shared heap. Either way it moves atomically with its view.
-        std::mem::swap(&mut self.snapshot_rebuild, &mut ctx.snapshot_rebuild);
-        // W7-4c — the snapshot cell registry is heap-keyed too (its KEYS are `GcRef`s into the heap the
-        // snapshot was built from), so it travels with the same view for the same reason.
-        std::mem::swap(&mut self.snapshot_cells, &mut ctx.snapshot_cells);
-        // TICKET-111 — the snapshot node registry is heap-keyed too, for the same reason.
-        std::mem::swap(&mut self.snapshot_nodes, &mut ctx.snapshot_nodes);
-        // TICKET-111 — pending adoption captures are heap-keyed too, for the same reason.
-        std::mem::swap(&mut self.snapshot_adopt, &mut ctx.snapshot_adopt);
-        // W7-4c — the counter travels WITH the registry it numbers; see `FiberCtx::snapshot_cells`.
-        // Split them and a fiber resuming on a fresher shell re-mints ids its own registry already
-        // uses, merging two unrelated bindings.
-        std::mem::swap(&mut self.snapshot_next_id, &mut ctx.snapshot_next_id);
-        // D2a — an M:N fiber (`Some`) owns its heap; swap it with the host's. A fiber with no heap of
-        // its own (`None`) shares the single `Vm::heap` (decision A), so its heap is left untouched.
-        // D2b — the same `Some` gate carries the fiber's remaining heap-keyed side state
-        // (out/stderr/executors/intern), so they move atomically WITH the heap their `GcRef`s index.
-        // A fiber with no heap of its own swaps none of that.
-        // GC: this atomicity is why a swapped-OUT `module_objs` needs no pin — it parks in `ctx`
-        // together with the heap it indexes, and `collect()` only ever walks the LIVE `self.heap`.
-        // The one production `FiberCtx` (`ReadyWorker::into_fiber`) always carries `heap: Some`.
-        if let Some(ctx_heap) = ctx.heap.as_mut() {
-            std::mem::swap(&mut self.heap, ctx_heap);
-            std::mem::swap(&mut self.out, &mut ctx.out);
-            std::mem::swap(&mut self.stderr, &mut ctx.stderr);
+        // M3.1 — `module_objs` is not swapped: every context holds the run's one module table.
+        // D2b — a context that owns its side state swaps it here: each field below belongs to ONE
+        // fiber (or one box context), so a shell that runs many in turn must not leave it behind
+        // for the next. A context that does not own side state aliases the shell's.
+        if ctx.owns_side {
+            // D2b — the fiber's `Executor` handles: the GC roots of the executors it made.
             std::mem::swap(&mut self.executors, &mut ctx.executors);
-            // M19 Phase 3 — the intern cache's `GcRef`s index this fiber's OWN heap, so it MUST travel
-            // atomically with the heap (same heap-keyed argument as `module_objs`). A fiber with no
-            // heap of its own (`heap: None`) never reaches here and keeps aliasing the shell's cache.
+            // M19 Phase 3 — the fiber's intern cache travels with its fiber.
             std::mem::swap(&mut self.str_intern, &mut ctx.str_intern);
-            std::mem::swap(&mut self.fn_values, &mut ctx.fn_values);
             // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
             // connecting fd that the netpoller is watching; it must not be left on the shell where the
             // next fiber would inherit or drop it).
             std::mem::swap(&mut self.pending_connect, &mut ctx.pending_connect);
             // D6c — a socket timeout marker set by the poll thread (on the detached fiber's ctx) swaps
             // in here so the resumed socket op sees it at entry. M:N-only, like `pending_connect`.
-            std::mem::swap(&mut self.poll_timed_out, &mut ctx.poll_timed_out);
+            std::mem::swap(&mut self.poll_timed_out, ctx.poll_timed_out.get_mut());
             // B1 — the in-flight `read`'s latched deadline belongs to the parked fiber's op (which
             // re-executes on wake), so it swaps with the fiber exactly like `poll_timed_out`.
             std::mem::swap(&mut self.poll_deadline, &mut ctx.poll_deadline);
@@ -555,11 +543,33 @@ impl Vm {
             proto,
             home,
             closure,
-            state: GenState::Pending(args),
-            ctx: GenCtx::default(),
-            stamp: 0,
+            parked: rvec::AtomicBox::new(Parked {
+                state: GenState::Pending(args),
+                ctx: GenCtx::default(),
+            }),
         };
         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
+    }
+
+    /// M2.4 — take generator `h`'s parked box for a resume (see [`GeneratorCore::parked`]). A
+    /// null pointer means a run holds it: a re-entrant resume from inside its own body, or a
+    /// resume on another thread. Python: `ValueError: generator already executing`.
+    pub(super) fn gen_take(&mut self, h: GcRef, span: Span) -> Result<Box<Parked>, RuntimeError> {
+        let heap = self.heap.write(h);
+        let Obj::Generator(g) = heap.get(h) else {
+            return Err(self.err("`.next()` on a non-generator value".to_string(), span));
+        };
+        g.parked
+            .take()
+            .ok_or_else(|| self.err("generator already running".to_string(), span))
+    }
+
+    /// Put the parked box `b` back into generator `h` (a suspend, an end, or a fault).
+    pub(super) fn gen_put(&mut self, h: GcRef, b: Box<Parked>) {
+        let heap = self.heap.write(h);
+        if let Obj::Generator(g) = heap.get(h) {
+            g.parked.put(b);
+        }
     }
 
     /// Resume a generator until its next `yield` (→ `Some(v)`) or until its body ends (→ `None`,
@@ -569,40 +579,55 @@ impl Vm {
     /// generator faults `deadlock` rather than parking the host.
     pub(super) fn generator_next(&mut self, h: GcRef, span: Span) -> Result<Value, RuntimeError> {
         // A RE-ENTRANT resume — `.next()` (or a `for`) on a generator that is already running, from
-        // inside its own body — is a fault, not an answer. This MUST come before the state take
-        // below: while a generator runs, its heap `state` is parked as the `Done` placeholder, so a
-        // re-entrant call would otherwise hit the `Done` short-circuit and silently report a live
-        // generator as EXHAUSTED (`None`). `active_generators` is the resume path's own root list,
-        // pushed/popped around the run, so it is self-clearing on every unwind path (yield,
-        // exhaustion, an early consumer `break`, a fault in the body, a fault caught by `recover:`)
-        // — a generator can never get poisoned as permanently "running". Python: `ValueError:
-        // generator already executing`.
-        if self.active_generators.contains(&h) {
-            return Err(self.err("generator already running".to_string(), span));
+        // inside its own body — is a fault, not an answer. The take sees the null owner pointer a
+        // running generator leaves, so it faults before any state read; the same take faults a
+        // resume from another thread. The box comes back on every return below (yield,
+        // exhaustion, a fault in the body, a fault caught by `recover:`), so a generator never
+        // stays "running". Python: `ValueError: generator already executing`.
+        let mut parked = self.gen_take(h, span)?;
+        if matches!(parked.state, GenState::Done) {
+            self.gen_put(h, parked);
+            return Ok(self.alloc_enum("Option", "None", &[]));
         }
-        // TICKET-137 — a module-global generator the task's snapshot could not copy: fault with the
-        // recorded cause. Before the state take below, whose `Done` short-circuit would read it as
-        // exhausted.
-        if let Obj::Generator(g) = self.heap.get(h)
-            && let GenState::Unsendable(msg) = &g.state
-        {
-            let msg = msg.to_string();
-            return Err(self.err(msg, span));
-        }
-        // Take the generator's lifecycle state + parked context out of the heap object. `state` is
-        // left as `Done` and `ctx` as empty; the real state is written back after the run. An
-        // already-`Done` generator short-circuits to `None`.
-        let (proto, home, closure, mut gen_ctx, state) = {
-            let Obj::Generator(g) = self.heap.get_mut(h) else {
-                return Err(self.err("`.next()` on a non-generator value".to_string(), span));
-            };
-            if matches!(g.state, GenState::Done) {
-                return Ok(self.alloc_enum("Option", "None", Vec::new()));
+        // The box goes back on every exit of the resume. A Rust panic inside it (a task fault)
+        // puts it back `Done` with an empty ctx: Python marks a generator that raised as finished.
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.generator_resume(h, span, &mut parked)
+        }));
+        match run {
+            Ok(r) => {
+                self.gen_put(h, parked);
+                match r? {
+                    Some(v) => Ok(self.alloc_enum("Option", "Some", &[v])),
+                    None => Ok(self.alloc_enum("Option", "None", &[])),
+                }
             }
-            let state = std::mem::replace(&mut g.state, GenState::Done);
-            let ctx = std::mem::take(&mut g.ctx);
-            (g.proto, g.home, g.closure, ctx, state)
+            Err(p) => {
+                parked.state = GenState::Done;
+                parked.ctx = GenCtx::default();
+                self.gen_put(h, parked);
+                std::panic::resume_unwind(p)
+            }
+        }
+    }
+
+    /// The body of [`Vm::generator_next`] while it holds `parked`: run generator `h` to its next
+    /// `yield` (→ `Some(v)`, `parked` suspended) or to its end (→ `None`, `parked` stays `Done`).
+    /// A fault leaves `parked` `Done` with an empty ctx.
+    fn generator_resume(
+        &mut self,
+        h: GcRef,
+        span: Span,
+        parked: &mut Parked,
+    ) -> Result<Option<Value>, RuntimeError> {
+        // Take the lifecycle state + parked context out of the box, which holds `Done` and an
+        // empty ctx while this run owns it; the real state goes back after the run.
+        let state = std::mem::replace(&mut parked.state, GenState::Done);
+        let mut gen_ctx = std::mem::take(&mut parked.ctx);
+        let Obj::Generator(g) = self.heap.get(h) else {
+            unreachable!("gen_take checked a generator")
         };
+        let (proto, home, closure) = (g.proto, g.home, g.closure);
 
         // Park the host context (rooted via `gen_host_ctx`) and install the generator's private
         // context into the live `Vm`. Two swaps: host out to a temp, then the generator in.
@@ -620,8 +645,8 @@ impl Vm {
         // NURSERY-FLOOR REBASE. `nurseries` is NOT part of `GenCtx` (never swapped by `swap_gen_ctx`),
         // so `self.nurseries` is the RESUMING driver's stack, while a parked frame's / recover
         // handler's `nursery_len` was captured (absolutely) against whatever floor existed when the
-        // generator was FIRST driven — a different, possibly deeper, driver's floor (or, across the
-        // airlock, a stale SENDER floor). A generator provably opens NO nursery of its own (`spawn` /
+        // generator was FIRST driven — a different, possibly deeper, driver's floor (or, for a generator
+        // another task drove first, that task's floor). A generator provably opens NO nursery of its own (`spawn` /
         // `parallel:` are checker-banned inside a generator, recover blocks included), so its
         // frame-return drain (`do_return` → `drain_escaped_nursery(frame.nursery_len)`) and its
         // recover-catch drain (`drain_escaped_nursery(handler.nursery_len)`) MUST be no-ops — they
@@ -629,7 +654,7 @@ impl Vm {
         // every generator-internal drain is a no-op. Identity when the drive floor is unchanged (the
         // common case: existing generators drive at a fixed depth), so it is behaviour-preserving
         // there; it fixes a latent same-heap over-drain when a generator is resumed deeper than it
-        // was first driven, and makes a cross-airlock handler's stale `nursery_len` safe.
+        // was first driven, and makes another task's handler `nursery_len` safe.
         // On the first (Pending) drive `self.frames`/`self.handlers` are empty here (the body frame is
         // pushed just below), so this is a no-op then; the pushed frame gets the correct floor from
         // `push_frame`.
@@ -684,7 +709,7 @@ impl Vm {
             self.gen_fault_prefix = gen_trace.unwrap_or_default();
         }
 
-        // A fault inside the generator: leave it `Done` (already set) with an empty ctx, propagate.
+        // A fault inside the generator: `parked` stays `Done` (already set) with an empty ctx.
         run?;
 
         if yielded {
@@ -693,18 +718,13 @@ impl Vm {
                 .stack
                 .pop()
                 .expect("yielded value on the generator stack");
-            if let Obj::Generator(g) = self.heap.get_mut(h) {
-                g.ctx = new_ctx;
-                g.state = GenState::Suspended;
-            }
-            Ok(self.alloc_enum("Option", "Some", vec![v]))
+            parked.ctx = new_ctx;
+            parked.state = GenState::Suspended;
+            Ok(Some(v))
         } else {
-            // Body returned / fell off → exhausted. Drop the (drained) context.
-            if let Obj::Generator(g) = self.heap.get_mut(h) {
-                g.ctx = GenCtx::default();
-                g.state = GenState::Done;
-            }
-            Ok(self.alloc_enum("Option", "None", Vec::new()))
+            // Body returned / fell off → exhausted: the box keeps `Done` and an empty ctx, and the
+            // drained context drops.
+            Ok(None)
         }
     }
 
@@ -727,8 +747,8 @@ impl Vm {
         if !unhandled {
             return None;
         }
-        let detail = match payload.first() {
-            Some(p) => self.display(*p),
+        let detail = match payload.try_get(0) {
+            Some(p) => self.display(p),
             None => self.display(v),
         };
         Some(self.err(format!("unhandled error: {detail}"), span))
@@ -743,8 +763,10 @@ impl Vm {
         #[cfg(test)]
         width::set_probe(Some(Arc::clone(&self.quiesce.width_probe)));
         if self.run_permit.is_none() {
-            self.run_permit = Some(width::RunPermit::take());
+            self.run_permit = Some(self.gc_blocking(&[], |_| width::RunPermit::take()));
         }
+        // M1.5 — this thread runs the program: it joins the run's heap until the `Vm` drops.
+        self.gc_attach();
         for idx in 0..self.program.modules.len() {
             self.run_module(idx)?;
         }
@@ -755,9 +777,8 @@ impl Vm {
     /// modules. The entry is the last module in dependency order. The `chezzi test` runner uses it as
     /// the home for free `test fn`s and suite construction thunks.
     pub(super) fn entry_home(&self) -> GcRef {
-        *self
-            .module_objs
-            .last()
+        self.module_objs
+            .get(self.program.modules.len().saturating_sub(1))
             .expect("modules initialized before invoking tests")
     }
 
@@ -779,8 +800,14 @@ impl Vm {
         let floor = self.nurseries.len();
         let home = self.entry_home();
         let r = self.run_proto(proto, home, None, args, true, false, Span::RUNTIME);
+        // The result rides the operand stack across the reclaim, which can wait and so collect.
+        let Ok(v) = r else {
+            let _ = self.drain_escaped_nursery(floor);
+            return r;
+        };
+        self.push(v);
         let _ = self.drain_escaped_nursery(floor);
-        r
+        Ok(self.pop())
     }
 
     /// The per-invocation reset EVERY `chezzi test` entry point shares — [`Vm::invoke_test`],
@@ -930,11 +957,9 @@ impl Vm {
 
     /// `chezzi test --max-heap=<N>` — set the per-test live-heap cap in bytes (`0` = OFF, the
     /// default). A test whose live heap exceeds `N` is hard-aborted (bypassing `recover:`) and
-    /// bucketed `OverMemory`. Deterministic-in-VM (not OS RSS). The trip point is a per-heap
-    /// high-water check, so a real runaway (unbounded growth) aborts on whichever heap runs it. A
-    /// CONCURRENT test near the boundary can still slip through — each M:N worker isolates its own
-    /// heap, so per-fiber allocations that only sum over the cap may not trip — a documented per-heap
-    /// limit, see `docs/design/roadmap.md §3b`.
+    /// bucketed `OverMemory`. Deterministic-in-VM (not OS RSS). M1.7: the cap is run-wide: every
+    /// task allocates into the run's one heap, and any sweep measures it, so tasks whose live bytes
+    /// only sum over the cap trip it too (`max_heap_caps_the_run_not_each_task`).
     pub fn set_max_heap(&mut self, cap: usize) {
         self.heap.set_mem_cap(cap);
     }
@@ -1082,20 +1107,20 @@ impl Vm {
             .enumerate()
             .map(|(i, n)| (n.as_str().into(), i as u32))
             .collect();
-        let mod_obj = self.heap.alloc(Obj::Module(Box::new(ModuleData {
-            name: m.label.clone().into_boxed_str(),
-            // TICKET-183: a let-created slot starts uninitialized (its line rides in the marker), so a
-            // read before the let runs faults; a hoisted slot starts nil until its binding runs.
-            slots: (0..m.global_slots.len())
-                .map(|i| match m.let_lines.get(i).copied().unwrap_or(0) {
-                    0 => Value::nil(),
-                    line => Value::uninit(line),
-                })
-                .collect(),
+        // TICKET-183: a let-created slot starts uninitialized (its line rides in the marker), so a
+        // read before the let runs faults; a hoisted slot starts nil until its binding runs.
+        let slots = (0..m.global_slots.len())
+            .map(|i| match m.let_lines.get(i).copied().unwrap_or(0) {
+                0 => Value::nil(),
+                line => Value::uninit(line),
+            })
+            .collect();
+        let mod_obj = self.heap.alloc(Obj::Module(Box::new(ModuleData::new(
+            m.label.clone().into_boxed_str(),
+            slots,
             index,
-        })));
-        debug_assert_eq!(self.module_objs.len(), idx);
-        self.module_objs.push(mod_obj);
+        ))));
+        self.module_objs.set(idx, mod_obj);
 
         // A native std module: populate its globals with Rust `NativeFn`s + float constants. It then
         // FALLS THROUGH to `run_proto` below so a HYBRID native module's BODIED Chezzi fns (e.g.
@@ -1147,7 +1172,7 @@ impl Vm {
             .program
             .module_index(&imp.target)
             .expect("resolver guarantees the import target is in the graph");
-        let target_obj = self.module_objs[target_idx];
+        let target_obj = self.module_obj(target_idx);
         match &imp.import {
             Import::Module { path, alias, .. } => {
                 let name = alias
@@ -1183,7 +1208,7 @@ impl Vm {
             // W7-39, TICKET-208 — an executor inherits its CREATOR's whole cancel chain, as
             // every spawned task does, so an outer `cancel()` or scope cancel reaches
             // the jobs this executor will start. Captured HERE, at creation, not at `submit`:
-            // the handle crosses the airlock by `Arc`, so the submitter can belong to an
+            // any task can hold the handle, so the submitter can belong to an
             // unrelated executor.
             creator_cancel: self.scope_ancestors(),
             created_at: span,

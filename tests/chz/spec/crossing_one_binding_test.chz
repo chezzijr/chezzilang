@@ -1,0 +1,384 @@
+# W7-4: a captured local is ONE BINDING, so two sibling closures over it share ONE cell in every
+# task they reach. `docs/reference/syntax/` says a write through a capture is visible "across
+# sibling closures". TICKET-100: a DATA DAG alias (`pair := [xs, xs]`) is one object in a task too.
+# M3.4: a spawn, a `spawn:` capture and an Executor job hold the parent's closures and data by
+# handle, so a task's write through a capture lands on the parent's one binding (Go
+# `m34go/binding/main.go`, go1.27.0: `spawn_named_args 1`, `spawn_block_two_captures 1`,
+# `separate_tasks 1 1`, `data_dag_alias_across_args [1 2]`).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+import Iterator from std.iter
+import std.concurrency
+import ConcurrentList, ConcurrentMap from std.concurrency.collection
+
+struct Ctr:
+    inc: fn() -> None
+    get: fn() -> int
+
+fn make() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+
+# Two closures over one binding in a cursor, built by a box call: the caller holds the only copy.
+fn pair_cursor() -> Iterator[fn() -> int]:
+    c := make()
+    fn bump() -> int:
+        c.inc()
+        return 0
+    return [bump, c.get].iter()
+
+# Module globals: two closures over ONE function-local cell, read as the run's one global (M3.1).
+_w74c := make()
+_w74i := _w74c.inc
+_w74g := _w74c.get
+
+# A module-global generator inside a REFERENCE CYCLE (it is parked in the very list it closes over).
+# Before M3.1 its snapshot walk was DISCARDED (`to_wire` Erred → inert Nil) AFTER it reached the local
+# cell holding `_w74cyc`'s list, and `_w74size` reached that same cell. Cell ids not rolled back out
+# of the per-module memo made `_w74size` emit a `Backref` to an id no `WireValue::Cell` defined, and
+# the replay panicked on `from_wire_memo`'s `.expect`.
+struct CycPair:
+    it: Iterator[int]
+    size: fn() -> int
+
+fn _w74mk() -> CycPair:
+    xs: List[Iterator[int]] = []
+    fn g() -> Iterator[int]:
+        yield xs.len()
+    fn size() -> int:
+        return xs.len()
+    it := g()
+    xs.push(it)
+    return CycPair(it, size)
+
+_w74pair := _w74mk()
+_w74cyc := _w74pair.it
+_w74size := _w74pair.size
+
+# W7-4 REVIEW — fixtures for `spawn_passes_a_deep_arg_and_a_cyclic_capture_by_handle` (below): a
+# struct chain deeper than the 10000 structural cap, and a generator parked on a reference cycle
+# through the module-global list it reads.
+struct _W74Deep:
+    next: List[_W74Deep]
+
+_w74hold: List[Iterator[int]] = []
+
+fn _w74deep(k: int) -> _W74Deep:
+    n := _W74Deep([])
+    i := 0
+    while i < k:
+        n = _W74Deep([n])
+        i = i + 1
+    return n
+
+fn _w74gen() -> Iterator[int]:
+    me := _w74hold[0]
+    yield 1
+    yield 2
+
+# Headline repro — no concurrency at all, just a Channel round-trip inside one task.
+# M3.2: a channel moves the closures themselves, so the received pair writes the sender's one
+# binding (Go `closures.go`, M3.2 report: `one_binding 2 2`). One binding per crossing is also
+# observable where a box call's result runs over fresh state (`sole` captures).
+test fn channel_send_keeps_one_binding():
+    c := make()
+    c.inc()
+    assert c.get() == 1
+    ch := Channel[Ctr](1)
+    ch.send(c)
+    d := ch.recv()
+    assert d.get() == 1
+    d.inc()
+    assert d.get() == 2
+    assert c.get() == 2
+    e := concurrency.Shared(0).read(fn(s): make())
+    e.inc()
+    e.inc()
+    assert e.get() == 2
+
+# The pair reached through a STRUCT FIELD after crossing (same cell, two field-held closures).
+# Go (`closures.go`): `struct_field 1`.
+test fn struct_field_keeps_one_binding():
+    ch := Channel[Ctr](1)
+    ch.send(make())
+    d := ch.recv()
+    d.inc()
+    assert d.get() == 1
+    e := concurrency.Shared(0).read(fn(s): make())
+    e.inc()
+    e.inc()
+    e.inc()
+    assert e.get() == 3
+
+# A cursor carrying both closures, through a channel: the closures themselves (Go `closures.go`:
+# `cursor 1`).
+test fn cursor_keeps_one_binding():
+    ch := Channel[Iterator[fn() -> int]](1)
+    ch.send(pair_cursor())
+    fs: List[fn() -> int] = []
+    for f in ch.recv():
+        fs.push(f)
+    fs[0]()
+    assert fs[1]() == 1
+    gs: List[fn() -> int] = []
+    for g in concurrency.Shared(0).read(fn(s): pair_cursor()):
+        gs.push(g)
+    gs[0]()
+    gs[0]()
+    assert gs[1]() == 2
+
+# M3.3: a `Shared` box holds the closures themselves, so `get` hands out the one binding (Go
+# `closures.go`, M3.3 report: `box_route_same_task 3`).
+test fn shared_keeps_one_binding():
+    box := concurrency.Shared(make())
+    d := box.get()
+    d.inc()
+    assert d.get() == 1
+    assert box.read(fn(c): c.get()) == 1
+
+# The cross-task counterpart: M3.2 moves the closures into the other task by handle, so the
+# receiving task's write lands on the sender's binding (Go `closures.go`: `other_task no-fault 1`).
+test fn channel_send_to_a_different_task_shares_the_binding():
+    c := make()
+    ch := Channel[Ctr](1)
+    done := Channel[str](1)
+    parallel:
+        spawn:
+            d := ch.recv()
+            res := recover:
+                d.inc()
+            match res:
+                ?_: done.send("no-fault")
+                !e: done.send(e.message())
+        ch.send(c)
+    msg := done.recv()
+    assert msg == "no-fault", msg
+    assert c.get() == 1
+
+# `spawn f(g, h)` — two closures arriving as two SEPARATE spawn args: the task's write through one
+# lands on the parent's one binding (M3.4).
+test fn spawn_named_args_keep_one_binding():
+    c := make()
+    r := Channel[str](1)
+    fn work(i: fn() -> None, g: fn() -> int, out: Channel[str]):
+        res := recover:
+            i()
+        match res:
+            ?_: out.send("no-fault")
+            !e: out.send(e.message())
+    parallel:
+        spawn work(c.inc, c.get, r)
+    got := r.recv()
+    assert got == "no-fault", got
+    assert c.get() == 1
+
+# `spawn:` block with TWO separate captured locals over one cell — one binding, from inside the block.
+test fn spawn_block_two_captures_keeps_one_binding():
+    c := make()
+    gi := c.inc
+    gg := c.get
+    r := Channel[str](1)
+    parallel:
+        spawn:
+            res := recover:
+                gi()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert gg() == 1
+
+# M3.1: two module globals over one factory-local cell are the run's closures, so a task's write
+# through one lands and the other reads it, in the task and in the parent. Go: +1 both ways.
+test fn module_global_snapshot_keeps_one_binding():
+    before := _w74g()
+    r := Channel[str](1)
+    seen := Channel[int](1)
+    parallel:
+        spawn:
+            res := recover:
+                _w74i()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+            seen.send(_w74g())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert seen.recv() == before + 1, "the sibling global closure missed the write"
+    assert _w74g() == before + 1, "the parent missed the task's write"
+
+# W7-4 — a module global beside a cycle-parked generator (see `_w74mk` above): the task calls the
+# sibling closure over the same local, which reads the run's one copy (M3.1).
+test fn discarded_snapshot_walk_rolls_back_its_cell_ids():
+    r := Channel[int](1)
+    parallel:
+        spawn:
+            r.send(_w74size())
+    assert r.recv() == 1
+
+# FENCE — TICKET-100 inverted the DATA DAG rule: an acyclic alias reached twice is now ONE object on
+# the far side, same as a cell (docs/reference/concurrency/). Goes red if a store ever stops back-referencing
+# an off-stack alias.
+test fn data_dag_alias_is_one_object():
+    xs := [1]
+    pair := [xs, xs]
+    ch := Channel[List[List[int]]](1)
+    ch.send(pair)
+    p := ch.recv()
+    p[0].push(2)
+    assert p[0].len() == 2
+    assert p[1].len() == 2
+
+# FENCE — two tasks in turn over one captured binding: the first task's write lands on the parent's
+# cell, and the second task and the parent read it (M3.4, Go `separate_tasks 1 1`).
+test fn separate_tasks_share_the_parents_binding():
+    c := make()
+    r := Channel[str](1)
+    r2 := Channel[int](1)
+    parallel:
+        spawn:
+            res := recover:
+                c.inc()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+    parallel:
+        spawn:
+            r2.send(c.get())
+    got := r.recv()
+    assert got == "no-fault", got
+    assert r2.recv() == 1
+    assert c.get() == 1
+
+# W7-4c — a task-local binding of a module global's closure and the global itself are one
+# binding: the task's `_w74i()` writes and its `gg()` reads the same cell (M3.1: the run's). Go:
+# the read sees the write.
+test fn module_global_plus_local_capture_shares_its_binding():
+    before := _w74g()
+    r := Channel[str](2)
+    parallel:
+        spawn:
+            gg := _w74c.get
+            res := recover:
+                _w74i()
+            match res:
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
+            r.send("{gg()}")
+    got := r.recv()
+    assert got == "no-fault", got
+    read := r.recv()
+    assert read == "{before + 1}", "read after the write saw {read}"
+
+# W7-4 REGRESSION — the `RwShared` read views once drained one stored wire through many rebuilds and
+# hit a host PANIC; each view must still return its closure. M3.3: every view returns the closures
+# themselves, by handle, so a write through `inc` lands on the one `n`, view after view (Go: a
+# closure read out of a guarded slice is the closure itself).
+test fn rwshared_views_over_sibling_closures():
+    n := 0
+    fn inc() -> int:
+        n = n + 1
+        return n
+    fn get() -> int:
+        return n
+    s := ConcurrentList(concurrency.RwShared([inc, get]))
+    both := s.inner.get()          # the live container
+    both[0]()
+    assert both[1]() == 1
+    # per-element view (`at` is the SAFE index: `E?`)
+    match s.at(1):
+        ?f: assert f() == 1
+        None: assert false, "at(1) on a 2-element list must be Some"
+    sl := s[0..2]      # one call, one container
+    sl[0]()
+    assert sl[1]() == 2
+    calls := 0
+    fn tick(f: fn() -> int):
+        calls = calls + 1
+    s.for_each(tick)
+    assert calls == 2
+    # one walk: `inc` runs inside the fold and its write lands.
+    s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f())
+    m := ConcurrentMap(concurrency.RwShared({"i": inc, "g": get}))
+    assert m.contains("i")
+    match m.get("g"):
+        ?f: assert f() == 3
+        None: assert false
+    m.for_each_entry(fn(k: str, f: fn() -> int): f())
+    assert m.fold_entries(0, fn(a: int, k: str, f: fn() -> int) -> int: a + 1) == 2
+    assert n == 4
+    # (`contains` shares the code path but is unreachable with closures — a `fn` is not Hashable, so a
+    # Set can never hold two sibling closures.)
+
+# FENCE — TICKET-100: one object across two SEPARATE spawn args: the task's write lands on the
+# parent's list (M3.4, Go `data_dag_alias_across_args [1 2]`).
+test fn data_dag_alias_across_spawn_args_lands():
+    xs := [1]
+    r := Channel[str](1)
+    fn work(a: List[int], b: List[int], out: Channel[str]):
+        res := recover:
+            a.push(2)
+        match res:
+            ?_: out.send("no-fault")
+            !e: out.send(e.message())
+    parallel:
+        spawn work(xs, xs, r)
+    got := r.recv()
+    assert got == "no-fault", got
+    assert xs == [1, 2]
+
+# W7-4 REVIEW (charge 1/5/7) — a `RwShared` read VIEW run CONCURRENTLY with a writer. The first cut
+# resolved a piece's `Backref` by RE-READING `core.v` after dropping the read guard, so a `set` in that
+# window swapped the stored wire for a fresh serialization whose ids are unrelated: the piece's backref
+# then hit `from_wire_memo`'s `.expect` — a HOST PANIC on a legal program (write-preferring `RwLock`,
+# so the queued writer wins the window: reproduced at every thread count). M3.3: a view reads the
+# live container by handle, so it never needs a second read. The reader's `at(1)` copy is its own
+# binding either way; what is asserted is that the program completes at all.
+test fn rwshared_view_survives_a_concurrent_writer():
+    n := 0
+    fn inc() -> int:
+        n = n + 1
+        return n
+    fn get() -> int:
+        return n
+    fn zero() -> int:
+        return 0
+    s := ConcurrentList(concurrency.RwShared([inc, get]))
+    d := Channel[int](2)
+    parallel:
+        spawn:
+            for i in 0..20000:
+                s.inner.set([zero, zero])
+                s.inner.set([inc, get])
+            d.send(1)
+        spawn:
+            hits := 0
+            for i in 0..20000:
+                match s.at(1):
+                    ?f: hits = hits + f()
+                    None: assert false, "the writer always stores a 2-element list"
+            d.send(2)
+    assert d.recv() + d.recv() == 3
+
+# W7-4 REVIEW (charge 3) — M3.4: a spawn walks none of its values, so an arg deeper than the
+# structural cap and a callee capture that is a generator in a reference cycle both pass by handle
+# and the task runs (Go hands a goroutine any pointer).
+test fn spawn_passes_a_deep_arg_and_a_cyclic_capture_by_handle():
+    it := _w74gen()
+    _w74hold.push(it)
+    for x in it:
+        break
+    fn callee(d: _W74Deep):
+        for y in it:
+            break
+    d := _w74deep(11000)
+    r := recover:
+        parallel:
+            spawn callee(d)
+    match r:
+        ?_: pass
+        !e: assert false, e.message()

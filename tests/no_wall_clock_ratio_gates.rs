@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 17] = [
+const CLOCK_READING_TESTS: [&str; 19] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault",
     "a_slow_but_healthy_job_at_the_exit_drain_is_untouched",
@@ -94,6 +94,12 @@ const CLOCK_READING_TESTS: [&str; 17] = [
     // TICKET-151: the same liveness deadline for a DIRECT `io.input` (no callback, no spin); the
     // clock starts at spawn because the fixture prints nothing before the read.
     "sibling_runs_while_a_direct_stdin_read_blocks",
+    // M2.9 (vm/gc_coord.rs): the test checks the stop timer itself. It spins until the clock
+    // moves and asserts an order (the spin <= the recorded stop <= the whole call), not a bound.
+    "stop_stats_time_the_whole_stop",
+    // M2.4 fix 1 (vm/rvec.rs): the clock only holds a read open for 50 ms so the take must wait;
+    // the assert is the order (`read_done` before the take returns), not a time.
+    "take_waits_for_a_read_in_progress",
     // threads_one_serializes_cpu_bound_parallel_tasks / _nested_eager_parallel_tasks (TICKET-059):
     // both now read the clock in tests/support/child_rusage.rs, not in their own bodies -- same
     // precedent as many_idle_workers_do_not_thundering_herd_on_yield, never listed here.
@@ -349,7 +355,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 117] = [
     "an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout",
     "an_eager_wait_timer_arm_loses_to_a_sibling_value",
     "an_executor_jobs_send_wakes_a_task_parked_on_another_scheds_channel",
-    "cancel_cascade_crosses_the_airlock",
+    "cancel_cascade_crosses_tasks",
     "cancel_trip_wakes_parked_wait_under_parallel",
     "connect_to_dead_port_reports_refused",
     // TICKET-114: the sleep is a POLL INTERVAL on `try_wait` against the 60 s hang bound (DEC-095's
@@ -506,7 +512,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 117] = [
     // programs' SOURCE STRINGS: it is the `defer` cleanup that the 300 ms `--timeout` cuts. It orders
     // no two events in the Rust test's own control flow.
     "a_hard_halt_in_a_defer_is_never_bound_by_recover_at_every_route",
-    // TICKET-297, `src/vm/tests/sched_wake.rs`. Its `time.sleep_ms` calls are inside the fixture .chz
+    // M4b, `src/vm/tests/sched_wake.rs`. Its `time.sleep_ms` calls are inside the fixture .chz
     // programs' SOURCE STRINGS: the 50 ms delays the child's fault until the owner is parked at the
     // inner join, and the 300 ms keeps the `spawned_owner` sibling alive. The Rust test orders
     // nothing with them; the `CHEZZI_TEST_PRE_FINISH_WINDOW` hook holds the gap between the trip
@@ -537,7 +543,11 @@ fn no_new_rust_test_sleeps_to_order_two_events() {
 /// nothing else can express the wait: a parked rendezvous sender or a job that must be INSIDE the
 /// sleep when cancelled has no Chezzi-visible predicate, and one entry asserts a window a value must
 /// NOT change across, which is a legitimate clock use, not a happens-before guess (TICKET-059/060).
-const CHZ_SLEEP_SITES: [(&str, &str); 10] = [
+const CHZ_SLEEP_SITES: [(&str, &str); 13] = [
+    // M3.2: the sleep lets the print reach its GC door before the swap, so the row covers the race
+    // it pins. It orders no result: the assertion accepts the print from either order, and a
+    // handshake cannot signal from inside the print path, which runs no user code.
+    ("tests/chz/spec/core_handle_test.chz", "time.sleep_ms(100)"),
     (
         "tests/chz/spec/rendezvous_channel_test.chz",
         "time.sleep_ms(150)",
@@ -570,9 +580,14 @@ const CHZ_SLEEP_SITES: [(&str, &str); 10] = [
     // TICKET-246: the sleep IS the wait under test -- a timed wait inside a box closure. The
     // `recv` beside it blocks until the `send` that follows the sleep, so the sleep orders nothing.
     ("tests/chz/suites/box_rules_test.chz", "time.sleep_ms(5)"),
-    // TICKET-246: the writer holds the box in this sleep; `started` orders the events. A reader
-    // that arrives after the sleep still sees the new value, so the assert holds at any timing.
-    ("tests/chz/suites/box_rules_test.chz", "time.sleep_ms(150)"),
+    // M3.3: the sleep lets a guard waiter reach its wait before the guard holder's channel gets
+    // its value; `held` orders the holder first, so the assert (30) holds at any timing.
+    ("tests/chz/spec/shared_handle_test.chz", "time.sleep_ms(20)"),
+    // M3.3 fix 1: the 80 ms holds a read while a writer and then a reader reach their waits; the
+    // 30 ms lets the writer (signalled by `wsig`) reach its wait first. A holder that releases early
+    // lets the writer in first too, so the asserts hold unless the writer is 30 ms late.
+    ("tests/chz/spec/shared_handle_test.chz", "time.sleep_ms(80)"),
+    ("tests/chz/spec/shared_handle_test.chz", "time.sleep_ms(30)"),
 ];
 
 /// Every `path:line: text` under `tests/chz` that calls `time.sleep_ms(` and is not one of

@@ -62,13 +62,18 @@ test fn a_faulted_tasks_error_is_memoized():
             assert e.message().contains("job failed"), e.message()
             assert not e.message().contains("closed"), e.message()
 
-test fn a_faulted_tasks_error_carries_no_origin():
+# M3.2: the Task holds the job's own error, so it keeps the origin a local `recover: bad()` gives
+# (CPython: `future.exception()` is the job's exception, its traceback at `bad`'s raise; M3.2
+# report `future_origin.py`: `ValueError job failed bad 6`).
+test fn a_faulted_tasks_error_carries_the_jobs_origin():
     ex := concurrency.Executor()
     t0 := ex.submit(bad)
     ex.shutdown()
     match t0.get():
         ?_: assert false, "get() on a faulted job must not return Ok"
         !e:
-            assert e.file() == None, "Task.get()'s error crosses an airlock and must answer None"
-            assert e.line() == None, "Task.get()'s error must answer None for line()"
-            assert e.col() == None, "Task.get()'s error must answer None for col()"
+            assert e.line() == ?13, "the line of the panic in `bad`"
+            assert e.col() == ?5, "the col of the panic in `bad`"
+            match e.file():
+                None: assert false, "expected the job's file"
+                ?p: assert p.ends_with("task_fault_test.chz"), "file: {p}"

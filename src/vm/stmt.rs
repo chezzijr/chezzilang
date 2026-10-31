@@ -4,12 +4,8 @@
 use super::block::Cut;
 use super::*;
 
-/// TICKET-246 — appended to the D4 fault when the write happens inside a `Shared` / `RwShared`
-/// closure.
-pub(crate) const BOX_COPY_WRITE_NOTE: &str = " (inside a Shared/RwShared closure this value is a copy of a capture or of a module global; if the box holds a module global's copy, store its .copy() in the box instead)";
-
-/// TICKET-246 — one of the three boxes that render what they hold, borrowed from a heap object
-/// or from a wire handle. [`Vm::display_box`] is its only renderer.
+/// TICKET-246 — one of the three boxes that render what they hold, borrowed from a heap object.
+/// [`Vm::display_box`] is its only renderer.
 #[derive(Clone, Copy)]
 pub(super) enum BoxCore<'a> {
     Shared(&'a Arc<SharedCore>),
@@ -18,60 +14,21 @@ pub(super) enum BoxCore<'a> {
 }
 
 impl<'a> BoxCore<'a> {
-    /// The box behind a wire handle; `None` for every other wire value.
-    pub(super) fn of_wire(w: &'a WireValue) -> Option<Self> {
-        match w {
-            WireValue::Shared(c) => Some(BoxCore::Shared(c)),
-            WireValue::RwShared(c) => Some(BoxCore::RwShared(c)),
-            WireValue::Atomic(c) => Some(BoxCore::Atomic(c)),
-            WireValue::Int(_)
-            | WireValue::Float(_)
-            | WireValue::Bool(_)
-            | WireValue::Nil
-            | WireValue::List { .. }
-            | WireValue::Tuple { .. }
-            | WireValue::Map { .. }
-            | WireValue::Set { .. }
-            | WireValue::Str(_)
-            | WireValue::Bytes(_)
-            | WireValue::ByteArray(_)
-            | WireValue::Iter { .. }
-            | WireValue::Struct { .. }
-            | WireValue::Enum { .. }
-            | WireValue::Cell { .. }
-            | WireValue::Backref(_)
-            | WireValue::Handle(_)
-            | WireValue::Channel(_)
-            | WireValue::AtomicInt(_)
-            | WireValue::Executor(_)
-            | WireValue::Socket(_)
-            | WireValue::Listener(_)
-            | WireValue::Writer(_)
-            | WireValue::Reader(_)
-            | WireValue::Ptr(_)
-            | WireValue::Builtin(_)
-            | WireValue::Native { .. }
-            | WireValue::Cffi(_)
-            | WireValue::Closure { .. }
-            | WireValue::Func { .. }
-            | WireValue::Generator { .. } => None,
-        }
-    }
-
-    pub(super) fn to_wire(self) -> WireValue {
-        match self {
-            BoxCore::Shared(c) => WireValue::Shared(Arc::clone(c)),
-            BoxCore::RwShared(c) => WireValue::RwShared(Arc::clone(c)),
-            BoxCore::Atomic(c) => WireValue::Atomic(Arc::clone(c)),
-        }
-    }
-
-    /// The core's identity: what the `seen` stack and the snapshot map are keyed on.
+    /// The core's identity: what the `seen` stack is keyed on.
     pub(super) fn addr(self) -> usize {
         match self {
             BoxCore::Shared(c) => Arc::as_ptr(c) as usize,
             BoxCore::RwShared(c) => Arc::as_ptr(c) as usize,
             BoxCore::Atomic(c) => Arc::as_ptr(c) as usize,
+        }
+    }
+
+    /// What the box holds, read with no wait (M3.2 / M3.3: each box holds one word).
+    pub(super) fn peek(self) -> Value {
+        match self {
+            BoxCore::Shared(c) => c.v.get(),
+            BoxCore::RwShared(c) => c.v.get(),
+            BoxCore::Atomic(c) => c.load(),
         }
     }
 
@@ -84,29 +41,7 @@ impl<'a> BoxCore<'a> {
     }
 }
 
-/// Box snapshots taken before a render, keyed on [`BoxCore::addr`].
-pub(super) type BoxSnaps = fxhash::FxHashMap<usize, WireValue>;
-
 impl Vm {
-    /// Build the D4 layer-C fault for a write to an airlock copy. `name` is the binding name when
-    /// the write site knows it (a global slot store); every other site passes `None` and gets the
-    /// generic `this value` subject.
-    pub(super) fn copied_write_err(&self, name: Option<&str>, span: Span) -> RuntimeError {
-        let subject = match name {
-            Some(n) => format!("'{n}'"),
-            None => "this value".to_string(),
-        };
-        // TICKET-246 — inside a box closure a marked value is a capture's copy or a module
-        // global's copy. The second can be held by the box state (`s.update(fn(_): DEFAULTS)`),
-        // where "lost at the join" alone would mislead, so the fault names that case and its fix.
-        let in_box = if self.box_chain.is_empty() {
-            ""
-        } else {
-            BOX_COPY_WRITE_NOTE
-        };
-        self.err(format!("{subject} {COPY_WRITE_TAIL}{in_box}"), span)
-    }
-
     /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's
     /// own list so the not-yet-run records stay GC-rooted in the frame. Stops once any party's
     /// `std.os.exit` is published, between two `defer`s too (Go: `os.Exit` does not run deferred
@@ -347,13 +282,14 @@ impl Vm {
         let v = self.pop();
         // Extract (variant_id, payload-arity, first-payload) up front so the heap borrow is released
         // before we mutate the stack / unwind a frame.
-        let info =
-            match v.view() {
-                ValueView::Obj(h) => self.heap.get(h).as_enum().map(|(variant_id, payload)| {
-                    (variant_id, payload.len(), payload.first().copied())
-                }),
-                ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => None,
-            };
+        let info = match v.view() {
+            ValueView::Obj(h) => self
+                .heap
+                .get(h)
+                .as_enum()
+                .map(|(variant_id, payload)| (variant_id, payload.len(), payload.try_get(0))),
+            ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => None,
+        };
         // M19 lever #2 — gate on the fixed native variant ids (`VID_OK`/`VID_SOME` unwrap, `VID_ERR`/
         // `VID_NONE_VARIANT` propagate), NOT a name compare. A user enum shadowing `Ok`/`Err`/`Some`/
         // `None` gets distinct ids, so it is correctly NOT treated as a Result/Option by `?`.
@@ -364,6 +300,11 @@ impl Vm {
                 return Ok(());
             }
             if variant_id == VID_ERR || variant_id == VID_NONE_VARIANT {
+                // The propagated value rides the operand stack from here to its delivery: each
+                // drain below can collect (a defer runs code; a nursery wait detaches this thread
+                // and another thread collects the run's one heap), and the stack is a root, a Rust
+                // local is not. `do_return` keeps its return value there for the same reason.
+                self.push(v);
                 // A `?` directly inside a `recover:` block (a handler installed in THIS frame)
                 // short-circuits to that boundary (try-block style): the `Err`/`None` value becomes
                 // the recover's result. Function-scoped `?` (no same-frame handler) falls through.
@@ -392,13 +333,13 @@ impl Vm {
                     if let Some(e) = body_defers {
                         self.store_escape_park(e);
                     }
-                    self.push(v);
                     self.rewind_op();
                     self.join_suspend = Some(origin);
                     return Ok(());
                 }
                 if let Some(h) = self.handlers.pop_if(|h| h.frame_len == frame_len) {
                     self.stack.truncate(h.stack_len);
+                    self.push(v); // the recover's value slot, rooted across the drains below
                     self.call_depth = h.call_depth;
                     // Drop scope markers of defer scopes opened inside the recover block — the `?`
                     // jumps past their `LeaveDeferScope`s, so they would otherwise leak.
@@ -434,27 +375,20 @@ impl Vm {
                     // Drain the recover block's own defers before binding the result. A fault in one
                     // supersedes the propagated value (becomes the recover's `Err`); a recover-block
                     // defer fault in turn supersedes a body defer fault (it unwinds later).
-                    match self.drain_frame_to(h.defer_len) {
-                        Some(e) => {
-                            let e = self.cleanup_halt(e)?;
-                            let sp = e.span;
-                            let msg = self.alloc_str(e.message);
-                            self.stamp_err_span(msg, sp);
-                            let err = self.alloc_enum("Result", "Err", vec![msg]);
-                            self.push(err);
-                        }
-                        None => match body_defer_err {
-                            // No recover-block defer fault, but a parallel-body defer faulted: that
-                            // becomes the recover's `Err` (Go semantics — a defer fault supersedes).
-                            Some(e) => {
-                                let sp = e.span;
-                                let msg = self.alloc_str(e.message);
-                                self.stamp_err_span(msg, sp);
-                                let err = self.alloc_enum("Result", "Err", vec![msg]);
-                                self.push(err);
-                            }
-                            None => self.push(v), // the propagated Result/Option value IS the result
-                        },
+                    // A body defer fault becomes the recover's `Err` when no recover-block defer
+                    // faulted (Go semantics — a defer fault supersedes).
+                    let fault = match self.drain_frame_to(h.defer_len) {
+                        Some(e) => Some(self.cleanup_halt(e)?),
+                        None => body_defer_err,
+                    };
+                    // With no fault, the propagated Result/Option value, already in place, IS the result.
+                    if let Some(e) = fault {
+                        self.pop(); // superseded
+                        let sp = e.span;
+                        let msg = self.alloc_str(e.message);
+                        self.stamp_err_span(msg, sp);
+                        let err = self.alloc_enum("Result", "Err", &[msg]);
+                        self.push(err);
                     }
                     // W13-20 — a deferred `.next()` run by either drain above (the escaped `parallel:`
                     // body's, or the recover block's own) can fault and park its own frames in
@@ -475,8 +409,7 @@ impl Vm {
                     }));
                 }
                 // Otherwise early-return this value from the enclosing function (running its
-                // deferred calls first; a fault in one propagates as a fault).
-                self.push(v);
+                // deferred calls first; a fault in one propagates as a fault). `v` is on top.
                 self.do_return(true)?;
                 return Ok(());
             }
@@ -567,16 +500,18 @@ impl Vm {
     }
 
     /// M19 memory-layout lever — resolve a struct `tid` back to its IDENTITY KEY (the `structs` map
-    /// key, e.g. `<main>::Point`) on the cold path (method dispatch / Display / arith / hash / wire /
-    /// snap), where `Obj::Struct` no longer carries a per-instance `name`. O(1) via `struct_names`.
+    /// key, e.g. `<main>::Point`) on the cold path (method dispatch / Display / arith / hash), where `Obj::Struct` no longer carries a per-instance `name`. O(1) via `struct_names`.
     /// Returns `"?"` for [`crate::base::op::TID_NONE`] / an out-of-range id (defensive — every
     /// source-constructed struct has a registered `def.tid`, so this is unreachable for Display).
     pub(super) fn struct_name_of_tid(&self, tid: u32) -> &str {
-        self.walk_src().struct_name_of_tid(tid)
+        self.program
+            .struct_names
+            .get(tid as usize)
+            .map_or("?", |s| s)
     }
 
     /// M19 lever #2 — resolve a `variant_id` back to its `(enum-type, variant)` names on the COLD path
-    /// (Display / stringify / error / wire / snap), where the instance no longer carries the strings.
+    /// (Display / stringify / error), where the instance no longer carries the strings.
     /// O(1) via `Program::variants_by_id`. Returns `("?", "?")` for [`crate::base::op::VID_NONE`] / an
     /// out-of-range id (defensive — a registered enum always resolves).
     pub(super) fn enum_names(&self, variant_id: u32) -> (&str, &str) {
@@ -584,24 +519,6 @@ impl Vm {
             .variants_by_id
             .get(variant_id as usize)
             .map_or(("?", "?"), |d| (d.enum_name.as_str(), d.name.as_str()))
-    }
-
-    /// The display rule of a carrier (TICKET-228): what a `T?` / `T!E` value prints in front of
-    /// its payload, the way the user writes it. An error is `!e`; a success or a present value is
-    /// its bare payload; `?` prints only in front of an absent payload (`?None`), so it stays
-    /// distinct from `None`. Rust `None` for a non-carrier and for the absent value itself, which
-    /// print by their variant name. `absent_payload` says whether the payload is absent or is
-    /// itself a `?`-prefixed present value.
-    fn carrier_prefix_of(
-        variant_id: u32,
-        absent_payload: impl FnOnce() -> bool,
-    ) -> Option<&'static str> {
-        match variant_id {
-            crate::base::op::VID_ERR => Some("!"),
-            crate::base::op::VID_OK => Some(""),
-            crate::base::op::VID_SOME => Some(if absent_payload() { "?" } else { "" }),
-            _ => None,
-        }
     }
 
     /// How a fault names a carrier value: one of the two words above, never `enum`.
@@ -624,43 +541,36 @@ impl Vm {
         )
     }
 
-    /// [`Self::carrier_prefix_of`] for a heap carrier.
+    /// The display rule of a carrier (TICKET-228): what a `T?` / `T!E` value prints in front of
+    /// its payload, the way the user writes it. An error is `!e`; a success or a present value is
+    /// its bare payload; `?` prints only in front of an absent payload (`?None`), so it stays
+    /// distinct from `None`. Rust `None` for a non-carrier and for the absent value itself, which
+    /// print by their variant name. `?` prints when the payload is absent or is itself a
+    /// `?`-prefixed present value.
     pub(super) fn carrier_prefix(
         &self,
         variant_id: u32,
-        payload: &[Value],
+        payload: &RVec<Value>,
     ) -> Option<&'static str> {
-        Self::carrier_prefix_of(variant_id, || {
-            payload.first().and_then(|v| v.as_obj()).is_some_and(|h| {
-                match self.heap.get(h).as_enum() {
+        let absent_payload = || {
+            payload
+                .try_get(0)
+                .and_then(|v| v.as_obj())
+                .is_some_and(|h| match self.heap.get(h).as_enum() {
                     Some((inner, inner_payload)) => {
                         inner == crate::base::op::VID_NONE_VARIANT
                             || (inner == crate::base::op::VID_SOME
                                 && self.carrier_prefix(inner, inner_payload) == Some("?"))
                     }
                     None => false,
-                }
-            })
-        })
-    }
-
-    /// [`Self::carrier_prefix_of`] for a wire carrier.
-    pub(super) fn carrier_prefix_wire(
-        variant_id: u32,
-        payload: &[WireValue],
-    ) -> Option<&'static str> {
-        Self::carrier_prefix_of(variant_id, || match payload.first() {
-            Some(WireValue::Enum {
-                variant_id: inner,
-                payload: inner_payload,
-                ..
-            }) => {
-                *inner == crate::base::op::VID_NONE_VARIANT
-                    || (*inner == crate::base::op::VID_SOME
-                        && Self::carrier_prefix_wire(*inner, inner_payload) == Some("?"))
-            }
-            _ => false,
-        })
+                })
+        };
+        match variant_id {
+            crate::base::op::VID_ERR => Some("!"),
+            crate::base::op::VID_OK => Some(""),
+            crate::base::op::VID_SOME => Some(if absent_payload() { "?" } else { "" }),
+            _ => None,
+        }
     }
 
     /// The pattern a carrier variant is matched by, for the `no match arm` fault text; Rust
@@ -705,7 +615,8 @@ impl Vm {
             ));
         }
         let at = self.stack.len() - argc;
-        let payload: Vec<Value> = self.stack.split_off(at);
+        let payload = RVec::from_slice(&self.stack[at..]);
+        self.stack.truncate(at);
         let h = self.heap.alloc(Obj::Enum {
             variant_id,
             payload,

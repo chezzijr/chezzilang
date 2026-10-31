@@ -1,0 +1,68 @@
+# A spawned task writes a module global (`n = 100`, `xs = [1, 2]`, `ys.push(2)`), and every closure
+# it sends reads the run's one copy of the global (M3.1, Go model). Goldens: the equivalent Go
+# program (go1.27.0): 100 / 2. History: TICKET-097/051 (install) and TICKET-137 (D2, per-task
+# copies) gave other answers; M3 deleted that copy model.
+import std.concurrency
+
+n: int = 1
+
+fn helper() -> int:
+    return n
+
+fn producer_a(c1: Channel[fn() -> int], c2: Channel[fn() -> int], fr: Channel[str]):
+    res := recover:
+        n = 100
+    match res:
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
+    c1.send(fn() -> int: helper())
+    c2.send(fn() -> int: n)
+
+test fn call_indirected_global_write_lands_and_every_closure_reads_it():
+    c1 := Channel[fn() -> int]()
+    c2 := Channel[fn() -> int]()
+    fr := Channel[str](1)
+    parallel:
+        spawn producer_a(c1, c2, fr)
+    fault := fr.recv()
+    assert fault == "no-fault", fault
+    indirect := c1.recv()
+    before := indirect()
+    direct := c2.recv()
+    after := indirect()
+    assert before == 100, "indirect (call-indirected) read saw {before} before the unrelated recv"
+    assert after == 100, "indirect (call-indirected) read saw {after} after the unrelated recv"
+    assert direct() == 100, "direct read saw {direct()}"
+
+xs: List[int] = [1]
+ys: List[int] = [1]
+
+fn producer_b(c: Channel[fn() -> int], c2: Channel[fn() -> int], fr1: Channel[str], fr2: Channel[str]):
+    res1 := recover:
+        xs = [1, 2]
+    match res1:
+        ?_: fr1.send("no-fault")
+        !e: fr1.send(e.message())
+    res2 := recover:
+        ys.push(2)
+    match res2:
+        ?_: fr2.send("no-fault")
+        !e: fr2.send(e.message())
+    c.send(fn() -> int: xs.len())
+    c2.send(fn() -> int: ys.len())
+
+test fn in_place_mutated_global_write_lands_and_every_closure_reads_it():
+    c := Channel[fn() -> int]()
+    c2 := Channel[fn() -> int]()
+    fr1 := Channel[str](1)
+    fr2 := Channel[str](1)
+    parallel:
+        spawn producer_b(c, c2, fr1, fr2)
+    fault1 := fr1.recv()
+    fault2 := fr2.recv()
+    assert fault1 == "no-fault", fault1
+    assert fault2 == "no-fault", fault2
+    f := c.recv()
+    g := c2.recv()
+    assert f() == 2, "assigned global via closure saw {f()}"
+    assert g() == 2, "in-place-mutated global via closure saw {g()}"

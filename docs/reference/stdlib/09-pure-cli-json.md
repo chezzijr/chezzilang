@@ -226,8 +226,6 @@ Constructors: `manual() -> Token` · `timeout(ms: int) -> Token` · `derive(pare
   chain, so the per-ancestor cost grows with depth (see [`benchmarks.md`](../../contributing/benchmarks.md)).
   A deep `derive()` chain polled in a CPU loop degrades quadratically; Go's context error check is a
   flat O(1) at every depth.
-- A `Token` from a tree deeper than **4 999** faults `maximum structural depth (10000) exceeded` when it
-  crosses the airlock.
 - Cancellation is **cooperative** (see `concurrency.md`): a task blocked in a
   `std.io`/`std.fs`/`std.process`/`std.request` call sees the token only once that call returns; those
   are [uninterruptible while in flight](04-native-core.md#blocking-calls-cannot-be-interrupted).

@@ -254,9 +254,9 @@ impl Vm {
     /// VM re-entry ⇒ no GC fires mid-copy), so it needs no rooting; a caller that then re-enters the
     /// VM (e.g. `hash_value` on a *later* element) must root the returned snapshot itself.
     ///
-    /// Deliberately NOT `deep_clone` (the concurrency airlock's `to_wire`/`from_wire`): that
-    /// serializer (a) FAULTS on a generator / cyclic key — nonsensical for a plain
-    /// single-thread insert that previously stored the key by reference and worked — and (b) rebuilds
+    /// Deliberately NOT a full deep copy (the deleted concurrency airlock's serializer): that copy
+    /// (a) FAULTED on a generator / cyclic key — nonsensical for a plain
+    /// single-thread insert that previously stored the key by reference and worked — and (b) rebuilt
     /// every by-reference sub-value (a `Closure`/`Channel`/`Shared`/… field) with a FRESH handle,
     /// which `values_equal` (identity-only for those arms) then never matches, so a later lookup of
     /// the same key misses. [`Vm::snapshot_value`] instead copies only the mutable, structurally-
@@ -336,15 +336,12 @@ impl Vm {
             return false; // already fully cleared (shared DAG node)
         }
         let children: Vec<Value> = match self.heap.get(h) {
-            Obj::Struct { fields, .. } => fields.as_slice().to_vec(),
-            Obj::Enum { payload, .. } => payload.clone(),
-            Obj::List(items) | Obj::Tuple(items) => items.clone(),
-            Obj::Map(m) => m
-                .entries
-                .iter()
-                .flat_map(|(_, k, val)| [*k, *val])
-                .collect(),
-            Obj::Set(s) => s.entries.iter().map(|(_, e)| *e).collect(),
+            Obj::Struct { fields, .. } => fields.to_vec(),
+            Obj::Enum { payload, .. } => payload.to_vec(),
+            Obj::List(items) => items.to_vec(),
+            Obj::Tuple(items) => items.to_vec(),
+            Obj::Map(m) => m.entries.iter().flat_map(|(_, k, val)| [k, val]).collect(),
+            Obj::Set(s) => s.entries.iter().map(|(_, e)| e).collect(),
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -390,9 +387,9 @@ impl Vm {
     /// every other value (scalars, immutable `Str`/`Bytes`/`Ptr`/`Builtin`, and all identity-compared
     /// by-reference objects: `Closure`/`Func`/`Channel`/`Shared`/…/`Generator`/`Iter`/`Cell`) BY
     /// REFERENCE — keeping those handles is what preserves `values_equal` (identity-only for them) and
-    /// avoids the airlock's non-sendable faults. `visited` maps an original aggregate handle to its
+    /// avoids a fault on a value a deep copy cannot rebuild. `visited` maps an original aggregate handle to its
     /// copy so a cyclic key is copied ONCE (cycle preserved, not overflowed); `depth` caps genuinely
-    /// deep (non-cyclic) keys at `MAX_STRUCTURAL_DEPTH` — the SAME bound `values_equal`/`to_wire` use —
+    /// deep (non-cyclic) keys at `MAX_STRUCTURAL_DEPTH` — the SAME bound `values_equal` uses —
     /// degrading to by-reference rather than a host-stack overflow. Pure alloc (no VM re-entry) so no
     /// GC can run mid-walk, hence no rooting: the intermediate handles held in Rust locals stay live.
     fn snapshot_value(
@@ -416,15 +413,18 @@ impl Vm {
         }
         match self.heap.get(h) {
             Obj::List(items) => {
-                let items = items.clone();
-                let nh = self.heap.alloc(Obj::List(items.clone()));
+                let items = items.to_vec();
+                let nh = self.heap.alloc(Obj::List(RVec::from_slice(&items)));
                 visited.insert(h, nh);
                 let copied: Vec<Value> = items
                     .iter()
                     .map(|&x| self.snapshot_value(x, visited, depth + 1))
                     .collect();
-                if let Obj::List(dst) = self.heap.get_mut(nh) {
-                    *dst = copied;
+                // `nh` is this snapshot's own new list: slot stores into its one block.
+                if let Obj::List(dst) = self.heap.write(nh).get(nh) {
+                    for (k, x) in copied.into_iter().enumerate() {
+                        dst.set(k, x);
+                    }
                 }
                 Value::obj(nh)
             }
@@ -436,24 +436,28 @@ impl Vm {
                     .iter()
                     .map(|&x| self.snapshot_value(x, visited, depth + 1))
                     .collect();
-                if let Obj::Tuple(dst) = self.heap.get_mut(nh) {
+                // `nh` is this snapshot's own new tuple, unpublished: an in-place fill.
+                if let Obj::Tuple(dst) = self.heap.init_mut(nh) {
                     *dst = copied;
                 }
                 Value::obj(nh)
             }
             Obj::Struct { tid, fields } => {
-                let (tid, fields) = (*tid, fields.clone());
+                let (tid, vals) = (*tid, fields.to_vec());
                 let nh = self.heap.alloc(Obj::Struct {
                     tid,
-                    fields: fields.clone(),
+                    fields: Fields::from_vec(vals.clone()),
                 });
                 visited.insert(h, nh);
-                let copied: Vec<Value> = fields
+                let copied: Vec<Value> = vals
                     .iter()
                     .map(|&f| self.snapshot_value(f, visited, depth + 1))
                     .collect();
-                if let Obj::Struct { fields, .. } = self.heap.get_mut(nh) {
-                    *fields = Fields::from_vec(copied);
+                // `nh` is this snapshot's own new struct: slot stores into its one block.
+                if let Obj::Struct { fields, .. } = self.heap.write(nh).get(nh) {
+                    for (k, f) in copied.into_iter().enumerate() {
+                        fields.set(k, f);
+                    }
                 }
                 Value::obj(nh)
             }
@@ -461,24 +465,27 @@ impl Vm {
                 variant_id,
                 payload,
             } => {
-                let (variant_id, payload) = (*variant_id, payload.clone());
+                let (variant_id, payload) = (*variant_id, payload.to_vec());
                 let nh = self.heap.alloc(Obj::Enum {
                     variant_id,
-                    payload: payload.clone(),
+                    payload: RVec::from_slice(&payload),
                 });
                 visited.insert(h, nh);
                 let copied: Vec<Value> = payload
                     .iter()
                     .map(|&p| self.snapshot_value(p, visited, depth + 1))
                     .collect();
-                if let Obj::Enum { payload, .. } = self.heap.get_mut(nh) {
-                    *payload = copied;
+                if let Obj::Enum { payload, .. } = self.heap.write(nh).get(nh) {
+                    for (k, p) in copied.into_iter().enumerate() {
+                        payload.set(k, p);
+                    }
                 }
                 Value::obj(nh)
             }
             Obj::Map(m) => {
-                let entries = m.entries.clone();
-                let nh = self.heap.alloc(Obj::Map(m.clone()));
+                let entries = m.entries.to_vec();
+                // An empty placeholder for a cycle back to `h`; the copy is built once below.
+                let nh = self.heap.alloc(Obj::Map(MapData::default()));
                 visited.insert(h, nh);
                 let copied: Vec<(u64, Value, Value)> = entries
                     .iter()
@@ -490,22 +497,19 @@ impl Vm {
                         )
                     })
                     .collect();
-                if let Obj::Map(dst) = self.heap.get_mut(nh) {
-                    dst.entries = copied;
-                }
+                // The placeholder holds no block, so the overwrite frees nothing.
+                *self.heap.init_mut(nh) = Obj::Map(MapData::from_entries(copied));
                 Value::obj(nh)
             }
             Obj::Set(s) => {
-                let entries = s.entries.clone();
-                let nh = self.heap.alloc(Obj::Set(s.clone()));
+                let entries = s.entries.to_vec();
+                let nh = self.heap.alloc(Obj::Set(SetData::default()));
                 visited.insert(h, nh);
                 let copied: Vec<(u64, Value)> = entries
                     .iter()
                     .map(|&(hh, e)| (hh, self.snapshot_value(e, visited, depth + 1)))
                     .collect();
-                if let Obj::Set(dst) = self.heap.get_mut(nh) {
-                    dst.entries = copied;
-                }
+                *self.heap.init_mut(nh) = Obj::Set(SetData::from_entries(copied));
                 Value::obj(nh)
             }
             // A `bytearray` is mutable + structurally compared but a GC LEAF (raw bytes, no children):
@@ -583,11 +587,12 @@ impl Vm {
         }
         // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
         let reordered: Vec<Value> = match self.heap.get(snap_h).as_list() {
-            Some(v) => order.iter().map(|&i| v[i]).collect(),
+            Some(v) => order.iter().map(|&i| v.get(i)).collect(),
             None => unreachable!(),
         };
-        if let Obj::List(v) = self.heap.get_mut(src_h) {
-            *v = reordered;
+        let heap = self.heap.write(src_h);
+        if let Obj::List(v) = heap.get(src_h) {
+            v.replace(heap, &reordered);
         }
         self.pop(); // unroot snapshot
         self.pop(); // unroot source
@@ -622,11 +627,11 @@ impl Vm {
         let (mut li, mut ri) = (0, 0);
         while li < left.len() && ri < right.len() {
             let a = match self.heap.get(src_h).as_list() {
-                Some(v) => v[left[li]],
+                Some(v) => v.get(left[li]),
                 None => unreachable!(),
             };
             let b = match self.heap.get(src_h).as_list() {
-                Some(v) => v[right[ri]],
+                Some(v) => v.get(right[ri]),
                 None => unreachable!(),
             };
             // `<= Equal` keeps the left element first on ties → stable.

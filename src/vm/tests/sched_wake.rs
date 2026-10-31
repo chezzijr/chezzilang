@@ -39,7 +39,7 @@ fn schedule_pulls_global_every_61st_tick() {
     periodic.lock_local(0).ring.push_back(mk_fiber(0)); // local
     periodic.seed(vec![mk_fiber(1)]); // global (bumps runnable)
     periodic.runnable.fetch_add(1, Ordering::Relaxed); // for the local fiber
-    let got = match periodic.take_runnable(0, GLOBAL_CHECK_INTERVAL, 0) {
+    let got = match periodic.take_runnable_unattached(0, GLOBAL_CHECK_INTERVAL, 0) {
         Take::Run(f, _) => f.task_index,
         Take::Stop => panic!("expected a runnable fiber"),
     };
@@ -50,7 +50,7 @@ fn schedule_pulls_global_every_61st_tick() {
     normal.lock_local(0).ring.push_back(mk_fiber(0));
     normal.seed(vec![mk_fiber(1)]);
     normal.runnable.fetch_add(1, Ordering::Relaxed);
-    let got = match normal.take_runnable(0, 1, 0) {
+    let got = match normal.take_runnable_unattached(0, 1, 0) {
         Take::Run(f, _) => f.task_index,
         Take::Stop => panic!("expected a runnable fiber"),
     };
@@ -86,7 +86,7 @@ fn a_periodic_global_pull_recruits_a_worker_for_the_skipped_runnext() {
     });
     ready_rx.recv().unwrap();
 
-    let got = match sched.take_runnable(0, GLOBAL_CHECK_INTERVAL, SENTINEL_SCOPE) {
+    let got = match sched.take_runnable_unattached(0, GLOBAL_CHECK_INTERVAL, SENTINEL_SCOPE) {
         Take::Run(f, _) => f.task_index,
         Take::Stop => panic!("expected a runnable fiber"),
     };
@@ -157,7 +157,7 @@ fn mnsched_park_then_wake_requeues_fiber() {
         assert_eq!(c.parked_n, 1);
         assert!(c.global.is_empty());
     }
-    sched.send_wake(key, &core, WireValue::Int(7));
+    sched.send_wake(key, &core, Value::int(7));
     {
         let c = sched.lock();
         assert_eq!(c.parked_n, 0);
@@ -203,7 +203,7 @@ fn a_give_hands_the_slot_owner_to_the_givers_runnext() {
     let f0 = take_run(&sched);
     let _f1 = take_run(&sched);
     sched.park(key, Arc::clone(&core), f0);
-    let out = sched.send_commit(key, &core, WireValue::Int(5), None, 1);
+    let out = sched.send_commit(key, &core, Value::int(5), None, 1);
     assert!(matches!(out, crate::vm::core::SendOutcome::Sent));
     assert!(
         sched.lock_local(1).runnext.is_some(),
@@ -326,11 +326,11 @@ fn mnsched_yield_fiber_reachable_by_other_worker_without_wake() {
     assert_eq!(f0.task_index, 0);
     sched.yield_fiber(f0); // requeue task 0 at the global tail — no notify needed for this to work
     // task 1 is still ahead of the requeued task 0 in the global queue.
-    match sched.take_runnable(1, 1, SENTINEL_SCOPE) {
+    match sched.take_runnable_unattached(1, 1, SENTINEL_SCOPE) {
         Take::Run(f, _) => assert_eq!(f.task_index, 1),
         Take::Stop => panic!("expected a runnable fiber, got Stop"),
     }
-    match sched.take_runnable(1, 1, SENTINEL_SCOPE) {
+    match sched.take_runnable_unattached(1, 1, SENTINEL_SCOPE) {
         Take::Run(f, _) => assert_eq!(f.task_index, 0),
         Take::Stop => panic!("expected a runnable fiber, got Stop"),
     }
@@ -1897,9 +1897,9 @@ main()
     }
 }
 
-/// C-ABI FFI under the M:N engine: an extern fn called INSIDE a `spawn:` block exercises the
-/// `SnapValue::Cffi` snapshot path (the worker re-allocs `Obj::Cffi` from the shared `Arc` — no
-/// re-dlopen, same address space). Must produce deterministic output.
+/// C-ABI FFI under the M:N engine: an extern fn called INSIDE a `spawn:` block reads the run's
+/// module global that holds it (M3.1; one `Obj::Cffi` over the shared `Arc` — no re-dlopen, same
+/// address space). Must produce deterministic output.
 /// Linux-only (needs libm.so.6). This is the hard proof from the FFI plan.
 #[test]
 #[cfg(target_os = "linux")]

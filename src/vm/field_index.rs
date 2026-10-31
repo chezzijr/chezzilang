@@ -18,7 +18,6 @@ impl Vm {
                 span,
             ));
         };
-        self.ensure_module_faulted(h); // D1: `module.member` on a not-yet-faulted worker module
         // M19 Phase 5b — inline-cache fast path: a hit collapses the struct name-probe to one pure-int
         // `tid` compare (the struct's layout id). Same `tid` ⇒ same field order ⇒ the cached `idx` is
         // the right slot, so the field-name re-verify is unnecessary. `cell.tid == TID_NONE` (empty or
@@ -31,7 +30,6 @@ impl Vm {
                 && *tid == cell.tid
                 && let Some(v) = fields.get(cell.idx as usize)
             {
-                let v = *v;
                 self.push(v);
                 return Ok(());
             }
@@ -66,7 +64,7 @@ impl Vm {
                     .structs
                     .get(sname)
                     .and_then(|d| d.fields.iter().position(|f| f == name));
-                let found = idx.and_then(|i| fields.get(i).map(|v| (i, *v)));
+                let found = idx.and_then(|i| fields.get(i).map(|v| (i, v)));
                 match found {
                     Some((i, v)) => {
                         if ic != NO_IC {
@@ -81,14 +79,20 @@ impl Vm {
                     }
                 }
             }
-            Obj::Module(m) => match m.index.get(name).copied() {
-                Some(i) => {
-                    let v = self.read_slot(h, i, span)?;
-                    self.push(v);
-                    Ok(())
+            Obj::Module(m) => {
+                let slot = m.names().index.get(name).copied();
+                match slot {
+                    Some(i) => {
+                        let v = self.read_slot(h, i, span)?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    None => {
+                        let msg = format!("module '{}' has no member '{name}'", m.names().name);
+                        Err(self.err(msg, span))
+                    }
                 }
-                None => Err(self.err(format!("module '{}' has no member '{name}'", m.name), span)),
-            },
+            }
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -148,10 +152,13 @@ impl Vm {
             Struct,
         }
         let sliced = match self.heap.get(h) {
+            // M3.0a — one snapshot of the block answers both the bounds and the reads: another
+            // thread can shrink a shared list between two.
             Obj::List(items) => {
-                let idxs = crate::slice::range_indices(&parts, items.len())
+                let v = items.view();
+                let idxs = crate::slice::range_indices(&parts, v.len())
                     .map_err(|m| self.err(m.to_string(), span))?;
-                Sliced::List(idxs.iter().map(|&i| items[i]).collect())
+                Sliced::List(idxs.iter().map(|&i| v.get(i)).collect())
             }
             // ASCII arm: a byte index IS a codepoint index. The `None` arm stays O(n) per slice for
             // non-ASCII text (DEC-072).
@@ -176,9 +183,10 @@ impl Vm {
             }
             // `bytearray[r]` slices over BYTE offsets and yields a NEW `bytearray` (mutable copy).
             Obj::ByteArray(b) => {
-                let idxs = crate::slice::range_indices(&parts, b.len())
+                let v = b.view();
+                let idxs = crate::slice::range_indices(&parts, v.len())
                     .map_err(|m| self.err(m.to_string(), span))?;
-                Sliced::ByteArray(idxs.iter().map(|&i| b[i]).collect())
+                Sliced::ByteArray(idxs.iter().map(|&i| v.get(i)).collect())
             }
             Obj::Struct { .. } | Obj::Enum { .. } => Sliced::Struct,
             Obj::BigInt(_)
@@ -214,7 +222,7 @@ impl Vm {
                 // Root the source across the alloc: the new list shares its element handles, which
                 // are otherwise unreachable (the source was popped) and could be collected by a GC.
                 self.push(obj);
-                let nh = self.heap.alloc(Obj::List(slice));
+                let nh = self.heap.alloc(Obj::List(slice.into()));
                 self.pop();
                 self.push(Value::obj(nh));
             }
@@ -227,7 +235,7 @@ impl Vm {
                 self.push(Value::obj(nh));
             }
             Sliced::ByteArray(sub) => {
-                let nh = self.heap.alloc(Obj::ByteArray(sub));
+                let nh = self.heap.alloc(Obj::ByteArray(sub.into()));
                 self.push(Value::obj(nh));
             }
             Sliced::Struct => {
@@ -257,16 +265,18 @@ impl Vm {
         // key. `Str`/`Struct` (and any non-Int key) fall through to the general match below.
         if let Some(n) = key.as_int_inline() {
             match self.heap.get(h) {
+                // M3.0a — one snapshot answers the bound and the read (see `slice_range`).
                 Obj::List(items) => {
-                    return match crate::slice::norm_index(n, items.len()).map(|i| items[i]) {
+                    let s = items.view();
+                    return match crate::slice::norm_index(n, s.len()).map(|i| s.get(i)) {
                         Some(v) => {
                             self.push(v);
                             Ok(())
                         }
-                        None => Err(self.err(
-                            format!("index {n} out of bounds (len {})", items.len()),
-                            span,
-                        )),
+                        None => {
+                            Err(self
+                                .err(format!("index {n} out of bounds (len {})", s.len()), span))
+                        }
                     };
                 }
                 // `bytes[i]`/`bytearray[i]` → `int` (0–255); out-of-range faults recoverably.
@@ -283,25 +293,22 @@ impl Vm {
                     };
                 }
                 Obj::ByteArray(b) => {
-                    return match crate::slice::norm_index(n, b.len()).map(|i| b[i] as i64) {
+                    let s = b.view();
+                    return match crate::slice::norm_index(n, s.len()).map(|i| s.get(i) as i64) {
                         Some(v) => {
                             self.push(Value::int(v));
                             Ok(())
                         }
                         None => {
                             Err(self
-                                .err(format!("index {n} out of bounds (len {})", b.len()), span))
+                                .err(format!("index {n} out of bounds (len {})", s.len()), span))
                         }
                     };
                 }
                 Obj::Map(_) => {
                     let hk = self.scalar_hash(key);
-                    return match self.map_probe(h, hk, key, span)? {
-                        Some(p) => {
-                            let Obj::Map(m) = self.heap.get(h) else {
-                                unreachable!()
-                            };
-                            let v = m.entries[p].2;
+                    return match self.map_lookup(h, hk, key, span)? {
+                        Some(v) => {
                             self.push(v);
                             Ok(())
                         }
@@ -349,16 +356,15 @@ impl Vm {
         match self.heap.get(h) {
             Obj::List(items) => {
                 let idx = int_idx(self)?;
-                let v = crate::slice::norm_index(idx, items.len()).map(|i| items[i]);
-                match v {
+                let s = items.view();
+                match crate::slice::norm_index(idx, s.len()).map(|i| s.get(i)) {
                     Some(v) => {
                         self.push(v);
                         Ok(())
                     }
-                    None => Err(self.err(
-                        format!("index {idx} out of bounds (len {})", items.len()),
-                        span,
-                    )),
+                    None => {
+                        Err(self.err(format!("index {idx} out of bounds (len {})", s.len()), span))
+                    }
                 }
             }
             Obj::Str(s) => {
@@ -403,24 +409,21 @@ impl Vm {
             }
             Obj::ByteArray(b) => {
                 let idx = int_idx(self)?;
-                match crate::slice::norm_index(idx, b.len()).map(|i| b[i] as i64) {
+                let s = b.view();
+                match crate::slice::norm_index(idx, s.len()).map(|i| s.get(i) as i64) {
                     Some(v) => {
                         self.push(Value::int(v));
                         Ok(())
                     }
                     None => {
-                        Err(self.err(format!("index {idx} out of bounds (len {})", b.len()), span))
+                        Err(self.err(format!("index {idx} out of bounds (len {})", s.len()), span))
                     }
                 }
             }
             Obj::Map(_) => {
                 let hk = self.hash_key_rooted(key, &[obj, key], span)?;
-                match self.map_probe(h, hk, key, span)? {
-                    Some(p) => {
-                        let Obj::Map(m) = self.heap.get(h) else {
-                            unreachable!()
-                        };
-                        let v = m.entries[p].2;
+                match self.map_lookup(h, hk, key, span)? {
+                    Some(v) => {
                         self.push(v);
                         Ok(())
                     }
@@ -490,10 +493,6 @@ impl Vm {
                 span,
             ));
         };
-        // D4 layer C (TICKET-169): a field store on an airlock copy is a lost write, not a race.
-        if self.heap.is_copied(h) {
-            return Err(self.copied_write_err(None, span));
-        }
         // M19 Phase 5b — IC fast path (see [`Vm::get_field`]): a hit on the `tid` guard writes straight
         // to the cached index (no field-name re-verify); a miss falls through to the probe + cache-fill.
         if ic != NO_IC {
@@ -505,11 +504,10 @@ impl Vm {
                 cell.tid == TID_NONE || self.field_fits(cell.tid, cell.idx as usize, val).is_ok();
             if cell.tid != TID_NONE
                 && fits
-                && let Obj::Struct { tid, fields, .. } = self.heap.get_mut(h)
+                && let Obj::Struct { tid, fields, .. } = self.heap.write(h).get(h)
                 && *tid == cell.tid
-                && let Some(slot) = fields.get_mut(cell.idx as usize)
+                && fields.set(cell.idx as usize, val)
             {
-                *slot = val;
                 return Ok(());
             }
         }
@@ -556,12 +554,11 @@ impl Vm {
             self.field_fits(t, i, val).map_err(|m| self.err(m, span))?;
         }
         let found;
-        match self.heap.get_mut(h) {
+        match self.heap.write(h).get(h) {
             Obj::Struct { tid, fields, .. } => {
                 let tid = *tid;
-                match idx.and_then(|i| fields.get_mut(i).map(|slot| (i, slot))) {
-                    Some((i, slot)) => {
-                        *slot = val;
+                match idx.filter(|&i| fields.set(i, val)) {
+                    Some(i) => {
                         found = (i as u32, tid);
                     }
                     None => {
@@ -623,13 +620,6 @@ impl Vm {
         let Some(h) = obj.as_obj() else {
             return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
         };
-        // D4 layer C (TICKET-169): an index store on an airlock copy is a lost write. A struct
-        // receiver is exempt — its `set_index` protocol method runs USER code, which may write
-        // only through a `Shared`/`RwShared` field (real sharing); that write is checked at
-        // `set_field`/`do_method_call`, not here.
-        if self.heap.is_copied(h) && !matches!(self.heap.get(h), Obj::Struct { .. }) {
-            return Err(self.copied_write_err(None, span));
-        }
         // M19 Tier-2 — Int-key fast path for a Map write: `scalar_hash` on an int needs no rooting
         // (it can't GC or re-enter, unlike a struct key's `hash()`), so skip `hash_key_rooted`. Same
         // `candidates`/`values_equal`/`push` as the general Map arm → byte-identical behavior. A
@@ -639,12 +629,14 @@ impl Vm {
             // `val` is an in-flight Rust local: `map_probe` roots the map + key itself, but a user
             // `eq` on a stored key could otherwise collect the value being written.
             let pos = self.with_roots(&[val], |vm| vm.map_probe(h, hk, key, span))?;
-            let Obj::Map(m) = self.heap.get_mut(h) else {
+            let heap = self.heap.write(h);
+            let Obj::Map(m) = heap.get(h) else {
                 unreachable!()
             };
-            match pos {
-                Some(i) => m.entries[i].2 = val,
-                None => m.push(hk, key, val),
+            // M3.0a — a position the entry block no longer holds (another thread removed entries
+            // after the probe) is a miss: the key is inserted.
+            if pos.and_then(|i| m.set_value(i, val)).is_none() {
+                m.push(heap, hk, key, val);
             }
             return Ok(());
         }
@@ -656,22 +648,22 @@ impl Vm {
             // On INSERT only, snapshot a struct/enum key so a later mutation of the
             // caller's live value can't corrupt the map (Go value-key model). An UPDATE reuses the
             // stored key and pays no clone. `snapshot_key` is pure alloc (no GC), so no rooting.
-            match pos {
-                Some(i) => {
-                    let Obj::Map(m) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    m.entries[i].2 = val;
-                }
-                None => {
-                    // Snapshot a struct/enum key on INSERT only (Go value-key model); pure
-                    // alloc (no GC), so `h`/`val` stay valid across it and no rooting is needed.
-                    let key = self.snapshot_key(key);
-                    let Obj::Map(m) = self.heap.get_mut(h) else {
-                        unreachable!()
-                    };
-                    m.push(hk, key, val);
-                }
+            // M3.0a — a position the entry block no longer holds is a miss (see above).
+            let updated = pos.and_then(|i| {
+                let Obj::Map(m) = self.heap.write(h).get(h) else {
+                    unreachable!()
+                };
+                m.set_value(i, val)
+            });
+            if updated.is_none() {
+                // Snapshot a struct/enum key on INSERT only (Go value-key model); pure
+                // alloc (no GC), so `h`/`val` stay valid across it and no rooting is needed.
+                let key = self.snapshot_key(key);
+                let heap = self.heap.write(h);
+                let Obj::Map(m) = heap.get(h) else {
+                    unreachable!()
+                };
+                m.push(heap, hk, key, val);
             }
             return Ok(());
         }
@@ -694,8 +686,8 @@ impl Vm {
         // `bytearray[i] = x` — the NEW mutable capability `bytes` lacks. The value must be an `int`
         // in 0..=255 (validated BEFORE the in-place write); the index must be in range. Both are
         // distinct recoverable faults. Mutation flows through the heap slot, so two bindings to the
-        // same `bytearray` observe it (like `list`). Validate the value up front (`&self` borrow)
-        // before the `&mut self` `get_mut` below.
+        // same `bytearray` observe it (like `list`). Validate the value up front, before the
+        // write door below.
         if matches!(self.heap.get(h), Obj::ByteArray(_)) {
             let byte = match self.int_val(val) {
                 Some(n) if (0..=255).contains(&n) => n as u8,
@@ -711,31 +703,32 @@ impl Vm {
                     );
                 }
             };
-            let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+            let Obj::ByteArray(b) = self.heap.write(h).get(h) else {
                 unreachable!()
             };
-            return match crate::slice::norm_index(idx, b.len()) {
+            // M3.0a — one snapshot answers the bound and the store (see `slice_range`).
+            let s = b.view();
+            let len = s.len();
+            return match crate::slice::norm_index(idx, len) {
                 Some(i) => {
-                    b[i] = byte;
+                    s.set(i, byte);
                     Ok(())
                 }
-                None => {
-                    let len = b.len();
-                    Err(self.err(format!("index {idx} out of bounds (len {len})"), span))
-                }
+                None => Err(self.err(format!("index {idx} out of bounds (len {len})"), span)),
             };
         }
-        match self.heap.get_mut(h) {
-            Obj::List(items) => match crate::slice::norm_index(idx, items.len()) {
-                Some(i) => {
-                    items[i] = val;
-                    Ok(())
+        match self.heap.write(h).get(h) {
+            Obj::List(items) => {
+                let s = items.view();
+                let len = s.len();
+                match crate::slice::norm_index(idx, len) {
+                    Some(i) => {
+                        s.set(i, val);
+                        Ok(())
+                    }
+                    None => Err(self.err(format!("index {idx} out of bounds (len {len})"), span)),
                 }
-                None => {
-                    let len = items.len();
-                    Err(self.err(format!("index {idx} out of bounds (len {len})"), span))
-                }
-            },
+            }
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -791,7 +784,7 @@ impl Vm {
         // M19 lever #2 — dispatch is a pure-int compare of the instance's stamped `variant_id` against
         // the arm's compile-time id (no variant-name string compare). `variant` is only the cold error.
         let (mut matches, vid, payload) = match self.heap.get(h).as_enum() {
-            Some((vid, payload)) => (vid == variant_id, vid, payload.clone()),
+            Some((vid, payload)) => (vid == variant_id, vid, payload.to_vec()),
             None => unreachable!("scrutinee ensured to be an enum"),
         };
         // SCRUTINEE-DRIVEN fallback on an id MISS. The compile-time `variant_id` can be the WRONG

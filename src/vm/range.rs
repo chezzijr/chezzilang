@@ -17,16 +17,22 @@ impl Vm {
         if *tid != self.struct_tid(&self.program.range_key) {
             return None;
         }
-        let [start, end, step, inclusive] = fields.as_slice() else {
+        if fields.len() != 4 {
             return None;
-        };
+        }
+        let (start, end, step, inclusive) = (
+            fields.get(0)?,
+            fields.get(1)?,
+            fields.get(2)?,
+            fields.get(3)?,
+        );
         let bound = |v: Value| -> Option<Option<i64>> {
             match v.as_obj().map(|h| self.heap.get(h)) {
                 Some(Obj::Enum {
                     variant_id,
                     payload,
                 }) if *variant_id == crate::base::op::VID_SOME => {
-                    Some(Some(self.int_val(*payload.first()?)?))
+                    Some(Some(self.int_val(payload.try_get(0)?)?))
                 }
                 Some(Obj::Enum { variant_id, .. })
                     if *variant_id == crate::base::op::VID_NONE_VARIANT =>
@@ -37,9 +43,9 @@ impl Vm {
             }
         };
         Some(RangeParts {
-            start: bound(*start)?,
-            end: bound(*end)?,
-            step: self.int_val(*step)?,
+            start: bound(start)?,
+            end: bound(end)?,
+            step: self.int_val(step)?,
             inclusive: inclusive.as_bool()?,
         })
     }

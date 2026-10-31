@@ -2,7 +2,8 @@
 # `Shared` hub, and per receiver two small boxes and a one-token lock channel; no runtime support.
 #
 # `b := Broadcast[T].new(cap)`; `rx := b.subscribe()`; `b.send(v)`; `b.close()`. Every receiver gets
-# every value sent after its `subscribe`, in send order, in its own mailbox: a channel of capacity
+# every value sent after its `subscribe` (the sent object itself, by handle, as from a channel), in
+# send order, in its own mailbox: a channel of capacity
 # `cap`. `send` does not wait for receivers. A receiver whose mailbox is full loses its oldest value,
 # and its next receive reports the count it missed as `!Lagged(missed)`, then continues with the
 # oldest value still held (tokio `RecvError::Lagged(n)`).
@@ -129,7 +130,8 @@ struct Broadcast[T]:
         lock.send(0)
         return Receiver(_ch=ch, _next=next, _held=concurrency.Shared(None), _lock=lock)
 
-    # Give every receiver its own copy of `v`. Does not wait for receivers: a full mailbox drops its
+    # Give every receiver `v`, by handle, as a channel send does (M3.3): every receiver gets the one
+    # object, so a write to it is seen by all. Does not wait for receivers: a full mailbox drops its
     # oldest value. It waits for the hub guard while another `send`, `subscribe` or `close` holds it.
     # With no receiver the value is dropped. After `close` it faults `send on a closed Broadcast`.
     fn send(self, v: T):

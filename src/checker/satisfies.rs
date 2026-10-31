@@ -18,8 +18,8 @@ impl Checker {
     /// `assignable` branch, so it cannot change what the checker accepts: it only appends WHY a
     /// value slot rejected a type, when that type was rejected because it fails a protocol.
     /// Empty when `expected` is not a protocol, and empty when `actual` DOES satisfy the
-    /// protocol — a witness that satisfies but is not sendable still reaches the error path via
-    /// `assignable`'s `sendable` check, and claiming a missing method there would be false.
+    /// protocol — a witness that satisfies but fails another `assignable` conjunct still reaches
+    /// the error path, and claiming a missing method there would be false.
     pub(super) fn protocol_note(&self, expected: &Ty, actual: &Ty) -> String {
         // A tuple misfits through its first misfitting element (a `Map[K, V]([(k, v)])` element).
         if let (Ty::Tuple(es), Ty::Tuple(xs)) = (expected, actual)

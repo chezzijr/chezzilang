@@ -113,7 +113,7 @@ fn golden_rwshared_concurrent_matches_expected() {
     assert_eq!(run_capture(src).expect("repeat run"), expected);
 }
 
-/// Airlock identity: a `RwShared` mutated from a spawned task is observed by the parent — the
+/// Crossing identity: a `RwShared` mutated from a spawned task is observed by the parent — the
 /// handle crosses as a SHARED `Arc` core (not a deep-copy), so both reach the one box.
 #[test]
 fn rwshared_mutation_from_spawn_is_observed_by_parent() {
@@ -627,11 +627,10 @@ fn golden_executor_pool_chz_matches_expected() {
     assert_eq!(run_capture(src).expect("vm run"), expected);
 }
 
-/// D1 (lazy module snapshot): a `--parallel` task that calls a sibling free function which in
-/// turn reads a module-level global must resolve both against the worker's *own* home module —
-/// exercising lazy fault-in of that module into the worker heap on first global access. The
-/// plain (no-`--parallel`) run is the equivalence oracle (same output). Characterization test:
-/// green before D1 (eager `build_worker_modules`) and after (lazy snapshot).
+/// D1 (historical: lazy module snapshot): a `--parallel` task that calls a sibling free function
+/// which in turn reads a module-level global must resolve both. M3.1: the task reads the run's one
+/// module, so nothing faults in. The plain (no-`--parallel`) run is the equivalence oracle (same
+/// output).
 #[test]
 fn parallel_task_resolves_sibling_fn_and_global() {
     let src = "\
@@ -654,18 +653,13 @@ main()
     assert_eq!(run_capture(src).expect("vm run"), "203\n");
 }
 
-/// D1 (lazy module snapshot): many trivial `--parallel` spawns no longer pay a full
-/// per-task module-graph rebuild. Correctness gate — every one of N tasks reaches the same
-/// `Shared` box, so the serialised count is exactly N. The cost is a COUNT, not a clock
-/// (TICKET-233): a task that reads no module global replays no module, where the eager per-task
-/// rebuild replayed every module for every task.
+/// Many trivial `--parallel` spawns, with and without a module-global read in the task body.
+/// Correctness gate — every one of N tasks reaches the same `Shared` box, so the serialised count
+/// is exactly N. M3.1: a task reads the run's module objects, so nothing is rebuilt per task.
 #[test]
 fn parallel_many_spawns_cheap_and_correct() {
     const N: usize = 2000;
     let program = |n: usize, step: &str| {
-        // TICKET-246 (plan step 9): the global read sits in the TASK body, outside the box
-        // closure, so the replay count stays a property of `spawn`. A box closure reads a scalar
-        // global through the box's slot door, which replays no module.
         let mut src = format!(
             "import Shared from std.concurrency\nstep: int = 1\nfn bump(s: Shared[int]):\n    k := {step}\n    s.update(fn(x): x + k)\nfn main():\n    s := Shared(0)\n    parallel:\n"
         );
@@ -675,19 +669,13 @@ fn parallel_many_spawns_cheap_and_correct() {
         src.push_str("    print(s.get())\nmain()\n");
         src
     };
-    let (out, replays) = run_capture_counting(&program(N, "1"), &MODULE_REPLAYS);
-    assert_eq!(out.expect("parallel run"), format!("{N}\n"));
     assert_eq!(
-        replays, 0,
-        "{N} spawns that read no module global replayed {replays} modules (want 0) -- a task is \
-         rebuilding a module it never reads"
+        run_capture(&program(N, "1")).expect("parallel run"),
+        format!("{N}\n")
     );
-    // The control: a task that reads one module global replays that one module, so the count is live.
-    let (out, replays) = run_capture_counting(&program(50, "step"), &MODULE_REPLAYS);
-    assert_eq!(out.expect("parallel run"), "50\n");
     assert_eq!(
-        replays, 50,
-        "50 spawns that each read one module global replayed {replays} modules (want 50)"
+        run_capture(&program(N, "step")).expect("parallel run"),
+        format!("{N}\n")
     );
 }
 
@@ -740,9 +728,8 @@ fn str_method_dispatch_does_not_clone_the_receiver() {
     );
 }
 
-/// B3.6: a submitted closure capturing a plain value (`int`) observes it **by value** across the
-/// airlock — exercises the `WireValue::Closure` capture round-trip (not just the shared-`Arc` handle
-/// path the golden's `Channel` capture takes). Auto-drained at program exit; the
+/// B3.6: a submitted closure capturing a plain value (`int`) observes it (M3.4: the job holds the
+/// closure and its cell by handle). Auto-drained at program exit; the
 /// `--parallel` drain reconstructs and runs the closure on the pool.
 #[test]
 fn executor_submitted_closure_captures_by_value() {
@@ -751,27 +738,15 @@ fn executor_submitted_closure_captures_by_value() {
     assert_eq!(run_capture(src).expect("parallel run"), "7\n");
 }
 
-/// A submitted closure crosses the airlock **by value**: it isolates its captures at
-/// `submit` time (`wire_callable` → `to_wire` deep-copies), so a mutation of a captured collection
-/// after the `submit` is NOT observed by the job. Eager execution shrank that window to nothing on the
-/// default (no-`--parallel`) run (the job is already running), but the isolation is what makes the
-/// plain run and M:N agree here regardless — it has always been keyed to the `submit`, never to when
-/// the job runs. The since-removed cooperative engine
-/// used to share captures by reference (queuing the closure's own `Handle`) to mirror the tree-walk
-/// `interp` oracle; that oracle has been removed and byte-identical output is now the sole invariant,
-/// so a plain run isolates identically to M:N — both print `[1]` here (not `[1, 2]`).
+/// M3.4: an Executor job holds its submitter's captured list by handle, so it reads the push the
+/// submitter makes before the gate opens (Go `m34go/captures/main.go`: `job_reads_submitter_push 2`).
 #[test]
-fn executor_cooperative_submit_isolates_captures_by_value() {
-    let src = "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    ex := Executor()\n    ex.submit(fn(): print(xs))\n    xs.push(2)\nmain()\n";
+fn executor_cooperative_submit_shares_captures_by_handle() {
+    let src = "import Executor from std.concurrency\nfn main():\n    xs := [1]\n    gate := Channel[int](1)\n    ex := Executor()\n    ex.submit(fn(): print(gate.recv() + xs.len()))\n    xs.push(2)\n    gate.send(0)\n    ex.shutdown()\nmain()\n";
     assert_eq!(
         run_capture(src).expect("vm run"),
-        "[1]\n",
-        "plain submit isolates the captured list by value at submit time"
-    );
-    assert_eq!(
-        run_capture(src).expect("parallel run"),
-        "[1]\n",
-        "M:N submit isolates the captured list by value too"
+        "2\n",
+        "the job reads the submitter's list"
     );
 }
 

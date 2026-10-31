@@ -31,8 +31,9 @@ test fn a_receiver_sees_the_values_sent_after_its_subscribe_in_order():
     assert take_all(early) == ["1", "2", "3"]
     assert take_all(late) == ["3"]
 
-# 2. `send` never blocks on a full mailbox, and every receiver gets its own copy.
-test fn send_never_blocks_and_each_receiver_gets_its_own_copy():
+# 2. `send` never blocks on a full mailbox, and every receiver gets the one value, by handle
+# (M3.3; Go `handle/main.go`: `broadcast_shares 2 2`).
+test fn send_never_blocks_and_every_receiver_gets_the_one_value():
     b := Broadcast[List[int]].new(2)
     a := b.subscribe()
     c := b.subscribe()
@@ -51,7 +52,7 @@ test fn send_never_blocks_and_each_receiver_gets_its_own_copy():
     vc2 := c.recv() ?? []
     va.push(99)
     assert va == [8, 99]
-    assert vc2 == [8]
+    assert vc2 == [8, 99]
 
 # 3. A receiver that falls behind gets `!Lagged(missed)`, then the oldest value still held.
 test fn a_lagging_receiver_reports_the_missed_count_then_continues():

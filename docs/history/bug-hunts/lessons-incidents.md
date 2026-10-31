@@ -246,7 +246,7 @@ the freeze.
   later use type an earlier binding; give the statement the type (`xs: List[int] = []`) or reject it
   there. One predicate (`Ty::has_hole`), one check (`Checker::closed_binding_ty`).
 
-## 4. Runtime, airlock, concurrency
+## 4. Runtime and concurrency
 
 - **A runtime verdict that declares user code broken must be built from what is *impossible*, never
   from what looks idle.** Three deadlock predicates in a row faulted healthy programs (a cap-1
@@ -276,6 +276,8 @@ the freeze.
   un-gated into a garbage cross-heap `GcRef` — genuine UB. Every new cross-heap store goes through
   `to_wire_crossable`, never bare `to_wire_at`. A missed *runtime* guard is UB; a missed checker
   widening is at worst an uglier error.
+  **Changed 2026-10-29 (shared heap, branch `exp/go-shared-heap`):** M3.5 deleted the airlock. The rule that
+  replaces it: the three shared-heap safety rules in `lessons.md` §4.
 - **Freshness is a property of the value graph, not of the operand's root AST kind (TICKET-240).**
   TICKET-179, 189 and 190 each added one more fresh ROOT shape and kept a root-only unmark, so a
   fresh value one level down (under an optional param, inside a fresh struct or list) falsely
@@ -285,6 +287,8 @@ the freeze.
   copy mark, so a graph walk that stops at an unmarked object never reaches a carrier's payload;
   and a map key can be a struct with a mutable field, so "every value is fresh" does not make a
   map fresh.
+  **Changed 2026-10-29 (shared heap, branch `exp/go-shared-heap`):** the copy marks are gone (M3.5);
+  `fresh_shape` stays for the write-to-a-temporary check (TICKET-254).
 - **An operator arm with a wildcard on the operator absorbs every operator added later
   (TICKET-247).** `ExprKind::Unary { expr, .. } => self.operand(expr)` was right while `UnaryOp` was
   `{Neg, Not}`. TICKET-227 added `Wrap` (`?x`) and `ErrVal` (`!x`), which hold their operand; the
@@ -314,12 +318,16 @@ the freeze.
   add a third list or a per-method exemption. Fixed by TICKET-179: the checker reads the VM's one
   table, a behavior grid checks it, and the mark now follows "can the parent observe it"
   (`docs/design/adr-d4-airlock.md`).
+  **Changed 2026-10-29 (shared heap, branch `exp/go-shared-heap`):** the task-copy mark is gone (M3.4,
+  M3.5); the one table of mutating natives stays (`native::is_mutating_native_kind`).
 - **Closures cross by value iff every capture is sendable** (Rust `Send` model). The only runtime
   non-sendables today are `Obj::Module` and a generator inside a value cycle (`ref`/`Ref[T]` were
   removed entirely, 2026-07-19). The scoping lesson survives them: when something must be
   non-sendable, fault it **only** in the `Obj::Closure` capture arms of `to_wire`/`to_snap`, never in the
   general struct/snapshot path — a module-global read from a spawned task is a read-only snapshot, and
   the general-arm and reach-gate attempts both faulted it.
+  **Changed 2026-10-29 (shared heap, branch `exp/go-shared-heap`):** every value crosses by handle and
+  `sendable` is deleted (M3.5). The scoping lesson stays: fault a shape at the narrowest site.
 - **Capture is free-variable, by reference.** A superset capture is safe; a subset silently breaks. The
   analyzer is exhaustive over every `ExprKind` with no `_` arm, and the same analyzer drives
   cell-boxing, so a gap would already crash existing closures.
@@ -328,8 +336,12 @@ the freeze.
   prosecutors twice. Guard: a generator still on the DFS stack rejects cleanly. A non-sendable
   module-global generator snapshots as inert `Nil` and faults only when reached; eager-faulting the
   snapshot regressed programs that merely held one.
+  **Changed 2026-10-29 (shared heap, branch `exp/go-shared-heap`):** no crossing walks a graph now (M3.5),
+  so the rule is moot; a generator that two tasks drive faults `generator already running` (M3.4).
 - **A data-snapshot `Iterator[T]` crosses by deep copy like a `List`.** Do not "mirror the generator
   pattern" for a cursor — one line (`[1,2,3].iter()`) made a `to_snap` `unreachable!` reachable.
+  **Changed 2026-10-29 (shared heap, branch `exp/go-shared-heap`):** a cursor crosses by handle like every
+  value (M3.4); `to_snap` is gone.
 - **Container key/membership equality must fault like `==`, not swallow.** `values_equal` was
   `values_equal_guarded(..).unwrap_or(false)`, so `s.contains(cyclic)` returned `false` where `a == b`
   faulted (CPython raises on both). Every production site now uses the guarded form via the
@@ -373,16 +385,22 @@ the freeze.
   `out` / `stderr` swap BACK (a `print` in the closure is the caller's output; without it
   `"10\n11\n"` printed as `"11\n"`). Only `Vm::with_box` swaps, and it undoes the swap under
   `catch_unwind`: a hand-written swap pair after the call leaves contexts crossed on a Rust panic.
+  **Changed 2026-10-29 (shared heap, branch `exp/go-shared-heap`):** M3.3 deleted the box heap and
+  `Vm::with_box`; a box closure runs in the caller's task.
 - **Render a shared box from a snapshot: copy, drop the lock, then render (TICKET-246).** Rendering
   under the payload lock hung `print` of a box that holds itself (`rc=124`) or overflowed the stack
   (`rc=134`). `Vm::display_box` keeps a stack of the boxes being rendered and prints `Shared(...)`
   for one already on it. A `&self` render builds fault messages and never waits: a busy box prints
   `Shared(<locked>)`. The print path waits first, through the update guard.
+  **Changed 2026-10-29 (shared heap, branch `exp/go-shared-heap`):** a render reads the box's one slot with
+  no lock or guard (M3.3, M3.5), so no path waits and `<locked>` is gone.
 - **A parallel reader of a live heap is proven by the type system, not by review (TICKET-246).**
   `RwShared` readers copy out of the box heap under a read lock. `Heap: Sync` is a `const _`
   assertion; a new `Cell` / `RefCell` in `Heap` or `Obj` must fail that build, never be worked
   around with `unsafe impl Sync`. No user code runs under the read lock: copy, unlock, then decode,
   compare keys or run the closure.
+  **Changed 2026-10-29 (shared heap, branch `exp/go-shared-heap`):** every task reads the one heap through
+  `&Heap`, and a `RwShared.read` closure runs on the live value under the read guard (M3.3).
 - **A pure-Chezzi scanner over non-ASCII text must pre-collect its codepoints.** As of TICKET-072,
   `text[i:i+1]` is O(1) per call for an ALL-ASCII `text` (`ChzStr` caches ASCII-ness at
   construction); a non-ASCII `text` still re-collects the whole `Vec<char>` per call (O(n²)).

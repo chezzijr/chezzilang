@@ -2,7 +2,6 @@
 //! discarded-carrier warning.
 //! Split out of `src/checker/sig.rs`. `super::*` is the parent module.
 
-use super::sig::TempWrite;
 use super::*;
 
 impl Checker {
@@ -345,24 +344,20 @@ impl Checker {
         // by the value-`match`/`if` tails; a `recover:` block ends in an ordinary statement). `?`/`??`/`?.` already yield
         // the UNWRAPPED payload, so they are not carriers here.
         let t = self.infer(e);
-        // TICKET-089 — a bare mutating call on a `Shared`/`RwShared`/`Atomic` read temporary
-        // mutates a deep copy and drops it: the write is lost. Returns BEFORE the carrier
-        // match — `s.get().remove(k)` / `.pop()` also return a carrier, and the lost-write
-        // message is the more actionable one, so one statement never carries both.
+        // TICKET-254 — a bare mutating call on a temporary copy (`xs.copy().push(1)`) drops the
+        // write. Returns BEFORE the carrier match — `xs.copy().pop()` also returns a carrier, and
+        // the lost-write message is the more actionable one, so one statement never carries both.
         if let Some((obj, method)) = fn_writes::method_call_parts(e)
-            && let Some(temp) = self.temporary_write(obj)
+            && self.temporary_write(obj)
         {
             let recv = self.probe_ty(obj);
             if mutates_receiver(&recv, method) {
-                let text = match temp {
-                    TempWrite::BoxRead { name, reader, fix } => format!(
-                        "'{method}' mutates the copy returned by '{name}.{reader}()', so the write is discarded — write through '{name}.{fix}(…)' instead"
-                    ),
-                    TempWrite::Copy => format!(
+                self.warn(
+                    e.span,
+                    format!(
                         "'{method}' changes a temporary copy; the result is dropped: bind the value to a name first, or call '{method}' on the source"
                     ),
-                };
-                self.warn(e.span, text);
+                );
                 return;
             }
         }
@@ -571,11 +566,6 @@ impl Checker {
         // sync with `yield_ty` here so pass-2 `check_yield` validates a generator's yields (and a
         // stray `yield` in a non-generator body is diagnosed as out-of-bounds).
         let saved_ig = std::mem::replace(&mut self.in_generator, decl.is_generator);
-        // TICKET-190: a generator body collects its frame facts; any other body collects none.
-        let saved_gf = std::mem::replace(
-            &mut self.gen_frame,
-            decl.is_generator.then(super::GenFrameAcc::default),
-        );
         // A nested function checked inside a speculative walk of an outer inline body is checked
         // for real: its `return`s are diagnosed.
         let saved_inferring = std::mem::replace(&mut self.inferring_ret, false);
@@ -588,8 +578,7 @@ impl Checker {
         // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
         let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
         // …nor a spawn block: a fn DECLARED inside a `spawn:` has its own caller, so a `?` in its
-        // body targets it normally (W7-48) — and (W8-3) the airlock-staleness taint is per-frame for
-        // the same reason. `enter_own_frame` moves the pair so neither can be reset without the other.
+        // body targets it normally (W7-48).
         let saved_frame = self.enter_own_frame();
         // M24 — the witness params whose `$w:T` binding this body can reach, and the name the
         // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER
@@ -765,12 +754,6 @@ impl Checker {
         }
         for (i, param) in decl.params.iter().enumerate() {
             let ty = param_ty(i, param);
-            if let Some(acc) = &mut self.gen_frame {
-                acc.tys
-                    .entry(param.name.clone())
-                    .or_default()
-                    .push(ty.clone());
-            }
             // Editor hover: record the param's declared type at its DECL-site name span (no-op
             // off-probe; covers free fns AND methods, both routed through check_fn_body).
             self.hover_record_at(param.name_span, &ty, HoverKind::Param, None);
@@ -881,7 +864,6 @@ impl Checker {
                 ),
             );
         }
-        self.record_gen_frame(decl);
         self.pop_scope();
         self.current_ret = saved_ret;
         self.ret_owner = saved_ret_owner;
@@ -891,7 +873,6 @@ impl Checker {
         self.current_self_ty = saved_self;
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
-        self.gen_frame = saved_gf;
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
         self.recover_depth = saved_recover;

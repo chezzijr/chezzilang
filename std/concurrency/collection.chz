@@ -2,14 +2,13 @@
 # `ConcurrentMap`, `ConcurrentSet`, `ConcurrentCounter`) over the `RwShared[T]` runtime primitive
 # (many concurrent readers OR one exclusive writer). Pure Chezzi over std-internal `_` primitives.
 #
-# WHY: `RwShared[Map[...]]` already gives you a shared, lock-guarded map across the spawn/parallel
-# airlock — but raw `read`/`write` closures are verbose, and the COMPOUND mutations (insert-if-absent,
+# WHY: `RwShared[Map[...]]` already gives you a shared, lock-guarded map across spawned
+# tasks — but raw `read`/`write` closures are verbose, and the COMPOUND mutations (insert-if-absent,
 # read-modify-write a count) MUST happen inside a SINGLE `write` lock or they race. These wrappers bake
 # the correct single-lock idiom in.
 #
-# AIRLOCK SHARING: a generic struct whose only field is an `RwShared` crosses spawn/parallel as a
-# SHARED Arc handle (RwShared is sendable and shares, and a struct of all-sendable fields does too) —
-# NOT a deep copy. So mutations a spawned task makes are visible to the parent after the join.
+# SHARING: a task gets the wrapper struct by handle, like every value (M3.4). So mutations a spawned
+# task makes are visible to the parent after the join.
 #
 # THE FOUR COLLECTIONS: `ConcurrentList[E]`, `ConcurrentMap[K, V]`, `ConcurrentSet[E]`,
 # `ConcurrentCounter[K]`. They are the user-facing surface of a shared container (TICKET-243): the
@@ -38,15 +37,16 @@ import std.concurrency
 # Hashable embeds Eq).
 # ============================================================================
 #
-# CONCURRENCY: the map is a LIVE map in the box's private heap (TICKET-246). get/contains/len are
-# CONCURRENT READS that copy only what they return (an O(1) expected probe of the map's hash
-# index); insert/remove/get_or_insert are plain map operations under the box's ONE update guard, the
-# same guard `write` takes, and copy nothing but their arguments. `get_or_insert` is
-# COMPOUND-ATOMIC: its check and its insert happen under that one guard, so it cannot lose a race.
+# CONCURRENCY: the map is the box's one LIVE map (M3.3). get/contains/len are CONCURRENT READS
+# under the read guard that return values by handle (an O(1) expected probe of the map's hash
+# index); insert/remove/get_or_insert are plain map operations under the write guard, the guard
+# `write` takes. `get_or_insert` is COMPOUND-ATOMIC: its check and its insert happen under that one
+# guard, so it cannot lose a race.
 #
-# WALKS (for_each_entry, fold_entries; for_each, fold below): a walk copies the collection once
-# (`inner.get()`) and loops over the copy. So it visits exactly the entries present when it
-# starts, each once, whatever `f` or another task removes or adds meanwhile.
+# WALKS (for_each_entry, fold_entries; for_each, fold below): a walk takes a shallow copy of the
+# collection under the read guard (`inner.read(fn(m): m.copy())`) and loops over the copy with no
+# guard held. So it visits exactly the entries present when it starts, each once, whatever `f` or
+# another task removes or adds meanwhile; the elements are the live ones, by handle.
 struct ConcurrentMap[K: Hashable, V]:
     inner: concurrency.RwShared[Map[K, V]]
 
@@ -83,28 +83,28 @@ struct ConcurrentMap[K: Hashable, V]:
 
     # Call `f(key, value)` once per entry present when the walk starts (one snapshot).
     fn for_each_entry[R](self, f: fn(K, V) -> R):
-        for k, v in self.inner.get():
+        for k, v in self.inner.read(fn(m): m.copy()):
             f(k, v)
 
     # Reduce the entries into `init` (same walk as `for_each_entry`).
     fn fold_entries[R](self, init: R, f: fn(R, K, V) -> R) -> R:
         acc := init
-        for k, v in self.inner.get():
+        for k, v in self.inner.read(fn(m): m.copy()):
             acc = f(acc, k, v)
         return acc
 
-    # A COPY of the whole map (snapshot). CONCURRENT READ. `read` already copies the value out, so the
-    # returned map is independent of later mutations.
+    # A shallow COPY of the whole map (snapshot), taken under the read guard: later inserts and
+    # removes do not change it; its values are the live ones, by handle.
     fn snapshot(self) -> Map[K, V]:
-        return self.inner.read(fn(m): m)
+        return self.inner.read(fn(m): m.copy())
 
 # ============================================================================
 # ConcurrentList[E] — a thread-safe list over `RwShared[List[E]]` (TICKET-243).
 # ============================================================================
 #
-# CONCURRENCY: len/at/slice are CONCURRENT READS that copy only what they return; for_each/fold
-# copy the list once and walk the copy (see WALKS above), so the lock is never held across `f`.
-# `push` takes the box's ONE update guard and appends in place; it does not copy the list.
+# CONCURRENCY: len/at/slice are CONCURRENT READS that return elements by handle; for_each/fold
+# walk a shallow copy (see WALKS above), so no guard is held across `f`. `push` takes the write
+# guard and appends in place.
 struct ConcurrentList[E]:
     inner: concurrency.RwShared[List[E]]
 
@@ -125,26 +125,26 @@ struct ConcurrentList[E]:
     fn at(self, i: int) -> E?:
         return self.inner._at(i)
 
-    # A COPY of the elements the `Range` selects, resolved exactly as `xs[r]` resolves it on a `List`
+    # A new list of the elements the `Range` selects, resolved exactly as `xs[r]` resolves it on a `List`
     # (`c[a..b]`, `c[3..]`, `c[Range(0, 10, 2)]`). CONCURRENT READ.
     fn slice(self, r: Range) -> List[E]:
         return self.inner._slice(r)
 
     # Call `f(element)` once per element, in order.
     fn for_each[R](self, f: fn(E) -> R):
-        for x in self.inner.get():
+        for x in self.inner.read(fn(c): c.copy()):
             f(x)
 
     # Reduce the elements into `init`, in order.
     fn fold[R](self, init: R, f: fn(R, E) -> R) -> R:
         acc := init
-        for x in self.inner.get():
+        for x in self.inner.read(fn(c): c.copy()):
             acc = f(acc, x)
         return acc
 
     # A COPY of the whole list (snapshot). CONCURRENT READ.
     fn snapshot(self) -> List[E]:
-        return self.inner.read(fn(xs): xs)
+        return self.inner.read(fn(xs): xs.copy())
 
 # ============================================================================
 # ConcurrentSet[E] — a thread-safe set over `RwShared[Set[E]]` (TICKET-243; E Hashable).
@@ -178,19 +178,19 @@ struct ConcurrentSet[E: Hashable]:
 
     # Call `f(element)` once per element, in insertion order.
     fn for_each[R](self, f: fn(E) -> R):
-        for x in self.inner.get():
+        for x in self.inner.read(fn(c): c.copy()):
             f(x)
 
     # Reduce the elements into `init`, in insertion order.
     fn fold[R](self, init: R, f: fn(R, E) -> R) -> R:
         acc := init
-        for x in self.inner.get():
+        for x in self.inner.read(fn(c): c.copy()):
             acc = f(acc, x)
         return acc
 
     # A COPY of the whole set (snapshot). CONCURRENT READ.
     fn snapshot(self) -> Set[E]:
-        return self.inner.read(fn(s): s)
+        return self.inner.read(fn(s): s.copy())
 
 # ============================================================================
 # ConcurrentCounter[K] — a thread-safe frequency table over `RwShared[Map[K, int]]` (K Hashable;

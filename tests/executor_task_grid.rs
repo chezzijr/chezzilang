@@ -292,8 +292,9 @@ fn judge(misses: Vec<String>) {
     );
 }
 
+/// M3.1: every party reads the run's one `xs`, so `show2` sees the push made after `show1`.
 #[test]
-fn globals_are_copied_at_start_for_every_party() {
+fn globals_are_read_live_for_every_party() {
     let mut misses = Vec::new();
     for p in &PARTIES {
         let src = prog(
@@ -319,22 +320,16 @@ fn globals_are_copied_at_start_for_every_party() {
     judge(misses);
 }
 
+/// M3.1: `xs` is a module global, the run's one copy, so every party's write to it lands: no
+/// party faults and the checker rejects none (Go: a goroutine appends to a package `var`).
 #[test]
-fn a_write_to_the_copy_faults_for_every_party() {
+fn a_write_to_a_global_lands_for_every_party() {
     let mut misses = Vec::new();
     for p in &PARTIES {
         let src = prog(p, "", &["$S(wr)", "hs.recv()"], "ex.shutdown()", false);
         for t in THREADS {
-            let g = run("copywrite", &src, Mode::Run, t, None);
-            // A job's fault is its Task's outcome (TICKET-289): only a nursery party ends the run.
-            // The `submit` party hands `wr` to the Executor directly, so the checker rejects it.
-            let fault_ends_run =
-                g.err.contains("is this task's copy") && g.code.is_some_and(|c| c != 0);
-            let ok_shape = if p.nursery || p.name == "submit" {
-                fault_ends_run
-            } else {
-                g.code == Some(0) && !g.err.contains("is this task's copy")
-            };
+            let g = run("globalwrite", &src, Mode::Run, t, None);
+            let ok_shape = g.code == Some(0) && !g.err.contains("is this task's copy");
             if !ok_shape {
                 misses.push(format!("{} T={t}: {}", p.name, g.show()));
             }
@@ -786,7 +781,9 @@ fn the_grid_holds_inside_a_test_fn() {
             "$S(show2)",
             "assert out.recv() == \"2 [1, 2]\"",
             "$S(wr_recovered)",
-            "assert out.recv().contains(\"is this task's copy\")",
+            "assert out.recv() == \"no fault\"",
+            "$S(show2)",
+            "assert out.recv() == \"2 [1, 2, 9]\"",
         ];
         if !p.nursery {
             body.extend([

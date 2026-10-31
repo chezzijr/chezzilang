@@ -53,7 +53,7 @@ struct Holder:
         return T.default()
 
 # The witness reaches every nested body: a closure (even one that ESCAPES the defining frame), a
-# nested `fn`, a `defer:` block and a `spawn:` block (it crosses the airlock by value).
+# nested `fn`, a `defer:` block and a `spawn:` block (it runs in another task).
 fn factory[T: Default](x: T) -> fn() -> T:
     return fn(): T.default()
 
@@ -64,7 +64,7 @@ fn logged[T: Default](x: T, sink: List[str], ch: Channel[str]):
         sink.push("defer {T.default()}")
     parallel:
         spawn:
-            # a spawned body crosses the airlock by VALUE, so it reports back over a channel
+            # the spawned body reports back over a channel, which orders it with the parent
             ch.send("spawn {T.default()}")
     note()
 

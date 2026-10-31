@@ -8,7 +8,7 @@ use super::*;
 //
 // A child token derived from a parent observes the parent's cancellation/timeout transitively
 // (root-to-leaves, one-directional). The link is LIVE (each node's `Shared` flag + the immediate
-// parent's `Channel[Token]` registry cross the airlock as live cores), so a parent cancel is pushed
+// parent's `Channel[Token]` registry cross a spawn as live cores), so a parent cancel is pushed
 // into every already-derived descendant — including children that crossed `spawn`/`parallel:`.
 // Cancelling a child never touches the parent.
 //
@@ -92,7 +92,7 @@ fn cancel_child_inherits_tightest_deadline() {
     );
 }
 
-/// The live link survives the concurrency airlock: a derived child crosses `spawn`/`parallel:`,
+/// The live link survives a task boundary: a derived child crosses `spawn`/`parallel:`,
 /// and a parent cancel done in the parent task BEFORE the nursery is observed by the spawned task.
 /// (The name is historical — `Token` no longer has a `parent` field. The link is the child's OWN
 /// `Shared` flag, which the parent's downward cascade already set, and it crosses as a LIVE core,
@@ -115,13 +115,13 @@ fn cancel_derive_free_fn_form() {
     assert_eq!(out, "before: false\nafter: true\n");
 }
 
-/// The registration channel is live across the airlock in BOTH directions: a worker task derives a
+/// The registration channel is live across a spawn in BOTH directions: a worker task derives a
 /// GRANDCHILD on the FAR side of a `spawn` (a `send` into the crossed child's `kids`) and parks in
 /// `wait: gk.done().recv()`, while a sibling cancels the ROOT on the near side (a drain of that same
 /// channel, two levels up). Every round must wake — the strongest liveness proof for the downward
 /// cascade, since neither half of the registry is owned by the task that reads it.
 #[test]
-fn cancel_cascade_crosses_the_airlock() {
+fn cancel_cascade_crosses_tasks() {
     let src = "import std.cancel\n\
                    import std.time\n\
                    fn waiter(c: cancel.Token, out: Channel[bool]):\n\
@@ -205,7 +205,7 @@ fn golden_ffi_ptr_chz_via_run_file() {
 /// block binds `div_t div(int, int)` — a libc fn taking two scalars and returning a small POD
 /// struct BY VALUE — to a Chezzi `struct DivT{quot, rem}`. `div(17, 5) == {3, 2}` (pure, always
 /// present). Byte-matches `.expected`. The `--parallel`/M:N engine is NOT driven here; the returned
-/// `NativeRet::Struct` already crosses the M:N airlock by the same deep-copy std.regex uses, so the
+/// `NativeRet::Struct` is a plain heap struct that crosses a spawn by handle like any other, so the
 /// path is exercised, just not by this golden. Runs wherever the `libc`/`libm` aliases resolve;
 /// otherwise prints a SKIP line naming the reason.
 #[test]

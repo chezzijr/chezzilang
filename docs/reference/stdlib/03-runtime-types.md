@@ -40,54 +40,48 @@ never blocking. Port Go's `make(chan T)` to `Channel[T](0)`.
 ### `Shared[T]` — cross-task shared cell
 `get() -> T` · `set(x: T) -> None` · `update(f: fn(T) -> T) -> None` · `read(f: fn(T) -> R) -> R`.
 
-**Where the value lives.** A `Shared[T]` keeps its value in a private heap of its own.
-`update(f)` runs `f` **inside the box, on the live value, in place**: `s.update(fn(t): hit(t))`
-with `hit` doing `t.hits += 1` and returning `t` copies nothing, however large `t` is. The value `f`
-returns is the new state. `Shared.read(f)` runs `f` inside the box too and copies only its **result**
-out; it runs on the live value, so a mutation `f` makes **persists** (use `RwShared.read` for a
-reader that works on its own copy). `get` is a **whole-value copy out**: mutating it
-(`s.get().push(x)`) changes the caller's copy, not the box (the checker warns on that shape). The same
-holds for `RwShared`/`Atomic` `get`; a plain in-task `struct` field differs: its reads alias the live
-value, but it cannot cross a spawn.
+**Where the value lives.** M3.3: a `Shared[T]` holds ONE value by handle, behind one guard (Go
+`struct { mu sync.Mutex; v T }`). `update(f)` runs `f` in the caller's task **on the live value, in
+place**, while the task holds the guard: `s.update(fn(t): hit(t))` with `hit` doing `t.hits += 1`
+and returning `t` copies nothing, however large `t` is. The value `f` returns is the new value.
+`Shared.read(f)` runs `f` the same way and returns its result; a mutation `f` makes **persists**.
+**`get()` returns the live value; write it only inside `update`** (a write outside the guard races
+another task's `update`, the user's bug as in Go). The same holds for `RwShared.get` and
+`Atomic.load`.
 
-**The closure rule.** A closure given to `update` / `read` runs like the body of a spawned task:
+**The closure rule.** A closure given to `update` / `read` is an ordinary call in the caller's task:
 
-- Its captures are **copies**. A write to a captured value is the task-copy error or fault
-  (`... is this task's copy: a write to it would be lost at the join ...`), never a silent lost write.
-  A capture the closure stores into the state is the box's own value once the call ends.
-- It sees **module globals as the caller has them at the call** (a binding made after the box, and a
-  rebinding between two calls, are both visible). A write to a module global faults the same way.
-- A module global's copy that the closure stores into the state stays a copy: a later in-place
-  write to it faults, and the fault says so. Store `G.copy()` instead.
+- Its captures are the caller's bindings: a write to one lands. A capture or a module global the
+  closure stores into the state is that object itself; store `G.copy()` to keep the box's own value.
+- It reads and writes the run's one copy of each module global (M3.1).
 - A fault inside the closure is raised in the caller and `recover:` catches it; the box keeps
-  serving, and the state is **what the closure left** (a `push` made before the fault stays).
-- A slow closure blocks every other user of the box and holds its worker, as with Elixir's `Agent`:
-  keep the closure short and do slow work outside it.
+  serving, and the value is **what the closure left** (a `push` made before the fault stays).
+- It may block (a channel wait, a sleep): the guard belongs to the task and stays with it. A slow
+  closure blocks every other user of the box, as with Elixir's `Agent`: keep it short.
 
-`update(f)` runs `f` **under the box's process-global update guard**, so the read-modify-write is
-atomic against other tasks (a `get`-then-`set` races). `set` takes the same guard, so a cross-task
+`update(f)` runs `f` **under the box's process-global guard**, so the read-modify-write is atomic
+against other tasks (a `get`-then-`set` races). `set` and `get` take the same guard, so a cross-task
 `set` racing an in-flight `update` **blocks** and lands instead of being overwritten.
 
-**Reentrancy limit:** `f` must not touch the **same** box's guard. The result at every worker count:
+**Reentrancy limit:** `f` must not take the **same** box's guard. The result at every worker count:
 
-| from inside `s.update(f)` / `rw.write(f)` | behaviour |
+| from inside `s.update(f)` / `rw.write(f)` / `rw.read(f)` | behaviour |
 |---|---|
-| `s.get()` / `s.read(g)` / `print(s)` — same `Shared` box | **faults**: the value lives in the box and the closure holds it, so no earlier copy exists to return |
-| `rw.get()` / `rw.read(g)` / `print(rw)` — same `RwShared` box, inside its `write` | **faults** the same way; inside a `read` closure they are legal, because that closure runs on its own copy |
-| `s.set(x)` — same box | **faults**: `"deadlock: this task already holds the update guard on this Shared box"` |
-| `s.update(g)` / `rw.write(g)` — same box | **faults** the same way, instead of hanging undetected |
+| `s.get()` / `s.read(g)` / `s.set(x)` / `s.update(g)` — same `Shared` box | **faults**: `"deadlock: this task already holds the update guard on this Shared box ..."` (Go: `Lock` in `Lock` deadlocks) |
+| `rw.get()` / `rw.read(g)` / `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `write` | **faults** the same way |
+| `rw.set(x)` / `rw.write(g)` — same `RwShared`, inside its `read` | **faults**: `"deadlock: this task already holds the read guard on this RwShared box ..."` (Go: `Lock` in `RLock` deadlocks) |
+| `rw.get()` / `rw.read(g)` — same `RwShared`, inside its `read` | legal while no writer waits; past a waiting writer **faults** with `a lock cycle` (Go: a recursive `RLock` with a writer queued deadlocks) |
+| `print(s)` | legal: a print takes no guard and shows the value as it is |
 
 A cross-task `set`/`update`/`write` on the SAME box from a *different*, healthy task BLOCKS behind the
-guard. Only a real wait-for cycle (same-box re-entry, or a longer AB-BA cycle across boxes) faults.
-(`rw.write` nested inside `rw.read` is the one legal same-box crossing: `read` never takes the guard,
-so the nested `write` persists.)
+guard. Only a real wait-for cycle (same-task re-entry, or a longer AB-BA cycle across boxes) faults.
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
 `get() -> T` · `set(x: T) -> None` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
 result, no write-back) · `write(f: fn(T) -> T) -> None` (exclusive write guard; `Shared.update` under
 the write lock). Use it over `Shared` when reads dominate. Same reentrancy limit as `Shared.update`
-(see the table above). `write` runs in place in the box heap; `read(f)` runs `f` on a copy in the
-reader's heap. Constructed value-first: `RwShared(v)`; an optional turbofish pins (and is checked
+(see the table above). `write` and `read(f)` run `f` on the live value, under the write guard and
+the read guard. Constructed value-first: `RwShared(v)`; an optional turbofish pins (and is checked
 against) the element type: `RwShared[T](v)` (a mismatch like `RwShared[str](0)` is a type error).
 
 **`RwShared[T]` has exactly these four methods, for every `T`.** It has no container methods:
@@ -97,17 +91,13 @@ container through [`std.concurrency.collection`](08-pure-concurrency-utils.md#st
 (`ConcurrentList`, `ConcurrentMap`, `ConcurrentSet`, `ConcurrentCounter`), which owns the per-entry
 readers and the single-entry writers.
 
-How the collections read: the container is a live `List` / `Map` / `Set` in the box's private heap.
-- The single-entry readers (`len`, `at`, `slice`, `get`, `contains`) copy only what they return, under
-  the shared read lock, and run a key's `hash` / `eq` in the caller after the lock is dropped.
-- The walks (`for_each`, `fold`, `for_each_entry`, `fold_entries`) copy the collection **once**
-  (`inner.get()`) and loop over the copy. A walk visits exactly the entries present when it starts,
-  each once, whatever the callback or another task removes or adds meanwhile, and the callback may call
-  any method of the collection it walks. Cost: one copy of the collection per walk.
-- Each piece is copied out **independently**, so two sibling closures over one captured local do NOT
-  share their binding when you pull them out one at a time (two `at()` calls are two crossings). A
-  whole-container `get()`/`read()`, and `slice`, are one crossing and do share. See
-  [`concurrency.md`](../concurrency/01-model.md) §airlock.
+How the collections read: the container is the box's one live `List` / `Map` / `Set`.
+- The single-entry readers (`len`, `at`, `slice`, `get`, `contains`) take the read guard and return
+  elements by handle; a key's `hash` runs before the guard, its `eq` under it.
+- The walks (`for_each`, `fold`, `for_each_entry`, `fold_entries`) take a shallow copy of the
+  collection under the read guard and loop over the copy with no guard held. A walk visits exactly
+  the entries present when it starts, each once, whatever the callback or another task removes or adds
+  meanwhile, and the callback may call any method of the collection it walks.
 
 ### `Atomic[T]` — cross-task atomic (numeric `T` for add/sub)
 `load() -> T` · `store(x: T) -> None` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·
@@ -130,37 +120,6 @@ The int sibling of `Atomic[T]`: it has no `[T]`, so a lock-free `std::sync::atom
 `Atomic` on an 8-way counter; see [`benchmarks.md`](../../contributing/benchmarks.md)). Same import
 gate as `Atomic`. Constructed `AtomicInt(v)` (one int arg; `AtomicInt(3.5)` is a type error).
 
-### `concurrency.is_task_copy` — is this value an airlock copy?
-`is_task_copy(v) -> bool` (after `import std.concurrency`). `true` when `v` is this task's airlock copy
-of a value another task owns: a spawned task's argument or capture, or an Executor job's capture. A
-write to such a value faults `this value is this task's copy` (D4, `concurrency.md`); `is_task_copy`
-reads the same mark, so std code can choose between writing a value and reading shared state without
-attempting the write. `false` for a value the calling task owns, a value received from a `Channel`,
-and a scalar. Its std caller is `Task.get()` (`std.concurrency`). It is `Kind::Inline`: it reads
-the calling task's own heap, so it never runs off-heap on the blocking pool.
-
-```
-fn child(xs: List[int]):
-    print(concurrency.is_task_copy(xs))     # true: the spawned task holds a copy
-
-xs := [1]
-print(concurrency.is_task_copy(xs))         # false: the parent owns xs
-parallel:
-    spawn child(xs)
-```
-
-`spawn print(concurrency.is_task_copy(xs))` prints `false`: a spawn's call arguments run in the
-parent (Go `go f(x)`), so the query runs before the crossing.
-
-### `concurrency.task_copy_of` — this task's copy of a value
-`task_copy_of[T](v: T) -> T` (after `import std.concurrency`). Returns `v` rebuilt as this task's
-copy, so a later write to it faults `this value is this task's copy` (D4). It is the rebuild every
-crossing runs: a function inside `v` leaves its module's globals unmarked, and a generator's
-frame-local list the creating task never saw stays writable. It is for std code that reads a shared
-core on behalf of a handle its owner aliases: `Task.get()` and a `memoize1` wrapper. A plain
-`Shared.get()` or `ch.recv()` result is the receiver's own. The engine runs it
-(`Kind::InterceptAirlock`).
-
 ### `concurrency.is_settled` — has a handle channel its outcome
 `is_settled(ch) -> bool` (after `import std.concurrency`). True once the channel `ch` is sealed: a
 `submit` channel whose job's outcome has been written. Never blocks, and never reads `false`
@@ -174,7 +133,7 @@ User code calls `submit`.
 |---|---|
 | `Executor()` | A pool with no cap on the jobs running at once. |
 | `Executor(n: int)` | **At most `n` jobs run at once** (Python `ThreadPoolExecutor(n)`); a job over the cap is held and starts when a running one finishes. `Executor(0)` (or any `n < 1`) faults `Executor(n) needs n >= 1`. A job parked in a blocking op still counts toward the cap, so `n` jobs that each wait for a held job are a deadlock, reported at the parked job's blocking op. |
-| `submit[T](f: fn() -> T) -> Task[T]` | **Starts the job immediately** (detached) and returns its `Task[T]`, like Python's `ThreadPoolExecutor.submit`. `task` is any zero-arg callable: a fn, method path, closure, std native (`time.now_ms`) or extern fn. **A job is a spawned task**: it copies its globals at the submit, inherits its creator's cancel chain and parks like any `spawn`ed task. A job fault is its Task's `get()` outcome; it ends no run and cancels no sibling. A refused submit returns an already-settled Task. An unused Task gets the discard warning. |
+| `submit[T](f: fn() -> T) -> Task[T]` | **Starts the job immediately** (detached) and returns its `Task[T]`, like Python's `ThreadPoolExecutor.submit`. `task` is any zero-arg callable: a fn, method path, closure, std native (`time.now_ms`) or extern fn. **A job is a spawned task**: it shares the run's globals and holds its captures by handle (a write the submitter makes after the submit is visible to the job; see `concurrency.md` §8), inherits its creator's cancel chain and parks like any `spawn`ed task. A job fault is its Task's `get()` outcome; it ends no run and cancels no sibling. A refused submit returns an already-settled Task. An unused Task gets the discard warning. |
 | `shutdown() -> None` | **Wait** for the submitted work. It raises no job fault: a job's fault is its Task's `!e` (see `concurrency.md` §8). |
 | `cancel() -> None` | Ask running jobs to stop **cooperatively** and return at once; `shutdown()` after it waits (Java `shutdownNow`). A RUNNING job with no cancellation point still finishes, but a job **sleeping, waiting a timer, or parked in a nested `Executor` join is ended**. A job held by the `Executor(n)` cap never starts, and its handle settles `!e` (CPython `shutdown(cancel_futures=True)`). See `concurrency.md` §cancellation points. |
 | `Task[T]` | `get() -> T!` returns `?value` or `!message` when the job faulted, or `!"task cancelled: cancel() stopped it before it finished"` when `cancel()` or a creator cancel dropped or cut it. `done() -> bool` and `cancel() -> None` (drop a held job, cut a running one). The outcome is **sealed**: every `get()` returns it. A `--max-heap` abort is never a Task outcome. |
@@ -241,7 +200,7 @@ nobody to send faults in milliseconds instead of hanging, while `ex.submit(fn():
   - `read(0)` (or a negative / computed-zero `n`) is a **no-op** `?""`: it never touches the socket,
     never reports EOF, and leaves any carried tail for the next read. It still reports a closed socket
     (`!"read on a closed socket"`).
-  - Two tasks may share one `Socket` (it crosses the airlock as a shared handle): each `read` takes its
+  - Two tasks may share one `Socket` (a task gets it by handle): each `read` takes its
     bytes off the socket and decodes them as ONE atomic step, so concurrent readers see wire order (they
     still must not both *block* on it: a second parked op on a shared socket is a fault).
   - Bytes that are not UTF-8 (a **binary payload**) → `!"invalid utf-8 on the socket: …"`.

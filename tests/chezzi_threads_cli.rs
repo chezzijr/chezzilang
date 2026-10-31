@@ -78,6 +78,7 @@ fn run_chz_test(
         cmd.arg(format!("--timeout={ms}"));
     }
     cmd.arg(path);
+    chz_dirs::set_build_mode(&mut cmd);
     match threads {
         Some(n) => {
             cmd.env("CHEZZI_THREADS", n);
@@ -241,7 +242,9 @@ fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
 /// second CPU runner (the pre-fix defect) pushes `cpu` well past `wall`. Measured under load average
 /// 28.9 on a 12-core box, four runs each: fixed 0.776-0.946 cores, pre-fix-reverted 1.267-1.771 cores.
 /// The burn size (75k iterations) is what every measured band and the negative control below were
-/// taken at — `CARGO_BIN_EXE_chezzi` under `cargo test` is the debug binary, not `--release`.
+/// taken at, on the debug binary with chezzi-vm at opt-level 0. `child_rusage::scale_burns` scales
+/// the burns of each test here with a "finished too fast" floor to that cost on the binary under
+/// test.
 #[cfg(unix)]
 #[test]
 fn threads_one_serializes_cpu_bound_parallel_tasks() {
@@ -260,7 +263,9 @@ fn threads_one_serializes_cpu_bound_parallel_tasks() {
     let spawns = "        spawn: burn(75000)\n".repeat(8);
     std::fs::write(
         &path_b,
-        format!("{burn}fn main():\n    parallel:\n{spawns}main()\n"),
+        child_rusage::scale_burns(&format!(
+            "{burn}fn main():\n    parallel:\n{spawns}main()\n"
+        )),
     )
     .expect("write program B");
 
@@ -313,14 +318,14 @@ fn threads_one_serializes_a_cpu_bound_top_level_body_alongside_a_spawn() {
     let path_b = dir.join("body_and_spawn.chz");
     std::fs::write(
         &path_b,
-        format!(
+        child_rusage::scale_burns(&format!(
             "{burn}fn main():\n    \
              parallel:\n        \
              spawn: burn(750000)\n        \
              y := burn(750000)\n        \
              print(y)\n\
              main()\n"
-        ),
+        )),
     )
     .expect("write program");
 
@@ -363,7 +368,8 @@ fn threads_one_serializes_a_top_level_body_that_burns_after_a_blocking_recv() {
     let path_b = dir.join("blocked_then_burn.chz");
     std::fs::write(
         &path_b,
-        "fn burn(n: int) -> int:\n    \
+        child_rusage::scale_burns(
+            "fn burn(n: int) -> int:\n    \
          x := 0\n    \
          i := 0\n    \
          while i < n:\n        \
@@ -381,6 +387,7 @@ fn threads_one_serializes_a_top_level_body_that_burns_after_a_blocking_recv() {
          v := go.recv()\n        \
          print(burn(750000) + v)\n\
          main()\n",
+        ),
     )
     .expect("write program");
 
@@ -429,14 +436,14 @@ fn a_cpu_bound_top_level_body_alongside_a_spawn_stays_two_wide_at_two_workers_an
     let path_b = dir.join("body_and_spawn.chz");
     std::fs::write(
         &path_b,
-        format!(
+        child_rusage::scale_burns(&format!(
             "{burn}fn main():\n    \
              parallel:\n        \
              spawn: burn(750000)\n        \
              y := burn(750000)\n        \
              print(y)\n\
              main()\n"
-        ),
+        )),
     )
     .expect("write program");
 
@@ -796,12 +803,14 @@ fn threads_one_serializes_cpu_bound_callback_tasks() {
     // cores gated, 1.9 cores with the worker loop's `width_acquire` removed.
     let spawns = format!(
         "{}{}",
-        "        spawn:\n            ys := [75000].map(fn(n): burn(n))\n".repeat(2),
+        "        spawn:\n            ys := [0].map(fn(k): burn(75000) + k)\n".repeat(2),
         "        spawn: burn(75000)\n".repeat(4)
     );
     std::fs::write(
         &path_b,
-        format!("{burn}fn main():\n    parallel:\n{spawns}main()\n"),
+        child_rusage::scale_burns(&format!(
+            "{burn}fn main():\n    parallel:\n{spawns}main()\n"
+        )),
     )
     .expect("write callback program");
 
@@ -868,13 +877,13 @@ fn threads_one_serializes_nested_eager_parallel_tasks() {
     let spawns = "        spawn: burn(75000)\n".repeat(16);
     std::fs::write(
         &path_b,
-        format!(
+        child_rusage::scale_burns(&format!(
             "{burn}fn work():\n    parallel:\n{spawns}\n\
              fn main():\n    \
              parallel:\n        \
              work()\n\
              main()\n"
-        ),
+        )),
     )
     .expect("write program B");
 
@@ -942,7 +951,7 @@ fn threads_one_serializes_a_cpu_bound_nursery_inside_an_executor_job() {
             print(\"done\")\n\
         main()\n";
     let path = dir.join("burn.chz");
-    std::fs::write(&path, program).expect("write program");
+    std::fs::write(&path, child_rusage::scale_burns(program)).expect("write program");
 
     for run in 0..SERIALIZATION_RUNS {
         let (wall, user, sys, status, stdout) =
@@ -1036,13 +1045,13 @@ fn threads_eight_scales_nested_eager_parallel_tasks_in_body() {
     let spawns = "        spawn: burn(75000)\n".repeat(16);
     std::fs::write(
         &path,
-        format!(
+        child_rusage::scale_burns(&format!(
             "{burn}fn work():\n    parallel:\n{spawns}\n\
              fn main():\n    \
              parallel:\n        \
              work()\n\
              main()\n"
-        ),
+        )),
     )
     .expect("write program");
 
@@ -1559,8 +1568,8 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_thread_one_sampled() {
 
 /// W13-5 (TICKET-125) residual, T>=2 — CLOSED by TICKET-129. TICKET-135 (D1): the recovered shapes now abort. `SchedCore::flag_deadlock_leaves` now
 /// DECLINES an unproven verdict (`unproven_ok: bool`, `Option<bool>` return) unless
-/// `MnSched::may_fault_unproven` licenses it — no live peer sched can still move or prove its own
-/// victims, matching Go's all-goroutines-parked rule. TICKET-125's own cross-sched deferral
+/// `MnSched::may_fault_unproven` licenses it — no live peer sched can still move (M3.2 deleted the
+/// proven-victims clause with the leaf proof), matching Go's all-goroutines-parked rule. TICKET-125's own cross-sched deferral
 /// (`defer_to_provable_peer`) had cut the false-fault rate (~3/5 -> ~1/20 at T=4 on `d2a`) without
 /// reaching 0 and was reverted; TICKET-129 measured 0 false faults of 60 runs per worker count on
 /// `d2a`/`d2d`/`g3` (debug binary) before closing `docs/contributing/gaps.md`'s W13-5 row.
@@ -1601,8 +1610,8 @@ fn w13_5_g3_recovered_panic_then_cousin_join_completes_at_every_worker_count() {
 }
 
 /// TICKET-125 — a GENUINE two-leaf deadlock on a channel created in `main` must still fault at every
-/// worker count: the non-provable fallback (fault the lowest-index leaf, then re-judge) must retire
-/// BOTH leaves rather than decline forever.
+/// worker count: the licensed fallback (fault the lowest-index leaf, then re-judge; since M3.2 the
+/// only path, as no leaf is proven) must retire BOTH leaves rather than decline forever.
 const TWO_LEAF_DEADLOCK_ON_A_MAIN_CHANNEL: &str = "fn main():
     ch := Channel[int](0)
     parallel:

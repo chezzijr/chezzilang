@@ -52,18 +52,14 @@ impl MnSched {
         }
         let job_fault = self.publish_job_fault(&c, scope_id, &outcome);
         c.leave_running();
-        // DEC-205 — a task's submit-time bytes stay charged until it FINISHES.
-        if let Some(charge) = c.slot_charge.remove(&task_index) {
-            c.unfinished_bytes -= charge;
-        }
         // W7-26r — this thread is the only party that can observe the cap for a nursery whose parent
         // is blocked in the join (see `core::halt_over_backlog`). These slots live outside every
         // `Heap`, so `live_bytes` never counted them either: this is the accounting AND the
-        // observation. Cheap: the summary is O(1) (buffered output capacities; a task's return value
-        // is `Nil`, W7-27) and the whole block is skipped when no cap is set.
+        // observation. Cheap: the summary is O(1) (buffered output capacities; a task keeps no
+        // return value, W7-27) and the whole block is skipped when no cap is set.
         let outcome = if self.mem_cap != 0 {
             let s = &mut c.scopes[scope_id];
-            s.bytes += super::core::outcome_summary(&outcome).0;
+            s.bytes += super::core::outcome_summary(&outcome);
             let (outcome, over) = super::core::halt_over_backlog(outcome, s.bytes, self.mem_cap);
             if over {
                 // Under the core lock, exactly as `trip_scope_cancel` requires — the release
@@ -173,8 +169,8 @@ impl MnSched {
     /// evaluate `is_deadlocked` (a bare `Relaxed` store outside it has no synchronizes-with edge, so a
     /// lock-holder could legally still read `false` and reap the scope's parked fibers as `Deadlocked`);
     /// (2) it lets the abort seams arm this veto BEFORE they clear their own (`awaiting_builder` /
-    /// `body_open`) — a gapless veto handoff. Idempotent (the fault path trips its
-    /// flag in [`MnSched::finish_with`], under `finish`'s own lock hold).
+    /// `body_open`) — a gapless veto handoff. Idempotent (the fault path trips its flag in
+    /// [`MnSched::finish_with`], under `finish`'s own lock hold).
     pub(super) fn trip_scope_cancel(&self, scope_id: usize) {
         let c = self.lock();
         crate::vm::trip_cancel_flag(&c.scopes[scope_id].cancel);

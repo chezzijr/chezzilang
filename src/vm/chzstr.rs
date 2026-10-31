@@ -236,13 +236,13 @@ mod tests {
 
     #[test]
     fn obj_size_unchanged_by_sso() {
-        // SSO must not grow `Obj` (the heap-slot footprint). `Box<str>`→`ChzStr` adds 8 bytes to
-        // the `Str` variant, but `MapData`/`SetData` set the cap at 64B (56B of payload + the 8B enum
-        // discriminant), so the total is unchanged. (M19 lever #3 shrank `Closure` from 88B to 64B —
+        // SSO must not grow `Obj` (the heap-slot footprint, 40B since M2.3: `MapData`/`SetData`
+        // hold two `RVec` pointers, entries and index). `Box<str>`→`ChzStr` adds 8 bytes to the
+        // `Str` variant, which still fits. (M19 lever #3 shrank `Closure` from 88B to 64B —
         // captures moved from a `HashMap<String,Value>`(48) to a positional `Vec<Value>`(24); lever #2
         // shrank `Enum` — two per-instance `Box<str>`(32) replaced by one `variant_id: u32`;
         // `Module`'s payload is now boxed (`Box<ModuleData>`), so it no longer sets the cap.)
-        assert_eq!(std::mem::size_of::<crate::vm::heap::Obj>(), 64);
+        assert_eq!(std::mem::size_of::<crate::vm::heap::Obj>(), 40);
     }
 
     #[test]

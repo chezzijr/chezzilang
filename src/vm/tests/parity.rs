@@ -574,8 +574,8 @@ fn struct_positional_layout_no_per_instance_names() {
             let tid = *tid;
             // positional: NOT Vec<(Box<str>, Value)>
             assert_eq!(
-                fields.as_slice(),
-                &[Value::int(1), Value::int(2)],
+                fields.to_vec(),
+                [Value::int(1), Value::int(2)],
                 "fields must be positional in declaration order, no per-instance names"
             );
             // Name is resolved from tid (no per-instance `name` field), not stored on the instance.
@@ -622,7 +622,7 @@ fn enum_variant_id_stamped_at_construction() {
                 *variant_id, green_id,
                 "variant_id must be the dense id stamped at construction"
             );
-            let payload: &Vec<Value> = payload; // no per-instance ty/variant Box<str>
+            let payload: &RVec<Value> = payload; // no per-instance ty/variant Box<str>
             assert!(payload.is_empty(), "nullary variant has empty payload");
         }
         _ => panic!("expected Obj::Enum"),
@@ -651,7 +651,7 @@ fn native_result_option_have_fixed_variant_ids() {
     assert_eq!(vid("Option", "None"), VID_NONE_VARIANT);
     // A native-built enum (alloc_enum ⇒ Option::Some) must carry the right id.
     let mut vm = Vm::new(Arc::new(program));
-    let v = vm.alloc_enum("Option", "Some", vec![Value::int(7)]);
+    let v = vm.alloc_enum("Option", "Some", &[Value::int(7)]);
     let Some(h) = v.as_obj() else { panic!() };
     let Obj::Enum { variant_id, .. } = vm.heap.get(h) else {
         panic!("expected enum")
@@ -1236,10 +1236,10 @@ fn builtin_value_equality_both_engines() {
 }
 
 /// Bug 3: all four first-class builtins are SENDABLE — a builtin bound to a local and CAPTURED
-/// into a spawned task crosses the airlock (the `SnapValue::Builtin` path) and runs. Byte-identical
+/// into a spawned task reaches the task and runs. Byte-identical
 /// on the VM and the M:N engine.
 #[test]
-fn builtin_value_sendable_across_airlock_both_engines() {
+fn builtin_value_crosses_tasks_both_engines() {
     let src = "import std.concurrency\nfn main():\n    f := ord\n    p := print\n    parallel:\n        spawn:\n            p(f(\"a\"))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(vm_out, "97\n");
@@ -1250,8 +1250,8 @@ fn builtin_value_sendable_across_airlock_both_engines() {
 /// callee reaches `prepare_worker`'s `PendingCall::Call` arm, which only handled Closure/Func —
 /// a raw `Obj::Builtin` hit the reject `_` on the M:N engine only (`spawn: 'function' is not an
 /// isolable task`) while serial/interp dispatched it fine: a three-engine parity divergence on a
-/// checker-accepted program. Fixed by `Lowered::Value` (TICKET-226: every non-closure callable
-/// crosses by value through `to_wire`, classified by `Vm::callable`).
+/// checker-accepted program. Fixed by `Lowered::Value` (TICKET-226; since M3.4 the task gets the
+/// callable by handle, classified by `Vm::callable`).
 #[test]
 fn spawn_builtin_fn_value_as_call_callee_both_engines() {
     let src = "import std.concurrency\nfn main():\n    g := print\n    parallel:\n        spawn g(\"from-task\")\nmain()\n";
@@ -1261,7 +1261,7 @@ fn spawn_builtin_fn_value_as_call_callee_both_engines() {
 
 /// `spawn print("hi")` — a bare first-class builtin spawned DIRECTLY (no intermediate binding),
 /// symmetric with `defer print(...)`. `print` lowers to `Op::LoadBuiltin` (value position) then
-/// `SpawnCall`, so the callee is an `Obj::Builtin` crossing the airlock by name.
+/// `SpawnCall`, so the callee is an `Obj::Builtin` crossing the spawn by name.
 /// The checker gate accepts it (parity-perf-0 fix); runtime prints identically.
 #[test]
 fn spawn_bare_builtin_print_both_engines() {

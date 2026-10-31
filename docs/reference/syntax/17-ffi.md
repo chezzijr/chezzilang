@@ -220,7 +220,7 @@ back. Declare it `ptr`, imported from `std.ffi` (`import ptr from std.ffi`, or `
   auto-freed**: call the library's destroy yourself, or it leaks.
 - It supports only `==`/`!=` with another `ptr`, and passing/returning. No methods, fields or arithmetic.
 - A returned NULL is not a fault. `null()` and `is_null(p)` come from `std.ffi`.
-- It prints as `<ptr null>` / `<ptr>`, never the address. It is sendable (crosses `spawn`/channels by value).
+- It prints as `<ptr null>` / `<ptr>`, never the address. A task or a channel gets the address itself.
 
 ```chezzi
 import null, is_null from std.ffi

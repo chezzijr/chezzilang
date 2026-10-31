@@ -210,15 +210,6 @@ impl Compiler {
             } => {
                 let bracket = bracket.as_deref();
                 self.compile_call(fc, callee, args, named, bracket, expr.span, expr.id)?;
-                // TICKET-190: a call that creates a generator stamps its param crossings.
-                if let Some(c) = self
-                    .gen_crossings
-                    .calls
-                    .get(&(self.current_module_idx, expr.id.0))
-                {
-                    let mask = crate::base::crossing::stamp_mask(&c.args);
-                    fc.emit(Op::StampGen(mask), expr.span);
-                }
             }
             ExprKind::Field { obj, name, .. } => {
                 // A tuple slot (`t.0`) is a value, never a name; everything else reads the
@@ -652,8 +643,8 @@ impl Compiler {
             DeferTarget::Call(call) => call,
             DeferTarget::Block(body) => {
                 // `defer:` block → a synthetic zero-arg closure capturing the referenced bindings by
-                // reference at the defer point (exactly `compile_spawn`'s Block arm, minus the
-                // airlock), then defer-invoke it with 0 args. Reuses `MakeClosure` + `DeferCall` — no
+                // reference at the defer point (exactly `compile_spawn`'s Block arm), then
+                // defer-invoke it with 0 args. Reuses `MakeClosure` + `DeferCall` — no
                 // new op. Free-variable capture (Finding D): only names the block references.
                 let snap = fc.snapshot_entries();
                 let (kept, free) = filter_entries_free_block(&snap, body, &[]);

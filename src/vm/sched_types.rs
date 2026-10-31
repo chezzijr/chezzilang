@@ -103,63 +103,27 @@ pub(super) struct FiberCtx {
     pub(super) eager_scheds: Vec<Option<EagerScope>>,
     pub(super) fault_trace: Option<Vec<TraceFrame>>,
     pub(super) fault_trace_depth: usize,
-    /// D2a — an M:N fiber carries its OWN heap (share-nothing): `swap_ctx` swaps it with the host
-    /// `Vm::heap` when this fiber schedules in, and back out when it parks. `None` for a fiber with
-    /// no heap of its own, which aliases the single `Vm::heap` instead (decision A — share-by-ref),
-    /// so its swap leaves the heap untouched. No production path builds a `None` fiber today
-    /// ([`Vm::into_fiber`] always passes `Some(worker.heap)`); only tests do. The `Some`/`None`
-    /// discriminant also gates every D2b side-state swap below.
-    pub(super) heap: Option<Heap>,
+    /// M1.6 — this context owns its own per-fiber side state (`executors`, `str_intern` and the
+    /// in-flight socket-op state below), so [`Vm::swap_ctx`] swaps it. `false`
+    /// for a context that aliases the shell's (tests only: every fiber and box context owns its
+    /// side state).
+    pub(super) owns_side: bool,
     /// D2b — per-task output buffers (Decision F: each task's stdout/stderr flushes in task order at
-    /// join, never interleaved live). An M:N worker shell runs many fibers in turn, so these MUST
-    /// travel with the fiber rather than living on the shell `Vm`. Swapped only for M:N fibers
-    /// (`heap.is_some()`); a fiber with no heap of its own keeps `Vec::new()` and aliases the shell's
-    /// buffers.
+    /// join, never interleaved live). A task owns its output stream, so only a task switch
+    /// ([`Vm::swap_task`]) moves these. A box context never owns one: a `print` inside a box call
+    /// lands in its caller's stream, so a box context's buffers stay empty.
     pub(super) out: Vec<u8>,
     pub(super) stderr: Vec<u8>,
-    /// D2b / Task 1 — the fiber's module-namespace objects + lazy-fault flags (D1). Each is a `GcRef`
-    /// into the fiber's OWN heap (travels via `heap` above), so a spawned task mutates its private copy
-    /// of every module global. These roots swap per-fiber (`swap_ctx` swaps them UNCONDITIONALLY).
-    pub(super) module_objs: Vec<GcRef>,
-    pub(super) module_faulted: Vec<bool>,
-    /// W6-2 — the snapshot this fiber's `module_objs` fault in from, and the cache of the snapshot of
-    /// its CURRENT view. Both describe the module view above, so they travel with it (see
-    /// [`Vm::module_snapshot`]): a shell drains fibers from several scopes, each built from its own
-    /// per-task snapshot. Heap-independent ([`SnapValue`] carries no `GcRef`), so GC rooting needs
-    /// nothing for them.
-    pub(super) module_snapshot: Option<Arc<ModuleSnapshot>>,
-    pub(super) snapshot_memo: Option<Arc<ModuleSnapshot>>,
-    /// W7-4a — the fiber's snapshot rebuild map (see [`Vm::snapshot_rebuild`]). UNLIKE the two above
-    /// it IS heap-keyed. A fiber's own heap is never traced while parked, and its map travels with the
-    /// heap here.
-    pub(super) snapshot_rebuild: fxhash::FxHashMap<u32, GcRef>,
-    /// W7-4c — the fiber's snapshot cell registry (see [`Vm::snapshot_cells`]). Heap-keyed like
-    /// `snapshot_rebuild`, and travels with the heap for the same reason.
-    ///
-    /// `snapshot_next_id` travels WITH it, and must: the "ids are monotonic, so a stale one MISSES"
-    /// guarantee is only true while the counter is at least as high as every id in the registry. Every
-    /// M:N shell starts at `0` (`spawn_worker` → `Vm::new`) and one shell drains fibers from several
-    /// scopes, so a registry numbered on shell A resuming on shell B would mint ids that COLLIDE with
-    /// its own entries — two unrelated bindings merged into one cell, silently.
-    pub(super) snapshot_cells: Arc<fxhash::FxHashMap<GcRef, u32>>,
-    /// TICKET-111 — the fiber's snapshot node registry (see [`Vm::snapshot_nodes`]). Heap-keyed and
-    /// travels with the heap, for the same reason as `snapshot_cells`.
-    pub(super) snapshot_nodes: Arc<fxhash::FxHashMap<GcRef, u32>>,
-    /// TICKET-111 — the fiber's pending adoption captures (see [`Vm::snapshot_adopt`]). Heap-keyed
-    /// (its values are `GcRef`s into the heap the fiber owns) and travels with the heap for the same
-    /// reason as `snapshot_rebuild`. `adopt_active` is NOT here — it is true only for the duration of
-    /// one `fault_module` call on the currently-running view, never a state a parked fiber holds.
-    pub(super) snapshot_adopt: fxhash::FxHashMap<u32, GcRef>,
-    pub(super) snapshot_next_id: u32,
-    /// D2b — the fiber's `Executor` handles (GC roots into its own heap; same heap-keyed argument as
-    /// `module_objs`). Empty for a fiber with no heap of its own.
+    /// M3.1 — the run's one module table (the same `Arc` every context holds), so the parked
+    /// context's roots reach the run's modules. Never swapped.
+    pub(super) module_objs: Arc<super::module_table::ModuleTable>,
+    /// D2b — the fiber's `Executor` handles (GC roots). Per fiber: swapped by
+    /// [`Vm::swap_ctx`] when `owns_side`. Empty for a context that does not own side state.
     pub(super) executors: Vec<GcRef>,
-    /// M19 Phase 3 — the fiber's `ConstStr` intern cache (GC roots into its own heap; same heap-keyed
-    /// argument as `module_objs`). Travels with `heap` across [`Vm::swap_ctx`]. Empty for a fiber
-    /// with no heap of its own (it aliases the shell's cache).
+    /// M19 Phase 3 — the fiber's `ConstStr` intern cache (GC roots). Per fiber:
+    /// swapped by [`Vm::swap_ctx`] when `owns_side`. Empty for a context that does not own side
+    /// state (it aliases the shell's cache).
     pub(super) str_intern: fxhash::FxHashMap<usize, GcRef>,
-    /// TICKET-215 — travels with heap, like str_intern.
-    pub(super) fn_values: fxhash::FxHashMap<FnKey, GcRef>,
     /// D6b — a non-blocking `connect` parked on writability (see [`ConnectInProgress`]). Non-heap, so
     /// it carries no `GcRef` and needs no GC rooting; but it MUST travel with the fiber across the
     /// park, so it swaps in [`Vm::swap_ctx`] like the other per-fiber state. `None` unless this fiber
@@ -172,7 +136,9 @@ pub(super) struct FiberCtx {
     /// the wake came from a timeout, not readiness. On schedule-in it swaps into [`Vm::poll_timed_out`];
     /// the rewound socket op checks it at ENTRY (before re-running the syscall) and returns
     /// `Err("timeout")` instead of retrying. `false` whenever no timeout wake is pending. M:N-only.
-    pub(super) poll_timed_out: bool,
+    /// M1.4 — atomic, so the poll thread (not attached to the GC) sets it through `&FiberCtx` and
+    /// never holds a `&mut` to a registered context (see `RootRegistry::roots`).
+    pub(super) poll_timed_out: AtomicBool,
     /// B1 — the absolute deadline of the `Socket.read` in flight on this fiber (its `timeout_ms`,
     /// latched at the first park). Travels WITH the fiber across [`Vm::swap_ctx`] like `poll_timed_out`,
     /// because the whole read op re-executes on every wake: without the latch each park would recompute
@@ -188,12 +154,16 @@ pub(super) struct FiberCtx {
     /// W15-3 — bytes of the in-flight `write` already sent; survives a park's ip-rewind re-run,
     /// cleared by `drop_poll_latch`.
     pub(super) poll_written: Option<usize>,
+    /// M1.4 — a spawned, not-yet-started fiber's task (callee + args), launched by `start_task` on
+    /// its first schedule. It lives in the context, not in [`FiberState`], so the context alone
+    /// roots it. `None` once started, and for every non-fiber context. NOT moved by `swap_ctx`.
+    pub(super) start: Option<PendingCall>,
 }
 
 /// Scheduling state of a fiber on the M:N scheduler.
 pub(super) enum FiberState {
-    /// Spawned but not yet started; holds the task to launch on first schedule.
-    Pending(PendingCall),
+    /// Spawned but not yet started; its task waits in [`FiberCtx::start`].
+    Pending,
     /// Started and runnable — resume by re-entering its `run_until`.
     Ready,
     /// Parked on an empty channel; runnable again once a sibling `send`s (the receiver handle stays
@@ -204,7 +174,8 @@ pub(super) enum FiberState {
 /// One child fiber: its saved context plus scheduling state. While the fiber is the one actively
 /// running, its context lives in the live `Vm` fields and `ctx` is empty (see the scheduler).
 pub(super) struct Fiber {
-    pub(super) ctx: FiberCtx,
+    /// M1.4 — boxed, so it never moves and the run's [`RootRegistry`] can list it.
+    pub(super) ctx: CtxBox,
     pub(super) state: FiberState,
     /// D2b — the fiber's stable Decision-F outcome slot. Under the cross-nursery flat scheduler this is
     /// the GLOBAL flat index into `SchedCore::slots` (= `scopes[scope_id].base_index + local_i`),
@@ -223,8 +194,8 @@ pub(super) struct Fiber {
     /// blocking-pool completion and the fiber's next schedule-in.
     pub(super) resume_native: Option<Result<crate::native::NativeRet, RuntimeError>>,
     /// TICKET-185 — this fiber's carried [`Vm::pending`] while it is not the running fiber. A
-    /// parked `recv` holds its channel here even without a slot, which [`SchedCore::provable`]
-    /// counts. Dropping a parked fiber settles it, so none of its entries outlive it.
+    /// parked `recv` holds its channel here even without a slot. Dropping a parked fiber settles
+    /// it, so none of its entries outlive it.
     pub(super) pending: Option<crate::vm::core::PendingOp>,
     /// TICKET-208 — the site this fiber parked at ([`Vm::park_site`]); `None` while it runs on.
     /// A deadlocked `Executor` job is reported there (see [`SchedCore::record_deadlocked`]).
@@ -280,12 +251,9 @@ pub(super) fn open_nurseries(
     })
 }
 
-// D2a — a `Fiber` now carries its own `Heap` (via `FiberCtx::heap`), and D2b parks fibers across
-// worker threads (parked on one worker, requeued by a `send` on another, resumed on a third). That
-// requires `Fiber: Send`. `Heap` is already `Send` (a plain `Vec` of `Obj`, no `Rc`/`RefCell`; a
-// whole `Vm`/`Heap` already crosses the pool boundary via `ReadyWorker`), so this holds today — the
-// guard makes a future non-`Send` field on `Fiber`/`FiberCtx` a loud compile error, not a D2b
-// surprise.
+// D2b parks fibers across worker threads (parked on one worker, requeued by a `send` on another,
+// resumed on a third). That requires `Fiber: Send`; the guard makes a future non-`Send` field on
+// `Fiber`/`FiberCtx` a loud compile error, not a D2b surprise.
 const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<Fiber>();
@@ -314,217 +282,14 @@ pub(super) struct Handler {
     pub(super) nursery_len: usize,
 }
 
-/// B3.2 — what a run isolated worker hands back across the airlock: the task's return value
-/// serialized in the worker heap, plus the worker's captured stdout/stderr (decision F —
-/// buffer-per-worker, returned to the parent rather than interleaved live).
-// `value` is read only by the worker unit tests (`ReadyWorker::run`, `#[cfg(test)]`): the join
-// discards each task's return value (data exits a spawn via `Shared`/`Channel`, not a return), so
-// the field is dead in the bin build — hence the allow. W7-27: every bin-build producer therefore
-// stores `WireValue::Nil` — a stored result is retained until the nursery join / `shutdown()`, and a
-// value nothing reads is pure retention. `out`/`stderr` are live (flushed at join).
-#[allow(dead_code)]
+/// B3.2 — what a finished task hands back to its join: the worker's captured stdout/stderr
+/// (decision F — buffer-per-worker, returned to the parent rather than interleaved live), flushed
+/// at the join. The join discards each task's return value (data exits a spawn via
+/// `Shared`/`Channel`, and an Executor job's value via its Task channel), so none is kept.
 #[derive(Debug)]
 pub(super) struct WorkerResult {
-    pub(super) value: WireValue,
     pub(super) out: Vec<u8>,
     pub(super) stderr: Vec<u8>,
-}
-
-/// B3.2 — a spawned task lowered to a `Send` description (no parent-heap `GcRef`s), ready to rebuild
-/// in a worker heap. The callee crosses as its `ProtoId` (the proto lives in the shared `Arc<Program>`)
-/// plus wire'd captures/args.
-/// `home`: the index of the callee's home module in the parent's `module_objs` (B3.3c), so the
-/// worker can resolve the rebuilt module obj for global / sibling-fn resolution; `None` when the
-/// home is a standalone module not in `module_objs` (the unit-test fixtures), which falls back to a
-/// fresh empty home.
-pub(super) enum Lowered {
-    // TICKET-016 (W8-25): NOT given a `globals` snapshot field, unlike `WireValue::Closure` and
-    // `SnapValue::Closure` — this IS the direct spawn callee (a `spawn:` block or `spawn f(..)`),
-    // whose home module is already comprehensively covered by `pin_snapshot`'s whole-module
-    // `ModuleSnapshot` (built and shared BEFORE this crossing). Giving it its own independent
-    // globals install re-wires any global closure value it reads (e.g. a module-level `let` holding
-    // another closure) through a SEPARATE `WireMemo`, splitting a `Cell` two crossings must share —
-    // measured regression: `airlock_cross_module_shared_binding_is_one_cell` and its `w74b` siblings
-    // split a shared cell / spuriously rejected a module handle when this was added. A closure reached
-    // as a NESTED VALUE (a capture, a `Channel.send`, or inside the module snapshot itself) still gets
-    // its own globals installed via the `WireValue`/`SnapValue` arms, which is what W8-25's actual
-    // repros need.
-    Closure {
-        proto: ProtoId,
-        captured: Vec<(String, WireValue)>,
-        args: Vec<WireValue>,
-        home: Option<usize>,
-        span: Span,
-    },
-    /// TICKET-226 — `spawn f(args)` where `f` is any non-closure callable ([`Vm::callable`]): a bare
-    /// fn, method path, variant ctor, `T.m`, `json.decode[T]`, native, builtin or extern fn. The
-    /// callee crosses by value through `to_wire`, and `from_wire_memo` lands it in the worker heap's
-    /// one `fn_value` slot. A closure stays [`Lowered::Closure`] for TICKET-016's no-globals rule.
-    /// Never add a per-kind arm beside this one.
-    Value {
-        callee: WireValue,
-        args: Vec<WireValue>,
-        span: Span,
-    },
-}
-
-/// D1 — a heap-independent, read-only snapshot of the parent's initialized module graph, shared
-/// across a nursery's workers via `Arc` (like `Arc<Program>`) and **faulted into each worker heap
-/// lazily, one module at a time, on first global access** (see [`Vm::fault_module`]). It replaces
-/// the eager per-task `build_worker_modules` reconstruction: N tasks now share one snapshot build
-/// + cheap `Arc` clones, and a task that touches only its home module rebuilds only that module.
-///
-/// `modules` is parallel to the parent's `module_objs` by index, so a callable's `home` /
-/// `module_idx` (already an index under the airlock — see [`Vm::home_index`]) lines up directly
-/// with the worker's pre-allocated (empty) module objects. Built at a task's pin instant by
-/// [`Vm::snapshot_modules`] and cached in `snapshot_memo`.
-pub(super) struct ModuleSnapshot {
-    pub(super) modules: Vec<ModuleSnap>,
-    /// W6-2 — may this snapshot's cache entry SURVIVE a nursery open? True iff every module-global slot
-    /// holds an immutable leaf or an `Arc`-shared core ([`Vm::slot_snapshot_reusable`]) — i.e. nothing
-    /// whose CONTENTS can change without a module-slot write (the two hooked mutators `set_global_slot`
-    /// / `module_define`). A module global holding a mutable aggregate (`List`/`Map`/`Set`/`Struct`/…) is
-    /// mutated IN PLACE (`q.push(1)`, `m[k] = v`, `p.x = 1`) with no slot write for the hooks to see, so
-    /// a snapshot holding one stays cached only while its `view` stamp is current
-    /// ([`Vm::fresh_view`]). A WHITELIST, so a future `Obj` variant defaults to "check the stamp"
-    /// (slower, never unsound).
-    pub(super) reusable: bool,
-    /// TICKET-213 — the stamp of the build: `(Heap::id, Heap::view_epoch)` of the heap it was read
-    /// from, taken after every object the globals reach was marked viewed. The snapshot still
-    /// describes the view exactly while the current heap's pair equals it: `Heap::get_mut` moves the
-    /// epoch at any in-place mutation of a marked object, and another heap (a worker seeded with its
-    /// starter's snapshot) never matches the id.
-    pub(super) view: (u64, u64),
-    /// TICKET-233 — module replays every worker made from this snapshot; drained into
-    /// [`MODULE_REPLAYS`] at the outermost nursery join.
-    #[cfg(test)]
-    pub(super) replays: std::sync::atomic::AtomicUsize,
-}
-
-/// D1 — one module in a [`ModuleSnapshot`]: its name plus its top-level globals as heap-independent
-/// [`SnapValue`]s (insertion order preserved so replay is deterministic).
-pub(super) struct ModuleSnap {
-    pub(super) name: Box<str>,
-    pub(super) globals: Vec<(String, SnapValue)>,
-}
-
-/// M19 Phase 2b — a module's globals as `(name, value)` pairs in **slot order** (slot `i` at index
-/// `i`). Used to snapshot a module deterministically: replaying the pairs in order via
-/// `module_define` rebuilds slots in the same order the compiler assigned them.
-pub(super) fn module_slot_pairs(
-    slots: &[Value],
-    index: &std::collections::HashMap<Box<str>, u32>,
-) -> Vec<(String, Value)> {
-    // Invariant: `index` names every slot `0..slots.len()` (the three growth paths — `run_module`
-    // pre-size, `module_define` append, `set_global_slot` overwrite — keep `slots`/`index` in
-    // lockstep). If that ever breaks, an unnamed hole would replay as a duplicate empty name and
-    // collapse later slots in a worker, silently corrupting its globals — so fail loudly here.
-    debug_assert_eq!(
-        slots.len(),
-        index.len(),
-        "module slots/index out of lockstep — slot order would corrupt on worker fault"
-    );
-    let mut pairs: Vec<(String, Value)> = vec![(String::new(), Value::nil()); slots.len()];
-    for (name, &i) in index {
-        pairs[i as usize] = (name.to_string(), slots[i as usize]);
-    }
-    pairs
-}
-
-/// D1 — one global value in heap-independent form, the snapshot analogue of what
-/// [`Vm::map_global_value`] rebuilt eagerly. `WireValue` already encodes pure data, `str`-by-value,
-/// and `Channel`/`Shared`/`Executor` cores (Arc-shared, meaningful in any heap), so the common case
-/// is [`SnapValue::Wire`]; the other variants cover exactly the values `to_wire` cannot carry
-/// heap-independently — a callable's parent-heap `GcRef` home/captures, an import-alias module ref,
-/// a native fn, and any container that embeds one of those. `Send` (every field is), so an
-/// `Arc<ModuleSnapshot>` crosses to pool threads.
-pub(super) enum SnapValue {
-    /// Fast path: a value whose wire form carries no by-reference `Handle` (pure data / `str` by
-    /// value / a `Channel`/`Shared`/`Executor` core). Replayed via `from_wire`.
-    Wire(WireValue),
-    /// A named function — re-allocated over the worker's home module on replay. `home` is an index
-    /// into `module_objs` (resolved via [`Vm::worker_home`], which falls back to a fresh empty module
-    /// for `None` — a home not in the table, i.e. the hand-built unit-test fixtures).
-    Func {
-        proto: ProtoId,
-        home: Option<usize>,
-    },
-    /// An anonymous function + its captured environment (each capture itself a `SnapValue`).
-    Closure {
-        proto: ProtoId,
-        captured: Vec<(String, SnapValue)>,
-        home: Option<usize>,
-    },
-    /// An import-alias global bound to another module — replays to the worker's `module_objs[idx]`
-    /// (the pre-alloced module obj, which faults its own globals lazily — no eager cascade).
-    ModuleAlias(usize),
-    /// A module value NOT in `module_objs` (defensive — shouldn't occur for a bound import; mirrors
-    /// the `None` arm of the old `map_global_value`): replayed as a fresh, eagerly-populated module.
-    ModuleInline {
-        name: Box<str>,
-        globals: Vec<(String, SnapValue)>,
-    },
-    /// A native (Rust) fn — re-allocated with the same fn pointer (`NativeFn` is `Clone`/`Send`) and
-    /// the same [`crate::native::Kind`] (a `Copy` field of its registry entry, so the rebuilt value
-    /// keeps running the way the entry says).
-    Native {
-        name: Box<str>,
-        func: crate::native::NativeFn,
-        kind: crate::native::Kind,
-    },
-    /// A first-class universe builtin fn (`print`/`ord`/`chr`/`panic`) — SENDABLE (pure code). Carries
-    /// only the id; replayed as a fresh `Obj::Builtin`.
-    Builtin(crate::base::builtin::Builtin),
-    /// TICKET-183 — an uninitialized let slot (its let had not run at the spawn); replays to
-    /// `Value::uninit(line)`, so the task's read faults like the parent's would.
-    Uninit(u32),
-    /// A dynamic C-ABI FFI fn — shares its `Arc<Cffi>` to the worker (same address space; no
-    /// re-dlopen). `Cffi` is `Send + Sync`, so the Arc crosses the OS-thread boundary safely.
-    Cffi(Arc<crate::native::cffi::Cffi>),
-    List(Vec<SnapValue>),
-    Tuple(Vec<SnapValue>),
-    /// An `Iterable.iter()` cursor snapshot — its items (each a `SnapValue`) plus the cursor `pos`.
-    /// Rebuilt as a fresh independent cursor on replay. Reached only for a handle-bearing cursor (a
-    /// cursor over closures/modules); a pure-data cursor takes the `to_wire` fast path above.
-    Iter {
-        items: Vec<SnapValue>,
-        pos: usize,
-    },
-    /// M19 lever #2 — the dense `variant_id` is carried directly (the same shared `Arc<Program>` makes
-    /// it meaningful on replay; carrying the id, not the name, preserves identity under name shadowing).
-    Enum {
-        variant_id: u32,
-        payload: Vec<SnapValue>,
-    },
-    Struct {
-        name: Box<str>,
-        fields: Vec<(Box<str>, SnapValue)>,
-    },
-    /// An `Obj::Cell` (a by-reference-captured local's box) embedding a handle — its inner snapped
-    /// recursively, replayed as ONE independent cell per BINDING on the worker (design §4 F1). A
-    /// pure-data cell takes the `to_wire` fast path above (`SnapValue::Wire(WireValue::Cell { .. })`).
-    ///
-    /// W7-4b — `id` is minted from the SAME [`WireMemo`] the wire arms use, so a binding reached down
-    /// both the fast (`Wire`) and slow (here) paths keeps one identity. A second reach emits
-    /// [`Backref`](SnapValue::Backref); `replay_snap` dedupes first-wins by id.
-    Cell {
-        id: u32,
-        inner: Box<SnapValue>,
-    },
-    /// W7-4b — a second reach of an already-emitted `Cell` id (an off-stack sibling closure, or a
-    /// letrec back-edge). The wire mirror of [`WireValue::Backref`], and it degrades the same way: an
-    /// id the rebuild map has never seen resolves to `nil` and flags `wire_backref_missing` (W7-11).
-    ///
-    /// That degradation is a LAST resort, not a supported outcome — a `nil` where a cell belongs
-    /// reaches `CellLoad on a non-handle value`. A miss means the serialize memo's scope stopped
-    /// matching the rebuild map's, so [`Vm::fault_module`] owns the flag around its replay and
-    /// `debug_assert`s on it (and clears it, so the miss is never charged to the next unrelated
-    /// `from_wire` caller).
-    Backref(u32),
-    /// `(cached hash, key, value)` triples — hashes are value-derived, so they carry over unchanged.
-    Map(Vec<(u64, SnapValue, SnapValue)>),
-    /// `(cached hash, element)` pairs.
-    Set(Vec<(u64, SnapValue)>),
 }
 
 /// B3.4 — how a `--parallel` task ended, recorded in its slot. The join ([`Vm::reduce_task_slots`])
@@ -536,7 +301,7 @@ pub(super) enum SnapValue {
 /// Higher-index racy faults and `Cancelled` still drop (no deterministic slot).
 #[derive(Debug)]
 pub(super) enum TaskOutcome {
-    /// Ran to completion. Its return value crossed the airlock; output flushed in task order.
+    /// Ran to completion; output flushed in task order.
     Done(WorkerResult),
     /// Observed the nursery cancel flag and unwound (a sibling faulted/exited first). Its buffered
     /// output is FLUSHED at its task-order slot, not dropped: with cancellation points a started task
@@ -911,7 +676,7 @@ impl ParkedEntry {
     /// names through the one pair of answers every blocked thing uses
     /// ([`quiesce::recv_satisfiable`], [`quiesce::wait_satisfiable`]). A fiber with nothing to
     /// ask (no `pending`, no channel, already claimed) answers `true`, which only declines the
-    /// verdict. Borrows each core: a cloned `Arc` would change [`SchedCore::provable`] (DEC-129).
+    /// verdict.
     pub(super) fn satisfiable(&self) -> bool {
         match self {
             ParkedEntry::Recv(f) => f.pending.as_ref().is_none_or(|op| {
@@ -978,8 +743,7 @@ pub(super) struct MnSched {
     /// predicate's read is sound.
     pub(super) inflight: AtomicUsize,
     /// W7-26r — the run's `--max-heap` cap (`0` = off), copied from the creating VM's heap. Uniform
-    /// per run (`spawn_worker` gives every worker heap the parent's cap), so one field is the whole
-    /// story. Read by `finish` to decide a scope's retained-backlog verdict — the observation site
+    /// per run (the cap lives in the run's one heap core), so one field is the whole story. Read by `finish` to decide a scope's retained-backlog verdict — the observation site
     /// the blocked joining fiber cannot provide.
     pub(super) mem_cap: usize,
     /// TICKET-167 — this sched's seeded-mode RNG stream, keyed by creation order (see `## Decisions`
@@ -1238,39 +1002,26 @@ impl std::ops::IndexMut<usize> for ScopeTable {
 }
 
 /// TICKET-219 — what settles a job that [`SchedCore::job_event`] drops or cuts: the fresh cap-1
-/// result channel of its Task, the cancel value and the job's own cancel flag. Registered at the
-/// submit; every job has one (TICKET-289).
+/// result channel of its Task and the job's own cancel flag. Registered at the submit; every job
+/// has one (TICKET-289).
 pub(super) struct JobSettle {
     pub(super) ch: Arc<ChannelCore>,
-    pub(super) cancel: WireValue,
     /// TICKET-289 — the job's own cancel flag: `Task.cancel()` and an uncatchable end of this job
     /// trip it, and no sibling reads it. The job's fiber carries a clone ([`Fiber::job_cancel`]).
     pub(super) flag: Arc<AtomicBool>,
 }
 
 impl JobSettle {
-    /// Seal the Task's channel with `v`. Returns whether this call sealed it: the first writer
-    /// wins, and a body that sealed its own value keeps it. Lock order `SchedCore` then
-    /// `ChannelCore::q`, as `send_wake`.
-    pub(super) fn seal(&self, v: WireValue) -> bool {
-        let sum = crate::vm::core::wire_summary(&v);
+    /// Seal the Task's channel with `Err(msg)`, as text: the transition that seals it holds no
+    /// heap, and the first receive builds the value (`Vm::recv_ready`). Returns whether this call
+    /// sealed it: the first writer wins, and a body that sealed its own value keeps it. Lock order
+    /// `SchedCore` then `ChannelCore::q`, as `send_wake`.
+    pub(super) fn seal_err(&self, msg: &str) -> bool {
         self.ch
             .q
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .seal(sum, v)
-    }
-
-    /// The cancel value with its one payload replaced by `msg`: the `Err(msg)` of a job that
-    /// ended by a fault. The cancel value is `Result.Err(str)`.
-    pub(super) fn fault_value(&self, msg: &str) -> WireValue {
-        let mut v = self.cancel.clone();
-        if let WireValue::Enum { payload, .. } = &mut v
-            && let Some(slot) = payload.first_mut()
-        {
-            *slot = WireValue::Str(msg.into());
-        }
-        v
+            .seal_err(msg)
     }
 }
 
@@ -1414,10 +1165,6 @@ pub(super) struct SchedCore {
     /// A deadlocked fiber of this sched is reported at its own blocking op. True for a detached
     /// sched (an `Executor`) alone: a nursery sched reports at the nursery.
     pub(super) leaf_site: bool,
-    /// Task index to submit-time bytes, an entry only for a nonzero charge (DEC-205).
-    pub(super) slot_charge: fxhash::FxHashMap<usize, usize>,
-    /// The sum of `slot_charge`: bytes of tasks reserved and not yet finished.
-    pub(super) unfinished_bytes: usize,
     /// How much of the scopes' retained-output `bytes` [`MnSched::take_charge`] already reported.
     pub(super) charged: usize,
     /// TICKET-286 — the run deadline whose [`MnSched::deadline_drain`] job is already armed.
@@ -1509,8 +1256,8 @@ pub(super) enum SockPoll {
 /// caller wakes no sender for it (the `wait:` settle path in `Vm::op_wait_poll` never did). `Got`
 /// is every other value — a buffered one, or a parked sender's offer, whose sender must be woken.
 pub(super) enum RecvStep {
-    Got(WireValue),
-    Filled(WireValue),
+    Got(Value),
+    Filled(Value),
     ClosedEmpty,
     Parked,
 }

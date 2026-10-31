@@ -1062,8 +1062,8 @@ fn golden_generators_inferred_chz() {
     assert_eq!(run_capture(src).unwrap(), expect);
 }
 
-/// F3 path C: a PENDING generator passed DIRECTLY as a spawn arg now CROSSES the airlock BY VALUE
-/// (deep copy) — the callee runs on its own copy instead of faulting.
+/// F3 path C: a PENDING generator passed DIRECTLY as a spawn arg now CROSSES by handle (M3.4)
+/// — the callee gets the parent's generator instead of faulting.
 #[test]
 fn generator_passed_to_spawn_crosses_by_value() {
     let src = concat!(
@@ -1080,8 +1080,8 @@ fn generator_passed_to_spawn_crosses_by_value() {
     assert_eq!(run_capture(src).expect("M:N"), "hi\n");
 }
 
-/// F3 path C: a generator nested inside a LIST spawn arg crosses BY VALUE too (the container recursion
-/// in `to_wire` serializes the leaf generator instead of faulting).
+/// F3 path C: a generator nested inside a LIST spawn arg reaches the task too (M3.4: by handle; the
+/// deleted wire form once faulted on it).
 #[test]
 fn generator_in_list_arg_to_spawn_crosses_by_value() {
     let src = concat!(
@@ -1098,7 +1098,7 @@ fn generator_in_list_arg_to_spawn_crosses_by_value() {
     assert_eq!(run_capture(src).expect("M:N"), "hi\n");
 }
 
-/// F3 path C: a generator stored into `Shared(...)` now crosses BY VALUE (deep copy into the box)
+/// F3 path C: a generator stored into `Shared(...)` is held by handle (M3.3)
 /// instead of faulting; the program runs to completion.
 #[test]
 fn generator_into_shared_crosses_by_value() {
@@ -1115,7 +1115,7 @@ fn generator_into_shared_crosses_by_value() {
     assert_eq!(run_capture(src).expect("M:N"), "stored\n");
 }
 
-/// F3 path C: a generator stored into `Atomic(...)` now crosses BY VALUE (deep copy into the box).
+/// F3 path C: a generator stored into `Atomic(...)` is held by handle.
 #[test]
 fn generator_into_atomic_crosses_by_value() {
     let src = concat!(
@@ -1132,7 +1132,7 @@ fn generator_into_atomic_crosses_by_value() {
 }
 
 /// F3 path C: a closure CAPTURING a local generator submitted to an `Executor` under `--parallel` now
-/// crosses BY VALUE — the submitted task drives its own copy instead of faulting. Runs to completion.
+/// crosses by handle — the submitted task drives the parent's generator. Runs to completion.
 #[test]
 fn generator_captured_in_executor_submit_crosses_by_value() {
     let src = concat!(
@@ -1149,8 +1149,8 @@ fn generator_captured_in_executor_submit_crosses_by_value() {
     assert_eq!(run_capture(src).expect("M:N"), "1\n");
 }
 
-/// F3 path C: an `Executor` task that RETURNS a generator under `--parallel` now crosses the return
-/// value BY VALUE (deep copy back to the parent). The Executor discards task returns, so no output.
+/// F3 path C: an `Executor` task that RETURNS a generator under `--parallel` now returns it
+/// by handle. The Executor discards task returns, so no output.
 #[test]
 fn generator_returned_from_executor_task_crosses_by_value() {
     let src = concat!(
@@ -1168,7 +1168,7 @@ fn generator_returned_from_executor_task_crosses_by_value() {
     assert_eq!(run_capture(src).expect("M:N"), "");
 }
 
-/// F3 path C: a generator into `Channel.send(...)` now crosses BY VALUE (deep copy into the queue)
+/// F3 path C: a generator into `Channel.send(...)` now crosses by handle (M3.2)
 /// instead of faulting; the program runs to completion.
 #[test]
 fn generator_into_channel_crosses_by_value() {

@@ -62,20 +62,6 @@ impl Checker {
             let is_import = !shadowed
                 && (self.imported_values.contains_key(name) || matches!(ty, Ty::Module(_)));
             self.reject_read_above_import(name, is_import, span);
-            // A function-local binding captured by an enclosing `spawn:` task crosses the airlock as
-            // a copy; a *non-sendable* one (e.g. a captured closure that's then called) can't, so
-            // reading it inside the task is an error — the read-side counterpart to the reassignment
-            // gate. Module globals/imports are excluded (`is_local_capture`): they resolve in every
-            // task like free functions, so reading an imported module here is fine.
-            if self.is_local_capture(name) && !self.sendable(&ty) {
-                self.error(
-                    span,
-                    format!(
-                        "cannot use non-sendable captured binding '{name}' of type {ty} inside a \
-                         spawned task (captures cross the airlock — communicate via a Channel or Shared)"
-                    ),
-                );
-            }
             return ty;
         }
         // A module-level fn slot, typed by its fn declaration.

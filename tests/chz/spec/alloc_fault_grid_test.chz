@@ -1,0 +1,55 @@
+# M2.7: every op that sizes a buffer from a user int, run under `recover:` in the entry task and in
+# a spawned task. A size that cannot be allocated is a clean fault; a size past `u32::MAX`
+# allocates (an `RVec` length is 64-bit, as a Go slice's `int`). Each golden is the base binary's
+# output (main, a `Vec` per buffer), one op per run: base writes the zeros of each 4 GiB bytearray,
+# so this whole file needs more than 6 GB there. Op 2 in the entry task is the M2.7 probe
+# `big.chz`; in the spawned task it is `big4.chz`. Not in the grid: `bytes * n` and `bytearray * n` (no such op),
+# concat, extend, insert, map and set growth, and the str ops that build a list (each is bounded
+# by a buffer that already exists, so no test can drive it past memory).
+import std.concurrency
+
+fn outcome(op: fn() -> int) -> str:
+    r := recover: op()
+    match r:
+        ?n: return "ok {n}"
+        !e: return "fault: {e.message()}"
+
+fn byte_past_u32() -> int:
+    b := bytearray(4294967297)
+    b[4294967296] = 7
+    return b.len() + b[4294967296]
+
+fn ops() -> List[fn() -> int]:
+    return [
+        fn() -> int: bytearray(4611686018427387904).len(),
+        fn() -> int: bytearray(4294967296).len(),
+        byte_past_u32,
+        fn() -> int: ([0] * 4611686018427387904).len(),
+        fn() -> int: ([0, 1, 2] * 1099511627776).len(),
+        fn() -> int: (4611686018427387904 * [0]).len(),
+        fn() -> int: "ab".repeat(9223372036854775807).len(),
+        fn() -> int: "a".pad_left(9223372036854775807, "x").len(),
+    ]
+
+GOLDEN := [
+    "fault: bytearray() size 4611686018427387904 is too large to allocate",
+    "ok 4294967296",
+    "ok 4294967304",
+    "fault: list repeat capacity overflow",
+    "fault: list repeat capacity overflow",
+    "fault: list repeat capacity overflow",
+    "fault: string repeat capacity overflow",
+    "fault: string pad capacity overflow",
+]
+
+test fn alloc_faults_in_the_entry_task():
+    got := [outcome(op) for op in ops()]
+    assert got == GOLDEN, "{got}"
+
+test fn alloc_faults_in_a_spawned_task():
+    out := Channel[List[str]](1)
+    parallel:
+        spawn:
+            out.send([outcome(op) for op in ops()])
+    got := out.recv()
+    assert got == GOLDEN, "{got}"

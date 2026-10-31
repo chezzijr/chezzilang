@@ -12,6 +12,12 @@ use super::sched::poke_live_scheds;
 use super::sched::spawn_worker_thread;
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    /// M1.5 — test-only: the next worker loop on this thread panics at its first iteration.
+    pub(super) static PANIC_AT_LOOP_TOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// TICKET-289 — test-only: arms [`Vm::window_hook`] once per run, through that run's
 /// own `HostConfig.env` (the seam `OWNER_FAULT_WINDOW_ENV` uses).
 #[cfg(test)]
@@ -49,9 +55,17 @@ impl Vm {
     }
 
     /// TICKET-141 — take a width permit in FIFO order. A no-op for an ungated shell or one that
-    /// already holds a permit.
+    /// already holds a permit. M1.5 — a permit that is not free is waited for through the GC door.
     pub(super) fn width_acquire(&mut self) {
-        width::acquire();
+        self.width_acquire_pinned(&[]);
+    }
+
+    /// [`Vm::width_acquire`] for a caller that holds `pins` in Rust locals across the wait: the door
+    /// publishes them with this `Vm`'s roots.
+    pub(super) fn width_acquire_pinned(&mut self, pins: &[GcRef]) {
+        if !width::try_acquire() {
+            self.gc_blocking(pins, |_| width::acquire());
+        }
     }
 
     /// TICKET-205 — list this gated thread as an in-place waiter of `cores` for as long as the
@@ -82,7 +96,7 @@ impl Vm {
         let _gated = self.gated_register(cores);
         width::release();
         let r = wait(self);
-        width::acquire();
+        self.width_acquire();
         r
     }
 
@@ -137,6 +151,9 @@ impl Vm {
                     std::hint::spin_loop();
                 }
             }
+            // M1.7 — attached, no door: the ops that reach a seed point hold popped operands in
+            // Rust locals, and a detach would let another thread's collection free them. The sleep
+            // is at most 50 us, so a stop waits at most that long (`tests/wait_site_guard.rs`).
             4 if worker_count() >= 2 => {
                 std::thread::sleep(std::time::Duration::from_micros(1 + (r >> 8) % 50))
             }
@@ -205,7 +222,7 @@ impl Vm {
     /// keeps DEC-052's immediate `yield_pool_slot(None)`.
     pub(super) fn guard_wait_enter(
         &mut self,
-        key: usize,
+        key: core::GuardWait,
         what: &str,
         span: Span,
     ) -> Result<DemoteReg, RuntimeError> {
@@ -329,9 +346,22 @@ impl Vm {
         boundary_stop: bool,
     ) {
         let held = width::holds();
-        self.mn_worker_loop_inner(sched, wid, owner_scope, boundary_stop);
+        // M1.5 — the thread that runs this loop joins the run's heap for its span. On a thread that
+        // already drives a `Vm`, the caller detached first (`Vm::gc_blocking`).
+        let fresh = self.gc_attach();
+        // The leave also runs on a panic: a joiner that only borrows this shell reattaches its own
+        // `Vm` while the unwind is caught, and the thread must hold one token then.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.mn_worker_loop_inner(sched, wid, owner_scope, boundary_stop)
+        }));
+        if fresh {
+            self.gc_leave();
+        }
+        if let Err(p) = r {
+            std::panic::resume_unwind(p);
+        }
         if held {
-            width::acquire();
+            self.width_acquire();
         }
     }
 
@@ -356,6 +386,12 @@ impl Vm {
         let mut tick: u64 = 0;
         let mut kept: Option<Fiber> = None;
         loop {
+            #[cfg(test)]
+            if PANIC_AT_LOOP_TOP.with(|p| p.replace(false)) {
+                panic!("test: a panic out of the worker loop");
+            }
+            // M1.5 — the fiber boundary is a safepoint: no fiber is swapped in.
+            self.gc_poll();
             // TICKET-287 (E1) — an inline owner stops at the first fiber boundary after its family
             // is done, even with work still runnable. `take_runnable` tests the same predicate only
             // when no fiber is runnable, and the `kept` re-run skips it, so a busy fiber outside the
@@ -377,7 +413,7 @@ impl Vm {
             let next = tick.wrapping_add(1);
             let (mut fiber, slice) = match kept.take() {
                 Some(f) => (f, Slice::Fresh),
-                None => match sched.take_runnable(wid, next, owner_scope) {
+                None => match sched.take_runnable(self, wid, next, owner_scope) {
                     Take::Run(f, slice) => (f, slice),
                     Take::Stop => {
                         debug_assert!(!width::holds(), "TICKET-141: exit holding a permit");
@@ -462,7 +498,9 @@ impl Vm {
                         && scope_id == 0
                         && matches!(&outcome, TaskOutcome::Exit { code: 3, .. })
                     {
-                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        self.gc_blocking(&[], |_| {
+                            std::thread::sleep(std::time::Duration::from_millis(300))
+                        });
                     }
                     #[cfg(test)]
                     if outcome.aborts() {
@@ -478,7 +516,7 @@ impl Vm {
                     if std::mem::take(&mut self.exit_origin) {
                         self.quiesce.end_exit_origin();
                     }
-                    // A fault/exit tripped the FIBER's SCOPE cancel (in `MnSched::finish_with`, via the
+                    // A fault/exit tripped the FIBER's SCOPE cancel (in `finish_with`, via the
                     // re-pointed `self.cancel`); requeue THAT scope's parked siblings so they observe it
                     // and unwind (running ones see it at a back-edge). `drain_family(scope_id)` reaches
                     // the channel-parked and the netpoller-parked fibers of this scope's family ONLY
@@ -556,7 +594,7 @@ impl Vm {
     /// reads), then swap the context back out. The run is panic-guarded so a worker-VM panic becomes a
     /// task `Fault` (keeps the loop alive + the slot filled — the join can't hang).
     pub(super) fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span, slice: Slice) -> Disp {
-        self.swap_ctx(&mut fiber.ctx);
+        self.swap_task(&mut fiber.ctx);
         // Cross-nursery flat scheduler — RE-POINT the shell's `self.cancel` to THIS fiber's SCOPE cancel
         // on every swap-in. One shell runs fibers from MULTIPLE scopes off the global queue; the
         // back-edge cancel check (`run_until`), `finish_with` (on this fiber's fault/exit), the demote
@@ -727,7 +765,17 @@ impl Vm {
             }
             let res = match state {
                 _ if self.join_suspend.is_some() => Ok(()),
-                FiberState::Pending(task) => self.start_task(task),
+                // M1.4 — a `Pending` fiber's task waits in its registered context (`swap_ctx`
+                // leaves `start` there), so the registry roots it up to here. M1.7 (brief item 15):
+                // the take and `start_task` are one expression, so no safepoint lies between the
+                // take and the push of the task onto the operand stack.
+                FiberState::Pending => self.start_task(
+                    fiber
+                        .ctx
+                        .start
+                        .take()
+                        .expect("a Pending fiber holds its task in `ctx.start`"),
+                ),
                 FiberState::Ready | FiberState::Blocked => self.run_until(0),
             };
             if res.is_ok() && self.offload.is_some() {
@@ -778,17 +826,17 @@ impl Vm {
         // A fiber that parks carries its site; one that runs on carries `None`.
         fiber.park_site = self.park_site.take();
         fiber.park_deadline = self.deadline;
-        self.swap_ctx(&mut fiber.ctx);
+        self.swap_task(&mut fiber.ctx);
         disp
     }
 
     /// D2b — a worker-VM PANIC (a VM `unwrap`/index bug, a panicking native/FFI callback) became this
-    /// fiber's outcome. It is a `Fault`, so [`MnSched::finish_with`] trips the fiber's cancel for it as
-    /// for any fault — and it MUST: `mn_worker_loop` treats a `Fault` as an
-    /// abort and calls `cancel_drain`, but a requeued sibling with `cancel == false` just re-runs `recv`
-    /// and PARKS AGAIN; the scope then quiesces uncancelled, `is_deadlocked` fires (correctly, by its own
-    /// rules), and `flag_deadlock` drops those siblings without `unwind_deferred` — their `defer`s never
-    /// run, hidden behind the panic-fault (`reduce_task_slots` ranks Fault > Deadlocked).
+    /// fiber's outcome. It is a `Fault`, so [`MnSched::finish_with`] trips the fiber's cancel for it
+    /// as for any fault — and it MUST: `mn_worker_loop` treats a `Fault` as an abort and calls
+    /// `cancel_drain`, but a requeued sibling with `cancel == false` just re-runs `recv` and PARKS
+    /// AGAIN; the scope then quiesces uncancelled, `is_deadlocked` fires (correctly, by its own
+    /// rules), and `flag_deadlock` drops those siblings without `unwind_deferred` — their `defer`s
+    /// never run, hidden behind the panic-fault (`reduce_task_slots` ranks Fault > Deadlocked).
     pub(super) fn panic_outcome(
         &mut self,
         p: Box<dyn std::any::Any + Send>,
@@ -808,7 +856,7 @@ impl Vm {
     /// [`PRE_FINISH_WINDOW_ENV`]: before the `finish`. No-op unless `key` is armed in this run's own
     /// `HostConfig.env`.
     #[cfg(test)]
-    fn window_hook(&self, key: &str) {
+    fn window_hook(&mut self, key: &str) {
         let armed = self
             .host
             .env
@@ -817,7 +865,9 @@ impl Vm {
             .remove(key)
             .is_some();
         if armed {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            self.gc_blocking(&[], |_| {
+                std::thread::sleep(std::time::Duration::from_millis(300))
+            });
         }
     }
 
@@ -859,7 +909,6 @@ impl Vm {
                     trace: self.take_fault_trace(),
                 },
                 Ok(()) => TaskOutcome::Done(WorkerResult {
-                    value: WireValue::Nil,
                     out: std::mem::take(&mut self.out),
                     stderr: std::mem::take(&mut self.stderr),
                 }),
@@ -1140,8 +1189,8 @@ impl Vm {
         // `close` alike, and an over-wake (woken fiber finds the queue empty and re-parks) is the
         // already-tolerated pattern. Dead entries are pruned as we walk (`Weak` — no deregistration).
         //
-        // Here rather than in `channel_send_wire` because this fn is the shared tail of ALL FIVE
-        // no-sched wake sites (`close`, `trip`, `channel_send_wire`, the bounded enqueue, and the
+        // Here rather than in `chan_send_step` because this fn is the shared tail of ALL FIVE
+        // no-sched wake sites (`close`, `trip`, `chan_send_step`, the bounded enqueue, and the
         // bounded slot-free wake); patching one would leave the other four broken. Every one of them
         // has dropped `ChannelCore::q` before calling, so taking the sched lock here is q-free.
         self.wake_on_send_key_kind(key, WakeKind::All);
@@ -1317,32 +1366,30 @@ impl Vm {
     /// pushed no frame, so it never entered that loop and its heap was never sampled. Measured then
     /// on the release binary: `spawn xs.len()` over a 300 K-element `List[str]` PASSED a 8 MB cap at
     /// 170.9 MB (21×), while the byte-identical `spawn use(xs)` (`use` = `return xs.len()`, one
-    /// bytecode frame) correctly reported OVER-MEMORY at the same RSS. The worker's copy is the
-    /// BIGGER one, too: `from_wire` mints a fresh `Obj::Str` per element and does not re-intern, so
-    /// N aliases of one interned literal become N objects.
+    /// bytecode frame) correctly reported OVER-MEMORY at the same RSS. The worker's copy was the
+    /// BIGGER one, too: the airlock (deleted in M3.5) minted a fresh `Obj::Str` per element.
     ///
     /// TICKET-235: every task has an entry frame now ([`Vm::task_entry`]), so such a body does
-    /// reach an instruction boundary. The sample stays: a worker heap is born over the cap in few
-    /// objects and `should_collect` counts objects. Removing it needs its own measurement against
-    /// `over_memory_trips_on_an_all_native_task_body`.
+    /// reach an instruction boundary. The sample stays: a task's payload can be born over the cap in
+    /// few objects. M3.4: a spawn copies nothing, so the payload is the producer's
+    /// (`a_spawned_payload_is_the_producers_and_costs_no_heap`); removing the sample still needs its
+    /// own measurement.
     ///
     /// SCOPE — [`start_task`](Vm::start_task), which every task is dispatched through: `spawn`,
-    /// `parallel:` and `Executor` jobs alike. `Heap::request_collect` (set in
-    /// [`spawn_worker`](Vm::spawn_worker)) is the second mechanism; read the note at that call
-    /// site before deleting either.
+    /// `parallel:` and `Executor` jobs alike. The byte pacing (`Heap::should_collect`) is the
+    /// second mechanism (see [`spawn_worker`](Vm::spawn_worker)).
     ///
-    /// COST CEILING: this is a FULL mark-sweep of the heap the fiber runs on, once per task start.
-    /// The heap is the M:N worker's own and freshly born, so it is small. (An engine where every fiber
-    /// shared ONE heap would make a capped run O(live heap × tasks); the cooperative engine that did
-    /// that has been removed, and `--max-heap` was refused with it at the CLI anyway. If a
-    /// shared-heap execution mode is ever reintroduced, this is the line that needs a cheaper
-    /// trigger.)
+    /// COST CEILING (M1.7): every task shares the run's one heap, so a full mark-sweep per start
+    /// made a capped run O(live heap × tasks) (2000 spawns over 200k live objects: 15.7 s against
+    /// 0.16 s). Go checks no memory at spawn. So the sample reads the run-wide counters first
+    /// (`Heap::run_bytes_estimate`: the last sweep's live bytes plus every byte charged since), and
+    /// it collects only when that estimate is over the cap; the fresh sweep then decides.
     ///
     /// **Collecting before the task's entry frame is pushed is sound.** The sample runs in
     /// `start_task` ahead of `invoke_value`, so `self.frames` is still empty here. Empty frames stop
     /// `run_until`'s *loop*; they do not make a direct [`collect`](Vm::collect) unsafe. `collect`
-    /// roots the operand stack first (`for v in &self.stack`), plus the swapped-in child's module
-    /// objects, intern cache and snapshot registry — the same root set the task's first instruction
+    /// roots the operand stack first (`for v in &self.stack`), plus the rest of the live context
+    /// (`RootView`) and the run's root registry — the same root set the task's first instruction
     /// boundary would see, minus frame slots that do not exist yet. That is why the contract above
     /// is "operands on the stack".
     ///
@@ -1350,7 +1397,9 @@ impl Vm {
     /// `is_over_memory` marker alone is what buckets the verdict `OverMemory` and makes it
     /// uncatchable by `recover:`.
     pub(super) fn sample_mem_cap(&mut self, span: Span) -> Result<(), RuntimeError> {
-        self.collect();
+        if self.heap.run_bytes_estimate() > self.heap.mem_cap() {
+            self.gc_collect();
+        }
         if self.heap.over_cap() {
             return Err(self
                 .err(

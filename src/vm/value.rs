@@ -29,7 +29,7 @@
 //! NOTE: the derived `PartialEq` compares the raw word — it is **not** the language `==` (two
 //! independently-boxed equal floats have different words). Use `Vm::values_equal` for language `==`.
 
-/// A handle into the GC heap (`Heap::slots` index). `Copy`, so duplicating an `Obj` `Value` aliases
+/// A handle into the GC heap (a slot number of the heap's slab, `vm/heap_slab.rs`). `Copy`, so duplicating an `Obj` `Value` aliases
 /// the same heap object — preserving by-reference sharing for lists / structs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GcRef(pub u32);
@@ -37,6 +37,9 @@ pub struct GcRef(pub u32);
 /// A runtime value: one 8-byte pointer-tagged word. See the module doc for the tag layout.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Value(u64);
+
+// One aligned word, so a racy read or write of a slot never tears (Go parity, M2.5).
+const _: () = assert!(size_of::<Value>() == 8 && align_of::<Value>() == 8);
 
 const TAG_INT_BIT: u64 = 1;
 const TAG_MASK: u64 = 0b111;
@@ -68,6 +71,16 @@ impl Value {
     pub fn bool(b: bool) -> Value {
         Value(if b { TRUE } else { FALSE })
     }
+    /// The raw word, for `RVec` slot storage (`vm/rvec.rs`).
+    #[inline]
+    pub(super) fn to_bits(self) -> u64 {
+        self.0
+    }
+    /// A word that [`to_bits`](Value::to_bits) returned, back as the value.
+    #[inline]
+    pub(super) fn from_bits(bits: u64) -> Value {
+        Value(bits)
+    }
     #[inline]
     pub fn nil() -> Value {
         Value(NIL)
@@ -75,7 +88,7 @@ impl Value {
     /// The marker a top-level `let` slot holds until its statement runs (TICKET-183). The payload
     /// is the let's source line, so a read-before-initialization fault names it with no lookup. It
     /// never leaves a module slot: `Op::GetGlobalSlot` and the `GetCaptured` home fallback fault on
-    /// it, and a spawn snapshot copies it as `SnapValue::Uninit`.
+    /// it, and a task reads the run's one slot (M3.1), so it faults there too.
     #[inline]
     pub fn uninit(line: u32) -> Value {
         Value(((line as u64) << 5) | UNINIT)

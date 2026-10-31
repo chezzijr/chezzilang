@@ -253,11 +253,3 @@ fn a_range_in_a_skipped_std_body_records_no_range_use() {
     assert!(reached.range_used, "a reached body recorded no Range use");
     compile_graph(&reached).expect("compile");
 }
-
-/// The write-summary pass scans only the reached fns: one for `is_empty`.
-#[test]
-fn a_std_import_scans_only_the_reached_fns_for_writes() {
-    let graph = graph_of("import is_empty from std.string\nprint(is_empty(\"\"))\n");
-    let scans = crate::checker::check_graph_counting_writer_scans(&graph);
-    assert_eq!(scans, 1, "scanned {scans} top-level fns for writes");
-}

@@ -341,8 +341,6 @@ impl Checker {
         expected: Option<&Ty>,
     ) -> Ty {
         self.receiver_or_report(params, None, body.span);
-        self.closure_write_frames
-            .push((self.scopes.len(), HashSet::new()));
         // Source #1 — the *expected* type of the slot the closure literal sits in. When it is a
         // `fn(..)` whose arity matches, an UNANNOTATED param binds to the expected param type
         // (checking-mode), and a non-`Unknown` expected return becomes the body's return context.
@@ -389,10 +387,7 @@ impl Checker {
         let saved_in_dflt = std::mem::replace(&mut self.in_default_provider, false);
         // A closure DECLARED inside a `spawn:` block is not itself the task — it has a caller, so a
         // `?` in its body targets the closure's own return (W7-48). Saved/restored beside
-        // `current_ret`. W8-3 — the airlock taint is per-frame for the same reason, and
-        // `enter_own_frame` moves the pair so neither can be reset without the other (this site was
-        // the one that cleared `in_spawn_block` alone: the closure body then reported the enclosing
-        // task's pending write AND ate the entry, so the parent's real stale read went silent).
+        // `current_ret`.
         let saved_frame = self.enter_own_frame();
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
@@ -401,7 +396,6 @@ impl Checker {
         // Same for the in-bounds signal: a `yield` inside the closure must be out-of-bounds.
         // (Defensive; closures are single-expression so a closure `yield` is unparseable today.)
         let saved_ig = std::mem::replace(&mut self.in_generator, false);
-        let saved_gf = self.gen_frame.take();
         // M24 Task 4: the witness scope CARRIES INTO a closure body. `$w:T` is never a free variable
         // (it is unspellable), so `compile_closure` appends it to the capture entries explicitly —
         // and, since M24-2, only where the body can REACH it, which is a strict superset of what
@@ -493,17 +487,6 @@ impl Checker {
         };
         let body_mark = self.tyvar_mark();
         let body_ty = self.inline_body_ty(body, slot);
-        self.last_closure_writes = self
-            .closure_write_frames
-            .pop()
-            .map(|(_, writes)| writes)
-            .unwrap_or_default();
-        if !self.last_closure_writes.is_empty() {
-            let mut writes: Vec<String> = self.last_closure_writes.iter().cloned().collect();
-            writes.sort();
-            self.closure_literal_writes
-                .insert((self.graph_module_idx, body.span), writes);
-        }
         let closure_had_err = self.errors.len() > closure_mark;
         self.pop_scope();
         self.loop_depth = saved_loop_depth;
@@ -515,7 +498,6 @@ impl Checker {
         self.exit_own_frame(saved_frame);
         self.yield_ty = saved_yield;
         self.in_generator = saved_ig;
-        self.gen_frame = saved_gf;
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_ret_type(t, body.span);

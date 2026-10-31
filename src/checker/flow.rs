@@ -4,8 +4,7 @@
 //! 1. missing-return (`check_fn_body_inner`: an annotated non-nil fn whose body falls through),
 //! 2. the inline `recover: expr` tail (`infer_recover`: a body that cannot fall through is bottom-typed),
 //! 3. inline-body inference (`infer_inline_fn_ret`, via [`super::Checker::call_diverges`]),
-//! 4. the escape checks of `recover:` / `defer:` / `spawn:` blocks,
-//! 5. fn_writes' "left" (a write after a possible early exit is not definite).
+//! 4. the escape checks of `recover:` / `defer:` / `spawn:` blocks.
 //!
 //! The walker's one non-AST input is the divergence oracle: whether an expression statement is a
 //! call whose RESOLVED callee never returns ([`super::Checker::call_diverges`]). It never tests a
@@ -67,11 +66,6 @@ impl Flow {
             continues: self.continues.or(other.continues),
             returns: self.returns.or(other.returns),
         }
-    }
-
-    /// Some `break` / `continue` / `return` leaves the statement.
-    pub(super) fn escapes(&self) -> bool {
-        self.breaks.is_some() || self.continues.is_some() || self.returns.is_some()
     }
 
     /// The earliest escape in source order, with its keyword.

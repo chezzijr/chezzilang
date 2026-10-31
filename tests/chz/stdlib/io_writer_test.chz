@@ -1,7 +1,7 @@
 # tests/chz/stdlib/io_writer_test.chz — std.io `Writer` durability (W6-1).
 #
 # `flush()`/`close()` on a `buffered(create(p))` writer must make the bytes readable FROM WITHIN THE
-# SAME PROGRAM, not merely at process exit (the drop-flush). W6-1: a mid-write drain (write > cap)
+# SAME PROGRAM (M5d: a dropped buffered writer loses its tail, as Go). W6-1: a mid-write drain (write > cap)
 # emptied the in-VM buffer and left the drained bytes sitting unflushed in the inner `BufWriter`, so a
 # later flush/close saw an empty buffer, returned early, and persisted NOTHING.
 # Temp paths carry the pid (the suite runs concurrently with other `cargo test` / `chezzi test` runs).
@@ -161,3 +161,24 @@ test fn write_that_drains_into_a_closed_inner_names_the_inner_too():
                 ?_: assert false, "a drain into a closed inner must be Err"
                 !e: assert e.message().contains("inner writer"), e.message()
         !e: assert false, "create: " + e.message()
+
+# M5c — a `create` or `append` writer is unbuffered (Go `os.File`): each `write` reaches the fd, so a
+# second handle reads the bytes back before any `flush()` or `close()`. Buffering comes only from
+# `io.buffered`.
+fn unbuffered_round_trip(p: str) -> str!:
+    w := io.create(p)?
+    w.write("abc")?
+    first := io.read_file(p)?
+    a := io.append(p)?
+    a.write("de")?
+    second := io.read_file(p)?
+    w.close()?
+    a.close()?
+    return first + "|" + second
+
+test fn create_and_append_writes_reach_the_file_before_flush_or_close():
+    p := scratch("unbuffered")
+    defer fs.remove_file(p)
+    match unbuffered_round_trip(p):
+        ?s: assert s == "abc|abcde", s
+        !e: assert false, e.message()

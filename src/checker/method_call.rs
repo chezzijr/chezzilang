@@ -30,53 +30,16 @@ impl Checker {
         // else (a struct/enum method call ignores it, as before).
         hint: Option<&Ty>,
     ) -> Ty {
-        // W8-3 — an in-place mutation (`xs.push(v)`, `m.remove(k)`, …) is a WRITE through the
-        // receiver binding, so it taints inside a `spawn:` body and untaints in the parent, exactly
-        // like `check_assign`'s lvalue arms. Recorded from `lookup` BEFORE `infer(obj)` runs, for the
-        // same ordering reason: the receiver read below must not report a taint this very statement
-        // supersedes. Simple-`Ident` receivers only here — the PROJECTED case (`xs[0].push(v)`,
-        // `s.xs.push(v)`) is handled below, AFTER `infer(obj)` runs, because it needs `obj`'s own
-        // stale read reported first (W19: a parent-side `xs[0].push(v)` observes the task's stale
-        // write before it supersedes it). `mutates_receiver` is type-keyed so the handle types, whose
-        // task-side writes ARE visible, never taint.
-        if let ExprKind::Ident(name) = &obj.kind
-            && let Some(rty) = self.lookup(name)
-            && self.call_writes_receiver(&rty, method)
-        {
-            let name = name.clone();
-            // W8-3 — a PARENT-side mutation reads the stale copy before it writes it, exactly like
-            // the compound assign `n += 1` in `note_assign_root`: EVERY method in `mutates_receiver`
-            // is a read-modify-write (`push`/`pop`/`sort`/`reverse`/`extend`/`insert`/
-            // `remove`/`update`), and the set contains no whole-container replacement at all —
-            // `clear` does not exist in `std/prelude.chz` — so there is no member of it that could
-            // legitimately supersede the task's write. Measured: task `xs.push("a")` then parent
-            // `xs.push("b")` prints `1`, not `2`. Report BEFORE untainting; reporting consumes the
-            // entry, so the receiver read in `infer(obj)` below still yields exactly one warning.
-            self.note_task_write(&name, obj.span);
-        }
         if method == "len" {
             self.range_literal_fault(obj, true);
         }
         let obj_ty = self.infer(obj);
-        // TICKET-165 — a mutator on a PROJECTED receiver (`xs[0].push(v)`, `s.xs.push(v)`,
-        // `m[k].push(v)`) mutates the container IN PLACE through the root binding (measured: `ys :=
-        // xs[0]; ys.push(2); print(xs)` prints `[[1, 2]]`), so it is a write through the root at the
-        // projected path, just like a projected `=`/`+=` target. `infer(obj)` above already reported
-        // any parent-side stale read of `obj` itself (W19), so this untaint runs strictly after it,
-        // and it reuses the `obj_ty` `infer(obj)` just computed rather than re-inferring the receiver
-        // (re-inferring would double-report — the same ceiling `note_projected_task_write`'s caller
-        // must not cross).
-        if self.call_writes_receiver(&obj_ty, method) {
-            self.note_projected_task_write(obj);
-        }
-        // Task 1 — a captured module-global aggregate mutated in a task (`xs.push(v)`, …) is no longer
-        // a compile error: spawning deep-copies module globals per task, so the write hits the task's
-        // OWN copy — invisible to the parent. The old frozen-module-global gate is deleted (`Shared`/`Channel` remain the escape
-        // hatch for genuinely-shared cross-task state; they cross by shared Arc via `to_snap`).
-        // A member-level turbofish (`obj.method[A, B](...)`) is only valid on a USER method that
-        // declares its OWN `[U]` type params. On a builtin (`xs.len[int]()`, `xs.iter[int]()`) or a
-        // non-generic user method it is an arity error — checked BEFORE the `.iter` fast-path below
-        // so `xs.iter[int]()` is rejected like `xs.len[int]()` (it was silently swallowed otherwise).
+        // M3.1/M3.4 — an aggregate mutated in a task (`xs.push(v)`, …), a module global or a
+        // captured local, is legal: the task writes the one object (Go). A member-level turbofish (`obj.method[A, B](...)`) is
+        // only valid on a USER method that declares its OWN `[U]` type params. On a builtin
+        // (`xs.len[int]()`, `xs.iter[int]()`) or a non-generic user method it is an arity error —
+        // checked BEFORE the `.iter` fast-path below so `xs.iter[int]()` is rejected like
+        // `xs.len[int]()` (it was silently swallowed otherwise).
         if !type_args.is_empty() && self.member_own_type_params(&obj_ty, method) == Some(false) {
             self.infer_all(args);
             self.error(
@@ -811,9 +774,8 @@ impl Checker {
             Ty::Channel(elem) => {
                 // The sigs are harvested from `std/prelude.chz`'s `native struct Channel[T]` (re-seeded
                 // by `seed_stdlib_structs`); the element type is substituted for `Ty::Param("T")` here.
-                // `send(v)` moves `v` across the airlock; `check_args` enforces it matches the element
-                // type `T`, which is itself sendable-checked at the channel's construction — so a
-                // well-typed `send` is always sendable.
+                // `send(v)` hands `v` over by handle (M3.2); `check_args` enforces it matches the
+                // element type `T`.
                 let elem = (**elem).clone();
                 if let Some(sig) =
                     self.native_method_sig("Channel", method, std::slice::from_ref(&elem))
@@ -860,14 +822,7 @@ impl Checker {
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
-                        self.check_crossing_closure_call(
-                            "Shared",
-                            method,
-                            &sig.params,
-                            sig.min_params,
-                            args,
-                            span,
-                        );
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
                         if method == "read" {
                             return self.recover_read_ret(args);
                         }
@@ -1080,14 +1035,7 @@ impl Checker {
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
-                        self.check_crossing_closure_call(
-                            "RwShared",
-                            method,
-                            &sig.params,
-                            sig.min_params,
-                            args,
-                            span,
-                        );
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
                         if method == "read" {
                             return self.recover_read_ret(args);
                         }
@@ -1135,18 +1083,17 @@ impl Checker {
                 // express — it must stay BEFORE the lookup so a non-numeric element short-circuits to
                 // the "no method" path (matching the retired `atomic_method_sig`).
                 let numeric_gated = matches!(method, "add" | "sub") && !elem.is_numeric();
-                // TICKET-144 (W14-24): `cas` on a payload holding a `fn` value can never succeed —
-                // each `load()` returns a fresh closure copy and closures compare by identity — so the
-                // `cas(a.load(), new)` retry loop would spin forever. Go's `atomic.Value` panics
-                // `comparing uncomparable type` there. `load`/`store`/`exchange` stay legal; a
-                // `Param`/protocol payload hides the fn, so the runtime `cas` backstops it.
+                // TICKET-144 (W14-24): `cas` refuses a payload that holds a `fn` value: Go's func is
+                // uncomparable, and `atomic.Value.CompareAndSwap` panics `comparing uncomparable type`
+                // there. `load`/`store`/`exchange` stay legal; a `Param`/protocol payload hides the fn,
+                // so the runtime `cas` backstops it.
                 if method == "cas"
                     && let Some(f) = self.reaches_func(&elem, &mut Vec::new())
                 {
                     self.error(
                         name_span,
                         format!(
-                            "Atomic[{elem}].cas cannot compare a payload that holds a function value ('{f}'): every load() returns a fresh copy, so the swap could never succeed; use store/exchange instead"
+                            "Atomic[{elem}].cas cannot compare a payload that holds a function value ('{f}'): a function value is not comparable (Go: func is uncomparable); use store/exchange instead"
                         ),
                     );
                 }
@@ -1221,38 +1168,34 @@ impl Checker {
                 // (C5 escape hatch). No element type to substitute (`&[]`). The generic `submit`
                 // routes through the helper's generic solver (infer T from the closure return);
                 // the inner `self._submit_settled(..)` that its body emits is the `Concrete` path.
-                // The capture floor wraps the whole resolution (TICKET-289): the generic path
-                // checks the closure inside the solver, so a `Concrete` arm alone would miss it.
-                self.with_crossing_floor("Executor", method, args, |c| {
-                    match c.resolve_native_handle_method(
-                        "Executor",
-                        method,
-                        &[],
-                        name_span,
-                        &obj_ty,
-                        type_args,
-                        args,
-                        span,
-                        hint,
-                    ) {
-                        NativeHandleMethod::Generic(t) => t,
-                        NativeHandleMethod::Concrete(sig) => {
-                            c.check_args_range(method, &sig.params, sig.min_params, args, span);
-                            sig.ret
-                        }
-                        NativeHandleMethod::Miss => {
-                            c.infer_all(args);
-                            let mut names = c.method_names("Executor");
-                            names.retain(|n| !c.std_internal_hidden(n));
-                            c.error_help(
-                                name_span,
-                                format!("type {obj_ty} has no method '{method}'"),
-                                suggest::did_you_mean(method, &names),
-                            );
-                            Ty::Unknown
-                        }
+                match self.resolve_native_handle_method(
+                    "Executor",
+                    method,
+                    &[],
+                    name_span,
+                    &obj_ty,
+                    type_args,
+                    args,
+                    span,
+                    hint,
+                ) {
+                    NativeHandleMethod::Generic(t) => t,
+                    NativeHandleMethod::Concrete(sig) => {
+                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                        sig.ret
                     }
-                })
+                    NativeHandleMethod::Miss => {
+                        self.infer_all(args);
+                        let mut names = self.method_names("Executor");
+                        names.retain(|n| !self.std_internal_hidden(n));
+                        self.error_help(
+                            name_span,
+                            format!("type {obj_ty} has no method '{method}'"),
+                            suggest::did_you_mean(method, &names),
+                        );
+                        Ty::Unknown
+                    }
+                }
             }
             // D6 — `Socket` / `Listener` (std.net): a small fixed method set. The runtime parks the
             // fiber on a would-block `read`/`write`/`accept`; from the type system they just return

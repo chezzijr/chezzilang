@@ -1,0 +1,70 @@
+# examples/crossing_cycle.chz: a SELF-REFERENTIAL value handed to another task (a `spawn` arg, a
+# `Channel.send`, a `Shared(...)`). A task holds the value by handle (M3.4, Go model), so
+# `a -> b -> a` reaches the task as the same object and nothing walks the cycle. Section 4 hands a
+# wide, acyclic list (100k elements) to a task.
+
+import Shared from std.concurrency
+
+struct Node:
+    val: int
+    next: List[Node]
+
+fn use_it(n: Node):
+    print("got {n.val}")
+
+fn use_wide(xs: List[int]):
+    print("wide got len {xs.len()} first {xs[0]} last {xs[99999]}")
+
+# 1) a self-referential value as a `spawn` argument now crosses — the task reads it.
+spawn_r_v := ""
+spawn_r := recover:
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)           # a -> b -> a  (cycle)
+    parallel:
+        spawn use_it(a)
+    spawn_r_v = "done"
+match spawn_r:
+    ?_:  print("spawn ok: {spawn_r_v}")
+    !e: print("spawn caught: {e.message()}")
+
+# 2) the same cycle handed to `Channel.send` now crosses.
+chan_r_v := ""
+chan_r := recover:
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    ch := Channel[Node]()
+    ch.send(a)
+    chan_r_v = "done"
+match chan_r:
+    ?_:  print("channel ok: {chan_r_v}")
+    !e: print("channel caught: {e.message()}")
+
+# 3) the same cycle wrapped in `Shared(...)` now crosses.
+shared_r_v := ""
+shared_r := recover:
+    a := Node(1, [])
+    b := Node(2, [])
+    a.next.push(b)
+    b.next.push(a)
+    s := Shared(a)
+    shared_r_v = "done"
+match shared_r:
+    ?_:  print("shared ok: {shared_r_v}")
+    !e: print("shared caught: {e.message()}")
+
+# 4) a wide, ACYCLIC list (100k shallow siblings) reaches a task as one handle.
+wide_v := ""
+wide := recover:
+    xs := [0]
+    for i in 1..100000:
+        xs.push(i)
+    parallel:
+        spawn use_wide(xs)
+    wide_v = "crossed"
+match wide:
+    ?_:  print("wide ok: {wide_v}")
+    !e: print("wide caught: {e.message()}")

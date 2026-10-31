@@ -1,4 +1,4 @@
-//! Golden tests: native handles and SSO, airlock existentials, named imports, cross-module types
+//! Golden tests: native handles and SSO, existentials across tasks, named imports, cross-module types
 //! and collisions, qualified decode, Executor submit, number parsing.
 //! Split out of `src/vm/golden_tests.rs`. `super::*` is the parent module.
 
@@ -118,7 +118,7 @@ main()
     );
 }
 
-// ----- Task 2 (option a): user protocol existentials cross the airlock -----
+// ----- Task 2 (option a): user protocol existentials cross tasks -----
 
 /// A concrete struct widened to a user protocol existential rides a `Channel[Proto]` to a spawned
 /// task, which calls a protocol method and prints — byte-identical. (Was checker-
@@ -129,20 +129,17 @@ fn protocol_value_crosses_channel_three_engine() {
     assert_golden_out(src, "sq\n");
 }
 
-/// An FFI fn (`Cffi`) crosses the wire-value airlock BY VALUE (its shared `Arc<Cffi>`, the same the
-/// snapshot path already ships across M:N workers) — a spawn fn-ARG. `cos` reaches the task and
-/// computes `cos(0.0) == 1.0`, byte-identical. (Was runtime-rejected pre-fix: an extern
-/// fn's type is `fn(float)->float` (`Ty::Func`, checker-sendable), so the runtime airlock was the sole
-/// — and wrong — gate; a Cffi is pure code, not a heap-local handle, so it now crosses.)
+/// An FFI fn (`Cffi`, pure code) passed as a spawn fn-ARG reaches the task and computes
+/// `cos(0.0) == 1.0`.
 #[test]
-fn ffi_handle_crosses_airlock_three_engine() {
+fn ffi_handle_crosses_spawn_arg() {
     assert_golden_out(
         "extern \"libm.so.6\":\n    fn cos(x: float) -> float\nfn use_fn(g: fn(float) -> float):\n    print(g(0.0))\nf := cos\nparallel:\n    spawn use_fn(f)\n",
         "1.0\n",
     );
 }
 
-/// An FFI fn sent over a `Channel` crosses by value and is callable after `recv` — `sqrt(9.0) == 3.0`,
+/// An FFI fn sent over a `Channel` crosses by handle and is callable after `recv` — `sqrt(9.0) == 3.0`,
 /// byte-identical (previously rejected at the `channel_method` "send" value-store).
 #[test]
 fn ffi_handle_crosses_channel_send() {
@@ -152,7 +149,7 @@ fn ffi_handle_crosses_channel_send() {
     );
 }
 
-/// An FFI fn stored in a `Shared` box at CONSTRUCTION crosses by value and is callable after `get` —
+/// An FFI fn stored in a `Shared` box at CONSTRUCTION crosses by handle and is callable after `get` —
 /// `sqrt(16.0) == 4.0` (previously rejected at the ctor value-store).
 #[test]
 fn ffi_handle_crosses_shared_ctor() {
@@ -162,7 +159,7 @@ fn ffi_handle_crosses_shared_ctor() {
     );
 }
 
-/// An FFI fn stored via `Shared.set` — the STORE path distinct from the ctor — crosses by value and
+/// An FFI fn stored via `Shared.set` — the STORE path distinct from the ctor — crosses by handle and
 /// is callable after `get` — `sqrt(25.0) == 5.0` (previously rejected at the store).
 #[test]
 fn ffi_handle_crosses_shared_set() {
@@ -173,7 +170,7 @@ fn ffi_handle_crosses_shared_set() {
 }
 
 /// The FFI-over-`Channel` send now SUCCEEDS (Ok), byte-identical: `recover:` sees an
-/// `Ok` → prints `false`. (Was `true` when the send rejected; the flip proves the airlock accepts it.)
+/// `Ok` → prints `false`. (Was `true` when the send rejected; the flip proves the send accepts it.)
 #[test]
 fn ffi_handle_send_succeeds() {
     assert_golden_out(
@@ -182,8 +179,7 @@ fn ffi_handle_send_succeeds() {
     );
 }
 
-/// MUST-PRESERVE: a legit `Shared` handle STILL crosses a `Channel` (maps to `WireValue::Shared`,
-/// `has_handle()` == false) — the guard must not over-reject shared-core handles.
+/// MUST-PRESERVE: a legit `Shared` handle crosses a `Channel` (M3.2: the receiver gets the handle).
 #[test]
 fn positive_shared_handle_crosses_channel() {
     assert_golden_out(
@@ -647,10 +643,10 @@ fn enum_no_collision_construct_in_importing_module() {
     assert_eq!(out, "1\n");
 }
 
-/// A spawned task constructs an imported struct AND a value crosses a Channel (cross-airlock,
-/// data-not-time): the run must produce `7`.
+/// A spawned task constructs an imported struct AND a value crosses a Channel (data-not-time):
+/// the run must produce `7`.
 #[test]
-fn imported_struct_across_airlock_three_engine() {
+fn imported_struct_crosses_channel_from_task() {
     let files = [
         ("geo.chz", "struct Point:\n    x: int\n    y: int\n"),
         (
@@ -862,8 +858,8 @@ fn match_arm_only_in_a_variant_three_engine() {
     }
 }
 
-/// AIRLOCK: a colliding struct value sent through a Channel survives the wire round-trip and
-/// prints its BARE name on the other side. Identical on interp, default VM, and `--parallel`.
+/// CROSSING: a colliding struct value sent through a Channel reaches the other side and
+/// prints its BARE name there. Identical on interp, default VM, and `--parallel`.
 #[test]
 fn collision_struct_sent_across_task() {
     let files = [
@@ -922,17 +918,16 @@ fn executor_autodrain_skipped_on_os_exit() {
     assert_eq!(code, Some(0));
 }
 
-// ----- Executor.submit crosses a submitted closure BY VALUE (previously diverged: serial vs M:N) -----
+// ----- Executor.submit hands a job its closure BY HANDLE (previously diverged: serial vs M:N) -----
 // The since-removed cooperative engine used to queue the submitted closure's own heap Handle
 // (captures shared by reference, bypassing the airlock), while M:N wired it by value — the two
-// disagreed. Now it routes through `wire_callable`/`to_wire`, so the generator airlock enforcement
-// runs and captures isolate correctly.
+// disagreed. M3.4: every engine path hands the job its captures by handle (the wire form is
+// deleted, M3.5).
 
 #[test]
 fn executor_submit_generator_capturing_closure_crosses_by_value() {
-    // F3 path C: a submitted closure captures a LIVE local generator (`it`, Pending). The by-value
-    // airlock (`to_wire`) serializes it and the submitted task drives its own copy. WAS: this
-    // faulted the generator crossing; NOW: it runs, byte-identical.
+    // F3 path C: a submitted closure captures a LIVE local generator (`it`, Pending). M3.4: the job
+    // drives the parent's generator by handle. WAS: this faulted the generator crossing.
     let src = "import Executor from std.concurrency\n\
 fn gen() -> Iterator[int]:
     yield 1
@@ -949,55 +944,43 @@ main()";
 }
 
 #[test]
-fn executor_submit_mutating_closure_isolated_parity() {
-    // Repro #3: a submitted closure captures + mutates a local list, observed after the drain. WAS a
-    // SILENT value divergence: the since-removed cooperative engine shared by reference (prints `2`),
-    // M:N isolated by value (prints `1`). NOW it isolates at submit → prints `1`.
-    // TICKET-169 (D4 layer C): the submitted closure's capture of `box` crossed the airlock and
-    // is marked as a copy, so `box.push(1)` inside the job now faults instead of mutating it — the
-    // parent's `box` was always going to read `1` (its own, untouched list) either way.
+fn executor_submit_mutating_closure_lands_parity() {
+    // Repro #3: a submitted closure captures + mutates a local list, observed after the drain. M3.4:
+    // the job holds the submitter's `box` by handle, so its push lands (Go, a goroutine appends to
+    // a captured slice through a pointer: `2`).
     let out = golden_entry(
-        "import Executor from std.concurrency\nfn bump_box(b):\n    recover: b.push(1)\nfn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): bump_box(box))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
+        "import Executor from std.concurrency\nfn bump_box(b):\n    b.push(1)\nfn main():\n    box := [0]\n    ex := Executor()\n    ex.submit(fn(): bump_box(box))\n    ex.shutdown()\n    print(box.len())\nmain()\n",
     );
-    assert_eq!(out, "1\n");
+    assert_eq!(out, "2\n");
 }
 
 #[test]
-fn executor_submit_module_global_inplace_mutation_isolates_parity() {
-    // Task 1 (Executor path) — a submitted closure mutating a MODULE-GLOBAL aggregate in place must
-    // isolate, exactly like the nursery path: the M:N drain (`drain_executor_on_pool` →
-    // `install_snapshot`) snapshots the module globals per task, so the parent's post-shutdown read
-    // sees the PRE-task value. Before the fix the since-removed cooperative engine's inline drain ran
-    // the task against the LIVE shell globals (leaked → serial=4) while M:N isolated (→ 3).
-    // TICKET-169 (D4 layer C): the job's own copy of the module global `xs` is marked, so
-    // `xs.push(99)` now faults instead of mutating it — the parent's read was always going to see
-    // its own (unaffected) `3` regardless.
+fn executor_submit_module_global_inplace_mutation_lands_parity() {
+    // Task 1 (Executor path) — a submitted closure that mutates a MODULE-GLOBAL aggregate in place
+    // writes the run's one `xs` (M3.1). Go (go1.27.0, `m31go/rust`): `4`.
     let out = golden_entry(
-        "import Executor from std.concurrency\nxs := [1, 2, 3]\nfn bump_xs():\n    recover: xs.push(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump_xs())\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
+        "import Executor from std.concurrency\nxs := [1, 2, 3]\nfn bump_xs():\n    xs.push(99)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump_xs())\n    ex.shutdown()\n    print(xs.len())\nmain()\n",
     );
-    assert_eq!(out, "3\n");
+    assert_eq!(out, "4\n");
 }
 
 #[test]
-fn executor_submit_module_global_callee_reassign_isolates_parity() {
+fn executor_submit_module_global_callee_reassign_lands_parity() {
     // Task 1 (Executor path) — a submitted closure whose free-fn callee REASSIGNS a module global
-    // (`bump()` does `count = count + 1`). Pre-dated the diff and still diverged (serial=2 / M:N=0)
-    // because the since-removed cooperative Executor drain aliased the shell globals. Now each
-    // submitted task runs against its own module-global copy → the parent reads the frozen 0.
-    // TICKET-169 (D4 layer C): each job's own copy of the module global `count` is marked, so
-    // `count = count + 1` now faults instead of reassigning it — the parent's read was always
-    // going to see its own frozen `0` regardless.
+    // (`bump()` does `count = count + 1`). M3.1: both jobs write the run's one `count`;
+    // `Executor(1)` runs them one after the other, so they never race. Go (go1.27.0, `m31go/rust`):
+    // `2`.
     let out = golden_entry(
-        "import Executor from std.concurrency\ncount := 0\nfn bump():\n    recover:\n        count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
+        "import Executor from std.concurrency\ncount := 0\nfn bump():\n    count = count + 1\nfn main():\n    ex := Executor(1)\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
     );
-    assert_eq!(out, "0\n");
+    assert_eq!(out, "2\n");
 }
 
 #[test]
 fn executor_submit_atomic_visible_to_parent_parity() {
-    // Task 1 (Executor escape hatch) — an `Atomic` module global crosses the Executor drain by shared
-    // `Arc` (via `to_snap`), NOT deep-copied, so a task-side `add` IS visible to the parent. Guards that
-    // the per-task serial snapshot does not clone the Arc away (trap #1) on the Executor path too.
+    // Task 1 (Executor escape hatch) — an `Atomic` module global is the run's one global (M3.1), so a
+    // task-side `add` IS visible to the parent. It once guarded that the per-task snapshot kept the
+    // `Arc` (trap #1) on the Executor path too.
     let out = golden_entry(
         "import Atomic, Executor from std.concurrency\na := Atomic(0)\nfn main():\n    ex := Executor()\n    ex.submit(fn(): a.add(1))\n    ex.submit(fn(): a.add(1))\n    ex.shutdown()\n    print(a.load())\nmain()\n",
     );

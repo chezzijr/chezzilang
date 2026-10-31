@@ -59,7 +59,6 @@ pub(crate) fn empty_program() -> Program {
         providers: Default::default(),
         native_methods: Default::default(),
         native_home: Default::default(),
-        fresh_calls: Vec::new(),
         variants: Default::default(),
         variants_by_id: Vec::new(),
         struct_names: Vec::new(),
@@ -79,7 +78,7 @@ pub(crate) fn empty_program() -> Program {
 
 fn mk_fiber(task_index: usize) -> Fiber {
     Fiber {
-        ctx: FiberCtx::default(),
+        ctx: CtxBox::default(),
         state: FiberState::Ready,
         task_index,
         scope_id: 0,
@@ -102,8 +101,11 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         span: Span::RUNTIME,
     };
     Fiber {
-        ctx: FiberCtx::default(),
-        state: FiberState::Pending(task),
+        ctx: CtxBox::unlisted(FiberCtx {
+            start: Some(task),
+            ..FiberCtx::default()
+        }),
+        state: FiberState::Pending,
         task_index,
         scope_id: 0,
         span: Span::RUNTIME,
@@ -172,10 +174,19 @@ fn run_parity(src: &str) -> String {
     run_capture(src).expect("vm run")
 }
 
+impl MnSched {
+    /// M1.5 — [`MnSched::take_runnable`] for a unit test: a fresh fixture `Vm` that holds no GC
+    /// token is the caller, so each wait runs with no door.
+    pub(super) fn take_runnable_unattached(&self, wid: usize, tick: u64, scope_id: usize) -> Take {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        self.take_runnable(&mut vm, wid, tick, scope_id)
+    }
+}
+
 fn take_run(s: &MnSched) -> Fiber {
     // tick=1 → not a periodic-global-check schedule, so the normal own-local-then-global order
     // applies (what the existing unit tests assert).
-    match s.take_runnable(0, 1, 0) {
+    match s.take_runnable_unattached(0, 1, 0) {
         Take::Run(f, _) => f,
         Take::Stop => panic!("expected a runnable fiber, got Stop"),
     }
@@ -246,11 +257,12 @@ fn strip_inline_test_mods(text: &str) -> String {
 }
 
 mod autodrain;
-mod channels_wire;
+mod channels;
 mod defaults_witness;
 mod executor_cut;
 mod executor_deadlock;
 mod extern_mnsched;
+mod gc_door;
 mod goldens_display;
 mod host_nursery;
 mod lang_basics;
