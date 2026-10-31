@@ -1189,6 +1189,9 @@ pub fn new_closed() -> Arc<AtomicBool> {
 pub struct ReaderCore {
     pub inner: Mutex<Option<std::io::BufReader<std::fs::File>>>,
     pub key: usize,
+    /// The fd is a FIFO, a pipe or a device: a read can wait without end for its writer, so it
+    /// runs in the [`Vm::host_wait`] bracket. Fixed at the open.
+    pub waits: bool,
     /// W7-9 — the RAW bytes of a line `read_line` pulled off the fd but could not decode as UTF-8
     /// (terminator INCLUDED). `read_line -> Option[str]` is a str-only seam, so an undecodable line
     /// is not returnable — but it was already taken off the `BufReader`, and dropping it is the
@@ -1246,12 +1249,16 @@ impl ReaderCarry {
 /// handle/core split as [`SocketCore`] — an `Arc`'d core outside every heap, so a `spawn`ed fiber can
 /// alias one handle. `Option` so `close()` can take + drop the backing (flushing + closing an fd)
 /// while aliasing handles observe `None` — a use-after-close is then a clean fault, never a panic.
-/// `key` is a stable identity (like `SocketCore.key`); there is NO netpoller registration (regular
-/// files are always epoll-ready, so file writes are synchronous blocking syscalls — no park).
+/// `key` is a stable identity (like `SocketCore.key`); there is NO netpoller registration (file
+/// writes are synchronous blocking syscalls — no park).
 #[derive(Debug)]
 pub struct WriterCore {
     pub inner: Mutex<Option<Backing>>,
     pub key: usize,
+    /// The fd is a FIFO, a pipe or a device: a write can wait without end for its reader, so it
+    /// runs in the [`Vm::host_wait`] bracket. Fixed at the open; `false` for a console or an
+    /// `io.buffered` core, which reach their fd through an inner core.
+    pub waits: bool,
 }
 
 /// R2 — where a [`WriterCore`] sends bytes.

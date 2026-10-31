@@ -179,7 +179,7 @@ fn rows() -> Vec<Row> {
             ..R
         },
         Row {
-            spec: "Stdin",
+            spec: "HostFd",
             body: "    print(io.input(\"\"))",
             self_ends: true,
             stdin: true,

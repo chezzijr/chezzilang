@@ -483,40 +483,28 @@ impl Vm {
         // scheduler the bracket is DEC-052's pool-slot yield), and an off-heap blocking native in a
         // Demote context demotes too (changed cell (f), F1: holding the runner hung `request.get`
         // to a sibling-served socket at T=1). Gated on `holds_host_thread`, so `sleep_ms(<=0)`
-        // never demotes for a no-op. The DEC-141 width bracket stays inside it.
+        // never demotes for a no-op. The DEC-141 width bracket stays inside it ([`Vm::host_wait`]).
         let in_place = kind.holds_host_thread();
-        let reg = match WaitSpec::of_native(kind) {
-            Some(spec) if in_place && self.block_mode(spec) == BlockMode::Demote => {
-                let what = if spec == WaitSpec::Stdin {
-                    "a stdin read"
-                } else {
-                    "a blocking call"
-                };
-                Some(self.block_enter(spec, None, what, span)?)
-            }
-            _ => None,
-        };
         let raw = if in_place {
-            self.width_release();
+            let what = if kind == Kind::HostWait {
+                "a stdin read"
+            } else {
+                "a blocking call"
+            };
             // M1.5 — a native that holds its host thread waits detached and returns an off-heap
             // `NativeRet`: it allocates nothing on the heap. M3.0a — it reads the args copied out
             // before the door opens, so the door pins nothing.
             let copies = self.copy_args(&args);
-            let raw = self.gc_blocking(&[], |door| {
+            self.host_wait(WaitSpec::of_native(kind), what, span, |door| {
                 func(&mut DoorHost {
                     door,
                     args: copies,
                     vals: Vec::new(),
                 })
-            });
-            self.width_acquire();
-            raw
+            })?
         } else {
             func(&mut VmHost { vm: self, args })
         };
-        if let Some(reg) = reg {
-            self.block_exit(reg);
-        }
         // TICKET-188 — a native that held its host thread has no checkpoint until it returns
         // (`docs/reference/stdlib/` "Blocking calls cannot be interrupted"), so the halt is delivered AT the
         // return, as the offload resume delivers it: the value that completed with it is dropped.

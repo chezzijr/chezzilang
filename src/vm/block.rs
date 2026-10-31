@@ -7,6 +7,7 @@
 //! The per-op MECHANISM (park on a channel bucket, park on the netpoller, the timer thread) stays
 //! with each op; only the decision lives here.
 
+use super::gc_door::Detached;
 use super::quiesce::PartyWait;
 use super::{MnSched, RuntimeError, SchedCore, Span, TraceFrame, Vm};
 use crate::native::Kind;
@@ -61,8 +62,9 @@ pub(super) enum WaitSpec {
     Sleep,
     /// an off-heap blocking native: `std.fs`, `std.request`, `std.process` (`Kind::Blocking`)
     Offload,
-    /// a stdin read (`Kind::HostWait`)
-    Stdin,
+    /// a host fd wait: a stdin read (`Kind::HostWait`), or a `Writer`/`Reader` syscall on a FIFO, a
+    /// pipe or a device (it waits without end for the party on the other end)
+    HostFd,
     /// a would-block socket `accept`/`read`/`write`
     Socket,
     /// a `net.connect` handshake in flight
@@ -85,7 +87,7 @@ impl WaitSpec {
             WaitSpec::Timer
             | WaitSpec::Sleep
             | WaitSpec::Offload
-            | WaitSpec::Stdin
+            | WaitSpec::HostFd
             | WaitSpec::Socket
             | WaitSpec::Connect => true,
             WaitSpec::Wait { deadline, .. } => deadline,
@@ -102,7 +104,7 @@ impl WaitSpec {
         match kind {
             Kind::TimedWait => Some(WaitSpec::Sleep),
             Kind::Blocking => Some(WaitSpec::Offload),
-            Kind::HostWait => Some(WaitSpec::Stdin),
+            Kind::HostWait => Some(WaitSpec::HostFd),
             Kind::Inline | Kind::InterceptIo | Kind::InterceptNet | Kind::InterceptTimer => None,
         }
     }
@@ -139,7 +141,7 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             // DEC-151: stdin is a host wait we do not own; DEC-016: a guard waits in place, then
             // demotes; changed cell (c), X1: an Executor join cannot snapshot-park (the join loop
             // holds its state on the host stack), so it hands its runner slot over.
-            W::Stdin | W::Guard | W::Join => Demote,
+            W::HostFd | W::Guard | W::Join => Demote,
             W::Recv
             | W::Timer
             | W::Send
@@ -162,7 +164,7 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             | W::Sleep
             | W::Offload
             | W::Join
-            | W::Stdin
+            | W::HostFd
             | W::Socket
             | W::Guard => Demote,
         },
@@ -174,13 +176,13 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             }
             | W::Socket => Refuse,
             W::Wait { deadline: true, .. } | W::Timer | W::Sleep => InlineSleep,
-            W::Stdin | W::Guard => Demote,
+            W::HostFd | W::Guard => Demote,
             W::Connect | W::Offload | W::Join => InPlace,
             W::Nursery => join(reentered),
         },
         BlockCtx::OwnThread { reentered, .. } => match spec {
             W::Timer | W::Sleep => InlineSleep,
-            W::Stdin | W::Guard => Demote,
+            W::HostFd | W::Guard => Demote,
             W::Recv | W::Send | W::Wait { .. } | W::Offload | W::Socket | W::Connect | W::Join => {
                 InPlace
             }
@@ -440,6 +442,34 @@ impl Vm {
         }
     }
 
+    /// THE bracket of a wait that holds its host thread: a `Kind::Blocking`/`Kind::HostWait`
+    /// native run inline, or a `Writer`/`Reader` syscall on a FIFO, a pipe or a device. When the
+    /// table says Demote for `spec`, [`Vm::block_enter`] hands this worker's runner slot to a
+    /// replacement; the width permit is released for `f`, which runs through the GC door (Go: a
+    /// blocking syscall hands off its P). Without it, at one worker the party on the other end of
+    /// the fd never runs.
+    pub(super) fn host_wait<R>(
+        &mut self,
+        spec: Option<WaitSpec>,
+        what: &str,
+        span: Span,
+        f: impl FnOnce(&mut Detached<'_>) -> R,
+    ) -> Result<R, RuntimeError> {
+        let reg = match spec {
+            Some(spec) if self.block_mode(spec) == BlockMode::Demote => {
+                Some(self.block_enter(spec, None, what, span)?)
+            }
+            _ => None,
+        };
+        self.width_release();
+        let r = self.gc_blocking(&[], f);
+        self.width_acquire();
+        if let Some(reg) = reg {
+            self.block_exit(reg);
+        }
+        Ok(r)
+    }
+
     /// The blocking context of the running code, derived from `mn`, `mn_enlist_sched`,
     /// `native_reentry` and `deferring` on every call. An `Executor` job is a fiber (TICKET-208).
     pub(super) fn block_ctx(&self) -> BlockCtx {
@@ -519,7 +549,7 @@ mod tests {
         v.extend([
             WaitSpec::Sleep,
             WaitSpec::Offload,
-            WaitSpec::Stdin,
+            WaitSpec::HostFd,
             WaitSpec::Socket,
             WaitSpec::Connect,
             WaitSpec::Guard,
@@ -543,7 +573,7 @@ mod tests {
         ("Wait+deadline+send", "PD SS IIII", true),
         ("Sleep", "PD SS SSSS", true),
         ("Offload", "PD II IIII", true),
-        ("Stdin", "DD DD DDDD", true),
+        ("HostFd", "DD DD DDDD", true),
         ("Socket", "PD RR IIII", true),
         ("Connect", "PI II IIII", true),
         ("Guard", "DD DD DDDD", false),
@@ -761,7 +791,7 @@ mod tests {
     fn of_native_maps_each_blocking_kind_to_its_row() {
         assert_eq!(WaitSpec::of_native(Kind::TimedWait), Some(WaitSpec::Sleep));
         assert_eq!(WaitSpec::of_native(Kind::Blocking), Some(WaitSpec::Offload));
-        assert_eq!(WaitSpec::of_native(Kind::HostWait), Some(WaitSpec::Stdin));
+        assert_eq!(WaitSpec::of_native(Kind::HostWait), Some(WaitSpec::HostFd));
         assert_eq!(WaitSpec::of_native(Kind::Inline), None);
         assert_eq!(WaitSpec::of_native(Kind::InterceptIo), None);
         assert_eq!(WaitSpec::of_native(Kind::InterceptNet), None);

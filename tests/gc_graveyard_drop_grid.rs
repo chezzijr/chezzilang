@@ -19,9 +19,6 @@
 //! garbage writer is swept before the next write. Each run is its own process and must exit 0 with
 //! its golden stdout within [`LIMIT`]. A run that outlives the bound is killed and FAILS. It is
 //! never retried.
-//!
-//! No `t1` cell: at one worker a job's blocked FIFO write keeps the one run permit (`vm/width.rs`),
-//! so `main` cannot run to drain the FIFO. An explicit `flush()` hangs there too, on main before M5.
 
 #[path = "support/grid_tests.rs"]
 #[macro_use]
@@ -204,6 +201,9 @@ fn assert_cell(kind: &str, threads: &str) {
         cmd.env_remove("CHEZZI_GC_STRESS");
     }
     match threads {
+        "t1" => {
+            cmd.env("CHEZZI_THREADS", "1");
+        }
         "t2" => {
             cmd.env("CHEZZI_THREADS", "2");
         }
@@ -250,4 +250,4 @@ fn assert_cell(kind: &str, threads: &str) {
     assert_eq!(out, want, "{name}: stdout\nstderr:\n{err}");
 }
 
-grid_tests!(KINDS x THREADS: [rev, order, nested_order, create_no_gc] x [t2, t4, tdefault] => crate::assert_cell);
+grid_tests!(KINDS x THREADS: [rev, order, nested_order, create_no_gc] x [t1, t2, t4, tdefault] => crate::assert_cell);

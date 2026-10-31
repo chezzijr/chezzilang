@@ -1,7 +1,7 @@
 // vm::fileio — R2 `Writer` / file-handle methods + openers. `super::*` == the `vm` module.
 // Mirrors vm::netio's Socket handle dispatch, but blocking-classified with NO netpoller/park
-// (regular files are always epoll-ready, so file writes are synchronous blocking syscalls). The
-// stdout/stderr backings route through `Vm::emit_out`/`emit_err` (`Vm.out`, what the golden test
+// (file writes are synchronous blocking syscalls; one on a FIFO, a pipe or a device runs in the
+// `Vm::host_wait` bracket, which hands its runner slot over). The stdout/stderr backings route through `Vm::emit_out`/`emit_err` (`Vm.out`, what the golden test
 // suite captures), never a raw fd.
 
 use super::*;
@@ -14,6 +14,8 @@ enum WriteErr {
     Closed,
     /// A real I/O error (ENOSPC, a broken pipe, …), rendered for the `Result::Err` payload.
     Io(String),
+    /// The `Vm::host_wait` bracket could not demote the worker: the op faults.
+    Fault(RuntimeError),
 }
 
 /// What a write to a writer core leaves to do once its lock is released.
@@ -35,7 +37,7 @@ fn from_inner(e: WriteErr) -> WriteErr {
         WriteErr::Closed => {
             WriteErr::Io("the inner writer this buffer drains into is closed".into())
         }
-        io => io,
+        other @ (WriteErr::Io(_) | WriteErr::Fault(_)) => other,
     }
 }
 
@@ -79,21 +81,43 @@ impl Vm {
         }
     }
 
+    /// The door of a syscall on a `Writer`/`Reader` fd: the [`Vm::host_wait`] bracket when the
+    /// fd can wait without end (`waits`: a FIFO, a pipe or a device), so the party on its other end
+    /// runs at one worker too (Go hands off its P); else the GC door.
+    fn fd_door<R>(
+        &mut self,
+        waits: bool,
+        span: Span,
+        f: impl FnOnce() -> R,
+    ) -> Result<R, RuntimeError> {
+        if waits {
+            self.host_wait(
+                Some(WaitSpec::HostFd),
+                "a FIFO or pipe syscall",
+                span,
+                |_| f(),
+            )
+        } else {
+            Ok(self.gc_blocking(&[], |_| f()))
+        }
+    }
+
     /// M1.5 — run `op` under a writer core's lock. With the lock free and `local` true no
-    /// syscall can happen, and `op` runs attached; else the lock and the write run through the GC
-    /// door (Go `entersyscall` only around a real syscall).
+    /// syscall can happen, and `op` runs attached; else the lock and the write run through
+    /// [`Vm::fd_door`] (Go `entersyscall` only around a real syscall).
     fn with_writer_lock<R>(
         &mut self,
         core: &WriterCore,
+        span: Span,
         local: impl FnOnce(&Option<Backing>) -> bool,
         op: impl FnOnce(&mut Option<Backing>) -> R,
-    ) -> R {
+    ) -> Result<R, RuntimeError> {
         if let Ok(mut guard) = core.inner.try_lock()
             && local(&guard)
         {
-            return op(&mut guard);
+            return Ok(op(&mut guard));
         }
-        self.gc_blocking(&[], |_| {
+        self.fd_door(core.waits, span, || {
             op(&mut core.inner.lock().unwrap_or_else(|e| e.into_inner()))
         })
     }
@@ -105,19 +129,27 @@ impl Vm {
     /// on the console exactly as it already was on a file (W6-9); `Buffered` → append to the in-VM
     /// buffer and drain to the inner core once it reaches `cap`. Returns the byte count on success —
     /// no backing can short-write (`write_all` / in-memory / an unbounded queue).
-    fn write_to_core(&mut self, core: &WriterCore, data: &[u8]) -> Result<usize, WriteErr> {
+    fn write_to_core(
+        &mut self,
+        core: &WriterCore,
+        data: &[u8],
+        span: Span,
+    ) -> Result<usize, WriteErr> {
         // Take the drain decision under the lock, then route to the inner core with the lock RELEASED
         // (the inner core has its own Mutex; a Stdout inner needs `&mut self`).
         // M1.5 — a file write reaches the fd (a FIFO or a pipe blocks), so it runs with the lock
         // through the GC door; a write a `Buffered` core keeps in its buffer runs attached. The
         // console sinks are written after the lock is released.
-        let next = self.with_writer_lock(core, writes_are_buffered, |g| write_locked(g, data))?;
+        let next = self
+            .with_writer_lock(core, span, writes_are_buffered, |g| write_locked(g, data))
+            .map_err(WriteErr::Fault)??;
         match next {
             Wrote::Done => {}
             Wrote::Stdout => self.emit_out_bytes(data),
             Wrote::Stderr => self.emit_err_bytes(data),
             Wrote::Drain(inner, drained) => {
-                self.write_to_core(&inner, &drained).map_err(from_inner)?;
+                self.write_to_core(&inner, &drained, span)
+                    .map_err(from_inner)?;
             }
         }
         Ok(data.len())
@@ -126,17 +158,20 @@ impl Vm {
     /// R2 — flush a writer core. `File` and `Stdout`/`Stderr` → an honest no-op: each holds no
     /// buffer (M5c: a file writer is unbuffered, Go `os.File`; a flush is not `File.Sync`).
     /// `Buffered` → drain the in-VM buffer to the inner core, THEN flush the inner.
-    fn flush_core(&mut self, core: &WriterCore) -> Result<(), WriteErr> {
+    fn flush_core(&mut self, core: &WriterCore, span: Span) -> Result<(), WriteErr> {
         // No backing's flush reaches the fd (a file holds no buffer; a `Buffered` drain is a write
         // on the inner core), so it runs attached unless the lock is busy.
-        let drain = self.with_writer_lock(core, |_| true, flush_locked)?;
+        let drain = self
+            .with_writer_lock(core, span, |_| true, flush_locked)
+            .map_err(WriteErr::Fault)??;
         if let Some((inner, drained)) = drain {
             // Guard the WRITE, not the flush: an empty `write_to_core` on a `Stdout`/`Stderr` inner
             // would hand `emit_out("")` to the captured `Vm.out` buffer / stream queue.
             if !drained.is_empty() {
-                self.write_to_core(&inner, &drained).map_err(from_inner)?;
+                self.write_to_core(&inner, &drained, span)
+                    .map_err(from_inner)?;
             }
-            self.flush_core(&inner).map_err(from_inner)?;
+            self.flush_core(&inner, span).map_err(from_inner)?;
         }
         Ok(())
     }
@@ -171,19 +206,21 @@ impl Vm {
                     return Err(self.err("write expects a str".into(), span));
                 };
                 let core = self.writer_core(h);
-                match self.write_to_core(&core, &data) {
+                match self.write_to_core(&core, &data, span) {
                     Ok(n) => Ok(self.sock_ok(Value::int(n as i64))),
                     Err(WriteErr::Closed) => Ok(self.sock_err("write on a closed writer")),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
+                    Err(WriteErr::Fault(e)) => Err(e),
                 }
             }
             WriterMethod::Flush => {
                 self.arity_err("flush", args, 0, span)?;
                 let core = self.writer_core(h);
-                match self.flush_core(&core) {
+                match self.flush_core(&core, span) {
                     Ok(()) => Ok(self.sock_ok(Value::nil())),
                     Err(WriteErr::Closed) => Ok(self.sock_err("flush on a closed writer")),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
+                    Err(WriteErr::Fault(e)) => Err(e),
                 }
             }
             WriterMethod::Close => {
@@ -191,12 +228,13 @@ impl Vm {
                 let core = self.writer_core(h);
                 // Flush the tail first, THEN take + drop the backing (closing the fd). A flush error on
                 // close still surfaces, but the backing is dropped regardless (no leaked fd).
-                let flushed = self.flush_core(&core);
+                let flushed = self.flush_core(&core, span);
                 // M1.5 — the drop closes the fd, through the door (a FIFO close can wait on its lock).
-                self.gc_blocking(&[], |_| close_slot(&core.inner));
+                self.fd_door(core.waits, span, || close_slot(&core.inner))?;
                 match flushed {
                     Ok(()) | Err(WriteErr::Closed) => Ok(self.sock_ok(Value::nil())),
                     Err(WriteErr::Io(e)) => Ok(self.sock_err(e)),
+                    Err(WriteErr::Fault(e)) => Err(e),
                 }
             }
         }
@@ -238,20 +276,22 @@ impl Vm {
         } else {
             return Err(self.err(format!("io.{verb} expects a path"), span));
         };
-        // M1.5 — an open blocks (a FIFO waits for its reader): it runs through the GC door.
-        let opened = self.gc_blocking(&[], |_| match verb {
+        // M1.5 — an open blocks (a FIFO waits for its reader): it runs through the door.
+        let waits = self.gc_blocking(&[], |_| path_waits(&path));
+        let opened = self.fd_door(waits, span, || match verb {
             "create" => std::fs::File::create(&path),
             "append" => std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path),
             _ => unreachable!("io_open on '{verb}'"),
-        });
+        })?;
         match opened {
             Ok(f) => {
                 let core = Arc::new(WriterCore {
                     inner: Mutex::new(Some(Backing::File(f))),
                     key: core::next_poll_key(),
+                    waits,
                 });
                 let v = Value::obj(self.heap.alloc(Obj::Writer(core)));
                 Ok(self.sock_ok(v))
@@ -266,6 +306,7 @@ impl Vm {
         let core = Arc::new(WriterCore {
             inner: Mutex::new(Some(backing)),
             key: core::next_poll_key(),
+            waits: false,
         });
         Value::obj(self.heap.alloc(Obj::Writer(core)))
     }
@@ -293,6 +334,7 @@ impl Vm {
                 cap,
             })),
             key: core::next_poll_key(),
+            waits: false,
         });
         Ok(Value::obj(self.heap.alloc(Obj::Writer(core))))
     }
@@ -340,22 +382,23 @@ impl Vm {
 
     /// M1.5 — run `op` under the reader core's two locks. With both locks free and `buffered`
     /// true no syscall can happen, and `op` runs attached; else the locks and the read run through
-    /// the GC door (Go `entersyscall` only around a real syscall).
+    /// [`Vm::fd_door`] (Go `entersyscall` only around a real syscall).
     fn with_reader_locks<R>(
         &mut self,
         core: &ReaderCore,
+        span: Span,
         buffered: impl FnOnce(&core::ReaderCarry, &Option<std::io::BufReader<std::fs::File>>) -> bool,
         op: impl FnOnce(&mut core::ReaderCarry, &mut Option<std::io::BufReader<std::fs::File>>) -> R,
-    ) -> R {
+    ) -> Result<R, RuntimeError> {
         // LOCK ORDER: `carry` OUTER, `inner` INNER (see `ReaderCore::carry`). A `try_lock` never
         // waits, so the fast path cannot block attached.
         if let Ok(mut carry) = core.carry.try_lock()
             && let Ok(mut guard) = core.inner.try_lock()
             && buffered(&carry, &guard)
         {
-            return op(&mut carry, &mut guard);
+            return Ok(op(&mut carry, &mut guard));
         }
-        self.gc_blocking(&[], |_| {
+        self.fd_door(core.waits, span, || {
             let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
             let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
             op(&mut carry, &mut guard)
@@ -382,13 +425,9 @@ impl Vm {
     /// here; an unknown one faults below). The fourth read path, `lines()`, is a BODIED pure-Chezzi
     /// generator over `read_line` (`std/io.chz`) — it inherits the carry and the stickiness for free.
     ///
-    /// No netpoller park — file reads block synchronously (regular files are always epoll-ready).
-    /// M1.5 — a read that can make a syscall runs detached through the GC door
-    /// (`with_reader_locks`), so a slow fifo/pipe read stalls no stop of the world.
-    ///
-    /// ponytail: an inline blocking read can pin an M:N worker on a slow fifo/pipe — the same accepted
-    /// ceiling `Writer.write` carries; NOT offloaded to the dirty pool (that path is whole-file-only).
-    /// For the intended regular-file use (always ready) the risk is nil; add offload if a fifo use lands.
+    /// No netpoller park — file reads block synchronously. M1.5 — a read that can make a syscall
+    /// runs detached through [`Vm::fd_door`] (`with_reader_locks`), so a slow FIFO or pipe read
+    /// stalls no stop of the world, and it hands its runner slot over, so the FIFO's writer runs.
     pub(super) fn reader_method(
         &mut self,
         h: GcRef,
@@ -403,7 +442,8 @@ impl Vm {
             ReaderMethod::ReadLine => {
                 self.arity_err("read_line", args, 0, span)?;
                 let core = self.reader_core(h);
-                let outcome = self.with_reader_locks(&core, line_is_buffered, read_line_locked);
+                let outcome =
+                    self.with_reader_locks(&core, span, line_is_buffered, read_line_locked)?;
                 match outcome {
                     Ok(Some(line)) => {
                         let sv = self.alloc_str(line);
@@ -426,9 +466,10 @@ impl Vm {
                 let core = self.reader_core(h);
                 let outcome = self.with_reader_locks(
                     &core,
+                    span,
                     |carry, guard| bytes_are_buffered(carry, guard, n),
                     |carry, guard| read_bytes_locked(carry, guard, n),
-                );
+                )?;
                 match outcome {
                     Ok(buf) => {
                         let bv = Value::obj(self.heap.alloc(Obj::Bytes(buf.into_boxed_slice())));
@@ -446,11 +487,11 @@ impl Vm {
                 // forbids is inner-then-carry, so close takes the carry first. Closed is closed: the
                 // carry is discarded with the fd (W7-9).
                 // M1.5 — the locks can wait for a read in progress: through the GC door.
-                self.gc_blocking(&[], |_| {
+                self.fd_door(core.waits, span, || {
                     let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
                     close_slot(&core.inner);
                     carry.reset();
-                });
+                })?;
                 Ok(self.sock_ok(Value::nil()))
             }
         }
@@ -469,31 +510,37 @@ impl Vm {
             return Err(self.err("io.open expects a path".into(), span));
         };
         // M1.5 — the open (a FIFO waits for its writer) and the directory probe run through the
-        // GC door; the handle is allocated after it.
-        let opened = self.gc_blocking(&[], |_| -> std::io::Result<Result<std::fs::File, String>> {
-            let f = std::fs::File::open(&path)?;
-            // `File::open` SUCCEEDS on a directory (Linux), which deferred the real failure to
-            // every subsequent read — with `read_line` advising `read_bytes`, which fails too.
-            // Reject at the call like `io.read_file` does (Python `open(dir)` → IsADirectoryError).
-            // The error text comes from a real 1-byte read, so it is the OS's own wording — the
-            // same string `io.read_file(dir)` already produces ("Is a directory (os error 21)"),
-            // not a second spelling of the same condition.
-            if f.metadata().is_ok_and(|m| m.is_dir()) {
-                let mut probe = [0u8; 1];
-                let msg = match std::io::Read::read(&mut &f, &mut probe) {
-                    Err(e) => format!("{e}"),
-                    Ok(_) => format!("{}", std::io::ErrorKind::IsADirectory),
-                };
-                return Ok(Err(msg));
-            }
-            Ok(Ok(f))
-        });
+        // door; the handle is allocated after it.
+        let waits = self.gc_blocking(&[], |_| path_waits(&path));
+        let opened = self.fd_door(
+            waits,
+            span,
+            || -> std::io::Result<Result<std::fs::File, String>> {
+                let f = std::fs::File::open(&path)?;
+                // `File::open` SUCCEEDS on a directory (Linux), which deferred the real failure to
+                // every subsequent read — with `read_line` advising `read_bytes`, which fails too.
+                // Reject at the call like `io.read_file` does (Python `open(dir)` → IsADirectoryError).
+                // The error text comes from a real 1-byte read, so it is the OS's own wording — the
+                // same string `io.read_file(dir)` already produces ("Is a directory (os error 21)"),
+                // not a second spelling of the same condition.
+                if f.metadata().is_ok_and(|m| m.is_dir()) {
+                    let mut probe = [0u8; 1];
+                    let msg = match std::io::Read::read(&mut &f, &mut probe) {
+                        Err(e) => format!("{e}"),
+                        Ok(_) => format!("{}", std::io::ErrorKind::IsADirectory),
+                    };
+                    return Ok(Err(msg));
+                }
+                Ok(Ok(f))
+            },
+        )?;
         match opened {
             Ok(Err(msg)) => Ok(self.sock_err(format!("{}: {msg}", path.display()))),
             Ok(Ok(f)) => {
                 let core = Arc::new(ReaderCore {
                     inner: Mutex::new(Some(std::io::BufReader::new(f))),
                     key: core::next_poll_key(),
+                    waits,
                     carry: Mutex::new(core::ReaderCarry::default()),
                 });
                 let v = Value::obj(self.heap.alloc(Obj::Reader(core)));
@@ -502,6 +549,12 @@ impl Vm {
             Err(e) => Ok(self.sock_err(format!("{}: {e}", path.display()))),
         }
     }
+}
+
+/// Can a syscall on the file at `path` wait without end: is it a FIFO, a socket or a device? A
+/// regular file, a directory and a path that does not exist yet answer at once.
+fn path_waits(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| !m.is_file() && !m.is_dir())
 }
 
 /// Close an I/O handle's `inner` slot: take its backing out under the lock, then drop it (a file

@@ -44,7 +44,7 @@ Modes:
 | `wait:` with timer + send arms | P | D | S | I | I | I | yes |
 | `sleep_ms` | P | D | S | S | S | S | yes |
 | blocking native (`fs`, `request`, `process`) | P | D | I | I | I | I | yes |
-| stdin (`io.input`, …) | D | D | D | D | D | D | yes |
+| stdin (`io.input`, …), a `Writer`/`Reader` on a FIFO, pipe or device | D | D | D | D | D | D | yes |
 | socket `accept`/`read`/`write` | P | D | R | R | R | I | yes |
 | `net.connect` handshake | P | I | I | R | R | I | yes |
 | `Shared` update guard | D | D | D | D | D | D | no |
@@ -114,7 +114,10 @@ top-level `main` blocks it and succeeds, as CPython (0.1 ms) and Go (314 µs) bo
 
 A `Kind::HostWait` native (the `std.io` stdin readers) demotes the worker and gives its slot back for
 the read, direct or inside a callback, so a runnable sibling runs while stdin is withheld, as under
-Go's `sysmon`.
+Go's `sysmon`. An `io.create`/`io.append`/`io.open` handle on a FIFO, a pipe or a device does the same
+for each open, write, flush, read and close that reaches the fd, so the task on the other end runs,
+also at `--threads=1` (Go: a blocking syscall hands off its P). A handle on a regular file keeps the
+fast path: its syscalls answer at once.
 
 ---
 
