@@ -230,14 +230,14 @@ impl Vm {
                         span,
                     ));
                 }
-                // M1.5 — Go `cgocall`: a C call runs detached, through the GC door, and returns an
-                // off-heap `NativeRet`; nothing allocates. M3.0a — it reads the args copied out
-                // before the door opens. M1.8 — a callback that C calls meanwhile runs attached
-                // (`DoorHost::invoke_callback`, Go `cgocallback`) on the arg values, which the
-                // door pins.
+                // Go `cgocall`: a C call runs detached and returns an off-heap `NativeRet`; nothing
+                // allocates. It keeps its run permit (`None`): no watcher hands over the slot of a
+                // long C call yet. It reads the args copied out before the door opens. A callback that C
+                // calls meanwhile runs attached (`DoorHost::invoke_callback`, Go `cgocallback`) on
+                // the arg values, which the door pins.
                 let pins: Vec<GcRef> = args.iter().filter_map(|v| v.child_gcref()).collect();
                 let copies = self.copy_args(&args);
-                let ret = self.gc_blocking(&pins, |door| {
+                let ret = self.wait_door(&pins, |door| {
                     cffi.call(&mut DoorHost {
                         door,
                         args: copies,
@@ -463,27 +463,14 @@ impl Vm {
             let deadline = now
                 .checked_add(std::time::Duration::from_millis(ms as u64))
                 .unwrap_or_else(|| now + std::time::Duration::from_secs(86_400 * 365));
-            self.block_until_deadline(deadline, span)?;
+            self.block_until_deadline(WaitSpec::Sleep, deadline, span)?;
             return Ok(Value::nil());
         }
         let writes_before = self.stdout_writes;
-        // TICKET-141 — a `Kind::Blocking` native run inline (its offload path is unavailable inside a
-        // callback) waits on the host thread: hold no width permit across it.
-        //
-        // TICKET-151 (W14-40) — a `Kind::HostWait` native (a stdin read) waits on the host the same
-        // way, and does so even OUTSIDE a callback, on a fiber that never preempted. Two halves, both
-        // load-bearing: `block_enter` hands this thread's runner slot to one replacement worker and
-        // accounts `running -> inflight` (a read returns on the user's input, so it must veto the
-        // deadlock predicate); the width release is DEC-141's bracket, without which a gated thread's
-        // own replacement waits on the permit this thread still holds. With only the width bracket a
-        // thread that never preempted moves nothing (`width::holds()` is false). Deliberately NOT gated
-        // on `native_reentry > 0`: a direct `io.input` starves a sibling exactly like one in a callback.
-        // TICKET-181 — ONE bracket for every native that holds its host thread (`Blocking`,
-        // `HostWait`), picked by the table: stdin demotes in every context (DEC-151; with no M:N
-        // scheduler the bracket is DEC-052's pool-slot yield), and an off-heap blocking native in a
-        // Demote context demotes too (changed cell (f), F1: holding the runner hung `request.get`
-        // to a sibling-served socket at T=1). Gated on `holds_host_thread`, so `sleep_ms(<=0)`
-        // never demotes for a no-op. The DEC-141 width bracket stays inside it ([`Vm::host_wait`]).
+        // A native that holds its host thread (`Blocking` run inline, `HostWait`) waits through
+        // one bracket whose steps come from its `WaitSpec` row (`block::wait_steps`): stdin demotes
+        // in every context, so a sibling runs at one worker too, and its wait vetoes the deadlock
+        // verdict. Gated on `holds_host_thread`, so `sleep_ms(<=0)` never demotes for a no-op.
         let in_place = kind.holds_host_thread();
         let raw = if in_place {
             let what = if kind == Kind::HostWait {
@@ -491,11 +478,10 @@ impl Vm {
             } else {
                 "a blocking call"
             };
-            // M1.5 — a native that holds its host thread waits detached and returns an off-heap
-            // `NativeRet`: it allocates nothing on the heap. M3.0a — it reads the args copied out
-            // before the door opens, so the door pins nothing.
+            // It waits detached and returns an off-heap `NativeRet`: it allocates nothing on the
+            // heap. It reads the args copied out before the door opens, so the door pins nothing.
             let copies = self.copy_args(&args);
-            self.host_wait(WaitSpec::of_native(kind), what, span, |door| {
+            self.wait_once(WaitSpec::of_native(kind), what, span, &[], |door| {
                 func(&mut DoorHost {
                     door,
                     args: copies,

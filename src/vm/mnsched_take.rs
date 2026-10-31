@@ -15,7 +15,8 @@ impl MnSched {
     /// deadlock. (D4c will insert work-stealing passes between the local and the park.)
     ///
     /// M1.5 — `vm` is the worker shell that calls this, with no fiber swapped in: each wait here
-    /// runs through its GC door ([`Vm::gc_blocking`]), so a stop never waits for an idle worker.
+    /// runs through its GC door ([`Vm::wait_door`] with no spec), so a stop never waits for an idle
+    /// worker. Each pass releases the permit at its top and takes one only for work (TICKET-230).
     pub(super) fn take_runnable(
         &self,
         vm: &mut Vm,
@@ -233,7 +234,7 @@ impl MnSched {
             if self.detached.is_some() && c.all_scopes_done() {
                 if !lingered {
                     lingered = true;
-                    vm.gc_blocking(&[], |_| {
+                    vm.wait_door(&[], |_| {
                         let (guard, _) = self
                             .cv
                             .wait_timeout(c, EXEC_RUNNER_LINGER)
@@ -281,7 +282,7 @@ impl MnSched {
                 // is a declined licence or a moved epoch: wait (timed), never spin on it.
                 drop(c);
                 let Some(relocked) = self.latch_own_verdict(|_| self.may_fault_unproven()) else {
-                    vm.gc_blocking(&[], |_| {
+                    vm.wait_door(&[], |_| {
                         let (guard, _) = self
                             .cv
                             .wait_timeout(self.lock(), DEMOTE_POLL_BACKOFF)
@@ -299,7 +300,7 @@ impl MnSched {
                 // licenses it yet: wait (timed — `judged = false` so the next pass re-derives the
                 // W7-58 verdict too), never spin on the same declined judgement.
                 let Some(done) = self.flag_leaves_and_wake(&mut c) else {
-                    vm.gc_blocking(&[], |_| {
+                    vm.wait_door(&[], |_| {
                         let (guard, _) = self
                             .cv
                             .wait_timeout(c, DEMOTE_POLL_BACKOFF)
@@ -358,7 +359,7 @@ impl MnSched {
                     // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict
                     // wait as above.
                     let Some(done) = self.flag_leaves_and_wake(&mut c) else {
-                        vm.gc_blocking(&[], |_| {
+                        vm.wait_door(&[], |_| {
                             let (guard, _) = self
                                 .cv
                                 .wait_timeout(c, DEMOTE_POLL_BACKOFF)
@@ -406,7 +407,7 @@ impl MnSched {
             if self.runnable.load(Ordering::Relaxed) > 0 {
                 self.spinning.fetch_add(1, Ordering::Relaxed);
                 *spun = true;
-                vm.gc_blocking(&[], |_| {
+                vm.wait_door(&[], |_| {
                     let (guard, _) = self
                         .cv
                         .wait_timeout(c, SPIN_BACKOFF)
@@ -445,7 +446,7 @@ impl MnSched {
             match self.joiner_step(&c, me, &mut idle_since) {
                 JoinerStep::Untimed => {}
                 JoinerStep::Timed => {
-                    vm.gc_blocking(&[], |_| {
+                    vm.wait_door(&[], |_| {
                         let (guard, _) = self
                             .cv
                             .wait_timeout(c, DEMOTE_POLL_BACKOFF)
@@ -463,7 +464,7 @@ impl MnSched {
                 }
             }
             if judged {
-                vm.gc_blocking(&[], |_| {
+                vm.wait_door(&[], |_| {
                     let (guard, _) = self
                         .cv
                         .wait_timeout(c, DEMOTE_POLL_BACKOFF)
@@ -482,14 +483,14 @@ impl MnSched {
                 // untimed on `idle_cv` as before TICKET-230, and every wake reaches it through
                 // `notify_waiters` or `recruit`.
                 if !width::listed() {
-                    vm.gc_blocking(&[], |_| {
+                    vm.wait_door(&[], |_| {
                         self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
                         let guard = self.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
                         self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
                         drop(guard);
                     });
                 } else if !width::reserved() {
-                    vm.gc_blocking(&[], |_| {
+                    vm.wait_door(&[], |_| {
                         self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
                         let (guard, _) = self
                             .idle_cv

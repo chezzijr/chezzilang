@@ -9,6 +9,7 @@
 
 use super::gc_door::Detached;
 use super::quiesce::PartyWait;
+use super::{GcRef, width};
 use super::{MnSched, RuntimeError, SchedCore, Span, TraceFrame, Vm};
 use crate::native::Kind;
 use std::sync::Arc;
@@ -107,6 +108,53 @@ impl WaitSpec {
             Kind::HostWait => Some(WaitSpec::HostFd),
             Kind::Inline | Kind::InterceptIo | Kind::InterceptNet | Kind::InterceptTimer => None,
         }
+    }
+
+    /// The row of a syscall on a `Writer`/`Reader` fd: `HostFd` when the fd can wait without end (a
+    /// FIFO, a pipe or a device), `None` for a regular file, whose syscalls answer at once.
+    pub(super) fn of_fd(waits: bool) -> Option<WaitSpec> {
+        waits.then_some(WaitSpec::HostFd)
+    }
+}
+
+/// The bookkeeping steps a wait on a VM host thread takes, besides the GC detach that every wait
+/// takes: [`wait_steps`]'s answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct WaitSteps {
+    /// hold no run permit during the wait (Go: a blocking syscall hands off its P)
+    pub(super) permit: bool,
+    /// [`Vm::block_enter`]: hand this worker's runner slot to a replacement and account the wait
+    pub(super) demote: bool,
+}
+
+/// THE steps of a wait, from its kind and the block context. `None` is a wait that ends at once (a
+/// regular-file syscall, a stat, a permit take): it keeps the permit. Every listed spec can last
+/// past one tick, so it releases the permit. The demote is the `Demote` cell of [`mode`].
+pub(super) fn wait_steps(spec: Option<WaitSpec>, ctx: BlockCtx) -> WaitSteps {
+    let Some(spec) = spec else {
+        return WaitSteps {
+            permit: false,
+            demote: false,
+        };
+    };
+    let demote = match spec {
+        // A nursery joiner hands its slot over in `Vm::joiner_shell`, not here.
+        WaitSpec::Nursery => false,
+        WaitSpec::Recv
+        | WaitSpec::Timer
+        | WaitSpec::Send
+        | WaitSpec::Wait { .. }
+        | WaitSpec::Sleep
+        | WaitSpec::Offload
+        | WaitSpec::HostFd
+        | WaitSpec::Socket
+        | WaitSpec::Connect
+        | WaitSpec::Guard
+        | WaitSpec::Join => mode(ctx, spec) == BlockMode::Demote,
+    };
+    WaitSteps {
+        permit: true,
+        demote,
     }
 }
 
@@ -361,14 +409,14 @@ impl Waiter {
 /// A demote bracket entered by [`Vm::block_enter`]: how the wait is accounted while this worker
 /// is off `running`. Ended by [`DemoteReg::release`] (a waiter-registered wait, in the same lock
 /// hold as the pop or settle that ends it — DEC-176) or [`Vm::block_exit`] (a `will_return` wait).
-pub(super) struct DemoteReg {
+struct DemoteReg {
     /// the `SchedCore::waiters` token, or `None` for an `inflight` wait
     tok: Option<u64>,
 }
 
 impl DemoteReg {
     /// End the bracket under core lock A: back onto `running`, and un-account the wait.
-    pub(super) fn release(self, sched: &MnSched, c: &mut SchedCore) {
+    fn release(self, sched: &MnSched, c: &mut SchedCore) {
         c.running += 1;
         match self.tok {
             Some(tok) => c.unregister_waiter(tok),
@@ -379,13 +427,33 @@ impl DemoteReg {
     }
 }
 
+/// A wait started by [`Vm::wait_begin`]: the demote bracket, when the wait's steps take one, and
+/// whether the wait gave its run permit back. [`Vm::wait_end`] ends it.
+pub(super) struct WaitReg {
+    demote: Option<DemoteReg>,
+    released: bool,
+    /// a tick of this wait already ran ([`Vm::wait_tick`])
+    ticked: bool,
+}
+
+impl WaitReg {
+    /// End a registered wait's demote under core lock A, in the same hold as the pop or settle
+    /// that ends it (DEC-176). A no-op when the wait took no demote. [`Vm::wait_end`] still ends
+    /// the wait.
+    pub(super) fn release(&mut self, sched: &MnSched, c: &mut SchedCore) {
+        if let Some(reg) = self.demote.take() {
+            reg.release(sched, c);
+        }
+    }
+}
+
 impl Vm {
     /// THE demote bracket: take this worker off `running` and account the wait by its spec — a
     /// `will_return` wait is `inflight` (it vetoes the verdict), every other one registers a
     /// [`Waiter`] on `wait` the verdict asks "can you still be satisfied?". Spawns this thread's
     /// replacement worker once. With no M:N scheduler (`mn == None`) it keeps DEC-052's
     /// `yield_pool_slot(None)` and accounts nothing.
-    pub(super) fn block_enter(
+    fn block_enter(
         &mut self,
         spec: WaitSpec,
         wait: Option<PartyWait>,
@@ -433,7 +501,7 @@ impl Vm {
 
     /// End a `will_return` bracket: takes core lock A itself. With no M:N scheduler there is
     /// nothing to undo, exactly as before (DEC-052).
-    pub(super) fn block_exit(&mut self, reg: DemoteReg) {
+    fn block_exit(&mut self, reg: DemoteReg) {
         debug_assert!(
             reg.tok.is_none(),
             "a waiter-registered wait releases under its own pop"
@@ -443,30 +511,124 @@ impl Vm {
         }
     }
 
-    /// THE bracket of a wait that holds its host thread: a `Kind::Blocking`/`Kind::HostWait`
-    /// native run inline, or a `Writer`/`Reader` syscall on a FIFO, a pipe or a device. When the
-    /// table says Demote for `spec`, [`Vm::block_enter`] hands this worker's runner slot to a
-    /// replacement; the width permit is released for `f`, which runs through the GC door (Go: a
-    /// blocking syscall hands off its P). Without it, at one worker the party on the other end of
-    /// the fd never runs.
-    pub(super) fn host_wait<R>(
+    /// THE start of a wait: steps (b) and (c) of [`wait_steps`], once for the whole wait (Go
+    /// `entersyscall`). When the steps say demote, [`Vm::block_enter`] hands this worker's runner
+    /// slot to a replacement and accounts the wait (`wait` is its registered waiter, `None` for a
+    /// `will_return` wait). Then the thread gives its run permit back, if it holds one. Each tick of
+    /// the wait runs through [`Vm::wait_door`]; [`Vm::wait_end`] ends it.
+    pub(super) fn wait_begin(
+        &mut self,
+        spec: WaitSpec,
+        wait: Option<PartyWait>,
+        what: &str,
+        span: Span,
+    ) -> Result<WaitReg, RuntimeError> {
+        let demote = if wait_steps(Some(spec), self.block_ctx()).demote {
+            Some(self.block_enter(spec, wait, what, span)?)
+        } else {
+            None
+        };
+        let mut reg = self.wait_permit(spec);
+        reg.demote = demote;
+        Ok(reg)
+    }
+
+    /// Step (b) alone: the start of a wait whose demote comes later ([`Vm::wait_demote`], the
+    /// guard's second stage, DEC-016) or is not this table's (a nursery joiner hands its slot over
+    /// in `Vm::joiner_shell`).
+    pub(super) fn wait_permit(&mut self, spec: WaitSpec) -> WaitReg {
+        let released = wait_steps(Some(spec), self.block_ctx()).permit && width::holds();
+        if released {
+            width::release();
+        }
+        WaitReg {
+            demote: None,
+            released,
+            ticked: false,
+        }
+    }
+
+    /// Step (c) on a wait that [`Vm::wait_permit`] started: the guard's second stage.
+    pub(super) fn wait_demote(
+        &mut self,
+        reg: &mut WaitReg,
+        spec: WaitSpec,
+        wait: Option<PartyWait>,
+        what: &str,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        if wait_steps(Some(spec), self.block_ctx()).demote {
+            reg.demote = Some(self.block_enter(spec, wait, what, span)?);
+        }
+        Ok(())
+    }
+
+    /// TICKET-193 — take the permit back in the middle of a wait, before the guard take: a thread
+    /// that takes the guard first parks the guard's owner behind permit holders.
+    pub(super) fn wait_retake(&mut self, reg: &WaitReg) {
+        if reg.released {
+            self.width_acquire();
+        }
+    }
+
+    /// Give the permit back again after [`Vm::wait_retake`], when the take lost its race.
+    pub(super) fn wait_rerelease(&mut self, reg: &WaitReg) {
+        if reg.released {
+            width::release();
+        }
+    }
+
+    /// One tick of a wait that loops: [`Vm::wait_door`] around `f`. A later tick that finds a turn
+    /// a waker queued for this thread (`width::reserved`, a gated wait) takes the turn and passes it
+    /// on before it waits again, as a per-tick re-take of the permit did: a turn nobody takes blocks
+    /// the head of the queue. The first tick does not, so a turn queued at the start of the wait is
+    /// taken by [`Vm::wait_end`] in the waker's order.
+    pub(super) fn wait_tick<R>(
+        &mut self,
+        reg: &mut WaitReg,
+        pins: &[GcRef],
+        f: impl FnOnce(&mut Detached<'_>) -> R,
+    ) -> R {
+        let pass = reg.released && reg.ticked;
+        reg.ticked = true;
+        self.wait_door(pins, |door| {
+            if pass && !width::holds() && width::reserved() {
+                width::acquire();
+                width::release();
+            }
+            f(door)
+        })
+    }
+
+    /// End a wait (Go `exitsyscall`): take the permit back if the wait gave it up, a free one first
+    /// (`pins` are the values the caller holds in Rust locals across that take), then end a
+    /// `will_return` demote.
+    pub(super) fn wait_end(&mut self, reg: WaitReg, pins: &[GcRef]) {
+        if reg.released {
+            self.width_acquire_pinned(pins);
+        }
+        if let Some(reg) = reg.demote {
+            self.block_exit(reg);
+        }
+    }
+
+    /// A wait of one tick: [`Vm::wait_begin`], [`Vm::wait_door`] around `f`, [`Vm::wait_end`].
+    /// For a `will_return` spec or `None`.
+    pub(super) fn wait_once<R>(
         &mut self,
         spec: Option<WaitSpec>,
         what: &str,
         span: Span,
+        pins: &[GcRef],
         f: impl FnOnce(&mut Detached<'_>) -> R,
     ) -> Result<R, RuntimeError> {
         let reg = match spec {
-            Some(spec) if self.block_mode(spec) == BlockMode::Demote => {
-                Some(self.block_enter(spec, None, what, span)?)
-            }
-            _ => None,
+            Some(spec) => Some(self.wait_begin(spec, None, what, span)?),
+            None => None,
         };
-        self.width_release();
-        let r = self.gc_blocking(&[], f);
-        self.width_acquire();
+        let r = self.wait_door(pins, f);
         if let Some(reg) = reg {
-            self.block_exit(reg);
+            self.wait_end(reg, pins);
         }
         Ok(r)
     }
@@ -602,6 +764,34 @@ mod tests {
             let want: String = row.chars().filter(|c| *c != ' ').collect();
             assert_eq!(got, want, "row {name} ({spec:?})");
             assert_eq!(spec.will_return(), will_return, "will_return of {name}");
+        }
+    }
+
+    /// [`wait_steps`] in every context: a listed spec releases the permit and demotes on its
+    /// `Demote` cell of [`mode`], except a nursery join; `None` takes neither step.
+    #[test]
+    fn every_wait_steps_cell_derives_from_the_table() {
+        for ctx in contexts() {
+            assert_eq!(
+                wait_steps(None, ctx),
+                WaitSteps {
+                    permit: false,
+                    demote: false
+                },
+                "None in {ctx:?}"
+            );
+            for spec in specs() {
+                let steps = wait_steps(Some(spec), ctx);
+                let demote = spec != WaitSpec::Nursery && mode(ctx, spec) == BlockMode::Demote;
+                assert_eq!(
+                    steps,
+                    WaitSteps {
+                        permit: true,
+                        demote
+                    },
+                    "{spec:?} in {ctx:?}"
+                );
+            }
         }
     }
 

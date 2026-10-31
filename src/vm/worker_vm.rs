@@ -163,19 +163,12 @@ impl Vm {
         sched.close_body(0);
         sched.latch_terminate_if_done();
         let slack = usize::from(self.owns_nested_sched(&sched));
-        self.width_release();
-        let reg = if self.block_mode(WaitSpec::Join) == BlockMode::Demote {
-            let wait = PartyWait::Join(Arc::clone(&sched), slack);
-            match self.block_enter(WaitSpec::Join, Some(wait), "an Executor join", span) {
-                Ok(reg) => Some(reg),
-                Err(e) => {
-                    self.width_acquire();
-                    return Err(e);
-                }
-            }
-        } else {
-            None
-        };
+        let mut reg = self.wait_begin(
+            WaitSpec::Join,
+            Some(PartyWait::Join(Arc::clone(&sched), slack)),
+            "an Executor join",
+            span,
+        )?;
         let party = self.block_party_guard(PartyWait::Join(Arc::clone(&sched), slack), None);
         let leave = loop {
             if sched.lock().join_over(slack) {
@@ -189,13 +182,13 @@ impl Vm {
             {
                 break Some(m.deadlock_err.clone());
             }
-            self.gc_blocking(&[], |_| sched.join_tick(slack, DEMOTE_POLL_BACKOFF));
+            self.wait_door(&[], |_| sched.join_tick(slack, DEMOTE_POLL_BACKOFF));
         };
-        if let (Some(reg), Some(m)) = (reg, self.mn.clone()) {
+        if let Some(m) = self.mn.clone() {
             reg.release(&m, &mut m.lock());
         }
         drop(party);
-        self.width_acquire();
+        self.wait_end(reg, &[]);
         let take_scope =
             |core: &ExecutorCore| core.scope.lock().unwrap_or_else(|e| e.into_inner()).take();
         let Some(e) = leave else {
@@ -258,7 +251,7 @@ impl Vm {
             // read the job's own Executor (see `HOLD_RUN_END_PASS`).
             #[cfg(test)]
             if crate::vm::HOLD_RUN_END_PASS.load(Ordering::Relaxed) && self.fiber_scope.is_some() {
-                self.gc_blocking(&[], |_| {
+                self.wait_door(&[], |_| {
                     std::thread::sleep(std::time::Duration::from_millis(900))
                 });
             }
@@ -308,7 +301,7 @@ impl Vm {
                 if crate::vm::HOLD_RUN_END_PASS.load(Ordering::Relaxed)
                     && self.fiber_scope.is_none()
                 {
-                    self.gc_blocking(&[], |_| {
+                    self.wait_door(&[], |_| {
                         std::thread::sleep(std::time::Duration::from_millis(600))
                     });
                 }
@@ -322,7 +315,7 @@ impl Vm {
     /// TICKET-284 — move one sched's finished output into this party's buffers, and take over the
     /// count of the exit output it moved ([`Vm::adopt_exit_output`]).
     fn take_job_streams(&mut self, sched: &MnSched) {
-        let (out, stderr, exits) = self.gc_blocking(&[], |_| sched.take_finished_streams());
+        let (out, stderr, exits) = self.wait_door(&[], |_| sched.take_finished_streams());
         self.out.extend_from_slice(&out);
         self.stderr.extend_from_slice(&stderr);
         self.adopt_exit_output(exits);

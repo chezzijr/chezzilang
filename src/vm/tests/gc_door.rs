@@ -37,7 +37,7 @@ fn a_panic_out_of_a_borrowed_shell_loop_leaves_its_token() {
         let sched = Arc::new(mk_sched(1));
         let mut shell = outer.spawn_worker();
         super::worker_loop::PANIC_AT_LOOP_TOP.with(|p| p.set(true));
-        let r = outer.gc_blocking(&[], |_| {
+        let r = outer.wait_door(&[], |_| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 shell.mn_worker_loop(&sched, 0, SENTINEL_SCOPE)
             }))
@@ -208,7 +208,7 @@ fn a_door_hands_its_retired_blocks_to_the_stop() {
             let v: RVec<u64> = RVec::with_capacity(1);
             v.push(&b.heap, 1);
             v.push(&b.heap, 2);
-            b.gc_blocking(&[], |_| {
+            b.wait_door(&[], |_| {
                 ready_tx.send(()).unwrap();
                 go_rx.recv().unwrap();
             });

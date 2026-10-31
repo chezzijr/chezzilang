@@ -240,8 +240,8 @@ impl Vm {
     ///
     /// TICKET-194: a free guard is taken with no cancellation point. Only a guard that would wait
     /// reaches `wait_halt`. Stage 1 (bounded by `GUARD_DEMOTE_BUDGET`, in place, DEC-016) then waits
-    /// holding no permit (DEC-141), the same order as `guard_wait_block` ([`Vm::guard_free_then_take`]).
-    /// Stage 1 reads the halts when the guard comes free (TICKET-200).
+    /// as `guard_wait_block` does ([`Vm::guard_free_then_take`]). Stage 1 reads the halts when the
+    /// guard comes free (TICKET-200).
     pub(super) fn take_update_guard<'a>(
         &mut self,
         key: GuardKey<'a>,
@@ -259,11 +259,11 @@ impl Vm {
                 let mut ticket = core::WaitTicket::new(key);
                 self.wait_halt(span)?;
                 let until = std::time::Instant::now() + GUARD_DEMOTE_BUDGET;
-                self.width_release();
+                // One wait over both stages: the permit is given back for all of it.
+                let mut reg = self.wait_permit(WaitSpec::Guard);
                 let staged = loop {
                     let left = until.saturating_duration_since(std::time::Instant::now());
-                    // No `?` in this loop: a halt must still reach `width_acquire` below.
-                    match self.guard_free_then_take(&mut ticket, None, left, span) {
+                    match self.guard_free_then_take(&reg, &mut ticket, None, left, span) {
                         Err(halt) => break Some(Err(halt)),
                         Ok(Ok(Some(g))) => break Some(Ok(Ok(g))),
                         Ok(Err(c)) => break Some(Ok(Err(c))),
@@ -271,11 +271,12 @@ impl Vm {
                         Ok(Ok(None)) => {}
                     }
                 };
-                self.width_acquire();
-                match staged {
-                    Some(r) => r?,
-                    None => self.guard_wait_block(key, &mut ticket, what, span)?,
-                }
+                let r = match staged {
+                    Some(r) => r,
+                    None => self.guard_wait_block(&mut reg, key, &mut ticket, what, span),
+                };
+                self.wait_end(reg, &[]);
+                r?
             }
         };
         let kind = key.lock.kind;
@@ -311,25 +312,25 @@ impl Vm {
         }
     }
 
-    /// TICKET-193/194 — THE guard order: wait for the guard to look free holding NO width permit
-    /// (DEC-141), take the permit, then take the guard with no wait. The caller holds no permit.
-    /// `Ok(Some)` and `Err` return holding the permit; `Ok(None)` (still held after `budget`, or
-    /// lost the race) returns without it. Stage 1 of [`Vm::take_update_guard`] and
-    /// [`Vm::guard_wait_block`] both call it. The `ticket` stays live across the permit handoff.
+    /// TICKET-193/194 — THE guard order: wait for the guard to look free holding no width permit,
+    /// take the permit back ([`Vm::wait_retake`]), then take the guard with no wait. So the permit
+    /// comes before the guard; a lost race gives it back again. `Ok(None)` is still held after `budget`, or lost the race.
+    /// Stage 1 of [`Vm::take_update_guard`] and [`Vm::guard_wait_block`] both call it. The `ticket`
+    /// stays live across the permit handoff.
     ///
     /// TICKET-200 — a wait that ends because the guard came free reads the halts
     /// ([`Vm::block_halts`]) before it takes the guard, because the free may be the halt's own cut
-    /// of the holder (an `os.exit` or a cancel unwinding the holder's `update`). A halt returns
-    /// `Err` holding no permit, like `Ok(None)`.
+    /// of the holder (an `os.exit` or a cancel unwinding the holder's `update`).
     fn guard_free_then_take<'a>(
         &mut self,
+        reg: &WaitReg,
         ticket: &mut core::WaitTicket<'a>,
         taking: Option<&std::sync::atomic::AtomicBool>,
         budget: std::time::Duration,
         span: Span,
     ) -> Result<Result<Option<core::UpdateGuard<'a>>, GuardCycle>, RuntimeError> {
         let me = self.guard_token;
-        match self.gc_blocking(&[], |_| {
+        match self.wait_door(&[], |_| {
             core::await_update_guard_free(ticket, me, Some(budget))
         }) {
             Err(c) => return Ok(Err(c)),
@@ -337,7 +338,7 @@ impl Vm {
             Ok(true) => {}
         }
         self.block_halts(span)?;
-        self.width_acquire();
+        self.wait_retake(reg);
         // A registered waiter marks its take before it tries (`core::GuardWait::taking`).
         let mark = |on: bool| {
             if let Some(t) = taking {
@@ -348,7 +349,7 @@ impl Vm {
         Ok(Ok(match ticket.try_take(me) {
             None => {
                 mark(false);
-                self.width_release();
+                self.wait_rerelease(reg);
                 None
             }
             g => g,
@@ -364,6 +365,7 @@ impl Vm {
     /// are un-accounted via `guard_wait_exit` on every exit path (no `?` before that call).
     fn guard_wait_block<'a>(
         &mut self,
+        reg: &mut WaitReg,
         key: GuardKey<'a>,
         ticket: &mut core::WaitTicket<'a>,
         what: &str,
@@ -376,11 +378,7 @@ impl Vm {
             admitted: ticket.admission(),
         };
         let taking = Arc::clone(&owned.taking);
-        let reg = self.guard_wait_enter(owned.clone(), what, span)?;
-        // TICKET-141 — the holder of this guard may be a preempted `update` closure on a gated
-        // sibling thread; hold no width permit while the guard is busy. TICKET-193 — take the
-        // permit back BEFORE the guard (the loop below).
-        self.width_release();
+        self.guard_wait_enter(reg, owned.clone(), what, span)?;
         let _party = self.block_party_guard(
             quiesce::PartyWait::Guard(owned, self.guard_token),
             Some((GUARD_DEADLOCK, span)),
@@ -390,8 +388,13 @@ impl Vm {
             // take the permit, then take the guard without waiting. Taking the guard first parks
             // its OWNER behind permit holders that wait in place for that same guard, so every
             // handoff cost one GUARD_DEMOTE_BUDGET (T=2: 7172 timeouts, 18.9 s).
-            match self.guard_free_then_take(ticket, Some(&taking), super::DEMOTE_POLL_BACKOFF, span)
-            {
+            match self.guard_free_then_take(
+                reg,
+                ticket,
+                Some(&taking),
+                super::DEMOTE_POLL_BACKOFF,
+                span,
+            ) {
                 Ok(Ok(Some(g))) => break Ok(Ok(g)),
                 Ok(Err(cycle)) => break Ok(Err(cycle)),
                 Err(e) => break Err(e),
@@ -416,7 +419,6 @@ impl Vm {
             }
         };
         self.guard_wait_exit(reg);
-        self.width_acquire();
         out
     }
 

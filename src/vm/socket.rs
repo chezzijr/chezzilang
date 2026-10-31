@@ -204,113 +204,118 @@ impl Vm {
             return Err(self.err(format!("std.net.{name} expects an address string"), span));
         };
         match name {
-            // M1.5 — name resolution (`getaddrinfo`) blocks: connect and listen run through the
-            // GC door.
-            "connect" => match self
-                .gc_blocking(&[], |_| crate::native::net::connect_nonblocking(&addr))
-            {
-                // Connected synchronously — wrap + return at once. RARE, and this comment used to
-                // claim it was "the common loopback case", which is measured false on Linux: a
-                // non-blocking `connect` reports `EINPROGRESS` even to a LIVE loopback listener
-                // (and to a closed loopback port — `connect_ex(('127.0.0.1', <closed>))` → `115`).
-                // The arm below is the normal path, not the fallback, which is why W7-59's gate
-                // choice there decides `net.connect`'s whole behaviour rather than a corner of it.
-                Ok((stream, false)) => {
-                    Ok(self.alloc_socket_ok(stream, core::next_poll_key(), core::new_in_flight()))
-                }
-                // Handshake in flight: park the fiber on writability under the M:N engine; off it,
-                // block until the handshake settles — everywhere except an eager `Executor` job,
-                // whose thread is shared (W7-59).
-                Ok((stream, true)) => {
-                    let connect_mode = self.block_mode(WaitSpec::Connect);
-                    if connect_mode == BlockMode::Park {
-                        self.park_on_connect(stream, span);
-                        Ok(Value::nil()) // parked sentinel; `poll_park` gates the result-push at `do_call`
-                    } else if connect_mode == BlockMode::Refuse {
-                        // W7-59 — an eager `Executor` job. A job does not own its thread: it runs on the
-                        // bounded, process-wide `vm::pool` (`worker_count()`, never grown on demand) with
-                        // no `MnSched` under it to spin a replacement, so blocking here steals width from
-                        // every other job and every `parallel:` nursery sharing that pool — measured at
-                        // `CHEZZI_THREADS=1` as a 10 s pin on a black-hole address. Same family as
-                        // `W7-40`'s R2, and the same message the four sibling ops give this context.
-                        //
-                        // This `Connect` row is deliberately NARROWER than the siblings' `Socket`
-                        // row of `block::mode`, and the difference is not an oversight.
-                        // `accept`/`read` wait on a CHEZZI peer — a fiber that can only run on the very
-                        // thread they would block — so blocking the one thread that owns it is
-                        // self-starvation (`W7-40` R1). A `connect` handshake is completed by the
-                        // KERNEL, so no chezzi party is starved by waiting for it, and both ancestors
-                        // block: CPython `socket.connect` from the main thread returns in 0.1 ms, Go
-                        // `net.Dial` from the main goroutine in 314 µs — refusing it here would be a
-                        // divergence with nothing behind it.
-                        Ok(self.sock_err(sock_would_block_msg("connect")))
-                    } else {
-                        // Everywhere the thread is the program's own — top-level `main` on the
-                        // default engine, a `connect` inside a native callback on M:N: block, but
-                        // through the SHARED demote loop rather than a private sleep-spin, so the wait
-                        // gets that loop's escapes (`--timeout`, `cancel`, a run-wide `os.exit` — W7-47 —
-                        // and a torn-down nursery) and, on a worker shell, `block_enter`'s
-                        // replacement worker.
-                        //
-                        // The 10 s connect cap is deliberately NOT clamped by `self.deadline`, unlike the
-                        // spin this replaces. `demote_block_socket` re-reads the run deadline at the top
-                        // of every iteration and caps its kernel wait at `DEMOTE_POLL_BACKOFF`, so a
-                        // `--timeout` is observed within 5 ms and raised as a HARD `Err`. Clamping would
-                        // make the op's OWN deadline expire in the same instant, and the op's expiry is
-                        // the CATCHABLE `Err("timeout")` — i.e. the clamp would turn W7-18's swallow into
-                        // a race instead of preventing it.
-                        let dl = std::time::Instant::now()
-                            + std::time::Duration::from_secs(CONNECT_BLOCK_TIMEOUT_SECS);
-                        let fd = stream.as_raw_fd();
-                        // The closure is `FnMut`, so it cannot move `stream` out on the ready edge —
-                        // hold it in an `Option` and `take()` it there. It must outlive the wait either
-                        // way: it owns the fd the poller watches.
-                        let mut pending = Some(stream);
-                        let v = self.demote_block_socket(
-                            fd,
-                            poller::Interest::Write,
-                            Some(dl),
-                            span,
-                            move |vm| {
-                                let Some(s) = pending.as_ref() else {
-                                    // Unreachable: the ready edge below is the only `take`, and it also
-                                    // ends the loop.
-                                    return SockPoll::Ready(Ok(
-                                        vm.sock_err("connect failed: already completed")
-                                    ));
-                                };
-                                match crate::native::net::finish_connect(s) {
-                                    // SO_ERROR clear AND the peer is reachable ⇒ connected.
-                                    Ok(()) if s.peer_addr().is_ok() => {
-                                        let s = pending.take().expect("checked above");
-                                        SockPoll::Ready(Ok(vm.alloc_socket_ok(
-                                            s,
-                                            core::next_poll_key(),
-                                            core::new_in_flight(),
-                                        )))
+            // Name resolution (`getaddrinfo`) is an off-heap blocking call.
+            "connect" => {
+                match self.wait_once(Some(WaitSpec::Offload), "a name lookup", span, &[], |_| {
+                    crate::native::net::connect_nonblocking(&addr)
+                })? {
+                    // Connected synchronously — wrap + return at once. RARE, and this comment used to
+                    // claim it was "the common loopback case", which is measured false on Linux: a
+                    // non-blocking `connect` reports `EINPROGRESS` even to a LIVE loopback listener
+                    // (and to a closed loopback port — `connect_ex(('127.0.0.1', <closed>))` → `115`).
+                    // The arm below is the normal path, not the fallback, which is why W7-59's gate
+                    // choice there decides `net.connect`'s whole behaviour rather than a corner of it.
+                    Ok((stream, false)) => Ok(self.alloc_socket_ok(
+                        stream,
+                        core::next_poll_key(),
+                        core::new_in_flight(),
+                    )),
+                    // Handshake in flight: park the fiber on writability under the M:N engine; off it,
+                    // block until the handshake settles — everywhere except an eager `Executor` job,
+                    // whose thread is shared (W7-59).
+                    Ok((stream, true)) => {
+                        let connect_mode = self.block_mode(WaitSpec::Connect);
+                        if connect_mode == BlockMode::Park {
+                            self.park_on_connect(stream, span);
+                            Ok(Value::nil()) // parked sentinel; `poll_park` gates the result-push at `do_call`
+                        } else if connect_mode == BlockMode::Refuse {
+                            // W7-59 — an eager `Executor` job. A job does not own its thread: it runs on the
+                            // bounded, process-wide `vm::pool` (`worker_count()`, never grown on demand) with
+                            // no `MnSched` under it to spin a replacement, so blocking here steals width from
+                            // every other job and every `parallel:` nursery sharing that pool — measured at
+                            // `CHEZZI_THREADS=1` as a 10 s pin on a black-hole address. Same family as
+                            // `W7-40`'s R2, and the same message the four sibling ops give this context.
+                            //
+                            // This `Connect` row is deliberately NARROWER than the siblings' `Socket`
+                            // row of `block::mode`, and the difference is not an oversight.
+                            // `accept`/`read` wait on a CHEZZI peer — a fiber that can only run on the very
+                            // thread they would block — so blocking the one thread that owns it is
+                            // self-starvation (`W7-40` R1). A `connect` handshake is completed by the
+                            // KERNEL, so no chezzi party is starved by waiting for it, and both ancestors
+                            // block: CPython `socket.connect` from the main thread returns in 0.1 ms, Go
+                            // `net.Dial` from the main goroutine in 314 µs — refusing it here would be a
+                            // divergence with nothing behind it.
+                            Ok(self.sock_err(sock_would_block_msg("connect")))
+                        } else {
+                            // Everywhere the thread is the program's own — top-level `main` on the
+                            // default engine, a `connect` inside a native callback on M:N: block, but
+                            // through the SHARED demote loop rather than a private sleep-spin, so the wait
+                            // gets that loop's escapes (`--timeout`, `cancel`, a run-wide `os.exit` — W7-47 —
+                            // and a torn-down nursery). The `Connect` row waits in place: it never demotes.
+                            //
+                            // The 10 s connect cap is deliberately NOT clamped by `self.deadline`, unlike the
+                            // spin this replaces. `demote_block_socket` re-reads the run deadline at the top
+                            // of every iteration and caps its kernel wait at `DEMOTE_POLL_BACKOFF`, so a
+                            // `--timeout` is observed within 5 ms and raised as a HARD `Err`. Clamping would
+                            // make the op's OWN deadline expire in the same instant, and the op's expiry is
+                            // the CATCHABLE `Err("timeout")` — i.e. the clamp would turn W7-18's swallow into
+                            // a race instead of preventing it.
+                            let dl = std::time::Instant::now()
+                                + std::time::Duration::from_secs(CONNECT_BLOCK_TIMEOUT_SECS);
+                            let fd = stream.as_raw_fd();
+                            // The closure is `FnMut`, so it cannot move `stream` out on the ready edge —
+                            // hold it in an `Option` and `take()` it there. It must outlive the wait either
+                            // way: it owns the fd the poller watches.
+                            let mut pending = Some(stream);
+                            let v = self.demote_block_socket(
+                                WaitSpec::Connect,
+                                fd,
+                                poller::Interest::Write,
+                                Some(dl),
+                                span,
+                                move |vm| {
+                                    let Some(s) = pending.as_ref() else {
+                                        // Unreachable: the ready edge below is the only `take`, and it also
+                                        // ends the loop.
+                                        return SockPoll::Ready(Ok(
+                                            vm.sock_err("connect failed: already completed")
+                                        ));
+                                    };
+                                    match crate::native::net::finish_connect(s) {
+                                        // SO_ERROR clear AND the peer is reachable ⇒ connected.
+                                        Ok(()) if s.peer_addr().is_ok() => {
+                                            let s = pending.take().expect("checked above");
+                                            SockPoll::Ready(Ok(vm.alloc_socket_ok(
+                                                s,
+                                                core::next_poll_key(),
+                                                core::new_in_flight(),
+                                            )))
+                                        }
+                                        Err(e) => SockPoll::Ready(Ok(
+                                            vm.sock_err(format!("connect failed: {e}"))
+                                        )),
+                                        Ok(()) => SockPoll::WouldBlock, // not settled yet
                                     }
-                                    Err(e) => SockPoll::Ready(Ok(
-                                        vm.sock_err(format!("connect failed: {e}"))
-                                    )),
-                                    Ok(()) => SockPoll::WouldBlock, // not settled yet
-                                }
-                            },
-                        )?;
-                        // W7-18 — kept as a fence, no longer the mechanism. `demote_block_socket`'s own
-                        // rung raises the run deadline as a HARD `Err` within 5 ms, so this fires only
-                        // if a future change re-clamps the op deadline (see above) or reorders that
-                        // loop's two deadline checks — either of which would let a `--timeout` come
-                        // back as the CATCHABLE `Err("timeout")` and be swallowed by a `recover:`,
-                        // exactly what the hard-abort contract forbids. It costs one `Instant::now()`,
-                        // and only when a `--timeout` is armed at all.
-                        self.deadline_halt(span)?;
-                        Ok(v)
+                                },
+                            )?;
+                            // W7-18 — kept as a fence, no longer the mechanism. `demote_block_socket`'s own
+                            // rung raises the run deadline as a HARD `Err` within 5 ms, so this fires only
+                            // if a future change re-clamps the op deadline (see above) or reorders that
+                            // loop's two deadline checks — either of which would let a `--timeout` come
+                            // back as the CATCHABLE `Err("timeout")` and be swallowed by a `recover:`,
+                            // exactly what the hard-abort contract forbids. It costs one `Instant::now()`,
+                            // and only when a `--timeout` is armed at all.
+                            self.deadline_halt(span)?;
+                            Ok(v)
+                        }
                     }
+                    Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
                 }
-                Err(e) => Ok(self.sock_err(format!("{addr}: {e}"))),
-            },
+            }
             "listen" => {
-                match self.gc_blocking(&[], |_| crate::native::net::listen_nonblocking(&addr)) {
+                match self.wait_once(Some(WaitSpec::Offload), "a name lookup", span, &[], |_| {
+                    crate::native::net::listen_nonblocking(&addr)
+                })? {
                     Ok(listener) => {
                         let core = Arc::new(ListenerCore {
                             listener: Mutex::new(Some(listener)),
@@ -476,38 +481,45 @@ impl Vm {
                 }
                 // No fiber to park: block the thread in place, where that starves nobody
                 // (the `Socket` row of `block::mode`; `park_on_fd` returned the refusal elsewhere).
-                self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
-                    let mut b = vec![0u8; n];
-                    let r = {
-                        let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
-                        let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
-                        let Some(stream) = guard.as_mut() else {
-                            return SockPoll::Ready(Ok(
-                                vm.sock_err("read_bytes on a closed socket")
-                            ));
-                        };
-                        if !carry.is_empty() {
-                            let take = n.min(carry.len());
-                            Ok(carry.drain(..take).collect::<Vec<u8>>())
-                        } else {
-                            match std::io::Read::read(stream, &mut b) {
-                                Ok(got) => Ok(b[..got].to_vec()),
-                                Err(e) => Err(e),
+                self.demote_block_socket(
+                    WaitSpec::Socket,
+                    fd,
+                    poller::Interest::Read,
+                    deadline,
+                    span,
+                    move |vm| {
+                        let mut b = vec![0u8; n];
+                        let r = {
+                            let mut carry = core.carry.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                            let Some(stream) = guard.as_mut() else {
+                                return SockPoll::Ready(Ok(
+                                    vm.sock_err("read_bytes on a closed socket")
+                                ));
+                            };
+                            if !carry.is_empty() {
+                                let take = n.min(carry.len());
+                                Ok(carry.drain(..take).collect::<Vec<u8>>())
+                            } else {
+                                match std::io::Read::read(stream, &mut b) {
+                                    Ok(got) => Ok(b[..got].to_vec()),
+                                    Err(e) => Err(e),
+                                }
                             }
+                        };
+                        match r {
+                            Ok(bytes) => {
+                                let bv =
+                                    Value::obj(vm.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())));
+                                SockPoll::Ready(Ok(vm.sock_ok(bv)))
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                SockPoll::WouldBlock
+                            }
+                            Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
                         }
-                    };
-                    match r {
-                        Ok(bytes) => {
-                            let bv =
-                                Value::obj(vm.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())));
-                            SockPoll::Ready(Ok(vm.sock_ok(bv)))
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            SockPoll::WouldBlock
-                        }
-                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                    }
-                })
+                    },
+                )
             }
             Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
         }
@@ -672,6 +684,7 @@ impl Vm {
                     // `park_on_fd` already returned the loud refusal (a `Refuse` cell of the `Socket`
                     // row of `block::mode`).
                     return self.demote_block_socket(
+                        WaitSpec::Socket,
                         fd,
                         poller::Interest::Read,
                         deadline,
@@ -817,22 +830,33 @@ impl Vm {
                 // In-callback on M:N (or top-level `main` on the default engine) → demote +
                 // backoff-poll the non-blocking write in place (#3 socket half).
                 let mut sent = sent;
-                self.demote_block_socket(fd, poller::Interest::Write, deadline, span, move |vm| {
-                    let r = {
-                        let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
-                        let Some(stream) = guard.as_mut() else {
-                            return SockPoll::Ready(Ok(vm.sock_err("write on a closed socket")));
+                self.demote_block_socket(
+                    WaitSpec::Socket,
+                    fd,
+                    poller::Interest::Write,
+                    deadline,
+                    span,
+                    move |vm| {
+                        let r = {
+                            let mut guard = core.stream.lock().unwrap_or_else(|e| e.into_inner());
+                            let Some(stream) = guard.as_mut() else {
+                                return SockPoll::Ready(
+                                    Ok(vm.sock_err("write on a closed socket")),
+                                );
+                            };
+                            write_from(stream, &data, &mut sent)
                         };
-                        write_from(stream, &data, &mut sent)
-                    };
-                    match r {
-                        Ok(()) => SockPoll::Ready(Ok(vm.sock_ok(Value::int(data.len() as i64)))),
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            SockPoll::WouldBlock
+                        match r {
+                            Ok(()) => {
+                                SockPoll::Ready(Ok(vm.sock_ok(Value::int(data.len() as i64))))
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                SockPoll::WouldBlock
+                            }
+                            Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
                         }
-                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                    }
-                })
+                    },
+                )
             }
             Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
         }
@@ -948,22 +972,33 @@ impl Vm {
                 }
                 // In-callback on M:N (or top-level `main` on the default engine) → demote +
                 // backoff-poll the non-blocking accept in place (#3 socket half).
-                self.demote_block_socket(fd, poller::Interest::Read, deadline, span, move |vm| {
-                    let r = {
-                        let guard = core.listener.lock().unwrap_or_else(|e| e.into_inner());
-                        let Some(listener) = guard.as_ref() else {
-                            return SockPoll::Ready(Ok(vm.sock_err("accept on a closed listener")));
+                self.demote_block_socket(
+                    WaitSpec::Socket,
+                    fd,
+                    poller::Interest::Read,
+                    deadline,
+                    span,
+                    move |vm| {
+                        let r = {
+                            let guard = core.listener.lock().unwrap_or_else(|e| e.into_inner());
+                            let Some(listener) = guard.as_ref() else {
+                                return SockPoll::Ready(Ok(
+                                    vm.sock_err("accept on a closed listener")
+                                ));
+                            };
+                            listener.accept()
                         };
-                        listener.accept()
-                    };
-                    match r {
-                        Ok((stream, _peer)) => SockPoll::Ready(Ok(vm.accept_socket_value(stream))),
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            SockPoll::WouldBlock
+                        match r {
+                            Ok((stream, _peer)) => {
+                                SockPoll::Ready(Ok(vm.accept_socket_value(stream)))
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                SockPoll::WouldBlock
+                            }
+                            Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
                         }
-                        Err(e) => SockPoll::Ready(Ok(vm.sock_err(format!("{e}")))),
-                    }
-                })
+                    },
+                )
             }
             Err((e, _)) => Ok(self.sock_err(format!("{e}"))),
         }

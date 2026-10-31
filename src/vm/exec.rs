@@ -763,7 +763,7 @@ impl Vm {
         #[cfg(test)]
         width::set_probe(Some(Arc::clone(&self.quiesce.width_probe)));
         if self.run_permit.is_none() {
-            self.run_permit = Some(self.gc_blocking(&[], |_| width::RunPermit::take()));
+            self.run_permit = Some(self.wait_door(&[], |_| width::RunPermit::take()));
         }
         // M1.5 — this thread runs the program: it joins the run's heap until the `Vm` drops.
         self.gc_attach();

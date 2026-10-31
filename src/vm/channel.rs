@@ -264,7 +264,7 @@ impl Vm {
         while p.is_queued() {
             let party =
                 self.block_party_guard(quiesce::PartyWait::Send(Arc::clone(&p)), Some((msg, span)));
-            r = self.block_wait_tick(h, core, span, |_| !p.is_queued());
+            r = self.block_wait_tick(WaitSpec::Send, h, core, span, |_| !p.is_queued());
             drop(party);
             if r.is_err() {
                 break;
@@ -512,7 +512,7 @@ impl Vm {
                 // eager `Executor` job here ran the full 3 s through a `cancel()` at 50 ms (and
                 // through `--timeout`), while the same `timer(ms).recv()` in a nursery — which parks,
                 // above — was cancelled at 55 ms. Same primitive, two answers.
-                self.block_until_deadline(deadline, span)?;
+                self.block_until_deadline(WaitSpec::Timer, deadline, span)?;
                 return Ok(RecvStep::Got(Value::bool(true)));
             }
         }

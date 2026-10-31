@@ -1190,7 +1190,7 @@ pub struct ReaderCore {
     pub inner: Mutex<Option<std::io::BufReader<std::fs::File>>>,
     pub key: usize,
     /// The fd is a FIFO, a pipe or a device: a read can wait without end for its writer, so it
-    /// runs in the [`Vm::host_wait`] bracket. Fixed at the open.
+    /// runs as a `HostFd` wait (`WaitSpec::of_fd`). Fixed at the open.
     pub waits: bool,
     /// W7-9 — the RAW bytes of a line `read_line` pulled off the fd but could not decode as UTF-8
     /// (terminator INCLUDED). `read_line -> Option[str]` is a str-only seam, so an undecodable line
@@ -1256,7 +1256,7 @@ pub struct WriterCore {
     pub inner: Mutex<Option<Backing>>,
     pub key: usize,
     /// The fd is a FIFO, a pipe or a device: a write can wait without end for its reader, so it
-    /// runs in the [`Vm::host_wait`] bracket. Fixed at the open; `false` for a console or an
+    /// runs as a `HostFd` wait (`WaitSpec::of_fd`). Fixed at the open; `false` for a console or an
     /// `io.buffered` core, which reach their fd through an inner core.
     pub waits: bool,
 }

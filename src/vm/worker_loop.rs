@@ -64,7 +64,7 @@ impl Vm {
     /// publishes them with this `Vm`'s roots.
     pub(super) fn width_acquire_pinned(&mut self, pins: &[GcRef]) {
         if !width::try_acquire() {
-            self.gc_blocking(pins, |_| width::acquire());
+            self.wait_door(pins, |_| width::acquire());
         }
     }
 
@@ -84,20 +84,6 @@ impl Vm {
             cores: cores.iter().map(|c| Arc::clone(c)).collect(),
             me,
         }
-    }
-
-    /// TICKET-205 — THE bracket of a one-tick in-place wait on channels: register, release the
-    /// permit, wait, re-take it.
-    pub(super) fn wait_released_on<R>(
-        &mut self,
-        cores: &[&Arc<ChannelCore>],
-        wait: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let _gated = self.gated_register(cores);
-        width::release();
-        let r = wait(self);
-        self.width_acquire();
-        r
     }
 
     /// TICKET-205 — a pool thread about to keep its slot past a slice end makes room for a queued
@@ -207,26 +193,29 @@ impl Vm {
         Ok(())
     }
 
-    /// TICKET-141 — `join_nursery` with this thread's width permit released for the whole join.
+    /// `join_nursery` as one wait: the permit is given back for the whole join (a nursery join's
+    /// steps, `block::wait_steps`).
     pub(super) fn join_nursery_released(&mut self) -> Result<(), RuntimeError> {
-        self.width_release();
+        let reg = self.wait_permit(WaitSpec::Nursery);
         let r = self.join_nursery();
-        self.width_acquire();
+        self.wait_end(reg, &[]);
         r
     }
 
-    /// TICKET-063 — enter a `Shared`/`RwShared` update-guard wait through the one demote bracket
-    /// ([`Vm::block_enter`]). A guard wait has no promised external progress — it returns only
+    /// TICKET-063 — the second stage of a `Shared`/`RwShared` update-guard wait: its demote
+    /// ([`Vm::wait_demote`]). A guard wait has no promised external progress — it returns only
     /// when the owner (one of the parties the verdict already judges) releases — so it registers
     /// a `PartyWait::Guard` waiter, never `inflight` (DEC-063). With `self.mn` `None` the bracket
     /// keeps DEC-052's immediate `yield_pool_slot(None)`.
     pub(super) fn guard_wait_enter(
         &mut self,
+        reg: &mut WaitReg,
         key: core::GuardWait,
         what: &str,
         span: Span,
-    ) -> Result<DemoteReg, RuntimeError> {
-        self.block_enter(
+    ) -> Result<(), RuntimeError> {
+        self.wait_demote(
+            reg,
             WaitSpec::Guard,
             Some(quiesce::PartyWait::Guard(key, self.guard_token)),
             what,
@@ -236,7 +225,7 @@ impl Vm {
 
     /// TICKET-063 — exit a guard wait entered via [`Vm::guard_wait_enter`]: unregister its waiter
     /// under core lock A. With `self.mn` `None` there is nothing to undo.
-    pub(super) fn guard_wait_exit(&mut self, reg: DemoteReg) {
+    pub(super) fn guard_wait_exit(&mut self, reg: &mut WaitReg) {
         if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
             reg.release(&sched, &mut sched.lock());
         }
@@ -347,7 +336,7 @@ impl Vm {
     ) {
         let held = width::holds();
         // M1.5 — the thread that runs this loop joins the run's heap for its span. On a thread that
-        // already drives a `Vm`, the caller detached first (`Vm::gc_blocking`).
+        // already drives a `Vm`, the caller detached first (`Vm::wait_door`).
         let fresh = self.gc_attach();
         // The leave also runs on a panic: a joiner that only borrows this shell reattaches its own
         // `Vm` while the unwind is caught, and the thread must hold one token then.
@@ -498,7 +487,7 @@ impl Vm {
                         && scope_id == 0
                         && matches!(&outcome, TaskOutcome::Exit { code: 3, .. })
                     {
-                        self.gc_blocking(&[], |_| {
+                        self.wait_door(&[], |_| {
                             std::thread::sleep(std::time::Duration::from_millis(300))
                         });
                     }
@@ -865,7 +854,7 @@ impl Vm {
             .remove(key)
             .is_some();
         if armed {
-            self.gc_blocking(&[], |_| {
+            self.wait_door(&[], |_| {
                 std::thread::sleep(std::time::Duration::from_millis(300))
             });
         }

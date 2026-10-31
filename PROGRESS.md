@@ -150,6 +150,25 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
    `defer` after a nursery child fault, with a cut sleeping body, is not reported as a deadlock (the
    base binary has the same miss).
 10. **Bug-hunt sweeps** resume after the refactor. They count toward the JIT entry rule below.
+11. **Blocking points, unit 1 (done 2026-10-31).** The steps a wait takes (GC detach, run permit,
+    demote) come from one table, `block::wait_steps`, through one door, `Vm::wait_door`. Fixed cells:
+    a `print` of a FIFO `Writer` that a blocked writer holds no longer hangs at T=1. Code-only: a `net.connect`
+    handshake in a callback takes its own `Connect` row. History: `docs/history/progress/2026-10.md`.
+12. **How a wait counts for the deadlock verdict (fact 2, next refactor unit).** Two mechanisms
+    count a blocked party: `block_enter` registration, and the party guards with `demote_once` and
+    `yield_pool_slot` (the 12 nursery joins, the in-place channel waits, guard stage 1). The nursery
+    joins never call `block_enter(Nursery)`, so the `Demote` cell of the `Nursery` row is dead
+    (`wait_steps` gives it no demote). Row W22-1 belongs to this fact.
+13. **A watcher for long `extern` calls (next unit after fact 2).** An `extern` C call keeps its
+    runner permit, so at `CHEZZI_THREADS=1` a sibling task waits for the call to return (Go 1.27 at
+    `GOMAXPROCS=1` prints the sibling's `tick` first: sysmon retakes the P of a cgo call after 20 us).
+    A demote on each call fixed that cell but a loop of 1e5 `abs` calls in a `spawn` took 543 ms
+    against 115 ms on base (release, `hyperfine -N -w 2 -r 7`), so the owner chose a Go sysmon-style
+    watcher that hands over the slot of a C call that runs past a threshold.
+14. **A child's fault does not stop its owner during an `extern` call** (found 2026-10-31, base has
+    it too). `parallel:` with a child that panics at 50 ms and an owner in `usleep(600 ms)` prints
+    `after` before the `boom` report. A blocking native delivers the halt at its return (TICKET-188),
+    but the `Callee::Cffi` path does not. Go ends the process at the panic.
 
 ### Open questions for the owner
 
@@ -284,7 +303,7 @@ bench than predicted. Ranked levers are in [`docs/design/roadmap.md`](docs/desig
 - M5c (owner decision 2026-10-30): an `io.create`/`io.append` writer is unbuffered, as Go's `os.File`: `Backing::File` holds the `File`, each `write` is one fd write through the GC door, and `flush()` on it is a no-op (not `fsync`). Buffering comes only from `io.buffered`. A job that writes into a FIFO and ends without `close()` no longer leaves its bytes in a garbage writer (`create_no_gc` cells; M5b base: 4 of 4 runs hang at T=2, T=4 and default; Go and main print `reader got 100`). The M5 `file` grid kind is gone: writing 67000 bytes into a 65536-byte FIFO before the signal is the user's deadlock, as in Go. 100000 small `write`s to a plain file: 233 ms (was 112 ms, 2.09x); through `io.buffered`: 116 ms (was 115 ms).
 - M5d (owner decision 2026-10-31): a garbage `io.buffered` writer loses its unflushed tail, as Go (no finalizer flushes a `bufio.Writer`; `os.File`'s finalizer only closes the fd): `WriterCore`'s `Drop` is deleted, so no drop writes to an fd; call `flush()` or `close()`. With no drop that can block, the M5b reaper thread (`vm/reaper.rs`, `heap_core::drop_site`, the `HeapCore` wait) is deleted, and the graveyard drops in the GC door as in M5 (a `Cffi` never reaches the graveyard: the run's fn-value table roots it). The reaper serialized blocked flushes (two buffered tails, drained in reverse order: 3 of 3 hangs at T=2, T=4 and default) and could land a tail after a later write (`b.write("T")`, b garbage, `f.write("A")`: the file held `TA`). Gate: `tests/gc_graveyard_drop_grid.rs` `rev`, `order`, `nested_order` (base: 9 of 9 cells fail) and `create_no_gc`; `buffered_file_dropped_without_close_loses_its_tail` (was `..._drop_flushes_best_effort_parity`).
 - M5e: `vm::tests::nested_nursery_in_spawned_task_uses_all_workers` is deleted: it compared two wall times and failed 1 run in 10 under CPU load. `runner_threads_reach_the_worker_count_in_every_nesting_shape` counts the runner threads of the same `nested_closed` shape at T 2, 4 and 8.
-- M5f: an `io.create`/`io.append`/`io.open` handle on a FIFO, a pipe or a device runs each open, write, flush, read and close that reaches the fd in `Vm::host_wait`, the bracket a stdin read uses (Go: a blocking syscall hands off its P): the worker hands its runner slot to a replacement and releases its width permit. Before, the thread kept its one permit inside the syscall, so at `--threads=1` the task on the other end of the FIFO never ran, and the run hung (main too). The `WaitSpec` row `Stdin` is now `HostFd`; a regular file keeps the GC-door fast path. Gate: `tests/fifo_handoff_grid.rs` (`write_full`, `read_empty`, `flush_full`, `exec_write_full` x T 1, 2, default; base: the 4 T=1 cells hang), and `tests/gc_graveyard_drop_grid.rs` gains its `t1` column.
+- M5f: an `io.create`/`io.append`/`io.open` handle on a FIFO, a pipe or a device runs each open, write, flush, read and close that reaches the fd as a `HostFd` wait, the steps a stdin read takes (Go: a blocking syscall hands off its P): the worker hands its runner slot to a replacement and releases its width permit. Before, the thread kept its one permit inside the syscall, so at `--threads=1` the task on the other end of the FIFO never ran, and the run hung (main too). The `WaitSpec` row `Stdin` is now `HostFd`; a regular file keeps the GC-door fast path. Gate: `tests/fifo_handoff_grid.rs` (`write_full`, `read_empty`, `flush_full`, `exec_write_full` x T 1, 2, default; base: the 4 T=1 cells hang), and `tests/gc_graveyard_drop_grid.rs` gains its `t1` column.
 - Open rows: `map_str` at T=1 is 1.10-1.13 against the pre-merge base `772e0bb8` (owner accepted 2026-10-29; f900b091 1.12 and the M3.5 base 1.13 too); `CHEZZI_GC_STRESS=1` timeouts in `tests/chz` that also occur on the base.
 
 ## Later

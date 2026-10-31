@@ -58,32 +58,27 @@ impl Vm {
     /// observed once per tick, so cancellation is now the SLOWEST thing in this loop rather than the
     /// fastest. That bound is unchanged by this fix, not introduced by it.
     ///
-    /// TICKET-141 — releases this thread's width permit for the tick and re-takes it after.
+    /// The tick is one wait of `spec` (`Recv` or `Send`): it holds no width permit, the halt check
+    /// included ([`Vm::wait_begin`]).
     ///
     /// M3.2 — `h` is the channel's handle, pinned for the wait: the collector reads the values in
     /// `core` (a buffered value, this party's offer or its filled slot) through it. The receiver of
     /// a `recv` may be a popped temporary, rooted by nothing else while this thread is detached.
     pub(super) fn block_wait_tick(
         &mut self,
-        h: GcRef,
-        core: &Arc<ChannelCore>,
-        span: Span,
-        ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
-    ) -> Result<(), RuntimeError> {
-        self.wait_released_on(&[core], |vm| {
-            vm.block_wait_tick_in_place(h, core, span, ready)
-        })
-    }
-
-    fn block_wait_tick_in_place(
-        &mut self,
+        spec: WaitSpec,
         h: GcRef,
         core: &Arc<ChannelCore>,
         span: Span,
         mut ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
     ) -> Result<(), RuntimeError> {
-        self.block_halt_check(span)?;
-        self.gc_blocking(&[h], |_| {
+        let _gated = self.gated_register(&[core]);
+        let reg = self.wait_begin(spec, None, "a channel wait", span)?;
+        if let Err(e) = self.block_halt_check(span) {
+            self.wait_end(reg, &[h]);
+            return Err(e);
+        }
+        self.wait_door(&[h], |_| {
             let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
             #[cfg_attr(not(test), allow(unused_mut))]
             let (mut guard, waited) = core
@@ -101,6 +96,7 @@ impl Vm {
             }
             drop((guard, waited));
         });
+        self.wait_end(reg, &[h]);
         Ok(())
     }
 
@@ -125,7 +121,7 @@ impl Vm {
         }
         let t0 = std::time::Instant::now();
         while self.halt_requested().is_none() && t0.elapsed() < std::time::Duration::from_secs(10) {
-            self.gc_blocking(&[], |_| {
+            self.wait_door(&[], |_| {
                 std::thread::sleep(std::time::Duration::from_millis(1))
             });
         }
@@ -381,33 +377,28 @@ impl Vm {
     /// sleep, `chezzi test --max-heap=8000000`). `--timeout` has no such gap: it is an absolute wall-clock deadline
     /// this loop reads directly.
     ///
-    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
+    /// The whole sleep is one wait of `spec`: it holds no width permit ([`Vm::wait_begin`]).
     pub(super) fn block_until_deadline(
         &mut self,
+        spec: WaitSpec,
         deadline: std::time::Instant,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        self.width_release();
-        let r = self.block_until_deadline_in_place(deadline, span);
-        self.width_acquire();
-        r
-    }
-
-    fn block_until_deadline_in_place(
-        &mut self,
-        deadline: std::time::Instant,
-        span: Span,
-    ) -> Result<(), RuntimeError> {
-        loop {
+        let reg = self.wait_begin(spec, None, "a sleep", span)?;
+        let r = loop {
             let now = std::time::Instant::now();
             if now >= deadline {
-                return Ok(());
+                break Ok(());
             }
-            self.block_halt_check(span)?;
-            self.gc_blocking(&[], |_| {
+            if let Err(e) = self.block_halt_check(span) {
+                break Err(e);
+            }
+            self.wait_door(&[], |_| {
                 std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now))
             });
-        }
+        };
+        self.wait_end(reg, &[]);
+        r
     }
 
     /// Block on an empty `recv` until a value arrives, instead of declaring a deadlock (see
@@ -459,7 +450,7 @@ impl Vm {
             // through a state the next iteration would immediately take (W7-13). All are written
             // under `core.q` (`done_latch` since W7-13r(b)), so re-checking them under the guard the
             // wait consumes closes the window.
-            let r = self.block_wait_tick(h, core, span, |g| {
+            let r = self.block_wait_tick(WaitSpec::Recv, h, core, span, |g| {
                 g.recv_ready_for(Some(&p))
                     || g.closed
                     || core.done_latch.load(Ordering::Relaxed)
@@ -762,7 +753,7 @@ impl Vm {
         {
             // W7-17 — CHUNKED, not a bare `thread::sleep`: the deadline is OURS, so it is a checkpoint
             // for its whole duration.
-            let slept = self.block_until_deadline(deadline, span);
+            let slept = self.block_until_deadline(wait_spec, deadline, span);
             let settled = op.settle();
             if let Some(r) = self.wait_settled(settled, base, meta, span) {
                 return r;
@@ -815,32 +806,30 @@ impl Vm {
                     || (!is_send0
                         && (g.recv_ready_for(Some(&p)) || first.done_latch.load(Ordering::Relaxed)))
             };
-            // TICKET-168 — DEC-141's bracket list missed this wait; a body wait: hangs at T=1 without it.
             let refs: Vec<&Arc<ChannelCore>> = arm_cores.iter().collect();
+            let _gated = self.gated_register(&refs);
+            let reg = self.wait_begin(wait_spec, None, "wait", span)?;
             #[cfg(test)]
             WAIT_ARM0_ENTRIES.fetch_add(1, Ordering::Relaxed);
             // M3.2 — the arm handles stay on the operand stack across the door, so the collector
             // reads each arm's offers and slots through them.
-            self.wait_released_on(&refs, |vm| {
-                vm.gc_blocking(&[], |_| {
-                    let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-                    #[cfg_attr(not(test), allow(unused_mut))]
-                    let (mut guard, waited) = first
-                        .cv
-                        .wait_timeout_while(q, tick, |g| {
-                            !arm0_ready(g) && !super::width::reserved()
-                        })
-                        .unwrap_or_else(|e| e.into_inner());
-                    #[cfg(test)]
-                    {
-                        WAIT_ARM0_BLOCKS.fetch_add(1, Ordering::Relaxed);
-                        if waited.timed_out() && arm0_ready(&mut guard) {
-                            WAIT_ARM0_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
-                        }
+            self.wait_door(&[], |_| {
+                let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
+                #[cfg_attr(not(test), allow(unused_mut))]
+                let (mut guard, waited) = first
+                    .cv
+                    .wait_timeout_while(q, tick, |g| !arm0_ready(g) && !super::width::reserved())
+                    .unwrap_or_else(|e| e.into_inner());
+                #[cfg(test)]
+                {
+                    WAIT_ARM0_BLOCKS.fetch_add(1, Ordering::Relaxed);
+                    if waited.timed_out() && arm0_ready(&mut guard) {
+                        WAIT_ARM0_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
                     }
-                    drop((guard, waited));
-                })
+                }
+                drop((guard, waited));
             });
+            self.wait_end(reg, &[]);
             drop(party);
             self.pending = Some(op);
             self.rewind_op();

@@ -109,13 +109,6 @@ pub(super) fn try_acquire() -> bool {
     }
     free
 }
-/// One in-place wait with the permit released.
-pub(super) fn released<R>(wait: impl FnOnce() -> R) -> R {
-    release();
-    let r = wait();
-    acquire();
-    r
-}
 pub(super) fn acquire() {
     if !holds() {
         with_slot(|s| RUNNERS.acquire_slot(s));

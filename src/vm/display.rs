@@ -76,13 +76,20 @@ impl OpenRender {
 }
 
 impl Vm {
-    /// [`io_state`] for the print path: a busy handle is waited for through the GC door.
-    fn io_state_door<T>(&mut self, inner: &std::sync::Mutex<Option<T>>) -> bool {
-        io_state(inner).unwrap_or_else(|| {
-            self.gc_blocking(&[], |_| {
+    /// [`io_state`] for the print path: a busy handle is waited for as its fd's wait (`waits`), so
+    /// the holder's FIFO peer runs at one worker too.
+    fn io_state_door<T>(
+        &mut self,
+        inner: &std::sync::Mutex<Option<T>>,
+        waits: bool,
+        span: Span,
+    ) -> Result<bool, RuntimeError> {
+        match io_state(inner) {
+            Some(open) => Ok(open),
+            None => self.wait_once(WaitSpec::of_fd(waits), "a busy handle", span, &[], |_| {
                 inner.lock().unwrap_or_else(|e| e.into_inner()).is_some()
-            })
-        })
+            }),
+        }
     }
 
     pub(super) fn type_name(&self, v: Value) -> &'static str {
@@ -710,15 +717,14 @@ impl Vm {
             | Obj::Ptr(_) => {
                 out.push_str(&self.display_guarded(Value::obj(h), depth)?);
             }
-            // M1.8 — the print path waits for a busy handle through the GC door: a read or write
-            // can hold the lock while it waits detached (a FIFO read), and a stop must not wait
-            // for this thread meanwhile.
+            // The print path waits for a busy handle through the wait door: a read or write can
+            // hold the lock while it waits detached (a FIFO read).
             Obj::Writer(core) => {
-                let open = self.io_state_door(&core.inner);
+                let open = self.io_state_door(&core.inner, core.waits, span)?;
                 out.push_str(&io_handle_text("Writer", open));
             }
             Obj::Reader(core) => {
-                let open = self.io_state_door(&core.inner);
+                let open = self.io_state_door(&core.inner, core.waits, span)?;
                 out.push_str(&io_handle_text("Reader", open));
             }
             // TICKET-246 / M3.3 — a box renders through its one renderer, with no wait.

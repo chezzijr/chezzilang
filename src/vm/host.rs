@@ -390,7 +390,7 @@ fn cwd_bytes() -> Result<Vec<u8>, crate::native::HostError> {
         })
 }
 
-/// M3.0a — the [`crate::native::Host`] of a native that runs in the GC door ([`Vm::gc_blocking`]):
+/// M3.0a — the [`crate::native::Host`] of a native that runs in the wait door ([`Vm::wait_door`]):
 /// a native that holds its host thread, and an extern C call. It serves the args copied out of
 /// the heap before the door opened ([`Vm::copy_args`]) and the Rust-owned host state, through the
 /// door's [`super::gc_door::Detached`] handle, which reaches no heap. A C callback and an exit

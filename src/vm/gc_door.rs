@@ -188,8 +188,19 @@ impl Vm {
         }
     }
 
-    /// THE blocking door. Every wait this thread can make while it holds a token runs as `f`
-    /// (`tests/wait_site_guard.rs` checks it): the thread publishes its roots plus `pins`, detaches
+    /// THE wait door. Every wait this thread can make runs as `f` (`tests/wait_site_guard.rs` checks
+    /// it): step (a) of [`block::wait_steps`](super::block::wait_steps), detach from the GC
+    /// ([`Vm::gc_blocking`]). The permit is [`Vm::wait_begin`]'s, for the whole wait; a gated loop
+    /// of ticks (a waker can queue it for a permit) waits through [`Vm::wait_tick`].
+    pub(super) fn wait_door<R>(
+        &mut self,
+        pins: &[GcRef],
+        f: impl FnOnce(&mut Detached<'_>) -> R,
+    ) -> R {
+        self.gc_blocking(pins, f)
+    }
+
+    /// The GC door: the thread publishes its roots plus `pins`, detaches
     /// (Go `entersyscall`), runs `f`, and reattaches (Go `exitsyscall`), which waits out a running
     /// collection. With no token it only runs `f`.
     ///
@@ -205,11 +216,7 @@ impl Vm {
     /// thread, also for one blocked on that lock. A panic in `f` reattaches before it unwinds on.
     ///
     /// The ticket waits in `Vm::detached` while `f` runs, so a re-entry from `f` can take it.
-    pub(super) fn gc_blocking<R>(
-        &mut self,
-        pins: &[GcRef],
-        f: impl FnOnce(&mut Detached<'_>) -> R,
-    ) -> R {
+    fn gc_blocking<R>(&mut self, pins: &[GcRef], f: impl FnOnce(&mut Detached<'_>) -> R) -> R {
         let Some(t) = self.attached.take() else {
             return f(&mut Detached { vm: self });
         };

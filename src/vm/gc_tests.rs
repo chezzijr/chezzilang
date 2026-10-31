@@ -1562,7 +1562,7 @@ fn share_handle<T: Send + 'static, R: Send + 'static>(
             let workers: Vec<Vm> = (0..n).map(|_| root.spawn_worker()).collect();
             // The root waits on the join in the blocking door, so its roots (the module that
             // holds the globals) stay published while the workers collect.
-            let results = root.gc_blocking(&[], |_| {
+            let results = root.wait_door(&[], |_| {
                 let threads: Vec<_> = workers
                     .into_iter()
                     .enumerate()

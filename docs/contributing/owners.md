@@ -97,11 +97,12 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Bytecode | `Op` (`base/op.rs`) | |
 | `==` between values | `values_equal_guarded` (`vm/equality.rs`) | |
 | May this op block here, and how | `mode` (`vm/block.rs`), `block_ctx` (`vm/block.rs`) | TICKET-181 |
+| Which steps a wait takes: GC detach, run permit, demote | `wait_steps` (`vm/block.rs`), read by `Vm::wait_begin`, `Vm::wait_permit` and `Vm::wait_demote` (`vm/block.rs`); `Vm::wait_end` undoes what `wait_begin` took; `Vm::wait_door` (`vm/gc_door.rs`) takes the GC detach on each tick | unit 1 (2026-10-31): a site names only its `WaitSpec`; `tests/wait_site_guard.rs` `every_wait_step_comes_from_the_table` fails on a permit or demote call outside the owners; `tests/wait_steps_grid.rs` |
 | What the run's collector marks | `Vm::collect_from` (`vm/frames.rs`) | M1.7: the union of the attached roots (`Attached::request_collect`, `vm/gc_coord.rs`), the registry's parked fibers, and every open box call (`Vm::gc_roots`); one sweep of the run's one core |
 | When the run collects | `Heap::should_collect` (`vm/heap.rs`) | M1.7: run-wide counts, `HeapCore::flush_allocs` and `HeapCore::flush_bytes` (`vm/heap_core.rs`) |
 | Which module objects a task reads and writes | `ModuleTable` (`vm/module_table.rs`), one per run | M3.1: every `Vm` and parked context holds the one table (`Vm::spawn_worker`); `Vm::run_module` fills a module's slot before its body runs, so a later module is visible to an earlier task |
 | The one fn object per fn key | `Vm::fn_value` (`vm/method_call.rs`) | M3.1: one table per run, shared by `Vm::spawn_worker` |
-| May a thread wait while it holds a GC token | `Vm::gc_blocking` (`vm/gc_door.rs`) | M1.5: every wait of an attached thread runs in its closure; `tests/wait_site_guard.rs` scans `src/vm` for each wait and lists the waits of threads that hold no token |
+| May a thread wait while it holds a GC token | `Vm::wait_door` (`vm/gc_door.rs`) | M1.5: every wait of an attached thread runs in its closure; `tests/wait_site_guard.rs` scans `src/vm` for each wait and lists the waits of threads that hold no token |
 | What a detached thread can reach | `Detached` (`vm/gc_door.rs`) | M3.0a: the door body's only handle, with no heap access; a native's args are copied before the door (`Vm::copy_arg`, `vm/host.rs`); a C callback re-attaches (`Detached::reenter`) |
 | May an abort of a fiber-owned nursery park this fiber | `park_abort_origin` (`vm/nursery.rs`) | TICKET-287: read by the `return`/`?` escape park, the fault unwind, the cancel funnel and the catching `recover:`; a fault carries its state in `Fiber::fault_park` (`FaultPark`, `vm/frames.rs`) |
 | CPU width / runner permits | `RUNNERS` (`vm/width.rs`) | TICKET-205/230 |
@@ -182,7 +183,7 @@ file at 2,500 lines and a test file at 3,500.
 | VM: module table | `vm/module_table.rs` (`ModuleTable`: the run's one table of module objects by index, atomic slots) |
 | VM: GC roots | `vm/root_registry.rs` (`RootView`, the one root walk of an execution context that `Vm::gc_roots`, `GeneratorCore::gc_roots` and `FiberCtx::roots` call; `RootRegistry`, the run's list of boxed fiber contexts, each a `CtxBox`) |
 | VM: stop-the-world GC coordinator | `vm/gc_coord.rs` (`GcCoord`, and the `Attached` and `DetachTicket` tokens: attach, leave, detach and reattach, safepoint polls, one collection per stop, the root hand-off) |
-| VM: GC door | `vm/gc_door.rs` (each thread's GC token on the `Vm` it drives: attach and leave, the safepoint poll, the GC entry `Vm::gc_collect`, and `Vm::gc_blocking`, the one door each wait of an attached thread runs in, with its `Detached` handle) |
+| VM: GC door | `vm/gc_door.rs` (each thread's GC token on the `Vm` it drives: attach and leave, the safepoint poll, the GC entry `Vm::gc_collect`, and `Vm::wait_door`, the one door each wait of an attached thread runs in, with its `Detached` handle; it detaches through the private `Vm::gc_blocking`) |
 | Base (read by the front end and the VM) | `base/op.rs` (bytecode, `Program`, `CompileError`), `base/hooks.rs`, `base/json_desc.rs`, `base/module_id.rs`, `base/provider_name.rs`, `base/words.rs` |
 | Run drivers (front end, then VM) | `run.rs` |
 | VM: execution | `vm/exec.rs` (setup, invoke), `vm/frames.rs` (frames, halts), `vm/step.rs` (dispatch loop), `vm/call.rs` (calls, natives), `vm/method_call.rs` (methods, hooks), `vm/json_decode.rs` |

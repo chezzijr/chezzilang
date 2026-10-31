@@ -19,7 +19,7 @@ impl Vm {
     /// snapshot-parks. Only ever called on the M:N engine inside a native callback (the recv site gates
     /// on `mn.is_some() && native_reentry > 0`).
     ///
-    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
+    /// The wait holds no width permit ([`Vm::wait_begin`]); each tick detaches from the GC ([`Vm::wait_door`]).
     pub(super) fn demote_recv_block(
         &mut self,
         h: GcRef,
@@ -66,7 +66,7 @@ impl Vm {
         //    all-blocked quiesce would never be detected — a hang). The registration lets
         //    `is_deadlocked` peek this fiber's queue so a value a sibling races in isn't misread as a
         //    deadlock (the #1 false-positive against an innocent parked sibling).
-        let reg = match self.block_enter(
+        let mut reg = match self.wait_begin(
             WaitSpec::Recv,
             Some(quiesce::PartyWait::Recv(
                 Arc::clone(&core),
@@ -90,7 +90,7 @@ impl Vm {
         //    window). A filled slot, then the QUEUE, are checked FIRST so a genuinely-sent value always
         //    wins over a spuriously-set `terminate`. Each exit path un-accounts under A; lost condvar
         //    wakeups are bounded by `DEMOTE_POLL_BACKOFF` (≤ latency, never a hang).
-        loop {
+        let exit = loop {
             // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
             let halt = self.halt_requested();
             // --- settle under core lock A: a delivered value wins over cancel / terminate / deadlock ---
@@ -141,35 +141,39 @@ impl Vm {
                         // Terminate without a delivered value (genuine deadlock / nursery torn down).
                         reg.release(&sched, &mut c);
                         Err(sched.deadlock_err.clone())
-                    } else if sched.is_deadlocked(&c) {
-                        // Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
-                        // than depending on a separate idle puller being alive to fire it.
-                        // TICKET-232 — through the one entry; the next pass returns through
-                        // `run_exit_err` or `terminate`, which releases `reg`.
-                        drop(c);
-                        sched.fault_own_deadlock();
-                        continue;
                     } else {
+                        // Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
+                        // than depending on a separate idle puller being alive to fire it. A verdict
+                        // ends the wait on a later pass through `run_exit_err` or `terminate`, which
+                        // releases `reg`. Either way this pass waits one tick: a pass that waits
+                        // nowhere keeps the run permit that the party judge may need (T=1).
+                        let dead = sched.is_deadlocked(&c);
                         drop(c);
+                        if dead {
+                            sched.fault_own_deadlock();
+                        }
                         // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
                         // M3.2 — `h` is pinned: the receiver may be a popped temporary, and the
                         // collector reads a value a sender puts in the slot through it.
-                        self.gc_blocking(&[h], |_| {
-                            width::released(|| {
-                                let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                                let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
-                                    p.is_queued()
-                                        && !g.recv_ready_for(Some(&p))
-                                        && !width::reserved()
-                                });
-                            })
+                        self.wait_tick(&mut reg, &[h], |_| {
+                            let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
+                                p.is_queued() && !g.recv_ready_for(Some(&p)) && !width::reserved()
+                            });
                         });
                         continue;
                     }
                 }
             };
-            return finish(op, exit);
+            break exit;
+        };
+        // The value is a Rust local across the permit take: pin it, and `h` for a filled slot.
+        let mut pins = vec![h];
+        if let Ok(RecvStep::Got(v)) = &exit {
+            pins.extend(v.child_gcref());
         }
+        self.wait_end(reg, &pins);
+        finish(op, exit)
     }
 
     /// TICKET-185 — a blocking `send` reached INSIDE a native callback, whose offer is already
@@ -178,7 +182,7 @@ impl Vm {
     /// (`CLOSED_SEND`). Cancel / exit / terminate / self-detected deadlock fault in place, unless
     /// the offer was already taken — then the `send` happened.
     ///
-    /// Releases this thread's width permit for the whole wait and re-takes it after (TICKET-141).
+    /// The wait holds no width permit ([`Vm::wait_begin`]); each tick detaches from the GC ([`Vm::wait_door`]).
     pub(super) fn demote_send_block(
         &mut self,
         h: GcRef,
@@ -204,13 +208,13 @@ impl Vm {
                 .expect("demote_send_block called with no active M:N scheduler (self.mn is None)"),
         );
         let _gated = self.gated_register(&[core]);
-        let reg = self.block_enter(
+        let mut reg = self.wait_begin(
             WaitSpec::Send,
             Some(quiesce::PartyWait::Send(Arc::clone(p))),
             "send",
             span,
         )?;
-        loop {
+        let out = loop {
             // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
             let halt = self.halt_requested();
             {
@@ -223,33 +227,33 @@ impl Vm {
                 };
                 if settled {
                     reg.release(&sched, &mut c);
-                    return Ok(());
+                    break Ok(());
                 }
                 if let Some(e) = self.blocked_halt(halt, span) {
                     reg.release(&sched, &mut c);
-                    return Err(e);
+                    break Err(e);
                 }
                 if c.cut_in_place() {
                     reg.release(&sched, &mut c);
-                    return Err(sched.deadlock_err.clone());
+                    break Err(sched.deadlock_err.clone());
                 }
                 if sched.is_deadlocked(&c) {
-                    // TICKET-232 — the next pass returns through `run_exit_err` or `terminate`.
+                    // A verdict ends the wait on a later pass through `run_exit_err` or
+                    // `terminate`. This pass still waits its tick (see the recv loop).
                     drop(c);
                     sched.fault_own_deadlock();
-                    continue;
                 }
             }
             // M3.2 — `h` is pinned: the collector reads this send's offer through it.
-            self.gc_blocking(&[h], |_| {
-                width::released(|| {
-                    let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                    let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |_| {
-                        p.is_queued() && !width::reserved()
-                    });
-                })
+            self.wait_tick(&mut reg, &[h], |_| {
+                let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |_| {
+                    p.is_queued() && !width::reserved()
+                });
             });
-        }
+        };
+        self.wait_end(reg, &[h]);
+        out
     }
 
     /// §6d M:N — a blocking multi-channel `wait` reached INSIDE a native callback (`native_reentry > 0`).
@@ -266,7 +270,7 @@ impl Vm {
     /// closed recv arm (the re-poll then faults `wait: all channels closed`). Cancel / exit /
     /// terminate / self-detected deadlock fault in place. Never parks.
     ///
-    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
+    /// The wait holds no width permit ([`Vm::wait_begin`]); each tick detaches from the GC ([`Vm::wait_door`]).
     pub(super) fn demote_wait_block(
         &mut self,
         arms: Vec<(Arc<ChannelCore>, bool)>,
@@ -301,11 +305,11 @@ impl Vm {
         };
         let wait = (!spec.will_return())
             .then(|| quiesce::PartyWait::Wait(arms.clone(), Some(Arc::clone(p))));
-        let reg = self.block_enter(spec, wait, "wait", span)?;
+        let mut reg = self.wait_begin(spec, wait, "wait", span)?;
         let recv_ready = |core: &Arc<ChannelCore>, g: &crate::vm::core::ChanState| {
             g.recv_ready_for(Some(p)) || core.done_latch.load(Ordering::Relaxed)
         };
-        loop {
+        let out = loop {
             // TICKET-188 — read before core lock A: a child fault's `scope_fault` takes that lock.
             let halt = self.halt_requested();
             {
@@ -326,26 +330,26 @@ impl Vm {
                 ready |= timer.is_some_and(|(_, d)| std::time::Instant::now() >= d);
                 if ready || all_closed {
                     reg.release(&sched, &mut c);
-                    return Ok(());
+                    break Ok(());
                 }
                 // Cancel (a sibling faulted): swallow the outcome (mirror the snapshot-park cancel arm).
                 if let Some(e) = self.blocked_halt(halt, span) {
                     reg.release(&sched, &mut c);
                     drop(c);
-                    return Err(e);
+                    break Err(e);
                 }
                 if c.cut_in_place() {
                     reg.release(&sched, &mut c);
                     drop(c);
-                    return Err(sched.deadlock_err.clone());
+                    break Err(sched.deadlock_err.clone());
                 }
                 // A pending timer guarantees future progress (its deadline send), so it vetoes the
                 // self-detected deadlock just like an `inflight` job does on the snapshot-park path.
                 if sched.is_deadlocked(&c) {
-                    // TICKET-232 — the next pass returns through `run_exit_err` or `terminate`.
+                    // A verdict ends the wait on a later pass through `run_exit_err` or
+                    // `terminate`. This pass still waits its tick (see the recv loop).
                     drop(c);
                     sched.fault_own_deadlock();
-                    continue;
                 }
             }
             // No single condvar to wait on (N arms, N condvars) → bounded backoff poll. Sleep on the
@@ -354,27 +358,26 @@ impl Vm {
             // M3.2 — the arm handles stay on the operand stack of `op_wait_poll` across the door, so
             // the collector reads each arm's offers and slots through them.
             let (first, is_send0) = &arms[0];
-            self.gc_blocking(&[], |_| {
-                width::released(|| {
-                    let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-                    // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
-                    // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
-                    let backoff = match timer {
-                        Some((_, d)) => DEMOTE_POLL_BACKOFF
-                            .min(d.saturating_duration_since(std::time::Instant::now())),
-                        None => DEMOTE_POLL_BACKOFF,
-                    };
-                    // W7-13r(b) — arm 0 is ready on what the loop above SETTLES on: `p` settled, or (recv arm)
-                    // a value to take or a `trip()` latch. `closed` is deliberately NOT a ready condition: the
-                    // re-poll SKIPS a closed+empty recv arm, so reporting ready would return instantly,
-                    // re-poll, skip, and spin — the parity-perf-0 live-lock.
-                    let _ = first.cv.wait_timeout_while(q, backoff, |g| {
-                        !(!p.is_queued() || (!is_send0 && recv_ready(first, g)))
-                            && !width::reserved()
-                    });
-                })
+            self.wait_tick(&mut reg, &[], |_| {
+                let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
+                // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
+                // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
+                let backoff = match timer {
+                    Some((_, d)) => DEMOTE_POLL_BACKOFF
+                        .min(d.saturating_duration_since(std::time::Instant::now())),
+                    None => DEMOTE_POLL_BACKOFF,
+                };
+                // Arm 0 is ready on what the loop above SETTLES on: `p` settled, or (recv arm) a value
+                // to take or a `trip()` latch. `closed` is NOT a ready condition: the re-poll SKIPS a
+                // closed+empty recv arm, so reporting ready would return at once, re-poll, skip, and
+                // spin.
+                let _ = first.cv.wait_timeout_while(q, backoff, |g| {
+                    !(!p.is_queued() || (!is_send0 && recv_ready(first, g))) && !width::reserved()
+                });
             });
-        }
+        };
+        self.wait_end(reg, &[]);
+        out
     }
 
     /// D5 owe #3 Path C (#3) — a `sleep_ms(ms>0)` reached INSIDE a native callback (`native_reentry > 0`)
@@ -388,8 +391,6 @@ impl Vm {
     /// returns only via a sibling `send`). Returns `Ok(Nil)` (`sleep_ms` yields nothing). Residual: the
     /// `thread::sleep` is uninterruptible, so a cancel during the sleep is observed only after it returns
     /// (no worse than the inline pin it replaces — the worker is now freed).
-    ///
-    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
     pub(super) fn demote_block_until(
         &mut self,
         deadline: std::time::Instant,
@@ -397,39 +398,26 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        self.width_release();
-        let r = self.demote_block_until_in_place(deadline, spec, what, span);
-        self.width_acquire();
-        r
-    }
-
-    fn demote_block_until_in_place(
-        &mut self,
-        deadline: std::time::Instant,
-        spec: WaitSpec,
-        what: &str,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let reg = self.block_enter(spec, None, what, span)?;
+        let reg = self.wait_begin(spec, None, what, span)?;
         loop {
             let now = std::time::Instant::now();
             if now >= deadline {
                 break;
             }
-            self.gc_blocking(&[], |_| {
+            self.wait_door(&[], |_| {
                 std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now))
             });
             // The one predicate for a run-wide halt (`run_halt_due`): it answers `false` wherever
             // `run_exit_err` below will not fire, so the sleep is never cut short for nothing.
             let read = self.halt_requested();
             if let Some(e) = self.blocked_halt(read, span) {
-                self.block_exit(reg);
+                self.wait_end(reg, &[]);
                 return Err(e);
             }
         }
-        // 4. Un-account inflight → running (the `+1` is essential — the fiber's next dispatch does
-        //    `running -= 1`, which would underflow without this restore).
-        self.block_exit(reg);
+        // Un-account inflight → running (the fiber's next dispatch does `running -= 1`, which would
+        // underflow without this restore).
+        self.wait_end(reg, &[]);
         // The halts a blocked party observes ([`Vm::block_halts`]), read once after the sleep: a
         // cancel or child fault aborts the native callback loop, so no further elements sleep; a
         // run-wide `os.exit` (W7-47) since W7-57 also aborts the sleep itself within one
@@ -533,25 +521,11 @@ impl Vm {
     /// fd" case above — an in-callback socket op is `inflight`, so it can never self-fire the deadlock
     /// predicate.
     ///
-    /// TICKET-141 — releases this thread's width permit for the whole wait and re-takes it after.
+    /// `spec` is `Socket`, or `Connect` for a `net.connect` handshake: its steps come from its own
+    /// row of `block::mode`.
     pub(super) fn demote_block_socket(
         &mut self,
-        fd: std::os::fd::RawFd,
-        interest: poller::Interest,
-        deadline: Option<std::time::Instant>,
-        span: Span,
-        attempt: impl FnMut(&mut Vm) -> SockPoll,
-    ) -> Result<Value, RuntimeError> {
-        self.width_release();
-        let r = self.demote_block_socket_in_place(fd, interest, deadline, span, attempt);
-        // M1.7 — the result is a Rust local across the permit's door: pin it.
-        let pin: Vec<GcRef> = r.iter().filter_map(|v| v.child_gcref()).collect();
-        self.width_acquire_pinned(&pin);
-        r
-    }
-
-    fn demote_block_socket_in_place(
-        &mut self,
+        spec: WaitSpec,
         fd: std::os::fd::RawFd,
         interest: poller::Interest,
         deadline: Option<std::time::Instant>,
@@ -562,17 +536,13 @@ impl Vm {
         // calling thread is its own, so there is nothing to demote FROM and the scheduler bookkeeping
         // below is skipped. The wait loop itself does not care either way.
         let sched = self.mn.as_ref().map(Arc::clone);
-        let reg = if self.block_mode(WaitSpec::Socket) == BlockMode::Demote {
-            Some(self.block_enter(WaitSpec::Socket, None, "a socket op", span)?)
-        } else {
-            None
-        };
+        let reg = self.wait_begin(spec, None, "a socket op", span)?;
         let out = loop {
             // The halts a blocked party observes ([`Vm::block_halts`]: `--timeout`, cancel, child
             // fault, `os.exit`), BEFORE doing more work each iteration. W7-18 — an in-callback socket
             // op is accounted `inflight`, so it VETOES the deadlock predicate: without the deadline
             // read here an untimed `accept` hangs exactly like the netpoller-park shape. `break`, NOT
-            // `?` — this loop is bracketed by `block_enter`/`block_exit`, and returning past the exit
+            // `?` — this loop is bracketed by `wait_begin`/`wait_end`, and returning past the end
             // would leak `running -= 1` / `inflight += 1` for the rest of the process (which is why
             // every other exit below is a `break` too).
             if let Err(e) = self.block_halts(span) {
@@ -612,13 +582,13 @@ impl Vm {
                             left.min(DEMOTE_POLL_BACKOFF)
                         }
                     };
-                    self.gc_blocking(&[], |_| wait_fd_ready(fd, interest, left));
+                    self.wait_door(&[], |_| wait_fd_ready(fd, interest, left));
                 }
             }
         };
-        if let Some(reg) = reg {
-            self.block_exit(reg);
-        }
+        // The result is a Rust local across the permit take: pin it.
+        let pin: Vec<GcRef> = out.iter().filter_map(|v| v.child_gcref()).collect();
+        self.wait_end(reg, &pin);
         out
     }
 }

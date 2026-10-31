@@ -6,11 +6,26 @@ Every blocking op asks ONE table how to block in the running context: `block::mo
 T=1, T=2 and T=0 against the Go answer. Changing a cell means changing `block::mode`, its unit test and
 this table in one commit.
 
-Every mode other than a plain compute step detaches the thread from the run's one heap before it
-blocks, and reattaches after. The garbage collector stops every attached thread and treats a detached
-thread as stopped. A blocking call that keeps its attachment hangs the next collection. Known limits:
-a CPU-bound native or C loop delays a stop, and an `extern` call keeps its runner permit at
-`CHEZZI_THREADS=1`. The model is in [`01-model.md`](01-model.md).
+The steps a wait takes come from one more table, `block::wait_steps(spec, ctx)`. `Vm::wait_begin`
+takes steps 2 and 3 once at the start of the wait and `Vm::wait_end` undoes them at its end (an in-place channel or `wait:` loop returns to its caller between ticks, so it brackets each tick) (Go
+`entersyscall` / `exitsyscall`); the one wait door, `Vm::wait_door`, takes step 1 on each tick:
+
+| step | when |
+|---|---|
+| 1. detach the thread from the run's one heap | every wait |
+| 2. hold no runner permit for the whole wait | every row of the table below, when the thread holds one; the end takes a free permit first, else queues |
+| 3. demote (hand the runner slot to a replacement) | the `D` cells below, except a nursery join, which hands its slot over in its own joiner |
+
+A guard wait takes the permit back in the middle, before it takes the guard (a thread that took the
+guard first would park the guard's owner behind permit holders), and gives it back again if it loses
+that race. A thread in a loop of in-place channel ticks that a waker queued for a permit passes
+that turn on before its next tick, so the queue never stalls behind it.
+
+A short wait with no row (a regular-file syscall, a `stat`, a permit take) keeps its permit. The
+garbage collector stops every attached thread and treats a detached thread as stopped. A blocking
+call that keeps its attachment hangs the next collection. Known limits: a CPU-bound native or C loop
+delays a stop, and an `extern` call keeps its runner permit, so at `CHEZZI_THREADS=1` no other task
+runs until it returns. The model is in [`01-model.md`](01-model.md).
 
 Contexts:
 
@@ -117,7 +132,9 @@ the read, direct or inside a callback, so a runnable sibling runs while stdin is
 Go's `sysmon`. An `io.create`/`io.append`/`io.open` handle on a FIFO, a pipe or a device does the same
 for each open, write, flush, read and close that reaches the fd, so the task on the other end runs,
 also at `--threads=1` (Go: a blocking syscall hands off its P). A handle on a regular file keeps the
-fast path: its syscalls answer at once.
+fast path: its syscalls answer at once. A `print` or `str` of such a handle while another task holds
+it in a blocked syscall waits the same way, so the task on the far end of the FIFO still runs at
+`--threads=1`.
 
 ---
 

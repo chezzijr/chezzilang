@@ -1,12 +1,13 @@
-//! M1.5 — every blocking call a VM thread can reach goes through the one GC door, `Vm::gc_blocking`.
+//! M1.5 — every blocking call a VM thread can reach goes through the one wait door, `Vm::wait_door`.
 //!
 //! A thread that holds a GC token (`gc_coord::Attached`) must reach a safepoint or detach in bounded
 //! time: a stop of the world waits for it. So a wait of an attached thread runs inside the closure
-//! of a `gc_blocking(..)` call, which detaches the thread for the wait. This scan reads the
+//! of a `wait_door(..)` call, which detaches the thread for the wait and, for a listed `WaitSpec`,
+//! holds no run permit. The steps come from the wait's kind (`block::wait_steps`). This scan reads the
 //! production code of `src/vm` (comments, string contents and inline `#[cfg(test)] mod NAME { .. }`
 //! blocks removed; `tests/`, `golden_tests/` and `*tests.rs` skipped) and finds each blocking call:
 //! a condvar or barrier wait, a sleep, a park, a channel receive, a thread join, a `poll(2)`. Each
-//! hit must sit inside the parentheses of a door call ([`DOORS`]: `gc_blocking(` or a wrapper of
+//! hit must sit inside the parentheses of a door call ([`DOORS`]: `wait_door(` or a wrapper of
 //! it), or inside a function on [`ALLOWED`] with its reason.
 //!
 //! A row with a call spelling is a WRAPPER: a function that blocks for its caller. Each call of it
@@ -21,6 +22,7 @@
 //!   (an in-place `Kind::Blocking`/`Kind::HostWait` native runs inside the door at `call.rs`; a
 //!   `Kind::Inline` native's syscalls must stay short, such as `getcwd` or `getrandom`);
 //! - a `Mutex::lock` held by a thread that waits detached (the rule is in `Vm::gc_blocking`'s doc);
+//! - a wait passed the wrong `WaitSpec` (`tests/wait_steps_grid.rs` runs the cells);
 //! - a `Drop` that makes a syscall (M5d: no `Drop` in `src/vm` writes to an fd; a dropped core
 //!   closes its fd);
 //! - a row is keyed by file and function name, so a new wait in an allowed function passes;
@@ -118,12 +120,6 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "acquire",
         "width::acquire(",
         "takes a runner permit; each call is in a door",
-    ),
-    (
-        "width.rs",
-        "released",
-        "width::released(",
-        "waits with the permit released; each call is in a door",
     ),
     (
         "width.rs",
@@ -367,11 +363,10 @@ fn strip_line(line: &str) -> String {
     out
 }
 
-/// The doors: `Vm::gc_blocking`, and the two functions that run their closure through it
-/// (`Vm::host_wait`, the bracket of a wait that holds its host thread, and `Vm::fd_door`, which
-/// picks it or the plain door). `doors_reach_gc_blocking` checks that each wrapper's body calls
-/// `gc_blocking(`.
-const DOORS: [&str; 3] = ["gc_blocking", "host_wait", "fd_door"];
+/// The doors: `Vm::wait_door`, and two functions that run their closure through it: `Vm::wait_once`,
+/// a wait of one tick, and `Vm::wait_tick`, a tick of a gated loop. `doors_reach_the_wait_door`
+/// checks that each wrapper's body calls `wait_door(`.
+const DOORS: [&str; 3] = ["wait_door", "wait_once", "wait_tick"];
 
 /// The byte ranges of `code` inside the parentheses of each call of a door.
 fn door_spans(code: &str) -> Vec<(usize, usize)> {
@@ -513,7 +508,7 @@ fn scan() -> (Vec<String>, Vec<String>) {
                     match row {
                         Some(r) => used[r] = true,
                         None => bad.push(format!(
-                            "src/vm/{rel}:{}: `{s}` in fn `{f}` is outside `gc_blocking(..)`",
+                            "src/vm/{rel}:{}: `{s}` in fn `{f}` is outside `wait_door(..)`",
                             n + 1
                         )),
                     }
@@ -536,7 +531,7 @@ fn every_wait_of_a_vm_thread_goes_through_the_gc_door() {
     assert!(
         bad.is_empty(),
         "a blocking call an attached thread can reach holds its GC token, so a stop of the world \
-         waits for it forever. Wrap it in `Vm::gc_blocking`, or add a row to ALLOWED with the \
+         waits for it forever. Wrap it in `Vm::wait_door`, or add a row to ALLOWED with the \
          reason no token is held:\n{}",
         bad.join("\n")
     );
@@ -547,9 +542,9 @@ fn every_wait_of_a_vm_thread_goes_through_the_gc_door() {
     );
 }
 
-/// Each door but `gc_blocking` is a wrapper: its own body must open the GC door.
+/// Each door but `wait_door` is a wrapper: its own body must open the wait door.
 #[test]
-fn doors_reach_gc_blocking() {
+fn doors_reach_the_wait_door() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/vm");
     let mut files = Vec::new();
     for e in std::fs::read_dir(&root).expect("read src/vm") {
@@ -582,8 +577,8 @@ fn doors_reach_gc_blocking() {
             })
             .unwrap_or_else(|| panic!("door `{door}` has no definition in src/vm"));
         assert!(
-            body.contains("gc_blocking("),
-            "door `{door}` does not call `gc_blocking(` in its body"
+            body.contains("wait_door("),
+            "door `{door}` does not call `wait_door(` in its body"
         );
     }
 }
@@ -592,7 +587,7 @@ fn doors_reach_gc_blocking() {
 #[test]
 fn the_scan_sees_doors_and_wrappers() {
     let code = production_code(
-        "fn a(&mut self) {\n    self.gc_blocking(&[], |_| {\n        cv.wait(g);\n    });\n    cv.wait(g); // \"x.wait(\"\n}\n",
+        "fn a(&mut self) {\n    self.wait_door(None, &[], |_| {\n        cv.wait(g);\n    });\n    cv.wait(g); // \"x.wait(\"\n}\n",
     );
     let doors = door_spans(&code);
     let first = code.find("cv.wait").unwrap();
@@ -613,4 +608,90 @@ fn the_scan_sees_doors_and_wrappers() {
         production_code("#[cfg(test)]\nmod tests {\n    fn f() { cv.wait(g); }\n}\nfn g() {}\n");
     assert!(!gated.contains(".wait("), "{gated}");
     assert_eq!(gated.lines().count(), 5, "line numbers are kept");
+}
+
+/// The spellings that take a step of a wait by hand: the run permit and the demote bracket.
+/// The fact-2 steps (`yield_pool_slot`, `demote_once`, `hand_joiner_slot`) are not listed: they
+/// have no single owner yet (`PROGRESS.md` "What is next", fact 2).
+const STEPS: &[&str] = &[
+    "width_release(",
+    "width_acquire(",
+    "width::release(",
+    "width::acquire(",
+    "block_enter(",
+];
+
+/// The files that own a step: the table and its door (`block.rs`, `gc_door.rs`), the permit gate
+/// (`width.rs`) and the runner loop that hands its permit over between fibers (`worker_loop.rs`).
+const STEP_OWNERS: &[&str] = &["block.rs", "gc_door.rs", "width.rs", "worker_loop.rs"];
+
+/// (file, function, why) for a call of the permit owner's own outside [`STEP_OWNERS`].
+const STEP_ALLOWED: &[(&str, &str, &str)] = &[
+    (
+        "mnsched_take.rs",
+        "take_runnable_inner",
+        "an idle worker releases its permit at each pass and takes one only for work (TICKET-230)",
+    ),
+    (
+        "exec.rs",
+        "reentered",
+        "a panic out of a callback re-takes the permit before an FFI trampoline resumes Chezzi code",
+    ),
+    (
+        "pool.rs",
+        "worker_loop",
+        "a pool thread returns its permit at the end of a job",
+    ),
+];
+
+/// A wait takes its steps from its `WaitSpec` through the one door (`Vm::wait_begin`,
+/// `Vm::wait_door`): no other site releases the permit or demotes by hand.
+#[test]
+fn every_wait_step_comes_from_the_table() {
+    let src = Path::new("src/vm");
+    let mut used = vec![false; STEP_ALLOWED.len()];
+    let mut bad = Vec::new();
+    for path in rust_files(src) {
+        let rel = path
+            .strip_prefix(src)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        if STEP_OWNERS.contains(&rel.as_str()) {
+            continue;
+        }
+        let code = production_code(&fs::read_to_string(&path).unwrap());
+        let fns = enclosing_fns(&code);
+        for (n, l) in code.lines().enumerate() {
+            for s in STEPS {
+                if !l.contains(s) {
+                    continue;
+                }
+                match STEP_ALLOWED
+                    .iter()
+                    .position(|(file, func, _)| *file == rel && *func == fns[n])
+                {
+                    Some(r) => used[r] = true,
+                    None => bad.push(format!("src/vm/{rel}:{}: `{s}` in fn `{}`", n + 1, fns[n])),
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a site takes a wait step by hand. Name the wait's `WaitSpec` and use `Vm::wait_begin` / \
+         `Vm::wait_door`:\n{}",
+        bad.join("\n")
+    );
+    let stale: Vec<String> = STEP_ALLOWED
+        .iter()
+        .zip(&used)
+        .filter(|(_, u)| !**u)
+        .map(|((file, func, why), _)| format!("src/vm/{file} fn `{func}` ({why})"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "a STEP_ALLOWED row matches no call any more; delete it:\n{}",
+        stale.join("\n")
+    );
 }
