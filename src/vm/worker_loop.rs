@@ -503,10 +503,7 @@ impl Vm {
                         });
                     }
                     #[cfg(test)]
-                    if matches!(
-                        &outcome,
-                        TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
-                    ) {
+                    if outcome.aborts() {
                         self.window_hook(PRE_FINISH_WINDOW_ENV);
                     }
                     let (aborts, job_fault) =

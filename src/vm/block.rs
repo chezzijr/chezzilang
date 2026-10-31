@@ -228,7 +228,8 @@ pub(super) enum Halt {
 pub(super) struct OwnedRef<'a> {
     /// the nursery's `nurseries` index
     pub(super) n: usize,
-    /// the nursery's cancel flag, which a faulting child trips before `finish` records the fault
+    /// the nursery's cancel flag, which a faulting child trips in `MnSched::finish_with`, in the
+    /// lock hold that stores its fault
     pub(super) flag: &'a Arc<AtomicBool>,
     pub(super) sched: &'a Arc<MnSched>,
     pub(super) scope: usize,

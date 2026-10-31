@@ -354,6 +354,18 @@ pub(super) enum TaskOutcome {
 }
 
 impl TaskOutcome {
+    /// TICKET-297 — does this outcome ABORT its scope (a `Fault` or an `Exit`)? THE one answer:
+    /// `MnSched::finish_with` reads it to trip the fiber's flag and to report `aborts`.
+    pub(super) fn aborts(&self) -> bool {
+        match self {
+            TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. } => true,
+            TaskOutcome::Done(_)
+            | TaskOutcome::Cancelled { .. }
+            | TaskOutcome::CancelledFault { .. }
+            | TaskOutcome::Deadlocked { .. } => false,
+        }
+    }
+
     /// TICKET-284 — does this outcome hold an `os.exit`'s output? A taker that moves it out of its
     /// slot counts it ([`MnSched::hold_exit_output`]); its receiver ends the count.
     pub(super) fn holds_exit_output(&self) -> bool {
