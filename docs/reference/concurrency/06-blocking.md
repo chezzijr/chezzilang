@@ -13,7 +13,7 @@ takes steps 2 and 3 once at the start of the wait and `Vm::wait_end` undoes them
 | step | when |
 |---|---|
 | 1. detach the thread from the run's one heap | every wait |
-| 2. hold no runner permit for the whole wait, and give a `parallel:` body's runner slot to its sched | every row of the table below, when the thread holds one; the end takes a free permit first, else queues |
+| 2. hold no runner permit for the whole wait, and give a `parallel:` body's runner slot to its sched | every row of the table below but `extern`, when the thread holds one; the end takes a free permit first, else queues |
 | 3. demote (hand the runner slot to a replacement) | the `D` cells below; a nursery join hands its slot over in its own joiner, in its `D` and `I` cells |
 
 The same table gives each wait the counts it registers for the deadlock verdicts. `Vm::wait_end`
@@ -25,6 +25,7 @@ take, before its next pop:
 | ends by itself (timer, sleep, offload, host fd, socket, connect, a timed `wait:`) | none; a demoted one is `inflight` |
 | `recv`, `send`, an untimed `wait:`, a guard, an Executor join | a party on a judged thread (`main`, a `main` `defer:`), the eager bodies of its thread marked blocked on it; a demoted one is a waiter |
 | a nursery join or abort | a party on a thread with no sched under it (`main`, the builder, `main` in a callback); a blocked owner on a fiber's thread; the eager bodies of its thread wait for it |
+| an `extern` C call | none: a thread in C is running, so both verdicts decline while it lasts (Go: a goroutine in cgo is not asleep) |
 
 A wait that ends by itself is a live party, so both verdicts decline while it lasts: a `wait:` whose
 timer arm is live returns at the deadline, as Go's `select` with `time.After` does.
@@ -37,9 +38,22 @@ that turn on before its next tick, so the queue never stalls behind it.
 
 A short wait with no row (a regular-file syscall, a `stat`, a permit take) keeps its permit. The
 garbage collector stops every attached thread and treats a detached thread as stopped. A blocking
-call that keeps its attachment hangs the next collection. Known limits: a CPU-bound native or C loop
-delays a stop, and an `extern` call keeps its runner permit, so at `CHEZZI_THREADS=1` no other task
-runs until it returns. The model is in [`01-model.md`](01-model.md).
+call that keeps its attachment hangs the next collection. Known limit: a CPU-bound inline native
+delays a stop until it returns (a C call runs detached, so it does not). The model is in
+[`01-model.md`](01-model.md).
+
+An `extern` C call (`WaitSpec::Extern`, `block::Permit::Watched`) keeps its permit and stamps its
+thread's slot (Go `entersyscall`). The `chezzi-sysmon` thread (`src/vm/sysmon.rs`, Go `sysmon`)
+starts at the first C call and reads every slot each tick: 20 us, doubled to 10 ms while nothing is
+retaken. A call it sees on two ticks, while a thread waits for a permit or the caller's sched has a
+queued fiber, is retaken: the watcher releases the permit for the thread, and for a worker it starts
+the replacement worker a demote would start (armed once per worker). So at `CHEZZI_THREADS=1` a sibling
+runs during a long C call, as Go 1.27 at `GOMAXPROCS=1` does. The call takes a permit back at its
+return, and a C callback takes one back before its Chezzi code runs (Go `exitsyscall`). A halt that
+arrives during the call (a cancel, a child's fault, `os.exit`) is delivered at the return, as for a
+blocking native; no ancestor interrupts a running C call. The watcher runs under `CHEZZI_SCHED_SEED`
+too: a C call that lasts longer than one watcher tick (20 us) is a wall-clock event, as a timer is,
+so a seeded replay is exact only for C calls shorter than one tick.
 
 Contexts:
 
@@ -79,6 +93,7 @@ Modes:
 | `Shared` update guard | D | D | D | D | D | D | no |
 | `Executor.shutdown()` / join | D | D | I | I | I | I | yes |
 | `parallel:` nursery join | P | D | H¹ | H¹ | I | H¹ | no |
+| `extern` C call (the watcher hands over a long call's permit) | I | I | I | I | I | I | yes |
 
 ¹ I when a host frame is under the joiner (a native callback or a defer drain): the joiner only waits.
 A fiber's nursery join in a Demote context hands its runner slot to a replacement worker and waits; it

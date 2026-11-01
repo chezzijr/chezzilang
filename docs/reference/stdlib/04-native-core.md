@@ -12,7 +12,8 @@ until the call returns**. A sibling's fault (scope cancel), a `cancel.Token`, `o
 when the call returns. Size the operation itself (a subprocess `timeout 5 …`, a request timeout) if you
 need a bound. A fault of a child of a nursery that the caller owns arrives the same way: at the return,
 and the call's result is dropped. The `std.io` stdin readers obey the same rule (Go's `os.Stdin.Read`
-and CPython's `input()` are not cancelled either).
+and CPython's `input()` are not cancelled either). An `extern` C call obeys it too: the halt takes
+effect at the call's return (Go does not interrupt a cgo call either).
 
 **Planned:** `std.process` calls will become killable: a cancelled task will signal the child's
 process group instead of waiting it out (design: [`killable-subprocess.md`](../../design/killable-subprocess.md)).

@@ -73,8 +73,8 @@ closure pass by handle too, so a task shares the parent's values.
 
 Known limits:
 
-- A CPU-bound native fn or C loop that never reaches a safepoint delays a stop until it returns.
-- An `extern` call keeps its runner permit at `CHEZZI_THREADS=1`. This is older than the one-heap change.
+- A CPU-bound inline native fn that never reaches a safepoint delays a stop until it returns. A C
+  call runs detached and delays no stop.
 
 ### Data races
 

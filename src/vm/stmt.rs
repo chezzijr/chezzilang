@@ -57,9 +57,9 @@ impl Vm {
     /// the unwind and no caller runs on.
     ///
     /// The length test comes first, so a return with no `defer` takes no mutex. The read is the
-    /// exit cell (`quiesce.pending()`), never `run_halt_hint()`: the hint is stored after the scheds
-    /// are halted, and a party woken by that halt would still run its `defer` (TICKET-213, measured
-    /// at two workers).
+    /// exit cell (`quiesce.pending()`), never `run_halt_hint()`: the hint is stored after the cell,
+    /// and a party that reads it in that gap would still run its `defer` (TICKET-213, measured at two
+    /// workers).
     fn next_deferred(
         &mut self,
         fi: usize,

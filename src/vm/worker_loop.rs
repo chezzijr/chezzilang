@@ -296,16 +296,21 @@ impl Vm {
     /// OS refused the thread (caller faults the fiber rather than blocking with no coverage); the
     /// cancel `.expect` is a true invariant (only reachable on the M:N engine in a nursery).
     pub(super) fn spawn_replacement_worker(&self, sched: &Arc<MnSched>, wid: usize) -> bool {
+        self.spare(sched, wid).start()
+    }
+
+    /// The replacement worker of [`Vm::spawn_replacement_worker`], built but not started: the
+    /// watcher of long C calls starts it (`sysmon`), on a thread that has no `Vm`.
+    pub(super) fn spare(&self, sched: &Arc<MnSched>, wid: usize) -> Spare {
         let cancel = self
             .cancel
             .as_ref()
             .expect("Path C replacement worker without a cancel token");
-        let shell = self.spawn_shell(sched, cancel);
-        // SENTINEL — the replacement covers the demoted thread's `wid` and drains the GLOBAL queue
-        // (across all scopes) until global terminate; the demoted owner returns on its own (its
-        // fiber settles → `self.demoted` exits its loop), so the replacement must not stop early on
-        // any single scope.
-        spawn_worker_thread(shell, sched, "chezzi-mn-repl", wid, SENTINEL_SCOPE).is_ok()
+        Spare {
+            shell: self.spawn_shell(sched, cancel),
+            sched: Arc::clone(sched),
+            wid,
+        }
     }
 
     /// D2b — a worker shell's lifetime: pull a runnable fiber, run it to its next park/finish, settle,
@@ -1234,13 +1239,14 @@ impl Vm {
         }
     }
 
-    /// W7-57 — the teardown half of a run end, after its cell is stored: halt every live sched,
-    /// then latch the hint, so `true` publishes the teardown to whoever reads it. The host
+    /// W7-57 — the teardown half of a run end, after its cell is stored: latch the hint, then halt
+    /// every live sched. The hint goes first, so a party that returns from a call that held its
+    /// thread (`Vm::return_halts`) while the scheds are being halted reads the halt. The host
     /// `request_exit` and the `Disp::Finish` arm (a job fault, `MnSched::publish_job_fault`) both
     /// run it.
     pub(super) fn halt_run(&self) {
-        self.halt_all_scheds();
         self.quiesce.mark_run_halt();
+        self.halt_all_scheds();
     }
 
     /// W7-56 — publish a freshly built `MnSched` on the run's registry (see [`Vm::sched_registry`]).
@@ -1310,5 +1316,35 @@ impl Vm {
                 .over_memory());
         }
         Ok(())
+    }
+}
+
+/// A replacement worker built by [`Vm::spare`] and not started yet.
+pub(super) struct Spare {
+    shell: Vm,
+    sched: Arc<MnSched>,
+    wid: usize,
+}
+
+impl Spare {
+    /// Start it. `false` iff the OS refused the thread.
+    pub(super) fn start(self) -> bool {
+        // SENTINEL — the replacement covers the demoted thread's `wid` and drains the GLOBAL queue
+        // (across all scopes) until global terminate; the demoted owner returns on its own (its
+        // fiber settles → `self.demoted` exits its loop), so the replacement must not stop early on
+        // any single scope.
+        spawn_worker_thread(
+            self.shell,
+            &self.sched,
+            "chezzi-mn-repl",
+            self.wid,
+            SENTINEL_SCOPE,
+        )
+        .is_ok()
+    }
+
+    /// Does its sched have a fiber that waits for a runner?
+    pub(super) fn queued(&self) -> bool {
+        self.sched.runnable.load(Ordering::Relaxed) > 0
     }
 }

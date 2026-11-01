@@ -248,7 +248,21 @@ impl Vm {
             return f(self);
         };
         self.reattach(ticket);
+        // A C callback during a watched call (Go `exitsyscall` in `cgocallback`): a permit the
+        // watcher retook comes back before VM code runs, and the return to C stamps the call again.
+        let watched = super::sysmon::callback_enter();
+        if watched == Some(false) {
+            self.extern_retaken();
+            self.width_acquire_pinned(pins);
+        }
         let r = catch_unwind(AssertUnwindSafe(|| f(self)));
+        if watched.is_some() && super::width::holds() {
+            super::sysmon::enter(
+                self.extern_spare
+                    .as_ref()
+                    .map_or(0, super::sysmon::Armed::id),
+            );
+        }
         let t = self.attached.take().expect("a re-entry returns attached");
         debug_no_payload_in_flight();
         let mut roots = self.gc_roots();

@@ -44,7 +44,11 @@ or alias of its name it is the value a call reaches.
 | a `struct` of these | struct by value | below |
 
 Any other param or return (list/map/set/tuple/enum/generic struct/…) is a *not C-marshallable* error.
-A `str`/`bool` where a number is expected is rejected. Calls run inline, so a slow C call holds its worker.
+A `str`/`bool` where a number is expected is rejected. A call runs on the calling thread and keeps
+its runner permit; the watcher hands over the permit of a long call, so other tasks run meanwhile
+(Go's sysmon does the same for a cgo call). A cancel, a child's fault or an `os.exit` that arrives
+during a call takes effect when the call returns
+([Blocking calls cannot be interrupted](../stdlib/04-native-core.md#blocking-calls-cannot-be-interrupted)).
 
 **Structs by value.** A `struct` as an extern param or return passes a C struct by value. Field order
 and types define the C layout; libffi computes size, alignment and offsets for the platform ABI:

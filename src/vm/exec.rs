@@ -211,6 +211,7 @@ impl Vm {
             repr_active: Vec::new(),
             wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false, // D5 owe #3 (Path C)
+            extern_spare: None,
             slice_in_place: false,
             run_permit: None,
             cancel: None,

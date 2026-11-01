@@ -231,19 +231,24 @@ impl Vm {
                     ));
                 }
                 // Go `cgocall`: a C call runs detached and returns an off-heap `NativeRet`; nothing
-                // allocates. It keeps its run permit (`None`): no watcher hands over the slot of a
-                // long C call yet. It reads the args copied out before the door opens. A callback that C
+                // allocates. It reads the args copied out before the door opens. A callback that C
                 // calls meanwhile runs attached (`DoorHost::invoke_callback`, Go `cgocallback`) on
                 // the arg values, which the door pins.
                 let pins: Vec<GcRef> = args.iter().filter_map(|v| v.child_gcref()).collect();
                 let copies = self.copy_args(&args);
-                let ret = self.wait_door(&pins, |door| {
-                    cffi.call(&mut DoorHost {
-                        door,
-                        args: copies,
-                        vals: args,
-                    })
-                });
+                let ret = self.wait_call(
+                    Some(WaitSpec::Extern),
+                    "an extern call",
+                    span,
+                    &pins,
+                    |door| {
+                        cffi.call(&mut DoorHost {
+                            door,
+                            args: copies,
+                            vals: args,
+                        })
+                    },
+                )?;
                 let ret = ret.map_err(|e| RuntimeError {
                     message: e.message,
                     span,
@@ -481,7 +486,7 @@ impl Vm {
             // It waits detached and returns an off-heap `NativeRet`: it allocates nothing on the
             // heap. It reads the args copied out before the door opens, so the door pins nothing.
             let copies = self.copy_args(&args);
-            self.wait_once(WaitSpec::of_native(kind), what, span, &[], |door| {
+            self.wait_call(WaitSpec::of_native(kind), what, span, &[], |door| {
                 func(&mut DoorHost {
                     door,
                     args: copies,
@@ -491,12 +496,6 @@ impl Vm {
         } else {
             func(&mut VmHost { vm: self, args })
         };
-        // TICKET-188 — a native that held its host thread has no checkpoint until it returns
-        // (`docs/reference/stdlib/` "Blocking calls cannot be interrupted"), so the halt is delivered AT the
-        // return, as the offload resume delivers it: the value that completed with it is dropped.
-        if in_place {
-            self.resume_halts(span)?;
-        }
         let ret = raw.map_err(|e| RuntimeError {
             message: e.message,
             span,

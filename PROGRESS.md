@@ -160,16 +160,17 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     blocked owner) and the joiner hand-over; `Vm::wait_begin` and `Vm::nursery_counts` take them.
     No cell changed a program's output (`tests/wait_counts_grid.rs`). W22-1 closed as not
     reproducing (fixed by TICKET-289). History: `docs/history/progress/2026-11.md`.
-13. **A watcher for long `extern` calls (next unit after fact 2).** An `extern` C call keeps its
-    runner permit, so at `CHEZZI_THREADS=1` a sibling task waits for the call to return (Go 1.27 at
-    `GOMAXPROCS=1` prints the sibling's `tick` first: sysmon retakes the P of a cgo call after 20 us).
-    A demote on each call fixed that cell but a loop of 1e5 `abs` calls in a `spawn` took 543 ms
-    against 115 ms on base (release, `hyperfine -N -w 2 -r 7`), so the owner chose a Go sysmon-style
-    watcher that hands over the slot of a C call that runs past a threshold.
-14. **A child's fault does not stop its owner during an `extern` call** (found 2026-10-31, base has
-    it too). `parallel:` with a child that panics at 50 ms and an owner in `usleep(600 ms)` prints
-    `after` before the `boom` report. A blocking native delivers the halt at its return (TICKET-188),
-    but the `Callee::Cffi` path does not. Go ends the process at the panic.
+13. **A watcher for long `extern` calls (done 2026-11-02).** A C call takes its permit steps from
+    the wait table (`WaitSpec::Extern`, `Permit::Watched`) through `Vm::wait_call`. The
+    `chezzi-sysmon` thread (`vm/sysmon.rs`, Go `sysmon`) hands over the permit of a call it sees on
+    two ticks, and for a worker it starts the replacement worker a demote would start. At
+    `CHEZZI_THREADS=1` a sibling now prints `tick` during a long call, as Go 1.27 does
+    (`tests/extern_watch_grid.rs`, 300 cells). Owner decision (2026-11-02): `benches/sched/extern_abs`
+    may run slower than base (5-14% measured, accepted for that cell only); every other bench cell
+    keeps the 10% gate. History: `docs/history/progress/2026-11.md`.
+14. **A child's fault stops its owner at the return of an `extern` call (done 2026-11-02).** The
+    halt is delivered at the call's return, as for a blocking native (owner decision: no ancestor
+    interrupts a running C call); the run-wide halt is read behind `run_halt_hint` there.
 15. **A spawned task's nursery abort reports `deadlock`, not the body's fault** (2026-11-01, base
     too): a faulting body beside a child stuck in its `defer:` reports `index 5 …` on `main` but
     `deadlock: every task …` in a `spawn`. Go ends with the panic.

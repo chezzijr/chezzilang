@@ -270,7 +270,10 @@ W8-8, W11-4, W13-26/27/28, W15-1) by running a hand-built program against Go.
 from a seeded PRNG: which fiber a pop returns, the step-0/steal cadence, `handoff_wake`'s `runnext`
 coin flip, the reds refill. At `CHEZZI_THREADS=1` the same seed replays the same schedule (see the
 replay limit). At `CHEZZI_THREADS>=2` it also injects random yields, spins and sleeps at each sync
-point, to widen real OS-thread race windows (the loom/shuttle pattern).
+point, to widen real OS-thread race windows (the loom/shuttle pattern). A preempted permit holder
+hands over at each slice under a seed (`width::handover_due`). The watcher of long `extern` calls
+(`src/vm/sysmon.rs`) stays on: a C call that lasts longer than one watcher tick (20 us) is a
+wall-clock event, as a timer is, so a seeded replay is exact only for C calls shorter than one tick.
 
 ```sh
 cargo build --release --bin schedfuzz --bin chezzi

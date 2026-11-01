@@ -668,13 +668,13 @@ impl crate::native::Host for VmHost<'_> {
         // parked in `accept()`/`recv()` never reaches the join. The run-scoped cell is what lets every
         // blocking loop see the exit (`Vm::run_exit_err`) — Go's `os.Exit` is immediate.
         //
-        // W7-57 — the order is: code, then teardown, then flag.
-        // 1. the code first, so anything woken by step 2 already reads it;
-        // 2. halt every live nursery — a party that is SPINNING, `recv`-parked or asleep reaches no
-        //    polling wait, so without this teardown it outlives the exit (a spinner forever);
-        // 3. the flag LAST, so `true` publishes both of the above to whoever reads it.
+        // W7-57 — the order is: code, then flag, then teardown (`Vm::halt_run`).
+        // 1. the code first, so anything woken by step 3 already reads it;
+        // 2. the flag, so `true` publishes the code, and a call that returns during step 3 reads it;
+        // 3. halt every live nursery — a party that is SPINNING, `recv`-parked or asleep reaches no
+        //    polling wait, so without this teardown it outlives the exit (a spinner forever).
         //
-        // Step 3 does NOT make the cancel rung win for a scoped fiber, and an earlier revision of this
+        // The flag does NOT make the cancel rung win for a scoped fiber, and an earlier revision of this
         // comment claimed it did. An `Acquire` load orders only the reads AFTER it, while both CPU
         // checkpoints read cancel BEFORE exit — so `cancel == false` + `exit == true` is legal, and the
         // measured result was a sibling `defer` that ran 2/8 times and once died mid-body. That

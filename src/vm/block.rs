@@ -10,7 +10,7 @@
 use super::gc_door::Detached;
 use super::quiesce::{PartyGuard, PartyWait};
 use super::sched::BlockedOwnerGuard;
-use super::{GcRef, width};
+use super::{GcRef, sysmon, width};
 use super::{MnSched, RuntimeError, SchedCore, Span, TraceFrame, Vm};
 use crate::native::Kind;
 use std::sync::Arc;
@@ -77,6 +77,9 @@ pub(super) enum WaitSpec {
     Join,
     /// a `parallel:` nursery join
     Nursery,
+    /// an `extern` C call: it keeps its permit, and the watcher hands over the permit of a long
+    /// one (`sysmon`)
+    Extern,
 }
 
 impl WaitSpec {
@@ -91,7 +94,8 @@ impl WaitSpec {
             | WaitSpec::Offload
             | WaitSpec::HostFd
             | WaitSpec::Socket
-            | WaitSpec::Connect => true,
+            | WaitSpec::Connect
+            | WaitSpec::Extern => true,
             WaitSpec::Wait { deadline, .. } => deadline,
             WaitSpec::Recv
             | WaitSpec::Send
@@ -130,6 +134,22 @@ pub(super) enum Handover {
     Joiner,
 }
 
+/// What a wait does with the thread's run permit: [`wait_steps`]'s answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Permit {
+    /// keep it (a wait that ends at once)
+    Keep,
+    /// give it back for the whole wait (Go: a blocking syscall hands off its P), and give the
+    /// runner slot (bit 0) of the `parallel:` body the thread runs to the claim, which starts a
+    /// runner for the tasks the body queued (TICKET-211). The slot goes in [`Vm::wait_enter`] and
+    /// [`Vm::nursery_counts`], so a guard's bounded first stage (DEC-016) hands it over at its
+    /// second stage.
+    Release,
+    /// keep it, and stamp the thread's watch slot: the watcher releases the permit of a call that
+    /// lasts past a tick (Go `sysmon` retakes the P of a cgo call)
+    Watched,
+}
+
 /// How a demoted wait is accounted while its worker is off `running`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Account {
@@ -157,12 +177,7 @@ pub(super) enum BodyMark {
 /// `join_parked`, a timer's `inflight`). A parked fiber is not a waiting thread.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct WaitSteps {
-    /// the thread stops running for the wait: it holds no run permit (Go: a blocking syscall
-    /// hands off its P), and the `parallel:` body it runs gives its runner slot (bit 0) to the
-    /// claim, which starts a runner for the tasks the body queued (TICKET-211). The slot goes in
-    /// [`Vm::wait_enter`] and [`Vm::nursery_counts`], so a guard's bounded first stage (DEC-016)
-    /// hands it over at its second stage.
-    pub(super) stops: bool,
+    pub(super) permit: Permit,
     pub(super) hand: Handover,
     /// a party of the process-wide verdict (`QuiesceState::parties`)
     pub(super) party: bool,
@@ -171,9 +186,22 @@ pub(super) struct WaitSteps {
     pub(super) owner: bool,
 }
 
+impl WaitSteps {
+    /// No counts, no demote and no body slot to hand over: only the permit step.
+    fn registers_nothing(self) -> bool {
+        self.hand == Handover::Keep
+            && !self.party
+            && self.bodies.is_none()
+            && !self.owner
+            && self.permit != Permit::Release
+    }
+}
+
 /// THE steps of a wait, from its kind and the block context. `None` is a wait that ends at once (a
 /// regular-file syscall, a stat, a permit take): it keeps the permit and counts nothing.
 ///
+/// - An `extern` C call counts nothing: a thread in C is running, so both verdicts decline while
+///   it lasts (Go: a goroutine in cgo is not asleep). Its permit is [`Permit::Watched`].
 /// - A wait that ends by itself ([`WaitSpec::will_return`]) counts nothing: it is a live party, so
 ///   both verdicts decline while it lasts. A demoted one is `inflight`.
 /// - Any other wait is a judged party ([`BlockCtx::judged`]), marks its bodies blocked on it, and a
@@ -185,22 +213,28 @@ pub(super) struct WaitSteps {
 pub(super) fn wait_steps(spec: Option<WaitSpec>, ctx: BlockCtx) -> WaitSteps {
     let Some(spec) = spec else {
         return WaitSteps {
-            stops: false,
+            permit: Permit::Keep,
             hand: Handover::Keep,
             party: false,
             bodies: None,
             owner: false,
         };
     };
-    let m = mode(ctx, spec);
     let shell = match ctx {
         BlockCtx::Park | BlockCtx::Demote => true,
         BlockCtx::Builder { .. } | BlockCtx::OwnThread { .. } => false,
     };
     match spec {
+        WaitSpec::Extern => WaitSteps {
+            permit: Permit::Watched,
+            hand: Handover::Keep,
+            party: false,
+            bodies: None,
+            owner: false,
+        },
         WaitSpec::Nursery => WaitSteps {
-            stops: true,
-            hand: match m {
+            permit: Permit::Release,
+            hand: match mode(ctx, spec) {
                 BlockMode::Demote | BlockMode::InPlace => Handover::Joiner,
                 BlockMode::Park | BlockMode::Help | BlockMode::InlineSleep | BlockMode::Refuse => {
                     Handover::Keep
@@ -228,8 +262,8 @@ pub(super) fn wait_steps(spec: Option<WaitSpec>, ctx: BlockCtx) -> WaitSteps {
                 Account::Waiter
             };
             WaitSteps {
-                stops: true,
-                hand: if m == BlockMode::Demote {
+                permit: Permit::Release,
+                hand: if mode(ctx, spec) == BlockMode::Demote {
                     Handover::Demote(account)
                 } else {
                     Handover::Keep
@@ -278,7 +312,7 @@ pub(super) struct Counts {
     bodies: Vec<(Arc<MnSched>, usize)>,
     /// the wait each sched in `bodies` publishes; `None` for a nested join
     wait: Option<Arc<PartyWait>>,
-    /// the scheds whose body runner slot this wait handed over ([`WaitSteps::stops`])
+    /// the scheds whose body runner slot this wait handed over ([`Permit::Release`])
     runners: Vec<Arc<MnSched>>,
 }
 
@@ -350,9 +384,10 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             | W::Socket
             | W::Connect
             | W::Nursery => Park,
+            W::Extern => InPlace,
         },
         BlockCtx::Demote => match spec {
-            W::Connect => InPlace,
+            W::Connect | W::Extern => InPlace,
             // TICKET-185: a demoted sender blocks on its published offer, as Go blocks.
             // TICKET-245: a nursery joiner hands its runner slot over and only waits.
             W::Send
@@ -376,15 +411,20 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             | W::Socket => Refuse,
             W::Wait { deadline: true, .. } | W::Timer | W::Sleep => InlineSleep,
             W::HostFd | W::Guard => Demote,
-            W::Connect | W::Offload | W::Join => InPlace,
+            W::Connect | W::Offload | W::Join | W::Extern => InPlace,
             W::Nursery => join(reentered),
         },
         BlockCtx::OwnThread { reentered, .. } => match spec {
             W::Timer | W::Sleep => InlineSleep,
             W::HostFd | W::Guard => Demote,
-            W::Recv | W::Send | W::Wait { .. } | W::Offload | W::Socket | W::Connect | W::Join => {
-                InPlace
-            }
+            W::Recv
+            | W::Send
+            | W::Wait { .. }
+            | W::Offload
+            | W::Socket
+            | W::Connect
+            | W::Join
+            | W::Extern => InPlace,
             W::Nursery => join(reentered),
         },
     }
@@ -584,6 +624,8 @@ pub(super) struct WaitReg {
     counts: Counts,
     demote: Option<DemoteReg>,
     released: bool,
+    /// the thread stamped its watch slot ([`Permit::Watched`])
+    watched: bool,
     /// a tick of this wait already ran ([`Vm::wait_tick`])
     ticked: bool,
 }
@@ -694,7 +736,7 @@ impl Vm {
             Some(BodyMark::Awaiting) => self.mark_bodies(&mut counts, true, None),
             None => {}
         }
-        if steps.stops {
+        if steps.permit == Permit::Release {
             self.hand_body_runners(&mut counts);
         }
         if steps.owner
@@ -725,7 +767,7 @@ impl Vm {
             .collect();
     }
 
-    /// TICKET-211 — the body's thread stops running ([`WaitSteps::stops`]): each `parallel:` body
+    /// TICKET-211 — the body's thread stops running ([`Permit::Release`]): each `parallel:` body
     /// it runs gives its runner slot to the claim, which starts runners for whatever the body
     /// already queued. A fiber-owned nursery's body is a fiber; it has no slot of its own.
     fn hand_body_runners(&self, counts: &mut Counts) {
@@ -797,12 +839,11 @@ impl Vm {
     /// The counts and the demote of a wait, steps (a) and (c) of [`wait_steps`].
     fn wait_enter(
         &mut self,
-        spec: WaitSpec,
+        steps: WaitSteps,
         on: Option<Blocked>,
         what: &str,
         span: Span,
     ) -> Result<(Counts, Option<DemoteReg>), RuntimeError> {
-        let steps = wait_steps(Some(spec), self.block_ctx());
         let counts = self.counts(steps, on.as_ref(), None);
         let demote = match steps.hand {
             Handover::Demote(account) => {
@@ -825,26 +866,89 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<WaitReg, RuntimeError> {
-        let (counts, demote) = self.wait_enter(spec, on, what, span)?;
-        let mut reg = self.wait_permit(spec);
-        reg.counts = counts;
-        reg.demote = demote;
-        Ok(reg)
+        let steps = wait_steps(Some(spec), self.block_ctx());
+        let (counts, demote) = self.wait_enter(steps, on, what, span)?;
+        let (released, watched) = self.permit_take(steps.permit);
+        Ok(WaitReg {
+            counts,
+            demote,
+            released,
+            watched,
+            ticked: false,
+        })
     }
 
     /// The permit step alone: the start of a wait whose counts and demote come later
     /// ([`Vm::wait_demote`], the guard's second stage, DEC-016), or a nursery join, whose counts each
     /// join site takes ([`Vm::nursery_counts`]).
     pub(super) fn wait_permit(&mut self, spec: WaitSpec) -> WaitReg {
-        let released = wait_steps(Some(spec), self.block_ctx()).stops && width::holds();
-        if released {
-            width::release();
-        }
+        let (released, watched) = self.permit_take(wait_steps(Some(spec), self.block_ctx()).permit);
         WaitReg {
             counts: Counts::none(),
             demote: None,
             released,
+            watched,
             ticked: false,
+        }
+    }
+
+    /// The permit step of a wait, if the thread holds a permit: `(released, watched)`.
+    fn permit_take(&mut self, permit: Permit) -> (bool, bool) {
+        let held = width::holds();
+        let (released, watched) = match permit {
+            Permit::Keep => (false, false),
+            Permit::Release => (held, false),
+            Permit::Watched => (false, held),
+        };
+        if released {
+            width::release();
+        }
+        if watched {
+            self.arm_extern_spare();
+            sysmon::enter(self.extern_spare.as_ref().map_or(0, sysmon::Armed::id));
+        }
+        (released, watched)
+    }
+
+    /// Undo [`Vm::permit_take`]: take the permit back if the wait gave it up or the watcher retook
+    /// it, a free one first.
+    fn permit_back(&mut self, released: bool, watched: bool, pins: &[GcRef]) {
+        let retaken = watched && !sysmon::leave();
+        if retaken {
+            self.extern_retaken();
+        }
+        if released || retaken {
+            self.width_acquire_pinned(pins);
+        }
+    }
+
+    /// A worker that a demote would replace arms its replacement once, for the watcher to start
+    /// when it retakes a C call's permit (`sysmon`).
+    fn arm_extern_spare(&mut self) {
+        if self.extern_spare.is_none()
+            && !self.demoted
+            && self.cancel.is_some()
+            && let Some(sched) = self.mn.as_ref().map(Arc::clone)
+        {
+            self.extern_spare = Some(sysmon::arm(self.spare(&sched, self.wid)));
+        }
+    }
+
+    /// The watcher retook this thread's permit during a C call: a started spare is this worker's
+    /// replacement, as [`Vm::demote_once`] would have spawned it.
+    /// A spare the OS refused is dropped, so the next C call arms a new one, as a refused
+    /// [`Vm::demote_once`] tries again at the next demote.
+    pub(super) fn extern_retaken(&mut self) {
+        let Some(state) = self.extern_spare.as_ref().map(sysmon::Armed::state) else {
+            return;
+        };
+        match state {
+            sysmon::SpareState::Waiting => {}
+            sysmon::SpareState::Started => {
+                self.extern_spare = None;
+                self.demoted = true;
+            }
+            sysmon::SpareState::Refused => self.extern_spare = None,
         }
     }
 
@@ -858,7 +962,8 @@ impl Vm {
         what: &str,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        let (counts, demote) = self.wait_enter(spec, on, what, span)?;
+        let steps = wait_steps(Some(spec), self.block_ctx());
+        let (counts, demote) = self.wait_enter(steps, on, what, span)?;
         reg.counts = counts;
         reg.demote = demote;
         Ok(())
@@ -910,19 +1015,19 @@ impl Vm {
             counts,
             demote,
             released,
+            watched,
             ticked: _,
         } = reg;
         drop(counts);
-        if released {
-            self.width_acquire_pinned(pins);
-        }
+        self.permit_back(released, watched, pins);
         if let Some(reg) = demote {
             self.block_exit(reg);
         }
     }
 
     /// A wait of one tick: [`Vm::wait_begin`], [`Vm::wait_door`] around `f`, [`Vm::wait_end`].
-    /// For a `will_return` spec or `None`.
+    /// For a `will_return` spec or `None`. A wait whose steps register nothing takes only its
+    /// permit step: a short C call pays no [`Counts`].
     pub(super) fn wait_once<R>(
         &mut self,
         spec: Option<WaitSpec>,
@@ -931,14 +1036,35 @@ impl Vm {
         pins: &[GcRef],
         f: impl FnOnce(&mut Detached<'_>) -> R,
     ) -> Result<R, RuntimeError> {
-        let reg = match spec {
-            Some(spec) => Some(self.wait_begin(spec, None, what, span)?),
-            None => None,
+        let Some(spec) = spec else {
+            return Ok(self.wait_door(pins, f));
         };
-        let r = self.wait_door(pins, f);
-        if let Some(reg) = reg {
-            self.wait_end(reg, pins);
+        let steps = wait_steps(Some(spec), self.block_ctx());
+        if steps.registers_nothing() {
+            let (released, watched) = self.permit_take(steps.permit);
+            let r = self.wait_door(pins, f);
+            self.permit_back(released, watched, pins);
+            return Ok(r);
         }
+        let reg = self.wait_begin(spec, None, what, span)?;
+        let r = self.wait_door(pins, f);
+        self.wait_end(reg, pins);
+        Ok(r)
+    }
+
+    /// A native or C call that holds its host thread: [`Vm::wait_once`], then the halt the call
+    /// could not see while it ran, delivered at its return (TICKET-188, "Blocking calls cannot be
+    /// interrupted"): the value that came back with it is dropped.
+    pub(super) fn wait_call<R>(
+        &mut self,
+        spec: Option<WaitSpec>,
+        what: &str,
+        span: Span,
+        pins: &[GcRef],
+        f: impl FnOnce(&mut Detached<'_>) -> R,
+    ) -> Result<R, RuntimeError> {
+        let r = self.wait_once(spec, what, span, pins, f)?;
+        self.return_halts(span)?;
         Ok(r)
     }
 
@@ -1025,6 +1151,7 @@ mod tests {
             WaitSpec::Guard,
             WaitSpec::Join,
             WaitSpec::Nursery,
+            WaitSpec::Extern,
         ]);
         v
     }
@@ -1033,7 +1160,7 @@ mod tests {
     /// S InlineSleep, R Refuse. Columns: Park, Demote, Builder as reentered = f, t, then
     /// OwnThread as (judged, reentered) = (f,f) (f,t) (t,f) (t,t). The last column is
     /// `will_return`.
-    const TABLE: [(&str, &str, bool); 15] = [
+    const TABLE: [(&str, &str, bool); 16] = [
         ("Recv", "PD RR IIII", false),
         ("Timer", "PD SS SSSS", true),
         ("Send", "PD RR IIII", false),
@@ -1049,6 +1176,7 @@ mod tests {
         ("Guard", "DD DD DDDD", false),
         ("Join", "DD II IIII", false),
         ("Nursery", "PD HI HIHI", false),
+        ("Extern", "II II IIII", true),
     ];
 
     #[test]
@@ -1078,12 +1206,13 @@ mod tests {
     /// column order. A cell is the hand-over (K keep, W demote as a waiter, F demote as `inflight`,
     /// J the nursery joiner's hand-over), then the counts: `p` a party, `w`/`a` the body marks
     /// ([`BodyMark::Wait`], [`BodyMark::Awaiting`]), `o` a blocked owner, `-` for none. Every listed
-    /// spec stops the thread ([`WaitSteps::stops`]).
+    /// spec but `Extern` gives its permit back ([`Permit::Release`]); `Extern` is
+    /// [`Permit::Watched`].
     ///
     /// The `Nursery` row's party cells are the W7-58 gate: a thread with no sched under it is the
     /// `1 +` of `live` and must count, the early-enlisted builder too (a `judged` gate would drop
     /// it); a worker shell must not, or `parties.len()` could exceed `live` and fault a live program.
-    const STEPS: [(&str, &str); 15] = [
+    const STEPS: [(&str, &str); 16] = [
         ("Recv", "K-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
         ("Timer", "K--- F--- K--- K--- K--- K--- K--- K---"),
         ("Send", "K-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
@@ -1102,6 +1231,7 @@ mod tests {
         ("Guard", "W-w- W-w- W-w- W-w- W-w- W-w- Wpw- Wpw-"),
         ("Join", "W-w- W-w- K-w- K-w- K-w- K-w- Kpw- Kpw-"),
         ("Nursery", "K-ao J-ao Kpa- Jpa- Kpa- Jpa- Kpa- Jpa-"),
+        ("Extern", "K--- K--- K--- K--- K--- K--- K--- K---"),
     ];
 
     #[test]
@@ -1118,7 +1248,6 @@ mod tests {
                 Some(BodyMark::Awaiting) => 'a',
                 None => '-',
             };
-            assert!(w.stops, "every listed spec stops the thread");
             format!(
                 "{hand}{}{bodies}{}",
                 if w.party { 'p' } else { '-' },
@@ -1128,6 +1257,18 @@ mod tests {
         let specs = specs();
         assert_eq!(specs.len(), STEPS.len());
         for (spec, (name, row)) in specs.into_iter().zip(STEPS) {
+            let want = if spec == WaitSpec::Extern {
+                Permit::Watched
+            } else {
+                Permit::Release
+            };
+            for c in contexts() {
+                assert_eq!(
+                    wait_steps(Some(spec), c).permit,
+                    want,
+                    "permit of {name} in {c:?}"
+                );
+            }
             let got: Vec<String> = contexts()
                 .into_iter()
                 .map(|c| cell(wait_steps(Some(spec), c)))
@@ -1138,7 +1279,7 @@ mod tests {
             assert_eq!(
                 wait_steps(None, ctx),
                 WaitSteps {
-                    stops: false,
+                    permit: Permit::Keep,
                     hand: Handover::Keep,
                     party: false,
                     bodies: None,
@@ -1147,6 +1288,17 @@ mod tests {
                 "None in {ctx:?}"
             );
         }
+    }
+
+    /// A spare whose start the OS refused does not demote the worker and does not stay armed: the
+    /// next C call arms a new one.
+    #[test]
+    fn a_refused_spare_is_dropped_and_does_not_demote() {
+        let mut vm = Vm::new(Arc::new(crate::vm::tests::empty_program()));
+        vm.extern_spare = Some(sysmon::armed_refused());
+        vm.extern_retaken();
+        assert!(vm.extern_spare.is_none(), "a refused spare is dropped");
+        assert!(!vm.demoted, "a refused spare is no replacement");
     }
 
     /// TICKET-188 — the owner-fault grid derives its op rows from [`TABLE`]: a new spec without a

@@ -370,9 +370,13 @@ pub(super) struct QuiesceState {
     /// `map`/`fold` reaches no blocking wait at all, so the `Mutex<Option>` above — read only by the
     /// demote/poll loops — never reaches it and the run hangs forever, or finishes work Go would not.
     ///
-    /// Stored **`Release` AFTER** the code and after [`super::Vm::halt_all_scheds`], and loaded
-    /// `Acquire` — which publishes the code and the scope-cancel stores to whoever reads `true`, and
-    /// nothing more. **It does NOT order the two rungs against each other**: an acquire orders only
+    /// Stored **`Release` AFTER** the code, at the start of [`super::Vm::halt_run`] (before the
+    /// scheds are halted), and loaded `Acquire` — which publishes the code to whoever reads `true`,
+    /// and nothing more. The window left is the gap between the cell store and this store: a
+    /// function entry, a loop back-edge and the return of a call that held its thread
+    /// (`Vm::return_halts`) read the hint and miss a halt published in it, and see it at their next
+    /// read; a `defer` pop reads the cell itself for that reason (`stmt.rs` `next_deferred`,
+    /// TICKET-213). **It does NOT order the two rungs against each other**: an acquire orders only
     /// the reads that FOLLOW it, and both CPU checkpoints read cancel BEFORE exit, so a stale
     /// `cancel == false` beside `exit == true` is a legal interleaving. An earlier revision leaned on
     /// that ordering to keep a scoped fiber on the `Cancelled` path and it was simply wrong — measured
@@ -521,8 +525,8 @@ impl QuiesceState {
         }
     }
 
-    /// W7-57 — latch the back-edge flag. Called by the host `request_exit` AFTER the code is published
-    /// and after every live sched has been halted; see the field's doc for why the order is required.
+    /// W7-57 — latch the back-edge flag. Called by `Vm::halt_run` AFTER the code is published and
+    /// before the scheds are halted; see the field's doc for the window that order leaves.
     pub(super) fn mark_run_halt(&self) {
         self.run_halt_hint.store(true, Ordering::Release);
     }
@@ -546,8 +550,8 @@ impl QuiesceState {
     }
 
     /// TICKET-208 — publish an `Executor` job's `--max-heap` abort: it ends the whole run. First
-    /// writer wins (Go: the first panic is the report). The caller halts every sched and then
-    /// latches the hint ([`Self::mark_run_halt`]), the order `request_exit` uses.
+    /// writer wins (Go: the first panic is the report). The caller then runs `Vm::halt_run`, which
+    /// latches the hint ([`Self::mark_run_halt`]) and halts every sched, the order `request_exit` uses.
     pub(super) fn request_job_fault(
         &self,
         err: super::RuntimeError,

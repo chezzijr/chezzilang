@@ -227,6 +227,13 @@ fn rows() -> Vec<Row> {
             ..R
         },
         Row {
+            spec: "Extern",
+            body: "    _ := usleep(DL000)",
+            prelude: "extern \"libc\":\n    fn usleep(us: int) -> int",
+            self_ends: true,
+            ..R
+        },
+        Row {
             spec: "Cpu",
             body: "    while true:\n        pass",
             ..R

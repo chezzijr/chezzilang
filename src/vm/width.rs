@@ -93,6 +93,23 @@ pub(super) fn release() {
         RUNNERS.release();
     }
 }
+/// The watcher released this thread's permit while the thread ran C code (`sysmon`): drop the
+/// thread's record of it, with no second release.
+pub(super) fn forfeit() {
+    if holds() {
+        WAITER_SEEN.with(|w| w.set(None));
+        HOLDS.with(|h| h.0.set(false));
+        probe_leave();
+    }
+}
+/// The watcher releases the permit of a thread in a C call ([`forfeit`] is that thread's half).
+pub(super) fn hand_off() {
+    RUNNERS.release();
+}
+/// Does a thread wait for a permit?
+pub(super) fn queued() -> bool {
+    RUNNERS.waiting() > 0
+}
 /// TICKET-230 — take a FREE permit without waiting: `false` when none is free beyond the queued
 /// tickets, or when a waker already queued this thread (its ticket keeps its place).
 pub(super) fn try_acquire() -> bool {

@@ -92,6 +92,18 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "the netpoller thread never attaches",
     ),
     (
+        "sysmon.rs",
+        "watch_loop",
+        "",
+        "the watcher thread of long C calls never attaches",
+    ),
+    (
+        "sysmon.rs",
+        "new_slot",
+        "",
+        "the first C call waits only for the watcher thread's start, a bounded wait",
+    ),
+    (
         "stream.rs",
         "flush_stream",
         "",
@@ -363,10 +375,11 @@ fn strip_line(line: &str) -> String {
     out
 }
 
-/// The doors: `Vm::wait_door`, and two functions that run their closure through it: `Vm::wait_once`,
-/// a wait of one tick, and `Vm::wait_tick`, a tick of a gated loop. `doors_reach_the_wait_door`
-/// checks that each wrapper's body calls `wait_door(`.
-const DOORS: [&str; 3] = ["wait_door", "wait_once", "wait_tick"];
+/// The doors: `Vm::wait_door`, and the functions that run their closure through it: `Vm::wait_once`,
+/// a wait of one tick, `Vm::wait_tick`, a tick of a gated loop, and `Vm::wait_call`, a native or C
+/// call that holds its thread (`wait_once` plus the halt at the return). `doors_reach_the_wait_door`
+/// checks that each wrapper's body calls a door before it in this list.
+const DOORS: [&str; 4] = ["wait_door", "wait_once", "wait_tick", "wait_call"];
 
 /// The byte ranges of `code` inside the parentheses of each call of a door.
 fn door_spans(code: &str) -> Vec<(usize, usize)> {
@@ -553,7 +566,7 @@ fn doors_reach_the_wait_door() {
             files.push(production_code(&std::fs::read_to_string(&p).expect("read")));
         }
     }
-    for door in &DOORS[1..] {
+    for (k, door) in DOORS.iter().enumerate().skip(1) {
         let def = format!("fn {door}");
         let body = files
             .iter()
@@ -577,10 +590,40 @@ fn doors_reach_the_wait_door() {
             })
             .unwrap_or_else(|| panic!("door `{door}` has no definition in src/vm"));
         assert!(
-            body.contains("wait_door("),
-            "door `{door}` does not call `wait_door(` in its body"
+            DOORS[..k].iter().any(|d| body.contains(&format!("{d}("))),
+            "door `{door}` calls no earlier door in its body"
         );
     }
+}
+
+/// An `extern` C call takes its permit steps, its counts and its halt from the wait table
+/// (`WaitSpec::Extern`): each `cffi.call(` sits inside a `wait_call(..)`, never in a bare door.
+#[test]
+fn every_extern_call_takes_its_steps_from_the_wait_table() {
+    let src = Path::new("src/vm");
+    let mut calls = 0;
+    let mut bad = Vec::new();
+    for path in rust_files(src) {
+        let code = production_code(&fs::read_to_string(&path).unwrap());
+        let spans = door_spans_of(&code, "wait_call");
+        let mut from = 0;
+        while let Some(at) = code[from..].find("cffi.call(") {
+            let pos = from + at;
+            from = pos + 1;
+            calls += 1;
+            if !spans.iter().any(|&(a, b)| a < pos && pos < b) {
+                let line = code[..pos].lines().count();
+                bad.push(format!("{}:{line}", path.display()));
+            }
+        }
+    }
+    assert!(calls > 0, "the scan found no `cffi.call(` in src/vm");
+    assert!(
+        bad.is_empty(),
+        "an extern call outside `Vm::wait_call(Some(WaitSpec::Extern), ..)` keeps its permit with \
+         no watcher and misses the halt at its return:\n{}",
+        bad.join("\n")
+    );
 }
 
 /// The scan itself: a wait inside a door passes, one outside fails, a wrapper's call is a hit.
@@ -620,12 +663,21 @@ const STEPS: &[&str] = &[
     "width_acquire(",
     "width::release(",
     "width::acquire(",
+    "width::hand_off(",
+    "width::forfeit(",
     "block_enter(",
 ];
 
 /// The files that own a step: the table and its door (`block.rs`, `gc_door.rs`), the permit gate
-/// (`width.rs`) and the runner loop that hands its permit over between fibers (`worker_loop.rs`).
-const STEP_OWNERS: &[&str] = &["block.rs", "gc_door.rs", "width.rs", "worker_loop.rs"];
+/// (`width.rs`), the runner loop that hands its permit over between fibers (`worker_loop.rs`) and
+/// the watcher that hands over the permit of a long C call (`sysmon.rs`, `Permit::Watched`).
+const STEP_OWNERS: &[&str] = &[
+    "block.rs",
+    "gc_door.rs",
+    "width.rs",
+    "worker_loop.rs",
+    "sysmon.rs",
+];
 
 /// (file, function, why) for a call of the permit owner's own outside [`STEP_OWNERS`].
 const STEP_ALLOWED: &[(&str, &str, &str)] = &[

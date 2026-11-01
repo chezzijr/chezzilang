@@ -24,6 +24,7 @@ use root_registry::{CtxBox, RootRegistry};
 use rvec::{AllocFailed, RCell, RVec};
 mod runner_cache;
 pub mod sched_seed;
+mod sysmon;
 mod timer;
 pub mod value;
 mod width;
@@ -1353,6 +1354,9 @@ pub struct Vm {
     /// [`Vm::run_one_fiber`] and NOT part of [`FiberCtx`] (a demoted thread runs exactly one fiber to
     /// settle, then exits, so it never carries the flag into another fiber).
     demoted: bool,
+    /// The replacement worker this worker armed for the watcher of long C calls (`sysmon`): the
+    /// watcher starts it in place of [`Vm::demote_once`] when it retakes a call's permit.
+    extern_spare: Option<sysmon::Armed>,
     /// TICKET-205 — this `Vm` cannot leave its OS thread at a slice end (an Executor job, a gated
     /// nursery body), so it counts reductions and hands its runner slot over in place.
     slice_in_place: bool,

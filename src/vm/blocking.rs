@@ -210,7 +210,24 @@ impl Vm {
     /// in-place blocking native): a cancel or a child fault, then the run-wide halt. No
     /// `--timeout` rung: at a return that would turn a post-hoc timeout into an abort.
     pub(super) fn resume_halts(&mut self, span: Span) -> Result<(), RuntimeError> {
+        self.halts_after(span, false)
+    }
+
+    /// [`Vm::resume_halts`] at the return of a call that held its thread (`Vm::wait_call`): the
+    /// run-wide rung is read behind `run_halt_hint`, as a function entry and a loop back-edge read
+    /// it. Every writer of a run-wide halt latches the hint right after its cell (`Vm::halt_run`
+    /// after an exit or a job abort, before the scheds are halted; `QuiesceState::decide` with a
+    /// verdict), so a halt this read misses lands at the next function entry. A short C call cannot
+    /// afford the three cell locks.
+    pub(super) fn return_halts(&mut self, span: Span) -> Result<(), RuntimeError> {
+        self.halts_after(span, true)
+    }
+
+    fn halts_after(&mut self, span: Span, hinted: bool) -> Result<(), RuntimeError> {
         let read = self.halt_requested();
+        if hinted && read.is_none() && !self.quiesce.run_halt_hint() {
+            return Ok(());
+        }
         self.read_halts(read, span).map_or(Ok(()), Err)
     }
 
