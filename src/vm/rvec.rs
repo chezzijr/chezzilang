@@ -335,6 +335,23 @@ fn max_cap<T: Elem>() -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllocFailed;
 
+/// `n` zero bytes as a boxed slice (the block of a `bytes`), or [`AllocFailed`] when the block cannot
+/// be allocated. The allocator zeroes the block, as for [`RVec::try_zeroed`], so no page is touched.
+pub fn try_zeroed_bytes(n: usize) -> Result<Box<[u8]>, AllocFailed> {
+    if n == 0 {
+        return Ok(Box::default());
+    }
+    let layout = Layout::array::<u8>(n).map_err(|_| AllocFailed)?;
+    // SAFETY: `layout` has a non-zero size.
+    let p = unsafe { alloc_zeroed(layout) };
+    if p.is_null() {
+        return Err(AllocFailed);
+    }
+    // SAFETY: `p` is a new block of `n` zeroed bytes with the layout of a `[u8; n]`, which is the
+    // layout `Box<[u8]>` frees with.
+    Ok(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(p, n)) })
+}
+
 #[cfg(test)]
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]

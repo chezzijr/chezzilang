@@ -48,7 +48,7 @@ and std, never in user code (see `syntax.md` §12c).
 | `List[T]()` / `List()` / `List(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` takes its type from the expected type on the same statement, like `Set()`; an untyped `xs := List()` is an error on that line) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T](xs)` checks `xs`'s elements against `T`. |
 | `Map[K, V]()` / `Map()` / `{}` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` takes its type from the expected type on the same statement; an untyped `m := Map()` is an error on that line). Map literal: `{k: v, ...}`. |
 | `Set[T]()` / `Set()` / `Set(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set; bare `Set()` takes its type from the expected type on the same statement; an untyped `s := Set()` is an error on that line) / set from an iterable. `Set[T](xs)` checks elements against `T`. |
-| `bytes(x)` | `bytes` | Convert a `bytes` / `bytearray` / `List[int]` to `bytes`. To UTF-8 encode a `str`, use `s.encode()` (Python's `bytes(str)` also errors without an encoding). Literal: `b"..."`. |
+| `bytes(n)` / `bytes(x)` | `bytes` | `n` zero bytes (the same negative-`n` fault and capacity fault as `bytearray(n)`) / convert a `bytes` / `bytearray` / `List[int]` to `bytes`. To UTF-8 encode a `str`, use `s.encode()` (Python's `bytes(str)` also errors without an encoding). Literal: `b"..."`. |
 | `bytearray()` / `bytearray(n)` / `bytearray(x)` | `bytearray` | Empty growable byte buffer / `n` zero bytes / a mutable copy of a `bytes` or `List[int]`. There is no `bytearray` literal. |
 
 ### Which failures fault, and why they are not `T!E`s

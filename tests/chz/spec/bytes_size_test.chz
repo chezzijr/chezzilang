@@ -1,0 +1,24 @@
+# `bytes(n)` gives `n` zero bytes, as `bytearray(n)` does (owner decision 2026-11-03, U5). CPython
+# prints `b'\x00\x00'` for `bytes(2)` and faults `negative count` for `bytes(-1)`. The capacity rule
+# is in `alloc_fault_grid_test.chz`.
+
+fn fault(op: fn() -> int) -> str:
+    r := recover: op()
+    match r:
+        ?n: return "ok {n}"
+        !e: return e.message()
+
+test fn bytes_of_a_size_is_that_many_zero_bytes():
+    assert bytes(2) == b"\x00\x00"
+    assert bytes(0) == b""
+    assert bytes(3).len() == 3
+    assert bytes(2) == bytes(bytearray(2))
+
+test fn a_negative_size_faults_as_for_bytearray():
+    assert fault(fn() -> int: bytes(-1).len()) == "bytes() size -1 must be non-negative"
+    assert fault(fn() -> int: bytearray(-1).len()) == "bytearray() size -1 must be non-negative"
+
+test fn the_other_forms_are_unchanged():
+    assert bytes([1, 2]) == b"\x01\x02"
+    assert bytes(b"ab") == b"ab"
+    assert bytes(bytearray([7])) == b"\x07"

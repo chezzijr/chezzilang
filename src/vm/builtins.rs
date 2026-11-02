@@ -586,26 +586,8 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let bytes: RVec<u8> = match args {
             [] => RVec::new(),
-            [one] if self.int_val(*one).is_some() => {
-                let n = self.int_val(*one).unwrap();
-                if n < 0 {
-                    return Err(
-                        self.err(format!("bytearray() size {n} must be non-negative"), span)
-                    );
-                }
-                // Bound the zero-fill: a block that cannot be allocated is a recoverable fault
-                // (`RVec::try_zeroed`), not an abort, with no hard cap, so legitimately large
-                // buffers still work. The allocator zeroes the block, so no page is touched here.
-                let n = n as usize;
-                match RVec::try_zeroed(n) {
-                    Ok(buf) => buf,
-                    Err(AllocFailed) => {
-                        return Err(self.err(
-                            format!("bytearray() size {n} is too large to allocate"),
-                            span,
-                        ));
-                    }
-                }
+            [one] if let Some(n) = self.int_val(*one) => {
+                self.zero_filled("bytearray", n, span, RVec::try_zeroed)?
             }
             [one] => self.collect_bytes_arg("bytearray", *one, span)?.into(),
             _ => {
@@ -618,15 +600,20 @@ impl Vm {
         Ok(Value::obj(self.heap.alloc(Obj::ByteArray(bytes))))
     }
 
-    /// `bytes(b)` → copy; `bytes(ba)` → immutable SNAPSHOT of a `bytearray`; `bytes([ints])` → from a
-    /// list of ints. The conversion bridge to the IMMUTABLE form (the other being the `b"..."` literal).
+    /// `bytes(N)` → N zero bytes (Python); `bytes(b)` → copy; `bytes(ba)` → immutable SNAPSHOT of a
+    /// `bytearray`; `bytes([ints])` → from a list of ints. The conversion bridge to the IMMUTABLE form (the other being the `b"..."` literal).
     pub(super) fn builtin_bytes(
         &mut self,
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let bytes: Vec<u8> = match args {
-            [one] => self.collect_bytes_arg("bytes", *one, span)?,
+        let bytes: Box<[u8]> = match args {
+            [one] if let Some(n) = self.int_val(*one) => {
+                self.zero_filled("bytes", n, span, super::rvec::try_zeroed_bytes)?
+            }
+            [one] => self
+                .collect_bytes_arg("bytes", *one, span)?
+                .into_boxed_slice(),
             _ => {
                 return Err(self.err(
                     format!("bytes() expects 1 argument, got {}", args.len()),
@@ -634,9 +621,25 @@ impl Vm {
                 ));
             }
         };
-        Ok(Value::obj(
-            self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())),
-        ))
+        Ok(Value::obj(self.heap.alloc(Obj::Bytes(bytes))))
+    }
+
+    /// The `n` zero bytes of `bytes(n)` and `bytearray(n)` (CPython's rule for both). A negative `n`
+    /// faults. A block that cannot be allocated is a recoverable fault, not an abort, with no hard
+    /// cap, so a large buffer still works; `alloc` zeroes the block, so no page is touched here.
+    fn zero_filled<B>(
+        &self,
+        what: &str,
+        n: i64,
+        span: Span,
+        alloc: impl FnOnce(usize) -> Result<B, AllocFailed>,
+    ) -> Result<B, RuntimeError> {
+        if n < 0 {
+            return Err(self.err(format!("{what}() size {n} must be non-negative"), span));
+        }
+        alloc(n as usize).map_err(|AllocFailed| {
+            self.err(format!("{what}() size {n} is too large to allocate"), span)
+        })
     }
 
     pub(super) fn builtin_int(

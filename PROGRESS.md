@@ -195,7 +195,7 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     a fault, the depth limit, a channel `recv` and a sibling's fault, 31 cells. History:
     `docs/history/progress/2026-11.md`.
 19. **U5 sibling cells and U14 (owner decisions 2026-11-03).** Done: `bool` is ordered, `false`
-    before `true`. History: `docs/history/progress/2026-11.md`.
+    before `true`; `bytes(n)` gives `n` zero bytes. History: `docs/history/progress/2026-11.md`.
 
 ### Open questions for the owner
 

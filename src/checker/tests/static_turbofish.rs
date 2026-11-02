@@ -1240,7 +1240,7 @@ fn nested_width_reads_as_its_scalar() {
     );
     rejects_entry(
         &format!("{prefix}l: List[str] = [\"a\"]\nb := bytes(l)\n"),
-        "bytes() expects a bytes, a bytearray, or a List[int], got List[str]",
+        "bytes() expects an int size, a bytes, a bytearray, or a List[int], got List[str]",
     );
     rejects_entry(
         &format!("{prefix}l: List[float] = [1.0]\nba := bytearray(l)\n"),

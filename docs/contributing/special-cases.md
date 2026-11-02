@@ -47,7 +47,7 @@ day's binary.
 | U2 | A hook is the method that satisfies the builtin protocol; a declared type with methods is one kind (struct and enum alike) | Family D of wave 23, enum half-hooks, `List(s)` for a bounded parameter | TICKET-250 (done) | no |
 | U3 | A receiver is the first parameter of a method and nothing else | the `self` universal cast (P0) | TICKET-250 (note added) | no (owner: `self` is the special word) |
 | U4 | An un-hinted `?x` is a carrier from creation; a wrapper holds its operand | Families B and C of wave 23 | TICKET-248, TICKET-247 (landed) | no |
-| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed); re-run 2026-10-16: still open `"ab" * 3`, `bytes(2)`, enum `.copy()`, `match 1.5:`, `{1, 2}.map(f)` | decided, see below |
+| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed); re-run 2026-10-16: still open `"ab" * 3`, enum `.copy()`, `match 1.5:`, `{1, 2}.map(f)` | decided, see below |
 | U6 | One iteration source: `for`, comprehensions, `List()`/`Set()`/`Map()`, destructuring and `Iterable` ask one function | range, channel, Set of tuples, std containers, `std.iter` | TICKET-253 (ranges), TICKET-257 (channels) | decided, see below |
 | U7 | A range is a value | every "a range is only valid as" site, `range()`, slice spelling | TICKET-253, TICKET-254 (landed) | decided, see below |
 | U8 | A block expression is an expression wherever layout exists, and layout exists inside brackets and interpolation holes | `match`/`recover:` rejected inside brackets, parameter default against field default, inline fn body against lambda body, line breaks in a hole | TICKET-260 (landed); re-run 2026-10-16: still open a line break inside a hole | decided, see below |
@@ -123,7 +123,7 @@ Sibling types that differed with no stated reason:
 | `int? < int?`, `false < true` (2026-11-03) | `int!str < int!str` | Rust orders both |
 | struct has automatic `.copy()` | enum has none | Rust derives `Clone` on both |
 | `iter.islice({1, 2}, 1)`, `[1.5].sum()` | `iter.enumerate({1, 2})`, `iter.sum([1.5])`, `{1, 2}.map(f)`, `xs.extend({2})`, `",".join({"a"})` | CPython works |
-| `bytearray()`, `bytearray(2)` | `bytes()`, `bytes(2)`, `bytes({1, 2})` | CPython works |
+| `bytearray()`, `bytearray(2)`, `bytes(2)` (2026-11-03) | `bytes()`, `bytes({1, 2})` | CPython works |
 | `match` literal patterns for int, str, bool, tuple | float, bytes | CPython `case 1.5:` |
 
 Hook spelling (U16): `remove` returns `V?` on Map, `bool` on Set, nothing on the concurrent

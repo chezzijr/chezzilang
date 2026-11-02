@@ -448,72 +448,24 @@ impl Checker {
                 }
                 Some(Ty::map(k, v))
             }
-            // `bytearray(...)` — the MUTABLE byte buffer (constructor-only, no literal). Four forms:
-            // `bytearray()` (empty), `bytearray(N)` (N zero bytes), `bytearray(b)` (from a `bytes`,
-            // mutable copy), `bytearray([ints])` (from a `list[int]`, each 0–255 validated at runtime),
-            // and `bytearray(ba)` (copy). Always infers `bytearray`.
+            // `bytearray(...)` — the MUTABLE byte buffer (constructor-only, no literal):
+            // `bytearray()` (empty), or one byte source (`byte_source_arg`). Infers `bytearray`.
             Builtin::ByteArray => {
-                match args.len() {
-                    0 => {}
-                    1 => match self.infer_value(&args[0]) {
-                        Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
-                        Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
-                        other @ Ty::Float | other @ Ty::Bool | other @ Ty::Str | other @ Ty::Nil | other @ Ty::List(_) | other @ Ty::Map(..) | other @ Ty::Set(_) | other @ Ty::Func { .. } | other @ Ty::Tuple(_) | other @ Ty::Struct(..) | other @ Ty::Enum(..) | other @ Ty::Param(_) | other @ Ty::Result(..) | other @ Ty::Option(_) | other @ Ty::Channel(_) | other @ Ty::Shared(_) | other @ Ty::Atomic(_) | other @ Ty::AtomicInt | other @ Ty::RwShared(_) | other @ Ty::Executor | other @ Ty::Socket | other @ Ty::Listener | other @ Ty::Writer | other @ Ty::Reader | other @ Ty::Ptr | other @ Ty::Width(_) | other @ Ty::Protocol(..) | other @ Ty::Module(_) | other @ Ty::Var(_) => self.error(
-                            args[0].span,
-                            format!("bytearray() expects an int size, a bytes, a bytearray, or a List[int], got {other}"),
-                        ),
-                    },
+                match args {
+                    [] => {}
+                    [arg] => self.byte_source_arg("bytearray", arg),
                     _ => self.error(span, "bytearray() expects bytearray(), bytearray(int), bytearray(bytes|bytearray), or bytearray(List[int])"),
                 }
                 Some(Ty::ByteArray)
             }
-            // `bytes(...)` — the conversion bridge to the IMMUTABLE form (also constructor-only; the
-            // `b"..."` literal is the other way to make a `bytes`). `bytes(ba)` snapshots a `bytearray`,
-            // `bytes(b)` copies a `bytes`, `bytes([ints])` builds from a `list[int]`. Infers `bytes`.
+            // `bytes(...)` — the IMMUTABLE form (the `b"..."` literal is the other way to make one):
+            // one byte source (`byte_source_arg`). Infers `bytes`.
             Builtin::Bytes => {
-                match args.len() {
-                    1 => match self.infer_value(&args[0]) {
-                        Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
-                        Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
-                        other @ Ty::Int
-                        | other @ Ty::Float
-                        | other @ Ty::Bool
-                        | other @ Ty::Str
-                        | other @ Ty::Nil
-                        | other @ Ty::List(_)
-                        | other @ Ty::Map(..)
-                        | other @ Ty::Set(_)
-                        | other @ Ty::Func { .. }
-                        | other @ Ty::Tuple(_)
-                        | other @ Ty::Struct(..)
-                        | other @ Ty::Enum(..)
-                        | other @ Ty::Param(_)
-                        | other @ Ty::Result(..)
-                        | other @ Ty::Option(_)
-                        | other @ Ty::Channel(_)
-                        | other @ Ty::Shared(_)
-                        | other @ Ty::Atomic(_)
-                        | other @ Ty::AtomicInt
-                        | other @ Ty::RwShared(_)
-                        | other @ Ty::Executor
-                        | other @ Ty::Socket
-                        | other @ Ty::Listener
-                        | other @ Ty::Writer
-                        | other @ Ty::Reader
-                        | other @ Ty::Ptr
-                        | other @ Ty::Width(_)
-                        | other @ Ty::Protocol(..)
-                        | other @ Ty::Module(_)
-                        | other @ Ty::Var(_) => self.error(
-                            args[0].span,
-                            format!(
-                                "bytes() expects a bytes, a bytearray, or a List[int], got {other}"
-                            ),
-                        ),
-                    },
+                match args {
+                    [arg] => self.byte_source_arg("bytes", arg),
                     _ => self.error(
                         span,
-                        "bytes() expects bytes(bytes|bytearray) or bytes(List[int])",
+                        "bytes() expects bytes(int), bytes(bytes|bytearray) or bytes(List[int])",
                     ),
                 }
                 Some(Ty::Bytes)
@@ -587,6 +539,20 @@ impl Checker {
                 self.check_args("AtomicInt", &[Ty::Int], args, span);
                 Some(Ty::AtomicInt)
             }
+        }
+    }
+
+    /// The one argument of `bytes(x)` and `bytearray(x)`: an int size (that many zero bytes,
+    /// CPython's `bytes(2)` is `b'\x00\x00'`), a `bytes` or `bytearray` (a copy), or a `List[int]`
+    /// (each element 0-255, checked at run time).
+    fn byte_source_arg(&mut self, what: &str, arg: &Expr) {
+        match self.infer_value(arg) {
+            Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
+            Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
+            other @ Ty::Float | other @ Ty::Bool | other @ Ty::Str | other @ Ty::Nil | other @ Ty::List(_) | other @ Ty::Map(..) | other @ Ty::Set(_) | other @ Ty::Func { .. } | other @ Ty::Tuple(_) | other @ Ty::Struct(..) | other @ Ty::Enum(..) | other @ Ty::Param(_) | other @ Ty::Result(..) | other @ Ty::Option(_) | other @ Ty::Channel(_) | other @ Ty::Shared(_) | other @ Ty::Atomic(_) | other @ Ty::AtomicInt | other @ Ty::RwShared(_) | other @ Ty::Executor | other @ Ty::Socket | other @ Ty::Listener | other @ Ty::Writer | other @ Ty::Reader | other @ Ty::Ptr | other @ Ty::Width(_) | other @ Ty::Protocol(..) | other @ Ty::Module(_) | other @ Ty::Var(_) => self.error(
+                arg.span,
+                format!("{what}() expects an int size, a bytes, a bytearray, or a List[int], got {other}"),
+            ),
         }
     }
 }
