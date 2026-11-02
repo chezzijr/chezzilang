@@ -131,8 +131,9 @@ fn int_float_promotes_ok() {
 // ===== 6. comparison =====
 
 #[test]
-fn comparing_bool_ordering_rejected() {
-    rejects("x := true < false\n", "cannot compare bool and bool");
+fn comparing_bool_and_int_rejected() {
+    // `bool` is ordered against `bool` only (`tests/chz/spec/bool_order_test.chz`).
+    rejects("x := true < 1\n", "cannot compare bool and int");
 }
 
 #[test]

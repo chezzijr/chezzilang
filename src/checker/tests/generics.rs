@@ -1934,11 +1934,11 @@ x := Numeral.Val(1) + Numeral.Val(\"hello\")
 fn list_min_max_return_option_and_keep_their_bound() {
     // (a) the where-bound still fires through the new `Option` return
     rejects(
-        "xs := [[true], [false]]\nxs.min()\n",
+        "xs := [[{1: 2}], [{1: 3}]]\nxs.min()\n",
         "does not satisfy Comparable",
     );
     rejects(
-        "xs := [[true], [false]]\nxs.max()\n",
+        "xs := [[{1: 2}], [{1: 3}]]\nxs.max()\n",
         "does not satisfy Comparable",
     );
     // …and a Comparable element is still accepted

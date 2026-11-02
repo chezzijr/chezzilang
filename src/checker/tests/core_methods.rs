@@ -241,9 +241,9 @@ fn list_sort_returns_nil_rejected_as_value() {
 
 #[test]
 fn list_sort_non_orderable_rejected() {
-    // `where T: Comparable` bound-enforcement diagnostic (bool is not Comparable).
+    // `where T: Comparable` bound-enforcement diagnostic (a Map is not Comparable).
     rejects(
-        "xs := [true, false]\nxs.sort()\n",
+        "xs := [{1: 2}, {3: 4}]\nxs.sort()\n",
         "does not satisfy Comparable",
     );
 }

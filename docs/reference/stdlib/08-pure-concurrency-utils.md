@@ -149,7 +149,7 @@ and `for r in rx:` gives `T!Lagged`. A receiver that fell more than `cap` values
 
 - `Comparable` embeds `Eq`, but a struct/enum satisfies `Eq` **structurally**, so defining
   `compare(self, other: Self) -> int` is enough. An `eq` is optional and only needed to *override* `==`.
-  int/float/str satisfy `Comparable` intrinsically, with no method to write.
+  int/float/bool/str satisfy `Comparable` intrinsically, with no method to write.
 - Its `compare` is **total on floats**: a `NaN` operand returns an ordering int, never a fault. It uses
   the total order of `List.sort()`/`sort_by_key`/`min`/`max` (`f64::total_cmp`, `NaN` to one end;
   `+0.0` and `-0.0` are Equal, so sort is stable across them and `min`/`max` keep the first). The

@@ -466,7 +466,7 @@ impl Checker {
         if protocol == "Comparable"
             && matches!(
                 ty,
-                Ty::Int | Ty::Float | Ty::Str | Ty::Bytes | Ty::ByteArray
+                Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::ByteArray
             )
         {
             return self.grant_intrinsic(protocol, ty);
@@ -540,7 +540,7 @@ impl Checker {
         // `Stringable` (sole method `str(self) -> str`) is satisfied intrinsically by every scalar —
         // all four stringify (int/float/bool/str), so a `[T: Stringable]` generic accepts them (the
         // erased body's `v.str()` is dispatched by the scalar `str` branch in `Vm::do_method_call`).
-        // Note the membership is all FOUR scalars — unlike Comparable (no Bool) / Hashable (no Float).
+        // Note the membership is all FOUR scalars, as for Comparable (Hashable has no Float).
         // TICKET-257 (owner rule U5): `print`, `str()` and `"{x}"` accept every value, so every kind a
         // `RecvKind` names is `Stringable`. A method that is not the hook is invisible to `print`, so
         // a type whose `str` has the wrong shape is graded like one with no `str` (the hook grid pins

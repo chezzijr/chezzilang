@@ -7,7 +7,7 @@ use super::*;
 // ----- M23 — the `Eq` protocol (checker foundation; the `==` dispatch itself lands later) -----
 
 /// The intrinsic scalar grant: ALL FOUR scalars satisfy `Eq` with no user method — `==` is defined
-/// on every scalar (unlike `Comparable`, which excludes `bool`). What a NON-scalar does is D1's
+/// on every scalar. What a NON-scalar does is D1's
 /// question, pinned by `eq_is_satisfied_by_every_type_whose_equality_is_structural` below.
 #[test]
 fn scalars_satisfy_eq_intrinsically() {
@@ -2889,7 +2889,7 @@ fn user_fn_where_bound_duplicating_decl_bound_reports_once() {
 import Comparable from std.cmp
 fn f[T: Comparable](x: T) -> int where T: Comparable:
     return 1
-f(true)
+f({1: 2})
 ";
     let n = check_src(src)
         .iter()
@@ -3270,9 +3270,9 @@ xs.sort()
 }
 
 #[test]
-fn sort_where_clause_bool_list_rejected() {
+fn sort_where_clause_map_list_rejected() {
     rejects(
-        "xs := [true, false]\nxs.sort()\n",
+        "xs := [{1: 2}, {3: 4}]\nxs.sort()\n",
         "does not satisfy Comparable",
     );
 }

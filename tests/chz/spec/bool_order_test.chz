@@ -1,0 +1,46 @@
+# `bool` is ordered, `false` before `true` (owner decision 2026-11-03, U5). Python prints `True`
+# for `False < True` and Rust's `bool: Ord` agrees; Go rejects the compare. Every consumer that
+# orders by `Comparable` reads the same order: the operators, `compare`, `sort`, `min`, `max` and a
+# `[T: Comparable]` bound.
+import Comparable from std.cmp
+
+fn lt[T: Comparable](a: T, b: T) -> bool:
+    return a < b
+
+fn sign[T: Comparable](a: T, b: T) -> int:
+    return a.compare(b)
+
+test fn the_operators_order_false_before_true():
+    assert false < true
+    assert not (true < false)
+    assert true > false
+    assert false <= false
+    assert true >= true
+    assert not (true < true)
+    assert false < true <= true
+
+test fn a_comparable_bound_accepts_bool():
+    assert lt(false, true)
+    assert not lt(true, false)
+    assert sign(false, true) == -1
+    assert sign(true, true) == 0
+    assert sign(true, false) == 1
+
+test fn sort_min_and_max_order_bools():
+    xs := [true, false, true, false]
+    xs.sort()
+    assert xs == [false, false, true, true]
+    assert [true, false].max() == ?true
+    assert [true, false].min() == ?false
+
+test fn a_tuple_and_a_list_of_bools_order_by_element():
+    assert (false, 1) < (true, 0)
+    assert [false, true] < [true]
+    ys := [(true, 2), (false, 9)]
+    ys.sort()
+    assert ys == [(false, 9), (true, 2)]
+
+test fn sort_orders_bytes_by_content():
+    zs := [b"b", b"a", b"c"]
+    zs.sort()
+    assert zs == [b"a", b"b", b"c"]

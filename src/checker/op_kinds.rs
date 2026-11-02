@@ -87,12 +87,13 @@ impl Checker {
             {
                 self.satisfies(l, protocol).is_ok()
             }
-            // TICKET-257: two str / bytes / bytearray operands ask `Comparable` like any pair of one
+            // TICKET-257: two bool / str / bytes / bytearray operands ask `Comparable` like any pair of one
             // kind. The mixed `bytes < bytearray` pair has no `Self`-typed protocol form and stays an
             // operator form (CPython orders it; so does `compare_op`).
-            (Ty::Str, Ty::Str) | (Ty::Bytes, Ty::Bytes) | (Ty::ByteArray, Ty::ByteArray) => {
-                self.satisfies(l, protocol).is_ok()
-            }
+            (Ty::Bool, Ty::Bool)
+            | (Ty::Str, Ty::Str)
+            | (Ty::Bytes, Ty::Bytes)
+            | (Ty::ByteArray, Ty::ByteArray) => self.satisfies(l, protocol).is_ok(),
             (Ty::Bytes, Ty::ByteArray) | (Ty::ByteArray, Ty::Bytes) => true,
             // TICKET-146: a tuple / `List` pair orders lexicographically when every element type is
             // Comparable; `compatible` keeps `(int, int) < (int, str)` out.

@@ -235,7 +235,7 @@ call the matching `std.string` free fns (no import needed). A character is a 1-c
 `xs.sum()` (numeric; empty `-> 0`, or `0.0` for a `List[float]`), `xs.sort()` (ascending, in place),
 `xs.concat(ys)→list` (new list), `xs.extend(ys)` (append in place, → None), `xs.copy()→list`
 (shallow), `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`, `xs.sort_by(fn(a, b) -> int)` (negative means
-`a` first; stable, in place), `xs.sort_by_key(fn(x) -> K)` (`K` Comparable: int/float/str or a type
+`a` first; stable, in place), `xs.sort_by_key(fn(x) -> K)` (`K` Comparable: int/float/bool/str or a type
 with `compare`; stable, in place).
 
 **Map methods:** `m.get(k)→V?` `m.contains(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`,

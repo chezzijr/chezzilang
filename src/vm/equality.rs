@@ -25,6 +25,8 @@ impl Vm {
             return self.float_of(l).partial_cmp(&self.float_of(r));
         }
         match (l.view(), r.view()) {
+            // `false` before `true` (Python `False < True`, Rust `bool: Ord`).
+            (ValueView::Bool(a), ValueView::Bool(b)) => Some(a.cmp(&b)),
             (ValueView::Obj(ha), ValueView::Obj(hb)) => {
                 match (self.heap.get(ha), self.heap.get(hb)) {
                     (Obj::Str(a), Obj::Str(b)) => Some(a.cmp(b)),
@@ -647,25 +649,14 @@ impl Vm {
         false
     }
 
-    /// Total order over scalar values for `sort()`. The checker restricts `sort` to homogeneous
-    /// int/float/str lists; str elements are read through the heap. Anything else compares Equal.
+    /// Total order over scalar values for `sort()`. The checker restricts `sort` to a homogeneous
+    /// Comparable element type. A float pair orders by `float_order` (NaN to one end); every other
+    /// pair reads the one scalar order, [`Self::compare`]. An unordered pair compares Equal.
     pub(super) fn value_order(&self, a: Value, b: Value) -> std::cmp::Ordering {
-        use std::cmp::Ordering::Equal;
-        // Homogeneous lists only (checker-enforced): both int (inline/boxed) → exact i64; both float
-        // → `float_order`; both str → lexical. A mixed/other pair compares Equal.
-        if self.is_integral(a) && self.is_integral(b) {
-            return self.int_of(a).cmp(&self.int_of(b));
-        }
         if a.is_float() && b.is_float() {
             return float_order(self.float_of(a), self.float_of(b));
         }
-        match (a.as_obj(), b.as_obj()) {
-            (Some(ha), Some(hb)) => match (self.heap.get(ha), self.heap.get(hb)) {
-                (Obj::Str(x), Obj::Str(y)) => x.cmp(y),
-                _ => Equal,
-            },
-            _ => Equal,
-        }
+        self.compare(a, b).unwrap_or(std::cmp::Ordering::Equal)
     }
 
     // ----- calls -----

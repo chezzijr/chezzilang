@@ -56,9 +56,10 @@ use std::collections::{HashMap, HashSet};
 /// `is_std_protocol`), and the method behind that grant is a REAL native method with a runtime arm already, not
 /// a promise this ratchet needs to police.
 pub const INTRINSIC_PROTO_METHODS: &[(&str, RecvKind)] = &[
-    // Comparable — int/float/str scalars.
+    // Comparable — int/float/bool/str scalars (`false` before `true`, Python and Rust `bool: Ord`).
     ("Comparable", RecvKind::Int),
     ("Comparable", RecvKind::Float),
+    ("Comparable", RecvKind::Bool),
     ("Comparable", RecvKind::Str),
     ("Comparable", RecvKind::Bytes),
     ("Comparable", RecvKind::ByteArray),
@@ -67,7 +68,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, RecvKind)] = &[
     ("Comparable", RecvKind::List),
     // Eq — D1: EVERY receiver kind whose `==` this table can key a row on except `nil` (not
     // spellable as a value). Most rows are the structural derive (`Vm::values_equal`): the four
-    // scalars are all here because `==` is defined on `bool` too, unlike `Comparable`;
+    // scalars are all here, as for `Comparable`;
     // `option`/`result` land on `Obj::Enum` at runtime, same as `enum`. `func` is the one exception —
     // a function value's `==` is IDENTITY (two loads of the same top-level `fn`/nested `fn` def are
     // equal, two calls to a factory are not — W7-54), not a structural walk, but it is still the same

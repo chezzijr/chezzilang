@@ -90,7 +90,7 @@ print(max(Point(1, 2), Point(3, 0)).x)   # works: Point is Comparable
 `< <= > >=` dispatch to `compare` for any `Comparable` value, including a bare `T: Comparable`
 (negative/zero/positive means less/equal/greater).
 
-- `int`, `float` and `str` are `Comparable`. So are a tuple and a `List[T]` when every element type
+- `int`, `float`, `bool` and `str` are `Comparable` (`false < true`, as in Python and Rust). So are a tuple and a `List[T]` when every element type
   is: they order lexicographically (the first unequal element decides, a shorter prefix sorts
   first). A `T?` derives no ordering: `a < b` on two `int?` is `cannot compare`, and `xs.sort()` on a
   `List[int?]` is `type int? does not satisfy Comparable`. `print((1, 2) < (1, 3))  # true`;

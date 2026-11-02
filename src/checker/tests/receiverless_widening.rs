@@ -2678,7 +2678,7 @@ fn comparable_tuple_list_option_non_comparable_element_rejected() {
         &format!("{plain}print((1, Plain(1)) < (1, Plain(2)))\n"),
         "cannot compare",
     );
-    rejects("print([true] < [false])\n", "cannot compare");
+    rejects("print([{1: 2}] < [{1: 3}])\n", "cannot compare");
     rejects(
         "a: bool? = true\nb: bool? = false\nprint(a < b)\n",
         "cannot compare",
@@ -2694,7 +2694,7 @@ fn comparable_tuple_list_option_non_comparable_element_rejected() {
         "does not satisfy Comparable",
     );
     rejects(
-        "xs := [[true], [false]]\nxs.min()\n",
+        "xs := [[{1: 2}], [{1: 3}]]\nxs.min()\n",
         "does not satisfy Comparable",
     );
 }
