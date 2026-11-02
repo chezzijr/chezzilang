@@ -189,6 +189,11 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     or more than one own method. `IndexSet` embeds `Index`. A failed embed is reported under the
     protocol asked for. No program output changed. `tests/protocol_method_grid.rs`, 67 cells.
     History: `docs/history/progress/2026-11.md`.
+18. **The two paths of a hook call give one failure answer (test only, 2026-11-02).** A `for`
+    loop runs the hook flat; `List(v)`, a comprehension and an operator re-enter through
+    `invoke_hook`. `every_hook_consumer_gives_the_same_failure_path` pins one golden per hook for
+    a fault, the depth limit, a channel `recv` and a sibling's fault, 31 cells. History:
+    `docs/history/progress/2026-11.md`.
 
 ### Open questions for the owner
 

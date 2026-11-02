@@ -1440,6 +1440,173 @@ fn every_iterand_source_feeds_every_consumer() {
     );
 }
 
+/// A run's text with the file name dropped and each call site cut to its line: the consumers of
+/// one hook spell its call at one line but at different columns.
+fn trace(name: &str, text: &str) -> String {
+    let text = text.replace(
+        &format!("{}:", dir().join(format!("{name}.chz")).display()),
+        "",
+    );
+    text.lines()
+        .map(|line| match line.split_once("(called at ") {
+            Some((head, site)) => {
+                let at = site.split(':').next().unwrap_or(site);
+                format!("{head}(called at {at})\n")
+            }
+            None => format!("{line}\n"),
+        })
+        .collect()
+}
+
+/// A user hook runs on one of two paths: a `for` loop and a direct `v.m(..)` push the hook's
+/// frame flat on the fiber (`do_method_call`), and `List(v)`, a comprehension and an operator
+/// re-enter through `invoke_hook`. Each cell runs every consumer of a hook at
+/// `CHEZZI_THREADS` 1, 2 and default (`run`), and every consumer must print the cell's one
+/// golden for that hook: a fault inside the hook, a hook that recurses past the depth limit, a
+/// channel `recv` fed by a spawned sibling, and a sibling's fault while the owner sleeps inside
+/// the hook. Each consumer is one statement, so its call site has one line in every spelling.
+#[test]
+fn every_hook_consumer_gives_the_same_failure_path() {
+    // The consumers of each hook. `V` is the cell's receiver value.
+    let consumers: [(&str, &str, &str); 8] = [
+        ("next", "for", "for x in V: print(x)"),
+        ("next", "list", "for x in List(V): print(x)"),
+        ("next", "comp", "for x in [q for q in V]: print(x)"),
+        ("next", "call", "print(V.next())"),
+        ("eq", "op", "print(V == V)"),
+        ("eq", "call", "print(V.eq(V))"),
+        ("add", "op", "print((V + V).n)"),
+        ("add", "call", "print(V.add(V).n)"),
+    ];
+    // (cell, declarations ending in `fn use_it():`, the line before the consumer, the receiver,
+    //  the consumers it skips, the golden of each hook as (hook, golden))
+    type Cell = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        [(&'static str, &'static str); 3],
+    );
+    let fault_decl = "struct Bad:\n    n: int\n    fn next(self) -> int?:\n        xs := [1]\n        return xs[5]\n    fn eq(self, other: Bad) -> bool:\n        xs := [1]\n        return xs[5] == 0\n    fn add(self, other: Bad) -> Bad:\n        xs := [1]\n        return Bad(xs[5])\nfn use_it():\n";
+    let depth_decl = "struct R:\n    n: int\n    fn next(self) -> int?:\n        return self.next()\n    fn eq(self, other: R) -> bool:\n        return self == other\n    fn add(self, other: R) -> R:\n        return self + other\nfn use_it():\n";
+    let feed_decl = "struct Feed:\n    c: Channel[int]\n    n: int\n    fn next(self) -> int?:\n        if self.n == 0:\n            return None\n        self.n = self.n - 1\n        return self.c.recv()\n    fn eq(self, other: Feed) -> bool:\n        return self.c.recv() + self.c.recv() + self.c.recv() == 3\n    fn add(self, other: Feed) -> Feed:\n        return Feed(self.c, self.c.recv() + self.c.recv() + self.c.recv())\nc := Channel[int](0)\nfn use_it():\n";
+    let slow_decl = "import std.time\nstruct Slow:\n    n: int\n    fn next(self) -> int?:\n        time.sleep_ms(200)\n        print(\"step\")\n        return None\n    fn eq(self, other: Slow) -> bool:\n        time.sleep_ms(200)\n        print(\"step\")\n        return true\n    fn add(self, other: Slow) -> Slow:\n        time.sleep_ms(200)\n        print(\"step\")\n        return self\nfn boom():\n    time.sleep_ms(50)\n    xs := [1]\n    print(xs[5])\nfn use_it():\n";
+    let depth = |hook: &str, line: usize| -> String {
+        format!(
+            "runtime error ({line}:16): maximum call depth (10000) exceeded (infinite recursion?)\n  at {hook} (called at {line})\n  … (× 9998 more identical frames) …\n  at use_it (called at 12)\n"
+        )
+    };
+    let depth_next = depth("next", 4);
+    let depth_eq = depth("eq", 6);
+    let depth_add = depth("add", 8);
+    let boom = "runtime error (19:11): index 5 out of bounds (len 1)\n  at boom (called at 22)\n";
+    let cells: [Cell; 4] = [
+        (
+            "fault",
+            fault_decl,
+            "    print(\"before\")\n",
+            "Bad(1)",
+            &[],
+            [
+                (
+                    "next",
+                    "before\nruntime error (5:16): index 5 out of bounds (len 1)\n  at next (called at 14)\n  at use_it (called at 15)\n",
+                ),
+                (
+                    "eq",
+                    "before\nruntime error (8:16): index 5 out of bounds (len 1)\n  at eq (called at 14)\n  at use_it (called at 15)\n",
+                ),
+                (
+                    "add",
+                    "before\nruntime error (11:20): index 5 out of bounds (len 1)\n  at add (called at 14)\n  at use_it (called at 15)\n",
+                ),
+            ],
+        ),
+        (
+            "depth",
+            depth_decl,
+            "    print(\"before\")\n",
+            "R(1)",
+            &[],
+            [
+                (
+                    "next",
+                    Box::leak(format!("before\n{depth_next}").into_boxed_str()),
+                ),
+                (
+                    "eq",
+                    Box::leak(format!("before\n{depth_eq}").into_boxed_str()),
+                ),
+                (
+                    "add",
+                    Box::leak(format!("before\n{depth_add}").into_boxed_str()),
+                ),
+            ],
+        ),
+        // The sender is a sibling task, so the hook parks in `recv` mid-call. `v.next()` takes
+        // one value of three and leaves the sender blocked; it has no row.
+        (
+            "channel",
+            feed_decl,
+            "    parallel:\n        spawn:\n            for i in 0..3:\n                c.send(i)\n",
+            "Feed(c, 3)",
+            &["next|call"],
+            [
+                ("next", "0\n1\n2\nEND\n"),
+                ("eq", "true\nEND\n"),
+                ("add", "3\nEND\n"),
+            ],
+        ),
+        // The owner sleeps inside the hook when the sibling faults: the run reports the
+        // sibling's fault, and neither the rest of the hook nor `after` prints.
+        (
+            "cancel",
+            slow_decl,
+            "    parallel:\n        spawn boom()\n",
+            "Slow(1)",
+            &[],
+            [("next", boom), ("eq", boom), ("add", boom)],
+        ),
+    ];
+    let mut bad = Vec::new();
+    for (cell, decl, before, value, skip, goldens) in cells {
+        for (hook, consumer, stmt) in consumers {
+            if skip.contains(&format!("{hook}|{consumer}").as_str()) {
+                continue;
+            }
+            let golden = goldens
+                .iter()
+                .find(|(h, _)| *h == hook)
+                .map(|(_, g)| *g)
+                .unwrap_or_else(|| panic!("cell {cell} has no golden for {hook}"));
+            let indent = if before.contains("parallel:") {
+                "        "
+            } else {
+                "    "
+            };
+            let after = if cell == "cancel" {
+                format!("{indent}print(\"after\")\n")
+            } else {
+                String::new()
+            };
+            let src = format!(
+                "{decl}{before}{indent}{}\n{after}use_it()\n",
+                stmt.replace('V', value)
+            );
+            let tag = format!("hookpath_{cell}_{hook}_{consumer}");
+            let got = run(&tag, &src, &mut bad);
+            let text = trace(&tag, &got.text);
+            if text != golden {
+                bad.push(format!(
+                    "{cell}|{hook}|{consumer}: expected {golden:?}, got {text:?}"
+                ));
+            }
+        }
+    }
+    assert_rows("hook failure path", bad);
+}
+
 /// TICKET-250 — the near-miss warning is true where it fires. For every (hook, shape, owner)
 /// cell: the checker warns `'m' on X is not the P hook` exactly when the method has a receiver,
 /// the grid's table says it is not the hook, and the operator use still runs to its last
