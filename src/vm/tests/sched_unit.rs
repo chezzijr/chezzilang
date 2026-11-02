@@ -1014,6 +1014,8 @@ fn a_demoted_wait_with_every_arm_closed_vetoes_the_deadlock_verdict() {
         )),
         cancel: vec![],
         fiber: true,
+        scope: None,
+        cut: false,
     });
     a.q.lock().unwrap().closed = true;
     b.q.lock().unwrap().closed = true;
@@ -1038,6 +1040,8 @@ fn a_demoted_wait_with_one_arm_still_open_reads_as_deadlocked() {
         )),
         cancel: vec![],
         fiber: true,
+        scope: None,
+        cut: false,
     });
     a.q.lock().unwrap().closed = true;
     assert!(

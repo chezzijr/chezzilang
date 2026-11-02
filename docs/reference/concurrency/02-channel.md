@@ -88,6 +88,9 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   | value and operation faults (index, overflow, `panic`, IO, call depth, a `Shared` guard re-entry) | yes |
   | scheduler and whole-program faults (deadlock, `os.exit`, `--max-heap`/`--timeout`) | no |
 
+  A `deadlock` that a `defer` meets while a fault unwinds supersedes that fault, and it stays fatal
+  in every context (`main`, a `spawn`, a callback, an `Executor` job): no `recover:` binds it.
+
   An `Executor` job's deadlock aborts at `shutdown()`, and `chezzi test` reports a deadlocking test as
   ERROR and runs the rest of the suite. No task runs its `defer`s on a fatal deadlock — not the parked
   siblings, and not the task that reports it: the frames are dropped where they stand, as Go's

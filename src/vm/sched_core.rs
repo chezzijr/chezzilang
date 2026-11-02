@@ -6,7 +6,8 @@ use super::*;
 impl SchedCore {
     /// Fault every still-parked fiber (across ALL scopes) with the deadlock error, cut every
     /// blocked-in-place waiter (`verdict_cut`) and latch `terminate` unless a demoted fiber is still
-    /// registered (called under the lock). Returns whether `terminate` latched. Correct because the
+    /// registered (called under the lock). An aborting family is cut first, alone
+    /// ([`SchedCore::cut_aborting_families`]). Returns whether `terminate` latched. Correct because the
     /// global predicate firing means nothing can progress anywhere. A `Wait` token sits in N buckets
     /// but is ONE fiber — claim-once (the wake CAS) dedups it so the flat slot is faulted and the fiber's SCOPE's `done` bumped exactly once.
     /// Each parked fiber's OWN buffered stdout/stderr (moved into `f.ctx.out`/`stderr` by `swap_task`
@@ -15,6 +16,9 @@ impl SchedCore {
     /// printed live before the deadlock returned. A distinct `Deadlocked` outcome (not `Fault`) is what lets
     /// the reduce flush ALL parked buffers here without disturbing the real-fault multi-fault path.
     pub(super) fn flag_deadlock(&mut self, err: &RuntimeError) -> bool {
+        if self.cut_aborting_families() {
+            return false;
+        }
         let buckets: Vec<Vec<ParkedEntry>> = self.parked.drain().map(|(_, v)| v).collect();
         for v in buckets {
             for entry in v {
@@ -59,10 +63,41 @@ impl SchedCore {
         self.terminate
     }
 
-    /// TICKET-296: THE read of every blocked-in-place waiter: the sched is torn down, or the
-    /// deadlock verdict cut it.
+    /// The verdict's cut of an aborting family: a demoted fiber of a cancelled scope (its owner's
+    /// own fault, or a child's fault, tripped the scope's cancel, before or after the owner reached
+    /// its join) waits in a `defer` that nothing can finish, and the owner waits for that family
+    /// alone. The verdict cuts those waiters as the scope's cancel ([`Vm::in_place_cut`]) and
+    /// nothing else, and latches nothing: the cause wins (DEC-147), the owner unwinds, and a later
+    /// wait is judged again. Returns whether such a waiter exists; without one the verdict is
+    /// sched-wide.
+    fn cut_aborting_families(&mut self) -> bool {
+        let cancelled: Vec<usize> = self
+            .scopes
+            .iter()
+            .filter(|(_, s)| s.done < s.total)
+            .map(|(i, _)| i)
+            .filter(|&i| self.scope_cancel_tripped(i))
+            .collect();
+        let mut any = false;
+        for w in self.waiters.values_mut() {
+            if w.fiber && w.scope.is_some_and(|s| cancelled.contains(&s)) {
+                w.cut = true;
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// TICKET-296: the sched is torn down, or the sched-wide verdict cut every blocked-in-place
+    /// waiter. Read through [`Vm::in_place_cut`].
     pub(super) fn cut_in_place(&self) -> bool {
         self.terminate || self.verdict_cut
+    }
+
+    /// Did the verdict cut the waiter `tok` as the stuck cleanup of a cancelled scope
+    /// ([`SchedCore::cut_aborting_families`])? Read through [`Vm::in_place_cut`].
+    pub(super) fn waiter_cut(&self, tok: Option<u64>) -> bool {
+        tok.is_some_and(|t| self.waiters.get(&t).is_some_and(|w| w.cut))
     }
 
     /// Store one claimed parked fiber's `Deadlocked` outcome and bump its scope's `done`. Shared by

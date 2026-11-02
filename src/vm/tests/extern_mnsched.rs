@@ -1581,6 +1581,34 @@ fn flag_deadlock_records_a_join_parked_owner_as_deadlocked() {
     assert_eq!(c.scopes[0].owners_blocked, 0);
 }
 
+/// A demoted fiber of a cancelled scope, waiting in a `defer` nothing can finish, is the
+/// verdict's one victim while a fiber of a live scope stays parked: the verdict cuts that waiter
+/// alone and latches nothing, so its owner unwinds and the parked fiber is judged again later.
+/// With the scope not cancelled, the same verdict is sched-wide.
+#[test]
+fn flag_deadlock_cuts_only_the_stuck_waiter_of_a_cancelled_scope() {
+    for cancelled in [true, false] {
+        let s = mk_sched(1);
+        let flag = Arc::new(AtomicBool::new(cancelled));
+        let s1 = s.register_scope(1, flag, Vec::new());
+        s.seed(vec![mk_fiber(0)]);
+        let parked = take_run(&s);
+        let ch = empty_core();
+        s.park(core_key(&ch), Arc::clone(&ch), parked);
+        let mut c = s.lock();
+        let tok = c.register_waiter(Waiter {
+            scope: Some(s1),
+            ..recv_waiter(&empty_core(), vec![])
+        });
+        let done = c.flag_deadlock(&s.deadlock_err);
+        assert_eq!(c.waiter_cut(Some(tok)), cancelled);
+        assert_eq!(c.parked_n, usize::from(cancelled));
+        assert_eq!(c.slots[0].is_none(), cancelled);
+        assert_eq!(c.cut_in_place(), !cancelled);
+        assert!(!done);
+    }
+}
+
 /// TICKET-103 — a cancel drain requeues channel-parked fibers of the family only; a join-parked
 /// owner stays filed until its children finish.
 #[test]

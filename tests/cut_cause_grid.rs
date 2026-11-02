@@ -120,6 +120,40 @@ fn boomer():
     panic(\"boom\")
 fn waiter():
     time.sleep_ms(1000)
+fn kid():
+    time.sleep_ms(1)
+fn kid_stuck():
+    defer:
+        print(stuck.recv())
+    time.sleep_ms(1)
+fn bad_index() -> int:
+    xs := [1]
+    return xs[5]
+never := Channel[int](0)
+fn sib_nursery():
+    parallel:
+        spawn kid_stuck()
+        spawn boomer()
+fn never_owner():
+    defer:
+        print(\"owner defer {never.recv()}\")
+    own_nursery()
+fn never_owner_alone():
+    defer:
+        print(\"owner defer {never.recv()}\")
+    time.sleep_ms(20)
+    if bad_index() == 0:
+        pass
+live := Channel[int](0)
+fn feeder():
+    time.sleep_ms(300)
+    live.send(7)
+fn own_nursery():
+    parallel:
+        spawn kid_stuck()
+        time.sleep_ms(20)
+        if bad_index() == 0:
+            pass
 ";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -131,6 +165,10 @@ enum Cause {
     Own,
     Deadlock,
     Timeout,
+    /// the owner's own body faults while it owns a child
+    OwnBody,
+    /// a child's fault while the owner's other child is stuck in its `defer`
+    SiblingFault,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -140,6 +178,10 @@ enum Party {
     Spawned,
     Job,
     Nested,
+    /// a spawned task that owns the spawned owner
+    NestedSpawn,
+    /// a `map` callback inside a spawned task
+    Callback,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -148,6 +190,22 @@ enum Cleanup {
     Stuck,
     Faulting,
     Slow,
+    /// the owned child's `defer` waits forever (`OwnBody` only)
+    ChildStuck,
+    /// `ChildStuck`, and the owner has a `defer` that prints `cleanup`
+    ChildStuckLogged,
+    /// `ChildStuck` under `r := recover:` in the party
+    ChildStuckCaught,
+    /// `ChildStuckCaught`, then a `live.recv()` that a sibling feeds at 300 ms
+    ChildStuckLive,
+    /// `ChildStuckLive` with no feeder: the `live.recv()` is dead
+    ChildStuckDead,
+    /// `SiblingFault` only: the owner is still in its body when the child faults
+    InBody,
+    /// under `r := recover:`, an owner whose own `defer` can never finish, beside a stuck child
+    OwnerStuckCaught,
+    /// `OwnerStuckCaught` with no child
+    OwnerStuckCaughtNoKid,
 }
 
 fn cleanup_lines(c: Cleanup) -> Vec<String> {
@@ -156,6 +214,14 @@ fn cleanup_lines(c: Cleanup) -> Vec<String> {
         Cleanup::Stuck => &["defer:", "    print(stuck.recv())"],
         Cleanup::Faulting => &["defer:", "    panic(\"cleanup failed\")"],
         Cleanup::Slow => &["defer:", "    time.sleep_ms(1000)"],
+        Cleanup::ChildStuck
+        | Cleanup::ChildStuckCaught
+        | Cleanup::ChildStuckLive
+        | Cleanup::ChildStuckDead
+        | Cleanup::InBody
+        | Cleanup::OwnerStuckCaught
+        | Cleanup::OwnerStuckCaughtNoKid => &[],
+        Cleanup::ChildStuckLogged => &["defer:", "    print(\"cleanup\")"],
     };
     v.iter().map(|s| s.to_string()).collect()
 }
@@ -167,6 +233,8 @@ fn indent(lines: &[String], n: usize) -> Vec<String> {
 
 /// Axis 1: the cause body B, with the cleanup C where the cause places it.
 fn body(cause: Cause, c: Cleanup) -> Vec<String> {
+    let c_kind = c;
+    let child_stuck = matches!(c, Cleanup::ChildStuck | Cleanup::ChildStuckLogged);
     let c = cleanup_lines(c);
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let mut b = Vec::new();
@@ -208,6 +276,59 @@ fn body(cause: Cause, c: Cleanup) -> Vec<String> {
             b.extend(c);
             b.push("waiter()".into());
         }
+        Cause::SiblingFault if c_kind == Cleanup::ChildStuckCaught => {
+            b.extend(s(&["r := recover: sib_nursery()", "print(\"caught {r}\")"]));
+        }
+        Cause::SiblingFault => {
+            b.extend(s(&[
+                "parallel:",
+                "    spawn kid_stuck()",
+                "    spawn boomer()",
+            ]));
+            if c_kind == Cleanup::InBody {
+                b.push("    time.sleep_ms(200)".into());
+            }
+        }
+        Cause::OwnBody if c_kind == Cleanup::OwnerStuckCaught => {
+            b.extend(s(&["r := recover: never_owner()", "print(\"caught {r}\")"]));
+        }
+        Cause::OwnBody if c_kind == Cleanup::OwnerStuckCaughtNoKid => {
+            b.extend(s(&[
+                "r := recover: never_owner_alone()",
+                "print(\"caught {r}\")",
+            ]));
+        }
+        Cause::OwnBody if c_kind == Cleanup::ChildStuckCaught => {
+            b.extend(s(&["r := recover: own_nursery()", "print(\"caught {r}\")"]));
+        }
+        Cause::OwnBody if matches!(c_kind, Cleanup::ChildStuckLive | Cleanup::ChildStuckDead) => {
+            b.push("parallel:".into());
+            if c_kind == Cleanup::ChildStuckLive {
+                b.push("    spawn feeder()".into());
+            }
+            b.extend(s(&[
+                "    r := recover: own_nursery()",
+                "    print(\"caught {r}\")",
+                "    print(\"got {live.recv()}\")",
+            ]));
+        }
+        Cause::OwnBody => {
+            b.extend(c);
+            b.push("parallel:".into());
+            b.push(
+                if child_stuck {
+                    "    spawn kid_stuck()"
+                } else {
+                    "    spawn kid()"
+                }
+                .into(),
+            );
+            b.extend(s(&[
+                "    time.sleep_ms(20)",
+                "    if bad_index() == 0:",
+                "        pass",
+            ]));
+        }
     }
     b
 }
@@ -242,6 +363,32 @@ fn wrap(party: Party, b: Vec<String>) -> (Vec<String>, Vec<String>) {
             ]);
             d.extend(indent(&b, 2));
             (d, s(&["owner()"]))
+        }
+        Party::NestedSpawn => {
+            let mut d = owner(&b);
+            d.extend(s(&[
+                "fn outer():",
+                "    parallel:",
+                "        spawn owner()",
+            ]));
+            (d, s(&["parallel:", "    spawn outer()"]))
+        }
+        Party::Callback => {
+            let mut d = owner(&b);
+            d.extend(s(&[
+                "fn owner_cb(i: int) -> int:",
+                "    owner()",
+                "    return i",
+            ]));
+            (
+                d,
+                s(&[
+                    "parallel:",
+                    "    spawn:",
+                    "        ys := [0].map(fn(i: int) -> int: owner_cb(i))",
+                    "        print(ys[0])",
+                ]),
+            )
         }
     }
 }
@@ -379,6 +526,31 @@ enum Expect {
     Control,
     /// `finish_run`: a verdict, the parked job's line, no hang
     VerdictDrain,
+    /// `own_body`: the owner's own `index 5` fault is the one report, as Go's `panic: index out of
+    /// range [5]`
+    BodyFault,
+    /// `own_body` with a stuck owner `defer`: the `defer`'s `deadlock` supersedes the body fault,
+    /// as Go's `fatal error: all goroutines are asleep - deadlock!` does
+    OwnStuck,
+    /// `own_body` with a logging owner `defer`: `cleanup` prints, then the body fault, as Go's
+    /// deferred call runs before `panic: index out of range [5]`
+    BodyFaultLogged,
+    /// `own_body` under `recover:`: the party catches the body fault and the run ends 0, as Go's
+    /// `recover()` does
+    Caught,
+    /// a job party: its Task holds the body fault, and `t.get()` prints it (TICKET-289)
+    HeldBodyFault,
+    /// `own_body` caught, then a live `recv`: the verdict that cut the stuck child judges the
+    /// later wait again, so the feeder's value arrives (Go: `caught`, then the receive)
+    LiveAfterRecover,
+    /// the same `recv` with no feeder: a genuine deadlock still faults (Go: `all goroutines are
+    /// asleep`)
+    DeadAfterRecover,
+    /// `sibling_fault` under `recover:`: the party catches the child's `boom`
+    CaughtBoom,
+    /// a `deadlock` fault that supersedes the caught fault is fatal: no `recover:` binds it
+    /// (DEC-135; Go: `fatal error: all goroutines are asleep - deadlock!`)
+    FatalDeadlock,
 }
 
 struct Cell {
@@ -441,16 +613,54 @@ fn ok(e: Expect, g: &Got) -> bool {
         Expect::VerdictDrain => {
             g.code != 0 && err.contains("deadlock") && out.contains("job started")
         }
+        Expect::OwnStuck => {
+            g.code != 0 && err.contains("deadlock") && !err.contains("index 5 out of bounds")
+        }
+        Expect::BodyFaultLogged => ok(Expect::BodyFault, g) && out.contains("cleanup"),
+        Expect::Caught => {
+            g.code == 0
+                && out.contains("caught !index 5 out of bounds")
+                && !err.contains("deadlock")
+        }
+        Expect::HeldBodyFault => {
+            g.code == 0 && out.contains("!index 5 out of bounds") && !err.contains("deadlock")
+        }
+        Expect::LiveAfterRecover => {
+            g.code == 0
+                && out.contains("caught !index 5 out of bounds")
+                && out.contains("got 7")
+                && !err.contains("deadlock")
+        }
+        Expect::DeadAfterRecover => {
+            g.code != 0
+                && out.contains("caught !index 5 out of bounds")
+                && err.contains("deadlock")
+                && !err.contains("index 5")
+        }
+        Expect::CaughtBoom => {
+            g.code == 0 && out.contains("caught !boom") && !err.contains("deadlock")
+        }
+        Expect::FatalDeadlock => g.code != 0 && err.contains("deadlock") && !out.contains("caught"),
+        Expect::BodyFault => {
+            g.code != 0 && err.contains("index 5 out of bounds") && !err.contains("deadlock")
+        }
     }
 }
 
-/// A cut job party: a stuck cleanup meets the deadlock verdict, which is a run end; every other
-/// outcome stays in the job's Task.
+/// A cut job party: every outcome stays in the job's Task. A cancelled sibling's stuck cleanup is
+/// cut alone, and the cause wins (DEC-147), as for every other party.
 fn job_party(cause: Cause, c: Cleanup) -> Expect {
     match (cause, c) {
-        (Cause::Cancel, Cleanup::Stuck) => Expect::Deadlock,
         (Cause::Child | Cause::Cancel | Cause::Join, _) => Expect::Held,
-        (Cause::Exit | Cause::Own | Cause::Deadlock | Cause::Timeout, _) => Expect::Held,
+        (
+            Cause::Exit
+            | Cause::Own
+            | Cause::Deadlock
+            | Cause::Timeout
+            | Cause::OwnBody
+            | Cause::SiblingFault,
+            _,
+        ) => Expect::Held,
     }
 }
 
@@ -478,12 +688,15 @@ fn cells() -> Vec<Cell> {
                 }
                 let expect = match cause {
                     K::Child | K::Cancel | K::Join if party == P::Job => job_party(cause, c),
+                    // A job's own stuck `defer` faults `deadlock`, which no `recover:` binds, the
+                    // Task's included: it aborts at `shutdown()` (DEC-135).
+                    K::Own if party == P::Job && c == C::Stuck => Expect::Deadlock,
                     K::Own if party == P::Job => Expect::Held,
                     K::Child | K::Join | K::Cancel => Expect::Delivered,
                     K::Exit => Expect::Exit,
                     K::Own => Expect::Own(c),
                     K::Deadlock => Expect::Deadlock,
-                    K::Timeout => unreachable!(),
+                    K::Timeout | K::OwnBody | K::SiblingFault => unreachable!(),
                 };
                 v.push(Cell {
                     name: format!("run {cause:?} x {party:?} x {c:?}"),
@@ -495,9 +708,94 @@ fn cells() -> Vec<Cell> {
             }
         }
     }
+    // Run mode: the owner's own body fault × 7 parties × 5 cleanups. The cause wins (DEC-147): an
+    // owner whose child's cleanup is stuck resumes its unwind once the verdict cuts the child.
+    let own_parties = [
+        P::Main,
+        P::Fn,
+        P::Spawned,
+        P::NestedSpawn,
+        P::Job,
+        P::Callback,
+        P::Nested,
+    ];
+    for party in own_parties {
+        for c in [
+            C::None,
+            C::Stuck,
+            C::ChildStuck,
+            C::ChildStuckLogged,
+            C::ChildStuckCaught,
+            C::ChildStuckLive,
+            C::ChildStuckDead,
+            C::OwnerStuckCaught,
+            C::OwnerStuckCaughtNoKid,
+        ] {
+            let mut runs = T3.to_vec();
+            if c != C::None {
+                runs.extend(SEEDED);
+            }
+            let expect = match (party, c) {
+                (_, C::ChildStuckCaught) => Expect::Caught,
+                (_, C::ChildStuckLive) => Expect::LiveAfterRecover,
+                (_, C::ChildStuckDead) => Expect::DeadAfterRecover,
+                (_, C::OwnerStuckCaught | C::OwnerStuckCaughtNoKid) => Expect::FatalDeadlock,
+                (P::Job, C::Stuck) => Expect::OwnStuck,
+                (P::Job, _) => Expect::HeldBodyFault,
+                (_, C::Stuck) => Expect::OwnStuck,
+                (_, C::ChildStuckLogged) => Expect::BodyFaultLogged,
+                _ => Expect::BodyFault,
+            };
+            let get = party == P::Job && matches!(expect, Expect::HeldBodyFault | Expect::OwnStuck);
+            v.push(Cell {
+                name: format!("run OwnBody x {party:?} x {c:?}"),
+                src: Box::new(move |_| {
+                    let src = cell_src(K::OwnBody, party, c, false);
+                    if get {
+                        src.replace("_ := ex0.submit(owner)", "t := ex0.submit(owner)")
+                            + "print(t.get())\n"
+                    } else {
+                        src
+                    }
+                }),
+                test_mode: false,
+                runs,
+                expect,
+            });
+        }
+    }
+    // Run mode: a child's fault while its sibling's `defer` is stuck × 7 parties × {owner at its
+    // join, owner in its body, under `recover:`}: the child's fault is the report (DEC-147).
+    for party in own_parties {
+        for c in [C::None, C::InBody, C::ChildStuckCaught] {
+            let mut runs = T3.to_vec();
+            runs.extend(SEEDED);
+            let expect = match (party, c) {
+                (_, C::ChildStuckCaught) => Expect::CaughtBoom,
+                (P::Job, _) => Expect::HeldGet,
+                _ => Expect::Delivered,
+            };
+            let get = matches!(expect, Expect::HeldGet);
+            v.push(Cell {
+                name: format!("run SiblingFault x {party:?} x {c:?}"),
+                src: Box::new(move |_| {
+                    let src = cell_src(K::SiblingFault, party, c, false);
+                    if get {
+                        src.replace("_ := ex0.submit(owner)", "t := ex0.submit(owner)")
+                            + "print(t.get())\n"
+                    } else {
+                        src
+                    }
+                }),
+                test_mode: false,
+                runs,
+                expect,
+            });
+        }
+    }
     // Run mode: a job party whose stuck cleanup meets the verdict after a child fault; `t.get()`
     // after `shutdown()` prints the fault the Task holds (TICKET-296).
-    for cause in [K::Child, K::Join] {
+    for cause in [K::Child, K::Join, K::Cancel] {
         let mut runs = T3.to_vec();
         runs.extend(SEEDED);
         v.push(Cell {

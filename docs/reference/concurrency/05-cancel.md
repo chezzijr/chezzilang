@@ -364,6 +364,18 @@ cleanup that can never complete faults `deadlock` (fatal) instead of hanging. A 
 another party outranks that verdict (Go: the exit status). A cleanup a live task WILL feed is not
 judged.
 
+**An owner that faults beside a stuck child reports its own fault.** When an owner faults on its
+own while a child's cleanup can never complete, the verdict tears down the stuck child and the
+owner's unwind goes on, in every context (`main`, a `spawn`, a callback, an `Executor` job): its
+`defer`s run, a `recover:` catches the fault, and the fault is the report (Go prints
+`panic: index out of range`). A job's fault stays in its Task. A stuck `defer` of the owner itself
+still faults `deadlock`, as Go's does. The verdict cuts only the stuck cleanups of the cancelled
+family, as that family's cancel, and latches nothing: every other task stays where it is, and a
+later wait is judged again. The same holds when a child's fault cancels the family after its owner
+reached the join: the child's fault is the report, and a `recover:` around the owner catches it.
+So a `recv` after the `recover:` that a live task feeds gets its value, and one that nothing
+feeds faults `deadlock`.
+
 **Which fault is reported.** At the end of a run (and of each test in `chezzi test`) one ranking
 picks the report:
 
@@ -388,7 +400,9 @@ lines are kept, not retracted). Compare the **set of lines**, the **exit code** 
 **One deliberate exception: a genuine deadlock does not run `defer`s.** When every fiber is parked,
 nothing is cancelled and nothing can arrive, the parked fibers are torn down where they stand and
 their `defer`s do **not** run. This covers the task that REPORTS the verdict too, so a `defer` that
-closes a file does not run on a deadlock. A deadlock is the runtime declaring the program cannot
+closes a file does not run on a deadlock. An owner that was already unwinding its own fault is
+not torn down: the verdict cuts its stuck family alone, and the owner resumes and runs its
+`defer`s (see above). A deadlock is the runtime declaring the program cannot
 proceed, which is not a cancellation, and the ancestors draw the line in the same place: Go's
 `fatal error: all goroutines are asleep - deadlock!` skips its `defer`s (its `panic` path runs them),
 and CPython does not reach the question — a `queue.Queue().get()` or an unset asyncio `Event` under a

@@ -171,9 +171,14 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
 14. **A child's fault stops its owner at the return of an `extern` call (done 2026-11-02).** The
     halt is delivered at the call's return, as for a blocking native (owner decision: no ancestor
     interrupts a running C call); the run-wide halt is read behind `run_halt_hint` there.
-15. **A spawned task's nursery abort reports `deadlock`, not the body's fault** (2026-11-01, base
-    too): a faulting body beside a child stuck in its `defer:` reports `index 5 …` on `main` but
-    `deadlock: every task …` in a `spawn`. Go ends with the panic.
+15. **An owner that faults beside a stuck child reports its own fault in every context (done
+    2026-11-02).** The verdict cuts only the stuck waiters of a cancelled scope and latches nothing
+    (`SchedCore::cut_aborting_families`); the owner resumes its unwind in every context: its
+    `defer`s run, a `recover:` catches, and the body's fault is the report (DEC-147, the cause
+    wins). A later wait is judged again, so a live `recv` after the `recover:` gets its value. The
+    cut ends the stuck cleanup as its scope's cancel, so a child's fault that arrives after the
+    owner parked is the report too; a `deadlock` that a `defer` meets is fatal in every context.
+    `tests/cut_cause_grid.rs` `OwnBody` cells. History: `docs/history/progress/2026-11.md`.
 
 ### Open questions for the owner
 

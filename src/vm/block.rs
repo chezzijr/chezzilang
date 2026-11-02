@@ -587,6 +587,10 @@ pub(super) struct Waiter {
     pub(super) cancel: Vec<Arc<AtomicBool>>,
     /// a demoted fiber (a victim the verdict may claim), not a blocked body
     pub(super) fiber: bool,
+    /// the scope of the demoted fiber; `None` for a blocked body
+    pub(super) scope: Option<usize>,
+    /// the verdict cut this waiter ([`SchedCore::cut_aborting_families`])
+    pub(super) cut: bool,
 }
 
 impl Waiter {
@@ -631,6 +635,11 @@ pub(super) struct WaitReg {
 }
 
 impl WaitReg {
+    /// The `SchedCore::waiters` token of this wait, if it registered a waiter.
+    pub(super) fn tok(&self) -> Option<u64> {
+        self.demote.as_ref().and_then(|d| d.tok)
+    }
+
     /// Take the counts out of this wait, for an in-place channel tick: it drops them after the
     /// permit take and after its own `GatedReg`, before its next pop. Dropping them before the
     /// `GatedReg` made `benches/sched/rendezvous_pingpong` at T=1 14% slower (r=15).
@@ -649,6 +658,24 @@ impl WaitReg {
 }
 
 impl Vm {
+    /// THE read of a blocked-in-place wait's cut: the sched-wide one
+    /// ([`SchedCore::cut_in_place`]), or this wait's own ([`SchedCore::waiter_cut`]). The verdict
+    /// cuts a wait of its own as the stuck cleanup of a cancelled scope, so the party unwinds as
+    /// cancelled ([`Cut::Cancelled`]): its `deadlock` stays swallowed, as a cancelled task's stuck
+    /// cleanup's does, and the scope's cause is the report (DEC-147).
+    pub(super) fn in_place_cut(&mut self, c: &SchedCore, tok: Option<u64>) -> bool {
+        if c.cut_in_place() {
+            return true;
+        }
+        if !c.waiter_cut(tok) {
+            return false;
+        }
+        if self.cut.is_none() {
+            self.cut = Some(Cut::Cancelled);
+        }
+        true
+    }
+
     /// THE demote bracket: take this worker off `running` and account the wait — `inflight` (it
     /// vetoes the verdict), or a [`Waiter`] on `wait` the verdict asks "can you still be
     /// satisfied?". Spawns this thread's replacement worker once. With no M:N scheduler
@@ -674,6 +701,8 @@ impl Vm {
                     ),
                     cancel: self.wake_set().flags(),
                     fiber: true,
+                    scope: self.fiber_scope,
+                    cut: false,
                 })),
                 Account::Inflight => {
                     sched.inflight.fetch_add(1, Ordering::Relaxed);

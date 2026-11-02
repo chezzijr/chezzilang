@@ -1146,6 +1146,8 @@ impl MnSched {
                     wait: Arc::clone(w),
                     cancel: Vec::new(),
                     fiber: false,
+                    scope: None,
+                    cut: false,
                 });
             }
             // TICKET-103 — the whole family, in this same acquisition: an unmarked continuation keeps

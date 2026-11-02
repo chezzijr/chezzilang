@@ -153,6 +153,8 @@ fn recv_waiter(core: &Arc<ChannelCore>, cancel: Vec<Arc<AtomicBool>>) -> Waiter 
         wait: Arc::new(quiesce::PartyWait::Recv(Arc::clone(core), None)),
         cancel,
         fiber: true,
+        scope: None,
+        cut: false,
     }
 }
 

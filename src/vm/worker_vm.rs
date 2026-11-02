@@ -177,7 +177,7 @@ impl Vm {
                 break Some(e);
             }
             if let Some(m) = self.mn.clone()
-                && m.lock().cut_in_place()
+                && self.in_place_cut(&m.lock(), reg.tok())
             {
                 break Some(m.deadlock_err.clone());
             }
