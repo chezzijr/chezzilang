@@ -324,12 +324,14 @@ fn collection_operators_eval_correct() {
     // empty-side concat keeps element type / values
     assert_eq!(run_capture("print([] + [1, 2])").expect("vm"), "[1, 2]\n");
     assert_eq!(run_capture("print([1, 2] + [])").expect("vm"), "[1, 2]\n");
-    // list repeat (both orders)
-    assert_eq!(run_capture("print([0] * 3)").expect("vm"), "[0, 0, 0]\n");
-    assert_eq!(run_capture("print(2 * [7])").expect("vm"), "[7, 7]\n");
+    // list repeat is a method (`*` means multiply only)
+    assert_eq!(
+        run_capture("print([0].repeat(3))").expect("vm"),
+        "[0, 0, 0]\n"
+    );
     // zero / negative repeat → empty
-    assert_eq!(run_capture("print([1] * 0)").expect("vm"), "[]\n");
-    assert_eq!(run_capture("print([1] * -2)").expect("vm"), "[]\n");
+    assert_eq!(run_capture("print([1].repeat(0))").expect("vm"), "[]\n");
+    assert_eq!(run_capture("print([1].repeat(-2))").expect("vm"), "[]\n");
     // set algebra (insertion-order preserved)
     let setops = "a: Set[int] = {1, 2, 3}\nb: Set[int] = {2, 3, 4}\nprint(\"{a | b}\")\nprint(\"{a & b}\")\nprint(\"{a - b}\")\nprint(\"{a ^ b}\")\n";
     assert_eq!(
@@ -344,7 +346,6 @@ fn collection_operators_eval_correct() {
 fn collection_compound_assign_eval_correct() {
     let cases = [
         ("xs := [1, 2]\nxs += [3, 4]\nprint(xs)", "[1, 2, 3, 4]\n"),
-        ("xs := [7]\nxs *= 3\nprint(xs)", "[7, 7, 7]\n"),
         (
             "a: Set[int] = {1, 2, 3}\nb: Set[int] = {2, 3, 4}\na |= b\nprint(\"{a}\")",
             "{1, 2, 3, 4}\n",
@@ -376,11 +377,11 @@ fn collection_compound_assign_eval_correct() {
     }
 }
 
-/// `[0] * n` with a huge `n` must raise a RECOVERABLE fault, not abort the process via a Vec
+/// `[0].repeat(n)` with a huge `n` must raise a RECOVERABLE fault, not abort the process via a Vec
 /// capacity-overflow panic — same checked-overflow policy as `str.repeat`,.
 #[test]
 fn list_repeat_capacity_overflow_is_recoverable_fault() {
-    let src = "print([0] * 9223372036854775807)";
+    let src = "print([0].repeat(9223372036854775807))";
     let vm = run_capture(src).expect_err("vm: list repeat overflow should fault");
     assert_eq!(vm.message, "list repeat capacity overflow");
     let it = run_capture(src).expect_err("interp: list repeat overflow");
@@ -389,16 +390,15 @@ fn list_repeat_capacity_overflow_is_recoverable_fault() {
     // Huge-but-representable count: passes the `isize::MAX` byte guard (1e17 * 16B = 1.6e18 <
     // isize::MAX ≈ 9.2e18) but the allocation itself is infeasible. Before the
     // `try_reserve_exact` guard this ABORTED the process (SIGABRT) instead of faulting.
-    let huge = "print([0] * 100000000000000000)";
+    let huge = "print([0].repeat(100000000000000000))";
     let vm = run_capture(huge).expect_err("vm: huge list repeat should fault");
     assert_eq!(vm.message, "list repeat capacity overflow");
     let it = run_capture(huge).expect_err("interp: huge list repeat");
     assert_eq!(it.message, "list repeat capacity overflow");
 
     // Boundary: small repeats still work.
-    assert_eq!(run_capture("print([0] * 3)").expect("vm"), "[0, 0, 0]\n");
     assert_eq!(
-        run_capture("print([0] * 3)").expect("interp"),
+        run_capture("print([0].repeat(3))").expect("vm"),
         "[0, 0, 0]\n"
     );
 }

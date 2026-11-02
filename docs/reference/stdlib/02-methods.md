@@ -58,6 +58,7 @@ recoverable capacity fault in both spellings. The empty-`old` rule of `replace` 
 | `min_by` / `max_by` | `(key: fn(T) -> K) -> T?` | The **element** whose derived key `K` (orderable/`Comparable`) is smallest / largest, wrapped in `?v`; first-seen ties. Empty list is `None`, never a fault. |
 | `first` / `last` | `() -> T?` | The first / last element, `None` if empty. Non-mutating. |
 | `reversed` | `() -> List[T]` | Returns a **new** reversed list; the receiver is untouched (contrast in-place `reverse`). |
+| `repeat` | `(n: int) -> List[T]` | A **new** list holding `n` copies of the elements, in order (Rust `vec.repeat(n)`); the receiver is untouched. `n <= 0` → `[]`. An empty receiver gives `[]` in constant time for any `n`. Raises a recoverable `list repeat capacity overflow` fault if the total would exceed allocatable capacity. `*` is not a list repeat. |
 | `insert` | `(i: int, x: T) -> None` | *mutates*: insert `x` before index `i`. Python-clamped: `i > len` appends, negatives are length-relative and clamp to `0`; never faults. |
 | `remove` | `(i: int) -> T` | *mutates*: remove & return the element at index `i` (Rust `Vec::remove`). A negative `i` counts from the end, as in `xs[i]`. A true out-of-range index **faults** (`index {i} out of bounds (len {n})`). |
 | `unique` | `() -> List[T]` | Returns a **new** list with all duplicates removed, first-occurrence order kept (Python `dict.fromkeys`). Structural equality; never mutates the receiver. One pass over a hash index when every element is a flat scalar key; a container, `bytearray`, or user-`eq` element falls back to a linear scan with the same result. |
@@ -129,7 +130,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 
 > **Set operators.** `\| & - ^` on two `Set[T]` are union / intersection / difference /
 > symmetric-difference, identical to the methods above (`^` has no method form). Lists support `+`
-> (concat) and `*` (repeat); see [`syntax.md` §4](../syntax/03-operators.md).
+> (concat); a list repeats with `repeat`, not `*`; see [`syntax.md` §4](../syntax/03-operators.md).
 
 > **Cyclic keys fault (recoverably).** Map/Set membership and key-equality (`has`, `get`, `remove`,
 > `insert`, `m[k]`, `in`, set algebra, and `List.contains`/`index_of`/`unique`/`dedup`) are *defined by*

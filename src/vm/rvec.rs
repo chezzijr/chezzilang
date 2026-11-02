@@ -11,7 +11,7 @@
 //!   many elements as a block of at most `isize::MAX` bytes has room for (`max_cap`).
 //! - Allocation failure: [`RVec::try_with_capacity`] and [`RVec::try_zeroed`] return
 //!   [`AllocFailed`] when the block's byte size passes `isize::MAX` or the allocator returns
-//!   null, so an op that sizes a buffer from a user int (`bytearray(n)`, `[x] * n`) reports a
+//!   null, so an op that sizes a buffer from a user int (`bytearray(n)`, `xs.repeat(n)`) reports a
 //!   clean fault. Every other allocation (a push, an insert, an extend) goes through the same
 //!   path and panics on that error, or aborts on a null allocation, as a `Vec` does.
 //! - `T` is an [`Elem`]: `Copy`, no padding, in an atomic slot of its own size (`u64`, `i64`

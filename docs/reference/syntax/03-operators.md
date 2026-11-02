@@ -8,7 +8,7 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 2 | `?` | error propagation (postfix, §9) |
 | 3 | `-` (unary) | |
 | 4 | `??` | null-coalescing, RIGHT-associative, `T?` or `T!E` (see below) |
-| 5 | `*` `/` `%` | `*` also list repeat: `[0] * 3` (and `3 * [0]`, commutative) |
+| 5 | `*` `/` `%` | `*` means multiply only; a list repeats with `xs.repeat(n)` |
 | 6 | `+` `-` | `+` also list concat: `[1,2] + [3,4]`; `-` also set difference: `a - b` |
 | 7 | `<<` `>>` | bitwise shift (int-only) |
 | 8 | `&` | bitwise and (int) / set intersection (`Set[T]`) |
@@ -49,12 +49,13 @@ The relative order follows Python (comparison looser than `..` < `|` < `^` < `&`
   `1 < 2 and 2 == true`, and the second link is `cannot compare int and bool for equality`
   (CPython answers `False`).
 
-**Collection operators.** `+ *` and `& ^ |` also work on collections, with the same behaviour as the
+**Collection operators.** `+` and `& ^ |` also work on collections, with the same behaviour as the
 method forms (a mismatched element type is a type error):
 
 - `List[T] + List[T]` → concat (= `.concat`); element types must match. `[] + [1]` infers `List[int]`.
-- `List[T] * int` / `int * List[T]` → repeat; `n <= 0` → `[]`. A giant `n` raises a recoverable
-  `list repeat capacity overflow`. An empty source repeats to `[]` in constant time for any `n`.
+- `*` on a `List` or a `str` and an `int`, in either order, is a type error
+  (``cannot apply * to List[int] and int — use `.repeat(n)` ``; owner decision 2026-11-03, Rust
+  `vec.repeat(n)`, Go `strings.Repeat`). Write `xs.repeat(n)` or `s.repeat(n)`.
 - `Set[T] | Set[T]` → union (= `.union`), `&` → intersection (= `.intersection`), `-` → difference
   (= `.difference`), `^` → symmetric-difference (no method form). The result keeps insertion order.
 

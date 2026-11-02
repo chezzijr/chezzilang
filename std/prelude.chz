@@ -86,6 +86,10 @@ native struct List[T]:
     native fn first(self) -> Option[T]
     native fn last(self) -> Option[T]
     native fn reversed(self) -> List[T]
+    # A new list that holds `n` copies of the elements, in order (Rust `vec.repeat(n)`, the rules of
+    # `str.repeat`): `n <= 0` is `[]`, and a total that cannot be allocated faults
+    # `list repeat capacity overflow`. `*` on a List is not a repeat: it means multiply only.
+    native fn repeat(self, n: int) -> List[T]
     native fn insert(self, i: int, x: T) -> None
     # TICKET-278 — remove the element at index `i` and return it (Rust `Vec::remove`); `i` follows the
     # `xs[i]` negative-index rule and a bad index faults like `xs[i]` does.

@@ -672,31 +672,6 @@ impl Vm {
                 {
                     self.set_op(SetOp::Difference, ha, hb, span)?
                 }
-                // List repeat (gap #3): `[0] * 3` / `3 * [0]` (commutative, Python-style). `n <= 0` →
-                // empty; guard capacity against the Vec overflow abort, like `str.repeat` (vm:7514).
-                (ValueView::Obj(ha), ValueView::Int(n))
-                | (ValueView::Int(n), ValueView::Obj(ha))
-                    if matches!(op, Op::Mul) && matches!(self.heap.get(ha), Obj::List(_)) =>
-                {
-                    self.list_repeat(ha, n, span)?
-                }
-                // List repeat with a boxed (>2^62) count: the count boxes as `Obj::BigInt`, so it
-                // arrives as `Obj` not `Int`. Route it to `list_repeat` (its capacity guard faults
-                // with "list repeat capacity overflow") instead of the generic "cannot apply Mul".
-                (ValueView::Obj(ha), ValueView::Obj(hb))
-                    if matches!(op, Op::Mul)
-                        && ((matches!(self.heap.get(ha), Obj::List(_))
-                            && matches!(self.heap.get(hb), Obj::BigInt(_)))
-                            || (matches!(self.heap.get(hb), Obj::List(_))
-                                && matches!(self.heap.get(ha), Obj::BigInt(_)))) =>
-                {
-                    let (lh, cnt) = if matches!(self.heap.get(ha), Obj::List(_)) {
-                        (ha, self.int_of(Value::obj(hb)))
-                    } else {
-                        (hb, self.int_of(Value::obj(ha)))
-                    };
-                    self.list_repeat(lh, cnt, span)?
-                }
                 _ => {
                     return Err(self.err(
                         format!(
@@ -738,51 +713,6 @@ impl Vm {
         } else {
             Err(self.err(format!("cannot apply Neg to {}", self.type_name(v)), span))
         }
-    }
-
-    /// `[elem...] * n` — repeat the list `n` times into a fresh list (gap #3). `n <= 0` → empty.
-    /// Sizes the whole block once with `RVec::try_with_capacity`: a total that overflows or a
-    /// block that cannot be allocated raises a RECOVERABLE fault (as `str.repeat` does), not a
-    /// panic or an abort.
-    pub(super) fn list_repeat(
-        &mut self,
-        h: GcRef,
-        n: i64,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let Obj::List(items) = self.heap.get(h) else {
-            unreachable!("list_repeat receiver is a list")
-        };
-        if n <= 0 {
-            return Ok(Value::obj(self.heap.alloc(Obj::List(RVec::new()))));
-        }
-        let n = n as usize;
-        // An empty source repeats to `[]` in constant time for any `n`: `total` below is 0
-        // regardless of `n`, so without this the loop at the bottom of this fn would still
-        // iterate `n` times extending nothing (W13-10). CPython's `len([] * (2**63-1))` is `0`
-        // instantly.
-        if items.is_empty() {
-            return Ok(Value::obj(self.heap.alloc(Obj::List(RVec::new()))));
-        }
-        // Guard the allocation: a total that overflows, or a block that cannot be allocated
-        // (`RVec::try_with_capacity`: past `isize::MAX` bytes, or a null from the allocator), is
-        // a recoverable fault, not an abort.
-        let src = items.to_vec();
-        let out = match src
-            .len()
-            .checked_mul(n)
-            .map(RVec::<Value>::try_with_capacity)
-        {
-            Some(Ok(out)) => out,
-            Some(Err(AllocFailed)) | None => {
-                return Err(self.err("list repeat capacity overflow".to_string(), span));
-            }
-        };
-        // The block holds every copy, so no extend below grows it.
-        for _ in 0..n {
-            out.extend_from_slice(&self.heap, &src);
-        }
-        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
     }
 
     /// Set algebra for the operator forms `| & - ^` (gap #3). Mirrors the

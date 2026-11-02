@@ -524,7 +524,7 @@ fn main():
         spawn:
             burn(200000)
             flag.store(1)
-        _xs := ([0] * 2000000).map(fn(i: int) -> int: flag.load()).filter(fn(v: int) -> bool: v == 1)
+        _xs := [0].repeat(2000000).map(fn(i: int) -> int: flag.load()).filter(fn(v: int) -> bool: v == 1)
         print(\"hof done\")
 main()
 ";

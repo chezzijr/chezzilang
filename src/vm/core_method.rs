@@ -899,6 +899,11 @@ impl Vm {
                             None => self.alloc_enum("Option", "None", &[]),
                         })
                     }
+                    ListMethod::Repeat => {
+                        self.arity_err("repeat", args, 1, span)?;
+                        let n = self.int_arg("repeat", &args[0], span)?;
+                        self.list_repeat(h, n, span)
+                    }
                     ListMethod::Reversed => {
                         // A NEW list (clone then reverse) — never mutate the receiver (that is `reverse`).
                         self.arity_err("reversed", args, 0, span)?;

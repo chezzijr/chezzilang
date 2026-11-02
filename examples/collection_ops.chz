@@ -1,4 +1,4 @@
-# Collection operators (gap #3): list `+`/`*` and set `| & - ^`.
+# Collection operators (gap #3): list `+` and set `| & - ^`, plus the list repeat method.
 # All of these mirror existing methods (list `.concat`, set `.union`/`.intersection`/
 # `.difference`) — `^` is symmetric-difference (no method form). Behaviour is identical.
 import std.io
@@ -10,12 +10,12 @@ fn main():
     io.print("{[7, 8] + []}")            # empty right side
     io.print("{[] + []}")                # both empty
 
-    # --- list repeat (`*`, commutative) ---
-    io.print("{[0] * 3}")                # list * int
-    io.print("{2 * [9]}")                # int * list (Python-style)
-    io.print("{[1, 2] * 2}")             # multi-element repeat
-    io.print("{[1] * 0}")                # zero → empty
-    io.print("{[1] * -1}")               # negative → empty
+    # --- list repeat (`xs.repeat(n)`; `*` means multiply only) ---
+    io.print("{[0].repeat(3)}")          # three copies
+    io.print("{[9].repeat(2)}")          # two copies
+    io.print("{[1, 2].repeat(2)}")       # multi-element repeat
+    io.print("{[1].repeat(0)}")          # zero → empty
+    io.print("{[1].repeat(-1)}")         # negative → empty
 
     # --- set union / intersection / difference / symmetric-difference ---
     a: Set[int] = {1, 2, 3}

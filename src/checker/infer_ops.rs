@@ -784,12 +784,6 @@ impl Checker {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
                     t
-                } else if op == Mul && matches!((&l, &r), (Ty::List(_), Ty::Int)) {
-                    // List repeat (gap #3): `[0] * 3` → `list[T]`. Result keeps the list's element.
-                    l.clone()
-                } else if op == Mul && matches!((&l, &r), (Ty::Int, Ty::List(_))) {
-                    // Commutative, Python-style: `3 * [0]` → `list[T]`.
-                    r.clone()
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
@@ -798,9 +792,10 @@ impl Checker {
                     self.error(
                         lspan,
                         format!(
-                            "cannot apply {} to {l_s} and {r_s}{}{note}",
+                            "cannot apply {} to {l_s} and {r_s}{}{}{note}",
                             op_sym(op),
-                            float_fix_note_join(&l, &r)
+                            float_fix_note_join(&l, &r),
+                            repeat_note(op, &l, &r)
                         ),
                     );
                     Ty::Unknown
@@ -1103,5 +1098,17 @@ impl Checker {
                 unreachable!("compare_pair called with a non-comparison operator")
             }
         }
+    }
+}
+
+/// The note for `*` between a List or a str and an int, in either order: `*` means multiply only,
+/// and the repeat is the method `repeat` that both types declare (owner decision 2026-11-03). Empty
+/// for every other pair. It never decides what is accepted.
+fn repeat_note(op: BinaryOp, l: &Ty, r: &Ty) -> &'static str {
+    let seq = |t: &Ty| matches!(t, Ty::List(_) | Ty::Str);
+    if op == BinaryOp::Mul && ((seq(l) && *r == Ty::Int) || (*l == Ty::Int && seq(r))) {
+        " — use `.repeat(n)`"
+    } else {
+        ""
     }
 }

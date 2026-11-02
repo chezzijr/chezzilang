@@ -493,15 +493,24 @@ fn list_plus_non_list_rejected() {
     rejects("xs := [1, 2] + 1\n", "cannot apply + to List[int] and int");
 }
 
+/// `*` means multiply only (owner decision 2026-11-03): a List or a str times an int, in either
+/// order and as `*=`, is a type error that names `.repeat(n)`. `List.repeat` is `List[T]`.
 #[test]
-fn list_times_int_returns_list() {
-    ok("xs := [1] * 3\nn: int = xs[0]\nprint(n)\n");
-}
-
-#[test]
-fn int_times_list_returns_list() {
-    // Commutative, Python-style: `3 * [1]` is also `List[int]`.
-    ok("xs := 3 * [1]\nn: int = xs[0]\nprint(n)\n");
+fn list_or_str_times_int_is_rejected_with_the_repeat_hint() {
+    for (src, pair) in [
+        ("xs := [1] * 3\n", "List[int] and int — use `.repeat(n)`"),
+        ("xs := 3 * [1]\n", "int and List[int] — use `.repeat(n)`"),
+        (
+            "xs := [1]\nxs *= 3\n",
+            "List[int] and int — use `.repeat(n)`",
+        ),
+        ("s := \"ab\" * 3\n", "str and int — use `.repeat(n)`"),
+        ("s := 3 * \"ab\"\n", "int and str — use `.repeat(n)`"),
+    ] {
+        rejects(src, &format!("cannot apply * to {pair}"));
+    }
+    ok("xs := [1].repeat(3)\nn: int = xs[0]\nprint(n)\n");
+    ok("ys: List[str] = [\"a\"].repeat(2)\nprint(ys)\n");
 }
 
 #[test]
@@ -546,7 +555,7 @@ fn set_difference_mismatched_element_rejected() {
 
 #[test]
 fn list_compound_assign_ops_ok() {
-    ok("xs := [1, 2]\nxs += [3, 4]\nxs *= 2\nprint(xs.len())\n");
+    ok("xs := [1, 2]\nxs += [3, 4]\nprint(xs.len())\n");
 }
 
 #[test]

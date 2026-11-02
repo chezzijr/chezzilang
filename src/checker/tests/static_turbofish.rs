@@ -1757,6 +1757,7 @@ fn receiver_write_table_matches_observed_behavior() {
                 "first()",
                 "last()",
                 "reversed()",
+                "repeat(2)",
                 "insert(0, 9)",
                 "remove(0)",
                 "unique()",

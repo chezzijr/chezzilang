@@ -110,7 +110,7 @@ fn compound_assign_rejected_heterogeneous() {
 fn compound_assign_existing_forms_still_work() {
     // Regression: the pre-existing accepted forms must all still check.
     entry_ok(
-        "fn main():\n    i := 1\n    i += 1\n    s := \"a\"\n    s += \"b\"\n    l := [1]\n    l += [2]\n    l *= 3\n    st := {1, 2}\n    st -= {1}\n    print(i)\nmain()\n",
+        "fn main():\n    i := 1\n    i += 1\n    s := \"a\"\n    s += \"b\"\n    l := [1]\n    l += [2]\n    st := {1, 2}\n    st -= {1}\n    print(i)\nmain()\n",
     );
 }
 

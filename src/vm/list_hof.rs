@@ -835,6 +835,51 @@ impl Vm {
         Ok(None)
     }
 
+    /// `xs.repeat(n)` — repeat the list `n` times into a fresh list. `n <= 0` → empty.
+    /// Sizes the whole block once with `RVec::try_with_capacity`: a total that overflows or a
+    /// block that cannot be allocated raises a RECOVERABLE fault (as `str.repeat` does), not a
+    /// panic or an abort.
+    pub(super) fn list_repeat(
+        &mut self,
+        h: GcRef,
+        n: i64,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let Obj::List(items) = self.heap.get(h) else {
+            unreachable!("list_repeat receiver is a list")
+        };
+        if n <= 0 {
+            return Ok(Value::obj(self.heap.alloc(Obj::List(RVec::new()))));
+        }
+        let n = n as usize;
+        // An empty source repeats to `[]` in constant time for any `n`: `total` below is 0
+        // regardless of `n`, so without this the loop at the bottom of this fn would still
+        // iterate `n` times extending nothing (W13-10). CPython's `len([] * (2**63-1))` is `0`
+        // instantly.
+        if items.is_empty() {
+            return Ok(Value::obj(self.heap.alloc(Obj::List(RVec::new()))));
+        }
+        // Guard the allocation: a total that overflows, or a block that cannot be allocated
+        // (`RVec::try_with_capacity`: past `isize::MAX` bytes, or a null from the allocator), is
+        // a recoverable fault, not an abort.
+        let src = items.to_vec();
+        let out = match src
+            .len()
+            .checked_mul(n)
+            .map(RVec::<Value>::try_with_capacity)
+        {
+            Some(Ok(out)) => out,
+            Some(Err(AllocFailed)) | None => {
+                return Err(self.err("list repeat capacity overflow".to_string(), span));
+            }
+        };
+        // The block holds every copy, so no extend below grows it.
+        for _ in 0..n {
+            out.extend_from_slice(&self.heap, &src);
+        }
+        Ok(Value::obj(self.heap.alloc(Obj::List(out))))
+    }
+
     /// An `int` method-argument, with a uniform type error matching the interp.
     pub(super) fn int_arg(&self, method: &str, v: &Value, span: Span) -> Result<i64, RuntimeError> {
         match self.int_val(*v) {

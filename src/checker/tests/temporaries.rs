@@ -776,6 +776,7 @@ fn native_container_results_are_new_objects() {
     // the receiver or shares its storage)
     let rows: &[(&str, &str, &str, &str)] = &[
         ("List", "x := [3, 1, 1, 2]", "reversed()", "r.pop()"),
+        ("List", "x := [3, 1, 1, 2]", "repeat(1)", "r.pop()"),
         ("List", "x := [3, 1, 1, 2]", "concat([4])", "r.pop()"),
         ("List", "x := [3, 1, 1, 2]", "map(fn(a): a + 1)", "r.pop()"),
         (
