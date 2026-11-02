@@ -183,6 +183,12 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     it for `spawn:`, `defer:`, `recover:` and a generator body; a `break` in `spawn:`/`defer:` now
     names the block, and an `else` guard in them is judged by the statement that leaves it.
     `tests/boundary_grid.rs`, 140 cells. History: `docs/history/progress/2026-11.md`.
+17. **A protocol's method name has one owner, its std decl (done 2026-11-02).** The build emits
+    `PROTOCOL_METHODS` from the `protocol` decls in `std/*.chz`; `Hook::method` and
+    `Unhooked::method` read it at compile time, and the build fails for a hook protocol with no decl
+    or more than one own method. `IndexSet` embeds `Index`. A failed embed is reported under the
+    protocol asked for. No program output changed. `tests/protocol_method_grid.rs`, 67 cells.
+    History: `docs/history/progress/2026-11.md`.
 
 ### Open questions for the owner
 

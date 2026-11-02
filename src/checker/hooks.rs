@@ -8,25 +8,20 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 
 impl Checker {
-    /// TICKET-250 — is method `method` of declared type `ty` the hook for the reserved
-    /// `protocol`? [`Self::hook_verdict`]'s `Ok`: the method's signature with the owner's type
+    /// TICKET-250 — is the method of declared type `ty` named by `hook` that hook?
+    /// [`Self::hook_verdict`]'s `Ok`: the method's signature with the owner's type
     /// arguments substituted in, and the protocol's type parameters as that signature binds them.
-    pub(super) fn hook_method(
-        &self,
-        ty: &Ty,
-        protocol: &str,
-        method: &str,
-    ) -> Option<(FnSig, HashMap<String, Ty>)> {
-        self.hook_verdict(ty, protocol, method).ok()
+    pub(super) fn hook_method(&self, ty: &Ty, hook: Hook) -> Option<(FnSig, HashMap<String, Ty>)> {
+        self.hook_verdict(ty, hook).ok()
     }
 
-    /// Does the run time call `method` of `ty` for `protocol`'s operator? True when the method is
+    /// Does the run time call `hook`'s method of `ty` for its operator? True when the method is
     /// the hook of the declaration: for this instantiation ([`Self::hook_method`]), or for the
     /// instantiations that satisfy the method's own `where` bound (`HookMiss::Bound`). The hook
     /// table has one bit per declared type, so a reader that grants a hookless path (a constant
     /// hash, structural equality, the other iteration hook) asks this, never `hook_method`.
-    pub(super) fn declares_hook(&self, ty: &Ty, protocol: &str, method: &str) -> bool {
-        match self.hook_verdict(ty, protocol, method) {
+    pub(super) fn declares_hook(&self, ty: &Ty, hook: Hook) -> bool {
+        match self.hook_verdict(ty, hook) {
             Ok(_) | Err(HookMiss::Bound(_)) => true,
             Err(HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_)) => false,
         }
@@ -40,13 +35,13 @@ impl Checker {
     /// ([`Checker::iterable_elem`]).
     pub(super) fn iterator_bound_elem(&self, ty: &Ty) -> Result<Option<Ty>, String> {
         let decl = self.declaration_of(ty).unwrap_or_else(|| ty.clone());
-        let called = |protocol: &str, hook: Hook| {
-            self.declares_hook(&decl, protocol, hook.method())
+        let called = |hook: Hook| {
+            self.declares_hook(&decl, hook)
                 .then(|| self.hook_candidate(&decl, hook))
                 .flatten()
         };
-        let next = called("Iterator", Hook::Next).and_then(|sig| Self::next_ret_elem(sig.ret));
-        let iter = called("Iterable", Hook::Iter).and_then(|sig| Self::iter_ret_elem(sig.ret));
+        let next = called(Hook::Next).and_then(|sig| Self::next_ret_elem(sig.ret));
+        let iter = called(Hook::Iter).and_then(|sig| Self::iter_ret_elem(sig.ret));
         match (next, iter) {
             (Some(next), Some(iter)) if next != iter => Err(format!(
                 "('next' yields {next}, 'iter' yields {iter}); the bound needs one element type. \
@@ -111,11 +106,11 @@ impl Checker {
     pub(super) fn hook_verdict(
         &self,
         ty: &Ty,
-        protocol: &str,
-        method: &str,
+        hook: Hook,
     ) -> Result<(FnSig, HashMap<String, Ty>), HookMiss> {
+        let (protocol, method) = (hook.protocol(), hook.method());
         if let Some(decl) = self.declaration_of(ty) {
-            match self.hook_verdict(&decl, protocol, method) {
+            match self.hook_verdict(&decl, hook) {
                 Ok(_) | Err(HookMiss::Bound(_)) => {}
                 Err(miss @ (HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_))) => {
                     return Err(miss);
@@ -214,13 +209,13 @@ impl Checker {
                 // A conditional method (`fn compare(..) where T: Comparable`) is the hook of the
                 // declaration: the table has one bit per declared type, and `HookMiss::Bound`
                 // makes an operator on an instantiation that fails the bound a check error.
-                match self.hook_verdict(&ty, row.protocol, row.method) {
+                match self.hook_verdict(&ty, row.hook) {
                     // The same two verdicts `declares_hook` answers `true` for.
                     Ok(_) | Err(HookMiss::Bound(_)) => set.insert(row.hook),
                     Err(HookMiss::Shape(why)) => {
                         let span = methods
                             .iter()
-                            .find(|m| m.name == row.method)
+                            .find(|m| m.name == row.hook.method())
                             .map_or(s.span, |m| m.name_span);
                         self.warn_near_miss_hook(&ty, name, row, &why, span);
                     }
@@ -230,7 +225,7 @@ impl Checker {
             if self.range_key_conflict(&ty) {
                 let span = methods
                     .iter()
-                    .find(|m| m.name == "index")
+                    .find(|m| m.name == Hook::Index.method())
                     .map_or(s.span, |m| m.name_span);
                 self.error(span, Self::range_key_conflict_text(name));
             }
@@ -323,7 +318,9 @@ impl Checker {
                 span,
                 format!(
                     "'{}' on {owner} is not the {} hook ({why}); {} will not call it",
-                    row.method, row.protocol, row.operator
+                    row.hook.method(),
+                    row.protocol,
+                    row.operator
                 ),
             );
         }
@@ -337,10 +334,7 @@ impl Checker {
         if !is_std_protocol(&owner) {
             return None;
         }
-        HOOKS
-            .iter()
-            .find(|row| row.method == method)
-            .map(|row| row.hook)
+        Hook::of_method(method)
     }
 
     fn requirement_owner(
@@ -403,11 +397,11 @@ impl Checker {
         mname: &str,
         methods: &HashMap<String, FnSig>,
     ) -> Result<(), ReqMiss> {
-        if HOOKS
+        if let Some(row) = HOOKS
             .iter()
-            .any(|row| row.protocol == protocol && row.method == mname)
+            .find(|row| row.protocol == protocol && row.hook.method() == mname)
             && let Some(decl) = self.declaration_of(ty)
-            && let Err(HookMiss::Shape(why)) = self.hook_verdict(&decl, protocol, mname)
+            && let Err(HookMiss::Shape(why)) = self.hook_verdict(&decl, row.hook)
         {
             return Err(ReqMiss::Shape(why));
         }

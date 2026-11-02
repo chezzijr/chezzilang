@@ -512,10 +512,11 @@ impl Checker {
 
     /// TICKET-197 — why an operator or hook on `ty` failed, when the reason is a misnamed
     /// parameter: ` (method 'add' parameter 1 is named 'o', but Add declares 'other')` for a
-    /// struct or enum whose `method` misnames a parameter of `protocol`, else empty.
-    pub(super) fn hook_name_note(&self, ty: &Ty, protocol: &str, method: &str) -> String {
+    /// struct or enum whose `hook` method misnames a parameter of its protocol, else empty.
+    pub(super) fn hook_name_note(&self, ty: &Ty, hook: Hook) -> String {
+        let (protocol, method) = (hook.protocol(), hook.method());
         // A conditional hook whose `where` bound this instantiation fails: name the bound.
-        if let Err(HookMiss::Bound(why)) = self.hook_verdict(ty, protocol, method) {
+        if let Err(HookMiss::Bound(why)) = self.hook_verdict(ty, hook) {
             return format!(" ({why})");
         }
         let methods = match ty {
@@ -562,9 +563,9 @@ impl Checker {
 
     /// [`Self::hook_name_note`] for iteration: the `iter` hook's reason, else the `next` hook's.
     pub(super) fn iter_hook_note(&self, ty: &Ty) -> String {
-        let note = self.hook_name_note(ty, "Iterable", "iter");
+        let note = self.hook_name_note(ty, Hook::Iter);
         if note.is_empty() {
-            self.hook_name_note(ty, "Iterator", "next")
+            self.hook_name_note(ty, Hook::Next)
         } else {
             note
         }

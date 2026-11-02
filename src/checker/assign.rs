@@ -259,7 +259,7 @@ impl Checker {
                             );
                         } else {
                             self.expect_int(index, "index");
-                            let note = self.hook_name_note(&other, "IndexSet", "set_index");
+                            let note = self.hook_name_note(&other, Hook::SetIndex);
                             self.error(
                                 target.span,
                                 format!("cannot index-assign into {other}{note}"),

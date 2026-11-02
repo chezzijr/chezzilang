@@ -51,7 +51,7 @@ impl Checker {
         // `.iter()` on a BUILTIN receiver (a collection, or an `Iterator[T]` cursor, where it
         // returns the cursor itself): a fresh cursor typed `Iterator[T]`. A struct, an enum and a
         // protocol slot are not typed here; each reaches its own arm of the dispatch below.
-        if method == "iter"
+        if method == Hook::Iter.method()
             && args.is_empty()
             && let Some(elem) = self.builtin_iter_elem(&obj_ty)
         {
@@ -275,7 +275,7 @@ impl Checker {
             // `next(self) -> Option[T]`, so it is drivable by explicit `.next()` as well as `for`.
             // (There is no registered struct named `Iterator`, so this must be handled here.)
             Ty::Struct(sname, targs) if sname == "Iterator" && targs.len() == 1 => {
-                if method == "next" {
+                if method == Hook::Next.method() {
                     self.check_args(method, &[], args, span);
                     return Ty::option(targs[0].clone());
                 }
@@ -285,7 +285,7 @@ impl Checker {
                     format!(
                         "type {obj_ty} has no method '{method}' (an iterator only has `next()`)"
                     ),
-                    suggest::did_you_mean(method, &["next".to_string()]),
+                    suggest::did_you_mean(method, &[Hook::Next.method().to_string()]),
                 );
                 Ty::Unknown
             }

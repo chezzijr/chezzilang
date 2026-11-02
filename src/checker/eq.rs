@@ -309,7 +309,7 @@ impl Checker {
                 if let hit @ Some(_) = any(self, args, stack) {
                     return hit;
                 }
-                if self.declares_hook(ty, "Eq", "eq") {
+                if self.declares_hook(ty, Hook::Eq) {
                     return Some(EqReach::Hook(ty.to_string()));
                 }
                 if stack.contains(name) {
@@ -327,7 +327,7 @@ impl Checker {
                 if let hit @ Some(_) = any(self, args, stack) {
                     return hit;
                 }
-                if self.declares_hook(ty, "Eq", "eq") {
+                if self.declares_hook(ty, Hook::Eq) {
                     return Some(EqReach::Hook(ty.to_string()));
                 }
                 if stack.contains(name) {
@@ -487,7 +487,7 @@ impl Checker {
     /// concrete witness is unknowable here — and it is not an exotic corner, it is on the hot path.
     /// `Ty::result(inner)` is literally `Ty::Result(inner, Ty::Protocol("Error"))`
     /// (`src/checker/ty.rs`), so every bare `Result[T]` carries an existential in its error slot;
-    /// refusing it would un-grant `Result` wholesale and break the `("Eq", "eq", "result")` ratchet
+    /// refusing it would un-grant `Result` wholesale and break the `("Eq", RecvKind::Result)` ratchet
     /// row. Same hole, same reason, as [`Self::reaches_user_eq`]'s. (Re-asking an obligation already
     /// in progress also answers `None`, but that is a coinductive ASSUMPTION rather than a hole —
     /// see [`EQ_BOUNDS_IN_PROGRESS`].)
@@ -727,7 +727,7 @@ impl Checker {
                     if let hit @ Some(_) = self.eq_where_unsatisfied(ty, &sig) {
                         return hit;
                     }
-                    if self.hook_method(ty, "Eq", "eq").is_some() {
+                    if self.hook_method(ty, Hook::Eq).is_some() {
                         return None;
                     }
                 }
@@ -751,7 +751,7 @@ impl Checker {
                     if let hit @ Some(_) = self.eq_where_unsatisfied(ty, &sig) {
                         return hit;
                     }
-                    if self.hook_method(ty, "Eq", "eq").is_some() {
+                    if self.hook_method(ty, Hook::Eq).is_some() {
                         return None;
                     }
                 }
@@ -804,7 +804,7 @@ impl Checker {
             // "nothing to prove" but "cannot be proven here", and it is deliberate: the concrete
             // witness is unknowable at this walk (existentials are erased by design), and it is not
             // exotic — every `Result[T]` carries `Ty::Protocol("Error")` in its error slot, so
-            // refusing it would un-grant `Result` wholesale (and break the `("Eq", "eq", "result")`
+            // refusing it would un-grant `Result` wholesale (and break the `("Eq", RecvKind::Result)`
             // ratchet row). Since W7-52 this arm is also what `[T: Eq]`/`.eq()`/`==` over a
             // protocol-typed value ITSELF (not just one nested inside a container/`Result`) routes
             // through — the D1 gate above now classifies `Ty::Protocol` as kind `"protocol"` instead

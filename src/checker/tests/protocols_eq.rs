@@ -809,14 +809,13 @@ struct Box[T]:
         ),
         "T is not bounded by Eq (add an `Eq` bound to T: `[T: Eq]`, or `where T: Eq` on a fn)",
     );
-    // Instance 3 — `[T: Hashable]` alone, `Set(xs)` construction inside the body: `Hashable` embeds
-    // `Eq` (owner decision 2, TICKET-265), so the body checks; the call fails because `Box[Tag]`'s `eq`
-    // cannot hold, so `Box[Tag]` is no `Hashable` (see `hashable_bound_licenses_eq`).
+    // Instance 3 — `[T: Hashable]` alone, `Set(xs)` inside the body: `Hashable` embeds `Eq`, so the
+    // body checks; the call fails because `Box[Tag]`'s `eq` cannot hold, reported under `Hashable`.
     rejects(
         &format!(
             "import Hashable from std.cmp\n{TAG_BOX}fn f[T: Hashable](xs: List[T]) -> int:\n    return Set(xs).len()\nprint(f([Box(Tag(1)), Box(Tag(2))]))\n"
         ),
-        "type Box[Tag] does not satisfy Eq",
+        "type Box[Tag] does not satisfy Hashable (Box[Tag]'s `eq` requires Tag: Comparable)",
     );
 
     // ---- ok() neighbours derived from the same premise ----
@@ -3430,7 +3429,7 @@ fn optional_never_orders_grid() {
     let user_enum = "enum E:\n    A\n    B\n    fn compare(self, other: E) -> int:\n        return 0\n    fn eq(self, other: E) -> bool:\n        return true\n";
     // (payload spelling, declarations the payload needs)
     let mut payloads: Vec<(&str, &str)> = Vec::new();
-    for (proto, _, kind) in INTRINSIC_PROTO_METHODS {
+    for (proto, kind) in INTRINSIC_PROTO_METHODS {
         if *proto != "Comparable" {
             continue;
         }

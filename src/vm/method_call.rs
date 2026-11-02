@@ -334,7 +334,7 @@ impl Vm {
         // `compare` on a primitive (int/float/str): they intrinsically satisfy `Comparable`, so an
         // erased generic body may call `.compare()` on a concrete primitive. Return the sign of the
         // ordering. Structs with their own `compare` fall through to the normal dispatch below.
-        if method == "compare" && args.len() == 1 {
+        if method == Hook::Compare.method() && args.len() == 1 {
             let is_prim = self.is_numeric(recv)
                 || matches!(recv.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Str(_)));
             if is_prim && let Some(ord) = self.compare(recv, args[0]) {
@@ -349,7 +349,7 @@ impl Vm {
         // `stringify` returns its raw unquoted contents. GC-safe: `recv` is already popped, and for a
         // scalar receiver `stringify` runs no user code, so the owned `String` exists before the alloc.
         // Mirrors the `compare` scalar branch above. Structs with their own `str` fall through below.
-        if method == "str" && args.is_empty() {
+        if method == Hook::Str.method() && args.is_empty() {
             let is_scalar = self.is_numeric(recv)
                 || recv.as_bool().is_some()
                 || recv.is_nil()
@@ -420,7 +420,8 @@ impl Vm {
         }
         // TICKET-257: the handles are `Eq` by identity (`Eq` grant rows for `Channel`, `Shared`,
         // `RwShared`, `Atomic`): `x.eq(y)` is `x == y`. No handle declares an `eq` of its own.
-        if ((method == "eq" && args.len() == 1) || (method == "str" && args.is_empty()))
+        if ((method == Hook::Eq.method() && args.len() == 1)
+            || (method == Hook::Str.method() && args.is_empty()))
             && matches!(
                 self.heap.get(h),
                 Obj::Channel(_)
@@ -438,7 +439,7 @@ impl Vm {
         }
         // Concurrency C4: `Channel` / `Shared` methods mutate the heap object in place (and `update`
         // re-enters the VM), so dispatch them directly off the handle, like the core-type methods.
-        if matches!(self.heap.get(h), Obj::Channel(_)) && method != "iter" {
+        if matches!(self.heap.get(h), Obj::Channel(_)) && method != Hook::Iter.method() {
             self.sched_seed_point();
             let result = self.channel_method(h, method, &args, span)?;
             if self.suspend.is_some() || self.send_suspend.is_some() {
@@ -456,31 +457,29 @@ impl Vm {
             if !args.is_empty() {
                 return Err(self.err(format!("a cursor's '{method}' takes no arguments"), span));
             }
-            match method {
-                "iter" => self.push(recv), // idempotent: iter() on a cursor returns self
-                "next" => {
-                    let Obj::Iter { items, pos } = self.heap.write(h).get(h) else {
-                        unreachable!()
-                    };
-                    // M3.0a — one read answers the bound and the element: two threads can step
-                    // one shared cursor (a racy step can repeat or skip an item, as in Go).
-                    let at = pos.get();
-                    let item = items.try_get(at);
-                    if item.is_some() {
-                        pos.set(at + 1);
-                    }
-                    let result = match item {
-                        Some(v) => self.alloc_enum("Option", "Some", &[v]),
-                        None => self.alloc_enum("Option", "None", &[]),
-                    };
-                    self.push(result);
+            if method == Hook::Iter.method() {
+                self.push(recv); // idempotent: iter() on a cursor returns self
+            } else if method == Hook::Next.method() {
+                let Obj::Iter { items, pos } = self.heap.write(h).get(h) else {
+                    unreachable!()
+                };
+                // M3.0a — one read answers the bound and the element: two threads can step
+                // one shared cursor (a racy step can repeat or skip an item, as in Go).
+                let at = pos.get();
+                let item = items.try_get(at);
+                if item.is_some() {
+                    pos.set(at + 1);
                 }
-                _ => {
-                    return Err(self.err(
-                        format!("a cursor has no method '{method}' (only `next()`/`iter()`)"),
-                        span,
-                    ));
-                }
+                let result = match item {
+                    Some(v) => self.alloc_enum("Option", "Some", &[v]),
+                    None => self.alloc_enum("Option", "None", &[]),
+                };
+                self.push(result);
+            } else {
+                return Err(self.err(
+                    format!("a cursor has no method '{method}' (only `next()`/`iter()`)"),
+                    span,
+                ));
             }
             return Ok(());
         }
@@ -488,11 +487,11 @@ impl Vm {
         // result drives `for x in g():` through the same lazy `next()` step as a struct iterator.
         // `.iter()` on a generator returns self (a generator IS an Iterator, hence Iterable).
         if matches!(self.heap.get(h), Obj::Generator(_)) {
-            if method == "iter" && args.is_empty() {
+            if method == Hook::Iter.method() && args.is_empty() {
                 self.push(recv); // idempotent: a generator's iter() is itself
                 return Ok(());
             }
-            if method != "next" || !args.is_empty() {
+            if method != Hook::Next.method() || !args.is_empty() {
                 return Err(self.err(
                     format!("a generator has no method '{method}' (only `next()`)"),
                     span,
@@ -606,7 +605,7 @@ impl Vm {
         // yields: the [`builtin_items`](Self::builtin_items) row, or a channel's drained values. A
         // cursor and a generator returned above (their `iter()` is self); any other receiver
         // (a struct, an enum) falls through to its own `iter` method.
-        if method == "iter" && args.is_empty() {
+        if method == Hook::Iter.method() && args.is_empty() {
             // Both readers may alloc (str per-char); root the receiver across the call.
             self.push(recv);
             let items: Option<RVec<Value>> = if matches!(self.heap.get(h), Obj::Channel(_)) {

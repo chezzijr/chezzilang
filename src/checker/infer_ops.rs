@@ -560,7 +560,7 @@ impl Checker {
                 {
                     t
                 } else {
-                    let note = self.hook_name_note(&t, Hook::Neg.protocol(), Hook::Neg.method());
+                    let note = self.hook_name_note(&t, Hook::Neg);
                     self.error(inner.span, format!("cannot negate {t}{note}"));
                     Ty::Unknown
                 }
@@ -764,7 +764,7 @@ impl Checker {
                     Ty::Unknown
                 } else {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
-                    let note = self.hook_name_note(&l, Hook::Add.protocol(), Hook::Add.method());
+                    let note = self.hook_name_note(&l, Hook::Add);
                     self.error(
                         lspan,
                         format!(
@@ -778,7 +778,8 @@ impl Checker {
             // `-`/`*` overload via the `Sub`/`Mul` protocols on same-typed structs; `/`/`%` stay
             // numeric-only (no protocol).
             Sub | Mul => {
-                let proto = binary_protocol(op).expect("an arithmetic operator has a protocol");
+                let hook = Hook::of_binary(op).expect("an arithmetic operator has a hook");
+                let proto = hook.protocol();
                 if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
@@ -793,7 +794,7 @@ impl Checker {
                     Ty::Unknown
                 } else {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
-                    let note = self.hook_name_note(&l, proto, &proto.to_lowercase());
+                    let note = self.hook_name_note(&l, hook);
                     self.error(
                         lspan,
                         format!(
@@ -808,7 +809,8 @@ impl Checker {
             // `/`/`%` overload via the `Div`/`Mod` protocols on same-typed structs/enums/type-params,
             // exactly like `-`/`*` use `Sub`/`Mul` (M22).
             Div | Mod => {
-                let proto = binary_protocol(op).expect("an arithmetic operator has a protocol");
+                let hook = Hook::of_binary(op).expect("an arithmetic operator has a hook");
+                let proto = hook.protocol();
                 if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
@@ -817,7 +819,7 @@ impl Checker {
                     Ty::Unknown
                 } else {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
-                    let note = self.hook_name_note(&l, proto, &proto.to_lowercase());
+                    let note = self.hook_name_note(&l, hook);
                     self.error(
                         lspan,
                         format!(
@@ -844,9 +846,8 @@ impl Checker {
                     Ty::Unknown
                 } else {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
-                    let note = binary_protocol(op).map_or(String::new(), |p| {
-                        self.hook_name_note(&l, p, &p.to_lowercase())
-                    });
+                    let note =
+                        Hook::of_binary(op).map_or(String::new(), |h| self.hook_name_note(&l, h));
                     self.error(
                         lspan,
                         format!(
@@ -908,7 +909,7 @@ impl Checker {
                 let ok = (l.is_numeric() && r.is_numeric()) || self.ordering_allowed(l, r);
                 if !ok && !either_unknown {
                     let [l_s, r_s] = Ty::render_distinct([l, r]);
-                    let note = self.hook_name_note(l, "Comparable", "compare");
+                    let note = self.hook_name_note(l, Hook::Compare);
                     self.error(lspan, format!("cannot compare {l_s} and {r_s}{note}"));
                 }
                 Ty::Bool
@@ -1086,7 +1087,7 @@ impl Checker {
                                 );
                             }
                         } else {
-                            let note = self.hook_name_note(other, "Contains", "contains");
+                            let note = self.hook_name_note(other, Hook::Contains);
                             self.error(
                                 rspan,
                                 format!(

@@ -18,7 +18,7 @@ impl Checker {
     /// The element type the `next` hook of declared type `ty` yields, or `None` when `ty` has no
     /// `next` hook ([`Checker::hook_method`] decides).
     pub(super) fn struct_iter_elem(&self, ty: &Ty) -> Option<Ty> {
-        Self::next_ret_elem(self.hook_method(ty, "Iterator", "next")?.0.ret)
+        Self::next_ret_elem(self.hook_method(ty, Hook::Next)?.0.ret)
     }
 
     /// The element type in the return type of a `next` hook, `Option[E]`.
@@ -121,7 +121,7 @@ impl Checker {
                     .and_then(|b| b.args.first().cloned())
             });
         }
-        match self.hook_verdict(ty, "Iterable", "iter") {
+        match self.hook_verdict(ty, Hook::Iter) {
             Ok((sig, _)) => return Self::iter_ret_elem(sig.ret),
             // `iter` runs and this instantiation fails its bound: no hook can type the elements.
             Err(HookMiss::Bound(_)) => return None,
@@ -238,12 +238,12 @@ impl Checker {
             Ty::Bytes | Ty::ByteArray => Some((Ty::Int, Ty::Int)),
             Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())),
             Ty::Struct(..) | Ty::Enum(..) => {
-                let (sig, _) = self.hook_method(ty, "Index", "index")?;
+                let (sig, _) = self.hook_method(ty, Hook::Index)?;
                 Some((sig.params.get(1)?.clone(), sig.ret))
             }
             // A protocol existential that IS or embeds `Index[K, V]` (M22).
             Ty::Protocol(..) => {
-                let (sig, map) = self.protocol_op_sig(ty, "index")?;
+                let (sig, map) = self.protocol_op_sig(ty, Hook::Index)?;
                 if sig.params.len() != 2 {
                     return None;
                 }
@@ -277,17 +277,17 @@ impl Checker {
         }
     }
 
-    /// M22 — `(sig, param-map)` for `method` on a protocol EXISTENTIAL: the signature resolved
+    /// M22 — `(sig, param-map)` for `hook`'s method on a protocol EXISTENTIAL: the signature resolved
     /// through the protocol's own methods or its embeds, paired with the map binding the protocol's
     /// type params to the value's carried args. The single seam every operator recovery below uses
     /// to read `K`/`V`/`R`/item off a protocol-typed receiver, mirroring `struct_param_map` for a
     /// struct one. The runtime receiver is always the concrete witness, dispatched by name, so
     /// every caller of this is a checker-only widening.
-    fn protocol_op_sig(&self, ty: &Ty, method: &str) -> Option<(FnSig, HashMap<String, Ty>)> {
+    fn protocol_op_sig(&self, ty: &Ty, hook: Hook) -> Option<(FnSig, HashMap<String, Ty>)> {
         let Ty::Protocol(p, pargs) = ty else {
             return None;
         };
-        let sig = self.protocol_method_sig(p, method)?;
+        let sig = self.protocol_method_sig(p, hook.method())?;
         let mut map: HashMap<String, Ty> = self
             .protocol_shape(p)?
             .type_params
@@ -320,7 +320,7 @@ impl Checker {
                     continue;
                 };
                 // Own `contains` OR one an embed requires (`protocol Bag: Contains[int]`).
-                let Some(sig) = self.protocol_method_sig(&b.name, "contains") else {
+                let Some(sig) = self.protocol_method_sig(&b.name, Hook::Contains.method()) else {
                     continue;
                 };
                 if sig.params.len() != 2 || sig.ret != Ty::Bool {
@@ -339,13 +339,13 @@ impl Checker {
         // A protocol EXISTENTIAL (`b: Bag[int]`) — same recovery, with the value's own carried args
         // standing in for the bound's.
         if let Ty::Protocol(..) = ty {
-            let (sig, map) = self.protocol_op_sig(ty, "contains")?;
+            let (sig, map) = self.protocol_op_sig(ty, Hook::Contains)?;
             if sig.params.len() != 2 || sig.ret != Ty::Bool {
                 return None;
             }
             return Some(subst(&sig.params[1], &map));
         }
-        let (sig, _) = self.hook_method(ty, "Contains", "contains")?;
+        let (sig, _) = self.hook_method(ty, Hook::Contains)?;
         sig.params.get(1).cloned()
     }
 
@@ -410,16 +410,16 @@ impl Checker {
         // A protocol existential that IS or embeds `IndexSet[K, V]` (M22). Same read-too rule as a
         // struct: compound index-assign needs `index` as well as `set_index`.
         if let Ty::Protocol(..) = ty {
-            let (sig, map) = self.protocol_op_sig(ty, "set_index")?;
-            let read = self.protocol_op_sig(ty, "index")?.0;
+            let (sig, map) = self.protocol_op_sig(ty, Hook::SetIndex)?;
+            let read = self.protocol_op_sig(ty, Hook::Index)?.0;
             if sig.params.len() != 3 || read.params.len() != 2 {
                 return None;
             }
             return Some((subst(&sig.params[1], &map), subst(&sig.params[2], &map)));
         }
-        let (sig, _) = self.hook_method(ty, "IndexSet", "set_index")?;
+        let (sig, _) = self.hook_method(ty, Hook::SetIndex)?;
         // Must also be readable — the `index` hook — or compound index-assign would crash.
-        self.hook_method(ty, "Index", "index")?;
+        self.hook_method(ty, Hook::Index)?;
         Some((sig.params.get(1)?.clone(), sig.params.get(2)?.clone()))
     }
 
@@ -437,10 +437,10 @@ impl Checker {
             // `bytes[a:b:c]` yields a new `bytes`; `bytearray` slices to a new `bytearray`;
             // `list`/`str` slice to themselves.
             Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray => Some(ty.clone()),
-            Ty::Struct(..) | Ty::Enum(..) => Some(self.hook_method(ty, "Slice", "slice")?.0.ret),
+            Ty::Struct(..) | Ty::Enum(..) => Some(self.hook_method(ty, Hook::Slice)?.0.ret),
             // A protocol existential that IS or embeds `Slice[R]` (M22) — same signature rule.
             Ty::Protocol(..) => {
-                let (sig, map) = self.protocol_op_sig(ty, "slice")?;
+                let (sig, map) = self.protocol_op_sig(ty, Hook::Slice)?;
                 if sig.params.len() != 2 || sig.params[1] != self.range_ty() {
                     return None;
                 }

@@ -2,7 +2,8 @@
 //!
 //! The generated file holds the embedded text table, one encoded AST per file (the artifact the
 //! resolver decodes instead of lexing and parsing at run time) and the encoded `protocol`
-//! statements of all files. `std/` is the one source: a new or edited file reruns this script.
+//! statements of all files, plus `PROTOCOL_METHODS`, the method names each `protocol` declares
+//! itself. `std/` is the one source: a new or edited file reruns this script.
 
 use chezzi_syntax::ast::StmtKind;
 use chezzi_syntax::ast::codec;
@@ -44,6 +45,8 @@ fn main() {
     let mut table = String::new();
     let mut asts = String::new();
     let mut protocols = Vec::new();
+    let mut protocol_methods = String::new();
+    let mut protocol_names = std::collections::HashSet::new();
     let (all_ids, ()) = codec::with_id_range(|| {
         for (i, rel) in files.iter().enumerate() {
             let path = std_dir.join(rel);
@@ -59,7 +62,14 @@ fn main() {
             match parsed {
                 Ok((module, words)) => {
                     for stmt in &module.stmts {
-                        if let StmtKind::Protocol { .. } = &stmt.kind {
+                        if let StmtKind::Protocol { name, methods, .. } = &stmt.kind {
+                            assert!(
+                                protocol_names.insert(name.clone()),
+                                "std/{rel}: protocol `{name}` is declared in two std files"
+                            );
+                            for m in methods {
+                                let _ = writeln!(protocol_methods, "    ({name:?}, {:?}),", m.name);
+                            }
                             protocols.push((i as u32, stmt.clone()));
                         }
                     }
@@ -88,7 +98,10 @@ fn main() {
          /// The encoded AST of each [`STD_FILES`] entry, in the same order; `None` when the file does not parse.\n\
          pub const STD_ASTS: &[Option<&[u8]>] = &[\n{asts}];\n\n\
          /// The encoded `protocol` statements of all [`STD_FILES`], each with its file's index.\n\
-         pub const STD_PROTOCOLS: &[u8] = include_bytes!({:?});\n",
+         pub const STD_PROTOCOLS: &[u8] = include_bytes!({:?});\n\n\
+         /// One row per method a std `protocol` declares itself, `(protocol, method)`, in decl order:\n\
+         /// the owner of every protocol method name (`Hook::method` reads it).\n\
+         pub const PROTOCOL_METHODS: &[(&str, &str)] = &[\n{protocol_methods}];\n",
         bin.display().to_string()
     );
     std::fs::write(out_dir.join("std_files.rs"), generated).expect("write std_files.rs");

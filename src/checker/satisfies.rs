@@ -354,7 +354,9 @@ impl Checker {
                     if !seen.insert(key) {
                         continue; // already answered on this walk — an embed diamond, not new work
                     }
-                    let _: Grant = self.satisfies_args_d(ty, &emb.name, &eargs, seen)?;
+                    let _: Grant = self
+                        .satisfies_args_d(ty, &emb.name, &eargs, seen)
+                        .map_err(|why| embed_miss_text(why, ty, &emb.name, &protocol_display))?;
                 }
             }
             if pinfo.methods.is_empty() {
@@ -528,7 +530,7 @@ impl Checker {
         // `Eq` by IDENTITY, exactly as `==` already accepts them; each has a `RecvKind` and a row.
         if protocol == "Eq"
             && Self::intrinsic_recv_kind(ty).is_some()
-            && self.hook_method(ty, "Eq", "eq").is_none()
+            && self.hook_method(ty, Hook::Eq).is_none()
         {
             return match self.eq_bounds_unsatisfied(ty) {
                 Some(why) => Err(format!("type {ty} does not satisfy Eq ({why})")),
@@ -547,7 +549,7 @@ impl Checker {
         if protocol == "Stringable"
             && Self::intrinsic_recv_kind(ty).is_some()
             && matches!(
-                self.hook_verdict(ty, "Stringable", "str"),
+                self.hook_verdict(ty, Hook::Str),
                 Err(HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_))
             )
         {
@@ -576,11 +578,12 @@ impl Checker {
         // half. A type without the `hash` hook falls through to the structural check below, which
         // names `hash`. `declares_hook` is false for every type that is not a struct or an enum.
         if protocol == "Hashable"
-            && self.declares_hook(ty, "Hashable", "hash")
-            && !self.declares_hook(ty, "Eq", "eq")
+            && self.declares_hook(ty, Hook::Hash)
+            && !self.declares_hook(ty, Hook::Eq)
         {
             return Err(format!(
-                "type {ty} does not satisfy Hashable (missing method 'eq')"
+                "type {ty} does not satisfy Hashable (missing method '{}')",
+                Hook::Eq.method()
             ));
         }
         // `str` conforms to `Error` intrinsically (Go-style: its message is itself).
@@ -877,5 +880,22 @@ impl Checker {
                 .map_err(ReqMiss::text)?;
         }
         Ok(())
+    }
+}
+
+/// An embed's rejection, reported under the protocol the user asked for: `type T does not satisfy
+/// <embed> (<reason>)` reads `type T does not satisfy <protocol> (<reason>)`, so the reason names
+/// the first missing method across the protocol's embeds and its own methods. Any other text (a
+/// sealed protocol, a bad type argument) is kept as it is.
+fn embed_miss_text(why: String, ty: &Ty, embed: &str, protocol: &str) -> String {
+    let prefix = format!(
+        "type {ty} does not satisfy {}",
+        crate::base::words::bare_display(embed)
+    );
+    match why.strip_prefix(&prefix) {
+        Some(rest) if rest.is_empty() || rest.starts_with(' ') => {
+            format!("type {ty} does not satisfy {protocol}{rest}")
+        }
+        Some(_) | None => why,
     }
 }

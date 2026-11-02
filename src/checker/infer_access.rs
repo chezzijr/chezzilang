@@ -424,7 +424,7 @@ impl Checker {
                     return v;
                 }
                 self.expect_int_ty(index, &idx_ty, "index");
-                let note = self.hook_name_note(&other, "Index", "index");
+                let note = self.hook_name_note(&other, Hook::Index);
                 self.error(obj.span, format!("cannot index into {other}{note}"));
                 Ty::Unknown
             }
@@ -477,7 +477,7 @@ impl Checker {
         {
             return v;
         }
-        let note = self.hook_name_note(obj_ty, "Slice", "slice");
+        let note = self.hook_name_note(obj_ty, Hook::Slice);
         self.error(obj.span, format!("cannot slice {obj_ty}{note}"));
         Ty::Unknown
     }

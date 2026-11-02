@@ -297,9 +297,10 @@ main()
 /// therefore be callable from an erased generic body. That pairing was honored for 2 of ~11 grants and
 /// broke the rest (`type int has no method 'add'` after `check: ok`).
 ///
-/// The rows are keyed on `(protocol, method, receiver-KIND)` because the receiver kind is the axis
+/// The rows are keyed on `(protocol, receiver-KIND)` because the receiver kind is the axis
 /// W6-3 actually failed on: `compare`/`str` *were* paired, but their interceptions were type-gated
-/// narrower than the checker's grant set. This test generates one probe program PER ROW from a
+/// narrower than the checker's grant set. This test generates one probe program PER ROW, calling
+/// the one own method of the protocol's std decl, from a
 /// receiver-literal table and a call template, and RUNS it. Widening a grant to one
 /// more type therefore cannot pass: `grant_intrinsic`'s `debug_assert` demands the new row, and the
 /// row demands a probe that actually runs.
@@ -573,38 +574,41 @@ fn intrinsic_grants_all_have_vm_arms() {
             "RecvKind::{k} has no receiver in intrinsic_grants_all_have_vm_arms"
         );
     }
-    // (method, call template) — `{r}` is the receiver, `{k}`/`{v}` the index key/value.
+    // (protocol, the argument list of its std decl's one own method) — `{k}`/`{v}` are the index
+    // key/value, `{i}` the contained item. The method name is the decl's (`protocol_method`).
     let calls: &[(&str, &str)] = &[
-        ("compare", "{r}.compare(b)"),
-        ("eq", "{r}.eq(b)"),
-        ("str", "{r}.str()"),
-        ("hash", "{r}.hash()"),
-        ("message", "{r}.message()"),
-        ("as_path", "{r}.as_path()"),
-        ("iter", "{r}.iter()"),
-        ("next", "{r}.next()"),
-        ("index", "{r}.index({k})"),
-        ("set_index", "{r}.set_index({k}, {v})"),
-        ("slice", "{r}.slice(0..1)"),
-        ("contains", "{r}.contains({i})"),
-        ("bitand", "{r}.bitand(b)"),
-        ("bitor", "{r}.bitor(b)"),
-        ("bitxor", "{r}.bitxor(b)"),
-        ("shl", "{r}.shl(b)"),
-        ("shr", "{r}.shr(b)"),
-        ("add", "{r}.add(b)"),
-        ("sub", "{r}.sub(b)"),
-        ("mul", "{r}.mul(b)"),
-        ("div", "{r}.div(b)"),
-        ("mod", "{r}.mod(b)"),
-        ("neg", "{r}.neg()"),
+        ("Comparable", "(b)"),
+        ("Eq", "(b)"),
+        ("Stringable", "()"),
+        ("Hashable", "()"),
+        ("Error", "()"),
+        ("PathLike", "()"),
+        ("Iterable", "()"),
+        ("Iterator", "()"),
+        ("Index", "({k})"),
+        ("IndexSet", "({k}, {v})"),
+        ("Slice", "(0..1)"),
+        ("Contains", "({i})"),
+        ("BitAnd", "(b)"),
+        ("BitOr", "(b)"),
+        ("BitXor", "(b)"),
+        ("Shl", "(b)"),
+        ("Shr", "(b)"),
+        ("Add", "(b)"),
+        ("Sub", "(b)"),
+        ("Mul", "(b)"),
+        ("Div", "(b)"),
+        ("Mod", "(b)"),
+        ("Neg", "()"),
     ];
     // Build the probe for a row, or `None` if the tables can't express it (which the assertions
     // below turn into a failure — a row must never be silently skipped).
     let recv_of = |kind: RecvKind| recvs.iter().find(|r| r.kind == kind);
-    let probe = |method: &str, kind: RecvKind| -> Option<String> {
+    let probe = |protocol: &str, kind: RecvKind| -> Option<String> {
         let rv = recv_of(kind)?;
-        let (_, tmpl) = *calls.iter().find(|(m, _)| *m == method)?;
+        let (_, arg_list) = *calls.iter().find(|(p, _)| *p == protocol)?;
+        let method = crate::base::hooks::protocol_method(protocol)?;
+        let tmpl = format!("{{r}}.{method}{arg_list}");
         // An unfilled ("-") column the template needs = a missing table entry, not a skip.
         if (tmpl.contains("{k}") && rv.key == "-")
             || (tmpl.contains("{v}") && rv.val == "-")
@@ -620,9 +624,9 @@ fn intrinsic_grants_all_have_vm_arms() {
         // TICKET-250 — a `next` owner is its own cursor for `iter` only where the call is typed
         // through the `Iterable` requirement (`Op::CallHook`); a concrete `a.iter()` on it is a
         // check error (`has no method 'iter'`). So this one row is probed through a bound.
-        if method == "iter" && kind == RecvKind::Struct {
+        if protocol == "Iterable" && kind == RecvKind::Struct {
             return Some(format!(
-                "import Iterable, Iterator from std.iter\n{}fn via[S: Iterable[int]](s: S) -> Iterator[int]:\n    return s.iter()\na := {}\nb := {}\nres := via(a)\n",
+                "import Iterable, Iterator from std.iter\n{}fn via[S: Iterable[int]](s: S) -> Iterator[int]:\n    return s.{method}()\na := {}\nb := {}\nres := via(a)\n",
                 rv.prelude, rv.lit, rv.lit
             ));
         }
@@ -702,7 +706,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         let mut ps: Vec<&str> = INTRINSIC_PROTO_METHODS
             .iter()
             .chain(INTRINSIC_UNPAIRED)
-            .map(|(p, _, _)| *p)
+            .map(|(p, _)| *p)
             .collect();
         ps.sort_unstable();
         ps.dedup();
@@ -721,7 +725,7 @@ fn intrinsic_grants_all_have_vm_arms() {
                     !INTRINSIC_PROTO_METHODS
                         .iter()
                         .chain(INTRINSIC_UNPAIRED)
-                        .any(|(tp, _, tk)| tp == p && *tk == rv.kind),
+                        .any(|(tp, tk)| tp == p && *tk == rv.kind),
                     "registered row ({p}, {}) claims an INTRINSIC grant the checker does not give: \
                      {errs:?}\n--- probe ---\n{src}",
                     rv.kind
@@ -732,7 +736,7 @@ fn intrinsic_grants_all_have_vm_arms() {
     let mut registered: Vec<(&str, RecvKind)> = INTRINSIC_PROTO_METHODS
         .iter()
         .chain(INTRINSIC_UNPAIRED)
-        .map(|(p, _, k)| (*p, *k))
+        .map(|(p, k)| (*p, *k))
         .collect();
     registered.sort_unstable();
     registered.dedup();
@@ -744,8 +748,9 @@ fn intrinsic_grants_all_have_vm_arms() {
          INTRINSIC_PROTO_METHODS ∪ INTRINSIC_UNPAIRED — a grant was widened or narrowed. Add/remove \
          the row AND make the method callable at runtime (W6-3)"
     );
-    for (p, m, kind) in INTRINSIC_PROTO_METHODS {
-        let src = probe(m, *kind).unwrap_or_else(|| {
+    for (p, kind) in INTRINSIC_PROTO_METHODS {
+        let m = crate::base::hooks::protocol_method(p).unwrap_or("?");
+        let src = probe(p, *kind).unwrap_or_else(|| {
             panic!(
                 "no probe for intrinsic grant ({p}, {m}, {kind}) — add its receiver literal / call \
                  template to intrinsic_grants_all_have_vm_arms (W6-3)"
@@ -770,8 +775,9 @@ fn intrinsic_grants_all_have_vm_arms() {
     // work, the row must be retired with it. `INTRINSIC_UNPAIRED` is EMPTY since W6-3b (the raw-
     // collection `Iterator` grant was narrowed away), so this loop and the disjointness loop below are
     // currently no-ops; they stay so the ratchet re-arms the moment a new unpairable grant is added.
-    for (p, m, kind) in INTRINSIC_UNPAIRED {
-        let src = probe(m, *kind)
+    for (p, kind) in INTRINSIC_UNPAIRED {
+        let m = crate::base::hooks::protocol_method(p).unwrap_or("?");
+        let src = probe(p, *kind)
             .unwrap_or_else(|| panic!("no probe for unpaired grant ({p}, {m}, {kind})"));
         let Err(err) = run_capture(&src) else {
             panic!("({p}, {m}, {kind}) is the documented carve-out — it must still fault");

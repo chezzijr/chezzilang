@@ -224,3 +224,120 @@ fn the_scan_reads_code_only() {
         "{message}"
     );
 }
+
+/// Every line of `code` that spells a protocol method name (a `PROTOCOL_METHODS` row) as a literal
+/// in a place that decides a method: a comparison (`== "add"`), a `matches!(x, .. "add" ..)`, an
+/// arm of a `match` (`"add" =>`, `("add", 1) =>`), a `"Add", "add"` protocol and method pair, or a
+/// `name: "add"` field. The std decl owns the name: such a site reads `Hook::method` or
+/// `Unhooked::method`.
+fn protocol_method_literals(code: &str) -> Vec<(usize, String)> {
+    let rows = chezzi::native::std_embed::PROTOCOL_METHODS;
+    let mut hits = Vec::new();
+    let mut in_match: Option<usize> = None;
+    for (n, line) in code.lines().enumerate() {
+        let indent = line.len() - line.trim_start().len();
+        if in_match.is_some_and(|at| !line.trim().is_empty() && indent <= at) {
+            in_match = None;
+        }
+        let arm = in_match.is_some();
+        let trimmed = line.trim();
+        if (trimmed.starts_with("match ") || trimmed.contains(" match ")) && trimmed.ends_with('{')
+        {
+            in_match = Some(indent);
+        }
+        let in_matches = line.find("matches!(");
+        for (protocol, method) in rows {
+            let lit = format!("\"{method}\"");
+            let decides = line.contains(&format!("== {lit}"))
+                || line.contains(&format!("!= {lit}"))
+                || line.contains(&format!("{lit} =="))
+                || line.contains(&format!("\"{protocol}\", {lit}"))
+                || line.contains(&format!("name: {lit}"))
+                || in_matches.is_some_and(|at| line[at..].contains(&lit))
+                || arm
+                    && (trimmed.starts_with(&format!("{lit} "))
+                        || trimmed.starts_with(&format!("({lit},")));
+            if decides && !hits.contains(&(n + 1, method.to_string())) {
+                hits.push((n + 1, method.to_string()));
+            }
+        }
+    }
+    hits
+}
+
+/// The sites that spell a protocol method's name for a method of another owner:
+/// `(src-relative file, the code on the line, why it is not a protocol method)`.
+const NOT_PROTOCOL_METHODS: &[(&str, &str, &str)] = &[
+    (
+        "checker/satisfies.rs",
+        "matches!(method, \"contains\" | \"index_of\" | \"dedup\" | \"unique\")",
+        "the `List` methods that need an `Eq` element; the native `List` decl owns their names",
+    ),
+    (
+        "checker/method_call.rs",
+        "matches!(method, \"contains\" | \"index_of\" | \"dedup\" | \"unique\")",
+        "the `List` methods that need an `Eq` element; the native `List` decl owns their names",
+    ),
+    (
+        "checker/method_call.rs",
+        "matches!(method, \"add\" | \"sub\")",
+        "the `Atomic` `add`/`sub` methods; the native `Atomic` decl owns their names",
+    ),
+    (
+        "checker/builtin_methods.rs",
+        "\"str\" => \"\"",
+        "the builtin type name `str` in `builtin_type_doc` (the scan blanks the long doc text)",
+    ),
+];
+
+#[test]
+fn a_protocol_method_name_is_read_from_its_std_decl() {
+    let mut copies = Vec::new();
+    for dir in ["checker", "compiler", "vm", "base"] {
+        let root = Path::new("src");
+        for path in rust_files(&root.join(dir)) {
+            let rel = path.strip_prefix(root).unwrap();
+            if is_test_file(rel) {
+                continue;
+            }
+            let code = production_code(&fs::read_to_string(&path).unwrap(), false);
+            let lines: Vec<&str> = code.lines().collect();
+            for (line, method) in protocol_method_literals(&code) {
+                let exempt = NOT_PROTOCOL_METHODS.iter().any(|(file, site, _)| {
+                    rel == Path::new(file) && lines[line - 1].contains(site)
+                });
+                if !exempt {
+                    copies.push(format!("src/{}:{line}: \"{method}\"", rel.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        copies.is_empty(),
+        "a protocol method name spelled outside its std decl (read `Hook::method` or \
+         `hooks::protocol_methods`):\n{}",
+        copies.join("\n")
+    );
+    // The rule itself: each shape counts once; a type name or an arity text does not.
+    let sample = "if method == \"add\" {}\nmatch (method, n) {\n    (\"neg\", 0) => 1,\n    \"str\" => 2,\n}\nself.hook_method(ty, \"Eq\", \"eq\");\nOp::CallMethod { name: \"next\".to_string() };\nlet t = \"str\";\nself.arity_err(\"contains\", args, 1, span);\nif matches!(m, \"shl\" | \"x\") {}\nmatch name {\n    \"hash\" => 3,\n}\n";
+    let found: Vec<String> = protocol_method_literals(&production_code(sample, false))
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(
+        found,
+        ["add", "neg", "str", "eq", "next", "shl", "hash"],
+        "{found:?}"
+    );
+    // Each exemption still names a live site: a deleted site takes its row with it.
+    for (file, site, why) in NOT_PROTOCOL_METHODS {
+        let code = production_code(
+            &fs::read_to_string(Path::new("src").join(file)).unwrap(),
+            false,
+        );
+        assert!(
+            code.contains(site),
+            "stale exemption src/{file}: `{site}` ({why})"
+        );
+    }
+}

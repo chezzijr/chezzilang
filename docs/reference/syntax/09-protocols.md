@@ -329,7 +329,9 @@ print((-Vec2(1, 2)).x)               # -1   — unary `-` calls Vec2.neg
 
 A protocol body may list **embed lines** (protocol refs joined by `+`) among its `fn` signatures, in
 any order; a body of only embed lines is a bundle. A type satisfies the protocol if it satisfies every
-embed (transitively) and has every own method.
+embed (transitively) and has every own method. A type that fails an embed is reported under the
+protocol you asked for, with the embed's reason: `type N does not satisfy Ord2 (missing method
+'compare')` for `protocol Ord2: Comparable`.
 
 - **`Arithmetic`** is `Add + Sub + Mul + Div`.
 - **`Num`** is `Arithmetic + Mod + Neg + Comparable`, satisfied by `int` and `float` only (sealed). A
@@ -394,7 +396,8 @@ parameter of its protocol and satisfies its embeds, and `Self` in a **return** i
 ### Indexing, slicing and membership
 
 Indexing and slicing use the prebuilt **`Index[K, V]`** (`obj[k]` via `index(self, key: K) -> V`),
-**`IndexSet[K, V]`** (`obj[k] = v` via `set_index(self, key: K, val: V)`) and **`Slice[R]`** (`obj[r]`
+**`IndexSet[K, V]`** (`obj[k] = v` via `set_index(self, key: K, val: V)`; it embeds `Index[K, V]`, as
+Rust's `IndexMut: Index`, because a compound `obj[k] += v` reads first) and **`Slice[R]`** (`obj[r]`
 for a `Range` via `slice(self, r: Range) -> R`; the parameter is named `r`). Built-in `list`/`map`/`str`
 satisfy them (`str` has `Index`/`Slice`, not `IndexSet`). A generic can be bounded by them; `K`/`V`/`R`
 are recovered at the call site.

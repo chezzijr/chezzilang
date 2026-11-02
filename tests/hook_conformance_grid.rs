@@ -1277,7 +1277,7 @@ fn iterator_bound_failures() -> Vec<String> {
 fn every_hook_row_has_a_grid_row() {
     let table: Vec<&str> = chezzi::base::hooks::HOOKS
         .iter()
-        .map(|row| row.method)
+        .map(|row| row.hook.method())
         .collect();
     let grid: Vec<&str> = hooks().iter().map(|hook| hook.name).collect();
     let mut sorted = (table.clone(), grid.clone());

@@ -49,9 +49,9 @@ protocol Num:
 protocol Index[K, V]:
     fn index(self, k: K) -> V
 
-# `IndexSet` embeds no protocol but has TWO methods in ORDER (index before set_index).
+# `IndexSet` is `Index` plus `set_index` (Rust `IndexMut: Index`): a compound `b[k] += v` reads first.
 protocol IndexSet[K, V]:
-    fn index(self, k: K) -> V
+    Index[K, V]
     fn set_index(self, k: K, v: V) -> None
 
 # Slicing: `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[..]` and `xs[Range(a, b, step)]` hand the `Range` value

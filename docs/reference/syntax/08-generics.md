@@ -96,8 +96,8 @@ print(b.max2(9))                     # 9
 import std.net
 fn f(s: net.Socket):
     bad := Box(s)
-    bad.top()                        # ERROR at check time: type Socket does not satisfy Eq
-                                     # (Comparable embeds Eq; the first unmet bound is named)
+    bad.top()                        # ERROR at check time: type Socket does not satisfy Comparable
+                                     # (Comparable embeds Eq; a failed embed names the bound asked for)
 ```
 
 The body may use the bounded operation. The bound is enforced on an instance call (`b.top()`) and on a

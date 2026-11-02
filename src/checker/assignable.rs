@@ -59,7 +59,7 @@ impl Checker {
             if let Some(bad) = self.unhashable_tuple_elem(t) {
                 msg.push_str(&format!(": element {bad} is not Hashable"));
             }
-            msg.push_str(&self.hook_name_note(t, "Hashable", "hash"));
+            msg.push_str(&self.hook_name_note(t, Hook::Hash));
             return Some(msg);
         }
         None

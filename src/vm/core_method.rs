@@ -7,6 +7,7 @@ use crate::ast::BinaryOp;
 use crate::base::builtin_method::{
     BytearrayMethod, BytesMethod, ListMethod, MapMethod, SetMethod, StrMethod,
 };
+use crate::base::hooks::{Hook, Unhooked};
 
 impl Vm {
     pub(super) fn intrinsic_proto_method(
@@ -41,14 +42,37 @@ impl Vm {
                 None => self.alloc_enum("Option", "None", &[]),
             }));
         }
+        // The `Unhooked` protocols have no operator hook. `Error`'s method on a `str` is the native
+        // `str.message`, so only `PathLike`'s reaches this miss arm.
+        if args.is_empty() && method == Unhooked::PathLike.method() {
+            return self.intrinsic_as_path(recv);
+        }
+        let Some(hook) = Hook::of_method(method) else {
+            return Ok(None);
+        };
         // `Add`/`Sub`/`Mul`/`Div`/`Mod` → the binary-arith primitive.
-        let bin = match method {
-            "add" => Some(Op::Add),
-            "sub" => Some(Op::Sub),
-            "mul" => Some(Op::Mul),
-            "div" => Some(Op::Div),
-            "mod" => Some(Op::Mod),
-            _ => None,
+        let bin = match hook {
+            Hook::Add => Some(Op::Add),
+            Hook::Sub => Some(Op::Sub),
+            Hook::Mul => Some(Op::Mul),
+            Hook::Div => Some(Op::Div),
+            Hook::Mod => Some(Op::Mod),
+            Hook::Iter
+            | Hook::Next
+            | Hook::Index
+            | Hook::SetIndex
+            | Hook::Slice
+            | Hook::Str
+            | Hook::Eq
+            | Hook::Hash
+            | Hook::Compare
+            | Hook::Neg
+            | Hook::Contains
+            | Hook::BitAnd
+            | Hook::BitOr
+            | Hook::BitXor
+            | Hook::Shl
+            | Hook::Shr => None,
         };
         if let Some(bin) = bin
             && args.len() == 1
@@ -59,13 +83,28 @@ impl Vm {
             return Ok(Some(self.pop()));
         }
         // `BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr` → the bitwise primitive.
-        let bit = match method {
-            "bitand" => Some(Op::BitAnd),
-            "bitor" => Some(Op::BitOr),
-            "bitxor" => Some(Op::BitXor),
-            "shl" => Some(Op::Shl),
-            "shr" => Some(Op::Shr),
-            _ => None,
+        let bit = match hook {
+            Hook::BitAnd => Some(Op::BitAnd),
+            Hook::BitOr => Some(Op::BitOr),
+            Hook::BitXor => Some(Op::BitXor),
+            Hook::Shl => Some(Op::Shl),
+            Hook::Shr => Some(Op::Shr),
+            Hook::Iter
+            | Hook::Next
+            | Hook::Index
+            | Hook::SetIndex
+            | Hook::Slice
+            | Hook::Str
+            | Hook::Eq
+            | Hook::Hash
+            | Hook::Compare
+            | Hook::Add
+            | Hook::Sub
+            | Hook::Mul
+            | Hook::Div
+            | Hook::Mod
+            | Hook::Neg
+            | Hook::Contains => None,
         };
         if let Some(bit) = bit
             && args.len() == 1
@@ -75,18 +114,18 @@ impl Vm {
             self.bitwise(&bit, span)?;
             return Ok(Some(self.pop()));
         }
-        match (method, args.len()) {
-            ("neg", 0) => Ok(Some(self.neg_value(recv, span)?)),
+        match (hook, args.len()) {
+            (Hook::Neg, 0) => Ok(Some(self.neg_value(recv, span)?)),
             // `Stringable` for a kind with no `str` method of its own: the SAME rendering `print`,
             // `str()` and `"{x}"` use. Miss-only, so a declared `str` hook is dispatched first.
-            ("str", 0) => {
+            (Hook::Str, 0) => {
                 let s = self.stringify(recv, span, 0)?;
                 Ok(Some(Value::obj(self.heap.alloc(Obj::Str(s.into())))))
             }
             // `Hashable` → the SAME hash a Map/Set key gets, so `x.hash()` can never disagree with
             // `m[x]` / `s.contains(x)` membership. `recv` stays rooted across the (possibly re-entrant,
             // possibly allocating) hash + the result box.
-            ("hash", 0) => {
+            (Hook::Hash, 0) => {
                 self.push(recv);
                 let hv = self.hash_value(recv, span)?;
                 let n = self.make_int(hv as i64);
@@ -114,11 +153,11 @@ impl Vm {
             // `self.compare` (IEEE-Equal) exactly as before — only NaN comes through here.
             // `order_key`'s terminal `Err` is unreachable behind the `is_numeric` gate.
             // TICKET-146: a tuple / List / Option receiver walks lexicographically (total order).
-            ("compare", 1) if self.seq_pair(recv, args[0]) => {
+            (Hook::Compare, 1) if self.seq_pair(recv, args[0]) => {
                 let other = args[0];
                 Ok(Some(Value::int(self.order_key(recv, other, span)? as i64)))
             }
-            ("compare", 1) => match self.compare(recv, args[0]) {
+            (Hook::Compare, 1) => match self.compare(recv, args[0]) {
                 Some(ord) => Ok(Some(Value::int(ord as i64))),
                 None if self.is_numeric(recv) && self.is_numeric(args[0]) => {
                     let other = args[0];
@@ -134,7 +173,7 @@ impl Vm {
             // (`values_equal_guarded` is the operator's OWN worker — not the fault-swallowing
             // `values_equal` test wrapper — so a cyclic operand raises the same recoverable
             // depth fault `==` raises instead of silently answering "not equal".)
-            ("eq", 1) => {
+            (Hook::Eq, 1) => {
                 let other = args[0];
                 Ok(Some(Value::bool(
                     self.with_roots(&[recv, other], |vm| {
@@ -142,60 +181,14 @@ impl Vm {
                     })?,
                 )))
             }
-            // W7-8 `PathLike` → the RAW OS bytes of a path spelled as a `str`/`bytes`/`bytearray`.
-            // `str` hands back its UTF-8 encoding (exactly what `str.encode()` yields), `bytes` IS the
-            // answer (returned unchanged — no copy), and a `bytearray` is COPIED into a fresh immutable
-            // `bytes` (the explicit `bytes(ba)` semantics: a later mutation of the buffer must not
-            // change a path already handed over). Miss-only dispatch, so a user type with its own
-            // `as_path` — including `path.Path` — never reaches here.
-            ("as_path", 0) => {
-                let Some(h) = recv.as_obj() else {
-                    return Ok(None);
-                };
-                let raw: Vec<u8> = match self.heap.get(h) {
-                    Obj::Str(s) => s.as_bytes().to_vec(),
-                    Obj::Bytes(_) => return Ok(Some(recv)),
-                    Obj::ByteArray(b) => b.to_vec(),
-                    Obj::BigInt(_)
-                    | Obj::FloatBox(_)
-                    | Obj::Iter { .. }
-                    | Obj::List(_)
-                    | Obj::Tuple(_)
-                    | Obj::Map(_)
-                    | Obj::Set(_)
-                    | Obj::Struct { .. }
-                    | Obj::Enum { .. }
-                    | Obj::Cell(_)
-                    | Obj::Func { .. }
-                    | Obj::Closure { .. }
-                    | Obj::Module(_)
-                    | Obj::Native { .. }
-                    | Obj::Builtin(_)
-                    | Obj::Cffi(_)
-                    | Obj::Ptr(_)
-                    | Obj::Channel(_)
-                    | Obj::Shared(_)
-                    | Obj::RwShared(_)
-                    | Obj::Atomic(_)
-                    | Obj::AtomicInt(_)
-                    | Obj::Executor(_)
-                    | Obj::Socket(_)
-                    | Obj::Listener(_)
-                    | Obj::Writer(_)
-                    | Obj::Reader(_)
-                    | Obj::Generator(_) => return Ok(None),
-                };
-                let r = self.heap.alloc(Obj::Bytes(raw.into()));
-                Ok(Some(Value::obj(r)))
-            }
-            ("index", 1) => {
+            (Hook::Index, 1) => {
                 self.push(recv);
                 self.push(args[0]);
                 self.get_index(span)?;
                 Ok(Some(self.pop()))
             }
             // `set_index` returns `nil` per the protocol; `Vm::set_index` pushes nothing.
-            ("set_index", 2) => {
+            (Hook::SetIndex, 2) => {
                 self.push(recv);
                 self.push(args[0]);
                 self.push(args[1]);
@@ -203,7 +196,7 @@ impl Vm {
                 Ok(Some(Value::nil()))
             }
             // `Slice[R]`'s one argument is the `Range` value; `c.slice(r)` is `c[r]` read as a slice.
-            ("slice", 1) => {
+            (Hook::Slice, 1) => {
                 self.push(recv);
                 self.push(args[0]);
                 self.slice_range(span)?;
@@ -211,14 +204,84 @@ impl Vm {
             }
             // `Contains` for bytes / bytearray (the only containers with no `contains` method):
             // the `in` operator's own worker.
-            ("contains", 1) => {
+            (Hook::Contains, 1) => {
                 self.push(args[0]);
                 self.push(recv);
                 self.op_contains(span)?;
                 Ok(Some(self.pop()))
             }
-            _ => Ok(None),
+            (
+                Hook::Iter
+                | Hook::Next
+                | Hook::Index
+                | Hook::SetIndex
+                | Hook::Slice
+                | Hook::Str
+                | Hook::Eq
+                | Hook::Hash
+                | Hook::Compare
+                | Hook::Add
+                | Hook::Sub
+                | Hook::Mul
+                | Hook::Div
+                | Hook::Mod
+                | Hook::Neg
+                | Hook::Contains
+                | Hook::BitAnd
+                | Hook::BitOr
+                | Hook::BitXor
+                | Hook::Shl
+                | Hook::Shr,
+                _,
+            ) => Ok(None),
         }
+    }
+
+    /// W7-8 `PathLike` → the RAW OS bytes of a path spelled as a `str`/`bytes`/`bytearray`.
+    /// `str` hands back its UTF-8 encoding (exactly what `str.encode()` yields), `bytes` IS the
+    /// answer (returned unchanged — no copy), and a `bytearray` is COPIED into a fresh immutable
+    /// `bytes` (the explicit `bytes(ba)` semantics: a later mutation of the buffer must not
+    /// change a path already handed over). Miss-only dispatch, so a user type with its own
+    /// `as_path` — including `path.Path` — never reaches here.
+    fn intrinsic_as_path(&mut self, recv: Value) -> Result<Option<Value>, RuntimeError> {
+        let Some(h) = recv.as_obj() else {
+            return Ok(None);
+        };
+        let raw: Vec<u8> = match self.heap.get(h) {
+            Obj::Str(s) => s.as_bytes().to_vec(),
+            Obj::Bytes(_) => return Ok(Some(recv)),
+            Obj::ByteArray(b) => b.to_vec(),
+            Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => return Ok(None),
+        };
+        let r = self.heap.alloc(Obj::Bytes(raw.into()));
+        Ok(Some(Value::obj(r)))
     }
 
     /// The miss arm of `core_method`, `bytes_method` and `bytearray_method`: a name no dispatcher

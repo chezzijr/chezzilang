@@ -21,7 +21,7 @@ impl Checker {
         arithmetic
             && super::proto::INTRINSIC_PROTO_METHODS
                 .iter()
-                .any(|(p, _, k)| *p == protocol && *k == kind)
+                .any(|(p, k)| *p == protocol && *k == kind)
     }
 
     /// Result type of an overloaded arithmetic operator (`+`/`-`/`*`) on two operands of the *same*
@@ -60,19 +60,20 @@ impl Checker {
     /// that satisfy `Comparable` (operator overloading dispatches to their `compare` at runtime),
     /// or a tuple / `List` / `Option` pair whose element types are all Comparable (TICKET-146).
     pub(super) fn ordering_allowed(&self, l: &Ty, r: &Ty) -> bool {
-        self.cmp_overload_allowed(l, r, "Comparable", "compare")
+        self.cmp_overload_allowed(l, r, Hook::Compare)
     }
 
     /// Shared body of [`Self::ordering_allowed`]: do `l` and `r` name the
     /// SAME type param / struct / enum, such that the comparison operator dispatches to
-    /// `protocol`'s `method`?
+    /// `hook`'s method?
     ///
-    /// Still protocol/method parameterized (the `op_overload_result` precedent) even with one caller:
+    /// Still hook parameterized (the `op_overload_result` precedent) even with one caller:
     /// `==`'s twin predicate was deleted in M23 Task 3 because the `Eq` overload is decided at RUNTIME
     /// off the operand's heap tag (`Vm::user_eq_method`) and never asked here — `infer_binary`'s `Eq`
     /// arm only needs the legality question (`may_be_equal`), which already accepts every pair this
     /// would have.
-    fn cmp_overload_allowed(&self, l: &Ty, r: &Ty, protocol: &str, method: &str) -> bool {
+    fn cmp_overload_allowed(&self, l: &Ty, r: &Ty, hook: Hook) -> bool {
+        let (protocol, method) = (hook.protocol(), hook.method());
         match (l, r) {
             (Ty::Param(a), Ty::Param(b)) if a == b => self.type_params.get(a).is_some_and(|bs| {
                 bs.iter()

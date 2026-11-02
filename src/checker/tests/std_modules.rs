@@ -1782,7 +1782,7 @@ fn builtin_iterable_rows() -> Vec<IterRow> {
         unordered: false,
     };
     let mut rows = Vec::new();
-    for (proto, _, kind) in INTRINSIC_PROTO_METHODS {
+    for (proto, kind) in INTRINSIC_PROTO_METHODS {
         if *proto != "Iterable" {
             continue;
         }
