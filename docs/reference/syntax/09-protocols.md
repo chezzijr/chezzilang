@@ -260,7 +260,8 @@ print([x] == [y])      # true — the recursion reaches the element's `eq`
   `a: Any = Box(1)`, `b: Any = Box("x")`, `a == b` checks and calls `Box`'s `eq`, whose body then
   faults on `int` vs `str` (recoverable; CPython raises `TypeError`). Keep the static type for the
   compile-time answer.
-- **`match` never calls `eq`.** A literal pattern is `int`/`str`/`bool` only, and a struct/enum arm
+- **`match` never calls `eq`.** A literal pattern is `int`/`float`/`str`/`bool` only (a float
+  literal matches by `==`, so `-0.0` matches `0.0`), and a struct/enum arm
   matches by variant and binds fields.
 
 **A generic body that compares its own type parameter must bound it by `Eq`.**

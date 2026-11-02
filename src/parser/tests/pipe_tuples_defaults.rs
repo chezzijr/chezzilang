@@ -615,13 +615,35 @@ fn neg_int_literal_and_range_patterns_parse() {
 }
 
 #[test]
-fn neg_float_pattern_still_rejected() {
-    // A negative float pattern stays a parse error (float patterns are not supported).
-    let e = parse_err("match x:\n    -3.0: print(1)\n    _: print(0)\n");
-    assert!(
-        e.to_string().contains("float"),
-        "expected a 'float' error, got: {e}"
-    );
+fn float_patterns_parse_and_a_float_range_is_rejected() {
+    // A float literal pattern, plain or negative (owner decision 2026-11-03).
+    for (src, want) in [
+        ("1.5", 1.5),
+        ("-3.0", -3.0),
+        ("-0.0", -0.0),
+        ("2e3", 2000.0),
+    ] {
+        match first_arm_pattern(&format!("match x:\n    {src}: print(1)\n    _: print(0)\n")) {
+            Pattern::Literal(LitPattern::Float(f)) => {
+                assert_eq!(f.to_bits(), f64::to_bits(want), "{src}");
+            }
+            other => panic!("{src}: {other:?}"),
+        }
+    }
+    // A range pattern stays int-only. A float lower bound is named as written, sign included.
+    for (src, want) in [
+        ("1.5..2.5", "found float 1.5"),
+        ("1.0..2.0", "found float 1.0"),
+        ("-1.0..=2", "found float -1.0"),
+        ("-1.5..=2", "found float -1.5"),
+        ("1..2.5", "float"),
+    ] {
+        let e = parse_err(&format!("match x:\n    {src}: print(1)\n    _: print(0)\n"));
+        assert!(
+            e.to_string().contains(want),
+            "{src}: expected {want:?}, got: {e}"
+        );
+    }
 }
 
 #[test]

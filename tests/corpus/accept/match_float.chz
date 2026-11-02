@@ -1,0 +1,16 @@
+# rule: pattern, subpattern
+fn classify(x: float) -> str:
+    match x:
+        -3.0: return "neg"
+        1.5 | 2.5: return "half"
+        _: return "other"
+
+fn inner(o: float?) -> str:
+    match o:
+        ?0.5: return "half"
+        _: return "other"
+
+fn pair(t: (float, int)) -> str:
+    match t:
+        (-1.5, -2): return "both negative"
+        _: return "other"

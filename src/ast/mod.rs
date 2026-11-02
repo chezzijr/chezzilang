@@ -629,7 +629,7 @@ pub struct MatchArm {
 
 /// A match pattern. Variant patterns with optional sub-patterns (`Circle(r)`, `Ok(v)`, `Point`,
 /// `None`, `Cons(h, Some(t))`), tuple patterns (`(a, b)`, `(0, x)` — gap #15), literal patterns
-/// (`0`, `"a"`, `true`) against int/str/bool scrutinees, a plain binding name in a sub-position,
+/// (`0`, `1.5`, `"a"`, `true`) against int/float/str/bool scrutinees, a plain binding name in a sub-position,
 /// and a `_` wildcard catch-all. Sub-patterns nest arbitrarily (`Variant`/`Tuple` bindings are
 /// themselves `Pattern`s).
 #[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
@@ -658,7 +658,8 @@ pub enum Pattern {
     },
     /// A tuple pattern, e.g. `(a, b)` or `(0, _)`. Two-or-more elements (matches a tuple value).
     Tuple(Vec<Pattern>),
-    /// An int/str/bool literal pattern. Float is intentionally excluded (float equality footgun).
+    /// An int/float/str/bool literal pattern. A float literal matches by `==` (`-0.0` matches
+    /// `0.0`; no NaN literal exists) and, like an int one, never makes a `match` exhaustive.
     Literal(LitPattern),
     /// An integer range pattern `start..end` (matches `start <= v < end`) or `start..=end`
     /// (`inclusive`; matches `start <= v <= end`). Int-only; refutable (never irrefutable / never
@@ -803,6 +804,7 @@ impl CarrierTag {
 #[derive(Debug, Clone, PartialEq, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub enum LitPattern {
     Int(i64),
+    Float(f64),
     Str(String),
     Bool(bool),
 }

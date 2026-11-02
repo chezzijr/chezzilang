@@ -1,0 +1,51 @@
+# A float literal pattern matches by `==` (owner decision 2026-11-03). Python `case 1.5:`, Rust
+# `1.5 =>` and Go `case 1.5:` each printed `one and a half` for 1.5. `-0.0` matches `0.0` (IEEE
+# `==`), and no NaN literal exists. A float pattern never makes a `match` exhaustive, so `_` stays.
+
+fn name(x: float) -> str:
+    match x:
+        1.5: return "one and a half"
+        -2.25: return "minus two and a quarter"
+        0.0: return "zero"
+        1e3: return "a thousand"
+        _: return "other"
+
+test fn a_float_pattern_matches_by_equality():
+    assert name(1.5) == "one and a half"
+    assert name(-2.25) == "minus two and a quarter"
+    assert name(1000.0) == "a thousand"
+    assert name(1.25) == "other"
+    assert name(0.1 + 0.2) == "other"
+
+test fn negative_zero_matches_zero():
+    assert name(-0.0) == "zero"
+    assert name(0.0) == "zero"
+    nz := -0.0
+    match nz:
+        -0.0: assert true
+        _: assert false, "-0.0 must match"
+
+test fn nan_matches_only_the_wildcard():
+    nan := float("nan")
+    assert name(nan) == "other"
+
+test fn a_float_pattern_works_in_every_pattern_position():
+    o: float? = ?2.5
+    r := match o:
+        ?2.5: "present"
+        _: "other"
+    assert r == "present"
+    t := (1, 0.5)
+    s := match t:
+        (1, 0.5): "pair"
+        _: "other"
+    assert s == "pair"
+    u := match 3.0:
+        1.0 | 3.0: "odd"
+        _: "other"
+    assert u == "odd"
+    g := match 1.5:
+        1.5 if false: "guarded"
+        1.5: "plain"
+        _: "other"
+    assert g == "plain"

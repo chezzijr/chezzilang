@@ -1483,6 +1483,52 @@ fn match_duplicate_literal_arm_rejected() {
     );
 }
 
+/// A float literal pattern (owner decision 2026-11-03) is checked on the int-literal path: it needs
+/// a `float` scrutinee (int never widens, D3), it never makes a `match` exhaustive, and a repeat
+/// by `==` is a duplicate arm (`-0.0` is `0.0`).
+#[test]
+fn float_literal_pattern_rules() {
+    let arms = |scrut: &str, arms: &str| format!("fn f(x: {scrut}) -> int:\n    match x:\n{arms}");
+    ok(&arms(
+        "float",
+        "        1.5: return 1\n        -2.5: return 2\n        _: return 0\n",
+    ));
+    rejects(
+        &arms("float", "        1.5: return 1\n        -2.5: return 2\n"),
+        "non-exhaustive match: add a `_` arm",
+    );
+    rejects(
+        &arms("int", "        1.5: return 1\n        _: return 0\n"),
+        "literal of type float cannot match scrutinee of type int",
+    );
+    rejects(
+        &arms("float", "        1: return 1\n        _: return 0\n"),
+        "literal of type int cannot match scrutinee of type float",
+    );
+    rejects(
+        &arms(
+            "float",
+            "        1.5: return 1\n        1.50: return 2\n        _: return 0\n",
+        ),
+        "duplicate match arm '1.5'",
+    );
+    rejects(
+        &arms(
+            "float",
+            "        0.0: return 1\n        -0.0: return 2\n        _: return 0\n",
+        ),
+        "duplicate match arm '-0.0'",
+    );
+    rejects(
+        &arms("float?", "        ?1: return 1\n        _: return 0\n"),
+        "literal of type int cannot match a value of type float",
+    );
+    ok(&arms(
+        "float?",
+        "        ?1.5: return 1\n        _: return 0\n",
+    ));
+}
+
 #[test]
 fn match_duplicate_literal_guard_carveout_and_distinct_ok() {
     // A GUARDED arm never closes the literal, so `1 if c: … / 1: …` is legal (must NOT over-reject).
@@ -1908,10 +1954,10 @@ fn match_literal_arm_in_enum_match_rejected() {
 }
 
 #[test]
-fn match_on_float_rejected() {
+fn match_on_bytes_rejected() {
     rejects(
-        "x := 1.5\nmatch x:\n    0: print(\"x\")\n    _: print(\"y\")\n",
-        "cannot match on non-enum type float",
+        "x := b\"a\"\nmatch x:\n    _: print(\"y\")\n",
+        "cannot match on non-enum type bytes",
     );
 }
 

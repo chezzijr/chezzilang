@@ -492,8 +492,9 @@ impl Parser {
     }
 
     /// Expect an integer literal in pattern position, accepting an optional leading `-` for a
-    /// negative int literal/range bound (int-only — a leading `-` before a float still routes to
-    /// `expect_int`, which rejects with "expected integer, found float"; no float pattern is added).
+    /// negative int literal/range bound (int-only — a float range bound routes to `expect_int`,
+    /// which rejects with "expected integer, found float"; a float literal pattern is parsed before
+    /// this is reached).
     pub(super) fn expect_pattern_int(&mut self) -> PResult<i64> {
         if self.eat(&Token::Minus) {
             // i64::MIN carve-out in pattern/range position: `-9223372036854775808` folds to i64::MIN

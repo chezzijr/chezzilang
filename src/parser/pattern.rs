@@ -48,10 +48,27 @@ impl Parser {
     }
 
     fn parse_pattern_primary(&mut self, top: bool) -> PResult<Pattern> {
-        // Literal patterns: int / str / bool. Float is intentionally not a pattern. A leading `-`
-        // begins a negative int literal/range pattern (int-only; `-3.0` routes through
-        // `expect_pattern_int` → `expect_int` and is rejected as "expected integer, found float").
+        // Literal patterns: int / float / str / bool. A leading `-` begins a negative literal or an
+        // int range bound. A float literal matches by `==` (owner decision 2026-11-03); a range stays
+        // int-only, so a float range bound is rejected ("expected integer, found float").
         match self.peek() {
+            Token::Float(_) | Token::Minus
+                if matches!(self.peek(), Token::Float(_))
+                    || matches!(self.peek_at(1), Token::Float(_)) =>
+            {
+                let negative = self.eat(&Token::Minus);
+                let Token::Float(f) = self.advance().kind else {
+                    unreachable!("the guard saw a float")
+                };
+                let f = if negative { -f } else { f };
+                if self.check(&Token::DotDot) || self.check(&Token::DotDotEq) {
+                    return Err(self.err(format!(
+                        "a range pattern takes integer bounds, found float {}",
+                        crate::fmtspec::repr_float(f)
+                    )));
+                }
+                return Ok(Pattern::Literal(LitPattern::Float(f)));
+            }
             Token::Int(_) | Token::Minus => {
                 let start = self.expect_pattern_int()?;
                 // `start..end` — a half-open integer range pattern (matches `start <= v < end`);

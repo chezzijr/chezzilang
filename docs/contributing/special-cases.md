@@ -47,7 +47,7 @@ day's binary.
 | U2 | A hook is the method that satisfies the builtin protocol; a declared type with methods is one kind (struct and enum alike) | Family D of wave 23, enum half-hooks, `List(s)` for a bounded parameter | TICKET-250 (done) | no |
 | U3 | A receiver is the first parameter of a method and nothing else | the `self` universal cast (P0) | TICKET-250 (note added) | no (owner: `self` is the special word) |
 | U4 | An un-hinted `?x` is a carrier from creation; a wrapper holds its operand | Families B and C of wave 23 | TICKET-248, TICKET-247 (landed) | no |
-| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed); re-run 2026-10-16: still open enum `.copy()`, `match 1.5:`, `{1, 2}.map(f)` | decided, see below |
+| U5 | An operator accepts a type exactly when the type satisfies the operator's protocol; builtin types declare their protocols like user types | `in`/`Contains`, `+`/`Add`, `==`/`Eq`, display/`Stringable`, sibling-type holes | TICKET-257 (landed); re-run 2026-10-16; `false < true`, `bytes(2)`, `"ab" * 3` (now `.repeat`) and `match 1.5:` landed 2026-11-03; still open: enum `.copy()` (waits on the Copy protocol), `{1, 2}.map(f)` | decided, see below |
 | U6 | One iteration source: `for`, comprehensions, `List()`/`Set()`/`Map()`, destructuring and `Iterable` ask one function | range, channel, Set of tuples, std containers, `std.iter` | TICKET-253 (ranges), TICKET-257 (channels) | decided, see below |
 | U7 | A range is a value | every "a range is only valid as" site, `range()`, slice spelling | TICKET-253, TICKET-254 (landed) | decided, see below |
 | U8 | A block expression is an expression wherever layout exists, and layout exists inside brackets and interpolation holes | `match`/`recover:` rejected inside brackets, parameter default against field default, inline fn body against lambda body, line breaks in a hole | TICKET-260 (landed); re-run 2026-10-16: still open a line break inside a hole | decided, see below |
@@ -124,7 +124,7 @@ Sibling types that differed with no stated reason:
 | struct has automatic `.copy()` | enum has none | Rust derives `Clone` on both |
 | `iter.islice({1, 2}, 1)`, `[1.5].sum()` | `iter.enumerate({1, 2})`, `iter.sum([1.5])`, `{1, 2}.map(f)`, `xs.extend({2})`, `",".join({"a"})` | CPython works |
 | `bytearray()`, `bytearray(2)`, `bytes(2)` (2026-11-03) | `bytes()`, `bytes({1, 2})` | CPython works |
-| `match` literal patterns for int, str, bool, tuple | float, bytes | CPython `case 1.5:` |
+| `match` literal patterns for int, float (2026-11-03), str, bool, tuple | bytes | CPython `case 1.5:` |
 
 Hook spelling (U16): `remove` returns `V?` on Map, `bool` on Set, nothing on the concurrent
 collections. A miss is `None` for `get`/`pop`/`first`, `-1` for `index_of`, a fault for `xs[i]`. `count`
@@ -221,7 +221,7 @@ Open rows (S1-1, S1-2, S2-8 and S2-1 went to TICKET-249, 250 and 252; see the au
 | S3-1 ✔ | P1 | check and run are exponential in a `recv.name[X](args)` chain: `.map[int](inc)` repeated | 12 links 224 ms, 16 links 3.5 s, 18 links over 10 s; without `[int]` 30 links take 8 ms | rustc: 30 links in 81 ms | fixed by TICKET-269 (debug `chezzi check`, 16 links: 7243 ms -> 27 ms) |
 | S3-3 ✔ | P2 | `t.0[i](5)` on a tuple whose element 0 is a list of functions | `unknown type 'i'` (read as a type argument); `t.0[0](5)` works | Rust, CPython `4` | not filed |
 | S3-4 ✔ | P2 | the generator ban on `spawn`/`defer`/`parallel:`/`wait:` is bypassed inside a `recover:` block in an `assert`; same gap gives a false "`yield` can only appear inside a generator" | check OK; the task outlives the generator | the checker's own rule | not filed |
-| S3-6 | P3 | grammar and parser drift that the conformance test cannot see: negative literal in a sub-pattern, `(x) := 5`, `1 \|> f(2,)`, `enum E: A()`, `where T: None` | parser and `docs/reference/grammar.bnf` disagree on accept/reject | — | not filed |
+| S3-6 | P3 | grammar and parser drift that the conformance test cannot see: `(x) := 5`, `1 \|> f(2,)`, `enum E: A()`, `where T: None` | parser and `docs/reference/grammar.bnf` disagree on accept/reject | — | not filed; the negative literal in a sub-pattern (`(-1.5, -2):`) is in the grammar since 2026-11-03 |
 
 Facts with several deciders (from the grammar hunter's table):
 
@@ -330,7 +330,7 @@ Items fixed since the audit are dropped (the generator annotation, `range()` in 
   inside a `parallel:`".
 - The syntax reference says `iter()` on an `Iterator` returns itself; on a struct with only `next`, the
   `iter` method does not exist.
-- False diagnostics: "cannot match on non-enum type float"; "named arguments are only supported on
+- False diagnostics: "named arguments are only supported on
   functions, struct constructors, and struct methods"; "`wait` needs at least one `recv` arm" (a
   send-only `wait:` is accepted); every parse error is labelled "resolve error"; `t := (1, None)`
   suggests `(int, int?)`.

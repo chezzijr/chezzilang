@@ -113,7 +113,9 @@ match safe_div(10, 2):
 
 **Scrutinee kinds.**
 - an enum, `T?` or `T!E`
-- an **int/str**: literal arms, which always need a `_`
+- an **int/float/str**: literal arms, which always need a `_`. A float arm (`1.5:`, `-2.5:`) matches
+  by `==`: `-0.0` matches `0.0`, and no NaN literal exists (Python `case 1.5:`, Rust `1.5 =>`, Go
+  `case 1.5:`)
 - a **bool**: exhaustive once unguarded `true` and `false` arms both appear (a `_` after both warns as
   unreachable)
 - a **tuple**: exhaustive once its arms cover the cartesian product of the element domains (no `_`)
@@ -184,7 +186,7 @@ match shape:
     Shape.Circle(a) | Shape.Square(a): a        # both alternatives bind `a` (same type)
 ```
 
-`true | false` does not close the bool domain; keep a `_` (int/str/bool literal domains are always open).
+`true | false` does not close the bool domain; keep a `_` (int/float/str/bool literal domains are always open).
 
 **Guards** (`pattern if cond:`) match only when the pattern binds and the guard (which sees the
 bindings) is true; otherwise the next arm is tried.
@@ -194,7 +196,8 @@ bindings) is true; otherwise the next arm is tried.
   does not close that variant. Only an unguarded arm with all-wildcard/binding payload does.
 - A guarded variant arm may be followed by an unguarded arm on the same variant (`E.A(n) if c` then
   `E.A(n)`).
-- An exact-duplicate literal arm (`1:` twice, `"x":` twice, `1 | 1`) is a `duplicate match arm` error,
+- An exact-duplicate literal arm (`1:` twice, `"x":` twice, `1 | 1`, `0.0:` then `-0.0:`) is a
+  `duplicate match arm` error,
   with the same guard exception (`1 if c:` then `1:` is legal). Range subsumption is not checked.
 
 **Unreachable arm.** An arm after an unguarded irrefutable arm is a warning (`unreachable match arm: an
@@ -227,7 +230,7 @@ match score:
 
 The range must be non-empty: `5..1`, `3..3`, `0..-5` are the compile error `empty range pattern`
 (rustc E0579), in every position. Int literals and range bounds may be negative (`-3:`, `-10..-5:`,
-`-10..5`). There is no float pattern: `-3.0:` / `3.0:` is a parse error.
+`-10..5`). A range is int-only: a float bound (`1.5..2.5:`) is a parse error.
 
 ```chezzi
 match temp:
@@ -249,7 +252,7 @@ A pattern **compares** the outer tag and **binds** only inside it.
 | `?(a, b)` | a present tuple payload | `a`, `b` |
 | `!IoErr(code)` | an error that is the struct `IoErr` | `code` |
 | `Color.Red`, `Shape.Circle(r)` | that enum variant | `r` |
-| `3`, `"a"`, `1..5`, `(x, 0)` | that literal, range or tuple shape | `x` |
+| `3`, `1.5`, `"a"`, `1..5`, `(x, 0)` | that literal, range or tuple shape | `x` |
 | `name` (a bare lowercase name) | anything: the default arm | the whole value |
 | `_` | anything: the default arm | nothing |
 

@@ -1368,6 +1368,7 @@ fn emit_range_test(
 fn emit_lit_const(fc: &mut FnComp, lit: &LitPattern, span: Span) {
     match lit {
         LitPattern::Int(n) => fc.emit(Op::ConstInt(*n), span),
+        LitPattern::Float(f) => fc.emit(Op::ConstFloat(*f), span),
         LitPattern::Str(s) => fc.emit(Op::ConstStr(s.clone()), span),
         LitPattern::Bool(b) => fc.emit(if *b { Op::True } else { Op::False }, span),
     }

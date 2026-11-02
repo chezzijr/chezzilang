@@ -467,7 +467,7 @@
 # ANY alternative matches (first match wins). A single primary parses unchanged. Every alternative
 # must bind the same variables (checker-enforced). A primary: a bare "IDENT" is a BINDING (or, for the
 # carrier pattern head, a variant); a QUALIFIED "IDENT" "DOT" "IDENT" names a user variant
-# (nullary, or with "LPAREN" a payload-carrying one); "(" … ")" a tuple pattern; an int/str/bool
+# (nullary, or with "LPAREN" a payload-carrying one); "(" … ")" a tuple pattern; an int/float/str/bool
 # literal; or a half-open integer range "INT" ".." "INT" (matches `start <= v < end`) or an inclusive
 # one "INT" "..=" "INT" (matches `start <= v <= end`). Sub-patterns
 # nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>. The SAME
@@ -499,14 +499,15 @@
                 | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | <carrierPattern>
-                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
+                | "INT" | "FLOAT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
                 | "INT" "DOTDOT" "INT"
                 | "INT" "DOTDOTEQ" "INT"
-# A leading "MINUS" makes the int literal / range bound negative (int-only — there is no float
-# pattern, so a "MINUS" before a float is a parse error, exactly like a bare float). Either range
-# bound may independently be negative (`-10..-5`, `-10..5`); the grammar also accepts an empty
-# range such as `0..-5`, which the checker rejects.
+# A leading "MINUS" makes the int or float literal / range bound negative. A float literal matches
+# by `==` (owner decision 2026-11-03); a range is int-only, so a float range bound is a parse error.
+# Either range bound may independently be negative (`-10..-5`, `-10..5`); the grammar also accepts
+# an empty range such as `0..-5`, which the checker rejects.
                 | "MINUS" "INT"
+                | "MINUS" "FLOAT"
                 | "MINUS" "INT" "DOTDOT" "MINUS" "INT"
                 | "MINUS" "INT" "DOTDOT" "INT"
                 | "INT" "DOTDOT" "MINUS" "INT"
@@ -530,7 +531,8 @@
                 | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | <carrierPattern>
-                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
+                | "INT" | "FLOAT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
+                | "MINUS" "INT" | "MINUS" "FLOAT"
                 | "INT" "DOTDOT" "INT"
 <subpatterns> ::= <subpattern> | <subpattern> "COMMA" <subpatterns>
 # One sub-pattern is grouping (`(p)` is `p`); a trailing comma makes it a 1-tuple pattern (`(a,)`).

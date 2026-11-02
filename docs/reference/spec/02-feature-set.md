@@ -19,7 +19,8 @@ exhaustiveness treat them like a user enum. Any module can import the variants o
   mentions an unpinned type parameter does not wrap.
 
 **Included:**
-- **Pattern matching**: `match` on enums (also int/str/bool + tuple + **struct** scrutinees),
+- **Pattern matching**: `match` on enums (also int/float/str/bool + tuple + **struct** scrutinees; a float literal
+  matches by `==`),
   exhaustiveness-checked.
   - A struct destructures **positionally** (`Point(x, y)` binds the fields in declaration order); a
     struct has one constructor, so a lone all-binding arm is irrefutable (no `_`). `S(..)` only sets
@@ -27,7 +28,7 @@ exhaustiveness treat them like a user enum. Any module can import the variants o
     (`syntax.md` §7a), so a constructor with logic is a static `S.new(..)`.
   - Nested patterns (incl. nested nullary variants like `?None`) + **or-patterns** (`p1 | p2`; every
     alternative must bind the same variables). A full enum or-pattern is exhaustive without `_`, and so
-    is `true | false` on a bool scrutinee; the open int/str domains still require a `_`.
+    is `true | false` on a bool scrutinee; the open int/float/str domains still require a `_`.
   - User-enum variants are **scoped under their enum** and must be written **qualified** as
     `Enum.Variant` (value, constructor, or `match` arm); a bare user-variant name is a compile error.
     Two enums may share a variant name (`Color.Red` / `Light.Red`). The built-in `?x`/`!e`/`None`

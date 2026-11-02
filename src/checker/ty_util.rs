@@ -918,6 +918,7 @@ pub(super) fn ty_collect_params(
 pub(super) fn lit_pattern_ty(lit: &LitPattern) -> Ty {
     match lit {
         LitPattern::Int(_) => Ty::Int,
+        LitPattern::Float(_) => Ty::Float,
         LitPattern::Str(_) => Ty::Str,
         LitPattern::Bool(_) => Ty::Bool,
     }

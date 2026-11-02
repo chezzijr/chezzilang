@@ -1000,12 +1000,15 @@ impl Checker {
                         use crate::ast::LitPattern;
                         let key = match lit {
                             LitPattern::Int(n) => format!("lit:i{n}"),
+                            // Keyed by `==`: `-0.0` and `0.0` are one value (`+ 0.0` folds them).
+                            LitPattern::Float(f) => format!("lit:f{}", (f + 0.0).to_bits()),
                             LitPattern::Str(s) => format!("lit:s{s}"),
                             LitPattern::Bool(b) => format!("lit:b{b}"),
                         };
                         if covered.contains(&key) {
                             let shown = match lit {
                                 LitPattern::Int(n) => n.to_string(),
+                                LitPattern::Float(f) => crate::fmtspec::repr_float(*f),
                                 LitPattern::Str(s) => format!("\"{s}\""),
                                 LitPattern::Bool(b) => b.to_string(),
                             };

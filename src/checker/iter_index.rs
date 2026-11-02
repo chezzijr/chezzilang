@@ -581,8 +581,9 @@ impl Checker {
             };
         }
         match &sty {
-            // int/str/bool scrutinees match against literal patterns (+ a `_` wildcard).
+            // int/float/str/bool scrutinees match against literal patterns (+ a `_` wildcard).
             Ty::Int => MatchKind::Literal(Ty::Int),
+            Ty::Float => MatchKind::Literal(Ty::Float),
             Ty::Str => MatchKind::Literal(Ty::Str),
             Ty::Bool => MatchKind::Literal(Ty::Bool),
             Ty::Tuple(tys) => MatchKind::Tuple(tys.clone()),
@@ -602,8 +603,7 @@ impl Checker {
             // known enum or are literals — so the normal coverage check applies. Genuinely unknowable
             // cases still fall back to `Skip`.
             Ty::Unknown => self.reconstruct_unknown_kind(patterns, scrutinee.span),
-            other @ Ty::Float
-            | other @ Ty::Bytes
+            other @ Ty::Bytes
             | other @ Ty::ByteArray
             | other @ Ty::Nil
             | other @ Ty::List(_)

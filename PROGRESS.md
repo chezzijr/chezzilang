@@ -195,13 +195,20 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     a fault, the depth limit, a channel `recv` and a sibling's fault, 31 cells. History:
     `docs/history/progress/2026-11.md`.
 19. **U5 sibling cells and U14 (owner decisions 2026-11-03).** Done: `bool` is ordered, `false`
-    before `true`; `bytes(n)` gives `n` zero bytes; `*` means
-    multiply only, and a list repeats with `xs.repeat(n)`; the lexer
-    skips a line that holds only spaces or tabs (U14). History: `docs/history/progress/2026-11.md`.
+    before `true`; `bytes(n)` gives `n` zero bytes; `*` means multiply only, and a list repeats with
+    `xs.repeat(n)`; the lexer skips a line that holds only spaces or tabs (U14); a float literal
+    pattern matches by `==`. History: `docs/history/progress/2026-11.md`. Deferred by the owner:
+    - **The Copy protocol** (design not chosen; the owner wants it considered more thoroughly). The
+      candidate form is `protocol Copy: fn copy(self) -> Self` (Rust `Clone`). Builtins would get
+      intrinsic rows; a struct or enum would derive it when all its fields are `Copy`; `Channel`,
+      `Shared`, `Executor` and `Task` would have no row. It would delete the 2 name-keyed `"copy"`
+      checks (`checker/method_call.rs:433`, `vm/method_call.rs:801`). Enum `.copy()` waits for it.
+    - `Set.map` / `Set.filter`: later.
 
 ### Open questions for the owner
 
-None open on 2026-10-16.
+- **Copy protocol: deep (Rust `Clone`) or shallow (Python `copy`)?** Open since 2026-11-03; see
+  item 19.
 
 ### Owner decisions not yet implemented
 
