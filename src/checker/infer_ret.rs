@@ -720,7 +720,7 @@ impl Checker {
             decl.name
                 .starts_with(crate::base::provider_name::PROVIDER_PREFIX),
         );
-        // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48).
+        // …and it is its own frame, whatever block holds its definition.
         let saved_frame = self.enter_own_frame();
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
         // An inline expression body is never a generator: a stray `yield` in it is diagnosed.

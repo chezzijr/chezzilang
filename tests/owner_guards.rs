@@ -51,6 +51,14 @@ const RULES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// (message text, the one `src/`-relative file that may hold it, the fact and its owner). Unlike
+/// [`RULES`], these match inside string literals.
+const MESSAGE_RULES: &[(&str, &str, &str)] = &[(
+    "not allowed inside a",
+    "checker/boundary.rs",
+    "what may cross a spawn, defer, recover or generator block: read `boundary::RULES`",
+)];
+
 fn rust_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -76,8 +84,9 @@ fn is_test_file(rel: &Path) -> bool {
 }
 
 /// `text` without `//` comments, string-literal contents and inline `#[cfg(test)] mod NAME { .. }`
-/// blocks. String delimiters stay (`""`), so a spelling with quotes still matches only code.
-fn production_code(text: &str) -> String {
+/// blocks. String delimiters stay (`""`), so a spelling with quotes still matches only code. With
+/// `keep_strings`, string contents stay.
+fn production_code(text: &str, keep_strings: bool) -> String {
     let mut out = String::new();
     let mut lines = text.lines().peekable();
     let mut skipping = false;
@@ -97,7 +106,7 @@ fn production_code(text: &str) -> String {
             skipping = true;
             continue;
         }
-        out.push_str(&strip_line(line));
+        out.push_str(&strip_line(line, keep_strings));
         out.push('\n');
     }
     out
@@ -106,7 +115,7 @@ fn production_code(text: &str) -> String {
 /// One line without its `//` comment; a string literal keeps its quotes and loses its contents,
 /// except a short identifier-like literal (`"_"`, `"self"`, `"Add"`): the fact spellings this test
 /// looks for are names, never prose.
-fn strip_line(line: &str) -> String {
+fn strip_line(line: &str, keep_strings: bool) -> String {
     let mut out = String::new();
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
@@ -131,9 +140,10 @@ fn strip_line(line: &str) -> String {
             }
             let body: String = chars[start + 1..i.min(chars.len())].iter().collect();
             out.push('"');
-            let is_name = body.chars().count() <= 16
-                && !body.is_empty()
-                && body.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            let is_name = keep_strings
+                || body.chars().count() <= 16
+                    && !body.is_empty()
+                    && body.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             if is_name {
                 out.push_str(&body);
             }
@@ -156,8 +166,14 @@ fn each_fact_is_spelled_only_by_its_owner() {
         if is_test_file(rel) {
             continue;
         }
-        let code = production_code(&fs::read_to_string(&path).unwrap());
-        for (spelling, owner, fact) in RULES {
+        let text = fs::read_to_string(&path).unwrap();
+        let code = production_code(&text, false);
+        let with_strings = production_code(&text, true);
+        let rules = RULES
+            .iter()
+            .map(|r| (r, &code))
+            .chain(MESSAGE_RULES.iter().map(|r| (r, &with_strings)));
+        for ((spelling, owner, fact), code) in rules {
             if rel == Path::new(owner) {
                 continue;
             }
@@ -182,14 +198,29 @@ fn each_fact_is_spelled_only_by_its_owner() {
 /// The scan itself: a spelling inside a comment or a longer string never counts; one in code does.
 #[test]
 fn the_scan_reads_code_only() {
-    let code =
-        production_code("let a = x == \"_\"; // y == \"_\"\nlet b = \"a == \\\"_\\\" here\";\n");
+    let code = production_code(
+        "let a = x == \"_\"; // y == \"_\"\nlet b = \"a == \\\"_\\\" here\";\n",
+        false,
+    );
     assert_eq!(code.matches("== \"_\"").count(), 1, "{code}");
-    let gated =
-        production_code("#[cfg(test)]\nmod tests {\n    fn f() { x == \"_\" }\n}\nfn g() {}\n");
+    let gated = production_code(
+        "#[cfg(test)]\nmod tests {\n    fn f() { x == \"_\" }\n}\nfn g() {}\n",
+        false,
+    );
     assert!(!gated.contains("== \"_\""), "{gated}");
     assert!(gated.contains("fn g()"), "{gated}");
-    let named =
-        production_code("if p.name == \"self\" {}\nlet m = \"say p == \\\"self\\\" here\";\n");
+    let named = production_code(
+        "if p.name == \"self\" {}\nlet m = \"say p == \\\"self\\\" here\";\n",
+        false,
+    );
     assert_eq!(named.matches("== \"self\"").count(), 1, "{named}");
+    let message = production_code(
+        "// is not allowed inside a\nlet m = \"is not allowed inside a x\";\n",
+        true,
+    );
+    assert_eq!(
+        message.matches("not allowed inside a").count(),
+        1,
+        "{message}"
+    );
 }

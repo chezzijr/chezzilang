@@ -68,9 +68,11 @@ main()
   anywhere and joins at the body's `return`/end (the top level joins at program exit). `return`,
   fall-through and `?` are join points; `defer`s run after the join. A task cannot outlive the
   function that spawned it.
-- **`return` inside a `spawn:` block is a compile error** (`'return' is not allowed inside a spawn
-  block`), also in an `if`/`for`/`match`/`wait:` arm in the block. Send the value on a
-  `Channel`/`Shared`. The error names the block the `return` is lexically in. A `return` in a
+- **`return`, `break` and `continue` inside a `spawn:` block are compile errors**
+  (`'return' is not allowed inside a spawn block: a spawned task has no caller to return to`;
+  `'break' is not allowed inside a spawn block: a spawned task runs outside the loop`), also in an `if`/`for`/`match`/`wait:` arm in the block. Send the value on a
+  `Channel`/`Shared`. The error names the innermost block the construct is in. A loop inside the
+  task owns its own `break`. A `return` in a
   `parallel:` body (parent frame) or in a nested `fn` declared in the block is fine.
 - **`?` (and `?.`) inside a `spawn:` block is a compile error** (`'?' is not allowed inside a spawn
   block: a spawned task has no caller to propagate to`), whatever the enclosing function returns and

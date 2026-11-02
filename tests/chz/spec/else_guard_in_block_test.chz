@@ -1,0 +1,89 @@
+# U11: an `else` guard crosses a `spawn:` or `defer:` block. Its block leaves by its own statement,
+# and `boundary::RULES` judges that statement (`tests/boundary_grid.rs` has the rejected cells).
+# Gated by chz_suite_passes (tests/chz_suite.rs).
+
+fn o(n: int) -> int?:
+    if n > 0:
+        return n
+    return None
+
+fn r(n: int) -> int!str:
+    if n > 0:
+        return n
+    return !"bad"
+
+fn save(n: int) -> None!str:
+    if n > 0:
+        return
+    return !"full"
+
+test fn a_guard_continues_a_loop_inside_a_task():
+    log: List[str] = []
+    parallel:
+        spawn:
+            for j in [1, 0, 2]:
+                v := o(j) else:
+                    log.push("skip {j}")
+                    continue
+                log.push("v {v}")
+    assert log == ["v 1", "skip 0", "v 2"], "got: {log}"
+
+test fn a_guard_that_panics_in_a_task_is_caught_by_an_outer_recover():
+    log: List[str] = []
+    res := recover:
+        parallel:
+            spawn:
+                v := o(3) else:
+                    panic("never")
+                log.push("v {v}")
+            spawn:
+                w := o(0) else:
+                    panic("no w")
+                log.push("w {w}")
+    match res:
+        ?_:
+            log.push("ok")
+        !e:
+            log.push("caught {e.message()}")
+    assert log == ["v 3", "caught no w"], "got: {log}"
+
+test fn an_expression_guard_continues_a_loop_inside_a_task():
+    log: List[str] = []
+    parallel:
+        spawn:
+            for i in [1, 0, 1]:
+                save(i) else e:
+                    log.push("fail {e}")
+                    continue
+                log.push("saved {i}")
+    assert log == ["saved 1", "fail full", "saved 1"], "got: {log}"
+
+fn defer_guards(log: List[str]):
+    defer:
+        for i in [1, 0, 2]:
+            v := r(i) else e:
+                log.push("err {e}")
+                continue
+            log.push("v {v}")
+        a := r(7) else:
+            panic("x")
+        log.push("a {a}")
+    log.push("body")
+
+test fn guards_in_a_defer_block_run_at_scope_exit():
+    log: List[str] = []
+    defer_guards(log)
+    assert log == ["body", "v 1", "err bad", "v 2", "a 7"], "got: {log}"
+
+fn defer_break(log: List[str]):
+    defer:
+        for i in [1, 0, 2]:
+            v := o(i) else:
+                break
+            log.push("v {v}")
+    log.push("body")
+
+test fn a_guard_breaks_a_loop_inside_a_defer_block():
+    log: List[str] = []
+    defer_break(log)
+    assert log == ["body", "v 1"], "got: {log}"

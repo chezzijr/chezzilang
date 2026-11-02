@@ -1326,7 +1326,7 @@ fn ticket184_flow_grid() {
             "fn g(n: int) -> int:\n    match n:\n        0: return 1\n        _: panic(\"x\")\nprint(g(0))\n",
             "ok",
         ),
-        // The recover escape check names the escape that comes first in source order.
+        // Each escape in a recover block reports at its own statement.
         (
             "N3",
             "fn f():\n    for i in 0..2:\n        r := recover:\n            if i == 0:\n                continue\n            return\n        print(r)\nf()\n",

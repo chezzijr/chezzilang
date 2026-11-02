@@ -664,20 +664,6 @@ impl Checker {
         err: &Option<(String, Span)>,
         body: &Block,
     ) -> Ty {
-        // The two positions with nowhere to leave to, as for `?` and `return`.
-        if self.in_spawn_block {
-            self.error(
-                e.span,
-                "'else' guard is not allowed inside a spawn block: a spawned task has no caller to leave to"
-                    .to_string(),
-            );
-        } else if self.in_defer_block {
-            self.error(
-                e.span,
-                "'else' guard is not allowed inside a defer block: a defer cannot leave"
-                    .to_string(),
-            );
-        }
         let m = self.tyvar_mark();
         let ty = self.infer(value);
         let ty = self.close_operand(m, ty);
@@ -759,20 +745,12 @@ impl Checker {
     /// The block form has no tail value (U8): every statement is an ordinary statement and the block
     /// is `!` (`Result[nil]`), the error or nothing.
     pub(super) fn infer_recover(&mut self, block: &Block, form: RecoverForm) -> Ty {
-        // A `recover:` block is a value, not a control-flow target: `return`/`break`/`continue` that
-        // would escape it are rejected. `?` is fine — it propagates normally.
-        if let Some((span, kw)) = self.block_flow(block).first_escape() {
-            self.error(
-                span,
-                format!("'{kw}' is not allowed inside a recover block"),
-            );
-        }
+        // `boundary::RULES` says what may cross the block: it is the target of a `?` on a `T!E`.
         self.push_scope();
-        self.recover_depth += 1;
-        let value_ty = match form {
+        let value_ty = self.in_block(boundary::Block::Recover, |c| match form {
             RecoverForm::Block => {
                 for stmt in block {
-                    self.check_stmt(stmt);
+                    c.check_stmt(stmt);
                 }
                 Ty::Nil
             }
@@ -783,18 +761,17 @@ impl Checker {
                 let StmtKind::Expr(e) = &stmt.kind else {
                     unreachable!("an inline recover holds one expression statement")
                 };
-                let ty = self.infer(e);
+                let ty = c.infer(e);
                 // A body that provably diverges (`recover: panic(...)`) yields no normal value, so its
                 // `Ok` payload is bottom (`Unknown`), not `nil`. Reuses the sound, conservative
                 // `flow::stmt` summary (divergence read from the resolved callee).
-                if ty == Ty::Nil && !flow::stmt(stmt, &|e| self.call_diverges(e)).falls_through {
+                if ty == Ty::Nil && !flow::stmt(stmt, &|e| c.call_diverges(e)).falls_through {
                     Ty::Unknown
                 } else {
                     ty
                 }
             }
-        };
-        self.recover_depth -= 1;
+        });
         self.pop_scope();
         Ty::result(value_ty)
     }

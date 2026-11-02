@@ -1,10 +1,10 @@
 //! TICKET-184 — the one control-flow summary: "can control fall through this statement, and which
-//! `break` / `continue` / `return` leave it?". Every consumer derives from [`stmt`] / [`block`]:
+//! `break` leaves it?". Every consumer derives from [`stmt`] / [`block`]:
 //!
 //! 1. missing-return (`check_fn_body_inner`: an annotated non-nil fn whose body falls through),
 //! 2. the inline `recover: expr` tail (`infer_recover`: a body that cannot fall through is bottom-typed),
 //! 3. inline-body inference (`infer_inline_fn_ret`, via [`super::Checker::call_diverges`]),
-//! 4. the escape checks of `recover:` / `defer:` / `spawn:` blocks.
+//! 4. the `else` guard's must-leave check (`infer_else_guard`).
 //!
 //! The walker's one non-AST input is the divergence oracle: whether an expression statement is a
 //! call whose RESOLVED callee never returns ([`super::Checker::call_diverges`]). It never tests a
@@ -14,9 +14,9 @@
 //! arm or faults ("all-closed + no ready send + no `else` faults", `docs/reference/syntax/`). If `wait:` ever
 //! completes without running an arm, the `Wait` arm of [`stmt`] must join [`Flow::NEXT`].
 //!
-//! Escapes are lexical: a `break` after a `return` in one block still counts. A `spawn:` / `defer:`
-//! block and a nested `fn` are their own frames, so nothing inside them escapes this statement; each
-//! block is escape-checked at its own site.
+//! A `break` is lexical: one after a `return` in the same block still counts. A `spawn:` /
+//! `defer:` block and a nested `fn` are their own frames, so nothing inside them escapes this
+//! statement. What may cross a block is `boundary::RULES`.
 
 use crate::ast::{Expr, ExprKind, Stmt, StmtKind};
 use crate::lexer::Span;
@@ -28,10 +28,6 @@ pub(super) struct Flow {
     pub falls_through: bool,
     /// A `break` that leaves the statement (targets an enclosing loop).
     pub breaks: Option<Span>,
-    /// A `continue` that leaves the statement (targets an enclosing loop).
-    pub continues: Option<Span>,
-    /// A `return` that leaves the statement (returns from the enclosing fn).
-    pub returns: Option<Span>,
 }
 
 impl Flow {
@@ -39,8 +35,6 @@ impl Flow {
     pub(super) const NEXT: Flow = Flow {
         falls_through: true,
         breaks: None,
-        continues: None,
-        returns: None,
     };
     /// Cannot fall through, escapes nowhere.
     pub(super) const STOP: Flow = Flow {
@@ -53,8 +47,6 @@ impl Flow {
         Flow {
             falls_through: self.falls_through && next.falls_through,
             breaks: self.breaks.or(next.breaks),
-            continues: self.continues.or(next.continues),
-            returns: self.returns.or(next.returns),
         }
     }
 
@@ -63,21 +55,7 @@ impl Flow {
         Flow {
             falls_through: self.falls_through || other.falls_through,
             breaks: self.breaks.or(other.breaks),
-            continues: self.continues.or(other.continues),
-            returns: self.returns.or(other.returns),
         }
-    }
-
-    /// The earliest escape in source order, with its keyword.
-    pub(super) fn first_escape(&self) -> Option<(Span, &'static str)> {
-        [
-            (self.returns, "return"),
-            (self.breaks, "break"),
-            (self.continues, "continue"),
-        ]
-        .into_iter()
-        .filter_map(|(sp, kw)| sp.map(|sp| (sp, kw)))
-        .min_by_key(|(sp, _)| (sp.line, sp.col))
     }
 }
 
@@ -91,16 +69,9 @@ pub(super) fn block(body: &[Stmt], diverges: &dyn Fn(&Expr) -> bool) -> Flow {
 /// returns.
 pub(super) fn stmt(s: &Stmt, diverges: &dyn Fn(&Expr) -> bool) -> Flow {
     match &s.kind {
-        StmtKind::Return(_) => Flow {
-            returns: Some(s.span),
-            ..Flow::STOP
-        },
+        StmtKind::Return(_) | StmtKind::Continue => Flow::STOP,
         StmtKind::Break => Flow {
             breaks: Some(s.span),
-            ..Flow::STOP
-        },
-        StmtKind::Continue => Flow {
-            continues: Some(s.span),
             ..Flow::STOP
         },
         StmtKind::If {
@@ -128,20 +99,16 @@ pub(super) fn stmt(s: &Stmt, diverges: &dyn Fn(&Expr) -> bool) -> Flow {
                 None => arms,
             }
         }
-        // The loop owns its own `break` / `continue`; a `return` inside still leaves it.
+        // The loop owns its own `break` / `continue`.
         StmtKind::While { cond, body } => {
             let b = block(body, diverges);
             Flow {
                 falls_through: !matches!(cond.kind, ExprKind::Bool(true)) || b.breaks.is_some(),
-                returns: b.returns,
                 ..Flow::NEXT
             }
         }
-        StmtKind::For { body, .. } => Flow {
-            returns: block(body, diverges).returns,
-            ..Flow::NEXT
-        },
-        // A `parallel:` body runs in this fn's frame: its `return` returns from the fn.
+        StmtKind::For { .. } => Flow::NEXT,
+        // A `parallel:` body runs in this fn's frame.
         StmtKind::Parallel { body } => block(body, diverges),
         StmtKind::Spawn(_) | StmtKind::Defer(_) | StmtKind::Fn(_) => Flow::NEXT,
         StmtKind::Expr(e) => Flow {
@@ -149,14 +116,12 @@ pub(super) fn stmt(s: &Stmt, diverges: &dyn Fn(&Expr) -> bool) -> Flow {
             ..Flow::NEXT
         },
         // An `else` guard: the statement falls through on success, and its block leaves on
-        // failure, so the block's `return` / `break` / `continue` are this statement's.
+        // failure, so the block's `break` is this statement's.
         StmtKind::Let { value, .. } => match &value.kind {
             ExprKind::ElseGuard { body, .. } => {
                 let b = block(body, diverges);
                 Flow {
-                    returns: b.returns,
                     breaks: b.breaks,
-                    continues: b.continues,
                     ..Flow::NEXT
                 }
             }

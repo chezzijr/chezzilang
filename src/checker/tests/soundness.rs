@@ -448,22 +448,6 @@ fn q_on_a_non_carrier_in_a_spawn_block_still_reports_the_type() {
     );
 }
 
-#[test]
-fn defer_block_break_still_says_break_outside_loop() {
-    let errs = check_entry(
-        "fn f() -> int:\n    for i in 0..2:\n        defer:\n            break\n    return 1\nprint(f())\n",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("break outside loop")),
-        "expected 'break outside loop', got: {errs:?}"
-    );
-    assert!(
-        !errs.iter().any(|e| e.message.contains("defer block")),
-        "the loop_depth guard must own break/continue — no double diagnostic: {errs:?}"
-    );
-}
-
 // --- the guard must be exhaustive over block-bearing statements: a `wait:` arm body (and its
 // `else`) is inside the block too, so a `return` there escapes the same way.
 

@@ -1,4 +1,4 @@
-//! Checker: loop variables, the `spawn:` frame flag, bound call slots, subscript keys and
+//! Checker: loop variables, the frame entry, bound call slots, subscript keys and
 //! module-scope names.
 //! Split out of `src/checker/setup.rs`. `super::*` is the parent module.
 
@@ -17,14 +17,14 @@ impl Checker {
         self.owning_scope(name)
             .is_some_and(|i| self.loop_vars[i].contains(name))
     }
-    /// A fn or closure body is its own frame: it has a caller, so the enclosing `spawn:` block's
-    /// no-caller rules (`?`, W7-48) stop at its boundary. Returns the flag to restore.
-    pub(super) fn enter_own_frame(&mut self) -> bool {
-        std::mem::replace(&mut self.in_spawn_block, false)
+    /// A fn or closure body is its own frame: it has a caller, so the blocks around its
+    /// definition stop at its boundary. Returns the stack to restore.
+    pub(super) fn enter_own_frame(&mut self) -> Vec<(boundary::Block, usize)> {
+        std::mem::take(&mut self.blocks)
     }
 
-    pub(super) fn exit_own_frame(&mut self, was_spawn: bool) {
-        self.in_spawn_block = was_spawn;
+    pub(super) fn exit_own_frame(&mut self, saved: Vec<(boundary::Block, usize)>) {
+        self.blocks = saved;
     }
     /// TICKET-189 — the source of each declaration slot of call `call_id`, read from the one binder's
     /// plan ([`Self::bind_call`], `call_plans`), so keyword arguments, default fills and a variadic

@@ -251,7 +251,7 @@ impl Compiler {
                 match fc.current_loop() {
                     Some(ctx) => ctx.break_jumps.push(j),
                     None => return Err(CompileError {
-                        message: "break outside loop".to_string(),
+                        message: "internal error: a `break` with no loop reached the compiler; the checker rejects it".to_string(),
                         span: stmt.span,
                     }),
                 }
@@ -263,7 +263,7 @@ impl Compiler {
                 match fc.current_loop() {
                     Some(ctx) => ctx.continue_jumps.push(j),
                     None => return Err(CompileError {
-                        message: "continue outside loop".to_string(),
+                        message: "internal error: a `continue` with no loop reached the compiler; the checker rejects it".to_string(),
                         span: stmt.span,
                     }),
                 }

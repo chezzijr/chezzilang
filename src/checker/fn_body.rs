@@ -6,20 +6,18 @@ use super::*;
 
 impl Checker {
     pub(super) fn check_return(&mut self, value: Option<&Expr>, span: Span) {
-        // Owner decision 2026-09-30 (TICKET-186): a module-level `return` is an error, as in
-        // CPython (`SyntaxError: 'return' outside function`). It skipped every later let, whose
-        // slot kept the uninit marker. The compiler still lowers it, so `run_file` tests in
-        // `src/vm/golden_tests.rs` (which skip the checker) reach the runtime check. A `defer:`,
-        // `spawn:` or `recover:` block already rejects its own `return`.
-        if !self.in_fn_body
-            && !self.in_defer_block
-            && !self.in_spawn_block
-            && self.recover_depth == 0
-        {
+        // A module-level `return` is an error, as in CPython (`'return' outside function`). The
+        // compiler still lowers it, so `run_file` tests (which skip the checker) reach the
+        // runtime check. A block around the `return` names itself instead, and its error is the
+        // only one: the enclosing fn's return type does not apply to a `return` it rejects.
+        let rejected = self.reject_in_block(boundary::Construct::Return, span);
+        if rejected || !self.in_fn_body {
             if let Some(e) = value {
                 self.infer(e);
             }
-            self.error(span, "'return' outside a function");
+            if !rejected {
+                self.error(span, "'return' outside a function");
+            }
             return;
         }
         // Inside a generator, a `return` may only be bare (stop the iterator early). A returned
@@ -103,33 +101,29 @@ impl Checker {
         }
     }
 
-    /// Generators do not support the structured-concurrency / cleanup statements whose
-    /// state (nurseries, frame defers) the suspendable generator context does not manage. Reject them
-    /// with a clear message rather than mis-execute. Recurses through nested control-flow blocks but
-    /// not into nested `fn` definitions (those have their own generator status).
+    /// A generator body rejects the statements `boundary::RULES` names for it. The walk descends
+    /// through nested control-flow blocks and expression-position `recover:` blocks, but not into
+    /// nested `fn` definitions (those have their own generator status).
     pub(super) fn check_generator_restrictions(&mut self, body: &[Stmt]) {
         for s in body {
-            // A restricted statement can also hide in a `recover:` block in expression position
-            // (`x := recover: … defer … `), which the statement structure does not reach — descend
-            // into those too so the ban can't be bypassed. (Mirrors the parser's yield detection.)
             let mut recover_blocks = Vec::new();
             crate::ast::stmt_expr_recover_blocks(s, &mut recover_blocks);
             for b in recover_blocks {
                 self.check_generator_restrictions(b);
             }
+            if let Some(c) = boundary::Construct::of_stmt(&s.kind)
+                && let Some(boundary::Rule::Rejected(reason)) = boundary::Block::Generator.rule(c)
+            {
+                self.error(
+                    s.span,
+                    boundary::message(boundary::Block::Generator, c, reason),
+                );
+            }
             match &s.kind {
-                StmtKind::Defer(_) => {
-                    self.error(s.span, "`defer` is not supported inside a generator")
-                }
-                StmtKind::Spawn(_) => {
-                    self.error(s.span, "`spawn` is not supported inside a generator")
-                }
-                StmtKind::Parallel { .. } => {
-                    self.error(s.span, "`parallel:` is not supported inside a generator")
-                }
-                StmtKind::Wait { .. } => {
-                    self.error(s.span, "`wait:` is not supported inside a generator")
-                }
+                StmtKind::Defer(_)
+                | StmtKind::Spawn(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Wait { .. } => {}
                 StmtKind::If {
                     branches,
                     else_block,
@@ -572,13 +566,8 @@ impl Checker {
         // A function body opens a fresh loop context: a loop enclosing this fn's *definition* must
         // not make a `break`/`continue` in the body legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
-        // A nested fn opens a fresh `?`-target context: a `?` in this body targets this function,
-        // not an enclosing recover at the definition site.
-        let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
-        // …and it is NOT a defer block: a `?` inside a fn declared in a defer block targets that fn.
-        let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
-        // …nor a spawn block: a fn DECLARED inside a `spawn:` has its own caller, so a `?` in its
-        // body targets it normally (W7-48).
+        // A nested fn is its own frame: a `?` or `return` in it targets it, whatever block holds
+        // its definition.
         let saved_frame = self.enter_own_frame();
         // M24 — the witness params whose `$w:T` binding this body can reach, and the name the
         // contract's fn-half keys them under. A MODULE-LEVEL FREE fn keys on its own name; a MEMBER
@@ -875,8 +864,6 @@ impl Checker {
         self.in_generator = saved_ig;
         self.inferring_ret = saved_inferring;
         self.loop_depth = saved_loop_depth;
-        self.recover_depth = saved_recover;
-        self.in_defer_block = saved_in_defer;
         self.exit_own_frame(saved_frame);
         self.witness_scope = saved_witness_scope;
         self.exit_type_params(saved_tps);

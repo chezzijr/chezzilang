@@ -664,8 +664,7 @@ impl Checker {
     /// Clone-and-lower rather than direct inference because direct inference would re-implement
     /// `infer_call`'s generics + witness recording + keyword resolution against a receiver with no
     /// `Expr` to hang off. It also buys the `Result` mode all of [`Self::infer_try`]'s gates
-    /// (`recover_depth`, `in_defer_block`, `in_spawn_block`, the `current_ret`/`in_fn_body`
-    /// return-kind gate) with
+    /// (the block verdict, the `current_ret`/`in_fn_body` return-kind gate) with
     /// ZERO new gate code, because the clone literally CONTAINS an `ExprKind::Try` at the right
     /// nesting. Both `lower_carrier_*` stamp every synthesized node from the carrier's own
     /// `span`/`name_span`, so the compiler — calling the same function on the same input — derives
@@ -956,10 +955,11 @@ impl Checker {
         let m = self.tyvar_mark();
         let t = self.infer(inner);
         let t = self.close_operand(m, t);
-        // Inside a `recover:` block, `?` short-circuits to the boundary (try-block style), not the
-        // enclosing function. The boundary's error type is `Error`, and its result is `Result`-typed,
-        // so only a `Result` operand fits — `?` on an `Option` is rejected here.
-        if self.recover_depth > 0 {
+        // The innermost block around the `?` that stops it decides (`boundary::RULES`). A recover
+        // block is its target (try-block style): its error type is `Error` and its result is a
+        // `T!E` value, so only a `T!E` operand fits.
+        let verdict = self.block_verdict(boundary::Construct::Try);
+        if let boundary::Verdict::Target(block, reason) = verdict {
             return match t {
                 Ty::Result(ok, err) => {
                     // A `recover:` result's error slot is the built-in `Error` existential, so a
@@ -974,7 +974,10 @@ impl Checker {
                 }
                 Ty::Unknown => Ty::Unknown,
                 Ty::Option(_) => {
-                    self.error(span, "'?' on a `T?` value is not allowed inside a recover block (its result is a `T!E` value); use match instead".to_string());
+                    self.error(
+                        span,
+                        boundary::message(block, boundary::Construct::Try, reason),
+                    );
                     Ty::Unknown
                 }
                 other @ Ty::Int
@@ -1015,35 +1018,14 @@ impl Checker {
                 }
             };
         }
-        // A `defer:` block and a spawned task run with NO CALLER, so a `?` there propagates to
-        // nothing — reject it. The nursery discards a task's returned `Err` by design (W7-46, Go's
-        // contract). A deferred block runs at scope exit: Rust rejects `?` in `Drop::drop`, and a Go
-        // deferred func cannot hand an error to its caller (owner decision 2026-10-19,
-        // TICKET-274). The user handles the error inside the block (`match`, `??`, a `recover:`).
-        // The gate order is load-bearing, and is why each boundary zeroes `recover_depth` and the
-        // spawn arm zeroes `in_defer_block`: a `recover:` OUTSIDE the boundary has its depth zeroed
-        // there, so its `?` falls through to here and is rejected; a `recover:` nested INSIDE
-        // re-arms from zero, so its own gate above fires first and stays legal (its boundary is in
-        // the same frame as the `?`). `defer:` is tested first because it is the inner boundary of
-        // `spawn: defer: g()?`: entering a `defer:` does not clear `in_spawn_block`.
-        // Shaped like the recover gate above: a non-carrier operand keeps the `expects` diagnostic
-        // (the boundary message would HIDE that defect), and `Unknown` stays silent so an
-        // already-reported operand does not cascade a second error.
-        let no_caller = if self.in_defer_block {
-            Some(
-                "'?' is not allowed inside a defer block: a deferred block has no caller to propagate to; handle the error in the block with `match` or `??`",
-            )
-        } else if self.in_spawn_block {
-            Some(
-                "'?' is not allowed inside a spawn block: a spawned task has no caller to propagate to",
-            )
-        } else {
-            None
-        };
-        if let Some(msg) = no_caller {
+        // A defer block or a task has no caller (Rust rejects `?` in `Drop::drop`; the nursery
+        // drops a task's `Err`, Go's contract). The user handles the error in the block. A
+        // non-carrier operand keeps the `expects` diagnostic, and `Unknown` stays silent so an
+        // already-reported operand does not cascade.
+        if let boundary::Verdict::Rejected(msg) = verdict {
             return match t {
                 Ty::Result(..) | Ty::Option(_) => {
-                    self.error(span, msg.to_string());
+                    self.error(span, msg);
                     Ty::Unknown
                 }
                 Ty::Unknown => Ty::Unknown,

@@ -368,8 +368,6 @@ impl Checker {
         // A closure body opens a fresh loop context (same rule as `check_fn_body`): a loop around
         // the closure's definition must not make a `break`/`continue` inside it legal.
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
-        let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
-        let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
         // `?` inside the body targets THIS closure's return, not the enclosing function's. With no
         // annotation there is no Result/Option context, so `?` is rejected (`Unknown` → `infer_try`
         // errors). Mirrors `check_fn_body`'s `current_ret` handling. An expected (slot) return type
@@ -385,9 +383,8 @@ impl Checker {
         let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
         // …and a closure inside a default-argument provider has its OWN caller (W7-51).
         let saved_in_dflt = std::mem::replace(&mut self.in_default_provider, false);
-        // A closure DECLARED inside a `spawn:` block is not itself the task — it has a caller, so a
-        // `?` in its body targets the closure's own return (W7-48). Saved/restored beside
-        // `current_ret`.
+        // A closure is its own frame: a `?` in its body targets the closure, whatever block holds
+        // its definition.
         let saved_frame = self.enter_own_frame();
         // A closure inside a generator is NOT itself a generator: clear the yield context so a stray
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
@@ -490,8 +487,6 @@ impl Checker {
         let closure_had_err = self.errors.len() > closure_mark;
         self.pop_scope();
         self.loop_depth = saved_loop_depth;
-        self.recover_depth = saved_recover;
-        self.in_defer_block = saved_in_defer;
         self.current_ret = saved_ret;
         self.in_fn_body = saved_in_fn;
         self.in_default_provider = saved_in_dflt;

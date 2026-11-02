@@ -592,37 +592,10 @@ impl Checker {
                 self.infer(e);
             }
             StmtKind::Defer(DeferTarget::Block(body)) => {
-                // `defer:` block — an ordinary nested scope checked in place. It runs in the same
-                // task, and — uniform by-reference
-                // capture — the block shares the enclosing binding's cell, so writing back through a
-                // captured local now mutates the shared cell (A2/A3/E1); no reassign gate is needed.
-                // A `defer:` block compiles to a fresh child proto with an empty loop stack, so a
-                // `break`/`continue` lexically nested in an enclosing loop but placed here is illegal
-                // at runtime. Save-zero-restore `loop_depth` (mirroring `check_fn_body`) so the
-                // `loop_depth == 0` guard at `StmtKind::Break`/`Continue` fires at check time; a
-                // legitimate loop INSIDE the block re-increments from 0, keeping its own break legal.
-                // A `return` here can never mean anything (Chezzi has no named return values and the
-                // block is its own closure) — the compiler silently dropped it, so reject it, like
-                // `recover:`. Only `return` is checked: the `loop_depth` reset owns break/continue.
-                if let Some(sp) = self.block_flow(body).returns {
-                    self.error(
-                        sp,
-                        "'return' is not allowed inside a defer block".to_string(),
-                    );
-                }
-                let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
-                // The `defer:` block is its own closure with NO CALLER: a `?` in it has nowhere to
-                // propagate to, so `infer_try` rejects it (TICKET-274). Zero `recover_depth` too: a
-                // `?` in the block cannot target an enclosing `recover:` (a `recover:` nested INSIDE
-                // the block re-arms it).
-                let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
-                let saved_in_defer = std::mem::replace(&mut self.in_defer_block, true);
-                // M24 Task 4: the witness scope carries in — `compile_defer`'s block arm appends the
-                // enclosing frame's `$w:T` bindings to the child proto's capture entries.
-                self.check_block(body);
-                self.in_defer_block = saved_in_defer;
-                self.recover_depth = saved_recover;
-                self.loop_depth = saved_loop_depth;
+                // A nested scope that shares the enclosing bindings' cells. It compiles to its own
+                // child proto with no caller: `boundary::RULES` says what may cross it. The witness
+                // scope carries in (`compile_defer` appends the frame's `$w:T` captures).
+                self.in_block(boundary::Block::Defer, |c| c.check_block(body));
             }
             StmtKind::Parallel { body } => {
                 self.push_scope();
@@ -704,64 +677,30 @@ impl Checker {
                         self.infer(e);
                     }
                     SpawnTarget::Block(body) => {
-                        // A spawned task outlives the frame — there is nothing for a `return` here
-                        // to return to (it was silently dropped). Reject it, like `recover:`.
-                        // Only `return` is checked: the `loop_depth` reset below owns break/continue.
-                        if let Some(sp) = self.block_flow(body).returns {
-                            self.error(
-                                sp,
-                                "'return' is not allowed inside a spawn block".to_string(),
-                            );
-                        }
-                        // A `spawn:` block compiles to a fresh child proto with an empty loop stack,
-                        // so a `break`/`continue` lexically nested in an enclosing loop but placed
-                        // here is illegal at runtime. Save-zero-restore `loop_depth` (mirroring
-                        // `infer_closure`) so the `loop_depth == 0` guard at `StmtKind::Break`/
-                        // `Continue` fires at check time; a legitimate loop INSIDE the block
-                        // re-increments from 0, keeping its own break/continue legal.
-                        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
-                        // A spawned task is its OWN frame (the compiler emits a fresh child proto),
-                        // so the `?`-targeting state belonging to the enclosing frame stops at this
-                        // boundary: an enclosing `defer:`'s no-caller flag and an enclosing
-                        // `recover:` boundary are zeroed here and restored below. `in_spawn_block`
-                        // then says what the resulting context IS — a task has no caller, so a `?`
-                        // in it is rejected with the spawn-specific diagnostic rather than one
-                        // naming the enclosing fn (W7-48). A `defer:`/`recover:` nested INSIDE the
-                        // task re-arms from zero, so its own (per-frame, correct) contract still
-                        // wins — see the gate order in `infer_try`.
-                        //
-                        // `current_ret`/`in_fn_body` are deliberately NOT zeroed. `in_spawn_block`
-                        // gates `infer_try` BEFORE it reads either, so a reset buys nothing there —
-                        // and their only other reader is `check_return` (`:3366`), where a fake
-                        // `Nil` made `spawn: return 5` inside `fn main() -> int` add a second,
-                        // FALSE error ("function returns nothing, cannot return a value") on top of
-                        // the correct "'return' is not allowed inside a spawn block" — the exact
-                        // class of enclosing-fn lie this fix exists to remove.
-                        let saved_in_defer = std::mem::replace(&mut self.in_defer_block, false);
-                        let saved_recover = std::mem::replace(&mut self.recover_depth, 0);
-                        let saved_in_spawn = std::mem::replace(&mut self.in_spawn_block, true);
-                        // M24 Task 4: the witness scope carries in. `compile_spawn`'s block arm
-                        // appends the enclosing frame's `$w:T` bindings to the capture entries.
-                        self.push_scope();
-                        for stmt in body {
-                            self.check_stmt(stmt);
-                        }
-                        self.pop_scope();
-                        self.in_spawn_block = saved_in_spawn;
-                        self.recover_depth = saved_recover;
-                        self.in_defer_block = saved_in_defer;
-                        self.loop_depth = saved_loop_depth;
+                        // A task is its own child proto with no caller: `boundary::RULES` says what
+                        // may cross it. `current_ret`/`in_fn_body` stay: `check_return` stops at
+                        // the block's own error. The witness scope carries in (`compile_spawn`
+                        // appends the frame's `$w:T` captures).
+                        self.in_block(boundary::Block::Spawn, |c| {
+                            c.push_scope();
+                            for stmt in body {
+                                c.check_stmt(stmt);
+                            }
+                            c.pop_scope();
+                        });
                     }
                 }
             }
             StmtKind::Wait { arms, else_block } => self.check_wait(arms, else_block.as_ref()),
             StmtKind::Break => {
-                if self.loop_depth == 0 {
+                if !self.reject_in_block(boundary::Construct::Break, span) && self.loop_depth == 0 {
                     self.error(span, "break outside loop");
                 }
             }
             StmtKind::Continue => {
-                if self.loop_depth == 0 {
+                if !self.reject_in_block(boundary::Construct::Continue, span)
+                    && self.loop_depth == 0
+                {
                     self.error(span, "continue outside loop");
                 }
             }

@@ -181,7 +181,8 @@ match g.next():            # 0
 
 - A generator can be a struct method (`fn m(self)`). A generator value is an `Iterator[T]`: drive it by
   `for`, pass it to an `[S: Iterator[T], T]` bound, or call `.next()` (`v` per yield, then `None`).
-- A bare `return` stops a generator early. `defer`/`spawn`/`parallel:`/`wait:` are not allowed inside one.
+- A bare `return` stops a generator early. `defer`/`spawn`/`parallel:`/`wait:` are not allowed inside one
+  (`'defer' is not allowed inside a generator body: a suspended generator does not manage frame defers`).
 - An un-inferable element (`yield []` alone, or an int-then-float mix; no int->float coercion at a
   `yield`) is rejected.
 - A task gets a generator by handle (M3.4), a module-global one too (M3.1): every task drives the

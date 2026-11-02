@@ -53,7 +53,7 @@ day's binary.
 | U8 | A block expression is an expression wherever layout exists, and layout exists inside brackets and interpolation holes | `match`/`recover:` rejected inside brackets, parameter default against field default, inline fn body against lambda body, line breaks in a hole | TICKET-260 (landed); re-run 2026-10-16: still open a line break inside a hole | decided, see below |
 | U9 | One pattern grammar at every binding site; a bare tuple is a tuple wherever an expression list ends a statement | destructuring differences, `return a, b`, 1-tuple types | TICKET-257 (map pairs only); re-run 2026-10-16: bare tuples fixed; 1-tuple fixed by TICKET-273 | decided, see below |
 | U10 | A function is a function: one parameter-list grammar and one "is a value" rule for every callable | defaults/variadics/generics by function kind, constructors and builtins as values | TICKET-259 ("a type name is never a value") | decided, see below |
-| U11 | A boundary block (`spawn:`, `defer:`, `recover:`, generator body) states once what may cross it | six separate checks, three message families | TICKET-274 (2026-10-19) rejects `?` in `defer:` and drops 'experimental' from the generator ban; the six checks and three families stay open | small |
+| U11 | A boundary block (`spawn:`, `defer:`, `recover:`, generator body) states once what may cross it | six separate checks, three message families | closed 2026-11-02: one table, `boundary::RULES` (`checker/boundary.rs`), and one message shape; an `else` guard is no construct of its own (its leaving statement decides); `tests/boundary_grid.rs` runs every cell | no |
 | U12 | The string / hole seam has one owner: the hole scanner sees what was written, not what escapes produced | escapes live as syntax, nested literals unescaped twice | TICKET-252 (landed) | no |
 | U13 | One name-resolution rule and one reserved set | user type named like a builtin, std import against user import, "unknown name 'str'" | `ea2ecda3`, `b19dab23`, `8c90e406` (a declaration shadows a builtin; one reserved set; one binding per name); re-run 2026-10-16: still open a divergent fn (`panic` inside) is not bottom-typed | small |
 | U14 | A physical line has one definition | CRLF blank line, CRLF in strings, tab on a blank line | TICKET-271 (CRLF, landed); still open: a tab on a blank line is a lex error (CPython runs it) | no |
@@ -195,8 +195,12 @@ box's contents print it `(int,)` / `(false,)` / `Shared((1,))` through one helpe
 `Self` is a type only: `-> Self` works; `Self(1)`, `Self.mk()` and a pattern `Self.A` do not (Rust
 accepts all three).
 
-Boundary blocks: six or more separate checks with three message families decide what may cross
-`spawn:`, `defer:`, `recover:` and a generator body. A generator body rejects `defer`, `spawn`, `parallel:` and `wait:` as a rule: a generator opens no nursery (DEC-040). A `?` in a `defer:` block is a check error, as in a `spawn:` block (TICKET-274).
+Boundary blocks: one table, `boundary::RULES` (`checker/boundary.rs`), says what may cross
+`spawn:`, `defer:`, `recover:` and a generator body, and every check reads it. Each rejection reads
+`'<construct>' is not allowed inside a <block>: <reason>`. An `else` guard crosses every block: the
+statement that leaves its block decides. A `break` with no loop at all is `break outside loop`. A
+generator body rejects `defer`, `spawn`,
+`parallel:` and `wait:`: a generator opens no nursery (DEC-040).
 
 Top level against a function body: a recursive lambda works as a global and is `unknown name` as a local;
 a nested `fn` may be redefined silently and a top-level one may not. The other differences (`?`, `return`,

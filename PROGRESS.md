@@ -179,6 +179,10 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     cut ends the stuck cleanup as its scope's cancel, so a child's fault that arrives after the
     owner parked is the report too; a `deadlock` that a `defer` meets is fatal in every context.
     `tests/cut_cause_grid.rs` `OwnBody` cells. History: `docs/history/progress/2026-11.md`.
+16. **What may cross a boundary block (U11, done 2026-11-02).** One table, `boundary::RULES`, says
+    it for `spawn:`, `defer:`, `recover:` and a generator body; a `break` in `spawn:`/`defer:` now
+    names the block, and an `else` guard in them is judged by the statement that leaves it.
+    `tests/boundary_grid.rs`, 140 cells. History: `docs/history/progress/2026-11.md`.
 
 ### Open questions for the owner
 

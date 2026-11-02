@@ -159,16 +159,16 @@ fn else_guard_grid() {
             "import Iterator from std.iter\nfn gen() -> Iterator[int]:\n    for i in [1, 2, 0, 4]:\n        v := r(i) else e:\n            return\n        yield v\nfor x in gen():\n    print(x)",
             "1\n2",
         ),
-        // ---- spawn and defer blocks: rejected.
+        // ---- spawn and defer blocks: the statement that leaves the block decides.
         rejects(
-            "spawn block",
+            "spawn block return",
             "fn main():\n    parallel:\n        spawn:\n            v := r(1) else e:\n                return\n            print(v)\nmain()",
-            "'else' guard is not allowed inside a spawn block: a spawned task has no caller to leave to",
+            "'return' is not allowed inside a spawn block: a spawned task has no caller to return to",
         ),
-        rejects(
-            "defer block",
+        prints(
+            "defer block panic",
             "fn main():\n    defer:\n        v := r(1) else e:\n            panic(e)\n        print(v)\nmain()",
-            "'else' guard is not allowed inside a defer block: a defer cannot leave",
+            "1",
         ),
         // ---- the block must leave, and never produces a value.
         rejects(

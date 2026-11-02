@@ -113,7 +113,7 @@ fn yield_outside_generator_rejected() {
 fn generator_defer_rejected() {
     rejects(
         "import Iterator from std.iter\nfn g() -> Iterator[int]:\n    defer print(0)\n    yield 1\n",
-        "`defer` is not supported inside a generator",
+        "'defer' is not allowed inside a generator body",
     );
 }
 
@@ -121,7 +121,7 @@ fn generator_defer_rejected() {
 fn generator_spawn_rejected() {
     rejects(
         "import Iterator from std.iter\nfn g() -> Iterator[int]:\n    parallel:\n        spawn print(0)\n    yield 1\n",
-        "`parallel:` is not supported inside a generator",
+        "'parallel:' is not allowed inside a generator body",
     );
 }
 
@@ -139,7 +139,7 @@ fn generator_defer_in_recover_rejected() {
     // The `defer` ban must not be bypassable by nesting inside a `recover:` block.
     rejects(
         "import Iterator from std.iter\nfn cleanup():\n    print(\"c\")\nfn g() -> Iterator[int]:\n    yield 0\n    x := recover:\n        defer cleanup()\n        1\n    print(x)\n",
-        "`defer` is not supported inside a generator",
+        "'defer' is not allowed inside a generator body",
     );
 }
 

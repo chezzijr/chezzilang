@@ -856,48 +856,7 @@ fn nested_loops_break_legal_in_both() {
 // outer loop. This rule is defensive: the current language can't route a checked statement-form
 // `break` into such a body (nested `fn` bodies aren't type-checked, and closure bodies are single
 // expressions that can't hold statements), so no source program exercises it through the checker.
-// The compiler is the enforcing layer — see its `break outside loop` CompileError on an empty
-// loop stack (closures compile in their own `FnComp` with an empty `loops` stack).
-//
-// `spawn:` / `defer:` blocks ARE the reachable case of the same rule: each compiles to a fresh
-// child proto with an empty loop stack, so a `break`/`continue` lexically nested in an enclosing
-// loop but placed inside the block is illegal at runtime. The checker mirrors the
-// fn/closure save-zero-restore of `loop_depth` across these block arms so the `break/continue
-// outside loop` guard fires at check time (was a three-way divergence: `check` passed, the VM
-// raised at runtime, the interp silently treated it as a block exit). A legitimate loop INSIDE the
-// block re-increments `loop_depth` from 0, so its own break/continue stay legal.
-
-#[test]
-fn break_in_defer_block_in_loop_rejected() {
-    rejects(
-        "fn w():\n    for i in 0..3:\n        defer:\n            break\n",
-        "break outside loop",
-    );
-}
-
-#[test]
-fn continue_in_defer_block_in_loop_rejected() {
-    rejects(
-        "fn w():\n    for i in 0..3:\n        defer:\n            continue\n",
-        "continue outside loop",
-    );
-}
-
-#[test]
-fn break_in_spawn_block_in_loop_rejected() {
-    rejects(
-        "fn w():\n    for i in 0..3:\n        spawn:\n            break\n",
-        "break outside loop",
-    );
-}
-
-#[test]
-fn continue_in_spawn_block_in_loop_rejected() {
-    rejects(
-        "fn w():\n    for i in 0..3:\n        spawn:\n            continue\n",
-        "continue outside loop",
-    );
-}
+// The compiler's empty loop stack is an internal error: the checker rejects every such `break`.
 
 #[test]
 fn break_in_loop_inside_defer_block_ok() {

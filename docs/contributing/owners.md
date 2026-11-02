@@ -75,6 +75,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Can an operator result alias an operand | `aliases_operand` (`checker/fn_writes.rs`) | Family C |
 | Match exhaustiveness, enum ctor domain | `checker/exhaust.rs` | |
 | Control-flow fall-through | `Flow` (`checker/flow.rs`) | TICKET-184 |
+| What may cross a `spawn:`, `defer:` or `recover:` block or sit in a generator body | `RULES` (`checker/boundary.rs`) | every check reads it through `Checker::block_verdict` over the `blocks` stack, or `Block::rule` for the generator walk; one message shape, `boundary::message`. `tests/boundary_grid.rs` runs every cell; `tests/owner_guards.rs` rejects the message text elsewhere |
 | Width of a struct field (FFI) | `note_field_widths` (`checker/setup.rs`) | `FieldWidthTable` |
 | C width ranges, vararg promotion | `vararg_promoted` (`native/cffi.rs`), `int_range` (`native/cffi.rs`) | |
 | Which type an annotation names (the arm order) | `named_arm`, `generic_arm`, `qualified_arm` (`checker/resolve_type.rs`) | read by `resolve_type_at` (diagnostics, and `record_type_hover` through `TypeDoc`), `resolve_ty_ro_d` and `resolve_qualified_ro` (`checker/resolve_ctype.rs`, silent), `resolve_ctype_d` (the C type) and `is_return_only_extern_type` (`checker/hoist.rs`, through `resolve_ctype`). `resolve_type_and_resolve_ty_ro_map_every_annotation_to_the_same_ty` (`checker/tests/generics.rs`) runs every arm; `a_return_only_extern_param_is_the_c_type_the_resolver_gives` (`checker/tests/ffi.rs`) runs the return-only forms |
@@ -170,7 +171,7 @@ file at 2,500 lines and a test file at 3,500.
 | Checker: pass 1 | `checker/harvest.rs` (stdlib and native harvest), `checker/hoist.rs` (collect and hoist decls), `checker/module_imports.rs` (diagnostics, import binding), `checker/scope.rs` (scopes, lookup, heads), `checker/writes.rs` (loop variables, call slots, subscripts) |
 | Checker: signatures and types | `checker/sig.rs` (receivers, `fn_sig`), `checker/infer_ret.rs`, `checker/witness_sig.rs`, `checker/resolve_type.rs`, `checker/resolve_ctype.rs`, `checker/ty.rs`, `checker/ty_util.rs`, `checker/tyvar.rs`, `checker/builtin_type.rs`, `checker/builtin_methods.rs` |
 | Checker: protocols | `checker/proto.rs` (intrinsic receivers, protocol hoisting), `checker/assignable.rs`, `checker/satisfies.rs`, `checker/hooks.rs`, `checker/op_kinds.rs`, `checker/eq.rs`, `checker/targs.rs`, `checker/generic_call.rs` |
-| Checker: statements | `checker/stmt.rs`, `checker/assign.rs`, `checker/fn_body.rs`, `checker/fresh.rs`, `checker/flow.rs`, `checker/unused.rs`, `checker/fn_writes.rs` |
+| Checker: statements | `checker/stmt.rs`, `checker/assign.rs`, `checker/fn_body.rs`, `checker/fresh.rs`, `checker/flow.rs`, `checker/boundary.rs`, `checker/unused.rs`, `checker/fn_writes.rs` |
 | Checker: expressions | `checker/infer.rs` (core), `checker/infer_ops.rs` (literals, operators), `checker/infer_access.rs` (field, index, carriers), `checker/fn_value.rs`, `checker/closure.rs`, `checker/branch.rs` (wait, match, if) |
 | Checker: calls | `checker/expr.rs` (call dispatch), `checker/ctor_call.rs`, `checker/builtin_call.rs`, `checker/fn_call.rs`, `checker/method_call.rs`, `checker/args.rs` |
 | Checker: patterns, names | `checker/pattern.rs`, `checker/exhaust.rs`, `checker/iter_index.rs`, `checker/resolve.rs`, `checker/globals.rs`, `checker/suggest.rs` |

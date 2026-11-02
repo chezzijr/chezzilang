@@ -119,7 +119,7 @@ fn recover_question_mark_allowed_in_non_result_fn() {
 fn recover_question_mark_on_option_rejected() {
     rejects(
         "fn find() -> int?:\n    return None\nfn main():\n    r := recover:\n        v := find()?\n        v\n    print(r)\nmain()\n",
-        "'?' on a `T?` value is not allowed inside a recover block",
+        "'?' is not allowed inside a recover block: the operand is a `T?` value",
     );
 }
 

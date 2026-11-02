@@ -230,8 +230,9 @@ fn run() -> str:                       # not a `T!E`-returning function
         !e: return "failed: {e.message()}"
 ```
 
-`return`/`break`/`continue` that would leave a `recover:` are rejected. A `?` on a `T?` inside it is
-rejected (use `match`). Use `recover:` at boundaries (a request, a REPL line, a plugin, a test); use
+`return`/`break`/`continue` that would leave a `recover:` are rejected (`'break' is not allowed
+inside a recover block: a recover block produces a value and cannot leave to the loop`). A `?` on a
+`T?` inside it is rejected (use `match`). A `yield` may appear inside it. Use `recover:` at boundaries (a request, a REPL line, a plugin, a test); use
 `T!E`/`?` for expected failures.
 
 **`panic(msg: str)` raises the same recoverable fault from your code.** It unwinds and returns no value
@@ -326,7 +327,10 @@ Top-level defers run LIFO when the program ends (or while unwinding an unhandled
   the `defer` point.)
 - A `?` in the block (also `?.` on a `T!E`) is ``'?' is not allowed inside a defer block: a deferred block has no caller to propagate to; handle the error in the block with `match` or `??` ``, whatever the function returns. A `?` in a `recover:`, a nested `fn` or a closure in the block targets that construct. Rust rejects `?` in `Drop::drop`, and a Go deferred func cannot return an error to its caller.
 - `return` anywhere in the block (also in an `if`/`for`/`match`/`wait:` arm) is
-  `'return' is not allowed inside a defer block`. A `return` in a nested `fn` declared in the block is fine.
+  `'return' is not allowed inside a defer block: a deferred block has no caller to return to`. A
+  `break` or `continue` that would leave the block is `'break' is not allowed inside a defer block: a
+  deferred block runs at scope exit, outside the loop`. A `return` in a nested `fn` declared in the
+  block is fine.
 
 ```chezzi
 fn handle(conn: Conn):
@@ -379,6 +383,10 @@ fn span(path: str) -> int!str:
 ```
 
 - A block that can fall through is `else block must leave (return, break, continue, panic)`.
+- A guard may stand in any block, a `spawn:`, `defer:` or `recover:` block too. The statement that
+  leaves the guard's block is judged as it would be outside a guard: in a `spawn:` block a
+  `continue` to a loop inside the task and a `panic` are fine, and a `return` is `'return' is not
+  allowed inside a spawn block: …`.
 - The guard exists on a `:=` or typed binding and on a bare call. An assignment (`x = f() else e:`,
   `a, b = …`, `self.f = …`, `xs[i] = …`, `x += …`) and `return f() else e:` are parse errors:
   ``an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return` ``.

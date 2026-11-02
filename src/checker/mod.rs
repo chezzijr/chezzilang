@@ -847,10 +847,10 @@ struct Checker {
     /// the element type each `yield` must produce. `None` outside a generator, so a stray `yield`
     /// is diagnosed. Saved/restored across nested fn/closure boundaries like `current_ret`.
     yield_ty: Option<Ty>,
-    /// `> 0` while checking statements lexically inside a `recover:` block (within the current
-    /// function — reset across nested fn/closure boundaries). A `?` here targets the recover
-    /// boundary (yielding to `r`), not the enclosing function's return.
-    recover_depth: u32,
+    /// The spawn, defer and recover blocks the walk is inside, innermost last, each with the
+    /// `loop_depth` at its entry. A fn or closure body is its own frame: it saves and clears the
+    /// stack. [`boundary::RULES`] says what may cross each block.
+    blocks: Vec<(boundary::Block, usize)>,
     /// True while a walk is SPECULATIVE (an inline body or a global typed by `infer_returns`): its
     /// diagnostics are rolled back and the main walk re-reports them.
     inferring_ret: bool,
@@ -910,25 +910,6 @@ struct Checker {
     /// walked, `Some(Some(span))` once a call in it typed to `Unknown`. `Checker::infer` is the
     /// one writer; no call site knows about it.
     untyped_call: Option<Option<Span>>,
-    /// True while checking statements lexically inside a `defer:` BLOCK (reset across nested
-    /// fn/closure boundaries, like `recover_depth`). The block runs at scope exit with no caller,
-    /// so `infer_try` rejects a `?` here (TICKET-274). Entering a defer block also zeroes
-    /// `recover_depth` (the block is its own closure: a `?` in it cannot target an outer
-    /// `recover:` boundary).
-    in_defer_block: bool,
-    /// True while checking statements lexically inside a `spawn:` BLOCK. Set at the task boundary
-    /// (`SpawnTarget::Block`) and cleared across every nested fn/closure boundary, where it is
-    /// saved/restored 1:1 beside `current_ret` — a `fn`/closure DECLARED inside a task has a caller
-    /// of its own, so a `?` in its body is legal.
-    ///
-    /// A spawned task is its own frame with no caller, so a `?` directly in it has nowhere to
-    /// propagate to — the nursery discards a task's returned `Err` by design (W7-46, Go's
-    /// contract). This flag exists so that rejection can say so. The alternative — zeroing
-    /// `current_ret` at the task boundary — reports "'?' used in a function that returns nil",
-    /// which reads as a claim about the ENCLOSING fn the user actually wrote, and additionally
-    /// makes `check_return` emit a second, false "function returns nothing" for a `return` in the
-    /// task. See `infer_try` (W7-48).
-    in_spawn_block: bool,
     /// Public surfaces of already-checked modules (multi-file programs), keyed by module id.
     module_sigs: HashMap<ModuleId, ModuleSig>,
     /// Names bound to an imported module in the *current* module → which module they refer to.
@@ -1348,6 +1329,7 @@ struct Checker {
 }
 
 mod args;
+mod boundary;
 mod branch;
 mod builtin_call;
 mod builtin_type;
