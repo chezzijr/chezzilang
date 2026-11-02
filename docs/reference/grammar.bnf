@@ -29,8 +29,8 @@
 
 # ===== top level =====
 # A file is zero or more statements then EOF. The lexer always emits a trailing NEWLINE before
-# EOF when the last line had content, and one DEDENT per still-open block; blank/comment-only
-# lines emit no tokens, so no stray NEWLINEs appear between statements.
+# EOF when the last line had content, and one DEDENT per still-open block; blank lines (empty, or
+# only spaces and tabs) and comment-only lines (a comment after spaces or tabs) emit no tokens, so no stray NEWLINEs appear between statements.
 # A module-level statement is an <item> or a <stmt>. An <item> is a TOP-LEVEL-ONLY declaration:
 # the checker, compiler and resolver harvest declarations from module-level statements alone, so
 # an item in a block would parse and then do nothing. A <block> holds <stmts>, which never reach

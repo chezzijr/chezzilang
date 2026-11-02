@@ -1,0 +1,22 @@
+# U14 (owner decision 2026-11-03): the lexer skips a line that holds only spaces or tabs, as it
+# skips a blank line, and a line of spaces or tabs then a comment; CPython runs such a file. A tab in real indentation stays an error. The lines
+# below that look empty hold a tab, spaces then a tab, and a tab then spaces.
+
+test fn a_whitespace_only_line_in_a_block_is_blank():
+    x := 1
+	
+    y := 2
+  	
+    z := x + y
+	  
+    assert z == 3
+	
+
+test fn the_next_test_still_runs():
+    assert true
+
+test fn an_indented_comment_line_with_a_tab_is_blank():
+    x := 1
+	# a tab, then a comment
+  	# spaces, a tab, then a comment
+    assert x == 1

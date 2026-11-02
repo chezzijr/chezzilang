@@ -1418,8 +1418,8 @@ impl Lexer {
     /// (1h) Handle the indentation at the start of a logical line — the heart of an
     /// indentation-sensitive lexer.
     ///
-    /// Consumes the leading spaces of the upcoming line, skipping blank and comment-only lines
-    /// (which never affect indentation). Then compares the line's indent width against the indent
+    /// Consumes the leading spaces of the upcoming line, skipping blank lines (empty, or only
+    /// spaces and tabs) and comment-only lines (which never affect indentation). Then compares the line's indent width against the indent
     /// stack `self.indents` and returns the layout tokens to emit:
     ///   - `Ok(Some(vec![Indent]))`      — deeper than before (one level opened)
     ///   - `Ok(Some(vec![Dedent, ...]))` — shallower (one Dedent per level closed)
@@ -1430,6 +1430,16 @@ impl Lexer {
     /// On return for a content line, the cursor sits at that line's first non-space char.
     fn scan_indentation(&mut self) -> Result<Option<Vec<Tok>>, LexError> {
         loop {
+            // 0. U14: a line that holds only spaces or tabs, or only them and then a comment, never
+            //    affects indentation (CPython). Consume its whitespace, so step 2, 3 or 4 skips it
+            //    before the tab check. A tab before code stays an error.
+            let ws = self.chars[self.pos..]
+                .iter()
+                .take_while(|c| matches!(c, ' ' | '\t'))
+                .count();
+            if matches!(self.chars.get(self.pos + ws), None | Some('\n') | Some('#')) {
+                self.pos += ws;
+            }
             // 1. measure indentation by consuming leading spaces
             let mut width = 0;
             while self.peek() == ' ' {

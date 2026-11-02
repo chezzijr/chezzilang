@@ -196,7 +196,8 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `docs/history/progress/2026-11.md`.
 19. **U5 sibling cells and U14 (owner decisions 2026-11-03).** Done: `bool` is ordered, `false`
     before `true`; `bytes(n)` gives `n` zero bytes; `*` means
-    multiply only, and a list repeats with `xs.repeat(n)`. History: `docs/history/progress/2026-11.md`.
+    multiply only, and a list repeats with `xs.repeat(n)`; the lexer
+    skips a line that holds only spaces or tabs (U14). History: `docs/history/progress/2026-11.md`.
 
 ### Open questions for the owner
 

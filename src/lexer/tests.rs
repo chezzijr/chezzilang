@@ -2033,6 +2033,66 @@ fn crlf_reads_as_lf_at_every_lexer_site() {
     assert!(red.is_empty(), "CRLF lexes unlike LF in: {red:?}");
 }
 
+/// U14 (owner decision 2026-11-03): a line that holds only spaces or tabs, or only them and then a
+/// comment, is a blank line, as in CPython. Each cell lexes to the same tokens, spans and doc comments as the form with a space in
+/// place of each tab (a spaces-only line was blank on base already). A tab in real indentation
+/// stays an error.
+#[test]
+fn a_whitespace_only_line_lexes_like_a_blank_line() {
+    let cells = [
+        ("tab", "\t"),
+        ("spaces then tab", "  \t"),
+        ("tab then spaces", "\t   "),
+        ("tabs", "\t\t"),
+    ];
+    let mut red = Vec::new();
+    for (cell, ws) in cells {
+        for (shape, blank) in [
+            (
+                "in a block",
+                "fn main():\n    x := 1\n@\n    print(x)\nmain()\n",
+            ),
+            ("after a block", "fn f():\n    1\n@\nf()\n"),
+            ("top level", "x := 1\n@\ny := 2\n"),
+            ("before a doc comment", "@\n# a\nfn f():\n    1\n"),
+            ("last line, no newline", "x := 1\n@"),
+            ("pipe continuation", "r := 5\n@\n    |> dbl()\nprint(r)\n"),
+            (
+                "comment line in a block",
+                "fn main():\n    x := 1\n@# c\n    print(x)\nmain()\n",
+            ),
+            ("comment line at top level", "print(1)\n@# c\nprint(2)\n"),
+            ("doc comment", "@# a\nfn f():\n    1\n"),
+        ] {
+            let want = tokenize_with_comments(&blank.replace('@', &ws.replace('\t', " ")), 0)
+                .map(|(t, d)| (format!("{t:?}"), d));
+            let got = tokenize_with_comments(&blank.replace('@', ws), 0)
+                .map(|(t, d)| (format!("{t:?}"), d));
+            assert!(want.is_ok(), "{shape}: the spaces form must lex");
+            if got.map_err(|e| e.message) != want.map_err(|e| e.message) {
+                red.push(format!("{cell} {shape}"));
+            }
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "a whitespace-only line lexes unlike a blank one in: {red:?}"
+    );
+    for src in [
+        "fn f():\n\tx := 1\n",
+        "fn f():\n    x := 1\n\ty := 2\n",
+        "fn f():\n  \tx := 1\n",
+        "fn f():\n    x := 1\n\t|> dbl()\n",
+    ] {
+        let err = tokenize(src).expect_err(src);
+        assert!(
+            err.message.contains("tabs are not allowed"),
+            "{src:?}: {}",
+            err.message
+        );
+    }
+}
+
 /// A lone `\r` keeps its reading: inline whitespace between tokens, a char inside a literal.
 /// An escaped `\r` is one CR. A `\` before a CRLF is the same error as before an LF.
 #[test]

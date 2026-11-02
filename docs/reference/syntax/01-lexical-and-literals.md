@@ -41,7 +41,9 @@ struct Point:
     x: int
 ```
 
-- **Blocks = indentation** (spaces only; tabs are a lex error). A block opens after a `:` line.
+- **Blocks = indentation** (spaces only; a tab in indentation is a lex error). A block opens after a
+  `:` line. A line that holds only spaces or tabs, or only spaces or tabs and then a comment, is
+  skipped as a blank line, as in CPython. A tab before code is still an error.
 - **Source encoding:** files are UTF-8. One byte-order mark (`U+FEFF`) at the start of a file is
   stripped, as CPython and Go do. A `U+FEFF` anywhere else, including a second one at the start, is a
   lex error. A `chezzi.toml` whose first bytes are `EF BB BF` parses as the same file without them.
