@@ -244,7 +244,10 @@ impl Checker {
             has_wildcard |= Self::bool_domain_closed(&kind, &covered);
             has_wildcard |= self.exh_add(&mut exh, &arm.pattern, arm.guard.is_some());
             match &hint {
-                Some(h) => self.install_hint(&arm.body, h.clone(), owned),
+                Some(h) if owned || h.carrier_parts().is_some() => {
+                    self.install_hint(&arm.body, h.clone(), owned)
+                }
+                Some(_) => self.expected_hint = None,
                 None => match self.branch_slot(beside, &mut sib, &arm.body) {
                     Some(s) => self.install_hint(&arm.body, s, true),
                     None => self.expected_hint = None,
@@ -256,10 +259,11 @@ impl Checker {
         }
         self.expected_hint = None;
         self.hint_owner = None;
+        let owned = owned || hint.is_none();
         let hint = hint.or(sib);
         let mut result = None;
         for (sp, t) in arm_tys {
-            result = Some(self.unify_branch(result, t, sp, hint.as_ref(), coalesce));
+            result = Some(self.unify_branch(result, t, sp, hint.as_ref(), owned, coalesce));
         }
         let help = self.exh_help(&exh);
         if !arm_pattern_error {
@@ -287,9 +291,10 @@ impl Checker {
         // equally the tail value, and `infer_call` drains the single slot via `take()`, so without
         // re-installing it the second-inferred branch would lose the hint and a generic ctor there
         // would deadlock (acceptance would depend on branch order).
+        // A seed (an unowned hint) wraps nothing, so it never hides the `None` sibling slot.
         let hint = self.expected_hint.take();
         let (hint, owned) = match hint {
-            None => {
+            h if h.is_none() || !owned => {
                 let mut leaves = vec![then];
                 let mut tail = els;
                 while let ExprKind::IfElse {
@@ -302,19 +307,24 @@ impl Checker {
                 leaves.push(tail);
                 match self.none_sibling_slot(&leaves) {
                     Some(s) => (Some(s), true),
-                    None => (None, owned),
+                    None => (h, owned),
                 }
             }
             h => (h, owned),
         };
         self.expect_bool(cond, "if condition");
         // Each branch value owns the hint when this if owns it (TICKET-227): it wraps on its own.
-        match &hint {
+        // A seed that is not a carrier tells a branch nothing it may use: an `!e` branch takes no
+        // success type from `bool` or `Any`, so it stays open for the frame close to judge.
+        let branch_hint = hint
+            .clone()
+            .filter(|h| owned || h.carrier_parts().is_some());
+        match &branch_hint {
             Some(h) => self.install_hint(then, h.clone(), owned),
             None => self.expected_hint = None,
         }
         let t_then = self.infer(then);
-        match &hint {
+        match &branch_hint {
             Some(h) => self.install_hint(els, h.clone(), owned),
             None => self.expected_hint = None,
         }
@@ -334,15 +344,16 @@ impl Checker {
         };
         self.expected_hint = None;
         self.hint_owner = None;
-        let acc = self.unify_branch(None, t_then, then.span, hint.as_ref(), false);
-        self.unify_branch(Some(acc), t_els, els.span, hint.as_ref(), false)
+        let acc = self.unify_branch(None, t_then, then.span, hint.as_ref(), owned, false);
+        self.unify_branch(Some(acc), t_els, els.span, hint.as_ref(), owned, false)
     }
 
     /// Fold one branch's type into a match/if expression's running result type. The first concrete
     /// branch sets the type; a later incompatible branch is a real error (and yields `Unknown` to
     /// suppress cascades). `Unknown` branches never override a concrete result. `hint` is the
     /// statically known expected type at this position (an annotated binding, a call argument, a
-    /// declared return) — it is read ONLY on a `compatible` mismatch, and ONLY through `assignable`,
+    /// declared return; `owned`) or a seed (an operand of `==`; not `owned`) — it is read ONLY on a
+    /// `compatible` mismatch, and ONLY through `assignable`,
     /// never folded into the accumulator (so an existing diagnostic like `Sq and int` stays that,
     /// not `Sh and int`). An int branch beside a float branch is an error (D3: no int→float widening).
     pub(super) fn unify_branch(
@@ -351,22 +362,26 @@ impl Checker {
         t: Ty,
         span: Span,
         hint: Option<&Ty>,
+        owned: bool,
         coalesce: bool,
     ) -> Ty {
         match acc {
             None => t,
             Some(prev) => {
-                // The join runs first: a `T!E` sibling types a bare `!e`. The open-error arms
-                // only keep `if c: 1 else: !"bad"` on the `!e` message, not on a type with a
-                // variable in it.
+                // The join runs first: a `T!E` sibling types a bare `!e`. An `!e` beside an arm it
+                // cannot join (`if c: 1 else: !"bad"`) keeps the `!e` message: its type has no
+                // variable, so no later compare can fill the `!e` and leave the `1` unwrapped. A
+                // seed never joins two arms that differ by a carrier layer (`int` and `int?`):
+                // nothing wraps the plain arm, as with no hint.
                 if let Some(m) = self.join_fill(&prev, &t) {
                     m
-                } else if super::tyvar::open_err(&prev) {
-                    prev
-                } else if super::tyvar::open_err(&t) {
-                    t
+                } else if let Some(s) = super::tyvar::sealed_open_err(&prev)
+                    .or_else(|| super::tyvar::sealed_open_err(&t))
+                {
+                    s
                 } else if let Some(h) = hint
                     && ty_fully_concrete(h)
+                    && (owned || !self.differ_by_carrier(&prev, &t))
                     && self.assignable(h, &prev)
                     && self.assignable(h, &t)
                 {
@@ -385,6 +400,23 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// Whether one arm fits the other only through a wrap (`int` beside `int?` or `int!str`): the
+    /// one test of "needs a wrap", [`Self::wrap_mode`], asked both ways. An unpinned `?x` arm is
+    /// read as its default, `T?`.
+    fn differ_by_carrier(&self, a: &Ty, b: &Ty) -> bool {
+        let view = |t: &Ty| {
+            if let Ty::Var(v) = t
+                && let Some(p) = self.tyvars.borrow().present_payload(*v)
+            {
+                Ty::Option(Box::new(p))
+            } else {
+                t.clone()
+            }
+        };
+        let (a, b) = (view(a), view(b));
+        self.wrap_mode(&a, &b).is_some() || self.wrap_mode(&b, &a).is_some()
     }
 
     // ===== expression inference =====

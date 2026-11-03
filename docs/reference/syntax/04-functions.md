@@ -195,6 +195,9 @@ Param types are required. With no `-> T` the body shape decides:
 or branches. `fn f(c: bool) -> int!str:` returning `1` and `!"bad"`, `x: int!str = if c: 1 else: !"bad"`
 and `take(!"bad")` are typed by the written type. With neither, the `!e` reports once:
 ``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``.
+A later operand of the same statement does not type it: a `T!E` sibling (`[(if c: 1 else: !"bad"), r]`),
+a generic bound (`Bx[int!str].from2([(if c: 1 else: !"bad")])`) and a compare
+(`(if c: 1 else: !"bad") == r`) report the same error, because nothing wraps the `1`.
 
 Methods follow the same rules. A method's return type reaches call sites and protocol satisfaction (a
 `compare(self, o)` returning `bool` fails `Comparable`, which requires `-> int`).

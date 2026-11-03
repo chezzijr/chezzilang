@@ -192,6 +192,15 @@ pub(super) fn open_err(t: &Ty) -> bool {
     matches!(t, Ty::Result(ok, _) if ok.is_unknown() || matches!(**ok, Ty::Var(_)))
 }
 
+/// An open `T!E` that a branch join keeps beside an arm it cannot join (`if c: 5 else: !"e"`), with
+/// its success slot `Unknown`. Nothing wraps the other arm, so no compare may fill the `!e`'s
+/// variable: the variable stays open, and the frame close reports [`ERR_VALUE_NEEDS_TYPE`] at the
+/// `!e`, once. `None` if `t` is not an open `T!E`.
+pub(super) fn sealed_open_err(t: &Ty) -> Option<Ty> {
+    let Ty::Result(_, e) = t else { return None };
+    open_err(t).then(|| Ty::Result(Box::new(Ty::Unknown), e.clone()))
+}
+
 /// Whether `t` mentions a `Ty::Var` anywhere.
 pub(super) fn has_var(t: &Ty) -> bool {
     let mut found = false;

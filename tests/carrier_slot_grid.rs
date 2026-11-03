@@ -629,3 +629,255 @@ fn carrier_slot_grid() {
     extra_cells(&mut cells);
     run_grid("carrier-slot", &cells, &[]);
 }
+
+/// An `if` whose branches are a plain value and an unpinned `!e` (`if c: 5 else: !"e"`) has no
+/// carrier type, and nothing wraps its `5`. A later compare in the same statement must not fill
+/// its open success slot: a generic bound's element recovery, a list or `if` sibling of type
+/// `T!E`. Each such cell rejects with the annotation error; the annotated binding wraps and runs.
+/// The `?` rows pin the neighbour: `if c: 5 else: ?6` rejects at its own join today.
+/// [`hint_source_cells`] adds the axis of where the expected type comes from.
+#[test]
+fn open_carrier_join_grid() {
+    const NEEDS: &str = "a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e`";
+    const Q_JOIN: &str = "branches have incompatible types: int and int?";
+    const DECLS: &str = "import Iterable from std.iter\nstruct Bx[T]:\n    v: List[T]\n    fn from2[S: Iterable[T]](xs: S) -> Bx[T]:\n        out := List[T]()\n        for x in xs:\n            out.push(x)\n        return Bx(out)\nfn f[S: Iterable[T], T](xs: S) -> List[T]:\n    out := List[T]()\n    for x in xs:\n        out.push(x)\n    return out\nc := true\n";
+    // (carrier, its reader, the carrier branch beside a plain `5`, that join's rejection)
+    let kinds: [(&str, &str, &str, &str); 2] = [
+        ("int!str", SHOW_RES, "!\"e\"", NEEDS),
+        ("int?", SHOW_OPT, "?6", Q_JOIN),
+    ];
+    // (site, program body with `{C}` / `{v}`, accepts)
+    let sites: [(&str, &str, bool); 6] = [
+        (
+            "bound_static",
+            "for x in Bx[{C}].from2([{v}]).v:\n    show(x)",
+            false,
+        ),
+        (
+            "bound_free_fn",
+            "b: List[{C}] = f([{v}])\nfor x in b:\n    show(x)",
+            false,
+        ),
+        (
+            "list_sibling",
+            "w: {C} = 9\nfor x in [{v}, w]:\n    show(x)",
+            false,
+        ),
+        (
+            "if_sibling",
+            "w: {C} = 9\nx := if c: {v} else: w\nshow(x)",
+            false,
+        ),
+        (
+            "annotated",
+            "xs: List[{C}] = [{v}]\nfor x in xs:\n    show(x)",
+            true,
+        ),
+        ("unannotated", "x := {v}\nshow(x)", false),
+    ];
+    let mut cells = Vec::new();
+    for (ty, show, carrier, reject) in kinds {
+        let shapes = [
+            ("if", format!("(if c: 5 else: {carrier})"), "", reject),
+            (
+                "nested_if",
+                format!("(if c: (if c: 5 else: {carrier}) else: 6)"),
+                "",
+                reject,
+            ),
+            // A multi-line `match` is a block value: it reaches a slot through a binding.
+            (
+                "match",
+                "m".to_string(),
+                "m := match c:\n    true: 5\n    false: {K}\n",
+                reject,
+            ),
+        ];
+        for (shape, v, pre, shape_reject) in &shapes {
+            for (site, body, accepts) in sites {
+                let pre = pre.replace("{K}", carrier);
+                let src = format!(
+                    "{DECLS}{show}{pre}{}\n",
+                    body.replace("{C}", ty).replace("{v}", v)
+                );
+                let expect = if accepts && pre.is_empty() {
+                    prints(if ty == "int?" { "some 5" } else { "ok 5" })
+                } else {
+                    Expect::Rejects(shape_reject)
+                };
+                cells.push(main_only(format!("{ty}/{shape}/{site}"), src, expect));
+            }
+        }
+        // The annotated twin of the `match` row: the written type wraps the plain arm.
+        cells.push(main_only(
+            format!("{ty}/match/annotated_binding"),
+            format!(
+                "{DECLS}{show}m: {ty} = match c:\n    true: 5\n    false: {carrier}\nfor x in Bx[{ty}].from2([m]).v:\n    show(x)\n"
+            ),
+            prints(if ty == "int?" { "some 5" } else { "ok 5" }),
+        ));
+    }
+    hint_source_cells(&mut cells, DECLS, NEEDS);
+    seed_join_and_report_cells(&mut cells);
+    run_grid("open-carrier-join", &cells, &[]);
+}
+
+/// A seed joins arms that need no wrap as on base: `Any` and a protocol, under `==` and `in`, for
+/// each arm (outputs from the base binary). The `!e` report lands on the `!e` arm in either order
+/// and in a `match`, once per statement.
+fn seed_join_and_report_cells(cells: &mut Vec<Cell>) {
+    const P: &str = "protocol P:\n    fn n(self) -> int\nstruct A:\n    x: int\n    fn n(self) -> int:\n        return 1\nstruct B:\n    x: int\n    fn n(self) -> int:\n        return 2\n";
+    let joins = [
+        (
+            "any_eq",
+            "",
+            "a: Any = 1\nprint((if c: 1 else: \"s\") == a)",
+        ),
+        (
+            "any_in",
+            "",
+            "xs: List[Any] = [1]\nprint((if c: 1 else: \"s\") in xs)",
+        ),
+        (
+            "proto_eq",
+            P,
+            "p: P = A(1)\nprint((if c: A(1) else: B(2)) == p)",
+        ),
+        (
+            "proto_in",
+            P,
+            "ps: List[P] = [A(1)]\nprint((if c: A(1) else: B(2)) in ps)",
+        ),
+    ];
+    for (name, decls, body) in joins {
+        for c in ["true", "false"] {
+            cells.push(main_only(
+                format!("seed_join/{name}/{c}"),
+                format!("{decls}c := {c}\n{body}\n"),
+                prints(c),
+            ));
+        }
+    }
+    let m = |name: &str, src: &str, frag: &'static str| {
+        main_only(
+            name.to_string(),
+            format!("c := true\n{src}\n"),
+            Expect::Rejects(frag),
+        )
+    };
+    cells.extend([
+        m(
+            "report/bang_first",
+            "x := if c: !\"e\" else: 5\nprint(x)",
+            "main.chz:2:12): a `!` value needs",
+        ),
+        m(
+            "report/bang_second",
+            "x := if c: 5 else: !\"e\"\nprint(x)",
+            "main.chz:2:20): a `!` value needs",
+        ),
+        m(
+            "report/match",
+            "m := match c:\n    true: !\"e\"\n    false: 5\nprint(m)",
+            "main.chz:3:11): a `!` value needs",
+        ),
+        m(
+            "report/once",
+            "xs := [if c: 5 else: !\"e\", !\"f\"]\nprint(xs)",
+            "chezzi: 1 type error",
+        ),
+        // A seed never joins `int` and an unpinned `?6` (its default `int?`): no hint rejects it too.
+        m(
+            "seed_join/q_default",
+            "o: int? = 5\nprint((if c: 5 else: ?6) == o)",
+            "branches have incompatible types: int and int?",
+        ),
+    ]);
+}
+
+/// The hint-source axis of [`open_carrier_join_grid`]: one `if` of a plain `5` and a carrier arm
+/// under each source of an expected type. An owned slot (binding, param, return, collection
+/// element, an `Any` slot) wraps the `5` and prints its annotated twin's value. A seed (a generic
+/// `T`, an operand of `==` / `!=` / `in`, under any outer type) wraps nothing: a `!e` arm rejects
+/// with the annotation error, and a `None` arm takes its sibling's optional, as with no hint.
+fn hint_source_cells(cells: &mut Vec<Cell>, decls: &str, needs: &'static str) {
+    const G: &str = "fn g[T](x: T) -> T:\n    return x\n";
+    // (carrier, its reader, the `if`, the generic-seed verdict, the `Any` slot output)
+    let kinds: [(&str, &str, &str, Expect, &str); 2] = [
+        (
+            "int!str",
+            SHOW_RES,
+            "(if c: 5 else: !\"e\")",
+            Expect::Rejects("branches have incompatible types: int and int!str"),
+            "5",
+        ),
+        (
+            "int?",
+            SHOW_OPT,
+            "(if c: 5 else: None)",
+            prints("some 5"),
+            "5",
+        ),
+    ];
+    for (ty, show, v, seed, any) in kinds {
+        let ok = if ty == "int?" { "some 5" } else { "ok 5" };
+        let bang = ty == "int!str";
+        // (source, program body with `{C}` / `{v}`, verdict)
+        let op = |out: &'static str| {
+            if bang {
+                Expect::Rejects(needs)
+            } else {
+                prints(out)
+            }
+        };
+        let sources: Vec<(&str, &str, Expect)> = vec![
+            ("binding", "x: {C} = {v}\nshow(x)", prints(ok)),
+            ("param", "show({v})", prints(ok)),
+            (
+                "declared_return",
+                "fn k() -> {C}:\n    return {v}\nshow(k())",
+                prints(ok),
+            ),
+            (
+                "list_element",
+                "xs: List[{C}] = [{v}]\nshow(xs[0])",
+                prints(ok),
+            ),
+            ("any_slot", "x: Any = {v}\nprint(x)", prints(any)),
+            ("generic_seed", "y: {C} = g({v})\nshow(y)", seed.clone()),
+            (
+                "eq_under_bool",
+                "w: {C} = 5\nb: bool = {v} == w\nprint(b)",
+                op("true"),
+            ),
+            ("eq_under_print", "w: {C} = 5\nprint({v} == w)", op("true")),
+            (
+                "eq_right_operand",
+                "w: {C} = 5\nprint(w == {v})",
+                op("true"),
+            ),
+            (
+                "eq_unhinted",
+                "w: {C} = 5\nb := {v} == w\nprint(b)",
+                op("true"),
+            ),
+            (
+                "ne_under_bool",
+                "w: {C} = 5\nb: bool = {v} != w\nprint(b)",
+                op("false"),
+            ),
+            (
+                "in_under_print",
+                "w: {C} = 5\nprint({v} in [w])",
+                op("true"),
+            ),
+        ];
+        for (source, body, expect) in sources {
+            let src = format!(
+                "{decls}{G}{show}{}\n",
+                body.replace("{C}", ty).replace("{v}", v)
+            );
+            cells.push(main_only(format!("hint/{ty}/{source}"), src, expect));
+        }
+    }
+}

@@ -204,6 +204,18 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
       `Shared`, `Executor` and `Task` would have no row. It would delete the 2 name-keyed `"copy"`
       checks (`checker/method_call.rs:433`, `vm/method_call.rs:801`). Enum `.copy()` waits for it.
     - `Set.map` / `Set.filter`: later.
+20. **A branch join gives a carrier type only to an arm the compiler wraps (done 2026-11-03).** An
+    `if` of a plain value and an `!e` with no owned carrier slot keeps the annotation error: a
+    generic bound, a `T!E` sibling, an outer `if` (check OK, then `cannot match on int`) and a
+    compare operand under a seed (`print((if c: 5 else: !"e") == r)` printed `false`) no longer type
+    it. A seed joins two arms only when neither needs a wrap (`Any` and protocol joins as before); an
+    `if` reads its `None` sibling slot under a seed too. `open_carrier_join_grid`, 75 cells. History: `docs/history/progress/2026-11.md`. Open, not
+    fixed (false rejects or a separate question):
+    - **The `match` / `??` seed leak.** `infer_match` still hides the `None` sibling slot under a seed:
+      `b: bool = (match ...: 5 / None) == o` rejects `branches have incompatible types: int and None`.
+      Reading the slot there makes `fn f(o: int?) -> int?: return o ?? None` accept (the cell
+      `coalesce_none_arm` pins the reject). Owner question: accept it? Rust accepts `o.or(None)`.
+    - **`Any == int?`.** `a: Any = 5; o: int? = 5; print(a == o)` prints `false`.
 
 ### Open questions for the owner
 
