@@ -1845,8 +1845,6 @@ fn receiver_write_table_matches_observed_behavior() {
                 "strip()",
                 "to_int()",
                 "to_float()",
-                "parse_int()",
-                "parse_float()",
             ],
         ),
         (

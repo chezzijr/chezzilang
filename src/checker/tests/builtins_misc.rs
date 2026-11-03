@@ -352,9 +352,9 @@ fn bytearray_not_assignable_to_bytes() {
 
 #[test]
 fn encode_decode_types() {
-    // str.encode() -> bytes; bytes.decode() -> str; bytearray.decode() -> str.
+    // str.encode() -> bytes; bytes.decode() -> str!; bytearray.decode() -> str!.
     ok(
-        "fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode()\n    s2: str = bytearray.from_iter([120]).decode()\n    print(s1 + s2 + \"{b.len()}\")\nmain()\n",
+        "fn main():\n    b: bytes = \"x\".encode()\n    s1: str = b\"x\".decode() ?? \"\"\n    s2: str = bytearray.from_iter([120]).decode() ?? \"\"\n    print(s1 + s2 + \"{b.len()}\")\nmain()\n",
     );
 }
 

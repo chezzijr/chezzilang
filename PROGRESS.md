@@ -238,6 +238,19 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     `reject_non_scalar_cast` and its type list, the scalar receivers' separate "no method" arm.
     `tests/scalar_conversion_grid.rs`, 99 cells; guard `a_prelude_ctor_takes_no_argument`. History:
     `docs/history/progress/2026-11.md`.
+23. **A failed text conversion gives an error that names the cause (done 2026-11-03).**
+    `b.decode()`, `ba.decode()` and `path.Path.decode()` are `str!`
+    (`!"decode: invalid UTF-8 at byte 2 (0xff)"`, `!"decode: incomplete UTF-8 sequence at byte 0"`);
+    `s.to_int()` / `s.to_float()` are `int!` / `float!` (`!"to_int: cannot parse 'x' as int"`,
+    `!"to_int: '…' is out of range for int"`). `f.to_int()` stays `int?`. `s.parse_int()` /
+    `s.parse_float()` are deleted (they duplicated `to_int` / `to_float`). One UTF-8 check
+    (`decode_utf8`) and one int parser (`parse_i64_pep515`). Grid: `tests/chz/spec/conversion_error_test.chz`.
+    Open: `io.read_line` still faults on invalid UTF-8 at EOF (`std/io.chz`, `src/native/io.rs`).
+    Open: `threads_one_serializes_cpu_bound_{callback,parallel}_tasks` (`tests/chezzi_threads_cli.rs`)
+    trip their "finished too fast" floor at times. On one debug build, `burn(750000)` at T=1 was
+    bimodal across processes (20 runs: 263-321 ms plus 7 runs at 526-563 ms); with ASLR off
+    (`setarch -R`) all 20 were 263-334 ms. `child_rusage::burn_scale` calibrates in one process and
+    the test measures in another, so the two can land in different modes.
 
 ### Open questions for the owner
 

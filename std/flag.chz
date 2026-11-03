@@ -42,11 +42,11 @@
 
 import std.math as math
 
-# Go `strconv.ParseInt(s, 0, 64)` — what Go 1.27 `flag.Int` runs. NOT `str.parse_int` (decimal only,
+# Go `strconv.ParseInt(s, 0, 64)` — what Go 1.27 `flag.Int` runs. NOT `str.to_int` (decimal only,
 # trims) and NOT `math.parse_int_base(s, 0)` (Python-style: no leading-0 octal, trims). Base from the
 # prefix: `0x`/`0o`/`0b` (any case) or a leading `0` = octal, else decimal. `_` is allowed only
 # between digits, or straight after a base prefix (Go `underscoreOK`). No whitespace, no second sign.
-# an error texts keep the `parse_int` family wording (`cannot parse`) so scripts that grep it stay stable.
+# an error texts keep the `to_int` family wording (`cannot parse`) so scripts that grep it stay stable.
 fn _parse_go_int(s: str) -> int!str:
     bad := "cannot parse '" + s + "' as an integer"
     body := s

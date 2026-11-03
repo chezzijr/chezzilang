@@ -1199,31 +1199,31 @@ match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
 
 // ----- break / continue parity (must produce the right output) -----
 
-// ----- Phase 0 scalar fills: bool(x) truthiness cast + Result-returning parse variants -----
+// ----- Phase 0 scalar fills: the Result-returning str parses -----
 
 #[test]
-fn parse_int_parity() {
-    // `s.parse_int() -> Result[int, str]` — the error-message-carrying sibling of `to_int() -> int?`.
+fn to_int_parity() {
+    // `s.to_int() -> int!`: the error names the cause.
     let src = r#"
 fn main():
-    print("42".parse_int())
-    print("  7 ".parse_int())
-    print("x".parse_int())
+    print("42".to_int())
+    print("  7 ".to_int())
+    print("x".to_int())
 
 main()
 "#;
-    assert_golden_out(src, "42\n7\n!cannot parse 'x' as an integer\n");
+    assert_golden_out(src, "42\n7\n!to_int: cannot parse 'x' as int\n");
 }
 
 #[test]
-fn parse_float_parity() {
-    // `s.parse_float() -> Result[float, str]` — the sibling of `to_float() -> float?`.
+fn to_float_parity() {
+    // `s.to_float() -> float!`: the error names the cause.
     let src = r#"
 fn main():
-    print("3.14".parse_float())
-    print("x".parse_float())
+    print("3.14".to_float())
+    print("x".to_float())
 
 main()
 "#;
-    assert_golden_out(src, "3.14\n!cannot parse 'x' as a float\n");
+    assert_golden_out(src, "3.14\n!to_float: cannot parse 'x' as float\n");
 }

@@ -223,13 +223,10 @@ native struct str:
     native fn split_lines(self) -> List[str]
     # `strip` is a trim alias.
     native fn strip(self) -> str
-    # Safe numeric parse — `T?`-returning (None on bad input) instead of raising.
-    native fn to_int(self) -> Option[int]
-    native fn to_float(self) -> Option[float]
-    # `T!E`-returning parse siblings: `?n` or `!msg` carrying a human-readable parse-error
-    # string (explicit `str` error type, not the default `Error` existential).
-    native fn parse_int(self) -> Result[int, str]
-    native fn parse_float(self) -> Result[float, str]
+    # Numeric parse (trims, like Python `int()` / `float()`): a bad input gives an error that names
+    # the cause (`!"to_int: cannot parse 'x' as int"`), never a fault.
+    native fn to_int(self) -> int!
+    native fn to_float(self) -> float!
 
 # The numeric conversions. `int` to `float` is total (Rust `n as f64`: past 2^53 it rounds to the
 # nearest float). `float` to `int` truncates toward zero and gives `None` for NaN, the infinities and
@@ -240,23 +237,24 @@ native struct int:
 native struct float:
     native fn to_int(self) -> Option[int]
 
-# `bytes` (immutable byte sequence): `decode() -> str` (UTF-8, recoverable fault on invalid UTF-8) and
-# `len()` (byte count). `extend` is NOT a bytes method (bytes is immutable).
+# `bytes` (immutable byte sequence): `decode() -> str!` (UTF-8; invalid UTF-8 gives an error that
+# names the byte, `!"decode: invalid UTF-8 at byte 2 (0xff)"`) and `len()` (byte count). `extend` is
+# NOT a bytes method (bytes is immutable).
 native struct bytes:
     # Each element is one byte, an int in 0..=255 (a fault names any other).
     native fn from_iter[S: Iterable[int]](xs: S) -> bytes
     # `n` zero bytes (Python `bytes(n)`); a negative `n` faults.
     native fn zeroed(n: int) -> bytes
-    native fn decode(self) -> str
+    native fn decode(self) -> str!
     # W7-8 — the DISPLAY twin of `decode()`: each maximal invalid UTF-8 subsequence becomes one U+FFFD
-    # (Python `b.decode(errors="replace")`), so it NEVER faults. `path.Path.str()` is built on it.
+    # (Python `b.decode(errors="replace")`), so it cannot fail. `path.Path.str()` is built on it.
     native fn decode_lossy(self) -> str
     native fn len(self) -> int
     native fn reversed(self) -> bytes
 
 # `bytearray` (mutable byte buffer): `len`, `push(int)` (appends one byte, 0-255 validated at runtime),
-# `pop() -> int?` (removes the last), `decode() -> str` (UTF-8, recoverable fault on invalid
-# UTF-8), `copy() -> bytearray` (a new buffer), `extend(bytes|bytearray|List[int])`.
+# `pop() -> int?` (removes the last), `decode() -> str!` (UTF-8, as `bytes.decode()`),
+# `copy() -> bytearray` (a new buffer), `extend(bytes|bytearray|List[int])`.
 native struct bytearray:
     native fn from_iter[S: Iterable[int]](xs: S) -> bytearray
     native fn zeroed(n: int) -> bytearray
@@ -265,7 +263,7 @@ native struct bytearray:
     # Takes any byte-sequence shape (bytes|bytearray|List[int]); the checker types the argument before the table lookup.
     native fn extend(self, other) -> None
     native fn pop(self) -> Option[int]
-    native fn decode(self) -> str
+    native fn decode(self) -> str!
     native fn copy(self) -> bytearray
     native fn reverse(self) -> None
     native fn reversed(self) -> bytearray

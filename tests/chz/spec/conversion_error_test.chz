@@ -1,0 +1,85 @@
+# tests/chz/spec/conversion_error_test.chz — a failed text conversion gives an error that names the
+# cause: `decode()` is `str!` and `s.to_int()` / `s.to_float()` are `int!` / `float!`.
+#
+# Axes: receiver {bytes, bytearray, path.Path} × input (empty, ASCII, a 2-byte char, a lone 0xff,
+# a cut-off sequence, an overlong form, a surrogate, a bad byte after valid text); str input × {to_int,
+# to_float}. A valid cell's value is the base build's output (the twin oracle). The error texts follow
+# `math.parse_int_base`; the byte index is Rust's `Utf8Error::valid_up_to`.
+import std.path
+
+# (input, expected decode() result)
+fn decode_cells() -> List[(bytes, str!)]:
+    return [
+        (b"", ?""),
+        (b"hi", ?"hi"),
+        (b"h\xc3\xa9", ?"h\u{e9}"),
+        (b"\xff", !"decode: invalid UTF-8 at byte 0 (0xff)"),
+        (b"\xc3", !"decode: incomplete UTF-8 sequence at byte 0"),
+        (b"\xc0\xaf", !"decode: invalid UTF-8 at byte 0 (0xc0)"),
+        (b"\xed\xa0\x80", !"decode: invalid UTF-8 at byte 0 (0xed)"),
+        (b"hi\xff", !"decode: invalid UTF-8 at byte 2 (0xff)"),
+        (b"ab\xe2\x82", !"decode: incomplete UTF-8 sequence at byte 2"),
+    ]
+
+test fn bytes_decode_names_the_cause():
+    for b, want in decode_cells():
+        got := b.decode()
+        assert got == want, "{b}: {got}"
+
+test fn bytearray_decode_names_the_cause():
+    for b, want in decode_cells():
+        got := bytearray.from_iter(b).decode()
+        assert got == want, "{b}: {got}"
+
+test fn path_decode_names_the_cause():
+    for b, want in decode_cells():
+        got := path.Path(b).decode()
+        assert got == want, "{b}: {got}"
+
+test fn decode_unwraps_with_a_default():
+    s: str = b"\xff".decode() ?? "?"
+    assert s == "?"
+    t: str = b"ok".decode() ?? "?"
+    assert t == "ok"
+
+fn first_line(b: bytes) -> str!:
+    s := b.decode()?
+    return ?s.split_lines()[0]
+
+test fn decode_propagates_with_question_mark():
+    assert first_line(b"a\nb") == ?"a"
+    assert first_line(b"\xffa") == !"decode: invalid UTF-8 at byte 0 (0xff)"
+
+test fn str_to_int_names_the_cause():
+    assert "42".to_int() == ?42
+    assert " 7 ".to_int() == ?7
+    assert "1_000".to_int() == ?1000
+    assert "+5".to_int() == ?5
+    assert "-0".to_int() == ?0
+    assert "x".to_int() == !"to_int: cannot parse 'x' as int"
+    assert "".to_int() == !"to_int: cannot parse '' as int"
+    assert "1.5".to_int() == !"to_int: cannot parse '1.5' as int"
+    assert "99999999999999999999".to_int() == !"to_int: '99999999999999999999' is out of range for int"
+    assert "-99999999999999999999".to_int() == !"to_int: '-99999999999999999999' is out of range for int"
+    assert "9223372036854775807".to_int() == ?9223372036854775807
+
+test fn str_to_float_names_the_cause():
+    assert "42".to_float() == ?42.0
+    assert " 7 ".to_float() == ?7.0
+    assert "1_000".to_float() == ?1000.0
+    assert "+5".to_float() == ?5.0
+    assert "1.5".to_float() == ?1.5
+    assert "99999999999999999999".to_float() == ?1e20
+    assert "x".to_float() == !"to_float: cannot parse 'x' as float"
+    assert "".to_float() == !"to_float: cannot parse '' as float"
+
+test fn to_int_unwraps_with_a_default():
+    n: int = "x".to_int() ?? -1
+    assert n == -1
+    m: float = "2.5".to_float() ?? 0.0
+    assert m == 2.5
+
+test fn float_to_int_keeps_its_option():
+    z := 0.0
+    assert (z / z).to_int() == None
+    assert (2.5).to_int() == ?2

@@ -32,10 +32,8 @@ hook is bound-only).
 | `strip_prefix` | `(p: str) -> str` | Remove `p` from the front if present, else unchanged. |
 | `strip_suffix` | `(p: str) -> str` | Remove `p` from the end if present, else unchanged. |
 | `split_lines` | `() -> List[str]` | Split on `"\n"`, `"\r\n"` or a lone `"\r"`; a trailing terminator yields no final empty piece (Python `str.splitlines()`). It does NOT split on `\v`, `\f`, U+0085, U+2028 or U+2029. |
-| `to_int` | `() -> int?` | Safe parse (trims first, accepts PEP-515 underscores between digits): `?n` or `None` on bad input. ASCII digits only: `"١٢"`/`"１２"` are `None` (Go/Rust semantics; CPython's `int()` accepts Unicode decimal digits). Same for `to_float` and `math.parse_int_base`. |
-| `to_float` | `() -> float?` | Safe parse (trims first, accepts PEP-515 underscores between digits): `?f` or `None` on bad input. |
-| `parse_int` | `() -> int!str` | `T!E`-returning parse (trims first, accepts PEP-515 underscores between digits): `?n` or `!msg` with a human-readable parse-error message. The error-message sibling of `to_int`, and ASCII-digits-only like it. |
-| `parse_float` | `() -> float!str` | `T!E`-returning parse (trims first, accepts PEP-515 underscores between digits): `?f` or `!msg`. The error-message sibling of `to_float`. |
+| `to_int` | `() -> int!` | Parse (trims first, accepts PEP-515 underscores between digits): `?n`, or an error that names the cause: `!"to_int: cannot parse 'x' as int"`, `!"to_int: '99999999999999999999' is out of range for int"`. ASCII digits only: `"١٢"`/`"１２"` are errors (Go/Rust semantics; CPython's `int()` accepts Unicode decimal digits). Same for `to_float` and `math.parse_int_base`. |
+| `to_float` | `() -> float!` | Parse (trims first, accepts PEP-515 underscores between digits): `?f` or `!"to_float: cannot parse 'x' as float"`. |
 | `encode` | `() -> bytes` | UTF-8 encode (always succeeds). |
 | `message` | `() -> str` | Returns self, so a bare `str` satisfies the `Error` protocol. |
 
@@ -171,7 +169,7 @@ operator-protocol `add` keep their name: they add numbers, they do not insert a 
 ### `bytes` (immutable) and `bytearray` (mutable)
 | Type | Method | Signature | Notes |
 |------|--------|-----------|-------|
-| both | `decode` | `() -> str` | UTF-8 decode (recoverable fault on invalid UTF-8). |
+| both | `decode` | `() -> str!` | UTF-8 decode. Invalid UTF-8 gives an error that names the first bad byte (Rust `Utf8Error::valid_up_to`): `b"hi\xff".decode()` is `!"decode: invalid UTF-8 at byte 2 (0xff)"`; a sequence cut off by the end is `!"decode: incomplete UTF-8 sequence at byte 0"` (`b"\xc3"`). |
 | `bytes` | `decode_lossy` | `() -> str` | UTF-8 decode with each **maximal invalid subsequence** replaced by `U+FFFD` (Python's `b.decode(errors="replace")`, Rust's `String::from_utf8_lossy`). **Never faults**, so it is the DISPLAY twin of `decode` (`path.Path.str()` uses it). Not injective: use `decode` when the exact bytes matter. |
 | both | `len` | `() -> int` | Byte count. |
 | `bytearray` | `push` | `(byte: int) -> None` | *mutates*: append a byte (0–255). |

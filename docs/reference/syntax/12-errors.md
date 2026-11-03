@@ -364,7 +364,7 @@ fn load(path: str) -> Config!str:
     text := read(path) else e:
         log("cannot read {path}: {e}")
         return !e
-    port := text.to_int() else:        # `else:` — the `T?` form; it may also ignore an error
+    port := text.to_int() else:        # `else:` ignores the error (the only form for a `T?`)
         return !"not a number"
     save(path) else e:                 # a `None!E` call: the statement form (or `_ := … else e:`)
         return !e

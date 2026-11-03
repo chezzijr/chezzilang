@@ -232,7 +232,7 @@ struct Parser:
             match raw.to_int():
                 ?i: return ?Json.Int(i)
                 # Outside the i64 window: Chezzi has no bignum, so fall back to the lossy f64 path.
-                None: return self.num_float(raw, start)
+                !_: return self.num_float(raw, start)
         return self.num_float(raw, start)
 
     fn num_float(self, raw: str, start: int) -> Json!:

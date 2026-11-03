@@ -1,7 +1,9 @@
 //! A call on a scalar type's name sets no field, so it gives the type's zero value (`int()` is `0`,
 //! as Python's `int()` and Rust's `i64::default()`), and an argument is a type error. A conversion is
 //! a method on the source value: `n.to_float()`, `f.to_int()` (`None` for NaN and the infinities),
-//! `s.to_int()`, `s.to_float()`. Display is interpolation: `"{x}"` (Go `fmt.Sprint`).
+//! `s.to_int()`, `s.to_float()` (an error that names the cause). Display is interpolation: `"{x}"`
+//! (Go `fmt.Sprint`). The value cells of the `str!` / `int!` / `float!` results are in
+//! `tests/chz/spec/conversion_error_test.chz`; this grid holds their type cells.
 //!
 //! Axes: name (int, float, str, bool, bytes) × arity (0, 1) × argument type (int, float, bool, str,
 //! List, struct, `T?`, `Any`) for the reject cells, each with the help that names the new form; the
@@ -92,9 +94,9 @@ const ACCEPT: &[(&str, &str)] = &[
     ("(9223372036854775807.0).to_int()", "None"),
     ("(-9223372036854775808.0).to_int()", "-9223372036854775808"),
     ("(3.9).to_int() == ?3", "true"),
-    // The str parsers stay.
+    // The str parsers give an error that names the cause.
     ("\"42\".to_int()", "42"),
-    ("\"x\".to_int()", "None"),
+    ("\"x\".to_int()", "!to_int: cannot parse 'x' as int"),
     ("\"1.5\".to_float()", "1.5"),
     // `\"{x}\"` on each kind: the text the base build's `str(x)` printed.
     ("\"{i}\"", "5"),
@@ -125,6 +127,11 @@ const ACCEPT_STMTS: &[(&str, &str)] = &[
     (
         "x: float = (2).to_float()\ny: int? = (2.5).to_int()\nprint(x, y)\n",
         "2.0 2\n",
+    ),
+    // `str.to_int`, `str.to_float` and `decode` give `T!`; `??` unwraps them to `T`.
+    (
+        "n: int = s.to_int() ?? 0\nx: float = s.to_float() ?? 0.0\nw: str = by.decode() ?? \"\"\nprint(n, x, w)\n",
+        "5 5.0 hi\n",
     ),
     // The else guard handles the miss.
     (
@@ -199,9 +206,9 @@ fn expected_help(name: &str, arg: &str) -> String {
     }
     match (name, ty) {
         ("int", "float") => "help: convert with `x.to_int()`, which gives int?".into(),
-        ("int", "str") => "help: convert with `x.to_int()`, which gives int?".into(),
+        ("int", "str") => "help: convert with `x.to_int()`, which gives int!".into(),
         ("float", "int") => "help: convert with `x.to_float()`, which gives float".into(),
-        ("float", "str") => "help: convert with `x.to_float()`, which gives float?".into(),
+        ("float", "str") => "help: convert with `x.to_float()`, which gives float!".into(),
         ("int", "bool") => "help: a bool is not a number; write `if x: 1 else: 0`".into(),
         ("float", "bool") => "help: a bool is not a number; write `if x: 1.0 else: 0.0`".into(),
         ("str", _) => "help: render the value with `\"{x}\"`".into(),
@@ -243,11 +250,39 @@ fn scalar_conversion_reject_cells() {
         ("f.to_float()", "type float has no method 'to_float'"),
         ("b.to_int()", "type bool has no method 'to_int'"),
         ("i.str()", "type int has no method 'str'"),
+        // `to_int` / `to_float` give the reason, so the `parse_*` duplicates are gone.
+        ("s.parse_int()", "type str has no method 'parse_int'"),
+        ("s.parse_float()", "type str has no method 'parse_float'"),
     ] {
         let src = format!("{PRELUDE}print({call})\n");
         let (ok, got) = chezzi("rej-method", "check", &src);
         if ok || !got.contains(want) {
             failures.push(format!("{call}: want `{want}`, got:\n{got}"));
+        }
+    }
+    // A `T!` result is not its `T`: the caller unwraps it.
+    for (stmt, want) in [
+        (
+            "n: int = s.to_int()",
+            "cannot assign int! to variable of type int",
+        ),
+        (
+            "x: float = s.to_float()",
+            "cannot assign float! to variable of type float",
+        ),
+        (
+            "t: str = by.decode()",
+            "cannot assign str! to variable of type str",
+        ),
+        (
+            "t: str = bytearray.from_iter(by).decode()",
+            "cannot assign str! to variable of type str",
+        ),
+    ] {
+        let src = format!("{PRELUDE}{stmt}\n");
+        let (ok, got) = chezzi("rej-carrier", "check", &src);
+        if ok || !got.contains(want) {
+            failures.push(format!("{stmt}: want `{want}`, got:\n{got}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

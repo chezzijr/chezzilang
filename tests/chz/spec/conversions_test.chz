@@ -14,7 +14,7 @@ test fn a_scalar_ctor_gives_the_zero_value():
 test fn str_to_int():
     assert "5".to_int() == ?5
     assert "-42".to_int() == ?-42
-    assert "x".to_int() == None
+    assert "x".to_int() == !"to_int: cannot parse 'x' as int"
 
 test fn float_to_int_truncates_toward_zero():
     assert (3.9).to_int() == ?3

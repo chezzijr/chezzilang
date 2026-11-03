@@ -812,7 +812,7 @@ fn golden_bytes_chz_matches_expected_and_interp() {
 }
 
 /// conversions golden: `examples/conversions.chz` (str.encode()/bytes.decode()/bytearray.decode()
-/// UTF-8 round-trip incl. a multi-byte char, an invalid-UTF-8 decode under `recover:`, List() over
+/// UTF-8 round-trip incl. a multi-byte char, an invalid-UTF-8 decode error, List() over
 /// every for-iterable shape — list/set/str/bytes/bytearray/range/user-iterator — Set() dedup, and
 /// Map() from 2-tuples with a last-wins dup key) byte-identical on the VM, the interpreter, and its
 /// `.expected` (three-engine parity gate).
@@ -828,7 +828,7 @@ fn golden_conversions_chz_matches_expected_and_interp() {
 /// the original string, byte-identical on the VM + interp.
 #[test]
 fn encode_decode_roundtrip_multibyte() {
-    let src = "fn main():\n    s := \"héllo\"\n    print(s.encode().decode())\n    print(s.encode().decode() == s)\nmain()\n";
+    let src = "fn main():\n    s := \"héllo\"\n    print(s.encode().decode())\n    print(s.encode().decode() == ?s)\nmain()\n";
     let out = run(src);
     assert_eq!(out, "héllo\ntrue\n");
 }
@@ -841,19 +841,15 @@ fn bytearray_decode_matches_bytes() {
     assert_eq!(out, "hi\nhi\n");
 }
 
-/// Invalid UTF-8 `decode()` is a RECOVERABLE fault (catchable by `recover:`), not a panic — and the
-/// error message is byte-identical.
+/// Invalid UTF-8 `decode()` gives an error that names the bad byte, not a fault.
 #[test]
-fn invalid_utf8_decode_recoverable() {
-    let src = "fn main():\n    r := recover:\n        b\"\\xff\\xfe\".decode()\n    match r:\n        ?v: print(v)\n        !e: print(\"caught\")\nmain()\n";
+fn invalid_utf8_decode_is_an_error() {
+    let src = "fn main():\n    match b\"\\xff\\xfe\".decode():\n        ?v: print(v)\n        !e: print(e)\n    print(b\"\\xff\".decode())\nmain()\n";
     let out = run(src);
-    assert_eq!(out, "caught\n");
-    // Uncaught, the same fault propagates as a recoverable RuntimeError with the same message.
-    let bare = "fn main():\n    print(b\"\\xff\".decode())\nmain()\n";
-    let (_, vm_res) = run_program(bare);
-    let (_, it_res) = run_program(bare);
-    assert_eq!(vm_res.unwrap_err().message, "invalid UTF-8 in decode()");
-    assert_eq!(it_res.unwrap_err().message, "invalid UTF-8 in decode()");
+    assert_eq!(
+        out,
+        "decode: invalid UTF-8 at byte 0 (0xff)\n!decode: invalid UTF-8 at byte 0 (0xff)\n"
+    );
 }
 
 /// `List()`/`Set()`/`Map()` over a user `.next()` iterator + dedup + last-wins, byte-identical

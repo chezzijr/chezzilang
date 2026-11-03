@@ -34,7 +34,7 @@ protocol PathLike:
 # DISPLAY and CONVERSION are deliberately two different methods (Rust makes the same split — its
 # `Path` implements no `Display`):
 #   p.str()    lossy display, U+FFFD substituted, NEVER faults  (satisfies `Stringable`)
-#   p.decode() EXACT, recoverable fault on non-UTF-8            (inherits `bytes.decode()` verbatim)
+#   p.decode() EXACT, `str!`: an error on non-UTF-8             (inherits `bytes.decode()` verbatim)
 #   p.bytes()  the raw OS bytes                                 (never faults)
 # `as_path` makes it satisfy `PathLike` STRUCTURALLY, so `fs.exists(p)` takes it directly — which is
 # what keeps the natural spelling off the lossy `fs.exists(p.str())` route.
@@ -56,9 +56,9 @@ struct Path:
     fn bytes(self) -> bytes:
         return self.raw
 
-    # EXACT conversion to `str`. Faults (recoverably, catchable with `recover:`) on a non-UTF-8 path —
-    # the same fault `bytes.decode()` raises, inherited rather than re-worded.
-    fn decode(self) -> str:
+    # EXACT conversion to `str`. A non-UTF-8 path gives the error `bytes.decode()` gives, inherited
+    # rather than re-worded.
+    fn decode(self) -> str!:
         return self.raw.decode()
 
     # LOSSY display (`Stringable`): each maximal invalid UTF-8 subsequence becomes one U+FFFD, so

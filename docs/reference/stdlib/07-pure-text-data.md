@@ -89,7 +89,7 @@ structurally, so `fs.exists(p)` takes it directly.
 | method | signature | semantics |
 | --- | --- | --- |
 | `bytes` | `(self) -> bytes` | The raw OS bytes. Byte-exact, never faults. |
-| `decode` | `(self) -> str` | **EXACT** conversion. Recoverable **fault** on a non-UTF-8 path (`invalid UTF-8 in decode()`), the fault `bytes.decode()` raises. |
+| `decode` | `(self) -> str!` | **EXACT** conversion. A non-UTF-8 path gives the error `bytes.decode()` gives (`!"decode: invalid UTF-8 at byte 1 (0xff)"`). |
 | `str` | `(self) -> str` | **LOSSY display** (`Stringable`): each maximal invalid UTF-8 subsequence → one `U+FFFD`. **Never faults**, so `print(p)` / interpolation always work. |
 | `as_path` | `(self) -> bytes` | `PathLike` conformance. |
 

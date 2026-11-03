@@ -1315,7 +1315,7 @@ fn hover_and_diagnostics_name_no_removed_spelling() {
             5,
             "fn() -> int!str",
         ),
-        ("p := \"1\".parse_int()\n", 0, 9, "fn() -> int!str"),
+        ("p := \"1\".to_int()\n", 0, 9, "fn() -> int!"),
     ];
     for (src, line, ch, want) in cells {
         let h = hov(src, line, ch).unwrap_or_else(|| panic!("no hover: {src}"));

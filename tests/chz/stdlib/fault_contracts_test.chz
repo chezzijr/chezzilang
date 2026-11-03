@@ -26,7 +26,6 @@ import std.crypto
 import std.flag
 import std.string as s
 import std.datetime as dt
-import std.path
 import std.os
 import Atomic, AtomicInt from std.concurrency
 
@@ -164,14 +163,6 @@ test fn crypto_token_hex_out_of_range_faults():
     match r2:
         ?_: assert false, "n over the 1MiB cap must fault"
         !e: assert e.message() == "token_hex: n exceeds the 1048576-byte cap, got 1048577"
-
-test fn path_decode_invalid_utf8_faults():
-    # `path_type_test.chz` already covers decode()'s fault (loosely, via `.contains`) and the display's lossy
-    # sibling byte-exactly; this pins the EXACT message the loose check there doesn't.
-    r := recover: path.Path(b"a\xffb").decode()
-    match r:
-        ?_: assert false, "non-UTF-8 path must fault on decode()"
-        !e: assert e.message() == "invalid UTF-8 in decode()"
 
 test fn datetime_days_in_month_faults():
     r1 := recover: dt.days_in_month(2024, 0)

@@ -284,16 +284,6 @@ fn str_methods_infer_types_ok() {
 }
 
 #[test]
-fn parse_int_infers_result_int_str() {
-    ok("s := \"5\"\nr: int!str = s.parse_int()\nprint(r)\n");
-}
-
-#[test]
-fn parse_float_infers_result_float_str() {
-    ok("s := \"5.0\"\nr: float!str = s.parse_float()\nprint(r)\n");
-}
-
-#[test]
 fn str_len_is_int() {
     // len() must be int — use it where an int is required.
     ok("s := \"hi\"\nn: int = s.len()\nprint(n)\n");
@@ -383,22 +373,22 @@ fn str_new_methods_infer_types_ok() {
 }
 
 #[test]
-fn str_to_int_is_option() {
-    // gap #7: safe parse returns Option, not a bare int.
-    ok("x: int? = \"42\".to_int()\nprint(x)\n");
+fn str_to_int_is_result() {
+    // The parse gives `int!`, whose error names the cause.
+    ok("x: int! = \"42\".to_int()\nprint(x)\n");
 }
 
 #[test]
-fn str_to_float_is_option() {
-    ok("x: float? = \"4.5\".to_float()\nprint(x)\n");
+fn str_to_float_is_result() {
+    ok("x: float! = \"4.5\".to_float()\nprint(x)\n");
 }
 
 #[test]
-fn str_to_int_result_is_option_not_int() {
-    // The result is Option[int], so binding it to a bare int must be rejected.
+fn str_to_int_result_is_not_int() {
+    // The result is `int!`, so binding it to a bare int must be rejected.
     rejects(
         "n: int = \"4\".to_int()\n",
-        "cannot assign int? to variable of type int",
+        "cannot assign int! to variable of type int",
     );
 }
 

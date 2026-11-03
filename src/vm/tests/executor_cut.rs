@@ -575,7 +575,7 @@ fn standalone_path_lowers_carrier_patterns_like_the_graph_path() {
             "1\n",
         ),
         (
-            "match \"7\".parse_int():\n    ?v:\n        print(v + 0)\n    !e:\n        print(e)\n",
+            "match \"7\".to_int():\n    ?v:\n        print(v + 0)\n    !e:\n        print(e)\n",
             "7\n",
         ),
     ];

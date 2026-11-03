@@ -4,7 +4,7 @@
 # `Path` is an ORDINARY Chezzi struct over `raw: bytes`. DISPLAY and CONVERSION are deliberately two
 # different methods (Rust makes the same split — `Path` has no `Display`):
 #   p.str()    lossy, U+FFFD substituted, NEVER faults  (Stringable)
-#   p.decode() exact, recoverable fault on non-UTF-8     (mirrors `bytes.decode()`)
+#   p.decode() exact, `str!`: an error on non-UTF-8      (the `bytes.decode()` error)
 #   p.bytes()  the raw OS bytes                          (never faults)
 # Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
@@ -24,12 +24,9 @@ test fn path_bytes_is_exact():
     assert path.Path(b"A\xffB.txt").bytes() == b"A\xffB.txt"
     assert path.Path(b"ok").bytes() == b"ok"
 
-test fn path_decode_is_exact_and_recoverable():
-    assert path.Path(b"ok/dir").decode() == "ok/dir"
-    r := recover: path.Path(b"A\xffB").decode()
-    match r:
-        ?_: assert false, "decode() on non-UTF-8 must fault"
-        !e: assert e.message().contains("invalid UTF-8"), "got: " + e.message()
+test fn path_decode_is_exact_and_names_the_bad_byte():
+    assert path.Path(b"ok/dir").decode() == ?"ok/dir"
+    assert path.Path(b"A\xffB").decode() == !"decode: invalid UTF-8 at byte 1 (0xff)"
 
 test fn path_str_is_lossy_and_never_faults():
     # ASCII round-trips unchanged.
@@ -70,6 +67,6 @@ test fn getcwd_returns_a_path():
         ?p:
             assert p.bytes().len() > 0
             # On a normal (UTF-8) cwd the exact and the lossy conversion agree.
-            assert p.decode() == p.str()
+            assert p.decode() == ?p.str()
             assert fs.is_dir(p)
         !e: assert false, "getcwd: " + e.message()

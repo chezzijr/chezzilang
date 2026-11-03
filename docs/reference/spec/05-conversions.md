@@ -14,8 +14,7 @@ whose help names the form below for the argument's type.
 |------|-----------|---------|
 | `n.to_float()` | `int` → `float` | never fails; past 2^53 it rounds to the nearest float (Rust `n as f64`) |
 | `f.to_int()` | `float` → `int?` | truncates toward zero; `None` for NaN, ±inf and a value outside i64 |
-| `s.to_int()` / `s.to_float()` | `str` → `int?` / `float?` | `None` on bad input (trims first, PEP-515 underscores) |
-| `s.parse_int()` / `s.parse_float()` | `str` → `int!str` / `float!str` | `!msg` names the reason (overflow or malformed) |
+| `s.to_int()` / `s.to_float()` | `str` → `int!` / `float!` | an error that names the cause (trims first, PEP-515 underscores): `!"to_int: cannot parse 'x' as int"`, `!"to_int: '99999999999999999999' is out of range for int"`, `!"to_float: cannot parse 'x' as float"` |
 | `"{x}"` | **anything** → `str` | never fails: the `Stringable` display (`print` uses the same path, Go `fmt.Sprint`) |
 | `ord(s)` / `chr(n)` | `str` ↔ codepoint `int` | narrow, single-purpose |
 
@@ -24,8 +23,8 @@ is already a type error). A `bool` does not convert to a number either; write `i
 
 | Old call | Type error help |
 |----------|-----------------|
-| `int(x)` on a `str` or a `float` | ``convert with `x.to_int()`, which gives int?`` |
-| `float(x)` on an `int` / a `str` | ``convert with `x.to_float()`, which gives float`` / `float?` |
+| `int(x)` on a `float` / a `str` | ``convert with `x.to_int()`, which gives int?`` / `int!` |
+| `float(x)` on an `int` / a `str` | ``convert with `x.to_float()`, which gives float`` / `float!` |
 | `int(x)` / `float(x)` on a `bool` | ``a bool is not a number; write `if x: 1 else: 0` `` (`1.0`, `0.0` for `float`) |
 | `str(x)` | ``render the value with `"{x}"` `` |
 | `bool(x)` | ``test the value: write `x != 0` `` for a number, `` `x != None` `` for an optional, `` `x.len() > 0` `` for a type with `len` |

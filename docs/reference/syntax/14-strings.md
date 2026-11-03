@@ -222,8 +222,7 @@ s.chars()        # → List[str] of 1-char strings; also `for c in s:` iterates 
 s.replace("a","b")  s.repeat(3)   s.reversed()     s.pad_left(4,"0")  s.pad_right(4," ")
 s.index_of("x")  s.count("x")     s.strip_prefix("p")  s.strip_suffix("s")
 s.split_lines()  # → List[str] split on a newline (LF, CRLF, or lone CR)
-s.to_int()       s.to_float()     # → int? / float? (a value / None — None on bad input)
-s.parse_int()    s.parse_float()  # → int!str / float!str (the value / !msg on bad input)
+s.to_int()       s.to_float()     # → int! / float! (the value / an error that names the cause)
 "a" + "b"        # concatenation
 ```
 

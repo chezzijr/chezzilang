@@ -95,7 +95,7 @@ fn field(key: str) -> int:
                     v := line.replace(key, "").replace("kB", "").strip()
                     match v.to_int():
                         ?n: return n
-                        None: return -3
+                        !_: return -3
             return -2
         !e:
             return -1

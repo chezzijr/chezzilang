@@ -2,7 +2,7 @@
 héllo
 true
 hi
-caught
+decode: invalid UTF-8 at byte 0 (0xff)
 60
 6
 2

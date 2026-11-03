@@ -22,17 +22,16 @@ fn main():
     enc := s.encode()
     print(enc.len())           # 6 bytes: 'h' 0xC3 0xA9 'l' 'l' 'o'
     print(enc.decode())        # héllo (round-trips)
-    print(enc.decode() == s)   # true
+    print(enc.decode() == ?s)  # true
 
     # bytearray.decode() — identical to bytes.decode().
     ba := bytearray.from_iter([104, 105])
     print(ba.decode())         # hi
 
-    # --- invalid UTF-8 decode faults RECOVERABLY (catchable by recover:) ---
-    r := recover: b"\xff\xfe".decode()
-    match r:
+    # --- invalid UTF-8: decode() gives an error that names the byte ---
+    match b"\xff\xfe".decode():
         ?v: print(v)
-        !e: print("caught")
+        !e: print(e)               # decode: invalid UTF-8 at byte 0 (0xff)
 
     # --- List.from_iter(it) over every for-iterable shape; sum to stay order-independent ---
     print(List.from_iter([10, 20, 30]).sum())        # 60 (from a list)

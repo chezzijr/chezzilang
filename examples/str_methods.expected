@@ -33,10 +33,6 @@ file.txt
 x
 42
 9
-None
+!to_int: cannot parse 'abc' as int
 4.5
-None
-42
-!cannot parse 'x' as an integer
-3.14
-!cannot parse 'x' as a float
+!to_float: cannot parse 'x' as float

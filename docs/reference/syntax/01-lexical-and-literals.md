@@ -131,15 +131,16 @@ any iterable of `int`: a `bytes`, a `bytearray`, a `List[int]`, a `Range`; each 
 | Conversion | Form | Gives | Notes |
 | --- | --- | --- | --- |
 | str → bytes (UTF-8) | `s.encode()` | `bytes` | method on `str`; always succeeds (str is UTF-8 internally) |
-| bytes → str (UTF-8) | `b.decode()` | `str` | method on `bytes`; **recoverable** fault on invalid UTF-8 |
-| bytearray → str (UTF-8) | `ba.decode()` | `str` | identical to `bytes.decode()` (decodes the current buffer) |
+| bytes → str (UTF-8) | `b.decode()` | `str!` | method on `bytes`; invalid UTF-8 gives an error that names the byte |
+| bytearray → str (UTF-8) | `ba.decode()` | `str!` | identical to `bytes.decode()` (decodes the current buffer) |
 | any iterable → list | `List.from_iter(it)` | `List[T]` | `it` is any **for-iterable**; `T` is the element type. `List[T]()` / `List()` are the empty forms. |
 | any iterable → set | `Set.from_iter(it)` | `Set[T]` | dedup; `T` must be `Hashable`; `Set[T]()` / `Set()` (0 args) is the empty set |
 | iterable of 2-tuples → map | `Map.from_iter(it)` | `Map[K, V]` | `it` yields `(K, V)` pairs; last-wins on dup keys; `K` `Hashable`. `Map[K, V]()` / `Map()` are the empty forms. |
 
 `.encode()`/`.decode()` are UTF-8 only; there is no encoding-name argument.
-`"héllo".encode().decode() == "héllo"` round-trips. `b"\xff\xfe".decode()` faults recoverably
-(`recover:` catches it).
+`"héllo".encode().decode() == ?"héllo"` round-trips. `b"hi\xff".decode()` is
+`!"decode: invalid UTF-8 at byte 2 (0xff)"`, and a sequence that the end of the input cuts off is
+`!"decode: incomplete UTF-8 sequence at byte 0"` (`b"\xc3"`). `b.decode_lossy()` cannot fail.
 
 `List.from_iter(it)` / `Set.from_iter(it)` / `Map.from_iter(it)` (the static `from_iter` of each type's
 `native struct` decl in `std/prelude.chz`) accept any for-iterable, the same set `for x in it` accepts:

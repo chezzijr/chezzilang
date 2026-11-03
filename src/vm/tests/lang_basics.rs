@@ -919,7 +919,10 @@ fn builtin_casts() {
     assert_eq!(run(r#"print("42".to_int())"#), "42\n");
     assert_eq!(run("print((3).to_float())"), "3.0\n");
     assert_eq!(run("print(\"5\")"), "5\n");
-    assert_eq!(run(r#"print("notnum".to_int())"#), "None\n");
+    assert_eq!(
+        run(r#"print("notnum".to_int())"#),
+        "!to_int: cannot parse 'notnum' as int\n"
+    );
     assert_eq!(run("print(int(), float(), bool())"), "0 0.0 false\n");
 }
 

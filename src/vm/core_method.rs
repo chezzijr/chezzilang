@@ -431,9 +431,7 @@ impl Vm {
                     | StrMethod::SplitLines
                     | StrMethod::Strip
                     | StrMethod::ToInt
-                    | StrMethod::ToFloat
-                    | StrMethod::ParseInt
-                    | StrMethod::ParseFloat => {}
+                    | StrMethod::ToFloat => {}
                 }
                 #[cfg(test)]
                 super::STR_RECV_CLONED_BYTES.with(|c| c.set(c.get() + s.len()));
@@ -712,15 +710,25 @@ impl Vm {
                         self.arity_err("strip", args, 0, span)?;
                         Ok(self.alloc_str(s.trim_matches(py_blank).to_string()))
                     }
-                    // gap #7: safe numeric parse — None on bad input (trims like int()/float()).
+                    // `to_int() -> int!` / `to_float() -> float!` (trims like Python `int()` /
+                    // `float()`): the error starts with the method name and names the cause.
                     StrMethod::ToInt => {
                         self.arity_err("to_int", args, 0, span)?;
-                        match strip_num_underscores(s.trim()).and_then(|t| t.parse::<i64>().ok()) {
-                            Some(n) => {
+                        match parse_i64_pep515(s.trim()) {
+                            Ok(n) => {
                                 let nv = self.make_int(n);
-                                Ok(self.alloc_enum("Option", "Some", &[nv]))
+                                Ok(self.alloc_enum("Result", "Ok", &[nv]))
                             }
-                            None => Ok(self.alloc_enum("Option", "None", &[])),
+                            Err(IntParseErr::Overflow) => {
+                                let msg = self
+                                    .alloc_str(format!("to_int: '{s}' is out of range for int"));
+                                Ok(self.alloc_enum("Result", "Err", &[msg]))
+                            }
+                            Err(IntParseErr::Malformed) => {
+                                let msg =
+                                    self.alloc_str(format!("to_int: cannot parse '{s}' as int"));
+                                Ok(self.alloc_enum("Result", "Err", &[msg]))
+                            }
                         }
                     }
                     StrMethod::ToFloat => {
@@ -728,42 +736,11 @@ impl Vm {
                         match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
                             Some(f) => {
                                 let fv = self.box_float(f);
-                                Ok(self.alloc_enum("Option", "Some", &[fv]))
-                            }
-                            None => Ok(self.alloc_enum("Option", "None", &[])),
-                        }
-                    }
-                    // Result-returning parse siblings of to_int/to_float — carry a human-readable
-                    // Err(msg) instead of None (trims first, like int()/float()/to_int/to_float).
-                    StrMethod::ParseInt => {
-                        self.arity_err("parse_int", args, 0, span)?;
-                        match parse_i64_pep515(s.trim()) {
-                            Ok(n) => {
-                                let nv = self.make_int(n);
-                                Ok(self.alloc_enum("Result", "Ok", &[nv]))
-                            }
-                            Err(IntParseErr::Overflow) => {
-                                let msg = self.alloc_str(format!(
-                                    "'{s}' overflows i64 (range -9223372036854775808..=9223372036854775807)"
-                                ));
-                                Ok(self.alloc_enum("Result", "Err", &[msg]))
-                            }
-                            Err(IntParseErr::Malformed) => {
-                                let msg =
-                                    self.alloc_str(format!("cannot parse '{s}' as an integer"));
-                                Ok(self.alloc_enum("Result", "Err", &[msg]))
-                            }
-                        }
-                    }
-                    StrMethod::ParseFloat => {
-                        self.arity_err("parse_float", args, 0, span)?;
-                        match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
-                            Some(f) => {
-                                let fv = self.box_float(f);
                                 Ok(self.alloc_enum("Result", "Ok", &[fv]))
                             }
                             None => {
-                                let msg = self.alloc_str(format!("cannot parse '{s}' as a float"));
+                                let msg = self
+                                    .alloc_str(format!("to_float: cannot parse '{s}' as float"));
                                 Ok(self.alloc_enum("Result", "Err", &[msg]))
                             }
                         }
@@ -1508,15 +1485,14 @@ impl Vm {
                 b.extend_from_slice(heap, &appended);
                 Ok(Value::nil())
             }
-            // `decode() -> str`: UTF-8 decode the current buffer. Invalid UTF-8 is a RECOVERABLE
-            // fault (catchable by `recover:`), never a panic — mirrors the bytes path + the interp.
+            // `decode() -> str!`: UTF-8 decode the current buffer (the same `decode_utf8` as `bytes`).
             BytearrayMethod::Decode => {
                 self.arity_err("decode", args, 0, span)?;
                 let Obj::ByteArray(b) = self.heap.get(h) else {
                     unreachable!()
                 };
                 let bytes = b.to_vec();
-                self.decode_utf8(&bytes, span)
+                Ok(self.decode_utf8(&bytes))
             }
             // `reverse() -> None` reverses in place, `reversed() -> bytearray` returns a NEW buffer
             // (Python `bytearray.reverse()`, `bytearray(reversed(b))`).
@@ -1552,9 +1528,8 @@ impl Vm {
         }
     }
 
-    /// `bytes` methods (immutable byte sequence): only `decode() -> str` (UTF-8). Mirrors the checker's
-    /// file-backed `native struct bytes` method table in `std/prelude.chz` (the retired `bytes_method_sig`)
-    /// — keep them in lockstep.
+    /// `bytes` methods (immutable byte sequence). The `native struct bytes` decls in
+    /// `std/prelude.chz` own the table; `BytesMethod` is generated from them.
     pub(super) fn bytes_method(
         &mut self,
         h: GcRef,
@@ -1572,7 +1547,7 @@ impl Vm {
                     unreachable!()
                 };
                 let bytes = b.clone();
-                self.decode_utf8(&bytes, span)
+                Ok(self.decode_utf8(&bytes))
             }
             // W7-8 `decode_lossy() -> str`: UTF-8 decode with each maximal invalid subsequence
             // replaced by U+FFFD (Python's `b.decode(errors="replace")`, Rust's
@@ -1605,12 +1580,23 @@ impl Vm {
         }
     }
 
-    /// UTF-8 decode a byte slice into a new heap `str`. Invalid UTF-8 maps to a RECOVERABLE
-    /// RuntimeError (catchable by `recover:`), not a panic.
-    pub(super) fn decode_utf8(&mut self, bytes: &[u8], span: Span) -> Result<Value, RuntimeError> {
+    /// UTF-8 decode a byte slice: `?str`, or `!text` that names the first bad byte (its index is
+    /// Rust's `Utf8Error::valid_up_to`). A sequence cut off by the end of the input is "incomplete".
+    pub(super) fn decode_utf8(&mut self, bytes: &[u8]) -> Value {
         match std::str::from_utf8(bytes) {
-            Ok(s) => Ok(self.alloc_str(s.to_string())),
-            Err(_) => Err(self.err("invalid UTF-8 in decode()".to_string(), span)),
+            Ok(s) => {
+                let v = self.alloc_str(s.to_string());
+                self.alloc_enum("Result", "Ok", &[v])
+            }
+            Err(e) => {
+                let at = e.valid_up_to();
+                let text = match e.error_len() {
+                    Some(_) => format!("decode: invalid UTF-8 at byte {at} (0x{:02x})", bytes[at]),
+                    None => format!("decode: incomplete UTF-8 sequence at byte {at}"),
+                };
+                let msg = self.alloc_str(text);
+                self.alloc_enum("Result", "Err", &[msg])
+            }
         }
     }
 
