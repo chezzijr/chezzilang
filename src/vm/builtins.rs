@@ -389,12 +389,19 @@ impl Vm {
         let (ty, method) = which.key();
         // A fault names the call that faulted (`bytes.zeroed() size -1 must be non-negative`).
         let what = format!("{ty}.{method}");
-        let [arg] = args[..] else {
+        // Every argument is there: a direct call fills the decl's defaults at the call site, and the
+        // static's value fills them in its prologue (`build_native_static_fn`).
+        if args.len() != which.arity() {
             return Err(self.err(
-                format!("{ty}.{method}() expects 1 argument, got {}", args.len()),
+                format!(
+                    "{ty}.{method}() expects {} argument(s), got {}",
+                    which.arity(),
+                    args.len()
+                ),
                 span,
             ));
-        };
+        }
+        let arg = args[0];
         let result = match which {
             NativeStatic::ListFromIter => {
                 let items = self.drain_iterable(arg, span)?;
@@ -419,6 +426,25 @@ impl Vm {
                 let n = self.int_val(arg).unwrap_or_default();
                 let bytes = self.zero_filled(&what, n, span, RVec::try_zeroed)?;
                 Value::obj(self.heap.alloc(Obj::ByteArray(bytes)))
+            }
+            NativeStatic::IntFromBeBytes | NativeStatic::IntFromLeBytes => {
+                let Some(Obj::Bytes(b)) = arg.as_obj().map(|h| self.heap.get(h)) else {
+                    return Err(self.err(format!("{what}() expects bytes"), span));
+                };
+                let Some(signed) = args[1].as_bool() else {
+                    return Err(self.err(format!("{what}() expects a bool signed"), span));
+                };
+                let big = matches!(which, NativeStatic::IntFromBeBytes);
+                match super::core_method::int_from_bytes(method, b, signed, big) {
+                    Ok(n) => {
+                        let nv = self.make_int(n);
+                        self.alloc_enum("Result", "Ok", &[nv])
+                    }
+                    Err(text) => {
+                        let msg = self.alloc_str(text);
+                        self.alloc_enum("Result", "Err", &[msg])
+                    }
+                }
             }
         };
         self.push(result);

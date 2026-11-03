@@ -559,13 +559,29 @@ impl Compiler {
     }
 
     /// The proto of a builtin type's static method as a value (`List.from_iter`): a fn of the
-    /// decl's arity that makes the call. Memoised by [`Compiler::synth_fn_proto`].
+    /// decl's arity that makes the call. A call through the value may leave out the trailing
+    /// defaulted parameters, as a direct call may: its prologue fills each from the decl's literal
+    /// default (`NativeStatic::defaults`, read from `std/*.chz` by the build), as a user fn's
+    /// default prologue does. Memoised by [`Compiler::synth_fn_proto`].
     pub(super) fn build_native_static_fn(&mut self, which: NativeStatic) -> ProtoId {
         let (_, method) = which.key();
         let arity = which.arity();
+        let defaults = which.defaults();
         let mut vf = FnComp::new(method.to_string(), arity, false);
-        for i in 0..arity {
-            let slot = vf.add_local(format!("$v{i}"));
+        vf.min_arity = defaults.min;
+        let slots: Vec<usize> = (0..arity).map(|i| vf.add_local(format!("$v{i}"))).collect();
+        for (k, d) in defaults.values.iter().enumerate() {
+            let slot = slots[defaults.min + k];
+            let jump_at = vf.code.len();
+            vf.emit(Op::JumpIfProvided(slot as u32, usize::MAX), Span::RUNTIME);
+            self.emit_decl_default(&mut vf, d);
+            vf.emit_set_local_raw(slot, Span::RUNTIME);
+            let after = vf.code.len();
+            if let Op::JumpIfProvided(_, t) = &mut vf.code[jump_at] {
+                *t = after;
+            }
+        }
+        for slot in slots {
             vf.emit_get_local_raw(slot, Span::RUNTIME);
         }
         vf.emit(Op::CallNativeStatic(which, arity), Span::RUNTIME);

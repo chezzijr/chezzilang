@@ -233,6 +233,15 @@ native struct str:
 # a value outside i64 (Rust `f64::to_i64` in `num-traits`), so no NaN becomes a silent number.
 native struct int:
     native fn to_float(self) -> float
+    # The int as `len` bytes (1 to 8), big- or little-endian (Rust `to_be_bytes`, Python
+    # `n.to_bytes(len, "big")`). Unsigned by default, as Python: a negative int needs `signed=true`
+    # (two's complement). A value that does not fit gives an error that names it.
+    native fn to_be_bytes(self, len: int, signed: bool = false) -> bytes!
+    native fn to_le_bytes(self, len: int, signed: bool = false) -> bytes!
+    # The int that 0 to 8 bytes hold (`b""` is 0, Python `int.from_bytes`). Unsigned by default: an
+    # 8-byte value above i64::MAX gives an error that names `signed=true`.
+    native fn from_be_bytes(b: bytes, signed: bool = false) -> int!
+    native fn from_le_bytes(b: bytes, signed: bool = false) -> int!
 
 native struct float:
     native fn to_int(self) -> Option[int]

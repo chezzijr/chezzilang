@@ -73,6 +73,14 @@ const KINDS: &[Kind] = &[
         twin: "    _ := t.read",
         params: ("n", "2", "timeout_ms", "0"),
     },
+    // `int.from_le_bytes(b: bytes, signed: bool = false) -> int!`, a native static.
+    Kind {
+        tag: "static",
+        head: "struct Twin:\n    k: int\n    fn from_le_bytes(b: bytes, signed: bool = false) -> int!:\n        return ?0\n",
+        native: "_ := int.from_le_bytes",
+        twin: "_ := Twin.from_le_bytes",
+        params: ("b", "b\"\\x01\"", "signed", "true"),
+    },
 ];
 
 /// (form, the call arguments; `{a}`/`{av}` name and value the first parameter, `{d}`/`{dv}` the
@@ -123,7 +131,7 @@ fn a_native_binds_like_its_user_twin() {
     assert!(bad.is_empty(), "{} cell(s):\n{}", bad.len(), bad.join("\n"));
 }
 
-/// A native static has no default today, so its rows are the named forms only: `bytes.zeroed(n)`.
+/// A native static with no default binds its name too: `bytes.zeroed(n)`.
 #[test]
 fn a_native_static_binds_named_arguments() {
     for (src, want) in [

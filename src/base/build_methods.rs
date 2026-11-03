@@ -360,7 +360,7 @@ fn main() {
         "    pub fn from_key(ty: &str, method: &str) -> Option<Self> {{"
     );
     let _ = writeln!(out, "        match (ty, method) {{");
-    for (v, t, n, _) in &statics {
+    for (v, t, n, ..) in &statics {
         let _ = writeln!(out, "            ({t:?}, {n:?}) => Some(Self::{v}),");
     }
     let _ = writeln!(out, "            _ => None,");
@@ -372,7 +372,7 @@ fn main() {
         "    pub fn key(self) -> (&'static str, &'static str) {{"
     );
     let _ = writeln!(out, "        match self {{");
-    for (v, t, n, _) in &statics {
+    for (v, t, n, ..) in &statics {
         let _ = writeln!(out, "            Self::{v} => ({t:?}, {n:?}),");
     }
     let _ = writeln!(out, "        }}");

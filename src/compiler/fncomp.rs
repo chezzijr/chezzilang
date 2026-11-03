@@ -6,7 +6,8 @@ use super::*;
 pub(super) struct FnComp {
     pub(super) name: String,
     pub(super) arity: usize,
-    /// See [`crate::base::op::Proto::min_arity`]. Starts at `arity`; only the default prologue lowers it.
+    /// See [`crate::base::op::Proto::min_arity`]. Starts at `arity`; the default prologue and a
+    /// native static's value (`build_native_static_fn`) lower it.
     pub(super) min_arity: usize,
     is_toplevel: bool,
     /// W13-21 — see [`crate::base::op::Proto::decl_span`]. Set from `FnDecl::name_span` only in

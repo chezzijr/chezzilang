@@ -262,6 +262,11 @@ Each group below is one fact decided in two or more places (grouped 2026-10-16).
     8192); `a_native_argument_takes_its_default_from_its_decl` (`tests/owner_guards.rs`) keeps them
     out. Socket and request `timeout_ms` is `int? = None` (None waits, socket `0` polls once).
     Grids: `tests/native_call_binding_grid.rs`, `tests/chz/stdlib/net_timeout_grid_test.chz`.
+26. **An int converts to and from bytes (done 2026-11-04).** `n.to_be_bytes(len, signed = false)` /
+    `n.to_le_bytes(...)` give `bytes!`; the statics `int.from_be_bytes(b, signed = false)` /
+    `int.from_le_bytes(...)` give `int!` (Rust `to_be_bytes`, Python `to_bytes` / `from_bytes`). `len`
+    is 1 to 8; each failure is an error that names the cause; `signed` goes by position or by name.
+    Grid: `tests/chz/spec/int_bytes_test.chz`.
 
 ### Open questions for the owner
 

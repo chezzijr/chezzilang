@@ -320,6 +320,27 @@ impl Vm {
                     self.arity_err("to_float", args, 0, span)?;
                     Ok(self.box_float(n as f64))
                 }
+                // `to_be_bytes(len, signed = false)`: the checker admits one or two arguments.
+                // `to_be_bytes(len, signed)`: the call site fills `signed = false` from the decl.
+                IntMethod::ToBeBytes | IntMethod::ToLeBytes => {
+                    let name = which.name();
+                    self.arity_err(name, args, 2, span)?;
+                    let len = self.int_val(args[0]).unwrap_or_default();
+                    let Some(signed) = args[1].as_bool() else {
+                        return Err(self.err(format!("{name}() expects a bool signed"), span));
+                    };
+                    let big = matches!(which, IntMethod::ToBeBytes);
+                    Ok(match int_to_bytes(name, n, len, signed, big) {
+                        Ok(b) => {
+                            let bv = Value::obj(self.heap.alloc(Obj::Bytes(b.into_boxed_slice())));
+                            self.alloc_enum("Result", "Ok", &[bv])
+                        }
+                        Err(text) => {
+                            let msg = self.alloc_str(text);
+                            self.alloc_enum("Result", "Err", &[msg])
+                        }
+                    })
+                }
             };
         }
         if recv.is_float()
@@ -1635,4 +1656,59 @@ impl Vm {
                 .alloc(Obj::Str((&*c.encode_utf8(&mut buf)).into())),
         )
     }
+}
+
+/// `n` as `len` bytes, big-endian when `big` (`n.to_be_bytes(len, signed)`; the error text starts
+/// with `name`). Python's `int.to_bytes` order of checks: a negative unsigned value before the fit.
+pub(super) fn int_to_bytes(
+    name: &str,
+    n: i64,
+    len: i64,
+    signed: bool,
+    big: bool,
+) -> Result<Vec<u8>, String> {
+    if !(1..=8).contains(&len) {
+        return Err(format!("{name}: len must be 1 to 8, got {len}"));
+    }
+    if !signed && n < 0 {
+        return Err(format!("{name}: {n} is negative; pass signed=true"));
+    }
+    let bits = 8 * len as u32;
+    let fits = match (signed, bits) {
+        (_, 64) => true,
+        (true, _) => (-(1i64 << (bits - 1))..(1i64 << (bits - 1))).contains(&n),
+        (false, _) => n < (1i64 << bits),
+    };
+    if !fits {
+        let unit = if len == 1 { "byte" } else { "bytes" };
+        return Err(format!("{name}: {n} does not fit in {len} {unit}"));
+    }
+    let be = n.to_be_bytes();
+    let mut out = be[8 - len as usize..].to_vec();
+    if !big {
+        out.reverse();
+    }
+    Ok(out)
+}
+
+/// The int that `b` (0 to 8 bytes, big-endian when `big`) holds (`int.from_be_bytes(b, signed)`;
+/// the error text starts with `name`). Signed reads two's complement; `b""` is 0 (Python).
+pub(super) fn int_from_bytes(name: &str, b: &[u8], signed: bool, big: bool) -> Result<i64, String> {
+    if b.len() > 8 {
+        return Err(format!("{name}: {} bytes is more than 8", b.len()));
+    }
+    let mut be = b.to_vec();
+    if !big {
+        be.reverse();
+    }
+    let negative = signed && be.first().is_some_and(|top| top & 0x80 != 0);
+    let mut buf = [if negative { 0xff } else { 0 }; 8];
+    buf[8 - be.len()..].copy_from_slice(&be);
+    let n = i64::from_be_bytes(buf);
+    if !signed && n < 0 {
+        return Err(format!(
+            "{name}: the value does not fit in int; pass signed=true"
+        ));
+    }
+    Ok(n)
 }

@@ -307,6 +307,45 @@ const REJECT: &[(&str, &str)] = &[
         "print(bytes.zeroed(\"a\"))",
         "argument 1 of 'zeroed': expected int, found str",
     ),
+    // `int.from_be_bytes(b: bytes, signed: bool = false)`: `bytes` only, as `io.write_bytes`
+    // (a `bytearray` converts with `bytes.from_iter(ba)`). The arity texts are the user twins': a
+    // static's `'f' expects 2 argument(s)`, a method's `'f' expects 1–2 argument(s)`.
+    (
+        "print(int.from_be_bytes(bytearray.from_iter([1])))",
+        "argument 1 of 'from_be_bytes': expected bytes, found bytearray",
+    ),
+    (
+        "print(int.from_le_bytes())",
+        "'from_le_bytes' expects 2 argument(s), got 0",
+    ),
+    (
+        "print(int.from_be_bytes(b\"\", true, 1))",
+        "'from_be_bytes' expects 2 argument(s), got 3",
+    ),
+    (
+        "print(int.from_be_bytes(b\"\", 1))",
+        "argument 2 of 'from_be_bytes': expected bool, found int",
+    ),
+    (
+        "print((1).to_be_bytes())",
+        "'to_be_bytes' expects 1–2 argument(s), got 0",
+    ),
+    (
+        "print((1).to_le_bytes(2, true, 1))",
+        "'to_le_bytes' expects 1–2 argument(s), got 3",
+    ),
+    (
+        "print((1).to_be_bytes(\"2\"))",
+        "argument 1 of 'to_be_bytes': expected int, found str",
+    ),
+    (
+        "b: bytes = (1).to_be_bytes(2)",
+        "cannot assign bytes! to variable of type bytes",
+    ),
+    (
+        "n: int = int.from_be_bytes(b\"\")",
+        "cannot assign int! to variable of type int",
+    ),
 ];
 
 /// One fault, one diagnostic: an element mismatch is the bound's failure, never reported twice. The

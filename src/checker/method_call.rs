@@ -572,7 +572,8 @@ impl Checker {
                     let Some(args) = self.bind_sig(&sig, method, args, 0, span) else {
                         return Ty::Unknown;
                     };
-                    self.check_args(method, &sig.params, &args, span);
+                    // The count a user method's arm accepts: a trailing default may be left out.
+                    self.check_args_range(method, &sig.params, sig.min_params, &args, span);
                     return sig.ret;
                 }
                 self.infer_all(args);

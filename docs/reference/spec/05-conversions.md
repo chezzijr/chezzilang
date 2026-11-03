@@ -15,6 +15,8 @@ whose help names the form below for the argument's type.
 | `n.to_float()` | `int` → `float` | never fails; past 2^53 it rounds to the nearest float (Rust `n as f64`) |
 | `f.to_int()` | `float` → `int?` | truncates toward zero; `None` for NaN, ±inf and a value outside i64 |
 | `s.to_int()` / `s.to_float()` | `str` → `int!` / `float!` | an error that names the cause (trims first, PEP-515 underscores): `!"to_int: cannot parse 'x' as int"`, `!"to_int: '99999999999999999999' is out of range for int"`, `!"to_float: cannot parse 'x' as float"` |
+| `n.to_be_bytes(len, signed)` / `n.to_le_bytes(…)` | `int` → `bytes!` | `len` is 1 to 8; `signed` defaults to `false` (Python `to_bytes`); a negative unsigned value, a value that does not fit and a bad `len` are errors that name the cause |
+| `int.from_be_bytes(b, signed)` / `int.from_le_bytes(…)` | `bytes` → `int!` | 0 to 8 bytes (`b""` is `0`); more than 8 bytes, or an unsigned 8-byte value above i64::MAX, is an error |
 | `"{x}"` | **anything** → `str` | never fails: the `Stringable` display (`print` uses the same path, Go `fmt.Sprint`) |
 | `ord(s)` / `chr(n)` | `str` ↔ codepoint `int` | narrow, single-purpose |
 

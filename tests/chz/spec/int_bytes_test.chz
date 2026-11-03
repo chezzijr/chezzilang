@@ -1,0 +1,179 @@
+# tests/chz/spec/int_bytes_test.chz — an int converts to and from bytes:
+# `n.to_be_bytes(len, signed=false)`, `n.to_le_bytes(...)` -> `bytes!`, and the statics
+# `int.from_be_bytes(b, signed=false)`, `int.from_le_bytes(...)` -> `int!`.
+#
+# Axes: n {0, 1, 255, 256, 258, -1, -128, -129, i64::MAX, i64::MIN} x len {1, 2, 8, 0, 9} x signed x
+# order. Each value cell is Python's `n.to_bytes(len, order, signed=signed)` (3.14.7, generated), and
+# each `?b` cell reads back to `n` through `from_*_bytes`. An unsigned negative int, a value that does
+# not fit and a len outside 1 to 8 give an error that names the cause (owner plan, 2026-11-03).
+
+# (n, len, signed, big-endian result, little-endian result)
+fn cells() -> List[(int, int, bool, bytes!, bytes!)]:
+    return [
+        (0, 1, false, ?b"\x00", ?b"\x00"),
+        (0, 1, true, ?b"\x00", ?b"\x00"),
+        (0, 2, false, ?b"\x00\x00", ?b"\x00\x00"),
+        (0, 2, true, ?b"\x00\x00", ?b"\x00\x00"),
+        (0, 8, false, ?b"\x00\x00\x00\x00\x00\x00\x00\x00", ?b"\x00\x00\x00\x00\x00\x00\x00\x00"),
+        (0, 8, true, ?b"\x00\x00\x00\x00\x00\x00\x00\x00", ?b"\x00\x00\x00\x00\x00\x00\x00\x00"),
+        (0, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (0, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (0, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (0, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (1, 1, false, ?b"\x01", ?b"\x01"),
+        (1, 1, true, ?b"\x01", ?b"\x01"),
+        (1, 2, false, ?b"\x00\x01", ?b"\x01\x00"),
+        (1, 2, true, ?b"\x00\x01", ?b"\x01\x00"),
+        (1, 8, false, ?b"\x00\x00\x00\x00\x00\x00\x00\x01", ?b"\x01\x00\x00\x00\x00\x00\x00\x00"),
+        (1, 8, true, ?b"\x00\x00\x00\x00\x00\x00\x00\x01", ?b"\x01\x00\x00\x00\x00\x00\x00\x00"),
+        (1, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (1, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (1, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (1, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (255, 1, false, ?b"\xff", ?b"\xff"),
+        (255, 1, true, !"to_be_bytes: 255 does not fit in 1 byte", !"to_le_bytes: 255 does not fit in 1 byte"),
+        (255, 2, false, ?b"\x00\xff", ?b"\xff\x00"),
+        (255, 2, true, ?b"\x00\xff", ?b"\xff\x00"),
+        (255, 8, false, ?b"\x00\x00\x00\x00\x00\x00\x00\xff", ?b"\xff\x00\x00\x00\x00\x00\x00\x00"),
+        (255, 8, true, ?b"\x00\x00\x00\x00\x00\x00\x00\xff", ?b"\xff\x00\x00\x00\x00\x00\x00\x00"),
+        (255, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (255, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (255, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (255, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (256, 1, false, !"to_be_bytes: 256 does not fit in 1 byte", !"to_le_bytes: 256 does not fit in 1 byte"),
+        (256, 1, true, !"to_be_bytes: 256 does not fit in 1 byte", !"to_le_bytes: 256 does not fit in 1 byte"),
+        (256, 2, false, ?b"\x01\x00", ?b"\x00\x01"),
+        (256, 2, true, ?b"\x01\x00", ?b"\x00\x01"),
+        (256, 8, false, ?b"\x00\x00\x00\x00\x00\x00\x01\x00", ?b"\x00\x01\x00\x00\x00\x00\x00\x00"),
+        (256, 8, true, ?b"\x00\x00\x00\x00\x00\x00\x01\x00", ?b"\x00\x01\x00\x00\x00\x00\x00\x00"),
+        (256, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (256, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (256, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (256, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (258, 1, false, !"to_be_bytes: 258 does not fit in 1 byte", !"to_le_bytes: 258 does not fit in 1 byte"),
+        (258, 1, true, !"to_be_bytes: 258 does not fit in 1 byte", !"to_le_bytes: 258 does not fit in 1 byte"),
+        (258, 2, false, ?b"\x01\x02", ?b"\x02\x01"),
+        (258, 2, true, ?b"\x01\x02", ?b"\x02\x01"),
+        (258, 8, false, ?b"\x00\x00\x00\x00\x00\x00\x01\x02", ?b"\x02\x01\x00\x00\x00\x00\x00\x00"),
+        (258, 8, true, ?b"\x00\x00\x00\x00\x00\x00\x01\x02", ?b"\x02\x01\x00\x00\x00\x00\x00\x00"),
+        (258, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (258, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (258, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (258, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (-1, 1, false, !"to_be_bytes: -1 is negative; pass signed=true", !"to_le_bytes: -1 is negative; pass signed=true"),
+        (-1, 1, true, ?b"\xff", ?b"\xff"),
+        (-1, 2, false, !"to_be_bytes: -1 is negative; pass signed=true", !"to_le_bytes: -1 is negative; pass signed=true"),
+        (-1, 2, true, ?b"\xff\xff", ?b"\xff\xff"),
+        (-1, 8, false, !"to_be_bytes: -1 is negative; pass signed=true", !"to_le_bytes: -1 is negative; pass signed=true"),
+        (-1, 8, true, ?b"\xff\xff\xff\xff\xff\xff\xff\xff", ?b"\xff\xff\xff\xff\xff\xff\xff\xff"),
+        (-1, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (-1, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (-1, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (-1, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (-128, 1, false, !"to_be_bytes: -128 is negative; pass signed=true", !"to_le_bytes: -128 is negative; pass signed=true"),
+        (-128, 1, true, ?b"\x80", ?b"\x80"),
+        (-128, 2, false, !"to_be_bytes: -128 is negative; pass signed=true", !"to_le_bytes: -128 is negative; pass signed=true"),
+        (-128, 2, true, ?b"\xff\x80", ?b"\x80\xff"),
+        (-128, 8, false, !"to_be_bytes: -128 is negative; pass signed=true", !"to_le_bytes: -128 is negative; pass signed=true"),
+        (-128, 8, true, ?b"\xff\xff\xff\xff\xff\xff\xff\x80", ?b"\x80\xff\xff\xff\xff\xff\xff\xff"),
+        (-128, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (-128, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (-128, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (-128, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (-129, 1, false, !"to_be_bytes: -129 is negative; pass signed=true", !"to_le_bytes: -129 is negative; pass signed=true"),
+        (-129, 1, true, !"to_be_bytes: -129 does not fit in 1 byte", !"to_le_bytes: -129 does not fit in 1 byte"),
+        (-129, 2, false, !"to_be_bytes: -129 is negative; pass signed=true", !"to_le_bytes: -129 is negative; pass signed=true"),
+        (-129, 2, true, ?b"\xff\x7f", ?b"\x7f\xff"),
+        (-129, 8, false, !"to_be_bytes: -129 is negative; pass signed=true", !"to_le_bytes: -129 is negative; pass signed=true"),
+        (-129, 8, true, ?b"\xff\xff\xff\xff\xff\xff\xff\x7f", ?b"\x7f\xff\xff\xff\xff\xff\xff\xff"),
+        (-129, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (-129, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (-129, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (-129, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (9223372036854775807, 1, false, !"to_be_bytes: 9223372036854775807 does not fit in 1 byte", !"to_le_bytes: 9223372036854775807 does not fit in 1 byte"),
+        (9223372036854775807, 1, true, !"to_be_bytes: 9223372036854775807 does not fit in 1 byte", !"to_le_bytes: 9223372036854775807 does not fit in 1 byte"),
+        (9223372036854775807, 2, false, !"to_be_bytes: 9223372036854775807 does not fit in 2 bytes", !"to_le_bytes: 9223372036854775807 does not fit in 2 bytes"),
+        (9223372036854775807, 2, true, !"to_be_bytes: 9223372036854775807 does not fit in 2 bytes", !"to_le_bytes: 9223372036854775807 does not fit in 2 bytes"),
+        (9223372036854775807, 8, false, ?b"\x7f\xff\xff\xff\xff\xff\xff\xff", ?b"\xff\xff\xff\xff\xff\xff\xff\x7f"),
+        (9223372036854775807, 8, true, ?b"\x7f\xff\xff\xff\xff\xff\xff\xff", ?b"\xff\xff\xff\xff\xff\xff\xff\x7f"),
+        (9223372036854775807, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (9223372036854775807, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (9223372036854775807, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (9223372036854775807, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (-9223372036854775807 - 1, 1, false, !"to_be_bytes: -9223372036854775808 is negative; pass signed=true", !"to_le_bytes: -9223372036854775808 is negative; pass signed=true"),
+        (-9223372036854775807 - 1, 1, true, !"to_be_bytes: -9223372036854775808 does not fit in 1 byte", !"to_le_bytes: -9223372036854775808 does not fit in 1 byte"),
+        (-9223372036854775807 - 1, 2, false, !"to_be_bytes: -9223372036854775808 is negative; pass signed=true", !"to_le_bytes: -9223372036854775808 is negative; pass signed=true"),
+        (-9223372036854775807 - 1, 2, true, !"to_be_bytes: -9223372036854775808 does not fit in 2 bytes", !"to_le_bytes: -9223372036854775808 does not fit in 2 bytes"),
+        (-9223372036854775807 - 1, 8, false, !"to_be_bytes: -9223372036854775808 is negative; pass signed=true", !"to_le_bytes: -9223372036854775808 is negative; pass signed=true"),
+        (-9223372036854775807 - 1, 8, true, ?b"\x80\x00\x00\x00\x00\x00\x00\x00", ?b"\x00\x00\x00\x00\x00\x00\x00\x80"),
+        (-9223372036854775807 - 1, 0, false, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (-9223372036854775807 - 1, 0, true, !"to_be_bytes: len must be 1 to 8, got 0", !"to_le_bytes: len must be 1 to 8, got 0"),
+        (-9223372036854775807 - 1, 9, false, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+        (-9223372036854775807 - 1, 9, true, !"to_be_bytes: len must be 1 to 8, got 9", !"to_le_bytes: len must be 1 to 8, got 9"),
+    ]
+
+test fn to_bytes_grid_round_trips():
+    for n, len, signed, be, le in cells():
+        got_be := n.to_be_bytes(len, signed)
+        assert got_be == be, "{n}.to_be_bytes({len}, signed={signed}): {got_be}"
+        got_le := n.to_le_bytes(len, signed)
+        assert got_le == le, "{n}.to_le_bytes({len}, signed={signed}): {got_le}"
+        match got_be:
+            ?b: assert int.from_be_bytes(b, signed) == ?n, "from_be_bytes({b})"
+            !_: pass
+        match got_le:
+            ?b: assert int.from_le_bytes(b, signed) == ?n, "from_le_bytes({b})"
+            !_: pass
+
+test fn signed_defaults_to_false():
+    # Python `(258).to_bytes(2, 'big')` is b'\x01\x02', `int.from_bytes(b'\xff\xff', 'big')` is 65535.
+    assert (258).to_be_bytes(2) == ?b"\x01\x02"
+    assert (258).to_le_bytes(2) == ?b"\x02\x01"
+    assert (255).to_be_bytes(1) == ?b"\xff"
+    assert (-1).to_be_bytes(2) == !"to_be_bytes: -1 is negative; pass signed=true"
+    assert (70000).to_be_bytes(2) == !"to_be_bytes: 70000 does not fit in 2 bytes"
+    assert int.from_be_bytes(b"\xff\xff") == ?65535
+    assert int.from_le_bytes(b"\x02\x01") == ?258
+
+test fn from_bytes_reads_twos_complement_when_signed():
+    assert int.from_be_bytes(b"\xff\xff", true) == ?-1
+    assert int.from_le_bytes(b"\x00\x80", true) == ?-32768
+    assert int.from_be_bytes(b"\x80\x00\x00\x00\x00\x00\x00\x00", true) == ?(-9223372036854775807 - 1)
+    assert int.from_be_bytes(b"\x7f\xff\xff\xff\xff\xff\xff\xff") == ?9223372036854775807
+
+test fn from_bytes_edges():
+    # Python `int.from_bytes(b'', 'big')` is 0.
+    assert int.from_be_bytes(b"") == ?0
+    assert int.from_le_bytes(b"", true) == ?0
+    nine := bytes.zeroed(9)
+    assert int.from_be_bytes(nine) == !"from_be_bytes: 9 bytes is more than 8"
+    assert int.from_le_bytes(nine, true) == !"from_le_bytes: 9 bytes is more than 8"
+    top := b"\xff\xff\xff\xff\xff\xff\xff\xff"
+    assert int.from_be_bytes(top) == !"from_be_bytes: the value does not fit in int; pass signed=true"
+    assert int.from_le_bytes(top) == !"from_le_bytes: the value does not fit in int; pass signed=true"
+    assert int.from_be_bytes(top, true) == ?-1
+    # A value with the top bit clear reads the same either way.
+    assert int.from_le_bytes(b"\x01\x00\x00\x00\x00\x00\x00\x00") == ?1
+
+test fn to_bytes_unwraps_and_propagates():
+    b: bytes = (7).to_be_bytes(4) ?? b""
+    assert b == b"\x00\x00\x00\x07"
+    assert header(1, 2) == ?b"\x01\x00\x02"
+    assert header(300, 2) == !"to_be_bytes: 300 does not fit in 1 byte"
+
+fn header(kind: int, size: int) -> bytes!:
+    k := kind.to_be_bytes(1)?
+    s := size.to_be_bytes(2)?
+    return ?bytes.from_iter([k[0], s[0], s[1]])
+
+test fn a_static_read_as_a_value_takes_its_default():
+    g := int.from_le_bytes
+    assert g(b"\xff\xff") == ?65535
+    assert g(b"\xff\xff", true) == ?-1
+
+test fn signed_binds_by_name():
+    assert (-1).to_be_bytes(2, signed=true) == ?b"\xff\xff"
+    assert (-1).to_le_bytes(len=2, signed=true) == ?b"\xff\xff"
+    assert (258).to_be_bytes(signed=false, len=2) == ?b"\x01\x02"
+    assert int.from_be_bytes(b"\xff\xff", signed=true) == ?-1
+    assert int.from_le_bytes(signed=true, b=b"\x00\x80") == ?-32768

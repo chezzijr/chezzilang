@@ -33,14 +33,24 @@ impl DeclDefaults {
     };
 }
 
-/// The defaults of the native fn `name` of the native std module `module` (`"std.io"`), or none.
-/// A direct call has every argument (the checker's binder fills the defaults at the call site);
-/// a call through a fn value is filled from this table by the callee.
-pub fn native_fn_defaults(module: &str, name: &str) -> &'static DeclDefaults {
+/// The defaults of the native `name` of `owner` (a native std module, `"std.io"`, for a
+/// module-level fn; the type for a method or static), or none. A direct call has every argument
+/// (the checker's binder fills the defaults at the call site); a call through a fn value is filled
+/// from this table by the callee.
+pub fn native_fn_defaults(owner: &str, name: &str) -> &'static DeclDefaults {
     NATIVE_DEFAULTS
         .iter()
-        .find(|(m, n, _, _)| *m == module && *n == name)
+        .find(|(m, n, _, _)| *m == owner && *n == name)
         .map_or(&DeclDefaults::NONE, |(_, _, _, d)| d)
+}
+
+impl NativeStatic {
+    /// The trailing defaults its decl declares (its `NATIVE_DEFAULTS` row): a call through the
+    /// static's value is filled from them.
+    pub fn defaults(self) -> &'static DeclDefaults {
+        let (ty, method) = self.key();
+        native_fn_defaults(ty, method)
+    }
 }
 
 /// The defaults of the native decl `name` whose parameters (without `self`) are `params`, for the
